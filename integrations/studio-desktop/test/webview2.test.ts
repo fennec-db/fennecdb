@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import vm from "node:vm";
-import { ARGUMENTS_VARIABLE, BROWSER_ARGUMENTS, guardPreload, PRELOAD_CHECK, PRELOAD_TRIES, webview2Environment } from "../src/bun/webview2.ts";
+import { guardPreload, PRELOAD_CHECK, PRELOAD_TRIES, webview2Variables } from "../src/bun/webview2.ts";
 
 // What the app asks of WebView2 that Electrobun 2.0.4 does not. The running
 // app's half is held on the Windows runners (checks/latepreload.mjs makes a
@@ -48,7 +48,7 @@ test("the check loads a page again where Electrobun's bridge is missing, and lea
 	assert.equal(run(() => {}), 0, "the bridge: left alone");
 });
 
-test("every WEBVIEW2_ variable the app was started with goes, its name read case-blind, and the app's arguments are set", () => {
+test("every WEBVIEW2_ variable the app was started with is taken out, its name read case-blind", () => {
 	const env = {
 		Path: "C:\\Windows",
 		WEBVIEW2_USER_DATA_FOLDER: "C:\\one-store-for-all",
@@ -56,8 +56,6 @@ test("every WEBVIEW2_ variable the app was started with goes, its name read case
 		WebView2_Pipe_For_Script_Debugger: "x",
 		NOT_WEBVIEW2_X: "stays",
 	};
-	const { remove, set } = webview2Environment(env);
-	assert.deepEqual(remove.sort(), ["WEBVIEW2_USER_DATA_FOLDER", "WebView2_Pipe_For_Script_Debugger", "webview2_additional_browser_arguments"].sort());
-	assert.deepEqual(set, [ARGUMENTS_VARIABLE, BROWSER_ARGUMENTS]);
-	assert.match(BROWSER_ARGUMENTS, /--block-new-web-contents=true/);
+	assert.deepEqual(webview2Variables(env).sort(), ["WEBVIEW2_USER_DATA_FOLDER", "WebView2_Pipe_For_Script_Debugger", "webview2_additional_browser_arguments"].sort());
+	assert.deepEqual(webview2Variables({ Path: "x" }), []);
 });

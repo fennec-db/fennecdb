@@ -1,28 +1,25 @@
-// What the app asks of WebView2 on Windows that Electrobun 2.0.4 does not.
-// Pure: `node --test` holds it on every system (test/webview2.test.ts), and
-// the running app's half is held by checks/hostile.mjs and
+// What the app asks of WebView2 on Windows that Electrobun 2.0.4 does not:
+// none of WebView2's variables from the environment the app was started from,
+// and a page that loaded before its preload loaded again. Pure: `node --test`
+// holds it on every system (test/webview2.test.ts); the running app's half is
 // checks/latepreload.mjs on the Windows runners.
 
-/** The variable WebView2's loader reads arguments from, to add to those its host gave it. */
-export const ARGUMENTS_VARIABLE = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS";
-
 /**
- * What the app adds to the arguments Electrobun 2.0.4 starts WebView2 with:
- * a request for a new window, from a page or any frame in it, opens nothing.
+ * The WEBVIEW2_* variables of `env` (names case-blind, as Windows reads them),
+ * which the app takes out of its own environment before its first window:
+ * what WebView2 is started with is Electrobun's and the app's, not the
+ * environment the app was started from. WebView2 reads them in the app's
+ * process when a view is made (where the app is not elevated; an elevated one
+ * it ignores), and Bun's `process.env` is that process's environment block
+ * (on both Windows runners a variable deleted from it was gone to
+ * GetEnvironmentVariableW). WEBVIEW2_USER_DATA_FOLDER would put every window
+ * in one store, the one thing the partitions are for (stores.ts);
+ * WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS could add `--remote-debugging-port`,
+ * handing every page, and the token a studio window holds, to any program of
+ * the machine; WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGER hands a page to a debugger.
  */
-export const BROWSER_ARGUMENTS = "--block-new-web-contents=true";
-
-/**
- * The WEBVIEW2_* variables this process holds, to be taken away (names
- * case-blind, as Windows reads them), and the one to be set in their place:
- * the app decides what its WebView2 is started with, not the environment it
- * was started from. WEBVIEW2_USER_DATA_FOLDER would put every window in one
- * store, the one thing the partitions are for (stores.ts);
- * WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGER hands a page to a debugger; the others
- * pick another runtime or add arguments of their own.
- */
-export function webview2Environment(env: Record<string, string | undefined>): { remove: string[]; set: [name: string, value: string] } {
-	return { remove: Object.keys(env).filter((k) => /^webview2_/i.test(k)), set: [ARGUMENTS_VARIABLE, BROWSER_ARGUMENTS] };
+export function webview2Variables(env: Record<string, string | undefined>): string[] {
+	return Object.keys(env).filter((k) => /^webview2_/i.test(k));
 }
 
 /** How many times a page is asked for its preload: its first load and two loads again. */

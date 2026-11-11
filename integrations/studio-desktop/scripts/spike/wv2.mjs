@@ -5,7 +5,7 @@
 // where it could not ask.
 import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { appendFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { BUN, CONTROL, D, EXE, HERE, POWERSHELL, REPORT, USER_DATA, cmd, evalIn, lines, mine, sleep, startApp, waitFor, log } from '../checks/lib.mjs';
@@ -196,7 +196,7 @@ return out;`,
   say(`${name}: cross-origin reads from the page`, fetched);
 
   const results = {};
-  for (const [k, js] of Object.entries(KINDS)) {
+  for (const [k, js] of Object.entries(process.env.SPIKE_KINDS === '1' ? KINDS : {})) {
     try {
       const r = await evalIn('h', `${PROBE}\n${js}`, 15000);
       results[k] = r.ok ? r.value : `threw ${r.value}`;
@@ -231,30 +231,11 @@ return out;`,
 const sid = spawnSync('whoami', ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8' }).stdout.trim().split(',').pop().replace(/"/g, '');
 say('grant the user its own folders', spawnSync('icacls', [D, '/grant', `*${sid}:(OI)(CI)F`, '/T', '/Q'], { encoding: 'utf8' }).stdout.trim());
 
-// The app's own calls (src/bun/win32.ts), run by its Bun: is this process elevated, and does
-// startAsUser start one that is not (whoami of a cmd it started, and elevated() asked of a Bun it started)?
-{
-  const url = pathToFileURL(join(HERE, 'src', 'bun', 'win32.ts')).href;
-  const whoFile = join(D, 'spike-startasuser-whoami.txt');
-  const elevFile = join(D, 'spike-startasuser-elevated.txt');
-  const inner = join(D, 'spike-elevated.ts');
-  writeFileSync(inner, `const w = await import(${JSON.stringify(url)}); require("node:fs").writeFileSync(${JSON.stringify(elevFile)}, String(w.elevated()));`);
-  const script = `const w = await import(${JSON.stringify(url)}); console.log("elevated here: " + w.elevated()); w.startAsUser(${JSON.stringify(`cmd.exe /c whoami /groups > "${whoFile}" 2>&1`)}); w.startAsUser(${JSON.stringify(`"${BUN}" "${inner}"`)}); console.log("started");`;
-  const r = spawnSync(BUN, ['-e', script], { encoding: 'utf8', timeout: 60000 });
-  say('win32.ts: elevated() and startAsUser()', `${r.stdout.trim()} ${r.stderr.trim().slice(0, 600)}`);
-  await sleep(5000);
-  for (const f of [whoFile, elevFile]) {
-    try {
-      say(`win32.ts: ${f.split(/[\\/]/).pop()}`, (await import('node:fs')).readFileSync(f, 'utf8').split(/\r?\n/).filter((l) => !/whoami/.test(f) || /Mandatory|S-1-5-32-544/.test(l)).join('\n'));
-    } catch (e) {
-      say(`win32.ts: ${f} not written`, String(e));
-    }
-  }
-}
-
-// The app sets WebView2's arguments itself now (webview2.ts): run as the runner runs it, and de-elevated.
-await config('elevated', {});
-await config('basic', { deElevated: true });
+// The app takes every WEBVIEW2_ variable out of its environment (webview2.ts): started de-elevated
+// (where WebView2 reads them) with two, its browser processes must show neither.
+const ONE_STORE = join(D, 'one-store-for-all');
+await config('basic-inherited', { deElevated: true, env: { WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--fennec-spike-marker', WEBVIEW2_USER_DATA_FOLDER: ONE_STORE } });
+say('the folder WEBVIEW2_USER_DATA_FOLDER named', existsSync(ONE_STORE) ? 'made (the variable reached WebView2)' : 'never made');
 
 appendFileSync(join(D, 'logs', 'spike-done'), 'done\n');
 hostile.close();

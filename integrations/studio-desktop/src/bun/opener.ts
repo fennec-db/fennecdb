@@ -59,32 +59,75 @@ export const LINK_OUT = "link-out";
 /**
  * Windows: a preload for every window of the app that takes a page's request
  * for a new window before WebView2 does; "" elsewhere. WebKit hands the
- * request to Electrobun (macOS's createWebView, WebKitGTK's decide-policy),
- * which raises `new-window-open` and opens nothing; Electrobun 2.0.4 handles
- * no WebView2 NewWindowRequested, so WebView2 opened a popup window of its
- * own for a page's `window.open`: held to no origin, in the page's store, and
- * alive after the app quit (`checks/sandbox.mjs` on both Windows runners). So
- * there `window.open`, and a link that would open a window (a target other
- * than the page's own, a modifier key, the middle button), send the address
- * over the event bridge as LINK_OUT and open nothing: a studio window hands
- * it to `linkOut`, as macOS's `new-window-open` is, and the app's own pages
- * drop it. A target naming a frame is taken as a new window too: neither the
- * studio nor the app's pages has a named frame. A page that takes another
- * `window.open`, from a frame it makes, still gets WebView2's popup: what the
- * app cannot refuse without Electrobun.
+ * request to Electrobun (macOS's createWebView, WebKitGTK's create signal),
+ * which opens nothing; Electrobun 2.0.4 handles no WebView2
+ * NewWindowRequested, so WebView2 opens a popup window of its own: held to no
+ * origin, in the page's store, and alive after the app quit. Nothing native
+ * refuses it -- `--block-new-web-contents=true`, which Microsoft lists, reached
+ * WebView2 156's browser process and blocked nothing -- so the preload does,
+ * and WebView2 runs it in every document of the window, every frame's
+ * included (the initial about:blank, srcdoc, data:, blob:, another origin's,
+ * one written by document.write: `checks/hostile.mjs` asks each).
+ *
+ * In each document it runs in, every way a page names a new window is taken:
+ *   - `window.open`, and `document.open` with three arguments, which is
+ *     window.open: the address goes over the event bridge as LINK_OUT and
+ *     nothing opens (a studio window hands it to `linkOut`, the app's own pages
+ *     drop it);
+ *   - a link (`a`, `area`, SVG's `a`) followed to a target other than the
+ *     page's own -- its own or the document's `<base target>` -- or with a
+ *     modifier key or the middle button: sent likewise, by a click on it
+ *     (taken at the window, before the page's listeners), `click()` (a link
+ *     outside the document is clicked where no window listener hears it) and
+ *     `dispatchEvent` (a script's click in a shadow root never reaches the
+ *     window);
+ *   - a form submitted to such a target (the submitter's `formtarget`, the
+ *     form's, the document's): `submit()` (which fires no event),
+ *     `requestSubmit()`, a click on its button and Enter in its field (a form in
+ *     a shadow root raises a submit event the window never hears) do nothing.
+ * A target naming a frame is taken as a new window too: neither the studio nor
+ * the app's pages has a named frame. Every replaced function is put out of a
+ * page's reach (not writable, not configurable), and every document of the
+ * window has its own, so no realm keeps WebView2's. What a person must click
+ * or allow first and the preload cannot see is not covered: a link inside a
+ * PDF in WebView2's viewer, and a notification's `clients.openWindow`, which
+ * Electrobun asks the user to allow.
  */
 export function newWindowPreload(platform: NodeJS.Platform = process.platform): string {
 	if (platform !== "win32") return "";
 	return `(function(){
-var send=function(u){try{var s=window.__electrobunSendToHost;if(typeof s==="function")s({type:${JSON.stringify(LINK_OUT)},url:new URL(String(u),document.baseURI).href});}catch(e){}};
-try{Object.defineProperty(window,"open",{value:function(u){if(u!==undefined&&u!==null&&String(u)!=="")send(u);return null;},writable:false,configurable:false});}catch(e){}
+var send=function(u,base){try{var s=window.__electrobunSendToHost;if(typeof s==="function")s({type:${JSON.stringify(LINK_OUT)},url:new URL(String(u),base||document.baseURI).href});}catch(e){}};
+var lock=function(o,k,v){try{Object.defineProperty(o,k,{value:v,writable:false,configurable:false});}catch(e){}};
+var named=function(u){return u!==undefined&&u!==null&&String(u)!=="";};
+lock(window,"open",function(u){if(named(u))send(u);return null;});
+var docOpen=Document.prototype.open;
+lock(Document.prototype,"open",function(u){if(arguments.length>2){if(named(u))send(u);return null;}return docOpen.apply(this,arguments);});
 var elsewhere=function(t){t=(t||"").toLowerCase();return t!==""&&t!=="_self"&&t!=="_top"&&t!=="_parent";};
-var away=function(e){var p=e.composedPath?e.composedPath():[e.target];for(var i=0;i<p.length;i++){var n=p[i];
-if(!n||!n.getAttribute||String(n.localName).toLowerCase()!=="a"||!n.hasAttribute("href"))continue;
-if(!elsewhere(n.getAttribute("target"))&&!e.ctrlKey&&!e.shiftKey&&!e.metaKey&&e.button!==1)return;
-e.preventDefault();send(n.getAttribute("href"));return;}};
-window.addEventListener("click",away,true);window.addEventListener("auxclick",away,true);
-window.addEventListener("submit",function(e){var f=e.target;if(f&&f.getAttribute&&elsewhere(f.getAttribute("target")))e.preventDefault();},true);
+var targetOf=function(el,own){var t=own!==undefined?own:el.getAttribute("target");if(t!==null)return t;var b=(el.ownerDocument||document).querySelector("base[target]");return b?b.getAttribute("target"):"";};
+var XLINK="http://www.w3.org/1999/xlink";
+var hrefOf=function(n){return n.getAttribute("href")!==null?n.getAttribute("href"):n.getAttributeNS?n.getAttributeNS(XLINK,"href"):null;};
+var kind=function(n){if(!n||n.nodeType!==1)return null;var l=String(n.localName).toLowerCase();
+if((l==="a"||l==="area")&&hrefOf(n)!==null)return "link";
+if(l==="button"&&String(n.getAttribute("type")||"submit").toLowerCase()==="submit"&&n.form)return "submit";
+if(l==="input"&&/^(submit|image)$/i.test(String(n.getAttribute("type")||""))&&n.form)return "submit";
+return null;};
+var formLeaves=function(f,by){return elsewhere(targetOf(f,by&&by.hasAttribute&&by.hasAttribute("formtarget")?by.getAttribute("formtarget"):undefined));};
+var asks=function(e){return !!(e&&(e.ctrlKey||e.shiftKey||e.metaKey||e.button===1));};
+var away=function(path,e){for(var i=0;i<path.length;i++){var n=path[i],k=kind(n);if(!k)continue;
+if(k==="link"){if(!elsewhere(targetOf(n))&&!asks(e))return null;send(hrefOf(n),n.baseURI);return n;}
+return formLeaves(n.form,n)||asks(e)?n:null;}return null;};
+var up=function(n){var p=[];while(n){p.push(n);n=n.parentNode||(n.nodeType===11&&n.host)||null;}return p;};
+var clicks=function(e){if(away(e.composedPath?e.composedPath():[e.target],e))e.preventDefault();};
+window.addEventListener("click",clicks,true);window.addEventListener("auxclick",clicks,true);
+var click=HTMLElement.prototype.click;
+lock(HTMLElement.prototype,"click",function(){if(away(up(this),null))return;return click.apply(this,arguments);});
+var dispatch=EventTarget.prototype.dispatchEvent;
+lock(EventTarget.prototype,"dispatchEvent",function(e){if(e&&/^(click|auxclick|DOMActivate)$/.test(e.type)&&this&&this.nodeType&&away(up(this),e))return false;return dispatch.apply(this,arguments);});
+var submit=HTMLFormElement.prototype.submit,requestSubmit=HTMLFormElement.prototype.requestSubmit;
+lock(HTMLFormElement.prototype,"submit",function(){if(formLeaves(this,null))return;return submit.apply(this,arguments);});
+lock(HTMLFormElement.prototype,"requestSubmit",function(by){if(formLeaves(this,by||null))return;return requestSubmit.apply(this,arguments);});
+window.addEventListener("submit",function(e){var f=e.target;if(f&&f.getAttribute&&formLeaves(f,e.submitter||null))e.preventDefault();},true);
+window.addEventListener("keydown",function(e){if(e.key!=="Enter")return;var p=e.composedPath?e.composedPath():[e.target],n=p[0];if(n&&String(n.localName).toLowerCase()==="input"&&n.form&&formLeaves(n.form,null))e.preventDefault();},true);
 })();`;
 }
 
