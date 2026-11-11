@@ -361,6 +361,7 @@ jobs:
         if: steps.keys.outputs.set == 'true'
         with:
           channel: stable
+          flutter-version: 3.47.9
 
       - name: The native libraries, from the release
         if: steps.keys.outputs.set == 'true'
