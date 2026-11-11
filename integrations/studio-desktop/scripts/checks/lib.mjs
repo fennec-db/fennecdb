@@ -402,7 +402,10 @@ export const WEBKIT = STORES[0];
 function forgetCredentials(account) {
   if (LINUX) {
     const r = spawnSync('secret-tool', ['clear', 'service', IDENTIFIER, ...(account ? ['account', account] : [])], { encoding: 'utf8', timeout: 30000 });
-    if (r.error || r.status !== 0) {
+    // Status 1 and nothing said is no item matched (libsecret's clear returns FALSE
+    // with no error); a store that cannot answer says why.
+    const noneThere = r.status === 1 && (r.stderr ?? '').trim() === '';
+    if (r.error || (r.status !== 0 && !noneThere)) {
       throw new Error(`secret-tool clear service ${IDENTIFIER}: ${r.error?.message ?? `status ${r.status}: ${r.stderr}`} (libsecret-tools has secret-tool, and a Secret Service must answer on the session bus)`);
     }
     return;
