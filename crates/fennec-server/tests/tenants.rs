@@ -147,7 +147,7 @@ fn a_client_that_stops_reading_does_not_hold_the_tenant() {
     }
     let mut stalled = TcpStream::connect(("127.0.0.1", n.server.port)).unwrap();
     stalled
-        .write_all(b"GET /t/acme/notes HTTP/1.1\r\nHost: t\r\n\r\n")
+        .write_all(b"GET /t/acme/notes HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .unwrap();
     std::thread::sleep(Duration::from_millis(300));
 
@@ -208,7 +208,11 @@ fn subscribe(port: u16, prefix: &str) -> Result<TcpStream, String> {
     use std::io::Read;
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
-    write!(s, "GET {prefix}/notes/changes HTTP/1.1\r\nHost: t\r\n\r\n").unwrap();
+    write!(
+        s,
+        "GET {prefix}/notes/changes HTTP/1.1\r\nHost: localhost\r\n\r\n"
+    )
+    .unwrap();
     let mut seen = String::new();
     let mut buf = [0u8; 4096];
     while !seen.contains("event: seed") {

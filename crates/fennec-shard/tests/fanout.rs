@@ -291,7 +291,7 @@ fn call(port: u16, method: &str, target: &str, body: &str, auth: Option<&str>) -
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
     let mut req = format!(
-        "{method} {target} HTTP/1.1\r\nHost: t\r\nConnection: close\r\nContent-Length: {}\r\n",
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n",
         body.len()
     );
     if let Some(t) = auth {

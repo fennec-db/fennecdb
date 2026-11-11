@@ -321,7 +321,7 @@ Covers `crates/fennec-ql/` and the shell in `crates/fennec-cli/`; its rules bind
 
 ### `crates/fennec-http/CLAUDE.md`
 
-Covers `crates/fennec-http/`; access binds fennec-core's hooks (`plugin::Hook`, `Check`) and its own collections' names (`declared::OWN`), replication fennec-core's `wal` and `changes_in`, held writes its wakes (`changes.rs`).
+Covers `crates/fennec-http/`; access binds fennec-core's hooks (`plugin::Hook`, `Check`) and its own collections' names (`declared::OWN`), an open server's rule fennec-shard's router (`cors::foreign`, `cors::vouched`), replication fennec-core's `wal` and `changes_in`, held writes its wakes (`changes.rs`).
 
 *Replication and archives*
 - Replication ships only what is on disk, by the change counter.
@@ -332,12 +332,12 @@ Covers `crates/fennec-http/`; access binds fennec-core's hooks (`plugin::Hook`, 
 
 *Access*
 - A scoped token is held to its rules at every level, twice for writes.
-- A field a read rule withholds is held out of what a statement does.
 - A rule may read another collection, answered before each statement.
 - A collection whose name starts with `_` is the server's, out of every rule's reach.
 - A token is bound to the tenant it names.
 - A token is taken only from the issuers, for the audiences and clients, a server was told.
 - An empty token is no token.
+- A server that asks for no token answers only under this machine's name, and a page only of its own origin or `--http-cors`'s.
 
 *Quotas and retries*
 - A tenant is held to its quota by its node, a block as it lands.
@@ -375,6 +375,13 @@ Covers `crates/fennec-http/src/mcp/`.
 
 *The HTTP server*
 - An agent's MCP tool is a statement, held to the token as `/query` is.
+
+### `crates/fennec-http/src/access/CLAUDE.md`
+
+Covers `crates/fennec-http/src/access/`.
+
+*Access*
+- A field a read rule withholds is held out of what a statement does.
 
 ### `crates/fennec-server/CLAUDE.md`
 

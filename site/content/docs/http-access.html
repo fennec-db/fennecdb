@@ -29,9 +29,42 @@ network: <code>--tls-cert</code> and <code>--tls-key</code> (<a href="/docs/serv
 <tr><td><code>--http-read-only</code></td><td>write endpoints return 403, and so does a call of a named statement whose body writes (one whose body only reads is answered); <code>fennec-server</code>'s own path is unaffected</td></tr>
 <tr><td>a replica</td><td>every write returns 403, whatever the flags: its writes come from its primary</td></tr>
 <tr><td>non-loopback address</td><td>refuses to bind without a token, unless <code>--insecure</code> is given</td></tr>
+<tr><td>no token</td><td>answers only under this machine's name, and a page only from its own origin or <code>--http-cors</code>'s; every other request is refused 403 before it runs (below)</td></tr>
 </tbody>
 </table>
 </div>
+
+<h3 id="open-servers">A server with no token</h3>
+
+<p>With neither <code>--http-token</code> nor JSON Web Tokens -- the Quickstart's
+server, a node given <code>--admin-token</code> alone -- whoever reaches the
+server reads and writes everything, and a browser reaches
+<code>127.0.0.1</code> from any page. So such a server holds every request to
+two checks before it runs anything, under <code>--insecure</code> too:</p>
+
+<ul>
+  <li><b>Its name.</b> The <code>Host</code> a request names must be
+    <code>localhost</code>, a name under it (<code>app.localhost</code>) or an IP
+    address. A page whose DNS name was rebound to 127.0.0.1 sends its own name,
+    and is refused (403) where it would have read every row. A server reached by
+    another name -- a container's service name, a tunnel's, a LAN name -- needs a
+    token: <code>reach it as localhost or by its address, or give it
+    --http-token</code>, the refusal says.</li>
+  <li><b>The page's origin.</b> A request carrying <code>Origin</code> must come
+    from the server's own origin (the studio it serves) or the one
+    <code>--http-cors</code> names (<code>*</code>: any). Another site's page, which
+    could send a write without a preflight (<code>mode: "no-cors"</code>), is
+    refused (403) before the write runs. Name your app's origin with
+    <code>--http-cors</code>.</li>
+</ul>
+
+<p>curl, the SDKs, Node's <code>fetch</code> and other servers send no
+<code>Origin</code> and pass on this machine's name. <code>/_health</code> and a
+preflight <code>--http-cors</code> lets in are answered under any name. A server
+with a token is held to neither check: a page holds no token, and sends none to
+another origin without the preflight CORS refuses. <code>fennec-shard</code> with
+no <code>--token</code> is held the same way (<a
+href="/docs/sharding-reference#cors">Tenants and sharding</a>).</p>
 
 <details class="deep"><summary>TLS, unfiltered writes, body limits and what a shape leaks</summary>
 <p>The endpoint runs inside <code>fennec-server</code> and takes its TLS flags.

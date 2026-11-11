@@ -187,7 +187,7 @@ fn a_replica_follows_its_primary_over_https() {
         .unwrap();
         s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
         let head = format!(
-            "POST /query HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "POST /query HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
         );
         fennec_http::http::write_parts(&mut s, head.as_bytes(), body.as_bytes()).unwrap();

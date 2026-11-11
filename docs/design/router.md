@@ -32,6 +32,25 @@ what it did: `make shard-bench`'s added p50 22.6 us against main's 23.3,
 six runs each in ABBA turns (20.7-25.2 and 20.5-25.7); on, 24.3
 (21.9-27.6), six header lines more in every answer.
 
+A node that asks for no token asks a page's `Origin` (an open server's
+rule, [http.md](http.md#open-servers)), and judged by its own
+`--http-cors`, which the router's replaces in what the page reads, it
+refused the very page the router told it may call. So a forward does not
+carry an `Origin` the router answers for (`cors::vouched`,
+`forwarded_headers`): one its `--http-cors` lets in, or the router's own
+under a name of this machine -- its studio's, which a rebound page is not,
+being under its own name. Any other goes on for the node to judge, a
+rebound page's own origin among them, and is refused there (403) where
+the node has no token; without `--http-cors` every origin goes on, and
+the node's rule is the one its headers, passed through, tell the page. A
+router with no `--token` is an open server itself -- `/_shard/` names
+every node's admin token, a query across every tenant runs there -- and is
+held to that rule on every request before it is routed: a forward's
+`Host` too, and its `Origin` where the router has `--http-cors`, whose
+rule is then the page's; without it the page is told the node's, so the
+node asks the origin. One with a token is as it was. The cost is one look
+for the `Origin` header a forward, against a list already read.
+
 ## Pooled connections
 
 **The router looks at a pooled connection before it writes, and sends a

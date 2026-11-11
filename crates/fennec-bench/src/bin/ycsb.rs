@@ -1039,7 +1039,7 @@ impl Server {
                 // Docker's proxy takes the connection before the server
                 // listens: ask for something.
                 let _ = s.set_read_timeout(Some(Duration::from_secs(1)));
-                let _ = s.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+                let _ = s.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
                 let mut b = [0u8; 16];
                 if matches!(std::io::Read::read(&mut s, &mut b), Ok(n) if n > 0) {
                     break;

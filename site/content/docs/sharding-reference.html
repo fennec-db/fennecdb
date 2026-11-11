@@ -204,6 +204,21 @@ page is told the rule the router's preflight told it, and never two
 <code>retry_after</code> in the body, as a quota's refusal does. Without the
 flag the router sends none of its own and passes a node's through as the node
 wrote them, and a preflight goes to the node.</p>
+
+<p>A node with no <code>--http-token</code> answers a page only from its own
+origin or its <code>--http-cors</code>'s (<a
+href="/docs/http-access#open-servers">A server with no token</a>). An origin
+the router's <code>--http-cors</code> lets in is the router's to answer for, so
+the router does not send it on and the node needs no flag of its own; any other
+origin goes to the node, which refuses it where it has no token. A router with
+no <code>--token</code> answers <code>/_shard/</code> -- every node's admin
+token, a query across every tenant -- to anyone who reaches it, so it is held
+the same way: only under this machine's name (<code>localhost</code> or an IP
+address), and its own routes only to its own pages and its
+<code>--http-cors</code>'s. A forward's origin is judged by the rule its page
+is told: the router's <code>--http-cors</code> where it has one, otherwise the
+node's. Reached by another name, a router needs <code>--token</code> and its
+nodes a data token.</p>
 </details>
 
 <h3 id="https-nodes">Nodes that serve HTTPS</h3>
@@ -260,7 +275,7 @@ it.</p>
 <tbody>
 <tr><td><code>-l, --listen &lt;address&gt;</code></td><td>Where the router listens. Port 0 takes one the system picks: the <code>listening on: http://&lt;address&gt;</code> line on stderr (<code>https://</code> with <code>--tls-cert</code>) names it. Default <code>127.0.0.1:8090</code>.</td></tr>
 <tr><td><code>-d, --directory &lt;path&gt;</code></td><td>The directory file: which node holds which tenant (<a href="#the-router-fennec-shard">The router</a>). Default <code>shard.fennec</code>. The router holds <code>&lt;path&gt;.lock</code> while it runs, as a node holds each open tenant's, so a second router or a shell over the file is refused, the holder named.</td></tr>
-<tr><td><code>--token &lt;value&gt;</code></td><td>Requires <code>Authorization: Bearer &lt;value&gt;</code> on <code>/_shard/</code>. Data requests pass their own <code>Authorization</code> through to the nodes, which check it against <code>--http-token</code> (<a href="#tokens">Tokens</a>).</td></tr>
+<tr><td><code>--token &lt;value&gt;</code></td><td>Requires <code>Authorization: Bearer &lt;value&gt;</code> on <code>/_shard/</code>. Data requests pass their own <code>Authorization</code> through to the nodes, which check it against <code>--http-token</code> (<a href="#tokens">Tokens</a>). Without it the router answers only under this machine's name and to its own pages and its <code>--http-cors</code>'s (<a href="#cors">the router's CORS rule</a>).</td></tr>
 <tr><td><code>--insecure</code></td><td>Allows a non-loopback address without <code>--token</code>. Off by default.</td></tr>
 <tr><td><code>--tls-cert &lt;pem&gt;</code></td><td>Serves clients HTTPS alone, with this certificate chain: the router's certificate first, then its intermediates. Needs <code>--tls-key</code>, both or neither; a file that cannot be read or parsed, or a key that is not the certificate's, is refused at the start. A plain HTTP request is answered 400, naming <code>https://</code>. Read at the start: a renewed certificate takes a restart (<a href="server.html#tls">HTTPS</a>).</td></tr>
 <tr><td><code>--tls-key &lt;pem&gt;</code></td><td>The private key of that certificate, PKCS#8, PKCS#1 or SEC1. The router ends the clients' TLS with it; what the router dials itself does not need it.</td></tr>

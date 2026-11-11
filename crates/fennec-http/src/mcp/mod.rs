@@ -240,8 +240,12 @@ pub(crate) fn admit<'a>(
     };
     // Before the token, as the binding asks of every connection: a page
     // on another origin, or one a DNS name was rebound under, is refused
-    // whatever it sends.
-    if let Some(why) = foreign(cfg, req) {
+    // whatever it sends. Asked of a server with a token too, which the
+    // connection's own check (`crate::open_refusal`) leaves alone.
+    let open = cfg.token.is_none() && cfg.access.is_none();
+    if let Some(why) =
+        crate::cors::foreign(cfg.cors.as_deref(), open.then_some("--http-token"), req)
+    {
         let body = Reply::error(403, None, INVALID_REQUEST, &why).body;
         return Err(Response::json(403, body.unwrap_or_default()));
     }
@@ -258,65 +262,6 @@ pub(crate) fn admit<'a>(
         }
     }
     Ok((opts, crate::authenticate(cfg, req, db)?))
-}
-
-/// Why a request is refused for where it comes from, if it is: an
-/// `Origin` that is neither the server's own nor the one `--http-cors`
-/// lets in, or -- on a server that asks for no token -- a `Host` that names
-/// something other than this machine. A page whose name was rebound to
-/// 127.0.0.1 sends its own name as `Host` and as its origin, which agree:
-/// the origin check alone lets it in, and only a server with a token keeps
-/// it out without this. An address written as one cannot be rebound.
-fn foreign(cfg: &Config, req: &Request) -> Option<String> {
-    let open = cfg.token.is_none() && cfg.access.is_none();
-    let host = req.header("host").map(str::trim);
-    if open {
-        if let Some(h) = host {
-            if !local_host(h) {
-                return Some(format!(
-                    "Host `{h}` is not this machine's, and this server asks for no token: \
-                     reach it as localhost or by its address, or give it --http-token"
-                ));
-            }
-        }
-    }
-    let origin = req.header("origin")?.trim();
-    // The origin `--http-cors` lets in, as every answer's CORS says it.
-    let allowed = crate::cors::allows(cfg.cors.as_deref(), req);
-    let same = origin
-        .split_once("://")
-        .is_some_and(|(_, authority)| Some(authority) == host);
-    match allowed || same {
-        true => None,
-        false => Some(format!(
-            "Origin `{origin}` may not call this server: --http-cors names the origin a page may come from"
-        )),
-    }
-}
-
-/// Whether `host` (a `Host` header, port and all) names this machine or an
-/// address: `localhost` and its subdomains, or an IP literal.
-fn local_host(host: &str) -> bool {
-    let name = match host.strip_prefix('[') {
-        // `[::1]:8080`
-        Some(rest) => {
-            return rest
-                .split(']')
-                .next()
-                .is_some_and(|ip| ip.parse::<std::net::Ipv6Addr>().is_ok())
-        }
-        None => host.rsplit_once(':').map_or(host, |(n, port)| {
-            if port.bytes().all(|b| b.is_ascii_digit()) {
-                n
-            } else {
-                host
-            }
-        }),
-    };
-    let name = name.trim_end_matches('.');
-    name.eq_ignore_ascii_case("localhost")
-        || name.to_ascii_lowercase().ends_with(".localhost")
-        || name.parse::<std::net::IpAddr>().is_ok()
 }
 
 /// One JSON-RPC message, read.
@@ -1084,30 +1029,6 @@ pub fn serve_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_local_host_is_this_machine_or_an_address() {
-        for h in [
-            "localhost",
-            "localhost:8080",
-            "LOCALHOST.:80",
-            "app.localhost:3000",
-            "127.0.0.1:8080",
-            "10.0.0.7:8080",
-            "[::1]:8080",
-            "[fe80::1]",
-        ] {
-            assert!(local_host(h), "{h}");
-        }
-        for h in [
-            "evil.example:8080",
-            "evil.example",
-            "localhost.evil.example",
-            "127.0.0.1.nip.io:80",
-        ] {
-            assert!(!local_host(h), "{h}");
-        }
-    }
 
     #[test]
     fn a_header_value_in_base64_is_read_as_its_text() {

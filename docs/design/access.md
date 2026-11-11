@@ -1,6 +1,6 @@
 # Access
 
-The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md) lists under *Access*: scoped tokens, field lists, rules reading another collection, the server's own collections, a token bound to its tenant, whom a token is for, and empty tokens. Each section below but *The server's own collections* and *Whom a token is for*, added after the move, is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md) and [crates/fennec-http/src/access/CLAUDE.md](../../crates/fennec-http/src/access/CLAUDE.md) (the field lists', moved there to make room) list under *Access*: scoped tokens, field lists, rules reading another collection, the server's own collections, a token bound to its tenant, whom a token is for, and empty tokens; an open server's, listed there too, is in [http.md](http.md#open-servers), beside MCP's guard. Each section below but *The server's own collections* and *Whom a token is for*, added after the move, is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Scoped tokens
 

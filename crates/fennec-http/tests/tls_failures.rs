@@ -60,7 +60,7 @@ fn a_failed_handshake_is_counted_by_why() {
     // A plain request, answered 400.
     let mut plain = connect(port);
     plain
-        .write_all(b"GET / HTTP/1.1\r\nHost: t\r\n\r\n")
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .unwrap();
     let _ = plain.read_to_end(&mut rest);
     until(Failed::PlainHttp, 1);
@@ -99,7 +99,7 @@ fn a_failed_handshake_is_counted_by_why() {
     let good = fennec_tls::Client::trusting_pem_file(&certs().join("ca.pem")).unwrap();
     let mut scrape = good.dial(connect(port), "localhost").unwrap();
     scrape
-        .write_all(b"GET /_metrics HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+        .write_all(b"GET /_metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .unwrap();
     let mut text = Vec::new();
     let ended = scrape.read_to_end(&mut text);

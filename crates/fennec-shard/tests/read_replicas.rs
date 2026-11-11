@@ -621,7 +621,8 @@ fn request(
 ) -> (u16, String, String) {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
-    let mut head = format!("{method} {target} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n");
+    let mut head =
+        format!("{method} {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n");
     for (k, v) in headers {
         head.push_str(&format!("{k}: {v}\r\n"));
     }
@@ -657,7 +658,7 @@ fn admin_bytes(port: u16, tag: &str, method: &str, target: &str, body: &[u8]) ->
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
     let head = format!(
-        "{method} {target} HTTP/1.1\r\nHost: x\r\nConnection: close\r\nAuthorization: Bearer \
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: Bearer \
          adm-{tag}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
         body.len()
     );
@@ -1160,7 +1161,7 @@ fn a_marked_read_near_a_read_replica_is_answered_there_and_never_older_than_its_
 fn first_event(port: u16, target: &str, headers: &[(&'static str, String)]) -> (u16, String) {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
-    let mut head = format!("GET {target} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n");
+    let mut head = format!("GET {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n");
     for (k, v) in headers {
         head.push_str(&format!("{k}: {v}\r\n"));
     }
@@ -2558,7 +2559,7 @@ fn a_read_replica_s_copy_refusing_another_tenant_of_its_name_deletes_itself() {
                 s.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
                 write!(
                     s,
-                    "GET /t/{t}/notes/changes HTTP/1.1\r\nHost: x\r\nFennec-Read: replica\r\n\r\n"
+                    "GET /t/{t}/notes/changes HTTP/1.1\r\nHost: localhost\r\nFennec-Read: replica\r\n\r\n"
                 )
                 .unwrap();
                 let mut heard = String::new();
@@ -3721,7 +3722,7 @@ fn a_marked_read_whose_body_the_replica_does_not_read_goes_home_by_the_replica_t
     let started = Instant::now();
     write!(
         s,
-        "POST /t/a/query HTTP/1.1\r\nHost: x\r\nConnection: close\r\nFennec-Read: replica\r\n\
+        "POST /t/a/query HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nFennec-Read: replica\r\n\
          Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     )

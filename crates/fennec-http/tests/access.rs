@@ -79,7 +79,7 @@ impl Node {
         let auth = token.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
         write!(
             s,
-            "{method} {target} HTTP/1.1\r\nHost: x\r\n{auth}Content-Length: {}\r\n\
+            "{method} {target} HTTP/1.1\r\nHost: localhost\r\n{auth}Content-Length: {}\r\n\
              Connection: close\r\n\r\n{body}",
             body.len()
         )
@@ -360,7 +360,7 @@ fn a_panicking_write_leaves_the_rules_in_force() {
         let body = r#"{"query":"put notes [{title: \"x\"}, {title: boom()}]"}"#;
         write!(
             s,
-            "POST /query HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\n\
+            "POST /query HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\
              Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         )
@@ -428,7 +428,7 @@ fn a_subscription_hears_nothing_of_other_users_rows() {
         .unwrap();
     write!(
         s,
-        "GET /notes/changes HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {alice}\r\n\r\n"
+        "GET /notes/changes HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {alice}\r\n\r\n"
     )
     .unwrap();
     let mut heard = String::new();
@@ -623,7 +623,7 @@ fn a_subscriptions_inner_get_reads_only_what_the_token_may() {
             .unwrap();
         write!(
             s,
-            "GET /board/changes?where={shape} HTTP/1.1\r\nHost: x\r\n\
+            "GET /board/changes?where={shape} HTTP/1.1\r\nHost: localhost\r\n\
              Authorization: Bearer {alice}\r\n\r\n"
         )
         .unwrap();
@@ -683,7 +683,7 @@ fn a_scoped_streams_inner_get_follows_the_rows_the_token_may_read() {
         .unwrap();
     write!(
         s,
-        "GET /board/changes?where=msg+in+(get+notes+select+title) HTTP/1.1\r\nHost: x\r\n\
+        "GET /board/changes?where=msg+in+(get+notes+select+title) HTTP/1.1\r\nHost: localhost\r\n\
          Authorization: Bearer {alice}\r\n\r\n"
     )
     .unwrap();
@@ -1059,7 +1059,7 @@ fn a_list_claim_scopes_reads_writes_and_subscriptions() {
         .unwrap();
     write!(
         s,
-        "GET /messages/changes HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {alice}\r\n\r\n"
+        "GET /messages/changes HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {alice}\r\n\r\n"
     )
     .unwrap();
     let mut heard = String::new();
@@ -1501,7 +1501,7 @@ fn a_subscription_ends_when_its_token_expires() {
         .unwrap();
     write!(
         s,
-        "GET /notes/changes HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {alice}\r\n\r\n"
+        "GET /notes/changes HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {alice}\r\n\r\n"
     )
     .unwrap();
     let mut heard = String::new();
@@ -1571,7 +1571,7 @@ fn a_scoped_stream_of_no_rows_hears_the_writes_to_rows_it_may_read() {
         .unwrap();
     write!(
         s,
-        "GET /notes/changes?select=id&where=false HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {alice}\r\n\r\n"
+        "GET /notes/changes?select=id&where=false HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {alice}\r\n\r\n"
     )
     .unwrap();
     let mut heard = String::new();
@@ -1662,7 +1662,7 @@ fn a_scoped_stream_hears_its_own_rows_reach_their_time_and_no_others() {
     s.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
     write!(
         s,
-        "GET /pos/changes HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {alice}\r\n\r\n"
+        "GET /pos/changes HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {alice}\r\n\r\n"
     )
     .unwrap();
     let mut heard = String::new();
@@ -1704,7 +1704,7 @@ fn a_scoped_poll_learns_nothing_of_writes_it_may_not_read() {
         let body = r#"{"query":"get notes select title"}"#;
         write!(
             s,
-            "POST /query HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\n\
+            "POST /query HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\
              If-None-Match: {tag}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         )
@@ -1772,7 +1772,7 @@ fn a_scoped_poll_of_an_inner_get_moves_with_the_rows_the_token_may_read() {
             r#"{"query":"get board select msg where msg in (get notes select title) order msg"}"#;
         write!(
             s,
-            "POST /query HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\n\
+            "POST /query HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\
              If-None-Match: {tag}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         )

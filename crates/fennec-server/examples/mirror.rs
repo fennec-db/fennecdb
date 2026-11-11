@@ -118,7 +118,7 @@ fn start(file: &Path) -> Server {
 fn subscribe(port: u16) -> BufReader<TcpStream> {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
-    write!(s, "GET /{T}/changes HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    write!(s, "GET /{T}/changes HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
     let mut r = BufReader::new(s);
     // The head, then the seed.
     until_line(&mut r, "event: seed");
@@ -145,7 +145,7 @@ fn count(port: u16) -> u64 {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     write!(
         s,
-        "POST /query HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "POST /query HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
     .unwrap();

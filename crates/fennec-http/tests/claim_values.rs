@@ -60,7 +60,7 @@ impl Node {
         s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         write!(
             s,
-            "{method} {target} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\n\
+            "{method} {target} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\
              {headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         )
@@ -94,7 +94,7 @@ impl Node {
             .unwrap();
         write!(
             s,
-            "GET {target} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\n\
+            "GET {target} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\
              Connection: close\r\n\r\n"
         )
         .unwrap();

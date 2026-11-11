@@ -104,7 +104,7 @@ fn http(port: u16, method: &str, path: &str, token: Option<&str>, body: &str) ->
     let auth = token.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
     write!(
         s,
-        "{method} {path} HTTP/1.1\r\nHost: x\r\n{auth}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\n{auth}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
     .unwrap();
@@ -485,7 +485,7 @@ fn raw(port: u16, method: &str, path: &str, headers: &str, body: &str) -> (u16, 
     s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
     write!(
         s,
-        "{method} {path} HTTP/1.1\r\nHost: x\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
     .unwrap();
@@ -610,7 +610,7 @@ fn first_event(port: u16, path: &str, headers: &str) -> (u16, String) {
     // Closed after an answer that is not a stream, which a stream is anyway.
     write!(
         s,
-        "GET {path} HTTP/1.1\r\nHost: x\r\n{headers}Connection: close\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: localhost\r\n{headers}Connection: close\r\n\r\n"
     )
     .unwrap();
     let mut out = String::new();
@@ -773,7 +773,7 @@ fn a_stream_and_changes_sent_after_a_write_wait_for_it_on_a_replica() {
 fn stream_head(port: u16, path: &str) -> String {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
-    write!(s, "GET {path} HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    write!(s, "GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
     let mut out = String::new();
     let mut chunk = [0u8; 4096];
     while !out.contains("\r\n\r\n") {
@@ -1085,7 +1085,7 @@ impl RawStream {
         let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
         write!(
             s,
-            "GET /_replication?since=0 HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {TOKEN}\r\n\r\n"
+            "GET /_replication?since=0 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {TOKEN}\r\n\r\n"
         )
         .unwrap();
         RawStream {

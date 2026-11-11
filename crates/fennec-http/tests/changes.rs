@@ -77,7 +77,8 @@ impl Sub {
         let mut sock = TcpStream::connect(("127.0.0.1", port)).expect("connect");
         sock.set_read_timeout(Some(Duration::from_millis(200)))
             .unwrap();
-        let mut req = format!("GET {target} HTTP/1.1\r\nHost: t\r\nAccept: text/event-stream\r\n");
+        let mut req =
+            format!("GET {target} HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n");
         for (k, v) in headers {
             req.push_str(&format!("{k}: {v}\r\n"));
         }
@@ -186,7 +187,7 @@ fn call(
 ) -> (u16, String) {
     let mut sock = TcpStream::connect(("127.0.0.1", port)).expect("connect");
     sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    let mut req = format!("{method} {target} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n");
+    let mut req = format!("{method} {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n");
     for (k, v) in headers {
         req.push_str(&format!("{k}: {v}\r\n"));
     }
@@ -1321,7 +1322,7 @@ fn a_poll_of_an_inner_get_is_answered_304_until_what_it_reads_is_written() {
         sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         write!(
             sock,
-            "POST /query HTTP/1.1\r\nHost: t\r\nConnection: close\r\nIf-None-Match: {tag}\r\n\
+            "POST /query HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nIf-None-Match: {tag}\r\n\
              Content-Length: {}\r\n\r\n{q}",
             q.len()
         )
@@ -1587,7 +1588,7 @@ fn a_poll_tag_names_the_images_adopted() {
         let q = r#"{"query":"get tasks order id"}"#;
         write!(
             sock,
-            "POST /query HTTP/1.1\r\nHost: t\r\nConnection: close\r\nIf-None-Match: {tag}\r\n\
+            "POST /query HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nIf-None-Match: {tag}\r\n\
              Content-Length: {}\r\n\r\n{q}",
             q.len()
         )

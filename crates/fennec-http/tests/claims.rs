@@ -78,7 +78,7 @@ impl Conn {
         let key = key.map_or(String::new(), |k| format!("Idempotency-Key: {k}\r\n"));
         write!(
             self.w,
-            "POST {path} HTTP/1.1\r\nHost: t\r\n{key}Content-Length: {}\r\n\r\n{body}",
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\n{key}Content-Length: {}\r\n\r\n{body}",
             body.len()
         )
         .unwrap();

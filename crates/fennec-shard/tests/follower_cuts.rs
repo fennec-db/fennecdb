@@ -452,7 +452,9 @@ fn a_move_a_standby_reads_ends_nothing_it_had_out() {
 
 /// A name the system's resolver is stood in for, its lookups let through
 /// or held until let go -- a forward dialing n1 holds there, its maps read
-/// and its connection not yet made, where no cut can see it.
+/// and its connection not yet made, where no cut can see it. The names
+/// are under `.localhost`: a node with no data token answers only this
+/// machine's names (`cors::foreign`), and the wires are on loopback.
 struct Lookups {
     state: Arc<(Mutex<(bool, usize)>, Condvar)>,
 }
@@ -512,7 +514,7 @@ impl Drop for Lookups {
 #[test]
 fn a_standby_s_forward_that_read_the_maps_before_the_failover_goes_where_they_say_after() {
     let _serial = serial();
-    let n1 = format!("n1.fcut-dial-{}.test", std::process::id());
+    let n1 = format!("n1.fcut-dial-{}.localhost", std::process::id());
     let lookups = std::cell::OnceCell::new();
     let p = pair("dial", None, |i, w| match i {
         0 => {
@@ -612,7 +614,11 @@ fn a_standby_s_cut_write_whose_bucket_another_failover_moves_still_waits_for_the
     let lookups: [std::cell::OnceCell<Lookups>; 3] = Default::default();
     let p = pair("moved", Some(NO_ROUND), |i, w| {
         let at: SocketAddr = w.addr.parse().unwrap();
-        let name = format!("n{}.fcut-moved-{}.test:8081", i + 1, std::process::id());
+        let name = format!(
+            "n{}.fcut-moved-{}.localhost:8081",
+            i + 1,
+            std::process::id()
+        );
         assert!(lookups[i].set(Lookups::of(&name, at)).is_ok());
         name
     });
@@ -719,7 +725,7 @@ fn a_standby_stops_asking_a_copy_for_a_client_that_left() {
     let mut client = TcpStream::connect(("127.0.0.1", p.standby)).unwrap();
     write!(
         client,
-        "POST {PATH} HTTP/1.1\r\nHost: t\r\nIdempotency-Key: left-1\r\n\
+        "POST {PATH} HTTP/1.1\r\nHost: localhost\r\nIdempotency-Key: left-1\r\n\
          Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{sql}",
         sql.len()
     )

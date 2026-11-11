@@ -25,7 +25,7 @@ fn call(addr: &str, target: &str, body: &str, extra: &str) -> u16 {
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     write!(
         s,
-        "POST {target} HTTP/1.1\r\nHost: x\r\n{extra}Content-Length: {}\r\n\
+        "POST {target} HTTP/1.1\r\nHost: localhost\r\n{extra}Content-Length: {}\r\n\
          Connection: close\r\n\r\n{body}",
         body.len()
     )
@@ -269,7 +269,7 @@ fn a_request_through_the_router_is_one_trace_with_the_node() {
         let mut s = TcpStream::connect(&front).unwrap();
         write!(
             s,
-            "GET /_metrics HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+            "GET /_metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
         )
         .unwrap();
         let mut out = String::new();

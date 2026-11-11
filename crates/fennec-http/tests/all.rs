@@ -25,6 +25,7 @@ mod mcp;
 mod named;
 mod node_archive;
 mod node_scheduled;
+mod open_servers;
 mod ordered_claims;
 mod own;
 mod prepared;

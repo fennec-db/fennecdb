@@ -1890,6 +1890,40 @@ impl Router {
                 }
                 continue;
             }
+            // A router with no `--token` answers `/_shard/` -- every node's
+            // admin token in the directory, a query across every tenant, a
+            // tenant's delete -- to whoever reaches it, as a node with none
+            // answers its data: held to the same rule before anything is
+            // routed, a forward included ([`fennec_http::cors::foreign`]).
+            // Past the preflight, which reads nothing. A forward's page is
+            // judged by the CORS rule it is told: the router's where it has
+            // `--http-cors`, else the node's, which the answer carries
+            // through -- the node asks that origin itself, and the router
+            // its `Host` alone. A router with a token is left as it was, as
+            // a node with one is: a page holds no token, and sends none
+            // across origins without a preflight; a forward's node judges
+            // its own.
+            if self.cfg.token.is_none() {
+                let cors = self.cfg.cors.as_deref();
+                let refused = match (cors, req.segments().first()) {
+                    (None, Some(&"t")) => fennec_http::cors::foreign_host("--token", &req),
+                    _ => fennec_http::cors::foreign(cors, Some("--token"), &req),
+                };
+                if let Some(why) = refused {
+                    let route = route_of(&req);
+                    let resp = self.cors(Response::error(403, &why));
+                    fennec_http::audit::http(&req, resp.status, peer);
+                    metrics::counted(route, resp.status);
+                    let sent = resp
+                        .write(&mut out, req.keep_alive, req.method == Method::Head)
+                        .is_ok();
+                    metrics::timed(route, arrived.elapsed());
+                    if !(sent && req.keep_alive) {
+                        return;
+                    }
+                    continue;
+                }
+            }
             // Everything but a forwarded request is counted here, as it is
             // answered -- before it is written, as every request is
             // ([`metrics::counted`]) -- and timed once it is; `forward`
@@ -2073,7 +2107,8 @@ impl Router {
         let named = client.zip(mark).map(|(ip, mark)| format!("{ip} {mark}"));
         // `forward_near`'s filter: a copy of its own here passed the entry's
         // Access token on to the node once only the shared one dropped it.
-        let mut headers: Vec<(&str, &str)> = forwarded_headers(req, traced);
+        let mut headers: Vec<(&str, &str)> =
+            forwarded_headers(req, traced, self.cfg.cors.as_deref());
         if let Some(named) = &named {
             headers.push((fennec_http::audit::ROUTER_HEADER, named));
         }
@@ -2305,7 +2340,7 @@ impl Router {
                 Ok(t) => t,
                 Err(resp) => return reply(out, resp),
             };
-            let mut headers = forwarded_headers(req, traced);
+            let mut headers = forwarded_headers(req, traced, self.cfg.cors.as_deref());
             let cut = matches!(ended, upstream::Ended::Cut { .. });
             if ended == whole && !upstream::replayable(req.method.name(), &req.target, &headers) {
                 return reply(out, region::homed(may_have_run(&node), &home));
@@ -3012,7 +3047,7 @@ impl Router {
             .or(peer.map(|p| p.ip()));
         if let Some((rnode, raddr, rmark)) = near {
             let named = client.map(|ip| format!("{ip} {rmark}"));
-            let mut headers = forwarded_headers(req, traced);
+            let mut headers = forwarded_headers(req, traced, self.cfg.cors.as_deref());
             if let Some(named) = &named {
                 headers.push((fennec_http::audit::ROUTER_HEADER, named));
             }
@@ -6321,15 +6356,27 @@ fn hop_by_hop(name: &str) -> bool {
 /// router's hostname that is no node's to see -- nor the request id the
 /// router sends, nor,
 /// while it traces, the client's trace context, which the router's own
-/// replaces. Borrowed, not cloned: a request's headers were copied into
-/// `String`s here and formatted one by one into the head, which with the
-/// router's own header made a request through it 1.5 us slower.
-fn forwarded_headers(req: &Request, traced: bool) -> Vec<(&str, &str)> {
+/// replaces -- nor an `Origin` the router answers for under `cors`, its
+/// `--http-cors` ([`fennec_http::cors::vouched`]): the page reads the
+/// router's CORS rule in place of the node's, so a node asking a page's
+/// origin, as one with no token does, is not asked again by a rule of its
+/// own the page never sees; an origin the router does not answer for goes
+/// on, for the node to judge. Borrowed, not cloned: a request's headers
+/// were copied into `String`s here and formatted one by one into the head,
+/// which with the router's own header made a request through it 1.5 us
+/// slower.
+fn forwarded_headers<'r>(
+    req: &'r Request,
+    traced: bool,
+    cors: Option<&str>,
+) -> Vec<(&'r str, &'r str)> {
+    let vouched = fennec_http::cors::vouched(cors, req);
     req.headers
         .iter()
         .filter(|(k, _)| {
             !hop_by_hop(k)
                 && !k.eq_ignore_ascii_case("host")
+                && !(vouched && k.eq_ignore_ascii_case("origin"))
                 && !k.eq_ignore_ascii_case(fennec_http::audit::ROUTER_HEADER)
                 && !k.eq_ignore_ascii_case(fennec_http::audit::CLIENT_HEADER)
                 && !k
@@ -6923,11 +6970,48 @@ mod tests {
             body: Vec::new(),
             keep_alive: true,
         };
-        let sent: Vec<&str> = forwarded_headers(&req, false)
+        let sent: Vec<&str> = forwarded_headers(&req, false, None)
             .into_iter()
             .map(|(k, _)| k)
             .collect();
         assert_eq!(sent, ["Authorization", "Fennec-Read", "Cf-Access"]);
+    }
+
+    /// A page's `Origin` goes to the node unless the router answers for it:
+    /// one its `--http-cors` lets in, or its own under a name of this
+    /// machine. Any other, the node judges; a rebound page's own origin
+    /// under its own name among them.
+    #[test]
+    fn an_origin_the_router_answers_for_is_not_sent_on() {
+        let req = |host: &str, origin: &str| Request {
+            method: Method::Post,
+            target: "/t/acme/query".into(),
+            path: "/t/acme/query".into(),
+            query: Vec::new(),
+            headers: vec![
+                ("Host".to_string(), host.to_string()),
+                ("Origin".to_string(), origin.to_string()),
+            ],
+            body: Vec::new(),
+            keep_alive: true,
+        };
+        let sends_origin = |req: &Request, cors: Option<&str>| {
+            forwarded_headers(req, false, cors)
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("origin"))
+        };
+        let app = "https://app.example";
+        let page = req("router.example:8090", app);
+        assert!(!sends_origin(&page, Some(app)));
+        assert!(!sends_origin(&page, Some("*")));
+        assert!(sends_origin(&page, Some("https://other.example")));
+        assert!(sends_origin(&page, None));
+        // The router's own studio, on this machine.
+        let own = req("127.0.0.1:8090", "http://127.0.0.1:8090");
+        assert!(!sends_origin(&own, None));
+        // A rebound name is its own origin too: the node is asked.
+        let rebound = req("evil.example:8090", "http://evil.example:8090");
+        assert!(sends_origin(&rebound, None));
     }
 
     /// An address nothing listens on: its connect is refused.

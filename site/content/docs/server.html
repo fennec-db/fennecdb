@@ -136,6 +136,17 @@ they may read and write.</p>
 
 <pre data-lang="bash">fennec-server --file data.fennec --http 0.0.0.0:8080 --http-token "$TOKEN"</pre>
 
+<p id="open-servers">A server with no token -- the Quickstart's, or a node given
+<code>--admin-token</code> alone -- answers only under this machine's name:
+<code>localhost</code> (or a name under it) and an IP address. A request naming
+another host, a container's service name or a LAN name among them, is refused
+(403): a web page whose DNS name was pointed at 127.0.0.1 would otherwise read
+every row. It answers a page in a browser only from its own origin (the studio)
+or the one <code>--http-cors</code> names; another site's page is refused before
+anything it sent runs. curl, the SDKs and other servers send no
+<code>Origin</code> and are unaffected. To reach the server by another name, give
+it a token; <code>/_health</code> answers under any name.</p>
+
 <div class="note trap">
   <p><b>Without a certificate the server speaks plain HTTP</b>, and a token sent
   over a network travels in the clear. Give it a certificate and a key and it

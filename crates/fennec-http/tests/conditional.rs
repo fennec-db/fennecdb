@@ -87,7 +87,7 @@ impl Node {
         let mut s = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         let mut head = format!(
-            "{method} {target} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\n\
+            "{method} {target} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\
              Content-Length: {}\r\nConnection: close\r\n",
             body.len()
         );

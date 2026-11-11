@@ -73,13 +73,6 @@ call or arithmetic (`like`'s pattern aside) or compared in order inside a
 value (`claims_held`), and a policy writing its own `$<n>`. A tenant claim
 naming no tenant reaches none; a `sub` of `""` is no subject.
 
-**[A field a read rule withholds is held out of what a statement
-does.](../../docs/design/access.md#field-lists)** `fields::hold` and
-`fields::write` guard or refuse (403) each use of it before the rules are
-ANDed in; it is `null` in a row (`Scope::shown`), absent from every schema
-answer (`Scope::shown_schema`) and refused by name as a missing one, and a
-stream sends no row a write left showing the same (`sse::Seen`).
-
 **[A rule may read another collection, answered before each
 statement.](../../docs/design/access.md#rules-reading-another-collection)**
 Its `in` lists are answered under each lock (`Scope::bound`), the scope
@@ -135,6 +128,15 @@ A variable set empty is unset (`env_secret`, fennec-shard's `env`); a token
 flag, a JWT secret's file or a key file given empty is refused at the
 start; a library constructor takes an empty token as none
 (`Config::settled`).
+
+**[A server that asks for no token answers only under this machine's
+name, and a page only of its own origin or
+`--http-cors`'s.](../../docs/design/http.md#open-servers)** Without
+`--http-token` and JWTs (`open_refusal`), or a router's `--token`,
+`cors::foreign` refuses (403) a `Host` not localhost's nor an IP, and any
+other `Origin`, before routing but for `/_health` and an allowed
+preflight; a router drops an origin it answers for (`cors::vouched`). A
+token server is unchanged.
 
 ### Quotas and retries
 

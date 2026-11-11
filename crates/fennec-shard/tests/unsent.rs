@@ -94,7 +94,7 @@ fn send(addr: &str, extra: &str, body: &str) -> (u16, String, String) {
     let mut s = TcpStream::connect(addr).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
     let req = format!(
-        "POST /t/acme/query HTTP/1.1\r\nHost: t\r\nConnection: close\r\n{extra}\
+        "POST /t/acme/query HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{extra}\
          Content-Length: {}\r\n\r\n{body}",
         body.len()
     );

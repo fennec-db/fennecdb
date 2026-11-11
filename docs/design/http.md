@@ -1,6 +1,6 @@
 # The HTTP server
 
-The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md), [crates/fennec-http/src/mcp/CLAUDE.md](../../crates/fennec-http/src/mcp/CLAUDE.md) (MCP's, moved there to make room) and [studio/CLAUDE.md](../../studio/CLAUDE.md) list under *The HTTP server*: the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, connections no thread is made for and chunked bodies (both added after the move), the OpenAPI document and the compatibility it is held to, and compressed answers (added after it too). Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md), [crates/fennec-http/src/mcp/CLAUDE.md](../../crates/fennec-http/src/mcp/CLAUDE.md) (MCP's, moved there to make room) and [studio/CLAUDE.md](../../studio/CLAUDE.md) list under *The HTTP server*: the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, connections no thread is made for and chunked bodies (both added after the move), the OpenAPI document and the compatibility it is held to, and compressed answers (added after it too) -- and the open server's rule its CLAUDE.md lists under *Access* (added after the move as well), beside MCP's guard it grew from. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Studio
 
@@ -211,7 +211,9 @@ takes half an answer for the whole. Refusals are the tool's result with
 `isError` and `/query`'s status, which a model corrects from; an unknown
 tool or a malformed call is JSON-RPC's error. The origin is asked before
 the token, and a server with no token answers only a `Host` naming
-localhost or an address, which a rebound DNS name cannot. A served
+localhost or an address, which a rebound DNS name cannot -- the check
+every route of such a server makes now ([below](#open-servers)), MCP's
+own asking the origin of a server with a token too. A served
 session reads pinned and writes through `handle_query` (read-only mode,
 quotas, the ceiling, the fsync); a local one (`Run::local`) runs under the
 lock -- a function pointer, not a flag, since a flag kept `/query`'s path
@@ -232,6 +234,104 @@ own spread (a row by id 0.027 against 0.028 ms p50).
 `integrations/mcp` holds it to `@modelcontextprotocol/client` in both
 eras over both transports, with every configuration `mcp.html` gives
 (`make mcp-test`).
+
+## Open servers
+
+**A server that asks for no token answers only under this machine's name,
+and a page only of its own origin or `--http-cors`'s** (`cors::foreign`,
+`open_refusal` in `serve_connection`, fennec-shard's `connection` and
+`forwarded_headers`; added after the move, under *Access*). Open is no
+`--http-token` and no JSON Web Tokens: `fennec-server --file x.fennec` as
+the Quickstart starts it, and a tenant node given `--admin-token` alone,
+whose tenants' data answers anyone. Such a server ran whatever reached it
+with every right, and two kinds of page reached it from a browser. A page
+on any site sends `fetch("http://127.0.0.1:8080/query", {method: "POST",
+mode: "no-cors", body: '{"query":"drop collection users"}'})`: a simple
+request, `text/plain`, no preflight. Its answer is opaque to the page, its
+write runs; CORS only added headers to an answer a handler had already
+made, and `/query` parsed any body whatever its type. And a page whose DNS
+name its owner rebinds to 127.0.0.1 after it loaded is on the server's
+origin as the browser sees it: it reads every answer, and a same-origin
+`GET` carries no `Origin` at all, so the `Host` it sends -- its own name --
+is the one thing that tells it apart. MCP's endpoint had the check alone,
+for its binding asks it of every connection.
+
+So every request of an open server is asked, in the connection's loop
+before a route is chosen, a tenant looked up, a body parsed or a lock
+taken: a `Host` that is neither `localhost` (a subdomain of it, the
+trailing dot, any case) nor an IP literal is refused, and so is an
+`Origin` that is neither the one `--http-cors` names (`*` names every one)
+nor the server's own (its authority the `Host`), `null` among them. Both
+are one 403 naming the check, with the CORS headers so that an allowed
+page reaching the server by another name reads why; the words are MCP's,
+which tell what to do: reach it as localhost or by its address, or give it
+`--http-token`. A request with no `Origin` -- curl, every SDK, another
+server, Node's `fetch` -- is no page's and passes on a local `Host`, and
+one with no `Host` (HTTP/1.0) is no browser's. An address cannot be
+rebound, and a name under `localhost` is this machine's in every browser,
+which answers it without asking DNS (RFC 6761); a server reached by any
+other name -- a container's service name, a tunnel's, a LAN name -- takes
+a token. The `Host` part holds under `--insecure` too: the Quickstart's
+`docker run ... --insecure` publishes the port to this machine, which a
+rebound page reaches as well as any.
+
+Two answers come first, for they read nothing: `/_health`, a constant,
+which an orchestrator's probe asks by whatever name it holds, and a
+preflight `--http-cors` lets in, the headers every answer carries. Every
+other path waits for the check, the static ones too -- the studio's files
+and the OpenAPI document hold no data, but leaving them out would make the
+rule a list of paths to keep, and they are asked from this machine or
+under a token anyway. `/_admin/`, `/_replication` and a hook's event carry
+a credential of their own, and are held to it all the same: a router, a
+replica or a webhook's sender reaching an open server by a name of its
+own reaches its data so too, so the rule is the whole server's -- a token
+there. A `--metrics` listener answers its scrape to the admin token too,
+so one given `--admin-token` is not open; on the main listener the admin
+token opens `/_admin/` alone and changes nothing.
+
+A server with a token is as it was. A page sends no `Authorization` to
+another origin without a preflight, which CORS refuses but for
+`--http-cors`'s origin, and a rebound page does not hold the token: no
+check of either kind stops anything there that the token does not, and a
+server reached as `db.example.com` behind a TLS terminator is the usual
+way to reach one. MCP keeps asking the origin of every server, as before.
+A server with a token pays one comparison a request; an open one 31 ns
+for an SDK's request with no `Origin` and 55 with its own (best of five
+runs of twenty million, release, the headers an SDK sends, load 5 on 8
+cores), against a `/query` row by id's 17.7 us p50 over HTTP: 0.2-0.3%.
+`local_host` compares the `.localhost` suffix in place; lowering a copy,
+as MCP's did, was 10 ns of it. The browser module holds none of it: the
+check is fennec-http's.
+
+The router is held the same where it asks no `--token`: its `/_shard/`
+names every node's admin token, runs a query across every tenant and
+deletes them, all of it answered to anyone on loopback before. It is asked
+on every request before it is routed: its own routes by its own
+`--http-cors`, a forward's `Host` always, and a forward's `Origin` by the
+rule its page is told -- the router's `--http-cors` where it has one, else
+the node's, which the node asks itself and its answer carries through (a
+page calling a tenant through such a router by the nodes' CORS alone, as
+`router.rs`'s preflight test does, kept working). With a token it is as a
+server with one is, and a forward's node judges it: the router sends the
+node an `Origin` unless it answers for it ([router.md](router.md#cors)),
+and the node's own address as `Host`, which a proxy in front of a node
+may route by.
+
+What stays open: a router with a token in front of nodes with none answers
+a rebound page's `GET` through it, the node seeing the router's name for
+it, not the page's. Sending the client's `Host` to the node would close it
+and break a node behind a proxy routing by name; the kit gives every node
+a token (`deploy/env/node.env`), and the docs say a node reached past this
+machine takes one.
+
+The harnesses met it where they reached an open server by a name: the
+language tests' containers reached the Quickstart's server as
+`host.docker.internal`, and reach it by the address Docker's
+`host-gateway` stands for now; every crate's raw requests wrote a
+placeholder `Host` (`t`, `x`, `bench`), `localhost` now. No test page in a
+browser calls an open server from another origin: the studio's, the
+examples' and the integrations' servers have tokens, and Node's `fetch`
+sends no `Origin`.
 
 ## Idempotency keys
 

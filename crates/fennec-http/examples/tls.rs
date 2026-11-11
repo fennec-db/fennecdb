@@ -186,7 +186,7 @@ fn post(q: &str, params: &str, close: bool) -> Vec<u8> {
     let body = format!("{{\"query\":\"{q}\",\"params\":[{params}]}}");
     let close = if close { "Connection: close\r\n" } else { "" };
     let mut r = format!(
-        "POST /query HTTP/1.1\r\nHost: b\r\n{close}Content-Length: {}\r\n\r\n",
+        "POST /query HTTP/1.1\r\nHost: localhost\r\n{close}Content-Length: {}\r\n\r\n",
         body.len()
     )
     .into_bytes();

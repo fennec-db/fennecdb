@@ -626,7 +626,7 @@ fn idle(n: usize, how: &str) {
             for _ in 0..n {
                 use std::io::{Read, Write};
                 let mut s = std::net::TcpStream::connect(&addr).unwrap();
-                s.write_all(b"GET /jobs/changes HTTP/1.1\r\nHost: b\r\n\r\n")
+                s.write_all(b"GET /jobs/changes HTTP/1.1\r\nHost: localhost\r\n\r\n")
                     .unwrap();
                 let mut seed = [0u8; 256];
                 let _ = s.read(&mut seed).unwrap();

@@ -111,7 +111,7 @@ impl Conn {
     }
 
     fn send(&mut self, path: &str, body: &str, headers: &[(&str, &str)]) {
-        let mut head = format!("POST {path} HTTP/1.1\r\nHost: t\r\n");
+        let mut head = format!("POST {path} HTTP/1.1\r\nHost: localhost\r\n");
         for (k, v) in headers {
             head.push_str(&format!("{k}: {v}\r\n"));
         }

@@ -156,7 +156,7 @@ fn call(port: u16, method: &str, target: &str, body: &str, auth: Option<&str>) -
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     let mut req = format!(
-        "{method} {target} HTTP/1.1\r\nHost: t\r\nConnection: close\r\nContent-Length: {}\r\n",
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n",
         body.len()
     );
     if let Some(t) = auth {
@@ -191,7 +191,7 @@ impl Stream {
         let mut sock = TcpStream::connect(("127.0.0.1", port)).unwrap();
         sock.set_read_timeout(Some(Duration::from_millis(200)))
             .unwrap();
-        sock.write_all(format!("GET {target} HTTP/1.1\r\nHost: t\r\n\r\n").as_bytes())
+        sock.write_all(format!("GET {target} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
             .unwrap();
         Stream {
             sock,
@@ -303,7 +303,7 @@ fn a_client_connection_is_kept_alive_across_forwarded_requests() {
 
     let mut s = TcpStream::connect(("127.0.0.1", c.port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    let one = "GET /t/acme/notes HTTP/1.1\r\nHost: t\r\n\r\n";
+    let one = "GET /t/acme/notes HTTP/1.1\r\nHost: localhost\r\n\r\n";
     s.write_all(one.as_bytes()).unwrap();
     s.write_all(one.as_bytes()).unwrap();
     let mut seen = String::new();
@@ -675,7 +675,7 @@ fn a_token_for_one_tenant_reaches_no_other_through_the_router() {
             .unwrap();
         write!(
             sock,
-            "GET /t/{t}/notes/changes HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {acme}\r\nConnection: close\r\n\r\n"
+            "GET /t/{t}/notes/changes HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {acme}\r\nConnection: close\r\n\r\n"
         )
         .unwrap();
         let mut out = String::new();
@@ -707,7 +707,7 @@ fn a_preflight_reaches_its_tenant_through_the_router_with_no_token() {
         .unwrap();
     write!(
         sock,
-        "OPTIONS /t/acme/query HTTP/1.1\r\nHost: t\r\nOrigin: https://app.example\r\n\
+        "OPTIONS /t/acme/query HTTP/1.1\r\nHost: localhost\r\nOrigin: https://app.example\r\n\
          Access-Control-Request-Method: POST\r\n\
          Access-Control-Request-Headers: authorization, content-type\r\n\
          Connection: close\r\n\r\n"
@@ -810,7 +810,7 @@ fn a_held_claim_is_waited_for_through_the_router() {
             s.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
             write!(
                 s,
-                "POST /t/acme/query HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\
+                "POST /t/acme/query HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
                  Fennec-Wait: {wait_ms}\r\nContent-Length: {}\r\n\r\n{body}",
                 body.len()
             )
@@ -973,7 +973,7 @@ fn ask(
     let auth = auth.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
     write!(
         s,
-        "{method} {target} HTTP/1.1\r\nHost: t\r\n{auth}{headers}Content-Length: {}\r\n\
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\n{auth}{headers}Content-Length: {}\r\n\
          Connection: close\r\n\r\n{body}",
         body.len()
     )

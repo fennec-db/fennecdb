@@ -35,7 +35,7 @@ fn a_router_on_port_0_names_the_port_it_took() {
 
     // And it is the router there: its directory, empty, with no token asked.
     let mut s = TcpStream::connect(&addr).unwrap();
-    s.write_all(b"GET /_shard/nodes HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    s.write_all(b"GET /_shard/nodes HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .unwrap();
     let mut answer = String::new();
     s.read_to_string(&mut answer).unwrap();

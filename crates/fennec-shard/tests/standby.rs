@@ -116,7 +116,7 @@ fn call(port: u16, method: &str, target: &str, body: &str, auth: Option<&str>) -
     let auth = auth.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
     write!(
         s,
-        "{method} {target} HTTP/1.1\r\nHost: x\r\n{auth}Content-Type: application/json\r\n\
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\n{auth}Content-Type: application/json\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
@@ -207,8 +207,10 @@ fn a_standby_forwards_from_the_primarys_directory_and_takes_over_when_promoted()
     // relay -- asks the next and takes this one for none that answered.
     let mut s = TcpStream::connect(("127.0.0.1", standby)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
-    s.write_all(b"DELETE /_shard/nodes/n1 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
-        .unwrap();
+    s.write_all(
+        b"DELETE /_shard/nodes/n1 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .unwrap();
     let mut out = String::new();
     s.read_to_string(&mut out).unwrap();
     assert!(out.contains("\r\nFennec-Follows: 1\r\n"), "{out}");
@@ -418,7 +420,7 @@ fn a_standby_without_its_directory_asks_to_be_asked_again() {
     s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
     write!(
         s,
-        "GET /t/acme/collections HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+        "GET /t/acme/collections HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
     )
     .unwrap();
     let mut out = String::new();

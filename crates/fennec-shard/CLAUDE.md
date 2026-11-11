@@ -125,7 +125,11 @@ a call to a node, and a refused hold makes none (`then`, never `then_some`).
 **[The router tells a page one CORS rule, its
 own.](../../docs/design/router.md#cors)** With `--http-cors` it answers
 preflights and puts its own CORS headers in place of a node's
-(`cors::is_cors_header`), never both.
+(`cors::is_cors_header`), never both. A forward carries no `Origin` it
+answers for, `--http-cors`'s or its own under this machine's name
+(`cors::vouched`), any other left for the node to judge; without
+`--token` it is an open server, held to fennec-http's rule, a forward's
+`Origin` by its `--http-cors` alone, the node's rule otherwise.
 
 **[The router looks at a pooled connection first, and resends only what
 cannot have run or may run twice.](../../docs/design/router.md#pooled-connections)**
