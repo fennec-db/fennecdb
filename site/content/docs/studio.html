@@ -496,8 +496,25 @@ its stdin, and it stops cleanly however the app ends.</p>
 
 <p>On a Mac with Apple silicon the studio is also an app: make a database,
 open one, serve it to your apps, back it up, or connect to a server, with no
-server of your own to start. It is not published for download yet; build it
-from source.</p>
+server of your own to start. Install it with one line:</p>
+
+<pre data-lang="bash">curl -fsSL https://fennecdb.com/install.sh | sh -s -- --app</pre>
+
+<p>That puts <code>fennec studio.app</code> in <code>~/Applications</code>, with
+no <code>sudo</code>, from the release's DMG, checked against the release's
+<code>SHA256SUMS</code> first; open it from Launchpad or Spotlight. The app is
+unsigned: it has no Developer ID and is not notarized, so a copy a browser
+downloaded is held back once. The DMG is on the <a
+href="https://github.com/fennec-db/fennecdb/releases/latest">release page</a>
+too, as <code>fennec-studio-v{{version}}-macos-arm64.dmg</code>: open it and
+drag the app onto Applications. Its first open is refused ("Apple could not
+verify..."); click Done, then in System Settings, Privacy &amp; Security, click
+<b>Open Anyway</b> beside fennec studio, once. The one-liner needs neither,
+since a file <code>curl</code> downloads is not quarantined; and
+<code>xattr -cr "/Applications/fennec studio.app"</code> takes the quarantine
+off a browser's copy.</p>
+
+<p>To build it from source instead:</p>
 
 <pre data-lang="bash">make studio-desktop
 

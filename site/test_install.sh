@@ -7,17 +7,39 @@
 # What it holds: the installer puts both binaries where it was told and says
 # how to reach them; it refuses a tarball whose checksum is not the release's,
 # a platform with no build, and a version with no release, each installing
-# nothing; and a copy cut short at any point runs nothing.
+# nothing; and a copy cut short at any point runs nothing. With --app, it
+# refuses every platform but macOS on Apple silicon, and on a Mac it installs
+# the app from the release's DMG into ~/Applications, again over it, and
+# refuses a DMG whose checksum is not the release's, an app whose signature
+# does not hold, a release with no DMG and an app that is running, each
+# leaving no image attached and nothing of its own behind.
+#
+#   FENNEC_TEST_DMG=<the .dmg scripts/dist.sh made> sh site/test_install.sh
+#
+# installs that DMG (desktop.yml's app job) where a stand-in is made
+# otherwise: a bundle around a copy of /bin/sleep, signed ad hoc.
 
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
 script=$here/install.sh
 work=$(mktemp -d "${TMPDIR:-/tmp}/fennecdb-install-test.XXXXXX")
+# As hdiutil names a mount point under it: /tmp and /var are /private's.
+work=$(cd "$work" && pwd -P)
 server_pid=
+sleeper_pid=
 cleanup() {
     if [ -n "$server_pid" ]; then
         kill "$server_pid" 2>/dev/null || true
+    fi
+    if [ -n "$sleeper_pid" ]; then
+        kill "$sleeper_pid" 2>/dev/null || true
+    fi
+    # An image a failing run left attached under $work is let go first.
+    if command -v hdiutil >/dev/null 2>&1; then
+        hdiutil info 2>/dev/null | awk -v w="$work" 'index($0, w) && $1 ~ /^\/dev\// { print $1 }' | while IFS= read -r dev; do
+            hdiutil detach -quiet -force "$dev" 2>/dev/null || true
+        done
     fi
     rm -rf "$work"
 }
@@ -97,14 +119,16 @@ done
 base=http://127.0.0.1:$(cat "$work/port")
 
 # install NAME [VAR=value...]: a run into a directory of its own, its output
-# in $work/NAME.out and its status in $work/NAME.rc.
+# in $work/NAME.out and its status in $work/NAME.rc; the script is given
+# $script_arg where it is set (--app).
+script_arg=
 install() {
     name=$1
     shift
     mkdir -p "$work/$name-home"
     set +e
     env HOME="$work/$name-home" FENNEC_BASE_URL="$base" FENNEC_INSTALL="$work/$name-inst" "$@" \
-        /bin/sh "$script" >"$work/$name.out" 2>&1
+        /bin/sh "$script" ${script_arg:+"$script_arg"} >"$work/$name.out" 2>&1
     echo $? >"$work/$name.rc"
     set -e
 }
@@ -185,6 +209,165 @@ expect "armv7: names the processor" contains "$work/arm32.out" "armv7l"
 expect "armv7: installs nothing" absent "$work/arm32-inst"
 install linuxarm PATH="$work/shim:$PATH" FAKE_OS=Linux FAKE_CPU=aarch64
 expect "linux aarch64: finds its build" contains "$work/linuxarm.out" "aarch64-unknown-linux-musl"
+
+# The app is for macOS on Apple silicon alone, a Rosetta shell's included
+# (sysctl says whether the Mac is one, under the shim as uname does).
+cat >"$work/shim/sysctl" <<'EOF'
+#!/bin/sh
+echo "${FAKE_ARM64:-0}"
+EOF
+chmod 755 "$work/shim/sysctl"
+script_arg=--app
+for platform in Linux:x86_64:0 Linux:aarch64:0 Darwin:x86_64:0 FreeBSD:amd64:0 MINGW64_NT-10.0:x86_64:0; do
+    os=${platform%%:*}
+    cpu=${platform#*:}
+    cpu=${cpu%%:*}
+    install "app-$os-$cpu" PATH="$work/shim:$PATH" FAKE_OS="$os" FAKE_CPU="$cpu" FAKE_ARM64=0
+    expect "--app on $os $cpu: refused" failing "app-$os-$cpu"
+    expect "--app on $os $cpu: says what the app is for" contains "$work/app-$os-$cpu.out" "macOS on Apple silicon"
+    expect "--app on $os $cpu: installs nothing" test -z "$(ls -A "$work/app-$os-$cpu-home")"
+    expect "--app on $os $cpu: downloads nothing" lacks "$work/app-$os-$cpu.out" "Looking for"
+done
+script_arg=
+
+set +e
+sh "$script" --app --nonsense >"$work/apparg.out" 2>&1
+apparg_rc=$?
+set -e
+expect "--app with an unknown argument: refused" test "$apparg_rc" -ne 0
+expect "--app with an unknown argument: names it" contains "$work/apparg.out" "--nonsense"
+
+# On a Mac, the app itself, from a DMG beside the tarballs of the release.
+if [ "$(uname -s)" = Darwin ] && command -v hdiutil >/dev/null 2>&1; then
+    # make_app DIR: a bundle named as the app is, around a copy of
+    # /bin/sleep, signed ad hoc, so the installer's check of the copy holds.
+    make_app() {
+        mkdir -p "$1/Contents/MacOS"
+        cp /bin/sleep "$1/Contents/MacOS/fennec-studio"
+        cat >"$1/Contents/Info.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key><string>fennec-studio</string>
+    <key>CFBundleIdentifier</key><string>dev.fennecdb.studio.installtest</string>
+    <key>CFBundleName</key><string>fennec studio</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+</dict>
+</plist>
+EOF
+        codesign --force --sign - "$1" 2>/dev/null
+    }
+    # make_dmg APP DMG: the volume scripts/dist.sh makes, the app and a link
+    # to /Applications.
+    make_dmg() {
+        rm -rf "$work/volume"
+        mkdir -p "$work/volume"
+        ditto "$1" "$work/volume/fennec studio.app"
+        ln -s /Applications "$work/volume/Applications"
+        hdiutil create -quiet -volname "fennec studio" -srcfolder "$work/volume" -fs HFS+ -format UDZO -ov "$2"
+    }
+    # list FILE...: their lines in the release's SHA256SUMS, as a published
+    # one gets the app's appended (desktop.yml).
+    list() {
+        for f in "$@"; do
+            printf '%s  %s\n' "$(sha256 "$f")" "$(basename "$f")" >>"$(dirname "$f")/SHA256SUMS"
+        done
+    }
+    not_attached() { ! hdiutil info 2>/dev/null | grep -F -q -- "$work"; }
+    no_staging() { [ -z "$(find "$1" -maxdepth 1 -name '.fennec-studio-install.*')" ]; }
+    verifies() { codesign --verify --deep --strict "$1" 2>/dev/null; }
+
+    dmg=$rel/fennec-studio-v$version-macos-arm64.dmg
+    if [ -n "${FENNEC_TEST_DMG:-}" ]; then
+        cp "$FENNEC_TEST_DMG" "$dmg"
+    else
+        make_app "$work/app/fennec studio.app"
+        make_dmg "$work/app/fennec studio.app" "$dmg"
+    fi
+    list "$dmg"
+    cp "$rel/SHA256SUMS" "$work/site/latest/download/SHA256SUMS"
+    apps() { printf '%s' "$work/$1-home/Applications"; }
+
+    script_arg=--app
+    install app PATH="$work/shim:$PATH" FAKE_OS=Darwin FAKE_CPU=arm64
+    expect "--app: exit 0" status app 0
+    expect "--app: found $version and checked the sum" contains "$work/app.out" "Checksum ok"
+    expect "--app: says it installed the app" contains "$work/app.out" "Installed fennec studio $version"
+    expect "--app: says how to open it" contains "$work/app.out" "open \"$(apps app)/fennec studio.app\""
+    expect "--app: the app is in ~/Applications" test -f "$(apps app)/fennec studio.app/Contents/Info.plist"
+    expect "--app: its signature holds" verifies "$(apps app)/fennec studio.app"
+    expect "--app: ~/Applications holds the app alone" test "$(ls -A "$(apps app)")" = "fennec studio.app"
+    expect "--app: nothing else in the home directory" test "$(ls -A "$work/app-home")" = Applications
+    expect "--app: no bin directory" absent "$work/app-inst"
+    expect "--app: no image left attached" not_attached
+
+    install app PATH="$work/shim:$PATH" FAKE_OS=Darwin FAKE_CPU=arm64
+    expect "--app again, over the first: exit 0" status app 0
+    expect "--app again: one app, no staging left" test "$(ls -A "$(apps app)")" = "fennec studio.app"
+    expect "--app again: its signature holds" verifies "$(apps app)/fennec studio.app"
+
+    install approsetta PATH="$work/shim:$PATH" FAKE_OS=Darwin FAKE_CPU=x86_64 FAKE_ARM64=1
+    expect "--app under Rosetta: installs the arm64 app" status approsetta 0
+
+    install apppinned PATH="$work/shim:$PATH" FAKE_OS=Darwin FAKE_CPU=arm64 FENNEC_VERSION=v$version
+    expect "--app with FENNEC_VERSION: exit 0" status apppinned 0
+
+    # The app running from where it is installed is not replaced under it.
+    # The stand-in is sleep, its argv[0] a path inside the app, which is what
+    # ps shows: a copy of /bin/sleep there would not run (arm64e, which macOS
+    # runs only as the system's own program).
+    bash -c 'exec -a "$1" sleep 120' sh "$(apps app)/fennec studio.app/Contents/MacOS/launcher" &
+    sleeper_pid=$!
+    i=0
+    until ps -p "$sleeper_pid" -o command= 2>/dev/null | grep -q "MacOS/launcher 120"; do
+        i=$((i + 1))
+        [ "$i" -lt 100 ] || { echo "the stand-in for a running app did not start" >&2; exit 1; }
+        sleep 0.1
+    done
+    before=$(ls -l "$(apps app)/fennec studio.app/Contents/MacOS")
+    install app PATH="$work/shim:$PATH" FAKE_OS=Darwin FAKE_CPU=arm64
+    expect "--app while it runs: refused" failing app
+    expect "--app while it runs: says to quit it" contains "$work/app.out" "is running from"
+    expect "--app while it runs: the app left as it was" test "$(ls -l "$(apps app)/fennec studio.app/Contents/MacOS")" = "$before"
+    kill "$sleeper_pid" 2>/dev/null || true
+    wait "$sleeper_pid" 2>/dev/null || true
+    sleeper_pid=
+
+    # A DMG that is not the one the sums name.
+    cp "$dmg" "$work/good.dmg"
+    printf 'x' >>"$dmg"
+    install apptampered PATH="$work/shim:$PATH" FAKE_OS=Darwin FAKE_CPU=arm64
+    expect "--app, a tampered DMG: refused" failing apptampered
+    expect "--app, a tampered DMG: names the checksum" contains "$work/apptampered.out" "checksum"
+    expect "--app, a tampered DMG: installs nothing" test -z "$(ls -A "$(apps apptampered)" 2>/dev/null)"
+    expect "--app, a tampered DMG: attaches nothing" not_attached
+    cp "$work/good.dmg" "$dmg"
+
+    # A release with no DMG, and one whose app's signature does not hold (a
+    # file of the bundle changed after it was signed).
+    for v in 9.9.7 9.9.8; do
+        mkdir -p "$work/site/download/v$v"
+        cp "$rel/fennec-v$version-aarch64-apple-darwin.tar.gz" "$work/site/download/v$v/fennec-v$v-aarch64-apple-darwin.tar.gz"
+        list "$work/site/download/v$v/fennec-v$v-aarch64-apple-darwin.tar.gz"
+    done
+    install appnodmg PATH="$work/shim:$PATH" FAKE_OS=Darwin FAKE_CPU=arm64 FENNEC_VERSION=9.9.8
+    expect "--app, a release with no DMG: refused" failing appnodmg
+    expect "--app, a release with no DMG: says so" contains "$work/appnodmg.out" "lists no fennec-studio-v9.9.8-macos-arm64.dmg"
+    make_app "$work/broken/fennec studio.app"
+    printf '\n' >>"$work/broken/fennec studio.app/Contents/Info.plist"
+    make_dmg "$work/broken/fennec studio.app" "$work/site/download/v9.9.7/fennec-studio-v9.9.7-macos-arm64.dmg"
+    list "$work/site/download/v9.9.7/fennec-studio-v9.9.7-macos-arm64.dmg"
+    install appunsigned PATH="$work/shim:$PATH" FAKE_OS=Darwin FAKE_CPU=arm64 FENNEC_VERSION=9.9.7
+    expect "--app, an app whose signature does not hold: refused" failing appunsigned
+    expect "--app, an app whose signature does not hold: says so" contains "$work/appunsigned.out" "signature does not hold"
+    expect "--app, an app whose signature does not hold: installs nothing" test -z "$(ls -A "$(apps appunsigned)" 2>/dev/null)"
+    expect "--app, an app whose signature does not hold: leaves no staging" no_staging "$(apps appunsigned)"
+    expect "--app, an app whose signature does not hold: attaches nothing" not_attached
+    script_arg=
+else
+    echo "skip  --app's install from a DMG: not a Mac with hdiutil (CI's macOS test job runs it)"
+fi
 
 # A base URL that is not https, or not this machine's: plain http elsewhere,
 # a user that makes `localhost` the user and another host the host, a host

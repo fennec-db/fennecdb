@@ -22,7 +22,7 @@ SCHEMA ?= 1
 STUDIO_SERVER ?=
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js upgrade-check openapi-lint openapi-check openapi-golden sync-scenarios-check fennecql-corpus builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-desktop studio-desktop-test studio-highlight statements-bench gzip-bench replay-bench hook-bench instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \ lists-bench
+.PHONY: all test test-js upgrade-check openapi-lint openapi-check openapi-golden sync-scenarios-check fennecql-corpus builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-desktop studio-desktop-dist studio-desktop-test studio-highlight statements-bench gzip-bench replay-bench hook-bench instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \ lists-bench
 	python-test go-test dotnet-test languages-test examples-test recipes-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench entry-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down pgvector-tls docker docker-run docker-compact docker-down grafana-check deploy-check drill memory clean \
@@ -132,8 +132,20 @@ studio-desktop:
 	CARGO=$(CARGO) integrations/studio-desktop/scripts/get-server.sh '$(STUDIO_SERVER)'
 	cd integrations/studio-desktop && npm run icon && npm run build
 
-## The desktop app's checks: the release build (above) is held to carrying
-## none of the test hooks, the sources type-checked and the unit tests run
+## The desktop app as it is downloaded: the stable build (above) unpacked,
+## signed ad hoc as a whole and put in a DMG beside a link to /Applications,
+## artifacts/dist/fennec-studio-macos-arm64.dmg there (scripts/dist.sh says
+## why it ships unpacked), then that DMG held as it ships
+## (scripts/checks/dist.mjs): its signature, no test hook, and the app
+## launched from the image's read-only mount and from a copy, and quit, the
+## copy unchanged by the run. desktop.yml attaches it to a release.
+studio-desktop-dist: studio-desktop
+	cd integrations/studio-desktop && sh scripts/dist.sh
+	cd integrations/studio-desktop && node scripts/checks/dist.mjs
+
+## The desktop app's checks: the DMG as it ships (above), then the release
+## build held to carrying none of the test hooks, the sources type-checked and
+## the unit tests run
 ## (names, the remote probe, wording, the token hand-off script, the server's
 ## environment, a token and its address, get-server.sh, the signing
 ## switches, the Hutch pin, a server's arguments, the figures of /_metrics,
@@ -150,7 +162,7 @@ studio-desktop:
 ## test variant (build-test/) a program LaunchServices may offer for a .fennec
 ## file, and deletes ~/Library/Application Support/dev.fennecdb.studio.test, its
 ## own folder, before it starts; a real install's is never read or written.
-studio-desktop-test: studio-desktop
+studio-desktop-test: studio-desktop-dist
 	cd integrations/studio-desktop && npm run typecheck && npm run test:unit
 	cd integrations/studio-desktop && FENNEC_DESKTOP_TEST_BUILD=1 npm run build
 	cd integrations/studio-desktop && npm run checks
@@ -1160,7 +1172,8 @@ site-serve: wasm wasm-lite wasm-min
 
 ## The ways to install a release that are not a registry: site/install.sh
 ## against a release of its own served from localhost (its checksum, its
-## refusals, a copy cut short), and the Homebrew formula held to its script.
+## refusals, a copy cut short, and on a Mac the app's DMG through --app), and
+## the Homebrew formula held to its script.
 ## CI's `packaging` job also makes the .deb and .rpm of the latest release
 ## and installs them in Debian and Fedora containers (tools/linux-packages-
 ## check.sh, which needs Docker).

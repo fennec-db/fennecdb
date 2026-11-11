@@ -98,6 +98,26 @@ nothing reaches a registry before the notes have had a read.
    one run pushes at a time.
    The `.deb` and `.rpm` need no step of their own: step 3 built them, and
    publishing the draft is what makes them downloadable.
+5. Once the release is published and `packages.yml`'s run is done, attach the
+   Mac app: `gh workflow run desktop.yml --ref main -f release=vX.Y.Z`. Its
+   `app` job builds the app with the release's own `fennec-server` and shell
+   (the tarball checked against the release's `SHA256SUMS`; a draft's
+   downloads are not public, so not before step 4), makes the DMG and runs
+   every check on it, the installer's `--app` path included. Where the
+   `desktop-signing` Environment holds its secrets the `sign` job signs and
+   notarizes and `attach` attaches that DMG (after its reviewer approves);
+   where it does not, `attach-unsigned` attaches the ad hoc one as
+   `fennec-studio-vX.Y.Z-macos-arm64.dmg` and appends its line to the
+   release's `SHA256SUMS`, every line before it kept byte for byte -- which
+   is how `install.sh --app` finds and checks it. The DMG's name is never
+   replaced (a re-run of the job finds its own there and goes on), and
+   `SHA256SUMS` is missing for the moment `--clobber` replaces it, so not while
+   `packages.yml` is reading it. Then run
+   `curl -fsSL https://fennecdb.com/install.sh | sh -s -- --app` once on a
+   Mac with Apple silicon, and open the DMG from the release page once,
+   downloaded by a browser: its first open is refused and *Open Anyway* in
+   System Settings, Privacy & Security opens it, which no check here can
+   click through.
 
 `make packages` runs the same checks locally at any time, NuGet's where
 the .NET SDK is installed.
@@ -320,7 +340,8 @@ field of it is read another way.
 | `fennecdb_flutter` on pub.dev | `integrations/dart/fennecdb_flutter` | the Flutter plugin: the package with the library for iOS, Android and macOS |
 | `fennecdb` in the Homebrew tap `fennec-db/homebrew-tap` | `packaging/homebrew`, `tools/homebrew-formula.py` | the formula: `fennec` and `fennec-server` from the release's tarballs, by platform, each with its SHA-256 |
 | `fennecdb_X.Y.Z-1_<arch>.deb`, `fennecdb-X.Y.Z-1.<arch>.rpm` on the release | `packaging/nfpm.yaml`, `tools/linux-packages.sh` | `/usr/bin/fennec` and `/usr/bin/fennec-server` from the musl tarballs, for amd64 and arm64; no dependencies |
-| `https://fennecdb.com/install.sh` | `site/install.sh` | the installer: the release's tarball for the machine, checked against `SHA256SUMS`, into `~/.fennecdb/bin`; deployed with the site, not with a release |
+| `https://fennecdb.com/install.sh` | `site/install.sh` | the installer: the release's tarball for the machine, checked against `SHA256SUMS`, into `~/.fennecdb/bin`; with `--app`, the Mac app's DMG, checked the same way, its app into `~/Applications`; deployed with the site, not with a release |
+| `fennec-studio-vX.Y.Z-macos-arm64.dmg` on the release | `integrations/studio-desktop` (`scripts/dist.sh`), `.github/workflows/desktop.yml` | fennec studio's Mac app (beta, Apple silicon), unpacked and signed ad hoc, attached by step 5 with its line appended to `SHA256SUMS`; unsigned until the signing Environment holds its secrets |
 | `fennec-vX.Y.Z-x86_64-pc-windows-msvc.zip`, `fennec-vX.Y.Z-aarch64-pc-windows-msvc.zip` on the release | `tools/windows-zip.sh` | `fennec.exe` and `fennec-server.exe`, the C runtime linked in; unsigned |
 | `https://fennecdb.com/install.ps1` | `site/install.ps1` | the Windows installer: the release's zip, checked against `SHA256SUMS`, into `%LOCALAPPDATA%\fennecdb\bin`; deployed with the site, not with a release |
 
@@ -355,8 +376,9 @@ pasting each when asked (the `.p12` and the `.p8` as base64):
     done
 
 A release whose server has `--studio` and `--exit-on-stdin-close` (0.1.12 and
-after) is then signed and its DMG attached with `gh workflow run desktop.yml -f
-release=v0.1.12`. The job's first step reads the Environment's rules back and
+after) is then signed and its DMG attached with `gh workflow run desktop.yml
+--ref main -f release=v0.1.12` (step 5 above), instead of the unsigned DMG
+the same dispatch attaches while the Environment has no secrets. The job's first step reads the Environment's rules back and
 stops unless they are the above, where GitHub lets its token read them; it
 may not be able to (the Environments API asks for administration rights, which
 a workflow's token is not given), so the order above is what stands behind it.

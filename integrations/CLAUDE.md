@@ -43,7 +43,14 @@ never loads. The toolchain is fetched into `.hutch-home/`,
 never `~/.hutch` or a shell file, and held to `hutch-pin.json`
 (`scripts/electrobun.mjs`); signing runs by hand from `main` alone, in an
 Environment given its reviewer and `main` rule before its secrets
-(`desktop.yml`).
+(`desktop.yml`). The DMG a release ships is the app unpacked, never
+Electrobun's self-extractor (a quarantined copy must run read-only), each
+Mach-O and then the bundle signed ad hoc (`scripts/dist.sh`), held as it
+ships by `checks/dist.mjs`: its signature, no hook, a launch and quit from
+the read-only image and from a copy left unchanged. It is attached only
+from `main`, where the signing job ran and signed nothing, by a job with no
+secret; its line is appended to `SHA256SUMS`, which only grows, and a DMG
+there is never replaced.
 
 **[Grafana's data source binds a dashboard's values; it never splices
 them.](../docs/design/integrations.md#grafana)** Names become `$n`s

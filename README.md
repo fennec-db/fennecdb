@@ -194,6 +194,17 @@ each release after 0.1.11, for amd64 and arm64, with their checksums in
 and the tarball, the image and the language packages too; the tap's formula is
 [`packaging/homebrew`](packaging/homebrew).
 
+**The studio app** (beta, macOS on Apple silicon), fennec studio as a Mac app
+with its own server for each file, unsigned (no Developer ID, not notarized):
+
+```bash
+curl -fsSL https://fennecdb.com/install.sh | sh -s -- --app   # ~/Applications, no sudo
+```
+
+or the release's `fennec-studio-vX.Y.Z-macos-arm64.dmg`, dragged onto
+Applications, whose first open a browser's quarantine holds to System
+Settings' *Open Anyway* ([the app](https://fennecdb.com/docs/studio#desktop)).
+
 **Shell.** Installed as above, `fennec data.fennec`; from a clone,
 `cargo build --release -p fennec-cli`, then:
 
@@ -352,7 +363,7 @@ let db = try await Fennec.sync(url: "https://api.example.com", token: jwt,
 | **Regions** | nodes in regions and zones, a tenant's replica in another zone of its region · a region keeping its own directory, leased and failed over by its own router while cut off ([its own directory](https://fennecdb.com/docs/sharding-regions#region-directories)) · one URL for every region: a Cloudflare Worker that learns each tenant's home from the routers and names each client to them under an HMAC, so a refused token waits by the client's address ([global entry](https://fennecdb.com/docs/sharding-entry#global-entry)) · read replicas in other regions: the reads a client marks, through any SDK (`reads: 'nearest'` in JavaScript), answered near it and never from before its own write, a subscription sent after that write waiting for it too, and a JavaScript live query's runs after each change its stream at home tells of ([read replicas](https://fennecdb.com/docs/sharding-read-replicas#read-replicas)) · a kit to run them: systemd units, alert rules, a runbook and a failover drill ([deploy/](deploy/RUNBOOK.md)) |
 | **Runs on** | Linux and macOS, arm64 and x86_64 · Windows 10 and 11 and Windows Server 2016 and later, x86_64 and arm64, the file mapped and made durable as on a Unix, from the release after 0.1.12 (`install.ps1`) · the image wherever Docker runs · the browser (WASM) · iOS and Android, in the app ([Install](https://fennecdb.com/docs/install)) |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, `--slow-ms`, and OpenTelemetry traces over OTLP (`--otlp-endpoint`) |
-| **Studio** | `fennec-server --studio`: collections, rows, edits, a query editor, the schema, live rows and the server's numbers in a browser at `/_studio/`, with the token you paste and no authority of its own · a Mac app (beta, built from source: [`integrations/studio-desktop`](integrations/studio-desktop/README.md)) that makes, opens, serves and backs up `.fennec` files: a served database's port, reach and token (kept in the Keychain) picked in a sheet, its server stopped with the app; saved servers and their tokens in the Keychain |
+| **Studio** | `fennec-server --studio`: collections, rows, edits, a query editor, the schema, live rows and the server's numbers in a browser at `/_studio/`, with the token you paste and no authority of its own · a Mac app (beta, `install.sh --app` or the release's DMG, unsigned: [`integrations/studio-desktop`](integrations/studio-desktop/README.md)) that makes, opens, serves and backs up `.fennec` files: a served database's port, reach and token (kept in the Keychain) picked in a sheet, its server stopped with the app; saved servers and their tokens in the Keychain |
 | **Runtime size** | 345 KB gzip wasm + 70 KB gzip client, or the client alone (`@fennecdb/web/client`) · 2091–4355 KB binary · 7.18 MB container image |
 
 Full reference: [FennecQL](https://fennecdb.com/docs/fennecql).
