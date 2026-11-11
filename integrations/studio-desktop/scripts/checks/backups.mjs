@@ -7,7 +7,8 @@
 import assert from 'node:assert/strict';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { assertClean, cmd, data, forgetServeItems, lines, procs, quit, R, startApp, step, waitFor, waitStudio, log } from './lib.mjs';
+import { othersMayRead } from '../../src/bun/backups.ts';
+import { WIN, assertClean, cmd, data, forgetServeItems, lines, procs, quit, R, startApp, step, waitFor, waitStudio, log } from './lib.mjs';
 
 assertClean('before');
 const FILE = data('bk', 30);
@@ -90,7 +91,9 @@ noScratch(join(R, 'data'));
 step('sealed with a new key: made with fennec key, beside nothing of the backups; read only with it');
 const key = await ask({ cmd: 'make-key', folder: KEYS, name: 'bk.key' }, 'make-key-result');
 assert.equal(key.ok, true, key.message);
-assert.equal(statSync(join(KEYS, 'bk.key')).mode & 0o777, 0o600);
+// Its owner's alone: mode 0600, or on Windows, where a mode is nothing, a DACL that lets no other user read it (read as the app reads one).
+if (!WIN) assert.equal(statSync(join(KEYS, 'bk.key')).mode & 0o777, 0o600);
+assert.equal(othersMayRead(join(KEYS, 'bk.key')), null, 'no one else may read the key');
 assert.equal((await ask({ cmd: 'make-key', folder: KEYS, name: 'bk.key' }, 'make-key-result')).ok, false, 'a key is never written over');
 const SEALED = join(R, 'bk-backups', 'bk-sealed');
 assert.equal((await ask({ cmd: 'set-archive', path: FILE, dir: SEALED, keyFile: join(SEALED, 'k.key') }, 'set-archive-result')).ok, false, 'a key file that is not there');
