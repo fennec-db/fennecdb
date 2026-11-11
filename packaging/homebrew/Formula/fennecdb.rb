@@ -1,4 +1,4 @@
-# Written by tools/homebrew-formula.py in fennec-db/fennecdb from release v0.1.11's
+# Written by tools/homebrew-formula.py in fennec-db/fennecdb from release v0.2.0's
 # SHA256SUMS, not by hand: `--check` writes it again from the same release and
 # compares, and `--verify` holds its sums to the release's files.
 class Fennecdb < Formula
@@ -13,23 +13,23 @@ class Fennecdb < Formula
 
   on_macos do
     on_arm do
-      url "https://github.com/fennec-db/fennecdb/releases/download/v0.1.11/fennec-v0.1.11-aarch64-apple-darwin.tar.gz"
-      sha256 "e2f89f0e6e6a6728a17065cfe02a447bbc260eb6c657caf57754fda7c0d2ea51"
+      url "https://github.com/fennec-db/fennecdb/releases/download/v0.2.0/fennec-v0.2.0-aarch64-apple-darwin.tar.gz"
+      sha256 "02fd38c82bd8ac62421d32934ee0f1948efd1b4e92ddf1a05a039a2de45e597f"
     end
     on_intel do
-      url "https://github.com/fennec-db/fennecdb/releases/download/v0.1.11/fennec-v0.1.11-x86_64-apple-darwin.tar.gz"
-      sha256 "48a610c61456cfd6ef0c5e43723f169d343699b0fd6cc1b00e62dab12c332025"
+      url "https://github.com/fennec-db/fennecdb/releases/download/v0.2.0/fennec-v0.2.0-x86_64-apple-darwin.tar.gz"
+      sha256 "556121b63eb25fe1136fea3711005057386dc30250607b8340f79f340c43080a"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/fennec-db/fennecdb/releases/download/v0.1.11/fennec-v0.1.11-aarch64-unknown-linux-musl.tar.gz"
-      sha256 "fa8e492b5be0f7f2d0f1ba19c3d6cc733c1e66177f76d44221030b570f2f05c1"
+      url "https://github.com/fennec-db/fennecdb/releases/download/v0.2.0/fennec-v0.2.0-aarch64-unknown-linux-musl.tar.gz"
+      sha256 "f3c9292518e2c7f1aa90964bb6c8a41d00a34d7bda3b005dcc582af98d425b17"
     end
     on_intel do
-      url "https://github.com/fennec-db/fennecdb/releases/download/v0.1.11/fennec-v0.1.11-x86_64-unknown-linux-musl.tar.gz"
-      sha256 "d5acff57f2b960051e00c66a872080580bfb7ff3f3cb49ae5e21fa8fddf38d8d"
+      url "https://github.com/fennec-db/fennecdb/releases/download/v0.2.0/fennec-v0.2.0-x86_64-unknown-linux-musl.tar.gz"
+      sha256 "8c29fd6c24b0b106e7116cd8352f22a60267b6774ce03c94ee8dea4a14ad58e3"
     end
   end
 
@@ -38,9 +38,10 @@ class Fennecdb < Formula
   end
 
   test do
-    # Neither binary has a version flag: fennec-server names its version on the
-    # first line of --help, and the shell is run on a script, in memory.
-    assert_match "fennec-server #{version}", shell_output("#{bin}/fennec-server --help 2>&1")
+    # Each binary names its version on stdout, and the shell is run on a
+    # script, in memory.
+    assert_equal "fennec #{version}", shell_output("#{bin}/fennec --version").chomp
+    assert_equal "fennec-server #{version}", shell_output("#{bin}/fennec-server --version").chomp
     script = "create collection t (n int)\nput t {id: 1, n: 7}\nget t\n"
     assert_match(/^1\s+7$/, pipe_output("#{bin}/fennec", script))
   end

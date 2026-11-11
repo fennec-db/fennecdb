@@ -495,10 +495,9 @@ and a new login goes into the same secret.
 **Homebrew.** `brew install fennec-db/tap/fennecdb` reads the repository
 `fennec-db/homebrew-tap`: Homebrew drops the `homebrew-` from the name, and
 the formula is `Formula/fennecdb.rb` on the default branch, `main`. The
-repository is public, and `brew install fennec-db/tap/fennecdb` works today: it
-installs 0.1.11, from the formula and README below, which were copied in by
-hand so that the first install need not wait for a release's job. Once, and
-if the tap is ever made again:
+repository is public, and `brew install fennec-db/tap/fennecdb` installs the
+latest release, whose formula the release's `packages.yml` pushed (0.2.0's
+first). Once, and if the tap is ever made again:
 
 1. Make it, empty, and copy in the formula and the README as they are in
    `packaging/homebrew/`:
@@ -508,7 +507,7 @@ if the tap is ever made again:
        cp packaging/homebrew/README.md README.md
 
    The copy in the repository is the formula of the release it names
-   (0.1.11), as `tools/homebrew-formula.py` writes it; CI holds it to that
+   (0.2.0), as `tools/homebrew-formula.py` writes it; CI holds it to that
    (`--check`, which needs the repository to be `fennec-db/fennecdb`, and
    `--verify`, which downloads the release's four tarballs and holds the
    sums to them), and the release job never edits it. The tap's is
