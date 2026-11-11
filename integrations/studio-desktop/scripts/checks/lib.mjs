@@ -14,7 +14,7 @@
 //   FENNEC_SERVER_BIN   a fennec-server to start by hand (default bin/fennec-server)
 //   SD_DIR              where data, logs and reports go (default a fresh directory under the system's temp one)
 import { execSync, spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -258,6 +258,64 @@ export function forgetServeItems() {
     return;
   }
   for (const d of databases) spawnSync('security', ['delete-generic-password', '-s', IDENTIFIER, '-a', `serve:${d.id}`], { stdio: 'ignore' });
+}
+
+/** Where WebKit keeps the test variant's data stores, a saved server's `persist:remote-<id>` among them. */
+export const WEBKIT = join(homedir(), 'Library', 'WebKit', IDENTIFIER);
+
+/**
+ * What the test variant keeps between runs, gone: its userData (state.json:
+ * the recent files, the saved connections, the databases it served), every
+ * Keychain item of its service (a connection's token, a served database's)
+ * and its WebKit data stores. run.mjs does this before each check, so one that
+ * failed half-way (a connection it never removed) is not in the next one's
+ * state: `remote` once failed for a connection `storage` had left. Only the
+ * test variant's own: its identifier is its own, and `security` matches the
+ * service exactly (`dev.fennecdb.studio`, a real install's, is another).
+ */
+export function freshState() {
+  rmSync(join(homedir(), 'Library', 'Application Support', IDENTIFIER), { recursive: true, force: true });
+  rmSync(WEBKIT, { recursive: true, force: true });
+  // `security` deletes the first item it finds, so it is asked until none is left; bounded, as `ps` is.
+  for (let i = 0; ; i++) {
+    if (i === 1000) throw new Error(`more than 1000 Keychain items under ${IDENTIFIER}`);
+    const r = spawnSync('security', ['delete-generic-password', '-s', IDENTIFIER], { stdio: 'ignore', timeout: 30000 });
+    if (r.status !== 0) break;
+  }
+}
+
+/**
+ * What a failed check leaves beside its output, in logs/<name>.*: the unified
+ * log of the app and of WebKit's processes since `since` (WebKit logs each
+ * load's steps in the app's own `bun`: the page made, the web process
+ * launched, the policy decided, the commit), a sample of the app while it
+ * still runs, and the crash reports written since. A window whose page never
+ * loads says nothing else: Electrobun 2.0.4 reports no failed navigation and
+ * no web process that ended. run.mjs calls it before it kills what is left.
+ */
+export function keepEvidence(name, since) {
+  const local = (t) => {
+    const d = new Date(t);
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  };
+  const out = `${D}/logs/${name}`;
+  const predicate = 'process == "bun" OR process == "launcher" OR process BEGINSWITH "com.apple.WebKit" OR process == "fennec-server"';
+  const shown = spawnSync('/usr/bin/log', ['show', '--style', 'compact', '--start', local(since - 1000), '--predicate', predicate], { encoding: 'utf8', maxBuffer: 1 << 28, timeout: 120000 });
+  writeFileSync(`${out}.unified.log`, shown.stdout || `log show: ${shown.error ?? shown.stderr}`);
+  for (const p of mine().filter((p) => /\/Contents\/MacOS\/bun /.test(p.command))) {
+    spawnSync('/usr/bin/sample', [String(p.pid), '2', '-file', `${out}.sample-${p.pid}.txt`], { stdio: 'ignore', timeout: 60000 });
+  }
+  const reports = join(homedir(), 'Library', 'Logs', 'DiagnosticReports');
+  let names = [];
+  try {
+    names = readdirSync(reports).filter((f) => /^(bun|launcher|fennec|com\.apple\.WebKit)/.test(f));
+  } catch {
+    // none
+  }
+  for (const f of names) {
+    if (statSync(join(reports, f)).mtimeMs >= since) copyFileSync(join(reports, f), `${out}.crash-${f}`);
+  }
 }
 
 /** Every process of the app and of the servers on this run's files must be gone before a check starts. */

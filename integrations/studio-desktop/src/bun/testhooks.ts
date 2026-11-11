@@ -96,7 +96,8 @@ export function pagePreload(origin: string): string {
 
 /** Every navigation a window is asked to make, and what was decided: the rules a window is held to are checked by these. */
 function watchNavigation(view: BrowserView, key: string) {
-	for (const name of ["will-navigate", "did-navigate", "new-window-open"]) {
+	// The commit too: a page that never loads is told apart from one that loaded and never drew.
+	for (const name of ["will-navigate", "did-commit-navigation", "did-navigate", "new-window-open"]) {
 		(view as any).on(name, (e: any) => report(name, { key, data: JSON.stringify(e?.data ?? e).slice(0, 200) }));
 	}
 }
