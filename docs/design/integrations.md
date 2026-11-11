@@ -459,6 +459,48 @@ connection, an accept loop that reads nothing), the navigation rules allowed
 the load, and the window and its view are made as every other window's are.
 What the app could not see is the evidence these hooks now keep.
 
+Windows and Linux on CI (phase 1 of the plan in #578, nothing shipped).
+`desktop.yml`'s `other-systems` job builds the shipped app and the test
+variant on `windows-latest`, `windows-11-arm`, `ubuntu-24.04` and
+`ubuntu-24.04-arm` with a release's server and shell (pinned in the workflow;
+the macOS job bundles this checkout's, and here the app is what is under test),
+and runs the type check, the unit tests and the checks. `get-server.sh` takes
+the release's Windows zip, held to `SHA256SUMS` as the tarballs are, and
+unpacks it with `unzip` or, in Git's bash where there is none, Windows' own
+`tar.exe` (bsdtar reads a zip); the machine's processor is read from the
+registry, since an x64 Git runs emulated on Windows on Arm, where its
+`PROCESSOR_ARCHITECTURE`, and Windows PowerShell's `OSArchitecture` (emulated
+too), said x64 and fetched the x64 server. The checks' platform layer is
+`checks/lib.mjs`: where the app is and how it is installed, its folders, the
+processes (`ps`; on Windows WMI through PowerShell 7 where there is one, since
+Windows PowerShell, emulated on `windows-11-arm`, took 42-45 s a query where
+`pwsh` took 0.6 s, both 0.4 s on x64), the credential
+store, a killed process's exit code (TerminateProcess's 1 on Windows), a path's
+separator, and whether the file system tells case apart, asked of the folder
+(`newdb`'s `FRESH` is another file on ext4). A stable build there is an
+installer, so `warmup` installs the test variant with it and every other check
+runs the installed copy: on Linux the installer starts that copy, on Windows it
+said "Installation completed successfully" and then, 120 s on, had neither
+started it nor ended, so `warmup` waits for either, ends both, and starts the
+installed app itself. `freshState` removes the pages' stores (Electrobun keeps
+WebKitGTK's under `$HOME/.local/share/<id>/stable/WebKit` and
+`$HOME/.cache/<id>/stable/WebKit`, HOME and not `XDG_DATA_HOME`, and WebView2's
+under `%LOCALAPPDATA%\<id>\stable\WebView2`) and the credential store's items
+of the test variant's service: `secret-tool clear service <id>` (Bun.secrets
+keeps libsecret's attributes `service` and `account`, matched exactly) and the
+`cmdkey` targets `LegacyGeneric:target=<id>/...` (Bun's generic credential is
+named `<service>/<name>`). Checked once on each system with items of the test
+variant, of a service one character longer and of a real install's: the first
+went, the others stayed (runs 43044414083 and 43060489878, a step since taken
+out). `secret-tool clear` with no item to clear exits 1 and says nothing, which
+is no failure; a store that cannot answer says why. On Windows a process of the app is also one that names
+its folder, since WebView2's processes are told their user data folder and
+outlive the app by a moment, and `run.mjs` waits for what it killed to be gone
+before the next check removes that folder. A check that cannot pass on a system
+until a later phase is skipped there by name, its reason and phase in
+`run.mjs`'s list and the run's SKIP lines; a unit test likewise, its reason
+beside it in `node --test`'s output (`test/platform.ts`).
+
 Toolchain. `electrobun init` installed Hutch (the build tool) in `~/.hutch` and
 appended two lines to `~/.zshrc`, and the npm package's resolver would, were
 its download to fail, run that installer. `scripts/electrobun.mjs` runs the
@@ -492,7 +534,22 @@ checks them each run). An Electrobun that Hutch could not fetch without its
 install script was also considered: a lock file was not committed, since
 Hutch's own is per project and per machine and with no Bun hash proved nothing
 here. A Bun upgrade is a pin change by the same command
-(`--print-runtime-pin`).
+(`--print-runtime-pin`), which prints every directory Hutch fetched for the
+system, pinned or not: a new Electrobun, Bun or system is a directory the pin
+does not name yet (the first version printed only the pinned ones).
+
+The pin is per system, since Hutch builds only for the one it runs on and each
+system's archive, binaries (`bin/hutch.exe` on Windows) and runtime are their
+own: macOS on Apple silicon, and Windows and Linux on x64 and arm64, each built
+by `desktop.yml` on its own runner. The Windows and Linux runtimes' digests
+were taken from the spike's runs (#578: 42997677468, 42999915984 and
+43002802508, each printing them three times, the same every time) and are held
+on every CI run as the Mac's are. A digest taken on Windows records no
+executable bit (Node reports a file's mode there as 0666 or 0444) and joins its
+paths with `\`: it is the same on Windows each time, and is compared only
+there. A system with Hutch pinned and no runtime is refused: the first version
+read a missing runtime as nothing to check, which would have built a new
+system's app with whatever Hutch fetched.
 
 The first launch. A stable Electrobun build is a self-extractor: the first run
 unpacks the app in place with an installer window and starts it as a process of

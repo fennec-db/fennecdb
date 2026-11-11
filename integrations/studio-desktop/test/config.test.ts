@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+import { EXE } from "./platform.ts";
 
 // electrobun.config.ts is code, read at build time: signing and notarizing
 // happen only where their secrets exist, and an empty one is none. Each case
 // loads the config in a fresh process with the environment it names.
 
-const dir = new URL("..", import.meta.url).pathname;
+// A path, not a URL's: a `file:` URL's pathname is /D:/a/... on Windows, no folder to run in.
+const dir = fileURLToPath(new URL("..", import.meta.url));
 const SECRETS = [
 	"ELECTROBUN_DEVELOPER_ID",
 	"ELECTROBUN_APPLEAPIKEY",
@@ -72,6 +75,12 @@ test("the test variant has its own identity and builds, is never signed, and is 
 	// The Keychain service follows the identifier, so a check never touches a real install's items.
 	assert.equal(JSON.parse(t.build.bun.define.__KEYCHAIN_SERVICE__), "dev.fennecdb.studio.test");
 	assert.equal(JSON.parse(release.build.bun.define.__KEYCHAIN_SERVICE__), "dev.fennecdb.studio");
+});
+
+test("the server and the shell are copied into the app by the names this system gives a program", () => {
+	const copy = config().build.copy as Record<string, string>;
+	for (const name of [`bin/fennec-server${EXE}`, `bin/fennec${EXE}`]) assert.equal(copy[name], name);
+	assert.equal(Object.keys(copy).filter((k) => k.startsWith("bin/")).length, 2, "and nothing else of bin/");
 });
 
 const pick = (c: any) => ({ codesign: c.build.mac.codesign, notarize: c.build.mac.notarize });

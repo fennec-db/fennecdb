@@ -21,5 +21,89 @@
 				"tree": "c0f4993e182ba17f44ab557acd041db286b9f7956ab58b5516154390008cf6cf"
 			}
 		}
+	},
+	"windows-x64": {
+		"archive": "fc2f0920a2392080f17ff5765cb82391ed691941bfdd3ee608b07a36b0590e23",
+		"files": {
+			"bin/hutch.exe": "0939b1ff56f2d0d71bae215e7d40a71ca84a3589e573328eee267c2e5102ee3b",
+			"bin/hutch-engine.exe": "624a49be00938237d9733590229c6c2538d1cc840fc6fd36047e41d680caa865"
+		},
+		"runtime": {
+			"releases/electrobun/2.0.4/windows-x64": {
+				"files": 236,
+				"tree": "571e98cfe4640feb8eac1a65a4ee419ad50b656d93de550c7000a38225c45692"
+			},
+			"toolchains/bun/1.4.0/windows-x64": {
+				"files": 2,
+				"tree": "9af4111a27a01a469255c8c0745ee3b8a5bf60f990a3abbb5e219ef54d6ea408"
+			},
+			"releases/cottontail/0.7.2/873c890ce57d8a8f011731776bca478453db8e76/windows-x64": {
+				"files": 313,
+				"tree": "86819eb06196fd7ce575f6af464299321ba92c9a600347f35bd3fc94608f8425"
+			}
+		}
+	},
+	"windows-arm64": {
+		"archive": "47a9226ae50764ebfc15063bb2a23c1cadcd37deebb34ef6405e7c8ade7918e4",
+		"files": {
+			"bin/hutch.exe": "6a6238021325aab3fd4bff03543f498a6f73522a2e61b3e7209f2670bd956b15",
+			"bin/hutch-engine.exe": "95531a569ba7fa9135e25ce3da877a348e31e2d2a2e6add494d63f4336eb5a08"
+		},
+		"runtime": {
+			"releases/electrobun/2.0.4/windows-arm64": {
+				"files": 236,
+				"tree": "fe7bdc8ae687b76f94d65524e42e28065ea3cc7edbf783483df433f50822cf54"
+			},
+			"toolchains/bun/1.4.0/windows-arm64": {
+				"files": 2,
+				"tree": "e65d5a9d57f6a18f46b334ef4c1356d3b163a2d5c12adcbfc4eb97cb14f440e0"
+			},
+			"releases/cottontail/0.7.2/873c890ce57d8a8f011731776bca478453db8e76/windows-arm64": {
+				"files": 313,
+				"tree": "d04d9734ce6a08718c561c5662f6d283dd2200b8c200c327e917d7282f36d32c"
+			}
+		}
+	},
+	"linux-x64": {
+		"archive": "0682359296439fab962e708104c2b1dcff2be7e8cc6bfda43ee414fa12fed84b",
+		"files": {
+			"bin/hutch": "c9f4e9c3a7c254338d5779fe7849e577ace69bf7535c4ab15dbaa102d51cd539",
+			"bin/hutch-engine": "66f3cccc340b9194d1f8c239380ad2887fde7847306c7b810dd6e12710b5f166"
+		},
+		"runtime": {
+			"releases/electrobun/2.0.4/linux-x64": {
+				"files": 234,
+				"tree": "b8dfaeb8c63f863e7bd975cd2408f8ae6529272114ff97974dfa68ff43c87490"
+			},
+			"toolchains/bun/1.4.0/linux-x64": {
+				"files": 2,
+				"tree": "4860f7660a2af63c92ae7826c2ba1b0a6563c7ccf104c2f059ed42c670db9306"
+			},
+			"releases/cottontail/0.7.2/873c890ce57d8a8f011731776bca478453db8e76/linux-x64": {
+				"files": 312,
+				"tree": "0c837259f8064ab966ab8e276cf211642a0cfda9fb5463171ea01eaa2ccd2559"
+			}
+		}
+	},
+	"linux-arm64": {
+		"archive": "ac486a73544a34e7ab33535930ef90b0356b777e06018708865ca44d2c0a1a45",
+		"files": {
+			"bin/hutch": "36f4f66b08be1b1faffad4ab1d18edb35d59387945f5e48341e792c817448e08",
+			"bin/hutch-engine": "e4b04fc7d6f49927f0f0024d08ac987775e780580ad58fea509de2b7406a23f1"
+		},
+		"runtime": {
+			"releases/electrobun/2.0.4/linux-arm64": {
+				"files": 234,
+				"tree": "c0de97f790a78f82f05d30b9b40ea4244194f55d05cc9e63d543b5e997187f23"
+			},
+			"toolchains/bun/1.4.0/linux-arm64": {
+				"files": 2,
+				"tree": "ba95c4f430c830ec8c2cd909696c5035518a3abb043dc8b8fe781a3ee6d39ead"
+			},
+			"releases/cottontail/0.7.2/873c890ce57d8a8f011731776bca478453db8e76/linux-arm64": {
+				"files": 312,
+				"tree": "e45833339e7376877007bc2e531ad63654d0614ce55acf326c66007dea0eb3bb"
+			}
+		}
 	}
 }

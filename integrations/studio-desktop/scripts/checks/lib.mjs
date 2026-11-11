@@ -9,30 +9,103 @@
 // and has its own identifier (dev.fennecdb.studio.test), so userData and the
 // Keychain service are its own too.
 //
+// The same checks drive it on macOS, Linux and Windows: what differs by system
+// is here -- where the app is and how it is installed, its folders, the
+// processes on the machine, the credential store, a killed program's exit
+// code, a path's separator and whether the file system tells case apart. Which
+// checks a system does not run yet, and why, is run.mjs's list.
+//
 // Environment:
-//   FENNEC_DESKTOP_APP  the test variant's .app (default build-test/stable-macos-arm64/fennec studio test.app)
-//   FENNEC_SERVER_BIN   a fennec-server to start by hand (default bin/fennec-server)
+//   FENNEC_DESKTOP_APP  the test variant (default: macOS build-test/stable-macos-arm64/fennec studio test.app;
+//                       Windows and Linux the copy `warmup` installs into its folder)
+//   FENNEC_SERVER_BIN   a fennec-server to start by hand (default bin/fennec-server, .exe on Windows)
 //   SD_DIR              where data, logs and reports go (default a fresh directory under the system's temp one)
 import { execSync, spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-export const HERE = new URL('../..', import.meta.url).pathname;
-export const APP = process.env.FENNEC_DESKTOP_APP ?? `${HERE}build-test/stable-macos-arm64/fennec studio test.app`;
-export const EXE = `${APP}/Contents/MacOS/launcher`;
-export const SERVER = process.env.FENNEC_SERVER_BIN ?? `${HERE}bin/fennec-server`;
+export const MAC = process.platform === 'darwin';
+export const WIN = process.platform === 'win32';
+export const LINUX = process.platform === 'linux';
+
+/** This directory (integrations/studio-desktop), with a separator at its end. A URL's pathname is /D:/a/... on Windows. */
+export const HERE = fileURLToPath(new URL('../..', import.meta.url));
 export const IDENTIFIER = 'dev.fennecdb.studio.test';
+/** A list of paths in one variable (FENNEC_DESKTOP_OPEN), as PATH is one: ";" on Windows, where a path holds a ":". */
+export const LIST = delimiter;
 
-export const D = process.env.SD_DIR ?? join(tmpdir(), 'fennec-desktop-checks');
-mkdirSync(`${D}/data`, { recursive: true });
-mkdirSync(`${D}/logs`, { recursive: true });
+/**
+ * The test variant's folder, Electrobun's `<appData>/<identifier>`: its userData
+ * (`stable/`, state.json in it) on every system, and on Windows and Linux the
+ * installed app (`stable/app`) and the pages' stores too.
+ */
+export const APP_DATA = MAC
+  ? join(homedir(), 'Library', 'Application Support', IDENTIFIER)
+  : WIN
+    ? join(process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local'), IDENTIFIER)
+    : join(process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share'), IDENTIFIER);
+/** Where the test variant keeps its state.json. */
+export const USER_DATA = join(APP_DATA, 'stable');
+
+/** The test variant's builds: what runs from here is the test variant's, its installer on Windows and Linux. */
+const BUILT = join(HERE, 'build-test');
+/**
+ * What installs the test variant on Windows and Linux, where a stable build is
+ * an installer and not an app that runs in place: on Windows the build's
+ * `<name>-Setup.exe` beside its payload (the build folder's own
+ * `bin/launcher.exe` answers "Not a valid self-extracting installer"); on Linux
+ * the build folder's `bin/launcher`, a self-extractor that installs the app into
+ * USER_DATA/app and starts it -- and, run again, installs it again over the app
+ * it started. So `warmup` runs it once, and every other check runs the
+ * installed app. None on macOS, where the build unpacks itself in place.
+ */
+function installer() {
+  const dir = join(BUILT, `stable-${WIN ? 'win' : 'linux'}-${process.arch}`);
+  const names = existsSync(dir) ? readdirSync(dir).sort() : [];
+  const found = WIN ? names.find((n) => /-Setup\.exe$/.test(n)) : names.find((n) => existsSync(join(dir, n, 'bin', 'launcher')));
+  if (!found) return join(dir, 'no-installer-here-build-the-test-variant');
+  return WIN ? join(dir, found) : join(dir, found, 'bin', 'launcher');
+}
+export const INSTALLER = MAC ? null : installer();
+export const APP = process.env.FENNEC_DESKTOP_APP ?? (MAC ? `${HERE}build-test/stable-macos-arm64/fennec studio test.app` : join(USER_DATA, 'app'));
+export const EXE = MAC ? `${APP}/Contents/MacOS/launcher` : join(APP, 'bin', WIN ? 'launcher.exe' : 'launcher');
+export const SERVER = process.env.FENNEC_SERVER_BIN ?? join(HERE, 'bin', `fennec-server${WIN ? '.exe' : ''}`);
+
+/**
+ * Whether the exit code a server reported is that of a process killed from
+ * outside (`kill -9`): no code and the signal on a Unix (137 where a shell
+ * reports it), 1 on Windows, where Node's and Bun's SIGKILL is
+ * TerminateProcess(handle, 1).
+ */
+export const killedCode = (code) => (WIN ? code === 1 : code === null || code === 137);
+/** How the app says so in a notice. */
+export const KILLED_SAID = WIN ? /code 1\b/ : /killed by a signal|code 137/;
+
+// Resolved, so a separator SD_DIR was given with (Git's bash writes D:\a\_temp/x) is the system's.
+export const D = resolve(process.env.SD_DIR ?? join(tmpdir(), 'fennec-desktop-checks'));
+mkdirSync(join(D, 'data'), { recursive: true });
+mkdirSync(join(D, 'logs'), { recursive: true });
 /** D as the app sees it (realpath: /tmp is /private/tmp on macOS), for the keys of its windows. */
 export const R = realpathSync(D);
-export const REPORT = `${D}/report.jsonl`;
-export const CONTROL = `${D}/control.jsonl`;
-/** Where the test variant keeps its state.json. */
-export const USER_DATA = join(homedir(), 'Library', 'Application Support', IDENTIFIER, 'stable');
+export const REPORT = join(D, 'report.jsonl');
+export const CONTROL = join(D, 'control.jsonl');
+
+/**
+ * Whether the file system the checks write on tells `a` from `A`: APFS by
+ * default and NTFS do not, ext4 does. Asked of the folder itself, not assumed
+ * by system (APFS can be made case-sensitive).
+ */
+export const CASE_BLIND = (() => {
+  const probe = join(R, `case-probe-${process.pid}`);
+  writeFileSync(probe, '');
+  try {
+    return existsSync(join(R, `CASE-PROBE-${process.pid}`));
+  } finally {
+    rmSync(probe, { force: true });
+  }
+})();
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export const now = () => Date.now();
@@ -47,18 +120,55 @@ export function sh(cmd) {
   }
 }
 
+/**
+ * The PowerShell that asks WMI on Windows: PowerShell 7 (`pwsh`) where there is
+ * one, else Windows PowerShell. On windows-11-arm the latter runs emulated and
+ * took 42 to 45 s a query (its CIM module loading), `pwsh` 0.6 s; on
+ * windows-latest both 0.4 s.
+ */
+export const POWERSHELL = WIN ? ((process.env.PATH ?? '').split(delimiter).some((d) => d && existsSync(join(d, 'pwsh.exe'))) ? 'pwsh.exe' : 'powershell.exe') : null;
+
 /** Every process on the machine: {pid, ppid, rss (KB), command}. */
 export function procs() {
+  if (WIN) {
+    // No ps: the command lines are WMI's. A program's path comes quoted, and is taken out of its quotes.
+    const ps = "Get-CimInstance Win32_Process | ForEach-Object { '{0} {1} {2} {3}' -f $_.ProcessId, $_.ParentProcessId, [int64]($_.WorkingSetSize / 1024), $_.CommandLine }";
+    return execSync(`${POWERSHELL} -NoProfile -NonInteractive -Command "${ps}"`, { maxBuffer: 1 << 26, timeout: 30000 })
+      .toString()
+      .split(/\r?\n/)
+      .map((l) => /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/.exec(l))
+      .filter(Boolean)
+      .map((m) => ({ pid: +m[1], ppid: +m[2], rss: +m[3], command: m[4].replace(/^"([^"]*)"/, '$1') }));
+  }
   // A bound: a `ps` that hangs would otherwise hang the check, and a hosted runner's own cleanup with it.
-  return execSync('ps -axww -o pid=,ppid=,rss=,command=', { maxBuffer: 1 << 26, timeout: 30000 })
+  // procps' `args` is BSD's `command`, the whole command line.
+  return execSync(MAC ? 'ps -axww -o pid=,ppid=,rss=,command=' : 'ps axww -o pid=,ppid=,rss=,args=', { maxBuffer: 1 << 26, timeout: 30000 })
     .toString()
     .split('\n')
     .map((l) => /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/.exec(l))
     .filter(Boolean)
     .map((m) => ({ pid: +m[1], ppid: +m[2], rss: +m[3], command: m[4] }));
 }
-/** The test variant's processes (the launcher, Bun, the servers it bundles) and servers started by hand on this run's files. */
-export const mine = () => procs().filter((p) => p.command.startsWith(APP) || p.command.includes(`fennec-server --file ${R}/`) || p.command.includes(`fennec-server --file ${D}/`));
+/** Paths compare as the system does: Windows' are case-blind (a command line may spell the drive or a folder otherwise). */
+const same = WIN ? (s) => s.toLowerCase() : (s) => s;
+/** A server started by hand on one of this run's files (`fennec-server.exe --file D:\...` on Windows). */
+const handServer = (command) =>
+  MAC
+    ? command.includes(`fennec-server --file ${R}/`) || command.includes(`fennec-server --file ${D}/`)
+    : /fennec-server(\.exe)? --file /i.test(command) && [R, D].some((dir) => same(command).includes(same(`--file ${dir}${sep}`)));
+/**
+ * The test variant's processes (the launcher, Bun, the servers it bundles) and
+ * servers started by hand on this run's files. On Windows and Linux also what
+ * runs from its build (the installer) and, on Windows, from its folder:
+ * WebView2's processes are told the store they use there (`--user-data-dir`),
+ * and outlive the app by a moment.
+ */
+export const mine = () =>
+  procs().filter((p) =>
+    MAC
+      ? p.command.startsWith(APP) || handServer(p.command)
+      : same(p.command).includes(same(APP)) || same(p.command).includes(same(USER_DATA)) || same(p.command).includes(same(BUILT)) || handServer(p.command),
+  );
 export const describe = (list) => list.map((p) => `${p.pid} (ppid ${p.ppid}) ${p.command.replace(APP, "<APP>").slice(0, 200)}`).join('\n');
 
 export function lines() {
@@ -168,10 +278,12 @@ export function startApp(name, env = {}) {
   current = name;
   rmSync(REPORT, { force: true });
   writeFileSync(CONTROL, '');
-  if (!existsSync(EXE)) throw new Error(`no app at ${APP}: build it with \`make studio-desktop-test\``);
+  if (!existsSync(EXE)) throw new Error(`no app at ${APP}: build it with \`make studio-desktop-test\`${MAC ? '' : ' (on Windows and Linux the warmup check installs it)'}`);
   const fd = openSync(`${D}/logs/${name}.app.log`, 'w');
   const child = spawn(EXE, [], {
-    env: { ...process.env, FENNEC_DESKTOP_REPORT: REPORT, FENNEC_DESKTOP_CONTROL: CONTROL, ...env },
+    // A stable Windows launcher is a program with no console, which drops the
+    // app's output unless told to keep one (Electrobun's ELECTROBUN_CONSOLE).
+    env: { ...process.env, ...(WIN ? { ELECTROBUN_CONSOLE: '1' } : {}), FENNEC_DESKTOP_REPORT: REPORT, FENNEC_DESKTOP_CONTROL: CONTROL, ...env },
     stdio: ['ignore', fd, fd],
   });
   closeSync(fd);
@@ -231,12 +343,12 @@ export async function startServer(args, env = {}, bin = SERVER) {
 }
 
 /** The data file `name` the checks open. */
-export const file = (name) => `${R}/data/${name}.fennec`;
+export const file = (name) => join(R, 'data', `${name}.fennec`);
 
 /** A fresh data file `name` of `rows` orders (the collections the studio's own tests use), replacing any. */
 export function data(name, rows = 50) {
   const path = file(name);
-  const r = spawnSync(process.execPath, [`${HERE}scripts/mkdata.mjs`, path, String(rows)], {
+  const r = spawnSync(process.execPath, [join(HERE, 'scripts', 'mkdata.mjs'), path, String(rows)], {
     env: { ...process.env, FENNEC_SERVER_BIN: SERVER },
     stdio: ['ignore', 'ignore', 'pipe'],
     encoding: 'utf8',
@@ -257,27 +369,75 @@ export function forgetServeItems() {
   } catch {
     return;
   }
-  for (const d of databases) spawnSync('security', ['delete-generic-password', '-s', IDENTIFIER, '-a', `serve:${d.id}`], { stdio: 'ignore' });
+  for (const d of databases) {
+    if (MAC) spawnSync('security', ['delete-generic-password', '-s', IDENTIFIER, '-a', `serve:${d.id}`], { stdio: 'ignore' });
+    else forgetCredentials(`serve:${d.id}`);
+  }
 }
 
-/** Where WebKit keeps the test variant's data stores, a saved server's `persist:remote-<id>` among them. */
-export const WEBKIT = join(homedir(), 'Library', 'WebKit', IDENTIFIER);
+/**
+ * Where the pages' data stores are, a saved server's `persist:remote-<id>`
+ * among them: WebKit's for the identifier on macOS; on Linux Electrobun's under
+ * `$HOME/.local/share` and `$HOME/.cache` (it reads HOME, not XDG_DATA_HOME);
+ * on Windows WebView2's user data folder in the test variant's own.
+ */
+export const STORES = MAC
+  ? [join(homedir(), 'Library', 'WebKit', IDENTIFIER)]
+  : LINUX
+    ? [join(homedir(), '.local', 'share', IDENTIFIER, 'stable', 'WebKit'), join(homedir(), '.cache', IDENTIFIER, 'stable', 'WebKit')]
+    : [join(USER_DATA, 'WebView2')];
+/** Where WebKit keeps the test variant's data stores on macOS. */
+export const WEBKIT = STORES[0];
+
+/**
+ * The test variant's items in the system's credential store, every one or
+ * `account`'s alone, gone; Linux and Windows (macOS's are `security`'s, in
+ * freshState). Bun.secrets keeps an item by service and name: on Linux as
+ * libsecret's attributes `service` and `account`, which `secret-tool clear`
+ * matches exactly; on Windows as a generic credential named
+ * `<service>/<name>`, which `cmdkey` lists as `LegacyGeneric:target=<that>`.
+ * Either way a real install's service, `dev.fennecdb.studio`, is another.
+ * One the store cannot answer stops the run rather than leave items unsaid.
+ */
+function forgetCredentials(account) {
+  if (LINUX) {
+    const r = spawnSync('secret-tool', ['clear', 'service', IDENTIFIER, ...(account ? ['account', account] : [])], { encoding: 'utf8', timeout: 30000 });
+    // Status 1 and nothing said is no item matched (libsecret's clear returns FALSE
+    // with no error); a store that cannot answer says why.
+    const noneThere = r.status === 1 && (r.stderr ?? '').trim() === '';
+    if (r.error || (r.status !== 0 && !noneThere)) {
+      throw new Error(`secret-tool clear service ${IDENTIFIER}: ${r.error?.message ?? `status ${r.status}: ${r.stderr}`} (libsecret-tools has secret-tool, and a Secret Service must answer on the session bus)`);
+    }
+    return;
+  }
+  const listed = spawnSync('cmdkey', ['/list'], { encoding: 'utf8', timeout: 30000 });
+  if (listed.error || listed.status !== 0) throw new Error(`cmdkey /list: ${listed.error?.message ?? `status ${listed.status}`}`);
+  for (const m of listed.stdout.matchAll(/^\s*Target:\s*(\S.*?)\s*$/gm)) {
+    const name = m[1].replace(/^LegacyGeneric:target=/, '');
+    if (account ? name !== `${IDENTIFIER}/${account}` : !name.startsWith(`${IDENTIFIER}/`)) continue;
+    const r = spawnSync('cmdkey', [`/delete:${m[1]}`], { encoding: 'utf8', timeout: 30000 });
+    if (r.error || r.status !== 0) throw new Error(`cmdkey /delete:${m[1]}: ${r.error?.message ?? `status ${r.status}: ${r.stdout}`}`);
+  }
+}
 
 /**
  * What the test variant keeps between runs, gone: its userData (state.json:
  * the recent files, the saved connections, the databases it served), every
- * Keychain item of its service (a connection's token, a served database's)
- * and its WebKit data stores. run.mjs does this before each check, so one that
- * failed half-way (a connection it never removed) is not in the next one's
- * state: `remote` once failed for a connection `storage` had left. Only the
- * test variant's own: its identifier is its own, and `security` matches the
- * service exactly (`dev.fennecdb.studio`, a real install's, is another).
+ * item of its service in the credential store (a connection's token, a served
+ * database's) and its pages' data stores. run.mjs does this before each check,
+ * so one that failed half-way (a connection it never removed) is not in the
+ * next one's state: `remote` once failed for a connection `storage` had left.
+ * Only the test variant's own: its identifier is its own, and the store is
+ * asked for its service exactly (`dev.fennecdb.studio`, a real install's, is
+ * another).
  */
 export function freshState() {
   // state.json alone: the rest of userData is Electrobun's (its self-extraction cache, its uninstall
-  // notes), no check's state, and goes once a run, before `warmup` (run.mjs).
+  // notes, and on Windows and Linux the installed app), no check's state, and goes once a run,
+  // before `warmup` (run.mjs).
   rmSync(join(USER_DATA, 'state.json'), { force: true });
-  rmSync(WEBKIT, { recursive: true, force: true });
+  for (const store of STORES) rmSync(store, { recursive: true, force: true });
+  if (!MAC) return forgetCredentials(null);
   // `security` deletes the first item it finds, so it is asked until none is left (44: none found);
   // bounded, as `ps` is, and one it could not answer stops the run rather than leave items unsaid.
   for (let i = 0; ; i++) {
@@ -297,8 +457,18 @@ export function freshState() {
  * still runs, and the crash reports written since. A window whose page never
  * loads says nothing else: Electrobun 2.0.4 reports no failed navigation and
  * no web process that ended. run.mjs calls it before it kills what is left.
+ *
+ * Linux and Windows keep less: WebKitGTK writes its warnings to the app's own
+ * output (the check's app log), and neither system has a log this reads yet;
+ * what is kept is what was running at the failure, the app's processes and
+ * the web engine's (WebKitGTK's helpers, WebView2's msedgewebview2).
  */
 export function keepEvidence(name, since) {
+  if (!MAC) {
+    const engine = procs().filter((p) => /WebKit(Web|Network)Process|msedgewebview2/i.test(p.command));
+    writeFileSync(`${D}/logs/${name}.processes.txt`, `the app's, ${new Date().toISOString()} (the check began ${new Date(since).toISOString()}):\n${describe(mine())}\n\nthe web engine's:\n${describe(engine)}\n`);
+    return;
+  }
   const local = (t) => {
     const d = new Date(t);
     const p = (n) => String(n).padStart(2, '0');

@@ -11,6 +11,9 @@ import type { Plan } from "./serving.ts";
 
 export { AlreadyOpen, PortTaken, StartFailed, randomToken, type FileServer } from "./process.ts";
 
+/** The release's Windows zip names its programs with `.exe`, and electrobun.config.ts copies them so. */
+const EXE = process.platform === "win32" ? ".exe" : "";
+
 /**
  * The bundled server. Only the test variant lets the environment name another
  * (the checks run the one they built): a shipped app that read it would start
@@ -20,13 +23,13 @@ export { AlreadyOpen, PortTaken, StartFailed, randomToken, type FileServer } fro
  */
 export function serverBinary(): string {
 	const named = __TESTABLE__ ? process.env["FENNEC_SERVER_BIN"] : undefined;
-	return named || join(PATHS.RESOURCES_FOLDER, "app", "bin", "fennec-server");
+	return named || join(PATHS.RESOURCES_FOLDER, "app", "bin", `fennec-server${EXE}`);
 }
 
 /** The bundled `fennec` shell, which takes, verifies and restores backups. The same rule as the server's. */
 export function cliBinary(): string {
 	const named = __TESTABLE__ ? process.env["FENNEC_CLI_BIN"] : undefined;
-	return named || join(PATHS.RESOURCES_FOLDER, "app", "bin", "fennec");
+	return named || join(PATHS.RESOURCES_FOLDER, "app", "bin", `fennec${EXE}`);
 }
 
 /**

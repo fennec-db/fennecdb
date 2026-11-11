@@ -35,7 +35,9 @@ test("a changed byte, a renamed file, a file added or taken away, a hidden one, 
 	assert.notEqual(digest(tree("hidden", { "bin/tool": "code", "lib": "data", ".dylib": "x" })).tree, base.tree);
 });
 
-test("whether a file is executable is part of it", () => {
+// Not a phase's: Windows keeps no executable bit (Node reports a file's mode as
+// 0666 or 0444, and chmod sets only read-only), so a digest taken there has none.
+test("whether a file is executable is part of it", { skip: process.platform === "win32" && "Windows keeps no executable bit: a program is its name there" }, () => {
 	const plain = digest(tree("plain", { tool: "code" }));
 	const root = tree("exec", { tool: "code" });
 	chmodSync(join(root, "tool"), 0o755);

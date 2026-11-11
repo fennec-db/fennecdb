@@ -21,7 +21,7 @@
 // by its timeout. A process is not stopped here.)
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { assertClean, cmd, data, describe, forgetServeItems, mine, procs, startApp, startServer, step, until, waitFor, waitStudio, log } from './lib.mjs';
+import { LIST, assertClean, cmd, data, describe, forgetServeItems, mine, procs, startApp, startServer, step, until, waitFor, waitStudio, log } from './lib.mjs';
 
 /** The pipes and sockets each pid holds, from lsof: pid -> [{fd, type, own, peer}], `own` and `peer` the kernel's addresses of the two ends. */
 function ends(pids) {
@@ -72,7 +72,7 @@ const A = data('small', 50);
 const B = data('second', 20);
 const C = data('served-one', 10);
 
-const app = startApp('orphan', { FENNEC_DESKTOP_OPEN: `${A}:${B}` });
+const app = startApp('orphan', { FENNEC_DESKTOP_OPEN: `${A}${LIST}${B}` });
 const a = await waitFor((l) => l.what === 'server-started' && l.path === A, 60000, 'the first server started');
 const b = await waitFor((l) => l.what === 'server-started' && l.path === B, 60000, 'the second server started');
 await waitStudio(`file:${A}`);

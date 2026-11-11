@@ -15,6 +15,7 @@
 // the main process by.
 
 import { appendFileSync, readFileSync } from "node:fs";
+import { delimiter } from "node:path";
 import { Utils, type BrowserWindow, type BrowserView } from "electrobun/main";
 import type { Notice } from "../shared/rpc.ts";
 import { secrets } from "./secrets.ts";
@@ -264,7 +265,8 @@ export async function boot(): Promise<boolean> {
 	}
 	report("ready");
 	const open = process.env["FENNEC_DESKTOP_OPEN"];
-	if (open) for (const p of open.split(":")) await openFile(p);
+	// A list as PATH is one: ";" on Windows, where every path holds a ":" (C:\...).
+	if (open) for (const p of open.split(delimiter)) await openFile(p);
 	if (process.env["FENNEC_DESKTOP_LAUNCHER"]) await showLauncher();
 	return Boolean(open) || Boolean(process.env["FENNEC_DESKTOP_LAUNCHER"]);
 }

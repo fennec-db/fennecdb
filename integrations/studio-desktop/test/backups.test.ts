@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -7,6 +7,7 @@ import { imagesIn, keyPlacement, listImages, makeKey, restoreArchive, takeBackup
 import { randomToken, startServer, type FileServer } from "../src/bun/process.ts";
 import { taskPlan, windowPlan } from "../src/bun/serving.ts";
 import { missing, nodeRun, nodeSpawn, SERVER } from "./node-spawn.ts";
+import { ownerAlone, WINDOWS } from "./platform.ts";
 
 // Backups through the real binaries and the app's own code: `fennec backup`
 // from a server started as the app starts one, into an archive folder;
@@ -108,7 +109,11 @@ test("two restores to one name at once: one makes the file, the other is refused
 	noScratch(work);
 });
 
-test("a key is kept apart from the backups: not under the folder picked, not on the backups' own disk", () => {
+// Phase 2: keyPlacement warns of a key others may read by its mode, which is
+// nothing on Windows (every file reads 0666 there): it would warn of every key.
+const keyModes = WINDOWS && "phase 2: who may read a key is its DACL on Windows, and keyPlacement reads a mode";
+
+test("a key is kept apart from the backups: not under the folder picked, not on the backups' own disk", { skip: keyModes }, () => {
 	// Real paths (the temporary folder is under a link on macOS), as the app's are.
 	const at = realpathSync(mkdtempSync(join(work, "keys-")));
 	const picked = join(at, "Backups");
@@ -157,7 +162,7 @@ test("sealed with a key file: the key is made once, the backup reads only with i
 	const keyFile = join(work, "keys", "sealed.key");
 	const made = await makeKey(nodeRun, keyFile);
 	assert.ok(made.ok, made.message);
-	assert.equal(statSync(keyFile).mode & 0o777, 0o600, "readable by its owner alone");
+	assert.equal(ownerAlone(keyFile), true, "readable by its owner alone: mode 0600, a DACL of its owner alone on Windows");
 	assert.equal((await makeKey(nodeRun, keyFile)).ok, false, "a key is never written over");
 	const archive = { dir: join(work, "backups", "sealed"), keyFile };
 	assert.ok((await takeBackup(nodeRun, { local: server.local, replicationToken: server.replicationToken! }, archive)).ok);

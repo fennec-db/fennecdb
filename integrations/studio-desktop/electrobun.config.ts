@@ -28,6 +28,11 @@ const notarize =
 
 const identifier = test ? "dev.fennecdb.studio.test" : "dev.fennecdb.studio";
 
+// The release's Windows zip names its programs with `.exe` (scripts/get-server.sh
+// puts them in bin/ so). Hutch builds only for the system it runs on, so that
+// system decides.
+const exe = process.platform === "win32" ? ".exe" : "";
+
 export default {
 	app: {
 		name: test ? "fennec studio test" : "fennec studio",
@@ -75,8 +80,8 @@ export default {
 			"src/ui/app.css": "views/ui/app.css",
 			// The server the app starts for a file, and the shell that takes,
 			// verifies and restores its backups: put here by scripts/get-server.sh.
-			"bin/fennec-server": "bin/fennec-server",
-			"bin/fennec": "bin/fennec",
+			[`bin/fennec-server${exe}`]: `bin/fennec-server${exe}`,
+			[`bin/fennec${exe}`]: `bin/fennec${exe}`,
 		},
 		mac: {
 			bundleCEF: false,

@@ -4,13 +4,17 @@
 
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Run } from "../src/bun/backups.ts";
 import type { Child, Spawn } from "../src/bun/process.ts";
+import { EXE } from "./platform.ts";
 
-const BIN = new URL("../bin/", import.meta.url).pathname;
-/** The binaries `make studio-desktop` puts in bin/ (scripts/get-server.sh). */
-export const SERVER = process.env["FENNEC_SERVER_BIN"] || `${BIN}fennec-server`;
-export const CLI = process.env["FENNEC_CLI_BIN"] || `${BIN}fennec`;
+// A path, not a URL's: a `file:` URL's pathname is /D:/a/... on Windows.
+const BIN = fileURLToPath(new URL("../bin/", import.meta.url));
+/** The binaries `make studio-desktop` puts in bin/ (scripts/get-server.sh), `.exe` on Windows. */
+export const SERVER = process.env["FENNEC_SERVER_BIN"] || join(BIN, `fennec-server${EXE}`);
+export const CLI = process.env["FENNEC_CLI_BIN"] || join(BIN, `fennec${EXE}`);
 /** Why a test that needs them cannot run, or "" when it can. */
 export const missing = () => [SERVER, CLI].filter((b) => !existsSync(b)).map((b) => `${b} is not there: run scripts/get-server.sh`).join("; ");
 

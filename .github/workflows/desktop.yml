@@ -7,6 +7,16 @@ name: desktop
 # drive. Nothing here is a required check: a change outside these paths cannot
 # break the app, and the macOS minutes are spent only where it could.
 #
+# WINDOWS AND LINUX (`other-systems`, phase 1 of the plan in #578): the same
+# app, the shipped build and the test variant, built on windows-latest,
+# windows-11-arm, ubuntu-24.04 and ubuntu-24.04-arm with a release's server
+# and shell (scripts/get-server.sh, the asset checked against the release's
+# SHA256SUMS), type-checked, unit-tested, and driven through the scripted
+# checks that run there (Linux's under xvfb-run, on a D-Bus session with
+# gnome-keyring's Secret Service unlocked). scripts/checks/run.mjs says which
+# checks a system skips, each with its reason and the phase that brings it.
+# Nothing they build is shipped or attached; no other job needs them.
+#
 # THE DOWNLOAD is unsigned until there is a Developer ID: the app unpacked
 # and signed ad hoc as a whole (scripts/dist.sh says why it cannot ship as
 # Electrobun's self-extractor), in a DMG, as the Windows zip ships unsigned.
@@ -226,6 +236,109 @@ jobs:
           path: integrations/studio-desktop/artifacts/dist/fennec-studio-macos-arm64.dmg
           retention-days: 7
           if-no-files-found: error
+
+  # Windows and Linux (the header): built and checked, nothing shipped. A
+  # dispatch that names a release is a maintainer attaching the Mac's DMG, and
+  # skips them.
+  other-systems:
+    name: app on ${{ matrix.name }} (build, unit tests, checks)
+    if: github.event.inputs.release == ''
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Windows x64, os: windows-latest }
+          - { name: Windows arm64, os: windows-11-arm }
+          - { name: Linux x64, os: ubuntu-24.04 }
+          - { name: Linux arm64, os: ubuntu-24.04-arm }
+    defaults:
+      run:
+        # Git's bash on Windows: scripts/get-server.sh is a shell script, and the steps read alike.
+        shell: bash
+        working-directory: integrations/studio-desktop
+    env:
+      # The release whose server and shell these jobs bundle, its asset checked against its
+      # SHA256SUMS. The macOS job bundles this checkout's; here the app is what is under test.
+      STUDIO_SERVER_RELEASE: '0.2.0'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Where the checks keep their data, reports and logs, so a failure can upload them.
+      - name: Where the checks write
+        run: echo "SD_DIR=$RUNNER_TEMP/fennec-desktop-checks" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      # What the app links on Linux (WebKitGTK 4.1, GTK 3, AppIndicator, librsvg: Ubuntu
+      # 24.04 calls GTK 3 libgtk-3-0t64), and what the checks drive it with: an X server
+      # (xvfb), a session bus, and a Secret Service (gnome-keyring) for Bun.secrets, whose
+      # items secret-tool clears.
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        # From the image's package lists, as ci.yml installs brotli; lists gone stale are
+        # fetched again. A mirror the runner's resolver does not answer for is asked of
+        # 1.1.1.1 and written into /etc/hosts: on 2026-11-11 Azure's (168.63.129.16) timed
+        # out on every *.ubuntu.com name for hours while it answered for github.com, and
+        # apt waited on each mirror until the step's time ran out.
+        run: |
+          mirrors=$( { sed -n 's|^[a-z]*://\([^/]*\)/.*|\1|p' /etc/apt/apt-mirrors.txt 2>/dev/null; sed -n 's|^URIs: *[a-z]*://\([^/ ]*\).*|\1|p' /etc/apt/sources.list.d/*.sources 2>/dev/null; } | sort -u)
+          for h in $mirrors; do
+            timeout 5 getent hosts "$h" >/dev/null && continue
+            echo "$h: not resolved here, asked of 1.1.1.1"
+            for a in $(dig +short +time=3 +tries=2 @1.1.1.1 "$h" A | grep -E '^[0-9.]+$'); do echo "$a $h"; done | sudo tee -a /etc/hosts
+          done
+          packages="libgtk-3-0t64 libwebkit2gtk-4.1-0 libayatana-appindicator3-1 librsvg2-2 xvfb dbus-x11 gnome-keyring libsecret-1-0 libsecret-tools"
+          sudo -E apt-get install -y -q $packages || { sudo -E apt-get update -q && sudo -E apt-get install -y -q $packages; }
+
+      # As the macOS job's, a cache per system: scripts/electrobun.mjs holds what is
+      # in it to hutch-pin.json on every run.
+      - uses: actions/cache@v6
+        with:
+          path: integrations/studio-desktop/.hutch-home
+          key: desktop-hutch-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('integrations/studio-desktop/package-lock.json', 'integrations/studio-desktop/hutch.config.ts', 'integrations/studio-desktop/hutch-pin.json') }}
+
+      - name: npm ci
+        run: npm ci --ignore-scripts --no-audit --no-fund --loglevel=error
+
+      - name: The server and shell of the release, checked against its SHA256SUMS
+        run: sh scripts/get-server.sh "$STUDIO_SERVER_RELEASE"
+
+      - name: Build the shipped app
+        run: npm run build
+
+      - name: Type check and unit tests
+        run: npm run typecheck && node --test --test-reporter=spec test/*.test.ts
+
+      - name: Build the test variant
+        run: FENNEC_DESKTOP_TEST_BUILD=1 npm run build
+
+      - name: The scripted checks
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            # A session bus of its own, gnome-keyring's login keyring made and unlocked on it
+            # (its password on stdin), and an X display: what a desktop session gives the app.
+            dbus-run-session -- sh -c 'printf checks | gnome-keyring-daemon --unlock --components=secrets >/dev/null && xvfb-run -a -s "-screen 0 1600x1000x24" node scripts/checks/run.mjs'
+          else
+            node scripts/checks/run.mjs
+          fi
+
+      - name: The logs of the checks
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-check-logs-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/fennec-desktop-checks/logs
+          retention-days: 14
+          if-no-files-found: ignore
 
   sign:
     name: sign and notarize
