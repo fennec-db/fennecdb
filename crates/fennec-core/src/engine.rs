@@ -4125,6 +4125,11 @@ pub struct TextIndexStats {
     pub bytes: usize,
 }
 
+/// `explain`'s words for a set an equality's bucket gave, which
+/// `Database::candidates_held` reads back to know that it did.
+const BY_ID: &str = "the id index";
+const BY_HASH: &str = "the hash index on";
+
 /// The candidate set for a filter on `id`, or `None` when the index cannot
 /// answer it.
 ///
@@ -11012,8 +11017,29 @@ impl Database {
 
         let mut out = Vec::new();
         let tested;
+        // The rows an equality's bucket gave each hold it, and are tested
+        // without it. Under a token's rules it is mostly the rule's own,
+        // `owner = $jwt.sub` over its bucket, which fennec-http asks before
+        // the statement's terms: asked again of each row, a scoped count
+        // over a bucket of 20 000 of 100 000 rows by a term of the
+        // statement's matching one took 712 -> 924 us; without it 595, its
+        // field no longer read (indexes.md, *Bound filters*). The browser
+        // module holds no rules, and binds the filter whole.
+        #[cfg(not(target_arch = "wasm32"))]
+        let (found, test) = {
+            let mut held = None;
+            let found = self.candidates_held(c, f, params, range_want, &mut held)?;
+            let test = match held {
+                Some(eq) => Filter::without(c, f, &ctx, eq, params),
+                None => Filter::new(c, f, &ctx),
+            };
+            (found, test)
+        };
+        #[cfg(target_arch = "wasm32")]
         let test = Filter::new(c, f, &ctx);
-        let scanned = match self.filter_candidates(c, f, params, range_want)? {
+        #[cfg(target_arch = "wasm32")]
+        let found = self.filter_candidates(c, f, params, range_want)?;
+        let scanned = match found {
             // The filter is exactly what the index answered: no row needs a
             // second look.
             Some((mut b, true)) => {
@@ -11075,6 +11101,23 @@ impl Database {
         params: &[Value],
         want: usize,
     ) -> Result<Option<(Vec<DocId>, bool)>> {
+        self.candidates_held(c, f, params, want, &mut None)
+    }
+
+    /// [`Self::filter_candidates`], and natively in `held` the equality --
+    /// its field and value -- whose bucket the rows are where one is: every
+    /// row holds it, as the bucket is a bare equality's whole answer
+    /// ([`Expr::is_bare_equality`]), so a test of them need not ask it
+    /// ([`Filter::without`]). The browser module, which holds no token's
+    /// rules, tests the whole filter as it did.
+    fn candidates_held<'f>(
+        &self,
+        c: &Collection,
+        f: &'f Expr,
+        params: &'f [Value],
+        want: usize,
+        held: &mut Option<(&'f str, &'f Value)>,
+    ) -> Result<Option<(Vec<DocId>, bool)>> {
         // Hash index pushdown. The candidate set is picked from the smallest
         // of the indexable equalities in the `and` chain.
         let mut eqs = Vec::new();
@@ -11084,6 +11127,7 @@ impl Database {
         // one over several fields said whole.
         let mut source: (&str, &str) = ("", "");
         let mut composed_said: Option<String> = None;
+        let mut given = None;
         for (field, val) in eqs {
             if field == "id" {
                 let Some(hit) = id_candidates(&c.store, &[val]) else {
@@ -11095,7 +11139,8 @@ impl Database {
                     .unwrap_or(true)
                 {
                     candidates = Some(hit);
-                    source = ("the id index", "id");
+                    source = (BY_ID, "id");
+                    given = Some((field, val));
                 }
                 continue;
             }
@@ -11119,7 +11164,8 @@ impl Database {
                 .unwrap_or(true)
             {
                 candidates = Some(bucket);
-                source = ("the hash index on", field);
+                source = (BY_HASH, field);
+                given = Some((field, val));
             }
         }
 
@@ -11352,6 +11398,14 @@ impl Database {
             }
         }
 
+        // The equality's bucket, unless an `in`, a range, a box or an index
+        // over several fields took its place.
+        #[cfg(not(target_arch = "wasm32"))]
+        if composed_said.is_none() && (source.0 == BY_ID || source.0 == BY_HASH) {
+            *held = given;
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = (held, given);
         Ok(candidates.map(|mut b| {
             b.sort_unstable();
             b.retain(|id| c.store.contains(*id));
@@ -16850,6 +16904,54 @@ impl<'q> Filter<'q> {
         let mut positions = Vec::new();
         let mut paths = Vec::new();
         let root = Filter::bind(c, f, ctx, &mut positions, &mut paths, taking);
+        Filter::made(c, root, positions, paths)
+    }
+
+    /// [`Filter::new`] of `f` but for its `and` term `field = value`, which
+    /// every row it will test holds: the rows its bucket gave
+    /// ([`Database::candidates_held`]). The other terms in their order, so
+    /// that each is asked of the rows it was, and what fails fails alike: the
+    /// term left out is a comparison with a value, which fails over no row.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn without(
+        c: &'q Collection,
+        f: &'q Expr,
+        ctx: &EvalCtx,
+        (field, value): (&str, &Value),
+        params: &[Value],
+    ) -> Filter<'q> {
+        let mut terms = Vec::new();
+        f.conjuncts(&mut terms);
+        let held = terms.iter().position(|t| {
+            t.equality_key(params)
+                .is_some_and(|(k, v)| k == field && std::ptr::eq(v, value))
+        });
+        // A filter of that term alone was answered by its bucket.
+        let (Some(at), true) = (held, terms.len() > 1) else {
+            return Filter::new(c, f, ctx);
+        };
+        terms.remove(at);
+        let (mut positions, mut paths) = (Vec::new(), Vec::new());
+        let mut root: Option<Test<'q>> = None;
+        for t in terms {
+            let t = Filter::bind(c, t, ctx, &mut positions, &mut paths, None);
+            root = Some(match root {
+                Some(a) => Test::And(Box::new(a), Box::new(t)),
+                None => t,
+            });
+        }
+        let root = root.expect("a term is left");
+        Filter::made(c, root, positions, paths)
+    }
+
+    /// The filter of `root`, which reads the fields at `positions` and the
+    /// paths `paths`, in the order they were bound.
+    fn made(
+        c: &'q Collection,
+        root: Test<'q>,
+        mut positions: Vec<usize>,
+        paths: Vec<(usize, &'q str)>,
+    ) -> Filter<'q> {
         let mut index_of = vec![usize::MAX; c.schema.fields.len()];
         for (i, p) in positions.iter_mut().enumerate() {
             index_of[*p] = i;

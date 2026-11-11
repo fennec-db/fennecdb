@@ -309,11 +309,31 @@ the collection's order, not the filter's. `tests/ordered_claims.rs` holds a
 scoped read's plan to the server token's with the claim written in, and
 `tests/rules_first.rs` the answers: each form above, the upsert, REST, a
 stream and MCP answer alike whichever side of the pivot bob's row is.
-The order costs nothing measurable: a candidate row is tested by both
-either way, and the order only changes which comes first -- a row both
-admit pays both, a row the rule refuses no longer pays the caller's terms,
-and a row the caller's terms refuse pays the rule first, one comparison of
-a bound slot under `owner = $jwt.sub` beside a decoded row.
+What the order costs is measured, not reasoned. A row both sides admit
+pays both either way; a row the rule refuses no longer pays the caller's
+terms; a row the caller's terms refuse pays the rule first, about 10 ns a
+row in the engine. Over 100 000 rows of five owners, rules first, a scoped
+count by a term matching one row of the rule's `owner` bucket went 712 ->
+924 us, the rule asked again of each row its own bucket gave -- which the
+engine no longer asks (indexes.md, *Bound filters*): 595 us now, against
+main's 711, and every other read of the bucket faster too, a page of 20 711
+-> 602 us; where the statement's own index gave the rows the rule refuses
+four in five first, 8.6 -> 7.1 us, an `in` 20.7 -> 18.6. One shape pays: a
+full scan under a rule no index answers that admits most rows, `published
+= true or author = $jwt.sub` over posts nine in ten published, by a term of
+the statement's matching few, the rule now asked of every row -- 3.74 ->
+4.87 ms over 100 000 rows (+30%), 4.39 -> 4.99 for a term matching half,
+3.68 -> 4.90 for a page of 20 (two runs in turns, load under 2; a third
+over 2 left out). Asking a caller's plain comparison before the rule, as
+PostgreSQL asks a `LEAKPROOF` operator, would take it back, but a
+comparison naming a field the collection lacks, or a parameter not sent,
+fails at the first row it reaches (indexes.md, *Bound filters*), which
+tells whether a hidden row got there; the rewrite holds no schema to tell
+those apart (`scoped()`), so the order is the rules' first. A rule an
+index answers -- an equality over an `@hash` field, whose bucket the
+engine then reads -- has no such cost; an engine refusing an unknown field
+and an unbound parameter before any row would let a plain comparison go
+first, and end it.
 
 A scoped `explain` ran through the same rewrite, and its plan counted what
 an index chose before the rules held it: `filter: {index}, {n} rows`, the

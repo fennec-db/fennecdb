@@ -304,6 +304,33 @@ each matched row again (`order_ids`), took 6 to 9% off an ordered scan
 natively but made the unordered ones 4 to 6% slower in the browser and the
 module 1.9 KB larger, so it is not in.
 
+**The rows an equality's bucket gave are tested without it**
+(`Database::candidates_held`, `Filter::without`). The scan's path
+(`matching_ids_to`: a `get`, its `count` and page, a `set`, a `del`) tested
+the rows a `@hash` bucket or the id index gave with the whole filter, the
+equality that chose them among its terms, though every one holds it: the
+bucket is that equality's whole answer, as `is_bare_equality` already takes
+it to be where the filter is that term alone. Natively the filter is now
+bound without it, the other terms in their order, so each is asked of the
+rows it was and fails where it failed; a union of buckets (`in`), a range, a
+box and an index over several fields are no one term's answer and leave the
+filter whole. A scoped token's rules made it a cost: fennec-http asks them
+before the statement's own terms (access.md, *The rules are asked before
+the caller's terms*), so `owner = $jwt.sub`, whose bucket is a scoped read's
+usual rows, was asked again of each. Over 100 000 rows, five owners and the
+rule's bucket of 20 000, main's engine with the rule last against this one
+with it first (medians of three runs in turns, each of 15 rounds, load under
+2 on 8 cores, `Database::query` alone): a count by a term matching one row
+711 -> 595 us, where the rule asked first without it took 924; one matching
+half 837 -> 617; `like` 1 229 -> 1 066; a page of 20 711 -> 602; where the
+statement's own equality gave the rows 8.6 -> 7.1 us, its page 8.8 -> 7.3;
+an `in` 20.7 -> 18.6, the rule refusing four rows in five before it; a row
+by id the same, 4.84 -> 4.78. Most of it is the field no longer read: a
+term left out that no other reads takes its field out of
+`Store::read_fields`' pass. The browser module, which holds no token's
+rules, binds the filter whole as before: 33 bytes more of it (852 824 ->
+852 857, brotli 70), inside the layout's own noise.
+
 A stream's look tests the rows written since its cursor through a bound
 filter too, where the filter reads another collection and holds a long
 `in` list (`Database::changes_held`): an inner `get` answered as 100 000

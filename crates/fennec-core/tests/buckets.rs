@@ -174,3 +174,74 @@ fn a_delete_out_of_a_large_bucket_costs_what_a_delete_without_one_does() {
         plain * 1e3
     );
 }
+
+/// The rows an equality's bucket gives are tested without that equality,
+/// every one holding it (`Filter::without`): they answer as the scan does,
+/// row for row and failure for failure, wherever the term stands in the
+/// `and` chain -- a value read through the field's type, a `nocase` fold,
+/// the id, a parameter, the term written twice -- and a term after it that
+/// fails still fails over the rows it reaches.
+#[test]
+fn rows_a_bucket_gave_answer_as_the_scan_without_its_equality() {
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection hashed (k text @hash, f float @hash, h text nocase @hash, n int)",
+    );
+    run(
+        &mut db,
+        "create collection plain (k text, f float, h text nocase, n int)",
+    );
+    for c in ["hashed", "plain"] {
+        for i in 0..40 {
+            run(
+                &mut db,
+                &format!(
+                    "put {c} {{k: \"k{}\", f: {}, h: \"{}\", n: {}}}",
+                    i % 3,
+                    i % 4,
+                    ["Ab", "aB", "cd"][i % 3],
+                    i % 7
+                ),
+            );
+        }
+    }
+    let params = [Value::Text("k1".into()), Value::Int(3)];
+    for filter in [
+        "k = \"k1\" and n > 2",
+        "n > 2 and k = \"k1\"",
+        "k = \"k1\" and n > 2 and k = \"k1\"",
+        "f = 2 and n < 5",
+        "h = \"AB\" and n >= 3",
+        "id = 7 and n > 1",
+        "n > 1 and id = 7",
+        "k = $1 and n >= $2",
+        "k = \"k1\" and (n = 1 or n = 4)",
+        "k = \"k1\" and k = \"k2\"",
+        "k = \"k1\" and 1 / (n - 3) > 0",
+        "1 / (n - 3) > 0 and k = \"k1\"",
+        "k = \"k2\" and 1 / (n - 6) > 0",
+    ] {
+        let answer = |c: &str| {
+            let stmt = fennec_ql::parse_one(&format!("get {c} where {filter} order id")).unwrap();
+            db.query(&stmt, &params)
+                .map(|r| {
+                    r.rows()
+                        .unwrap()
+                        .rows
+                        .iter()
+                        .map(|r| r.id)
+                        .collect::<Vec<_>>()
+                })
+                .map_err(|e| e.to_string())
+        };
+        assert_eq!(answer("hashed"), answer("plain"), "{filter}");
+        let count = |c: &str| {
+            let stmt = fennec_ql::parse_one(&format!("get {c} where {filter} count")).unwrap();
+            db.query(&stmt, &params)
+                .map(|r| format!("{:?}", r.rows().unwrap().rows))
+                .map_err(|e| e.to_string())
+        };
+        assert_eq!(count("hashed"), count("plain"), "{filter}");
+    }
+}
