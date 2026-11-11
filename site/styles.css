@@ -1357,6 +1357,19 @@ html { scrollbar-color: var(--rule-hot) transparent; }
 
 /* ================================================================ download */
 
+/* The systems' tabs. Without script each system shows under its name and the
+   bar the page writes is hidden. With it, the four panels share one cell, the
+   tallest setting its height, and only the chosen one is seen: so neither
+   this machine's system, picked once the script runs, nor any later pick
+   moves what is below. */
+html:not(.js) .dl-sys > .lang-tabs { display: none; }
+.js .dl-sys { display: grid; grid-template-columns: minmax(0, 1fr); }
+.js .dl-sys > .lang { grid-row: 2; grid-column: 1; }
+.js .dl-sys > .lang::before { content: none; }
+.js .dl-sys > .lang ~ .lang { visibility: hidden; }
+.js .dl-sys.on > .lang { visibility: visible; }
+.js .dl-sys.on > .lang[hidden] { display: block; visibility: hidden; }
+
 /* The page opens on the same dune band as the docs (`{{scarp}}`), then the
    system's tabs and the command for it. The tabs are the language tabs
    (site.js, `data-detect`): without script every system shows, one under

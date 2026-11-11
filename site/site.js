@@ -702,17 +702,25 @@ if (motions.length) {
 for (const box of document.querySelectorAll('[data-langs]')) {
   const panels = [...box.querySelectorAll(':scope > .lang')];
   const key = box.dataset.key || 'fennec-lang';
-  const bar = document.createElement('div');
-  bar.className = 'lang-tabs';
-  bar.setAttribute('role', 'tablist');
-  bar.setAttribute('aria-label', box.dataset.tabs || 'Language');
+  // A box at the top of its page writes its bar into the page (the Download
+  // page's systems): a bar added here pushed all below it down as the page
+  // was read, a layout shift Lighthouse held at 0.257.
+  const written = box.querySelector(':scope > .lang-tabs');
+  const bar = written || document.createElement('div');
+  if (!written) {
+    bar.className = 'lang-tabs';
+    bar.setAttribute('role', 'tablist');
+    bar.setAttribute('aria-label', box.dataset.tabs || 'Language');
+  }
   const tabs = panels.map((p, i) => {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.setAttribute('role', 'tab');
-    b.textContent = p.dataset.name;
+    const b = written ? bar.children[i] : document.createElement('button');
+    if (!written) {
+      b.type = 'button';
+      b.setAttribute('role', 'tab');
+      b.textContent = p.dataset.name;
+      bar.append(b);
+    }
     b.addEventListener('click', () => show(i, true));
-    bar.append(b);
     return b;
   });
   const show = (i, keep) => {
@@ -720,7 +728,7 @@ for (const box of document.querySelectorAll('[data-langs]')) {
     tabs.forEach((b, j) => b.setAttribute('aria-selected', String(j === i)));
     if (keep && panels[i].dataset.keep !== 'false') { try { localStorage.setItem(key, panels[i].dataset.name); } catch {} }
   };
-  box.prepend(bar);
+  if (!written) box.prepend(bar);
   box.classList.add('on');
   let start = 0;
   try {
