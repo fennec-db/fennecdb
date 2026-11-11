@@ -684,7 +684,13 @@ messages   read,insert  where room in (get members select room where user = $jwt
     token, is never held; <code>--request-rate 0</code> holds no one. Past
     the requests of the server's own token, nothing is counted by address:
     a client with no token is the server's to keep out, and one in front
-    of it to slow down.</li>
+    of it to slow down. A backend that holds one scoped token for all its
+    users is one caller: every user's request counts against that token's
+    1 000 a second. Give each user a token of their own, each its own
+    caller held to its own rules, or raise <code>--request-rate</code> to
+    what the backend asks at its peak (<code>0</code> for none);
+    <code>fennec_request_rate_refused_total</code> rising says the bound
+    is biting.</li>
 </ul>
 
 <p>The server's own <code>--http-token</code> keeps full access alongside.</p>
