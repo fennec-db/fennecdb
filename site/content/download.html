@@ -1,6 +1,6 @@
 <!--
 title: Download — fennecdb
-description: Download fennecdb: one command for macOS, Linux or Windows puts fennec-server and the fennec shell in your home directory with no sudo, checked against the release's SHA256SUMS. Homebrew, .deb, .rpm, tarballs, the Docker image and a package for each language too.
+description: Download fennec studio, the Mac app (beta) that makes, opens and serves a database with the server inside it, or fennecdb for the command line: one command for macOS, Linux or Windows puts fennec-server and the fennec shell in your home directory with no sudo, checked against the release's SHA256SUMS. Homebrew, .deb, .rpm, tarballs, the Docker image and a package for each language too.
 -->
 
 {{scarp}}
@@ -9,12 +9,67 @@ description: Download fennecdb: one command for macOS, Linux or Windows puts fen
   <div class="band-in dl">
     <p class="dl-eyebrow">Download · release {{version}}</p>
     <h1 class="dl-title" id="dl-title">Download fennecdb</h1>
-    <p class="dl-lede">Two programs, <code>fennec-server</code> and the shell
-      <code>fennec</code>, as a download for your machine, and a package for
-      each language that reaches them. One command puts both in your home
-      directory, with no sudo.</p>
+    <p class="dl-lede">fennec studio, an app that makes, opens and serves a
+      database on your Mac with the server inside it. Or the two programs for
+      the command line, <code>fennec-server</code> and <code>fennec</code>,
+      and a package for each language that reaches them.</p>
 
-    <div class="langs dl-sys" data-langs data-detect data-key="fennec-download" data-tabs="Your system">
+    <div class="dl-hero">
+      <script>(function () {
+        // This machine, before the card is painted (a class on <html>, no
+        // layout moves after): Windows and Linux are shown the Playground and
+        // the server's --studio in place of the .dmg. The same user-agent
+        // test as site.js's system tabs; without script every visitor sees
+        // the Mac's.
+        var ua = navigator.userAgent || '';
+        var c = document.documentElement.classList;
+        if (/Win/i.test(ua)) c.add('dl-other', 'dl-is-win');
+        else if (!/Mac|iPhone|iPad/i.test(ua) && /Linux|X11|Android/i.test(ua)) c.add('dl-other', 'dl-is-lin');
+      })();</script>
+      <div class="dl-app">
+        <div class="dl-app-id">
+          <span class="dl-app-icon" aria-hidden="true">{{mark}}</span>
+          <div>
+            <p class="dl-app-name">fennec studio<span class="dl-beta">BETA</span></p>
+            <p class="dl-app-kind">for Mac · Apple silicon · release {{version}}</p>
+          </div>
+        </div>
+
+        <div class="dl-app-mac">
+          <p class="dl-app-say">Make a database, open one, serve it to your apps, back it up, or connect to a server, with no server of your own to start.</p>
+          <a class="dl-get" href="https://github.com/fennec-db/fennecdb/releases/download/v{{version}}/fennec-studio-v{{version}}-macos-arm64.dmg"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M4 20h16"/></svg><span><b>Download for Mac</b><small>.dmg · 24 MB · Apple silicon</small></span></a>
+          <ul class="dl-ticks">
+            <li><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3 3 7-7"/></svg>fennec-server and fennec inside</li>
+            <li><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3 3 7-7"/></svg>In SHA256SUMS</li>
+            <li><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3 3 7-7"/></svg>Tokens in the Keychain</li>
+          </ul>
+          <p class="dl-first"><strong>Not signed by Apple.</strong> The first time you open it, macOS stops it once: System Settings › Privacy &amp; Security › <strong>Open Anyway</strong>. After that it opens as any app does.</p>
+          <p class="dl-app-line">Or in one line, with nothing to click through:</p>
+          <div class="dl-one"><pre data-lang="bash">curl -fsSL https://fennecdb.com/install.sh | sh -s -- --app</pre></div>
+          <p class="dl-else">On an Intel Mac, Windows or Linux, the same studio comes in the server, <code>fennec-server --studio</code>, and runs in your browser on the <a href="playground.html">Playground</a>.</p>
+        </div>
+
+        <div class="dl-app-other">
+          <p class="dl-app-say">The app is for Macs with Apple silicon for now. On <span class="dl-sys-win">Windows</span><span class="dl-sys-lin">Linux</span>, the same studio comes in the server you install below, and runs in your browser with nothing installed.</p>
+          <a class="dl-get" href="playground.html"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M7 6.5h.01M10 6.5h.01"/></svg><span><b>Open it in your browser</b><small>the Playground · a database in your tab</small></span></a>
+          <a class="dl-get calm" href="#studio-anywhere"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8l4 4-4 4M12 17h7"/></svg><span><b>In the server: --studio</b><small>then open /_studio/ on its address</small></span></a>
+          <p class="dl-else">On a Mac with Apple silicon: <a href="https://github.com/fennec-db/fennecdb/releases/download/v{{version}}/fennec-studio-v{{version}}-macos-arm64.dmg">fennec studio's .dmg</a>, 24 MB.</p>
+        </div>
+      </div>
+
+      <figure class="dl-hero-shot">
+        <div class="dl-win">
+          <div class="dl-win-bar" aria-hidden="true"><span></span><span></span><span></span><em>orders.fennec · fennec studio</em></div>
+          <img src="images/studio-grid-dark.webp" width="1280" height="800" fetchpriority="high" alt="fennec studio: the collections on the left with their row counts and a collection's fields and indexes, 100 000 orders in a grid with counts by status and owner above it, and one row unfolded on the right, its json field as a tree and its vector summarised">
+        </div>
+        <figcaption class="dl-cap">A file's window is the server's own studio: 100 000 orders, counted by their <code>@hash</code> fields, one row unfolded.</figcaption>
+      </figure>
+    </div>
+
+    <div class="dl-or"><h2>Or the command line</h2></div>
+    <p class="dl-or-say">One command puts <code>fennec-server</code> and the shell <code>fennec</code> in your home directory, with no sudo. The studio is in the server: start it with <code>--studio</code>.</p>
+
+    <div class="langs dl-sys"data-langs data-detect data-key="fennec-download" data-tabs="Your system">
 <div class="lang-tabs" role="tablist" aria-label="Your system"><button type="button" role="tab" aria-selected="true">macOS</button><button type="button" role="tab" aria-selected="false">Linux</button><button type="button" role="tab" aria-selected="false">Windows</button><button type="button" role="tab" aria-selected="false">Docker</button></div>
 
 <div class="lang" data-name="macOS" data-keep="false">
@@ -118,6 +173,94 @@ href="docs/server.html#containers">Run it in a container</a> has the rest.</p>
 </section>
 
 <svg class="ridgeline" viewBox="0 0 1440 90" preserveAspectRatio="none" aria-hidden="true">
+  <path d="M0 74 C 190 40 300 86 470 62 C 640 38 760 80 940 54 C 1120 28 1270 72 1440 46 L1440 90 L0 90 Z" fill="#1B1233"/>
+</svg>
+
+<section class="band" id="app" aria-labelledby="app-title">
+  <div class="band-in dl">
+    <h2 class="rise" id="app-title">fennec studio, the app</h2>
+    <p class="lede rise">A window on the studio a <code>fennec-server</code>
+      serves. The app starts the server it carries, one for each file, and
+      shows that server's own <code>/_studio/</code>, so the window does what
+      the studio does in a browser. Nothing of a database is written by the
+      app itself.</p>
+
+    <figure class="motion rise" data-scenes="app" data-version="{{version}}">
+      <canvas role="img" aria-label="fennec studio is dragged from its disk image into Applications. A file, orders.fennec, is opened: the app starts the fennec-server it carries on that file, with --file, --http 127.0.0.1:0, --sync 250, --studio and --exit-on-stdin-close, and the server says where it is listening, on a port the system picks. A window opens on that server's own studio, its collections on the left and the rows filling the grid."></canvas>
+      <figcaption class="motion-cap">The flags are the ones the app starts a
+        window's server with, in their order; <code>--sync</code> is the
+        file's own setting, 250 ms by default. The token goes in the
+        server's environment, never on its command line, so none is drawn.
+        The port is whichever the system picks.</figcaption>
+    </figure>
+
+    <ul class="dl-facts six rise">
+      <li><b>A file</b><span>File, Open… or a double-click in Finder. The window is on that file's own server; closing it stops the server once it has written its checkpoint.</span></li>
+      <li><b>A new database</b><span>A name and a folder, a first collection if you like, and when a write is safe on disk. The bundled server makes the file.</span></li>
+      <li><b>Serve it to your apps</b><span>A port, this Mac alone or your network, MCP and metrics. The token is kept in the Keychain, never on a command line.</span></li>
+      <li><b>Servers</b><span>Each one served, running or stopped: its statements a second, median answer and connections, how to connect, and its output.</span></li>
+      <li><b>Backups</b><span>Back up now while it runs, sealed with a key file if you choose; Verify reads the folder as a restore would; Restore… never writes over a file.</span></li>
+      <li><b>A saved server</b><span>An address and a token, kept in the Keychain and sent only to that address. The window is on its studio: no CORS to set up.</span></li>
+    </ul>
+
+    <div class="langs dl-sys dl-shots rise" data-langs data-key="fennec-studio-screens" data-tabs="Screens of the app">
+<div class="lang-tabs" role="tablist" aria-label="Screens of the app"><button type="button" role="tab" aria-selected="true">Databases</button><button type="button" role="tab" aria-selected="false">Servers</button><button type="button" role="tab" aria-selected="false">A file's query editor</button></div>
+
+<div class="lang" data-name="Databases" data-keep="false">
+<figure class="dl-shot">
+<div class="dl-win">
+<div class="dl-win-bar" aria-hidden="true"><span></span><span></span><span></span><em>fennec studio</em></div>
+<img src="images/studio-desktop-databases-dark.webp" width="1280" height="800" loading="lazy" alt="fennec studio's desktop app, dark: the Databases list with three files, their size, collections, when each was opened and the port two of them are served on, and orders.fennec picked below it, with its rows, collections and dead space, the buttons to open it in the studio, back it up, compact it and reveal it in Finder, and its server's address and settings beside them">
+</div>
+<figcaption class="dl-cap">The databases on this Mac: what each holds, and which are served.</figcaption>
+</figure>
+</div>
+
+<div class="lang" data-name="Servers" data-keep="false">
+<figure class="dl-shot">
+<div class="dl-win">
+<div class="dl-win-bar" aria-hidden="true"><span></span><span></span><span></span><em>fennec studio</em></div>
+<img src="images/studio-desktop-servers-dark.webp" width="1280" height="800" loading="lazy" alt="fennec studio's desktop app, dark: the Servers list with two served databases, and orders.fennec picked: running, its statements a second, median answer, connections and file size, its settings, a curl command to connect with the token left out, and the server's own output">
+</div>
+<figcaption class="dl-cap">A served database: its numbers, how to connect, and what the server says.</figcaption>
+</figure>
+</div>
+
+<div class="lang" data-name="A file's query editor" data-keep="false">
+<figure class="dl-shot">
+<div class="dl-win">
+<div class="dl-win-bar" aria-hidden="true"><span></span><span></span><span></span><em>orders.fennec · fennec studio</em></div>
+<img src="images/studio-query-dark.webp" width="1280" height="800" loading="lazy" alt="fennec studio's query editor, dark: a get over orders with two parameters, coloured as the docs colour FennecQL, its 200 rows in the grid under it with counts by owner, the status, the time, the rows and the request id beside the tabs, and the saved and past queries on the right">
+</div>
+<figcaption class="dl-cap">A query with its parameters, its rows, and the request id to find it in the logs.</figcaption>
+</figure>
+</div>
+
+    </div>
+
+    <h3 class="dl-h3 rise" id="studio-anywhere">The studio without the app</h3>
+    <div class="dl-cards three rise">
+      <div class="dl-card">
+        <h4>In any fennec-server</h4>
+        <p>Off by default. Start the server with <code>--studio</code>, open <code>/_studio/</code> on its address and paste a token.</p>
+        <pre data-lang="bash">fennec-server --file data.fennec --studio</pre>
+        <p class="dl-small">Embedded in the binary: 74 KB of JavaScript and CSS at first load, gzipped.</p>
+      </div>
+      <div class="dl-card">
+        <h4>In your browser, now</h4>
+        <p>The Playground is the same studio over a database in your own tab: nothing to install, nothing sent anywhere.</p>
+        <p><a class="btn btn-line" href="playground.html">Open the Playground</a></p>
+      </div>
+      <div class="dl-card">
+        <h4>No new authority</h4>
+        <p>Wherever it runs, the studio reads and writes with the token it is given, over the same HTTP every client uses. Keep it on a private network or behind your own sign-in.</p>
+        <p class="dl-small"><a href="docs/studio.html#security">Security</a> · <a href="docs/studio.html">The studio, in full</a></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<svg class="ridgeline" viewBox="0 0 1440 90" preserveAspectRatio="none" aria-hidden="true">
   <path d="M0 62 C 210 30 330 80 500 54 C 690 24 810 74 990 46 C 1160 20 1290 62 1440 38 L1440 90 L0 90 Z" fill="#1B1233"/>
 </svg>
 
@@ -160,15 +303,23 @@ href="docs/server.html#containers">Run it in a container</a> has the rest.</p>
 <section class="band" id="what-you-get">
   <div class="band-in">
     <h2 class="rise">What you get</h2>
-    <p class="lede rise">The same engine in each: the server's file, the shell's,
-      the one in a page and the one in an app are one format.</p>
+    <p class="lede rise">The same engine in each: the app's file, the server's,
+      the shell's, the one in a page and the one in an app on a phone are one
+      format.</p>
 
-    <div class="dl-cards rise">
+    <div class="dl-cards five rise">
+      <div class="dl-card lit">
+        <p class="dl-k">fennec studio.app</p>
+        <p class="dl-fig"><b>24 MB</b> the .dmg, Apple silicon</p>
+        <p>The studio as a Mac app, with <code>fennec-server</code> and
+          <code>fennec</code> inside: nothing else to install.</p>
+      </div>
       <div class="dl-card">
         <p class="dl-k">fennec-server</p>
         <p class="dl-fig">HTTP and JSON, from every language</p>
         <p>The server: one file is one database, with live queries, sync to
-          devices, search, rules and tenants, and HTTPS of its own.</p>
+          devices, search, rules and tenants, HTTPS of its own, and the studio
+          with <code>--studio</code>.</p>
       </div>
       <div class="dl-card">
         <p class="dl-k">fennec</p>
@@ -200,12 +351,13 @@ href="docs/server.html#containers">Run it in a container</a> has the rest.</p>
   <div class="band-in">
     <h2 class="rise">Every way, every machine</h2>
     <p class="lede rise">Pick the way that suits your machine; each installs the
-      release's own binaries.</p>
+      release's own files.</p>
 
     <div class="tbl rise">
 <table>
 <thead><tr><th scope="col">Way</th><th scope="col">Gives you</th><th scope="col">On</th></tr></thead>
 <tbody>
+<tr><td><a href="docs/studio.html#desktop">fennec studio, the app</a></td><td>the studio in a window, a database made, opened, served or backed up with no server to start; the server and the shell inside</td><td>macOS on Apple silicon (beta); the .dmg, or one line with <code>--app</code></td></tr>
 <tr><td><a href="docs/install.html#install-script">The install script</a></td><td><code>fennec-server</code> and <code>fennec</code>, in your home directory, no <code>sudo</code></td><td>macOS and Linux, arm64 and x86_64</td></tr>
 <tr><td><a href="docs/install.html#windows">Windows</a></td><td>the same two, <code>.exe</code>s in your profile, no administrator: the script or the zip</td><td>Windows 10 and 11, Windows Server 2016 and later; x86_64 and arm64, from 0.2.0 on</td></tr>
 <tr><td><a href="docs/install.html#homebrew">Homebrew</a></td><td>the same two, kept up to date by <code>brew</code></td><td>macOS and Linux, arm64 and x86_64</td></tr>
@@ -213,7 +365,7 @@ href="docs/server.html#containers">Run it in a container</a> has the rest.</p>
 <tr><td><a href="docs/install.html#tarball">A tarball</a></td><td>the same two, in a folder</td><td>macOS and Linux, arm64 and x86_64</td></tr>
 <tr><td><a href="docs/install.html#docker">The Docker image</a></td><td><code>fennec-server</code> alone, 7 MB</td><td>anywhere Docker runs, amd64 and arm64</td></tr>
 <tr><td><a href="docs/install.html#packages">A package for your language</a></td><td>a client for the server, or the database in your app</td><td>by language, below</td></tr>
-<tr><td><a href="docs/install.html#source">From source</a></td><td>whatever <code>main</code> is today</td><td>where Rust builds</td></tr>
+<tr><td><a href="docs/install.html#source">From source</a></td><td>whatever <code>main</code> is today, the app too</td><td>where Rust builds; the app on a Mac</td></tr>
 </tbody>
 </table>
     </div>
@@ -299,16 +451,25 @@ shasum -a 256 -c --ignore-missing SHA256SUMS
         <p>A release lists every file with its checksum in <code>SHA256SUMS</code>;
           the <a href="https://github.com/fennec-db/fennecdb/releases/tag/v{{version}}">release page</a>
           lists the files.</p>
+        <h3 class="dl-later">The app</h3>
+        <p>Its .dmg is in <code>SHA256SUMS</code> too, so the same two lines
+          check it, and the one-line install checks it before it copies
+          anything. It is signed ad hoc, not by Apple: macOS asks once before
+          it first opens, and <code>xattr -cr "/Applications/fennec studio.app"</code>
+          does what Open Anyway does.</p>
       </div>
       <div>
-        <h3>From source, and the studio's desktop app</h3>
+        <h3>From source</h3>
         <p>For a build the releases do not have, clone the repository and build
           with <code>cargo</code> and <code>make</code>:
           <a href="docs/build.html">Build from source</a>.</p>
-        <p>fennec studio's desktop app (beta) is a window on the studio a
-          <code>fennec-server</code> serves, one server per file. It is built from
-          the repository with <code>make studio-desktop</code>:
-          <a href="docs/studio.html#desktop">Desktop app</a>.</p>
+        <pre data-lang="bash">make studio-desktop
+open "integrations/studio-desktop/build/stable-macos-arm64/fennec studio.app"</pre>
+        <p>The app from a checkout, unsigned, with the server and the shell
+          built from the same checkout. It needs Node, npm and Rust, and
+          fetches its build tool into its own directory: nothing is installed
+          globally. An app you build opens as it is
+          (<a href="docs/studio.html#desktop">Desktop app</a>).</p>
       </div>
     </div>
   </div>
@@ -323,6 +484,7 @@ shasum -a 256 -c --ignore-missing SHA256SUMS
     <h2 class="rise">Installed. Now a first query</h2>
     <ul class="cards rise">
       <li><a href="docs/quickstart.html">Quickstart</a><p>Run the server and write a row, from the language you already use.</p></li>
+      <li><a href="docs/studio.html">The studio</a><p>Rows, edits, the query editor, live rows and the server's numbers.</p></li>
       <li><a href="docs/shell.html">The shell</a><p>Open a file in <code>fennec</code> and query it, in FennecQL or SQL.</p></li>
       <li><a href="docs/server.html">Server</a><p>Tokens, durability, limits and containers.</p></li>
     </ul>
