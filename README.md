@@ -153,7 +153,8 @@ nearest ten at 99.1% recall in 0.141 ms, against pgvector's 98.6% in 2.076
 A first query in a few commands: **[Quickstart](https://fennecdb.com/docs/quickstart)**
 starts the server and writes two rows, and [in the
 browser](https://fennecdb.com/docs/quickstart-browser) there is no server at
-all. Every way to install is on **[Install](https://fennecdb.com/docs/install)**.
+all. The **[download page](https://fennecdb.com/download)** picks the command
+for your machine; every way to install is on **[Install](https://fennecdb.com/docs/install)**.
 From a clone instead ([Build from source](https://fennecdb.com/docs/build)):
 
 ```bash

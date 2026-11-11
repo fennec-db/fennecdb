@@ -694,6 +694,7 @@ CLAIMS = [
     ("site/content/index.html", r"compiles to (\d+) KB of gzipped WebAssembly", "kb_gz", 0),
     ("site/content/index.html", r"(\d+) KB of gzipped WebAssembly with no", "kb_gz", 0),
     ("site/content/playground.html", r"\((\d+) KB\s+gzipped\)", "kb_gz", 0),
+    ("site/content/download.html", r"<b>(\d+) KB</b> of gzipped WebAssembly", "kb_gz", 0),
     ("site/content/docs/concepts.html", r"(\d+) KB gzip<br><small>the wasm", "kb_gz", 0),
     (BENCH_SIZE,
      r'wasm32, browser</td><td class="n"><b>(\d+) KB</b>', "kb", 0),
@@ -1717,7 +1718,7 @@ def llms_texts():
 
 # The pages that are not docs, and the group each is found under. 404 is not
 # content.
-SEARCH_PAGES = {"index": "Home", "playground": "Playground"}
+SEARCH_PAGES = {"index": "Home", "playground": "Playground", "download": "Download"}
 # What a section's text does not hold: drawings, scripts, and what the page
 # hides from a screen reader too.
 SEARCH_SKIP = {"svg", "script", "style", "canvas", "template", "noscript", "button"}

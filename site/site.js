@@ -624,7 +624,7 @@ if (motions.length) {
       canvas.height = Math.round(w * dpr * sh / sw);
     };
     const draw = () => {
-      mod.render(canvas.getContext('2d'), keys[at], t, canvas.width, canvas.height, narrow.matches, clock);
+      mod.render(canvas.getContext('2d'), keys[at], t, canvas.width, canvas.height, narrow.matches, clock, fig.dataset);
       const d = mod.cycle(keys[at]);
       steps.forEach((b, i) => {
         b.toggleAttribute('aria-current', i === at);
@@ -702,17 +702,25 @@ if (motions.length) {
 for (const box of document.querySelectorAll('[data-langs]')) {
   const panels = [...box.querySelectorAll(':scope > .lang')];
   const key = box.dataset.key || 'fennec-lang';
-  const bar = document.createElement('div');
-  bar.className = 'lang-tabs';
-  bar.setAttribute('role', 'tablist');
-  bar.setAttribute('aria-label', box.dataset.tabs || 'Language');
+  // A box at the top of its page writes its bar into the page (the Download
+  // page's systems): a bar added here pushed all below it down as the page
+  // was read, a layout shift Lighthouse held at 0.257.
+  const written = box.querySelector(':scope > .lang-tabs');
+  const bar = written || document.createElement('div');
+  if (!written) {
+    bar.className = 'lang-tabs';
+    bar.setAttribute('role', 'tablist');
+    bar.setAttribute('aria-label', box.dataset.tabs || 'Language');
+  }
   const tabs = panels.map((p, i) => {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.setAttribute('role', 'tab');
-    b.textContent = p.dataset.name;
+    const b = written ? bar.children[i] : document.createElement('button');
+    if (!written) {
+      b.type = 'button';
+      b.setAttribute('role', 'tab');
+      b.textContent = p.dataset.name;
+      bar.append(b);
+    }
     b.addEventListener('click', () => show(i, true));
-    bar.append(b);
     return b;
   });
   const show = (i, keep) => {
@@ -720,7 +728,7 @@ for (const box of document.querySelectorAll('[data-langs]')) {
     tabs.forEach((b, j) => b.setAttribute('aria-selected', String(j === i)));
     if (keep && panels[i].dataset.keep !== 'false') { try { localStorage.setItem(key, panels[i].dataset.name); } catch {} }
   };
-  box.prepend(bar);
+  if (!written) box.prepend(bar);
   box.classList.add('on');
   let start = 0;
   try {
@@ -728,6 +736,15 @@ for (const box of document.querySelectorAll('[data-langs]')) {
     const at = panels.findIndex((p) => p.dataset.name === kept);
     if (at >= 0) start = at;
   } catch {}
+  // The Download page's tabs are the systems, `data-detect`: the tab is the
+  // one for the machine reading, from its user agent, macOS where it says
+  // nothing; a choice kept by a panel that keeps nothing never overrides it.
+  if (box.hasAttribute('data-detect')) {
+    const ua = navigator.userAgent || '';
+    const os = /Win/i.test(ua) ? 'Windows' : /Mac|iPhone|iPad/i.test(ua) ? 'macOS' : /Linux|X11|Android/i.test(ua) ? 'Linux' : 'macOS';
+    const at = panels.findIndex((p) => p.dataset.name === os);
+    if (at >= 0) start = at;
+  }
   show(start, false);
 }
 

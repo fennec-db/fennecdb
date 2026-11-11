@@ -1224,6 +1224,160 @@ const SCENES = [
       mono(c, 'sealed backups, to a bucket', ...L.sealSay, { size: 13, align: n ? 'left' : 'center', color: P.sand2, alpha: a });
     },
   },
+  {
+    /* The install script at work, in install.sh's own words: the command is
+       typed, the light runs to the release on GitHub and this machine's
+       tarball is picked, its SHA-256 is held to its line in SHA256SUMS before
+       anything is unpacked, and the two programs land in ~/.fennecdb/bin
+       while the terminal prints what the script prints. The terminal's lines
+       are the script's `say` lines (site/install.sh) for a first install on
+       an Apple silicon Mac; the release is the page's own (`data-version`),
+       and the checksum is a bar the width of 64 hex digits, not digits: any
+       digits drawn here would be the sum of no file. Every wire runs in a gap
+       between boxes, never under a word. On a phone the boxes stand in a
+       column and the terminal wraps at its width, as a terminal does; at 15
+       a side the words are about 11 px on a 390 px screen. */
+    key: 'install',
+    d: 8.8,
+    h: 480, nh: 1150,
+    draw(c, t, n, data = {}) {
+      const v = /^[0-9A-Za-z.+-]+$/.test(data.version || '') ? data.version : 'X.Y.Z';
+      const target = 'aarch64-apple-darwin';
+      const a = 1;
+      const ask = 1.8, at = 2.3, dl0 = 2.6, dl1 = 3.3, ok = 3.9, un0 = 4.3, un1 = 4.9, tell0 = 4.8, tell1 = 5.1;
+      // 64 hex digits' width, drawn as a bar (\u0001 is one digit's cell).
+      const SUM = '\u0001'.repeat(64);
+      const LINES = [
+        ['$ curl -fsSL https://fennecdb.com/install.sh | sh', 0.4, P.star],
+        ['Looking for the latest fennecdb release', 2.0, P.sand2],
+        [`Downloading fennec-v${v}-${target}.tar.gz`, 2.6, P.sand2],
+        [`Checksum ok (${SUM})`, 3.9, P.oasis],
+        ['', 4.9, P.sand2],
+        [`Installed fennecdb ${v} (${target}) in /Users/you/.fennecdb/bin:`, 5.0, P.sand],
+        ['  fennec         the shell:  fennec scratch.fennec', 5.15, P.sand2],
+        ['  fennec-server  the server: fennec-server --file notes.fennec', 5.3, P.sand2],
+        [`  (fennec-server ${v})`, 5.6, P.dim],
+        ['', 6.2, P.sand2],
+        ['/Users/you/.fennecdb/bin is not on your PATH. Add it for this shell:', 6.3, P.sand],
+        ['', 6.45, P.sand2],
+        ['  export PATH="$HOME/.fennecdb/bin:$PATH"', 6.6, P.hot],
+        ['', 6.75, P.sand2],
+        ["and put the same line in your shell's startup file (~/.zshrc, ~/.bashrc", 6.9, P.sand2],
+        ['or ~/.profile) to keep it. For fish: fish_add_path "$HOME/.fennecdb/bin".', 7.05, P.sand2],
+        ['', 7.3, P.sand2],
+        ['A first query: https://fennecdb.com/docs/quickstart', 7.45, P.oasis],
+      ];
+
+      // The boxes, and the wires between them, each in a gap.
+      const R = n ? { x: 20, y: 16, w: 440, h: 172 } : { x: 40, y: 36, w: 420, h: 170 };
+      const K = n ? { x: 20, y: R.y + R.h + 40, w: 440, h: 176 } : { x: 520, y: 36, w: 300, h: 170 };
+      const B = n ? { x: 20, y: K.y + K.h + 40, w: 440, h: 160 } : { x: 880, y: 36, w: 360, h: 170 };
+      const VIS = n ? 20 : 7, LH = n ? 21 : 19.5, size = n ? 15 : 13.5;
+      const T = n ? { x: 20, y: B.y + B.h + 40, w: 440, h: 66 + (VIS - 1) * LH + 22 } : { x: 40, y: 250, w: 1200, h: 200 };
+      const pTR = n ? [[T.x, T.y + 54], [9, T.y + 54], [9, R.y + 64], [R.x, R.y + 64]] : [[250, T.y], [250, R.y + R.h]];
+      const pRK = n ? [[240, R.y + R.h], [240, K.y]] : [[R.x + R.w, 116], [K.x, 116]];
+      const pKB = n ? [[240, K.y + K.h], [240, B.y]] : [[K.x + K.w, 116], [B.x, 116]];
+      const pBT = n ? [[240, B.y + B.h], [240, T.y]] : [[1060, B.y + B.h], [1060, T.y]];
+
+      [pTR, pRK, pKB, pBT].forEach((p) => wire(c, p, P.rule, 1.5, a));
+      streak(c, pTR, span(t, ask, at), { tail: 0.4 });
+      streak(c, pRK, span(t, dl0, dl1), { tail: 0.4 });
+      streak(c, pKB, span(t, un0, un1), { tail: 0.4 });
+      streak(c, pBT, span(t, tell0, tell1), { tail: 0.4 });
+
+      // The release on GitHub, the machine's tarball picked from it.
+      const ms = n ? 15 : 12.5;
+      box(c, R.x, R.y, R.w, R.h, { r: 12, fill: P.deep, stroke: t > at ? P.sun : P.rule, alpha: a, line: 1.6, glow: flash(t, at, 1, 0) });
+      mono(c, 'github.com/fennec-db/fennecdb', R.x + 18, R.y + (n ? 30 : 28), { size: n ? 15 : 13, alpha: a });
+      mono(c, 'latest', R.x + R.w - 18, R.y + (n ? 30 : 28), { size: n ? 15 : 13, color: P.oasis, align: 'right', alpha: a });
+      text(c, `Release v${v}`, R.x + 18, R.y + (n ? 66 : 56), { size: n ? 22 : 19, weight: 600, color: P.star, alpha: a });
+      const rows = [`fennec-v${v}-${target}.tar.gz`];
+      if (!n) rows.push(`fennec-v${v}-x86_64-unknown-linux-musl.tar.gz`);
+      rows.push(`fennecdb_${v}-1_amd64.deb`, 'SHA256SUMS');
+      const sumsAt = rows.length - 1;
+      rows.forEach((s, i) => {
+        const y = R.y + (n ? 100 : 85) + i * (n ? 28 : 23);
+        const pick = i === 0 ? ease(span(t, dl0 - 0.25, dl0 + 0.05)) : 0;
+        const sums = i === sumsAt ? ease(span(t, dl1, dl1 + 0.3)) * (1 - ease(span(t, ok + 0.4, ok + 1))) : 0;
+        if (pick > 0) box(c, R.x + 10, y - (n ? 18 : 15), R.w - 20, n ? 24 : 21, { r: 6, fill: 'rgba(79,224,196,.07)', stroke: P.oasis, alpha: a * pick, line: 1 });
+        const col = i === 0 && pick > 0.5 ? P.oasis : i === sumsAt && sums > 0.5 ? P.hot : P.dim;
+        mono(c, s, R.x + 18, y, { size: ms, color: col, alpha: a });
+      });
+
+      // The check, before anything is unpacked.
+      const kOn = ease(span(t, dl1, dl1 + 0.3)), kOk = ease(span(t, ok, ok + 0.3));
+      box(c, K.x, K.y, K.w, K.h, { r: 12, fill: P.deep, stroke: kOk > 0 ? P.oasis : P.rule, alpha: a, line: 1.6, glow: flash(t, ok, 1.1, 0.25) * kOk });
+      text(c, 'Checked first', K.x + 18, K.y + (n ? 36 : 32), { size: n ? 22 : 19, weight: 600, color: P.star, alpha: a });
+      mono(c, 'before anything is unpacked', K.x + 18, K.y + (n ? 62 : 54), { size: ms, alpha: a });
+      mono(c, "the tarball's SHA-256", K.x + 18, K.y + (n ? 96 : 88), { size: n ? 15 : 13, color: P.sand, alpha: a * kOn });
+      mono(c, '= its line in SHA256SUMS', K.x + 18, K.y + (n ? 120 : 110), { size: n ? 15 : 13, color: P.sand, alpha: a * kOn });
+      const ky = K.y + (n ? 150 : 144);
+      if (kOn > 0 && kOk <= 0) mono(c, 'comparing' + '.'.repeat(1 + Math.floor((t * 5) % 3)), K.x + 18, ky + 5, { size: n ? 15 : 13, alpha: a * kOn });
+      if (kOk > 0) chip(c, 'matches', K.x + 18, ky, { size: n ? 15 : 14, color: P.oasis, stroke: P.oasis, alpha: a * kOk, font: MONO });
+
+      // The folder the two programs land in.
+      const bOn = ease(span(t, un1 - 0.05, un1 + 0.35));
+      box(c, B.x, B.y, B.w, B.h, { r: 12, fill: P.deep, stroke: bOn > 0 ? P.sun : P.rule, alpha: a, line: 1.6, glow: flash(t, un1, 1.1, 0) });
+      mono(c, '~/.fennecdb/bin', B.x + 18, B.y + 32, { size: 15, color: P.hot, alpha: a });
+      mono(c, 'no sudo', B.x + B.w - 18, B.y + 32, { size: n ? 15 : 12.5, align: 'right', alpha: a });
+      [['fennec-server', 'the server'], ['fennec', 'the shell']].forEach(([nm, d], i) => {
+        const k = ease(span(t, un1 + i * 0.18, un1 + 0.45 + i * 0.18));
+        const y = B.y + (n ? 78 : 84) + i * 52;
+        file(c, B.x + 40, y - (1 - k) * 10, 0.95, { alpha: a * k, glow: flash(t, un1 + i * 0.18, 1, 0) });
+        text(c, nm, B.x + 72, y - 1, { size: n ? 19 : 18, weight: 600, color: P.star, alpha: a * k });
+        mono(c, d, B.x + 72, y + (n ? 20 : 18), { size: ms, alpha: a * k });
+      });
+
+      // The terminal: the command typed, then the script's lines, scrolling.
+      // A line longer than the terminal is wrapped at its width, as a
+      // terminal wraps it; the typed command keeps its place in its rows.
+      box(c, T.x, T.y, T.w, T.h, { r: 12, fill: P.term, stroke: P.ruleHot, alpha: a, line: 1.4 });
+      dot(c, T.x + 22, T.y + 20, 5, P.ember, a); dot(c, T.x + 38, T.y + 20, 5, P.sun, a); dot(c, T.x + 54, T.y + 20, 5, P.oasis, a);
+      mono(c, 'terminal', T.x + 78, T.y + 24.5, { size: n ? 15 : 12.5, alpha: a });
+      wire(c, [[T.x, T.y + 38], [T.x + T.w, T.y + 38]], P.rule, 1, a);
+      c.save();
+      c.font = `400 ${size}px ${MONO}`;
+      const cw = c.measureText('0').width;
+      c.restore();
+      const cols = Math.max(16, Math.floor((T.w - 44) / cw));
+      const rowsOf = [];
+      LINES.forEach(([s, when, col], li) => {
+        const parts = s.length ? Math.ceil(s.length / cols) : 1;
+        for (let k = 0; k < parts; k++) rowsOf.push({ s: s.slice(k * cols, (k + 1) * cols), when: when + k * 0.04, col, li, k });
+      });
+      let shown = 0;
+      rowsOf.forEach((r) => { shown += ease(span(t, r.when, r.when + 0.25)); });
+      const scroll = Math.max(0, shown - VIS);
+      const top = T.y + (n ? 66 : 64);
+      const typed = Math.floor(LINES[0][0].length * span(t, 0.4, 1.6));
+      c.save();
+      c.beginPath(); c.rect(T.x + 1, T.y + 40, T.w - 2, T.h - 42); c.clip();
+      rowsOf.forEach((r, i) => {
+        // A row leaving at the top fades out under the header's rule, so a
+        // half-scrolled line is never cut through its letters.
+        const k = ease(span(t, r.when, r.when + 0.25));
+        const y = top + (i - scroll) * LH;
+        const leave = span(y, T.y + 40 + size * 0.7, T.y + 40 + size * 1.2);
+        if (k <= 0 || !r.s || leave <= 0 || y > T.y + T.h + 20) return;
+        let str = r.s;
+        if (r.li === 0) str = r.s.slice(0, Math.max(0, typed - r.k * cols));
+        if (!str) return;
+        let x = T.x + 22;
+        for (const part of str.split(/(\u0001+)/)) {
+          if (!part) continue;
+          if (part[0] === '\u0001') {
+            // A sum's width, not a sum: dim, so it reads as digits unread.
+            box(c, x + 1, y - size * 0.55, part.length * cw - 2, size * 0.5, { r: 2, fill: P.dim, stroke: null, alpha: a * k * leave * 0.45 });
+          } else mono(c, part, x, y, { size, color: r.col, alpha: a * leave * (r.li === 0 ? 1 : k) });
+          x += part.length * cw;
+        }
+        if (r.li === 0 && t < ask && typed - r.k * cols <= cols && typed >= r.k * cols) {
+          box(c, x + 2, y - 12, 8, 16, { r: 1, fill: P.sand, stroke: null, alpha: a * (Math.sin(t * 9) > 0 ? 0.9 : 0.25) });
+        }
+      });
+      c.restore();
+    },
+  },
 ];
 
 const STARS = (() => {
@@ -1259,8 +1413,10 @@ export function stage(key, narrow) {
 
 /* Draws scene `key` at `t` seconds of its own into a context of any size.
    The stars twinkle by `clock`, the figure's own time, which runs on across
-   a scene's start: by the scene's they jumped as it began again. */
-export function render(c, key, t, width, height, narrow = false, clock = t) {
+   a scene's start: by the scene's they jumped as it began again. `data` is
+   the figure's `data-*`: what the page tells a scene it cannot know (the
+   install scene's release). */
+export function render(c, key, t, width, height, narrow = false, clock = t, data = {}) {
   const scene = SCENE[key];
   const { w, h } = stage(key, narrow);
   const s = Math.min(width / w, height / h);
@@ -1271,6 +1427,6 @@ export function render(c, key, t, width, height, narrow = false, clock = t) {
   c.save();
   const end = cycle(key);
   c.globalAlpha = ease(span(t, 0, 0.45)) * (1 - ease(span(t, end - 0.6, end)));
-  scene.draw(c, t, narrow && !scene.wide);
+  scene.draw(c, t, narrow && !scene.wide, data);
   c.restore();
 }
