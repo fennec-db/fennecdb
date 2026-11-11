@@ -13,8 +13,8 @@
 #   fennec-studio-macos-arm64.dmg     -> fennec-studio-vX.Y.Z-macos-arm64.dmg
 #   fennec-studio-windows-x64.zip     -> fennec-studio-vX.Y.Z-windows-x64.zip
 #   fennec-studio-windows-arm64.zip   -> ...
-#   fennec-studio-linux-x64.tar.gz
-#   fennec-studio-linux-arm64.tar.gz
+#   fennec-studio-linux-x64.tar.xz
+#   fennec-studio-linux-arm64.tar.xz
 #
 # SHA256SUMS is the one place install.sh --app and install.ps1 -App learn a
 # sum from, and every sum anyone took from it stays: the new file starts
@@ -64,7 +64,7 @@ lines=
 for file in "$@"; do
   base=$(basename "$file")
   case $base in
-    fennec-studio-macos-arm64.dmg | fennec-studio-windows-x64.zip | fennec-studio-windows-arm64.zip | fennec-studio-linux-x64.tar.gz | fennec-studio-linux-arm64.tar.gz) ;;
+    fennec-studio-macos-arm64.dmg | fennec-studio-windows-x64.zip | fennec-studio-windows-arm64.zip | fennec-studio-linux-x64.tar.xz | fennec-studio-linux-arm64.tar.xz) ;;
     *) die "$base is not one of the app's downloads" ;;
   esac
   [ -f "$file" ] || die "no $file"

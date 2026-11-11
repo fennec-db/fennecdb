@@ -191,6 +191,9 @@ linux_app_needs() {
   Ubuntu, Debian:  sudo apt install libwebkit2gtk-4.1-0 libayatana-appindicator3-1
   Fedora:          sudo dnf install webkit2gtk4.1 libayatana-appindicator-gtk3
   Arch:            sudo pacman -S webkit2gtk-4.1 libayatana-appindicator"
+    # The app comes as a .tar.xz, which tar hands to xz.
+    command -v xz >/dev/null 2>&1 ||
+        die "the app comes as a .tar.xz, and this system has no xz to unpack it: nothing was installed. Install xz (Ubuntu, Debian: sudo apt install xz-utils; Fedora: sudo dnf install xz), then run this again."
 }
 
 # fetch URL FILE. Over https each tool is held to https and TLS 1.2 or later,
@@ -380,7 +383,7 @@ install_app_linux() {
     apps=$data/applications
     entry=$apps/fennecstudio.desktop
 
-    name=fennec-studio-v$version-linux-$app_arch.tar.gz
+    name=fennec-studio-v$version-linux-$app_arch.tar.xz
     want=$(awk -v n="$name" '{ f = $2; sub(/^\*/, "", f); if (f == n) { print $1; exit } }' "$sums")
     [ -n "$want" ] || die "release v$version lists no $name: it has no Linux app yet"
 
@@ -404,7 +407,7 @@ install_app_linux() {
     stage=$root/.app-install.$$
     rm -rf "$stage"
     mkdir "$stage" || die "could not write in $root"
-    tar -xzf "$tmp/$name" -C "$stage" || die "could not unpack $name"
+    tar -xJf "$tmp/$name" -C "$stage" || die "could not unpack $name"
     src=$stage/fennec-studio
     [ -f "$src/bin/launcher" ] && [ -f "$src/Resources/app/bun/index.js" ] ||
         die "$name holds no app (fennec-studio/bin/launcher): nothing was installed"

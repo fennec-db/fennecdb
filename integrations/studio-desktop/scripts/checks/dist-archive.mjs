@@ -3,7 +3,7 @@
 // from the build's payload. checks/dist.mjs hands over to this there.
 //
 //   node scripts/checks/dist.mjs [the archive]
-//     default: the one artifacts/dist/fennec-studio-<windows|linux>-<x64|arm64>.<zip|tar.gz>
+//     default: the one artifacts/dist/fennec-studio-<windows|linux>-<x64|arm64>.<zip|tar.xz>
 //
 // What it holds, on that very file:
 //   - it is one folder, fennec-studio, the app unpacked: its launcher and its
@@ -41,7 +41,7 @@ import { D, HERE, POWERSHELL, R, WIN, log, procs, sleep, step } from './lib.mjs'
 import { treeDigest } from '../tree-digest.mjs';
 
 const SYS = WIN ? 'windows' : 'linux';
-const EXT = WIN ? 'zip' : 'tar.gz';
+const EXT = WIN ? 'zip' : 'tar.xz';
 const IDENTIFIER = 'dev.fennecdb.studio';
 const REPO = resolve(HERE, '..', '..');
 const ROOT = join(R, 'dist');
@@ -165,9 +165,22 @@ function listing(root) {
   return out;
 }
 
-/** That a run changed nothing under `root`, `was` its listing before: what it added, removed or changed is named. */
-function unchanged(root, was, what) {
+/**
+ * The one file a run may add to the app: Electrobun's launcher writes its own
+ * log beside itself on Windows, bin\app.log, at each start (seen on x64 and
+ * arm64, the first runs of this check), so the folder must be one its user
+ * can write -- an install in the profile, or a download unpacked there.
+ */
+const LAUNCHER_LOG = WIN ? join('bin', 'app.log') : null;
+
+/** That a run changed nothing under `root` but the launcher's log, `was` its listing before: what it added, removed or changed is named. */
+function unchanged(root, was, what, label) {
   const now = listing(root);
+  if (LAUNCHER_LOG && now.has(LAUNCHER_LOG) && !was.has(LAUNCHER_LOG)) {
+    copyFileSync(join(root, LAUNCHER_LOG), join(D, 'logs', `dist-${label}.launcher-app.log`));
+    log(`the launcher's own log, ${LAUNCHER_LOG}, written as it ran (logs/dist-${label}.launcher-app.log)`);
+    now.delete(LAUNCHER_LOG);
+  }
   const added = [...now.keys()].filter((p) => !was.has(p));
   const removed = [...was.keys()].filter((p) => !now.has(p));
   const changed = [...now.keys()].filter((p) => was.has(p) && was.get(p) !== now.get(p));
@@ -283,7 +296,7 @@ step('started where it was unpacked, as a browser download is');
   const { env } = homeOf('unpacked');
   const was = listing(app);
   await launchAndStop(app, launcher, 'unpacked', env);
-  unchanged(app, was, 'the run wrote into the app');
+  unchanged(app, was, 'the run wrote into the app', 'unpacked');
   log(`the folder: ${digest.files} files unchanged by the run`);
 }
 
@@ -355,7 +368,7 @@ log(`${WIN ? 'the Start-menu shortcut' : 'the menu entry'} starts ${target}`);
 step('started where the installer put it, by its shortcut\'s target');
 const wasInstalled = listing(dest);
 await launchAndStop(dest, target, 'installed', inst.env);
-unchanged(dest, wasInstalled, 'the run wrote into the installed app');
+unchanged(dest, wasInstalled, 'the run wrote into the installed app', 'installed');
 log(`the installed app: ${digest.files} files unchanged by the run`);
 
 rmSync(ROOT, { recursive: true, force: true });

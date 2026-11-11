@@ -24,7 +24,7 @@ name: desktop
 # A RELEASE: started by hand from main with a release's tag, every build job
 # uses that release's server and shell and runs every check, and
 # `attach-unsigned` attaches what nothing signs -- Windows' and Linux's four
-# downloads, fennec-studio-v<version>-<windows|linux>-<x64|arm64>.<zip|tar.gz>,
+# downloads, fennec-studio-v<version>-<windows|linux>-<x64|arm64>.<zip|tar.xz>,
 # where all four jobs passed, and the Mac's DMG where the signing job signed
 # nothing -- each line appended to the release's SHA256SUMS in one write
 # (scripts/attach.sh). A dispatch from another branch builds and checks them

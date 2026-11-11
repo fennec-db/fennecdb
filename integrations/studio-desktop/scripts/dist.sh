@@ -10,7 +10,7 @@
 #
 #   scripts/dist.sh
 #     artifacts/dist/fennec-studio-windows-<x64|arm64>.zip   (Git's bash)
-#     artifacts/dist/fennec-studio-linux-<x64|arm64>.tar.gz
+#     artifacts/dist/fennec-studio-linux-<x64|arm64>.tar.xz
 #
 # Unpacked before it ships. Electrobun's stable build is a self-extractor: a
 # launcher (the extractor, linker-signed ad hoc) and the app as a .tar.zst in
@@ -56,8 +56,10 @@ die() {
 # install.ps1 -App and install.sh --app put where the installer would
 # (checks/dist.mjs holds both). A zip on Windows, which Expand-Archive and
 # Explorer open, written by Windows' own tar.exe (libarchive's bsdtar: Git's
-# writes none), as tools/windows-zip.sh writes the programs'; a gzip tarball
-# on Linux, which every system there opens, its modes kept.
+# writes none), as tools/windows-zip.sh writes the programs'; a tarball on
+# Linux, its modes kept, compressed with xz, which every desktop there has: the
+# x64 app was 36.8 MB so, 50.6 MB as gzip -9 and 40.2 MB as zstd -19 (Electrobun's
+# own installer 41.8 MB), and a zip's deflate is all Expand-Archive reads.
 archive() {
   case $(uname -s) in
     Linux) sys=linux ;;
@@ -80,7 +82,7 @@ archive() {
     *) [ "$sys" = windows ] || die "a Windows build, and this is not Windows" ;;
   esac
   name=fennec-studio-$sys-$arch
-  if [ "$sys" = windows ]; then ext=zip; else ext=tar.gz; fi
+  if [ "$sys" = windows ]; then ext=zip; else ext=tar.xz; fi
   out=artifacts/dist/$name.$ext
   work=build/dist
   rm -rf "$work"
@@ -113,7 +115,7 @@ archive() {
     (cd "$work/unpacked" && { "$tar" -a -c --options zip:compression-level=9 -f "../$name.zip" fennec-studio ||
       { rm -f "../$name.zip" && "$tar" -a -c -f "../$name.zip" fennec-studio; }; }) || die "could not write the zip"
   else
-    (cd "$work/unpacked" && tar -c --owner=0 --group=0 --numeric-owner fennec-studio | gzip -9 >"../$name.tar.gz") || die "could not write the tarball"
+    (cd "$work/unpacked" && tar -c --owner=0 --group=0 --numeric-owner fennec-studio | xz -9 >"../$name.tar.xz") || die "could not write the tarball"
   fi
   mv "$work/$name.$ext" "$out"
   echo "dist: $out, the app unpacked from $(basename "$payload"): $(wc -c <"$out" | tr -d ' ') bytes, $(du -sk "$app" | cut -f1) KB unpacked"

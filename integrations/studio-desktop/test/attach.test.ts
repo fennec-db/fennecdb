@@ -70,7 +70,7 @@ esac
 );
 chmodSync(join(bin, "gh"), 0o755);
 
-const DOWNLOADS = ["fennec-studio-linux-arm64.tar.gz", "fennec-studio-linux-x64.tar.gz", "fennec-studio-macos-arm64.dmg", "fennec-studio-windows-arm64.zip", "fennec-studio-windows-x64.zip"];
+const DOWNLOADS = ["fennec-studio-linux-arm64.tar.xz", "fennec-studio-linux-x64.tar.xz", "fennec-studio-macos-arm64.dmg", "fennec-studio-windows-arm64.zip", "fennec-studio-windows-x64.zip"];
 const OLD_SUMS = `${"1".repeat(64)}  fennec-v0.9.0-x86_64-unknown-linux-musl.tar.gz\n${"2".repeat(64)}  fennec-v0.9.0-x86_64-pc-windows-msvc.zip\n`;
 
 let n = 0;
@@ -148,11 +148,11 @@ test("an asset of a download's name that is another file fails the run before an
 });
 
 test("a line for a download with another sum fails the run before anything is written", { skip }, () => {
-	const sums = `${OLD_SUMS}${"3".repeat(64)}  ${versioned("fennec-studio-linux-x64.tar.gz")}\n`;
+	const sums = `${OLD_SUMS}${"3".repeat(64)}  ${versioned("fennec-studio-linux-x64.tar.xz")}\n`;
 	const { releases, rel, files } = setup(sums);
 	const r = attach(releases, ["v0.9.0", ...files]);
 	assert.notEqual(r.status, 0);
-	assert.match(r.stderr, /SHA256SUMS lists fennec-studio-v0\.9\.0-linux-x64\.tar\.gz with 3{64}/);
+	assert.match(r.stderr, /SHA256SUMS lists fennec-studio-v0\.9\.0-linux-x64\.tar\.xz with 3{64}/);
 	assert.doesNotMatch(log(releases), /^upload/m);
 	assert.equal(readFileSync(join(rel, "SHA256SUMS"), "utf8"), sums);
 });
@@ -187,7 +187,7 @@ test("what is not a release, a download or a file is refused, and nothing is upl
 	for (const [args, said] of [
 		[["v0.9.0", other], /fennec-studio-macos-x64\.dmg is not one of the app's downloads/],
 		[["v0.9.0", files[0]!, files[0]!], /named twice/],
-		[["v0.9.0", join(dist, "missing", "fennec-studio-linux-x64.tar.gz")], /no .*fennec-studio-linux-x64\.tar\.gz/],
+		[["v0.9.0", join(dist, "missing", "fennec-studio-linux-x64.tar.xz")], /no .*fennec-studio-linux-x64\.tar\.xz/],
 	] as const) {
 		const r = attach(releases, [...args]);
 		assert.notEqual(r.status, 0, args.join(" "));

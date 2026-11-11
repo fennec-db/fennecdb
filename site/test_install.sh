@@ -266,9 +266,9 @@ for a in x64 arm64; do
     printf '#!/bin/sh\nexec sleep "${1:-0}"\n' >"$d/bin/launcher"
     chmod 755 "$d/bin/launcher"
     echo "// the $a app" >"$d/Resources/app/bun/index.js"
-    tar -czf "$rel/fennec-studio-v$version-linux-$a.tar.gz" -C "$work/linuxapp-$a" fennec-studio
+    tar -cJf "$rel/fennec-studio-v$version-linux-$a.tar.xz" -C "$work/linuxapp-$a" fennec-studio
 done
-list "$rel/fennec-studio-v$version-linux-x64.tar.gz" "$rel/fennec-studio-v$version-linux-arm64.tar.gz"
+list "$rel/fennec-studio-v$version-linux-x64.tar.xz" "$rel/fennec-studio-v$version-linux-arm64.tar.xz"
 cp "$rel/SHA256SUMS" "$work/site/latest/download/SHA256SUMS"
 # A release with the programs and no Linux app.
 mkdir -p "$work/site/download/v9.9.6"
@@ -335,7 +335,17 @@ expect "--app with no WebKitGTK 4.1: says what to install" contains "$work/linno
 linux_app linnoayatana FAKE_LIBS=libwebkit2gtk-4.1.so.0
 expect "--app with no AyatanaAppIndicator: refused" failing linnoayatana
 expect "--app with no AyatanaAppIndicator: names it" contains "$work/linnoayatana.out" "has no libayatana-appindicator3.so.1:"
-for n in linold linmusl linnowebkit linnoayatana; do
+# No xz, which the app's .tar.xz needs: a PATH of links to what the installer
+# runs, xz left out.
+mkdir -p "$work/noxz"
+for tool in tar gzip awk sed grep head mktemp sha256sum shasum cat rm mkdir cp chmod mv curl wget ps; do
+    path=$(command -v "$tool" 2>/dev/null || true)
+    case $path in /*) ln -sf "$path" "$work/noxz/$tool" ;; esac
+done
+linux_app linnoxz PATH="$work/shim:$work/noxz"
+expect "--app with no xz: refused" failing linnoxz
+expect "--app with no xz: says what to install" contains "$work/linnoxz.out" "sudo apt install xz-utils"
+for n in linold linmusl linnowebkit linnoayatana linnoxz; do
     expect "--app, $n: installs nothing" test -z "$(ls -A "$work/$n-home")"
     expect "--app, $n: downloads nothing" lacks "$work/$n.out" "Looking for"
 done
@@ -360,7 +370,7 @@ wait "$sleeper_pid" 2>/dev/null || true
 sleeper_pid=
 
 # A tarball that is not the one the sums name, and a release with no app.
-tgz=$rel/fennec-studio-v$version-linux-x64.tar.gz
+tgz=$rel/fennec-studio-v$version-linux-x64.tar.xz
 cp "$tgz" "$work/good.tgz"
 printf 'x' >>"$tgz"
 linux_app lintampered
@@ -370,7 +380,7 @@ expect "--app on Linux, a tampered tarball: installs nothing" test -z "$(ls -A "
 cp "$work/good.tgz" "$tgz"
 linux_app linnoapp FENNEC_VERSION=9.9.6
 expect "--app on Linux, a release with no app: refused" failing linnoapp
-expect "--app on Linux, a release with no app: says so" contains "$work/linnoapp.out" "lists no fennec-studio-v9.9.6-linux-x64.tar.gz"
+expect "--app on Linux, a release with no app: says so" contains "$work/linnoapp.out" "lists no fennec-studio-v9.9.6-linux-x64.tar.xz"
 expect "--app on Linux, a release with no app: installs nothing" test -z "$(ls -A "$work/linnoapp-home")"
 
 # A home whose path no menu entry can name (a dollar in it): the app, and no entry.
