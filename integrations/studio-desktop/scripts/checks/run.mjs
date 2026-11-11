@@ -16,7 +16,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { closeSync, mkdirSync, openSync, rmSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
-import { APP_DATA, D, HERE, WIN, describe, freshState, keepEvidence, mine, now, sleep } from './lib.mjs';
+import { APP_DATA, D, HERE, WIN, describe, freshState, keepEvidence, mine, now, procs, sleep } from './lib.mjs';
 
 /**
  * Every check, in the order they run, and the systems one does not run on yet:
@@ -116,6 +116,13 @@ function startedAt(pids) {
 }
 
 const system = process.platform;
+// Every wait for the app's processes asks the system for all of them, and on Windows that is
+// WMI through PowerShell, which a slow runner makes the bulk of a check's time: said up front.
+{
+  const t = now();
+  procs();
+  console.log(`the system lists its processes in ${now() - t} ms here`);
+}
 const results = [];
 for (const { name, skip } of chosen) {
   const why = skip?.[system];

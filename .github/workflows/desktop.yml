@@ -281,10 +281,13 @@ jobs:
       # items secret-tool clears.
       - name: Linux packages
         if: runner.os == 'Linux'
+        timeout-minutes: 10
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq libgtk-3-0t64 libwebkit2gtk-4.1-0 libayatana-appindicator3-1 librsvg2-2 \
-            xvfb dbus-x11 gnome-keyring libsecret-1-0 libsecret-tools >/dev/null
+          sudo -E apt-get update -qq -o Acquire::Retries=3
+          sudo -E apt-get install -y -qq -o Acquire::Retries=3 libgtk-3-0t64 libwebkit2gtk-4.1-0 libayatana-appindicator3-1 librsvg2-2 \
+            xvfb dbus-x11 gnome-keyring libsecret-1-0 libsecret-tools
 
       # As the macOS job's, a cache per system: scripts/electrobun.mjs holds what is
       # in it to hutch-pin.json on every run.
@@ -325,6 +328,13 @@ jobs:
             dbus-run-session -- sh -c 'printf checks | gnome-keyring-daemon --unlock --components=secrets >/dev/null && sh "$0" "$1"' "$RUNNER_TEMP/probe.sh" "$bun"
           else
             sh "$RUNNER_TEMP/probe.sh" "$bun"
+            q='Get-CimInstance Win32_Process | Measure-Object | ForEach-Object Count'
+            for shell in powershell.exe pwsh.exe; do for i in 1 2 3; do
+              s=$(date +%s%N); n=$("$shell" -NoProfile -NonInteractive -Command "$q" | tr -d '\r'); e=$(date +%s%N)
+              echo "$shell, $n processes: $(( (e - s) / 1000000 )) ms"
+            done; done
+            s=$(date +%s%N); powershell.exe -NoProfile -NonInteractive -Command 'exit 0'; e=$(date +%s%N); echo "powershell.exe, nothing: $(( (e - s) / 1000000 )) ms"
+            file "$(command -v powershell.exe)" "$(command -v pwsh.exe)" 2>/dev/null || true
           fi
 
       - name: The scripted checks

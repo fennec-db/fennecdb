@@ -60,11 +60,13 @@ if [ -n "$version" ]; then
   triple=${TARGET_TRIPLE:-}
   if [ -z "$triple" ]; then
     if [ -n "$windows" ]; then
-      # A 32-bit or emulated shell reports its own processor; the machine's is in PROCESSOR_ARCHITEW6432 then.
-      case "${PROCESSOR_ARCHITEW6432:-${PROCESSOR_ARCHITECTURE:-}}" in
-        AMD64) triple=x86_64-pc-windows-msvc ;;
-        ARM64) triple=aarch64-pc-windows-msvc ;;
-        *) die "no release asset for Windows on ${PROCESSOR_ARCHITECTURE:-an unknown processor}; set TARGET_TRIPLE" ;;
+      # The system's processor, not this bash's: an x64 Git runs emulated on Windows on Arm,
+      # where its PROCESSOR_ARCHITECTURE says AMD64.
+      arch=$(powershell.exe -NoProfile -NonInteractive -Command '[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture' | tr -d '\r')
+      case "$arch" in
+        X64) triple=x86_64-pc-windows-msvc ;;
+        Arm64) triple=aarch64-pc-windows-msvc ;;
+        *) die "no release asset for Windows on ${arch:-a processor PowerShell did not name}; set TARGET_TRIPLE" ;;
       esac
     else
       case "$(uname -s)-$(uname -m)" in

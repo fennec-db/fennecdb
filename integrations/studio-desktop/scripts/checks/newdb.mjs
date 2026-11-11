@@ -15,14 +15,25 @@ mkdirSync(FOLDER);
 
 const app = startApp('newdb', { FENNEC_DESKTOP_LAUNCHER: '1' });
 await waitFor((l) => l.what === 'ready', 60000, 'ready');
-await waitFor((l) => l.what === 'page-text' && l.key === 'launcher' && /New database/.test(l.text), 20000, 'the launcher drawn');
+// Drawn with what the main process answered (the bundled server's version, which only its answer
+// fills in): its page asks it through the RPC bridge, and on Windows a click before that bridge
+// is up went nowhere, the new-database window never asked for.
+await waitFor((l) => l.what === 'page-text' && l.key === 'launcher' && /New database/.test(l.text) && /Bundled server fennec-server/.test(l.text), 20000, 'the launcher drawn with the main process\'s answer');
 
 step('the launcher\'s button opens the window');
 let n = lines().length;
 await evalIn('launcher', `document.getElementById('new').click()`);
 await waitFor((l, i) => i >= n && l.what === 'page-text' && l.key === 'newdb' && /New database/.test(l.text), 15000, 'the new-database window drawn');
-const shown = await evalIn('newdb', `return [document.getElementById('folder').value, document.getElementById('file').textContent].join('|')`);
-assert.match(shown.value, /Documents\|orders\.fennec$/, `starts in Documents, showing what the file will be called: ${shown.value}`);
+// Its folder is the main process's answer too (`defaults`), there once the window's bridge is.
+const shown = await until(
+  async () => {
+    const v = (await evalIn('newdb', `return [document.getElementById('folder').value, document.getElementById('file').textContent].join('|')`)).value;
+    return /^[^|]+\|/.test(v) && v;
+  },
+  15000,
+  'the window showing the folder it starts in',
+);
+assert.match(shown, /Documents\|orders\.fennec$/, `starts in Documents, showing what the file will be called: ${shown}`);
 
 step('Choose… the folder, name it: the file is made and opened');
 cmd({ cmd: 'answer', kind: 'folder', path: FOLDER });

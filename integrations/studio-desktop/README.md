@@ -12,9 +12,12 @@ new file, `fennec backup` takes an image, `fennec restore` makes a file of one.
 
 Beta, macOS on Apple silicon only. The shell is [Electrobun](https://electrobun.dev)
 2.0.4 (a Bun main process and the system's WKWebView); its build tool ships no
-Intel Mac build, and its Windows and Linux paths are not used here yet (no file
-associations, no save dialog, no credential store in the Keychain's place;
-`fennec-server` takes its lock and ships for Windows, docs/design/windows.md).
+Intel Mac build. Windows and Linux (x64 and arm64 each) are on the way and not
+downloadable yet: CI builds the app there and runs its unit tests and the
+checks that pass there ([Windows and Linux](#windows-and-linux)), and what is
+missing before it ships is in the plan in #578 (file associations, the stop on
+Windows by the end of the server's stdin, the credential store in the
+Keychain's place, the installers).
 A release's DMG is unsigned, signed ad hoc and not notarized
 ([Download](#download)), until a maintainer adds the secrets
 ([below](#signing-and-notarization)); an app you build here opens as it is.
@@ -143,6 +146,49 @@ npm run build                # the stable build, as `make studio-desktop` does
 npm run typecheck && npm run test:unit
 ```
 
+### Windows and Linux
+
+Built and checked on CI, nothing shipped yet: `desktop.yml`'s `other-systems`
+job builds the shipped app and the test variant on `windows-latest`,
+`windows-11-arm`, `ubuntu-24.04` and `ubuntu-24.04-arm`, with a release's server
+and shell, and runs the type check, the unit tests and the scripted checks that
+pass there. The same by hand, from this directory (on Windows in Git's bash):
+
+```bash
+npm ci --ignore-scripts
+sh scripts/get-server.sh 0.2.0            # the release's Windows zip or Linux tarball, checked against its SHA256SUMS
+npm run build                              # the shipped build, an installer
+npm run typecheck && npm run test:unit
+FENNEC_DESKTOP_TEST_BUILD=1 npm run build  # the test variant
+npm run checks                             # Linux: on an X display, a session bus and an unlocked Secret Service
+```
+
+Linux takes WebKitGTK 4.1 and glibc 2.38 (Ubuntu 24.04, Debian 13, Fedora 39
+and later): `libwebkit2gtk-4.1-0`, `libgtk-3-0t64`, `libayatana-appindicator3-1`
+and `librsvg2-2`, and for the checks `xvfb`, `dbus-x11`, `gnome-keyring` and
+`libsecret-tools`, run as CI runs them: `dbus-run-session -- sh -c 'printf
+<password> | gnome-keyring-daemon --unlock --components=secrets && xvfb-run -a
+node scripts/checks/run.mjs'`. Windows takes WebView2 (part of Windows 11). The
+`make` targets are the Mac's (the icon, the DMG).
+
+A stable build there is an installer, not an app that runs where it is: on
+Windows `build/stable-win-<arch>/fennec studio-Setup.exe` (and
+`artifacts/win-<arch>-fennecstudio-Setup.zip`), on Linux
+`build/stable-linux-<arch>/fennecstudio/bin/launcher` (and
+`artifacts/linux-<arch>-fennecstudio-Setup.tar.gz`). Run, it installs the app
+for the user alone, into `%LOCALAPPDATA%\dev.fennecdb.studio\stable\app` or
+`~/.local/share/dev.fennecdb.studio/stable/app`, and starts it.
+
+What does not pass there yet is skipped by name, never silently, each with its
+reason and the phase of the plan (#578) that brings it: the checks' list is in
+`scripts/checks/run.mjs` and a run prints each as SKIP; the unit tests skip on
+Windows the ones that stop a real server and hold the stop to exit 0 (a stop is
+TerminateProcess there until the app ends the server's stdin, phase 2), the
+instance guard's socket tests (Node takes no socket path on Windows, phase 2)
+and the key placement test (a key's readers are its DACL there, phase 2), and
+`node --test` prints the reason beside each. The tree digest's executable bit
+is no phase's: Windows keeps none.
+
 ### The toolchain stays in this directory
 
 Electrobun's builds are driven by Hutch, a build tool its `electrobun` npm
@@ -157,8 +203,11 @@ is handed an installer that refuses, so no path ends in the global one.
 `HUTCH_HOME` yourself to keep the toolchain elsewhere.
 
 **The tool and what it fetches are held to `hutch-pin.json`**, in this
-repository, and `scripts/electrobun.mjs` checks it on every run, cached or
-fresh, before it builds anything:
+repository, a pin for each system the app is built on (macOS on Apple silicon,
+Windows and Linux on x64 and arm64: Hutch builds only for the system it runs
+on), and `scripts/electrobun.mjs` checks it on every run, cached or fresh,
+before it builds anything; a system with no pin, or with Hutch pinned and not
+what it fetches, is refused:
 
 * **Hutch**: the SHA-256 of the archive as it is downloaded, and of the two
   binaries in it. The release's own index sits in the same place as the archive
@@ -179,8 +228,10 @@ fresh, before it builds anything:
   cache is not run.)
 
 A different Electrobun is a change to `hutch-pin.json`, which a pull request
-shows: `node scripts/electrobun.mjs --print-runtime-pin` prints the runtime's
-digests, and the script says which hashes a mismatch is.
+shows: `node scripts/electrobun.mjs --print-runtime-pin` prints the digests of
+every runtime directory Hutch fetched for this system (pinned or not: a new
+Electrobun, Bun or system is a directory the pin does not name yet), and the
+script says which hashes a mismatch is.
 
 ### The checks
 
@@ -214,9 +265,13 @@ digests, and the script says which hashes a mismatch is.
    `scripts/checks/release.mjs` reads the shipped app's main bundle and fails if
    any of them is in it. **An environment variable the shipped app reads for
    itself is a hook, unless it is read behind `__TESTABLE__`.**
-3. `scripts/checks/run.mjs`, which needs a window server (a logged-in Mac or a
-   CI runner) and runs each in a process of its own, killing what one leaves
-   behind:
+3. `scripts/checks/run.mjs`, which needs a window server (a logged-in Mac, a
+   Windows desktop session, an X display on Linux, or a CI runner's) and runs
+   each in a process of its own, killing what one leaves behind; on Windows
+   and Linux it skips, by name and with the reason, what cannot pass there yet
+   ([above](#windows-and-linux)), and `warmup` installs the test variant with
+   the build's installer and starts the installed copy, which every other
+   check runs:
 
    | check | what it holds |
    |---|---|
@@ -259,6 +314,19 @@ checks remove their items as they go as well (a served database's,
 `serve:<id>`, by `forgetServeItems` at the end of each check that serves one).
 Nothing of a real install (`dev.fennecdb.studio`) is read or written. To take the test variant out of the "Open With" list, delete
 `build-test/`.
+
+**On Windows and Linux** `warmup` installs the test variant, as its installer
+installs it for a user, into its own folder: `%LOCALAPPDATA%\dev.fennecdb.studio.test`
+with a Desktop and a Start-menu shortcut and an uninstall entry under HKCU, or
+`~/.local/share/dev.fennecdb.studio.test` with a `.desktop` file in
+`~/.local/share/applications`. `run.mjs` deletes that folder once a run, and
+`freshState` before each check deletes its `state.json`, the pages' stores
+(WebView2's in `...\stable\WebView2`; WebKitGTK's in
+`~/.local/share/dev.fennecdb.studio.test/stable/WebKit` and
+`~/.cache/dev.fennecdb.studio.test/stable/WebKit`) and every item of its
+service in the credential store (`cmdkey`'s `dev.fennecdb.studio.test/...`
+targets; `secret-tool clear service dev.fennecdb.studio.test`). The shortcuts
+and the uninstall entry stay; Windows' uninstall entry removes them.
 
 `scripts/measure.mjs` times the launch to the studio, idle memory and quit of
 the test variant (not run by the checks or CI: a shared runner's figures say

@@ -40,8 +40,9 @@ state, its `state.json`, Keychain items and WebKit stores (`freshState`), so
 one that fails half-way fails alone; a failed one keeps the system log of the
 app and of WebKit's processes (`keepEvidence`), the main record of a page that
 never loads. The toolchain is fetched into `.hutch-home/`,
-never `~/.hutch` or a shell file, and held to `hutch-pin.json`
-(`scripts/electrobun.mjs`); signing runs by hand from `main` alone, in an
+never `~/.hutch` or a shell file, and held to `hutch-pin.json`, a pin of
+every system it builds on, Hutch and what Hutch fetches, a system without
+one refused (`scripts/electrobun.mjs`); signing runs by hand from `main` alone, in an
 Environment given its reviewer and `main` rule before its secrets
 (`desktop.yml`). The DMG a release ships is the app unpacked, never
 Electrobun's self-extractor (a quarantined copy must run read-only), each

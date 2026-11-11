@@ -9,14 +9,16 @@
 // once, and this does it: start, wait for the app, quit it, end the helper.
 //
 // On Windows and Linux the build is an installer instead (lib.mjs's
-// INSTALLER): it installs the app into the test variant's own folder and
-// starts the installed copy, which on Windows is not handed the hooks'
-// environment and so never says it is up. So there this installs, waits for
-// the installed app to run, ends what the installer started, and then starts
-// the installed app itself, as every other check does, and quits it.
+// INSTALLER): it installs the app into the test variant's own folder, and on
+// Linux starts the installed copy; on Windows it said the installation had
+// completed and then, 120 s on, had neither started the app nor ended (the
+// spike's run saw a copy it started never say it was up). So there this
+// installs, waits for the installer to say it is done or for the installed
+// copy to run, ends both, and then starts the installed app itself, as every
+// other check does, and quits it.
 import { spawn } from 'node:child_process';
-import { closeSync, existsSync, openSync } from 'node:fs';
-import { APP, D, INSTALLER, MAC, cmd, describe, logName, mine, now, quit, sleep, startApp, step, waitFor, log } from './lib.mjs';
+import { closeSync, existsSync, openSync, readFileSync } from 'node:fs';
+import { APP, D, EXE, INSTALLER, MAC, cmd, describe, logName, mine, now, quit, sleep, startApp, step, waitFor, log } from './lib.mjs';
 
 if (MAC) {
   const app = startApp('warmup', { FENNEC_DESKTOP_LAUNCHER: '1' });
@@ -50,26 +52,35 @@ if (MAC) {
   const setup = spawn(INSTALLER, [], { env, stdio: ['ignore', fd, fd] });
   closeSync(fd);
   const t0 = now();
-  // Installed once the installed copy runs: its Bun, which its launcher starts on its main.js.
+  // Installed once the installer says so (its last line, after the shortcuts and the uninstall
+  // entry), or once the installed copy runs (its Bun, which its launcher starts on its main.js):
+  // on Linux it starts it; on Windows it said so and then neither started it nor ended, 120 s on.
+  const said = () => /Installation completed successfully/.test(readFileSync(`${D}/logs/warmup.app.log`, 'utf8'));
   const running = () => mine().filter((p) => p.command.includes(APP) && /main\.js/.test(p.command));
-  while (!running().length) {
-    if (now() - t0 > 120000) throw new Error(`the installed app did not start in 120 s:\n${describe(mine())}`);
-    if (setup.exitCode !== null && setup.exitCode !== 0) throw new Error(`the installer ended with ${setup.exitCode} (logs/warmup.app.log)`);
-    await sleep(250);
-  }
-  log(`installed and started in ${((now() - t0) / 1000).toFixed(1)} s: ${APP}`);
-  // What the installer started, and the installer, ended: they hold no file of a check's.
-  for (const p of mine()) {
-    try {
-      process.kill(p.pid, 'SIGKILL');
-    } catch {
-      // gone
+  for (;;) {
+    if (running().length) {
+      log(`installed, and started by the installer, in ${((now() - t0) / 1000).toFixed(1)} s: ${APP}`);
+      break;
     }
-  }
-  const t1 = now();
-  while (mine().length) {
-    if (now() - t1 > 30000) throw new Error(`what the installer started is still running:\n${describe(mine())}`);
+    if (said() && existsSync(EXE)) {
+      log(`installed in ${((now() - t0) / 1000).toFixed(1)} s, the installer says: ${APP}`);
+      break;
+    }
+    if (setup.exitCode !== null && setup.exitCode !== 0) throw new Error(`the installer ended with ${setup.exitCode} (logs/warmup.app.log)`);
+    if (now() - t0 > 120000) throw new Error(`the installer did not install the app in 120 s:\n${describe(mine())}`);
     await sleep(250);
+  }
+  // The installer, and what it started, ended: they hold no file of a check's. Asked again until
+  // none is left, since an installer ended a moment after it started the app leaves that app.
+  for (const t1 = now(); mine().length; await sleep(250)) {
+    if (now() - t1 > 30000) throw new Error(`what the installer started is still running:\n${describe(mine())}`);
+    for (const p of mine()) {
+      try {
+        process.kill(p.pid, 'SIGKILL');
+      } catch {
+        // gone
+      }
+    }
   }
 
   step('the installed app: up, its launcher drawn, and a quit leaves nothing');
