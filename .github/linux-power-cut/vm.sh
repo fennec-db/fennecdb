@@ -82,6 +82,7 @@ boot_id() {
 start_vm() {
     local disk=$1 log=$2
     rm -f "$VM/qemu.pid"
+    wc -l < "$VM/serial.log" > "$VM/serial.mark" 2>/dev/null || echo 0 > "$VM/serial.mark"
     local drive=(-blockdev "driver=file,node-name=rf,filename=$VM/root.qcow2,cache.direct=on"
                  -blockdev "driver=qcow2,node-name=r0,file=rf"
                  -device "virtio-blk-pci,drive=r0,bootindex=0,write-cache=on"
@@ -94,7 +95,12 @@ start_vm() {
     else
         drive+=(-blockdev "driver=qcow2,node-name=d0,file=f0")
     fi
-    drive+=(-device "virtio-blk-pci,drive=d0,serial=fennecd,write-cache=on")
+    # No merging of adjacent requests into one: virtio-blk merges them up
+    # to IOV_MAX buffers, and blklogwrites writes a request's log entry as
+    # its buffers and two of its own, which pwritev refuses past IOV_MAX --
+    # run 43010736756's guest got EIO for four merged requests of 256
+    # buffers each, and its log a hole where their entry was.
+    drive+=(-device "virtio-blk-pci,drive=d0,serial=fennecd,write-cache=on,request-merging=off")
     qemu-system-x86_64 -machine q35,accel=kvm -cpu host -smp 4 -m 4096 \
         "${drive[@]}" \
         -drive if=none,id=cd0,file="$VM/seed.iso",format=raw,media=cdrom,readonly=on \
@@ -104,6 +110,16 @@ start_vm() {
         -display none -rtc base=utc \
         -pidfile "$VM/qemu.pid" -daemonize
     echo "qemu pid $(cat "$VM/qemu.pid"): data disk $(basename "$disk")${log:+, its writes logged to $(basename "$log")}"
+}
+
+# The I/O errors the guest's kernel logged since this boot began: a request
+# QEMU failed, which is the rig's fault and never the server's, and which
+# leaves a hole in a write log besides.
+disk_errors() {
+    local from
+    from=$(cat "$VM/serial.mark" 2>/dev/null || echo 0)
+    tail -n +"$((from + 1))" "$VM/serial.log" 2>/dev/null | tr -d '\r' |
+        grep -E 'I/O error, dev vd|Buffer I/O error|EXT4-fs error|XFS \(vd.\).*(error|I/O)' || true
 }
 
 # Until a command runs over SSH, bounded by $1 seconds.
@@ -355,7 +371,7 @@ boot_check() {
 }
 
 power_cut() {
-    local n=$1 mode=$2 next=$3 lp delay cur base log
+    local n=$1 mode=$2 next=$3 lp delay cur base log errs
     cur=$(cat "$VM/cur")
     if [ "$mode" = lost ] && [ ! -f "$VM/log-$n.bin" ]; then
         echo "cut $n is to lose the disk's cache, and its boot logged no writes"
@@ -385,6 +401,12 @@ power_cut() {
     for _ in $(seq 1 120); do kill -0 "$lp" 2>/dev/null || break; sleep 0.5; done
     kill -9 "$lp" 2>/dev/null || true
     wait "$lp" 2>/dev/null || true
+    errs=$(disk_errors)
+    if [ -n "$errs" ]; then
+        say "RIG the guest's disks failed requests in the boot before cut $n: QEMU's fault, not the server's"
+        head -n 20 <<< "$errs"
+        return 1
+    fi
     if [ "$mode" = lost ]; then
         lost_disk "$n"
         boot_check "$n" plain "$cur" ""
