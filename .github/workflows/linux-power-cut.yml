@@ -44,7 +44,7 @@ permissions:
 
 concurrency:
   group: linux-power-cut-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
   # The release's own build (release.yml's `binaries`): musl, static, the
@@ -156,7 +156,7 @@ jobs:
         run: .github/linux-power-cut/vm.sh cut 5 plain plain
       - name: What each cut found
         if: always()
-        run: .github/linux-power-cut/vm.sh summary || true
+        run: .github/linux-power-cut/vm.sh summary
       - name: Stop QEMU
         if: always()
         run: |

@@ -31,12 +31,13 @@ MAGIC = 0x6A736677736872
 # How far short of its superblock's count a log may break off at a kill:
 # an entry's place is taken once its write to the disk completes and its
 # own write to the log follows, so only those still in flight -- a disk
-# queue's depth, AHCI's 32 and virtio's 256 -- can be missing at the tail.
+# queue's depth, AHCI's 32 and virtio-blk's 256 per queue, of which the
+# Linux guest's -smp 4 may run 4 (1 024 in all) -- can be missing at the tail.
 # A log that breaks off further back lost an entry QEMU failed to log
 # (run 43010736756: its guest saw EIO, and the walk stopped at 4 531 of
 # 34 581), and replaying what is before the hole would rebuild a disk older
 # than its last flush: an acknowledged write gone, the rig's doing.
-IN_FLIGHT = 512
+IN_FLIGHT = 1024
 FLUSH, FUA, DISCARD, MARK = 1, 2, 4, 8
 
 NBD_REQUEST = 0x25609513

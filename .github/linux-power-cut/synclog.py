@@ -7,6 +7,9 @@ cut tests only where the file lost what the log kept.
 
     synclog.py FILE LOG
 
+Its last line is `PUTBACK <n>`, the entries the open will put back, which
+vm.sh sums: a run where no cut put one back never exercised the path.
+
 Run in the Linux guest by vm.sh, on the image's python3; the standard
 library alone, and it writes nothing. It reads the log as `naming` and
 `recover` read it -- the header's magic, version and hash, the file's
@@ -52,6 +55,7 @@ def main():
     path, log_path = sys.argv[1], sys.argv[2]
     if not os.path.isfile(log_path):
         print("no log beside the file")
+        print("PUTBACK 0")
         return
     with open(log_path, "rb") as f:
         log = f.read()
@@ -60,22 +64,27 @@ def main():
     word = lambda at: int.from_bytes(log[at : at + 8], "little")
     if len(log) < HEADER or log[:8] != LOG_MAGIC:
         print(f"a log of {len(log)} bytes, its header wiped: spent by an open, or not begun yet; the file {size} bytes")
+        print("PUTBACK 0")
         return
     if int.from_bytes(log[8:12], "little") != VERSION or word(56) != h64(0, log[:56]):
         print(f"a log whose header is not whole: none applied; the file {size} bytes")
+        print("PUTBACK 0")
         return
     gen, base, printed, dev, ino = word(16), word(24), word(32), word(40), word(48)
     if (dev, ino) != (st.st_dev, st.st_ino):
         print(f"a live log of generation {gen} naming another file (device {dev}, inode {ino}): none applied")
+        print("PUTBACK 0")
         return
     if size < base:
         print(f"a live log of generation {gen} from byte {base}, and the file is {size} bytes: none applied")
+        print("PUTBACK 0")
         return
     with open(path, "rb") as f:
         frm = max(base - PRINT, 0)
         f.seek(frm)
         if h64(base, f.read(base - frm)) != printed:
             print(f"a live log of generation {gen} from byte {base}, and the file's bytes before it are not those it names: none applied")
+            print("PUTBACK 0")
             return
         at, pos = base, HEAD
         entries = differ = past = 0
@@ -101,6 +110,7 @@ def main():
         f"the file {size} bytes, {differ} of the entries not in it as written, {past} bytes of them past its end"
         + (": the open puts them back" if differ else ": nothing for the open to put back")
     )
+    print(f"PUTBACK {differ}")
 
 
 if __name__ == "__main__":

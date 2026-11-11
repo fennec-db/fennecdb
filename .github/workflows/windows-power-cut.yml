@@ -40,7 +40,7 @@ permissions:
 
 concurrency:
   group: windows-power-cut-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
   # The release's own zip, as release.yml makes it: MSVC, the C runtime

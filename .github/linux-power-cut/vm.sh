@@ -351,7 +351,19 @@ boot_check() {
     # The files as the cut left them, before the server's open applies the
     # sync log or cuts a torn tail: kept if anything after fails.
     gssh 'rm -rf pre && mkdir -m 700 pre && cp -a /d/t.fennec* pre/'
-    say "SYNCLOG cut $n $label: $(gssh 'python3 - /d/t.fennec /d/t.fennec.sync' < "$HERE/synclog.py")"
+    # Run outside `say`'s argument so its failure is seen: a crash of the
+    # reader is the rig's, never a pass with nothing checked.
+    if ! sl=$(gssh 'python3 - /d/t.fennec /d/t.fennec.sync' < "$HERE/synclog.py"); then
+        say "RIG synclog.py failed in cut $n $label: $sl"
+        return 1
+    fi
+    putback=$(sed -n 's/^PUTBACK \([0-9][0-9]*\)$/\1/p' <<< "$sl" | tail -n 1)
+    if [ -z "$putback" ]; then
+        say "RIG synclog.py printed no PUTBACK count in cut $n $label: $sl"
+        return 1
+    fi
+    echo "$putback" >> "$VM/putback.txt"
+    say "SYNCLOG cut $n $label: $(grep -v '^PUTBACK ' <<< "$sl")"
     if ! serve "$n-$label"; then
         keep "$n-$label"
         return 1
@@ -426,10 +438,19 @@ power_cut() {
 }
 
 summary() {
+    local total rc=0
+    total=$(awk '{ s += $1 } END { print s + 0 }' "$VM/putback.txt" 2>/dev/null || echo 0)
+    # Only a run whose cuts all ran has a verdict on the sync log: a run
+    # that stopped early already failed for its own reason.
+    if [ "$total" -eq 0 ] && ! grep -q -E '^(RIG|BAD|VERDICT .* FAIL)' "$VM/summary.txt" && [ -s "$VM/putback.txt" ]; then
+        say "RIG the sync log was never exercised: no cut in the run left an entry for the open to put back"
+        rc=1
+    fi
     cat "$VM/summary.txt"
     if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
         { echo '```'; cat "$VM/summary.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
     fi
+    return $rc
 }
 
 case ${1:-} in
