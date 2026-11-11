@@ -244,6 +244,9 @@ jobs:
     env:
       # A secret cannot be tested in a step's `if`; this says whether they are all there.
       HAVE: ${{ secrets.ELECTROBUN_DEVELOPER_ID != '' && secrets.MACOS_CERTIFICATE_P12 != '' && secrets.MACOS_CERTIFICATE_PASSWORD != '' && secrets.ELECTROBUN_APPLEAPIKEY != '' && secrets.ELECTROBUN_APPLEAPIISSUER != '' && secrets.ELECTROBUN_APPLEAPIKEY_P8 != '' }}
+      # And whether any one is: the rules guard a secret, so they are checked
+      # wherever even one is there.
+      ANY: ${{ secrets.ELECTROBUN_DEVELOPER_ID != '' || secrets.MACOS_CERTIFICATE_P12 != '' || secrets.MACOS_CERTIFICATE_PASSWORD != '' || secrets.ELECTROBUN_APPLEAPIKEY != '' || secrets.ELECTROBUN_APPLEAPIISSUER != '' || secrets.ELECTROBUN_APPLEAPIKEY_P8 != '' }}
       RELEASE: ${{ github.event.inputs.release }}
     steps:
       # First of all, before a secret is used for anything: does the Environment
@@ -253,6 +256,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -u
+          # The first job that names the Environment makes it, with no rules;
+          # with no secret in it there is nothing for them to guard, and failing
+          # here would stop the unsigned DMG, which waits on this job.
+          if [ "$ANY" != true ]; then
+            echo "the Environment desktop-signing holds no signing secret, so there is nothing for its rules to guard: not checked"
+            exit 0
+          fi
           api="repos/$GITHUB_REPOSITORY/environments/desktop-signing"
           if ! environment=$(gh api "$api" 2>"$RUNNER_TEMP/rules.err") || ! policies=$(gh api "$api/deployment-branch-policies" 2>>"$RUNNER_TEMP/rules.err"); then
             echo "::warning::the job's token cannot read the rules of the Environment desktop-signing ($(tr '\n' ' ' < "$RUNNER_TEMP/rules.err" | cut -c1-160)), so they are not checked here: they must have been set up before the secrets were (see the header of this workflow and RELEASING.md)"
