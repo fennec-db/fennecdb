@@ -177,7 +177,8 @@ Windows `build/stable-win-<arch>/fennec studio-Setup.exe` (and
 `build/stable-linux-<arch>/fennecstudio/bin/launcher` (and
 `artifacts/linux-<arch>-fennecstudio-Setup.tar.gz`). Run, it installs the app
 for the user alone, into `%LOCALAPPDATA%\dev.fennecdb.studio\stable\app` or
-`~/.local/share/dev.fennecdb.studio/stable/app`, and starts it.
+`~/.local/share/dev.fennecdb.studio/stable/app`, and on Linux starts it (on the
+Windows runners it said it was done and started nothing).
 
 What does not pass there yet is skipped by name, never silently, each with its
 reason and the phase of the plan (#578) that brings it: the checks' list is in

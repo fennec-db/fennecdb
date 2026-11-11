@@ -295,7 +295,7 @@ jobs:
           done
           resolvectl status 2>/dev/null | grep -iE "DNS Server|Current DNS" | head -4 || true
           for s in 168.63.129.16 1.1.1.1 8.8.8.8; do
-            printf '@%s archive.ubuntu.com: ' "$s"; timeout 10 dig +short +time=3 +tries=1 @"$s" archive.ubuntu.com | tr '\n' ' '; echo
+            printf '@%s archive.ubuntu.com: ' "$s"; timeout 10 dig +short +time=3 +tries=1 @"$s" archive.ubuntu.com | tr "\n" " " || echo "failed ($?)"; echo
           done
           printf 'http to archive.ubuntu.com by address: '; timeout 15 curl -s -o /dev/null -w '%{http_code}\n' --resolve archive.ubuntu.com:80:91.189.91.82 http://archive.ubuntu.com/ubuntu/dists/noble/Release || echo failed
           packages="libgtk-3-0t64 libwebkit2gtk-4.1-0 libayatana-appindicator3-1 librsvg2-2 xvfb dbus-x11 gnome-keyring libsecret-1-0 libsecret-tools"
