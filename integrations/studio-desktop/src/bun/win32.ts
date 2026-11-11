@@ -50,6 +50,8 @@ function load() {
 		CloseHandle: { args: [FFIType.u64], returns: FFIType.i32 },
 		LocalFree: { args: [FFIType.u64], returns: FFIType.u64 },
 		lstrlenW: { args: [FFIType.u64], returns: FFIType.i32 },
+		SetEnvironmentVariableW: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
+		GetEnvironmentVariableW: { args: [FFIType.ptr, FFIType.ptr, FFIType.u32], returns: FFIType.u32 },
 	});
 	const advapi32 = dlopen("advapi32.dll", {
 		OpenProcessToken: { args: [FFIType.u64, FFIType.u32, FFIType.ptr], returns: FFIType.i32 },
@@ -101,6 +103,24 @@ function tokenSid(kind: typeof TOKEN_USER | typeof TOKEN_OWNER): string {
 	} finally {
 		k.CloseHandle(handle[0]!);
 	}
+}
+
+/**
+ * Sets (or with null, removes) `name` in this process's own environment block,
+ * the one Windows' calls read (GetEnvironmentVariableW) and a process this
+ * one starts inherits where it is handed none: what WebView2's loader reads,
+ * in this process, when Electrobun creates a view (webview2.ts).
+ */
+export function setEnvironment(name: string, value: string | null): void {
+	if (!win().k.SetEnvironmentVariableW(wide(name), value === null ? null : wide(value))) throw new Error(`SetEnvironmentVariableW(${name}) failed`);
+}
+
+/** `name` as this process's environment block holds it, or null where it holds none (or an empty one). */
+export function environment(name: string): string | null {
+	// 32767 characters is the most a variable holds, and the answer is its length without the NUL.
+	const out = Buffer.alloc(32768 * 2);
+	const n = win().k.GetEnvironmentVariableW(wide(name), out, 32768);
+	return n === 0 || n > 32767 ? null : out.subarray(0, n * 2).toString("utf16le");
 }
 
 /** This user's SID, which no other user of the machine has. */

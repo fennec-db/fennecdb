@@ -17,6 +17,7 @@ import { sweepSecrets } from "./clipboard.ts";
 import { claimInstance, instancePath, pipeName, runtimeFolder, type PipeSecurity } from "./instance.ts";
 import { startMenu } from "./menu.ts";
 import { closeLauncher, launcherOpen, showLauncher } from "./pages.ts";
+import { webview2Environment } from "./webview2.ts";
 import { sweepLeftStores } from "./windows.ts";
 
 /**
@@ -50,6 +51,26 @@ async function guard(): Promise<{ path: string; pipe?: PipeSecurity } | null> {
 	} catch (e) {
 		console.error(`no single-instance guard: ${(e as Error).message}`);
 		return null;
+	}
+}
+
+// Windows: what WebView2 is started with is the app's, set before the first
+// window makes it read the environment (webview2.ts). Where it cannot be set,
+// no page is shown without it.
+if (process.platform === "win32") {
+	try {
+		const w = await import("./win32.ts");
+		const { remove, set } = webview2Environment(process.env);
+		for (const name of remove) {
+			w.setEnvironment(name, null);
+			delete process.env[name];
+		}
+		w.setEnvironment(set[0], set[1]);
+		process.env[set[0]] = set[1];
+	} catch (e) {
+		console.error(`WebView2's arguments could not be set: ${(e as Error).message}`);
+		Utils.quit();
+		await new Promise(() => {});
 	}
 }
 

@@ -82,10 +82,21 @@ export async function external(url: string) {
 	if (process.env["FENNEC_DESKTOP_REAL_OPEN"] === "1") report("external-done", { url, done: await openLink(url) });
 }
 
+/**
+ * What a page that loaded before its preload is left with, made on purpose
+ * (FENNEC_DESKTOP_BRIDGELESS_FIRST=1, `checks/latepreload.mjs`): the first
+ * document of each studio window loses Electrobun's bridge, as a document
+ * WebView2 created before AddScriptToExecuteOnDocumentCreated landed has none.
+ * `window.name` outlives a load of the same page, so the documents after it
+ * keep theirs. WebView2's race itself cannot be had on demand.
+ */
+const BRIDGELESS_FIRST = `(function(){if(window.top!==window||window.name==="fennec-check-bridgeless")return;window.name="fennec-check-bridgeless";window.__electrobunSendToHost=undefined;})();`;
+
 /** Reports what the studio in a window shows, until the check stops looking. */
 export function pagePreload(origin: string): string {
 	const o = JSON.stringify(origin);
 	return [
+		process.env["FENNEC_DESKTOP_BRIDGELESS_FIRST"] === "1" ? BRIDGELESS_FIRST : "",
 		`(function(){if(location.origin!==${o})return;`,
 		`var n=0,last="",t=setInterval(function(){n++;`,
 		`var txt=document.body?document.body.innerText:"";`,
