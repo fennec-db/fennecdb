@@ -88,6 +88,24 @@ const REAL = WIN
 const before = new Set(REAL.filter((p) => existsSync(p)));
 if (before.size) log(`the real home holds ${[...before].join(', ')} (a real install): left as it is`);
 
+/**
+ * What the run just ended made in the real home anyway, said (a shortcut's
+ * target read back) and removed, so the next run's is seen as its own: on
+ * Windows a run of the app was seen to leave `fennec studio.lnk` in the real
+ * Start menu, whatever APPDATA said.
+ */
+function madeInRealHome(label) {
+  for (const p of REAL.filter((q) => existsSync(q) && !before.has(q))) {
+    let what = '';
+    if (p.endsWith('.lnk')) {
+      const ps = `$s = (New-Object -ComObject WScript.Shell).CreateShortcut('${p.replaceAll("'", "''")}'); '{0} | {1} | {2}' -f $s.TargetPath, $s.Arguments, $s.WorkingDirectory`;
+      what = `, a shortcut to ${spawnSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', timeout: 60000 }).stdout?.trim()}`;
+    }
+    log(`the ${label} run made ${p} in the real home${what}: removed`);
+    rmSync(p, { recursive: true, force: true });
+  }
+}
+
 /** Every process started from `pid` down, by parent, with those whose command names `app`. */
 function family(roots, app) {
   const all = procs();
@@ -236,6 +254,7 @@ async function launchAndStop(app, launcher, label, env) {
   if (!WIN) assert.equal(code, 0, `the launcher ended with ${code ?? signal}, not 0: its own SIGTERM handler (logs/dist-${label}.app.log)`);
   log(`stopped${WIN ? ' (its tree ended)' : ': exit 0'}, nothing of it left`);
   started.delete(child.pid);
+  madeInRealHome(label);
 }
 
 /** Runs `cmd` to its end without blocking this process's own server; its output, its status. */
@@ -336,6 +355,7 @@ if (WIN) {
   server = null;
 }
 log(installed.text.trim());
+madeInRealHome('installer');
 assert.equal(installed.code, 0, `the installer ended with ${installed.code} (logs/dist-install.log)`);
 assert.match(installed.text, new RegExp(`Checksum ok \\(${sha256(ARCHIVE)}\\)`), 'the installer checked the sum');
 const dest = join(inst.data, 'stable', 'app');
