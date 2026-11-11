@@ -51,6 +51,13 @@ set -- "$src"/Contents/Resources/*.tar.zst
 [ "$#" -eq 1 ] && [ -f "$1" ] || die "$src holds no single .tar.zst payload: is it a stable build that was never launched?"
 payload=$1
 
+# A volume a run that stopped half-way left attached goes before its folder,
+# and this run's goes whatever happens.
+detach_volume() {
+  if [ -d "$work/rw" ]; then hdiutil detach -force "$work/rw" >/dev/null 2>&1 || true; fi
+}
+detach_volume
+trap detach_volume EXIT
 rm -rf "$work"
 mkdir -p "$work/unpacked" "$work/volume" "$(dirname "$out")"
 tar -xf "$payload" -C "$work/unpacked" || die "could not unpack $payload"
@@ -82,14 +89,32 @@ codesign --force --sign - --timestamp=none "$app"
 codesign --verify --deep --strict --verbose=2 "$app"
 echo "dist: $name unpacked from $(basename "$payload"), $signed nested Mach-O files and the bundle signed ad hoc"
 
-# The volume: the app and a link to /Applications to drag it onto. Compressed
-# with LZMA (ULMO, macOS 10.15 and later; Apple silicon starts at 11), the
-# smallest hdiutil makes (docs/design/integrations.md has the sizes).
-ditto "$app" "$work/volume/$name"
-ln -s /Applications "$work/volume/Applications"
+# The volume: the app and a link to /Applications to drag it onto, written
+# into an empty read-write image this script attaches itself, then
+# compressed with LZMA (ULMO, macOS 10.15 and later; Apple silicon starts at
+# 11), the smallest hdiutil makes (docs/design/integrations.md has the
+# sizes). Not `hdiutil create -srcfolder`, which does the same with a detach
+# of its own: on a hosted runner it failed once in two runs, after the copy
+# (the classic "Resource busy": a scanner, XProtect or Spotlight, holding a
+# file just written, here ten Mach-O files where Electrobun's own DMG has a
+# tarball). Spotlight is told to leave the volume alone, everything is
+# synced before the detach, and a detach still refused is forced: nothing is
+# left to write, and the image is verified and held by checks/dist.mjs file
+# by file. Not -quiet anywhere: it closes hdiutil's stderr too.
+size=$(du -sm "$app" | cut -f1)
+hdiutil create -megabytes $((size + size / 5 + 16)) -fs HFS+ -volname "fennec studio" -type UDIF -ov "$work/rw.dmg"
+mkdir -p "$work/rw"
+hdiutil attach -nobrowse -noautoopen -noverify -mountpoint "$work/rw" "$work/rw.dmg"
+touch "$work/rw/.metadata_never_index"
+ditto "$app" "$work/rw/$name"
+ln -s /Applications "$work/rw/Applications"
+sync
+if ! hdiutil detach "$work/rw"; then
+  echo "dist: the volume is held (above); everything is written and synced, so it is detached by force"
+  hdiutil detach -force "$work/rw"
+fi
 rm -f "$out"
-# Not -quiet: it closes hdiutil's stderr too, and a failure says nothing.
-hdiutil create -volname "fennec studio" -srcfolder "$work/volume" -fs HFS+ -format ULMO -ov "$out"
+hdiutil convert "$work/rw.dmg" -format ULMO -o "$out"
 hdiutil verify "$out"
 ls -l "$out"
 if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$out"; fi

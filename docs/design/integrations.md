@@ -505,10 +505,26 @@ does not have. Not used: `--deep` to sign (it signs nested code with the outer
 bundle's options, and Apple advises against it), the hardened runtime (Bun's
 JIT would need entitlements, and ad hoc code gains nothing from it). The image
 is HFS+, the app beside a link to `/Applications`, LZMA-compressed (ULMO,
-macOS 10.15 and later; Apple silicon starts at 11): 25.3 MB (25 286 247 bytes)
-for an app of 79 MB on disk, against 33.8 MB as ULFO (LZFSE), 37.3 MB as UDZO
+macOS 10.15 and later; Apple silicon starts at 11): 24.2 MB (24 202 568 bytes)
+for an app of 79 MB on disk, against 32.8 MB as ULFO (LZFSE), 36.2 MB as UDZO
 (zlib) and 25.9 MB for Electrobun's self-extracting DMG (25 876 994 bytes), the
-same build, measured on the M1 above.
+same build, measured on the M1 above. It is made in steps: an empty read-write
+image, attached by the script at a mount point of its own with
+`.metadata_never_index` at its root, the app and the link written into it,
+`sync`, a detach, then `hdiutil convert` (which mounts nothing). `hdiutil create
+-srcfolder`, the first version, does the same with a detach of its own, and on
+the hosted runner it failed once in the first two runs, after the copy, with
+exit 1 and nothing said (`-quiet` closes stderr too): the classic "Resource
+busy" of a scanner, XProtect or Spotlight, holding a file just written to the
+volume, here ten Mach-O files where Electrobun's own DMG, which never failed, has
+a tarball. A volume with a file held open was seen to refuse a plain detach
+("Resource busy", exit 16) and take a forced one, so a detach refused is forced:
+everything is written and synced by then, and `hdiutil verify` and
+`checks/dist.mjs` hold the image file by file. `hdiutil makehybrid -hfs`, which
+writes the volume from a folder with no mount at all, was tried and rejected:
+it gives every file Finder information, which `codesign --verify --strict`
+refuses ("resource fork, Finder information, or similar detritus"), and
+`dist.mjs` failed it.
 
 `checks/dist.mjs` holds the file that ships, on every CI run and first in `make
 studio-desktop-test`: the image verifies and is ULMO, its volume the app and the

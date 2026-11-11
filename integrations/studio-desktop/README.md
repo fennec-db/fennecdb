@@ -35,7 +35,7 @@ A release's DMG is unsigned, signed ad hoc and not notarized
 ## Download
 
 A release carries the app as `fennec-studio-v<version>-macos-arm64.dmg`
-(25.3 MB), listed in its `SHA256SUMS`, once a maintainer has run
+(24.2 MB), listed in its `SHA256SUMS`, once a maintainer has run
 `desktop.yml` for it (RELEASING.md). Two ways to install it:
 
 * **The one-liner**, which needs no click in System Settings:
