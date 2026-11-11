@@ -108,6 +108,17 @@ jobs:
             *.tar.zst) zstd -dc "$f" 2>/dev/null | tar -tvf - | head -12 || echo "(no zstd)" ;;
           esac; done
 
+      - name: Linux, what the binaries need of the system (glibc, the libraries)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: |
+          for f in $(find build -type f \( -name '*.so' -o -name launcher -o -name bun -o -name 'fennec*' \) | grep -v '\.json$'); do
+            need=$(objdump -T "$f" 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+            echo "$f: ${need:-static or none}"
+          done
+          so=$(find build -name 'libNativeWrapper.so' | head -1)
+          echo "== ldd $so (direct needs)"; objdump -p "$so" | grep NEEDED
+
       - name: Type check
         continue-on-error: true
         run: npm run typecheck
@@ -158,6 +169,42 @@ jobs:
         if: runner.os == 'Linux'
         continue-on-error: true
         run: dbus-run-session -- xvfb-run -a -s "-screen 0 1600x1000x24" node scripts/spike/linux-open-external.mjs
+
+      - name: Run the installer as a user would (no Mark of the Web on a runner), and see what it did
+        continue-on-error: true
+        timeout-minutes: 6
+        run: |
+          work="$RUNNER_TEMP/installer"; mkdir -p "$work"
+          if [ "$RUNNER_OS" = Windows ]; then
+            zip=$(ls artifacts/*Setup*.zip | head -1); echo "installer: $zip"
+            powershell -NoProfile -Command "Expand-Archive -LiteralPath '$zip' -DestinationPath '$work' -Force"
+            ls -la "$work"
+            setup=$(find "$work" -maxdepth 2 -iname '*Setup*.exe' | head -1); echo "running $setup"
+            t0=$(date +%s)
+            "$setup" > "$work/setup.log" 2>&1 &
+            for i in $(seq 1 90); do [ -e "$LOCALAPPDATA/dev.fennecdb.studio/stable/app/bin/launcher.exe" ] && break; sleep 1; done
+            sleep 8
+            echo "after $(( $(date +%s) - t0 )) s"; cat "$work/setup.log" | tail -20
+            echo "== installed"; find "$LOCALAPPDATA/dev.fennecdb.studio" -maxdepth 3 | head -40; du -sh "$LOCALAPPDATA/dev.fennecdb.studio/stable/app" || true
+            echo "== shortcuts"; find "$APPDATA/Microsoft/Windows/Start Menu/Programs" "$USERPROFILE/Desktop" -iname '*fennec*' 2>/dev/null
+            echo "== Add/Remove Programs (HKCU)"; reg query 'HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall' //s //f fennec 2>/dev/null | head -30
+            echo "== .fennec association (HKCU)"; reg query 'HKCU\Software\Classes\.fennec' 2>&1 | head -5
+            echo "== running from the install"
+            powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { \$_.ExecutablePath -like '*dev.fennecdb.studio*' } | ForEach-Object { '{0} {1}' -f \$_.ProcessId, \$_.CommandLine; Stop-Process -Id \$_.ProcessId -Force }"
+          else
+            tgz=$(ls artifacts/*Setup*.tar.gz | head -1); echo "installer: $tgz"
+            tar -xzf "$tgz" -C "$work"; ls -laR "$work" | head -20
+            inst=$(find "$work" -type f -name installer | head -1)
+            t0=$(date +%s)
+            timeout 120 xvfb-run -a "$inst" > "$work/installer.log" 2>&1 &
+            for i in $(seq 1 90); do [ -e "$HOME/.local/share/dev.fennecdb.studio/stable/app/bin/launcher" ] && break; sleep 1; done
+            sleep 8
+            echo "after $(( $(date +%s) - t0 )) s"; tail -20 "$work/installer.log"
+            echo "== installed"; find "$HOME/.local/share/dev.fennecdb.studio" -maxdepth 3 | head -40; du -sh "$HOME/.local/share/dev.fennecdb.studio/stable/app" || true
+            echo "== desktop entry"; ls ~/.local/share/applications/ 2>/dev/null; cat ~/.local/share/applications/*fennec* 2>/dev/null
+            echo "== running from the install"; pgrep -af dev.fennecdb.studio || true
+            pkill -9 -f "$HOME/.local/share/dev.fennecdb.studio" || true
+          fi
 
       - name: Nothing of the app is left running
         if: always()

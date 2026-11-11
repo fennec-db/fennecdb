@@ -11,7 +11,7 @@
 // The Windows asset is a zip (`fennec-v<V>-<triple>.zip`), unpacked with the
 // system's own bsdtar (C:\Windows\System32\tar.exe), which reads zips; the
 // others are the `.tar.gz` get-server.sh already takes.
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -64,6 +64,8 @@ try {
 } finally {
   rmSync(tmp, { recursive: true, force: true });
 }
-const help = execFileSync(join(here, 'bin', `fennec-server${exe}`), ['--help'], { encoding: 'utf8' });
+// The usage goes to stderr, as get-server.sh's `2>&1` takes it.
+const shown = spawnSync(join(here, 'bin', `fennec-server${exe}`), ['--help'], { encoding: 'utf8' });
+const help = `${shown.stdout}${shown.stderr}`;
 for (const flag of ['--studio', '--exit-on-stdin-close']) if (!help.includes(flag)) throw new Error(`this fennec-server has no ${flag}`);
 console.log(`get-release: bin/fennec-server${exe} and bin/fennec${exe} in place`);
