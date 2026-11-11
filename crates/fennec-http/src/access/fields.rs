@@ -538,9 +538,11 @@ pub(super) fn hold(
         if inner {
             if let Some([f]) = sel.project.as_deref() {
                 let show = v.needed(&[base(f).to_string()], &reach)?;
+                // The rule's half first, as every rule goes before the
+                // statement's own terms (`access::and`).
                 if let Some(show) = all_of(show) {
                     sel.filter = Some(match sel.filter.take() {
-                        Some(f) => Expr::And(Box::new(f), Box::new(show)),
+                        Some(f) => Expr::And(Box::new(show), Box::new(f)),
                         None => show,
                     });
                 }

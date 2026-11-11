@@ -1,6 +1,6 @@
 # Access
 
-The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md) lists under *Access*: scoped tokens, field lists, rules reading another collection, the server's own collections, a token bound to its tenant, whom a token is for, and empty tokens. Each section below but *The server's own collections* and *Whom a token is for*, added after the move, is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-http/src/access/CLAUDE.md](../../crates/fennec-http/src/access/CLAUDE.md) lists under *Access* (moved there from `crates/fennec-http/CLAUDE.md` to make room, beside `access.rs` and `access/`): scoped tokens, field lists, rules reading another collection, the server's own collections, a token bound to its tenant, whom a token is for, and empty tokens. Each section below but *The server's own collections* and *Whom a token is for*, added after the move, is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Scoped tokens
 
@@ -262,6 +262,81 @@ rows 285 us against the server token's 0.85, 1.3 us after; a page of 20
 claims, json, `nocase` and collated indexes against a scan, plans, counts,
 `not`s, rows with no value, `like` patterns, text fields under a time
 claim, indexes over several fields and deny lists.
+
+**The rules are asked before the caller's terms, and a plan is the server
+token's** (`access::and`, `Hook::before_upsert`, `Scope::rewrite_with`).
+The engine binds an `and` as written (`Filter::bind` keeps `Test::And(a,
+b)`), asks `a` first, stops at its first false and hands up its first error
+(`Filter::test`, `eval`, `test_each`), which `/query` answers 400 with its
+message. Every rule was ANDed in after the caller's `where`: `restrict`
+built `and(filter, rule)` for a `get`, each `lookup` level, each inner
+`get`, a facet's rest and a subscription's shape, `reaping` the `expired`
+grant's the same, and a `set` or `del` its rules -- `returning`'s read
+rules among them -- after its filter. So a term of the caller's that fails
+ran over rows the rules hide: under `notes read,write where owner =
+$jwt.sub`, alice's `get notes where id = $1 and 1 / (case when body >= $2
+then 0 else 1 end) = 1` with `[17, "m"]` took bob's row 17 from the id
+index and divided over it before `owner` was compared, answered 400 where
+his body is past `"m"` and 200 `[]` where not, a binary search reading any
+field of any row out of the two; an int past 64 bits and a float past its
+range failed alike, and a `set`, a `del`, a `lookup` level, an inner `get`,
+REST's `?where=`, a stream's seed and MCP's `query` all ran the same
+filter. Field lists had closed it for a withheld field (`(showing_f and
+term)`, *Field lists* below); a row's rules never were. Now every rule goes
+first wherever a caller's terms meet one -- `and(rule, filter)` in
+`restrict`, `reaping` and a write's rules, `returning`'s read rules beside
+the write's, a rule's own inner `get` held to the read rules (`hold`) and
+an inner `get`'s column guard (`fields`) -- and a held write, whose every
+run is `handle` whole, and whose looks test the statement as `scoped()`
+made it, takes the same order. An upsert's `else set` was the one place a
+caller's expression met a row no filter found: the row holding a `@unique`
+value its document holds, any row's, set by `set_row`, which worked the
+values out over it (`updated`) before `before_write` and
+`before_overwrite` judged it -- `put notes {email: "bob@x"} if absent else
+set {n: 1 / (case when body >= "m" then 0 else 1 end)}` was 400 or 403 by
+bob's body. The engine now hands the hooks that row first
+(`Hook::before_upsert`, natively; the browser module registers none), and
+`Check` asks it of the update rules (`Check::updatable`), the test
+`before_overwrite` makes after it, where a `put` naming an id still meets
+it alone. PostgreSQL orders a row security policy's quals before a query's
+own for the same reason, letting a function through ahead of them only
+where it is marked `LEAKPROOF`; nothing here is marked, so nothing goes
+ahead. The plans are what they were but for a tie: `filter_candidates`
+takes a strictly smaller set and keeps the first on a tie, so where the
+rule's index and the caller's find as many rows, the rule's now answers,
+the same rows read; ranges and indexes over several fields are taken by
+the collection's order, not the filter's. `tests/ordered_claims.rs` holds a
+scoped read's plan to the server token's with the claim written in, and
+`tests/rules_first.rs` the answers: each form above, the upsert, REST, a
+stream and MCP answer alike whichever side of the pivot bob's row is.
+The order costs nothing measurable: a candidate row is tested by both
+either way, and the order only changes which comes first -- a row both
+admit pays both, a row the rule refuses no longer pays the caller's terms,
+and a row the caller's terms refuse pays the rule first, one comparison of
+a bound slot under `owner = $jwt.sub` beside a decoded row.
+
+A scoped `explain` ran through the same rewrite, and its plan counted what
+an index chose before the rules held it: `filter: {index}, {n} rows`, the
+full scan's `{tested} of {total}`, an index over several fields' and
+`near`'s lines (`tests/access.rs` had alice's plan of `where owner = "bob"`
+show bob's row count, asserting only that it was not empty); only
+`match`'s line was held back (`Match::within`, text.md). Holding the counts
+back would not do: which index a plan names is a comparison of two counts,
+since the planner takes the smaller set, so under `owner = $jwt.sub` with
+alice holding one note, `explain get notes where email = $1` named
+`email`'s index exactly where no row held the address. So
+`Scope::rewrite_with` refuses `Statement::Explain` (403, "`explain` is the
+server token's: a plan counts rows this token's rules hide from it") once
+it is held to the rules as its `get` would be -- a collection the token is
+granted nothing on is missing (404) for its `explain` as for its `get`,
+the server's own among them -- on every route, each through `scoped()`:
+`/query`, `/batch` and MCP's `query`. Whatever runs as the server's token
+(`Who::Full`) keeps it. A plan worked out over the token's rows alone was the other way, not
+taken: a second planner, its choices still comparisons of what the rules
+hide. A test needing a scoped statement's plan explains the statement as
+`Scope::rewrite` leaves it, in process (`tests/ordered_claims.rs`,
+`tests/access.rs`). The studio's plan tab and Grafana's Explain show the
+refusal's message.
 
 ### ES256, and the algorithms still refused
 

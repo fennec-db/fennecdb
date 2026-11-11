@@ -159,9 +159,9 @@ message, where `Error::reason` reads it back up to the first `` (` `` --
 never a field beside it -- for every answer's `reason`.
 
 **[`if absent else set` is an upsert; `put <c> $n` takes a parameter's
-documents.](../../docs/design/writes.md#upserts)** Scoped, the row it sets
-passes the update filter (`Check::before_overwrite`) and `$n`'s documents
-go in first (`Statement::with_documents`); a sync replica refuses a
+documents.](../../docs/design/writes.md#upserts)** Scoped, its row passes
+the update filter before it is read (`Hook::before_upsert`) and `$n`'s
+documents go in first (`Statement::with_documents`); a sync replica refuses a
 document naming neither id nor key (`UPSERT_KEY`).
 
 **[A `set` or a `del` picks its rows with `order` and `limit`, and
@@ -381,8 +381,8 @@ rules, `@ttl`'s `alive` -- as a `where`'s rows are
 `tests/match_filter.rs` holds it to the ranking's ids, and every form to
 `id in (get ... match ... select id)` where that list, the ranking's first
 10 000 rows, holds them all. It keeps no row ceiling (a ranking keeps
-`MAX_MATCH_ROWS`), its rows charged to a call, and a scoped token's
-`explain` tells the rows it kept alone; `rerank`, `order _score`, marks
+`MAX_MATCH_ROWS`), its rows charged to a call, and `explain` under
+`within` tells the rows it kept alone; `rerank`, `order _score`, marks
 beside `count` and an ungrouped aggregate's `limit` without `order` are
 refused.
 

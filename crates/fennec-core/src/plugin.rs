@@ -75,6 +75,19 @@ pub trait Hook: Send + Sync {
     fn before_overwrite(&self, _schema: &Schema, _old: &Document, _doc: &Document) -> Result<()> {
         Ok(())
     }
+    /// Called with an upsert's row as it stands -- the one holding a
+    /// `@unique` value its document holds, which may be any row -- before
+    /// its `else set` is worked out over it. Returning `Err` aborts the
+    /// write. A `set`'s rows were found through its filter, a scoped
+    /// token's rules first; this row was found by a value alone, and an
+    /// expression failing over it -- `1 / (case when body >= "m" then 0
+    /// else 1 end)` -- told its writer what a row it may not update holds,
+    /// 400 against the 403 [`Self::before_overwrite`] gave it after. A
+    /// scoped token is held to its update rules here (`fennec-http`'s
+    /// `access`). Natively: the browser module registers no hook.
+    fn before_upsert(&self, _schema: &Schema, _old: &Document) -> Result<()> {
+        Ok(())
+    }
     fn after_write(&self, _collection: &str, _op: WriteOp, _doc: &Document) -> Result<()> {
         Ok(())
     }

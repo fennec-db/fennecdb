@@ -14388,6 +14388,16 @@ impl Database {
         let Some(old) = c.store.read(schema, id)? else {
             return Ok(false);
         };
+        // An upsert's row was found by the value it holds, no hook's rule
+        // asked of it: judged before its `else set` reads it
+        // ([`crate::plugin::Hook::before_upsert`]). A `set`'s rows met the
+        // rules in its filter. The browser module registers no hook.
+        #[cfg(not(target_arch = "wasm32"))]
+        if new.is_some() {
+            for h in hooks {
+                h.before_upsert(schema, &old)?;
+            }
+        }
         let mut doc = updated(schema, &old, assigns, ctx, new)?;
         ask_hooks(hooks, schema, WriteOp::Update, &mut doc)?;
         for h in hooks {

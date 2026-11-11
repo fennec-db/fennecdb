@@ -189,9 +189,11 @@ query of one or two words, under the bitmap's bar, retires what it did.
 What bounded it before bounds it and errors as it did: a word `fuzzy` or
 `prefix` reads as more than `MAX_EXPANSIONS` words, `--call-max-rows`,
 and the ranking's 10 000 rows wherever `match` still ranks. `explain`
-says how many rows the words scored and how many the filter kept; to a
-scoped token it says the kept alone, since the words reach rows it cannot
-read.
+says how many rows the words scored and how many the filter kept; under
+`within` it says the kept alone, since the words reach rows the token
+cannot read. A scoped token's own `explain` is refused since (access.md,
+*The rules are asked before the caller's terms*): the line stays for a
+scoped statement explained in process, as `tests/access.rs` explains one.
 
 A plain ordered `get`, which runs none of this code, ran 4% slower in the
 first timing run (4.88 -> 5.08 us, in every pair), and the branch's binary

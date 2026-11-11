@@ -321,7 +321,7 @@ Covers `crates/fennec-ql/` and the shell in `crates/fennec-cli/`; its rules bind
 
 ### `crates/fennec-http/CLAUDE.md`
 
-Covers `crates/fennec-http/`; access binds fennec-core's hooks (`plugin::Hook`, `Check`) and its own collections' names (`declared::OWN`), replication fennec-core's `wal` and `changes_in`, held writes its wakes (`changes.rs`).
+Covers `crates/fennec-http/`, access aside (below); replication binds fennec-core's `wal` and `changes_in`, held writes its wakes (`changes.rs`).
 
 *Replication and archives*
 - Replication ships only what is on disk, by the change counter.
@@ -329,15 +329,6 @@ Covers `crates/fennec-http/`; access binds fennec-core's hooks (`plugin::Hook`, 
 - `/_changes` reads the writes on disk, documents and all
 - A read can wait for a write on a replica
 - An archive and a backup can be sealed
-
-*Access*
-- A scoped token is held to its rules at every level, twice for writes.
-- A field a read rule withholds is held out of what a statement does.
-- A rule may read another collection, answered before each statement.
-- A collection whose name starts with `_` is the server's, out of every rule's reach.
-- A token is bound to the tenant it names.
-- A token is taken only from the issuers, for the audiences and clients, a server was told.
-- An empty token is no token.
 
 *Quotas and retries*
 - A tenant is held to its quota by its node, a block as it lands.
@@ -375,6 +366,19 @@ Covers `crates/fennec-http/src/mcp/`.
 
 *The HTTP server*
 - An agent's MCP tool is a statement, held to the token as `/query` is.
+
+### `crates/fennec-http/src/access/CLAUDE.md`
+
+Covers `crates/fennec-http/src/access.rs` and `src/access/`; access binds fennec-core's hooks (`plugin::Hook`, `Check`) and its own collections' names (`declared::OWN`), and every path a token's statement takes.
+
+*Access*
+- A scoped token is held to its rules at every level, twice for writes.
+- A field a read rule withholds is held out of what a statement does.
+- A rule may read another collection, answered before each statement.
+- A collection whose name starts with `_` is the server's, out of every rule's reach.
+- A token is bound to the tenant it names.
+- A token is taken only from the issuers, for the audiences and clients, a server was told.
+- An empty token is no token.
 
 ### `crates/fennec-server/CLAUDE.md`
 
