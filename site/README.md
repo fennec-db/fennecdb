@@ -565,7 +565,7 @@ first install on an Apple silicon Mac, the release is the figure's
 `data-version`, and the checksum is a bar the width of 64 hex digits, never
 digits that would be no file's sum. On a phone its boxes stand in a column
 and the terminal wraps at its width. Change a `say` line of `install.sh`
-and change the scene's lines with it. Its `338 KB` is held to the module (`CLAIMS`); the image's `7 MB` is, as on the
+and change the scene's lines with it. Its `345 KB` is held to the module (`CLAIMS`); the image's `7 MB` is, as on the
 Install page, not.
 
 ## The language sessions
