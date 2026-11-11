@@ -287,8 +287,14 @@ jobs:
         # From the image's package lists, as ci.yml installs brotli: an `apt-get update` hung
         # the step twice, its mirror unresolved. Lists that have gone stale are fetched again.
         run: |
+          # TEMPORARY: where apt fetches from, and whether those names resolve.
+          cat /etc/apt/apt-mirrors.txt 2>/dev/null || true
+          grep -h "^URIs" /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+          for h in azure.archive.ubuntu.com archive.ubuntu.com security.ubuntu.com ports.ubuntu.com azure.ports.ubuntu.com; do
+            printf '%s: ' "$h"; timeout 10 getent hosts "$h" || echo "unresolved ($?)"
+          done
           packages="libgtk-3-0t64 libwebkit2gtk-4.1-0 libayatana-appindicator3-1 librsvg2-2 xvfb dbus-x11 gnome-keyring libsecret-1-0 libsecret-tools"
-          sudo -E apt-get install -y -qq $packages || { sudo -E apt-get update -qq && sudo -E apt-get install -y -qq $packages; }
+          sudo -E apt-get install -y -q $packages || { sudo -E apt-get update -q && sudo -E apt-get install -y -q $packages; }
 
       # As the macOS job's, a cache per system: scripts/electrobun.mjs holds what is
       # in it to hutch-pin.json on every run.
