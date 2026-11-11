@@ -506,8 +506,9 @@ beside it in `node --test`'s output (`test/platform.ts`).
 The process and security layer (phase 2 of #578, nothing shipped). What
 macOS gave the app for nothing is made on Windows and Linux, and every phase 2
 skip went; what each rests on was measured on the four runners (runs
-43072853201 and 43077312854, a probe of each call beside the checks), and
-each is held by a check or a unit test on every system it applies to.
+43072853201 and 43077312854, a probe of each call beside the checks, and
+43080486766), and each is held by a check or a unit test on every system it
+applies to.
 
 - **The stop.** On Windows libuv's and Bun's `kill("SIGTERM")` is
   TerminateProcess: the spike's server ended in 1 to 3 ms with no shutdown line,
@@ -614,11 +615,12 @@ each is held by a check or a unit test on every system it applies to.
   `ReadAlias` named the login collection in 5 to 14 ms where the keyring was
   unlocked and answered "/" in 26 and 27 ms where gnome-keyring ran with none,
   and a bus that was not there was said in 6 to 8 ms; in `keyring` the app
-  refused a token in 3.14 to 3.18 s on a bus whose Secret Service never
-  answered. Its case of a keyring with no default collection is a
-  gnome-keyring of its own (its own runtime and data folders): one started
-  beside the run's found the run's daemon by its control socket, registered
-  nothing on the check's bus, and the case was the first again. Rejected: racing
+  refused a token in 3.14 to 3.19 s on a bus whose Secret Service never
+  answered, and in 163 ms, saying there is no default keyring, on one whose
+  gnome-keyring has none. That case is a gnome-keyring of its own (its own
+  runtime and data folders): one started beside the run's found the run's
+  daemon by its control socket, registered nothing on the check's bus, and the
+  case was the first again. Rejected: racing
   Bun.secrets against a timer (a `set` that lost the race may land after the
   app said it kept nothing, and an unlock prompt would be cut off); `gdbus`,
   `busctl` or `dbus-send` (none is on every desktop); and a file of the app's
