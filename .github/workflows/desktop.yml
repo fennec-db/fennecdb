@@ -284,20 +284,18 @@ jobs:
         timeout-minutes: 10
         env:
           DEBIAN_FRONTEND: noninteractive
-        # From the image's package lists, as ci.yml installs brotli: an `apt-get update` hung
-        # the step twice, its mirror unresolved. Lists that have gone stale are fetched again.
+        # From the image's package lists, as ci.yml installs brotli; lists gone stale are
+        # fetched again. A mirror the runner's resolver does not answer for is asked of
+        # 1.1.1.1 and written into /etc/hosts: on 2026-11-11 Azure's (168.63.129.16) timed
+        # out on every *.ubuntu.com name for hours while it answered for github.com, and
+        # apt waited on each mirror until the step's time ran out.
         run: |
-          # TEMPORARY: where apt fetches from, and whether those names resolve.
-          cat /etc/apt/apt-mirrors.txt 2>/dev/null || true
-          grep -h "^URIs" /etc/apt/sources.list.d/*.sources 2>/dev/null || true
-          for h in github.com registry.npmjs.org azure.archive.ubuntu.com archive.ubuntu.com ports.ubuntu.com; do
-            printf '%s: ' "$h"; timeout 10 getent hosts "$h" || echo "unresolved ($?)"
+          mirrors=$( { sed -n 's|^[a-z]*://\([^/]*\)/.*|\1|p' /etc/apt/apt-mirrors.txt 2>/dev/null; sed -n 's|^URIs: *[a-z]*://\([^/ ]*\).*|\1|p' /etc/apt/sources.list.d/*.sources 2>/dev/null; } | sort -u)
+          for h in $mirrors; do
+            timeout 5 getent hosts "$h" >/dev/null && continue
+            echo "$h: not resolved here, asked of 1.1.1.1"
+            for a in $(dig +short +time=3 +tries=2 @1.1.1.1 "$h" A | grep -E '^[0-9.]+$'); do echo "$a $h"; done | sudo tee -a /etc/hosts
           done
-          resolvectl status 2>/dev/null | grep -iE "DNS Server|Current DNS" | head -4 || true
-          for s in 168.63.129.16 1.1.1.1 8.8.8.8; do
-            printf '@%s archive.ubuntu.com: ' "$s"; timeout 10 dig +short +time=3 +tries=1 @"$s" archive.ubuntu.com | tr "\n" " " || echo "failed ($?)"; echo
-          done
-          printf 'http to archive.ubuntu.com by address: '; timeout 15 curl -s -o /dev/null -w '%{http_code}\n' --resolve archive.ubuntu.com:80:91.189.91.82 http://archive.ubuntu.com/ubuntu/dists/noble/Release || echo failed
           packages="libgtk-3-0t64 libwebkit2gtk-4.1-0 libayatana-appindicator3-1 librsvg2-2 xvfb dbus-x11 gnome-keyring libsecret-1-0 libsecret-tools"
           sudo -E apt-get install -y -q $packages || { sudo -E apt-get update -q && sudo -E apt-get install -y -q $packages; }
 
