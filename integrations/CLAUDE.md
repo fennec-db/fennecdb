@@ -53,7 +53,7 @@ tarball, x64 and arm64, are the payload unpacked too, one folder, never
 Electrobun's installer (`scripts/dist.sh`), held by `checks/dist-archive.mjs`:
 no hook, started where it is unpacked and where `install.ps1 -App` or
 `install.sh --app` put it from a release laid out on the runner, unchanged by
-either run. A release's downloads are attached only from `main`, the DMG
+either run but for the launcher's own log (`bin\app.log`, on Windows). A release's downloads are attached only from `main`, the DMG
 where the signing job ran and signed nothing, by a job with no secret
 (`scripts/attach.sh`): their lines are appended to `SHA256SUMS` in one write,
 which only grows, and an asset there is never replaced.
