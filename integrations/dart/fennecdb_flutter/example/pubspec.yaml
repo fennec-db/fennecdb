@@ -4,13 +4,16 @@ publish_to: none
 version: 0.2.0
 
 environment:
-  sdk: ^3.4.0
+  sdk: ^3.13.0
+  # material_ui's floor: Flutter 3.50 deprecates package:flutter/material.dart for it.
+  flutter: ">=3.47.0"
 
 dependencies:
   flutter:
     sdk: flutter
   fennecdb_flutter:
     path: ../
+  material_ui: ^1.11.0
   path_provider: ^2.1.0
 
 dependency_overrides:
