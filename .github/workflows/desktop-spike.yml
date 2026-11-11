@@ -38,12 +38,14 @@ jobs:
         shell: bash
         working-directory: integrations/studio-desktop
     env:
-      SD_DIR: ${{ runner.temp }}/fennec-desktop-checks
       CHECK_LIMIT_MS: '150000'
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+
+      - name: Where the checks write
+        run: echo "SD_DIR=$RUNNER_TEMP/fennec-desktop-checks" >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@v7
         with:
