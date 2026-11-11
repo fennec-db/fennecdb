@@ -263,7 +263,10 @@ chmod 755 "$work/shim/getconf" "$work/shim/ldconfig"
 for a in x64 arm64; do
     d=$work/linuxapp-$a/fennec-studio
     mkdir -p "$d/bin" "$d/Resources/app/bun"
-    printf '#!/bin/sh\nexec sleep "${1:-0}"\n' >"$d/bin/launcher"
+    cat >"$d/bin/launcher" <<'EOF'
+#!/bin/sh
+exec sleep "${1:-0}"
+EOF
     chmod 755 "$d/bin/launcher"
     echo "// the $a app" >"$d/Resources/app/bun/index.js"
     tar -cJf "$rel/fennec-studio-v$version-linux-$a.tar.xz" -C "$work/linuxapp-$a" fennec-studio
@@ -306,7 +309,7 @@ echo '{}' >"$(data lin)/dev.fennecdb.studio/stable/state.json"
 linux_app lin
 expect "--app on Linux again, over the first: exit 0" status lin 0
 expect "--app on Linux again: the app's state beside it kept" test -f "$(data lin)/dev.fennecdb.studio/stable/state.json"
-expect "--app on Linux again: no staging left" test "$(ls -A "$(data lin)/dev.fennecdb.studio/stable" | tr '\n' ' ')" = "app state.json "
+expect "--app on Linux again: no staging left" test "$(ls -A "$(data lin)/dev.fennecdb.studio/stable")" = "$(printf '%s\n' app state.json)"
 
 linux_app linarm FAKE_CPU=aarch64
 expect "--app on Linux arm64: exit 0" status linarm 0
@@ -351,11 +354,14 @@ for n in linold linmusl linnowebkit linnoayatana linnoxz; do
 done
 
 # The app running from its place is not replaced under it: a sleep whose
-# argv[0] is the launcher's path, which is what ps shows.
+# argv[0] is the launcher's path, which is what ps shows. Waited for as the
+# installer looks, a command starting with it: a grep for the path would
+# find its own command in the listing and end the wait before the sleep.
 bash -c 'exec -a "$1" sleep 120' sh "$(place lin)/bin/launcher" &
 sleeper_pid=$!
 i=0
-until ps -A -ww -o args= 2>/dev/null | grep -F -q "$(place lin)/bin/launcher 120"; do
+until ps -A -ww -o args= 2>/dev/null |
+    running="$(place lin)/bin/launcher 120" awk 'index($0, ENVIRON["running"]) == 1 { found = 1 } END { exit !found }'; do
     i=$((i + 1))
     [ "$i" -lt 100 ] || { echo "the stand-in for a running app did not start" >&2; exit 1; }
     sleep 0.1
@@ -384,10 +390,10 @@ expect "--app on Linux, a release with no app: says so" contains "$work/linnoapp
 expect "--app on Linux, a release with no app: installs nothing" test -z "$(ls -A "$work/linnoapp-home")"
 
 # A home whose path no menu entry can name (a dollar in it): the app, and no entry.
-linux_app 'lin$odd'
-expect "--app on Linux, a path holding a dollar: exit 0" status 'lin$odd' 0
-expect "--app on Linux, a path holding a dollar: the app" test -x "$(place 'lin$odd')/bin/launcher"
-expect "--app on Linux, a path holding a dollar: no entry" absent "$(data 'lin$odd')/applications"
+linux_app "lin\$odd"
+expect "--app on Linux, a path holding a dollar: exit 0" status "lin\$odd" 0
+expect "--app on Linux, a path holding a dollar: the app" test -x "$(place "lin\$odd")/bin/launcher"
+expect "--app on Linux, a path holding a dollar: no entry" absent "$(data "lin\$odd")/applications"
 expect "--app on Linux, a path holding a dollar: says so" contains "$work/lin\$odd.out" "has none"
 script_arg=
 

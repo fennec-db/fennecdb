@@ -417,11 +417,11 @@ server.serve_forever()
         try {
             $deadline = (Get-Date).AddSeconds(30)
             while (-not (Get-Process -Id $runningApp.Id -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }
-            $before = Names (Join-Path (AppDir app) 'bin')
+            $binBefore = Names (Join-Path (AppDir app) 'bin')
             $rc = AppInstall app
             Expect "$tag -App while it runs: refused" ($rc -ne 0) (Out app)
             Expect "$tag -App while it runs: says to quit it" ((Out app).Contains('is running from')) (Out app)
-            Expect "$tag -App while it runs: the app left as it was" ((Names (Join-Path (AppDir app) 'bin')) -eq $before -and (Test-Path -LiteralPath $launcher))
+            Expect "$tag -App while it runs: the app left as it was" ((Names (Join-Path (AppDir app) 'bin')) -eq $binBefore -and (Test-Path -LiteralPath $launcher))
         } finally {
             Stop-Process -Id $runningApp.Id -Force -ErrorAction SilentlyContinue
             $runningApp.WaitForExit()

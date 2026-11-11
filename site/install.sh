@@ -153,7 +153,7 @@ app_platform() {
 # in /sbin on some systems, off a user's PATH), or, where there is no
 # ldconfig, in the usual folders.
 has_lib() {
-    if listing=$( (PATH=$PATH:/sbin:/usr/sbin && ldconfig -p) 2>/dev/null); then
+    if listing=$(PATH=$PATH:/sbin:/usr/sbin ldconfig -p 2>/dev/null); then
         printf '%s\n' "$listing" | grep -F -q -- "$1 ("
         return
     fi
@@ -431,7 +431,7 @@ install_app_linux() {
     # sign would need escaped twice over (the entry spec's string and its
     # Exec quoting); such a path gets no entry, and is said.
     case $dest in
-        *'"'* | *'\'* | *'$'* | *'`'* | *'%'* | *'
+        *'"'* | *\\* | *'$'* | *'`'* | *'%'* | *'
 '*)
             noentry=1
             ;;
