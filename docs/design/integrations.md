@@ -517,7 +517,10 @@ Environment, and the order cannot be enforced by the workflow alone, since the
 Environments API asks for administration rights that the job's token does not
 have; the job's first step reads the rules back where the token can, and fails
 unless they are those, and warns where it cannot (RELEASING.md has the `gh api`
-commands). The signing job has read access only,
+commands). It reads them only where the Environment holds at least one of the
+secrets: the first dispatch makes the Environment with no rules, and with
+nothing in it to guard, failing would only stop the unsigned DMG, whose job
+waits on this one. The signing job has read access only,
 restores no cache (what a cache holds was written by runs without the secrets),
 checks out without persisting the token, imports the certificate into a
 keychain of its own with `-T /usr/bin/codesign -T /usr/bin/security` and not
