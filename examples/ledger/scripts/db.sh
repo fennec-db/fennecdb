@@ -10,6 +10,8 @@
 #                  `listening on: http://<address>` line names
 #   FENNEC_DIR     data/tenants
 #   FENNEC_SYNC    always
+#   FENNEC_REQUEST_RATE  unset: the server's own bound on a scoped caller,
+#                  1 000 requests a second (--request-rate); 0 for none
 #   FENNEC_TOKEN, FENNEC_ADMIN_TOKEN, FENNEC_JWT_SECRET   as src/config.ts and src/tokens.ts read them
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -28,6 +30,10 @@ secret="$dir/../jwt.secret"
 printf '%s' "${FENNEC_JWT_SECRET:-ledger-dev-jwt-secret-of-at-least-32-bytes}" >"$secret"
 # --replication-token keeps each tenant's change stream (/t/<t>/_changes);
 # no replica need follow it.
+# --request-rate only where asked: unset, a scoped caller -- the app's one
+# backend token among them -- meets the server's default.
+set --
+[ -n "${FENNEC_REQUEST_RATE:-}" ] && set -- --request-rate "$FENNEC_REQUEST_RATE"
 FENNEC_HTTP_TOKEN=${FENNEC_TOKEN:-ledger-dev-operator} exec "$server" \
     --dir "$dir" \
     --http "127.0.0.1:${FENNEC_PORT:-8080}" \
@@ -36,4 +42,5 @@ FENNEC_HTTP_TOKEN=${FENNEC_TOKEN:-ledger-dev-operator} exec "$server" \
     --jwt-secret-file "$secret" \
     --policy "$here/policy.txt" \
     --audit "${FENNEC_AUDIT:-$dir/../audit.log}" \
-    --sync "${FENNEC_SYNC:-always}"
+    --sync "${FENNEC_SYNC:-always}" \
+    "$@"

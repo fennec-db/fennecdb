@@ -17,6 +17,13 @@ dir=$(mktemp -d)
 export FENNEC_PORT=0
 export FENNEC_DIR="$dir/tenants"
 export FENNEC_AUDIT="$dir/audit.log"
+# No per-caller bound on the node: the invariants and the benches drive it
+# through the app's one backend token as fast as it goes, the ledger's own
+# limiter off (`rateLimit: 1e9`), and at the server's default of 1 000 a
+# second (#554) that token was answered 429 past its retries on a fast
+# runner -- a bound of time, not the invariants the test is about. The
+# console's per-customer limit is the ledger's, tested in security.test.ts.
+export FENNEC_REQUEST_RATE=0
 db=
 stop() {
     [ -n "$db" ] && kill "$db" 2>/dev/null || true
