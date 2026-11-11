@@ -491,7 +491,9 @@ keeps libsecret's attributes `service` and `account`, matched exactly) and the
 `cmdkey` targets `LegacyGeneric:target=<id>/...` (Bun's generic credential is
 named `<service>/<name>`). Checked once on each system with items of the test
 variant, of a service one character longer and of a real install's: the first
-went, the others stayed. On Windows a process of the app is also one that names
+went, the others stayed (runs 43044414083 and 43060489878, a step since taken
+out). `secret-tool clear` with no item to clear exits 1 and says nothing, which
+is no failure; a store that cannot answer says why. On Windows a process of the app is also one that names
 its folder, since WebView2's processes are told their user data folder and
 outlive the app by a moment, and `run.mjs` waits for what it killed to be gone
 before the next check removes that folder. A check that cannot pass on a system

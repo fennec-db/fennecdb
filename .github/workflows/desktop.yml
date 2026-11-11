@@ -321,32 +321,6 @@ jobs:
       - name: Build the test variant
         run: FENNEC_DESKTOP_TEST_BUILD=1 npm run build
 
-      # TEMPORARY, taken out before review: freshState empties the test variant's credential
-      # store items, and only those (a longer service, and a real install's, stay).
-      - name: freshState's control (temporary)
-        run: |
-          bun=$(find .hutch-home/toolchains/bun -type f \( -name bun -o -name bun.exe \) | head -1)
-          cat > "$RUNNER_TEMP/probe.sh" <<'EOF'
-          set -eu
-          bun="$1"
-          "$bun" -e 'for (const s of ["dev.fennecdb.studio.test", "dev.fennecdb.studio.testx", "dev.fennecdb.studio"]) for (const n of ["connection:probe", "serve:probe"]) await Bun.secrets.set({ service: s, name: n, value: "v" }); console.log("set")'
-          [ "$(uname -s)" = Linux ] || cmdkey //list | grep -i fennec || true
-          node --input-type=module -e "const { freshState } = await import('./scripts/checks/lib.mjs'); freshState(); console.log('freshState ran')"
-          "$bun" -e 'for (const s of ["dev.fennecdb.studio.test", "dev.fennecdb.studio.testx", "dev.fennecdb.studio"]) for (const n of ["connection:probe", "serve:probe"]) { console.log(s, n, await Bun.secrets.get({ service: s, name: n })); await Bun.secrets.delete({ service: s, name: n }); }'
-          EOF
-          if [ "$RUNNER_OS" = Linux ]; then
-            dbus-run-session -- sh -c 'printf checks | gnome-keyring-daemon --unlock --components=secrets >/dev/null && sh "$0" "$1"' "$RUNNER_TEMP/probe.sh" "$bun"
-          else
-            sh "$RUNNER_TEMP/probe.sh" "$bun"
-            q='Get-CimInstance Win32_Process | Measure-Object | ForEach-Object Count'
-            for shell in powershell.exe pwsh.exe; do for i in 1 2 3; do
-              s=$(date +%s%N); n=$("$shell" -NoProfile -NonInteractive -Command "$q" | tr -d '\r'); e=$(date +%s%N)
-              echo "$shell, $n processes: $(( (e - s) / 1000000 )) ms"
-            done; done
-            s=$(date +%s%N); powershell.exe -NoProfile -NonInteractive -Command 'exit 0'; e=$(date +%s%N); echo "powershell.exe, nothing: $(( (e - s) / 1000000 )) ms"
-            file "$(command -v powershell.exe)" "$(command -v pwsh.exe)" 2>/dev/null || true
-          fi
-
       - name: The scripted checks
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
