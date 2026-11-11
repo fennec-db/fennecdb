@@ -2,8 +2,9 @@
 # (docs/design/durability.md, "A power cut"): this commit's fennec-server,
 # built as the release builds it, under `--sync always` in an Ubuntu 24.04
 # guest (QEMU/KVM on the runner, the cloud image set up by cloud-init), its
-# file on an ext4 disk of its own, cut by `kill -9` of QEMU at a random time
-# while a client on the host writes to it, five times; after each the guest
+# file on a disk of its own -- ext4, and XFS beside it -- cut by `kill -9`
+# of QEMU at a random time while a client on the host writes to it, five
+# times; after each the guest
 # boots, the server opens the same file -- the sync log beside it applied,
 # the path a durable write takes on Linux and no other system -- and every
 # write it acknowledged is checked there, whole, no batch half there. Two
@@ -72,8 +73,15 @@ jobs:
           if-no-files-found: error
 
   vm:
-    name: Linux guest (ext4), cut five times
+    name: Linux guest (${{ matrix.fs }}), cut five times
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The data disk's file system: ext4 as mkfs.ext4 makes it
+        # (data=ordered), and XFS as mkfs.xfs does -- each journals its
+        # metadata alone and orders a file's data its own way.
+        fs: [ext4, xfs]
     timeout-minutes: 60
     permissions:
       contents: read
@@ -87,7 +95,7 @@ jobs:
       IMAGE_URL: 'https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64.img'
       IMAGE_SHA256: 04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94
       SEED: ${{ github.run_id }}-${{ github.run_attempt }}
-      FS: ext4
+      FS: ${{ matrix.fs }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -160,7 +168,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: failure()
         with:
-          name: linux-power-cut-logs
+          name: linux-power-cut-logs-${{ matrix.fs }}
           path: |
             ${{ env.VM }}/serial.log
             ${{ env.VM }}/summary.txt

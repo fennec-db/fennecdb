@@ -337,7 +337,7 @@ boot_check() {
     # What the cut left beside the file: its lock, the sync log, and the
     # image a compact it stopped was writing (`.beside` for a compact beside
     # the database, `.compacting` for one under the lock), which the next
-    # compact writes anew; ext4's own lost+found.
+    # compact writes anew; ext4's own lost+found (XFS keeps none).
     gssh 'ls -A /d' > "$VM/files-$n-$label.txt"
     say "FILES cut $n $label: $(tr '\n' ' ' < "$VM/files-$n-$label.txt")"
     if grep -v -x -E 'lost\+found|t\.fennec|t\.fennec\.(lock|sync|beside|compacting)' "$VM/files-$n-$label.txt"; then
