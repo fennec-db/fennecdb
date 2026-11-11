@@ -24,6 +24,8 @@
 set -euo pipefail
 VM=${VM:?}
 HERE=$(cd "$(dirname "$0")" && pwd)
+# The host's files Linux's rig shares: the load and check, and the replay.
+SHARED=$(cd "$HERE/../power-cut" && pwd)
 PW='Fennec-PowerCut-2026!'
 SEED=${SEED:-0}
 WINDOW_LO=${WINDOW_LO:-2}
@@ -35,7 +37,7 @@ gssh() { sshpass -p "$PW" ssh "${SSHO[@]}" -p 2222 Administrator@127.0.0.1 "$@";
 gscp() { sshpass -p "$PW" scp "${SSHO[@]}" -P 2222 "$@"; }
 now() { date +%s; }
 T0=$(now)
-CLIENT=(python3 "$HERE/client.py" --token-file "$VM/token" --state "$VM/state")
+CLIENT=(python3 "$SHARED/client.py" --token-file "$VM/token" --state "$VM/state")
 
 # A line for the log and for the run's summary page.
 say() { echo "$*"; echo "$*" >> "$VM/summary.txt"; }
@@ -309,7 +311,7 @@ lost_disk() {
     np=$!
     for _ in $(seq 1 100); do [ -S "$VM/nbd.sock" ] && break; sleep 0.1; done
     t0=$(now)
-    python3 "$HERE/replay.py" "$VM/log-$n.bin" "$VM/nbd.sock" | tee "$VM/replay-$n.log"
+    python3 "$SHARED/replay.py" "$VM/log-$n.bin" "$VM/nbd.sock" | tee "$VM/replay-$n.log"
     wait "$np"
     say "$(grep '^REPLAY [0-9]' "$VM/replay-$n.log" | sed "s/^REPLAY/REPLAY cut $n:/")"
     say "TIMING cut${n}_replay=$(( $(now) - t0 ))s log=$(( $(stat -c %s "$VM/log-$n.bin") >> 20 ))MiB"

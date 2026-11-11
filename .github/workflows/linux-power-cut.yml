@@ -1,0 +1,175 @@
+# A power cut under Linux, windows-power-cut.yml's counterpart
+# (docs/design/durability.md, "A power cut"): this commit's fennec-server,
+# built as the release builds it, under `--sync always` in an Ubuntu 24.04
+# guest (QEMU/KVM on the runner, the cloud image set up by cloud-init), its
+# file on an ext4 disk of its own, cut by `kill -9` of QEMU at a random time
+# while a client on the host writes to it, five times; after each the guest
+# boots, the server opens the same file -- the sync log beside it applied,
+# the path a durable write takes on Linux and no other system -- and every
+# write it acknowledged is checked there, whole, no batch half there. Two
+# of the cuts also lose the disk's volatile cache: the disk rebuilt as of
+# the last flush the guest asked for (QEMU's blklogwrites, replay.py),
+# checked the same way. .github/linux-power-cut/ holds the guest's side,
+# .github/power-cut/ the host's files both systems' rigs run.
+#
+# About a quarter of an hour, so never on a pull request and not a required
+# check: by hand, weekly, and on a push to main that touches the durability
+# code -- the file and its flushes (fs, fs/windows), the sync log, the
+# engine's flush and commit (engine.rs, its handover and the maintenance
+# beside it) and the lock. A release needs its last run green
+# (RELEASING.md).
+name: linux power cut
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '53 4 * * 1'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fennec-core/src/fs.rs'
+      - 'crates/fennec-core/src/fs/**'
+      - 'crates/fennec-core/src/synclog.rs'
+      - 'crates/fennec-core/src/engine.rs'
+      - 'crates/fennec-core/src/engine/handover.rs'
+      - 'crates/fennec-core/src/engine/maintenance.rs'
+      - 'crates/fennec-abi/src/lock.rs'
+      - '.github/linux-power-cut/**'
+      - '.github/power-cut/**'
+      - '.github/workflows/linux-power-cut.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-power-cut-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The release's own build (release.yml's `binaries`): musl, static, the
+  # release profile. Built beside the guest's download and first boot.
+  server:
+    name: fennec-server (release, x86_64-unknown-linux-musl)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: |
+          rustup show
+          rustup target add x86_64-unknown-linux-musl
+      - name: Install musl tooling
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools >/dev/null
+      - name: Build, as release.yml builds it
+        run: cargo build --release --target x86_64-unknown-linux-musl -p fennec-server
+      - uses: actions/upload-artifact@v7
+        with:
+          name: fennec-linux-server
+          path: target/x86_64-unknown-linux-musl/release/fennec-server
+          retention-days: 3
+          if-no-files-found: error
+
+  vm:
+    name: Linux guest (ext4), cut five times
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      # `gh run download` of the binary the job beside this one uploads,
+      # while this one boots the guest: a `needs:` would wait for it first.
+      actions: read
+    env:
+      # Ubuntu 24.04's cloud image, a dated release Canonical keeps; the
+      # SHA-256 is the one its SHA256SUMS names. Not cached: the
+      # repository's caches are full, and it downloads in seconds.
+      IMAGE_URL: 'https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64.img'
+      IMAGE_SHA256: 04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94
+      SEED: ${{ github.run_id }}-${{ github.run_attempt }}
+      FS: ext4
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: The runner
+        run: |
+          echo "cpus $(nproc)"; free -g | head -2; df -h / /mnt 2>/dev/null || df -h /
+          lscpu | grep -iE 'model name|virtualization|hypervisor'
+          if [ -d /mnt ] && [ "$(df --output=avail -BG /mnt | tail -1 | tr -dc 0-9)" -gt 30 ]; then
+            VM=/mnt/vm; sudo mkdir -p "$VM"; sudo chown "$(id -u):$(id -g)" "$VM"
+          else
+            VM=$RUNNER_TEMP/vm; mkdir -p "$VM"
+          fi
+          echo "VM=$VM" >> "$GITHUB_ENV"
+          # The server's token: made here, a file only the runner's user
+          # reads, copied into the guest; never printed.
+          (umask 077; python3 -c 'import secrets, sys; sys.stdout.write(secrets.token_urlsafe(32))' > "$VM/token")
+      - name: KVM for the runner's user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: QEMU and the tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 qemu-utils genisoimage >/dev/null
+          qemu-system-x86_64 --version | head -1
+      - name: The cloud image
+        run: |
+          t0=$(date +%s)
+          curl -sS -L --fail --retry 3 -o "$VM/cloud.img" "$IMAGE_URL"
+          echo "TIMING image_download=$(( $(date +%s) - t0 ))s" | tee -a "$VM/summary.txt"
+          sum=$(sha256sum "$VM/cloud.img" | cut -d' ' -f1)
+          if [ "$sum" != "$IMAGE_SHA256" ]; then echo "image sha256 $sum, pinned $IMAGE_SHA256"; exit 1; fi
+      - name: First boot, cloud-init, a clean restart
+        timeout-minutes: 15
+        run: .github/linux-power-cut/vm.sh boot
+      - name: This commit's fennec-server in the guest, serving
+        timeout-minutes: 30
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/linux-power-cut/vm.sh fennec
+      - name: Cut 1, the disk as QEMU left it
+        timeout-minutes: 10
+        run: .github/linux-power-cut/vm.sh cut 1 plain log
+      - name: Cut 2, and the disk as of its last flush
+        timeout-minutes: 15
+        run: .github/linux-power-cut/vm.sh cut 2 lost plain
+      - name: Cut 3, the disk as QEMU left it
+        timeout-minutes: 10
+        run: .github/linux-power-cut/vm.sh cut 3 plain log
+      - name: Cut 4, and the disk as of its last flush
+        timeout-minutes: 15
+        run: .github/linux-power-cut/vm.sh cut 4 lost plain
+      - name: Cut 5, the disk as QEMU left it
+        timeout-minutes: 10
+        run: .github/linux-power-cut/vm.sh cut 5 plain plain
+      - name: What each cut found
+        if: always()
+        run: .github/linux-power-cut/vm.sh summary || true
+      - name: Stop QEMU
+        if: always()
+        run: |
+          if [ -f "$VM/qemu.pid" ]; then kill -9 "$(cat "$VM/qemu.pid")" 2>/dev/null || true; fi
+      # The serial log, the client's record of every write and each check,
+      # the server's output, and on a failure the files the cut left as
+      # they were before the server opened them: never the token, the key,
+      # the disks or the write logs.
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: linux-power-cut-logs
+          path: |
+            ${{ env.VM }}/serial.log
+            ${{ env.VM }}/summary.txt
+            ${{ env.VM }}/state/
+            ${{ env.VM }}/load-*.log
+            ${{ env.VM }}/check-*.log
+            ${{ env.VM }}/server-*.log
+            ${{ env.VM }}/replay-*.log
+            ${{ env.VM }}/files-*.txt
+            ${{ env.VM }}/evidence/
+          retention-days: 7
+          if-no-files-found: ignore

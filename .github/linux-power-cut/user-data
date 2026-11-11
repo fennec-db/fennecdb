@@ -1,0 +1,36 @@
+#cloud-config
+# The Linux power-cut guest (vm.sh, docs/design/durability.md#a-power-cut):
+# one user the host reaches with this run's key (vm.sh writes it in for
+# @KEY@), nothing installed or upgraded, and nothing left to write to the
+# disks on a timer of its own between the cuts.
+hostname: fennec-cut
+users:
+  - name: fennec
+    shell: /bin/bash
+    sudo: 'ALL=(ALL) NOPASSWD:ALL'
+    lock_passwd: true
+    ssh_authorized_keys:
+      - @KEY@
+ssh_pwauth: false
+disable_root: true
+package_update: false
+package_upgrade: false
+package_reboot_if_required: false
+write_files:
+  # A boot after a cut is one that did not finish, and Ubuntu's GRUB then
+  # waits at its menu for 30 s (recordfail) with no one at the console.
+  - path: /etc/default/grub.d/99-power-cut.cfg
+    content: |
+      GRUB_RECORDFAIL_TIMEOUT=0
+      GRUB_TIMEOUT=0
+runcmd:
+  - - sh
+    - -c
+    - >-
+      for u in apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service
+      fstrim.timer motd-news.timer man-db.timer e2scrub_all.timer dpkg-db-backup.timer
+      snapd.service snapd.socket snapd.seeded.service;
+      do systemctl disable --now "$u" 2>/dev/null || true; done
+  - update-grub
+  - sync
+  - touch /var/lib/power-cut-ready

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """The load a power cut lands in, and the check after it.
 
-The host's side of the Windows power-cut test (docs/design/windows.md,
-decision 9): the guest's fennec-server, under `--sync always`, reached
-through QEMU's port forward. The standard library alone: it runs on the
-runner beside QEMU.
+The host's side of the power-cut tests, Windows' and Linux's
+(docs/design/windows.md#the-power-cut, docs/design/durability.md#a-power-cut):
+the guest's fennec-server, under `--sync always`, reached through QEMU's
+port forward. The standard library alone: it runs on the runner beside
+QEMU, and nothing in it is either system's.
 
     client.py setup --state DIR
     client.py load  --state DIR --cut N --seed S
