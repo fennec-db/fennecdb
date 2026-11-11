@@ -1,7 +1,7 @@
 // Notes in a fennecdb file in the app's own directory. The list is a live
 // query, run again after every write; the search box ranks by the words
 // and the toy vector together (lib/notes.dart).
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
