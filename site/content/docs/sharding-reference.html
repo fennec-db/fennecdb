@@ -205,8 +205,8 @@ page is told the rule the router's preflight told it, and never two
 flag the router sends none of its own and passes a node's through as the node
 wrote them, and a preflight goes to the node.</p>
 
-<p>A node with no <code>--http-token</code> answers a page only from its own
-origin or its <code>--http-cors</code>'s (<a
+<p>A node with no data token (<code>--http-token</code> or JSON Web Tokens)
+answers a page only from its own origin or its <code>--http-cors</code>'s (<a
 href="/docs/http-access#open-servers">A server with no token</a>). An origin
 the router's <code>--http-cors</code> lets in is the router's to answer for, so
 the router does not send it on and the node needs no flag of its own; any other
@@ -217,16 +217,25 @@ the same way: only under this machine's name (<code>localhost</code> or an IP
 address), and its own routes only to its own pages and its
 <code>--http-cors</code>'s. A forward's origin is judged by the rule its page
 is told: the router's <code>--http-cors</code> where it has one, otherwise the
-node's. Reached by another name, a router needs <code>--token</code> and its
-nodes a data token.</p>
+node's. Every router sends the node the name its client reached the router by
+in <code>X-Forwarded-Host</code>, in place of any the client sent, and a node
+with no data token answers only this machine's names there too. So once
+clients reach the router by any other name, the router needs
+<code>--token</code>, and every node needs a data token as well: the router's
+token does not stand in for it.</p>
 </details>
 
 <h3 id="https-nodes">Nodes that serve HTTPS</h3>
 
 <p>A node started with <code>--tls-cert</code> and <code>--tls-key</code> is
-recorded with its scheme in the address:</p>
+recorded with its scheme in the address. Reached by a name, as here, the
+node needs a data token beside its admin token: a node with none answers only
+under this machine's names (<a href="#cors">CORS through the router</a>), so
+it would refuse the router's own calls with 403.</p>
 
-<pre data-lang="bash">curl -X PUT localhost:8090/_shard/nodes/n1 -H 'Authorization: Bearer root' \
+<pre data-lang="bash">fennec-server --dir /data/n1 --http 0.0.0.0:8081 --admin-token a1 \
+         --http-token "$DATA_TOKEN" --tls-cert node1.pem --tls-key node1.key
+curl -X PUT localhost:8090/_shard/nodes/n1 -H 'Authorization: Bearer root' \
      -d '{"addr":"https://node1.internal:8081","token":"a1"}'</pre>
 
 <ul>
@@ -422,7 +431,9 @@ fennec-server --jwt-secret-file jwt.secret --mint-token '{"sub":"alice","tenant"
 <code>--admin-token</code>, which only the router holds. The router's
 <code>--token</code> guards <code>/_shard/</code>; like the nodes, it refuses to
 listen on a non-loopback address without one unless given
-<code>--insecure</code>.</p>
+<code>--insecure</code>. A node with no data token answers only requests made
+under this machine's name, <code>localhost</code> or an address, through the
+router as straight to it (<a href="#cors">CORS through the router</a>).</p>
 
 <p>With <code>--jwt-secret</code> or <code>--jwt-keys</code> a node also takes
 JSON Web Tokens held to its <code>--policy</code>, and the policy is the

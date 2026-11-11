@@ -243,9 +243,8 @@ pub(crate) fn admit<'a>(
     // whatever it sends. Asked of a server with a token too, which the
     // connection's own check (`crate::open_refusal`) leaves alone.
     let open = cfg.token.is_none() && cfg.access.is_none();
-    if let Some(why) =
-        crate::cors::foreign(cfg.cors.as_deref(), open.then_some("--http-token"), req)
-    {
+    let flag = open.then_some("--http-token");
+    if let Some(why) = crate::cors::foreign(cfg.cors.as_deref(), flag, cfg.tls.is_some(), req) {
         let body = Reply::error(403, None, INVALID_REQUEST, &why).body;
         return Err(Response::json(403, body.unwrap_or_default()));
     }

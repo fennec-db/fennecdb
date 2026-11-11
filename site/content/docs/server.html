@@ -147,6 +147,26 @@ anything it sent runs. curl, the SDKs and other servers send no
 <code>Origin</code> and are unaffected. To reach the server by another name, give
 it a token; <code>/_health</code> answers under any name.</p>
 
+<p id="behind-a-proxy">Behind a reverse proxy, the same holds for the name the
+proxy was reached by:</p>
+
+<ul>
+  <li><b>A proxy that keeps the <code>Host</code></b> (Caddy's and Traefik's
+    default) passes on the browser's name, and names it in
+    <code>X-Forwarded-Host</code> too, which the server asks as it asks its
+    own <code>Host</code>. An open server behind it answers 403 to every
+    request: give it <code>--http-token</code> or JSON Web Tokens.</li>
+  <li><b>A proxy that rewrites the <code>Host</code></b> to the server's
+    address (nginx's default <code>proxy_pass</code>) gets through. But a page
+    served on the proxy's origin, the studio among them, is not on the
+    server's own origin, so its POSTs are refused until
+    <code>--http-cors</code> names that origin
+    (<code>--http-cors https://db.example.com</code>). Such a proxy hides the
+    page's name from the server, so a page whose DNS name was rebound to the
+    proxy reaches the server through it: a server reached past this machine
+    needs a token, behind a proxy or not.</li>
+</ul>
+
 <div class="note trap">
   <p><b>Without a certificate the server speaks plain HTTP</b>, and a token sent
   over a network travels in the clear. Give it a certificate and a key and it

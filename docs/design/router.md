@@ -41,15 +41,29 @@ carry an `Origin` the router answers for (`cors::vouched`,
 under a name of this machine -- its studio's, which a rebound page is not,
 being under its own name. Any other goes on for the node to judge, a
 rebound page's own origin among them, and is refused there (403) where
-the node has no token; without `--http-cors` every origin goes on, and
-the node's rule is the one its headers, passed through, tell the page. A
-router with no `--token` is an open server itself -- `/_shard/` names
-every node's admin token, a query across every tenant runs there -- and is
-held to that rule on every request before it is routed: a forward's
-`Host` too, and its `Origin` where the router has `--http-cors`, whose
-rule is then the page's; without it the page is told the node's, so the
-node asks the origin. One with a token is as it was. The cost is one look
-for the `Origin` header a forward, against a list already read.
+the node has no token; without `--http-cors` every origin but that one,
+the router's own, goes on, and the node's rule is the one its headers,
+passed through, tell the page. A router with no `--token` is an open
+server itself -- `/_shard/` names every node's admin token, a query across
+every tenant runs there -- and is held to that rule on every request
+before it is routed: a forward's `Host` too, and its `Origin` where the
+router has `--http-cors`, whose rule is then the page's; without it the
+page is told the node's, so the node asks the origin. One with a token
+asks a page nothing of its own routes. The cost is one look for the
+`Origin` header a forward, against a list already read.
+
+Every forward names the `Host` its client reached the router by in
+`X-Forwarded-Host`, its own `Host` the node's address as before, for an
+open node asks that name as it asks its own ([http.md](http.md#open-servers)):
+without it a router with a token, which asks a page nothing, let a page
+whose name was rebound to it read an open node's tenants. The router puts
+its own in place of any the client sent, a page rebound to it being
+same-origin and free to send any header; a router relaying to another
+region's sends its client's on, kept there under the mark of the
+`--token` both hold and replaced otherwise. The header can only add a
+refusal at the node, so it needs no mark of its own. It is never the
+router that judges a forward by what a client sent: the node asks the
+name, and a client can only make its own request refused.
 
 ## Pooled connections
 

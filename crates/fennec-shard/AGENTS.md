@@ -127,9 +127,14 @@ own.](../../docs/design/router.md#cors)** With `--http-cors` it answers
 preflights and puts its own CORS headers in place of a node's
 (`cors::is_cors_header`), never both. A forward carries no `Origin` it
 answers for, `--http-cors`'s or its own under this machine's name
-(`cors::vouched`), any other left for the node to judge; without
-`--token` it is an open server, held to fennec-http's rule, a forward's
-`Origin` by its `--http-cors` alone, the node's rule otherwise.
+(`cors::vouched`), any other left for the node to judge, and names the
+`Host` its client reached it by in `X-Forwarded-Host`, in place of any the
+client sent -- a relaying router's kept, under its mark alone
+(`forwarded_headers`) -- for an open node to ask as its own: never judged
+at the router from a client's headers, which a rebound page sets as it
+likes. Without `--token` the router is an open server, held to
+fennec-http's rule, a forward without `--http-cors` to its `Host` alone,
+the node judging its `Origin`.
 
 **[The router looks at a pooled connection first, and resends only what
 cannot have run or may run twice.](../../docs/design/router.md#pooled-connections)**

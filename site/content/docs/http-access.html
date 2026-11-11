@@ -64,7 +64,11 @@ preflight <code>--http-cors</code> lets in are answered under any name. A server
 with a token is held to neither check: a page holds no token, and sends none to
 another origin without the preflight CORS refuses. <code>fennec-shard</code> with
 no <code>--token</code> is held the same way (<a
-href="/docs/sharding-reference#cors">Tenants and sharding</a>).</p>
+href="/docs/sharding-reference#cors">Tenants and sharding</a>). Behind the
+router or a proxy, the server also asks the name the router or proxy was
+reached by, which they send in <code>X-Forwarded-Host</code>: a node with no
+data token answers only a client that reached the router under this machine's
+name (<a href="/docs/server#behind-a-proxy">Behind a proxy</a>).</p>
 
 <details class="deep"><summary>TLS, unfiltered writes, body limits and what a shape leaks</summary>
 <p>The endpoint runs inside <code>fennec-server</code> and takes its TLS flags.

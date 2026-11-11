@@ -789,8 +789,10 @@ fn is_remote(addr: &str) -> bool {
 /// every tenant's statements for anyone, as a file's server with no token
 /// does, and is asked so on every route -- a router or a replica reaching
 /// it by another name than this machine's reaches its data so too, and
-/// takes a token there. A `--metrics` listener answers its scrape to the
-/// admin token too, so that one makes it no longer open.
+/// takes a token there, as does one behind a router its clients reach by
+/// such a name, which the router names in `X-Forwarded-Host`
+/// ([`cors::foreign_host`]). A `--metrics` listener answers its scrape to
+/// the admin token too, so that one makes it no longer open.
 ///
 /// A server with a token is left as it was: a page sends no
 /// `Authorization` to another origin without a preflight, which CORS
@@ -801,8 +803,13 @@ fn open_refusal(cfg: &Config, backend: &Backend, req: &Request) -> Option<Respon
     if cfg.token.is_some() || cfg.access.is_some() || scrape_token {
         return None;
     }
-    cors::foreign(cfg.cors.as_deref(), Some("--http-token"), req)
-        .map(|why| Response::error(403, &why))
+    cors::foreign(
+        cfg.cors.as_deref(),
+        Some("--http-token"),
+        cfg.tls.is_some(),
+        req,
+    )
+    .map(|why| Response::error(403, &why))
 }
 
 /// A single connection: reads consecutive requests on a keep-alive

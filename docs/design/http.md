@@ -259,9 +259,14 @@ for its binding asks it of every connection.
 So every request of an open server is asked, in the connection's loop
 before a route is chosen, a tenant looked up, a body parsed or a lock
 taken: a `Host` that is neither `localhost` (a subdomain of it, the
-trailing dot, any case) nor an IP literal is refused, and so is an
-`Origin` that is neither the one `--http-cors` names (`*` names every one)
-nor the server's own (its authority the `Host`), `null` among them. Both
+trailing dot, any case) nor an IP literal (bracketed, an IPv6 one, with
+nothing after its bracket but a port: `[::1]evil.example` names no
+address) is refused, and so is an `Origin` that is neither the one
+`--http-cors` names (`*` names every one) nor the server's own -- its
+authority the `Host`, its scheme `https` where the listener speaks TLS and
+`http` where it does not, for `http://localhost`, port 80's page, is
+another origin than an HTTPS listener's on 443 reached as `localhost`,
+whose `Host` names the same authority -- `null` among them. Both
 are one 403 naming the check, with the CORS headers so that an allowed
 page reaching the server by another name reads why; the words are MCP's,
 which tell what to do: reach it as localhost or by its address, or give it
@@ -289,19 +294,24 @@ there. A `--metrics` listener answers its scrape to the admin token too,
 so one given `--admin-token` is not open; on the main listener the admin
 token opens `/_admin/` alone and changes nothing.
 
-A server with a token is as it was. A page sends no `Authorization` to
+A server with a token asks neither. A page sends no `Authorization` to
 another origin without a preflight, which CORS refuses but for
 `--http-cors`'s origin, and a rebound page does not hold the token: no
 check of either kind stops anything there that the token does not, and a
 server reached as `db.example.com` behind a TLS terminator is the usual
-way to reach one. MCP keeps asking the origin of every server, as before.
-A server with a token pays one comparison a request; an open one 31 ns
-for an SDK's request with no `Origin` and 55 with its own (best of five
-runs of twenty million, release, the headers an SDK sends, load 5 on 8
-cores), against a `/query` row by id's 17.7 us p50 over HTTP: 0.2-0.3%.
-`local_host` compares the `.localhost` suffix in place; lowering a copy,
-as MCP's did, was 10 ns of it. The browser module holds none of it: the
-check is fennec-http's.
+way to reach one. MCP keeps asking the origin of every server, as before
+-- its scheme too now, so a page calling `/_mcp` on its own origin through
+a TLS terminator in front of a plain listener names that origin with
+`--http-cors`. A server with a token pays one comparison a request; an
+open one 29 ns for an SDK's request with no `Origin` and 54 with its own
+(best of five runs of twenty million, release, the headers an SDK sends,
+load under 2 on 8 cores), against a `/query` row by id's 17.7 us p50 over
+HTTP: 0.2-0.3%. That is one pass over the headers (`looked`), each name
+told by its length before its letters, `Host`, `Origin` and
+`X-Forwarded-Host` found in it: asked by name in turn, the three were 46
+ns, where `Host` and `Origin` alone had been 32. `local_host` compares the
+`.localhost` suffix in place; lowering a copy, as MCP's did, was 10 ns of
+it. The browser module holds none of it: the check is fennec-http's.
 
 The router is held the same where it asks no `--token`: its `/_shard/`
 names every node's admin token, runs a query across every tenant and
@@ -311,18 +321,57 @@ on every request before it is routed: its own routes by its own
 rule its page is told -- the router's `--http-cors` where it has one, else
 the node's, which the node asks itself and its answer carries through (a
 page calling a tenant through such a router by the nodes' CORS alone, as
-`router.rs`'s preflight test does, kept working). With a token it is as a
-server with one is, and a forward's node judges it: the router sends the
-node an `Origin` unless it answers for it ([router.md](router.md#cors)),
-and the node's own address as `Host`, which a proxy in front of a node
-may route by.
+`router.rs`'s preflight test does, kept working). With a token it asks a
+page nothing, as a server with one does, and a forward's node judges it:
+the router sends the node an `Origin` unless it answers for it
+([router.md](router.md#cors)), the node's own address as `Host`, which a
+proxy in front of a node may route by, and the `Host` its client reached
+it by as `X-Forwarded-Host`.
 
-What stays open: a router with a token in front of nodes with none answers
-a rebound page's `GET` through it, the node seeing the router's name for
-it, not the page's. Sending the client's `Host` to the node would close it
-and break a node behind a proxy routing by name; the kit gives every node
-a token (`deploy/env/node.env`), and the docs say a node reached past this
-machine takes one.
+That last closed what the first version of this rule left open: a router
+with a token in front of nodes with none answered a rebound page's `GET`
+through it -- a tenant's rows, its streams, `/_changes` -- the node seeing
+the router's name for it, never the page's, and the router asking a page
+nothing (a write was refused already, its `Origin` going on to the node).
+Sending the client's `Host` as the node's `Host` would have closed it and
+broken a node behind a proxy routing by name; the router sends it beside
+it instead, and an open node asks `X-Forwarded-Host` as it asks `Host`,
+every one of its values and every name in each one's list. The header
+needs no mark to be believed, the router's or another's: it can only add a
+refusal. A request naming this machine in both passes as it did with
+`Host` alone; one carrying a name of another refuses itself, whoever sent
+it -- a client sending it straight to an open node gains nothing it would
+not have had without it. What would lift a refusal is a forward that
+named this machine for a page that reached the router by another name,
+and the router never sends one: it drops whatever the client sent under
+the name and puts its own in place (`forwarded_headers`), so a rebound
+page, which being same-origin may send any header, cannot name
+`localhost` there. A router relaying to another region's router sends the
+name its client used, and that router keeps it only on a request bearing
+the mark of the `--token` they share (`audit::request`, the relay's
+`relayed`), any other replaced as a client's is. The gap is never closed
+at the router by reading a client's headers -- "no `Authorization`, so ask
+the `Host`" -- for a rebound page sets whichever it likes.
+
+`X-Forwarded-Host` rather than RFC 7239's `Forwarded: host=`, the
+standard's own: one value where `Forwarded` is a list of hops, each a list
+of quoted pairs, parsed on every request of an open server; and it is the
+one a proxy in front of a node sends of its own -- Caddy and Traefik by
+default, nginx where its configuration says `proxy_set_header
+X-Forwarded-Host $host` -- so the rule meets theirs too: an open server
+behind such a proxy is reached by the proxy's public name, and refuses it
+as it would refuse it as its `Host`. A proxy that rewrites the `Host` and
+sends no such header, nginx's default, hides the page's name from the
+server: an open server behind it answers a rebound page through it, so a
+server reached past this machine, behind a proxy or not, takes a token,
+as the docs say -- a node too wherever its router's clients reach the
+router by a name other than this machine's (the kit gives every node one,
+`deploy/env/node.env`). A forward costs one compare a header more, the
+`Host` looked up and one push, into a list now made once at its full
+length, room for the router's mark beside it: an SDK's request's headers
+are sorted in 73 ns where they took 97, the list collected having grown
+as it filled (best of five runs of ten million, release, load 2 on 8
+cores).
 
 The harnesses met it where they reached an open server by a name: the
 language tests' containers reached the Quickstart's server as

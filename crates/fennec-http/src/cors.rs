@@ -34,15 +34,22 @@ use crate::http::{Request, Response};
 /// the `Origin` part of an open one alone too, but for MCP's endpoint,
 /// which asks it of every server, as its binding asks of every connection.
 /// A request with no `Origin` -- curl, the SDKs, another server -- is no
-/// page's.
-pub fn foreign(cors: Option<&str>, token_flag: Option<&str>, req: &Request) -> Option<String> {
-    if let Some(why) = token_flag.and_then(|flag| foreign_host(flag, req)) {
-        return Some(why);
-    }
-    let host = req.header("host").map(str::trim);
-    let origin = req.header("origin")?.trim();
+/// page's. `tls`: whether the listener speaks HTTPS, whose own origin is
+/// `https://` and no other.
+pub fn foreign(
+    cors: Option<&str>,
+    token_flag: Option<&str>,
+    tls: bool,
+    req: &Request,
+) -> Option<String> {
+    let (host, origin) = match looked(token_flag, req) {
+        Ok(found) => found,
+        Err(why) => return Some(why),
+    };
+    let origin = origin?;
     // The origin `--http-cors` lets in, as every answer's CORS says it.
-    match allows(cors, req) || same_origin(origin, host) {
+    let allowed = matches!(cors, Some(c) if c == "*" || Some(c) == req.header("origin"));
+    match allowed || same_origin(origin, host, tls) {
         true => None,
         false => Some(format!(
             "Origin `{origin}` may not call this server: --http-cors names the origin a page may come from"
@@ -50,18 +57,81 @@ pub fn foreign(cors: Option<&str>, token_flag: Option<&str>, req: &Request) -> O
     }
 }
 
+/// The header a router names the `Host` its client reached it by in, on
+/// every request it forwards: the client's own, the router's name for
+/// itself, which the node never sees otherwise -- a forward's `Host` is
+/// the node's address, which a proxy in front of a node may route by. The
+/// one a client sent is dropped and the router's put in its place; a
+/// relaying router's alone is kept, under its mark (fennec-shard's
+/// `forwarded_headers`). `X-Forwarded-Host` rather than RFC 7239's
+/// `Forwarded: host=`: one value, no list of hops with its quoting to
+/// parse on every request of an open server, and the one the proxies a
+/// node may sit behind send of their own -- Caddy and Traefik by default,
+/// nginx where told -- so the rule meets theirs too.
+pub const FORWARDED_HOST: &str = "X-Forwarded-Host";
+
 /// The `Host` part of [`foreign`] alone, of a server that asks for no
 /// token, `token_flag` the flag that would give it one: a router with no
 /// `--http-cors` of its own asks it of a forward, whose page is judged by
 /// the node's rule, the one its answer carries through.
+///
+/// Asked of [`FORWARDED_HOST`] as of `Host`, every value of each and every
+/// name in a list: a router in front of an open node reached by a rebound
+/// name sends the node that name there, the node seeing its own address as
+/// `Host` -- a token router's, which asks a page nothing on a forward, let
+/// a rebound page read a tenant's rows, its streams and `/_changes`
+/// through it. The header is believed from no one, for it can only refuse
+/// more: a request naming this machine in both passes as it did with
+/// `Host` alone, and one sending it of its own -- a rebound page can, being
+/// same-origin -- refuses itself. Nothing a client sends lifts a refusal,
+/// so the router overwrites it rather than this asking who sent it.
 pub fn foreign_host(token_flag: &str, req: &Request) -> Option<String> {
-    let h = req.header("host")?.trim();
-    (!local_host(h)).then(|| {
-        format!(
-            "Host `{h}` is not this machine's, and this server asks for no token: \
-             reach it as localhost or by its address, or give it {token_flag}"
-        )
-    })
+    looked(Some(token_flag), req).err()
+}
+
+/// One pass over `req`'s headers, as every request of an open server
+/// makes it: its first `Host` and `Origin`, trimmed, or -- where
+/// `token_flag` asks it -- why a `Host` or [`FORWARDED_HOST`] names another
+/// machine than this one. Each name is told by its length before its
+/// letters, in the one pass: asked by name in turn, the three cost an
+/// SDK's request with no `Origin` 46 ns, where `Host` and `Origin` alone
+/// had cost 32; so, 29 (55 and 54 with its own origin; best of five runs
+/// of twenty million, release).
+fn looked<'r>(
+    token_flag: Option<&str>,
+    req: &'r Request,
+) -> Result<(Option<&'r str>, Option<&'r str>), String> {
+    let (mut host, mut origin) = (None, None);
+    for (k, v) in &req.headers {
+        let foreign = match k.len() {
+            4 if k.eq_ignore_ascii_case("host") => {
+                let h = v.trim();
+                host.get_or_insert(h);
+                // A `Host` holds no comma, and is asked whole.
+                token_flag.and(Some(h)).filter(|h| !local_host(h))
+            }
+            6 if k.eq_ignore_ascii_case("origin") => {
+                origin.get_or_insert(v.trim());
+                None
+            }
+            // A proxy adds its own to the list after the ones before it.
+            16 if k.eq_ignore_ascii_case(FORWARDED_HOST) && token_flag.is_some() => {
+                v.split(',').map(str::trim).find(|h| !local_host(h))
+            }
+            _ => None,
+        };
+        if let (Some(h), Some(flag)) = (foreign, token_flag) {
+            let through = match k.len() == 4 {
+                true => "",
+                false => " (the name a router or proxy was reached by)",
+            };
+            return Err(format!(
+                "Host `{h}`{through} is not this machine's, and this server asks for no \
+                 token: reach it as localhost or by its address, or give it {flag}"
+            ));
+        }
+    }
+    Ok((host, origin))
 }
 
 /// Whether a router may answer for `req`'s origin to the node it forwards
@@ -70,33 +140,42 @@ pub fn foreign_host(token_flag: &str, req: &Request) -> Option<String> {
 /// (`fennec-shard`'s rule), or the router's own under a name of this
 /// machine -- a page it served, its studio's. Under any other name its own
 /// origin is a rebound page's as much as the router's: the node is sent it
-/// and asks it as its own.
-pub fn vouched(cors: Option<&str>, req: &Request) -> bool {
+/// and asks it as its own. `tls`: whether the router's listener speaks
+/// HTTPS.
+pub fn vouched(cors: Option<&str>, tls: bool, req: &Request) -> bool {
     let Some(origin) = req.header("origin").map(str::trim) else {
         return false;
     };
     let host = req.header("host").map(str::trim);
-    allows(cors, req) || (same_origin(origin, host) && host.is_some_and(local_host))
+    allows(cors, req) || (same_origin(origin, host, tls) && host.is_some_and(local_host))
 }
 
-/// Whether `origin` (`scheme://authority`) is the one `host` names: a page
-/// the server itself served.
-fn same_origin(origin: &str, host: Option<&str>) -> bool {
+/// Whether `origin` (`scheme://authority`) is the one `host` names, on a
+/// listener speaking HTTPS where `tls`: a page the server itself served.
+/// The scheme is half of an origin: `http://localhost`, port 80's page,
+/// is no page of an HTTPS listener on 443 reached as `localhost`, whose
+/// `Host` names the same authority.
+fn same_origin(origin: &str, host: Option<&str>, tls: bool) -> bool {
+    let scheme = if tls { "https" } else { "http" };
     origin
         .split_once("://")
-        .is_some_and(|(_, authority)| Some(authority) == host)
+        .is_some_and(|(s, authority)| s == scheme && Some(authority) == host)
 }
 
 /// Whether `host` (a `Host` header, port and all) names this machine or an
 /// address: `localhost` and its subdomains, or an IP literal.
 pub fn local_host(host: &str) -> bool {
     let name = match host.strip_prefix('[') {
-        // `[::1]:8080`
+        // `[::1]:8080`: the address, then nothing or a port alone --
+        // `[::1]evil.example` names no address.
         Some(rest) => {
-            return rest
-                .split(']')
-                .next()
-                .is_some_and(|ip| ip.parse::<std::net::Ipv6Addr>().is_ok())
+            return rest.split_once(']').is_some_and(|(ip, port)| {
+                ip.parse::<std::net::Ipv6Addr>().is_ok()
+                    && (port.is_empty()
+                        || port
+                            .strip_prefix(':')
+                            .is_some_and(|p| p.bytes().all(|b| b.is_ascii_digit())))
+            })
         }
         None => host.rsplit_once(':').map_or(host, |(n, port)| {
             if port.bytes().all(|b| b.is_ascii_digit()) {
@@ -223,6 +302,7 @@ mod tests {
             "127.0.0.1:8080",
             "10.0.0.7:8080",
             "[::1]:8080",
+            "[::1]",
             "[fe80::1]",
         ] {
             assert!(local_host(h), "{h}");
@@ -232,9 +312,75 @@ mod tests {
             "evil.example",
             "localhost.evil.example",
             "127.0.0.1.nip.io:80",
+            // After the bracket, a port alone.
+            "[::1]evil.example",
+            "[::1].evil.example:80",
+            "[::1]:abc",
+            "[::1]:80evil",
         ] {
             assert!(!local_host(h), "{h}");
         }
+    }
+
+    fn request(headers: &[(&str, &str)]) -> Request {
+        Request {
+            method: crate::http::Method::Post,
+            target: "/query".into(),
+            path: "/query".into(),
+            query: Vec::new(),
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            body: Vec::new(),
+            keep_alive: true,
+        }
+    }
+
+    /// An origin is its scheme too: a listener speaking HTTPS reached as
+    /// `localhost` is no page's of `http://localhost`, port 80's, and a
+    /// plain one none of `https://`'s.
+    #[test]
+    fn a_servers_own_origin_is_its_scheme_too() {
+        let open = Some("--http-token");
+        let page = |origin| request(&[("Host", "localhost"), ("Origin", origin)]);
+        assert_eq!(foreign(None, open, true, &page("https://localhost")), None);
+        assert!(foreign(None, open, true, &page("http://localhost")).is_some());
+        assert_eq!(foreign(None, open, false, &page("http://localhost")), None);
+        assert!(foreign(None, open, false, &page("https://localhost")).is_some());
+        // MCP asks a server with a token the same.
+        assert!(foreign(None, None, true, &page("http://localhost")).is_some());
+        // The router answers for its own page alike.
+        assert!(vouched(None, true, &page("https://localhost")));
+        assert!(!vouched(None, true, &page("http://localhost")));
+        assert!(!vouched(None, false, &page("https://localhost")));
+    }
+
+    /// `X-Forwarded-Host` is asked as `Host` is, every name of it, and can
+    /// only refuse: the name a router in front was reached by.
+    #[test]
+    fn a_forwarded_host_can_only_refuse() {
+        let asked = |headers: &[(&str, &str)]| foreign_host("--http-token", &request(headers));
+        let node = ("Host", "127.0.0.1:8081");
+        assert_eq!(asked(&[node]), None);
+        assert_eq!(asked(&[node, ("X-Forwarded-Host", "localhost:8090")]), None);
+        let why = asked(&[node, ("x-forwarded-host", "evil.example:8090")]).unwrap();
+        assert!(why.contains("Host `evil.example:8090`"), "{why}");
+        assert!(why.contains("a router or proxy"), "{why}");
+        // Every name in its list, and every one of the header.
+        let list = ("X-Forwarded-Host", "localhost, evil.example");
+        assert!(asked(&[node, list]).is_some());
+        let twice = [
+            node,
+            ("X-Forwarded-Host", "localhost"),
+            ("X-Forwarded-Host", "evil.example"),
+        ];
+        assert!(asked(&twice).is_some());
+        // It lifts no refusal of `Host`.
+        let rebound = ("Host", "evil.example");
+        assert!(asked(&[rebound, ("X-Forwarded-Host", "localhost")]).is_some());
+        // No `Host` but the header: still asked.
+        assert!(asked(&[("X-Forwarded-Host", "evil.example")]).is_some());
     }
 
     #[test]

@@ -594,9 +594,11 @@ fn a_router_answers_for_the_origins_it_lets_in_to_an_open_node() {
     assert!(r.body.contains("\"notes\""), "{}", r.body);
 }
 
-/// A router with `--token` is as it was: a page holds no token.
+/// A router with `--token` asks a page nothing of its own routes: a page
+/// holds no token. A forward's node judges the page, told the name the
+/// router was reached by (below).
 #[test]
-fn a_router_with_a_token_is_unchanged() {
+fn a_router_with_a_token_asks_a_page_nothing_of_its_own_routes() {
     let port = router(Directory::in_memory(), None, 0);
     let root = "Authorization: Bearer root\r\n";
     let r = send(
@@ -646,4 +648,130 @@ fn an_open_router_without_http_cors_leaves_a_forwards_origin_to_its_node() {
     assert_eq!(r.status, 403, "{}", r.body);
     let r = send(port, "GET", "/t/acme/collections", "localhost", "", "");
     assert!(r.body.contains("\"notes\""), "{}", r.body);
+}
+
+/// A router with `--token` asks a page nothing on a forward, and a node
+/// with no data token saw only the router's address for itself: a page
+/// whose name was rebound to the router read a tenant's rows, its streams
+/// and `/_changes` through it. The router names the `Host` its client
+/// reached it by in `X-Forwarded-Host`, in place of any the client sent,
+/// and the node asks that as it asks its own.
+#[test]
+fn a_token_router_tells_an_open_node_the_name_its_client_reached_it_by() {
+    let n = node("forwarded-host", None);
+    let port = in_front_of(&n, None);
+    let make = r#"{"query":"create collection notes (title text)"}"#;
+    let r = send(port, "POST", "/t/acme/query", "localhost", "", make);
+    assert_eq!(r.status, 200, "{}", r.body);
+
+    let rebound = "evil.example:8090";
+    for target in [
+        "/t/acme/notes",
+        "/t/acme/notes/changes",
+        "/t/acme/_changes",
+        "/t/acme/collections",
+    ] {
+        let r = send(port, "GET", target, rebound, "", "");
+        assert_eq!(r.status, 403, "{target}: {}", r.body);
+        assert!(r.body.contains("Host `evil.example:8090`"), "{}", r.body);
+        assert!(r.body.contains("give it --http-token"), "{}", r.body);
+        // One naming this machine, sent by the page itself, is no use.
+        let forged = "X-Forwarded-Host: localhost\r\n";
+        let r = send(port, "GET", target, rebound, forged, "");
+        assert_eq!(r.status, 403, "{target}: {}", r.body);
+    }
+    // A write, a same-origin page's sending no `Origin`.
+    let drop = r#"{"query":"drop collection notes"}"#;
+    let r = send(port, "POST", "/t/acme/query", rebound, "", drop);
+    assert_eq!(r.status, 403, "{}", r.body);
+
+    // This machine's names pass, through the router as straight to the
+    // node; a client's own header naming another is replaced, as any is.
+    let own = format!("127.0.0.1:{port}");
+    for host in ["localhost", "app.localhost:8090", own.as_str()] {
+        let r = send(port, "GET", "/t/acme/notes", host, "", "");
+        assert_eq!(r.status, 200, "{host}: {}", r.body);
+    }
+    let other = "X-Forwarded-Host: evil.example\r\n";
+    let r = send(port, "GET", "/t/acme/notes", "localhost", other, "");
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = send(port, "GET", "/t/acme/collections", "localhost", "", "");
+    assert!(r.body.contains("\"notes\""), "{}", r.body);
+}
+
+/// A relay to the home region's router carries the name the first
+/// router's client reached it by: the router it relays to keeps it, the
+/// request marked by the `--token` both hold, and its node is told the
+/// page's name rather than the first router's for the second. Sent to
+/// that router straight, a client's own is replaced as at any.
+#[test]
+fn a_relay_keeps_the_name_its_client_reached_the_first_router_by() {
+    use crate::unsent::{read_request, ANSWERED};
+    use std::io::BufReader;
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+
+    // A stand-in node, answering every request and handing on its head.
+    let stand_in = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (heads, asked) = mpsc::channel::<String>();
+    let at = stand_in.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        for conn in stand_in.incoming() {
+            let Ok(conn) = conn else { return };
+            let heads = heads.clone();
+            std::thread::spawn(move || {
+                let mut conn = BufReader::new(conn);
+                loop {
+                    let head = read_request(&mut conn);
+                    if heads.send(head).is_err() || conn.get_mut().write_all(ANSWERED).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    let forwarded = |head: &str| -> Vec<String> {
+        head.lines()
+            .filter_map(|l| l.split_once(':'))
+            .filter(|(k, _)| k.trim().eq_ignore_ascii_case("x-forwarded-host"))
+            .map(|(_, v)| v.trim().to_string())
+            .collect()
+    };
+    let next = || asked.recv_timeout(Duration::from_secs(30)).unwrap();
+
+    // The home region's router, holding `acme` on the stand-in.
+    let home = router(placed_at(&at), None, 0);
+    // The router in front, relaying `acme` to home's.
+    let mut d = Directory::in_memory();
+    d.set_region("us", Some(&[format!("http://127.0.0.1:{home}")]))
+        .unwrap();
+    d.place_home("acme", "us").unwrap();
+    let front = router(d, None, 0);
+
+    let forged = "X-Forwarded-Host: localhost\r\n";
+    let r = send(
+        front,
+        "GET",
+        "/t/acme/notes",
+        "evil.example:8090",
+        forged,
+        "",
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    let head = next();
+    assert_eq!(forwarded(&head), ["evil.example:8090"], "{head}");
+    // Its own `Host` is its address, as a node's is.
+    assert!(head.contains(&format!("Host: {at}")), "{head}");
+
+    let r = send(
+        home,
+        "GET",
+        "/t/acme/notes",
+        "localhost",
+        "X-Forwarded-Host: x.example\r\n",
+        "",
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    let head = next();
+    assert_eq!(forwarded(&head), ["localhost"], "{head}");
 }
