@@ -198,6 +198,22 @@ caller in a loop gets a fiftieth of what one connection can ask. A service
 asking more says so with `--request-rate 0`, or asks with the server's
 token, which is never held.
 
+*One token for a backend.* A backend that holds one scoped token for every
+user it serves is one caller: its users' requests share one bucket, and
+past 1 000 a second all of them are answered 429. The ledger example's
+server is one: its CI tests drive sixteen clients through the app's one
+backend token as fast as it goes, and on a fast runner met the bound (#573,
+which runs that node with `--request-rate 0`). That is the
+bound as written: behind one token the server cannot tell the users apart.
+The ways out are the operator's -- a token for each user (each its own
+caller, held to its own rules), `--request-rate` raised to the backend's
+peak or `0`, or the server's token where the backend needs no rules --
+and `fennec_request_rate_refused_total` rising is the sign it bites. Not
+built: a bound a token's role names (a rate for a role, or a role left
+unheld), more configuration for a case the flag already answers; it waits
+for an operator whose one server holds both a backend's token and its
+users' own, where neither a raised flag nor `0` fits both.
+
 *The table.* `--call-rate` kept its callers in one `Mutex`, asked only by
 a call; asked by every scoped request, one lock would be a line every
 core's requests pass through in turn. Both rates' tables are cut into
