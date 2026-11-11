@@ -15,7 +15,7 @@
 // and leaves a request for a new window to it, which opens a window of its own.
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { WIN, assertClean, cmd, evalIn, lines, quit, sleep, startApp, step, waitFor, webviewWindows, log } from './lib.mjs';
+import { WIN, assertClean, cmd, evalIn, lines, quit, sleep, startApp, step, waitFor, webviewBrowserSwitches, webviewWindows, log } from './lib.mjs';
 
 assertClean('before');
 
@@ -76,6 +76,14 @@ n = lines().length;
 cmd({ cmd: 'openconn', id });
 assert.equal((await waitFor((l, i) => i >= n && l.what === 'openconn-result' && l.id === id, 20000, 'opened')).ok, true);
 await waitFor((l, i) => i >= n && l.key === KEY && l.detail?.type === 'state' && l.detail.title === 'hostile', 30000, 'the page drawn');
+
+if (WIN) {
+  step("WebView2 was started with the app's arguments (src/bun/webview2.ts)");
+  const browsers = webviewBrowserSwitches();
+  log(`WebView2's browser processes' switches:\n${browsers.map((s) => `  ${s.filter((x) => !/user-data-dir|mojo|field-trial|metrics|variations|webview-exe/.test(x)).join(' ')}`).join('\n')}`);
+  assert.ok(browsers.length > 0, 'a browser process of the app');
+  for (const switches of browsers) assert.ok(switches.includes('--block-new-web-contents=true'), `each refuses a new window: ${switches.join(' ')}`);
+}
 
 step("another origin's answer is read only where it allows it: fetch, XHR and a frame's document");
 const reads = await evalIn(

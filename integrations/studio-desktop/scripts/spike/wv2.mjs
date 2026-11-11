@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { appendFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { BUN, CONTROL, D, EXE, HERE, POWERSHELL, REPORT, USER_DATA, cmd, evalIn, lines, mine, sleep, startApp, waitFor, log } from '../checks/lib.mjs';
 
 const ps = (script, ms = 60000) => spawnSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8', timeout: ms });
@@ -230,12 +231,30 @@ return out;`,
 const sid = spawnSync('whoami', ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8' }).stdout.trim().split(',').pop().replace(/"/g, '');
 say('grant the user its own folders', spawnSync('icacls', [D, '/grant', `*${sid}:(OI)(CI)F`, '/T', '/Q'], { encoding: 'utf8' }).stdout.trim());
 
-const BLOCK = '--block-new-web-contents=true --fennec-spike-marker';
-await config('elevated-none', {});
-await config('elevated-env', { env: { WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: BLOCK } });
-await config('basic-none', { deElevated: true });
-await config('basic-env', { deElevated: true, env: { WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: BLOCK } });
-await config('basic-env-replace-test', { deElevated: true, env: { WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection' } });
+// The app's own calls (src/bun/win32.ts), run by its Bun: is this process elevated, and does
+// startAsUser start one that is not (whoami of a cmd it started, and elevated() asked of a Bun it started)?
+{
+  const url = pathToFileURL(join(HERE, 'src', 'bun', 'win32.ts')).href;
+  const whoFile = join(D, 'spike-startasuser-whoami.txt');
+  const elevFile = join(D, 'spike-startasuser-elevated.txt');
+  const inner = join(D, 'spike-elevated.ts');
+  writeFileSync(inner, `const w = await import(${JSON.stringify(url)}); require("node:fs").writeFileSync(${JSON.stringify(elevFile)}, String(w.elevated()));`);
+  const script = `const w = await import(${JSON.stringify(url)}); console.log("elevated here: " + w.elevated()); w.startAsUser(${JSON.stringify(`cmd.exe /c whoami /groups > "${whoFile}" 2>&1`)}); w.startAsUser(${JSON.stringify(`"${BUN}" "${inner}"`)}); console.log("started");`;
+  const r = spawnSync(BUN, ['-e', script], { encoding: 'utf8', timeout: 60000 });
+  say('win32.ts: elevated() and startAsUser()', `${r.stdout.trim()} ${r.stderr.trim().slice(0, 600)}`);
+  await sleep(5000);
+  for (const f of [whoFile, elevFile]) {
+    try {
+      say(`win32.ts: ${f.split(/[\\/]/).pop()}`, (await import('node:fs')).readFileSync(f, 'utf8').split(/\r?\n/).filter((l) => !/whoami/.test(f) || /Mandatory|S-1-5-32-544/.test(l)).join('\n'));
+    } catch (e) {
+      say(`win32.ts: ${f} not written`, String(e));
+    }
+  }
+}
+
+// The app sets WebView2's arguments itself now (webview2.ts): run as the runner runs it, and de-elevated.
+await config('elevated', {});
+await config('basic', { deElevated: true });
 
 appendFileSync(join(D, 'logs', 'spike-done'), 'done\n');
 hostile.close();

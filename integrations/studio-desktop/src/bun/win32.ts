@@ -21,6 +21,9 @@ const TOKEN_QUERY = 0x0008;
 /** `TOKEN_INFORMATION_CLASS`: the user, and the owner it gives what it creates. */
 const TOKEN_USER = 1;
 const TOKEN_OWNER = 4;
+/** `TOKEN_INFORMATION_CLASS`: whether the token is elevated, and its integrity level. */
+const TOKEN_ELEVATION = 20;
+const TOKEN_INTEGRITY_LEVEL = 25;
 /**
  * `SE_OBJECT_TYPE::SE_FILE_OBJECT`: a named pipe is a file object to the named
  * security calls, which open it by its `\\.\pipe\` path as CreateFile does.
@@ -52,6 +55,7 @@ function load() {
 		lstrlenW: { args: [FFIType.u64], returns: FFIType.i32 },
 		SetEnvironmentVariableW: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
 		GetEnvironmentVariableW: { args: [FFIType.ptr, FFIType.ptr, FFIType.u32], returns: FFIType.u32 },
+		GetStdHandle: { args: [FFIType.i32], returns: FFIType.u64 },
 	});
 	const advapi32 = dlopen("advapi32.dll", {
 		OpenProcessToken: { args: [FFIType.u64, FFIType.u32, FFIType.ptr], returns: FFIType.i32 },
@@ -62,6 +66,16 @@ function load() {
 		SetNamedSecurityInfoW: { args: [FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64], returns: FFIType.u32 },
 		GetNamedSecurityInfoW: { args: [FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr], returns: FFIType.u32 },
 		CredWriteW: { args: [FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
+		SaferCreateLevel: { args: [FFIType.u32, FFIType.u32, FFIType.u32, FFIType.ptr, FFIType.u64], returns: FFIType.i32 },
+		SaferComputeTokenFromLevel: { args: [FFIType.u64, FFIType.u64, FFIType.ptr, FFIType.u32, FFIType.u64], returns: FFIType.i32 },
+		SaferCloseLevel: { args: [FFIType.u64], returns: FFIType.i32 },
+		ConvertStringSidToSidW: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
+		GetLengthSid: { args: [FFIType.u64], returns: FFIType.u32 },
+		SetTokenInformation: { args: [FFIType.u64, FFIType.u32, FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
+		CreateProcessAsUserW: {
+			args: [FFIType.u64, FFIType.u64, FFIType.ptr, FFIType.u64, FFIType.u64, FFIType.i32, FFIType.u32, FFIType.u64, FFIType.u64, FFIType.ptr, FFIType.ptr],
+			returns: FFIType.i32,
+		},
 	});
 	return { k: kernel32.symbols, a: advapi32.symbols };
 }
@@ -121,6 +135,72 @@ export function environment(name: string): string | null {
 	const out = Buffer.alloc(32768 * 2);
 	const n = win().k.GetEnvironmentVariableW(wide(name), out, 32768);
 	return n === 0 || n > 32767 ? null : out.subarray(0, n * 2).toString("utf16le");
+}
+
+/** Whether this process runs elevated: an administrator's full token, at high integrity. */
+export function elevated(): boolean {
+	const { k, a } = win();
+	const handle = new BigUint64Array(1);
+	if (!a.OpenProcessToken(k.GetCurrentProcess(), TOKEN_QUERY, handle)) throw new Error("OpenProcessToken failed");
+	try {
+		const value = new Uint32Array(1);
+		const size = new Uint32Array(1);
+		if (!a.GetTokenInformation(handle[0]!, TOKEN_ELEVATION, value, 4, size)) throw new Error("GetTokenInformation(TokenElevation) failed");
+		return value[0] !== 0;
+	} finally {
+		k.CloseHandle(handle[0]!);
+	}
+}
+
+/**
+ * Starts `commandLine` as this user without an administrator's rights: this
+ * process's token made a normal user's (SAFER's NORMALUSER level, which makes
+ * Administrators a deny-only group and drops the privileges an administrator
+ * holds) at medium integrity, as a process started from Explorer runs where
+ * UAC is on. It is handed this process's standard handles and environment.
+ */
+export function startAsUser(commandLine: string): void {
+	const { k, a } = win();
+	const SAFER_SCOPEID_USER = 2;
+	const SAFER_LEVELID_NORMALUSER = 0x20000;
+	const SAFER_LEVEL_OPEN = 1;
+	const level = new BigUint64Array(1);
+	if (!a.SaferCreateLevel(SAFER_SCOPEID_USER, SAFER_LEVELID_NORMALUSER, SAFER_LEVEL_OPEN, level, 0n)) throw new Error("SaferCreateLevel failed");
+	const token = new BigUint64Array(1);
+	const computed = a.SaferComputeTokenFromLevel(level[0]!, 0n, token, 0, 0n);
+	a.SaferCloseLevel(level[0]!);
+	if (!computed) throw new Error("SaferComputeTokenFromLevel failed");
+	try {
+		// Medium integrity: TOKEN_MANDATORY_LABEL is a pointer to the SID and its attributes, SE_GROUP_INTEGRITY.
+		const sid = new BigUint64Array(1);
+		if (!a.ConvertStringSidToSidW(wide("S-1-16-8192"), sid)) throw new Error("ConvertStringSidToSidW failed");
+		try {
+			const label = new ArrayBuffer(16);
+			const v = new DataView(label);
+			v.setBigUint64(0, sid[0]!, true);
+			v.setUint32(8, 0x20, true);
+			if (!a.SetTokenInformation(token[0]!, TOKEN_INTEGRITY_LEVEL, new Uint8Array(label), 16 + a.GetLengthSid(sid[0]!))) throw new Error("SetTokenInformation(TokenIntegrityLevel) failed");
+		} finally {
+			k.LocalFree(sid[0]!);
+		}
+		// STARTUPINFOW on a 64-bit Windows: cb 0, dwFlags 60, hStdInput 80, hStdOutput 88, hStdError 96; 104 in all.
+		const STARTF_USESTDHANDLES = 0x100;
+		const info = new ArrayBuffer(104);
+		const si = new DataView(info);
+		si.setUint32(0, 104, true);
+		si.setUint32(60, STARTF_USESTDHANDLES, true);
+		si.setBigUint64(80, k.GetStdHandle(-10), true);
+		si.setBigUint64(88, k.GetStdHandle(-11), true);
+		si.setBigUint64(96, k.GetStdHandle(-12), true);
+		// PROCESS_INFORMATION: hProcess 0, hThread 8, the ids 16 and 20.
+		const pi = new BigUint64Array(3);
+		const line = wide(commandLine);
+		if (!a.CreateProcessAsUserW(token[0]!, 0n, line, 0n, 0n, 1, 0, 0n, 0n, new Uint8Array(info), pi)) throw new Error("CreateProcessAsUserW failed");
+		k.CloseHandle(pi[0]!);
+		k.CloseHandle(pi[1]!);
+	} finally {
+		k.CloseHandle(token[0]!);
+	}
 }
 
 /** This user's SID, which no other user of the machine has. */
