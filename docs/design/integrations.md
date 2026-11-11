@@ -467,10 +467,14 @@ the macOS job bundles this checkout's, and here the app is what is under test),
 and runs the type check, the unit tests and the checks. `get-server.sh` takes
 the release's Windows zip, held to `SHA256SUMS` as the tarballs are, and
 unpacks it with `unzip` or, in Git's bash where there is none, Windows' own
-`tar.exe` (bsdtar reads a zip); the machine's processor is asked of the system
-(`OSArchitecture`), since an x64 Git runs emulated on Windows on Arm. The
-checks' platform layer is `checks/lib.mjs`: where the app is and how it is
-installed, its folders, the processes (`ps`, WMI on Windows), the credential
+`tar.exe` (bsdtar reads a zip); the machine's processor is read from the
+registry, since an x64 Git runs emulated on Windows on Arm, where its
+`PROCESSOR_ARCHITECTURE`, and Windows PowerShell's `OSArchitecture` (emulated
+too), said x64 and fetched the x64 server. The checks' platform layer is
+`checks/lib.mjs`: where the app is and how it is installed, its folders, the
+processes (`ps`; on Windows WMI through PowerShell 7 where there is one, since
+Windows PowerShell, emulated on `windows-11-arm`, took 42-45 s a query where
+`pwsh` took 0.6 s, both 0.4 s on x64), the credential
 store, a killed process's exit code (TerminateProcess's 1 on Windows), a path's
 separator, and whether the file system tells case apart, asked of the folder
 (`newdb`'s `FRESH` is another file on ext4). A stable build there is an

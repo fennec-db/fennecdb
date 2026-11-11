@@ -6,11 +6,19 @@
 // beside the test it skipped.
 
 import { execFileSync } from "node:child_process";
-import { statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
+import { delimiter, join } from "node:path";
 
 export const WINDOWS = process.platform === "win32";
 /** A program's file name ends so: the release's Windows zip holds `fennec-server.exe`. */
 export const EXE = WINDOWS ? ".exe" : "";
+
+/**
+ * PowerShell 7 (`pwsh`) where there is one, else Windows PowerShell: on
+ * windows-11-arm the latter runs emulated and took over 40 s to ask WMI, `pwsh`
+ * under a second (scripts/checks/lib.mjs's POWERSHELL says the same).
+ */
+const POWERSHELL = (process.env["PATH"] ?? "").split(delimiter).some((d) => d !== "" && existsSync(join(d, "pwsh.exe"))) ? "pwsh.exe" : "powershell.exe";
 
 /**
  * Phase 2. A stop is `kill("SIGTERM")`, which on Windows libuv and Bun make
@@ -24,7 +32,7 @@ export const WINDOWS_STOP = WINDOWS && "phase 2: a stop on Windows is TerminateP
 export function argvOf(pid: number): string {
 	if (!WINDOWS) return execFileSync("ps", ["-ww", "-o", "command=", "-p", String(pid)]).toString();
 	const ps = `(Get-CimInstance Win32_Process -Filter "ProcessId=${Number(pid)}").CommandLine`;
-	return execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps]).toString();
+	return execFileSync(POWERSHELL, ["-NoProfile", "-NonInteractive", "-Command", ps]).toString();
 }
 
 /**
@@ -46,7 +54,7 @@ export function ownerAlone(path: string): true | string {
 		"$said = ($rules | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value + ' ' + $_.AccessControlType + ' ' + $_.FileSystemRights + ' inherited ' + $_.IsInherited }) -join '; '; " +
 		"if ($acl.AreAccessRulesProtected -and $rules.Count -eq 1 -and $rules[0].AccessControlType -eq 'Allow' -and $rules[0].FileSystemRights -eq 'FullControl' -and $rules[0].IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq $me) { 'owner alone' } " +
 		"else { 'protected ' + $acl.AreAccessRulesProtected + ', me ' + $me + ': ' + $said }";
-	const said = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { env: { ...process.env, FENNEC_TEST_PATH: path } })
+	const said = execFileSync(POWERSHELL, ["-NoProfile", "-NonInteractive", "-Command", ps], { env: { ...process.env, FENNEC_TEST_PATH: path } })
 		.toString()
 		.trim();
 	return said === "owner alone" || said;

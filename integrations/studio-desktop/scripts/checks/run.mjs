@@ -16,7 +16,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { closeSync, mkdirSync, openSync, rmSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
-import { APP_DATA, D, HERE, WIN, describe, freshState, keepEvidence, mine, now, procs, sleep } from './lib.mjs';
+import { APP_DATA, D, HERE, POWERSHELL, WIN, describe, freshState, keepEvidence, mine, now, procs, sleep } from './lib.mjs';
 
 /**
  * Every check, in the order they run, and the systems one does not run on yet:
@@ -116,7 +116,7 @@ function startedAt(pids) {
   if (WIN) {
     const filter = pids.map((p) => `ProcessId=${Number(p)}`).join(' or ');
     const ps = `Get-CimInstance Win32_Process -Filter '${filter}' | ForEach-Object { '{0} {1}' -f $_.ProcessId, $_.CreationDate }`;
-    return spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', timeout: 30000 }).stdout;
+    return spawnSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', timeout: 30000 }).stdout;
   }
   return spawnSync('ps', ['-o', 'pid=,lstart=', '-p', pids.join(',')], { encoding: 'utf8', timeout: 30000 }).stdout;
 }

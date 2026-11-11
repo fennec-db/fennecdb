@@ -60,13 +60,14 @@ if [ -n "$version" ]; then
   triple=${TARGET_TRIPLE:-}
   if [ -z "$triple" ]; then
     if [ -n "$windows" ]; then
-      # The system's processor, not this bash's: an x64 Git runs emulated on Windows on Arm,
-      # where its PROCESSOR_ARCHITECTURE says AMD64.
-      arch=$(powershell.exe -NoProfile -NonInteractive -Command '[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture' | tr -d '\r')
+      # The system's processor, as the registry holds it, not this bash's: an x64 Git runs
+      # emulated on Windows on Arm, where its PROCESSOR_ARCHITECTURE says AMD64, and so does
+      # what an emulated program asks (Windows PowerShell's OSArchitecture said X64 there).
+      arch=$(reg.exe query 'HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' //v PROCESSOR_ARCHITECTURE | tr -d '\r' | awk '$1 == "PROCESSOR_ARCHITECTURE" { print $3 }')
       case "$arch" in
-        X64) triple=x86_64-pc-windows-msvc ;;
-        Arm64) triple=aarch64-pc-windows-msvc ;;
-        *) die "no release asset for Windows on ${arch:-a processor PowerShell did not name}; set TARGET_TRIPLE" ;;
+        AMD64) triple=x86_64-pc-windows-msvc ;;
+        ARM64) triple=aarch64-pc-windows-msvc ;;
+        *) die "no release asset for Windows on ${arch:-a processor the registry did not name}; set TARGET_TRIPLE" ;;
       esac
     else
       case "$(uname -s)-$(uname -m)" in

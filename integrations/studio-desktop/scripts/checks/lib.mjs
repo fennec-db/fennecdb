@@ -120,12 +120,20 @@ export function sh(cmd) {
   }
 }
 
+/**
+ * The PowerShell that asks WMI on Windows: PowerShell 7 (`pwsh`) where there is
+ * one, else Windows PowerShell. On windows-11-arm the latter runs emulated and
+ * took 42 to 45 s a query (its CIM module loading), `pwsh` 0.6 s; on
+ * windows-latest both 0.4 s.
+ */
+export const POWERSHELL = WIN ? ((process.env.PATH ?? '').split(delimiter).some((d) => d && existsSync(join(d, 'pwsh.exe'))) ? 'pwsh.exe' : 'powershell.exe') : null;
+
 /** Every process on the machine: {pid, ppid, rss (KB), command}. */
 export function procs() {
   if (WIN) {
-    // No ps: the command lines are WMI's (about a second a call). A program's path comes quoted, and is taken out of its quotes.
+    // No ps: the command lines are WMI's. A program's path comes quoted, and is taken out of its quotes.
     const ps = "Get-CimInstance Win32_Process | ForEach-Object { '{0} {1} {2} {3}' -f $_.ProcessId, $_.ParentProcessId, [int64]($_.WorkingSetSize / 1024), $_.CommandLine }";
-    return execSync(`powershell.exe -NoProfile -NonInteractive -Command "${ps}"`, { maxBuffer: 1 << 26, timeout: 30000 })
+    return execSync(`${POWERSHELL} -NoProfile -NonInteractive -Command "${ps}"`, { maxBuffer: 1 << 26, timeout: 30000 })
       .toString()
       .split(/\r?\n/)
       .map((l) => /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/.exec(l))
