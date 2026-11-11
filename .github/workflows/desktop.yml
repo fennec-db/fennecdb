@@ -316,24 +316,6 @@ jobs:
       - name: Build the shipped app
         run: npm run build
 
-      # TEMPORARY (phase 2): what Bun and the system answer, printed; removed before review.
-      - name: Phase 2 probe (temporary)
-        continue-on-error: true
-        timeout-minutes: 5
-        run: |
-          bun=$(ls .hutch-home/toolchains/bun/*/*/bun* | grep -v '\.lock$' | head -1)
-          "$bun" scripts/probe-phase2.ts
-          if [ "$RUNNER_OS" = Linux ]; then
-            echo "== unlocked login keyring"
-            dbus-run-session -- sh -c 'printf checks | gnome-keyring-daemon --unlock --components=secrets >/dev/null && "$0" scripts/probe-phase2.ts store' "$bun"
-            echo "== a bus with no Secret Service started"
-            dbus-run-session -- "$bun" scripts/probe-phase2.ts store
-            echo "== gnome-keyring started, no login keyring"
-            dbus-run-session -- sh -c 'gnome-keyring-daemon --start --components=secrets >/dev/null; "$0" scripts/probe-phase2.ts store' "$bun"
-            echo "== no bus"
-            env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR=/nonexistent "$bun" scripts/probe-phase2.ts store
-          fi
-
       - name: Type check and unit tests
         run: npm run typecheck && node --test --test-reporter=spec test/*.test.ts
 

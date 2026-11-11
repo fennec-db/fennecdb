@@ -31,7 +31,10 @@ a hard kill only for one not ended 30 s later (`process.ts`). Only
 `session.ts` gives a page a token, a frozen `window.fennecHost` defined
 where `location.origin` is the server's alone. A studio window is
 `sandbox: true` (the event bridge only) and held to its origin, one with
-the RPC bridge to its `views://` folder (`holdTo`). No path or link the
+the RPC bridge to its `views://` folder (`holdTo`); on Windows, where
+Electrobun leaves a page's request for a new window to WebView2 (a window of
+its own, held to nothing), a preload takes it first, a studio window's to
+the same filter (`newWindowPreload`, `checks/sandbox.mjs`). No path or link the
 app hands the system goes through a shell: on Linux `xdg-open` with an
 argument vector, never Electrobun's `openExternal` or `showItemInFolder`
 (`opener.ts`, `checks/opener.mjs`). One instance a user listens where only

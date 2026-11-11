@@ -106,7 +106,11 @@ if (WIN) {
   const read = spawnSync(BUN, ['-e', script], { encoding: 'utf8', timeout: 30000 });
   const sddl = read.stdout.trim();
   log('its security descriptor:', sddl, read.stderr.trim());
-  assert.match(sddl, new RegExp(`D:P\\(A;;FA;;;${sid}\\)$`), 'protected, one entry: every right to its user, and none to anyone else');
+  // SDDL writes an account it has an alias for by the alias (the built-in Administrator, RID 500,
+  // which the runners run as, is LA), and the DACL's flags as letters: P, protected, and AI, which
+  // SetNamedSecurityInfo adds (read back on the runners: O:LAD:PAI(A;;FA;;;LA)).
+  const who = sid.endsWith('-500') ? `(?:LA|${sid})` : sid;
+  assert.match(sddl, new RegExp(`D:P(?:AI)?\\(A;;FA;;;${who}\\)$`), 'protected, one entry: every right to its user, and none to anyone else');
 }
 
 step('a second instance asks this one to show itself and quits, opening nothing');

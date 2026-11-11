@@ -22,8 +22,6 @@ const SMALL = data('small', 20);
 mkdirSync(join(D, 'wrap'), { recursive: true });
 const SEEN = join(D, 'wrap', 'server-env.txt');
 const WRAP = join(D, 'wrap', `fennec-server${WIN ? '.exe' : ''}`);
-/** Windows: the processor the stand-in runs as, which on an arm64 machine may be one Windows emulates. */
-const ARCH = join(D, 'wrap', 'stand-in-arch.txt');
 if (WIN) {
   const source = join(D, 'wrap', 'stand-in.ts');
   writeFileSync(
@@ -31,8 +29,10 @@ if (WIN) {
     [
       `import { writeFileSync } from "node:fs";`,
       `import { spawn } from "node:child_process";`,
-      `writeFileSync(${JSON.stringify(SEEN)}, Object.entries(process.env).map(([k, v]) => k + "=" + v).join("\\n") + "\\n");`,
-      `writeFileSync(${JSON.stringify(ARCH)}, process.arch);`,
+      // `--env-to <file>`: its environment written there, and nothing started (the control below).
+      `const out = process.argv[2] === "--env-to" ? process.argv[3] : ${JSON.stringify(SEEN)};`,
+      `writeFileSync(out, Object.entries(process.env).map(([k, v]) => k + "=" + v).join("\\n") + "\\n");`,
+      `if (process.argv[2] === "--env-to") process.exit(0);`,
       `const child = spawn(${JSON.stringify(SERVER)}, process.argv.slice(2), { stdio: "inherit" });`,
       `child.on("exit", (code) => process.exit(code ?? 1));`,
     ].join('\n'),
@@ -61,8 +61,8 @@ await waitStudio(`file:${SMALL}`);
 
 step('the environment the server was started with');
 // Windows' names are case-blind: one is the same however it is spelled.
-const seen = () =>
-  Object.fromEntries(readFileSync(SEEN, 'utf8').split(/\r?\n/).filter((l) => l.indexOf('=') > 0).map((l) => [WIN ? l.slice(0, l.indexOf('=')).toUpperCase() : l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
+const seen = (file = SEEN) =>
+  Object.fromEntries(readFileSync(file, 'utf8').split(/\r?\n/).filter((l) => l.indexOf('=') > 0).map((l) => [WIN ? l.slice(0, l.indexOf('=')).toUpperCase() : l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
 const names = Object.keys(seen());
 log('names:', names.join(' '));
 for (const leak of ['OTEL_EXPORTER_OTLP_ENDPOINT', 'OTEL_SERVICE_NAME', 'FENNEC_JWT_SECRET', 'FENNEC_KEY_FILE', 'AWS_SECRET_ACCESS_KEY', 'GITHUB_TOKEN', 'FENNEC_DESKTOP_REPORT', 'FENNEC_DESKTOP_CONTROL', 'FENNEC_DESKTOP_OPEN', 'FENNEC_SERVER_BIN']) {
@@ -72,15 +72,17 @@ for (const leak of ['OTEL_EXPORTER_OTLP_ENDPOINT', 'OTEL_SERVICE_NAME', 'FENNEC_
 const ALLOWED = WIN
   ? /^(HOME|PATH|TMPDIR|LANG|USER|LOGNAME|TZ|LC_[A-Z]+|HOMEDRIVE|HOMEPATH|LOGONSERVER|SYSTEMDRIVE|SYSTEMROOT|TEMP|TMP|USERDOMAIN|USERNAME|USERPROFILE|WINDIR|FENNEC_HTTP_TOKEN|FENNEC_REPLICATION_TOKEN)$/
   : /^(HOME|PATH|TMPDIR|LANG|USER|LOGNAME|TZ|LC_[A-Z]+|FENNEC_HTTP_TOKEN|FENNEC_REPLICATION_TOKEN|PWD|SHLVL|_|OLDPWD)$/;
-// A program Windows emulates (an x64 one on an arm64 machine) has PROCESSOR_ARCHITECTURE set in
-// its own environment by the system, whatever it was started with: allowed for a stand-in that
-// runs as another processor than the app's Bun alone, and said.
+// What Windows puts in a process's environment whatever it is handed is no leak of the app's: the
+// control starts the stand-in from here with SystemRoot alone (libuv adds its required_vars, which
+// the allowlist names) and reads what it got. On the arm64 runner that was PROCESSOR_ARCHITECTURE,
+// the stand-in a native arm64 program. Allowed where the control shows it, and said.
 let extra = [];
 if (WIN) {
-  const standIn = readFileSync(ARCH, 'utf8').trim();
-  const app_ = spawnSync(BUN, ['-e', 'process.stdout.write(process.arch)'], { encoding: 'utf8', timeout: 30000 }).stdout.trim();
-  log(`the stand-in runs as ${standIn}, the app's Bun as ${app_}; PROCESSOR_ARCHITECTURE: ${seen().PROCESSOR_ARCHITECTURE ?? '(none)'}`);
-  if (standIn !== app_) extra = ['PROCESSOR_ARCHITECTURE'];
+  const control = join(D, 'wrap', 'control-env.txt');
+  const r = spawnSync(WRAP, ['--env-to', control], { env: { SystemRoot: process.env.SystemRoot }, encoding: 'utf8', timeout: 30000 });
+  assert.equal(r.status, 0, `the control ran: ${r.stderr}${r.error ?? ''}`);
+  extra = Object.keys(seen(control)).filter((n) => !ALLOWED.test(n));
+  log(`what Windows gives a process handed SystemRoot alone, beyond the allowlist: ${extra.join(' ') || '(nothing)'}`);
 }
 assert.deepEqual(names.filter((n) => !ALLOWED.test(n) && !extra.includes(n)), [], 'only the allowlist (and what the wrapper script\'s own shell adds)');
 // The case-blind compare is what lets Windows' `Path` through, where a name compared as macOS's would drop it.

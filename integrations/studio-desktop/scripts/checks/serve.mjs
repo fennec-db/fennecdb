@@ -26,8 +26,8 @@ async function ask(c, what, ms = 30000) {
   return waitFor((l, i) => i >= n && l.what === what && (l.path === undefined || c.path === undefined || l.path === c.path), ms, what);
 }
 const status = async (url, token) => (await fetch(url, { headers: token ? { authorization: `Bearer ${token}` } : {} })).status;
-/** The fennec-server processes on `path`: the app's (under its bundle) and any other. */
-const serversOn = (path) => procs().filter((p) => /fennec-server /.test(p.command) && p.command.includes(`--file ${path} `));
+/** The fennec-server processes on `path` (`fennec-server.exe` on Windows): the app's (under its bundle) and any other. */
+const serversOn = (path) => procs().filter((p) => /fennec-server(\.exe)? /.test(p.command) && p.command.includes(`--file ${path} `));
 const freePort = () =>
   new Promise((resolve) => {
     const s = createServer().listen(0, '127.0.0.1', () => {

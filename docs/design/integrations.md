@@ -505,9 +505,9 @@ beside it in `node --test`'s output (`test/platform.ts`).
 
 The process and security layer (phase 2 of #578, nothing shipped). What
 macOS gave the app for nothing is made on Windows and Linux, and every phase 2
-skip went; what each rests on was measured on the four runners (run
-@@RUN@@), and each is held by a check or a unit test on every system it
-applies to.
+skip went; what each rests on was measured on the four runners (runs
+43072853201 and 43077312854, a probe of each call beside the checks), and
+each is held by a check or a unit test on every system it applies to.
 
 - **The stop.** On Windows libuv's and Bun's `kill("SIGTERM")` is
   TerminateProcess: the spike's server ended in 1 to 3 ms with no shutdown line,
@@ -517,7 +517,10 @@ applies to.
   so `process.ts` ends the pipe it holds (`Child.endStdin`, `STOP_BY_STDIN`)
   and keeps TerminateProcess for a server that has not ended 30 s later; the
   unit tests hold the stop to exit 0 on every system (TerminateProcess is exit
-  1), and `files`, `newdb`, `serve` and `backups` now run on Windows. @@STOP@@
+  1), and `files`, `newdb`, `serve` and `backups` now run on Windows. On both
+  Windows runners the stop was exit 0 with the file free to the next server at
+  once, and `newdb` found the first collection a server stopped so had
+  buffered.
   Not taken: a console control event (CTRL_BREAK) needs the server in a
   console of its own the app shares, where Electrobun starts Bun with
   CREATE_NO_WINDOW; and the server has no route that stops it. The shell's
@@ -531,7 +534,12 @@ applies to.
   system's rule on every system (the platform is a parameter); `environment`
   reads the server's environment back through a stand-in, on Windows a program
   the app's Bun builds (`bun build --compile`), since Bun starts no script there
-  without a shell. @@ENV@@
+  without a shell. On x64 the server was handed its token, `HOME`, `PATH` and
+  Windows' eleven, and nothing else. On arm64 it held `PROCESSOR_ARCHITECTURE`
+  (`ARM64`) as well, the stand-in a native arm64 program: Windows sets it in a
+  process's environment whatever the process is handed, which the check's
+  control shows by starting the stand-in with `SystemRoot` alone, and the check
+  allows only what that control holds.
 - **One instance a user.** Linux's socket was in `/tmp`, which every user
   writes to; it is in `$XDG_RUNTIME_DIR` (the login session's, 0700), else the
   app's own data folder where that is the user's and no one else may write to
@@ -541,9 +549,16 @@ applies to.
   SID>`, listened on through Bun's `node:net`: libuv makes the first instance
   with FILE_FLAG_FIRST_PIPE_INSTANCE, so a listen that succeeds is a pipe this
   process made, and the app then gives it a protected DACL of one entry, every
-  right to the user's SID (`SetNamedSecurityInfoW` on its name, which opens it
-  as a client would: its server sees a connection that ends at once).
-  `pages` reads that DACL back on Windows (`D:P(A;;FA;;;<SID>)`). Another user
+  right to the user's SID (`SetNamedSecurityInfoW` on its name as a file
+  object, which opens it as a client would: its server sees a connection that
+  ends at once). The kernel object type, tried first, takes by name only a
+  semaphore, an event, a mutex, a waitable timer or a file mapping: every call
+  answered 161 (ERROR_BAD_PATHNAME) on both runners, so no pipe was made its
+  user's and a second instance, taking ours for someone else's, ran unguarded.
+  `pages` reads that DACL back on Windows: `O:LAD:PAI(A;;FA;;;LA)` on the
+  runners, whose user is the built-in Administrator (RID 500, which SDDL writes
+  `LA`), `AI` the flag SetNamedSecurityInfo adds. There a first claim was
+  "alone" and a second "another", the first asked once to show itself. Another user
   can still make a pipe of that name first; a pipe whose owner is not this user
   (its SID, its token's default owner, or Administrators, which only an
   administrator makes) is never asked or obeyed, and one this user cannot open
@@ -570,7 +585,9 @@ applies to.
   hands a link and a folder named `x$(cd$IFS~;touch$IFS<marker>)` to a stand-in
   xdg-open, which records one argument each, the encoding the check works out
   on its own, and to the real one with nothing it can start; no marker either
-  time. @@OPENER@@ macOS (NSWorkspace) and Windows (ShellExecute, Explorer's
+  time. On both Linux runners the stand-in was handed one argument each, as the
+  check works them out, and the real xdg-open, with nothing it could start,
+  exited 4; no marker. macOS (NSWorkspace) and Windows (ShellExecute, Explorer's
   `/select,"<path>"`, where a path holds no `"`) take no shell, and are handed
   the same normalised link.
 - **The credential store.** Bun 1.4.0 writes every Windows item with
@@ -580,7 +597,9 @@ applies to.
   (`CredWriteW`, the same `<service>/<name>` target and UTF-8 bytes, kept with
   CRED_PERSIST_LOCAL_MACHINE) and reads and deletes it through Bun;
   `remote` asks `cmdkey` that the saved token is kept on this machine.
-  @@CRED@@ On Linux libsecret answered neither "no store" nor "no keyring" in
+  On both Windows runners `cmdkey` lists the app's item as "Local machine
+  persistence" and one Bun wrote with none, and Bun reads the app's back.
+  On Linux libsecret answered neither "no store" nor "no keyring" in
   time (25 s a call where the service never answered; `get` null with no
   default collection). The app asks first, itself, over the session bus's
   socket (`secretservice.ts`: SASL EXTERNAL, `Hello`, then
@@ -591,7 +610,15 @@ applies to.
   token could not be read and sends nothing, and the main window shows "token
   store not answering", never "no token". The call opens no prompt (a locked
   keyring is unlocked by libsecret, with the user, when an item is read,
-  unbounded), and needs no program outside the app. @@KEYRING@@ Rejected: racing
+  unbounded), and needs no program outside the app. On the Linux runners
+  `ReadAlias` named the login collection in 5 to 14 ms where the keyring was
+  unlocked and answered "/" in 26 and 27 ms where gnome-keyring ran with none,
+  and a bus that was not there was said in 6 to 8 ms; in `keyring` the app
+  refused a token in 3.14 to 3.18 s on a bus whose Secret Service never
+  answered. Its case of a keyring with no default collection is a
+  gnome-keyring of its own (its own runtime and data folders): one started
+  beside the run's found the run's daemon by its control socket, registered
+  nothing on the check's bus, and the case was the first again. Rejected: racing
   Bun.secrets against a timer (a `set` that lost the race may land after the
   app said it kept nothing, and an unlock prompt would be cut off); `gdbus`,
   `busctl` or `dbus-send` (none is on every desktop); and a file of the app's
@@ -614,24 +641,58 @@ applies to.
   thread), only under `Partitions\`, by Electrobun's own naming (a name not
   plain is hashed as Electrobun hashes it, so none climbs out); WebView2's
   processes hold its files a moment after the window closes, so a removal
-  tries again for up to 20 s. `storage` now runs on Windows and holds each
-  folder gone. @@STORES@@
+  tries again for up to 20 s. A removal is done when the folder is not there,
+  asked after each try, not when the call returned: on the arm64 runner the app
+  once said a removed connection's folder was gone and the check found it
+  there. `storage` now runs on Windows and holds each folder gone, a closed
+  file window's too, on both runners.
+- **New windows.** Electrobun 2.0.4 handles no WebView2 NewWindowRequested (it
+  raises `new-window-open` only for a Ctrl+click it sees starting a
+  navigation), so WebView2 opens a window of its own for a page's
+  `window.open`, as it does wherever its host does not answer: a window held
+  to no origin, in the page's store, and on both runners `sandbox`'s requests
+  left WebView2's processes, three renderers each, running when the check's
+  40 s for the app to be gone ran out. On Windows every window of the app is given a preload
+  (`newWindowPreload`, opener.ts) that takes `window.open`, and a link that
+  would open a window (a target other than the page's own, a modifier key, the
+  middle button), before WebView2 does, opens nothing, and sends the address
+  over the event bridge as `link-out`: a studio window's goes to `linkOut`, as
+  macOS's `new-window-open` does, and the app's own pages drop it. Neither the
+  studio nor the app's pages opens a window of its own. `sandbox` holds on
+  Windows, as on macOS, that the page's request reaches the app and the filter
+  is what refuses it, both links within the gap reached it, and no WebView2
+  process of the app's has a window; `pages` the last for the launcher's
+  `window.open`; `test/opener.test.ts` runs the preload as a page would. What
+  it cannot hold: a page that takes another `window.open`, from a frame it
+  makes, still gets WebView2's window, which only Electrobun can refuse. Nor
+  can the app change that Electrobun starts WebView2 with
+  `--disable-web-security --allow-insecure-localhost`
+  (win/nativeWrapper.cpp:8128): for the phase that ships it.
+- **A preload that comes late.** Electrobun adds a view's preload
+  (AddScriptToExecuteOnDocumentCreated, which completes later) and navigates
+  in the same call without waiting for it (win/nativeWrapper.cpp:7828 and
+  8077), so a first document can load before its script is there: on the x64
+  runner a saved server's window, opened again at once, loaded with no event
+  bridge (no session, no guard for new windows) and never reported. Each
+  window is asked once it navigated, through ExecuteScript, which needs no
+  preload, whether Electrobun's bridge is there, and loaded again if not, at
+  most three times a view (`preloaded`, windows.ts).
 - **The checks that could not ask.** `orphan` reads Linux's `/proc` (a pipe's
   two ends are one `pipe:[inode]`, told apart by the descriptor's access mode;
   a socketpair's are paired by `ss`), with the same control as macOS's; on
   Windows, which has no table a check reads without a handle walker of its
   own, it kills the app and needs every server to end and every file free:
   that no server holds another's pipe is what it no longer proves there.
-  `sandbox` could not see a page's `window.open` on WebKitGTK or WebView2,
-  which raise no `new-window-open` for a script's (a popup no gesture asked
-  for); there it holds that nothing was opened and the window stayed, and asks
-  the app's filter directly (`open-link`), which `test/opener.test.ts` holds
-  as well: what it no longer proves there is that a page's request reaches the
-  filter at all. `pages` failed its eval step on Windows because WebView2 runs
+  `sandbox` cannot see a page's `window.open` on WebKitGTK, which raises no
+  `new-window-open` for a script's (a popup no gesture asked for); there it
+  holds that nothing was opened and the window stayed, and asks the app's
+  filter directly (`open-link`), which `test/opener.test.ts` holds as well:
+  what it no longer proves on Linux is that a page's request reaches the filter
+  at all. `pages` failed its eval step on Windows because WebView2 runs
   the check's script (ExecuteScript) as DevTools' Runtime.evaluate does, whose
   allowUnsafeEvalBlockedByCSP is on: the check's own `new Function` ran. A
   string given to `setTimeout` is compiled by the page in a task of its own
-  after that script returned, and is refused on all three: the page's CSP
+  after that script returned, and was refused on all three: the page's CSP
   holds. `keyPlacement` read a key's mode, which is 0666 for every Windows
   file; it reads the key's DACL there, by `icacls <key> /save` (SDDL, SIDs
   and no language's group names), open where an entry lets Everyone,

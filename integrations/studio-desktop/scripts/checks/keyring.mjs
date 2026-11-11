@@ -8,16 +8,20 @@
 // other checks'):
 //   - a bus with no Secret Service started on it: gnome-keyring is installed,
 //     so the bus would start it, and on the runners that start never answers;
-//   - gnome-keyring running on it with no default collection (no login keyring).
+//   - gnome-keyring running on it with no default collection (no login keyring):
+//     a daemon of its own, with a runtime and a data folder of its own. Started
+//     with the run's, `--start` found the run's daemon by its control socket in
+//     $XDG_RUNTIME_DIR/keyring and registered nothing on this bus, which then
+//     never answered: the first case again, not this one.
 // In each, saving a connection with a token is refused within a bound well
 // under the 25 s it stands against, and opening one saved before is refused in
 // words, with no request sent to its server (a token not read is not "none").
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
-import { USER_DATA, assertClean, cmd, lines, procs, quit, startApp, step, waitFor, log } from './lib.mjs';
+import { D, USER_DATA, assertClean, cmd, lines, procs, quit, startApp, step, waitFor, log } from './lib.mjs';
 
 assertClean('before');
 const TOKEN = `keyring-check-${process.pid}-token`;
@@ -42,7 +46,8 @@ function bus() {
 }
 const keyrings = () => procs().filter((p) => /gnome-keyring-daemon/.test(p.command)).map((p) => p.pid);
 
-async function noStore(name, address) {
+/** The app on the session bus at `address`, where the store is refused for the reason `said` names. */
+async function noStore(name, address, said) {
   // A connection saved before the store went: its token is somewhere the app cannot read now.
   const saved = { id: '11111111-2222-3333-4444-555555555555', name: 'saved before', url: URL_, tenant: null };
   writeFileSync(join(USER_DATA, 'state.json'), JSON.stringify({ recents: [], connections: [saved], databases: [] }));
@@ -59,6 +64,7 @@ async function noStore(name, address) {
   log(`answered in ${took} ms:`, refused.message);
   assert.equal(refused.what, 'conn-refused', 'not saved');
   assert.match(refused.message, /credential store|keyring/i, 'said as the store it is');
+  assert.match(refused.message, said, 'and why');
   assert.ok(took < FAST_MS, `within ${FAST_MS / 1000} s, not libsecret's 25: ${took} ms`);
   const state = readFileSync(join(USER_DATA, 'state.json'), 'utf8');
   assert.deepEqual(JSON.parse(state).connections.map((c) => c.name), ['saved before'], 'the list is as it was');
@@ -92,14 +98,23 @@ try {
   step('a session bus with no Secret Service started on it');
   const a = bus();
   started.push(a.pid);
-  await noStore('keyring-none', a.address);
+  await noStore('keyring-none', a.address, /did not answer/);
 
   step('gnome-keyring on a session bus, with no default collection');
   const b = bus();
   started.push(b.pid);
-  const k = spawnSync('gnome-keyring-daemon', ['--start', '--components=secrets'], { env: { ...process.env, DBUS_SESSION_BUS_ADDRESS: b.address }, encoding: 'utf8', timeout: 30000 });
-  log('gnome-keyring-daemon --start:', k.status, k.stdout.trim().replace(/\n/g, ' '));
-  await noStore('keyring-no-default', b.address);
+  const own = join(D, 'keyring-own');
+  // Empty each time: no keyring an earlier run made.
+  rmSync(own, { recursive: true, force: true });
+  mkdirSync(join(own, 'run'), { recursive: true, mode: 0o700 });
+  mkdirSync(join(own, 'data'), { recursive: true });
+  const k = spawnSync('gnome-keyring-daemon', ['--start', '--components=secrets'], {
+    env: { ...process.env, DBUS_SESSION_BUS_ADDRESS: b.address, XDG_RUNTIME_DIR: join(own, 'run'), XDG_DATA_HOME: join(own, 'data') },
+    encoding: 'utf8',
+    timeout: 30000,
+  });
+  log('gnome-keyring-daemon --start:', k.status, k.stdout.trim().replace(/\n/g, ' '), k.stderr.trim().replace(/\n/g, ' '));
+  await noStore('keyring-no-default', b.address, /no default keyring/);
 } finally {
   // The buses this check started, and the keyring daemons on them.
   for (const pid of [...started, ...keyrings().filter((p) => !before.has(p))]) {
