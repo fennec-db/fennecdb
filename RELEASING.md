@@ -58,6 +58,18 @@ nothing reaches a registry before the notes have had a read.
    every `brew install` and every sum already taken. To change what a
    published release holds, release a new version.
 
+   **A power cut.** Every release needs the last run of
+   `linux-power-cut.yml` green, as its Linux binaries are every release's:
+   the commit's fennec-server, built as `release.yml` builds it, in an
+   Ubuntu guest cut five times on ext4 and five on XFS under `--sync
+   always` writes, compacts and spills, twice each with its disk's cache
+   lost, the sync log a durable write
+   takes on Linux applied at each open and every acknowledged write read
+   back (docs/design/durability.md, "A power cut"): `gh run list --workflow
+   linux-power-cut.yml --limit 1`, and if it ran before the commit being
+   released, `gh workflow run linux-power-cut.yml --ref main` and wait for
+   it.
+
    **Windows.** The zip is unsigned (SmartScreen warns of a program a
    browser downloaded; `install.ps1` takes the mark off what it checked),
    and nothing publishes it but the release itself: there is no winget or

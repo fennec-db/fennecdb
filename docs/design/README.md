@@ -9,7 +9,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [crates.md](crates.md) -- zero dependencies, limits that error rather than truncate, and the build profiles
 - [storage.md](storage.md) -- the mapped file, the handover of writes to it, a block's spills, compaction and the file format
 - [engine.md](engine.md) -- the single writer, a block's documents built beside the readers, long reads pinned, and a block as one record
-- [durability.md](durability.md) -- a storage error stopping writes, buffered writes written behind the lock, the sync log, and the one shutdown
+- [durability.md](durability.md) -- a storage error stopping writes, buffered writes written behind the lock, the sync log, the power cut that holds it on Linux, and the one shutdown
 - [replication.md](replication.md) -- replication, a node's tenants archived over one stream, `/_changes`, `Fennec-After`, sealed archives and `--follow`
 - [tenants.md](tenants.md) -- scaling out by tenant, the router's directory, moves, failovers and leases, and replicas tried again
 - [regions.md](regions.md) -- regions and zones, a region's own directory, and the global entry

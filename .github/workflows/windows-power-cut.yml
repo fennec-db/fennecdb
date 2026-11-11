@@ -7,7 +7,8 @@
 # it acknowledged is checked there, whole, no batch half there. Two of the
 # cuts also lose the disk's volatile cache: the disk rebuilt as of the last
 # flush the guest asked for (QEMU's blklogwrites, replay.py), checked the
-# same way. .github/windows-power-cut/ holds the rig.
+# same way. .github/windows-power-cut/ holds the rig, .github/power-cut/
+# the host's files linux-power-cut.yml runs too.
 #
 # About half an hour, so never on a pull request and not a required check:
 # by hand, weekly, and on a push to main that touches the durability code --
@@ -31,6 +32,7 @@ on:
       - 'crates/fennec-core/src/engine/maintenance.rs'
       - 'crates/fennec-abi/src/lock.rs'
       - '.github/windows-power-cut/**'
+      - '.github/power-cut/**'
       - '.github/workflows/windows-power-cut.yml'
 
 permissions:
@@ -38,7 +40,7 @@ permissions:
 
 concurrency:
   group: windows-power-cut-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
   # The release's own zip, as release.yml makes it: MSVC, the C runtime
