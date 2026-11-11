@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -8,6 +7,7 @@ import { after, test } from "node:test";
 import { AlreadyOpen, PortTaken, randomToken, StartFailed, startServer, type Child, type FileServer, type Spawn } from "../src/bun/process.ts";
 import { DEFAULT_SETTINGS, servePlan, taskPlan, windowPlan, type Plan } from "../src/bun/serving.ts";
 import { missing, nodeSpawn, SERVER } from "./node-spawn.ts";
+import { argvOf, WINDOWS_STOP } from "./platform.ts";
 
 // The real fennec-server, started through the app's own start (process.ts) on
 // port 0, as a window's and a served database's servers are: where it listens,
@@ -15,7 +15,8 @@ import { missing, nodeSpawn, SERVER } from "./node-spawn.ts";
 // the server's own shutdown (exit 0, the lock let go), and that a file another
 // server holds, and a port another program holds, are said as what they are.
 
-const skip = missing() || false;
+// Each of these stops a server and holds the stop to exit 0 (`database` makes its file so).
+const skip = missing() || WINDOWS_STOP || false;
 const work = mkdtempSync(join(tmpdir(), "fennec-desktop-process-"));
 const running: FileServer[] = [];
 after(async () => {
@@ -36,7 +37,6 @@ async function database(name: string) {
 	assert.equal(await s.stop(), 0);
 	return file;
 }
-const argvOf = (pid: number) => execFileSync("ps", ["-ww", "-o", "command=", "-p", String(pid)]).toString();
 const status = async (url: string, token?: string) => (await fetch(url, { headers: token ? { authorization: `Bearer ${token}` } : {} })).status;
 
 test("a window's server: loopback, any port, the token in its environment and in no argument, and a stop that is its shutdown", { skip }, async () => {

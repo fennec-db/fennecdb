@@ -33,7 +33,7 @@
 //     pinned archive: the resolver's fallback to "a compatible Hutch already
 //     at $HUTCH_HOME/bin" is switched off, and so is ELECTROBUN_HUTCH_BINARY.
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -61,7 +61,7 @@ if (installed !== pin.electrobun || resolver.PAIRED_HUTCH_VERSION !== pin.hutch)
 }
 const platformKey = resolver.hutchPlatformKey(process.platform, process.arch);
 const pinned = platformKey ? pin[platformKey] : undefined;
-if (!pinned) die(`no Hutch is pinned for ${process.platform} ${process.arch} (hutch-pin.json has: ${Object.keys(pin).filter((k) => k.includes("-")).join(", ")}); this app builds on macOS with Apple silicon`);
+if (!pinned) die(`no Hutch is pinned for ${process.platform} ${process.arch} (hutch-pin.json has: ${Object.keys(pin).filter((k) => k.includes("-")).join(", ")}); Hutch builds only for the system it runs on, each pinned by its own hashes`);
 
 // A binary named in the environment is taken by the resolver unchecked.
 const environment = { ...process.env, HUTCH_HOME: process.env.HUTCH_HOME || join(here, ".hutch-home") };
@@ -111,8 +111,10 @@ for (const [file, want] of Object.entries(pinned.files)) {
 /** What Hutch fetched into HUTCH_HOME, held to the pin. `null` for none that differs, else what differs. */
 function runtimeProblems() {
 	const home = environment.HUTCH_HOME;
+	// A platform with Hutch pinned and no runtime would build with whatever Hutch fetched.
+	if (!pinned.runtime) return [`no runtime is pinned for ${platformKey}: \`node scripts/electrobun.mjs --print-runtime-pin\` prints what Hutch fetched, to be read and written in hutch-pin.json`];
 	const problems = [];
-	for (const [dir, want] of Object.entries(pinned.runtime ?? {})) {
+	for (const [dir, want] of Object.entries(pinned.runtime)) {
 		if (!existsSync(join(home, dir))) {
 			problems.push(`${dir} is not there`);
 			continue;
@@ -126,8 +128,23 @@ function runtimeProblems() {
 const args = process.argv.slice(2);
 
 if (args[0] === "--print-runtime-pin") {
+	// Every directory Hutch fetched for this platform, not only those pinned: a new
+	// Electrobun, Bun or platform is a directory the pin does not name yet. What it
+	// prints is unverified, read before it is pinned (a stale version a cache kept
+	// is printed too).
+	const home = environment.HUTCH_HOME;
 	const out = {};
-	for (const dir of Object.keys(pinned.runtime ?? {})) out[dir] = treeDigest(join(environment.HUTCH_HOME, dir));
+	const walk = (rel, depth) => {
+		if (!existsSync(join(home, rel))) return;
+		for (const name of readdirSync(join(home, rel)).sort()) {
+			const sub = `${rel}/${name}`;
+			if (!statSync(join(home, sub)).isDirectory()) continue;
+			if (name === platformKey) out[sub] = treeDigest(join(home, sub));
+			else if (depth < 4) walk(sub, depth + 1);
+		}
+	};
+	walk("releases", 0);
+	walk("toolchains", 0);
 	console.log(JSON.stringify(out, null, "\t"));
 	process.exit(0);
 }

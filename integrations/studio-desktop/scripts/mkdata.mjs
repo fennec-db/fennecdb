@@ -8,16 +8,23 @@
 // in the file at shutdown).
 import { spawn } from 'node:child_process';
 import { rmSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 const [out, rowsArg = '100000', dimArg = '0'] = process.argv.slice(2);
 if (!out) throw new Error('usage: mkdata.mjs out.fennec [rows] [dim]');
 const n = Number(rowsArg);
 const dim = Number(dimArg);
-const bin = process.env.FENNEC_SERVER_BIN ?? new URL('../bin/fennec-server', import.meta.url).pathname;
+const WINDOWS = process.platform === 'win32';
+const bin = process.env.FENNEC_SERVER_BIN ?? fileURLToPath(new URL(`../bin/fennec-server${WINDOWS ? '.exe' : ''}`, import.meta.url));
 const TOKEN = 'mkdata';
 for (const f of [out, `${out}.lock`, `${out}.sync`]) rmSync(f, { force: true });
 
-const child = spawn(bin, ['--file', out, '--http', '127.0.0.1:0', '--sync', 'off'], { env: { ...process.env, FENNEC_HTTP_TOKEN: TOKEN }, stdio: ['ignore', 'ignore', 'pipe'] });
+// Stopped by its own shutdown, which writes the checkpoint: SIGTERM, and on Windows, where
+// kill("SIGTERM") is TerminateProcess, the end of its stdin (--exit-on-stdin-close).
+const child = spawn(bin, ['--file', out, '--http', '127.0.0.1:0', '--sync', 'off', ...(WINDOWS ? ['--exit-on-stdin-close'] : [])], {
+  env: { ...process.env, FENNEC_HTTP_TOKEN: TOKEN },
+  stdio: [WINDOWS ? 'pipe' : 'ignore', 'ignore', 'pipe'],
+});
 const url = await new Promise((resolve, reject) => {
   let text = '';
   child.stderr.on('data', (b) => {
@@ -63,5 +70,6 @@ await query('create collection docs (title text @text, lang text @hash, code tex
 for (let i = 0; i < 300; i++) await query('insert docs {title: $1, lang: $2, code: $3}', [`document ${i} about ${['deserts', 'foxes', 'vectors'][i % 3]}`, ['en', 'tr', 'de'][i % 3], `D-${i}`]);
 console.error(`${n} rows${dim ? ` x ${dim}` : ''} in ${Date.now() - t0} ms`);
 
-child.kill('SIGTERM');
+if (WINDOWS) child.stdin.end();
+else child.kill('SIGTERM');
 await new Promise((r) => child.on('exit', r));

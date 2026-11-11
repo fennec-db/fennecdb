@@ -1,16 +1,24 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { lstatSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { claimInstance, instancePath } from "../src/bun/instance.ts";
+import { WINDOWS } from "./platform.ts";
 
 // One instance of the app at a time: the second asks the first to show itself
 // and is told to quit, before it reads state.json or touches the Keychain.
 
 // A short folder: a socket's path is 104 bytes at most on macOS, and the
 // test's temporary folder inside $TMPDIR is longer than the app's own name there.
-const work = mkdtempSync("/tmp/fdi-");
+// Windows has no /tmp (a folder of that name on the current drive, if any).
+const work = mkdtempSync(WINDOWS ? join(tmpdir(), "fdi-") : "/tmp/fdi-");
+// Phase 2. Bun, which the app runs on, listens on a socket's path on Windows
+// (AF_UNIX), but Node, which runs these tests, takes a path there for a named
+// pipe's and refuses one that is not (EACCES), so the guard cannot be asked
+// here; it moves to a named pipe of the user's own then.
+const socket = WINDOWS && "phase 2: Node takes no socket path on Windows (Bun does); the guard moves to a named pipe";
 after(() => rmSync(work, { recursive: true, force: true }));
 
 const asked = () => {
@@ -26,7 +34,7 @@ const asked = () => {
 	};
 };
 
-test("the first instance claims it; a second is told to quit and the first is asked to show itself", async () => {
+test("the first instance claims it; a second is told to quit and the first is asked to show itself", { skip: socket }, async () => {
 	const path = instancePath("one", work);
 	const first = asked();
 	assert.equal(await claimInstance(path, first.onAsk), true);
@@ -36,13 +44,13 @@ test("the first instance claims it; a second is told to quit and the first is as
 	assert.equal(first.count(), 1);
 });
 
-test("two started together: one claims it, the other quits", async () => {
+test("two started together: one claims it, the other quits", { skip: socket }, async () => {
 	const path = instancePath("two", work);
 	const results = await Promise.all([claimInstance(path, () => {}), claimInstance(path, () => {})]);
 	assert.deepEqual(results.sort(), [false, true]);
 });
 
-test("a socket an instance that ended left behind is taken over", async () => {
+test("a socket an instance that ended left behind is taken over", { skip: socket }, async () => {
 	const path = instancePath("stale", work);
 	// A socket file nobody listens on, as a killed instance leaves it: a process
 	// that listens and is killed (a listener closed in Node unlinks its socket).
@@ -55,7 +63,7 @@ test("a socket an instance that ended left behind is taken over", async () => {
 	await shown;
 });
 
-test("a plain file where the socket goes is taken over as well", async () => {
+test("a plain file where the socket goes is taken over as well", { skip: socket }, async () => {
 	const path = instancePath("file", work);
 	writeFileSync(path, "");
 	assert.equal(await claimInstance(path, () => {}), true);
