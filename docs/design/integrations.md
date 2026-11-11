@@ -688,12 +688,12 @@ not: Electrobun's uninstaller and its HKCU Uninstall entry, and a Desktop
 shortcut; removal here is two paths, which the installers print. Sizes, the
 first CI runs (the spike's installer download beside each):
 
-| | download | installer's | unpacked |
+| | download | installer's | unpacked (`du`, MiB) |
 |---|---|---|---|
-| Windows x64, zip | 49.3 MB | 39.9 MB | 109 MB, 23 files |
-| Windows arm64, zip | 45.0 MB | 35.9 MB | 97 MB |
-| Linux x64, `.tar.xz` | 36.8 MB | 41.8 MB | 120 MB, 24 files |
-| Linux arm64, `.tar.xz` | @@LINARM_MB@@ MB | 40.3 MB | @@LINARM_UNPACKED@@ MB |
+| Windows x64, zip | 49.3 MB | 39.9 MB | 107, 23 files |
+| Windows arm64, zip | 45.0 MB | 35.9 MB | 95, 23 files |
+| Linux x64, `.tar.xz` | 36.8 MB | 41.8 MB | 117, 24 files |
+| Linux arm64, `.tar.xz` | 33.3 MB | 40.3 MB | 115, 24 files |
 
 Linux's is xz because it was the smallest the systems open themselves: the x64
 app was 36.8 MB as `xz -9`, 50.6 MB as `gzip -9` (the first version) and
@@ -721,8 +721,9 @@ again by that target. Each start has a home of the check's own (`HOME` on
 Linux, the XDG folders unset; `LOCALAPPDATA`, `APPDATA` and the temporary
 folder on Windows) and is up when the main process runs and a window of the
 app's processes is on screen (`xdotool search --onlyvisible --pid` under
-xvfb; a non-zero `MainWindowHandle` on Windows): 0.6 s on Linux, 2.1-2.9 s on
-Windows. Linux stops it with SIGTERM to the main process, the app's own
+xvfb; a non-zero `MainWindowHandle` on Windows): 0.6 s on Linux, 1.7-3.3 s on
+Windows and once 48.8 s (`windows-11-arm`, the installed copy's fresh WebView2
+profile), within a bound of 240 s. Linux stops it with SIGTERM to the main process, the app's own
 handler, the launcher's exit 0 and nothing left; Windows ends the tree
 (`taskkill /T /F`), since a SIGTERM there is TerminateProcess and a quit by
 the app's own hand is phase 2's. A run changes no file of the app but one:

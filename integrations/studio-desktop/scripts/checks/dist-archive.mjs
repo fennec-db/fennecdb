@@ -238,8 +238,12 @@ async function launchAndStop(app, launcher, label, env) {
   started.set(child.pid, app);
   const exited = new Promise((r) => child.on('exit', (code, signal) => r({ code, signal })));
   const t0 = Date.now();
-  const main = await until(() => family(new Set([child.pid]), app).find((p) => /[\\/]bin[\\/]bun(\.exe)?\b/i.test(p.command)), 90000, `the app's main process (logs/dist-${label}.app.log)`);
-  const shown = await until(() => windowed(family(new Set([child.pid]), app).map((p) => p.pid)), 120000, `a window of the app on screen (logs/dist-${label}.app.log)`);
+  // Bounds only, waits for an event: a window came 0.6 s after the start on
+  // Linux, 1.7-3.3 s on Windows and once 48.8 s (windows-11-arm, a fresh
+  // WebView2 profile), and phase 1 saw a page there take over 120 s; a check
+  // is given 240 s.
+  const main = await until(() => family(new Set([child.pid]), app).find((p) => /[\\/]bin[\\/]bun(\.exe)?\b/i.test(p.command)), 120000, `the app's main process (logs/dist-${label}.app.log)`);
+  const shown = await until(() => windowed(family(new Set([child.pid]), app).map((p) => p.pid)), 240000, `a window of the app on screen (logs/dist-${label}.app.log)`);
   const seen = family(new Set([child.pid]), app);
   log(`up in ${((Date.now() - t0) / 1000).toFixed(1)} s: main process ${main.pid}, a window of ${shown.pid} on screen ("${shown.title}"), ${seen.length} processes`);
 
