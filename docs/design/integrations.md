@@ -405,6 +405,60 @@ looking for what was never there. The checks wait for events -- a fact the app
 reports, a process leaving, a page drawing -- and wait out a time only for what
 must not happen (`waitNone`, 1.2 s, a link that must not be opened).
 
+A check fails alone. The test variant keeps state between launches -- its
+`state.json` (recent files, saved connections, the databases it served), its
+Keychain items (service `dev.fennecdb.studio.test`) and its WebKit data stores
+(`~/Library/WebKit/dev.fennecdb.studio.test`, one directory a `persist:` store,
+named by the SHA-256 of the store's name) -- and `run.mjs` used to empty only
+the first, once, before the first check. In run 42876456804 `storage` failed
+after saving a connection and before removing it, and `remote`, two checks
+later, failed on its last assertion (no saved connections) for that
+connection. So `run.mjs` empties all three before each check (`freshState`),
+`state.json` alone of its folder, whose rest is Electrobun's (its
+self-extraction cache, its uninstall notes) and no check's state, and which
+goes once a run, before `warmup`, as it went before (a CI run emptying the
+whole folder before each check passed too, so this is less removed under
+`~/Library`, not a fix):
+the Keychain is emptied by service, one `security delete-generic-password -s`
+an item until none is left, which matches the service exactly (checked: an item
+under a longer service that begins with it stays), so a real install's
+(`dev.fennecdb.studio`) is never touched. A `storage` made to fail where that
+run did, then `remote`: on the old `run.mjs` both fail, `remote` on the same
+assertion; with `freshState` `storage` fails and `remote` passes. The stores
+went with nothing before: a Mac that ran the checks for a few weeks held 865 of
+them (201 MB), every saved server's a check ever made, each emptied by its
+removal and left in place.
+
+A failed check keeps what the app cannot say (`keepEvidence`, before `run.mjs`
+kills what is left): the unified log of the app and of WebKit's processes since
+the check started, a `sample` of the app's `bun` while it runs, and any crash
+report written meanwhile, all in the logs CI uploads. A window whose page never
+loads is otherwise silent: Electrobun 2.0.4's navigation delegate implements
+neither `didFailProvisionalNavigation` nor
+`webViewWebContentProcessDidTerminate`, so a load WebKit gave up on, or a web
+process that ended under it, reaches the app as nothing at all. WebKit's own
+log has each step (`WebPageProxy::loadRequestWithNavigationShared`, the web
+process launched, `decidePolicyForNavigationAction` -- the app's
+`will-navigate` -- then the navigation handed to a second, new web process,
+`ProvisionalPageProxy::didCommitLoadForFrame`, `didFinishLoadForFrame`), and
+the test hooks report `did-commit-navigation` as well, so the next such failure
+says where its load stopped. That is what run 42876456804's `storage` was: the
+first window in a new `persist:remote-<id>` store reported `will-navigate`,
+allowed, and nothing more for 30 s. A slow load would have shown a tail: in 115
+passing CI runs, the step it failed in (two windows in a new persistent store)
+took 1.7 to 6.0 s, p99 5.8 s. It did not come back in 350 tries:
+- 215 on a MacBook Air (macOS 26.1), each beside 12 CPU and 2 fsync busy loops,
+  load average 15 to 30:
+  - 65 `storage` runs on the old `run.mjs` and 60 on this one;
+  - 70 new stores' windows in one process;
+  - 80 launches that opened the first new store from an empty WebKit directory;
+- 135 `storage` runs on hosted runners (macOS 26.7.2), each from an empty state.
+
+So its cause is not known. The check's server was answering (a thread per
+connection, an accept loop that reads nothing), the navigation rules allowed
+the load, and the window and its view are made as every other window's are.
+What the app could not see is the evidence these hooks now keep.
+
 Toolchain. `electrobun init` installed Hutch (the build tool) in `~/.hutch` and
 appended two lines to `~/.zshrc`, and the npm package's resolver would, were
 its download to fail, run that installer. `scripts/electrobun.mjs` runs the

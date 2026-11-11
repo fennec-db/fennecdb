@@ -168,17 +168,26 @@ digests, and the script says which hashes a mismatch is.
    `ONLY=files,remote npm run checks` runs a subset (with the test variant
    built: `FENNEC_DESKTOP_TEST_BUILD=1 npm run build`). A failure's logs are in
    `$SD_DIR` (default `fennec-desktop-checks` in the temp directory):
-   `<check>.log` and the app's own `<check>.app.log`.
+   `<check>.log` and the app's own `<check>.app.log`, and for a check that
+   failed, what the app cannot say for itself: `<check>.unified.log` (the
+   system log of the app and of WebKit's processes since the check started,
+   in which WebKit writes each load's steps), a `sample` of the app while it
+   still runs and any crash report written meanwhile (`keepEvidence`).
 
 **What running the checks does to a Mac.** The test variant is a second app
 with a bundle identifier of its own, and LaunchServices may list it among the
 programs that can open a `.fennec` file (the `finder` check needs the document
-type). `run.mjs` deletes the test variant's own folder in
-`~/Library/Application Support/dev.fennecdb.studio.test` before it starts, and
-its Keychain items (service `dev.fennecdb.studio.test`) are the checks' own,
-removed as they go (a served database's, `serve:<id>`, by `forgetServeItems`
-at the end of each check that serves one). Nothing of a real install (`dev.fennecdb.studio`) is read or
-written. To take the test variant out of the "Open With" list, delete
+type). Before each check `run.mjs` deletes what the test variant keeps
+(`freshState`): its `state.json` in
+`~/Library/Application Support/dev.fennecdb.studio.test` (the saved
+connections, the databases it served; the folder itself, Electrobun's
+unpacked copy of the app among it, once a run, before `warmup`), its WebKit data stores in
+`~/Library/WebKit/dev.fennecdb.studio.test` and every Keychain item of its
+service, `dev.fennecdb.studio.test`, so a check that failed half-way, with a
+connection it never removed, fails alone and never the ones after it. The
+checks remove their items as they go as well (a served database's,
+`serve:<id>`, by `forgetServeItems` at the end of each check that serves one).
+Nothing of a real install (`dev.fennecdb.studio`) is read or written. To take the test variant out of the "Open With" list, delete
 `build-test/`.
 
 `scripts/measure.mjs` times the launch to the studio, idle memory and quit of
