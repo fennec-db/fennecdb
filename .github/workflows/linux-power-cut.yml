@@ -25,7 +25,7 @@ on:
   schedule:
     - cron: '53 4 * * 1'
   push:
-    branches: [main, linux-power-cut]
+    branches: [main]
     paths:
       - 'crates/fennec-core/src/fs.rs'
       - 'crates/fennec-core/src/fs/**'
