@@ -37,13 +37,16 @@ const app = startApp('spike-open-external', {
 });
 await waitStudio(`file:${SMALL}`, 0, 60000);
 
-step('a page opens the payload');
+step('a page opens the payload: by script, then from a link it clicks');
 await evalIn(`file:${SMALL}`, `window.open(${JSON.stringify(payload)}); return true`);
-const ext = await waitFor((l) => l.what === 'external', 10000, 'the link handed to the app');
-log('the app was handed:', ext.url, ext.url === payload ? '(as the page wrote it)' : '(changed)');
+await evalIn(`file:${SMALL}`, `const a = document.createElement('a'); a.href = ${JSON.stringify(payload)}; a.target = '_blank'; document.body.appendChild(a); a.click(); return true`);
+// WebKitGTK may send no new-window-open for a script's window.open (seen in the
+// sandbox check): then the handing over is not shown here, and step 2 goes on.
+const ext = await waitFor((l) => l.what === 'external', 10000, 'the link handed to the app').catch(() => null);
+log(ext ? `the app was handed: ${ext.url} ${ext.url === payload ? '(as the page wrote it)' : '(changed)'}` : 'no link reached the app from the page (no new-window-open)');
 
 step('Utils.openExternal(payload), as the shipped app would call it');
-cmd({ cmd: 'spike-open-external', url: ext.url });
+cmd({ cmd: 'spike-open-external', url: payload });
 const r = await waitFor((l) => l.what === 'spike-open-external', 15000, 'openExternal returned');
 log('openExternal returned', r.ok);
 for (let i = 0; i < 50 && !existsSync(marker); i++) await new Promise((res) => setTimeout(res, 100));
@@ -51,5 +54,5 @@ const ran = existsSync(marker);
 log(ran ? `INJECTION: ${marker} was made by a shell the URL reached` : `no marker: the URL did not reach a shell`);
 rmSync(marker, { force: true });
 await quit(app);
-console.log(JSON.stringify({ probe: 'linux-open-external', handedUnchanged: ext.url === payload, openExternalReturned: r.ok, shellRanPayload: ran }));
+console.log(JSON.stringify({ probe: 'linux-open-external', handedToApp: ext ? ext.url === payload ? 'unchanged' : ext.url : 'not reached', openExternalReturned: r.ok, shellRanPayload: ran }));
 assert.ok(true);

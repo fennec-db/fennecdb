@@ -200,7 +200,9 @@ export async function evalIn(key, js, ms = 15000) {
 export const textOf = async (key) => (await evalIn(key, `return document.body.innerText.replace(/\\s+/g,' ')`)).value;
 
 /** The studio in window `key` showing a database, signed in, in a report after the `after`th. */
-export async function waitStudio(key, after = 0, ms = 30000) {
+// SPIKE: each window's store is a WebView2 environment of its own on Windows (a
+// browser process per window), slower to come up on a hosted runner.
+export async function waitStudio(key, after = 0, ms = WIN ? 120000 : 30000) {
   return waitFor((l, i) => i >= after && l.detail?.type === 'state' && l.detail.loaded && l.key === key, ms, `the studio loaded in ${key}`);
 }
 /** The last state a studio window reported. */
