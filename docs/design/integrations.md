@@ -689,7 +689,7 @@ installing story on all three systems, `keyring`, an updater, single-instance,
 and `fennec-http` could run in the app's own process: no child, no orphan, no
 stderr parsing, the process's own `fcntl` lock) and a larger rewrite in Rust
 outside the zero-dependency set (allowed under `integrations/`) at 3-10 MB for
-the shell instead of Bun's 63; re-decide before Windows. No server at all, the
+the shell instead of Bun's 63; re-decided before Windows, below. No server at all, the
 studio's local mode over the file's bytes, reads a 100 000-row file (8.3 MB)
 in 5.3 ms in Node and the 64 MB graph file in 101 ms, and is the wrong design
 for a file: the module has no mmap and the file is loaded whole into wasm
@@ -701,6 +701,31 @@ window would need the RPC bridge, so no sandbox), the `<file>.lock` is an
 `fcntl` record lock a page cannot take, and it is a second engine on one thread
 without `--warm`, auto-compact, `@ttl` sweeps, `/_changes`, MCP, the admin view
 or metrics. It stays right for the site's playground.
+
+Re-decided before Windows and Linux (2026-11-11), from a spike's runs on
+`windows-latest`, `windows-11-arm`, `ubuntu-24.04` and `ubuntu-24.04-arm`
+(42997677468, 42999915984, 43002802508; #578, closed unmerged): Electrobun
+stays. 2.0.4 builds the app on all four and a file opens, is edited through
+the studio and reopens on each. What this design rests on holds there: a
+server whose holder is killed hard ends in 104-155 ms and frees its file. On
+Windows that is only by the end of its stdin: `kill("SIGTERM")` there is
+TerminateProcess, ending the server in 1-3 ms with no shutdown line, so no sync
+and no checkpoint. Its gaps each have a way round in the app but one:
+- The launcher drops its arguments (upstream #483, #554), so a `.fennec`
+  double-clicked on Windows or Linux cannot reach the app. This one has none.
+- WebView2's `sessionClearStorageData` clears the first open view's profile, not
+  the partition it is given; the app removes the partition's folder itself.
+- Linux's `openExternal` and `showItemInFolder` fall back to
+  `system("xdg-open \"…\"")`, a shell over a URL or a path: a URL's `$(…)` ran on
+  the runners. The app never calls them on Linux and spawns `xdg-open` with an
+  argument vector.
+- Linux has no application menu, so the main window's buttons stand in for it.
+- Nothing signs on Windows.
+
+Linux needs glibc 2.38 and WebKitGTK 4.1 (Ubuntu 24.04, Debian 13, Fedora 39 and
+later; not Ubuntu 22.04, Debian 12 or RHEL 9). Tauri is taken up again only if
+a double-clicked file finds no way to the app: neither an argument forwarded
+upstream nor a small opener of our own.
 
 Measured on a MacBook Air (MacBookAir10,1, Apple M1, 8 GB), macOS 26.1, with
 other work running (load average 3 to 4), by `scripts/measure.mjs` on the test
