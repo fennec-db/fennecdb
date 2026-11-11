@@ -7,7 +7,9 @@
 //   - that pipe's DACL, made its user's alone once it listens;
 //   - a credential kept on this machine: Bun.secrets writes every item with
 //     CRED_PERSIST_ENTERPRISE, which roams with a domain profile to every
-//     machine the user signs in to (secrets.ts).
+//     machine the user signs in to (secrets.ts);
+//   - a variable taken out of the process's environment block, which WebView2
+//     reads and the app's `process.env` is not (webview2.ts).
 // Only the main process on Windows loads it; nothing here runs elsewhere, and
 // `node --test` never imports it (bun:ffi is Bun's).
 //
@@ -50,6 +52,8 @@ function load() {
 		CloseHandle: { args: [FFIType.u64], returns: FFIType.i32 },
 		LocalFree: { args: [FFIType.u64], returns: FFIType.u64 },
 		lstrlenW: { args: [FFIType.u64], returns: FFIType.i32 },
+		SetEnvironmentVariableW: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
+		GetEnvironmentVariableW: { args: [FFIType.ptr, FFIType.ptr, FFIType.u32], returns: FFIType.u32 },
 	});
 	const advapi32 = dlopen("advapi32.dll", {
 		OpenProcessToken: { args: [FFIType.u64, FFIType.u32, FFIType.ptr], returns: FFIType.i32 },
@@ -101,6 +105,24 @@ function tokenSid(kind: typeof TOKEN_USER | typeof TOKEN_OWNER): string {
 	} finally {
 		k.CloseHandle(handle[0]!);
 	}
+}
+
+/**
+ * Takes `name` out of this process's own environment block, the one Windows'
+ * calls read and WebView2 reads when Electrobun makes a view. Not `delete
+ * process.env[name]`: the app runs in a Worker (Electrobun's main.js), whose
+ * `process.env` is a copy of its own.
+ */
+export function unsetEnvironment(name: string): void {
+	win().k.SetEnvironmentVariableW(wide(name), null);
+	// Judged by what the block holds after, not by the call's BOOL: a name the
+	// block never held fails the call, and is what was asked.
+	if (inEnvironment(name)) throw new Error(`${name} is still in the environment`);
+}
+
+/** Whether this process's environment block holds `name` (asked for a size of 0, a held one, empty too, answers at least 1). */
+export function inEnvironment(name: string): boolean {
+	return win().k.GetEnvironmentVariableW(wide(name), null, 0) !== 0;
 }
 
 /** This user's SID, which no other user of the machine has. */

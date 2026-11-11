@@ -19,8 +19,10 @@
 // WebView2's browser has that switch, which is asserted -- an Electrobun that
 // drops it fails this check until they are held there too.
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { WIN, assertClean, cmd, evalIn, lines, quit, sleep, startApp, step, until, waitFor, webviewBrowserSwitches, webviewWindows, log } from './lib.mjs';
+import { join } from 'node:path';
+import { D, WIN, assertClean, cmd, evalIn, lines, quit, sleep, startApp, step, until, waitFor, webviewBrowserSwitches, webviewWindows, log } from './lib.mjs';
 
 assertClean('before');
 
@@ -71,8 +73,19 @@ function opener(k, url) {
   return `<!doctype html><script>var r;try{r=open(${JSON.stringify(url)});r=r===null?"null":typeof r}catch(e){r="threw "+e}parent.postMessage({k:${JSON.stringify(k)},returned:r},"*")</script>`;
 }
 
-const app = startApp('hostile');
+// Windows: started with WebView2's variables, which the app takes out of its environment block
+// before its first window (src/bun/webview2.ts). An elevated app's WebView2 ignores them (the
+// runners'), so what is held is the block, which a WebView2 not elevated reads.
+const ONE_STORE = join(D, 'hostile-one-store');
+const app = startApp(
+  'hostile',
+  WIN ? { WEBVIEW2_USER_DATA_FOLDER: ONE_STORE, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--fennec-check-marker', webview2_pipe_for_script_debugger: 'fennec-check' } : {},
+);
 await waitFor((l) => l.what === 'ready', 60000, 'ready');
+if (WIN) {
+  step("WebView2's variables the app was started with are out of its environment before its first window");
+  assert.deepEqual((await waitFor((l) => l.what === 'webview2-variables', 5000, 'the variables reported')).left, [], 'none is left in the block');
+}
 let n = lines().length;
 cmd({ cmd: 'addconn', name: 'hostile', url: PAGE, token: '', tenant: '' });
 const id = (await waitFor((l, i) => i >= n && l.what === 'conn-added' && l.name === 'hostile', 10000, 'saved')).id;
@@ -175,7 +188,10 @@ const later = (await evalIn(KEY, `return window.__answers || {}`)).value;
 log('what each was answered:', JSON.stringify({ ...said, 'later, from a frame': later }, null, 1));
 const opened = asked.filter((u) => u.startsWith('/popup/'));
 assert.deepEqual(opened, [], 'no window loaded any of the addresses asked for');
-if (WIN) assert.deepEqual(webviewWindows(), [], 'and WebView2 drew no window of its own');
+if (WIN) {
+  assert.deepEqual(webviewWindows(), [], 'and WebView2 drew no window of its own');
+  assert.ok(!existsSync(ONE_STORE), 'no window was given the store WEBVIEW2_USER_DATA_FOLDER named');
+}
 for (const [kind, answer] of Object.entries({ ...said, ...later })) {
   if (/^(object|undefined)$/.test(answer)) assert.fail(`${kind}: the page was handed a window (${answer})`);
 }

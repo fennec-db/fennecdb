@@ -8,11 +8,11 @@
  * The WEBVIEW2_* variables of `env` (names case-blind, as Windows reads them),
  * which the app takes out of its own environment before its first window:
  * what WebView2 is started with is Electrobun's and the app's, not the
- * environment the app was started from. WebView2 reads them in the app's
- * process when a view is made (where the app is not elevated; an elevated one
- * it ignores), and Bun's `process.env` is that process's environment block
- * (on both Windows runners a variable deleted from it was gone to
- * GetEnvironmentVariableW). WEBVIEW2_USER_DATA_FOLDER would put every window
+ * environment the app was started from. WebView2 reads them from the app's
+ * process's environment block when a view is made (where the app is not
+ * elevated; an elevated one it ignores), which the app's `process.env` is not:
+ * it runs in a Worker, whose copy is its own (win32.ts's `unsetEnvironment`).
+ * WEBVIEW2_USER_DATA_FOLDER would put every window
  * in one store, the one thing the partitions are for (stores.ts);
  * WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS could add `--remote-debugging-port`,
  * handing every page, and the token a studio window holds, to any program of

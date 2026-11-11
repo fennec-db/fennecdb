@@ -55,8 +55,24 @@ async function guard(): Promise<{ path: string; pipe?: PipeSecurity } | null> {
 }
 
 // Windows: none of WebView2's variables from the environment the app was
-// started from reaches its windows (webview2.ts); taken out before the first.
-if (process.platform === "win32") for (const name of webview2Variables(process.env)) delete process.env[name];
+// started from reaches its windows (webview2.ts); taken out of the process's
+// environment block before the first. Where that fails, no page is shown.
+if (process.platform === "win32") {
+	try {
+		const names = webview2Variables(process.env);
+		if (names.length) {
+			const w = await import("./win32.ts");
+			for (const name of names) {
+				w.unsetEnvironment(name);
+				delete process.env[name];
+			}
+		}
+	} catch (e) {
+		console.error(`WebView2's variables could not be taken out: ${(e as Error).message}`);
+		Utils.quit();
+		await new Promise(() => {});
+	}
+}
 
 // One instance at a time (instance.ts): a second asks the first to show its
 // main window and quits before it opens anything or reads its lists.

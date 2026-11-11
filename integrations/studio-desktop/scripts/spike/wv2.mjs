@@ -44,6 +44,21 @@ console.log(JSON.stringify(out));
 );
 const envProbe = spawnSync(BUN, [probe], { encoding: 'utf8', env: { ...process.env, FENNEC_SPIKE_B: 'inherited' }, timeout: 60000 });
 say("Bun's process.env and the Win32 environment", envProbe.stdout.trim() + envProbe.stderr.trim());
+// The same from a Worker, where Electrobun runs the app's code (its main.js).
+const worker = join(D, 'spike-env-worker.ts');
+writeFileSync(worker, `delete process.env.FENNEC_SPIKE_B; process.env.FENNEC_SPIKE_A = "set-in-worker"; postMessage("done");`);
+const host = join(D, 'spike-env-host.ts');
+writeFileSync(
+  host,
+  `import { dlopen, FFIType, ptr } from "bun:ffi";
+const k = dlopen("kernel32.dll", { GetEnvironmentVariableW: { args: [FFIType.ptr, FFIType.ptr, FFIType.u32], returns: FFIType.u32 } });
+const get = (name) => { const n = Buffer.from(name + "\\0", "utf16le"); const b = Buffer.alloc(2048); const len = k.symbols.GetEnvironmentVariableW(ptr(n), ptr(b), 1024); return len ? b.subarray(0, len * 2).toString("utf16le") : null; };
+const w = new Worker(${JSON.stringify(worker)});
+w.onmessage = () => { console.log(JSON.stringify({ afterWorkerDeleteB: get("FENNEC_SPIKE_B"), afterWorkerAssignA: get("FENNEC_SPIKE_A"), mainProcessEnvB: process.env.FENNEC_SPIKE_B ?? null })); process.exit(0); };
+`,
+);
+const workerProbe = spawnSync(BUN, [host], { encoding: 'utf8', env: { ...process.env, FENNEC_SPIKE_B: 'inherited' }, timeout: 60000 });
+say("a Worker's process.env and the Win32 environment", workerProbe.stdout.trim() + workerProbe.stderr.trim());
 
 // ---- the pages: a hostile "remote server" with no CSP, and another origin
 const hits = [];
@@ -87,10 +102,11 @@ say('servers', { H, B });
 /** WebView2's processes of the test variant, the browser's command line first. */
 function webview2() {
   const dir = USER_DATA.replace(/'/g, "''");
-  const r = ps(`Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains('${dir}') } | ForEach-Object { '{0}|{1}' -f $_.ProcessId, $_.CommandLine }`);
+  const one = join(D, 'one-store-for-all').replace(/'/g, "''");
+  const r = ps(`Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Where-Object { $_.CommandLine -and ($_.CommandLine.Contains('${dir}') -or $_.CommandLine.Contains('${one}')) } | ForEach-Object { '{0}|{1}' -f $_.ProcessId, $_.CommandLine }`);
   return r.stdout.split(/\r?\n/).filter(Boolean).map((l) => ({ pid: +l.slice(0, l.indexOf('|')), cl: l.slice(l.indexOf('|') + 1) }));
 }
-const switches = (cl) => (cl.match(/--[A-Za-z0-9-]+(=("[^"]*"|\S*))?/g) ?? []).filter((s) => !/user-data-dir|mojo|field-trial|metrics-shmem|embedded-browser-webview-dpi|webview-exe-version|variations/.test(s));
+const switches = (cl) => (cl.match(/--[A-Za-z0-9-]+(=("[^"]*"|\S*))?/g) ?? []).filter((s) => !/mojo|field-trial|metrics-shmem|embedded-browser-webview-dpi|webview-exe-version|variations/.test(s));
 
 /** Every visible top-level window of the test variant's WebView2 processes, with its title. */
 function windowsOfWebview2() {

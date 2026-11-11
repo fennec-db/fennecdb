@@ -273,8 +273,15 @@ async function run(c: any) {
 }
 
 /** Starts what the environment asks for. Returns whether it opened something the launcher need not cover. */
+/** Names checks/hostile.mjs starts the app with on Windows: none may be left in its environment block (webview2.ts). */
+const WEBVIEW2_NAMES = ["WEBVIEW2_USER_DATA_FOLDER", "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "webview2_pipe_for_script_debugger"];
+
 export async function boot(): Promise<boolean> {
 	onFact(report);
+	if (process.platform === "win32") {
+		const w = await import("./win32.ts");
+		report("webview2-variables", { left: WEBVIEW2_NAMES.filter((name) => w.inEnvironment(name)) });
+	}
 	if (CONTROL) {
 		let offset = 0;
 		// A look's lines run in turn, but the next look does not wait for them:
