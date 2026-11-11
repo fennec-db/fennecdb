@@ -29,7 +29,7 @@ show that your install lacks is in the next one, and
 <tr><td><a href="#docker">The Docker image</a></td><td><code>fennec-server</code> alone, 7 MB</td><td>anywhere Docker runs, amd64 and arm64</td></tr>
 <tr><td><a href="#packages">A package for your language</a></td><td>a client for the server, or the database in your app</td><td>by language</td></tr>
 <tr><td><a href="#source">From source</a></td><td>whatever <code>main</code> is today</td><td>where Rust builds</td></tr>
-<tr><td><a href="#studio-app">The studio app</a></td><td>fennec studio as a Mac app (beta), with its own server for each file, in <code>~/Applications</code></td><td>macOS on Apple silicon</td></tr>
+<tr><td><a href="#studio-app">The studio app</a></td><td>fennec studio as an app (beta), with its own server for each file, in your home directory or profile</td><td>macOS on Apple silicon; Windows 10 and 11 and Linux (glibc 2.38, WebKitGTK 4.1), x64 and arm64</td></tr>
 </tbody>
 </table>
 </div>
@@ -63,8 +63,8 @@ that puts the directory on your <code>PATH</code> and leaves that to you.</p>
     https://fennecdb.com/install.sh | less</code>
     (<a href="https://fennecdb.com/install.sh">install.sh</a>).</li>
   <li><b>To remove it,</b> delete <code>~/.fennecdb</code>.</li>
-  <li><b>With <code>--app</code></b>, on a Mac with Apple silicon, it installs
-    <a href="#studio-app">the studio app</a> instead.</li>
+  <li><b>With <code>--app</code></b>, on a Mac with Apple silicon or on Linux,
+    it installs <a href="#studio-app">the studio app</a> instead.</li>
 </ul>
 
 <h2 id="windows">Windows</h2>
@@ -229,24 +229,61 @@ each make target does.</p>
 
 <h2 id="studio-app">The studio app</h2>
 
-<p>On a Mac with Apple silicon, <a href="studio.html#desktop">fennec
-studio</a> is also an app (beta) that opens a <code>.fennec</code> file with
-nothing to start: it carries <code>fennec-server</code> and the shell. The
-install script installs it instead of the two programs:</p>
+<p><a href="studio.html#desktop">fennec studio</a> is also an app (beta) that
+opens a <code>.fennec</code> file with nothing to start: it carries
+<code>fennec-server</code> and the shell. On a Mac with Apple silicon and on
+Linux the install script installs it instead of the two programs:</p>
 
 <pre data-lang="bash">curl -fsSL https://fennecdb.com/install.sh | sh -s -- --app</pre>
 
-<p>It downloads the release's
+<p>On a Mac it downloads the release's
 <code>fennec-studio-v{{version}}-macos-arm64.dmg</code>, checks it against
 <code>SHA256SUMS</code> before it opens it, and copies the app into
-<code>~/Applications</code>, no <code>sudo</code>; anywhere else it stops and
-installs nothing. The app is unsigned (no Developer ID, not notarized). What
-<code>curl</code> downloads is not quarantined, so the app opens at once; the
-same DMG downloaded from the <a
+<code>~/Applications</code>, no <code>sudo</code>. The app is unsigned (no
+Developer ID, not notarized). What <code>curl</code> downloads is not
+quarantined, so the app opens at once; the same DMG downloaded from the <a
 href="https://github.com/fennec-db/fennecdb/releases/tag/v{{version}}">release</a>
 by a browser is, and its first open asks once, in System Settings, Privacy
 &amp; Security, <b>Open Anyway</b>. To remove it, delete
 <code>~/Applications/fennec studio.app</code>.</p>
+
+<p>On Linux, x64 or arm64, it first asks whether the system has what the app
+links: glibc 2.38 or later and WebKitGTK 4.1, which Ubuntu 24.04, Debian 13,
+Fedora 39 and later have and Ubuntu 22.04, Debian 12 and RHEL 9 do not. Where
+one is missing it says what to install and installs nothing:</p>
+
+<pre data-lang="bash">sudo apt install libwebkit2gtk-4.1-0 libayatana-appindicator3-1   # Ubuntu, Debian
+sudo dnf install webkit2gtk4.1 libayatana-appindicator-gtk3       # Fedora</pre>
+
+<p>Then it downloads <code>fennec-studio-v{{version}}-linux-x64.tar.xz</code>
+(or <code>-arm64</code>), checks it the same way, and puts the app in
+<code>~/.local/share/dev.fennecdb.studio/stable/app</code> and its entry in
+your applications menu in
+<code>~/.local/share/applications/fennecstudio.desktop</code>, no
+<code>sudo</code>. To remove it, delete those two; the folder above the app
+keeps its saved state.</p>
+
+<p>On Windows, PowerShell installs it, Windows PowerShell 5.1 or PowerShell 7.
+<code>irm | iex</code> hands a script no argument, so here the script is made
+a script block and called with <code>-App</code>:</p>
+
+<pre data-lang="powershell">&amp; ([scriptblock]::Create((irm https://fennecdb.com/install.ps1))) -App</pre>
+
+<p>It downloads <code>fennec-studio-v{{version}}-windows-x64.zip</code> (or
+<code>-arm64</code>, the machine's processor's, as for the programs), checks
+it against <code>SHA256SUMS</code> before it unpacks it, and puts the app in
+<code>%LOCALAPPDATA%\dev.fennecdb.studio\stable\app</code> and a shortcut,
+fennec studio, in the Start menu: no administrator, no <code>PATH</code>, and
+nothing it downloaded is run. The app is not signed. What the script downloads
+carries no mark of the web, so SmartScreen does not ask; the same zip a
+browser saved does, and the app's first start asks once (<b>More info</b>,
+<b>Run anyway</b>), and Smart App Control, where it is on, refuses it. To
+remove it, delete that folder and the shortcut.</p>
+
+<p>On either, a running app is not replaced: quit it, then run the line again.
+The zip and the tarball hold one folder, <code>fennec-studio</code>, which
+also runs where it is unpacked (<code>bin\launcher.exe</code>,
+<code>bin/launcher</code>).</p>
 
 <h2 id="checking">Checking a download</h2>
 

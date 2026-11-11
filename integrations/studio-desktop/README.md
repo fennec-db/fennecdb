@@ -10,14 +10,14 @@ own `/_studio/` page, so what the window does is what the studio does in a
 browser. Nothing of a database is written by the app itself: a server makes a
 new file, `fennec backup` takes an image, `fennec restore` makes a file of one.
 
-Beta, macOS on Apple silicon only. The shell is [Electrobun](https://electrobun.dev)
-2.0.4 (a Bun main process and the system's WKWebView); its build tool ships no
-Intel Mac build. Windows and Linux (x64 and arm64 each) are on the way and not
-downloadable yet: CI builds the app there and runs its unit tests and the
-checks that pass there ([Windows and Linux](#windows-and-linux)), and what is
-missing before it ships is in the plan in #578 (file associations, the stop on
-Windows by the end of the server's stdin, the credential store in the
-Keychain's place, the installers).
+Beta, macOS on Apple silicon, Windows and Linux (x64 and arm64 each). The
+shell is [Electrobun](https://electrobun.dev) 2.0.4 (a Bun main process and the
+system's WKWebView, WebView2 on Windows, WebKitGTK 4.1 on Linux); its build
+tool ships no Intel Mac build. On Windows and Linux CI builds the app, runs its
+unit tests and the checks that pass there, and makes and checks the download
+([Windows and Linux](#windows-and-linux)); what is still missing there is in
+the plan in #578 (file associations, the stop on Windows by the end of the
+server's stdin, the credential store in the Keychain's place).
 A release's DMG is unsigned, signed ad hoc and not notarized
 ([Download](#download)), until a maintainer adds the secrets
 ([below](#signing-and-notarization)); an app you build here opens as it is.
@@ -61,6 +61,42 @@ A release carries the app as `fennec-studio-v<version>-macos-arm64.dmg`
   then System Settings, Privacy & Security, **Open Anyway** beside fennec
   studio, once. From a terminal, `xattr -cr "/Applications/fennec studio.app"`
   takes the quarantine off instead.
+
+On **Windows and Linux** a release carries the app as
+`fennec-studio-v<version>-windows-<x64|arm64>.zip` and
+`fennec-studio-v<version>-linux-<x64|arm64>.tar.xz`, in its `SHA256SUMS` too:
+one folder, `fennec-studio`, the app unpacked, which runs where it is unpacked
+(`bin\launcher.exe`, `bin/launcher`). The one-liners put it where Electrobun's
+own installer would, with a Start-menu shortcut or a menu entry, no
+administrator and no `sudo`, refusing an app running from there:
+
+```powershell
+& ([scriptblock]::Create((irm https://fennecdb.com/install.ps1))) -App   # %LOCALAPPDATA%\dev.fennecdb.studio\stable\app
+```
+
+```bash
+curl -fsSL https://fennecdb.com/install.sh | sh -s -- --app   # ~/.local/share/dev.fennecdb.studio/stable/app
+```
+
+Linux needs glibc 2.38 and WebKitGTK 4.1 (Ubuntu 24.04, Debian 13, Fedora 39
+and later), which the script asks for before it downloads anything, saying what
+to install where one is missing. Neither download is signed: `install.ps1`
+takes the zip with no mark of the web, where a browser's copy is stopped once
+by SmartScreen (More info, Run anyway) and refused where Smart App Control is
+on. Electrobun's own installers are not shipped: Windows' `Setup.exe` did not
+end on the runners, and both keep the whole payload again for an updater the
+app does not have (the design file has the rest).
+
+```bash
+make studio-desktop-dist   # on Windows (Git's bash) or Linux: the zip or tarball in artifacts/dist/, then checks/dist.mjs on it
+```
+
+There `scripts/checks/dist.mjs` hands over to `dist-archive.mjs`: the one
+folder, a launcher that is not the extractor, no test hook, started where it
+is unpacked, then installed through `install.ps1 -App` or `install.sh --app`
+from a release laid out on the machine and started by the shortcut's or the
+menu entry's own target, unchanged by either run but for the launcher's own
+log, `bin\app.log`, which Electrobun writes beside itself on Windows.
 
 **What the DMG holds.** Electrobun's stable build is a self-extractor: a
 launcher and the app as a `.tar.zst` in its Resources, which the first launch
@@ -148,11 +184,13 @@ npm run typecheck && npm run test:unit
 
 ### Windows and Linux
 
-Built and checked on CI, nothing shipped yet: `desktop.yml`'s `other-systems`
-job builds the shipped app and the test variant on `windows-latest`,
-`windows-11-arm`, `ubuntu-24.04` and `ubuntu-24.04-arm`, with a release's server
-and shell, and runs the type check, the unit tests and the scripted checks that
-pass there. The same by hand, from this directory (on Windows in Git's bash):
+Built, checked and shipped from CI: `desktop.yml`'s `other-systems` job builds
+the shipped app and the test variant on `windows-latest`, `windows-11-arm`,
+`ubuntu-24.04` and `ubuntu-24.04-arm`, with a release's server and shell, runs
+the type check, the unit tests and the scripted checks that pass there, and
+makes and checks the download ([Download](#download)), which a release
+dispatch attaches. The same by hand, from this directory (on Windows in Git's
+bash):
 
 ```bash
 npm ci --ignore-scripts
@@ -161,6 +199,7 @@ npm run build                              # the shipped build, an installer
 npm run typecheck && npm run test:unit
 FENNEC_DESKTOP_TEST_BUILD=1 npm run build  # the test variant
 npm run checks                             # Linux: on an X display, a session bus and an unlocked Secret Service
+sh scripts/dist.sh && node scripts/checks/dist.mjs   # the download, and held as it ships (Linux: xdotool)
 ```
 
 Linux takes WebKitGTK 4.1 and glibc 2.38 (Ubuntu 24.04, Debian 13, Fedora 39
@@ -169,7 +208,7 @@ and `librsvg2-2`, and for the checks `xvfb`, `dbus-x11`, `gnome-keyring` and
 `libsecret-tools`, run as CI runs them: `dbus-run-session -- sh -c 'printf
 <password> | gnome-keyring-daemon --unlock --components=secrets && xvfb-run -a
 node scripts/checks/run.mjs'`. Windows takes WebView2 (part of Windows 11). The
-`make` targets are the Mac's (the icon, the DMG).
+`make` targets but `studio-desktop-dist` are the Mac's (the icon, the DMG).
 
 A stable build there is an installer, not an app that runs where it is: on
 Windows `build/stable-win-<arch>/fennec studio-Setup.exe` (and
@@ -764,13 +803,12 @@ which needs the signing identity and bundle id to stay fixed.
   archives and Start it when I log in (both above, for their reasons).
 
 * Updates: Electrobun makes bsdiff patches against a release it can download,
-  and nothing is published; a new version is a new DMG.
-* Intel Macs, Windows and Linux. Windows has `fennec_abi::lock` (`LockFileEx`)
-  and the release's zip of `fennec-server.exe` and `fennec.exe` (unsigned);
-  the app there needs Electrobun's WebView2 path, file associations and a save
-  dialog, the system's credential store in the Keychain's place, and a signing
-  hook (Hutch does not sign on Windows): a project of its own after the
-  release (docs/design/windows.md, the owner's tenth decision).
+  and nothing is published; a new version is a new DMG, zip or tarball.
+* Intel Macs. And on Windows and Linux what the plan in #578 still lists: file
+  associations, the stop on Windows by the end of the server's stdin, the
+  credential store in the Keychain's place, a signing hook (Hutch does not
+  sign on Windows: Authenticode is the owner's sixth decision in
+  docs/design/windows.md), an uninstall entry, a `.deb` or `.rpm`.
 * A stable origin for a file: the server listens on a port the system picks.
   A window's store is its own, so nothing a file's page keeps (its theme, its
   history) carries to the next open of the file.

@@ -111,24 +111,34 @@ nothing reaches a registry before the notes have had a read.
    The `.deb` and `.rpm` need no step of their own: step 3 built them, and
    publishing the draft is what makes them downloadable.
 5. Once the release is published and `packages.yml`'s run is done, attach the
-   Mac app: `gh workflow run desktop.yml --ref main -f release=vX.Y.Z`. Its
-   `app` job builds the app with the release's own `fennec-server` and shell
-   (the tarball checked against the release's `SHA256SUMS`; a draft's
+   app: `gh workflow run desktop.yml --ref main -f release=vX.Y.Z`. Its
+   `app` job builds the Mac app with the release's own `fennec-server` and
+   shell (the tarball checked against the release's `SHA256SUMS`; a draft's
    downloads are not public, so not before step 4), makes the DMG and runs
-   every check on it, the installer's `--app` path included. Where the
-   `desktop-signing` Environment holds its secrets the `sign` job signs and
-   notarizes and `attach` attaches that DMG (after its reviewer approves);
-   where it does not, `attach-unsigned` attaches the ad hoc one as
-   `fennec-studio-vX.Y.Z-macos-arm64.dmg` and appends its line to the
-   release's `SHA256SUMS`, every line before it kept byte for byte -- which
-   is how `install.sh --app` finds and checks it. The DMG's name is never
-   replaced (a re-run of the job finds its own there and goes on), and
-   `SHA256SUMS` is missing for the moment `--clobber` replaces it, so not while
-   `packages.yml` is reading it. Then run
-   `curl -fsSL https://fennecdb.com/install.sh | sh -s -- --app` once on a
-   Mac with Apple silicon, and open the DMG from the release page once,
-   downloaded by a browser: its first open is refused and *Open Anyway* in
-   System Settings, Privacy & Security opens it, which no check here can
+   every check on it, the installer's `--app` path included; its four
+   `other-systems` jobs do the same on Windows and Linux, x64 and arm64, each
+   with the release's zip or tarball, and make and hold the zip or tarball of
+   the app, installed through `install.ps1 -App` or `install.sh --app` and
+   started. Where the `desktop-signing` Environment holds its secrets the
+   `sign` job signs and notarizes and `attach` attaches that DMG (after its
+   reviewer approves). `attach-unsigned` attaches what nothing signs: the
+   ad hoc DMG where the Environment holds no secrets, as
+   `fennec-studio-vX.Y.Z-macos-arm64.dmg`, and, where all four of their jobs
+   passed, `fennec-studio-vX.Y.Z-windows-x64.zip`, `-windows-arm64.zip`,
+   `-linux-x64.tar.xz` and `-linux-arm64.tar.xz`. It appends their lines to
+   the release's `SHA256SUMS` in one write, every line before them kept byte
+   for byte -- which is how `install.sh --app` and `install.ps1 -App` find and
+   check them. A download's name is never replaced (a re-run of the job finds
+   its own there and goes on, and a failed job's download is attached by
+   re-running it), and `SHA256SUMS` is missing for the moment `--clobber`
+   replaces it, so not while `packages.yml` is reading it. Then, once each:
+   `curl -fsSL https://fennecdb.com/install.sh | sh -s -- --app` on a Mac
+   with Apple silicon and on a Linux desktop, and `& ([scriptblock]::Create((irm
+   https://fennecdb.com/install.ps1))) -App` on Windows; open the DMG from the
+   release page, downloaded by a browser: its first open is refused and *Open
+   Anyway* in System Settings, Privacy & Security opens it; and start the
+   Windows zip's `bin\launcher.exe` downloaded by a browser, which SmartScreen
+   holds to *More info*, *Run anyway* -- neither of which a check here can
    click through.
 
 `make packages` runs the same checks locally at any time, NuGet's where
@@ -352,10 +362,11 @@ field of it is read another way.
 | `fennecdb_flutter` on pub.dev | `integrations/dart/fennecdb_flutter` | the Flutter plugin: the package with the library for iOS, Android and macOS |
 | `fennecdb` in the Homebrew tap `fennec-db/homebrew-tap` | `packaging/homebrew`, `tools/homebrew-formula.py` | the formula: `fennec` and `fennec-server` from the release's tarballs, by platform, each with its SHA-256 |
 | `fennecdb_X.Y.Z-1_<arch>.deb`, `fennecdb-X.Y.Z-1.<arch>.rpm` on the release | `packaging/nfpm.yaml`, `tools/linux-packages.sh` | `/usr/bin/fennec` and `/usr/bin/fennec-server` from the musl tarballs, for amd64 and arm64; no dependencies |
-| `https://fennecdb.com/install.sh` | `site/install.sh` | the installer: the release's tarball for the machine, checked against `SHA256SUMS`, into `~/.fennecdb/bin`; with `--app`, the Mac app's DMG, checked the same way, its app into `~/Applications`; deployed with the site, not with a release |
+| `https://fennecdb.com/install.sh` | `site/install.sh` | the installer: the release's tarball for the machine, checked against `SHA256SUMS`, into `~/.fennecdb/bin`; with `--app`, the app checked the same way: the Mac's DMG, its app into `~/Applications`, or Linux's tarball into `~/.local/share/dev.fennecdb.studio/stable/app` with a menu entry; deployed with the site, not with a release |
 | `fennec-studio-vX.Y.Z-macos-arm64.dmg` on the release | `integrations/studio-desktop` (`scripts/dist.sh`), `.github/workflows/desktop.yml` | fennec studio's Mac app (beta, Apple silicon), unpacked and signed ad hoc, attached by step 5 with its line appended to `SHA256SUMS`; unsigned until the signing Environment holds its secrets |
+| `fennec-studio-vX.Y.Z-windows-x64.zip`, `-windows-arm64.zip`, `-linux-x64.tar.xz`, `-linux-arm64.tar.xz` on the release | `integrations/studio-desktop` (`scripts/dist.sh`), `.github/workflows/desktop.yml` | fennec studio for Windows and Linux (beta): the folder `fennec-studio`, the app unpacked, which runs where it is unpacked; attached by step 5 with their lines appended to `SHA256SUMS`; unsigned |
 | `fennec-vX.Y.Z-x86_64-pc-windows-msvc.zip`, `fennec-vX.Y.Z-aarch64-pc-windows-msvc.zip` on the release | `tools/windows-zip.sh` | `fennec.exe` and `fennec-server.exe`, the C runtime linked in; unsigned |
-| `https://fennecdb.com/install.ps1` | `site/install.ps1` | the Windows installer: the release's zip, checked against `SHA256SUMS`, into `%LOCALAPPDATA%\fennecdb\bin`; deployed with the site, not with a release |
+| `https://fennecdb.com/install.ps1` | `site/install.ps1` | the Windows installer: the release's zip, checked against `SHA256SUMS`, into `%LOCALAPPDATA%\fennecdb\bin`; with `-App`, the app's zip, checked the same way, into `%LOCALAPPDATA%\dev.fennecdb.studio\stable\app` with a Start-menu shortcut; deployed with the site, not with a release |
 
 ## Once: the desktop app's signing Environment
 
