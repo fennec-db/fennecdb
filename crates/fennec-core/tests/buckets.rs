@@ -179,34 +179,38 @@ fn a_delete_out_of_a_large_bucket_costs_what_a_delete_without_one_does() {
 /// every one holding it (`Filter::without`): they answer as the scan does,
 /// row for row and failure for failure, wherever the term stands in the
 /// `and` chain -- a value read through the field's type, a `nocase` fold,
-/// the id, a parameter, the term written twice -- and a term after it that
-/// fails still fails over the rows it reaches.
+/// the id, a parameter, the term written twice, bytes compared with the
+/// list of numbers JSON writes them as -- and a term after it that fails
+/// still fails over the rows it reaches.
 #[test]
 fn rows_a_bucket_gave_answer_as_the_scan_without_its_equality() {
     let mut db = Database::new();
     run(
         &mut db,
-        "create collection hashed (k text @hash, f float @hash, h text nocase @hash, n int)",
+        "create collection hashed (k text @hash, f float @hash, h text nocase @hash, n int, \
+         b bytes @hash)",
     );
     run(
         &mut db,
-        "create collection plain (k text, f float, h text nocase, n int)",
+        "create collection plain (k text, f float, h text nocase, n int, b bytes)",
     );
     for c in ["hashed", "plain"] {
         for i in 0..40 {
             run(
                 &mut db,
                 &format!(
-                    "put {c} {{k: \"k{}\", f: {}, h: \"{}\", n: {}}}",
+                    "put {c} {{k: \"k{}\", f: {}, h: \"{}\", n: {}, b: {}}}",
                     i % 3,
                     i % 4,
                     ["Ab", "aB", "cd"][i % 3],
-                    i % 7
+                    i % 7,
+                    ["[104, 105]", "[1, 2]", "\"hi\""][i % 3],
                 ),
             );
         }
     }
-    let params = [Value::Text("k1".into()), Value::Int(3)];
+    let hi = Value::List(vec![Value::Int(104), Value::Int(105)]);
+    let params = [Value::Text("k1".into()), Value::Int(3), hi];
     for filter in [
         "k = \"k1\" and n > 2",
         "n > 2 and k = \"k1\"",
@@ -221,6 +225,20 @@ fn rows_a_bucket_gave_answer_as_the_scan_without_its_equality() {
         "k = \"k1\" and 1 / (n - 3) > 0",
         "1 / (n - 3) > 0 and k = \"k1\"",
         "k = \"k2\" and 1 / (n - 6) > 0",
+        // Bytes go out as JSON as a list of numbers, and come back so: the
+        // bucket found the rows by the list read as bytes, the scan
+        // compared bytes with a list by kind and found none.
+        "b = [104, 105] and n >= 0",
+        "n >= 0 and b = [104, 105]",
+        "b = [104, 105]",
+        "b = $3 and n > 1",
+        "b = $3",
+        "b = \"hi\" and n > 1",
+        "b in [[104, 105], [9]] and n > 1",
+        "b in [[104, 105], [9]]",
+        "b != [104, 105] and n > 4",
+        "b = [104, 105.5] and n >= 0",
+        "b = [104, 256] and n >= 0",
     ] {
         let answer = |c: &str| {
             let stmt = fennec_ql::parse_one(&format!("get {c} where {filter} order id")).unwrap();
@@ -236,6 +254,13 @@ fn rows_a_bucket_gave_answer_as_the_scan_without_its_equality() {
                 .map_err(|e| e.to_string())
         };
         assert_eq!(answer("hashed"), answer("plain"), "{filter}");
+        // The bytes `[104, 105]` and the text `"hi"` are one value, the
+        // rows `i % 3` of 0 and 2.
+        if filter.starts_with("b = [104, 105]") || filter.starts_with("b = $3") {
+            let found = answer("plain").unwrap();
+            assert!(!found.is_empty(), "{filter}");
+            assert!(found.iter().all(|id| (id - 1) % 3 != 1), "{filter}: {found:?}");
+        }
         let count = |c: &str| {
             let stmt = fennec_ql::parse_one(&format!("get {c} where {filter} count")).unwrap();
             db.query(&stmt, &params)

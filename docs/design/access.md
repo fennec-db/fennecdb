@@ -318,7 +318,7 @@ count by a term matching one row of the rule's `owner` bucket went 712 ->
 engine no longer asks (indexes.md, *Bound filters*): 595 us now, against
 main's 711, and every other read of the bucket faster too, a page of 20 711
 -> 602 us; where the statement's own index gave the rows the rule refuses
-four in five first, 8.6 -> 7.1 us, an `in` 20.7 -> 18.6. One shape pays: a
+four in five first, 8.6 -> 7.1 us, an `in` 20.7 -> 18.6. One shape paid: a
 full scan under a rule no index answers that admits most rows, `published
 = true or author = $jwt.sub` over posts nine in ten published, by a term of
 the statement's matching few, the rule now asked of every row -- 3.74 ->
@@ -329,11 +329,90 @@ PostgreSQL asks a `LEAKPROOF` operator, would take it back, but a
 comparison naming a field the collection lacks, or a parameter not sent,
 fails at the first row it reaches (indexes.md, *Bound filters*), which
 tells whether a hidden row got there; the rewrite holds no schema to tell
-those apart (`scoped()`), so the order is the rules' first. A rule an
-index answers -- an equality over an `@hash` field, whose bucket the
-engine then reads -- has no such cost; an engine refusing an unknown field
-and an unbound parameter before any row would let a plain comparison go
-first, and end it.
+those apart (`scoped()`), so it writes the rules first, and the engine,
+which binds with the schema, took the cost back (*The engine keeps the
+order*, below). A rule an index answers -- an equality over an `@hash`
+field, whose bucket the engine then reads -- had no such cost.
+
+**The engine keeps the order** (`Filter::bind`, `Test::And`, `Chain`,
+`Filter::without`, `answer_filter`). That the rules run first is the
+engine's to keep as much as the rewrite's: `access::and` writes them
+first, and a term then runs only over the rows the terms before it pass
+while the engine binds an `and` as written (`Test::And(a, b)`), asks `a`
+first and stops at its first false (`Filter::test`), tests the rows a
+bucket gave without its equality but the other terms in their order
+(`Filter::without`), and asks `@ttl`'s `alive` ahead of all of them. A
+planner ordering terms by cost or selectivity, as PostgreSQL orders a
+scan's quals, would move a caller's failing term ahead of the rules and
+give the oracle back with every test of access passing, since none of
+them reads the engine's order. So the access rule names fennec-core's
+`Filter`, the root's index says access binds it, and fennec-core's *A
+filter is bound to its collection once a query* says which terms may
+move; `tests/and_terms.rs` holds them.
+
+What may move is a term that cannot fail. The bound filter evaluates only
+what it cannot bind (`Test::Eval`): a field or a path the schema does not
+read, a parameter not sent or an `in $n` given no list, arithmetic over
+constants (`n = 9223372036854775807 + 1`), a `like` pattern ending in its
+escape, a point or a box that is none, a call, two fields compared. Every
+other test compares a value the row holds with one bound once a query --
+a known field, `id` or readable path against a literal or a sent `$n` of
+any kind, `nocase`, a collation and `null` among them; an `in` list, and
+`in $n` bound to one; `has`, `is null`, `~`; a `like()` pattern
+`bind_pattern` takes; a geo call with a valid point or box -- and fails
+over no row, so where it runs shows in the time a row takes and nowhere
+else. `Chain` lays an `and`'s terms out (`Filter::new`,
+`Filter::without`): of those before the first that may fail
+(`Test::rank`), each single test first and then each `or`, each kind in
+its order; from that one on, each where it was written. A term that may
+fail is asked of the rows it was, after the same terms, and fails or not
+as it did: the answers and the failures are the written filter's, which
+`tests/and_terms.rs` holds each layout to (the filter under `not (not
+...)`, which binds as it stands). The expression the planner reads is
+untouched, so no index and no tie moves; a stream's look binds as
+written, its kept sets paired with its lists in the order bound.
+
+A term that cannot fail does not go ahead of every term that may, only
+of those before the first: the term that may fail can be a rule's. A
+rule may compare a call over a field (`lower(team) = $jwt.team`, which
+`claims_held` takes, the claim outside the call) or arithmetic over
+fields, and those fail over a row whose value they cannot take. A
+caller's `body >= "m"` moved ahead of such a term would choose which
+hidden rows reach it -- the oracle again, read through the rule.
+`a_term_that_cannot_fail_stays_behind_one_that_may` holds `1 / (n - 3) >
+0 and n != 3` failing as written, which a hoisted `n != 3` answers.
+
+`@ttl`'s `alive` went in last (`answer_filter` ANDed `not (field <= now -
+ttl)` after the filter, `changes_since` likewise, `changes_held` asked it
+after the bound filter, and a stream's expiry step ANDed its window after
+the shape), so a term failing by a field ran over a row past its time and
+not yet swept that the rules admit, and told a token without the
+`expired` grant what it held -- low, since the token could read the row
+until it expired. It goes first now in all four (indexes.md, *@ttl*):
+one comparison that cannot fail, of a field the filter reads, no
+equality, `in` or range, so no plan moves. `tests/ttl.rs` holds a `get`,
+a count, a `set`, a `del` and both change readers to it, and
+`a_stream_s_shape_never_runs_over_a_row_long_past_its_time` a stream's
+seed and step, its window most of the collection so the step scans.
+
+What the layout took back, measured as the rest of this section was --
+`Database::query` alone over 100 000 rows, medians of six runs taken in
+turns, each the median of 15 rounds, the load under 2 on 8 cores; main's
+engine with the rule last, then this branch's with the rules first,
+before `Chain` and with it, in us a statement: the scan under `published =
+true or author = $jwt.sub`, posts nine in ten published, counting by a
+term matching one row 3 766 -> 4 818 -> 3 596, by one matching half 4 847
+-> 5 773 -> 4 669, a page of 20 3 727 -> 4 841 -> 3 531 -- each below
+main's, the rule's `or` asked only of the rows the term passes, as main
+asked it. Over the rule's `owner` bucket of 20 000, a count by a term
+matching one row 746 -> 654 -> 626 and by one matching half 996 -> 707 ->
+719 (the runs of either branch fell at 600-650 and 700-750 alike), a page
+of 20 30.9 -> 30.4 -> 30.4 and a count by `~` 1 498 -> 1 499 -> 1 494; the
+statement's own bucket of 20 under the rule 5.72 -> 4.98 -> 5.03, and a
+row by id beside it 4.21 -> 4.14 -> 4.17. A layout is made once a query.
+The browser module lays its filters out too, though it holds no rules,
+so that a filter is tested alike wherever it runs: 595 bytes of it,
+written as two `and`s rather than a list of tests, which was 199 more.
 
 A scoped `explain` ran through the same rewrite, and its plan counted what
 an index chose before the rules held it: `filter: {index}, {n} rows`, the

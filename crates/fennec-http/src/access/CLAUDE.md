@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-fennec-http's access -- scoped tokens and their rules, field lists, the server's own collections, tenant binding and whom a token is for -- for code in `crates/fennec-http/src/access.rs` and `crates/fennec-http/src/access/`, which binds fennec-core's hooks (`plugin::Hook`, `Check`) and its own collections' names (`declared::OWN`) too; the rest of fennec-http's rules are in [its CLAUDE.md](../../CLAUDE.md), the rules every change meets in the root's [CLAUDE.md](../../../../CLAUDE.md).
+fennec-http's access -- scoped tokens and their rules, field lists, the server's own collections, tenant binding and whom a token is for -- for code in `crates/fennec-http/src/access.rs` and `crates/fennec-http/src/access/`, which binds fennec-core's hooks (`plugin::Hook`, `Check`), its `Filter` -- the order it tests an `and`'s terms in -- and its own collections' names (`declared::OWN`) too; the rest of fennec-http's rules are in [its CLAUDE.md](../../CLAUDE.md), the rules every change meets in the root's [CLAUDE.md](../../../../CLAUDE.md).
 
 ## Invariants
 
@@ -12,9 +12,14 @@ statement must go through `scoped()` or it reads everything. The rules are
 tested before any term of the caller's: ANDed in first wherever they meet
 one (`access::and`), so a term that fails never runs over a row they hide,
 and an upsert's row is judged before its `else set` reads it
-(`Hook::before_upsert`). `explain` is the server token's (403): a plan
-counts rows before the rules hold them. A scoped write
-outside `within()` goes unchecked, so only a named statement's call runs
+(`Hook::before_upsert`). The order is fennec-core's to keep: it tests an
+`and`'s terms that may fail as written, each after every term before it
+(`Filter::bind`, `Test::And`, `Filter::chain`, `Filter::without`), only a
+term that cannot fail (`Test::may_fail`) moving ahead of them, and `@ttl`'s
+`alive` first (`answer_filter`); a planner ordering terms by cost must keep
+it, or a failing term is an oracle again. `explain` is the server
+token's (403): a plan counts rows before the rules hold them. A scoped
+write outside `within()` goes unchecked, so only a named statement's call runs
 one there (`run_as`), and a binding's writes, which the `Check` hook passes
 over (`Hook::writer_only`) once `Hook::waking` judged it -- a row passing
 its condition or not where that reads a field the token is not shown

@@ -1669,6 +1669,34 @@ test('in (get ...) and @ttl on wasm, and in the module without indexes', { skip:
   }
 });
 
+// Bytes go out as JSON as a list of numbers, and are found by it: the
+// module's scan reads the list beside a `bytes` field as the bytes it
+// writes, as a `@hash` keys it, so both answer the row -- alone, beside
+// another term, as a parameter and in an `in` -- as a native build does
+// (fennec-core's tests/buckets.rs).
+test('bytes are found by the list of numbers they go out as, through a @hash or not', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const { Fennec } = await import('./fennec.js');
+  const db = await Fennec.open(wasm);
+  db.run(`create collection hashed (b bytes @hash, n int);
+          create collection plain (b bytes, n int)`);
+  for (const c of ['hashed', 'plain']) {
+    db.run(`put ${c} [{b: [104, 105], n: 1}, {b: [1, 2], n: 2}, {b: "hi", n: 3}]`);
+  }
+  const ids = (sql, params) => db.rows(sql, params).map((r) => r.id);
+  for (const [where, params] of [
+    ['b = [104, 105]', []],
+    ['b = [104, 105] and n >= 0', []],
+    ['n >= 0 and b = [104, 105]', []],
+    ['b = $1 and n > 0', [[104, 105]]],
+    ['b in [[104, 105], [9]] and n > 0', []],
+  ]) {
+    const plain = ids(`get plain select id where ${where} order id`, params);
+    assert.deepEqual(plain, [1, 3], where);
+    assert.deepEqual(ids(`get hashed select id where ${where} order id`, params), plain, where);
+  }
+  db.close();
+});
+
 test('alter collection in the browser, and a file holding one loaded', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
   const { Fennec } = await import('./fennec.js');
   const cat = (...parts) => {

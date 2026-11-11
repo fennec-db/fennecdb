@@ -1,6 +1,6 @@
 # AGENTS.md
 
-fennec-core's invariants -- storage, writes, indexes, the HNSW graph, vector and text search, `lookup` and aggregates, and the browser module's builds -- for code in `crates/fennec-core/`. The engine's lock and blocks -- prepared blocks and pinned reads -- are in [src/engine/AGENTS.md](src/engine/AGENTS.md), beside their code. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
+fennec-core's invariants -- storage, writes, indexes, the HNSW graph, vector and text search, `lookup` and aggregates, and the browser module's builds -- for code in `crates/fennec-core/`. The engine's lock and blocks -- prepared blocks and pinned reads -- are in [src/engine/AGENTS.md](src/engine/AGENTS.md), beside their code; the text index's words -- the tokenizer's fold and the table of words -- in [src/text/AGENTS.md](src/text/AGENTS.md): read it before changing `text.rs` or `text/`. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
 
 ## Invariants
 
@@ -205,17 +205,22 @@ module keeps one map.
 
 **[`@ttl` is an ordered index whose rows expire, and every read leaves them
 out at once.](../../docs/design/indexes.md#ttl)** Every filter must have
-`Database::alive` ANDed in; a server sweeps (`fennec_http::sweep`) a row a
-pass past its time (`sweep::GRACE`), never a replica, a following tenant
-or the browser, and a scoped token reads `expired()` only by the `expired`
-grant.
+`Database::alive` ANDed in first, ahead of every term (`answer_filter`,
+`changes_since`, `changes_held`, `sse::Expiry::step`'s window); a server
+sweeps (`fennec_http::sweep`) a row a pass past its time (`sweep::GRACE`),
+never a replica, a following tenant or the browser, and a scoped token
+reads `expired()` only by the `expired` grant.
 
 **[Only an `and` chain reaches an index.](../../docs/design/indexes.md#index-reach)**
 An `in` takes buckets only when every element resolves, else the scan.
 
 **[A filter is bound to its collection once a
 query.](../../docs/design/indexes.md#bound-filters)** What `Filter` cannot bind
-stays `eval`: an error at the first row, never over none. A stream's look
+stays `eval`: an error at the first row, never over none. An `and`'s
+terms that may fail (`Test::may_fail`) are tested as written, each after
+every term before it, only those that cannot moving ahead of them
+(`Filter::chain`, `Filter::without`): fennec-http's access binds the order,
+a scoped token's rules written first. A stream's look
 binds a filter holding a long `in` list once a look, its lists kept for
 the next (`Database::changes_held`, `Lists`, their sets alone), where it
 reads another collection.
@@ -386,27 +391,8 @@ rules, `@ttl`'s `alive` -- as a `where`'s rows are
 beside `count` and an ungrouped aggregate's `limit` without `order` are
 refused.
 
-**[`@text` matches whole words unless told
-otherwise.](../../docs/design/text.md#tokenizer)** It folds `I`, `İ`, `ı`, `i`
-together and a Latin or Greek letter to its base letter (`sutlac` is
-`Sütlaç`) at index and query time, through `text/fold.rs`,
-`tools/fold/gen.py`'s alone (`--check`); unspaced scripts go by grams
-(`text::grams`). `@text(accents)` (kind 11, a byte of flags) also indexes
-a word its accents make another as written (`text::WRITTEN`), by
-`indexed_terms` around a tokenizer that tests no flag, case deciding it no
-more than the fold. Ranking, `facet`, `highlight()` and `fuzzy` read a
-query through `read_words` (`query_terms`): a word typed with accents its
-spelling only where a row the statement reads holds it
-(`TextIndex::holds`, a scoped token's `within`), never a row it cannot,
-else its fold. Nothing else folds: `=`, `like`, `nocase`, collations and
-the other indexes compare as they did.
-
 **[The text index is derived and never
 persisted.](../../docs/design/text.md#text-index-is-derived)**
-
-**[A text index's words are a table of their own
-(`text/terms.rs`).](../../docs/design/text.md#term-table)** `memory_bytes`
-counts each list's allocation past its bytes (`ALLOC`).
 
 **[`fuzzy` and `prefix` walk a sorted copy of the
 words.](../../docs/design/text.md#fuzzy-and-prefix)** Every write keeps it up

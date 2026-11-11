@@ -274,9 +274,7 @@ Covers `crates/fennec-core/`; the browser module's rules bind `crates/fennec-was
 - `nocase` text compares by its case fold wherever it compares.
 - `match` prunes with MaxScore.
 - Beside `order`, `count` or an aggregate, `match` is a filter: the rows its ranking scores above zero.
-- `@text` matches whole words unless told otherwise.
 - The text index is derived and never persisted.
-- A text index's words are a table of their own (`text/terms.rs`).
 - `fuzzy` and `prefix` walk a sorted copy of the words.
 - `rerank` deliberately uses no index.
 - `fuse` adds ranks, not scores.
@@ -300,6 +298,14 @@ Covers `crates/fennec-core/src/engine/`.
 *The engine's lock and blocks*
 - A block's documents are built beside the readers
 - A long read is pinned, and read with no lock held
+
+### `crates/fennec-core/src/text/CLAUDE.md`
+
+Covers `crates/fennec-core/src/text/`; its rules bind `text.rs`'s tokenizer and its reading of a query too.
+
+*Text*
+- `@text` matches whole words unless told otherwise.
+- A text index's words are a table of their own (`text/terms.rs`).
 
 ### `crates/fennec-ql/CLAUDE.md`
 
@@ -369,7 +375,7 @@ Covers `crates/fennec-http/src/mcp/`.
 
 ### `crates/fennec-http/src/access/CLAUDE.md`
 
-Covers `crates/fennec-http/src/access.rs` and `src/access/`; access binds fennec-core's hooks (`plugin::Hook`, `Check`) and its own collections' names (`declared::OWN`), and every path a token's statement takes.
+Covers `crates/fennec-http/src/access.rs` and `src/access/`; access binds fennec-core's hooks (`plugin::Hook`, `Check`), its `Filter` -- the order an `and`'s terms are tested in, `@ttl`'s `alive` first (`Filter::chain`, `answer_filter`) -- and its own collections' names (`declared::OWN`), and every path a token's statement takes.
 
 *Access*
 - A scoped token is held to its rules at every level, twice for writes.
