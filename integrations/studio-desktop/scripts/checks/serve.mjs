@@ -49,8 +49,13 @@ cmd({ cmd: 'close', key: `file:${FILE}` });
 await waitFor((l, i) => i >= n && l.what === 'server-stopped' && l.key === `file:${FILE}`, 15000, 'its window\'s server stopped');
 
 step('the serve sheet, from the Databases list: the command it shows holds no token, and Show shows the Keychain\'s');
-await until(async () => (await evalIn('launcher', `return document.querySelector('tr[data-path="${FILE}"]') !== null`)).value, 10000, 'the row');
-await evalIn('launcher', `[...document.querySelector('tr[data-path="${FILE}"]').querySelectorAll('button')].find((b) => b.textContent === 'Serve…').click()`);
+// The row by its path compared as a string: in a selector a Windows path's `\f` is a form feed
+// once in the script, which no CSS string holds, so querySelector threw, and the error's text was
+// taken for the row found. Only `true` is the row.
+const theRow = `[...document.querySelectorAll('tr[data-path]')].find((t) => t.dataset.path === ${JSON.stringify(FILE)})`;
+await until(async () => (await evalIn('launcher', `return ${theRow} !== undefined`)).value === true, 10000, 'the row');
+const clicked = await evalIn('launcher', `[...${theRow}.querySelectorAll('button')].find((b) => b.textContent === 'Serve…').click(); return true`);
+assert.equal(clicked.value, true, `Serve… clicked: ${clicked.value}`);
 const command = await until(async () => (await evalIn('launcher', `return document.getElementById('sheet').open && document.getElementById('command').textContent`)).value, 10000, 'the sheet open, with its command');
 // No backups set up for it: no replication token, which would answer /_changes to the data token too.
 assert.match(command, /^FENNEC_HTTP_TOKEN=•••• fennec-server --file /);

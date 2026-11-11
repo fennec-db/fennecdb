@@ -391,6 +391,18 @@ export const WEBKIT = STORES[0];
 /** Windows: the folder WebView2 keeps the persistent partition `persist:<name>` in (src/bun/stores.ts, Electrobun's own naming for the plain names the app gives). */
 export const partitionDir = (partition) => join(USER_DATA, 'WebView2', 'Partitions', partition.replace(/^persist:/, ''));
 
+/**
+ * Windows: the top-level windows of the app's WebView2 processes (the app's own
+ * windows are bun.exe's), which a popup WebView2 opened by itself would be.
+ */
+export function webviewWindows() {
+  const dir = `'${USER_DATA.replace(/'/g, "''")}'`;
+  const ps = `$ids = @(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains(${dir}) } | ForEach-Object { $_.ProcessId }); if ($ids.Count) { Get-Process -Id $ids -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | ForEach-Object { '{0} {1}' -f $_.Id, $_.MainWindowTitle } }`;
+  const r = spawnSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', timeout: 60000 });
+  if (r.status !== 0) throw new Error(`the windows were not listed: ${r.stderr || r.error}`);
+  return r.stdout.trim().split(/\r?\n/).filter(Boolean);
+}
+
 /** The Bun the test variant bundles: what a check runs a script of the app's own with (src/bun/win32.ts), or builds a stand-in program with. */
 export const BUN = MAC ? `${APP}/Contents/MacOS/bun` : join(APP, 'bin', WIN ? 'bun.exe' : 'bun');
 

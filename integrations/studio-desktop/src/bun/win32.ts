@@ -21,8 +21,16 @@ const TOKEN_QUERY = 0x0008;
 /** `TOKEN_INFORMATION_CLASS`: the user, and the owner it gives what it creates. */
 const TOKEN_USER = 1;
 const TOKEN_OWNER = 4;
-/** `SE_OBJECT_TYPE::SE_KERNEL_OBJECT`: a named pipe. */
-const SE_KERNEL_OBJECT = 6;
+/**
+ * `SE_OBJECT_TYPE::SE_FILE_OBJECT`: a named pipe is a file object to the named
+ * security calls, which open it by its `\\.\pipe\` path as CreateFile does.
+ * The kernel object type, which the first version passed, takes by name only a
+ * semaphore, an event, a mutex, a waitable timer or a file mapping: on the
+ * runners every call answered 161 (ERROR_BAD_PATHNAME), so no pipe was made
+ * its user's, and a second instance took ours for someone else's and ran
+ * unguarded.
+ */
+const SE_FILE_OBJECT = 1;
 const OWNER_SECURITY_INFORMATION = 0x1;
 const DACL_SECURITY_INFORMATION = 0x4;
 /** The DACL inherits nothing. */
@@ -118,7 +126,7 @@ export function restrictPipe(name: string, sid: string): void {
 		const dacl = new BigUint64Array(1);
 		const defaulted = new Int32Array(1);
 		if (!a.GetSecurityDescriptorDacl(sd[0]!, present, dacl, defaulted) || !present[0]) throw new Error("the security descriptor has no DACL");
-		const code = a.SetNamedSecurityInfoW(wide(name), SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, 0n, 0n, dacl[0]!, 0n);
+		const code = a.SetNamedSecurityInfoW(wide(name), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, 0n, 0n, dacl[0]!, 0n);
 		if (code !== 0) throw new Error(`SetNamedSecurityInfoW: error ${code}`);
 	} finally {
 		k.LocalFree(sd[0]!);
@@ -135,7 +143,7 @@ export function pipeOwner(name: string): { sid: string } | { error: number } {
 	const { k, a } = win();
 	const owner = new BigUint64Array(1);
 	const sd = new BigUint64Array(1);
-	const code = a.GetNamedSecurityInfoW(wide(name), SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION, owner, null, null, null, sd);
+	const code = a.GetNamedSecurityInfoW(wide(name), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, owner, null, null, null, sd);
 	if (code !== 0) return { error: code };
 	try {
 		return { sid: sidText(owner[0]!) };
@@ -153,7 +161,7 @@ export function pipeSddl(name: string): string {
 	const owner = new BigUint64Array(1);
 	const dacl = new BigUint64Array(1);
 	const sd = new BigUint64Array(1);
-	const code = a.GetNamedSecurityInfoW(wide(name), SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, owner, null, dacl, null, sd);
+	const code = a.GetNamedSecurityInfoW(wide(name), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, owner, null, dacl, null, sd);
 	if (code !== 0) throw new Error(`GetNamedSecurityInfoW: error ${code}`);
 	try {
 		const conv = dlopen("advapi32.dll", {

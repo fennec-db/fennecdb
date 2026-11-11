@@ -53,6 +53,41 @@ export function linkOut(url: string, last: { at: number }, now = Date.now()): st
 	return link;
 }
 
+/** What a page's request for a new window sends over the event bridge on Windows (`newWindowPreload`). */
+export const LINK_OUT = "link-out";
+
+/**
+ * Windows: a preload for every window of the app that takes a page's request
+ * for a new window before WebView2 does; "" elsewhere. WebKit hands the
+ * request to Electrobun (macOS's createWebView, WebKitGTK's decide-policy),
+ * which raises `new-window-open` and opens nothing; Electrobun 2.0.4 handles
+ * no WebView2 NewWindowRequested, so WebView2 opened a popup window of its
+ * own for a page's `window.open`: held to no origin, in the page's store, and
+ * alive after the app quit (`checks/sandbox.mjs` on both Windows runners). So
+ * there `window.open`, and a link that would open a window (a target other
+ * than the page's own, a modifier key, the middle button), send the address
+ * over the event bridge as LINK_OUT and open nothing: a studio window hands
+ * it to `linkOut`, as macOS's `new-window-open` is, and the app's own pages
+ * drop it. A target naming a frame is taken as a new window too: neither the
+ * studio nor the app's pages has a named frame. A page that takes another
+ * `window.open`, from a frame it makes, still gets WebView2's popup: what the
+ * app cannot refuse without Electrobun.
+ */
+export function newWindowPreload(platform: NodeJS.Platform = process.platform): string {
+	if (platform !== "win32") return "";
+	return `(function(){
+var send=function(u){try{var s=window.__electrobunSendToHost;if(typeof s==="function")s({type:${JSON.stringify(LINK_OUT)},url:new URL(String(u),document.baseURI).href});}catch(e){}};
+try{Object.defineProperty(window,"open",{value:function(u){if(u!==undefined&&u!==null&&String(u)!=="")send(u);return null;},writable:false,configurable:false});}catch(e){}
+var elsewhere=function(t){t=(t||"").toLowerCase();return t!==""&&t!=="_self"&&t!=="_top"&&t!=="_parent";};
+var away=function(e){var p=e.composedPath?e.composedPath():[e.target];for(var i=0;i<p.length;i++){var n=p[i];
+if(!n||!n.getAttribute||String(n.localName).toLowerCase()!=="a"||!n.hasAttribute("href"))continue;
+if(!elsewhere(n.getAttribute("target"))&&!e.ctrlKey&&!e.shiftKey&&!e.metaKey&&e.button!==1)return;
+e.preventDefault();send(n.getAttribute("href"));return;}};
+window.addEventListener("click",away,true);window.addEventListener("auxclick",away,true);
+window.addEventListener("submit",function(e){var f=e.target;if(f&&f.getAttribute&&elsewhere(f.getAttribute("target")))e.preventDefault();},true);
+})();`;
+}
+
 /** A path as a file: URI with every byte outside `A-Za-z0-9-._~/` percent-encoded. */
 export function fileUri(path: string): string {
 	const bytes = Buffer.from(path, "utf8");

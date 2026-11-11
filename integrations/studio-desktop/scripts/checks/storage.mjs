@@ -12,7 +12,7 @@
 // server's origin, in the data store it is told): under one shared store it
 // would see what the first wrote, and these fail.
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { WIN, assertClean, cmd, data, evalIn, lines, partitionDir, quit, startApp, startServer, step, until, waitFor, waitStudio, log } from './lib.mjs';
 
 assertClean('before');
@@ -54,7 +54,19 @@ async function storeWindow(spec) {
 async function dropped(partition, after) {
   const d = await waitFor((l, i) => i >= after && l.what === 'store-dropped' && l.partition === partition, 30000, `${partition} taken away`);
   assert.equal(d.ok, true, `${partition}: what it kept was taken away`);
-  if (WIN) assert.equal(existsSync(partitionDir(partition)), false, `${partitionDir(partition)} is gone`);
+  if (WIN) folderGone(partition);
+}
+/** Windows: `partition`'s folder is not there; else what is in it, which says what kept or made it. */
+function folderGone(partition) {
+  const dir = partitionDir(partition);
+  if (!existsSync(dir)) return;
+  let inside = [];
+  try {
+    inside = readdirSync(dir, { recursive: true }).map(String).slice(0, 40);
+  } catch (e) {
+    inside = [String(e)];
+  }
+  assert.fail(`${dir} is gone; it holds: ${inside.join(', ') || '(nothing)'}`);
 }
 const save = async (name) => {
   const n = lines().length;

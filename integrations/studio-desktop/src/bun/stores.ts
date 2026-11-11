@@ -26,7 +26,7 @@
 // `node --test` holds it (test/stores.test.ts).
 
 import { createHash, randomUUID } from "node:crypto";
-import { readdirSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 /** The partitions of the windows open now, with how many windows each. */
@@ -100,7 +100,10 @@ export async function removeStoreFolder(root: string, partition: string, ms = 20
 		if (inUse(partition)) return false;
 		try {
 			rmSync(folder, { recursive: true, force: true });
-			return true;
+			// Gone is what is asked, not a removal that returned: on the Windows runners the
+			// folder of a store the app had said was removed was still there.
+			if (!existsSync(folder)) return true;
+			if (Date.now() > until) return false;
 		} catch (e) {
 			const code = (e as NodeJS.ErrnoException).code;
 			if (!["EBUSY", "EPERM", "EACCES", "ENOTEMPTY"].includes(code ?? "") || Date.now() > until) return false;

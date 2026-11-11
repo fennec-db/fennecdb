@@ -3,12 +3,14 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { EXTERNAL_GAP_MS, fileUri, folderOf, linkOut, linuxOpeners, runFirst, webLink } from "../src/bun/opener.ts";
+import vm from "node:vm";
+import { EXTERNAL_GAP_MS, fileUri, folderOf, LINK_OUT, linkOut, linuxOpeners, newWindowPreload, runFirst, webLink } from "../src/bun/opener.ts";
 
 // What the app hands the system to open, and the filter a studio window's
 // links go through. The page-to-app hop is a WebKit event a script cannot
-// raise on WebKitGTK or WebView2, so the filter is held here on every system,
-// and `checks/sandbox.mjs` holds the event where it is raised (macOS).
+// raise on WebKitGTK, and on Windows the app's own preload, so the filter and
+// the preload are held here on every system, and `checks/sandbox.mjs` holds
+// the hop where it is raised (macOS, Windows).
 
 const work = mkdtempSync(join(tmpdir(), "fennec-desktop-opener-"));
 after(() => rmSync(work, { recursive: true, force: true }));
@@ -79,4 +81,83 @@ test("the first opener there is is started, with no shell; one that is not there
 	assert.equal((await import("node:fs")).existsSync(marker), false, "no shell ran the word");
 	const none = await runFirst([["no-such-program-fennec-test"], ["no-such-program-either"]]);
 	assert.ok("error" in none && /not found.*not found/.test(none.error), JSON.stringify(none));
+});
+
+/**
+ * Windows' preload run as a page at `base` runs it: the bridge and the window's
+ * listeners stood in for, and WebView2's own `window.open` one that fails the
+ * test if it is ever reached.
+ */
+function windowsPage(base = "http://127.0.0.1:4000/_studio/") {
+	const sent: { type: string; url: string }[] = [];
+	const listeners: Record<string, ((e: unknown) => void)[]> = {};
+	const page: Record<string, unknown> = {
+		URL,
+		document: { baseURI: base },
+		// A copy, as the bridge serializes it: an object of the page's realm is no plain object of this one.
+		__electrobunSendToHost: (m: unknown) => sent.push(JSON.parse(JSON.stringify(m))),
+		addEventListener: (type: string, f: (e: unknown) => void, capture: boolean) => {
+			assert.equal(capture, true, "taken before the page's own listeners");
+			(listeners[type] ??= []).push(f);
+		},
+		open: () => assert.fail("WebView2's own window.open was reached"),
+	};
+	page["window"] = page;
+	vm.createContext(page);
+	vm.runInContext(newWindowPreload("win32"), page);
+	const run = (js: string) => vm.runInContext(js, page);
+	/** An event of `type` that went through `path` (the innermost first), as the page's listeners would see it. */
+	const dispatch = (type: string, path: unknown[], init: Record<string, unknown> = {}) => {
+		const e = { target: path[0], composedPath: () => path, button: 0, ctrlKey: false, shiftKey: false, metaKey: false, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, ...init };
+		for (const f of listeners[type] ?? []) f(e);
+		return e.defaultPrevented;
+	};
+	return { sent, run, dispatch };
+}
+const element = (localName: string, attrs: Record<string, string>) => ({ localName, getAttribute: (n: string) => attrs[n] ?? null, hasAttribute: (n: string) => n in attrs });
+
+test("off Windows there is no new-window preload: WebKit hands the request to Electrobun", () => {
+	assert.equal(newWindowPreload("darwin"), "");
+	assert.equal(newWindowPreload("linux"), "");
+});
+
+test("Windows: window.open sends the address to the app and opens nothing, and cannot be put back", () => {
+	const { sent, run } = windowsPage();
+	assert.equal(run(`window.open("https://example.com/a")`), null);
+	assert.equal(run(`window.open("../docs#x")`), null, "a relative address");
+	assert.equal(run(`window.open("file:///etc/passwd")`), null, "the filter is the app's: every address goes to it");
+	assert.equal(run(`window.open()`), null, "nothing named: nothing sent");
+	assert.deepEqual(sent, [
+		{ type: LINK_OUT, url: "https://example.com/a" },
+		{ type: LINK_OUT, url: "http://127.0.0.1:4000/docs#x" },
+		{ type: LINK_OUT, url: "file:///etc/passwd" },
+	]);
+	run(`window.open = function () { return "replaced"; }`);
+	assert.equal(run(`window.open("https://example.com/b")`), null, "an assignment does not replace it");
+	assert.throws(() => run(`Object.defineProperty(window, "open", { value: () => 1 })`), "nor a definition");
+});
+
+test("Windows: a link that would open a window is sent to the app instead, and one that stays is left alone", () => {
+	const { sent, dispatch } = windowsPage();
+	const inner = { localName: "span" };
+	const blank = element("a", { href: "https://example.com/blank", target: "_blank" });
+	assert.equal(dispatch("click", [inner, blank]), true, "target=_blank, clicked on what it holds");
+	const named = element("a", { href: "/x", target: "results" });
+	assert.equal(dispatch("click", [named]), true, "a target naming a frame: none is there");
+	const plain = element("a", { href: "#c=orders" });
+	assert.equal(dispatch("click", [plain]), false, "a link in the page stays the page's");
+	assert.equal(dispatch("click", [element("a", { href: "/y", target: "_self" })]), false);
+	assert.equal(dispatch("click", [element("a", { href: "/z", target: "_top" })]), false);
+	assert.equal(dispatch("click", [plain], { ctrlKey: true }), true, "Ctrl+click asks for a new tab");
+	assert.equal(dispatch("click", [plain], { shiftKey: true }), true, "Shift+click for a new window");
+	assert.equal(dispatch("auxclick", [plain], { button: 1 }), true, "the middle button");
+	assert.equal(dispatch("click", [element("a", {})]), false, "an anchor with no href is no link");
+	assert.equal(dispatch("click", [element("button", { href: "/n", target: "_blank" })]), false, "only an anchor");
+	assert.deepEqual(
+		sent.map((m) => m.url),
+		["https://example.com/blank", "http://127.0.0.1:4000/x", "http://127.0.0.1:4000/_studio/#c=orders", "http://127.0.0.1:4000/_studio/#c=orders", "http://127.0.0.1:4000/_studio/#c=orders"],
+	);
+	assert.equal(dispatch("submit", [element("form", { target: "_blank" })]), true, "a form posted to a new window is not");
+	assert.equal(dispatch("submit", [element("form", {})]), false, "one posted in place is the page's");
+	assert.equal(sent.length, 5, "a form sends nothing");
 });

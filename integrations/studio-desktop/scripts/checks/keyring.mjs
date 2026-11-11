@@ -17,7 +17,7 @@ import { spawnSync } from 'node:child_process';
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
-import { USER_DATA, assertClean, cmd, lines, procs, quit, startApp, step, waitFor, waitNotice, log } from './lib.mjs';
+import { USER_DATA, assertClean, cmd, lines, procs, quit, startApp, step, waitFor, log } from './lib.mjs';
 
 assertClean('before');
 const TOKEN = `keyring-check-${process.pid}-token`;
@@ -77,7 +77,9 @@ async function noStore(name, address) {
   cmd({ cmd: 'openconn', id: saved.id });
   const opened = await waitFor((l, i) => i >= n && l.what === 'openconn-result', FAST_MS + 15000, 'the open answered');
   assert.equal(opened.ok, false, 'not opened');
-  const notice = await waitNotice(/token saved for saved before could not be read/, 15000, n);
+  // Its words are the notice's message; its title is the general "Something went wrong".
+  const notice = await waitFor((l, i) => i >= n && l.what === 'notice' && /token saved for saved before could not be read/.test(l.message), 15000, 'a notice that the saved token could not be read');
+  await waitFor((l) => l.what === 'notice-ready' && l.key === notice.key, 15000, `${notice.key} drawn`);
   log('said:', notice.title, '|', notice.message, '|', notice.detail ?? '');
   assert.match(`${notice.message} ${notice.detail ?? ''}`, /credential store|keyring/i);
   assert.equal(requests, 0, 'nothing was sent to its server, with a token or without');

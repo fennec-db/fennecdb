@@ -40,7 +40,7 @@ import {
 	verifyBackups,
 } from "./app.ts";
 import { copySecret, SECRET_ON_CLIPBOARD_MS, type Clipboard } from "./clipboard.ts";
-import { reveal } from "./opener.ts";
+import { newWindowPreload, reveal } from "./opener.ts";
 import { DEFAULT_SYNC, isSync, settingsFrom, SYNC_NOTES, type Sync } from "./serving.ts";
 import { holdTo, pageFrame } from "./windows.ts";
 
@@ -209,7 +209,8 @@ export async function showLauncher() {
 		url: "views://launcher/index.html",
 		rpc: launcherRPC,
 		frame: pageFrame(1280, 800),
-		preload: hooks?.pagePreloadFor("launcher"),
+		// What is left empty is no preload, as the shipped build had.
+		preload: newWindowPreload() + (hooks?.pagePreloadFor("launcher") ?? "") || undefined,
 	});
 	holdTo(launcher.webview, "views://launcher/*");
 	hooks?.watchPage(launcher, "launcher");
@@ -279,7 +280,8 @@ export async function showNewDatabase() {
 		url: "views://newdb/index.html",
 		rpc: newDbRPC,
 		frame: pageFrame(600, 720),
-		preload: hooks?.pagePreloadFor("newdb"),
+		// What is left empty is no preload, as the shipped build had.
+		preload: newWindowPreload() + (hooks?.pagePreloadFor("newdb") ?? "") || undefined,
 	});
 	holdTo(newdb.webview, "views://newdb/*");
 	hooks?.watchPage(newdb, "newdb");

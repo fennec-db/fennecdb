@@ -12,7 +12,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { BrowserView, BrowserWindow, PATHS, Session } from "electrobun/main";
 import type { Notice } from "../shared/rpc.ts";
-import { linkOut, openLink } from "./opener.ts";
+import { LINK_OUT, linkOut, newWindowPreload, openLink } from "./opener.ts";
 import { sessionPreload, type StudioSession } from "./session.ts";
 import { goesWithWindow, inUse, removeStoreFolder, storeClosed, storeOpened, sweepStores, webview2Root } from "./stores.ts";
 
@@ -34,6 +34,32 @@ let cascade = 0;
  */
 export function holdTo(view: BrowserView, pattern: string) {
 	view.setNavigationRules(["^*", pattern]);
+	preloaded(view);
+}
+
+/** How many times a page is asked for its preload: its first load and two loads again. */
+const PRELOAD_TRIES = 3;
+
+/**
+ * Windows: a page that loaded without its preload is loaded again. Electrobun
+ * 2.0.4 adds a view's preload (AddScriptToExecuteOnDocumentCreated, which
+ * completes later) and navigates in the same call, without waiting for it
+ * (win/nativeWrapper.cpp:7828 and 8077), so the first document can load
+ * before the script is there: on the x64 runner a saved server's window,
+ * opened again at once, loaded with no event bridge (and so no session and
+ * no guard for new windows) and never reported. Once it has navigated the
+ * page is asked through ExecuteScript, which needs no preload, whether
+ * Electrobun's bridge is there, and loaded again if not, the preload being in
+ * place by then; at most PRELOAD_TRIES times a view, so one that never gets it
+ * is not loaded for ever.
+ */
+function preloaded(view: BrowserView) {
+	if (process.platform !== "win32") return;
+	let asked = 0;
+	(view as any).on("did-navigate", () => {
+		if (++asked > PRELOAD_TRIES) return;
+		view.executeJavascript(`if(typeof window.__electrobunSendToHost!=="function")location.reload();`);
+	});
 }
 
 function frame(width: number, height: number) {
@@ -148,7 +174,7 @@ export async function openStudioWindow(opts: { key: string; title: string; sessi
 	});
 	const view = new BrowserView({
 		url: `${origin}/_studio/`,
-		preload: sessionPreload(opts.session) + extra,
+		preload: sessionPreload(opts.session) + newWindowPreload() + extra,
 		sandbox: true,
 		partition: opts.partition,
 		windowId: win.id,
@@ -166,6 +192,13 @@ export async function openStudioWindow(opts: { key: string; title: string; sessi
 		const url = typeof d === "string" ? d : d?.url;
 		if (typeof url === "string") void openExternal(url, last);
 	});
+	// Windows: the same request, taken from the page before WebView2 opens a window of its own (opener.ts).
+	if (process.platform === "win32") {
+		(view as any).on("host-message", (e: any) => {
+			const d = detailOf(e);
+			if (d?.type === LINK_OUT && typeof d.url === "string") void openExternal(d.url, last);
+		});
+	}
 	const studio = { win, view };
 	if (__TESTABLE__) (await import("./testhooks.ts")).watchStudio(studio, opts.key);
 	return studio;
@@ -191,7 +224,7 @@ export async function showNotice(n: Notice, onAction: (id: string) => void = () 
 	const win = new BrowserWindow({
 		title: n.title,
 		url: "views://notice/index.html",
-		preload: noticePreload(n),
+		preload: noticePreload(n) + newWindowPreload(),
 		sandbox: true,
 		frame: frame(540, 330),
 	});

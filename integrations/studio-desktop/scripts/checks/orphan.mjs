@@ -124,10 +124,13 @@ assertClean('before');
 if (MAC || LINUX) {
   step('the control: a process that holds another one\'s stdin write end is found');
   const reader = spawn('cat', [], { stdio: ['pipe', 'ignore', 'ignore'] });
+  // Both started is an event each, listened for before either is awaited: Node emits
+  // `spawn` on the next tick, so the reader's had gone by when the first version,
+  // awaiting the leaker's first, began to listen for it, and the check hung on Linux.
+  const readerUp = new Promise((r) => reader.once('spawn', r));
   // Handed the write end as a descriptor of its own, which is the leak.
   const leaker = spawn('sleep', ['30'], { stdio: ['ignore', 'ignore', 'ignore', reader.stdin] });
-  await new Promise((r) => leaker.once('spawn', r));
-  await new Promise((r) => reader.once('spawn', r));
+  await Promise.all([readerUp, new Promise((r) => leaker.once('spawn', r))]);
   const found = writersOfStdin(reader.pid, [reader.pid, leaker.pid, process.pid]);
   reader.kill();
   leaker.kill();

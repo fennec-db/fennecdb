@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { BUN, EXE, HERE, LINUX, REPORT, WIN, assertClean, cmd, evalIn, file, lines, quit, startApp, step, waitFor, waitNone, waitNotice, log } from './lib.mjs';
+import { BUN, EXE, HERE, LINUX, REPORT, WIN, assertClean, cmd, evalIn, file, lines, quit, startApp, step, waitFor, waitNone, waitNotice, webviewWindows, log } from './lib.mjs';
 
 assertClean('before');
 
@@ -72,6 +72,8 @@ step('a link out of an app page is not handed to the browser: only a studio wind
 const m = lines().length;
 await evalIn('launcher', `window.open("https://example.com/"); return 1`);
 await waitNone((l, i) => i >= m && l.what === 'external', 1200, 'a link from an app page was handed to the browser');
+// Nor opened by WebView2 in a window of its own, which it does for a request Electrobun leaves to it (src/bun/opener.ts).
+if (WIN) assert.deepEqual(webviewWindows(), [], 'no window WebView2 opened by itself');
 
 step('the app\'s own pages run their bundle alone: their CSP refuses eval and inline script');
 // Eval is asked of the page itself: a string given to setTimeout is compiled by

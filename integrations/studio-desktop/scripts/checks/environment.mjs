@@ -22,6 +22,8 @@ const SMALL = data('small', 20);
 mkdirSync(join(D, 'wrap'), { recursive: true });
 const SEEN = join(D, 'wrap', 'server-env.txt');
 const WRAP = join(D, 'wrap', `fennec-server${WIN ? '.exe' : ''}`);
+/** Windows: the processor the stand-in runs as, which on an arm64 machine may be one Windows emulates. */
+const ARCH = join(D, 'wrap', 'stand-in-arch.txt');
 if (WIN) {
   const source = join(D, 'wrap', 'stand-in.ts');
   writeFileSync(
@@ -30,6 +32,7 @@ if (WIN) {
       `import { writeFileSync } from "node:fs";`,
       `import { spawn } from "node:child_process";`,
       `writeFileSync(${JSON.stringify(SEEN)}, Object.entries(process.env).map(([k, v]) => k + "=" + v).join("\\n") + "\\n");`,
+      `writeFileSync(${JSON.stringify(ARCH)}, process.arch);`,
       `const child = spawn(${JSON.stringify(SERVER)}, process.argv.slice(2), { stdio: "inherit" });`,
       `child.on("exit", (code) => process.exit(code ?? 1));`,
     ].join('\n'),
@@ -69,7 +72,17 @@ for (const leak of ['OTEL_EXPORTER_OTLP_ENDPOINT', 'OTEL_SERVICE_NAME', 'FENNEC_
 const ALLOWED = WIN
   ? /^(HOME|PATH|TMPDIR|LANG|USER|LOGNAME|TZ|LC_[A-Z]+|HOMEDRIVE|HOMEPATH|LOGONSERVER|SYSTEMDRIVE|SYSTEMROOT|TEMP|TMP|USERDOMAIN|USERNAME|USERPROFILE|WINDIR|FENNEC_HTTP_TOKEN|FENNEC_REPLICATION_TOKEN)$/
   : /^(HOME|PATH|TMPDIR|LANG|USER|LOGNAME|TZ|LC_[A-Z]+|FENNEC_HTTP_TOKEN|FENNEC_REPLICATION_TOKEN|PWD|SHLVL|_|OLDPWD)$/;
-assert.deepEqual(names.filter((n) => !ALLOWED.test(n)), [], 'only the allowlist (and what the wrapper script\'s own shell adds)');
+// A program Windows emulates (an x64 one on an arm64 machine) has PROCESSOR_ARCHITECTURE set in
+// its own environment by the system, whatever it was started with: allowed for a stand-in that
+// runs as another processor than the app's Bun alone, and said.
+let extra = [];
+if (WIN) {
+  const standIn = readFileSync(ARCH, 'utf8').trim();
+  const app_ = spawnSync(BUN, ['-e', 'process.stdout.write(process.arch)'], { encoding: 'utf8', timeout: 30000 }).stdout.trim();
+  log(`the stand-in runs as ${standIn}, the app's Bun as ${app_}; PROCESSOR_ARCHITECTURE: ${seen().PROCESSOR_ARCHITECTURE ?? '(none)'}`);
+  if (standIn !== app_) extra = ['PROCESSOR_ARCHITECTURE'];
+}
+assert.deepEqual(names.filter((n) => !ALLOWED.test(n) && !extra.includes(n)), [], 'only the allowlist (and what the wrapper script\'s own shell adds)');
 // The case-blind compare is what lets Windows' `Path` through, where a name compared as macOS's would drop it.
 if (WIN) assert.ok(names.includes('PATH') && names.includes('SYSTEMROOT'), 'Path and SystemRoot, however Windows spells them');
 const env = seen();
