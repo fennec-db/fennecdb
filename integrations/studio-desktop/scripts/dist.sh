@@ -88,7 +88,8 @@ echo "dist: $name unpacked from $(basename "$payload"), $signed nested Mach-O fi
 ditto "$app" "$work/volume/$name"
 ln -s /Applications "$work/volume/Applications"
 rm -f "$out"
-hdiutil create -quiet -volname "fennec studio" -srcfolder "$work/volume" -fs HFS+ -format ULMO -ov "$out"
-hdiutil verify -quiet "$out"
+# Not -quiet: it closes hdiutil's stderr too, and a failure says nothing.
+hdiutil create -volname "fennec studio" -srcfolder "$work/volume" -fs HFS+ -format ULMO -ov "$out"
+hdiutil verify "$out"
 ls -l "$out"
 if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$out"; fi
