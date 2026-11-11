@@ -284,10 +284,11 @@ jobs:
         timeout-minutes: 10
         env:
           DEBIAN_FRONTEND: noninteractive
+        # From the image's package lists, as ci.yml installs brotli: an `apt-get update` hung
+        # the step twice, its mirror unresolved. Lists that have gone stale are fetched again.
         run: |
-          sudo -E apt-get update -qq -o Acquire::Retries=3
-          sudo -E apt-get install -y -qq -o Acquire::Retries=3 libgtk-3-0t64 libwebkit2gtk-4.1-0 libayatana-appindicator3-1 librsvg2-2 \
-            xvfb dbus-x11 gnome-keyring libsecret-1-0 libsecret-tools
+          packages="libgtk-3-0t64 libwebkit2gtk-4.1-0 libayatana-appindicator3-1 librsvg2-2 xvfb dbus-x11 gnome-keyring libsecret-1-0 libsecret-tools"
+          sudo -E apt-get install -y -qq $packages || { sudo -E apt-get update -qq && sudo -E apt-get install -y -qq $packages; }
 
       # As the macOS job's, a cache per system: scripts/electrobun.mjs holds what is
       # in it to hutch-pin.json on every run.

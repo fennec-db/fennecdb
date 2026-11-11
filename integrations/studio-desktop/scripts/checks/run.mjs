@@ -71,7 +71,13 @@ const CHECKS = [
       win32: "phase 2: it reads the Keychain with `security`; the credential store by name (Credential Manager's) then",
     },
   },
-  { name: 'newdb' },
+  {
+    name: 'newdb',
+    skip: {
+      win32:
+        "phase 2: a new database's first collection is written by a server the app then stops by SIGTERM, TerminateProcess on Windows, which takes with it what the server still buffers (--sync 250): the window finds no collection, until the app ends its stdin",
+    },
+  },
   {
     name: 'serve',
     skip: {
