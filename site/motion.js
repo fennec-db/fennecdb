@@ -284,6 +284,28 @@ function words(c, s, x, y, { size = 16, lit = 0, terms, color = P.sand, alpha = 
   }
 }
 
+// The app's icon: the mark on the dusk-violet tile, without its light.
+function appIcon(c, x, y, size, { alpha = 1 } = {}) {
+  if (alpha <= 0) return;
+  box(c, x - size / 2, y - size / 2, size, size, { r: size * 0.24, fill: P.night2, stroke: '#5C3A42', alpha, line: 1.4 });
+  mark(c, x, y, size * 0.66 / 64, alpha, 99);
+}
+
+// A folder, Applications' in the disk image; `lit` once the app is in it.
+function folder(c, x, y, { alpha = 1, glow: g = 0, lit = false } = {}) {
+  if (alpha <= 0) return;
+  c.save();
+  c.globalAlpha *= alpha;
+  c.lineJoin = 'round';
+  c.beginPath();
+  c.moveTo(x - 34, y - 22); c.lineTo(x - 12, y - 22); c.lineTo(x - 5, y - 15); c.lineTo(x + 34, y - 15);
+  c.lineTo(x + 34, y + 24); c.lineTo(x - 34, y + 24); c.closePath();
+  c.fillStyle = P.panel2; c.fill();
+  if (g > 0) { c.shadowColor = GLOW; c.shadowBlur = 18 * g; }
+  c.strokeStyle = lit ? P.oasis : P.sun; c.lineWidth = 1.8; c.stroke();
+  c.restore();
+}
+
 /* --------------------------------------------------------------- scenes */
 
 const SCENES = [
@@ -1376,6 +1398,124 @@ const SCENES = [
         }
       });
       c.restore();
+    },
+  },
+  {
+    /* fennec studio, the app: the .dmg's app is dragged into Applications, a
+       file is opened, the server the app carries is started on it, and a
+       window opens on that server's own /_studio/, its rows coming in. The
+       command is the one the app starts a window's server with
+       (integrations/studio-desktop/src/bun/serving.ts, `windowPlan` and
+       `serverArgs`), flag for flag in its order: `--sync` is the file's own
+       setting, 250 ms by default, and the token is in the environment, never
+       on the command line, so none is drawn. The line under it is the
+       server's own (`fennec-http <version> listening on: ...`), the port the
+       one the system picks, wrapped at the pane's width as a terminal wraps
+       it. The window's rows are bars: no row is drawn that is not a shape.
+       The three panes stand in a row with the light in the two gaps, or on a
+       phone in a column with it down the right side, clear of the captions
+       under the panes; a wire never runs under a word. */
+    key: 'app',
+    d: 8.2,
+    h: 440, nh: 1040,
+    draw(c, t, n, data = {}) {
+      const v = /^[0-9A-Za-z.+-]+$/.test(data.version || '') ? data.version : 'X.Y.Z';
+      const hotRule = '#5C3A42', termFill = '#0A0716', port = 52341;
+      const G = n ? { x: 20, y: 16, w: 440, h: 230 } : { x: 40, y: 40, w: 380, h: 300 };
+      const S = n ? { x: 20, y: G.y + G.h + 56, w: 440, h: 310 } : { x: 480, y: 40, w: 340, h: 300 };
+      const Wn = n ? { x: 20, y: S.y + S.h + 56, w: 440, h: 330 } : { x: 880, y: 40, w: 360, h: 300 };
+      const pGS = n ? [[430, G.y + G.h], [430, S.y]] : [[G.x + G.w, 190], [S.x, 190]];
+      const pSW = n ? [[430, S.y + S.h], [430, Wn.y]] : [[S.x + S.w, 190], [Wn.x, 190]];
+      const drag0 = 0.7, drag1 = 1.9, run0 = 2.1, run1 = 2.5, open = 2.5, listen = 4.2, out0 = 4.5, out1 = 5.0, win = 5.0;
+      const flags = [['fennec-server', 2.9, P.star], ['  --file /Users/you/orders.fennec', 3.1, P.sand2], ['  --http 127.0.0.1:0', 3.3, P.sand2],
+        ['  --sync 250', 3.4, P.sand2], ['  --studio', 3.5, P.hot], ['  --exit-on-stdin-close', 3.7, P.sand2]];
+      const cap = (pane, k, s) => {
+        if (n) mono(c, `${k}  ${s}`, pane.x, pane.y + pane.h + 32, { size: 14, color: P.sand2 });
+        else {
+          mono(c, s, pane.x, pane.y + pane.h + 34, { size: 13, color: P.sand2 });
+          mono(c, String(k), pane.x + pane.w, pane.y + pane.h + 34, { size: 13, align: 'right' });
+        }
+      };
+      const chrome = (pane, title, tone, on) => {
+        dot(c, pane.x + 20, pane.y + 18, 4.5, P.ember); dot(c, pane.x + 35, pane.y + 18, 4.5, P.sun); dot(c, pane.x + 50, pane.y + 18, 4.5, P.oasis);
+        mono(c, title, pane.x + 68, pane.y + 22.5, { size: n ? 13.5 : 12.5, alpha: on, color: tone });
+        wire(c, [[pane.x, pane.y + 36], [pane.x + pane.w, pane.y + 36]], P.rule, 1);
+      };
+
+      [pGS, pSW].forEach((p) => wire(c, p, P.rule, 1.5));
+      streak(c, pGS, span(t, run0, run1), { tail: 0.4 });
+      streak(c, pSW, span(t, out0, out1), { tail: 0.4 });
+
+      // The disk image: the app, an arrow, Applications.
+      const landed = flash(t, drag1, 1.1, 0);
+      box(c, G.x, G.y, G.w, G.h, { r: 12, fill: P.deep, stroke: t > drag1 ? P.sun : P.rule, line: 1.6, glow: landed });
+      chrome(G, `fennec-studio-v${v}-macos-arm64.dmg`, P.dim, 1);
+      const ax = G.x + (n ? 110 : 100), fx = G.x + (n ? 330 : 290), iy = G.y + (n ? 130 : 150);
+      appIcon(c, ax, iy, 76);
+      text(c, 'fennec studio', ax, iy + 66, { size: n ? 17 : 15, weight: 600, color: P.star, align: 'center' });
+      wire(c, [[ax + 56, iy], [fx - 52, iy]], hotRule, 1.6, 1, [5, 6]);
+      wire(c, [[fx - 60, iy - 7], [fx - 52, iy], [fx - 60, iy + 7]], hotRule, 1.6);
+      const inApps = t > drag1;
+      folder(c, fx, iy, { glow: landed, lit: inApps });
+      text(c, 'Applications', fx, iy + 66, { size: n ? 17 : 15, weight: 600, color: inApps ? P.oasis : P.sand2, align: 'center' });
+      const dk = ease(span(t, drag0, drag1));
+      if (dk > 0 && dk < 1) appIcon(c, lerp(ax, fx, dk), iy - Math.sin(dk * Math.PI) * 26, 76 * lerp(1, 0.6, dk), { alpha: 0.85 });
+      cap(G, 1, 'Drag it to Applications');
+
+      // The file opened, and the server the app carries started on it.
+      const sOn = ease(span(t, open, open + 0.3));
+      box(c, S.x, S.y, S.w, S.h, { r: 12, fill: termFill, stroke: t > listen ? P.oasis : t > open ? P.sun : P.rule, line: 1.6, glow: t > listen ? flash(t, listen, 1.1, 0.2) : 0 });
+      file(c, S.x + 32, S.y + 40, 0.95, { alpha: 0.35 + 0.65 * sOn, glow: flash(t, open, 1, 0) });
+      text(c, 'orders.fennec', S.x + 56, S.y + 39, { size: n ? 19 : 17, weight: 600, color: P.star });
+      mono(c, 'File, Open…', S.x + 56, S.y + 59, { size: n ? 14 : 12.5, alpha: 0.5 + 0.5 * sOn });
+      wire(c, [[S.x + 18, S.y + 80], [S.x + S.w - 18, S.y + 80]], P.rule, 1);
+      const fs = n ? 15 : 13.5, fp = n ? 23 : 21;
+      flags.forEach(([s, when, col], i) => {
+        mono(c, s, S.x + 22, S.y + (n ? 112 : 106) + i * fp, { size: fs, color: col, alpha: ease(span(t, when, when + 0.25)), weight: i === 0 ? 500 : 400 });
+      });
+      const ls = n ? 14 : 12;
+      c.save();
+      c.font = `400 ${ls}px ${MONO}`;
+      const cols = Math.max(16, Math.floor((S.w - 44) / c.measureText('0').width));
+      c.restore();
+      const said = `fennec-http ${v} listening on: http://127.0.0.1:${port}  [token]`;
+      // Wrapped between words, so the address stays whole.
+      const rows = [];
+      for (const w of said.split(' ')) {
+        if (rows.length && (rows[rows.length - 1] + ' ' + w).length <= cols) rows[rows.length - 1] += ' ' + w;
+        else rows.push(w);
+      }
+      rows.forEach((row, k) => {
+        mono(c, row, S.x + 22, S.y + (n ? 268 : 252) + k * (n ? 21 : 17), { size: ls, color: P.oasis, alpha: ease(span(t, listen + k * 0.04, listen + 0.3 + k * 0.04)) });
+      });
+      cap(S, 2, 'It starts its server on the file');
+
+      // The window: that server's own /_studio/, its rows coming in.
+      const wk = ease(span(t, win, win + 0.4));
+      box(c, Wn.x, Wn.y, Wn.w, Wn.h, { r: 12, fill: P.deep, stroke: wk > 0 ? P.sun : P.rule, line: 1.6, glow: flash(t, win, 1.1, 0) });
+      chrome(Wn, `127.0.0.1:${port}/_studio/`, wk > 0.5 ? P.sand2 : P.dim, 0.4 + 0.6 * wk);
+      const sb = n ? 130 : 110, gx = Wn.x + sb + 14;
+      c.save();
+      c.globalAlpha *= wk;
+      wire(c, [[Wn.x + sb, Wn.y + 37], [Wn.x + sb, Wn.y + Wn.h - 1]], P.rule, 1);
+      mono(c, 'collections', Wn.x + 14, Wn.y + 60, { size: n ? 13 : 11.5 });
+      box(c, Wn.x + 8, Wn.y + 72, sb - 16, 24, { r: 6, fill: 'rgba(79,224,196,.08)', stroke: P.oasis, line: 1 });
+      mono(c, 'orders', Wn.x + 16, Wn.y + 88.5, { size: n ? 14 : 12.5, color: P.oasis });
+      [0, 1, 2].forEach((i) => box(c, Wn.x + 16, Wn.y + 110 + i * 22, 58 - i * 12, 8, { r: 4, fill: P.rule, stroke: null }));
+      mono(c, 'orders', gx, Wn.y + 60, { size: n ? 14 : 12, color: P.sand2 });
+      wire(c, [[Wn.x + sb + 1, Wn.y + 74], [Wn.x + Wn.w, Wn.y + 74]], P.rule, 1);
+      const cx = n ? [0, 66, 186] : [0, 56, 160];
+      ['id', 'status', 'owner'].forEach((h, i) => mono(c, h, gx + cx[i], Wn.y + 94, { size: n ? 13 : 11.5 }));
+      const rp = n ? 26 : 23;
+      for (let i = 0; i < 8; i++) {
+        const k = ease(span(t, win + 0.3 + i * 0.16, win + 0.55 + i * 0.16));
+        const y = Wn.y + (n ? 116 : 110) + i * rp;
+        box(c, gx + cx[0], y, 32, 9, { r: 4, fill: hotRule, stroke: null, alpha: k });
+        box(c, gx + cx[1], y, 44 + ((i * 37) % 5) * 10, 9, { r: 4, fill: i % 3 === 0 ? 'rgba(79,224,196,.55)' : 'rgba(244,169,60,.5)', stroke: null, alpha: k });
+        box(c, gx + cx[2], y, 40 + ((i * 53) % 4) * 6, 9, { r: 4, fill: P.rule, stroke: null, alpha: k });
+      }
+      c.restore();
+      cap(Wn, 3, "A window on that server's own studio");
     },
   },
 ];

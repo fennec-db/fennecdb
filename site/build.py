@@ -684,6 +684,7 @@ CLAIMS = [
     # fennec studio's first load, which studio/test/statements.test.mjs holds
     # under 120 KB.
     ("site/content/docs/studio.html", r"first load is (\d+) KB of JavaScript and CSS, gzipped", "kb_studio_gz", 0),
+    ("site/content/download.html", r"Embedded in the binary: (\d+) KB of JavaScript and CSS", "kb_studio_gz", 0),
     ("README.md", r"\*\*Runtime size\*\* \| (\d+) KB gzip wasm", "kb_gz", 0),
     ("README.md", r"gzip wasm \+ (\d+) KB gzip client", "kb_client_gz", 0),
     ("README.md", r"fennec-server:(\d+\.\d+\.\d+)", "version", 0),

@@ -1462,11 +1462,107 @@ html:not(.js) .dl-sys > .lang-tabs { display: none; }
 .dl-two p { margin: 12px 0 0; color: var(--sand-2); font-size: 15.5px; line-height: 1.6; }
 .dl-two > div > p:first-child { margin-top: 0; }
 
+/* The app first: a card for fennec studio beside its window. Windows and
+   Linux are shown the other variant, chosen by a class the page sets on
+   <html> before the card is painted (the script in the card), so nothing
+   moves once it is shown; without script everyone sees the Mac's. */
+.dl-hero { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 44px; align-items: center; margin: 44px 0 0; }
+.dl-app { min-width: 0; padding: clamp(18px, 2.4vw, 28px); border: 1px solid var(--rule); border-radius: 16px; background: rgba(21,15,38,.92); }
+.dl-app-id { display: flex; align-items: center; gap: 16px; }
+.dl-app-icon {
+  display: grid; place-items: center; flex: none; width: 72px; height: 72px; border-radius: 18px;
+  background: linear-gradient(160deg, #331A3A 0%, #120E28 100%); border: 1px solid var(--rule-hot);
+  box-shadow: 0 18px 40px -20px rgba(255,122,61,.7);
+}
+.dl-app-icon svg { width: 48px; height: 48px; }
+.dl-app-name { margin: 0; font: 700 27px/1.1 var(--sans); color: var(--star); letter-spacing: -.02em; }
+.dl-app-kind { margin: 7px 0 0; font: 400 13px/1.4 var(--mono); color: var(--sand-dim); }
+.dl-beta {
+  display: inline-block; margin-left: 10px; padding: 4px 9px; border: 1px solid rgba(79,224,196,.6); border-radius: 999px;
+  color: var(--oasis); font: 500 11.5px/1 var(--mono); vertical-align: 4px; letter-spacing: .04em;
+}
+.dl-app-say { margin: 18px 0 0; color: var(--sand-2); font-size: 16.5px; line-height: 1.6; }
+.dl-get {
+  display: flex; align-items: center; gap: 14px; margin: 22px 0 0; padding: 12px 22px; min-height: 66px; box-sizing: border-box;
+  border-radius: 12px; text-decoration: none; color: #23100A;
+  background: linear-gradient(135deg, var(--sun-hot), var(--sun) 52%, var(--ember));
+  box-shadow: 0 26px 60px -28px rgba(255,122,61,.95), inset 0 1px 0 rgba(255,255,255,.35);
+  transition: transform .25s var(--ease), box-shadow .25s var(--ease);
+}
+.dl-get:hover, .dl-get:focus-visible { color: #23100A; transform: translateY(-2px); }
+.dl-get svg { width: 26px; height: 26px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.dl-get b { display: block; font: 700 19px/1.1 var(--sans); }
+.dl-get small { display: block; margin-top: 5px; font: 500 12.5px/1.2 var(--mono); color: #4A2A18; }
+.dl-get.calm { color: var(--sand); background: transparent; border: 1px solid var(--rule-hot); box-shadow: none; }
+.dl-get.calm:hover, .dl-get.calm:focus-visible { color: var(--star); border-color: var(--sun); background: rgba(244,169,60,.08); }
+.dl-get.calm small { color: var(--sand-dim); }
+.dl-get.calm svg { color: var(--oasis); }
+.dl-ticks { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 16px 0 0; padding: 0; list-style: none; color: var(--sand-2); font: 400 13px/1.5 var(--mono); }
+.dl-ticks li { display: inline-flex; align-items: center; gap: 7px; margin: 0; }
+.dl-ticks svg { width: 15px; height: 15px; flex: none; fill: none; stroke: var(--oasis); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.dl-first {
+  margin: 16px 0 0; padding: 12px 14px; border: 1px solid rgba(255,206,115,.35); border-radius: 10px;
+  background: rgba(255,206,115,.06); color: var(--sand-2); font-size: 14.5px; line-height: 1.55;
+}
+.dl-first strong { color: var(--sun-hot); font-weight: 600; }
+.dl-app-line { margin: 16px 0 8px; color: var(--sand-dim); font: 400 13px/1.4 var(--mono); }
+.dl-one .code { margin: 0; max-width: none; }
+.dl-one .code pre { padding: 40px 14px 12px; }
+.dl-one .code code { font-size: 12.5px; white-space: pre; overflow-wrap: normal; }
+.dl-else { margin: 20px 0 0; padding: 16px 0 0; border-top: 1px solid var(--rule); color: var(--sand-dim); font-size: 14.5px; line-height: 1.6; }
+.dl-else code { color: var(--sand-2); }
+.dl-app-other, .dl-sys-win, .dl-sys-lin { display: none; }
+.dl-other .dl-app-mac { display: none; }
+.dl-other .dl-app-other { display: block; }
+.dl-is-win .dl-sys-win, .dl-is-lin .dl-sys-lin { display: inline; }
+
+.dl-hero-shot { min-width: 0; margin: 0; }
+.dl-win { margin: 0; overflow: hidden; border: 1px solid var(--rule-hot); border-radius: 12px; background: #0A0716; box-shadow: 0 50px 100px -50px rgba(0,0,0,.95), 0 30px 80px -50px rgba(255,122,61,.45); }
+.dl-win-bar { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 14px; background: var(--panel); border-bottom: 1px solid var(--rule); }
+.dl-win-bar span { width: 11px; height: 11px; border-radius: 50%; background: var(--rule-hot); }
+.dl-win-bar em { margin-left: 10px; font: 400 12px/1 var(--mono); font-style: normal; color: var(--sand-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dl-win img { display: block; width: 100%; height: auto; aspect-ratio: 1280 / 800; }
+.dl-cap { margin: 12px 0 0; color: var(--sand-dim); font: 400 13px/1.55 var(--mono); }
+.dl-shot { margin: 0; }
+
+.dl-or { display: flex; align-items: center; gap: 18px; margin: 64px 0 0; }
+.band .dl-or h2 { margin: 0; flex: none; max-width: none; font: 650 24px/1.2 var(--sans); letter-spacing: -.01em; color: var(--star); }
+.dl-or::after { content: ""; flex: 1; height: 1px; background: var(--rule); }
+.dl-or-say { margin: 10px 0 0; max-width: 46em; color: var(--sand-2); font-size: 16.5px; line-height: 1.6; }
+.dl-or-say + .langs { margin-top: 22px; }
+
+/* The app's band: its six facts in three columns, its screens as tabs
+   (written in the page, like the systems', and stacked in one cell so the
+   screens' shared shape holds the place), the studio without it in three cards. */
+.dl-facts.six { grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0 0 8px; }
+.dl-shots.langs { margin-top: 36px; }
+.dl-h3 { margin: 64px 0 22px; font: 650 24px/1.2 var(--sans); color: var(--star); }
+.dl-cards.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.dl-cards.five { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.dl-card.lit { border-color: rgba(244,169,60,.55); box-shadow: 0 0 40px -22px rgba(244,169,60,.9); }
+.dl-card h4 { margin: 0 0 12px; font: 600 19px/1.25 var(--sans); color: var(--star); }
+.dl-card h4 + p { margin-bottom: 14px; }
+.dl-card .code { margin: 0 0 12px; max-width: none; }
+.dl-card .code pre { padding: 12px 100px 12px 14px; }
+.dl-card .code code { font-size: 13px; }
+.dl-card .dl-small { margin-top: 12px; color: var(--sand-dim); font-size: 14px; }
+.dl-two h3.dl-later { margin-top: 30px; }
+.dl-two .code { margin: 14px 0 0; max-width: none; }
+.dl-two .code + p { margin-top: 14px; }
+.motion[data-scenes="app"] canvas { aspect-ratio: 1280 / 440; }
+@media (max-width: 600px) { .motion[data-scenes="app"] canvas { aspect-ratio: 480 / 1040; } }
+
+@media (max-width: 1180px) {
+  .dl-cards.five { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
 @media (max-width: 1060px) {
-  .dl-facts, .dl-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dl-facts, .dl-facts.six, .dl-cards, .dl-cards.five, .dl-cards.three { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .dl-pkgs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dl-hero { grid-template-columns: minmax(0, 1fr); gap: 32px; }
 }
 @media (max-width: 700px) {
-  .dl-facts, .dl-cards, .dl-pkgs, .dl-two { grid-template-columns: minmax(0, 1fr); }
+  .dl-facts, .dl-facts.six, .dl-cards, .dl-cards.five, .dl-cards.three, .dl-pkgs, .dl-two { grid-template-columns: minmax(0, 1fr); }
   .dl .lang-tabs button { flex: 1 1 auto; text-align: center; }
+  .dl-or { margin-top: 48px; }
+  .band .dl-or h2 { font-size: 21px; }
 }
