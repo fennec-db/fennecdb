@@ -2190,13 +2190,15 @@ def build():
         page = page.replace("{{base}}", base)
         page = page.replace("{{repo}}", REPO_URL)
         # One header link is current: Benchmarks for its pages, Compare for the
-        # comparison pages, Docs for the rest of the docs, Playground for its own.
+        # comparison pages, Docs for the rest of the docs, Download and
+        # Playground for their own.
         here = ' aria-current="page"'
         compare = key == "docs/compare" or key.startswith("docs/vs-")
         page = page.replace("{{nav_bench}}", here if is_benchmark(key) else "")
         page = page.replace("{{nav_compare}}", here if compare else "")
         page = page.replace("{{nav_docs}}", here if is_docs and not is_benchmark(key)
                             and not compare else "")
+        page = page.replace("{{nav_download}}", here if key == "download" else "")
         page = page.replace("{{nav_playground}}", here if key == "playground" else "")
         if is_docs:
             # The dune field carries over the top of every docs page, so the
