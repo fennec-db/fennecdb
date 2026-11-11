@@ -78,8 +78,8 @@ export const linuxOpeners = (target: string): string[][] => [
 /**
  * Starts the first of `argvs` that can be started, with no shell, and
  * resolves with how it ended (its code, or the error that kept every one of
- * them from starting). The opener goes on alone: a browser it starts may
- * outlive the app.
+ * them from starting). It holds nothing of the app's up: xdg-open may wait
+ * for the browser it starts, which may outlive the app.
  */
 export function runFirst(argvs: string[][], start = spawn): Promise<{ argv: string[]; code: number | null } | { error: string }> {
 	return new Promise((resolve) => {

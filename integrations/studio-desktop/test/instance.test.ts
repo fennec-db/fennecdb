@@ -80,7 +80,8 @@ test("a guard that cannot be made does not keep the app from starting: it runs u
 		return;
 	}
 	assert.equal(await claimInstance(join(work, "no-such-folder", "x.instance"), () => {}), "unguarded");
-	assert.equal(await claimInstance(join(work, "x".repeat(120)), () => {}), "unguarded", "a path past the 104 bytes a socket's may have");
+	// macOS refuses a socket's path past its 104 bytes; Linux's libuv takes the first 108 of one.
+	if (process.platform === "darwin") assert.equal(await claimInstance(join(work, "x".repeat(120)), () => {}), "unguarded", "a path past the 104 bytes a socket's may have");
 });
 
 /** The pipe's security calls as instance.ts asks them, answering as told and saying what was asked. */

@@ -61,7 +61,10 @@ test("Linux's openers are argument vectors, the address one argument of each", (
 	]);
 });
 
-test("the first opener there is is started, with no shell; one that is not there is passed over", async () => {
+test("the first opener there is is started, with no shell; one that is not there is passed over", async (t) => {
+	// The opener holds no event loop up (the app's windows do), so the test holds this one until it is done.
+	const held = setInterval(() => {}, 1000);
+	t.after(() => clearInterval(held));
 	// A program that is there, run with a shell's word as an argument: it is handed the word, not what a shell would make of it.
 	const node = process.execPath;
 	const marker = join(work, "marker");

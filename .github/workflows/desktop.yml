@@ -316,12 +316,6 @@ jobs:
       - name: Build the shipped app
         run: npm run build
 
-      - name: Type check and unit tests
-        run: npm run typecheck && node --test --test-reporter=spec test/*.test.ts
-
-      - name: Build the test variant
-        run: FENNEC_DESKTOP_TEST_BUILD=1 npm run build
-
       # TEMPORARY (phase 2): what Bun and the system answer, printed; removed before review.
       - name: Phase 2 probe (temporary)
         continue-on-error: true
@@ -339,6 +333,12 @@ jobs:
             echo "== no bus"
             env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR=/nonexistent "$bun" scripts/probe-phase2.ts store
           fi
+
+      - name: Type check and unit tests
+        run: npm run typecheck && node --test --test-reporter=spec test/*.test.ts
+
+      - name: Build the test variant
+        run: FENNEC_DESKTOP_TEST_BUILD=1 npm run build
 
       - name: The scripted checks
         run: |
