@@ -144,6 +144,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The installer's --app path, which only a Mac runs: a stand-in DMG
+      # served from localhost as a release's, installed into the Applications
+      # folder of a home of its own and refused where it must be (the
+      # packaging job runs the rest on Linux, desktop.yml the real DMG).
+      - name: The installer's Mac app path
+        if: matrix.os == 'macos-latest'
+        run: sh site/test_install.sh
+
       # rust-toolchain.toml pins stable and asks for wasm32-unknown-unknown;
       # `rustup show` is what installs both before the first cargo call.
       - name: Install the pinned toolchain

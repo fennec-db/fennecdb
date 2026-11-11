@@ -471,8 +471,89 @@ keychain of its own with `-T /usr/bin/codesign -T /usr/bin/security` and not
 expands `$(shell ...)` in a value on its command line), runs `release.mjs` on the
 signed bundle, and greps the bundled server's signature for the hardened runtime
 and for the Developer ID separately (one `grep -E` with an alternation passes if
-either is there). A second job, with the workflow's only write permission and no
-secret, attaches the DMG the first uploaded; nothing unsigned is ever attached.
+either is there). A second job, with a write permission and no secret, attaches
+the DMG the first uploaded. Where the Environment holds no secrets the unsigned
+DMG is attached instead (The download, below): a signed one wins, and a signing
+job that failed or was not approved attaches nothing, so a maintainer who meant
+to sign never finds an unsigned DMG in its place.
+
+The download. The owner decided (2026-11-11) to ship the app without an Apple
+Developer account, unsigned, as the Windows zip ships, until there is one.
+Electrobun's stable build cannot be that download: it is a self-extractor, a
+launcher (linker-signed ad hoc, identifier `extractor`) and the app as a
+`.tar.zst` in its Resources, which the first launch unpacks into the bundle
+itself, and `codesign --verify --deep --strict` fails on it ("code has no
+resources but signature indicates they must be present"). A browser's
+download is quarantined, and a quarantined app whose signature does not hold
+is refused as "damaged" with no Open Anyway; and a quarantined app opened where
+Finder did not move it runs translocated, from a read-only mount (it was seen
+running from `/private/var/folders/.../AppTranslocation/...`), where an
+extractor cannot write into its bundle. So `scripts/dist.sh` ships the state
+the first launch leaves: it untars the same payload, clears the extended
+attributes `codesign` refuses, signs each Mach-O file (found by `file`, the
+deepest first: the six in `Contents/MacOS`, the bundled `fennec-server` and
+`fennec`, and the extractor Electrobun keeps as `Contents/Resources/uninstall`)
+and then the bundle, ad hoc (`codesign --force --sign -`), and verifies it.
+That untarring is the first launch's result was checked once, on the test
+variant: its payload untarred beside it and the bundle `warmup` left had the
+same 25 files, the same digest (`tree-digest.mjs`, executable bits included)
+and no difference under `diff -r`; only the system's `com.apple.provenance`
+attributes differ. The extractor's other work (its installer window, the
+quarantine it takes off, the tar it keeps under Application Support for bsdiff
+updates, an uninstaller's record) is outside the bundle and for updates the app
+does not have. Not used: `--deep` to sign (it signs nested code with the outer
+bundle's options, and Apple advises against it), the hardened runtime (Bun's
+JIT would need entitlements, and ad hoc code gains nothing from it). The image
+is HFS+, the app beside a link to `/Applications`, LZMA-compressed (ULMO,
+macOS 10.15 and later; Apple silicon starts at 11): 25.3 MB (25 286 247 bytes)
+for an app of 79 MB on disk, against 33.8 MB as ULFO (LZFSE), 37.3 MB as UDZO
+(zlib) and 25.9 MB for Electrobun's self-extracting DMG (25 876 994 bytes), the
+same build, measured on the M1 above.
+
+`checks/dist.mjs` holds the file that ships, on every CI run and first in `make
+studio-desktop-test`: the image verifies and is ULMO, its volume the app and the
+link alone; the app's signature holds, ad hoc, for `dev.fennecdb.studio`, its
+resources sealed and not the linker's, and each Mach-O file verifies alone; no
+payload is left and the launcher is not the extractor (it holds no
+`Self-extractor` string); `release.mjs` finds no hook in it. It launches the app
+from the image's own read-only mount, the stand-in for a translocated run, then
+from a copy `ditto` took out (as Finder and `install.sh` take it) once the image
+is let go: each time with a `HOME` and a `TMPDIR` of its own, up when the app's
+instance socket is made there (the app's own code ran) and a window of its
+process is on screen (CoreGraphics' window list through JXA: a window's owner
+needs no permission, its title would), and quit with SIGTERM, the app's own
+handler, exit 0 and none of its processes left. The copy's tree digest is the
+same before and after its run and its signature still holds. The shipped app
+has no hooks, so this is all a check can see of it; the test variant's checks
+hold the rest. WebKit keeps a store for the identifier in
+`~/Library/WebKit/dev.fennecdb.studio` whatever `HOME` says, and macOS at times
+its preferences in `~/Library/Preferences/dev.fennecdb.studio.plist` (seen
+after one run, not after three others): both take the home from the system. The check removes what
+it made, the preferences through `defaults delete` first (cfprefsd would write
+a plist removed under it again), leaves what a real install had, and tells
+LaunchServices to forget both copies it ran.
+
+The release. A dispatch from `main` naming a release builds in the `app` job
+itself, with the release's server and shell (`get-server.sh`, the tarball held
+to the release's `SHA256SUMS`), so the DMG attached is one every check ran on;
+`attach-unsigned` (needs `app` and `sign`, the second having run and signed
+nothing) holds `contents: write` and no secret, checks nothing out and runs
+`gh` alone. It names the DMG `fennec-studio-v<version>-macos-arm64.dmg` and
+appends its line to the release's `SHA256SUMS`, the one place `install.sh`
+learns a sum from. That is the one asset of a published release replaced, and
+it only grows: the new file must start with every byte of the old (`cmp -n`),
+have one line more, and read back as written, so no sum anyone took changes. A
+DMG of that name already on the release is never replaced: one whose SHA-256 is
+this run's is a re-run's and the job goes on to the line, another fails it. A
+separate sums file was considered and not taken: every installer and the
+formula read `SHA256SUMS`, and a second file would be a second place to trust.
+GitHub cannot write an asset in place, so `--clobber` deletes and uploads, and
+for that moment the release has no `SHA256SUMS` and an install fails saying it
+could not download it; RELEASING.md runs the dispatch after `packages.yml`.
+Not verified: the Finder double-click of a quarantined copy and Open Anyway.
+A terminal here is a developer tool Gatekeeper exempts, so `open` started a
+quarantined copy without asking; it needs a person at a Mac, once a release
+carries the DMG.
 
 Rejected. webview-bun with `bun build --compile` (an 89.8 MB binary, studio
 visible in 0.87 s): `Webview.run()` blocks the JavaScript thread in the native
@@ -654,11 +735,13 @@ leaves nothing else to read. CI's `deploy` job runs both checks.
 
 ## Install channels
 
-**A release is installed from its own files, each checked before it is used.** Four ways to install `fennec` and `fennec-server` other than a registry or the image -- Homebrew's formula, `https://fennecdb.com/install.sh`, a `.deb` and an `.rpm`, and on Windows `https://fennecdb.com/install.ps1` -- all take the archives `release.yml` built (the musl tarballs for Linux, which are static, the two macOS ones, and the two Windows zips) and build nothing themselves. Each names what it installs by a SHA-256, which is what holds them to one source: the formula carries the four sums of `SHA256SUMS`, each installer checks the tarball or the zip against the sum of the release it came from, and the packages are made from those tarballs and listed in `SHA256SUMS` with the rest. Because all three name the release's files by checksum, a published release's assets are never replaced: re-running `release.yml` for a tag whose release is public (`publish`) uploads only the files the release has no asset of, with a warning that its `SHA256SUMS` does not list them, where a draft's are replaced as before. A rebuild is not byte for byte the first build (the Rust toolchain, the runner image), so a replaced tarball would have failed every `brew install` and every sum already taken from the old `SHA256SUMS`. The image jobs still push `:X.Y.Z` and `:latest` again on a re-run; the image is not named by a checksum anywhere here.
+**A release is installed from its own files, each checked before it is used.** Four ways to install `fennec` and `fennec-server` other than a registry or the image -- Homebrew's formula, `https://fennecdb.com/install.sh`, a `.deb` and an `.rpm`, and on Windows `https://fennecdb.com/install.ps1` -- all take the archives `release.yml` built (the musl tarballs for Linux, which are static, the two macOS ones, and the two Windows zips) and build nothing themselves. Each names what it installs by a SHA-256, which is what holds them to one source: the formula carries the four sums of `SHA256SUMS`, each installer checks the tarball or the zip against the sum of the release it came from, and the packages are made from those tarballs and listed in `SHA256SUMS` with the rest. Because all three name the release's files by checksum, a published release's assets are never replaced: re-running `release.yml` for a tag whose release is public (`publish`) uploads only the files the release has no asset of, with a warning that its `SHA256SUMS` does not list them, where a draft's are replaced as before. A rebuild is not byte for byte the first build (the Rust toolchain, the runner image), so a replaced tarball would have failed every `brew install` and every sum already taken from the old `SHA256SUMS`. The image jobs still push `:X.Y.Z` and `:latest` again on a re-run; the image is not named by a checksum anywhere here. One file of a published release is written again, and only by growing: `desktop.yml` appends the Mac app's DMG's line to `SHA256SUMS`, every line before it kept byte for byte, and never replaces a DMG ([Studio desktop](#studio-desktop), The release).
 
 The formula is `tools/homebrew-formula.py`'s output and nobody's text. The release job and a maintainer by hand run the same script on the release's `SHA256SUMS`. Two checks hold a copy, and neither is enough alone. `--check` writes the formula again from the version and sums the file holds, for `fennec-db/fennecdb`, and fails on any difference, so a hand edit of the text or of the repository is found by CI (the `packaging` job), as is a template change not followed by a new formula; it cannot find a sum edited to another value, since the sums are the file's own input, and a repository edited in the header and the urls together passes unless the repository must be this one, which it must (`--repo`). `--verify` downloads the four tarballs from the repository's own releases and holds them to the sums, which is what `brew install` will do and what finds that sum; CI runs both on the committed copy, which is the one a maintainer puts in the tap, and the release job runs both on what it is about to push. The formula is pushed by `packages.yml` (`homebrew`) once the release is published, not by `release.yml` at the tag, because it names the release's download URLs and a draft's are not public: a tap updated at the tag would send `brew install` to a 404 until someone published the notes, where a tap a few minutes behind sends it nowhere. A draft or a pre-release is not offered (the event says it, and a dispatch asks the release), since `brew upgrade` would hand a pre-release to everyone, and neither is a version older than the formula the tap holds (`sort -V` on the version in its url), so that a dispatch for an old tag, or two releases published close together and finished out of order, cannot move the tap back; the older run says so in a warning and in the summary and ends green. One run pushes at a time (`concurrency: homebrew-tap`, never cancelling one under way). The push takes `HOMEBREW_TAP_TOKEN`, a fine-grained token with Contents read and write on the tap alone, kept as a secret of the `homebrew` environment, which only `main` and `v*` tags may use (RELEASING.md has the commands), so a workflow on any other branch cannot read it; the repository-level secret of that name is deleted, because a repository secret is every workflow's. The job hands the token to `git` as an `http.extraheader` in `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`, which is in no URL, no argument and no `.git/config`, and the encoded form is masked as well as the token. A job with the secret set and a push that fails fails: a tap that silently stays a release behind is the failure nobody sees, so only the secret's absence is a notice. The formula's `test do` asks each binary for its version and runs a three-line script through the shell in memory. From 0.1.13 that is `fennec --version` and `fennec-server --version`, each held to `<name> <version>` on stdout and an exit of 0 (`shell_output`). A release before it has no version flag -- `fennec` rejects `--version`, and `fennec-server` names its version only on the first line of `--help`, on stderr -- so its formula asserts that line instead: the renderer picks the form by the version it writes (`VERSION_FLAG`), and the formula of a release from before the flag -- whichever one the tap holds, or one written again for an older tag -- comes out byte for byte as it did before, which `--check` on the committed 0.1.11 copy holds. Cutting over by version rather than by asking a binary keeps the script from downloading anything to write a formula. `tools/linux-packages-check.sh` makes the same choice by the binaries' version (`FENNEC_BINARY_VERSION`, else the package's), since CI runs it on the latest release, which may be one from before the flag. `brew audit --strict --online`, `brew style`, `brew livecheck` and `brew test` were run on it from a throwaway local tap (Homebrew installs no formula from a bare path), and `brew test` was seen to fail on a wrong version. The `--version` form was held to `brew style` and `brew test` the same way, on this code built as 0.1.13, and the packages check to both forms: 0.1.11's packages took the `--help` path, packages of binaries built as 0.1.13 the flag's, and 0.1.11's binaries named 0.1.13 failed it on `fennec --version`.
 
 `site/install.sh` is served by the site's worker as a static asset (`site/build.py` copies it to `dist/install.sh`, and `_headers` serves it as `text/plain` so a browser shows it, cached five minutes so a fix reaches the next install). It is POSIX `sh`, and outside its functions there is nothing but `set -eu`, comments and plain assignments before `main "$@"` on the last line, so a copy cut short stops at a syntax error or before the call and runs nothing: `build.py` refuses a script that is not that, and `site/test_install.sh` cuts it at some 300 points and asserts none runs anything. It works the platform out (a Rosetta shell on an Apple silicon Mac gets the native build; Windows is refused, `install.ps1` and WSL named), finds the latest release by the tarball names in `releases/latest/download/SHA256SUMS` or takes `FENNEC_VERSION`, downloads over https, checks the sum before it unpacks, and puts the two files in `~/.fennecdb/bin` or `$FENNEC_INSTALL/bin` (made absolute, so the `PATH` line it prints is good from anywhere) by writing beside and renaming over, so a running server's file is not overwritten in place and a copy that fails leaves no staged file. It edits no shell file and prints the `PATH` line instead; it evals nothing, and a version is held to `[0-9A-Za-z.+-]` before it goes into a URL. The downloader is curl (`--proto =https --tlsv1.2`) or a wget that checks certificates: GNU's, run with `--https-only --secure-protocol=TLSv1_2`, and BusyBox's only where it hands the connection to `ssl_client`, which Alpine's does (it refused a self-signed certificate) and upstream's own TLS does not -- that one checks nothing, so a BusyBox wget without `ssl_client`, or one that says "certificate validation not implemented", is refused with the instruction to install curl, and any other wget is refused as unknown. `FENNEC_BASE_URL` moves the releases to a mirror, https or `http://localhost` and `http://127.0.0.1` with an optional port alone (matched whole, with any `@`, so `http://localhost:x@example.com`, a request to example.com, is refused, as is a space), which is how the test serves a release of its own. The sum is the same release's, so it catches a damaged or truncated download and not a release someone replaced, which the docs say. It was run for real on macOS (arm64, and under Rosetta) and in `alpine` (busybox `wget` and `sha256sum`; arm64, and x86_64 under emulation) and `debian`. On Windows it names `install.ps1` and stops ([windows.md](windows.md#6-a-windows-release) rejects extending it to Git Bash and MSYS).
+
+`install.sh --app` installs the Mac app instead of the two programs, by the same rules: the platform first (macOS on Apple silicon, a Rosetta shell's included by `hw.optional.arm64`; anything else is told what the app is for and nothing is downloaded), the release found as for the programs (the latest by its `aarch64-apple-darwin` tarball, or `FENNEC_VERSION`), and `fennec-studio-v<version>-macos-arm64.dmg`'s sum from that release's `SHA256SUMS` checked before the image is attached (`desktop.yml` appends the line, [Studio desktop](#studio-desktop)). It attaches it read-only, `-nobrowse` and at a mount point in its own temporary folder, copies the app out with `ditto` into a staging folder inside `~/Applications` (made if missing, so the rename that follows stays on one volume), lets the image go, holds the copy to `codesign --verify --deep --strict` (ad hoc, but it must hold: a copy cut short or an app changed after it was signed is refused), and only then renames the old app aside and the new one into place, putting the old one back if the second rename fails. An app running from that place is refused before anything is downloaded: a process whose command starts with the bundle's `Contents/MacOS/`, read from `ps` by `awk` (not `pgrep -f`, whose pattern is a regular expression, nor a `grep`, whose own command holds the path and matched itself in the first version). Its cleanup lets the image go before it removes the temporary folder that holds the mount point. It needs no `sudo` and writes nothing but the app. A file `curl` downloads carries no quarantine, so the app opens with no Gatekeeper prompt, where the same DMG from a browser asks once (Open Anyway). `site/test_install.sh` refuses `--app` on Linux (both processors), an Intel Mac, FreeBSD and Windows' shells, under a `uname` and a `sysctl` that answer as told; on a Mac (CI's macOS `test` job) it installs a stand-in DMG (a bundle around `/bin/sleep`, signed ad hoc), again over it, under Rosetta and pinned, and refuses a tampered DMG, an app whose signature does not hold, a release with no DMG and an app running from the place (a `sleep` whose argv[0] is a path inside it: a copy of `/bin/sleep` there is killed at exec, arm64e running only as the system's own), each leaving no image attached and no staging folder; and `desktop.yml`'s app job runs the same on the DMG it just made (`FENNEC_TEST_DMG`).
 
 The Windows zip and `site/install.ps1` are [windows.md](windows.md#6-a-windows-release)'s decision 6. `release.yml`'s `windows` job builds `fennec.exe` on the cli profile and `fennec-server.exe` on release for `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc`, each on a runner of its architecture (`windows-latest`, `windows-11-arm`), with the C runtime linked in (`+crt-static`, `tools/windows-zip.sh`, under the runner's bash as the tarballs' build is), so they ask a fresh Windows for no Visual C++ redistributable, and zips them as `fennec-v<version>-<target>.zip`, the folder the tarballs hold with the same five files -- Windows' own `tar.exe` (libarchive's bsdtar) writes the zip, Git's writes none. Before it is kept, `tools/windows-zip-check.ps1` holds it as `linux-packages-check.sh` holds a package: the folder and its five files, neither program importing the Visual C++ runtime (`vcruntime140.dll`, `msvcp140.dll`, the UCRT's `api-ms-win-crt-*.dll`, read from each program's import directory), then `install.ps1` installing it from the folder it was made in under Windows PowerShell 5.1 and PowerShell 7, each program saying its version, and the shell writing a row into a file and reading it back in another process; a failure stops the release, as a package that does not install does. CI's `windows (release zip)` job runs the same two scripts on every change, so a tag meets no step of the Windows release CI has not run -- the Unix release's steps are held only by their pieces before a tag (the `build` job's profiles, the `packaging` job's installer and packages), which a Windows runner's slower start made worth a whole run here. A tag from before the scripts, dispatched again, builds no zip and says so. The zip is in `SHA256SUMS` with the rest (`publish` globs `*.zip`), and unsigned: signing is the owner's decision.
 

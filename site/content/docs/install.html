@@ -29,6 +29,7 @@ show that your install lacks is in the next one, and
 <tr><td><a href="#docker">The Docker image</a></td><td><code>fennec-server</code> alone, 7 MB</td><td>anywhere Docker runs, amd64 and arm64</td></tr>
 <tr><td><a href="#packages">A package for your language</a></td><td>a client for the server, or the database in your app</td><td>by language</td></tr>
 <tr><td><a href="#source">From source</a></td><td>whatever <code>main</code> is today</td><td>where Rust builds</td></tr>
+<tr><td><a href="#studio-app">The studio app</a></td><td>fennec studio as a Mac app (beta), with its own server for each file, in <code>~/Applications</code></td><td>macOS on Apple silicon</td></tr>
 </tbody>
 </table>
 </div>
@@ -62,6 +63,8 @@ that puts the directory on your <code>PATH</code> and leaves that to you.</p>
     https://fennecdb.com/install.sh | less</code>
     (<a href="https://fennecdb.com/install.sh">install.sh</a>).</li>
   <li><b>To remove it,</b> delete <code>~/.fennecdb</code>.</li>
+  <li><b>With <code>--app</code></b>, on a Mac with Apple silicon, it installs
+    <a href="#studio-app">the studio app</a> instead.</li>
 </ul>
 
 <h2 id="windows">Windows</h2>
@@ -223,6 +226,27 @@ href="integrations.html">Integrations</a>).</p>
 repository and build with <code>cargo</code> and <code>make</code>. <a
 href="build.html">Build from source</a> has the commands, the tests and what
 each make target does.</p>
+
+<h2 id="studio-app">The studio app</h2>
+
+<p>On a Mac with Apple silicon, <a href="studio.html#desktop">fennec
+studio</a> is also an app (beta) that opens a <code>.fennec</code> file with
+nothing to start: it carries <code>fennec-server</code> and the shell. The
+install script installs it instead of the two programs:</p>
+
+<pre data-lang="bash">curl -fsSL https://fennecdb.com/install.sh | sh -s -- --app</pre>
+
+<p>It downloads the release's
+<code>fennec-studio-v{{version}}-macos-arm64.dmg</code>, checks it against
+<code>SHA256SUMS</code> before it opens it, and copies the app into
+<code>~/Applications</code>, no <code>sudo</code>; anywhere else it stops and
+installs nothing. The app is unsigned (no Developer ID, not notarized). What
+<code>curl</code> downloads is not quarantined, so the app opens at once; the
+same DMG downloaded from the <a
+href="https://github.com/fennec-db/fennecdb/releases/tag/v{{version}}">release</a>
+by a browser is, and its first open asks once, in System Settings, Privacy
+&amp; Security, <b>Open Anyway</b>. To remove it, delete
+<code>~/Applications/fennec studio.app</code>.</p>
 
 <h2 id="checking">Checking a download</h2>
 

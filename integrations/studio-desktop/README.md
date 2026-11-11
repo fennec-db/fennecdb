@@ -15,11 +15,9 @@ Beta, macOS on Apple silicon only. The shell is [Electrobun](https://electrobun.
 Intel Mac build, and its Windows and Linux paths are not used here yet (no file
 associations, no save dialog, no credential store in the Keychain's place;
 `fennec-server` takes its lock and ships for Windows, docs/design/windows.md).
-Not signed or notarized until a maintainer adds the secrets
-([below](#signing-and-notarization)). An app you build here opens as it is; a
-build you *downloaded* unsigned (the CI's artifact) is quarantined by the
-browser and opens after `xattr -cr "fennec studio.app"` or *Open Anyway* in
-System Settings.
+A release's DMG is unsigned, signed ad hoc and not notarized
+([Download](#download)), until a maintainer adds the secrets
+([below](#signing-and-notarization)); an app you build here opens as it is.
 
 ```
  fennec studio.app
@@ -34,6 +32,77 @@ System Settings.
  └─ fennec backup | verify | restore | key     backups; the replication token in its environment
 ```
 
+## Download
+
+A release carries the app as `fennec-studio-v<version>-macos-arm64.dmg`
+(25.3 MB), listed in its `SHA256SUMS`, once a maintainer has run
+`desktop.yml` for it (RELEASING.md). Two ways to install it:
+
+* **The one-liner**, which needs no click in System Settings:
+
+  ```bash
+  curl -fsSL https://fennecdb.com/install.sh | sh -s -- --app
+  ```
+
+  It downloads the latest release's DMG (`FENNEC_VERSION=X.Y.Z` names
+  another), checks it against the release's `SHA256SUMS` before it attaches
+  it, read-only and out of Finder's sight, copies the app into
+  `~/Applications` (made if missing; no `sudo`), lets the image go, checks the
+  copy's signature and only then renames it over the one there. A file `curl`
+  downloads carries no quarantine, so macOS opens the app without asking. It
+  refuses, installing nothing, any platform but macOS on Apple silicon, and
+  an app running from where it would go.
+* **The DMG from the release page**: open it and drag fennec studio onto
+  Applications. A browser's download is quarantined, and the app has no
+  Developer ID, so the first open is refused ("Apple could not verify ...");
+  then System Settings, Privacy & Security, **Open Anyway** beside fennec
+  studio, once. From a terminal, `xattr -cr "/Applications/fennec studio.app"`
+  takes the quarantine off instead.
+
+**What the DMG holds.** Electrobun's stable build is a self-extractor: a
+launcher and the app as a `.tar.zst` in its Resources, which the first launch
+unpacks into the bundle itself ([below](#the-checks)). That cannot be
+downloaded unsigned. Its signature does not hold (`codesign --verify --deep
+--strict`: "code has no resources but signature indicates they must be
+present"), and macOS calls a quarantined app whose signature does not hold
+damaged, with no Open Anyway; and a quarantined app opened where Finder did
+not move it runs translocated, from a read-only mount, where an extractor
+cannot write into its bundle. So the DMG's app is the build already unpacked
+(the payload untarred: what the first launch leaves, file for file), each
+Mach-O file in it and then the bundle signed ad hoc, which names no one but
+holds, in an LZMA image beside a link to `/Applications`
+(`scripts/dist.sh`). Nothing writes into it when it runs.
+
+```bash
+make studio-desktop-dist   # integrations/studio-desktop/artifacts/dist/fennec-studio-macos-arm64.dmg, then checks/dist.mjs on it
+```
+
+`scripts/checks/dist.mjs` holds that very file as it ships, and `make
+studio-desktop-test` runs it first: the image verifies and holds the app and
+the link alone; the app's signature holds, ad hoc, for `dev.fennecdb.studio`,
+its resources sealed, and so does each of its Mach-O files; it is unpacked
+(no payload, a launcher that is not the extractor) and holds no test hook
+(`release.mjs`); it launches **from the image's own read-only mount**, as a
+translocated copy runs (its instance socket made, a window of its process on
+screen), and quits on SIGTERM through its own handler, exit 0, nothing of it
+left; and a copy taken out with `ditto`, as Finder and the one-liner take it,
+launches and quits the same way, every file of it unchanged by the run and
+its signature still holding. It starts the shipped app, under its real
+identifier, with a `HOME` and a `TMPDIR` of its own; WebKit and macOS still
+keep a store in `~/Library/WebKit/dev.fennecdb.studio` and, at times,
+`~/Library/Preferences/dev.fennecdb.studio.plist`, which the check removes
+where it made them and leaves where a real install had them. On CI the `app` job makes
+and checks the DMG on every run, runs `install.sh --app` on it
+(`site/test_install.sh`), and keeps it as the `fennec-studio-unsigned-dmg`
+artifact.
+
+**Not verified here:** what a person meets opening a quarantined copy from
+Finder, the refusal and Open Anyway, which needs a person at a Mac (a terminal
+is exempt from Gatekeeper as a developer tool, so `open` started a quarantined
+copy without asking); and whether the Keychain asks again for a saved server's
+token after an update to an ad hoc build, since an item's access is granted to
+the program by its code's identity, which for ad hoc code is a hash of it.
+
 ## Build, run, test
 
 You need a Mac with the Xcode command line tools (`sips`, `iconutil`,
@@ -42,7 +111,8 @@ Nothing is installed globally and no shell file is touched.
 
 ```bash
 make studio-desktop        # the unsigned .app and .dmg
-make studio-desktop-test   # type check, unit tests, every scripted check
+make studio-desktop-dist   # the DMG a release ships, held as it ships (Download, above)
+make studio-desktop-test   # that, type check, unit tests, every scripted check
 ```
 
 `make studio-desktop` builds `fennec-server` and the `fennec` shell from this
@@ -593,8 +663,10 @@ use (and no cache restored in it), holds the result to the same hook check the
 unsigned build passes and to `codesign --verify --deep --strict`, the hardened
 runtime and the Developer ID on the bundled server, `spctl` and `stapler
 validate` (app and DMG), and uploads the DMG. A separate job, which has the
-workflow's only write permission and none of the secrets, then attaches it to
-the release. Nothing unsigned is ever attached. The release's name is checked
+workflow's write permission and none of the secrets, then attaches it to
+the release. Where the Environment holds no secrets, the unsigned DMG
+([Download](#download)) is attached instead, by a job of the same kind; a
+signed one wins, and a signing job that fails attaches nothing. The release's name is checked
 (`^v?N.N.N$`) before it reaches `make`, which expands what it is given.
 
 **Not exercised (this repository had no Developer ID certificate when this
