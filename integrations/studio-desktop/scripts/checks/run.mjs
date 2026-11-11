@@ -12,16 +12,16 @@
 // next one starts clean, and fails for it.
 import { spawn, spawnSync } from 'node:child_process';
 import { closeSync, mkdirSync, openSync, rmSync, writeSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { D, HERE, IDENTIFIER, describe, mine } from './lib.mjs';
+import { APP_DATA, D, HERE, WIN, describe, mine } from './lib.mjs';
 
 const ALL = ['release', 'warmup', 'files', 'server-dies', 'orphan', 'sandbox', 'pages', 'storage', 'environment', 'remote', 'newdb', 'serve', 'backups', 'finder'];
 const only = (process.env.ONLY ?? '').split(',').filter(Boolean);
 const names = only.length ? ALL.filter((n) => only.includes(n)) : ALL;
-const LIMIT_MS = 240_000;
+// SPIKE: CHECK_LIMIT_MS shortens it on a runner where a check that hangs would hold the job.
+const LIMIT_MS = Number(process.env.CHECK_LIMIT_MS) || 240_000;
 
 // The test variant's own state, never a real install's: a different identifier.
-rmSync(`${homedir()}/Library/Application Support/${IDENTIFIER}`, { recursive: true, force: true });
+rmSync(APP_DATA, { recursive: true, force: true });
 rmSync(`${D}/data`, { recursive: true, force: true });
 mkdirSync(`${D}/data`, { recursive: true });
 mkdirSync(`${D}/logs`, { recursive: true });
@@ -50,7 +50,7 @@ for (const name of names) {
   if (left.length) {
     console.log(`${name} left processes behind; killing them:\n${describe(left)}`);
     // When each started, to tell a process that outlived the check from one started after it ended.
-    const started = spawnSync('ps', ['-o', 'pid=,lstart=', '-p', left.map((p) => p.pid).join(',')], { encoding: 'utf8', timeout: 30000 });
+    const started = WIN ? { stdout: '(no ps on Windows)' } : spawnSync('ps', ['-o', 'pid=,lstart=', '-p', left.map((p) => p.pid).join(',')], { encoding: 'utf8', timeout: 30000 });
     console.log(`started:\n${started.stdout}`);
     for (const p of left) {
       try {

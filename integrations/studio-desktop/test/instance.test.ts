@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { lstatSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { claimInstance, instancePath } from "../src/bun/instance.ts";
@@ -10,7 +11,10 @@ import { claimInstance, instancePath } from "../src/bun/instance.ts";
 
 // A short folder: a socket's path is 104 bytes at most on macOS, and the
 // test's temporary folder inside $TMPDIR is longer than the app's own name there.
-const work = mkdtempSync("/tmp/fdi-");
+// SPIKE: tmpdir() on Windows, where "/tmp" is a folder of the current drive that need not exist.
+const work = mkdtempSync(process.platform === "win32" ? join(tmpdir(), "fdi-") : "/tmp/fdi-");
+/** SPIKE: a named pipe leaves no file behind on Windows: nothing stale to take over. */
+const unixOnly = { skip: process.platform === "win32" ? "a named pipe goes with its last holder" : false };
 after(() => rmSync(work, { recursive: true, force: true }));
 
 const asked = () => {
@@ -42,7 +46,7 @@ test("two started together: one claims it, the other quits", async () => {
 	assert.deepEqual(results.sort(), [false, true]);
 });
 
-test("a socket an instance that ended left behind is taken over", async () => {
+test("a socket an instance that ended left behind is taken over", unixOnly, async () => {
 	const path = instancePath("stale", work);
 	// A socket file nobody listens on, as a killed instance leaves it: a process
 	// that listens and is killed (a listener closed in Node unlinks its socket).
@@ -55,7 +59,7 @@ test("a socket an instance that ended left behind is taken over", async () => {
 	await shown;
 });
 
-test("a plain file where the socket goes is taken over as well", async () => {
+test("a plain file where the socket goes is taken over as well", unixOnly, async () => {
 	const path = instancePath("file", work);
 	writeFileSync(path, "");
 	assert.equal(await claimInstance(path, () => {}), true);

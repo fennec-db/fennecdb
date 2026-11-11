@@ -28,6 +28,10 @@ const notarize =
 
 const identifier = test ? "dev.fennecdb.studio.test" : "dev.fennecdb.studio";
 
+// SPIKE (Windows and Linux): the release's Windows zip holds `fennec-server.exe`
+// and `fennec.exe`; Hutch builds for the host it runs on, so the host decides.
+const exe = process.platform === "win32" ? ".exe" : "";
+
 export default {
 	app: {
 		name: test ? "fennec studio test" : "fennec studio",
@@ -75,8 +79,8 @@ export default {
 			"src/ui/app.css": "views/ui/app.css",
 			// The server the app starts for a file, and the shell that takes,
 			// verifies and restores its backups: put here by scripts/get-server.sh.
-			"bin/fennec-server": "bin/fennec-server",
-			"bin/fennec": "bin/fennec",
+			[`bin/fennec-server${exe}`]: `bin/fennec-server${exe}`,
+			[`bin/fennec${exe}`]: `bin/fennec${exe}`,
 		},
 		mac: {
 			bundleCEF: false,

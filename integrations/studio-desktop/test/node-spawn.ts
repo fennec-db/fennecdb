@@ -4,13 +4,16 @@
 
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { Run } from "../src/bun/backups.ts";
 import type { Child, Spawn } from "../src/bun/process.ts";
 
-const BIN = new URL("../bin/", import.meta.url).pathname;
+// SPIKE: fileURLToPath, not `.pathname` (`/D:/a/...` on Windows), and `.exe` there.
+const BIN = fileURLToPath(new URL("../bin/", import.meta.url));
+const EXE = process.platform === "win32" ? ".exe" : "";
 /** The binaries `make studio-desktop` puts in bin/ (scripts/get-server.sh). */
-export const SERVER = process.env["FENNEC_SERVER_BIN"] || `${BIN}fennec-server`;
-export const CLI = process.env["FENNEC_CLI_BIN"] || `${BIN}fennec`;
+export const SERVER = process.env["FENNEC_SERVER_BIN"] || `${BIN}fennec-server${EXE}`;
+export const CLI = process.env["FENNEC_CLI_BIN"] || `${BIN}fennec${EXE}`;
 /** Why a test that needs them cannot run, or "" when it can. */
 export const missing = () => [SERVER, CLI].filter((b) => !existsSync(b)).map((b) => `${b} is not there: run scripts/get-server.sh`).join("; ");
 
@@ -27,6 +30,7 @@ export const nodeSpawn: Spawn = (argv, env): Child => {
 			return p.exitCode;
 		},
 		kill: (signal) => void p.kill(signal),
+		endStdin: () => void p.stdin.end(),
 	};
 };
 

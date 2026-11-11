@@ -14,14 +14,37 @@
 //   FENNEC_SERVER_BIN   a fennec-server to start by hand (default bin/fennec-server)
 //   SD_DIR              where data, logs and reports go (default a fresh directory under the system's temp one)
 import { execSync, spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-export const HERE = new URL('../..', import.meta.url).pathname;
-export const APP = process.env.FENNEC_DESKTOP_APP ?? `${HERE}build-test/stable-macos-arm64/fennec studio test.app`;
-export const EXE = `${APP}/Contents/MacOS/launcher`;
-export const SERVER = process.env.FENNEC_SERVER_BIN ?? `${HERE}bin/fennec-server`;
+// SPIKE (Windows and Linux): where the test variant is, its launcher, its
+// userData and the processes on the machine differ by system. macOS is as it was.
+export const WIN = process.platform === 'win32';
+export const MAC = process.platform === 'darwin';
+export const HERE = fileURLToPath(new URL('../..', import.meta.url));
+/** The test variant's launcher on Windows and Linux: build-test/stable-<os>-<arch>/<name>/bin/launcher[.exe], found. */
+function findLauncher() {
+  const want = WIN ? 'launcher.exe' : 'launcher';
+  const walk = (dir, depth) => {
+    if (!existsSync(dir)) return null;
+    for (const name of readdirSync(dir).sort()) {
+      const full = join(dir, name);
+      const st = statSync(full);
+      if (st.isFile() && name === want) return full;
+      if (st.isDirectory() && depth < 4) {
+        const hit = walk(full, depth + 1);
+        if (hit) return hit;
+      }
+    }
+    return null;
+  };
+  return walk(join(HERE, 'build-test'), 0) ?? join(HERE, 'build-test', 'launcher-not-found', want);
+}
+export const APP = process.env.FENNEC_DESKTOP_APP ?? (MAC ? `${HERE}build-test/stable-macos-arm64/fennec studio test.app` : join(findLauncher(), '..', '..'));
+export const EXE = MAC ? `${APP}/Contents/MacOS/launcher` : process.env.FENNEC_DESKTOP_EXE ?? findLauncher();
+export const SERVER = process.env.FENNEC_SERVER_BIN ?? join(HERE, 'bin', `fennec-server${WIN ? '.exe' : ''}`);
 export const IDENTIFIER = 'dev.fennecdb.studio.test';
 
 export const D = process.env.SD_DIR ?? join(tmpdir(), 'fennec-desktop-checks');
@@ -31,8 +54,13 @@ mkdirSync(`${D}/logs`, { recursive: true });
 export const R = realpathSync(D);
 export const REPORT = `${D}/report.jsonl`;
 export const CONTROL = `${D}/control.jsonl`;
-/** Where the test variant keeps its state.json. */
-export const USER_DATA = join(homedir(), 'Library', 'Application Support', IDENTIFIER, 'stable');
+/** Where the test variant keeps its state.json: Electrobun's Utils.paths.userData, by system. */
+export const APP_DATA = MAC
+  ? join(homedir(), 'Library', 'Application Support', IDENTIFIER)
+  : WIN
+    ? join(process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local'), IDENTIFIER)
+    : join(process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share'), IDENTIFIER);
+export const USER_DATA = join(APP_DATA, 'stable');
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export const now = () => Date.now();
@@ -49,8 +77,18 @@ export function sh(cmd) {
 
 /** Every process on the machine: {pid, ppid, rss (KB), command}. */
 export function procs() {
+  if (WIN) {
+    // SPIKE: no ps; the command lines from WMI (slow: about a second a call).
+    const ps = "Get-CimInstance Win32_Process | ForEach-Object { '{0} {1} {2} {3}' -f $_.ProcessId, $_.ParentProcessId, [int]($_.WorkingSetSize/1024), $_.CommandLine }";
+    return execSync(`powershell -NoProfile -NonInteractive -Command "${ps}"`, { maxBuffer: 1 << 26, timeout: 30000 })
+      .toString()
+      .split(/\r?\n/)
+      .map((l) => /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/.exec(l))
+      .filter(Boolean)
+      .map((m) => ({ pid: +m[1], ppid: +m[2], rss: +m[3], command: m[4].replace(/^"([^"]*)"/, '$1') }));
+  }
   // A bound: a `ps` that hangs would otherwise hang the check, and a hosted runner's own cleanup with it.
-  return execSync('ps -axww -o pid=,ppid=,rss=,command=', { maxBuffer: 1 << 26, timeout: 30000 })
+  return execSync(MAC ? 'ps -axww -o pid=,ppid=,rss=,command=' : 'ps axww -o pid=,ppid=,rss=,args=', { maxBuffer: 1 << 26, timeout: 30000 })
     .toString()
     .split('\n')
     .map((l) => /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/.exec(l))
@@ -58,7 +96,13 @@ export function procs() {
     .map((m) => ({ pid: +m[1], ppid: +m[2], rss: +m[3], command: m[4] }));
 }
 /** The test variant's processes (the launcher, Bun, the servers it bundles) and servers started by hand on this run's files. */
-export const mine = () => procs().filter((p) => p.command.startsWith(APP) || p.command.includes(`fennec-server --file ${R}/`) || p.command.includes(`fennec-server --file ${D}/`));
+export const mine = () =>
+  procs().filter((p) =>
+    MAC
+      ? p.command.startsWith(APP) || p.command.includes(`fennec-server --file ${R}/`) || p.command.includes(`fennec-server --file ${D}/`)
+      : // SPIKE: Windows' and Linux's command lines: the app's folder (launcher, bun, the bundled servers) and servers on this run's files.
+        p.command.includes(APP) || (/fennec-server/.test(p.command) && (p.command.includes(`--file ${R}`) || p.command.includes(`--file ${D}`))),
+  );
 export const describe = (list) => list.map((p) => `${p.pid} (ppid ${p.ppid}) ${p.command.replace(APP, "<APP>").slice(0, 200)}`).join('\n');
 
 export function lines() {
@@ -171,7 +215,9 @@ export function startApp(name, env = {}) {
   if (!existsSync(EXE)) throw new Error(`no app at ${APP}: build it with \`make studio-desktop-test\``);
   const fd = openSync(`${D}/logs/${name}.app.log`, 'w');
   const child = spawn(EXE, [], {
-    env: { ...process.env, FENNEC_DESKTOP_REPORT: REPORT, FENNEC_DESKTOP_CONTROL: CONTROL, ...env },
+    // SPIKE: a stable Windows launcher is a GUI program that drops the app's
+    // output unless asked to keep a console (Electrobun's cross-platform guide).
+    env: { ...process.env, ...(WIN ? { ELECTROBUN_CONSOLE: '1' } : {}), FENNEC_DESKTOP_REPORT: REPORT, FENNEC_DESKTOP_CONTROL: CONTROL, ...env },
     stdio: ['ignore', fd, fd],
   });
   closeSync(fd);
@@ -231,7 +277,7 @@ export async function startServer(args, env = {}, bin = SERVER) {
 }
 
 /** The data file `name` the checks open. */
-export const file = (name) => `${R}/data/${name}.fennec`;
+export const file = (name) => (MAC ? `${R}/data/${name}.fennec` : join(R, 'data', `${name}.fennec`));
 
 /** A fresh data file `name` of `rows` orders (the collections the studio's own tests use), replacing any. */
 export function data(name, rows = 50) {

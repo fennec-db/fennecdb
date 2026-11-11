@@ -9,6 +9,9 @@ import type { Run } from "./backups.ts";
 import { startServer, type Child, type FileServer, type Spawn } from "./process.ts";
 import type { Plan } from "./serving.ts";
 
+/** SPIKE: the release's Windows zip names its programs with `.exe`. */
+const EXE = process.platform === "win32" ? ".exe" : "";
+
 export { AlreadyOpen, PortTaken, StartFailed, randomToken, type FileServer } from "./process.ts";
 
 /**
@@ -20,13 +23,13 @@ export { AlreadyOpen, PortTaken, StartFailed, randomToken, type FileServer } fro
  */
 export function serverBinary(): string {
 	const named = __TESTABLE__ ? process.env["FENNEC_SERVER_BIN"] : undefined;
-	return named || join(PATHS.RESOURCES_FOLDER, "app", "bin", "fennec-server");
+	return named || join(PATHS.RESOURCES_FOLDER, "app", "bin", `fennec-server${EXE}`);
 }
 
 /** The bundled `fennec` shell, which takes, verifies and restores backups. The same rule as the server's. */
 export function cliBinary(): string {
 	const named = __TESTABLE__ ? process.env["FENNEC_CLI_BIN"] : undefined;
-	return named || join(PATHS.RESOURCES_FOLDER, "app", "bin", "fennec");
+	return named || join(PATHS.RESOURCES_FOLDER, "app", "bin", `fennec${EXE}`);
 }
 
 /**
@@ -46,6 +49,7 @@ export const bunSpawn: Spawn = (argv, env): Child => {
 			return p.exitCode;
 		},
 		kill: (signal) => p.kill(signal),
+		endStdin: () => void p.stdin.end(),
 	};
 };
 

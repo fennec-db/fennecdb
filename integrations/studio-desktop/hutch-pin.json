@@ -21,5 +21,33 @@
 				"tree": "c0f4993e182ba17f44ab557acd041db286b9f7956ab58b5516154390008cf6cf"
 			}
 		}
+	},
+	"windows-x64": {
+		"archive": "fc2f0920a2392080f17ff5765cb82391ed691941bfdd3ee608b07a36b0590e23",
+		"files": {
+			"bin/hutch.exe": "0939b1ff56f2d0d71bae215e7d40a71ca84a3589e573328eee267c2e5102ee3b",
+			"bin/hutch-engine.exe": "624a49be00938237d9733590229c6c2538d1cc840fc6fd36047e41d680caa865"
+		}
+	},
+	"windows-arm64": {
+		"archive": "47a9226ae50764ebfc15063bb2a23c1cadcd37deebb34ef6405e7c8ade7918e4",
+		"files": {
+			"bin/hutch.exe": "6a6238021325aab3fd4bff03543f498a6f73522a2e61b3e7209f2670bd956b15",
+			"bin/hutch-engine.exe": "95531a569ba7fa9135e25ce3da877a348e31e2d2a2e6add494d63f4336eb5a08"
+		}
+	},
+	"linux-x64": {
+		"archive": "0682359296439fab962e708104c2b1dcff2be7e8cc6bfda43ee414fa12fed84b",
+		"files": {
+			"bin/hutch": "c9f4e9c3a7c254338d5779fe7849e577ace69bf7535c4ab15dbaa102d51cd539",
+			"bin/hutch-engine": "66f3cccc340b9194d1f8c239380ad2887fde7847306c7b810dd6e12710b5f166"
+		}
+	},
+	"linux-arm64": {
+		"archive": "ac486a73544a34e7ab33535930ef90b0356b777e06018708865ca44d2c0a1a45",
+		"files": {
+			"bin/hutch": "36f4f66b08be1b1faffad4ab1d18edb35d59387945f5e48341e792c817448e08",
+			"bin/hutch-engine": "e4b04fc7d6f49927f0f0024d08ac987775e780580ad58fea509de2b7406a23f1"
+		}
 	}
 }

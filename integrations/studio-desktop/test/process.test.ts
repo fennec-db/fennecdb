@@ -148,6 +148,7 @@ const writes =
 				return code;
 			},
 			kill: () => end((code = 0)),
+			endStdin: () => end((code = 0)),
 		};
 	};
 

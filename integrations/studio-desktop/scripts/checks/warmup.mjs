@@ -7,7 +7,10 @@
 // seen unsigned, in place and from `open`; not verified for a signed and
 // notarized build). So the checks start from a build that has been launched
 // once, and this does it: start, wait for the app, quit it, end the helper.
-import { cmd, describe, mine, sleep, startApp, step, waitFor, log, now } from './lib.mjs';
+import { EXE, cmd, describe, mine, sleep, startApp, step, waitFor, log, now } from './lib.mjs';
+
+// SPIKE: the launcher by its path on every system (macOS: .app/Contents/MacOS/launcher).
+const isLauncher = (p) => p.command.endsWith('/Contents/MacOS/launcher') || p.command.startsWith(EXE);
 
 const app = startApp('warmup', { FENNEC_DESKTOP_LAUNCHER: '1' });
 await waitFor((l) => l.what === 'ready', 90000, 'the app, after unpacking itself');
@@ -18,9 +21,9 @@ step('quit');
 cmd({ cmd: 'quit' });
 // The app itself ends within a moment; what may stay is the unpacker.
 const t0 = now();
-while (now() - t0 < 20000 && mine().some((p) => !p.command.endsWith('/Contents/MacOS/launcher'))) await sleep(100);
+while (now() - t0 < 20000 && mine().some((p) => !isLauncher(p))) await sleep(100);
 const left = mine();
-const real = left.filter((p) => !p.command.endsWith('/Contents/MacOS/launcher'));
+const real = left.filter((p) => !isLauncher(p));
 if (real.length) throw new Error(`the app did not quit:\n${describe(real)}`);
 if (left.length) {
   log(`the unpacker is still running (${left.map((p) => p.pid).join(', ')}): Electrobun's first launch; ended`);

@@ -17,7 +17,8 @@ const bin = process.env.FENNEC_SERVER_BIN ?? new URL('../bin/fennec-server', imp
 const TOKEN = 'mkdata';
 for (const f of [out, `${out}.lock`, `${out}.sync`]) rmSync(f, { force: true });
 
-const child = spawn(bin, ['--file', out, '--http', '127.0.0.1:0', '--sync', 'off'], { env: { ...process.env, FENNEC_HTTP_TOKEN: TOKEN }, stdio: ['ignore', 'ignore', 'pipe'] });
+// SPIKE (Windows): stopped by the end of its stdin, Windows having no SIGTERM.
+const child = spawn(bin, ['--file', out, '--http', '127.0.0.1:0', '--sync', 'off', '--exit-on-stdin-close'], { env: { ...process.env, FENNEC_HTTP_TOKEN: TOKEN }, stdio: ['pipe', 'ignore', 'pipe'] });
 const url = await new Promise((resolve, reject) => {
   let text = '';
   child.stderr.on('data', (b) => {
@@ -63,5 +64,6 @@ await query('create collection docs (title text @text, lang text @hash, code tex
 for (let i = 0; i < 300; i++) await query('insert docs {title: $1, lang: $2, code: $3}', [`document ${i} about ${['deserts', 'foxes', 'vectors'][i % 3]}`, ['en', 'tr', 'de'][i % 3], `D-${i}`]);
 console.error(`${n} rows${dim ? ` x ${dim}` : ''} in ${Date.now() - t0} ms`);
 
-child.kill('SIGTERM');
+if (process.platform === 'win32') child.stdin.end();
+else child.kill('SIGTERM');
 await new Promise((r) => child.on('exit', r));

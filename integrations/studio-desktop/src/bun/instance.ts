@@ -9,13 +9,29 @@
 // instance that ended answers nothing, and is taken over. Pure but for the
 // socket, so `node --test` holds it (test/instance.test.ts).
 
+import { createHash } from "node:crypto";
 import { unlinkSync } from "node:fs";
 import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-/** The socket of the app `identifier` (the test variant has its own), per user. */
-export const instancePath = (identifier: string, folder = tmpdir()) => join(folder, `${identifier}.instance`);
+/**
+ * The socket of the app `identifier` (the test variant has its own), per user.
+ *
+ * SPIKE (Windows): Node's and Bun's `listen(path)` on Windows take a named
+ * pipe, `\\.\pipe\<name>`, and refuse a file path (the error is not
+ * EADDRINUSE, so the guard would let every instance run). A pipe's names are
+ * one namespace for the whole machine, so the name carries the user's own
+ * temporary folder (per user) by a hash; a pipe goes with the last process
+ * that held it, so there is never a stale one to take over. What another
+ * user's process could do is squat the name first (a pipe's default DACL lets
+ * its creator decide): this app would then quit as if one ran -- to be
+ * answered by a DACL'd pipe or a per-session name in phase 2.
+ */
+export const instancePath = (identifier: string, folder = tmpdir()) =>
+	process.platform === "win32"
+		? `\\\\.\\pipe\\${identifier}.instance.${createHash("sha256").update(folder.toLowerCase()).digest("hex").slice(0, 16)}`
+		: join(folder, `${identifier}.instance`);
 
 /** Does an instance answer at `path`? If one does, it is asked to show itself. */
 function askOther(path: string): Promise<boolean> {

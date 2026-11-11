@@ -1,0 +1,184 @@
+# SPIKE, not for merging: what it takes to build and run fennec studio's
+# desktop app (integrations/studio-desktop, Electrobun 2.0.4) on Windows and
+# Linux. It builds the shipped app and the test variant on each runner, prints
+# what a pin and a size need, runs the unit tests and probes of the
+# process, the credential store and the instance guard, and as many of the
+# scripted checks as port, Linux's under xvfb with a Secret Service on D-Bus.
+# Every finding step goes on whatever it finds; the job fails only when the
+# app cannot be built. The pull request that holds it is a draft to be closed.
+name: desktop-spike
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/desktop-spike.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-spike-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  app:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows x64, os: windows-latest, checks: 'warmup,files,server-dies,sandbox,pages,storage,newdb,backups' }
+          - { name: windows arm64, os: windows-11-arm, checks: 'warmup,files,server-dies,sandbox,storage' }
+          - { name: linux x64, os: ubuntu-24.04, checks: 'warmup,files,server-dies,orphan,sandbox,pages,storage,environment,newdb,backups' }
+          - { name: linux arm64, os: ubuntu-24.04-arm, checks: 'warmup,files,server-dies,sandbox,storage' }
+    defaults:
+      run:
+        shell: bash
+        working-directory: integrations/studio-desktop
+    env:
+      SD_DIR: ${{ runner.temp }}/fennec-desktop-checks
+      CHECK_LIMIT_MS: '150000'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: The runner
+        run: |
+          echo "runner: $RUNNER_OS $RUNNER_ARCH, node $(node --version)"
+          if [ "$RUNNER_OS" = Windows ]; then
+            cmd //c ver
+            # WebView2 Runtime: the per-machine Evergreen key (Electrobun's renderer on Windows).
+            reg query 'HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' //v pv || \
+              reg query 'HKLM\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' //v pv || echo "no WebView2 Runtime key"
+            powershell -NoProfile -Command '[Environment]::UserInteractive; (Get-Process -Id $PID).SessionId; whoami'
+          else
+            cat /etc/os-release | head -4
+            apt-cache policy libwebkit2gtk-4.1-0 | head -3
+          fi
+
+      - name: Linux packages (WebKitGTK 4.1, GTK 3, AppIndicator, librsvg; xvfb, D-Bus, a Secret Service)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          # Ubuntu 24.04 names GTK 3 libgtk-3-0t64 (the 64-bit time_t move); Electrobun's guide still says libgtk-3-0.
+          sudo apt-get install -y -qq libgtk-3-0t64 libwebkit2gtk-4.1-0 libayatana-appindicator3-1 librsvg2-2 \
+            xvfb dbus-x11 gnome-keyring libsecret-1-0 libsecret-tools lsof zstd >/dev/null
+          dpkg-query -W libwebkit2gtk-4.1-0 libgtk-3-0t64 libayatana-appindicator3-1 librsvg2-2 libsecret-1-0
+
+      - name: npm ci
+        run: npm ci --ignore-scripts --no-audit --no-fund --loglevel=error
+
+      - name: The server and shell of release v0.2.0, checked against its SHA256SUMS
+        run: |
+          node scripts/spike/get-release.mjs 0.2.0
+          ls -l bin
+
+      - name: Build the shipped app (Hutch fetched into .hutch-home, the runtime's digests printed)
+        run: |
+          t0=$(date +%s)
+          node scripts/electrobun.mjs build --env=stable
+          echo "built in $(( $(date +%s) - t0 )) s"
+
+      - name: Build the test variant
+        run: FENNEC_DESKTOP_TEST_BUILD=1 node scripts/electrobun.mjs build --env=stable
+
+      - name: What was built, and its sizes
+        run: |
+          echo "== artifacts (what is downloaded)"; ls -l artifacts
+          echo "== build"; find build -maxdepth 4 | head -60
+          echo "== the app's own folder"; du -sh build/*/* 2>/dev/null || true
+          app=$(find build -maxdepth 3 -type d -name bin | head -1)
+          [ -n "$app" ] && { echo "== $app"; ls -l "$app"; du -sh "$app/.."; }
+          res=$(find build -maxdepth 4 -type d -name Resources | head -1)
+          [ -n "$res" ] && { echo "== $res"; find "$res" -maxdepth 3 -type f -size +200k -exec ls -l {} \; ; }
+          echo "== Hutch home"; du -sh .hutch-home/* 2>/dev/null
+          echo "== the update archive's and the installer's contents (first lines)"
+          for f in artifacts/*; do echo "-- $f"; case "$f" in
+            *.zip) unzip -l "$f" 2>/dev/null | head -20 || powershell -NoProfile -Command "Add-Type -A System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::OpenRead('$f').Entries | Select -First 20 FullName,Length | Format-Table -AutoSize" ;;
+            *.tar.gz) tar -tzvf "$f" | head -20 ;;
+            *.tar.zst) zstd -dc "$f" 2>/dev/null | tar -tvf - | head -12 || echo "(no zstd)" ;;
+          esac; done
+
+      - name: Type check
+        continue-on-error: true
+        run: npm run typecheck
+
+      - name: Unit tests (node --test), the real server and shell from bin/
+        continue-on-error: true
+        run: |
+          exe=; [ "$RUNNER_OS" = Windows ] && exe=.exe
+          export FENNEC_SERVER_BIN="$PWD/bin/fennec-server$exe" FENNEC_CLI_BIN="$PWD/bin/fennec$exe"
+          node --test --test-reporter=spec test/*.test.ts 2>&1 | tee "$RUNNER_TEMP/unit.txt" | grep -E '^\s*(✔|✖|﹣|ℹ (tests|pass|fail|skipped))' || true
+          echo "== failures"; grep -A12 '✖' "$RUNNER_TEMP/unit.txt" | head -200 || true
+
+      - name: Probe how a server is stopped, under Node and under the bundled Bun
+        continue-on-error: true
+        run: |
+          exe=; [ "$RUNNER_OS" = Windows ] && exe=.exe
+          server="$PWD/bin/fennec-server$exe"
+          bun=$(find .hutch-home/toolchains/bun -type f \( -name bun -o -name bun.exe \) | head -1)
+          echo "bundled bun: $bun ($("$bun" --version))"
+          node scripts/spike/probe-process.mjs "$server"
+          "$bun" scripts/spike/probe-process.mjs "$server"
+
+      - name: Probe the credential store (Bun.secrets, the bundled Bun)
+        continue-on-error: true
+        run: |
+          bun=$(find .hutch-home/toolchains/bun -type f \( -name bun -o -name bun.exe \) | head -1)
+          echo "-- as the app finds it"
+          "$bun" scripts/spike/probe-secrets.mjs
+          if [ "$RUNNER_OS" = Linux ]; then
+            echo "-- on a D-Bus session with no Secret Service"
+            dbus-run-session -- "$bun" scripts/spike/probe-secrets.mjs
+            echo "-- with gnome-keyring's Secret Service, its login keyring unlocked"
+            dbus-run-session -- sh -c 'printf "" | gnome-keyring-daemon --unlock --components=secrets >/dev/null; "$0" scripts/spike/probe-secrets.mjs' "$bun"
+          fi
+
+      - name: The scripted checks that port (${{ matrix.checks }})
+        continue-on-error: true
+        env:
+          ONLY: ${{ matrix.checks }}
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            dbus-run-session -- sh -c 'printf "" | gnome-keyring-daemon --unlock --components=secrets >/dev/null; xvfb-run -a -s "-screen 0 1600x1000x24" node scripts/checks/run.mjs'
+          else
+            node scripts/checks/run.mjs
+          fi
+
+      - name: Linux, a web link from a page through Electrobun's openExternal
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: dbus-run-session -- xvfb-run -a -s "-screen 0 1600x1000x24" node scripts/spike/linux-open-external.mjs
+
+      - name: Nothing of the app is left running
+        if: always()
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { \$_.CommandLine -match 'studio-desktop|fennec-server' } | Select ProcessId,CommandLine | Format-List" || true
+          else
+            ps axww -o pid,ppid,args | grep -E 'studio-desktop|fennec-server' | grep -v grep || echo none
+          fi
+
+      - name: Logs of the checks
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-spike-logs-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/fennec-desktop-checks/logs
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: The unsigned downloads
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-spike-artifacts-${{ runner.os }}-${{ runner.arch }}
+          path: integrations/studio-desktop/artifacts/*
+          retention-days: 7
+          if-no-files-found: warn

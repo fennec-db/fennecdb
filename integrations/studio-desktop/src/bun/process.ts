@@ -65,7 +65,19 @@ export type Child = {
 	exited: Promise<number | null>;
 	readonly exitCode: number | null;
 	kill(signal: "SIGTERM" | "SIGKILL"): void;
+	/** Ends the pipe on its stdin: under `--exit-on-stdin-close`, the server's one shutdown. */
+	endStdin(): void;
 };
+
+/**
+ * SPIKE (Windows): how a stop asks for the one shutdown. Windows has no
+ * SIGTERM; libuv and Bun emulate `kill("SIGTERM")` with TerminateProcess, which
+ * ends the server with no sync and no checkpoint (desktop-spike.yml's process
+ * probe shows it). The end of its stdin is the shutdown the server already
+ * takes there (`--exit-on-stdin-close`, docs/design/windows.md, decision 4):
+ * the app ends the pipe it holds. Elsewhere SIGTERM, as before.
+ */
+const STOP_BY_STDIN = process.platform === "win32";
 export type Spawn = (argv: string[], env: Record<string, string>) => Child;
 
 export type FileServer = {
@@ -257,7 +269,10 @@ export async function startServer(
 		},
 		stop(graceMs = 30_000) {
 			stopping ??= (async () => {
-				if (proc.exitCode === null) proc.kill("SIGTERM");
+				if (proc.exitCode === null) {
+					if (STOP_BY_STDIN) proc.endStdin();
+					else proc.kill("SIGTERM");
+				}
 				let timer: ReturnType<typeof setTimeout> | undefined;
 				const done = await Promise.race([exited, new Promise<"late">((r) => (timer = setTimeout(() => r("late"), graceMs)))]);
 				clearTimeout(timer);

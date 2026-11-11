@@ -238,6 +238,10 @@ async function run(c: any) {
 			break;
 		}
 		case "quit": Utils.quit(); break;
+		// SPIKE (Linux): Electrobun's own openExternal, which the shipped app hands a
+		// studio page's web links to (windows.ts), called for real: where GIO has no
+		// handler it falls back to `system("xdg-open \"<url>\"")`.
+		case "spike-open-external": report("spike-open-external", { url: c.url, ok: Utils.openExternal(c.url) }); break;
 	}
 }
 
@@ -263,7 +267,8 @@ export async function boot(): Promise<boolean> {
 	}
 	report("ready");
 	const open = process.env["FENNEC_DESKTOP_OPEN"];
-	if (open) for (const p of open.split(":")) await openFile(p);
+	// SPIKE: ";" on Windows, where ":" is in every path (C:\...).
+	if (open) for (const p of open.split(process.platform === "win32" ? ";" : ":")) await openFile(p);
 	if (process.env["FENNEC_DESKTOP_LAUNCHER"]) await showLauncher();
 	return Boolean(open) || Boolean(process.env["FENNEC_DESKTOP_LAUNCHER"]);
 }

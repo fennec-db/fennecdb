@@ -10,6 +10,13 @@
 // `node --test` holds it (test/env.test.ts).
 
 const KEEP = new Set(["HOME", "PATH", "TMPDIR", "LANG", "USER", "LOGNAME", "TZ"]);
+// SPIKE (Windows): a variable's name is case-blind there (`Path`, not `PATH`),
+// and a program started without `SystemRoot` may fail to start Winsock
+// (WSAEPROVIDERFAILEDINIT); the temporary folder is `TEMP`/`TMP` and the
+// profile `USERPROFILE`/`LOCALAPPDATA`. desktop-spike.yml's process probe
+// starts the server with the allowlist above alone to see which matter.
+const KEEP_WINDOWS = new Set(["SYSTEMROOT", "WINDIR", "PATH", "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "USERNAME", "TZ"]);
+const keep = (k: string) => (process.platform === "win32" ? KEEP_WINDOWS.has(k.toUpperCase()) : KEEP.has(k) || k.startsWith("LC_"));
 
 /** The secrets a program of the app's may be given, by the variable it reads them from. */
 export type Secrets = {
@@ -22,7 +29,7 @@ export type Secrets = {
 export function childEnvironment(env: Record<string, string | undefined>, secrets: Secrets): Record<string, string> {
 	const out: Record<string, string> = {};
 	for (const [k, v] of Object.entries(env)) {
-		if (v !== undefined && (KEEP.has(k) || k.startsWith("LC_"))) out[k] = v;
+		if (v !== undefined && keep(k)) out[k] = v;
 	}
 	for (const [k, v] of Object.entries(secrets)) {
 		// An empty one is none: the server and the shell take a variable set empty as unset.
