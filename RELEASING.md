@@ -403,9 +403,19 @@ first version goes out with a token:
 2. Publish the release: the four `@fennecdb` packages go out with it.
 3. On npmjs.com, for each of the four, *Settings*, *Trusted publishing*,
    GitHub Actions: `fennec-db/fennecdb`, workflow `packages.yml`, environment
-   `npm`.
+   `npm`; *Allow npm publish* on, *Allow npm dist-tag* off. With publish off,
+   npm stages every version the workflow sends (`0.0.0-stage` on the
+   package's page) until the owner approves it with 2FA, as it staged
+   0.2.0's token publishes; the job never runs `npm dist-tag`. The repository
+   name is fixed once the connection is made: `fennecdb`, two n's.
 4. Delete the secret and revoke the token. Later releases publish with the
    workflow's identity alone.
+5. The policy does not look at the ref, so the `npm` environment does:
+   limit it to `main` and `v*` tags with the NuGet section's three
+   commands, naming `npm` where they name `nuget`.
+
+Steps 3 to 5 were done for the four packages after 0.2.0, so the release
+after it is the first they take by the workflow's identity alone.
 
 **NuGet.** By trusted publishing: the package is packed and used by a job
 that cannot publish (`nuget-pack`), and pushed by one that holds only
@@ -578,8 +588,8 @@ installs nothing. CI's `windows (release zip)` job runs
 time the workflow runs. A required reviewer on them makes a publish wait for a second
 yes. `homebrew`, which holds a secret of its own, and `pypi` and `nuget`,
 whose policies PyPI and nuget.org trust, are limited to `main` and `v*`
-tags (the Homebrew, PyPI and NuGet sections above); `npm` is to be, once
-its packages publish by trusted publishing.
+tags (the Homebrew, PyPI and NuGet sections above), and `npm` too since its
+packages publish by trusted publishing.
 
 **After the first publish.** The docs install what a registry holds: PyPI's
 `fennecdb` since 0.1.5 (`pip install "fennecdb[langchain]"`). Until
