@@ -23,7 +23,9 @@
 #     the call of a file the script put together;
 #   - nothing makes a script block from a text: no [scriptblock] type, no
 #     member named Create, NewScriptBlock, InvokeScript, ExpandString,
-#     InvokeCommand or Invoke, no member whose name is computed.
+#     InvokeCommand or Invoke, no member whose name is computed; and no COM
+#     object of the shell starts a program: no member named Run, Exec or
+#     ShellExecute.
 #
 # Strings and comments are not commands: the usage text names `irm | iex`.
 # Every problem is printed as `file:line: what`, and any makes the exit
@@ -95,9 +97,13 @@ if ($ast -and -not $errors) {
         'start-job', 'sajb', 'start-threadjob', 'start-process', 'saps',
         'set-alias', 'sal', 'new-alias', 'nal', 'new-module', 'import-module'
     )
+    # Run, Exec and ShellExecute: the shell's COM objects' ways to start a
+    # program (WScript.Shell, which the -App path makes a Start-menu
+    # shortcut with, has the first two; Shell.Application the third).
     $bannedMembers = @(
         'create', 'newscriptblock', 'invokescript', 'expandstring',
-        'invokecommand', 'invoke', 'invokereturnasis', 'invokewithcontext'
+        'invokecommand', 'invoke', 'invokereturnasis', 'invokewithcontext',
+        'run', 'exec', 'shellexecute'
     )
     $all = $ast.FindAll({ param($n) $true }, $true)
     foreach ($n in $all) {

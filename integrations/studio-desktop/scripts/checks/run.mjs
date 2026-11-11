@@ -25,13 +25,7 @@ import { APP_DATA, D, HERE, POWERSHELL, WIN, describe, freshState, keepEvidence,
  * check skipped is said as SKIP with its reason; none is left out silently.
  */
 const CHECKS = [
-  {
-    name: 'release',
-    skip: {
-      linux: 'phase 4: nothing ships for Linux until then; this reads the payload of a macOS bundle',
-      win32: 'phase 4: nothing ships for Windows until then; this reads the payload of a macOS bundle',
-    },
-  },
+  { name: 'release' },
   { name: 'warmup' },
   {
     name: 'files',

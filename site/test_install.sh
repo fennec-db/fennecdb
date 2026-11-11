@@ -210,24 +210,175 @@ expect "armv7: installs nothing" absent "$work/arm32-inst"
 install linuxarm PATH="$work/shim:$PATH" FAKE_OS=Linux FAKE_CPU=aarch64
 expect "linux aarch64: finds its build" contains "$work/linuxarm.out" "aarch64-unknown-linux-musl"
 
-# The app is for macOS on Apple silicon alone, a Rosetta shell's included
-# (sysctl says whether the Mac is one, under the shim as uname does).
+# The app is for macOS on Apple silicon, a Rosetta shell's included (sysctl
+# says whether the Mac is one, under the shim as uname does), and for Linux
+# on x86_64 and arm64; Windows is sent to install.ps1.
 cat >"$work/shim/sysctl" <<'EOF'
 #!/bin/sh
 echo "${FAKE_ARM64:-0}"
 EOF
 chmod 755 "$work/shim/sysctl"
 script_arg=--app
-for platform in Linux:x86_64:0 Linux:aarch64:0 Darwin:x86_64:0 FreeBSD:amd64:0 MINGW64_NT-10.0:x86_64:0; do
+for platform in Darwin:x86_64:0 FreeBSD:amd64:0 Linux:armv7l:0 MINGW64_NT-10.0:x86_64:0; do
     os=${platform%%:*}
     cpu=${platform#*:}
     cpu=${cpu%%:*}
     install "app-$os-$cpu" PATH="$work/shim:$PATH" FAKE_OS="$os" FAKE_CPU="$cpu" FAKE_ARM64=0
     expect "--app on $os $cpu: refused" failing "app-$os-$cpu"
-    expect "--app on $os $cpu: says what the app is for" contains "$work/app-$os-$cpu.out" "macOS on Apple silicon"
+    case $os in
+        MINGW*) expect "--app on $os $cpu: names install.ps1 -App" contains "$work/app-$os-$cpu.out" "install.ps1))) -App" ;;
+        *) expect "--app on $os $cpu: says what the app is for" contains "$work/app-$os-$cpu.out" "macOS on Apple silicon (arm64) and for Linux on x86_64 and arm64" ;;
+    esac
     expect "--app on $os $cpu: installs nothing" test -z "$(ls -A "$work/app-$os-$cpu-home")"
     expect "--app on $os $cpu: downloads nothing" lacks "$work/app-$os-$cpu.out" "Looking for"
 done
+script_arg=
+
+# list FILE...: their lines in the release's SHA256SUMS, as a published one
+# gets the app's appended (desktop.yml).
+list() {
+    for f in "$@"; do
+        printf '%s  %s\n' "$(sha256 "$f")" "$(basename "$f")" >>"$(dirname "$f")/SHA256SUMS"
+    done
+}
+
+# On Linux, what the app needs is asked first -- getconf and ldconfig under
+# the shim answer as told -- and then the release's tarball of the app goes
+# into the data folder of a home of its own, with a menu entry. A stand-in
+# app: a launcher that sleeps, and its main process's file.
+cat >"$work/shim/getconf" <<'EOF'
+#!/bin/sh
+[ "$1" = GNU_LIBC_VERSION ] && [ -n "${FAKE_GLIBC:-}" ] || exit 1
+echo "glibc $FAKE_GLIBC"
+EOF
+cat >"$work/shim/ldconfig" <<'EOF'
+#!/bin/sh
+[ "$1" = -p ] || exit 1
+echo "some libs found in cache \`/etc/ld.so.cache'"
+for l in ${FAKE_LIBS:-}; do
+    printf '\t%s (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/%s\n' "$l" "$l"
+done
+EOF
+chmod 755 "$work/shim/getconf" "$work/shim/ldconfig"
+for a in x64 arm64; do
+    d=$work/linuxapp-$a/fennec-studio
+    mkdir -p "$d/bin" "$d/Resources/app/bun"
+    printf '#!/bin/sh\nexec sleep "${1:-0}"\n' >"$d/bin/launcher"
+    chmod 755 "$d/bin/launcher"
+    echo "// the $a app" >"$d/Resources/app/bun/index.js"
+    tar -czf "$rel/fennec-studio-v$version-linux-$a.tar.gz" -C "$work/linuxapp-$a" fennec-studio
+done
+list "$rel/fennec-studio-v$version-linux-x64.tar.gz" "$rel/fennec-studio-v$version-linux-arm64.tar.gz"
+cp "$rel/SHA256SUMS" "$work/site/latest/download/SHA256SUMS"
+# A release with the programs and no Linux app.
+mkdir -p "$work/site/download/v9.9.6"
+cp "$rel/fennec-v$version-x86_64-unknown-linux-musl.tar.gz" "$work/site/download/v9.9.6/fennec-v9.9.6-x86_64-unknown-linux-musl.tar.gz"
+list "$work/site/download/v9.9.6/fennec-v9.9.6-x86_64-unknown-linux-musl.tar.gz"
+
+# linux_app NAME [VAR=value...]: --app as on a Linux on x86_64 that has what
+# the app needs, unless the variables say otherwise.
+needs="libwebkit2gtk-4.1.so.0 libayatana-appindicator3.so.1"
+linux_app() {
+    n=$1
+    shift
+    install "$n" PATH="$work/shim:$PATH" FAKE_OS=Linux FAKE_CPU=x86_64 FAKE_GLIBC=2.39 FAKE_LIBS="$needs" "$@"
+}
+data() { printf '%s' "$work/$1-home/.local/share"; }
+place() { printf '%s' "$(data "$1")/dev.fennecdb.studio/stable/app"; }
+script_arg=--app
+
+linux_app lin
+expect "--app on Linux: exit 0" status lin 0
+expect "--app on Linux: checked the sum" contains "$work/lin.out" "Checksum ok"
+expect "--app on Linux: says where it installed the app" contains "$work/lin.out" "Installed fennec studio $version (beta) in $(place lin)."
+expect "--app on Linux: the app is there, its launcher executable" test -x "$(place lin)/bin/launcher"
+expect "--app on Linux: the x64 app" contains "$(place lin)/Resources/app/bun/index.js" "the x64 app"
+expect "--app on Linux: nothing beside it" test "$(ls -A "$(data lin)/dev.fennecdb.studio/stable")" = app
+expect "--app on Linux: a menu entry starting it" contains "$(data lin)/applications/fennecstudio.desktop" "Exec=\"$(place lin)/bin/launcher\""
+expect "--app on Linux: the entry is an application's" contains "$(data lin)/applications/fennecstudio.desktop" "Type=Application"
+expect "--app on Linux: the applications folder holds the entry alone" test "$(ls -A "$(data lin)/applications")" = fennecstudio.desktop
+expect "--app on Linux: nothing else in the home" test "$(ls -A "$work/lin-home")" = .local
+expect "--app on Linux: no bin directory" absent "$work/lin-inst"
+expect "--app on Linux: says how to start it" contains "$work/lin.out" "\"$(place lin)/bin/launcher\""
+
+# Again over it, as an upgrade: the app's own state beside it is kept.
+echo '{}' >"$(data lin)/dev.fennecdb.studio/stable/state.json"
+linux_app lin
+expect "--app on Linux again, over the first: exit 0" status lin 0
+expect "--app on Linux again: the app's state beside it kept" test -f "$(data lin)/dev.fennecdb.studio/stable/state.json"
+expect "--app on Linux again: no staging left" test "$(ls -A "$(data lin)/dev.fennecdb.studio/stable" | tr '\n' ' ')" = "app state.json "
+
+linux_app linarm FAKE_CPU=aarch64
+expect "--app on Linux arm64: exit 0" status linarm 0
+expect "--app on Linux arm64: the arm64 app" contains "$(place linarm)/Resources/app/bun/index.js" "the arm64 app"
+
+linux_app linxdg XDG_DATA_HOME="$work/linxdg-data"
+expect "--app with XDG_DATA_HOME: exit 0" status linxdg 0
+expect "--app with XDG_DATA_HOME: the app there" test -x "$work/linxdg-data/dev.fennecdb.studio/stable/app/bin/launcher"
+expect "--app with XDG_DATA_HOME: the entry there" test -f "$work/linxdg-data/applications/fennecstudio.desktop"
+expect "--app with XDG_DATA_HOME: nothing in the home" test -z "$(ls -A "$work/linxdg-home")"
+
+linux_app linpinned FENNEC_VERSION=v$version
+expect "--app on Linux with FENNEC_VERSION: exit 0" status linpinned 0
+
+# What the app needs, each lack said before anything is downloaded.
+linux_app linold FAKE_GLIBC=2.35
+expect "--app on glibc 2.35: refused" failing linold
+expect "--app on glibc 2.35: says what it needs and what this has" contains "$work/linold.out" "needs glibc 2.38 or later, and this Linux has 2.35"
+linux_app linmusl FAKE_GLIBC=
+expect "--app with no glibc: refused" failing linmusl
+expect "--app with no glibc: says so" contains "$work/linmusl.out" "has no glibc"
+linux_app linnowebkit FAKE_LIBS=libayatana-appindicator3.so.1
+expect "--app with no WebKitGTK 4.1: refused" failing linnowebkit
+expect "--app with no WebKitGTK 4.1: names it" contains "$work/linnowebkit.out" "has no libwebkit2gtk-4.1.so.0:"
+expect "--app with no WebKitGTK 4.1: says what to install" contains "$work/linnowebkit.out" "sudo apt install libwebkit2gtk-4.1-0 libayatana-appindicator3-1"
+linux_app linnoayatana FAKE_LIBS=libwebkit2gtk-4.1.so.0
+expect "--app with no AyatanaAppIndicator: refused" failing linnoayatana
+expect "--app with no AyatanaAppIndicator: names it" contains "$work/linnoayatana.out" "has no libayatana-appindicator3.so.1:"
+for n in linold linmusl linnowebkit linnoayatana; do
+    expect "--app, $n: installs nothing" test -z "$(ls -A "$work/$n-home")"
+    expect "--app, $n: downloads nothing" lacks "$work/$n.out" "Looking for"
+done
+
+# The app running from its place is not replaced under it: a sleep whose
+# argv[0] is the launcher's path, which is what ps shows.
+bash -c 'exec -a "$1" sleep 120' sh "$(place lin)/bin/launcher" &
+sleeper_pid=$!
+i=0
+until ps -A -ww -o args= 2>/dev/null | grep -F -q "$(place lin)/bin/launcher 120"; do
+    i=$((i + 1))
+    [ "$i" -lt 100 ] || { echo "the stand-in for a running app did not start" >&2; exit 1; }
+    sleep 0.1
+done
+before=$(ls -l "$(place lin)/bin")
+linux_app lin
+expect "--app on Linux while it runs: refused" failing lin
+expect "--app on Linux while it runs: says to quit it" contains "$work/lin.out" "is running from"
+expect "--app on Linux while it runs: the app left as it was" test "$(ls -l "$(place lin)/bin")" = "$before"
+kill "$sleeper_pid" 2>/dev/null || true
+wait "$sleeper_pid" 2>/dev/null || true
+sleeper_pid=
+
+# A tarball that is not the one the sums name, and a release with no app.
+tgz=$rel/fennec-studio-v$version-linux-x64.tar.gz
+cp "$tgz" "$work/good.tgz"
+printf 'x' >>"$tgz"
+linux_app lintampered
+expect "--app on Linux, a tampered tarball: refused" failing lintampered
+expect "--app on Linux, a tampered tarball: names the checksum" contains "$work/lintampered.out" "checksum"
+expect "--app on Linux, a tampered tarball: installs nothing" test -z "$(ls -A "$work/lintampered-home")"
+cp "$work/good.tgz" "$tgz"
+linux_app linnoapp FENNEC_VERSION=9.9.6
+expect "--app on Linux, a release with no app: refused" failing linnoapp
+expect "--app on Linux, a release with no app: says so" contains "$work/linnoapp.out" "lists no fennec-studio-v9.9.6-linux-x64.tar.gz"
+expect "--app on Linux, a release with no app: installs nothing" test -z "$(ls -A "$work/linnoapp-home")"
+
+# A home whose path no menu entry can name (a dollar in it): the app, and no entry.
+linux_app 'lin$odd'
+expect "--app on Linux, a path holding a dollar: exit 0" status 'lin$odd' 0
+expect "--app on Linux, a path holding a dollar: the app" test -x "$(place 'lin$odd')/bin/launcher"
+expect "--app on Linux, a path holding a dollar: no entry" absent "$(data 'lin$odd')/applications"
+expect "--app on Linux, a path holding a dollar: says so" contains "$work/lin\$odd.out" "has none"
 script_arg=
 
 set +e
@@ -266,13 +417,6 @@ EOF
         ditto "$1" "$work/volume/fennec studio.app"
         ln -s /Applications "$work/volume/Applications"
         hdiutil create -quiet -volname "fennec studio" -srcfolder "$work/volume" -fs HFS+ -format UDZO -ov "$2"
-    }
-    # list FILE...: their lines in the release's SHA256SUMS, as a published
-    # one gets the app's appended (desktop.yml).
-    list() {
-        for f in "$@"; do
-            printf '%s  %s\n' "$(sha256 "$f")" "$(basename "$f")" >>"$(dirname "$f")/SHA256SUMS"
-        done
     }
     not_attached() { ! hdiutil info 2>/dev/null | grep -F -q -- "$work"; }
     no_staging() { [ -z "$(find "$1" -maxdepth 1 -name '.fennec-studio-install.*')" ]; }
