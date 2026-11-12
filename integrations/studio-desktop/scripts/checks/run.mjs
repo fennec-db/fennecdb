@@ -16,7 +16,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { closeSync, mkdirSync, openSync, rmSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
-import { APP_DATA, D, HERE, POWERSHELL, WIN, describe, forgetRegistration, freshState, keepEvidence, mine, now, procs, sleep } from './lib.mjs';
+import { APP_DATA, D, HERE, POWERSHELL, WIN, clearDimming, describe, forgetRegistration, freshState, keepEvidence, mine, now, procs, sleep } from './lib.mjs';
 
 /**
  * Every check, in the order they run, and the systems one does not run on:
@@ -101,6 +101,13 @@ const system = process.platform;
   procs();
   console.log(`the system lists its processes in ${now() - t} ms here`);
 }
+// Windows: a picker of the shell's left on the screen dims every window under it and takes every
+// click (lib.mjs's `dimWindows`): what the run found there is said and closed, and a check that
+// leaves one fails, the picker closed for the checks after it.
+if (WIN) {
+  const found = await clearDimming();
+  console.log(found ? `the screen as the run found it, dimmed: ${JSON.stringify(found)}` : 'the screen as the run found it: nothing dims it');
+}
 const results = [];
 for (const { name, skip } of chosen) {
   const why = skip?.[system];
@@ -153,7 +160,9 @@ for (const { name, skip } of chosen) {
     while (mine().length && now() - t < 30000) await sleep(200);
     if (mine().length) console.log(`still running 30 s after the kill:\n${describe(mine())}`);
   }
-  results.push({ name, ok: code === 0 && left.length === 0, ms: Date.now() - t0 });
+  const dimmed = WIN ? await clearDimming() : null;
+  if (dimmed) console.log(`${name} left the screen dimmed by another program's picker; closing it: ${JSON.stringify(dimmed)}`);
+  results.push({ name, ok: code === 0 && left.length === 0 && !dimmed, ms: Date.now() - t0 });
 }
 
 console.log('\n===== results');

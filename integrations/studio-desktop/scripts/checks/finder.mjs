@@ -39,7 +39,7 @@ import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, 
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
-  APP, CONTROL, D, EXE, LINUX, MAC, POWERSHELL, R, REPORT, WIN, assertClean, cmd, data, describe, doubleClick, forgetRegistration, lines, logName, mine, procs, quit, registration, startApp, step, until, waitFor, waitNotice, waitStudio, log,
+  APP, CONTROL, D, EXE, LINUX, MAC, R, REPORT, WIN, assertClean, closeProgram, cmd, data, describe, dimWindows, doubleClick, forgetRegistration, lines, logName, mine, procs, quit, registration, startApp, step, until, waitFor, waitNotice, waitStudio, log,
 } from './lib.mjs';
 
 assertClean('before');
@@ -106,41 +106,6 @@ if (MAC) {
 const mains = () => mine().filter((p) => /main\.js/.test(p.command));
 
 /**
- * Windows: the shell's dimming windows (class Shell_SystemDim) shown now, each
- * as its process, its rectangle and whether it is visible. One the "Open with"
- * dialog leaves lies over every window after it: on the windows-11-arm runner
- * a click `menu` made into its main window's page landed on one, of another
- * process, after this check had ended OpenWith.exe by a kill.
- */
-function dimWindows() {
-  const ps = [
-    `Add-Type -Namespace FennecCheck -Name Dim -MemberDefinition '[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowExW(IntPtr parent, IntPtr after, string cls, string title); [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h); [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid); [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, int[] r);'`,
-    `$h = [IntPtr]::Zero`,
-    `while (($h = [FennecCheck.Dim]::FindWindowExW([IntPtr]::Zero, $h, 'Shell_SystemDim', $null)) -ne [IntPtr]::Zero) { $o = 0; [void][FennecCheck.Dim]::GetWindowThreadProcessId($h, [ref]$o); $r = New-Object int[] 4; [void][FennecCheck.Dim]::GetWindowRect($h, $r); '{0} {1} {2} {3}' -f $o, (Get-Process -Id $o -ErrorAction SilentlyContinue).ProcessName, [FennecCheck.Dim]::IsWindowVisible($h), ($r -join ',') }`,
-  ].join('; ');
-  const r = spawnSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', timeout: 60000 });
-  return r.stdout.split(/\r?\n/).map((l) => /^(\d+) (\S*) (True|False) (.*)$/.exec(l.trim())).filter(Boolean).map((m) => ({ pid: +m[1], name: m[2], visible: m[3] === 'True', rect: m[4] }));
-}
-
-/**
- * Windows: "Open with" closed as a person closes it, its window asked to close
- * (CloseMainWindow, WM_CLOSE), and killed only where it has none or does not
- * end. Says how it ended.
- */
-async function closeOpenWith(pid) {
-  const asked = spawnSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', '$p = Get-Process -Id ([int]$env:FENNEC_CHECK_PID) -ErrorAction SilentlyContinue; if ($p) { $p.CloseMainWindow() } else { "gone" }'], { encoding: 'utf8', timeout: 60000, env: { ...process.env, FENNEC_CHECK_PID: String(pid) } }).stdout.trim();
-  if (asked === 'gone') return 'gone before it was asked';
-  const ended = asked === 'True' && (await until(() => !procs().some((p) => p.pid === pid), 15000, 'Open with closed by its window').then(() => true, () => false));
-  if (ended) return 'closed by its window';
-  try {
-    process.kill(pid, 'SIGKILL');
-  } catch {
-    // gone
-  }
-  return asked === 'True' ? 'asked to close, did not end in 15 s, killed' : 'no window to close (CloseMainWindow false), killed';
-}
-
-/**
  * A double-click that must start nothing of the app. Linux's `gio open` says no
  * (no program for the type). Windows hands a file of no known type to "Open
  * with" (the Unknown class's openas verb: OpenWith.exe, the "How do you want to
@@ -157,7 +122,8 @@ async function refused(path, why) {
   if (WIN && r.status === 0) {
     const asked = await until(() => procs().find((p) => !before.has(p.pid) && /\\OpenWith\.exe/i.test(p.command)), 30000, `${why}: Windows asking what to open the file with`);
     log(`Windows asks what to open it with: ${asked.command}; the screen dimmed by ${JSON.stringify(dimWindows().filter((w) => w.visible))} (before it: ${JSON.stringify(dimBefore)})`);
-    for (const p of procs().filter((q) => !before.has(q.pid) && /\\OpenWith\.exe/i.test(q.command))) log(`Open with (${p.pid}): ${await closeOpenWith(p.pid)}`);
+    // Its picker is PickerHost.exe's on Windows 11, started for it: closed first, as a person closes the dialog.
+    for (const p of procs().filter((q) => !before.has(q.pid) && /\\(PickerHost|OpenWith)\.exe/i.test(q.command)).sort((a, b) => /PickerHost/i.test(b.command) - /PickerHost/i.test(a.command))) log(`${p.command.split('\\').pop()} (${p.pid}): ${await closeProgram(p.pid)}`);
     // The screen as the double-click found it: no dimming window left that was not there before.
     const dimmed = () => dimWindows().filter((w) => w.visible && !dimBefore.some((b) => b.pid === w.pid && b.rect === w.rect));
     const clear = await until(() => dimmed().length === 0, 15000, 'the dimming gone').then(() => true, () => false);

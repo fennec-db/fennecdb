@@ -975,12 +975,16 @@ window and the app's words are each system's, and the app has its icon there.
   program is registered for the type (`application/octet-stream` there); on
   Windows the shell hands a file of no known type to the Unknown class's
   openas verb, `OpenWith.exe` (`cmd /c start` would do the same through
-  cmd), which is the event waited for, then closed as a person closes it
-  (CloseMainWindow, its WM_CLOSE; a kill only where it has no window or does
+  cmd), which is the event waited for, then closed, with the picker it
+  started (PickerHost.exe on Windows 11), as a person closes them
+  (CloseMainWindow, WM_CLOSE; a kill only where one has no window or does
   not end), and no dimming window of the shell's (Shell_SystemDim) it brought
-  may be left. It was ended by a kill, and on the windows-11-arm runner the
-  click `menu` made next into its main window's page landed on a
-  Shell_SystemDim window of another process lying over it. Then the app's first start
+  may be left. Such a picker dims the whole screen and takes every click: on
+  the windows-11-arm runner two PickerHost.exe pickers dimmed it from before
+  `finder` ran, and the click `menu` made into its main window's page landed
+  on one. So `run.mjs` says what dims the screen when the run starts and after
+  each check (`dimWindows`: each dimming window's program and when it
+  started), closes it so (`clearDimming`), and fails a check that left one. Then the app's first start
   registers it, the double-click starts the app with the file, which opens
   with no main window over it; a second file's is handed to the instance
   there; a `.fennec` that is not a database is said; on Linux, the app run

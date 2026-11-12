@@ -149,6 +149,56 @@ export function procs() {
     .filter(Boolean)
     .map((m) => ({ pid: +m[1], ppid: +m[2], rss: +m[3], command: m[4] }));
 }
+/**
+ * Windows: the shell's dimming windows (class Shell_SystemDim) there now, each
+ * as its process, the program's name, when it started, whether it is visible
+ * and its rectangle. A picker of the shell's ("Open with", PickerHost.exe)
+ * dims the whole screen under itself, and a click anywhere lands on the dim:
+ * on the windows-11-arm runner two lay over every window from before `finder`
+ * ran, and `menu`'s click into its main window's page landed on one.
+ */
+export function dimWindows() {
+  const ps = [
+    `Add-Type -Namespace FennecCheck -Name Dim -MemberDefinition '[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowExW(IntPtr parent, IntPtr after, string cls, string title); [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h); [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid); [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, int[] r);'`,
+    `$h = [IntPtr]::Zero`,
+    `while (($h = [FennecCheck.Dim]::FindWindowExW([IntPtr]::Zero, $h, 'Shell_SystemDim', $null)) -ne [IntPtr]::Zero) { $o = 0; [void][FennecCheck.Dim]::GetWindowThreadProcessId($h, [ref]$o); $r = New-Object int[] 4; [void][FennecCheck.Dim]::GetWindowRect($h, $r); $p = Get-Process -Id $o -ErrorAction SilentlyContinue; '{0} {1} {2} {3} {4}' -f $o, $p.ProcessName, $(if ($p.StartTime) { $p.StartTime.ToUniversalTime().ToString('o') } else { '-' }), [FennecCheck.Dim]::IsWindowVisible($h), ($r -join ',') }`,
+  ].join('; ');
+  const r = spawnSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', timeout: 60000 });
+  return (r.stdout ?? '').split(/\r?\n/).map((l) => /^(\d+) (\S*) (\S+) (True|False) (.*)$/.exec(l.trim())).filter(Boolean).map((m) => ({ pid: +m[1], name: m[2], started: m[3], visible: m[4] === 'True', rect: m[5] }));
+}
+
+/**
+ * Windows: a program closed as a person closes it, its window asked to close
+ * (CloseMainWindow, WM_CLOSE), and killed only where it has none or does not
+ * end within 15 s. Says how it ended.
+ */
+export async function closeProgram(pid) {
+  const asked = spawnSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', '$p = Get-Process -Id ([int]$env:FENNEC_CHECK_PID) -ErrorAction SilentlyContinue; if ($p) { $p.CloseMainWindow() } else { "gone" }'], { encoding: 'utf8', timeout: 60000, env: { ...process.env, FENNEC_CHECK_PID: String(pid) } }).stdout.trim();
+  if (asked === 'gone') return 'gone before it was asked';
+  const ended = asked === 'True' && (await until(() => !procs().some((p) => p.pid === pid), 15000, `${pid} closed by its window`).then(() => true, () => false));
+  if (ended) return 'closed by its window';
+  try {
+    process.kill(pid, 'SIGKILL');
+  } catch {
+    // gone
+  }
+  return asked === 'True' ? 'asked to close, did not end in 15 s, killed' : 'no window to close (CloseMainWindow false), killed';
+}
+
+/**
+ * Windows: the screen cleared of the dimming windows on it, each program that
+ * shows one closed (`closeProgram`), and waited for until none is visible.
+ * What was there and how each went, or null where nothing was.
+ */
+export async function clearDimming() {
+  const there = dimWindows().filter((w) => w.visible);
+  if (!there.length) return null;
+  const how = {};
+  for (const pid of new Set(there.map((w) => w.pid))) how[pid] = await closeProgram(pid);
+  const clear = await until(() => !dimWindows().some((w) => w.visible), 15000, 'the dimming gone').then(() => true, () => false);
+  return { there, how, clear };
+}
+
 /** Paths compare as the system does: Windows' are case-blind (a command line may spell the drive or a folder otherwise). */
 const same = WIN ? (s) => s.toLowerCase() : (s) => s;
 /** A server started by hand on one of this run's files (`fennec-server.exe --file D:\...` on Windows). */
