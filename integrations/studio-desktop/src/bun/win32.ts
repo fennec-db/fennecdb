@@ -9,7 +9,8 @@
 //     CRED_PERSIST_ENTERPRISE, which roams with a domain profile to every
 //     machine the user signs in to (secrets.ts);
 //   - a variable taken out of the process's environment block, which WebView2
-//     reads and the app's `process.env` is not (webview2.ts).
+//     reads and a delete from the app's `process.env` did not reach
+//     (webview2.ts).
 // Only the main process on Windows loads it; nothing here runs elsewhere, and
 // `node --test` never imports it (bun:ffi is Bun's).
 //
@@ -110,8 +111,11 @@ function tokenSid(kind: typeof TOKEN_USER | typeof TOKEN_OWNER): string {
 /**
  * Takes `name` out of this process's own environment block, the one Windows'
  * calls read and WebView2 reads when Electrobun makes a view. Not `delete
- * process.env[name]`: the app runs in a Worker (Electrobun's main.js), whose
- * `process.env` is a copy of its own.
+ * process.env[name]` alone: on both Windows runners the app, started
+ * de-elevated with WEBVIEW2_USER_DATA_FOLDER and deleting it so, still had
+ * WebView2 make that folder, though a Worker of the same Bun outside the app
+ * took a name out of the block by the same delete; why is not known
+ * (docs/design/integrations.md#studio-desktop).
  */
 export function unsetEnvironment(name: string): void {
 	win().k.SetEnvironmentVariableW(wide(name), null);

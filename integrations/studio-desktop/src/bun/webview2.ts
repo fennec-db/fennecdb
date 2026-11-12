@@ -10,8 +10,9 @@
  * what WebView2 is started with is Electrobun's and the app's, not the
  * environment the app was started from. WebView2 reads them from the app's
  * process's environment block when a view is made (where the app is not
- * elevated; an elevated one it ignores), which the app's `process.env` is not:
- * it runs in a Worker, whose copy is its own (win32.ts's `unsetEnvironment`).
+ * elevated; an elevated one it ignores), which a delete from the app's
+ * `process.env` did not reach on the Windows runners (win32.ts's
+ * `unsetEnvironment`).
  * WEBVIEW2_USER_DATA_FOLDER would put every window
  * in one store, the one thing the partitions are for (stores.ts);
  * WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS could add `--remote-debugging-port`,

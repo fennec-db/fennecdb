@@ -33,10 +33,23 @@ where `location.origin` is the server's alone. A studio window is
 `sandbox: true` (the event bridge only) and held to its origin, one with
 the RPC bridge to its `views://` folder (`holdTo`); on Windows, where
 Electrobun leaves a page's request for a new window to WebView2 (a window of
-its own, held to nothing), a preload takes it first, a studio window's to
-the same filter (`newWindowPreload`, `checks/sandbox.mjs`). No path or link the
-app hands the system goes through a shell: on Linux `xdg-open` with an
-argument vector, never Electrobun's `openExternal` or `showItemInFolder`
+its own, held to nothing), a preload in every document of a window, every
+frame's, takes each way a page names one first -- `window.open`,
+`document.open` with three arguments, and a link or form whose own,
+submitter's or `<base>` target is another window, by a click, `click()`,
+`dispatchEvent`, `submit()` or `requestSubmit()` -- a studio window's to the
+same filter (`newWindowPreload`, `checks/hostile.mjs`), and a page that loaded
+before its preload is loaded again (`guardPreload`, `checks/latepreload.mjs`).
+There WebView2 runs with Electrobun's `--disable-web-security`, which no
+variable takes away (`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` only adds, and
+an elevated app's is ignored): `hostile` holds a page to its origin's reads
+on macOS and Linux, and on Windows fails once the switch is gone, so the
+reads are held there too, and `sandbox` holds a studio window's to its own
+origin by its CSP on every system; no `WEBVIEW2_*` variable the app was
+started with reaches it, each taken out of the process's environment block
+(`webview2.ts`, `win32.ts`), never by `process.env` alone, whose delete did
+not reach WebView2. No path or link the app hands the system goes through a
+shell: on Linux `xdg-open` with an argument vector, never Electrobun's `openExternal` or `showItemInFolder`
 (`opener.ts`, `checks/opener.mjs`). One instance a user listens where only
 that user can (`instance.ts`). A saved server's token is in the system's
 credential store alone with its address (`token.ts`), never sent elsewhere

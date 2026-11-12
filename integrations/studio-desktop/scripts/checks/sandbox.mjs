@@ -2,7 +2,8 @@
 // studio needs: no bridge to the main process, no leaving its server's
 // origin, links out go to the browser (here: reported, not opened).
 import assert from 'node:assert/strict';
-import { MAC, WIN, assertClean, cmd, data, evalIn, lines, quit, startApp, step, waitFor, waitNone, waitStudio, webviewWindows, log } from './lib.mjs';
+import { createServer } from 'node:http';
+import { MAC, WIN, assertClean, cmd, data, evalIn, lines, quit, startApp, step, until, waitFor, waitNone, waitStudio, webviewWindows, log } from './lib.mjs';
 
 assertClean('before');
 const SMALL = data('small', 50);
@@ -75,6 +76,47 @@ assert.ok(where.value.startsWith(started.origin), `still on ${started.origin}: $
 // the `open-link` hook below drives it in the running app on Linux.
 const RAISED = MAC || WIN;
 const askedOf = (l) => (l.what === 'new-window-open' && /file:|fennec-check:/.test(l.data)) || (l.what === 'page' && l.key === KEY && l.detail?.type === 'link-out' && /^(file:|fennec-check:)/.test(l.detail.url));
+// Another origin, as a page in the studio would reach it: one answer that
+// allows any reader, one that allows none, and a page for a frame. On Windows
+// Electrobun starts WebView2 with --disable-web-security, so the same-origin
+// policy reads nothing for a page there (hostile.mjs); what holds the studio's
+// reads is its own CSP (connect-src 'self', default-src 'self' for frames,
+// crates/fennec-http/src/studio.rs), which refuses a request before it leaves.
+const otherAsked = [];
+const other = createServer((req, res) => {
+  otherAsked.push(req.url);
+  const open = req.url === '/shared' ? { 'access-control-allow-origin': '*' } : {};
+  res.writeHead(200, { 'content-type': req.url === '/frame' ? 'text/html' : 'text/plain', ...open });
+  res.end(req.url === '/frame' ? '<!doctype html><title>another origin</title>' : 'not for the studio');
+});
+const OTHER = await new Promise((r) => other.listen(0, '127.0.0.1', () => r(`http://127.0.0.1:${other.address().port}`)));
+step("the studio reads no answer of another origin, one that allows any reader neither: its CSP refuses fetch, XHR and a frame before a request leaves, on every system");
+const reads = await evalIn(
+  KEY,
+  `const out = {};
+const get = async (u) => { try { const r = await fetch(u); return 'read ' + r.status; } catch (e) { return 'refused'; } };
+out.own = await get(location.href);
+out.shared = await get(${JSON.stringify(`${OTHER}/shared`)});
+out.secret = await get(${JSON.stringify(`${OTHER}/secret`)});
+try { const x = new XMLHttpRequest(); x.open('GET', ${JSON.stringify(`${OTHER}/shared`)}, false); x.send(); out.xhr = 'read ' + x.status; } catch (e) { out.xhr = 'refused'; }
+const f = document.createElement('iframe'); f.src = ${JSON.stringify(`${OTHER}/frame`)};
+f.addEventListener('load', () => { try { window.__frameRead = 'read ' + f.contentDocument.title; } catch (e) { window.__frameRead = 'refused'; } }, { once: true });
+document.body.append(f);
+return out;`,
+  30000,
+);
+// A refused frame may still raise load, on an error page; one the window's rules refuse raises none.
+reads.value.frame = await until(async () => (await evalIn(KEY, `return window.__frameRead || ''`)).value, 5000, 'the frame').catch(() => 'not loaded');
+log('what the studio read:', JSON.stringify(reads.value), '| the other origin was asked:', JSON.stringify(otherAsked));
+assert.equal(reads.value.own, 'read 200', "the control: the studio's own origin answers its fetch");
+assert.equal(reads.value.shared, 'refused', 'fetch: an answer of another origin, though it allows any reader');
+assert.equal(reads.value.secret, 'refused', 'fetch: one that allows none');
+assert.equal(reads.value.xhr, 'refused', 'XHR: the same');
+// WebKit may leave a refused frame an empty document of the studio's own: what must not be read is the other origin's.
+assert.notEqual(reads.value.frame, 'read another origin', 'a frame of another origin: its document');
+assert.deepEqual(otherAsked, [], 'no request reached the other origin: the CSP refused each before it left, not the same-origin policy after');
+other.close();
+
 step('an address that is not http(s) is not handed to the system, and the first one that is, is: the address was what held the others back');
 // Before any web link, so that the rate limit below has nothing to do with it.
 const mNon = lines().length;

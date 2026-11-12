@@ -665,11 +665,9 @@ applies to.
   is what refuses it, both links within the gap reached it, and no WebView2
   process of the app's has a window; `pages` the last for the launcher's
   `window.open`; `test/opener.test.ts` runs the preload as a page would. What
-  it cannot hold: a page that takes another `window.open`, from a frame it
-  makes, still gets WebView2's window, which only Electrobun can refuse. Nor
-  can the app change that Electrobun starts WebView2 with
-  `--disable-web-security --allow-insecure-localhost`
-  (win/nativeWrapper.cpp:8128): for the phase that ships it.
+  this guessed it could not hold, a frame's own `window.open`, it did; what it
+  did not, and the switches Electrobun starts WebView2 with, are below
+  (WebView2's two holes).
 - **A preload that comes late.** Electrobun adds a view's preload
   (AddScriptToExecuteOnDocumentCreated, which completes later) and navigates
   in the same call without waiting for it (win/nativeWrapper.cpp:7828 and
@@ -678,7 +676,8 @@ applies to.
   bridge (no session, no guard for new windows) and never reported. Each
   window is asked once it navigated, through ExecuteScript, which needs no
   preload, whether Electrobun's bridge is there, and loaded again if not, at
-  most three times a view (`preloaded`, windows.ts).
+  most three times a view (`guardPreload`, webview2.ts; `latepreload` holds
+  it, below).
 - **The checks that could not ask.** `orphan` reads Linux's `/proc` (a pipe's
   two ends are one `pipe:[inode]`, told apart by the descriptor's access mode;
   a socketpair's are paired by `ss`), with the same control as macOS's; on
@@ -701,6 +700,119 @@ applies to.
   Authenticated Users or Users read it, as the server reads a TLS key's
   (`owner_only::open_to`), and its folder test compared `/` paths, which
   Windows' are not.
+
+WebView2's two holes (before phase 4 ships Windows). Measured on both Windows
+runners, WebView2 156.0.4314.58 on each, by a spike since taken out (runs
+43104202430, 43107758866 and 43109301246): a saved server's page with no CSP, a
+stand-in's, asked for another origin's answers and for windows in every way it
+has.
+
+- **The same-origin policy is off, and the app cannot turn it on.**
+  Electrobun 2.0.4 hands every WebView2 environment
+  `--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection
+  --allow-insecure-localhost --disable-web-security`
+  (win/nativeWrapper.cpp:8262 on main 89b102c8d0; 2.0.4's libNativeWrapper.dll
+  holds the same string), with no option to leave one out, where its CEF path
+  has one. On both runners the page read another origin's answer that allowed
+  no reader, by fetch and by XHR, and the document of a frame of another
+  origin. `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`, the route tried, is added to
+  the host's arguments, not put in their place: Microsoft's reference for
+  CreateCoreWebView2EnvironmentWithOptions says "appended", and an app started
+  without an administrator's rights (a token SAFER made a normal user's, set
+  to medium integrity), the variable set in its own environment, had WebView2's
+  browser process
+  started with its argument beside all three of Electrobun's, which WebView2
+  sorts and keeps. Where the app is elevated the variable is ignored outright
+  ("Develop secure WebView2 apps"; the runners' user is the built-in
+  Administrator, TokenIsElevated 1, and the app started as the checks start it
+  had none of it). The loader inside Electrobun's library names only the
+  browser folder, channel, user-data and Edge View variables (the `WEBVIEW2_`
+  strings 2.0.4's libNativeWrapper.dll holds); the arguments are the runtime's
+  to merge, and no Chromium switch puts the policy back. So neither
+  `--disable-web-security` nor `--allow-insecure-localhost` can be taken away,
+  though nothing of the app's needs the second: the servers it starts are
+  plain http on 127.0.0.1, and a saved https server's certificate is checked
+  by Bun's fetch in the probe before any window opens on it. The ways left, none
+  taken here: Electrobun's own (an option for WebView2's arguments, as CEF's
+  `chromiumFlags`, or no such switch; then a version bump); the CEF renderer on
+  Windows, whose switches can be left out (2.0.4's CEF archive is 169 MB for
+  x64 and 166 MB for arm64, against 10.7 and 11.8 MB for its core); another
+  shell (Tauri, re-decided above); a copy of Electrobun's library with the
+  string patched out, which the pin (`hutch-pin.json`) holds to its release.
+  What is open meanwhile is a saved server's own page: the studio's CSP
+  (`connect-src 'self'`, `default-src 'self'` for frames) refuses those reads
+  to the studio and to anything injected into it, before a request leaves;
+  `sandbox` holds that on every system, Windows included: a studio window's
+  fetch and XHR of another origin, one that allows any reader too, are
+  refused and that origin is asked nothing, where the studio's own origin
+  answers it (the control). `hostile` holds a page with no CSP to its origin's
+  reads on macOS and Linux and, on Windows, that WebView2 is still started
+  with the switch: an Electrobun that drops it fails the check until the reads
+  are held there.
+- **New windows.** Phase 2's preload runs in every document of the window,
+  every frame's: the initial about:blank of a frame a moment old (reached by
+  index too), a frame of about:blank, of srcdoc (its own script too), of a
+  data: and a blob: address, of the page's origin and another's, one written
+  by document.write and a frame in a frame each had the bridge and the
+  preload's `window.open`, and none opened a window. What opened WebView2's
+  own window on both runners, elevated or not, was every way a page names a
+  window without `window.open`: `document.open` with three arguments, in the
+  page and in a frame; `form.submit()` to a target, which fires no submit
+  event; a script's click on a link in a shadow root, whose event, not
+  composed, never reaches the window; and a link under `<base target>`. Run
+  elevated, the five windows' processes outlived the app's quit. The preload
+  now takes, in each document, `document.open` with three arguments as
+  `window.open`; a link (`a`, `area`, SVG's `a`) whose target -- its own, else
+  the document's `<base target>` -- is another window, or followed with a
+  modifier key or the middle button, by the window's click listener,
+  `click()` (a link outside the document is clicked where no listener hears
+  it) and `dispatchEvent` (at the link or at any node in it); and a form so
+  targeted, its submitter's `formtarget` first, by `submit()`,
+  `requestSubmit()`, a click on its button and Enter in its field (a form in a
+  shadow root raises a submit event the window never hears). Each replaced
+  function is neither writable nor configurable, and no realm keeps WebView2's,
+  every document having its own. `hostile` asks 27 kinds on every system and
+  needs no address of the stand-in's loaded, and on Windows no window of
+  WebView2's processes; `test/opener.test.ts` runs the preload as a page
+  would. Not taken: `--block-new-web-contents=true`, which Microsoft's list of
+  WebView2 flags says makes every popup fail: it reached the de-elevated app's
+  browser process and the five windows opened as before; WebView2's
+  NewWindowRequested and its frames' (FrameCreated), which Electrobun 2.0.4
+  registers neither of and nothing outside its library reaches; a listener in
+  each shadow root through `attachShadow`, which a declarative shadow root
+  never calls. Not covered: what a person must click or allow first where no
+  document's script is, a link in WebView2's PDF viewer and a notification's
+  `clients.openWindow`, which Electrobun asks the user to allow.
+- **WebView2's variables.** WebView2 reads `WEBVIEW2_*` from the app's
+  process where the app is not elevated, so the app takes every one it was
+  started with out of its environment before its first window (`webview2.ts`):
+  `WEBVIEW2_USER_DATA_FOLDER` would put every window in one store, the one
+  thing the partitions are for, and `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`
+  can add `--remote-debugging-port`, handing every page and a studio window's
+  token to any program of the machine. They go through SetEnvironmentVariableW,
+  each judged gone by GetEnvironmentVariableW after, not through `process.env`
+  alone. Started de-elevated with `WEBVIEW2_USER_DATA_FOLDER` and
+  `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`, the app that only deleted them from
+  its `process.env` had WebView2 make that folder on both runners (43107758866);
+  the app that takes them out with SetEnvironmentVariableW had its browser
+  processes in its own partitions' folders, without the variable's argument,
+  and the folder never made, on both (43109301246). Why the delete did not
+  reach WebView2 is not known. Electrobun runs the app's code in a Worker (its
+  main.js, `new Worker(entry, {})`), but a Worker the bundled Bun made outside
+  the app, deleting a name from its `process.env`, took it out of the block
+  GetEnvironmentVariableW reads on both runners, as the main thread's delete
+  did (43109301246); only the main thread's `process.env` kept it, a copy of
+  its own. `hostile` starts the app with three of them and needs none left in
+  the block; that no window got the named store it can only see where WebView2
+  is not elevated, which on the runners it is: there it holds the block alone.
+- **A late preload, held.** WebView2's race cannot be had on demand, so the
+  test variant makes what it leaves: `FENNEC_DESKTOP_BRIDGELESS_FIRST=1` takes
+  the bridge from the first document of each studio window. `latepreload`
+  needs that window loaded again, with its bridge and its session, and the
+  control, the guard turned off (`FENNEC_DESKTOP_NO_PRELOAD_GUARD=1`), the same
+  window silent; the load again came 47 to 82 ms after the first on x64 and
+  59 to 113 ms on arm64 (one each in 43104202430, 43107758866 and
+  43109301246).
 
 Toolchain. `electrobun init` installed Hutch (the build tool) in `~/.hutch` and
 appended two lines to `~/.zshrc`, and the npm package's resolver would, were
