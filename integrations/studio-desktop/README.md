@@ -320,7 +320,7 @@ script says which hashes a mismatch is.
    | `backups` | a backup with nothing running (a server for it alone, stopped with exit 0, no window) and one through the window's own server; verify; a restore into a new file that opens with the rows; never over a file there or the open one; a key made with `fennec key` (0600, never written over), a sealed backup that is no database in the clear, verified and restored; a new database from a folder of backups; a database served with `--sync off`, refused with the reason |
    | `opener` | Linux: a link and a folder whose names run `touch` in a shell (the control: through `sh -c`, as Electrobun hands them, the marker is made): handed to a stand-in `xdg-open`, each is one argument, made inert, and no marker; handed to the real one, which can start nothing, no marker |
    | `keyring` | Linux: on a session bus with no Secret Service, and on one whose keyring has no default collection, saving a token is refused in words within seconds (libsecret alone waited 25 s), kept in no file, and a connection saved before is refused, nothing sent to its server |
-   | `finder` | `open -a <app> <file>` with the app not running: the file arrives as `open-url`, spaces and non-ASCII letters included |
+   | `finder` | `open -a <app> <file>` with the app not running: the file arrives as `open-url`, spaces and non-ASCII letters included; and handed over late (the test variant holds it until the launcher is up), the launcher is closed and the file's window opens, its own blank view kept (a removal of it crashed the app here once, on a hosted runner) |
 
    `ONLY=files,remote npm run checks` runs a subset (with the test variant
    built: `FENNEC_DESKTOP_TEST_BUILD=1 npm run build`). A failure's logs are in
@@ -449,7 +449,14 @@ its page's view is made in it (`windows.ts`) with a store of its own: a name
 without `persist:` for a file (a store that exists for the window), and
 `persist:remote-<id>` for a saved server (kept between runs, apart from every
 other saved server's, and cleared when the connection is removed). Electrobun's
-own view of the window, blank and in the shared store, is removed first.
+own view of the window, blank and in the shared store, is removed on Windows
+and Linux and kept on macOS, where it loads nothing and may navigate nowhere:
+Electrobun 2.0.4 there makes the view on the main thread after the window
+returns and removes it at once on the app's own thread, so a removal straight
+after the window mostly did nothing and, falling while the view was being
+made, crashed the app; removed once surely made, it cost an open about 28 ms
+and freed no memory. The test variant reports it (`own-view`), and every check
+that waits for a studio window holds it to that (`waitStudio`).
 
 **New database…** is a small window of the app's own (Electrobun has no save
 panel): the folder from the folder dialog, a name, and the app creates the
