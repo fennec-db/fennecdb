@@ -21,6 +21,7 @@ const GW_CHILD = 5;
 const GWL_EXSTYLE = -20;
 const SM_CYCAPTION = 4;
 const SM_CYMENU = 15;
+const DWMWA_CLOAKED = 14;
 const VK: Record<string, number> = { ctrl: 0x11, shift: 0x10, alt: 0x12 };
 
 let user32: ReturnType<typeof load> | null = null;
@@ -48,6 +49,8 @@ function load() {
 	}).symbols;
 }
 const u = () => (user32 ??= load());
+let dwmapi: { DwmGetWindowAttribute: (h: bigint, attr: number, out: Uint32Array, size: number) => number } | null = null;
+const dwm = () => (dwmapi ??= dlopen("dwmapi.dll", { DwmGetWindowAttribute: { args: [FFIType.u64, FFIType.u32, FFIType.ptr, FFIType.u32], returns: FFIType.i32 } }).symbols as never);
 
 const key = (vk: number, up: boolean) => u().keybd_event(vk, 0, up ? KEYEVENTF_KEYUP : 0, 0n);
 
@@ -116,12 +119,15 @@ export function foreground(): { pid: number; title: string; image?: string } {
 }
 
 /**
- * A left click on `hwnd`'s title bar, at the first point along it, from its
- * left, where the window under the point is `hwnd` itself (no other window
- * lies over it): the middle of the caption, above the menu bar and the client
- * area (ClientToScreen of the client's top, less SM_CYMENU and half of
- * SM_CYCAPTION). As a person brings a window forward without touching its
- * page. Says where, and the window it found there.
+ * A left click on `hwnd`'s title bar, as a person brings a window forward
+ * without touching its page: the middle of the caption, above the menu bar
+ * and the client area (ClientToScreen of the client's top, less SM_CYMENU and
+ * half of SM_CYCAPTION), at the first point along it, from its left, where
+ * the window under the point is `hwnd` itself, or else 60 pixels in. The shell's
+ * hosts (Search, the sign-in prompt) keep windows DWM cloaks, unseen, which
+ * WindowFromPoint may still name over the point: what it names is said, cloaked
+ * or not, and the click is made all the same, the window's coming to the front
+ * being what is asked. Says where, and the window it found there.
  */
 export function clickTitle(hwnd: bigint): { x: number; y: number; cursor: number[]; hit: unknown } {
 	const top = new Int32Array([0, 0]);
@@ -131,14 +137,27 @@ export function clickTitle(hwnd: bigint): { x: number; y: number; cursor: number
 	const y = top[1]! - u().GetSystemMetrics(SM_CYMENU) - Math.round(u().GetSystemMetrics(SM_CYCAPTION) / 2);
 	const at = (x: number) => BigInt.asUintN(64, (BigInt(y) << 32n) | BigInt.asUintN(32, BigInt(x)));
 	const screenRight = u().GetSystemMetrics(0);
-	for (let x = rect[0]! + 60; x < Math.min(rect[2]!, screenRight) - 160; x += 40) {
-		if (u().WindowFromPoint(at(x)) !== hwnd) continue;
-		const done = click(hwnd, x - top[0]!, y - top[1]!);
-		return { ...done, hit: describeWindow(hwnd, hwnd) };
+	let x = rect[0]! + 60;
+	for (let c = x; c < Math.min(rect[2]!, screenRight) - 160; c += 40) {
+		if (u().WindowFromPoint(at(c)) === hwnd) {
+			x = c;
+			break;
+		}
 	}
-	throw new Error(`no point of the title bar at y ${y} is the window's own: another window lies over all of it`);
+	const under = u().WindowFromPoint(at(x));
+	const hit = describeWindow(under, hwnd);
+	return { ...click(hwnd, x - top[0]!, y - top[1]!), hit };
 }
 
+/** DWMWA_CLOAKED of a window: 0 where DWM shows it, else why it does not (1 the app, 2 the shell, 4 inherited). */
+function cloaked(hwnd: bigint): number | null {
+	const v = new Uint32Array(1);
+	try {
+		return dwm().DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, v, 4) === 0 ? v[0]! : null;
+	} catch {
+		return null;
+	}
+}
 /**
  * The tick of the last input the session took (GetLastInputInfo), injected
  * input included: unchanged after keys pressed, the system took none of them
@@ -157,7 +176,7 @@ function describeWindow(hwnd: bigint, top: bigint) {
 	const name = new Uint16Array(256);
 	const n = u().GetClassNameW(hwnd, name, name.length);
 	const ours = hwnd === top || u().IsChild(top, hwnd) !== 0;
-	return { pid: pid[0]!, class: Buffer.from(name.buffer, 0, Math.max(0, n) * 2).toString("utf16le"), ours, ...(ours ? {} : { image: imageOf(pid[0]!) }) };
+	return { pid: pid[0]!, class: Buffer.from(name.buffer, 0, Math.max(0, n) * 2).toString("utf16le"), ours, ...(ours ? {} : { image: imageOf(pid[0]!), cloaked: cloaked(hwnd) }) };
 }
 
 /** A process's program, or why it is not known. */

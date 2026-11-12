@@ -232,7 +232,7 @@ export async function askSecretService(env: Record<string, string | undefined> =
  * bound, for the words. The timer is set again for what is left where it fires
  * before the deadline by that clock: Node counts a timer by its monotonic
  * clock in whole milliseconds, and the time left was read in whole ones too,
- * so a 300 ms bound fired at 299 by Date.now() (the Linux arm64 runner).
+ * so a 300 ms bound fired under 300 by Date.now() (the Linux arm64 runner).
  */
 function askOne(path: string, deadline: number, ms: number, uid: number): Promise<StoreAnswer> {
 	return new Promise((resolve) => {

@@ -1046,9 +1046,11 @@ window and the app's words are each system's, and the app has its icon there.
   never both; on Linux, which has no input a check can press as a person's
   under xvfb, dispatched in the page. Where the main window opened behind
   another program's, the app leaves it there, and the check brings it forward
-  as a person would, by a click on its title bar at a point no other window
-  lies over: the app's look at that activation is then the one that moves the
-  focus, the other half of the rule. (The windows-11-arm image comes up with a
+  as a person would, by a click on its title bar (where WindowFromPoint names
+  another window over every point of it, as it named the shell's hosts', the
+  window and whether DWM cloaks it are said, and the click made all the same:
+  the window's coming forward is what is asked): the app's look at that
+  activation is then the one that moves the focus, the other half of the rule. (The windows-11-arm image comes up with a
   "Microsoft account" sign-in window of its own, WWAHost.exe started before the
   job, in front of every window and over the main window's whole title bar,
   though not among the visible windows when a step before the checks looked;
