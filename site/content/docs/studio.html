@@ -539,6 +539,12 @@ unpack it, from <code>bin\launcher.exe</code>. Downloaded by a browser it is
 marked, and SmartScreen stops its first start ("Windows protected your PC"):
 <b>More info</b>, then <b>Run anyway</b>. Where Smart App Control is on, it
 blocks unsigned programs and offers no way past: use the line above.</p>
+
+<p>Connect the Windows app only to servers you trust. Its windows are
+WebView2, which the app's shell starts with web security off, so a page that
+sends no Content-Security-Policy could read other sites' answers there. The
+studio's own pages, as fennec-server serves them, send one and are held by
+it.</p>
 </div>
 
 <div class="lang" data-name="Linux" data-keep="false">
