@@ -1047,16 +1047,19 @@ window and the app's words are each system's, and the app has its icon there.
   under xvfb, dispatched in the page. Where the main window opened behind
   another program's, the app leaves it there, and the check brings it forward
   as a person would, by a click on its title bar (where WindowFromPoint names
-  another window over every point of it, as it named the shell's hosts', the
-  window and whether DWM cloaks it are said, and the click made all the same:
-  the window's coming forward is what is asked): the app's look at that
-  activation is then the one that moves the focus, the other half of the rule. (The windows-11-arm image comes up with a
-  "Microsoft account" sign-in window of its own, WWAHost.exe started before the
-  job, in front of every window and over the main window's whole title bar,
-  though not among the visible windows when a step before the checks looked;
-  `desktop.yml` asks each WWAHost window to close then, and ends a WWAHost
-  still running 15 s on, and `run.mjs` says when another program's window is
-  in front.) Nothing
+  another window over every point of it, the window and whether DWM cloaks it
+  are said, and the click made all the same: the window's coming forward is
+  what is asked): the app's look at that activation is then the one that moves
+  the focus, the other half of the rule. (The windows-11-arm image comes up
+  with the Start menu open, its search in front, and a "Microsoft account"
+  sign-in window, WWAHost.exe, each started before the job and in front of
+  every window: the Start menu lay over the middle of the main window's title
+  bar, whose right end ran off the screen, and the sign-in window was not
+  among the visible ones when a step before the checks looked. `desktop.yml`
+  asks each WWAHost window to close then, ends a WWAHost still running 15 s
+  on, and closes the Start menu, in front, by Escape; the check looks along
+  the whole visible title bar for a point that is the window's; `run.mjs`
+  says when another program's window is in front.) Nothing
   else of the check's own brings a window forward or moves its focus: no Alt (the first version pressed and let
   go of one before a SetForegroundWindow, which can put the menu bar of a
   window in front by then in menu mode, where keys go), no activation, and no keys

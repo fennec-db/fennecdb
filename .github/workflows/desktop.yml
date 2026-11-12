@@ -360,16 +360,18 @@ jobs:
       - name: Build the test variant
         run: FENNEC_DESKTOP_TEST_BUILD=1 npm run build
 
-      # The windows-11-arm image comes up with a "Microsoft account" sign-in window of
-      # its own (WWAHost.exe, started before the job) in front of every window the
-      # checks open: `menu` found the app's main window behind it, its title bar
-      # under it. The window was not among the visible ones when this step looked,
-      # and in front seconds later, so every WWAHost process is said with its
-      # windows, each window asked to close as a person closes it (WM_CLOSE; .NET's
-      # MainWindowHandle is 0 for it), and the process ended where it is still
-      # there 15 s on: no part of the app is a WWAHost's. run.mjs says if another
-      # program's window is in front after.
-      - name: The runner's own sign-in prompt closed
+      # The windows-11-arm image comes up with the Start menu open, its search in
+      # front, and a "Microsoft account" sign-in window (WWAHost.exe), each started
+      # before the job and in front of every window the checks open: `menu` found
+      # the app's main window behind them, the middle of its title bar under the
+      # Start menu. The sign-in window was not among the visible ones when this step
+      # looked, and in front seconds later, so every WWAHost process is said with
+      # its windows, each window asked to close as a person closes it (WM_CLOSE;
+      # .NET's MainWindowHandle is 0 for it), and the process ended where it is
+      # still there 15 s on: no part of the app is a WWAHost's. Then the Start menu,
+      # in front, is closed as a person closes it, by Escape. run.mjs says if
+      # another program's window is in front after.
+      - name: The runner's own Start menu and sign-in prompt closed
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -382,22 +384,38 @@ jobs:
             [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
             [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
             [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint m, IntPtr w, IntPtr l);
+            [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+            [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+            public static int FrontPid() { uint p; GetWindowThreadProcessId(GetForegroundWindow(), out p); return (int)p; }
+            public static void Escape() { keybd_event(0x1B, 0, 0, UIntPtr.Zero); keybd_event(0x1B, 0, 2, UIntPtr.Zero); }
             public static List<IntPtr> Of(int pid) { var r = new List<IntPtr>(); EnumWindows((h, l) => { uint p; GetWindowThreadProcessId(h, out p); if (p == pid) r.Add(h); return true; }, IntPtr.Zero); return r; }
             public static string Title(IntPtr h) { var s = new StringBuilder(256); GetWindowTextW(h, s, 256); return s.ToString(); }
           }
           '@
           $hosts = @(Get-Process WWAHost -ErrorAction SilentlyContinue)
-          if (-not $hosts) { 'no WWAHost running'; exit 0 }
+          if (-not $hosts) { 'no WWAHost running' }
           foreach ($p in $hosts) {
             $wins = [FennecWindows]::Of($p.Id)
             '{0} WWAHost, started {1}, {2} top-level windows' -f $p.Id, $p.StartTime.ToUniversalTime().ToString('o'), $wins.Count
             foreach ($h in $wins) { '  "{0}" visible {1}, asked to close: {2}' -f [FennecWindows]::Title($h), [FennecWindows]::IsWindowVisible($h), [FennecWindows]::PostMessageW($h, 0x10, [IntPtr]::Zero, [IntPtr]::Zero) }
           }
-          $ids = $hosts.Id
-          $until = (Get-Date).AddSeconds(15)
-          while (@(Get-Process -Id $ids -ErrorAction SilentlyContinue).Count -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 200 }
-          $left = @(Get-Process -Id $ids -ErrorAction SilentlyContinue)
-          if ($left) { 'still running 15 s on, ended: ' + ($left.Id -join ', '); $left | Stop-Process -Force } else { 'every WWAHost ended once its windows closed' }
+          if ($hosts) {
+            $ids = $hosts.Id
+            $until = (Get-Date).AddSeconds(15)
+            while (@(Get-Process -Id $ids -ErrorAction SilentlyContinue).Count -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 200 }
+            $left = @(Get-Process -Id $ids -ErrorAction SilentlyContinue)
+            if ($left) { 'still running 15 s on, ended: ' + ($left.Id -join ', '); $left | Stop-Process -Force } else { 'every WWAHost ended once its windows closed' }
+          }
+          $front = { $p = Get-Process -Id ([FennecWindows]::FrontPid()) -ErrorAction SilentlyContinue; if ($p) { '{0} {1}, started {2}' -f $p.Id, $p.ProcessName, $(if ($p.StartTime) { $p.StartTime.ToUniversalTime().ToString('o') } else { '-' }) } else { 'nothing' } }
+          $start = 'SearchHost|StartMenuExperienceHost'
+          $was = & $front
+          "in front: $was"
+          if ($was -match " ($start),") {
+            [FennecWindows]::Escape()
+            $until = (Get-Date).AddSeconds(10)
+            while ((& $front) -match " ($start),") { if ((Get-Date) -gt $until) { break }; Start-Sleep -Milliseconds 200 }
+            "after Escape, in front: $(& $front)"
+          }
 
       - name: The scripted checks
         run: |

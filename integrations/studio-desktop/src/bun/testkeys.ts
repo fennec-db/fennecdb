@@ -137,8 +137,11 @@ export function clickTitle(hwnd: bigint): { x: number; y: number; cursor: number
 	const y = top[1]! - u().GetSystemMetrics(SM_CYMENU) - Math.round(u().GetSystemMetrics(SM_CYCAPTION) / 2);
 	const at = (x: number) => BigInt.asUintN(64, (BigInt(y) << 32n) | BigInt.asUintN(32, BigInt(x)));
 	const screenRight = u().GetSystemMetrics(0);
+	// From past the window's icon (its system menu) to short of its caption buttons, within the
+	// screen: on the arm64 runner the window ran off the screen's right edge, buttons and all, and
+	// the Start menu lay over the middle of its title bar.
 	let x = rect[0]! + 60;
-	for (let c = x; c < Math.min(rect[2]!, screenRight) - 160; c += 40) {
+	for (let c = x; c < Math.min(rect[2]! - 160, screenRight - 4); c += 40) {
 		if (u().WindowFromPoint(at(c)) === hwnd) {
 			x = c;
 			break;
