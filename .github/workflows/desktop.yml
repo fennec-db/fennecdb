@@ -363,20 +363,35 @@ jobs:
       # The windows-11-arm image comes up with a "Microsoft account" sign-in window of
       # its own (WWAHost.exe, started before the job) in front of every window the
       # checks open: `menu` found the app's main window behind it, its title bar
-      # under it. Closed as a person closes it (CloseMainWindow), ended only where it
-      # does not close; run.mjs says if another program's window is in front after.
+      # under it. Each visible window of WWAHost is asked to close as a person closes
+      # it (WM_CLOSE; not .NET's CloseMainWindow, whose MainWindowHandle is 0 for that
+      # window), the program ended only where they do not close; run.mjs says if
+      # another program's window is in front after.
       - name: The runner's own sign-in prompt closed
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $shown = { Get-Process WWAHost -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } }
-          $w = & $shown
+          Add-Type -TypeDefinition @'
+          using System; using System.Collections.Generic; using System.Runtime.InteropServices; using System.Text;
+          public static class FennecWindows {
+            delegate bool EnumProc(IntPtr h, IntPtr l);
+            [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc f, IntPtr l);
+            [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+            [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+            [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
+            [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint m, IntPtr w, IntPtr l);
+            public static List<IntPtr> Of(int pid) { var r = new List<IntPtr>(); EnumWindows((h, l) => { uint p; GetWindowThreadProcessId(h, out p); if (p == pid && IsWindowVisible(h)) r.Add(h); return true; }, IntPtr.Zero); return r; }
+            public static string Title(IntPtr h) { var s = new StringBuilder(256); GetWindowTextW(h, s, 256); return s.ToString(); }
+          }
+          '@
+          $shown = { foreach ($p in @(Get-Process WWAHost -ErrorAction SilentlyContinue)) { foreach ($h in [FennecWindows]::Of($p.Id)) { [pscustomobject]@{ Process = $p; Window = $h; Title = [FennecWindows]::Title($h) } } } }
+          $w = @(& $shown)
           if (-not $w) { 'no sign-in prompt'; exit 0 }
-          foreach ($p in $w) { '{0} {1}, started {2}: "{3}", asked to close: {4}' -f $p.Id, $p.ProcessName, $p.StartTime.ToUniversalTime().ToString('o'), $p.MainWindowTitle, $p.CloseMainWindow() }
+          foreach ($x in $w) { '{0} WWAHost, started {1}: "{2}", asked to close: {3}' -f $x.Process.Id, $x.Process.StartTime.ToUniversalTime().ToString('o'), $x.Title, [FennecWindows]::PostMessageW($x.Window, 0x10, [IntPtr]::Zero, [IntPtr]::Zero) }
           $until = (Get-Date).AddSeconds(15)
-          while ((& $shown) -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 200 }
-          $left = & $shown
-          if ($left) { 'not closed in 15 s: ended'; $left | Stop-Process -Force } else { 'closed' }
+          while (@(& $shown).Count -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 200 }
+          $left = @(& $shown)
+          if ($left) { 'not closed in 15 s: ended'; $left.Process | Sort-Object Id -Unique | Stop-Process -Force } else { 'closed' }
 
       - name: The scripted checks
         run: |

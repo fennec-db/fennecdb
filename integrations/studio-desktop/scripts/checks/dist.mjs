@@ -227,7 +227,23 @@ mkdirSync(`${ROOT}/Applications`, { recursive: true });
 said('ditto', [app, copy]);
 // LaunchServices noted the image's app as it ran; it is forgotten before the image goes.
 spawnSync(LSREGISTER, ['-u', app], { stdio: 'ignore', timeout: 60000 });
-said('hdiutil', ['detach', '-quiet', MNT]);
+// A detach while a process has a file open on the volume is refused (16, EBUSY): on the macOS
+// runner once, after the app had quit and every process started from it had ended. What it
+// leaves a moment longer is not started from its path (WebKit's processes are the system's),
+// so the event waited for is the volume's last open file closed (lsof on the mount point: every
+// open file of that file system this user may see), bounded; what still holds it is named.
+const holding = () => {
+  const out = spawnSync('lsof', ['-F', 'pc', MNT], { encoding: 'utf8', timeout: 60000 }).stdout ?? '';
+  const held = [];
+  for (const l of out.split('\n')) {
+    if (l.startsWith('p')) held.push({ pid: +l.slice(1), command: '' });
+    else if (l.startsWith('c') && held.length) held[held.length - 1].command = l.slice(1);
+  }
+  return held;
+};
+const letGo = await until(() => holding().length === 0, 60000, 'every file on the image closed').then(() => true, () => false);
+const detached = spawnSync('hdiutil', ['detach', '-quiet', MNT], { encoding: 'utf8', timeout: 120000 });
+if (detached.status !== 0) throw new Error(`hdiutil detach ${MNT} failed (${detached.status ?? detached.signal}): ${detached.stdout}${detached.stderr}; ${letGo ? 'no process of this user had a file open on it' : `still open after 60 s: ${JSON.stringify(holding())}`}`);
 mounted = false;
 log('the image let go');
 const digest = treeDigest(copy);
