@@ -84,16 +84,54 @@ test("the first opener there is is started, with no shell; one that is not there
 });
 
 /**
- * Windows' preload run as a page at `base` runs it: the bridge and the window's
- * listeners stood in for, and WebView2's own `window.open` one that fails the
- * test if it is ever reached.
+ * Windows' preload run as a page at `base` runs it: the bridge, the window's
+ * listeners and the prototypes it replaces stood in for. What WebView2 itself
+ * would have done -- its own `window.open`, a native `click()`,
+ * `dispatchEvent`, `submit()`, `requestSubmit()`, `document.open` -- is
+ * recorded in `reached`, and `window.open` fails the test if reached at all.
  */
 function windowsPage(base = "http://127.0.0.1:4000/_studio/") {
 	const sent: { type: string; url: string }[] = [];
+	const reached: string[] = [];
 	const listeners: Record<string, ((e: unknown) => void)[]> = {};
+	class EventTarget {
+		dispatchEvent(e: { type: string }) {
+			reached.push(`dispatchEvent ${e.type}`);
+			return true;
+		}
+	}
+	class HTMLElement extends EventTarget {
+		localName = "";
+		click() {
+			reached.push(`click ${this.localName}`);
+		}
+	}
+	class HTMLFormElement extends HTMLElement {
+		submit() {
+			reached.push("submit");
+		}
+		requestSubmit() {
+			reached.push("requestSubmit");
+		}
+	}
+	class Document {
+		open(...args: unknown[]) {
+			reached.push(`document.open with ${args.length}`);
+			return "the document";
+		}
+	}
+	let baseTarget: string | null = null;
+	const document = Object.assign(new Document(), {
+		baseURI: base,
+		querySelector: (sel: string) => (sel === "base[target]" && baseTarget !== null ? { getAttribute: () => baseTarget } : null),
+	});
 	const page: Record<string, unknown> = {
 		URL,
-		document: { baseURI: base },
+		EventTarget,
+		HTMLElement,
+		HTMLFormElement,
+		Document,
+		document,
 		// A copy, as the bridge serializes it: an object of the page's realm is no plain object of this one.
 		__electrobunSendToHost: (m: unknown) => sent.push(JSON.parse(JSON.stringify(m))),
 		addEventListener: (type: string, f: (e: unknown) => void, capture: boolean) => {
@@ -106,15 +144,31 @@ function windowsPage(base = "http://127.0.0.1:4000/_studio/") {
 	vm.createContext(page);
 	vm.runInContext(newWindowPreload("win32"), page);
 	const run = (js: string) => vm.runInContext(js, page);
-	/** An event of `type` that went through `path` (the innermost first), as the page's listeners would see it. */
+	/** An event of `type` that went through `path` (the innermost first), as the window's listeners would see it. */
 	const dispatch = (type: string, path: unknown[], init: Record<string, unknown> = {}) => {
-		const e = { target: path[0], composedPath: () => path, button: 0, ctrlKey: false, shiftKey: false, metaKey: false, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, ...init };
+		const e = { type, target: path[0], composedPath: () => path, button: 0, ctrlKey: false, shiftKey: false, metaKey: false, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, ...init };
 		for (const f of listeners[type] ?? []) f(e);
 		return e.defaultPrevented;
 	};
-	return { sent, run, dispatch };
+	/** An element of the page, with `attrs`, inside `parent` (an element or a shadow root), in a form where it is a form's control. */
+	const element = (localName: string, attrs: Record<string, string>, parent: unknown = null, form: unknown = null): any => {
+		const proto = localName === "form" ? HTMLFormElement.prototype : HTMLElement.prototype;
+		return Object.assign(Object.create(proto), {
+			localName,
+			nodeType: 1,
+			parentNode: parent,
+			form,
+			baseURI: base,
+			ownerDocument: document,
+			getAttribute: (n: string) => attrs[n] ?? null,
+			hasAttribute: (n: string) => n in attrs,
+			getAttributeNS: (_ns: string, n: string) => attrs[`xlink:${n}`] ?? null,
+		});
+	};
+	const shadowRoot = (host: unknown) => ({ nodeType: 11, parentNode: null, host });
+	const setBaseTarget = (t: string | null) => void (baseTarget = t);
+	return { sent, reached, run, dispatch, element, shadowRoot, setBaseTarget, document };
 }
-const element = (localName: string, attrs: Record<string, string>) => ({ localName, getAttribute: (n: string) => attrs[n] ?? null, hasAttribute: (n: string) => n in attrs });
 
 test("off Windows there is no new-window preload: WebKit hands the request to Electrobun", () => {
 	assert.equal(newWindowPreload("darwin"), "");
@@ -137,10 +191,19 @@ test("Windows: window.open sends the address to the app and opens nothing, and c
 	assert.throws(() => run(`Object.defineProperty(window, "open", { value: () => 1 })`), "nor a definition");
 });
 
+test("Windows: document.open with three arguments is window.open, and with fewer the page's own", () => {
+	const { sent, reached, run } = windowsPage();
+	assert.equal(run(`document.open("https://example.com/w", "", "")`), null);
+	assert.deepEqual(sent.map((m) => m.url), ["https://example.com/w"]);
+	assert.equal(run(`document.open()`), "the document", "the document opened for writing, as before");
+	assert.deepEqual(reached, ["document.open with 0"]);
+	assert.throws(() => run(`Object.defineProperty(Document.prototype, "open", { value: () => 1 })`), "not to be put back");
+});
+
 test("Windows: a link that would open a window is sent to the app instead, and one that stays is left alone", () => {
-	const { sent, dispatch } = windowsPage();
-	const inner = { localName: "span" };
+	const { sent, dispatch, element, setBaseTarget } = windowsPage();
 	const blank = element("a", { href: "https://example.com/blank", target: "_blank" });
+	const inner = element("span", {}, blank);
 	assert.equal(dispatch("click", [inner, blank]), true, "target=_blank, clicked on what it holds");
 	const named = element("a", { href: "/x", target: "results" });
 	assert.equal(dispatch("click", [named]), true, "a target naming a frame: none is there");
@@ -152,12 +215,70 @@ test("Windows: a link that would open a window is sent to the app instead, and o
 	assert.equal(dispatch("click", [plain], { shiftKey: true }), true, "Shift+click for a new window");
 	assert.equal(dispatch("auxclick", [plain], { button: 1 }), true, "the middle button");
 	assert.equal(dispatch("click", [element("a", {})]), false, "an anchor with no href is no link");
-	assert.equal(dispatch("click", [element("button", { href: "/n", target: "_blank" })]), false, "only an anchor");
-	assert.deepEqual(
-		sent.map((m) => m.url),
-		["https://example.com/blank", "http://127.0.0.1:4000/x", "http://127.0.0.1:4000/_studio/#c=orders", "http://127.0.0.1:4000/_studio/#c=orders", "http://127.0.0.1:4000/_studio/#c=orders"],
-	);
-	assert.equal(dispatch("submit", [element("form", { target: "_blank" })]), true, "a form posted to a new window is not");
-	assert.equal(dispatch("submit", [element("form", {})]), false, "one posted in place is the page's");
-	assert.equal(sent.length, 5, "a form sends nothing");
+	assert.equal(dispatch("click", [element("area", { href: "/map", target: "_blank" })]), true, "an image map's area is a link");
+	assert.equal(dispatch("click", [element("a", { "xlink:href": "/svg", target: "_blank" })]), true, "and SVG's a, by xlink:href");
+	setBaseTarget("_blank");
+	assert.equal(dispatch("click", [plain]), true, "a link with no target of its own, under <base target=_blank>");
+	assert.equal(dispatch("click", [element("a", { href: "/own", target: "" })]), false, "its own target, empty, is the page");
+	setBaseTarget(null);
+	assert.deepEqual(sent.map((m) => m.url), [
+		"https://example.com/blank",
+		"http://127.0.0.1:4000/x",
+		"http://127.0.0.1:4000/_studio/#c=orders",
+		"http://127.0.0.1:4000/_studio/#c=orders",
+		"http://127.0.0.1:4000/_studio/#c=orders",
+		"http://127.0.0.1:4000/map",
+		"http://127.0.0.1:4000/svg",
+		"http://127.0.0.1:4000/_studio/#c=orders",
+	]);
+});
+
+test("Windows: a script's click on a link, by click() or dispatchEvent, out of the window's hearing, is taken as a click is", () => {
+	const { sent, reached, element, shadowRoot } = windowsPage();
+	// Outside the document: its click event never reaches the window.
+	const detached = element("a", { href: "https://example.com/detached", target: "_blank" });
+	detached.click();
+	// In a closed shadow root, a script's event that is not composed: it never leaves the root.
+	const host = element("div", {});
+	const shadowed = element("a", { href: "https://example.com/shadow", target: "_blank" }, shadowRoot(host));
+	assert.equal(shadowed.dispatchEvent({ type: "click", cancelable: false }), false, "not dispatched, cancelable or not");
+	// At a text node inside the link: its activation is the link's.
+	const text = { nodeType: 3, parentNode: shadowed };
+	assert.equal(Reflect.apply(Object.getPrototypeOf(Object.getPrototypeOf(shadowed)).dispatchEvent, text, [{ type: "click" }]), false);
+	assert.deepEqual(sent.map((m) => m.url), ["https://example.com/detached", "https://example.com/shadow", "https://example.com/shadow"]);
+	assert.deepEqual(reached, [], "WebView2 followed none of them");
+	// What stays is the page's own: a link in place, any other event.
+	element("a", { href: "#here" }).click();
+	shadowed.dispatchEvent({ type: "focus" });
+	assert.deepEqual(reached, ["click a", "dispatchEvent focus"]);
+});
+
+test("Windows: a form submitted to another window is not submitted, by any of the ways a page has", () => {
+	const { reached, dispatch, element, setBaseTarget } = windowsPage();
+	const leaving = element("form", { target: "_blank", action: "https://example.com/f" });
+	const staying = element("form", { action: "/save" });
+	leaving.submit();
+	leaving.requestSubmit();
+	staying.submit();
+	staying.requestSubmit();
+	assert.deepEqual(reached, ["submit", "requestSubmit"], "submit() fires no event, so it is taken itself; the form that stays is submitted");
+	const by = element("button", { formtarget: "_blank" }, staying, staying);
+	staying.requestSubmit(by);
+	assert.deepEqual(reached.length, 2, "a submitter's formtarget is the form's target");
+	setBaseTarget("_blank");
+	staying.submit();
+	assert.deepEqual(reached.length, 2, "and so is the document's <base target>");
+	setBaseTarget(null);
+	// A click on its button and Enter in its field: a form in a shadow root raises a submit event the window never hears.
+	const button = element("button", {}, leaving, leaving);
+	assert.equal(dispatch("click", [button]), true, "its submit button");
+	assert.equal(dispatch("click", [element("input", { type: "image" }, leaving, leaving)]), true, "an image input submits too");
+	assert.equal(dispatch("click", [element("button", { type: "button" }, leaving, leaving)]), false, "a button that submits nothing");
+	assert.equal(dispatch("click", [element("button", {}, staying, staying)]), false, "the button of a form that stays");
+	const field = element("input", { type: "text" }, leaving, leaving);
+	assert.equal(dispatch("keydown", [field], { key: "Enter" }), true, "Enter in its field");
+	assert.equal(dispatch("keydown", [field], { key: "a" }), false, "any other key");
+	assert.equal(dispatch("keydown", [element("input", {}, staying, staying)], { key: "Enter" }), false);
+	assert.equal(dispatch("submit", [leaving], { submitter: null }), true, "its submit event, where the window hears it");
+	assert.equal(dispatch("submit", [staying], { submitter: null }), false);
 });

@@ -15,6 +15,7 @@ import type { Notice } from "../shared/rpc.ts";
 import { LINK_OUT, linkOut, newWindowPreload, openLink } from "./opener.ts";
 import { sessionPreload, type StudioSession } from "./session.ts";
 import { goesWithWindow, inUse, removeStoreFolder, storeClosed, storeOpened, sweepStores, webview2Root } from "./stores.ts";
+import { guardPreload } from "./webview2.ts";
 
 let cascade = 0;
 
@@ -34,32 +35,10 @@ let cascade = 0;
  */
 export function holdTo(view: BrowserView, pattern: string) {
 	view.setNavigationRules(["^*", pattern]);
-	preloaded(view);
-}
-
-/** How many times a page is asked for its preload: its first load and two loads again. */
-const PRELOAD_TRIES = 3;
-
-/**
- * Windows: a page that loaded without its preload is loaded again. Electrobun
- * 2.0.4 adds a view's preload (AddScriptToExecuteOnDocumentCreated, which
- * completes later) and navigates in the same call, without waiting for it
- * (win/nativeWrapper.cpp:7828 and 8077), so the first document can load
- * before the script is there: on the x64 runner a saved server's window,
- * opened again at once, loaded with no event bridge (and so no session and
- * no guard for new windows) and never reported. Once it has navigated the
- * page is asked through ExecuteScript, which needs no preload, whether
- * Electrobun's bridge is there, and loaded again if not, the preload being in
- * place by then; at most PRELOAD_TRIES times a view, so one that never gets it
- * is not loaded for ever.
- */
-function preloaded(view: BrowserView) {
-	if (process.platform !== "win32") return;
-	let asked = 0;
-	(view as any).on("did-navigate", () => {
-		if (++asked > PRELOAD_TRIES) return;
-		view.executeJavascript(`if(typeof window.__electrobunSendToHost!=="function")location.reload();`);
-	});
+	// Windows: a page that loaded before its preload is loaded again (webview2.ts).
+	// The test variant can be told not to, as the control of checks/latepreload.mjs.
+	if (__TESTABLE__ && process.env["FENNEC_DESKTOP_NO_PRELOAD_GUARD"] === "1") return;
+	guardPreload(view as any);
 }
 
 function frame(width: number, height: number) {
