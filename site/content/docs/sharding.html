@@ -68,8 +68,10 @@ fennec-http {{version}} listening on: http://127.0.0.1:8082  [no auth]</pre>
 <pre data-lang="bash" data-label="terminal 3">fennec-shard --listen 127.0.0.1:8090 --directory shard.fennec --token root</pre>
 <pre data-lang="text" data-label="prints">fennec-shard {{version}} listening on: http://127.0.0.1:8090  [0 node(s), 0 tenant(s)]</pre>
     <p>None of the three was given a token for data requests, which is why they
-    answer one without. They listen on loopback; on any other address they ask
-    for one (<a href="sharding-reference.html#tokens">Tokens</a>).</p>
+    answer one without. They listen on loopback, and answer only a request
+    made under this machine's name, <code>localhost</code> or an address; on any
+    other address they ask for one (<a
+    href="sharding-reference.html#tokens">Tokens</a>).</p>
   </li>
   <li>
     <p>In a fourth terminal, in the same directory, tell the router about the

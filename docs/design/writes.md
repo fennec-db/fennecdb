@@ -219,7 +219,12 @@ put the first one's vector back over the set's. A scoped token needs
 update beside insert for it, and the row it sets must pass its update
 filter (`Check::before_overwrite` asks `admits` of the row written over,
 as PostgreSQL's `ON CONFLICT DO UPDATE` asks the row its `USING`): found
-by a value any row may hold, it was anyone's. `put <c> $n` (`docs_param`)
+by a value any row may hold, it was anyone's. It is asked before `else
+set` reads the row (`Hook::before_upsert`, which `set_row` calls for an
+upsert's row before `updated`): asked after, an expression failing over
+the row -- `1 / (case when body >= "m" then 0 else 1 end)` -- answered 400
+where it failed and 403 where it did not, by a row the token may not read
+(access.md, *The rules are asked before the caller's terms*). `put <c> $n` (`docs_param`)
 writes the parameter's object, or each of its list of objects, a member a
 field (`documents_in`, `Database::document_of`): an object is read exact
 from the start, as a body's json field is, and a list of numbers in it

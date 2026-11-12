@@ -236,7 +236,9 @@ fn the_leasing_thread_s_rounds_are_due_from_when_the_last_was_due() {
 #[test]
 fn a_dead_node_whose_name_never_resolves_holds_up_no_other_node_s_lease() {
     let (nodes, port, router) = three_leased("dns", true, TERM, upstream());
-    let name = "n1.dns.leases.test:8081";
+    // Under `.localhost`: the node has no data token, and answers only
+    // this machine's names (`cors::foreign`); its proxy is on loopback.
+    let name = "n1.dns.leases.localhost:8081";
     let resolver = Resolver::new(name, nodes[0].proxy.addr.parse().unwrap());
     let body = format!(r#"{{"addr":"{name}","token":"adm-dns1"}}"#);
     let (status, body) = call(port, "PUT", "/_shard/nodes/n1", &body, None);
@@ -1311,7 +1313,7 @@ fn raw(port: u16, method: &str, target: &str, token: &str, body: &[u8]) -> (u16,
     s.set_read_timeout(Some(WITHIN)).unwrap();
     write!(
         s,
-        "{method} {target} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\n\
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     )

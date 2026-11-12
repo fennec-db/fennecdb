@@ -369,7 +369,7 @@ fn notification() {
     let mut stream = std::net::TcpStream::connect(&addr).unwrap();
     write!(
         stream,
-        "GET /jobs/changes?key=eq.k0 HTTP/1.1\r\nHost: bench\r\nAccept: text/event-stream\r\n\r\n"
+        "GET /jobs/changes?key=eq.k0 HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n\r\n"
     )
     .unwrap();
     let mut events = BufReader::new(stream.try_clone().unwrap());

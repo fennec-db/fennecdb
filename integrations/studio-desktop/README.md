@@ -16,8 +16,7 @@ system's WKWebView, WebView2 on Windows, WebKitGTK 4.1 on Linux); its build
 tool ships no Intel Mac build. On Windows and Linux CI builds the app, runs its
 unit tests and the checks that pass there, and makes and checks the download
 ([Windows and Linux](#windows-and-linux)); what is still missing there is in
-the plan in #578 (file associations, the stop on Windows by the end of the
-server's stdin, the credential store in the Keychain's place).
+the plan in #578 (file associations and the menus).
 A release's DMG is unsigned, signed ad hoc and not notarized
 ([Download](#download)), until a maintainer adds the secrets
 ([below](#signing-and-notarization)); an app you build here opens as it is.
@@ -204,8 +203,9 @@ sh scripts/dist.sh && node scripts/checks/dist.mjs   # the download, and held as
 
 Linux takes WebKitGTK 4.1 and glibc 2.38 (Ubuntu 24.04, Debian 13, Fedora 39
 and later): `libwebkit2gtk-4.1-0`, `libgtk-3-0t64`, `libayatana-appindicator3-1`
-and `librsvg2-2`, and for the checks `xvfb`, `dbus-x11`, `gnome-keyring` and
-`libsecret-tools`, run as CI runs them: `dbus-run-session -- sh -c 'printf
+and `librsvg2-2` (and `xdg-utils`, which opens a link or a folder), and for the
+checks `xvfb`, `dbus-x11`, `gnome-keyring` and `libsecret-tools`, run as CI runs
+them: `dbus-run-session -- sh -c 'printf
 <password> | gnome-keyring-daemon --unlock --components=secrets && xvfb-run -a
 node scripts/checks/run.mjs'`. Windows takes WebView2 (part of Windows 11). The
 `make` targets but `studio-desktop-dist` are the Mac's (the icon, the DMG).
@@ -219,15 +219,43 @@ for the user alone, into `%LOCALAPPDATA%\dev.fennecdb.studio\stable\app` or
 `~/.local/share/dev.fennecdb.studio/stable/app`, and on Linux starts it (on the
 Windows runners it said it was done and started nothing).
 
-What does not pass there yet is skipped by name, never silently, each with its
-reason and the phase of the plan (#578) that brings it: the checks' list is in
-`scripts/checks/run.mjs` and a run prints each as SKIP; the unit tests skip on
-Windows the ones that stop a real server and hold the stop to exit 0 (a stop is
-TerminateProcess there until the app ends the server's stdin, phase 2), the
-instance guard's socket tests (Node takes no socket path on Windows, phase 2)
-and the key placement test (a key's readers are its DACL there, phase 2), and
-`node --test` prints the reason beside each. The tree digest's executable bit
-is no phase's: Windows keeps none.
+What does not run there is skipped by name, never silently, each with its
+reason, and where a later phase of the plan (#578) brings it, that phase: the
+checks' list is in `scripts/checks/run.mjs` and a run prints each as SKIP
+(`finder`, a file handed over by the desktop, phase 3; `opener` and
+`keyring`, Linux's alone). A unit test that cannot hold on a system says why beside it: the tree
+digest's executable bit (Windows keeps none), a Unix socket's leftovers and
+folder modes on Windows, and D-Bus off Linux.
+
+What the app does otherwise there (phase 2):
+
+* **A server is stopped by the end of its stdin on Windows**, not by SIGTERM,
+  which libuv and Bun make TerminateProcess there: the server ended in 1 to 3
+  ms with no checkpoint, and a new database's first collection, still
+  buffered, was lost. The end of stdin is its one shutdown (exit 0); a server
+  that has not ended 30 s later is still terminated.
+* **The server's environment** is the same allowlist, its names compared
+  case-blind on Windows (`Path`), with Windows' own names for the system's,
+  temporary and user's folders.
+* **One instance a user**: a socket in `$XDG_RUNTIME_DIR` on Linux (never
+  `/tmp`), and on Windows a named pipe named by the user's SID, made the user's
+  alone once it listens; a pipe of that name someone else made is never
+  obeyed (the app runs unguarded rather than quit).
+* **No link or folder goes through a shell**: on Linux the app starts
+  `xdg-open` itself, the address one argument, never Electrobun's
+  `openExternal` or `showItemInFolder`, which run `system("xdg-open ...")`.
+* **The credential store**: Windows' Credential Manager, the item kept on the
+  machine (Bun's own write roams it with a domain profile); on Linux a Secret
+  Service with a login keyring, asked first and bounded, so no store is said
+  in words within seconds, never taken for "no token", and a token is kept
+  in no file instead.
+* **A page's request for a new window** (`window.open`, a link with a target)
+  is taken by the app on Windows: Electrobun leaves it to WebView2, which
+  opens a window of its own, held to no address and alive after the app quit.
+  A studio window's goes to the browser through the same filter as on macOS.
+* **WebView2 keeps each window's store in a folder** and Electrobun's clear
+  there empties another window's: the app removes a removed connection's
+  folder, and a file window's, once no window is in it.
 
 ### The toolchain stays in this directory
 
@@ -308,7 +336,7 @@ script says which hashes a mismatch is.
 3. `scripts/checks/run.mjs`, which needs a window server (a logged-in Mac, a
    Windows desktop session, an X display on Linux, or a CI runner's) and runs
    each in a process of its own, killing what one leaves behind; on Windows
-   and Linux it skips, by name and with the reason, what cannot pass there yet
+   and Linux it skips, by name and with the reason, what does not run there
    ([above](#windows-and-linux)), and `warmup` installs the test variant with
    the build's installer and starts the installed copy, which every other
    check runs:
@@ -319,15 +347,17 @@ script says which hashes a mismatch is.
    | `warmup` | the first launch of a build (below) |
    | `files` | open, edit through the studio's own form, a second open only shows the window, close stops the server with exit 0, reopen has the edit (also at once, while the first server is still stopping); a file another program holds is a message and **Try again** works once it lets go; a missing file, a folder, a file that is not a database and an empty one are said before any server is started, and nothing is written beside them; a quit right after a close waits for that server, and it ends with exit 0 |
    | `server-dies` | `kill -9` the server under a window: a message, the window closed, **Open again** works |
-   | `orphan` | the app killed with two files open, one opened after the other, and a third served: **the descriptor tables (lsof), read while the app is alive, say the write end of each server's stdin is the app's alone** (a control starts a process that does hold another's and requires the reading to find it), then every server ends by itself (the end of its stdin), the served one too, and every file is free for another program. A process is not stopped: on a hosted macOS runner a SIGSTOPped server made `ps` hang, and the job with it |
-   | `sandbox` | the session is `window.fennecHost`, frozen, in the page's own world, and in no storage; the studio has no sign-in form and no Sign out; only the event bridge in a studio window, no navigating off its origin; **a non-web address is dropped by the app** (the page asked, and nothing reached the system) and the first web link is handed to the browser, which the rate limit of one in three seconds does not explain |
-   | `pages` | the launcher, the new-database window and a notice window cannot be navigated anywhere else (a web page, a file, another of the app's pages): without the rule, the launcher goes to example.com |
-   | `storage` | what a window keeps (the studio's history, theme) is its own, **read from a second window on the same origin** (`store-window`, a test hook): a window in another store does not see a file window's, one in the same store does (the control); two saved servers on one address do not share it; a saved server's survives its window; **a removed connection's store, opened again under its id, is empty**, whether or not a window was open on it |
-   | `environment` | the server is started with the allowlist and its token, whatever the app was started with (`OTEL_*`, `FENNEC_JWT_SECRET`, and the checks' own variables stay out) |
-   | `remote` | saved servers: token in the Keychain and in no `state.json` or process argument; the studio signed in; every failure in words (wrong token, no token, studio off, unreachable, a redirect that the token does not follow); an address changed without a token forgets the saved one, and nothing is sent to the new address; edit; Check now, with no window; two clicks open one window; remove deletes the Keychain item |
+   | `orphan` | the app killed with two files open, one opened after the other, and a third served: **the descriptor tables, read while the app is alive (lsof on macOS, `/proc` and `ss` on Linux), say the write end of each server's stdin is the app's alone** (a control starts a process that does hold another's and requires the reading to find it), then every server ends by itself (the end of its stdin), the served one too, and every file is free for another program. On Windows, which has no table a check reads, the kill, the ending and the free files alone. A process is not stopped: on a hosted macOS runner a SIGSTOPped server made `ps` hang, and the job with it |
+   | `sandbox` | the session is `window.fennecHost`, frozen, in the page's own world, and in no storage; the studio has no sign-in form and no Sign out; only the event bridge in a studio window, no navigating off its origin; **a non-web address is dropped by the app** (the page asked, and nothing reached the system) and the first web link is handed to the browser, which the rate limit of one in three seconds does not explain. WebKitGTK raises nothing for a script's `window.open`, so on Linux the page-to-app step is not shown: nothing is opened and the window stays, and the app's filter is asked directly (`open-link`); on Windows the app's preload takes the request (`link-out`) and **no window of WebView2's own is opened** |
+   | `pages` | the launcher, the new-database window and a notice window cannot be navigated anywhere else (a web page, a file, another of the app's pages): without the rule, the launcher goes to example.com; their CSP refuses a string the page itself would eval (a string timer, compiled after the check's script returned: WebView2 lets the check's own script eval) and inline script; the one instance listens where its user alone can (on Windows a pipe whose DACL, read back, is one entry for its user's SID), and a second asks it to show itself and quits; on Windows the launcher's `window.open` opens no window of WebView2's own |
+   | `storage` | what a window keeps (the studio's history, theme) is its own, **read from a second window on the same origin** (`store-window`, a test hook): a window in another store does not see a file window's, one in the same store does (the control); two saved servers on one address do not share it; a saved server's survives its window; **a removed connection's store, opened again under its id, is empty**, whether or not a window was open on it; on Windows each store's folder is gone once it was taken away, a closed file window's too |
+   | `environment` | the server is started with the allowlist and its token, whatever the app was started with (`OTEL_*`, `FENNEC_JWT_SECRET`, and the checks' own variables stay out), read back by a stand-in server: a shell script, or on Windows a program the app's Bun builds; there `Path` and `SystemRoot` reach it, and what Windows sets in any process (a control started with `SystemRoot` alone says what: `PROCESSOR_ARCHITECTURE` on arm64) is allowed |
+   | `remote` | saved servers: token in the system's credential store (asked by name: `security`, `secret-tool`, `cmdkey`; on Windows kept on this machine) and in no `state.json` or process argument; the studio signed in; every failure in words (wrong token, no token, studio off, unreachable, a redirect that the token does not follow); an address changed without a token forgets the saved one, and nothing is sent to the new address; edit; Check now, with no window; two clicks open one window; remove deletes the store's item |
    | `newdb` | the folder dialog (answered by the check), a name, the file made and opened; an existing name refused, case-insensitively, the file untouched; bad names; a first collection and `--sync always`, made by a server; a field list that could close itself, refused with no file made; "Serve it" hands over to the serve sheet, the file a database already; Cancel |
    | `serve` | the main window draws one section at a time; the serve sheet from the Databases list: its command holds no token, Show shows the Keychain's; Start: any free port, the token from the Keychain and in no argument or `state.json`, 401 without it; Open is a window on that server, not a second one, and closing it leaves the server running; its output and figures; Restart with a port and the network (the same token); New token taken at the next start; a port another program answers on and a file another program serves, each said; a server killed under it, said, and **Start again**; Stop is exit 0 and the file free; a quit stops it; **a relaunch starts nothing** and lists it stopped; Remove deletes the Keychain item |
    | `backups` | a backup with nothing running (a server for it alone, stopped with exit 0, no window) and one through the window's own server; verify; a restore into a new file that opens with the rows; never over a file there or the open one; a key made with `fennec key` (0600, never written over), a sealed backup that is no database in the clear, verified and restored; a new database from a folder of backups; a database served with `--sync off`, refused with the reason |
+   | `opener` | Linux: a link and a folder whose names run `touch` in a shell (the control: through `sh -c`, as Electrobun hands them, the marker is made): handed to a stand-in `xdg-open`, each is one argument, made inert, and no marker; handed to the real one, which can start nothing, no marker |
+   | `keyring` | Linux: on a session bus with no Secret Service, and on one whose keyring has no default collection, saving a token is refused in words within seconds (libsecret alone waited 25 s), kept in no file, and a connection saved before is refused, nothing sent to its server |
    | `finder` | `open -a <app> <file>` with the app not running: the file arrives as `open-url`, spaces and non-ASCII letters included |
 
    `ONLY=files,remote npm run checks` runs a subset (with the test variant
@@ -386,15 +416,17 @@ thing in the list below that has to be looked at with a real certificate.
 
 | | |
 |---|---|
-| `src/bun/server.ts`, `process.ts` | **the one place a server is started**: `fennec-server --file F --http H:P --sync S [...] --exit-on-stdin-close` (`serving.ts` writes the arguments) with a random 32-byte token in `FENNEC_HTTP_TOKEN` (a served database's: the Keychain's) and, for a file whose backups are set up or a server started to take one, another in `FENNEC_REPLICATION_TOKEN`, and **a pipe on its stdin that the app holds for the server's life**, found by the `fennec-http <version> listening on: http://<host>:<port>` line on stderr (the whole line, anchored, on the host and port that were asked for: a line that merely contains the words, or another address, is refused and the server stopped; `listening.ts`) and, served with `--metrics`, by its `metrics on:` line too, which that listener's own thread writes before or after the other: the start waits for every line its plan asked for, within its 30 s, and fails naming the one that never came; stderr is read, with stdout, for as long as it runs into a ring of its last 1 000 lines; SIGTERM to stop it (sync and checkpoint on the way down), SIGKILL after 30 s; given a few variables (`env.ts`: `HOME`, `PATH`, `TMPDIR`, `LANG`, `LC_*`, `USER`, `LOGNAME`, `TZ`) and nothing else of the app's environment. `process.ts` takes the spawn it is handed, so `node --test` drives the real binary through it |
+| `src/bun/server.ts`, `process.ts` | **the one place a server is started**: `fennec-server --file F --http H:P --sync S [...] --exit-on-stdin-close` (`serving.ts` writes the arguments) with a random 32-byte token in `FENNEC_HTTP_TOKEN` (a served database's: the Keychain's) and, for a file whose backups are set up or a server started to take one, another in `FENNEC_REPLICATION_TOKEN`, and **a pipe on its stdin that the app holds for the server's life**, found by the `fennec-http <version> listening on: http://<host>:<port>` line on stderr (the whole line, anchored, on the host and port that were asked for: a line that merely contains the words, or another address, is refused and the server stopped; `listening.ts`) and, served with `--metrics`, by its `metrics on:` line too, which that listener's own thread writes before or after the other: the start waits for every line its plan asked for, within its 30 s, and fails naming the one that never came; stderr is read, with stdout, for as long as it runs into a ring of its last 1 000 lines; SIGTERM to stop it (sync and checkpoint on the way down), on Windows the end of its stdin (there SIGTERM is TerminateProcess, no checkpoint), SIGKILL after 30 s; given a few variables (`env.ts`: `HOME`, `PATH`, `TMPDIR`, `LANG`, `LC_*`, `USER`, `LOGNAME`, `TZ`, on Windows compared case-blind and with its own names for the system's, temporary and user's folders) and nothing else of the app's environment. `process.ts` takes the spawn it is handed, so `node --test` drives the real binary through it |
 | `src/bun/session.ts` | **the one place a token reaches a page**: the preload that defines `window.fennecHost` (below) |
-| `src/bun/windows.ts` | what a studio window is held to; the notice window; `holdTo`, which holds every window of the app to its address |
+| `src/bun/windows.ts` | what a studio window is held to; the notice window; `holdTo`, which holds every window of the app to its address (on Windows a page that loaded before Electrobun added its preload is loaded again) |
 | `src/bun/app.ts` | open a file or a saved server, make a new database, serve, stop and restart a database, take and restore backups, keep the lists; **one server a file**, whatever starts or stops one going through the file's lane one after another; one window per `file:<real path>` or `remote:<id>`; one open of a thing at a time; what a quit waits for |
 | `src/bun/serving.ts`, `metrics.ts`, `backups.ts` | a server's arguments, the command the serve sheet shows, a served database's facts and the snippets an app connects with; the figures read from a server's `/_metrics`; `fennec backup`, `verify`, `restore` and `key` run with the app's environment rules, and a restore put in place without writing over a file: pure, or over a runner handed in, unit-tested |
 | `src/bun/pages.ts` | the main window (`launcher` in the code, as it began) and the new-database window and what they may ask (`src/shared/rpc.ts`) |
 | `src/bun/messages.ts`, `remote.ts`, `names.ts`, `dbfile.ts`, `env.ts`, `token.ts`, `listening.ts` | every failure in words, the probe of a saved server, the check of a new name and of a first collection, what a file is, the environment of what the app starts, a token and the address (or the file) it is for, the lines of a server's stderr the app acts on: pure, unit-tested |
-| `src/bun/secrets.ts`, `store.ts` | Keychain (`Bun.secrets`) and `state.json` |
-| `src/bun/instance.ts`, `clipboard.ts` | one instance of the app at a time; a token copied to the clipboard cleared a minute later: pure but for a socket and a clipboard handed in, unit-tested |
+| `src/bun/secrets.ts`, `store.ts` | the system's credential store (`Bun.secrets`; on Windows written by the app, kept on the machine, `win32.ts`; on Linux asked first, `secretservice.ts`) and `state.json` |
+| `src/bun/opener.ts` | a link and a folder handed to the system, never through a shell (on Linux `xdg-open` with an argument vector), and on Windows the preload that takes a page's request for a new window before WebView2 opens one of its own: pure but for the spawn, unit-tested |
+| `src/bun/stores.ts` | which data store a window gets, and on Windows the store folders removed once no window is in them: pure but for the files, unit-tested |
+| `src/bun/instance.ts`, `clipboard.ts` | one instance of the app at a time; a token copied to the clipboard cleared a minute later: pure but for a socket (a pipe on Windows) and a clipboard handed in, unit-tested |
 | `src/launcher`, `src/newdb`, `src/notice`, `src/ui` | the app's own pages |
 
 **One app at a time.** Two instances would each keep `state.json` and the
@@ -402,12 +434,17 @@ Keychain items as if alone: one's **Remove** would delete the token under a
 server the other runs, and each would write the other's lists over. macOS opens
 the running app rather than a second from Finder, the Dock and `open`, but not
 from `open -n` or the binary run by hand, and Electrobun 2.0.4 has no
-single-instance switch; so the first instance listens on a socket of its own in
-the user's temporary folder (`$TMPDIR/<identifier>.instance`, a folder only the
-user can reach), and a later one binds there first: refused, it asks the
-instance there to show its main window and quits before it reads a list or the
-Keychain. A socket an instance that ended left answers nothing and is taken
-over (`instance.ts`, `test/instance.test.ts`). The test variant's identifier is
+single-instance switch; so the first instance listens where only its user can
+reach -- a socket in the user's temporary folder on macOS
+(`$TMPDIR/<identifier>.instance`), in `$XDG_RUNTIME_DIR` on Linux, and on
+Windows a named pipe named by the user's SID (`\\.\pipe\<identifier>.instance.<SID>`),
+made with no other instance of that name and then given a DACL of its user
+alone -- and a later one binds there first: refused, it asks the instance
+there to show its main window and quits before it reads a list or the
+credential store. A socket an instance that ended left answers nothing and is
+taken over; a pipe another user made first under that name is never asked, and
+the app runs unguarded rather than quit for it (`instance.ts`,
+`test/instance.test.ts`). The test variant's identifier is
 its own, so a check never meets an installed app.
 
 **Open…** takes `.fennec` files (the panel is limited to them) and, whatever
@@ -649,8 +686,10 @@ it. So a window that shows one gets:
 
 **What is not covered, said as it is:**
 
-* **The Keychain keeps the token from other users and from pages, not from
-  other programs of the same user.** The Keychain's client here is the bundled
+* **The system's credential store keeps the token from other users and from
+  pages, not from other programs of the same user** (the Keychain here; Windows'
+  Credential Manager and Linux's Secret Service bind an item to no program
+  either). The Keychain's client here is the bundled
   `bun`, a general-purpose runtime that any program running as that user can
   run with a script of its own (`Bun.secrets.get({service, name})`, the service
   being the app's identifier and the name `connection:<id>` from `state.json`),
@@ -698,15 +737,17 @@ macOS has no parent-death signal, so a child is not told when its app is
 killed (not quit). But the system closes every descriptor a dead process held,
 and each server's stdin is a pipe the app holds the write end of
 (`--exit-on-stdin-close`, site/content/docs/server.html): the server sees it
-end, **`kill -9` too**, and shuts down as on SIGTERM (sync, checkpoint, its lock
+end, **`kill -9` too** (TerminateProcess on Windows), and shuts down as on SIGTERM (sync, checkpoint, its lock
 let go, exit 0) instead of running on holding the file with nobody to answer.
 Nothing is noted on disk and nothing is stopped at the next launch: an earlier
 app's registry and reaper are gone, since no release of this app ever held a
 server that would need them. The write end must stay in the app alone: a child
 that inherited it would keep the server's stdin open after the app was gone
 (`checks/orphan.mjs` opens two files one after the other, reads the descriptor
-tables with lsof to see that each server's stdin is written to by the app alone,
-kills the app, and needs both to end and both files to be free). A quit waits for every server, one
+tables -- lsof on macOS, `/proc` on Linux -- to see that each server's stdin is
+written to by the app alone, kills the app, and needs both to end and both
+files to be free; Windows has no table it reads). On Windows the end of that
+stdin is also how the app stops a server: its SIGTERM is TerminateProcess. A quit waits for every server, one
 being started and one whose window closed a moment ago included.
 
 A run of the `fennec` shell is not a server, and is not held so: a quit stops
@@ -804,11 +845,11 @@ which needs the signing identity and bundle id to stay fixed.
 
 * Updates: Electrobun makes bsdiff patches against a release it can download,
   and nothing is published; a new version is a new DMG, zip or tarball.
-* Intel Macs. And on Windows and Linux what the plan in #578 still lists: file
-  associations, the stop on Windows by the end of the server's stdin, the
-  credential store in the Keychain's place, a signing hook (Hutch does not
-  sign on Windows: Authenticode is the owner's sixth decision in
-  docs/design/windows.md), an uninstall entry, a `.deb` or `.rpm`.
+* Intel Macs. And on Windows and Linux: a `.fennec` handed over by the desktop
+  (Electrobun's launcher drops its arguments) and the menus (phase 3 of #578),
+  a signing hook on Windows (Hutch does not sign there: Authenticode is the
+  owner's sixth decision in docs/design/windows.md), an uninstall entry, a
+  `.deb` or `.rpm`.
 * A stable origin for a file: the server listens on a port the system picks.
   A window's store is its own, so nothing a file's page keeps (its theme, its
   history) carries to the next open of the file.

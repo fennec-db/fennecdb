@@ -804,7 +804,7 @@ fn send(port: u16, token: &str, target: &str, body: &str, extra: &str) -> (u16, 
     };
     write!(
         s,
-        "{method} {target} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\n{extra}\
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n{extra}\
          Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )

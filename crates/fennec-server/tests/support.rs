@@ -378,7 +378,7 @@ impl Http {
         body: &str,
         headers: &[(&str, &str)],
     ) -> Option<Answer> {
-        let mut req = format!("{method} {target} HTTP/1.1\r\nHost: t\r\n");
+        let mut req = format!("{method} {target} HTTP/1.1\r\nHost: localhost\r\n");
         if let Some(t) = &self.token {
             req.push_str(&format!("Authorization: Bearer {t}\r\n"));
         }

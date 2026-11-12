@@ -116,7 +116,7 @@ fn https_from_the_client_plain_http_to_the_node() {
     for n in 0..2 {
         let q = format!("{{\"query\":\"get notes where n = {n}\"}}");
         let req = format!(
-            "POST /t/acme/query HTTP/1.1\r\nHost: r\r\nContent-Length: {}\r\n\r\n{q}",
+            "POST /t/acme/query HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{q}",
             q.len()
         );
         client.get_mut().write_all(req.as_bytes()).unwrap();
@@ -150,7 +150,7 @@ fn a_stream_is_relayed_over_tls_as_it_arrives() {
     let mut client = dial(port);
     client
         .get_mut()
-        .write_all(b"GET /t/acme/notes/changes HTTP/1.1\r\nHost: r\r\n\r\n")
+        .write_all(b"GET /t/acme/notes/changes HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .unwrap();
     client.get_mut().flush().unwrap();
     let mut node_conn = accepted(&node);
@@ -194,7 +194,7 @@ fn a_relayed_stream_s_end_is_a_close_notify_and_a_break_none() {
         let mut client = dial(port);
         client
             .get_mut()
-            .write_all(b"GET /t/acme/notes/changes HTTP/1.1\r\nHost: r\r\n\r\n")
+            .write_all(b"GET /t/acme/notes/changes HTTP/1.1\r\nHost: localhost\r\n\r\n")
             .unwrap();
         client.get_mut().flush().unwrap();
         let mut node_conn = accepted(&node);
@@ -236,7 +236,7 @@ fn plain_http_to_the_router_is_told_to_ask_over_https() {
     let port = router_to(&node.local_addr().unwrap().to_string());
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
-    s.write_all(b"GET /t/acme/notes HTTP/1.1\r\nHost: r\r\n\r\n")
+    s.write_all(b"GET /t/acme/notes HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .unwrap();
     let mut got = String::new();
     s.read_to_string(&mut got).unwrap();
@@ -257,7 +257,7 @@ fn a_held_request_s_close_notify_goes_on_to_the_node() {
     let mut client = dial(port);
     let q = r#"{"query":"get jobs"}"#;
     let req = format!(
-        "POST /t/acme/query HTTP/1.1\r\nHost: r\r\nFennec-Wait: 30000\r\n\
+        "POST /t/acme/query HTTP/1.1\r\nHost: localhost\r\nFennec-Wait: 30000\r\n\
          Content-Length: {}\r\n\r\n{q}",
         q.len()
     );

@@ -94,6 +94,8 @@ let o: Overview | null = null;
 let selected: string | null = null;
 let selectedServer: string | null = null;
 let home = "";
+/** Where tokens are kept on this system, as the app names it: the Keychain, Credential Manager, the Secret Service. */
+let storeName = "the system's credential store";
 const live = new Map<string, Figures>();
 
 const row = (path: string | null) => o?.databases.find((d) => d.path === path) ?? null;
@@ -124,6 +126,8 @@ function render() {
 	renderConnections();
 	renderBackups();
 	$("keychain").textContent = `Tokens are stored in ${o.keychain}.`;
+	storeName = o.keychain;
+	for (const e of document.querySelectorAll(".store-name")) e.textContent = storeName;
 }
 
 // ------------------------------------------------------------------ databases
@@ -207,7 +211,7 @@ function renderDetail() {
 	$("db-serving").textContent = on ? "Serving" : s && s.state !== "stopped" ? (s.state === "starting" ? "Starting…" : "Stopping…") : "Not served";
 	$("db-for").textContent = on && s?.startedAt ? `for ${since(s.startedAt)}` : "";
 	$("db-url").textContent = on && s?.url ? s.url : s ? (s.settings.port ? `Port ${s.settings.port} when started` : "Any free port when started") : "";
-	$("db-facts").textContent = s ? s.facts : "Serve it so your apps can connect: a port, a token kept in your Keychain, and the server runs until you stop it or quit the app.";
+	$("db-facts").textContent = s ? s.facts : `Serve it so your apps can connect: a port, a token kept in ${storeName}, and the server runs until you stop it or quit the app.`;
 	$("db-show-server").hidden = !s;
 	$("db-serve").hidden = Boolean(s && s.state !== "stopped");
 	$("db-serve").textContent = s ? "Start…" : "Serve…";
@@ -338,7 +342,7 @@ $("srv-remove").addEventListener("click", async () => {
 	o = await ask.removeServer({ path: selectedServer });
 	selectedServer = null;
 	render();
-	say("Removed from Servers, and its token from your Keychain.");
+	say(`Removed from Servers, and its token from ${storeName}.`);
 });
 $("serve-pick").addEventListener("click", () => void openSheet(null));
 
@@ -485,7 +489,7 @@ function renderConnections() {
 					{ type: "button", class: `pick-item${c.id === editing ? " selected" : ""}`, onclick: () => edit(c) },
 					el("span", { class: "strong" }, el("span", { class: `dot${check?.ok ? " on" : check ? " bad" : ""}`, ariaHidden: "true" }), c.name),
 					el("span", { class: "mono muted" }, c.url + (c.tenant ? ` · ${c.tenant}` : "")),
-					el("span", { class: "muted" }, [open ? "open" : "", c.hasToken ? "token in keychain" : "no token", check ? (check.ok ? "reachable" : "not reachable") : ""].filter(Boolean).join(" · ")),
+					el("span", { class: "muted" }, [open ? "open" : "", c.hasToken === null ? "token store not answering" : c.hasToken ? "token saved" : "no token", check ? (check.ok ? "reachable" : "not reachable") : ""].filter(Boolean).join(" · ")),
 				),
 			);
 			// What the earlier list had, kept for whoever drives it: the name opens it.
@@ -502,8 +506,8 @@ function renderConnections() {
 		$("conn-chip").hidden = !check;
 		$("conn-chip").textContent = check?.ok ? "Reachable" : "Not reachable";
 		$("conn-chip").className = `chip${check?.ok ? " on" : " bad"}`;
-		$("token-note").textContent = c.hasToken ? "saved in your Keychain" : "none saved";
-		$("forget-token").hidden = !c.hasToken;
+		$("token-note").textContent = c.hasToken === null ? `${storeName} did not answer` : c.hasToken ? `saved in ${storeName}` : "none saved";
+		$("forget-token").hidden = c.hasToken !== true;
 	}
 }
 
@@ -514,7 +518,7 @@ function edit(c: Connection) {
 	input("url").value = c.url;
 	input("tenant").value = c.tenant ?? "";
 	input("token").value = "";
-	input("token").placeholder = c.hasToken ? "unchanged: type one to replace it" : "kept in your Keychain";
+	input("token").placeholder = c.hasToken ? "unchanged: type one to replace it" : `kept in ${storeName}`;
 	$("conn-title").textContent = c.name;
 	$("save").textContent = "Save changes";
 	for (const id of ["cancel-edit", "conn-remove", "conn-check", "conn-open"]) $(id).hidden = false;
@@ -526,9 +530,9 @@ function edit(c: Connection) {
 function stopEditing() {
 	editing = null;
 	form.reset();
-	input("token").placeholder = "kept in your Keychain";
+	input("token").placeholder = `kept in ${storeName}`;
 	$("conn-title").textContent = "A new connection";
-	$("token-note").textContent = "kept in your Keychain";
+	$("token-note").textContent = `kept in ${storeName}`;
 	$("save").textContent = "Save connection";
 	for (const id of ["cancel-edit", "conn-remove", "conn-check", "conn-open", "forget-token", "last-check-box", "conn-chip"]) $(id).hidden = true;
 	warnClear();
@@ -555,16 +559,16 @@ $("forget-token").addEventListener("click", async () => {
 	if (editing === null) return;
 	o = await ask.forgetToken({ id: editing });
 	render();
-	input("token").placeholder = "kept in your Keychain";
+	input("token").placeholder = `kept in ${storeName}`;
 	$("forget-token").hidden = true;
-	say("The saved token was removed from the keychain. The connection stays.");
+	say(`The saved token was removed from ${storeName}. The connection stays.`);
 });
 $("conn-remove").addEventListener("click", async () => {
 	if (editing === null) return;
 	o = await ask.removeConnection({ id: editing });
 	stopEditing();
 	render();
-	say("Removed, and its token from the keychain.");
+	say(`Removed, and its token from ${storeName}.`);
 });
 $("conn-check").addEventListener("click", async () => {
 	if (editing === null) return;
@@ -593,7 +597,7 @@ form.addEventListener("submit", async (e) => {
 		r.forgotToken
 			? "Saved. The address changed, so the token saved for the old one was forgotten: type the new server's token."
 			: changedToken
-				? "Saved. The token is in the keychain."
+				? `Saved. The token is in ${storeName}.`
 				: wasEditing
 					? "Saved."
 					: "Saved, with no token.",

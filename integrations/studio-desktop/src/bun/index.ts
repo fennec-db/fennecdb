@@ -14,22 +14,67 @@
 import Electrobun, { Utils } from "electrobun/main";
 import { anythingOpen, isQuitting, openFile, serversBusy, stopAll } from "./app.ts";
 import { sweepSecrets } from "./clipboard.ts";
-import { claimInstance, instancePath } from "./instance.ts";
+import { claimInstance, instancePath, pipeName, runtimeFolder, type PipeSecurity } from "./instance.ts";
 import { startMenu } from "./menu.ts";
 import { closeLauncher, launcherOpen, showLauncher } from "./pages.ts";
+import { sweepLeftStores } from "./windows.ts";
+
+/**
+ * Where this user's one instance listens (instance.ts), and on Windows the
+ * security calls that make the pipe the user's (win32.ts); null where nothing
+ * is the user's alone, and the app runs unguarded.
+ */
+async function guard(): Promise<{ path: string; pipe?: PipeSecurity } | null> {
+	if (process.platform === "darwin") return { path: instancePath(__KEYCHAIN_SERVICE__) };
+	if (process.platform === "linux") {
+		const folder = runtimeFolder(process.env, process.getuid?.() ?? -1, Utils.paths.userData);
+		return folder ? { path: instancePath(__KEYCHAIN_SERVICE__, folder) } : null;
+	}
+	try {
+		const w = await import("./win32.ts");
+		const user = w.userSid();
+		// What our own instance's pipe is owned by: this user, or Administrators where it ran
+		// elevated (only an administrator makes that owner, and one is the machine's anyway).
+		const ours = new Set([user, w.ownerSid(), "S-1-5-32-544"]);
+		return {
+			path: pipeName(__KEYCHAIN_SERVICE__, user),
+			pipe: {
+				secure: (name) => w.restrictPipe(name, user),
+				owner: (name) => {
+					const o = w.pipeOwner(name);
+					if ("sid" in o) return ours.has(o.sid) ? "ours" : "theirs";
+					return o.error === w.ERROR_PIPE_BUSY ? "busy" : "theirs";
+				},
+			},
+		};
+	} catch (e) {
+		console.error(`no single-instance guard: ${(e as Error).message}`);
+		return null;
+	}
+}
 
 // One instance at a time (instance.ts): a second asks the first to show its
 // main window and quits before it opens anything or reads its lists.
-const alone = await claimInstance(instancePath(__KEYCHAIN_SERVICE__), () => {
-	if (__TESTABLE__) void import("./testhooks.ts").then((h) => h.report("instance-asked"));
-	void showLauncher();
-});
-if (!alone) {
+const where = await guard();
+const claim = where
+	? await claimInstance(
+			where.path,
+			() => {
+				if (__TESTABLE__) void import("./testhooks.ts").then((h) => h.report("instance-asked"));
+				void showLauncher();
+			},
+			where.pipe,
+		)
+	: "unguarded";
+if (__TESTABLE__) (await import("./testhooks.ts")).report("instance", { path: where?.path ?? null, claim });
+if (claim === "another") {
 	if (__TESTABLE__) (await import("./testhooks.ts")).report("second-instance");
 	Utils.quit();
 	// Nothing after this runs in a second instance.
 	await new Promise(() => {});
 }
+// Windows: the file windows' stores a run that ended left behind (stores.ts), by the one instance alone.
+if (claim === "alone") void sweepLeftStores();
 
 const started = Date.now();
 /** The launcher was shown because nothing else was opening, not because someone asked for it. */

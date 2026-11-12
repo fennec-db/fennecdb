@@ -120,7 +120,7 @@ impl Node {
         let method = if target == "/_whoami" { "GET" } else { "POST" };
         write!(
             s,
-            "{method} {target} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\n{extra}\
+            "{method} {target} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n{extra}\
              Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         )
@@ -595,7 +595,7 @@ impl Node {
         let auth = token.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
         write!(
             s,
-            "{method} {target} HTTP/1.1\r\nHost: x\r\n{auth}{extra}\
+            "{method} {target} HTTP/1.1\r\nHost: localhost\r\n{auth}{extra}\
              Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         )

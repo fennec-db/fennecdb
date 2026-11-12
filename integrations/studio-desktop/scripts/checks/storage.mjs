@@ -12,7 +12,8 @@
 // server's origin, in the data store it is told): under one shared store it
 // would see what the first wrote, and these fail.
 import assert from 'node:assert/strict';
-import { assertClean, cmd, data, evalIn, lines, quit, startApp, startServer, step, until, waitFor, waitStudio, log } from './lib.mjs';
+import { existsSync, readdirSync } from 'node:fs';
+import { WIN, assertClean, cmd, data, evalIn, lines, partitionDir, quit, startApp, startServer, step, until, waitFor, waitStudio, log } from './lib.mjs';
 
 assertClean('before');
 const REMOTE = data('remote', 10);
@@ -34,14 +35,38 @@ const close = async (key) => {
   cmd({ cmd: 'close', key });
   await waitFor((l, i) => i >= n && l.what === 'window-close' && l.key === key, 15000, `${key} closing`);
 };
+/** The store each window was opened in, by its key. */
+const partitions = new Map();
 /** A new window on a server's origin, in the store `spec` names; its key. */
 async function storeWindow(spec) {
   const key = `store:${++windowsMade}`;
   const n = lines().length;
   cmd({ cmd: 'store-window', key, ...spec });
-  await waitFor((l, i) => i >= n && l.what === 'store-window-opened' && l.key === key, 20000, `${key} opened`);
+  partitions.set(key, (await waitFor((l, i) => i >= n && l.what === 'store-window-opened' && l.key === key, 20000, `${key} opened`)).partition);
   await waitStudio(key, n);
   return key;
+}
+/**
+ * The app took `partition`'s store away (its report), and on Windows its
+ * folder is gone: WebView2 keeps every store in one, and Electrobun's clear
+ * there empties another window's (src/bun/stores.ts).
+ */
+async function dropped(partition, after) {
+  const d = await waitFor((l, i) => i >= after && l.what === 'store-dropped' && l.partition === partition, 30000, `${partition} taken away`);
+  assert.equal(d.ok, true, `${partition}: what it kept was taken away`);
+  if (WIN) folderGone(partition);
+}
+/** Windows: `partition`'s folder is not there; else what is in it, which says what kept or made it. */
+function folderGone(partition) {
+  const dir = partitionDir(partition);
+  if (!existsSync(dir)) return;
+  let inside = [];
+  try {
+    inside = readdirSync(dir, { recursive: true }).map(String).slice(0, 40);
+  } catch (e) {
+    inside = [String(e)];
+  }
+  assert.fail(`${dir} is gone; it holds: ${inside.join(', ') || '(nothing)'}`);
 }
 const save = async (name) => {
   const n = lines().length;
@@ -71,8 +96,10 @@ assert.equal(await read(reader), 'select * from control', 'the same persistent s
 await close(writer);
 await close(reader);
 let n = lines().length;
+if (WIN) assert.ok(existsSync(partitionDir(`persist:remote-${control}`)), 'WebView2 keeps the store in a folder of its own (the control for its removal)');
 cmd({ cmd: 'rmconn', id: control });
-await waitFor((l, i) => i >= n && l.what === 'conn-removed' && l.id === control, 15000, 'control removed');
+await waitFor((l, i) => i >= n && l.what === 'conn-removed' && l.id === control, 30000, 'control removed');
+await dropped(`persist:remote-${control}`, n);
 
 step("a file's window has a store of its own: another window on the same origin does not see it");
 await write(FILE_KEY, 'select * from file');
@@ -81,7 +108,11 @@ assert.equal(await read(FILE_KEY), 'select * from file');
 // store of Electrobun's window, shared by origin) it would see the file window's history.
 const stranger = await storeWindow({ of: FILE_KEY });
 assert.equal(await read(stranger), null, "a window of another store on the same origin does not see the file window's");
+await write(stranger, 'select * from a closed window');
+n = lines().length;
 await close(stranger);
+// A file window's store goes with it: on Windows its folder, which no later window is given.
+await dropped(partitions.get(stranger), n);
 // And the other direction: what the stranger writes is not in the file window's.
 const stranger2 = await storeWindow({ of: FILE_KEY });
 await write(stranger2, 'select * from stranger');
@@ -111,7 +142,8 @@ assert.equal(await read(beforeA), 'select * from a', "the connection's store hol
 await close(beforeA);
 n = lines().length;
 cmd({ cmd: 'rmconn', id: a });
-await waitFor((l, i) => i >= n && l.what === 'conn-removed' && l.id === a, 15000, 'a removed');
+await waitFor((l, i) => i >= n && l.what === 'conn-removed' && l.id === a, 30000, 'a removed');
+await dropped(`persist:remote-${a}`, n);
 // The same store, reopened under the removed id, is empty.
 const afterA = await storeWindow(remote(a));
 await until(async () => (await read(afterA)) === null, 10000, "the removed connection's store emptied");
@@ -120,7 +152,8 @@ await close(afterA);
 n = lines().length;
 cmd({ cmd: 'rmconn', id: b });
 await waitFor((l, i) => i >= n && l.what === 'window-close' && l.key === `remote:${b}`, 15000, "b's window closed by its removal");
-await waitFor((l, i) => i >= n && l.what === 'conn-removed' && l.id === b, 15000, 'b removed');
+await waitFor((l, i) => i >= n && l.what === 'conn-removed' && l.id === b, 30000, 'b removed');
+await dropped(`persist:remote-${b}`, n);
 const afterB = await storeWindow(remote(b));
 await until(async () => (await read(afterB)) === null, 10000, "the store of a connection removed with its window open emptied");
 

@@ -91,7 +91,7 @@ fn get(router: &str, token: &str, extra: &str) -> (u16, Duration) {
     s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
     write!(
         s,
-        "GET /t/acme/notes HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\n{extra}\
+        "GET /t/acme/notes HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n{extra}\
          Connection: close\r\n\r\n"
     )
     .unwrap();
@@ -124,7 +124,7 @@ fn a_refusal_through_the_router_waits_by_the_client_and_not_by_the_router() {
     let mut s = TcpStream::connect(&node).unwrap();
     write!(
         s,
-        "POST /t/acme/query HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer data\r\n\
+        "POST /t/acme/query HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer data\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n{q}",
         q.len()
     )
@@ -195,7 +195,7 @@ fn a_refusal_through_the_router_waits_by_the_client_and_not_by_the_router() {
     let started = Instant::now();
     write!(
         s,
-        "GET /t/acme/notes HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {forged}\r\n{spoof}\
+        "GET /t/acme/notes HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {forged}\r\n{spoof}\
          Connection: close\r\n\r\n"
     )
     .unwrap();
@@ -218,7 +218,7 @@ fn ask(addr: &str, method: &str, target: &str, headers: &str, body: &str) -> (u1
     s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
     write!(
         s,
-        "{method} {target} HTTP/1.1\r\nHost: x\r\n{headers}Content-Length: {}\r\n\
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\n{headers}Content-Length: {}\r\n\
          Connection: close\r\n\r\n{body}",
         body.len()
     )

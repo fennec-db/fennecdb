@@ -153,7 +153,7 @@ impl Node {
             .unwrap();
         write!(
             s,
-            "GET /notes/changes HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\n\r\n"
+            "GET /notes/changes HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\r\n"
         )
         .unwrap();
         let mut heard = String::new();

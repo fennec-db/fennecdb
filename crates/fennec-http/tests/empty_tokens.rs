@@ -40,7 +40,7 @@ fn status(port: u16, method: &str, target: &str) -> u16 {
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     write!(
         s,
-        "{method} {target} HTTP/1.1\r\nHost: t\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
     )
     .unwrap();
     let mut head = [0u8; 12];

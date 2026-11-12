@@ -9,12 +9,13 @@
 //! value are refused at startup. Several are the review of #408's (r1, r2,
 //! r3, r6, r8, r9, r10).
 
+use fennec_core::prelude::{Database, Statement};
 use fennec_http::access::Access;
 use fennec_http::{Config, Server};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const SECRET: &[u8] = b"thirty-two bytes and a few more, for HS256";
 const ROOT: &str = "root-token";
@@ -22,13 +23,14 @@ const ROOT: &str = "root-token";
 struct Node {
     port: u16,
     access: Arc<Access>,
+    db: Arc<RwLock<Database>>,
 }
 
 fn start(policy: &str, setup: &[&str]) -> Node {
     // The wait after a refusal is the process's (tests/access.rs).
     fennec_http::audit::set_delay(0);
     let access = Arc::new(Access::new(SECRET, policy).unwrap());
-    let mut db = fennec_core::prelude::Database::new();
+    let mut db = Database::new();
     for sql in setup {
         db.execute(&fennec_ql::parse_one(sql).unwrap())
             .unwrap_or_else(|e| panic!("{sql}: {e}"));
@@ -39,18 +41,45 @@ fn start(policy: &str, setup: &[&str]) -> Node {
         access: Some(Arc::clone(&access)),
         ..Config::default()
     };
-    let server = Server::new(Arc::new(RwLock::new(db)), cfg);
+    let db = Arc::new(RwLock::new(db));
+    let server = Server::new(Arc::clone(&db), cfg);
     let listener = server.bind().unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
         let _ = server.serve_on(listener);
     });
-    Node { port, access }
+    Node { port, access, db }
 }
 
 impl Node {
     fn token(&self, claims: &str) -> String {
         self.access.mint(claims).unwrap()
+    }
+
+    /// The plan of the read `sql` as `token` runs it, the engine's to tell
+    /// in process: the statement as written for the server's token, and as
+    /// the token's scope rewrites it for any other -- whose `explain` the
+    /// server refuses, a plan counting the rows its rules hide.
+    fn plan(&self, token: &str, sql: &str) -> String {
+        let stmt = fennec_ql::parse_one(sql).unwrap();
+        let db = self.db.read().unwrap();
+        let stmt = match token {
+            ROOT => stmt,
+            _ => {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                let scope = self.access.scope(token, now).unwrap();
+                let bound = scope.bound(&db, &[&stmt]).unwrap();
+                bound.rewrite(stmt).unwrap()
+            }
+        };
+        let Statement::Select(sel) = stmt else {
+            panic!("{sql}: not a read")
+        };
+        let rows = db.query(&Statement::Explain(sel), &[]).unwrap();
+        format!("{:?}", rows.rows().unwrap().rows)
     }
 
     fn query(&self, token: &str, sql: &str) -> (u16, String) {
@@ -61,7 +90,7 @@ impl Node {
         s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         write!(
             s,
-            "POST /query HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\n\
+            "POST /query HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\
              Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         )
@@ -377,34 +406,24 @@ fn a_guarded_read_plans_as_the_server_tokens() {
             &put_people,
         ],
     );
-    let plan = |token: &str, sql: &str| {
-        let (status, body) = n.query(token, sql);
-        assert_eq!(status, 200, "{sql}: {body}");
-        body
-    };
     let clearance = n.token(r#"{"clearance":5}"#);
     let from = n.token(r#"{"from":"n01995"}"#);
     for (root, scoped, token) in [
+        ("get files where level <= 5", "get files", &clearance),
         (
-            "explain get files where level <= 5",
-            "explain get files",
+            "get files where level <= 5 count",
+            "get files count",
             &clearance,
         ),
-        (
-            "explain get files where level <= 5 count",
-            "explain get files count",
-            &clearance,
-        ),
-        (
-            "explain get people where name >= \"n01995\"",
-            "explain get people",
-            &from,
-        ),
+        ("get people where name >= \"n01995\"", "get people", &from),
     ] {
-        let (root, scoped) = (plan(ROOT, root), plan(token, scoped));
+        let (root, scoped) = (n.plan(ROOT, root), n.plan(token, scoped));
         assert!(root.contains("the ordered index on"), "{root}");
         assert_eq!(scoped, root, "{scoped}\n{root}");
     }
+    // The plan is the engine's, in process: over HTTP the token is refused
+    // one (tests/rules_first.rs).
+    assert_eq!(n.query(&clearance, "explain get files").0, 403);
 }
 
 /// A scoped count over an ordered index is answered from the range as the
@@ -423,8 +442,8 @@ fn a_guarded_count_over_an_ordered_index_reads_no_row() {
     let n = start("files read where level <= $jwt.clearance\n", &setup);
     let t = n.token(r#"{"clearance":4000}"#);
     assert_eq!(n.query(&t, "get files count").1, r#"[{"count":4001}]"#);
-    let (_, root) = n.query(ROOT, "explain get files where level <= 4000 count");
-    let (_, scoped) = n.query(&t, "explain get files count");
+    let root = n.plan(ROOT, "get files where level <= 4000 count");
+    let scoped = n.plan(&t, "get files count");
     assert_eq!(scoped, root);
 }
 
@@ -550,8 +569,8 @@ fn a_guarded_read_over_an_index_of_several_fields_plans_as_the_server_tokens() {
             "get files where team = \"t1\" and level <= 2000 order level desc limit 5",
         ),
     ] {
-        let (_, plan) = n.query(&t, &format!("explain {scoped}"));
-        let (_, want) = n.query(ROOT, &format!("explain {root}"));
+        let plan = n.plan(&t, scoped);
+        let want = n.plan(ROOT, root);
         assert!(want.contains("the index on (team, level)"), "{want}");
         assert_eq!(plan, want, "{scoped}");
         assert_eq!(n.query(&t, scoped).1, n.query(ROOT, root).1, "{scoped}");
@@ -559,7 +578,7 @@ fn a_guarded_read_over_an_index_of_several_fields_plans_as_the_server_tokens() {
     // A claim of another kind: no span, and no row.
     let top = n.token(r#"{"team":"t1","c":"top"}"#);
     assert_eq!(n.query(&top, "get files count").1, r#"[{"count":0}]"#);
-    let (_, plan) = n.query(&top, "explain get files count");
+    let plan = n.plan(&top, "get files count");
     assert!(plan.contains("the index on (team, level)"), "{plan}");
 }
 
@@ -647,8 +666,8 @@ fn a_claim_that_reads_as_a_time_holds_a_text_field_as_text() {
         assert_eq!(scoped, root, "{c}");
         assert!(scoped.contains(r#"{"day":""}"#), "{scoped}");
     }
-    let (_, plan) = n.query(&n.token(until), "explain get sdays count");
-    let (_, want) = n.query(ROOT, "explain get sdays where day <= \"2026-01-01\" count");
+    let plan = n.plan(&n.token(until), "get sdays count");
+    let want = n.plan(ROOT, "get sdays where day <= \"2026-01-01\" count");
     assert!(want.contains("which is the answer"), "{want}");
     assert_eq!(plan, want);
     let max = r#"{"max":"1-1-1"}"#;
@@ -661,7 +680,7 @@ fn a_claim_that_reads_as_a_time_holds_a_text_field_as_text() {
         r#"[{"ver":"0.9"},{"ver":"1-0-0"},{"ver":null}]"#
     );
     assert_eq!(n.rows(until, "get stamps count"), r#"[{"count":2}]"#);
-    let (_, plan) = n.query(&n.token(until), "explain get stamps count");
+    let plan = n.plan(&n.token(until), "get stamps count");
     assert!(plan.contains("the ordered index on at"), "{plan}");
     assert_eq!(
         n.rows(until, "get meta select m order id"),

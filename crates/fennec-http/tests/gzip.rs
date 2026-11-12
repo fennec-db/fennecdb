@@ -76,7 +76,7 @@ fn ask(port: u16, method: &str, target: &str, body: &str, extra: &str) -> Answer
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     write!(
         s,
-        "{method} {target} HTTP/1.1\r\nHost: t\r\n{extra}Content-Length: {}\r\n\
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\n{extra}Content-Length: {}\r\n\
          Connection: close\r\n\r\n{body}",
         body.len()
     )
@@ -186,7 +186,11 @@ fn read_until(s: &mut TcpStream, have: &mut Vec<u8>, done: impl Fn(&[u8]) -> boo
 fn subscribe(port: u16, extra: &str) -> (TcpStream, String, Vec<u8>) {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    write!(s, "GET /notes/changes HTTP/1.1\r\nHost: t\r\n{extra}\r\n").unwrap();
+    write!(
+        s,
+        "GET /notes/changes HTTP/1.1\r\nHost: localhost\r\n{extra}\r\n"
+    )
+    .unwrap();
     let mut got = Vec::new();
     read_until(&mut s, &mut got, |b| b.windows(4).any(|w| w == b"\r\n\r\n"));
     let at = got.windows(4).position(|w| w == b"\r\n\r\n").unwrap();

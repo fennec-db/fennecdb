@@ -154,7 +154,7 @@ impl Client {
         body.push('}');
         write!(
             self.out,
-            "POST /query HTTP/1.1\r\nHost: b\r\nContent-Length: {}\r\n\r\n{body}",
+            "POST /query HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         )
         .unwrap();

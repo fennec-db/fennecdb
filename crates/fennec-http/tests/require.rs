@@ -65,7 +65,7 @@ impl Conn {
     fn post(&mut self, path: &str, body: &str) -> (u16, String) {
         write!(
             self.w,
-            "POST {path} HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\n\r\n{body}",
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         )
         .unwrap();

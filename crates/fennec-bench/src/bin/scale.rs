@@ -401,7 +401,7 @@ fn pg_memory() -> Option<(u64, u64)> {
 fn metric(http: u16, name: &str) -> Option<u64> {
     use std::io::{Read, Write};
     let mut s = std::net::TcpStream::connect(("127.0.0.1", http)).ok()?;
-    s.write_all(b"GET /_metrics HTTP/1.1\r\nHost: bench\r\nConnection: close\r\n\r\n")
+    s.write_all(b"GET /_metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .ok()?;
     let mut body = String::new();
     s.read_to_string(&mut body).ok()?;

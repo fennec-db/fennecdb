@@ -19,70 +19,31 @@ import { join } from 'node:path';
 import { APP_DATA, D, HERE, POWERSHELL, WIN, describe, freshState, keepEvidence, mine, now, procs, sleep } from './lib.mjs';
 
 /**
- * Every check, in the order they run, and the systems one does not run on yet:
- * why, and the phase of the Windows and Linux plan that brings it (#578: 2, the
- * process and security layer; 3, desktop integration; 4, distribution). A
- * check skipped is said as SKIP with its reason; none is left out silently.
+ * Every check, in the order they run, and the systems one does not run on:
+ * why, and, for one a later phase of the Windows and Linux plan brings, which
+ * (#578: 3, desktop integration; 4, distribution). A check skipped is said as
+ * SKIP with its reason; none is left out silently.
  */
+const LINUX_ONLY = {
+  darwin: 'Linux alone: macOS hands a link to NSWorkspace and a folder to Finder, and keeps tokens in the Keychain, none of it through a shell or a bus',
+  win32: 'Linux alone: Windows hands a link and a folder to ShellExecute, and keeps tokens in Credential Manager, none of it through a shell or a bus',
+};
 const CHECKS = [
   { name: 'release' },
   { name: 'warmup' },
-  {
-    name: 'files',
-    skip: { win32: "phase 2: a closed window's server is stopped by SIGTERM, TerminateProcess on Windows (exit 1, no checkpoint), until the app ends its stdin" },
-  },
+  { name: 'files' },
   { name: 'server-dies' },
-  {
-    name: 'orphan',
-    skip: {
-      linux: "phase 2: it reads the descriptor tables with lsof, which finds no pipe's other end on Linux: /proc/<pid>/fd then",
-      win32: 'phase 2: no lsof, and the stop by stdin it needs; the app killed, its servers ending and the files free then',
-    },
-  },
-  {
-    name: 'sandbox',
-    skip: {
-      linux: "phase 2: a page's window.open of a non-web address raises no new-window-open on WebKitGTK, so the app is never asked; links handed to the system without a shell then",
-      win32: "phase 2: a page's window.open of a non-web address raises no new-window-open on WebView2, so the app is never asked; links handed to the system then",
-    },
-  },
-  {
-    name: 'pages',
-    skip: { win32: "phase 2: WebView2 runs the check's executeJavascript outside the page's CSP, so eval runs there; whether the page itself refuses it is not yet asked" },
-  },
-  {
-    name: 'storage',
-    skip: { win32: "phase 2: WebView2's clearStorageData empties the first view's profile, not the partition it is given, so a removed connection's store keeps its data until the app removes its folder" },
-  },
-  {
-    name: 'environment',
-    skip: { win32: "phase 2: its stand-in server is a shell script, which Windows runs as no program, and the allowlist must compare names case-blind (Path)" },
-  },
-  {
-    name: 'remote',
-    skip: {
-      linux: "phase 2: it reads the Keychain with `security`; the credential store by name (libsecret's) then",
-      win32: "phase 2: it reads the Keychain with `security`; the credential store by name (Credential Manager's) then",
-    },
-  },
-  {
-    name: 'newdb',
-    skip: {
-      win32:
-        "phase 2: a new database's first collection is written by a server the app then stops by SIGTERM, TerminateProcess on Windows, which takes with it what the server still buffers (--sync 250): the window finds no collection, until the app ends its stdin",
-    },
-  },
-  {
-    name: 'serve',
-    skip: {
-      linux: "phase 2: it reads the Keychain with `security`; the credential store by name (libsecret's) then",
-      win32: "phase 2: it reads the Keychain with `security`, and a served database's Stop must be exit 0: the stop by stdin then",
-    },
-  },
-  {
-    name: 'backups',
-    skip: { win32: 'phase 2: the server started for a backup alone is stopped by SIGTERM, TerminateProcess on Windows (exit 1), until the app ends its stdin' },
-  },
+  { name: 'orphan' },
+  { name: 'sandbox' },
+  { name: 'pages' },
+  { name: 'storage' },
+  { name: 'environment' },
+  { name: 'remote' },
+  { name: 'newdb' },
+  { name: 'serve' },
+  { name: 'backups' },
+  { name: 'opener', skip: LINUX_ONLY },
+  { name: 'keyring', skip: LINUX_ONLY },
   {
     name: 'finder',
     skip: {

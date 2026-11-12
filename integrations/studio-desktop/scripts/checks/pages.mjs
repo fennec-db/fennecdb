@@ -7,8 +7,10 @@
 // by navigation rules, and a navigation anywhere else, a web page, a file, or
 // another of the app's pages, is refused. (sandbox.mjs holds a studio window.)
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { EXE, REPORT, assertClean, cmd, evalIn, file, lines, quit, startApp, step, waitFor, waitNone, waitNotice, log } from './lib.mjs';
+import { spawn, spawnSync } from 'node:child_process';
+import { dirname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { BUN, EXE, HERE, LINUX, REPORT, WIN, assertClean, cmd, evalIn, file, lines, quit, startApp, step, waitFor, waitNone, waitNotice, webviewWindows, log } from './lib.mjs';
 
 assertClean('before');
 
@@ -70,13 +72,45 @@ step('a link out of an app page is not handed to the browser: only a studio wind
 const m = lines().length;
 await evalIn('launcher', `window.open("https://example.com/"); return 1`);
 await waitNone((l, i) => i >= m && l.what === 'external', 1200, 'a link from an app page was handed to the browser');
+// Nor opened by WebView2 in a window of its own, which it does for a request Electrobun leaves to it (src/bun/opener.ts).
+if (WIN) assert.deepEqual(webviewWindows(), [], 'no window WebView2 opened by itself');
 
 step('the app\'s own pages run their bundle alone: their CSP refuses eval and inline script');
+// Eval is asked of the page itself: a string given to setTimeout is compiled by
+// the page, in a task of its own, after the check's script has returned. The
+// check's script is no page code: WebView2 runs it (ExecuteScript) as DevTools'
+// Runtime.evaluate does, which lets the evaluated code eval past the page's CSP
+// (its allowUnsafeEvalBlockedByCSP is on by default), so `new Function` there
+// ran on Windows while the page's own would not. A function timer after it
+// reports whether the string ran.
 for (const key of ['launcher', 'newdb']) {
-  const r = await evalIn(key, `try { new Function('return 1')(); return 'ran'; } catch (e) { return 'refused'; }`);
-  assert.equal(r.value, 'refused', `${key}: eval under the page's CSP`);
+  const r = await evalIn(key, `return await new Promise((done) => { window.__evalRan = false; setTimeout("window.__evalRan = true", 0); setTimeout(() => done(window.__evalRan), 50); })`);
+  assert.equal(r.value, false, `${key}: a string the page would eval, refused by its CSP`);
+  const direct = await evalIn(key, `try { new Function('return 1')(); return 'ran'; } catch (e) { return 'refused'; }`);
+  log(`${key}: new Function in the check's own script: ${direct.value}`);
+  if (!WIN) assert.equal(direct.value, 'refused', `${key}: eval under the page's CSP`);
   const inline = await evalIn(key, `window.__inlineRan = false; const s = document.createElement('script'); s.textContent = 'window.__inlineRan = true'; document.head.append(s); return window.__inlineRan`);
   assert.equal(inline.value, false, `${key}: an inline script is not run`);
+}
+
+step('the one instance listens where only its user can: $TMPDIR, $XDG_RUNTIME_DIR, or a pipe of its user\'s SID that only that user may open');
+const claim = await waitFor((l) => l.what === 'instance', 10000, 'the instance claimed');
+log('the guard:', claim.path, claim.claim);
+assert.equal(claim.claim, 'alone');
+if (LINUX && process.env.XDG_RUNTIME_DIR) assert.equal(dirname(claim.path), process.env.XDG_RUNTIME_DIR, 'in the session\'s own folder, not /tmp');
+if (WIN) {
+  const sid = /\.instance\.(S-1-[0-9-]+)$/.exec(claim.path)?.[1];
+  assert.ok(sid, `the pipe is named by its user's SID: ${claim.path}`);
+  // The pipe's owner and DACL, read through the app's own call (win32.ts) by the app's own Bun.
+  const script = `const w = await import(${JSON.stringify(pathToFileURL(join(HERE, 'src', 'bun', 'win32.ts')).href)}); console.log(w.pipeSddl(${JSON.stringify(claim.path)}));`;
+  const read = spawnSync(BUN, ['-e', script], { encoding: 'utf8', timeout: 30000 });
+  const sddl = read.stdout.trim();
+  log('its security descriptor:', sddl, read.stderr.trim());
+  // SDDL writes an account it has an alias for by the alias (the built-in Administrator, RID 500,
+  // which the runners run as, is LA), and the DACL's flags as letters: P, protected, and AI, which
+  // SetNamedSecurityInfo adds (read back on the runners: O:LAD:PAI(A;;FA;;;LA)).
+  const who = sid.endsWith('-500') ? `(?:LA|${sid})` : sid;
+  assert.match(sddl, new RegExp(`D:P(?:AI)?\\(A;;FA;;;${who}\\)$`), 'protected, one entry: every right to its user, and none to anyone else');
 }
 
 step('a second instance asks this one to show itself and quits, opening nothing');

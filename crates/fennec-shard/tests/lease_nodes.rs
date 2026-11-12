@@ -126,7 +126,7 @@ impl Node {
         let client = fennec_tls::Client::trusting_pem_file(&ca).unwrap();
         let mut s = client.dial(s, "localhost").unwrap();
         let head = format!(
-            "POST {path} HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
         );
         s.write_all(head.as_bytes()).unwrap();
@@ -371,7 +371,7 @@ pub fn call(
     let auth = auth.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
     write!(
         s,
-        "{method} {target} HTTP/1.1\r\nHost: x\r\n{auth}Content-Type: application/json\r\n\
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\n{auth}Content-Type: application/json\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )

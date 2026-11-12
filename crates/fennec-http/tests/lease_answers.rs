@@ -129,7 +129,7 @@ impl Conn {
     /// A request with the header lines `extra`, each ending `\r\n`.
     fn send_with(&mut self, method: &str, target: &str, extra: &str, body: &str) -> Answer {
         let head = format!(
-            "{method} {target} HTTP/1.1\r\nHost: n\r\n{extra}Content-Length: {}\r\n\r\n",
+            "{method} {target} HTTP/1.1\r\nHost: localhost\r\n{extra}Content-Length: {}\r\n\r\n",
             body.len()
         );
         self.out.write_all(head.as_bytes()).unwrap();

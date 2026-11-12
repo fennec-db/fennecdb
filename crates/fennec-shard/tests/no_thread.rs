@@ -121,7 +121,7 @@ fn call(addr: &str, method: &str, target: &str, body: &str) -> (u16, String, Str
     let mut s = TcpStream::connect(addr).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
     let req = format!(
-        "{method} {target} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
          Content-Length: {}\r\n\r\n{body}",
         body.len()
     );

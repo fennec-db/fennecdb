@@ -62,7 +62,7 @@ fn call(addr: &str, method: &str, target: &str, body: &str, auth: Option<&str>) 
     let auth = auth.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
     write!(
         s,
-        "{method} {target} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n{auth}\
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{auth}\
          Content-Length: {}\r\n\r\n{body}",
         body.len()
     )

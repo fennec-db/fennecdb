@@ -15,7 +15,13 @@
 // end however the app ended -- `kill -9` too -- and shuts down as on SIGTERM:
 // sync, checkpoint, `<file>.lock` let go, exit 0. That is why no server is left
 // holding a file with nobody to answer. Stopped, it is sent SIGTERM, the same
-// shutdown, and SIGKILL only if it has not ended 30 s later.
+// shutdown, and SIGKILL only if it has not ended 30 s later. **On Windows it is
+// stopped by the end of that stdin**: there is no SIGTERM, and libuv's and
+// Bun's `kill("SIGTERM")` is TerminateProcess, which ended the server in 1 to 3
+// ms with no shutdown line -- no sync, no checkpoint, and a new database's first
+// collection, still buffered under `--sync 250`, lost (#578, and phase 1's
+// `newdb`). The end of stdin is the server's one shutdown there (about 160 ms,
+// exit 0); TerminateProcess is left for a server that has not ended 30 s later.
 //
 // Two things about it are not obvious. The pipe's write end must stay in this
 // process alone: a child that inherited it (a descriptor not marked
@@ -65,8 +71,13 @@ export type Child = {
 	exited: Promise<number | null>;
 	readonly exitCode: number | null;
 	kill(signal: "SIGTERM" | "SIGKILL"): void;
+	/** Ends the pipe on its stdin: under `--exit-on-stdin-close`, the server's shutdown. */
+	endStdin(): void;
 };
 export type Spawn = (argv: string[], env: Record<string, string>) => Child;
+
+/** How a stop asks for the server's shutdown: SIGTERM, or on Windows, where that is TerminateProcess, the end of its stdin. */
+export const STOP_BY_STDIN = process.platform === "win32";
 
 export type FileServer = {
 	file: string;
@@ -85,7 +96,7 @@ export type FileServer = {
 	replicationToken: string | null;
 	pid: number;
 	startedAt: number;
-	/** SIGTERM, then SIGKILL after `graceMs`. Resolves once the process is gone. */
+	/** SIGTERM (Windows: the end of its stdin), then SIGKILL after `graceMs`. Resolves once the process is gone. */
 	stop(graceMs?: number): Promise<number | null>;
 	/** Resolves when the process exits, for whatever reason. */
 	exited: Promise<number | null>;
@@ -257,7 +268,10 @@ export async function startServer(
 		},
 		stop(graceMs = 30_000) {
 			stopping ??= (async () => {
-				if (proc.exitCode === null) proc.kill("SIGTERM");
+				if (proc.exitCode === null) {
+					if (STOP_BY_STDIN) proc.endStdin();
+					else proc.kill("SIGTERM");
+				}
 				let timer: ReturnType<typeof setTimeout> | undefined;
 				const done = await Promise.race([exited, new Promise<"late">((r) => (timer = setTimeout(() => r("late"), graceMs)))]);
 				clearTimeout(timer);

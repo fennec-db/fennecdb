@@ -52,7 +52,7 @@ fn status(addr: &str, target: &str, token: Option<&str>) -> u16 {
     let auth = token.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
     write!(
         s,
-        "GET {target} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n{auth}\r\n"
+        "GET {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{auth}\r\n"
     )
     .unwrap();
     let mut answer = String::new();

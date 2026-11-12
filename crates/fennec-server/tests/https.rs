@@ -113,8 +113,10 @@ fn get_tls(port: u16, path: &str) -> String {
     s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
     let client = fennec_tls::Client::trusting_pem_file(Path::new(&cert("ca.pem"))).unwrap();
     let mut s = client.dial(s, "localhost").unwrap();
-    s.write_all(format!("GET {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n").as_bytes())
-        .unwrap();
+    s.write_all(
+        format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").as_bytes(),
+    )
+    .unwrap();
     s.flush().unwrap();
     let mut out = Vec::new();
     let _ = s.read_to_end(&mut out);
@@ -141,7 +143,7 @@ fn serves_https_alone_and_pings_over_it() {
     // Plain HTTP is told the scheme.
     let mut s = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
-    s.write_all(b"GET /_health HTTP/1.1\r\nHost: t\r\n\r\n")
+    s.write_all(b"GET /_health HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .unwrap();
     let mut plain = String::new();
     s.read_to_string(&mut plain).unwrap();
@@ -208,7 +210,7 @@ fn every_tls_end_is_a_close_notify_the_shutdown_s_too() {
     let mut made = dial();
     write!(
         made,
-        "POST /query HTTP/1.1\r\nHost: t\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{q}",
+        "POST /query HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{q}",
         q.len()
     )
     .unwrap();
@@ -221,7 +223,7 @@ fn every_tls_end_is_a_close_notify_the_shutdown_s_too() {
     let mut stream = std::io::BufReader::new(dial());
     stream
         .get_mut()
-        .write_all(b"GET /notes/changes HTTP/1.1\r\nHost: t\r\n\r\n")
+        .write_all(b"GET /notes/changes HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .unwrap();
     let mut events = String::new();
     while !events.contains("event: seed") {
@@ -286,7 +288,7 @@ fn ask_tls(port: u16, method: &str, path: &str, body: &str) -> String {
     let client = fennec_tls::Client::trusting_pem_file(Path::new(&cert("ca.pem"))).unwrap();
     let mut s = client.dial(s, "localhost").unwrap();
     let head = format!(
-        "{method} {path} HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     s.write_all(head.as_bytes()).unwrap();

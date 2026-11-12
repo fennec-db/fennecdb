@@ -328,6 +328,68 @@ fn a_row_written_again_since_it_was_found_is_not_swept() {
     assert_eq!(count(&db, &format!("get s where id = {} count", ids[0])), 1);
 }
 
+/// `alive` is asked before every term of a filter, as a scoped token's
+/// rules are (access.md, *The rules are asked before the caller's terms*):
+/// a term failing by a field of a row -- `1 / n` over `n = 0` -- never runs
+/// over a row past its time and not yet swept, through a `get`, a count, a
+/// `set`, a `del` and a subscriber's changes, row at a time or bound. ANDed
+/// in after, it told such a row's fields to whoever wrote the term, a
+/// token without the `expired` grant among them. `expired()` reads the row,
+/// and the term fails there as written.
+#[test]
+fn a_term_that_fails_never_runs_over_an_expired_row() {
+    let mut db = Database::new();
+    db.set_clock(Some(NOW));
+    run(
+        &mut db,
+        "create collection e (n int, k text, seen timestamp @ttl(30m))",
+        &[],
+    );
+    let seq = db.change_seq();
+    run(
+        &mut db,
+        &format!(
+            "put e [{{id: 1, n: 0, k: \"a\", seen: {}}}, {{id: 2, n: 2, k: \"a\", seen: {NOW}}}]",
+            NOW - TTL
+        ),
+        &[],
+    );
+    for f in [
+        "1 / n >= 0",
+        "k = \"a\" and 1 / n >= 0",
+        "1 / n >= 0 and k = \"a\"",
+    ] {
+        let found = rows(&db, &format!("get e where {f}"), &[]);
+        assert_eq!(found.rows.iter().map(|r| r.id).collect::<Vec<_>>(), [2]);
+        assert_eq!(count(&db, &format!("get e where {f} count")), 1, "{f}");
+        let set = run(&mut db, &format!("set e {{k: \"a\"}} where {f}"), &[]);
+        assert!(matches!(set, Response::Affected(1)), "{f}: {set:?}");
+        let filter = match fennec_ql::parse_one(&format!("get e where {f}")).unwrap() {
+            Statement::Select(s) => s.filter.unwrap(),
+            _ => unreachable!(),
+        };
+        let Changes::Batch(b) = db
+            .changes_since("e", seq, Some(&filter), None, &[])
+            .unwrap()
+        else {
+            panic!("reseed");
+        };
+        assert_eq!(b.puts.rows.iter().map(|r| r.id).collect::<Vec<_>>(), [2]);
+        let written = db.written_after("e", seq).unwrap().expect("in the ring");
+        let Changes::Batch(b) = db
+            .changes_held("e", written, Some(&filter), None, None)
+            .unwrap()
+        else {
+            panic!("reseed");
+        };
+        assert_eq!(b.puts.rows.iter().map(|r| r.id).collect::<Vec<_>>(), [2]);
+    }
+    let stmt = fennec_ql::parse_one("get e where expired() and 1 / n >= 0").unwrap();
+    assert!(db.query(&stmt, &[]).is_err());
+    let del = run(&mut db, "del e where 1 / n >= 0", &[]);
+    assert!(matches!(del, Response::Affected(1)), "{del:?}");
+}
+
 #[test]
 fn a_subscriber_is_told_an_expired_row_is_gone() {
     let mut db = Database::new();

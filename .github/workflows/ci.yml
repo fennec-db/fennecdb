@@ -1159,9 +1159,15 @@ jobs:
           integrations/ffi-sizes.sh x86_64-unknown-linux-gnu aarch64-linux-android armv7-linux-androideabi x86_64-linux-android \
             | tee -a "$GITHUB_STEP_SUMMARY"
 
+      # Flutter is pinned here, in the Apple job and in packages.yml: `stable`
+      # alone floats, and 3.50.0 (2026-11-11) deprecated
+      # package:flutter/material.dart, which `flutter analyze` fails on in the
+      # examples (#590). Raised by hand, once the examples take what a new
+      # release asks: 3.50.0 after they moved to package:material_ui (#591).
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version: 3.50.0
           cache: true
 
       # The Dart package under Flutter's own Dart -- its sync tests against
@@ -1285,6 +1291,7 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version: 3.50.0
           cache: true
 
       - name: The Flutter plugin in an iOS app

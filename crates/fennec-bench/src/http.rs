@@ -65,7 +65,7 @@ impl Http {
         self.head.clear();
         write!(
             self.head,
-            "{method} {path} HTTP/1.1\r\nHost: bench\r\nContent-Type: {content_type}\r\n{headers}Content-Length: {}\r\n\r\n",
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: {content_type}\r\n{headers}Content-Length: {}\r\n\r\n",
             body.len()
         )
         .unwrap();
@@ -101,7 +101,7 @@ impl Http {
         self.head.clear();
         write!(
             self.head,
-            "POST /query HTTP/1.1\r\nHost: bench\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            "POST /query HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
             body.len()
         )
         .unwrap();

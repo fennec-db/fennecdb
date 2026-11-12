@@ -29,9 +29,46 @@ network: <code>--tls-cert</code> and <code>--tls-key</code> (<a href="/docs/serv
 <tr><td><code>--http-read-only</code></td><td>write endpoints return 403, and so does a call of a named statement whose body writes (one whose body only reads is answered); <code>fennec-server</code>'s own path is unaffected</td></tr>
 <tr><td>a replica</td><td>every write returns 403, whatever the flags: its writes come from its primary</td></tr>
 <tr><td>non-loopback address</td><td>refuses to bind without a token, unless <code>--insecure</code> is given</td></tr>
+<tr><td>no token</td><td>answers only under this machine's name, and a page only from its own origin or <code>--http-cors</code>'s; every other request is refused 403 before it runs (below)</td></tr>
 </tbody>
 </table>
 </div>
+
+<h3 id="open-servers">A server with no token</h3>
+
+<p>With neither <code>--http-token</code> nor JSON Web Tokens -- the Quickstart's
+server, a node given <code>--admin-token</code> alone -- whoever reaches the
+server reads and writes everything, and a browser reaches
+<code>127.0.0.1</code> from any page. So such a server holds every request to
+two checks before it runs anything, under <code>--insecure</code> too:</p>
+
+<ul>
+  <li><b>Its name.</b> The <code>Host</code> a request names must be
+    <code>localhost</code>, a name under it (<code>app.localhost</code>) or an IP
+    address. A page whose DNS name was rebound to 127.0.0.1 sends its own name,
+    and is refused (403) where it would have read every row. A server reached by
+    another name -- a container's service name, a tunnel's, a LAN name -- needs a
+    token: <code>reach it as localhost or by its address, or give it
+    --http-token</code>, the refusal says.</li>
+  <li><b>The page's origin.</b> A request carrying <code>Origin</code> must come
+    from the server's own origin (the studio it serves) or the one
+    <code>--http-cors</code> names (<code>*</code>: any). Another site's page, which
+    could send a write without a preflight (<code>mode: "no-cors"</code>), is
+    refused (403) before the write runs. Name your app's origin with
+    <code>--http-cors</code>.</li>
+</ul>
+
+<p>curl, the SDKs, Node's <code>fetch</code> and other servers send no
+<code>Origin</code> and pass on this machine's name. <code>/_health</code> and a
+preflight <code>--http-cors</code> lets in are answered under any name. A server
+with a token is held to neither check: a page holds no token, and sends none to
+another origin without the preflight CORS refuses. <code>fennec-shard</code> with
+no <code>--token</code> is held the same way (<a
+href="/docs/sharding-reference#cors">Tenants and sharding</a>). Behind the
+router or a proxy, the server also asks the name the router or proxy was
+reached by, which they send in <code>X-Forwarded-Host</code>: a node with no
+data token answers only a client that reached the router under this machine's
+name (<a href="/docs/server#behind-a-proxy">Behind a proxy</a>).</p>
 
 <details class="deep"><summary>TLS, unfiltered writes, body limits and what a shape leaks</summary>
 <p>The endpoint runs inside <code>fennec-server</code> and takes its TLS flags.
@@ -581,6 +618,32 @@ messages   read,insert  where room in (get members select room where user = $jwt
     spelling, in the ranking, its facets and its marks alike: a spelling
     only another user's rows write leaves the token's word read as every
     spelling.</li>
+  <li id="scoped-rules-first"><b>The rules are asked first.</b> A row
+    meets the token's rules before any condition of the statement's own,
+    in a <code>where</code>, a <code>lookup</code> level, an inner
+    <code>get</code>, a <code>set</code> or <code>del</code>, REST's
+    <code>?where=</code> and a subscription's shape alike, so a condition
+    that fails — a division by zero, a number past 64 bits — is never
+    worked out over a row the token may not read: <code>get notes where id
+    = 17 and 1 / (case when body &gt;= "m" then 0 else 1 end) = 1</code> is
+    <code>[]</code> whatever another user's note 17 holds. A row past its
+    <code>@ttl</code> is left out before either, so such a condition never
+    meets one without the <code>expired</code> grant. An upsert's
+    <code>else set</code> reads the row holding its value only once the
+    token may update it, and is refused (403) before it reads one it may
+    not. Conditions that cannot fail — a field compared with a value, an
+    <code>in</code> list, <code>like</code> — may be tested in another
+    order where that is faster; the answer is the same.</li>
+  <li id="scoped-explain"><b><code>explain</code> is the server token's.</b>
+    A scoped token's <code>explain</code> is refused (403, <code>`explain`
+    is the server token's: a plan counts rows this token's rules hide from
+    it</code>) through <code>/query</code>, <code>/batch</code> and MCP's
+    <code>query</code> tool: a plan counts the rows an index found before
+    the rules held them, and which index it names compares two such
+    counts, so it would tell a user whether another user's row holds a
+    value. A collection the token is granted nothing on is still answered
+    404, as for a <code>get</code>. The server's own token explains as
+    before.</li>
   <li><b><a href="http-reference.html#subscriptions">Subscriptions</a></b> are told only of rows they were sent: a scoped
     subscriber hears of a row leaving its shape only if the row was in it,
     so the ids other users write never reach it — rows leaving as a rule
