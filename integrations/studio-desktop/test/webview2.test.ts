@@ -60,17 +60,27 @@ test("every WEBVIEW2_ variable the app was started with is taken out, its name r
 	assert.deepEqual(webview2Variables({ Path: "x" }), []);
 });
 
-/** A window and its page as `keysToPage` sees them: their handlers, and how often the window was activated. */
+/** A window and its page as `keysToPage` sees them: their handlers, how often the window was activated, and a timer the test runs by hand. */
 function fakeWindow() {
-	const on: Record<string, (() => void)[]> = { focus: [], "did-navigate": [] };
+	const on: Record<string, (() => void)[]> = { focus: [], close: [], "did-navigate": [] };
+	const ticks = new Map<number, () => void>();
+	let next = 0;
+	const settle = () => new Promise((r) => setImmediate(r));
 	const w = {
 		activated: 0,
-		win: { on: (e: "focus", h: () => void) => void on[e]!.push(h), activate: () => void w.activated++ },
+		win: { on: (e: "focus" | "close", h: () => void) => void on[e]!.push(h), activate: () => void w.activated++ },
 		view: { on: (e: "did-navigate", h: () => void) => void on[e]!.push(h) },
-		fire: async (e: "focus" | "did-navigate") => {
+		every: { set: (f: () => void) => (ticks.set(++next, f), next), clear: (t: unknown) => void ticks.delete(t as number) },
+		watching: () => ticks.size,
+		fire: async (e: "focus" | "close" | "did-navigate") => {
 			for (const h of on[e]!) h();
 			// The handler asks for the focus asynchronously (win32.ts is loaded on first use).
-			await new Promise((r) => setImmediate(r));
+			await settle();
+		},
+		tick: async () => {
+			for (const f of [...ticks.values()]) f();
+			await settle();
+			await settle();
 		},
 		on,
 	};
@@ -91,20 +101,53 @@ test("on Windows a window's page is given the focus once it loads and at each ac
 	const w = fakeWindow();
 	let focus = at({});
 	const said: string[] = [];
-	keysToPage(w.win, w.view, () => focus, (_f, moved, why) => said.push(`${why} ${moved}`), "win32");
+	keysToPage(w.win, w.view, () => focus, (_f, moved, why) => said.push(`${why} ${moved}`), "win32", w.every);
 	await w.fire("did-navigate");
 	assert.equal(w.activated, 1, "the page loaded, the window in front, the focus on the bare window");
 	focus = at({ onWindow: false });
 	await w.fire("focus");
 	assert.equal(w.activated, 1, "the page has the focus: nothing is done");
-	focus = at({ front: false });
-	await w.fire("focus");
-	await w.fire("did-navigate");
-	assert.equal(w.activated, 1, "a window behind: nothing is done, so nothing is brought forward");
 	focus = at({});
 	await w.fire("focus");
 	assert.equal(w.activated, 2, "activated by the user, the focus on the bare window: moved into the page");
-	assert.deepEqual(said, ["loaded true", "activated false", "activated false", "loaded false", "activated true"], "every look is said, why and whether moved");
+	assert.deepEqual(said, ["loaded true", "activated false", "activated true"], "every look is said, why and whether moved");
+	assert.equal(w.watching(), 0, "a window in front is not watched");
+});
+
+test("a window behind is never brought forward, and its page gets the focus once the user brings it forward, with no event of its own", async () => {
+	const w = fakeWindow();
+	let focus = at({ front: false });
+	const said: string[] = [];
+	keysToPage(w.win, w.view, () => focus, (_f, moved, why) => said.push(`${why} ${moved}`), "win32", w.every);
+	// Made the active window of its thread while another program's was in front, then loaded behind it.
+	await w.fire("focus");
+	await w.fire("did-navigate");
+	assert.equal(w.activated, 0, "nothing is brought forward");
+	assert.equal(w.watching(), 1, "watched for coming forward, once");
+	await w.tick();
+	assert.equal(w.activated, 0, "still behind: still nothing");
+	// A click on its title bar: in front, the focus on the bare window, and no WM_ACTIVATE.
+	focus = at({});
+	await w.tick();
+	assert.equal(w.activated, 1, "come forward: the focus moved into its page");
+	assert.equal(w.watching(), 0, "no longer watched once in front");
+	assert.deepEqual(said, ["activated false", "loaded false", "forward true"]);
+});
+
+test("a window closed while behind is no longer watched", async () => {
+	const w = fakeWindow();
+	keysToPage(w.win, w.view, () => at({ front: false }), undefined, "win32", w.every);
+	await w.fire("did-navigate");
+	assert.equal(w.watching(), 1);
+	await w.fire("close");
+	assert.equal(w.watching(), 0, "the close stops the watch");
+	const gone = fakeWindow();
+	let there = true;
+	keysToPage(gone.win, gone.view, () => (there ? at({ front: false }) : null), undefined, "win32", gone.every);
+	await gone.fire("did-navigate");
+	there = false;
+	await gone.tick();
+	assert.equal(gone.watching(), 0, "a window whose handle is gone stops its watch too");
 });
 
 test("a window closed before its look is no failure", async () => {
@@ -113,7 +156,7 @@ test("a window closed before its look is no failure", async () => {
 		throw new Error("Can't activate window. Window no longer exists");
 	};
 	const said: boolean[] = [];
-	keysToPage(w.win, w.view, () => at({}), (_f, moved) => said.push(moved), "win32");
+	keysToPage(w.win, w.view, () => at({}), (_f, moved) => said.push(moved), "win32", w.every);
 	await w.fire("focus");
 	assert.deepEqual(said, [true]);
 });
@@ -121,7 +164,7 @@ test("a window closed before its look is no failure", async () => {
 test("macOS and Linux leave a window's focus to their toolkit: nothing is listened for", () => {
 	for (const platform of ["darwin", "linux"] as const) {
 		const w = fakeWindow();
-		keysToPage(w.win, w.view, () => at({}), undefined, platform);
-		assert.equal(w.on["focus"]!.length + w.on["did-navigate"]!.length, 0, platform);
+		keysToPage(w.win, w.view, () => at({}), undefined, platform, w.every);
+		assert.equal(w.on["focus"]!.length + w.on["close"]!.length + w.on["did-navigate"]!.length, 0, platform);
 	}
 });

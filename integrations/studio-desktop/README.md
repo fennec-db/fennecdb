@@ -603,8 +603,9 @@ the main window takes Ctrl+N, Ctrl+O and Ctrl+Shift+O in its own page, on
 Linux too; a studio window's menu bar works with the mouse. The page has the
 focus because the app puts it there: Windows gives an activated window's
 focus to the window itself, where no key reaches a page, so once a window's
-page loads and whenever the window is activated, the app moves the focus into
-the page, only for a window already in front, never bringing one forward. Linux has no
+page loads, whenever the window is activated, and when a window that was
+behind another program's comes forward, the app moves the focus into the
+page, only for a window already in front, never bringing one forward. Linux has no
 application menu (Electrobun 2.0.4), so the main window's own buttons do what
 macOS's File menu does: New database, Open file…, the Databases list (Open
 Recent), Remote connections (Connect to a Server…); with the main window

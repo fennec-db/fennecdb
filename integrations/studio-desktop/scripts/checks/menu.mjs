@@ -14,7 +14,7 @@
 // its page: windows.ts's `focusesPage`; on the arm64 runner it was on the bare
 // window, and typed keys reached nothing; where the window opened behind
 // another program's, which the app leaves there, a click on its title bar
-// brings it forward first, and the app's look at that activation moves the
+// brings it forward first, and the app's look once it is in front moves the
 // focus), and a click into its page reaches the page, text typed after it too. Either
 // failing fails the check, saying what the page saw and where the system's
 // input went, so a chord that does nothing is the app's failing, not the keys'.
@@ -116,7 +116,7 @@ if (WIN) {
   // The app's look once the page loaded says whether the window opened in front. Behind another
   // program's window (on the arm64 runner a "Microsoft account" window was in front), the app
   // leaves it there, and a person brings it forward with a click on its title bar, not its page:
-  // so does the check, and the app's look at that activation is the one that moves the focus.
+  // so does the check, and the app's look once it is in front is the one that moves the focus.
   const loaded = await waitFor((l) => l.what === 'page-focus' && l.key === 'launcher' && l.why === 'loaded', 30000, "the app's look at the main window once its page loaded");
   if (!loaded.focus?.front) {
     const n = lines().length;
@@ -127,8 +127,10 @@ if (WIN) {
     cmd({ cmd: 'keys', key: 'launcher', title: true });
     const r = await waitFor((l, i) => i >= t && l.what === 'keys-result', 15000, 'the click on the title bar');
     if (!r.front) assert.fail(`a click on the main window's title bar did not bring it forward (${JSON.stringify(r)})`);
-    const act = await waitFor((l, i) => i >= t && l.what === 'page-focus' && l.key === 'launcher' && l.why === 'activated' && l.focus?.front, 15000, "the app's look at the main window once it was brought forward");
-    log(`brought forward by its title bar (${JSON.stringify(r.clicked)}): the app ${act.moved ? 'moved the focus into its page' : `found ${JSON.stringify(act.focus)}`}`);
+    // An activation (WM_ACTIVATE), or, for a window that was its thread's active one while behind,
+    // the app's watch seeing it come forward: either look is the app's, with the window in front.
+    const act = await waitFor((l, i) => i >= t && l.what === 'page-focus' && l.key === 'launcher' && (l.why === 'activated' || l.why === 'forward') && l.focus?.front, 15000, "the app's look at the main window once it was brought forward");
+    log(`brought forward by its title bar (${JSON.stringify(r.clicked)}): the app's look (${act.why}) ${act.moved ? 'moved the focus into its page' : `found ${JSON.stringify(act.focus)}`}`);
   }
   // The event the keys wait for: the page has the system's focus. Nothing of the check's own moves it.
   const focused = await until(async () => (await pageSaw()).focused, 15000, "the main window's page focused").then(() => true, () => false);

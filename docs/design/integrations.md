@@ -1049,8 +1049,9 @@ window and the app's words are each system's, and the app has its icon there.
   as a person would, by a click on its title bar (where WindowFromPoint names
   another window over every point of it, the window and whether DWM cloaks it
   are said, and the click made all the same: the window's coming forward is
-  what is asked): the app's look at that activation is then the one that moves
-  the focus, the other half of the rule. (The windows-11-arm image comes up
+  what is asked): the app's look once it is in front (its activation's, or
+  the watch's for a window that was behind) is then the one that moves the
+  focus, the other half of the rule. (The windows-11-arm image comes up
   with the Start menu open, its search in front, and a "Microsoft account"
   sign-in window, WWAHost.exe, each started before the job and in front of
   every window: the Start menu lay over the middle of the main window's title
@@ -1089,7 +1090,16 @@ window and the app's words are each system's, and the app has its icon there.
   refused, so it is made only for a window that is the one in front
   (GetForegroundWindow) and never brings one forward: a window behind another
   program's stays behind, and its page is given the focus when the user
-  brings it forward. What it does not change: Electrobun makes every window
+  brings it forward. That needs a look of its own: a window Electrobun made
+  the active one of its thread while another program's was in front (its
+  creation's SetActiveWindow, where the foreground was refused) gets no
+  WM_ACTIVATE when a click brings it forward. Measured on the arm64 runner,
+  the Start menu open as the main window opened: clicked by its title bar,
+  it came to the front with no `focus` event and its focus on the bare
+  window. So a window a look finds behind is looked at every 100 ms
+  (`BEHIND_LOOK_MS`) until it is in front, then given the focus (`forward`),
+  or until it closes; one in front is never watched, so a window that opens
+  in front costs no timer. What it does not change: Electrobun makes every window
   activated (`activate` defaults to true), by the same AttachThreadInput, so a
   window that opens while the user is in another program, a file handed over
   late, comes forward as it did before; and between the look and the call, a

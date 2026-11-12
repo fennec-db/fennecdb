@@ -41,10 +41,11 @@ export function counted(win: BrowserWindow<any>): void {
 
 /**
  * Windows: the keyboard focus put in `view`'s page, the page `win` shows, once
- * it has loaded and whenever the window is activated, where the window is in
- * front and the focus is in no page; never by bringing a window forward
- * (webview2.ts's `keysToPage`, `checks/menu.mjs`). Every window the app makes
- * is given it, as every one is `counted`: each takes keys in its page.
+ * it has loaded, whenever the window is activated and when it comes forward
+ * from behind another program's, where the window is in front and the focus
+ * is in no page; never by bringing a window forward (webview2.ts's
+ * `keysToPage`, `checks/menu.mjs`). Every window the app makes is given it, as
+ * every one is `counted`: each takes keys in its page.
  */
 export function focusesPage(win: BrowserWindow<any>, view: BrowserView): void {
 	keysToPage(

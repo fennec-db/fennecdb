@@ -74,12 +74,23 @@ export type KeyFocus = {
 export const movesFocus = (f: KeyFocus | null): boolean => f !== null && f.front && !f.menu && f.onWindow;
 
 /** The part of an Electrobun window `keysToPage` uses. */
-export type FocusedWindow = { on(event: "focus", handler: () => void): void; activate(): void };
+export type FocusedWindow = { on(event: "focus" | "close", handler: () => void): void; activate(): void };
+
+/** Why the app looked at a window's focus: its page loaded, it was activated, or it came forward from behind. */
+export type FocusLook = "loaded" | "activated" | "forward";
+
+/** How often a window behind another program's is looked at, until it comes forward. */
+export const BEHIND_LOOK_MS = 100;
+
+/** The timer `keysToPage` watches a window behind with (setInterval's, or a test's). */
+export type Every = { set(f: () => void, ms: number): unknown; clear(t: unknown): void };
+const EVERY: Every = { set: (f, ms) => setInterval(f, ms), clear: (t) => clearInterval(t as ReturnType<typeof setInterval>) };
 
 /**
  * Windows: the keyboard focus put in the page of `win` (its view `view`) once
- * the page has loaded and each time the window is activated, where the window
- * is in front and the focus is in no page. Activating a window, Windows'
+ * the page has loaded, each time the window is activated, and when a window
+ * that was behind another program's comes forward, where the window is in
+ * front and the focus is in no page. Activating a window, Windows'
  * DefWindowProc puts the focus on the window itself (WM_ACTIVATE), and a
  * WebView2 page is a child window of another process, which takes it only
  * when the host moves it there (the controller's MoveFocus); Electrobun 2.0.4
@@ -92,20 +103,35 @@ export type FocusedWindow = { on(event: "focus", handler: () => void): void; act
  * AttachThreadInput to the thread in front where SetForegroundWindow is
  * refused, so it is asked only of a window already in front and never brings
  * one forward: a window behind another program's stays there, and its page is
- * given the focus when the user brings it forward (its "focus" event). A menu
- * that has the input is left to it. Not on macOS and Linux: there the page is the
- * window's own view, which AppKit makes its first responder and GTK gives the
- * window's focus, and `activate()` would bring the app forward over another.
+ * given the focus when the user brings it forward. That needs a look of its
+ * own: a window Electrobun made the active one of its thread while another
+ * program's was in front (its creation's SetActiveWindow, where the foreground
+ * was refused) gets no WM_ACTIVATE when a click on it brings it forward, as on
+ * the arm64 runner, where the Start menu was open when the main window opened:
+ * clicked by its title bar, it came to the front with no "focus" event, its
+ * focus on the bare window. So a window found behind is looked at every
+ * BEHIND_LOOK_MS until it is in front or closed, and no longer once it is.
+ * A menu that has the input is left to it. Not on macOS and Linux: there the
+ * page is the window's own view, which AppKit makes its first responder and
+ * GTK gives the window's focus, and `activate()` would bring the app forward
+ * over another.
  */
 export function keysToPage(
 	win: FocusedWindow,
 	view: { on(event: "did-navigate", handler: () => void): void },
 	look: () => KeyFocus | null | Promise<KeyFocus | null>,
-	said: (f: KeyFocus | null, moved: boolean, why: "loaded" | "activated") => void = () => {},
+	said: (f: KeyFocus | null, moved: boolean, why: FocusLook) => void = () => {},
 	platform: NodeJS.Platform = process.platform,
+	every: Every = EVERY,
 ): void {
 	if (platform !== "win32") return;
-	const give = async (why: "loaded" | "activated") => {
+	let behind: unknown = null;
+	let closed = false;
+	const stopWatching = () => {
+		if (behind !== null) every.clear(behind);
+		behind = null;
+	};
+	const give = async (why: FocusLook) => {
 		const f = await look();
 		const moved = movesFocus(f);
 		if (moved) {
@@ -116,7 +142,24 @@ export function keysToPage(
 			}
 		}
 		said(f, moved, why);
+		if (f === null || f.front || closed) stopWatching();
+		else if (behind === null) {
+			behind = every.set(() => {
+				void (async () => {
+					const now = await look();
+					if (now === null) return stopWatching();
+					if (now.front && behind !== null) {
+						stopWatching();
+						await give("forward");
+					}
+				})();
+			}, BEHIND_LOOK_MS);
+		}
 	};
 	view.on("did-navigate", () => void give("loaded"));
 	win.on("focus", () => void give("activated"));
+	win.on("close", () => {
+		closed = true;
+		stopWatching();
+	});
 }
