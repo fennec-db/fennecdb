@@ -4,6 +4,9 @@
 //   node scripts/checks/dist.mjs [the .dmg]
 //     default: artifacts/dist/fennec-studio-macos-arm64.dmg
 //
+// On Windows and Linux it holds the zip or the tarball instead
+// (dist-archive.mjs, which says what it holds).
+//
 // What it holds, on that very file:
 //   - the image verifies, is compressed, and holds the app and a link to
 //     /Applications, nothing else;
@@ -34,8 +37,15 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { D, HERE, R, log, procs, sleep, step } from './lib.mjs';
+import { D, HERE, MAC, R, log, procs, sleep, step } from './lib.mjs';
 import { treeDigest } from '../tree-digest.mjs';
+
+// Windows and Linux ship the app unpacked in a zip and a tarball, held as they
+// ship by dist-archive.mjs.
+if (!MAC) {
+  await import('./dist-archive.mjs');
+  process.exit(0);
+}
 
 const DMG = process.argv[2] ?? `${HERE}artifacts/dist/fennec-studio-macos-arm64.dmg`;
 const NAME = 'fennec studio.app';

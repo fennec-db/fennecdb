@@ -29,13 +29,7 @@ const LINUX_ONLY = {
   win32: 'Linux alone: Windows hands a link and a folder to ShellExecute, and keeps tokens in Credential Manager, none of it through a shell or a bus',
 };
 const CHECKS = [
-  {
-    name: 'release',
-    skip: {
-      linux: 'phase 4: nothing ships for Linux until then; this reads the payload of a macOS bundle',
-      win32: 'phase 4: nothing ships for Windows until then; this reads the payload of a macOS bundle',
-    },
-  },
+  { name: 'release' },
   { name: 'warmup' },
   { name: 'files' },
   { name: 'server-dies' },

@@ -1,6 +1,6 @@
 <!--
 title: Download — fennecdb
-description: Download fennec studio, the Mac app (beta) that makes, opens and serves a database with the server inside it, or fennecdb for the command line: one command for macOS, Linux or Windows puts fennec-server and the fennec shell in your home directory with no sudo, checked against the release's SHA256SUMS. Homebrew, .deb, .rpm, tarballs, the Docker image and a package for each language too.
+description: Download fennec studio, the app (beta) for Mac, Windows and Linux that makes, opens and serves a database with the server inside it, or fennecdb for the command line: one command for macOS, Linux or Windows puts fennec-server and the fennec shell in your home directory with no sudo, checked against the release's SHA256SUMS. Homebrew, .deb, .rpm, tarballs, the Docker image and a package for each language too.
 -->
 
 {{scarp}}
@@ -10,15 +10,16 @@ description: Download fennec studio, the Mac app (beta) that makes, opens and se
     <p class="dl-eyebrow">Download · release {{version}}</p>
     <h1 class="dl-title" id="dl-title">Download fennecdb</h1>
     <p class="dl-lede">fennec studio, an app that makes, opens and serves a
-      database on your Mac with the server inside it. Or the two programs for
+      database on your Mac, Windows or Linux machine with the server inside it.
+      Or the two programs for
       the command line, <code>fennec-server</code> and <code>fennec</code>,
       and a package for each language that reaches them.</p>
 
     <div class="dl-hero">
       <script>(function () {
         // This machine, before the card is painted (a class on <html>, no
-        // layout moves after): Windows and Linux are shown the Playground and
-        // the server's --studio in place of the .dmg. The same user-agent
+        // layout moves after): Windows and Linux are shown their own zip or
+        // tarball and install line in place of the .dmg. The same user-agent
         // test as site.js's system tabs; without script every visitor sees
         // the Mac's.
         var ua = navigator.userAgent || '';
@@ -31,7 +32,7 @@ description: Download fennec studio, the Mac app (beta) that makes, opens and se
           <span class="dl-app-icon" aria-hidden="true">{{mark}}</span>
           <div>
             <p class="dl-app-name">fennec studio<span class="dl-beta">BETA</span></p>
-            <p class="dl-app-kind">for Mac · Apple silicon · release {{version}}</p>
+            <p class="dl-app-kind">for <span class="dl-sys-mac">Mac · Apple silicon</span><span class="dl-sys-win">Windows · x64 and arm64</span><span class="dl-sys-lin">Linux · x64 and arm64</span> · release {{version}}</p>
           </div>
         </div>
 
@@ -46,13 +47,35 @@ description: Download fennec studio, the Mac app (beta) that makes, opens and se
           <p class="dl-first"><strong>Not signed by Apple.</strong> The first time you open it, macOS stops it once: System Settings › Privacy &amp; Security › <strong>Open Anyway</strong>. After that it opens as any app does.</p>
           <p class="dl-app-line">Or in one line, with nothing to click through:</p>
           <div class="dl-one"><pre data-lang="bash">curl -fsSL https://fennecdb.com/install.sh | sh -s -- --app</pre></div>
-          <p class="dl-else">On an Intel Mac, Windows or Linux, the same studio comes in the server, <code>fennec-server --studio</code>, and runs in your browser on the <a href="playground.html">Playground</a>.</p>
+          <p class="dl-else">For Windows, <a href="https://github.com/fennec-db/fennecdb/releases/download/v{{version}}/fennec-studio-v{{version}}-windows-x64.zip">the .zip</a>, and Linux, <a href="https://github.com/fennec-db/fennecdb/releases/download/v{{version}}/fennec-studio-v{{version}}-linux-x64.tar.xz">the .tar.xz</a> (x64; arm64 on the <a href="https://github.com/fennec-db/fennecdb/releases/tag/v{{version}}">release</a>). On an Intel Mac the same studio comes in the server, <code>fennec-server --studio</code>, and runs in your browser on the <a href="playground.html">Playground</a>.</p>
         </div>
 
         <div class="dl-app-other">
-          <p class="dl-app-say">The app is for Macs with Apple silicon for now. On <span class="dl-sys-win">Windows</span><span class="dl-sys-lin">Linux</span>, the same studio comes in the server you install below, and runs in your browser with nothing installed.</p>
-          <a class="dl-get" href="playground.html"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M7 6.5h.01M10 6.5h.01"/></svg><span><b>Open it in your browser</b><small>the Playground · a database in your tab</small></span></a>
-          <a class="dl-get calm" href="#studio-anywhere"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8l4 4-4 4M12 17h7"/></svg><span><b>In the server: --studio</b><small>then open /_studio/ on its address</small></span></a>
+          <p class="dl-app-say">Make a database, open one, serve it to your apps, back it up, or connect to a server, with no server of your own to start.</p>
+          <div class="dl-for-win">
+            <a class="dl-get" href="https://github.com/fennec-db/fennecdb/releases/download/v{{version}}/fennec-studio-v{{version}}-windows-x64.zip"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M4 20h16"/></svg><span><b>Download for Windows</b><small>.zip · 49 MB · x64</small></span></a>
+            <ul class="dl-ticks">
+              <li><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3 3 7-7"/></svg>fennec-server and fennec inside</li>
+              <li><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3 3 7-7"/></svg>In SHA256SUMS</li>
+              <li><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3 3 7-7"/></svg>No administrator</li>
+            </ul>
+            <p class="dl-first"><strong>Not signed.</strong> Unzip it and start <code>fennec-studio\bin\launcher.exe</code>. The first time, SmartScreen stops it once: <strong>More info</strong>, then <strong>Run anyway</strong>. Where Smart App Control is on, it refuses unsigned programs outright: use the line below.</p>
+            <p class="dl-app-line">Or in PowerShell, with nothing to click through and a Start-menu shortcut:</p>
+            <div class="dl-one"><pre data-lang="powershell">&amp; ([scriptblock]::Create((irm https://fennecdb.com/install.ps1))) -App</pre></div>
+            <p class="dl-else">Windows 10 and 11. On an arm64 machine, <a href="https://github.com/fennec-db/fennecdb/releases/download/v{{version}}/fennec-studio-v{{version}}-windows-arm64.zip">the arm64 zip</a>; the line above takes your processor's. Or with nothing installed: the <a href="playground.html">Playground</a>, or <a href="#studio-anywhere"><code>fennec-server --studio</code></a>.</p>
+          </div>
+          <div class="dl-for-lin">
+            <a class="dl-get" href="https://github.com/fennec-db/fennecdb/releases/download/v{{version}}/fennec-studio-v{{version}}-linux-x64.tar.xz"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M4 20h16"/></svg><span><b>Download for Linux</b><small>.tar.xz · 37 MB · x64</small></span></a>
+            <ul class="dl-ticks">
+              <li><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3 3 7-7"/></svg>fennec-server and fennec inside</li>
+              <li><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3 3 7-7"/></svg>In SHA256SUMS</li>
+              <li><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3 3 7-7"/></svg>No sudo</li>
+            </ul>
+            <p class="dl-first"><strong>Needs glibc 2.38 and WebKitGTK 4.1:</strong> Ubuntu 24.04, Debian 13, Fedora 39 and later; not Ubuntu 22.04 or Debian 12. Unpack it and start <code>fennec-studio/bin/launcher</code>.</p>
+            <p class="dl-app-line">Or in one line, which asks for what the app needs first and adds it to your applications menu:</p>
+            <div class="dl-one"><pre data-lang="bash">curl -fsSL https://fennecdb.com/install.sh | sh -s -- --app</pre></div>
+            <p class="dl-else">On an arm64 machine, <a href="https://github.com/fennec-db/fennecdb/releases/download/v{{version}}/fennec-studio-v{{version}}-linux-arm64.tar.xz">the arm64 tarball</a>; the line above takes your processor's. Or with nothing installed: the <a href="playground.html">Playground</a>, or <a href="#studio-anywhere"><code>fennec-server --studio</code></a>.</p>
+          </div>
           <p class="dl-else">On a Mac with Apple silicon: <a href="https://github.com/fennec-db/fennecdb/releases/download/v{{version}}/fennec-studio-v{{version}}-macos-arm64.dmg">fennec studio's .dmg</a>, 24 MB.</p>
         </div>
       </div>

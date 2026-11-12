@@ -76,10 +76,15 @@ Environment given its reviewer and `main` rule before its secrets
 Electrobun's self-extractor (a quarantined copy must run read-only), each
 Mach-O and then the bundle signed ad hoc (`scripts/dist.sh`), held as it
 ships by `checks/dist.mjs`: its signature, no hook, a launch and quit from
-the read-only image and from a copy left unchanged. It is attached only
-from `main`, where the signing job ran and signed nothing, by a job with no
-secret; its line is appended to `SHA256SUMS`, which only grows, and a DMG
-there is never replaced.
+the read-only image and from a copy left unchanged. Windows' zip and Linux's
+tarball, x64 and arm64, are the payload unpacked too, one folder, never
+Electrobun's installer (`scripts/dist.sh`), held by `checks/dist-archive.mjs`:
+no hook, started where it is unpacked and where `install.ps1 -App` or
+`install.sh --app` put it from a release laid out on the runner, unchanged by
+either run but for the launcher's own log (`bin\app.log`, on Windows). A release's downloads are attached only from `main`, the DMG
+where the signing job ran and signed nothing, by a job with no secret
+(`scripts/attach.sh`): their lines are appended to `SHA256SUMS` in one write,
+which only grows, and an asset there is never replaced.
 
 **[Grafana's data source binds a dashboard's values; it never splices
 them.](../docs/design/integrations.md#grafana)** Names become `$n`s

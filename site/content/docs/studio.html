@@ -496,10 +496,15 @@ its stdin, and it stops cleanly however the app ends.</p>
 
 <h2 id="desktop">Desktop app (beta)</h2>
 
-<p>On a Mac with Apple silicon the studio is also an app: make a database,
-open one, serve it to your apps, back it up, or connect to a server, with no
-server of your own to start. Install it with one line:</p>
+<p>The studio is also an app, on a Mac with Apple silicon, on Windows and on
+Linux, x64 and arm64: make a database, open one, serve it to your apps, back it
+up, or connect to a server, with no server of your own to start. Install it
+with one line:</p>
 
+<div class="langs" data-langs data-detect data-key="fennec-app-install" data-tabs="Your system">
+<div class="lang-tabs" role="tablist" aria-label="Your system"><button type="button" role="tab" aria-selected="true">macOS</button><button type="button" role="tab" aria-selected="false">Windows</button><button type="button" role="tab" aria-selected="false">Linux</button></div>
+
+<div class="lang" data-name="macOS" data-keep="false">
 <pre data-lang="bash">curl -fsSL https://fennecdb.com/install.sh | sh -s -- --app</pre>
 
 <p>That puts <code>fennec studio.app</code> in <code>~/Applications</code>, with
@@ -515,6 +520,50 @@ verify..."); click Done, then in System Settings, Privacy &amp; Security, click
 since a file <code>curl</code> downloads is not quarantined; and
 <code>xattr -cr "/Applications/fennec studio.app"</code> takes the quarantine
 off a browser's copy.</p>
+</div>
+
+<div class="lang" data-name="Windows" data-keep="false">
+<pre data-lang="powershell">&amp; ([scriptblock]::Create((irm https://fennecdb.com/install.ps1))) -App</pre>
+
+<p>In PowerShell, Windows PowerShell 5.1 or PowerShell 7, on Windows 10 or 11.
+That puts the app in
+<code>%LOCALAPPDATA%\dev.fennecdb.studio\stable\app</code> and a shortcut,
+fennec studio, in the Start menu, with no administrator and no
+<code>PATH</code> touched, from the release's zip for your processor, checked
+against <code>SHA256SUMS</code> first. The app is not signed. What the script
+downloads carries no mark of the web, so it opens at once. The zip is on the <a
+href="https://github.com/fennec-db/fennecdb/releases/latest">release page</a>
+too, <code>fennec-studio-v{{version}}-windows-x64.zip</code> (or
+<code>-arm64</code>): a folder, <code>fennec-studio</code>, that runs where you
+unpack it, from <code>bin\launcher.exe</code>. Downloaded by a browser it is
+marked, and SmartScreen stops its first start ("Windows protected your PC"):
+<b>More info</b>, then <b>Run anyway</b>. Where Smart App Control is on, it
+blocks unsigned programs and offers no way past: use the line above.</p>
+
+<p>Connect the Windows app only to servers you trust. Its windows are
+WebView2, which the app's shell starts with web security off, so a page that
+sends no Content-Security-Policy could read other sites' answers there. The
+studio's own pages, as fennec-server serves them, send one and are held by
+it.</p>
+</div>
+
+<div class="lang" data-name="Linux" data-keep="false">
+<pre data-lang="bash">curl -fsSL https://fennecdb.com/install.sh | sh -s -- --app</pre>
+
+<p>On x64 and arm64, with glibc 2.38 or later and WebKitGTK 4.1: Ubuntu 24.04,
+Debian 13, Fedora 39 and later (not Ubuntu 22.04, Debian 12 or RHEL 9). The
+script asks first, and where something is missing it says what to install
+(<code>sudo apt install libwebkit2gtk-4.1-0 libayatana-appindicator3-1</code> on
+Ubuntu and Debian) and installs nothing. It puts the app in
+<code>~/.local/share/dev.fennecdb.studio/stable/app</code> and an entry,
+fennec studio, in your applications menu, with no <code>sudo</code>, from the
+release's tarball, checked against <code>SHA256SUMS</code> first. The tarball
+is on the <a href="https://github.com/fennec-db/fennecdb/releases/latest">release
+page</a> too, <code>fennec-studio-v{{version}}-linux-x64.tar.xz</code> (or
+<code>-arm64</code>): a folder, <code>fennec-studio</code>, that runs where you
+unpack it, from <code>bin/launcher</code>.</p>
+</div>
+</div>
 
 <p>To build it from source instead:</p>
 
@@ -576,9 +625,14 @@ open "integrations/studio-desktop/build/stable-macos-arm64/fennec studio.app"
     port another program has, a server that stopped, one that cannot be
     reached, one with no studio and a token it refuses each say so in a window
     of the app's own, with the way forward.</li>
-  <li><b>macOS only for now,</b> Apple silicon, and not yet signed. An app
-    you build opens as it is; an unsigned one you downloaded needs
+  <li><b>Not signed, on any system.</b> An app you build opens as it is; one
+    the install line takes opens at once; one a browser downloaded is asked
+    about once (macOS's Open Anyway, Windows' SmartScreen), or on a Mac needs
     <code>xattr -cr "fennec studio.app"</code> first.</li>
+  <li><b>On Windows and Linux, for now:</b> a double-click on a
+    <code>.fennec</code> file does not reach the app (open it from the app's
+    own window), and Linux has no menu bar: the main window's buttons do what
+    its menus would.</li>
 </ul>
 
 <figure class="shot">

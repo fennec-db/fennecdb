@@ -13,6 +13,16 @@
 #     administrator, and no profile and no PATH is touched. It says how to
 #     put the folder on your PATH, and that is the only thing left to you.
 #
+# Or the fennec studio app (beta) instead, x64 or arm64, with -App:
+#
+#   & ([scriptblock]::Create((irm https://fennecdb.com/install.ps1))) -App
+#
+# It downloads the release's zip of the app for this machine, checks it the
+# same way before it unpacks it, puts the app in
+# $env:LOCALAPPDATA\dev.fennecdb.studio\stable\app (where the app's own
+# installer would) and a shortcut to it in the Start menu: no administrator,
+# no PATH, and nothing it downloaded is run.
+#
 # Settings, all optional, as environment variables set before the line
 # above ($env:FENNEC_VERSION = '0.1.13'):
 #
@@ -46,6 +56,9 @@ function Write-FennecUsage {
     Write-Host '  FENNEC_VERSION  X.Y.Z; the latest release when unset'
     Write-Host '  FENNEC_INSTALL  installs into $env:FENNEC_INSTALL\bin; default $env:LOCALAPPDATA\fennecdb'
     Write-Host '  FENNEC_FROM     a folder holding a release''s zip and SHA256SUMS, nothing downloaded'
+    Write-Host '  -App            the fennec studio app (beta) instead, into'
+    Write-Host '                  $env:LOCALAPPDATA\dev.fennecdb.studio, with a Start-menu shortcut:'
+    Write-Host '                  & ([scriptblock]::Create((irm https://fennecdb.com/install.ps1))) -App'
     Write-Host ''
     Write-Host 'Windows 10 or Windows Server 2016 and later, on x86_64 or arm64.'
     Write-Host 'On macOS and Linux: curl -fsSL https://fennecdb.com/install.sh | sh'
@@ -222,6 +235,163 @@ function Install-FennecFiles([string] $src, [string] $bindir) {
     return , $kept
 }
 
+# The release's file NAME in TMP, from the folder FROM or downloaded from
+# BASE, held to the sum SHA256SUMS gives it before anything reads it, and the
+# mark of the web taken off it where it carries one (a copy of a zip a
+# browser saved does): the file is the release's, by its sum, and what is
+# unpacked from it would carry the mark on into SmartScreen's warning.
+function Get-FennecAsset([string] $name, [string] $want, [string] $version, [string] $from, [string] $base, [string] $tmp) {
+    $file = Join-Path $tmp $name
+    if ($from) {
+        Write-Host "Taking $name from $from"
+        $source = Join-Path $from $name
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "$from holds no $name" }
+        Copy-Item -LiteralPath $source -Destination $file
+    } else {
+        Write-Host "Downloading $name"
+        try {
+            Get-FennecFile "$base/download/v$version/$name" $file
+        } catch {
+            throw "could not download $base/download/v$version/$name ($($_.Exception.Message))"
+        }
+    }
+    $got = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($got -ne $want) {
+        throw "the checksum of $name is $got, SHA256SUMS says $want`: nothing was installed"
+    }
+    Write-Host "Checksum ok ($want)"
+    Unblock-File -LiteralPath $file
+    return $file
+}
+
+# Whether a program runs from the folder DIR: a running app's files cannot be
+# replaced under it (Windows refuses to move a folder a running program's
+# file is in). A process whose path cannot be read (another user's) is not
+# this user's app.
+function Test-FennecAppRunning([string] $dir) {
+    $prefix = $dir.TrimEnd('\') + '\'
+    foreach ($p in @(Get-Process -ErrorAction SilentlyContinue)) {
+        $path = $null
+        try { $path = $p.Path } catch { $path = $null }
+        if ($path -and $path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
+# A shortcut LNK to the program TARGET, through the shell's own object: a
+# .lnk is a binary format, and this is the one writer every Windows has.
+function New-FennecShortcut([string] $lnk, [string] $target) {
+    $shell = New-Object -ComObject WScript.Shell
+    try {
+        $s = $shell.CreateShortcut($lnk)
+        $s.TargetPath = $target
+        $s.WorkingDirectory = Split-Path -Parent $target
+        $s.Description = 'fennec studio: make, open, serve and back up fennecdb databases'
+        $s.Save()
+    } finally {
+        [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
+    }
+}
+
+# The app (fennec studio, beta), from the release's zip of it for this
+# machine's processor: checked against SHA256SUMS before it is unpacked,
+# unpacked beside its place and renamed into it, over the one there by
+# rename, so a failure leaves that one as it was. Its place is the one the
+# app's own installer (Electrobun's) uses, so the two never make two copies,
+# and the folder above it is the app's own (state.json, its pages' stores),
+# never touched. Then a shortcut in the Start menu. Nothing it unpacked runs.
+function Install-FennecApp([string[]] $sums, [string] $version, [string] $arch, [string] $from, [string] $base, [string] $tmp) {
+    $appArch = 'x64'
+    if ($arch -eq 'aarch64') { $appArch = 'arm64' }
+    $name = "fennec-studio-v$version-windows-$appArch.zip"
+    $want = Get-FennecSum $sums $name
+    if (-not $want) { throw "release v$version lists no $name`: it has no Windows app yet" }
+    if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is not set: the app goes into it' }
+    $root = Join-Path $env:LOCALAPPDATA 'dev.fennecdb.studio\stable'
+    $dest = Join-Path $root 'app'
+    if (Test-FennecAppRunning $dest) { throw "fennec studio is running from $dest`: quit it, then run this again" }
+
+    $zip = Get-FennecAsset $name $want $version $from $base $tmp
+
+    New-Item -ItemType Directory -Force -Path $root -ErrorAction SilentlyContinue | Out-Null
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw "could not make $root" }
+    # What an install that could not remove its staging folder left: a file
+    # in it was held, by a scanner or the app the previous one replaced.
+    foreach ($left in @(Get-ChildItem -LiteralPath $root -Force -Directory -Filter '.app-install.*')) {
+        Remove-Item -LiteralPath $left.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    $stage = Join-Path $root ".app-install.$PID"
+    Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+    try {
+        Expand-Archive -LiteralPath $zip -DestinationPath $stage -Force
+    } catch {
+        Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+        throw "could not unpack $name ($($_.Exception.Message)): nothing was installed"
+    }
+    $src = Join-Path $stage 'fennec-studio'
+    if (-not (Test-Path -LiteralPath (Join-Path $src 'bin\launcher.exe') -PathType Leaf) -or -not (Test-Path -LiteralPath (Join-Path $src 'Resources\app\bun\index.js') -PathType Leaf)) {
+        Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+        throw "$name holds no app (fennec-studio\bin\launcher.exe): nothing was installed"
+    }
+    $previous = $null
+    if (Test-Path -LiteralPath $dest) {
+        $previous = Join-Path $stage 'previous'
+        try {
+            Move-Item -LiteralPath $dest -Destination $previous
+        } catch {
+            Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+            throw "could not move the app at $dest aside ($($_.Exception.Message)): nothing was installed"
+        }
+    }
+    try {
+        Move-Item -LiteralPath $src -Destination $dest
+    } catch {
+        $said = $_.Exception.Message
+        if ($previous) {
+            try {
+                Move-Item -LiteralPath $previous -Destination $dest
+            } catch {
+                # Kept, not removed with the rest: it is the only copy left.
+                throw "could not write $dest ($said), nor put the one that was there back: it is $previous"
+            }
+        }
+        Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+        throw "could not write $dest ($said)"
+    }
+    Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+
+    $launcher = Join-Path $dest 'bin\launcher.exe'
+    $lnk = $null
+    if ($env:APPDATA) {
+        $programs = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
+        try {
+            New-Item -ItemType Directory -Force -Path $programs -ErrorAction Stop | Out-Null
+            $lnk = Join-Path $programs 'fennec studio.lnk'
+            New-FennecShortcut $lnk $launcher
+        } catch {
+            $Host.UI.WriteErrorLine("fennecdb install: installed, but could not write the Start-menu shortcut ($($_.Exception.Message))")
+            $lnk = $null
+        }
+    }
+
+    Write-Host ''
+    Write-Host "Installed fennec studio $version (beta) in $dest."
+    if ($lnk) {
+        Write-Host 'Open it from the Start menu, fennec studio, or:'
+    } else {
+        Write-Host 'Start it with:'
+    }
+    Write-Host ''
+    Write-Host "  & '$($launcher.Replace("'", "''"))'"
+    Write-Host ''
+    Write-Host 'Not signed: what this script downloads carries no mark of the web, so SmartScreen'
+    Write-Host 'does not ask; the same zip saved by a browser does, and asks once.'
+    $remove = $dest
+    if ($lnk) { $remove = "$dest and $lnk" }
+    Write-Host "To remove it: delete $remove."
+    Write-Host 'The app: https://fennecdb.com/docs/studio#desktop'
+}
+
 function Test-FennecOnPath([string] $dir, [string] $path) {
     if (-not $path) { return $false }
     foreach ($p in $path.Split(';')) {
@@ -231,10 +401,15 @@ function Test-FennecOnPath([string] $dir, [string] $path) {
 }
 
 function Invoke-FennecInstall([object[]] $arguments, [string] $tmp) {
+    $app = $false
     foreach ($a in $arguments) {
         if (@('-h', '--help', '-Help', '/?') -contains $a) {
             Write-FennecUsage
             return
+        }
+        if (@('-App', '--app') -contains $a) {
+            $app = $true
+            continue
         }
         Write-FennecUsage
         throw "unknown argument '$a'"
@@ -248,6 +423,7 @@ function Invoke-FennecInstall([object[]] $arguments, [string] $tmp) {
     }
 
     $from = $env:FENNEC_FROM
+    $base = $null
     if ($from -and $env:FENNEC_BASE_URL) {
         throw 'FENNEC_FROM and FENNEC_BASE_URL each name where the release is: set one'
     }
@@ -305,6 +481,11 @@ function Invoke-FennecInstall([object[]] $arguments, [string] $tmp) {
     $want = $null
     $v = $version
     if (-not $v) { $v = Get-FennecListed $sums $target }
+    if ($app -and $v -and $v -cmatch '^[0-9A-Za-z.+-]+$') {
+        # The release the programs' zip names, or the one asked for: its app.
+        Install-FennecApp $sums $v $arch $from $base $tmp
+        return
+    }
     if ($v -and $v -cmatch '^[0-9A-Za-z.+-]+$') {
         $name = "fennec-v$v-$target.zip"
         $want = Get-FennecSum $sums $name
@@ -323,30 +504,7 @@ function Invoke-FennecInstall([object[]] $arguments, [string] $tmp) {
     }
     $version = $v
 
-    $zip = Join-Path $tmp $name
-    if ($from) {
-        Write-Host "Taking $name from $from"
-        $source = Join-Path $from $name
-        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "$from holds no $name" }
-        Copy-Item -LiteralPath $source -Destination $zip
-    } else {
-        Write-Host "Downloading $name"
-        try {
-            Get-FennecFile "$base/download/v$version/$name" $zip
-        } catch {
-            throw "could not download $base/download/v$version/$name ($($_.Exception.Message))"
-        }
-    }
-
-    $got = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($got -ne $want) {
-        throw "the checksum of $name is $got, SHA256SUMS says $want`: nothing was installed"
-    }
-    Write-Host "Checksum ok ($want)"
-    # The mark of the web, where the download carries one (a copy of a zip a
-    # browser saved does): the zip is the release's, by its sum, and an
-    # unpacked program would carry the mark on.
-    Unblock-File -LiteralPath $zip
+    $zip = Get-FennecAsset $name $want $version $from $base $tmp
 
     $unpacked = Join-Path $tmp 'unpacked'
     try {
