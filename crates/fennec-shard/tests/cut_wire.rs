@@ -333,7 +333,7 @@ pub fn ask(port: u16, method: &str, target: &str, extra: &str, body: &str) -> As
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(WITHIN)).unwrap();
     let req = format!(
-        "{method} {target} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n{extra}\
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{extra}\
          Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     );
@@ -385,7 +385,7 @@ pub fn unanswered(rx: &Receiver<Asked>, what: &str) {
 pub fn subscribed(port: u16) -> Receiver<bool> {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(WITHIN)).unwrap();
-    s.write_all(b"GET /t/acme/notes/changes HTTP/1.1\r\nHost: t\r\n\r\n")
+    s.write_all(b"GET /t/acme/notes/changes HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .unwrap();
     let mut seen = Vec::new();
     let mut chunk = [0u8; 4096];

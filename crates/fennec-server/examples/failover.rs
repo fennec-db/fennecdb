@@ -92,7 +92,7 @@ impl Http {
     fn ask(&mut self, method: &str, path: &str, body: &str) -> Option<(u16, String)> {
         write!(
             self.w,
-            "{method} {path} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {TOKEN}\r\n\
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {TOKEN}\r\n\
              Content-Length: {}\r\n\r\n{body}",
             body.len()
         )

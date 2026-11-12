@@ -66,7 +66,7 @@ fn call(port: u16, method: &str, target: &str, body: &str, auth: Option<&str>) -
     let auth = auth.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
     write!(
         s,
-        "{method} {target} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n{auth}\
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{auth}\
          Content-Length: {}\r\n\r\n{body}",
         body.len()
     )
@@ -184,7 +184,7 @@ fn the_router_counts_what_it_answered_forwarded_and_moved() {
     let mut held = TcpStream::connect(("127.0.0.1", port)).unwrap();
     write!(
         held,
-        "POST /t/acme/query HTTP/1.1\r\nHost: t\r\nFennec-Wait: 30000\r\n\
+        "POST /t/acme/query HTTP/1.1\r\nHost: localhost\r\nFennec-Wait: 30000\r\n\
          Content-Length: {}\r\n\r\n{claim}",
         claim.len()
     )

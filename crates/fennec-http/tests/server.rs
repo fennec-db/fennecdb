@@ -71,7 +71,7 @@ impl Conn {
     /// was `None`, and a timeout was reported as a close.
     fn ask(&mut self, method: &str, target: &str, body: &str) -> io::Result<(u16, String)> {
         let req = format!(
-            "{method} {target} HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\n\r\n{body}",
+            "{method} {target} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
         self.w.write_all(req.as_bytes())?;
@@ -118,7 +118,7 @@ impl Conn {
     /// as [`Self::keyed`] is.
     fn sent(&mut self, target: &str, extra: &str, body: &str) -> (u16, bool, String) {
         let req = format!(
-            "POST {target} HTTP/1.1\r\nHost: t\r\n{extra}Content-Length: {}\r\n\r\n{body}",
+            "POST {target} HTTP/1.1\r\nHost: localhost\r\n{extra}Content-Length: {}\r\n\r\n{body}",
             body.len()
         );
         self.w.write_all(req.as_bytes()).unwrap();
@@ -1588,7 +1588,7 @@ fn idle_timeout_closes_the_connection_without_a_word() {
     // A request cut off part way is answered, since one was asked: 408.
     let mut s = TcpStream::connect(("127.0.0.1", h.port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    s.write_all(b"GET /collections HTTP/1.1\r\nHost: t\r\n")
+    s.write_all(b"GET /collections HTTP/1.1\r\nHost: localhost\r\n")
         .unwrap();
     let mut sent = String::new();
     let _ = s.read_to_string(&mut sent);
@@ -1638,7 +1638,7 @@ fn a_polled_read_is_answered_304_until_what_it_reads_is_written() {
         let body = format!("{{\"query\": {}}}", json_string(q));
         write!(
             s,
-            "POST /query HTTP/1.1\r\nHost: t\r\nIf-None-Match: {tag}\r\nConnection: close\r\n\
+            "POST /query HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: {tag}\r\nConnection: close\r\n\
              Content-Length: {}\r\n\r\n{body}",
             body.len()
         )

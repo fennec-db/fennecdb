@@ -89,7 +89,7 @@ fn call(port: u16, method: &str, target: &str, body: &str) -> (u16, String) {
     s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
     write!(
         s,
-        "{method} {target} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )

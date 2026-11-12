@@ -72,7 +72,7 @@ impl Node {
         let key = key.map_or(String::new(), |k| format!("Idempotency-Key: {k}\r\n"));
         write!(
             s,
-            "{method} {target} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\n{key}\
+            "{method} {target} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n{key}\
              Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         )

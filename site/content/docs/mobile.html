@@ -503,6 +503,10 @@ is still an option. Caddy does it in three lines, certificate included:</p>
     reverse_proxy 127.0.0.1:8080
 }</pre>
 
+<p>The server behind it still needs its token: reached by a name, a server
+with none refuses every request (<a href="/docs/server#behind-a-proxy">Behind
+a proxy</a>).</p>
+
 <p>Each binding makes its requests with the platform's client --
 <code>URLSession</code>, <code>HttpURLConnection</code>,
 <code>dart:io</code>'s <code>HttpClient</code> -- so the system's trust

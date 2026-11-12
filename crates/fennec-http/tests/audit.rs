@@ -60,7 +60,7 @@ fn ask(port: u16, method: &str, target: &str, headers: &str, body: &str) -> (u16
     s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
     write!(
         s,
-        "{method} {target} HTTP/1.1\r\nHost: x\r\n{headers}Content-Length: {}\r\n\
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\n{headers}Content-Length: {}\r\n\
          Connection: close\r\n\r\n{body}",
         body.len()
     )
@@ -118,7 +118,7 @@ fn call(port: u16, token: Option<&str>, method: &str, target: &str, body: &str) 
     let auth = token.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
     write!(
         s,
-        "{method} {target} HTTP/1.1\r\nHost: x\r\n{auth}Content-Length: {}\r\n\
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\n{auth}Content-Length: {}\r\n\
          Connection: close\r\n\r\n{body}",
         body.len()
     )

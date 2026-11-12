@@ -262,7 +262,7 @@ fn call(port: u16, method: &str, target: &str, body: &str, auth: Option<&str>) -
     let auth = auth.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
     write!(
         s,
-        "{method} {target} HTTP/1.1\r\nHost: x\r\n{auth}Content-Type: application/json\r\n\
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\n{auth}Content-Type: application/json\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
@@ -295,7 +295,7 @@ fn home(port: u16, tenant: &str, ask: bool) -> (u16, Option<String>) {
     let asked = if ask { "Fennec-Home: 1\r\n" } else { "" };
     write!(
         s,
-        "POST /t/{tenant}/query HTTP/1.1\r\nHost: x\r\n{asked}Content-Length: {}\r\n\
+        "POST /t/{tenant}/query HTTP/1.1\r\nHost: localhost\r\n{asked}Content-Length: {}\r\n\
          Connection: close\r\n\r\n{body}",
         body.len()
     )
@@ -896,7 +896,7 @@ fn a_promoted_region_router_fences_the_one_before_it_at_its_nodes() {
     let mut s = TcpStream::connect(("127.0.0.1", us1.port)).unwrap();
     write!(
         s,
-        "POST /_admin/tenants/acme/promote HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer \
+        "POST /_admin/tenants/acme/promote HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer \
          adm-fence-us1\r\nFennec-Lease-Holder: us 1 {history}\r\nContent-Length: 0\r\n\
          Connection: close\r\n\r\n"
     )
@@ -924,7 +924,7 @@ fn hook_event(port: u16, tenant: &str, secret: &str, id: &str, order: &str) -> (
     s.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
     write!(
         s,
-        "POST /t/{tenant}/_hooks/stripe HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\
+        "POST /t/{tenant}/_hooks/stripe HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
          Stripe-Signature: t={t},v1={hex}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )

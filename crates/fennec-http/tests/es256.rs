@@ -291,7 +291,7 @@ fn a_server_takes_es256_tokens_and_refuses_them_changed() {
         let body = r#"{"query":"get notes"}"#;
         write!(
             s,
-            "POST /query HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\n\
+            "POST /query HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\
              Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         )

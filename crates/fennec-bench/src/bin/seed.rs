@@ -154,7 +154,7 @@ fn find(hay: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
 fn seed_event(addr: &str, buf: &mut Vec<u8>) -> (TcpStream, f64, usize) {
     let t = Instant::now();
     let mut s = TcpStream::connect(addr).unwrap();
-    write!(s, "GET /items/changes HTTP/1.1\r\nHost: bench\r\n\r\n").unwrap();
+    write!(s, "GET /items/changes HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
     buf.clear();
     let mut chunk = vec![0u8; 1 << 20];
     // The seed's data is one line, and the event ends at the first blank

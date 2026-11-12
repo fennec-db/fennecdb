@@ -327,7 +327,7 @@ Covers `crates/fennec-ql/` and the shell in `crates/fennec-cli/`; its rules bind
 
 ### `crates/fennec-http/CLAUDE.md`
 
-Covers `crates/fennec-http/`, access aside (below); replication binds fennec-core's `wal` and `changes_in`, held writes its wakes (`changes.rs`).
+Covers `crates/fennec-http/`, access aside (below); an open server's rule binds fennec-shard's router (`cors::foreign`, `cors::vouched`), replication fennec-core's `wal` and `changes_in`, held writes its wakes (`changes.rs`).
 
 *Replication and archives*
 - Replication ships only what is on disk, by the change counter.
@@ -360,6 +360,7 @@ Covers `crates/fennec-http/`, access aside (below); replication binds fennec-cor
 - `--tls-cert` and `--tls-key` make a listener HTTPS alone
 - Every HTTP dial takes HTTPS by its URL.
 - The OpenAPI document is held to the routes.
+- A server that asks for no token answers only under this machine's name, and a page only of its own origin or `--http-cors`'s.
 
 *Held writes*
 - `Fennec-Wait` holds a `set` or a `del` that writes nothing until it can
@@ -375,7 +376,7 @@ Covers `crates/fennec-http/src/mcp/`.
 
 ### `crates/fennec-http/src/access/CLAUDE.md`
 
-Covers `crates/fennec-http/src/access.rs` and `src/access/`; access binds fennec-core's hooks (`plugin::Hook`, `Check`), its `Filter` -- the order an `and`'s terms are tested in, `@ttl`'s `alive` first (`Chain`, `answer_filter`) -- and its own collections' names (`declared::OWN`), and every path a token's statement takes.
+Covers `crates/fennec-http/src/access.rs` and `src/access/`; access binds fennec-core's hooks (`plugin::Hook`, `Check`), its `Filter` -- the order an `and`'s terms are tested in, `@ttl`'s `alive` first (`Chain`, `answer_filter`) -- and its own collections' names (`declared::OWN`), and every path a token's statement takes, a stream's among them (`sse.rs`).
 
 *Access*
 - A scoped token is held to its rules at every level, twice for writes.

@@ -212,7 +212,7 @@ fn ask(
     s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
     write!(
         s,
-        "{method} {target} HTTP/1.1\r\nHost: x\r\n{headers}Content-Length: {}\r\n\
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\n{headers}Content-Length: {}\r\n\
          Connection: close\r\n\r\n{body}",
         body.len()
     )
@@ -426,7 +426,7 @@ impl KeptAlive {
         let body = r#"{"query":"get notes count"}"#;
         write!(
             self.out,
-            "POST /t/acme/query HTTP/1.1\r\nHost: x\r\n{headers}Content-Length: {}\r\n\r\n{body}",
+            "POST /t/acme/query HTTP/1.1\r\nHost: localhost\r\n{headers}Content-Length: {}\r\n\r\n{body}",
             body.len()
         )
         .unwrap();

@@ -273,6 +273,15 @@ dispatcher looking for one; the `tests/openapi.rs` pair send each
 operation so its handler answers it (its token, a hook's signature) and
 hold each answer's mark to the document.
 
+**[A server that asks for no token answers only under this machine's
+name, and a page only of its own origin or
+`--http-cors`'s.](../../docs/design/http.md#open-servers)** Without
+`--http-token` and JWTs (`open_refusal`), `cors::foreign` refuses (403),
+before routing but for `/_health` and an allowed preflight, a `Host` or
+`X-Forwarded-Host` (only refusing) not localhost's nor an IP, and an
+`Origin` not its own, scheme and all, nor `--http-cors`'s; the router's is
+fennec-shard's.
+
 ### Held writes
 
 **[`Fennec-Wait` holds a `set` or a `del` that writes nothing until it

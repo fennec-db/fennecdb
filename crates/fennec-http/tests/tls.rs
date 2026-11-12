@@ -92,7 +92,7 @@ fn answer(r: &mut impl BufRead) -> Answer {
 
 fn request(path: &str, body: &[u8], headers: &[(&str, &str)]) -> Vec<u8> {
     let mut out = format!(
-        "POST {path} HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\n",
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n",
         body.len()
     );
     for (k, v) in headers {
@@ -160,7 +160,8 @@ fn a_long_body_goes_both_ways() {
 
     // Chunked, in pieces a record splits.
     let put = query(&format!("put notes {{id: 2, t: '{long}'}}"));
-    let mut req = b"POST /query HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+    let mut req =
+        b"POST /query HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
     for c in put.chunks(10_000) {
         req.extend_from_slice(format!("{:x}\r\n", c.len()).as_bytes());
         req.extend_from_slice(c);
@@ -191,7 +192,7 @@ fn changes_stream_over_tls() {
 
     let mut s = BufReader::new(dial(port).unwrap());
     s.get_mut()
-        .write_all(b"GET /notes/changes HTTP/1.1\r\nHost: t\r\n\r\n")
+        .write_all(b"GET /notes/changes HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .unwrap();
     s.get_mut().flush().unwrap();
     let mut events = String::new();
@@ -303,7 +304,7 @@ fn plain_http_is_told_to_ask_over_https() {
     let (port, _server) = start(|_| {});
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
-    s.write_all(b"GET /_health HTTP/1.1\r\nHost: t\r\n\r\n")
+    s.write_all(b"GET /_health HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .unwrap();
     let mut got = String::new();
     s.read_to_string(&mut got).unwrap();
