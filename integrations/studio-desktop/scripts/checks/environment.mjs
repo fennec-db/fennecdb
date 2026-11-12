@@ -8,14 +8,17 @@
 // is a stand-in that writes its own environment down and runs the real one: a
 // shell script on macOS and Linux, and on Windows, where a script is no program
 // the app can start without a shell, a program built from a few lines by the
-// app's own Bun (`bun build --compile`), the real server its child with the
+// Bun the app ships (`bun build --compile`), the real server its child with the
 // stand-in's stdin, so the app's stop by its end reaches it. (A shipped app
-// does not read FENNEC_SERVER_BIN: checks/release.mjs.)
+// does not read FENNEC_SERVER_BIN: checks/release.mjs.) That Bun is the one
+// Hutch fetched, not the app's copy: the build writes the app's icon into that
+// copy, and Bun then refuses it as the base of a program ("Error adding Bun
+// section to PE file: InvalidSecurityDirectory").
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { BUN, D, SERVER, WIN, assertClean, cmd, data, lines, quit, startApp, step, waitFor, waitStudio, log } from './lib.mjs';
+import { BUN, D, EXE, HERE, SERVER, WIN, assertClean, cmd, data, lines, quit, startApp, step, waitFor, waitStudio, log } from './lib.mjs';
 
 assertClean('before');
 const SMALL = data('small', 20);
@@ -30,18 +33,32 @@ if (WIN) {
       `import { writeFileSync } from "node:fs";`,
       `import { spawn } from "node:child_process";`,
       // `--env-to <file>`: its environment written there, and nothing started (the control below).
-      `const out = process.argv[2] === "--env-to" ? process.argv[3] : ${JSON.stringify(SEEN)};`,
-      `writeFileSync(out, Object.entries(process.env).map(([k, v]) => k + "=" + v).join("\\n") + "\\n");`,
+      // Only a server on a file is written down: the main window asks `--version` too, with none of it.
+      `const out = process.argv[2] === "--env-to" ? process.argv[3] : process.argv.includes("--file") ? ${JSON.stringify(SEEN)} : null;`,
+      `if (out) writeFileSync(out, Object.entries(process.env).map(([k, v]) => k + "=" + v).join("\\n") + "\\n");`,
       `if (process.argv[2] === "--env-to") process.exit(0);`,
       `const child = spawn(${JSON.stringify(SERVER)}, process.argv.slice(2), { stdio: "inherit" });`,
       `child.on("exit", (code) => process.exit(code ?? 1));`,
     ].join('\n'),
   );
-  const built = spawnSync(BUN, ['build', '--compile', source, '--outfile', WRAP], { encoding: 'utf8', timeout: 120000 });
+  const pin = JSON.parse(readFileSync(join(HERE, 'hutch-pin.json'), 'utf8'));
+  const toolchain = Object.keys(pin[`windows-${process.arch}`]?.runtime ?? {}).find((k) => k.startsWith('toolchains/bun/'));
+  assert.ok(toolchain, `hutch-pin.json pins a Bun for windows-${process.arch}`);
+  const bun = join(HERE, '.hutch-home', toolchain, 'bun.exe');
+  // What the icon's write left of the app's copy: its publisher's signature, as Windows reads it.
+  const signature = (f) => spawnSync('powershell', ['-NoProfile', '-Command', '$s = Get-AuthenticodeSignature -LiteralPath $env:FENNEC_CHECK_FILE; "{0} {1}" -f $s.Status, $s.SignerCertificate.Subject'], { encoding: 'utf8', env: { ...process.env, FENNEC_CHECK_FILE: f } }).stdout.trim();
+  log(`the toolchain's Bun: ${signature(bun)}; the app's: ${signature(BUN)}`);
+  // And whose icon each shows (the first icon of each, drawn and hashed alike): the app's Bun with
+  // the launcher's, which the build gives the app's icon, is the build's write.
+  const icons = spawnSync('powershell', ['-NoProfile', '-Command', "Add-Type -AssemblyName System.Drawing; foreach ($f in $env:FENNEC_CHECK_FILES -split '\\|') { $m = New-Object System.IO.MemoryStream; [System.Drawing.Icon]::ExtractAssociatedIcon($f).ToBitmap().Save($m, [System.Drawing.Imaging.ImageFormat]::Png); [System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash($m.ToArray())).Replace('-', '').Substring(0, 16) }"], { encoding: 'utf8', env: { ...process.env, FENNEC_CHECK_FILES: [bun, BUN, EXE].join('|') } });
+  const [ofToolchain, ofApp, ofLauncher] = icons.stdout.trim().split(/\r?\n/);
+  log(`their icons: the toolchain's Bun ${ofToolchain}, the app's ${ofApp}, the app's launcher ${ofLauncher}${icons.stderr ? ` (${icons.stderr.trim()})` : ''}`);
+  const built = spawnSync(bun, ['build', '--compile', source, '--outfile', WRAP], { encoding: 'utf8', timeout: 120000 });
   assert.equal(built.status, 0, `the stand-in built: ${built.stderr}${built.stdout}`);
 } else {
-  // `env -0` would be exact, and is not on every system; one a line is enough for names.
-  writeFileSync(WRAP, `#!/bin/sh\nenv > '${SEEN}'\nexec '${SERVER}' "$@"\n`);
+  // `env -0` would be exact, and is not on every system; one a line is enough for names. Only a
+  // server on a file is written down: the main window asks `--version` too, with none of it.
+  writeFileSync(WRAP, `#!/bin/sh\ncase " $* " in *" --file "*) env > '${SEEN}' ;; esac\nexec '${SERVER}' "$@"\n`);
   chmodSync(WRAP, 0o755);
 }
 
@@ -55,7 +72,8 @@ const LEAKS = {
   AWS_SECRET_ACCESS_KEY: 'leak-aws',
   GITHUB_TOKEN: 'leak-gh',
 };
-const app = startApp('environment', { FENNEC_SERVER_BIN: WRAP, FENNEC_DESKTOP_OPEN: SMALL, ...LEAKS });
+// The main window too: on Windows and Linux closing the last window quits the app (lastwindow.mjs), and this closes the file's and opens it again.
+const app = startApp('environment', { FENNEC_SERVER_BIN: WRAP, FENNEC_DESKTOP_OPEN: SMALL, FENNEC_DESKTOP_LAUNCHER: '1', ...LEAKS });
 await waitFor((l) => l.what === 'server-started', 60000, 'the server started');
 await waitStudio(`file:${SMALL}`);
 

@@ -545,6 +545,26 @@ WebView2, which the app's shell starts with web security off, so a page that
 sends no Content-Security-Policy could read other sites' answers there. The
 studio's own pages, as fennec-server serves them, send one and are held by
 it.</p>
+
+<p>To remove it, delete the app's folder and its shortcut, <code>fennec
+studio.lnk</code> in the Start menu's folder
+(<code>%APPDATA%\Microsoft\Windows\Start Menu\Programs</code>). That leaves
+what the app registers each time it starts so that <code>.fennec</code> files
+open in it, three things under <code>HKEY_CURRENT_USER\Software\Classes</code>
+and none of the machine's: the key <code>dev.fennecdb.studio.fennec</code>,
+its value in <code>.fennec\OpenWithProgids</code>, and <code>.fennec</code>'s
+default where it names that key. Left there, a double-clicked
+<code>.fennec</code> says Windows cannot find the app. To take them away:</p>
+
+<pre data-lang="powershell">reg delete HKCU\Software\Classes\dev.fennecdb.studio.fennec /f
+reg delete HKCU\Software\Classes\.fennec\OpenWithProgids /v dev.fennecdb.studio.fennec /f
+reg query HKCU\Software\Classes\.fennec /ve   # where this says dev.fennecdb.studio.fennec:
+reg delete HKCU\Software\Classes\.fennec /ve /f</pre>
+
+<p>Your saved connections and served databases are in
+<code>%LOCALAPPDATA%\dev.fennecdb.studio</code>, and their tokens in
+Credential Manager under <code>dev.fennecdb.studio/</code> (<code>cmdkey
+/list</code>); both are kept unless you delete them.</p>
 </div>
 
 <div class="lang" data-name="Linux" data-keep="false">
@@ -562,6 +582,23 @@ is on the <a href="https://github.com/fennec-db/fennecdb/releases/latest">releas
 page</a> too, <code>fennec-studio-v{{version}}-linux-x64.tar.xz</code> (or
 <code>-arm64</code>): a folder, <code>fennec-studio</code>, that runs where you
 unpack it, from <code>bin/launcher</code>.</p>
+
+<p>To remove it, delete the app's folder and its menu entry,
+<code>~/.local/share/applications/fennecstudio.desktop</code>. That leaves
+what the app registers each time it starts so that <code>.fennec</code> files
+open in it, two files under <code>~/.local/share</code>
+(<code>$XDG_DATA_HOME</code> where that is set): a hidden entry,
+<code>applications/dev.fennecdb.studio.desktop</code>, which the desktop
+ignores once the app is gone, and the file type,
+<code>mime/packages/dev.fennecdb.studio.xml</code>. To take them away:</p>
+
+<pre data-lang="bash">rm ~/.local/share/applications/dev.fennecdb.studio.desktop ~/.local/share/mime/packages/dev.fennecdb.studio.xml
+update-mime-database ~/.local/share/mime; update-desktop-database ~/.local/share/applications</pre>
+
+<p>Your saved connections and served databases are in
+<code>~/.local/share/dev.fennecdb.studio</code>, and their tokens in the
+Secret Service (<code>secret-tool clear service dev.fennecdb.studio</code>
+removes them); both are kept unless you delete them.</p>
 </div>
 </div>
 
@@ -578,7 +615,8 @@ open "integrations/studio-desktop/build/stable-macos-arm64/fennec studio.app"
 </figure>
 
 <ul>
-  <li><b>A file.</b> File, Open… (or a double-click in Finder). The app
+  <li><b>A file.</b> File, Open…, or a double-click on a <code>.fennec</code>
+    file in Finder (and, on Windows and Linux, Explorer or a file manager). The app
     starts a <code>fennec-server</code> it carries, on the file, and opens a
     window on that server's own <code>/_studio/</code>, so the window does
     what the studio does in a browser. Closing the window stops the server
@@ -589,7 +627,7 @@ open "integrations/studio-desktop/build/stable-macos-arm64/fennec studio.app"
     when the system writes), or a folder of backups to start from. The
     bundled server makes the file; the app never writes the format itself.</li>
   <li><b>Serve it to your apps.</b> A port (empty takes any free one, read
-    from the server's <code>listening on:</code> line), this Mac alone or
+    from the server's <code>listening on:</code> line), this computer alone or
     your network, the studio, compaction, <a href="/docs/mcp">MCP</a> and
     metrics on a port of their own. The sheet shows the command the app runs.
     The token is made once and kept in the Keychain; the server gets it in
@@ -625,14 +663,22 @@ open "integrations/studio-desktop/build/stable-macos-arm64/fennec studio.app"
     port another program has, a server that stopped, one that cannot be
     reached, one with no studio and a token it refuses each say so in a window
     of the app's own, with the way forward.</li>
+  <li><b>On Windows and Linux</b> the app registers <code>.fennec</code> files
+    to open in it each time it starts, for you alone, and never over a
+    program you picked for them; a double-click starts it with the file, or
+    hands the file to the copy already running. In the main window
+    <code>Ctrl+N</code>, <code>Ctrl+O</code> and <code>Ctrl+Shift+O</code> do
+    what the File menu does; Windows gives each window a menu bar, and Linux
+    none, where the main window's buttons are the File menu (start the app
+    again to bring that window back while a file's is open). With no Dock
+    there, closing the last window quits the app, and its servers stop as
+    they do when you quit, a served database's too: keep a window open while
+    you serve one. Removing the app leaves that registration: the Windows and
+    Linux tabs above say how to remove it.</li>
   <li><b>Not signed, on any system.</b> An app you build opens as it is; one
     the install line takes opens at once; one a browser downloaded is asked
     about once (macOS's Open Anyway, Windows' SmartScreen), or on a Mac needs
     <code>xattr -cr "fennec studio.app"</code> first.</li>
-  <li><b>On Windows and Linux, for now:</b> a double-click on a
-    <code>.fennec</code> file does not reach the app (open it from the app's
-    own window), and Linux has no menu bar: the main window's buttons do what
-    its menus would.</li>
 </ul>
 
 <figure class="shot">

@@ -17,7 +17,7 @@ import type { Host } from "./listening.ts";
 
 /** When a write is on disk: `--sync always`, `--sync 250`, `--sync off`. */
 export type Sync = "always" | "250" | "off";
-/** Who can reach a served database: this Mac (127.0.0.1) or the network (0.0.0.0). */
+/** Who can reach a served database: this computer (127.0.0.1) or the network (0.0.0.0). */
 export type Reach = "mac" | "lan";
 
 export type ServeSettings = {
@@ -139,10 +139,19 @@ export function commandShown(p: Plan, home = ""): string {
 
 const SYNC_WORDS: Record<Sync, string> = { always: "every write synced", "250": "synced every 250 ms", off: "synced when the system writes" };
 
+/**
+ * What the app calls the computer it runs on, each system's own word: "This
+ * Mac" in macOS's Finder, "This PC" in Windows' Explorer, and on Linux, whose
+ * desktops name it each their own way, "This computer".
+ */
+export function thisMachine(platform: string = process.platform): string {
+	return platform === "darwin" ? "This Mac" : platform === "win32" ? "This PC" : "This computer";
+}
+
 /** What a served database's card says it runs with: "This Mac only · token required · synced every 250 ms · studio on". */
-export function factsOf(s: ServeSettings, sync: Sync): string {
+export function factsOf(s: ServeSettings, sync: Sync, machine = thisMachine()): string {
 	return [
-		s.reach === "lan" ? "your network" : "This Mac only",
+		s.reach === "lan" ? "your network" : `${machine} only`,
 		"token required",
 		SYNC_WORDS[sync],
 		s.studio ? "studio on" : "no studio",

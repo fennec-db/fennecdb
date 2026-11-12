@@ -8,9 +8,14 @@
 //   - a credential kept on this machine: Bun.secrets writes every item with
 //     CRED_PERSIST_ENTERPRISE, which roams with a domain profile to every
 //     machine the user signs in to (secrets.ts);
+//   - the launcher's command line, which holds the file Explorer handed it
+//     (handover.ts), and the registration that has Explorer hand it one
+//     (associate.ts);
 //   - a variable taken out of the process's environment block, which WebView2
 //     reads and a delete from the app's `process.env` did not reach
-//     (webview2.ts).
+//     (webview2.ts);
+//   - where a window's keyboard focus is, which decides whether the app moves
+//     it into the window's page (webview2.ts's `keysToPage`).
 // Only the main process on Windows loads it; nothing here runs elsewhere, and
 // `node --test` never imports it (bun:ffi is Bun's).
 //
@@ -46,6 +51,23 @@ const CRED_PERSIST_LOCAL_MACHINE = 2;
 export const ERROR_PIPE_BUSY = 231;
 export const ERROR_ACCESS_DENIED = 5;
 
+/** Enough to read another process's name and command line, which its user's processes are given. */
+const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+/** `PROCESSINFOCLASS::ProcessCommandLineInformation` (Windows 8.1 and later): the command line, as a UNICODE_STRING. */
+const PROCESS_COMMAND_LINE_INFORMATION = 60;
+/** The current user's hive: the predefined handle `(HKEY)(LONG)0x80000001`, sign-extended to 64 bits. */
+const HKEY_CURRENT_USER = 0xffffffff80000001n;
+/** The classes as Explorer reads them: the user's over the machine's (`(HKEY)(LONG)0x80000000`). */
+const HKEY_CLASSES_ROOT = 0xffffffff80000000n;
+const KEY_WRITE = 0x20006;
+const REG_SZ = 1;
+/** `RRF_RT_REG_SZ`: RegGetValueW answers a REG_SZ alone. */
+const RRF_RT_REG_SZ = 0x2;
+/** winerror.h: no such key or value. */
+export const ERROR_FILE_NOT_FOUND = 2;
+/** shlobj.h: a file type's association changed, so Explorer reads its icons again. */
+const SHCNE_ASSOCCHANGED = 0x08000000;
+
 let libs: ReturnType<typeof load> | null = null;
 function load() {
 	const kernel32 = dlopen("kernel32.dll", {
@@ -53,8 +75,16 @@ function load() {
 		CloseHandle: { args: [FFIType.u64], returns: FFIType.i32 },
 		LocalFree: { args: [FFIType.u64], returns: FFIType.u64 },
 		lstrlenW: { args: [FFIType.u64], returns: FFIType.i32 },
+		OpenProcess: { args: [FFIType.u32, FFIType.i32, FFIType.u32], returns: FFIType.u64 },
+		QueryFullProcessImageNameW: { args: [FFIType.u64, FFIType.u32, FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
 		SetEnvironmentVariableW: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
 		GetEnvironmentVariableW: { args: [FFIType.ptr, FFIType.ptr, FFIType.u32], returns: FFIType.u32 },
+	});
+	const ntdll = dlopen("ntdll.dll", {
+		NtQueryInformationProcess: { args: [FFIType.u64, FFIType.u32, FFIType.ptr, FFIType.u32, FFIType.ptr], returns: FFIType.i32 },
+	});
+	const shell32 = dlopen("shell32.dll", {
+		SHChangeNotify: { args: [FFIType.i32, FFIType.u32, FFIType.ptr, FFIType.ptr], returns: FFIType.void },
 	});
 	const advapi32 = dlopen("advapi32.dll", {
 		OpenProcessToken: { args: [FFIType.u64, FFIType.u32, FFIType.ptr], returns: FFIType.i32 },
@@ -65,8 +95,19 @@ function load() {
 		SetNamedSecurityInfoW: { args: [FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64], returns: FFIType.u32 },
 		GetNamedSecurityInfoW: { args: [FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr], returns: FFIType.u32 },
 		CredWriteW: { args: [FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
+		RegCreateKeyExW: { args: [FFIType.u64, FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.ptr, FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
+		RegSetValueExW: { args: [FFIType.u64, FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
+		RegCloseKey: { args: [FFIType.u64], returns: FFIType.i32 },
+		RegGetValueW: { args: [FFIType.u64, FFIType.ptr, FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
+		RegDeleteTreeW: { args: [FFIType.u64, FFIType.ptr], returns: FFIType.i32 },
+		RegDeleteKeyValueW: { args: [FFIType.u64, FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
 	});
-	return { k: kernel32.symbols, a: advapi32.symbols };
+	const user32 = dlopen("user32.dll", {
+		GetForegroundWindow: { args: [], returns: FFIType.u64 },
+		GetWindowThreadProcessId: { args: [FFIType.u64, FFIType.ptr], returns: FFIType.u32 },
+		GetGUIThreadInfo: { args: [FFIType.u32, FFIType.ptr], returns: FFIType.i32 },
+	});
+	return { k: kernel32.symbols, a: advapi32.symbols, n: ntdll.symbols, s: shell32.symbols, u: user32.symbols };
 }
 const win = () => (libs ??= load());
 
@@ -127,6 +168,36 @@ export function unsetEnvironment(name: string): void {
 /** Whether this process's environment block holds `name` (asked for a size of 0, a held one, empty too, answers at least 1). */
 export function inEnvironment(name: string): boolean {
 	return win().k.GetEnvironmentVariableW(wide(name), null, 0) !== 0;
+}
+
+/** GUITHREADINFO's flags: a menu bar, a popup menu or the system menu has the thread's input. */
+const GUI_MENU_MODES = 0x4 | 0x8 | 0x10;
+
+/**
+ * Where the keyboard focus of `hwnd`, a top-level window of the app, is
+ * (webview2.ts's `KeyFocus`): whether it is the window in front, whether a
+ * menu has its thread's input, and whether the focus is on a window of this
+ * process or none. A page is WebView2's window, of WebView2's own process, so
+ * a focus on one of ours is where no key reaches a page: the bare window, its
+ * view's container. Asked of the window's own thread (GetGUIThreadInfo), which
+ * is Electrobun's UI thread, not the one this runs on.
+ */
+export function keyFocus(hwnd: bigint): { front: boolean; menu: boolean; onWindow: boolean } {
+	const { u } = win();
+	const thread = u.GetWindowThreadProcessId(hwnd, null);
+	// GUITHREADINFO: cbSize, flags, then hwndActive, hwndFocus, ... (pointer-sized, 8-aligned on 64-bit).
+	const info = new BigUint64Array(9);
+	const head = new Uint32Array(info.buffer, 0, 2);
+	head[0] = info.byteLength;
+	if (!thread || !u.GetGUIThreadInfo(thread, info)) return { front: false, menu: false, onWindow: false };
+	const focus = info[2]!;
+	let onWindow = focus === 0n;
+	if (!onWindow) {
+		const pid = new Uint32Array(1);
+		u.GetWindowThreadProcessId(focus, pid);
+		onWindow = pid[0] === process.pid;
+	}
+	return { front: u.GetForegroundWindow() === hwnd, menu: (head[1]! & GUI_MENU_MODES) !== 0, onWindow };
 }
 
 /** This user's SID, which no other user of the machine has. */
@@ -235,4 +306,83 @@ export function writeLocalCredential(service: string, name: string, value: strin
 	void target;
 	void user;
 	if (!ok) throw new Error("Windows' Credential Manager did not keep the token (CredWriteW failed)");
+}
+
+/**
+ * The program and the command line of process `pid` (one of this user's): the
+ * launcher's, which holds the file Explorer handed it (handover.ts). Read with
+ * the least access there is, as Task Manager reads a command line.
+ */
+export function processCommandLine(pid: number): { image: string; commandLine: string } {
+	const { k, n } = win();
+	const handle = k.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+	if (!handle) throw new Error(`OpenProcess(${pid}) failed`);
+	try {
+		const name = new Uint16Array(32768);
+		const size = new Uint32Array([name.length]);
+		if (!k.QueryFullProcessImageNameW(handle, 0, name, size)) throw new Error("QueryFullProcessImageNameW failed");
+		const image = Buffer.from(name.buffer, 0, size[0]! * 2).toString("utf16le");
+		// A UNICODE_STRING (Length, MaximumLength, 4 bytes of padding, Buffer) and then
+		// the string it points at, in the same buffer: 32 767 characters at most.
+		const answer = new BigUint64Array(8200);
+		const at = ptr(answer);
+		const returned = new Uint32Array(1);
+		const status = n.NtQueryInformationProcess(handle, PROCESS_COMMAND_LINE_INFORMATION, at, answer.byteLength, returned);
+		if (status !== 0) throw new Error(`NtQueryInformationProcess: status 0x${(status >>> 0).toString(16)}`);
+		const v = new DataView(answer.buffer);
+		const length = v.getUint16(0, true);
+		const offset = Number(v.getBigUint64(8, true) - BigInt(at));
+		if (offset < 16 || offset + length > answer.byteLength) throw new Error("the command line is not where its answer says");
+		return { image, commandLine: Buffer.from(answer.buffer, offset, length).toString("utf16le") };
+	} finally {
+		k.CloseHandle(handle);
+	}
+}
+
+/**
+ * The REG_SZ `name` (null: the key's default value) of `HKCU\<key>`, or with
+ * `classes` of `HKCR\<key>` (the user's classes over the machine's), or null
+ * where there is none.
+ */
+export function readString(key: string, name: string | null, classes = false): string | null {
+	const data = new Uint16Array(32768);
+	const size = new Uint32Array([data.byteLength]);
+	const root = classes ? HKEY_CLASSES_ROOT : HKEY_CURRENT_USER;
+	const code = win().a.RegGetValueW(root, wide(key), name === null ? null : wide(name), RRF_RT_REG_SZ, null, data, size);
+	if (code === ERROR_FILE_NOT_FOUND) return null;
+	if (code !== 0) throw new Error(`RegGetValueW(${classes ? "HKCR" : "HKCU"}\\${key}): error ${code}`);
+	// The size counts the closing NUL.
+	return Buffer.from(data.buffer, 0, Math.max(0, size[0]! - 2)).toString("utf16le");
+}
+
+/** Writes the REG_SZ `name` (null: the key's default value) of `HKCU\<key>`, making the key where it is missing. */
+export function writeUserString(key: string, name: string | null, value: string): void {
+	const { a } = win();
+	const opened = new BigUint64Array(1);
+	const made = a.RegCreateKeyExW(HKEY_CURRENT_USER, wide(key), 0, null, 0, KEY_WRITE, null, opened, null);
+	if (made !== 0) throw new Error(`RegCreateKeyExW(HKCU\\${key}): error ${made}`);
+	try {
+		const data = wide(value);
+		const code = a.RegSetValueExW(opened[0]!, name === null ? null : wide(name), 0, REG_SZ, data, data.byteLength);
+		if (code !== 0) throw new Error(`RegSetValueExW(HKCU\\${key}): error ${code}`);
+	} finally {
+		a.RegCloseKey(opened[0]!);
+	}
+}
+
+/** Deletes `HKCU\<key>` and everything under it; none there is no failure. */
+export function deleteUserKey(key: string): void {
+	const code = win().a.RegDeleteTreeW(HKEY_CURRENT_USER, wide(key));
+	if (code !== 0 && code !== ERROR_FILE_NOT_FOUND) throw new Error(`RegDeleteTreeW(HKCU\\${key}): error ${code}`);
+}
+
+/** Deletes the value `name` (null: the key's default) of `HKCU\<key>`; none there is no failure. */
+export function deleteUserValue(key: string, name: string | null): void {
+	const code = win().a.RegDeleteKeyValueW(HKEY_CURRENT_USER, wide(key), name === null ? null : wide(name));
+	if (code !== 0 && code !== ERROR_FILE_NOT_FOUND) throw new Error(`RegDeleteKeyValueW(HKCU\\${key}): error ${code}`);
+}
+
+/** Tells Explorer a file type's association changed, so it shows the type's new icon and handler. */
+export function associationsChanged(): void {
+	win().s.SHChangeNotify(SHCNE_ASSOCCHANGED, 0, null, null);
 }

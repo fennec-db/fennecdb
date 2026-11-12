@@ -260,8 +260,10 @@ sudo dnf install webkit2gtk4.1 libayatana-appindicator-gtk3       # Fedora</pre>
 <code>~/.local/share/dev.fennecdb.studio/stable/app</code> and its entry in
 your applications menu in
 <code>~/.local/share/applications/fennecstudio.desktop</code>, no
-<code>sudo</code>. To remove it, delete those two; the folder above the app
-keeps its saved state.</p>
+<code>sudo</code>. To remove it, delete those two, and the two files of the
+<code>.fennec</code> registration the app wrote in
+<code>~/.local/share</code> (<a href="/docs/studio#desktop">the studio's
+page</a> names them); the folder above the app keeps its saved state.</p>
 
 <p>On Windows, PowerShell installs it, Windows PowerShell 5.1 or PowerShell 7.
 <code>irm | iex</code> hands a script no argument, so here the script is made
@@ -278,7 +280,10 @@ nothing it downloaded is run. The app is not signed. What the script downloads
 carries no mark of the web, so SmartScreen does not ask; the same zip a
 browser saved does, and the app's first start asks once (<b>More info</b>,
 <b>Run anyway</b>), and Smart App Control, where it is on, refuses it. To
-remove it, delete that folder and the shortcut.</p>
+remove it, delete that folder and the shortcut, and the <code>.fennec</code>
+registration the app wrote under <code>HKEY_CURRENT_USER</code> (<a
+href="/docs/studio#desktop">the studio's page</a> has its three
+<code>reg delete</code> lines).</p>
 
 <p>On either, a running app is not replaced: quit it, then run the line again.
 The zip and the tarball hold one folder, <code>fennec-studio</code>, which

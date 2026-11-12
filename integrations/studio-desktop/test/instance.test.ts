@@ -6,7 +6,7 @@ import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { claimInstance, instancePath, ownFolder, pipeName, runtimeFolder, type PipeSecurity } from "../src/bun/instance.ts";
+import { askText, claimInstance, instancePath, ownFolder, pipeName, readAsk, runtimeFolder, type Ask, type PipeSecurity } from "../src/bun/instance.ts";
 import { WINDOWS } from "./platform.ts";
 
 // One instance of the app at a time: the second asks the first to show itself
@@ -46,6 +46,30 @@ test("the first instance claims it; a second is told to quit and the first is as
 	assert.equal(await claimInstance(path, () => assert.fail("a second instance listens for nobody")), "another");
 	await shown;
 	assert.equal(first.count(), 1);
+});
+
+test("a second started with files hands them to the first, whole, and quits", async () => {
+	const path = where("open");
+	let wake: (a: Ask) => void = () => {};
+	const heard = new Promise<Ask>((r) => (wake = r));
+	assert.equal(await claimInstance(path, (a) => wake(a)), "alone");
+	const files = ["/home/u/with space/şirket 1.fennec", 'C:\\a "b"\\$(x)\nc.fennec'];
+	assert.equal(await claimInstance(path, () => assert.fail("a second instance listens for nobody"), undefined, { open: files }), "another");
+	assert.deepEqual(await heard, { open: files });
+});
+
+test("what goes over is `show` or one line of JSON; anything else asks nothing", () => {
+	assert.equal(askText({ show: true }), "show\n");
+	const open: Ask = { open: ["/a b/c.fennec", "/d\ne.fennec"] };
+	assert.deepEqual(readAsk(askText(open)), open);
+	assert.equal(askText(open).split("\n").length, 2, "one line, a newline in a path escaped");
+	assert.deepEqual(readAsk("show\n"), { show: true });
+	assert.deepEqual(readAsk("show"), { show: true });
+	// An empty connection is Windows' owner check, which opens the pipe as a client would.
+	for (const nothing of ["", "\n", "hello\n", "{", '{"open":[]}', '{"open":"/a"}', '{"open":[1]}', '{"open":[""]}', '{"show":true}']) {
+		assert.equal(readAsk(nothing), null, JSON.stringify(nothing));
+	}
+	assert.equal(readAsk(JSON.stringify({ open: Array.from({ length: 257 }, (_, i) => `/f${i}`) })), null, "more files than one ask holds");
 });
 
 test("two started together: one claims it, the other quits", async () => {

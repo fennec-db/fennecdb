@@ -149,6 +149,81 @@ export function procs() {
     .filter(Boolean)
     .map((m) => ({ pid: +m[1], ppid: +m[2], rss: +m[3], command: m[4] }));
 }
+/**
+ * Windows: the shell's dimming windows (class Shell_SystemDim) there now, each
+ * as its process, the program's name, when it started, whether it is visible
+ * and its rectangle. A picker of the shell's ("Open with", PickerHost.exe)
+ * dims the whole screen under itself, and a click anywhere lands on the dim:
+ * on the windows-11-arm runner the firewall's prompt for a program listening
+ * on 0.0.0.0 (desktop.yml now turns it off) lay over every window, and `menu`'s
+ * click into its main window's page landed on it.
+ */
+export function dimWindows() {
+  return screenNow().dims;
+}
+
+/**
+ * Windows: what is on the screen that a check's input meets, through one
+ * PowerShell: the dimming windows (`dimWindows`) and the window in front, by
+ * its process, the program's name, when it started and its title.
+ */
+export function screenNow() {
+  const ps = [
+    `Add-Type -Namespace FennecCheck -Name Dim -MemberDefinition '[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowExW(IntPtr parent, IntPtr after, string cls, string title); [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h); [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid); [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, int[] r); [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr h, System.Text.StringBuilder s, int n);'`,
+    `function Started($p) { if ($p.StartTime) { $p.StartTime.ToUniversalTime().ToString('o') } else { '-' } }`,
+    `$h = [IntPtr]::Zero`,
+    `while (($h = [FennecCheck.Dim]::FindWindowExW([IntPtr]::Zero, $h, 'Shell_SystemDim', $null)) -ne [IntPtr]::Zero) { $o = 0; [void][FennecCheck.Dim]::GetWindowThreadProcessId($h, [ref]$o); $r = New-Object int[] 4; [void][FennecCheck.Dim]::GetWindowRect($h, $r); $p = Get-Process -Id $o -ErrorAction SilentlyContinue; 'D {0} {1} {2} {3} {4}' -f $o, $p.ProcessName, (Started $p), [FennecCheck.Dim]::IsWindowVisible($h), ($r -join ',') }`,
+    `$f = [FennecCheck.Dim]::GetForegroundWindow(); $o = 0; [void][FennecCheck.Dim]::GetWindowThreadProcessId($f, [ref]$o); $t = New-Object System.Text.StringBuilder 256; [void][FennecCheck.Dim]::GetWindowTextW($f, $t, 256); $p = Get-Process -Id $o -ErrorAction SilentlyContinue; 'F {0} {1} {2} {3}' -f $o, $p.ProcessName, (Started $p), $t.ToString()`,
+  ].join('; ');
+  const out = (spawnSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', timeout: 60000 }).stdout ?? '').split(/\r?\n/).map((l) => l.trim());
+  const dims = out.map((l) => /^D (\d+) (\S*) (\S+) (True|False) (.*)$/.exec(l)).filter(Boolean).map((m) => ({ pid: +m[1], name: m[2], started: m[3], visible: m[4] === 'True', rect: m[5] }));
+  const f = out.map((l) => /^F (\d+) (\S*) (\S+) ?(.*)$/.exec(l)).find(Boolean);
+  return { dims, front: f ? { pid: +f[1], name: f[2], started: f[3], title: f[4] } : null };
+}
+
+/**
+ * Windows: program `pid`'s window asked to close, as a person closes it
+ * (CloseMainWindow, WM_CLOSE). What it answered: `asked`, `no window` or
+ * `gone`.
+ */
+export function closeWindowOf(pid) {
+  const said = spawnSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', '$p = Get-Process -Id ([int]$env:FENNEC_CHECK_PID) -ErrorAction SilentlyContinue; if ($p) { $p.CloseMainWindow() } else { "gone" }'], { encoding: 'utf8', timeout: 60000, env: { ...process.env, FENNEC_CHECK_PID: String(pid) } }).stdout.trim();
+  return said === 'gone' ? 'gone' : said === 'True' ? 'asked' : 'no window';
+}
+
+/**
+ * Windows: a program the checks started closed as a person closes it, and
+ * killed only where it has no window or does not end within 15 s. Says how it
+ * ended.
+ */
+export async function closeProgram(pid) {
+  const asked = closeWindowOf(pid);
+  if (asked === 'gone') return 'gone before it was asked';
+  const ended = asked === 'asked' && (await until(() => !procs().some((p) => p.pid === pid), 15000, `${pid} closed by its window`).then(() => true, () => false));
+  if (ended) return 'closed by its window';
+  try {
+    process.kill(pid, 'SIGKILL');
+  } catch {
+    // gone
+  }
+  return asked === 'asked' ? 'asked to close, did not end in 15 s, killed' : 'no window to close, killed';
+}
+
+/**
+ * Windows: the dimming windows on the screen, each program that shows one
+ * asked to close its window (`closeWindowOf`), never killed: the shell's
+ * picker hosts outlive their windows. What was there, what each answered, and
+ * whether the screen was clear within 15 s; null where nothing dimmed it.
+ */
+export async function clearDimming() {
+  const there = dimWindows().filter((w) => w.visible);
+  if (!there.length) return null;
+  const how = {};
+  for (const pid of new Set(there.map((w) => w.pid))) how[pid] = closeWindowOf(pid);
+  const clear = await until(() => !dimWindows().some((w) => w.visible), 15000, 'the dimming gone').then(() => true, () => false);
+  return { there, how, clear };
+}
+
 /** Paths compare as the system does: Windows' are case-blind (a command line may spell the drive or a folder otherwise). */
 const same = WIN ? (s) => s.toLowerCase() : (s) => s;
 /** A server started by hand on one of this run's files (`fennec-server.exe --file D:\...` on Windows). */
@@ -173,7 +248,10 @@ export const describe = (list) => list.map((p) => `${p.pid} (ppid ${p.ppid}) ${p
 
 export function lines() {
   if (!existsSync(REPORT)) return [];
-  return readFileSync(REPORT, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  // Whole lines alone: the app may be writing the last one as it is read (seen on Linux arm64,
+  // a page's text cut at byte 1127).
+  const text = readFileSync(REPORT, 'utf8');
+  return text.slice(0, text.lastIndexOf('\n') + 1).split('\n').filter(Boolean).map((l) => JSON.parse(l));
 }
 /**
  * Sends the app a command. The lines one look of the app finds run in turn,
@@ -585,3 +663,125 @@ export function assertClean(when) {
   const left = mine();
   if (left.length) throw new Error(`${when}: processes left behind:\n${describe(left)}`);
 }
+
+/**
+ * Windows and Linux: what the test variant's registration of `.fennec` is
+ * (src/bun/associate.ts writes it at each start), by the names the README's
+ * "Uninstall" gives a user to remove it by.
+ */
+export const PROG_ID = `${IDENTIFIER}.fennec`;
+export const MIME_TYPE = 'application/x-fennecdb';
+const DATA_HOME = process.env.XDG_DATA_HOME && process.env.XDG_DATA_HOME.startsWith('/') ? process.env.XDG_DATA_HOME : join(homedir(), '.local', 'share');
+export const DESKTOP_FILE = join(DATA_HOME, 'applications', `${IDENTIFIER}.desktop`);
+export const MIME_FILE = join(DATA_HOME, 'mime', 'packages', `${IDENTIFIER}.xml`);
+
+/** `reg` with an argument vector, its output and status: Windows' own registry tool, which the README's removal uses too. */
+export function reg(args) {
+  const r = spawnSync('reg', args, { encoding: 'utf8', timeout: 30000 });
+  if (r.error) throw new Error(`reg ${args.join(' ')}: ${r.error.message}`);
+  return { status: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+}
+
+/** A REG_SZ of HKCU (`name` null: the key's default), or null where there is none. */
+export function regValue(key, name) {
+  const r = reg(['query', `HKCU\\${key}`, ...(name === null ? ['/ve'] : ['/v', name])]);
+  if (r.status !== 0) return null;
+  const m = /REG_SZ[ \t]*(.*?)\r?$/m.exec(r.out);
+  return m ? m[1] : null;
+}
+
+/**
+ * The test variant's registration, as the system holds it: on Windows the
+ * values under HKCU\Software\Classes; on Linux the two files, and what GIO
+ * makes of them (a `.fennec` file's type, the programs for that type).
+ */
+export function registration(sample) {
+  if (WIN) {
+    return {
+      progId: regValue(`Software\\Classes\\${PROG_ID}`, null),
+      icon: regValue(`Software\\Classes\\${PROG_ID}\\DefaultIcon`, null),
+      command: regValue(`Software\\Classes\\${PROG_ID}\\shell\\open\\command`, null),
+      listed: regValue(`Software\\Classes\\.fennec\\OpenWithProgids`, PROG_ID) !== null,
+      default: regValue('Software\\Classes\\.fennec', null),
+    };
+  }
+  const read = (p) => (existsSync(p) ? readFileSync(p, 'utf8') : null);
+  const gio = (args) => {
+    const r = spawnSync('gio', args, { encoding: 'utf8', timeout: 30000 });
+    return r.error ? `gio: ${r.error.message}` : `${r.stdout ?? ''}${r.stderr ?? ''}`.trim();
+  };
+  return {
+    desktop: read(DESKTOP_FILE),
+    mime: read(MIME_FILE),
+    type: sample ? gio(['info', '-a', 'standard::content-type', sample]).match(/standard::content-type: (\S+)/)?.[1] ?? null : null,
+    programs: gio(['mime', MIME_TYPE]),
+  };
+}
+
+/** Runs one of the system's tools on the registration and says how it ended; one not installed is said, not failed. */
+function tool(argv) {
+  const r = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout: 60000 });
+  if (r.error?.code === 'ENOENT') return `${argv[0]}: not installed`;
+  if (r.error || r.status !== 0) throw new Error(`${argv.join(' ')}: ${r.error?.message ?? `status ${r.status}: ${r.stderr}`}`);
+  return `${argv[0]}: done`;
+}
+
+/**
+ * The test variant's registration gone, as the README tells a user to remove
+ * the app's: on Windows its ProgID, its line in `.fennec`'s list, and
+ * `.fennec`'s default where that is its own (`reg delete`); on Linux its two
+ * files, and the system's caches made again without them. What another
+ * program registered is left.
+ */
+export function forgetRegistration() {
+  if (MAC) return [];
+  if (WIN) {
+    const done = [];
+    if (reg(['delete', `HKCU\\Software\\Classes\\${PROG_ID}`, '/f']).status === 0) done.push(PROG_ID);
+    if (reg(['delete', 'HKCU\\Software\\Classes\\.fennec\\OpenWithProgids', '/v', PROG_ID, '/f']).status === 0) done.push('.fennec\\OpenWithProgids');
+    if (regValue('Software\\Classes\\.fennec', null) === PROG_ID && reg(['delete', 'HKCU\\Software\\Classes\\.fennec', '/ve', '/f']).status === 0) done.push('.fennec default');
+    return done;
+  }
+  const done = [];
+  for (const f of [DESKTOP_FILE, MIME_FILE]) {
+    if (existsSync(f)) {
+      rmSync(f);
+      done.push(f);
+    }
+  }
+  // Each made again where the app could have made it: on a folder that is not there, update-mime-database fails.
+  if (existsSync(join(DATA_HOME, 'mime', 'packages'))) done.push(tool(['update-mime-database', join(DATA_HOME, 'mime')]));
+  if (existsSync(join(DATA_HOME, 'applications'))) done.push(tool(['update-desktop-database', join(DATA_HOME, 'applications')]));
+  return done;
+}
+
+/**
+ * A double-click on `path`, as close as a runner allows: on Windows the
+ * shell's own ShellExecuteEx on the file (.NET's Process.Start with
+ * UseShellExecute, which Explorer's double-click is, with no dialog on a
+ * failure), on Linux `gio open`, GNOME's (GDesktopAppInfo, the program the
+ * file's type names). The hooks' variables go along in the environment, which
+ * a program the system starts from here inherits. The path goes as data: in
+ * the environment on Windows, an argument on Linux.
+ */
+export function doubleClick(path, env = {}) {
+  const all = { ...process.env, FENNEC_DESKTOP_REPORT: REPORT, FENNEC_DESKTOP_CONTROL: CONTROL, ...env };
+  if (WIN) {
+    const ps = "$i = New-Object System.Diagnostics.ProcessStartInfo; $i.FileName = $env:FENNEC_CHECK_OPEN; $i.UseShellExecute = $true; [void][System.Diagnostics.Process]::Start($i)";
+    const r = spawnSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', ps], { env: { ...all, FENNEC_CHECK_OPEN: path }, encoding: 'utf8', timeout: 60000 });
+    return { status: r.status, said: `${r.stdout ?? ''}${r.stderr ?? ''}${r.error ? r.error.message : ''}`.trim() };
+  }
+  // gio's output goes to a file of its own, not a pipe: the app it starts inherits gio's stdout and
+  // stderr, and spawnSync waits for a pipe's every writer, so with pipes each double-click that
+  // started the app returned only at the timeout, a minute on, gio long gone.
+  const out = join(D, 'logs', `double-click-${++clicks}.log`);
+  const fd = openSync(out, 'w');
+  let r;
+  try {
+    r = spawnSync('gio', ['open', path], { env: all, stdio: ['ignore', fd, fd], timeout: 60000 });
+  } finally {
+    closeSync(fd);
+  }
+  return { status: r.status, said: `${readFileSync(out, 'utf8')}${r.error ? r.error.message : ''}`.trim() };
+}
+let clicks = 0;

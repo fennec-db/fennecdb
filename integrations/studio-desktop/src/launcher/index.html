@@ -16,7 +16,7 @@
 <body class="main-window">
 <div class="app">
   <nav class="side" aria-label="Sections">
-    <div class="side-head">This Mac</div>
+    <div class="side-head machine">This Mac</div>
     <button type="button" class="nav" data-section="databases" aria-current="page">
       <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><ellipse cx="12" cy="5.5" rx="7.5" ry="3"></ellipse><path d="M4.5 5.5v13c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3v-13"></path><path d="M4.5 12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3"></path></svg>
       Databases
@@ -44,7 +44,7 @@
       <header class="head">
         <div>
           <h1 id="databases-title">Databases</h1>
-          <p class="sub">Files on this Mac. Open one in the studio, or serve it so your apps can connect.</p>
+          <p class="sub">Files on <span class="machine-lower">this Mac</span>. Open one in the studio, or serve it so your apps can connect.</p>
         </div>
         <div class="actions">
           <button type="button" id="open">Open file…</button>
@@ -296,7 +296,7 @@
       </div>
       <fieldset>
         <legend>Who can reach it</legend>
-        <label class="choice"><input type="radio" name="reach" value="mac" checked><span><span class="strong">This Mac only</span> <span class="mono muted">127.0.0.1</span><span class="hint block">Apps and tools on this computer.</span></span></label>
+        <label class="choice"><input type="radio" name="reach" value="mac" checked><span><span class="strong"><span class="machine">This Mac</span> only</span> <span class="mono muted">127.0.0.1</span><span class="hint block">Apps and tools on this computer.</span></span></label>
         <label class="choice"><input type="radio" name="reach" value="lan"><span><span class="strong">My network</span> <span class="mono muted">0.0.0.0</span><span class="hint block">Other machines too. The server refuses to listen here without a token, and it always has one.</span></span></label>
       </fieldset>
     </div>
@@ -326,7 +326,7 @@
         <label class="choice"><input type="checkbox" name="studio" checked><span><span class="strong">The studio</span><span class="hint block">Browse and query at /_studio/ in any browser.</span></span></label>
         <label class="choice"><input type="checkbox" name="compact" checked><span><span class="strong">Compact by itself</span><span class="hint block">Once half the file is dead, beside the queries.</span></span></label>
         <label class="choice"><input type="checkbox" name="mcp"><span><span class="strong">Tools for AI agents</span><span class="hint block">MCP: schema, search, query and get.</span></span></label>
-        <label class="choice"><input type="checkbox" name="metrics"><span><span class="strong">Prometheus metrics</span><span class="hint block">On a port of their own, on this Mac.</span></span></label>
+        <label class="choice"><input type="checkbox" name="metrics"><span><span class="strong">Prometheus metrics</span><span class="hint block">On a port of their own, on <span class="machine-lower">this Mac</span>.</span></span></label>
       </div>
     </fieldset>
     <div class="field">

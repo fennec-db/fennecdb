@@ -45,7 +45,8 @@ import { collectionStatement, databaseFileName, fileNameRefusal } from "./names.
 import { originOf, probeRemote } from "./remote.ts";
 import { secrets } from "./secrets.ts";
 import { AlreadyOpen, PortTaken, StartFailed, cliBusy, randomToken, runCli, serverBinary, startFileServer, stopCli, type FileServer } from "./server.ts";
-import { commandShown, factsOf, hostOf, servePlan, snippets, taskPlan, windowPlan, type ServeSettings, type Sync } from "./serving.ts";
+import { revealLabel } from "./opener.ts";
+import { commandShown, factsOf, hostOf, servePlan, snippets, taskPlan, thisMachine, windowPlan, type ServeSettings, type Sync } from "./serving.ts";
 import { store, type StoredConnection, type StoredDatabase } from "./store.ts";
 import { keychainName, sealToken, serveItemName, servedToken, tokenFor } from "./token.ts";
 import { filePartition, remotePartition } from "./stores.ts";
@@ -1127,6 +1128,8 @@ export async function overview(): Promise<Overview> {
 		checks: Object.fromEntries(checks),
 		open: [...windows.keys()],
 		keychain: secrets.kind,
+		machine: thisMachine(),
+		reveal: revealLabel(),
 		bundled: await bundledVersion(),
 		home: Utils.paths.home,
 	};

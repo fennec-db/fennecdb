@@ -27,6 +27,7 @@ const notarize =
 		(set("ELECTROBUN_APPLEID") && set("ELECTROBUN_APPLEIDPASS") && set("ELECTROBUN_TEAMID")));
 
 const identifier = test ? "dev.fennecdb.studio.test" : "dev.fennecdb.studio";
+const name = test ? "fennec studio test" : "fennec studio";
 
 // The release's Windows zip names its programs with `.exe` (scripts/get-server.sh
 // puts them in bin/ so). Hutch builds only for the system it runs on, so that
@@ -35,21 +36,22 @@ const exe = process.platform === "win32" ? ".exe" : "";
 
 export default {
 	app: {
-		name: test ? "fennec studio test" : "fennec studio",
+		name,
 		identifier,
 		version,
 		description: "fennec studio as a desktop app: make, open, serve and back up database files, or connect to a server.",
 		// A double-click on a .fennec file in Finder arrives as an `open-url`
-		// event with a file: URL (macOS only; Windows and Linux file
-		// associations are not implemented by Electrobun 2.0.4).
+		// event with a file: URL. Electrobun 2.0.4 registers it on macOS alone:
+		// on Windows and Linux the app registers itself (src/bun/associate.ts).
 		fileAssociations: [{ name: "fennecdb database", ext: ["fennec"], role: "Editor" }],
 	},
 	runtime: {
 		// The default quits the process as the last window closes, right after the
 		// close handlers return: too soon for a server to finish its SIGTERM
-		// (sync + checkpoint) while we still hold its lock. The app stays up
-		// with no window, as a macOS document app does, and stops the servers
-		// itself on quit (src/bun/index.ts).
+		// (sync + checkpoint) while we still hold its lock. On macOS the app
+		// stays up with no window, as a document app does; on Windows and Linux
+		// its last window closed is a quit of its own; either way it stops the
+		// servers itself before it goes (src/bun/index.ts).
 		exitOnLastWindowClosed: false,
 	},
 	build: {
@@ -62,6 +64,8 @@ export default {
 				__TESTABLE__: JSON.stringify(test),
 				// The Keychain service the saved servers' tokens go under.
 				__KEYCHAIN_SERVICE__: JSON.stringify(identifier),
+				// The name a .fennec file's registration gives the app (Windows, Linux).
+				__APP_NAME__: JSON.stringify(name),
 			},
 		},
 		views: {
@@ -93,11 +97,17 @@ export default {
 			createDmg: !test,
 			icons: "icon.iconset",
 		},
+		// The app's icon there, made from icon/icon.svg as the macOS iconset is
+		// (scripts/make-icon.sh): the launcher's, the shortcuts' and the windows'.
+		// Hutch puts it in the app too (Resources/app.ico; Resources/appIcon.png),
+		// which a .fennec file's registration shows (src/bun/associate.ts).
 		linux: {
 			bundleCEF: false,
+			icon: "icon/icon.png",
 		},
 		win: {
 			bundleCEF: false,
+			icon: "icon/icon.ico",
 		},
 	},
 	// No update feed yet: Electrobun makes bsdiff patches only against a

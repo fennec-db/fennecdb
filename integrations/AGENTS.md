@@ -27,7 +27,16 @@ in an allowlisted environment (never argv; names compared case-blind on
 Windows), its stdin a pipe the app holds (`--exit-on-stdin-close`: none
 outlives the app, `kill -9` included); it is stopped by SIGTERM, on Windows
 by the end of that stdin (SIGTERM is TerminateProcess there, no checkpoint),
-a hard kill only for one not ended 30 s later (`process.ts`). Only
+a hard kill only for one not ended 30 s later (`process.ts`). On Windows and
+Linux the last window closed quits the app as File, Quit does, its servers
+stopped first, while nothing is opening; every window the app makes is
+`counted` (`onLastWindowClosed`, `checks/lastwindow.mjs`); macOS's stays. On
+Windows each window's page is given the keyboard focus once it loads, at
+each activation and when it comes forward from behind (a watch while it is
+behind), only from a window already in front and never by bringing one
+forward (`focusesPage`, `keysToPage`); `checks/menu.mjs` types into the
+main window as it opened and clicks into its page as a person would, never
+activating a window or dispatching keys in the page there. Only
 `session.ts` gives a page a token, a frozen `window.fennecHost` defined
 where `location.origin` is the server's alone. A studio window is
 `sandbox: true` (the event bridge only) and held to its origin, one with
@@ -51,7 +60,16 @@ started with reaches it, each taken out of the process's environment block
 not reach WebView2. No path or link the app hands the system goes through a
 shell: on Linux `xdg-open` with an argument vector, never Electrobun's `openExternal` or `showItemInFolder`
 (`opener.ts`, `checks/opener.mjs`). One instance a user listens where only
-that user can (`instance.ts`). A saved server's token is in the system's
+that user can (`instance.ts`). A `.fennec` double-clicked on Windows or Linux
+is read back from the launcher, the app's parent, which drops its arguments,
+only where that parent is the launcher beside the app's Bun (`handover.ts`),
+each argument a path opened as Open… opens one, never run or read as a command;
+a second instance hands its paths to the first over that channel. The app
+registers itself, for its user, at every start of the one instance and only
+what differs, never over another program's default, an entry whose launcher
+is gone ignored on Linux (`TryExec`), and what an uninstall leaves, every
+key and file, is the README's and the studio page's (`associate.ts`,
+`checks/finder.mjs`, its control the registration taken away). A saved server's token is in the system's
 credential store alone with its address (`token.ts`), never sent elsewhere
 or along a redirect: on Windows kept on the machine (`win32.ts`), on Linux
 refused in words where no Secret Service with a default collection answers
@@ -64,8 +82,9 @@ another window's, by removing its WebView2 folder once no window uses it, a
 file window's too (`stores.ts`, `checks/storage.mjs`). The shipped bundle holds
 no test hook, such as an environment read outside `__TESTABLE__`
 (`checks/release.mjs`). Each check starts with none of the test variant's
-state, its `state.json`, credential store items and web stores (`freshState`), so
-one that fails half-way fails alone; a failed one keeps the system log of the
+state, its `state.json`, credential store items and web stores (`freshState`),
+and on Windows with no picker of the shell's dimming the screen, one a check
+left failing it (`clearDimming`), so one that fails half-way fails alone; a failed one keeps the system log of the
 app and of WebKit's processes (`keepEvidence`), the main record of a page that
 never loads. The toolchain is fetched into `.hutch-home/`,
 never `~/.hutch` or a shell file, and held to `hutch-pin.json`, a pin of

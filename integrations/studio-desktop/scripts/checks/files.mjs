@@ -12,7 +12,8 @@ const SMALL = data('small', 50);
 const HELD = data('held', 10);
 const KEY = `file:${SMALL}`;
 
-const app = startApp('files', { FENNEC_DESKTOP_OPEN: SMALL });
+// The main window too: on Windows and Linux closing the last window quits the app (lastwindow.mjs), and this closes the file's and opens it again.
+const app = startApp('files', { FENNEC_DESKTOP_OPEN: SMALL, FENNEC_DESKTOP_LAUNCHER: '1' });
 const started = await waitFor((l) => l.what === 'server-started', 60000, 'the server started');
 const loaded = await waitStudio(KEY);
 assert.equal(loaded.detail.signin, false, 'the studio is signed in: no sign-in form');

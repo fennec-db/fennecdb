@@ -5,7 +5,10 @@
 // the Dock and `open`, but not from `open -n` or the binary run by hand;
 // Electrobun 2.0.4 has no single-instance switch. So the first instance
 // listens somewhere that is its user's alone, and a later one that reaches it
-// asks it to show itself and quits. What "its user's alone" is depends on the
+// asks it to show itself, or on Windows and Linux to open the files the system
+// handed the later one (a `.fennec` double-clicked while the app runs:
+// handover.ts), and quits. A path goes over as data, a JSON string, and is
+// opened as Open… opens one. What "its user's alone" is depends on the
 // system:
 //   - macOS: a socket in $TMPDIR, the user's own folder (0700);
 //   - Linux: a socket in $XDG_RUNTIME_DIR (0700, the user's, made by the login
@@ -49,11 +52,35 @@ export function runtimeFolder(env: Record<string, string | undefined>, uid: numb
 	return null;
 }
 
-/** Does an instance answer at `path`? If one does, it is asked to show itself. */
-function askOther(path: string): Promise<boolean> {
+/** What a later instance asks of the one there: to show its main window, or to open files it was handed. */
+export type Ask = { show: true } | { open: string[] };
+
+/** The most a later instance may say: a path is 32 767 characters at most on Windows, 4 096 bytes on Linux. */
+const ASK_BYTES = 1 << 20;
+const ASK_FILES = 256;
+
+/** An ask as it goes over: `show`, or one line of JSON naming the files. */
+export const askText = (ask: Ask) => ("open" in ask ? `${JSON.stringify({ open: ask.open })}\n` : "show\n");
+
+/** What a later instance said, or null for nothing an instance says (an empty connection: Windows' owner check opens one). */
+export function readAsk(text: string): Ask | null {
+	const line = text.trim();
+	if (line === "show") return { show: true };
+	if (!line.startsWith("{")) return null;
+	try {
+		const open = (JSON.parse(line) as { open?: unknown }).open;
+		if (Array.isArray(open) && open.length > 0 && open.length <= ASK_FILES && open.every((p) => typeof p === "string" && p !== "")) return { open };
+	} catch {
+		// Not JSON: nothing.
+	}
+	return null;
+}
+
+/** Does an instance answer at `path`? If one does, it is asked `ask`. */
+function askOther(path: string, ask: Ask): Promise<boolean> {
 	return new Promise((resolve) => {
 		const socket = connect(path);
-		socket.once("connect", () => socket.end("show\n", () => resolve(true)));
+		socket.once("connect", () => socket.end(askText(ask), () => resolve(true)));
 		socket.once("error", () => resolve(false));
 	});
 }
@@ -61,12 +88,21 @@ function askOther(path: string): Promise<boolean> {
 type Listened = "listening" | "taken" | "failed";
 
 /** Listens at `path` for later instances; "taken": something is there already. */
-function listen(path: string, onAsk: () => void): Promise<Listened> {
+function listen(path: string, onAsk: (ask: Ask) => void): Promise<Listened> {
 	return new Promise((resolve) => {
 		const server = createServer((c) => {
+			let text = "";
 			c.on("error", () => {});
-			c.once("data", () => onAsk());
-			c.resume();
+			c.setEncoding("utf8");
+			c.on("data", (d: string) => {
+				text += d;
+				// More than any ask is: not an instance of this app.
+				if (text.length > ASK_BYTES) c.destroy();
+			});
+			c.on("end", () => {
+				const ask = readAsk(text);
+				if (ask) onAsk(ask);
+			});
 		});
 		server.once("error", (e: NodeJS.ErrnoException) => resolve(e.code === "EADDRINUSE" ? "taken" : "failed"));
 		server.listen(path, () => {
@@ -87,8 +123,8 @@ export type PipeSecurity = {
 
 /**
  * "alone": this is the one instance, and `onAsk` is called whenever another
- * starts. "another": another runs, and has been asked to show itself; this
- * one is to quit before it opens anything. "unguarded": no guard could be
+ * starts, with what it asks. "another": another runs, and has been asked
+ * `ask`; this one is to quit before it opens anything. "unguarded": no guard could be
  * kept (no folder of the user's alone, a socket that cannot be made, a pipe
  * someone else made): the app runs, as it would with none.
  *
@@ -98,7 +134,7 @@ export type PipeSecurity = {
  * instances started together beside such a socket could both take it, in the
  * moment between one's look and its unlink.
  */
-export async function claimInstance(path: string, onAsk: () => void, pipe?: PipeSecurity): Promise<"alone" | "another" | "unguarded"> {
+export async function claimInstance(path: string, onAsk: (ask: Ask) => void, pipe?: PipeSecurity, ask: Ask = { show: true }): Promise<"alone" | "another" | "unguarded"> {
 	for (let attempt = 0; attempt < 3; attempt++) {
 		const listened = await listen(path, onAsk);
 		if (listened === "failed") return "unguarded";
@@ -123,7 +159,7 @@ export async function claimInstance(path: string, onAsk: () => void, pipe?: Pipe
 			// Not this user's: never asked, never obeyed.
 			if (owner !== "ours") return "unguarded";
 		}
-		if (await askOther(path)) return "another";
+		if (await askOther(path, ask)) return "another";
 		// Nothing answered: what is there was left by an instance that ended. A pipe has no file to leave.
 		if (!isPipe(path)) {
 			try {

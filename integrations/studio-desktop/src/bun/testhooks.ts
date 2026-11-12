@@ -159,6 +159,16 @@ export function noticeShown(win: BrowserWindow, n: Notice) {
 	});
 }
 
+/**
+ * Where a window's keyboard focus was each time the app looked (windows.ts's
+ * `focusesPage`), and whether it moved it into the page: the check waits for
+ * this before it types into a window as it opened.
+ */
+export function pageFocus(w: BrowserWindow, f: unknown, moved: boolean, why: string) {
+	const key = [...pages].find(([, p]) => p.win === w)?.[0] ?? null;
+	report("page-focus", { key, win: w.id, why, focus: f, moved });
+}
+
 /** The text an app page shows, reported when it changes. */
 export function pagePreloadFor(name: string): string {
 	return `(function(){var last="";setInterval(function(){var t=(document.body?document.body.innerText:"").replace(/\\s+/g," ").slice(0,900);if(t!==last){last=t;window.__electrobunSendToHost&&window.__electrobunSendToHost({type:"page-text",name:${JSON.stringify(name)},text:t});}},300);})();`;
@@ -278,6 +288,68 @@ async function run(c: any) {
 		}
 		// The main window's "Show in folder".
 		case "reveal": await revealPath(c.path); break;
+		// Windows: keys pressed into a window, as a person's are (testkeys.ts): a
+		// `click` into its page (near its top left corner), which brings it to the
+		// front as a person's does, then `type` typed or `chord` pressed. Nothing
+		// else brings it forward: no Alt pressed (with the window in front by then,
+		// one can put its menu bar in menu mode, which takes the keys after it),
+		// no SetForegroundWindow, no activation. Keys go only into a window in front.
+		case "keys": {
+			const page = win(c.key);
+			if (!page || process.platform !== "win32") {
+				report("keys-result", { key: c.key, error: page ? "Windows alone" : "no such window" });
+				break;
+			}
+			const k = await import("./testkeys.ts");
+			const hwnd = BigInt(page.win.ptr as unknown as number);
+			const before = k.lastInput();
+			let front = k.isFront(hwnd);
+			// A point near the page's top left corner, inside it at any scale; or, with `title`, a point of
+			// its title bar no other window lies over, as a person brings a window forward without
+			// touching its page.
+			let clicked: ReturnType<typeof k.click> | null;
+			try {
+				clicked = c.title ? k.clickTitle(hwnd) : c.click ? k.click(hwnd, 8, 8) : null;
+			} catch (e) {
+				report("keys-result", { key: c.key, error: (e as Error).message, front, targets: k.inputTargets(hwnd, null), inFront: k.foreground(), self: process.pid });
+				break;
+			}
+			// Whether the system took the click: the raw input thread takes it after mouse_event returns.
+			let clickTaken = clicked ? k.lastInput() !== before : null;
+			for (let i = 0; clicked && !clickTaken && i < 25; i++) {
+				await Bun.sleep(20);
+				clickTaken = k.lastInput() !== before;
+			}
+			// A click's activation is handled by the window's own thread, not this one: it is waited for.
+			for (let i = 0; !front && clicked && i < 50; i++) {
+				await Bun.sleep(40);
+				front = k.isFront(hwnd);
+			}
+			const typedFrom = k.lastInput();
+			if (front && c.type) k.type(c.type);
+			if (front && c.chord) k.chord(c.chord);
+			// Whether the system took any of it: the raw input thread takes it after this returns.
+			let taken = front && (c.type || c.chord) ? k.lastInput() !== typedFrom : null;
+			for (let i = 0; taken === false && i < 25; i++) {
+				await Bun.sleep(20);
+				taken = k.lastInput() !== typedFrom;
+			}
+			report("keys-result", { key: c.key, front, clicked, clickTaken, before: typedFrom, taken, type: c.type ?? null, chord: c.chord ?? null, targets: k.inputTargets(hwnd, clicked), ...(front ? {} : { inFront: k.foreground(), self: process.pid }) });
+			break;
+		}
+		// The session's last input now (GetLastInputInfo's tick), and where input to window `key` goes,
+		// its windows within it too, for a check whose keys or click a page never saw.
+		case "last-input": {
+			if (process.platform !== "win32") {
+				report("last-input", { error: "Windows alone" });
+				break;
+			}
+			const k = await import("./testkeys.ts");
+			const page = c.key ? win(c.key) : undefined;
+			const hwnd = page ? BigInt(page.win.ptr as unknown as number) : null;
+			report("last-input", { tick: k.lastInput(), front: k.foreground(), self: process.pid, ...(hwnd ? { targets: k.inputTargets(hwnd, null), tree: k.windowTree(hwnd) } : {}) });
+			break;
+		}
 		case "quit": Utils.quit(); break;
 	}
 }

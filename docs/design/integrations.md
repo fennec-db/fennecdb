@@ -321,9 +321,10 @@ in an `async` function, so the main process's JavaScript, every server's
 supervision and the quit handler stood still until someone clicked (a check that
 never clicked held the app for good). `exitOnLastWindowClosed` is false: the
 default quits as the last window's close handlers return, too soon for a
-server's SIGTERM to finish while the app still holds its lock; the app stays in
-the Dock, as a document app does, and stops its servers itself on quit
-(`before-quit` held until they have). A second open of a file the app is still
+server's SIGTERM to finish while the app still holds its lock; on macOS the app
+stays in the Dock, as a document app does, and on Windows and Linux its last
+window closed is a quit of its own (Desktop integration, below); either way it
+stops its servers itself on quit (`before-quit` held until they have). A second open of a file the app is still
 starting a server for waits for that one, and so does a second click on a saved
 server while it is being looked at (a few seconds, up to the probe's timeout):
 both are in `starting`, one open of a thing at a time.
@@ -853,6 +854,330 @@ has.
   59 to 113 ms on arm64 (one each in 43104202430, 43107758866 and
   43109301246).
 
+Desktop integration (phase 3 of #578). A `.fennec` opens from Explorer and a
+file manager, the app registers itself for that, the menus' keys, the last
+window and the app's words are each system's, and the app has its icon there.
+
+- **What reaches the app.** Electrobun 2.0.4 registers a document type on
+  macOS alone, and its launcher, the one program a registration can name,
+  starts the main process as `[bun, main.js]`, its own arguments dropped
+  (launcher/main.zig; upstream #483, #554). Measured on the four runners, the
+  test variant started by GIO's `gio open` on a `.fennec` (Linux) and by the
+  shell's ShellExecuteEx on one (Windows), reporting what it was given:
+  - its own arguments: Bun's and the app's script alone, the file in neither
+    (`[<app>/bin/bun, <app>/Resources/app/bun/index.js]`);
+  - its environment: the caller's (gio's, or the program that asked the
+    shell), with the launcher's own additions (`ELECTROBUN_LAUNCHER_PID`,
+    `ELECTROBUN_INSTALL_ROOT_NAME`, `ICU_DATA`, and on Linux
+    `LD_LIBRARY_PATH`) and GIO's (`GIO_LAUNCHED_DESKTOP_FILE`, `_PID`): no
+    file;
+  - its parent: the launcher, by `process.ppid`, the pid the launcher names
+    in `ELECTROBUN_LAUNCHER_PID`, which waits on it for the app's life
+    (`WaitForSingleObject` on Windows, a spawn and a wait elsewhere), and
+    whose own command line holds the file whole -- on Linux
+    `[<app>/bin/launcher, <file>]`, spaces and non-ASCII letters as given, its
+    folder the caller's.
+
+  So the app reads the file back from its launcher (`handover.ts`): on Linux
+  `/proc/<parent>/cmdline`, the arguments as the system handed them,
+  NUL-separated, and `/proc/<parent>/cwd` for a relative one; on Windows the
+  command line through NtQueryInformationProcess (ProcessCommandLineInformation,
+  with PROCESS_QUERY_LIMITED_INFORMATION, as Task Manager reads one), split by
+  the C runtime's rules since 2008, the ones the launcher's own Zig runtime
+  splits by. Only a parent whose program is the `launcher` beside the app's
+  Bun is read (`/proc/<parent>/exe`, QueryFullProcessImageNameW): a terminal
+  that ran Bun, a harness or a reparenting init hands nothing. Every argument
+  after the program is a path but the launcher's own flags (Linux's
+  `--automation`; with `--uninstall` it never starts the app), opened as
+  Open… opens one, so a file that is not a database is said in words and a
+  server is never started on it; nothing of it is run or read as a command.
+  With the app running, the double-click starts a second instance, which
+  hands its paths to the first over `instance.ts`'s channel, its user's alone,
+  as one line of JSON (`show` otherwise, as before), and quits before it reads
+  a list; a path is at most 32 767 characters on Windows, so an ask is bounded
+  at a mebibyte and 256 files, and anything else that connects asks nothing
+  (Windows' owner check opens the pipe and says nothing).
+  Rejected, the plan's candidate first: an opener program of our own,
+  registered as the handler, handing the path over and starting the app where
+  none runs. On Windows it must be a GUI-subsystem executable, since the app's
+  Bun is a console program whose window would flash at every double-click, so
+  it is a binary to build for each system and processor, and a process more
+  between the click and the app, for what the launcher already holds. Also
+  rejected: an environment variable (nothing puts the file in one, and a
+  variable the shipped app reads for itself is a hook, `release.mjs`); a
+  shell, `cmd /c`, `sh -c`, PowerShell or a script host as the handler (a
+  shell, and a console); waiting for upstream (#483 and #554, open). A way
+  was found, so Tauri is not taken up again.
+- **Who registers it: the app, at every start.** Electrobun's installer and
+  Setup.exe run nothing of the app's, the release's zip and tarball (phase 4)
+  are unpacked anywhere with no installer at all, and the install scripts
+  (`install.ps1 -App`, `install.sh --app`) cover their own copies alone and
+  would point nowhere once one was moved. So the one instance writes it at each
+  start (`associate.ts`), only what differs from what is there: a moved copy
+  points it at itself the next time it runs, and a start that changes nothing
+  writes nothing (`finder` holds a second start to no write). On Windows,
+  under `HKCU\Software\Classes`: a ProgID `<identifier>.fennec`, its name, a
+  DefaultIcon (Hutch's `Resources\app.ico`) and `shell\open\command` =
+  `"<launcher>" "%1"`, a REG_SZ, so nothing in it is expanded but the shell's
+  own `%1`, and a launcher path holding a `%` (which the shell would
+  substitute) or a quote is not registered; listed in
+  `.fennec\OpenWithProgids`, and made `.fennec`'s default only where, as
+  Explorer reads it (HKCR: the user's over the machine's), there is none, it
+  is the app's already, or it names a ProgID whose quoted program is gone. A
+  program the user picked is Explorer's own record (UserChoice, hash-sealed),
+  which wins and is never written; another program's default is left, and a
+  command this cannot read (unquoted, another type) is taken for another
+  program's. Then SHChangeNotify(SHCNE_ASSOCCHANGED), so Explorer shows the
+  icon. The calls are win32.ts's, each answered by its return value. On Linux,
+  under `$XDG_DATA_HOME` (`~/.local/share`): the shared-mime-info type
+  `application/x-fennecdb`, `*.fennec`, in `mime/packages/<identifier>.xml`,
+  and a desktop entry `applications/<identifier>.desktop` with
+  `MimeType=application/x-fennecdb;`, `Exec="<launcher>" %f` (quoted and
+  escaped as the specification reads it: the string's escapes, then its
+  quoting; a launcher path holding a `%` is not registered, since GIO looks
+  for the program before it expands the `%%` the specification asks for, and
+  ignored such an entry on the runners), `NoDisplay=true` (Electrobun's own entry,
+  `fennecstudio.desktop`, with no `MimeType` and no `%f`, is the one in the
+  menus) and `TryExec=<launcher>`; each written by a rename, and then
+  `update-mime-database` and `update-desktop-database`, each started with an
+  argument vector where it is installed (a missing one is said, not failed).
+  Nothing is made the type's default: GIO took the only program for the type
+  as its default with no `mimeapps.list` line, and a program the user picked
+  there stays theirs. GIO reads a `.fennec` as the type once the database is
+  made again (`gio info`); xdg-open with no desktop session asks `file(1)`,
+  which knows no `.fennec`, so the check drives `gio open`, which GNOME's
+  file manager is. KDE's (KService's cache over the same entries) is not
+  checked.
+- **What is left.** The download is the app unpacked, with no uninstaller
+  (phase 4); removing its folder, and the shortcut or menu entry the install
+  scripts made, leaves the registration, and so would Electrobun's
+  uninstaller (Windows' Apps settings, the launcher's `--uninstall`), which
+  removes its own records alone. On Windows the ProgID's command then names a
+  launcher that is gone, and a double-click says Windows cannot find it, until
+  the three `reg delete` lines in the README's Uninstall and the studio page's
+  Windows tab; on Linux `TryExec` has GIO ignore the entry once its launcher is
+  gone (`finder` removes the copy an entry names and the double-click starts
+  nothing), so nothing points nowhere, and the two files stay, for the two
+  `rm`s there. The owner's decision: those lines are the uninstall for now,
+  written out in both places with every key and file, and an uninstall entry
+  of the app's own is a later phase's. The per-start registration was asked
+  whether it could drop one that names a path no longer there, cheaply: it has
+  none to drop. It writes one ProgID and one entry for its identifier, pointed
+  at the copy that starts, so a copy moved or removed is written over by the
+  next start of any other; once the last copy is gone, nothing of the app runs
+  to remove it. (`.fennec`'s default naming a ProgID whose program is gone is
+  already taken over, above.)
+- **The checks.** `finder` drives the double-click as close as a runner
+  allows: on Windows .NET's Process.Start with UseShellExecute, which is the
+  shell's ShellExecuteEx, as Explorer's double-click is; on Linux `gio open`.
+  Its control takes the registration away as the README tells a user to, and
+  the same double-click starts nothing of the app: on Linux gio says no
+  program is registered for the type (`application/octet-stream` there); on
+  Windows the shell hands a file of no known type to the Unknown class's
+  openas verb, `OpenWith.exe` (`cmd /c start` would do the same through
+  cmd), which is the event waited for, then closed, with the picker it
+  started (PickerHost.exe on Windows 11), as a person closes them
+  (CloseMainWindow, WM_CLOSE; a kill only where one has no window or does
+  not end), and no dimming window of the shell's (Shell_SystemDim) it brought
+  may be left. Such a picker dims the whole screen and takes every click: on
+  the windows-11-arm runner the click `menu` made into its main window's page
+  landed on the dim of a PickerHost.exe that was there from before `finder`
+  ran. Two were started, by their start times when `test/process.test.ts`
+  and then `serve` started fennec-server on 0.0.0.0: Windows 11's firewall
+  asking whether a program listening on the network may be reached (Windows
+  Server, the x64 runner, does not ask). `desktop.yml` tells the Windows
+  runners' firewall not to ask (NotifyOnListen off), the tests and checks
+  reaching every server over loopback, which it does not filter; `run.mjs`
+  says what dims the screen when the run starts and after each check
+  (`dimWindows`: each dimming window's program and when it started), asks it
+  to close as a person would (`clearDimming`; never a kill, as a picker host
+  outlives its window), and fails a check that left one. Then the app's first start
+  registers it, the double-click starts the app with the file, which opens
+  with no main window over it; a second file's is handed to the instance
+  there; a `.fennec` that is not a database is said; on Linux, the app run
+  from a folder named `odd "q" 'a' \`cd&&touch <marker>\`` registers itself
+  there and a double-click starts that very launcher with the file, the name
+  whole and no marker, and once the copy is removed the entry is ignored; the
+  registration removed again, nothing starts. The app does not start at all
+  from a folder whose name holds a backslash (Bun 1.4.0 reads one in its
+  script's path as a separator: "ENOENT reading .../b/app/Resources/main.js")
+  or `$(...)` (Electrobun's core could not open its native library,
+  FileNotFound: its launcher puts the folder in `LD_LIBRARY_PATH`, where the
+  loader reads `$` and splits at `:` and `;`), so the name holds neither. `run.mjs` removes the test variant's
+  registration at the start and the end of every run.
+- **Menus.** The File menu's accelerators were a bare letter, which
+  Electrobun makes Command on macOS and Ctrl on Windows (its
+  setMenuItemAccelerator takes a lone letter as Ctrl and the letter), and
+  `shift+o`, which was Shift and O with neither on any system; they are
+  `CmdOrCtrl+N`, `+O` and `+Shift+O`, Command and Ctrl. Windows gives each
+  window a menu bar, and translates accelerators in the main process's
+  message loop (TranslateAccelerator), which sees the keys of its own
+  windows; WebView2 in a window is another process's window. Measured on the
+  Windows x64 runner: with the main window in front and with a click into its
+  page (text typed after it arrived in the search box), Ctrl+N, Ctrl+O and
+  Ctrl+Shift+O reached no menu item, and nothing else either (no WebView2
+  window of its own): WebView2 has the keys, and Electrobun 2.0.4 handles none
+  of its AcceleratorKeyPressed. (On the arm64 runner the system took the keys
+  a check typed, GetLastInputInfo moving, and the page got none of them: it
+  had not the focus, `document.hasFocus()` false, which was on the bare window,
+  GetGUIThreadInfo's focus the top-level BasicWindowClass; after Electrobun's
+  `activate()` it was in WebView2's Chrome_WidgetWin_1 and the same text
+  arrived, three keys seen. Fixed by the app, below: keys in a window's page.)
+  So the main window takes the File menu's keys
+  in its own page on Windows and Linux (src/launcher/index.ts, not on macOS,
+  whose menu bar takes Command's first); a key the menu did take would never
+  reach the page, so none runs twice. A studio window's page is a server's,
+  with the event bridge alone: its menu bar works with the mouse, its keys do
+  nothing. Not taken: a preload that sends them over the event bridge, which
+  any page can send on as well, so a server's page could open the Open dialog
+  at will.
+  Linux has no application menu ("Application menus are not supported on
+  Linux", linux/nativeWrapper.cpp), so the main window's own buttons are its
+  File menu: New database, Open file…, the Databases list's Open (Open Recent),
+  Remote connections (Connect to a Server…); with no Dock, the main window
+  closed is shown again by starting the app a second time, which asks the one
+  there. `menu` presses each of them, and the keys: on Windows as a person's
+  (testkeys.ts: keybd_event, and a click as a mouse's, absolute, which also
+  brings the window to the front), its control twice -- text typed into the
+  main window as it opened, with no click into its page, arriving in its
+  search box, then a click into its page reaching the page and text typed
+  after it arriving --
+  each key's effect asserted and taken once, by the menu bar or the page,
+  never both; on Linux, which has no input a check can press as a person's
+  under xvfb, dispatched in the page. Where the main window opened behind
+  another program's, the app leaves it there, and the check brings it forward
+  as a person would, by a click on its title bar (where WindowFromPoint names
+  another window over every point of it, the window and whether DWM cloaks it
+  are said, and the click made all the same: the window's coming forward is
+  what is asked): the app's look once it is in front (its activation's, or
+  the watch's for a window that was behind) is then the one that moves the
+  focus, the other half of the rule. (The windows-11-arm image comes up
+  with the Start menu open, its search in front, and a "Microsoft account"
+  sign-in window, WWAHost.exe, each started before the job and in front of
+  every window: the Start menu lay over the middle of the main window's title
+  bar, whose right end ran off the screen, and the sign-in window was not
+  among the visible ones when a step before the checks looked. `desktop.yml`
+  asks each WWAHost window to close then, ends a WWAHost still running 15 s
+  on, and closes the Start menu, in front, by Escape; the check looks along
+  the whole visible title bar for a point that is the window's; `run.mjs`
+  says when another program's window is in front.) Nothing
+  else of the check's own brings a window forward or moves its focus: no Alt (the first version pressed and let
+  go of one before a SetForegroundWindow, which can put the menu bar of a
+  window in front by then in menu mode, where keys go), no activation, and no keys
+  dispatched in the page on Windows, where the first version did so when the
+  system seemed to take none, a reading that ran ahead of the system's input
+  thread and hid the arm64 runner's failure. Keys or a click the page did not
+  get fail it, with what the page saw, the click's point and the window
+  under it, the focus and the menu mode of the window's thread, the windows
+  within it and the app's looks at its focus.
+- **Keys in a window's page (Windows).** Activating a window, Windows'
+  DefWindowProc puts the keyboard focus on the window itself (WM_ACTIVATE),
+  and a WebView2 page is a child window of WebView2's process, which has the
+  focus only when the host moves it there (the controller's MoveFocus).
+  Electrobun 2.0.4 moves it only in `activate()` (activateWindow's
+  FocusActiveView, win/nativeWrapper.cpp:11496): not on WM_ACTIVATE (:6074),
+  which it passes to DefWindowProc, and not once a view is made, which comes
+  after its window was shown and activated. So a window shown in front had the
+  focus on the bare window, and what a user typed before clicking into the
+  page reached nothing (measured on the arm64 runner, above). The app moves it
+  itself (`keysToPage`, webview2.ts; `focusesPage`, windows.ts, given every
+  window the app makes): once a window's page has loaded (`did-navigate`) and
+  at each of its activations (its `focus` event), where GetGUIThreadInfo on the
+  window's own thread says the focus is on a window of the app's process or
+  none (no page: a page's window is WebView2's process's) and no menu has its
+  input, it calls `activate()`. That call also brings a window forward, by
+  AttachThreadInput to the thread in front where SetForegroundWindow is
+  refused, so it is made only for a window that is the one in front
+  (GetForegroundWindow) and never brings one forward: a window behind another
+  program's stays behind, and its page is given the focus when the user
+  brings it forward. That needs a look of its own: a window Electrobun made
+  the active one of its thread while another program's was in front (its
+  creation's SetActiveWindow, where the foreground was refused) gets no
+  WM_ACTIVATE when a click brings it forward. Measured on the arm64 runner,
+  the Start menu open as the main window opened: clicked by its title bar,
+  it came to the front with no `focus` event and its focus on the bare
+  window. So a window a look finds behind is looked at every 100 ms
+  (`BEHIND_LOOK_MS`) until it is in front, then given the focus (`forward`),
+  or until it closes; one in front is never watched, so a window that opens
+  in front costs no timer. What it does not change: Electrobun makes every window
+  activated (`activate` defaults to true), by the same AttachThreadInput, so a
+  window that opens while the user is in another program, a file handed over
+  late, comes forward as it did before; and between the look and the call, a
+  few milliseconds, the user may switch away, which the call would undo. On
+  macOS and Linux the page is the window's own view, which AppKit makes its
+  first responder and GTK gives the window's focus, and `activate()` would
+  bring the app forward over another: nothing is done there (`menu` cannot
+  press keys as a person's on either). `test/webview2.test.ts` holds the
+  rule, `menu` the running app on both Windows runners.
+- **The last window.** macOS keeps an app with no window in the Dock, and the
+  app stays there as a document app does, a served database still running.
+  Windows and Linux have no Dock: an app whose last window closed is gone from
+  the taskbar and the switcher, and the convention is that it quits. So there
+  the last window closed is a quit (`onLastWindowClosed`, index.ts): the same
+  `Utils.quit()` File, Quit makes, whose `before-quit` holds it until every
+  server has stopped by its one shutdown (the end of its stdin on Windows,
+  SIGTERM on Linux, each writing its checkpoint, a hard kill only 30 s on), a
+  served database's too. It is the owner's choice from the platforms'
+  convention; a served database needs a window left open there. Not
+  Electrobun's `exitOnLastWindowClosed`, which quits as the close handlers
+  return, before any server has stopped (above). Every window the app makes
+  is counted (`counted`, windows.ts: the main window, the new-database
+  window, a notice, a studio window), and the count is read on the next turn
+  after a close, with nothing opening (`anythingOpen`): a notice's Try again
+  closes the notice, the last window then, and opens its file, which makes a
+  window of its own, so that quits nothing. `lastwindow` holds both systems'
+  rules, the notice's Try again with the app left up, and on Windows and
+  Linux the quit: `last-window-closed`, the window's and the served
+  database's servers each stopped with exit 0, nothing of the app left. The
+  checks that close a file's only window and open it again (`files`,
+  `environment`) show the main window too, and `menu` closes Linux's main
+  window with a file's open.
+- **The app's words.** The main window named the computer "This Mac" (its
+  side bar, the Databases section, the serve sheet's reach and metrics, a
+  served database's card) and its button "Reveal in Finder". Each system's own
+  word is used: "This PC", as Windows' Explorer names it, and "This computer"
+  on Linux, whose desktops each name it their own way; "Show in Explorer" and
+  "Open its folder" (`xdg-open` opens the folder there). They come with the
+  main window's first list (`Overview.machine`, `.reveal`; `thisMachine`,
+  `revealLabel`), the HTML's own being macOS's; the credential store's name
+  already came so. `pages` holds the words on each system and, on Windows and
+  Linux, no Mac, Finder or Keychain left in any section of the main window;
+  the notices name none.
+- **Icons.** `icon/icon.ico` (16, 24, 32, 48, 64, 128 and 256 pixels, each a
+  PNG entry, 48.9 KB) and `icon/icon.png` (512 pixels, 69.2 KB), made from
+  `icon/icon.svg` by `scripts/make-icon.sh rasters` on a Mac (sips draws the
+  SVG, as for the iconset) and kept in git with `icon/rasters.json`, their and
+  the SVG's digests, since neither Windows nor Linux has an SVG renderer of its
+  own to make them where they are built; `test/icon.test.ts` fails once the
+  SVG changes until they are made again. `build.win.icon` and
+  `build.linux.icon`: Hutch embeds the .ico in `launcher.exe` and the
+  Setup.exe and keeps it as `Resources\app.ico`, and keeps the PNG as
+  `Resources/appIcon.png` and `Resources/app/icon.png`; Electrobun's Start-menu
+  shortcut and menu entry show them, and the registration names those copies
+  rather than adding its own. What they cost, the release build of this
+  branch beside main's on the same x64 runner, twice (the two differ by
+  timestamps alone): Windows' `Setup.zip` 39 897 737 -> 40 014 917 bytes
+  (+117 180, +0.29%; the second +120 113), its update archive (`.tar.zst`)
+  +72 129 and +72 083, `launcher.exe` and the Setup.exe +49 664 each (the
+  icon's images), `Resources\app.ico` 48 892; Linux's `Setup.tar.gz`
+  41 806 525 -> 41 875 912 (+69 387, +0.17%; the second +69 315), the update
+  archive +69 236 and +69 187 (Hutch's two copies of the PNG are one in
+  zstd's window). The build also writes the icon's images into the app's own
+  `bun.exe`, read from the x64 download: RT_ICON 1 to 7 are the .ico's seven
+  images and RT_GROUP_ICON 1 names them, as in `launcher.exe`, but Bun's own
+  group, the named `IDI_MYICON`, stays, and still names RT_ICON 1 as its one
+  256-pixel image of 270 600 bytes, which is now the app's 16-pixel one; a
+  named group comes before a numbered one, so it is the icon Windows draws for
+  that file, the 16-pixel image (its hash, `environment`'s, is neither the
+  toolchain Bun's nor the launcher's, on both runners). The write leaves the
+  security directory naming Bun's signature at 88 815 616, 10 328 bytes, in a
+  file of 88 594 432: Windows reads it as NotSigned (the toolchain's is Valid),
+  and Bun refuses that copy as the base of a program (InvalidSecurityDirectory:
+  `environment`'s stand-in is built by the toolchain's). Whether a window's
+  taskbar button or Task Manager shows that icon, Electrobun setting none of
+  its own, is not measured. macOS's is the iconset it had. Without them the launcher, its shortcut, its menu entry and
+  each window show a default program's icon, and a `.fennec` file none.
+
 Toolchain. `electrobun init` installed Hutch (the build tool) in `~/.hutch` and
 appended two lines to `~/.zshrc`, and the npm package's resolver would, were
 its download to fail, run that installer. `scripts/electrobun.mjs` runs the
@@ -1161,7 +1486,9 @@ Windows that is only by the end of its stdin: `kill("SIGTERM")` there is
 TerminateProcess, ending the server in 1-3 ms with no shutdown line, so no sync
 and no checkpoint. Its gaps each have a way round in the app but one:
 - The launcher drops its arguments (upstream #483, #554), so a `.fennec`
-  double-clicked on Windows or Linux cannot reach the app. This one has none.
+  double-clicked on Windows or Linux cannot reach the app. This one had none
+  in sight then; phase 3 found one: the launcher stays the app's parent, and
+  the app reads its arguments back from it (Desktop integration, above).
 - WebView2's `sessionClearStorageData` clears the first open view's profile, not
   the partition it is given; the app removes the partition's folder itself.
 - Linux's `openExternal` and `showItemInFolder` fall back to
@@ -1174,7 +1501,8 @@ and no checkpoint. Its gaps each have a way round in the app but one:
 Linux needs glibc 2.38 and WebKitGTK 4.1 (Ubuntu 24.04, Debian 13, Fedora 39 and
 later; not Ubuntu 22.04, Debian 12 or RHEL 9). Tauri is taken up again only if
 a double-clicked file finds no way to the app: neither an argument forwarded
-upstream nor a small opener of our own.
+upstream nor a small opener of our own. Phase 3 found a third, smaller than
+either: the launcher's own command line, read back by the app.
 
 Measured on a MacBook Air (MacBookAir10,1, Apple M1, 8 GB), macOS 26.1, with
 other work running (load average 3 to 4), by `scripts/measure.mjs` on the test

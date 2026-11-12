@@ -10,13 +10,25 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { BUN, EXE, HERE, LINUX, REPORT, WIN, assertClean, cmd, evalIn, file, lines, quit, startApp, step, waitFor, waitNone, waitNotice, webviewWindows, log } from './lib.mjs';
+import { BUN, EXE, HERE, LINUX, MAC, REPORT, WIN, assertClean, cmd, evalIn, file, lines, quit, startApp, step, until, waitFor, waitNone, waitNotice, webviewWindows, log } from './lib.mjs';
 
 assertClean('before');
 
 const app = startApp('pages', { FENNEC_DESKTOP_LAUNCHER: '1' });
 await waitFor((l) => l.what === 'ready', 60000, 'ready');
 await waitFor((l) => l.what === 'page-text' && l.key === 'launcher' && /Open file/.test(l.text), 20000, 'the launcher drawn');
+
+step("the main window says what each system calls things: the computer, its file manager, its credential store");
+{
+  const words = MAC ? { machine: 'This Mac', reveal: 'Reveal in Finder' } : WIN ? { machine: 'This PC', reveal: 'Show in Explorer' } : { machine: 'This computer', reveal: 'Open its folder' };
+  // Its words come with the first list it draws; the HTML's own are macOS's.
+  await until(async () => (await evalIn('launcher', `return document.getElementById('db-reveal').textContent`)).value === words.reveal, 20000, `the file manager's button: ${words.reveal}`);
+  // Every section's text, the hidden ones and the serve sheet's too.
+  const text = (await evalIn('launcher', `return document.body.textContent.replace(/\\s+/g, ' ')`)).value;
+  assert.ok(text.includes(words.machine) && text.includes(`${words.machine} only`), `the main window names the computer ${words.machine}`);
+  if (!MAC) assert.doesNotMatch(text, /\bMac\b|Finder|Keychain/, 'no macOS word is left in the main window');
+  log(`${words.machine}, ${words.reveal}`);
+}
 cmd({ cmd: 'newdb' });
 await waitFor((l) => l.what === 'page-text' && l.key === 'newdb' && /New database/.test(l.text), 20000, 'the new-database window drawn');
 const n = lines().length;

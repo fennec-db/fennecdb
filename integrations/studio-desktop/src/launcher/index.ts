@@ -128,6 +128,10 @@ function render() {
 	$("keychain").textContent = `Tokens are stored in ${o.keychain}.`;
 	storeName = o.keychain;
 	for (const e of document.querySelectorAll(".store-name")) e.textContent = storeName;
+	// The system's own words: "This PC" on Windows, "This computer" on Linux, Explorer for Finder.
+	for (const e of document.querySelectorAll(".machine")) e.textContent = o.machine;
+	for (const e of document.querySelectorAll(".machine-lower")) e.textContent = o.machine.replace(/^This/, "this");
+	$("db-reveal").textContent = o.reveal;
 }
 
 // ------------------------------------------------------------------ databases
@@ -239,6 +243,24 @@ $("db-serve").addEventListener("click", () => selected && void openSheet(selecte
 $("db-stop").addEventListener("click", () => selected && void run(ask.stopServer({ path: selected }), "Stopping…"));
 $("open").addEventListener("click", () => void run(ask.chooseFile({})));
 $("new").addEventListener("click", () => void run(ask.newDatabase({})));
+
+// The File menu's keys in the main window itself, where no menu takes them
+// first: Linux has no application menu, and on Windows the page is WebView2's,
+// a window of another process, whose keys the menu bar's accelerators never
+// see. macOS's menu bar takes its Command keys before any page, so there this
+// is never asked. A key the menu did take never reaches the page: no action
+// runs twice.
+if (!/Macintosh/.test(navigator.userAgent)) {
+	document.addEventListener("keydown", (e) => {
+		if (!e.ctrlKey || e.altKey || e.metaKey || e.repeat) return;
+		const k = e.key.toLowerCase();
+		if (k === "n" && !e.shiftKey) void run(ask.newDatabase({}));
+		else if (k === "o" && !e.shiftKey) void run(ask.chooseFile({}));
+		else if (k === "o" && e.shiftKey) show("connections");
+		else return;
+		e.preventDefault();
+	});
+}
 
 // ------------------------------------------------------------------ servers
 
