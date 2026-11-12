@@ -403,6 +403,19 @@ export function webviewWindows() {
   return r.stdout.trim().split(/\r?\n/).filter(Boolean);
 }
 
+/**
+ * Windows: the command lines of the test variant's WebView2 browser processes
+ * (one an environment: a process with no --type=), each as its switches. What
+ * the app's arguments reached, where WebView2 was started with them.
+ */
+export function webviewBrowserSwitches() {
+  const dir = `'${USER_DATA.replace(/'/g, "''")}'`;
+  const ps = `Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains(${dir}) -and -not $_.CommandLine.Contains(' --type=') } | ForEach-Object { $_.CommandLine }`;
+  const r = spawnSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', timeout: 60000 });
+  if (r.status !== 0) throw new Error(`WebView2's processes were not listed: ${r.stderr || r.error}`);
+  return r.stdout.trim().split(/\r?\n/).filter(Boolean).map((cl) => cl.match(/--[A-Za-z0-9-]+(=("[^"]*"|\S*))?/g) ?? []);
+}
+
 /** The Bun the test variant bundles: what a check runs a script of the app's own with (src/bun/win32.ts), or builds a stand-in program with. */
 export const BUN = MAC ? `${APP}/Contents/MacOS/bun` : join(APP, 'bin', WIN ? 'bun.exe' : 'bun');
 

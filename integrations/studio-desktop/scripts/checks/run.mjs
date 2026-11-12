@@ -35,6 +35,14 @@ const CHECKS = [
   { name: 'server-dies' },
   { name: 'orphan' },
   { name: 'sandbox' },
+  { name: 'hostile' },
+  {
+    name: 'latepreload',
+    skip: {
+      darwin: "Windows alone: WebKit takes a view's user script at once (its user content controller), where WebView2 completes AddScriptToExecuteOnDocumentCreated later",
+      linux: "Windows alone: WebKit takes a view's user script at once (its user content controller), where WebView2 completes AddScriptToExecuteOnDocumentCreated later",
+    },
+  },
   { name: 'pages' },
   { name: 'storage' },
   { name: 'environment' },

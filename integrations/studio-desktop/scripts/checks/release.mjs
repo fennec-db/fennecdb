@@ -79,7 +79,7 @@ function bundle(app) {
   return fromTar(zlib.zstdDecompressSync(readFileSync(join(resources, payload))), 'Resources/app/bun/index.js');
 }
 
-const HOOKS = ['FENNEC_DESKTOP_REPORT', 'FENNEC_DESKTOP_CONTROL', 'FENNEC_DESKTOP_OPEN', 'FENNEC_DESKTOP_LAUNCHER', 'FENNEC_DESKTOP_HOLD_OPEN_URL', 'FENNEC_SERVER_BIN', 'FENNEC_CLI_BIN', '"close-direct"'];
+const HOOKS = ['FENNEC_DESKTOP_REPORT', 'FENNEC_DESKTOP_CONTROL', 'FENNEC_DESKTOP_OPEN', 'FENNEC_DESKTOP_LAUNCHER', 'FENNEC_DESKTOP_HOLD_OPEN_URL', 'FENNEC_DESKTOP_BRIDGELESS_FIRST', 'FENNEC_DESKTOP_NO_PRELOAD_GUARD', 'FENNEC_SERVER_BIN', 'FENNEC_CLI_BIN', '"close-direct"'];
 
 const shipped = bundle(release);
 const testing = existsSync(test) ? bundle(test) : null;
