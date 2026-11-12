@@ -414,9 +414,11 @@ connection it never removed, fails alone and never the ones after it. The
 checks remove their items as they go as well (a served database's,
 `serve:<id>`, by `forgetServeItems` at the end of each check that serves one).
 On Windows `run.mjs` also says what dims the screen when the run starts and
-after each check (a picker of the shell's, as "Open with" is on Windows 11,
-lies over every window and takes every click), closes it as a person would,
-and fails a check that left one.
+after each check (a prompt of the shell's on Windows 11, as "Open with" or the
+firewall asking about a program listening on the network, lies over every
+window and takes every click), asks it to close as a person would, and fails a
+check that left one; CI's Windows runners are told not to ask about listening
+programs (`desktop.yml`).
 Nothing of a real install (`dev.fennecdb.studio`) is read or written. To take the test variant out of the "Open With" list, delete
 `build-test/`.
 

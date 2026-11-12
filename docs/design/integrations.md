@@ -980,11 +980,18 @@ window and the app's words are each system's, and the app has its icon there.
   (CloseMainWindow, WM_CLOSE; a kill only where one has no window or does
   not end), and no dimming window of the shell's (Shell_SystemDim) it brought
   may be left. Such a picker dims the whole screen and takes every click: on
-  the windows-11-arm runner two PickerHost.exe pickers dimmed it from before
-  `finder` ran, and the click `menu` made into its main window's page landed
-  on one. So `run.mjs` says what dims the screen when the run starts and after
-  each check (`dimWindows`: each dimming window's program and when it
-  started), closes it so (`clearDimming`), and fails a check that left one. Then the app's first start
+  the windows-11-arm runner the click `menu` made into its main window's page
+  landed on the dim of a PickerHost.exe that was there from before `finder`
+  ran. Two were started, by their start times when `test/process.test.ts`
+  and then `serve` started fennec-server on 0.0.0.0: Windows 11's firewall
+  asking whether a program listening on the network may be reached (Windows
+  Server, the x64 runner, does not ask). `desktop.yml` tells the Windows
+  runners' firewall not to ask (NotifyOnListen off), the tests and checks
+  reaching every server over loopback, which it does not filter; `run.mjs`
+  says what dims the screen when the run starts and after each check
+  (`dimWindows`: each dimming window's program and when it started), asks it
+  to close as a person would (`clearDimming`; never a kill, as a picker host
+  outlives its window), and fails a check that left one. Then the app's first start
   registers it, the double-click starts the app with the file, which opens
   with no main window over it; a second file's is handed to the instance
   there; a `.fennec` that is not a database is said; on Linux, the app run

@@ -154,8 +154,9 @@ export function procs() {
  * as its process, the program's name, when it started, whether it is visible
  * and its rectangle. A picker of the shell's ("Open with", PickerHost.exe)
  * dims the whole screen under itself, and a click anywhere lands on the dim:
- * on the windows-11-arm runner two lay over every window from before `finder`
- * ran, and `menu`'s click into its main window's page landed on one.
+ * on the windows-11-arm runner the firewall's prompt for a program listening
+ * on 0.0.0.0 (desktop.yml now turns it off) lay over every window, and `menu`'s
+ * click into its main window's page landed on it.
  */
 export function dimWindows() {
   const ps = [
@@ -168,33 +169,46 @@ export function dimWindows() {
 }
 
 /**
- * Windows: a program closed as a person closes it, its window asked to close
- * (CloseMainWindow, WM_CLOSE), and killed only where it has none or does not
- * end within 15 s. Says how it ended.
+ * Windows: program `pid`'s window asked to close, as a person closes it
+ * (CloseMainWindow, WM_CLOSE). What it answered: `asked`, `no window` or
+ * `gone`.
+ */
+export function closeWindowOf(pid) {
+  const said = spawnSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', '$p = Get-Process -Id ([int]$env:FENNEC_CHECK_PID) -ErrorAction SilentlyContinue; if ($p) { $p.CloseMainWindow() } else { "gone" }'], { encoding: 'utf8', timeout: 60000, env: { ...process.env, FENNEC_CHECK_PID: String(pid) } }).stdout.trim();
+  return said === 'gone' ? 'gone' : said === 'True' ? 'asked' : 'no window';
+}
+
+/**
+ * Windows: a program the checks started closed as a person closes it, and
+ * killed only where it has no window or does not end within 15 s. Says how it
+ * ended.
  */
 export async function closeProgram(pid) {
-  const asked = spawnSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', '$p = Get-Process -Id ([int]$env:FENNEC_CHECK_PID) -ErrorAction SilentlyContinue; if ($p) { $p.CloseMainWindow() } else { "gone" }'], { encoding: 'utf8', timeout: 60000, env: { ...process.env, FENNEC_CHECK_PID: String(pid) } }).stdout.trim();
+  const asked = closeWindowOf(pid);
   if (asked === 'gone') return 'gone before it was asked';
-  const ended = asked === 'True' && (await until(() => !procs().some((p) => p.pid === pid), 15000, `${pid} closed by its window`).then(() => true, () => false));
+  const ended = asked === 'asked' && (await until(() => !procs().some((p) => p.pid === pid), 15000, `${pid} closed by its window`).then(() => true, () => false));
   if (ended) return 'closed by its window';
   try {
     process.kill(pid, 'SIGKILL');
   } catch {
     // gone
   }
-  return asked === 'True' ? 'asked to close, did not end in 15 s, killed' : 'no window to close (CloseMainWindow false), killed';
+  return asked === 'asked' ? 'asked to close, did not end in 15 s, killed' : 'no window to close, killed';
 }
 
 /**
- * Windows: the screen cleared of the dimming windows on it, each program that
- * shows one closed (`closeProgram`), and waited for until none is visible.
- * What was there and how each went, or null where nothing was.
+ * Windows: the dimming windows on the screen, each program that shows one
+ * asked to close its window (`closeWindowOf`), never killed: the shell's
+ * picker hosts outlive their windows, and in the run that killed them a
+ * "Microsoft account" window was in front when `menu` started. What was there,
+ * what each answered, and
+ * whether the screen was clear within 15 s; null where nothing dimmed it.
  */
 export async function clearDimming() {
   const there = dimWindows().filter((w) => w.visible);
   if (!there.length) return null;
   const how = {};
-  for (const pid of new Set(there.map((w) => w.pid))) how[pid] = await closeProgram(pid);
+  for (const pid of new Set(there.map((w) => w.pid))) how[pid] = closeWindowOf(pid);
   const clear = await until(() => !dimWindows().some((w) => w.visible), 15000, 'the dimming gone').then(() => true, () => false);
   return { there, how, clear };
 }

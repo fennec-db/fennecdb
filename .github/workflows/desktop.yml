@@ -323,6 +323,21 @@ jobs:
           packages="libgtk-3-0t64 libwebkit2gtk-4.1-0 libayatana-appindicator3-1 librsvg2-2 xvfb dbus-x11 gnome-keyring libsecret-1-0 libsecret-tools xdg-utils shared-mime-info desktop-file-utils libglib2.0-bin"
           sudo -E apt-get install -y -q $packages || { sudo -E apt-get update -q && sudo -E apt-get install -y -q $packages; }
 
+      # Windows 11 (the arm64 runner; Windows Server, x64, does not) asks whether a
+      # program that listens on the network may be reached, in a prompt of the
+      # shell's (PickerHost.exe) that dims the whole screen and takes every click
+      # after it: process.test.ts and `serve` start fennec-server on 0.0.0.0, and
+      # `menu`'s click into the main window's page landed on that dim. The runner is
+      # told not to ask, as a machine's firewall may be; the tests and checks reach
+      # every server over loopback, which the firewall does not filter. run.mjs
+      # fails a check that leaves the screen dimmed all the same.
+      - name: Windows' firewall asks nothing of a program that listens
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Set-NetFirewallProfile -Profile Domain,Private,Public -NotifyOnListen False
+          Get-NetFirewallProfile | Format-Table Name, Enabled, NotifyOnListen
+
       # As the macOS job's, a cache per system: scripts/electrobun.mjs holds what is
       # in it to hutch-pin.json on every run.
       - uses: actions/cache@v6

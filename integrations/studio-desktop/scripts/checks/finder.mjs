@@ -39,7 +39,7 @@ import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, 
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
-  APP, CONTROL, D, EXE, LINUX, MAC, R, REPORT, WIN, assertClean, closeProgram, cmd, data, describe, dimWindows, doubleClick, forgetRegistration, lines, logName, mine, procs, quit, registration, startApp, step, until, waitFor, waitNotice, waitStudio, log,
+  APP, CONTROL, D, EXE, LINUX, MAC, R, REPORT, WIN, assertClean, closeProgram, closeWindowOf, cmd, data, describe, dimWindows, doubleClick, forgetRegistration, lines, logName, mine, procs, quit, registration, startApp, step, until, waitFor, waitNotice, waitStudio, log,
 } from './lib.mjs';
 
 assertClean('before');
@@ -122,8 +122,10 @@ async function refused(path, why) {
   if (WIN && r.status === 0) {
     const asked = await until(() => procs().find((p) => !before.has(p.pid) && /\\OpenWith\.exe/i.test(p.command)), 30000, `${why}: Windows asking what to open the file with`);
     log(`Windows asks what to open it with: ${asked.command}; the screen dimmed by ${JSON.stringify(dimWindows().filter((w) => w.visible))} (before it: ${JSON.stringify(dimBefore)})`);
-    // Its picker is PickerHost.exe's on Windows 11, started for it: closed first, as a person closes the dialog.
-    for (const p of procs().filter((q) => !before.has(q.pid) && /\\(PickerHost|OpenWith)\.exe/i.test(q.command)).sort((a, b) => /PickerHost/i.test(b.command) - /PickerHost/i.test(a.command))) log(`${p.command.split('\\').pop()} (${p.pid}): ${await closeProgram(p.pid)}`);
+    // A picker of PickerHost.exe's started for it (Windows 11) is asked to close its window, as a person
+    // closes the dialog, and never killed (the host outlives its window); then OpenWith.exe itself.
+    for (const p of procs().filter((q) => !before.has(q.pid) && /\\PickerHost\.exe/i.test(q.command))) log(`its picker (${p.pid}): ${closeWindowOf(p.pid)}`);
+    for (const p of procs().filter((q) => !before.has(q.pid) && /\\OpenWith\.exe/i.test(q.command))) log(`Open with (${p.pid}): ${await closeProgram(p.pid)}`);
     // The screen as the double-click found it: no dimming window left that was not there before.
     const dimmed = () => dimWindows().filter((w) => w.visible && !dimBefore.some((b) => b.pid === w.pid && b.rect === w.rect));
     const clear = await until(() => dimmed().length === 0, 15000, 'the dimming gone').then(() => true, () => false);
