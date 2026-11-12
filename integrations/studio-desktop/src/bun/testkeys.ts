@@ -1,22 +1,29 @@
 // Windows: keys pressed into a window of the app as a person's would be, for
-// `checks/menu.mjs`: the window brought to the front, a click where a person
-// would click to put the focus in its page, then each key down and up through
-// the system's input stream (keybd_event, mouse_event), which delivers it to
-// whatever has the focus in that window, WebView2's page included. Test
-// variant only: testhooks.ts imports it, and nothing else does.
+// `checks/menu.mjs`: a click where a person would click into its page, then
+// each key down and up through the system's input stream (keybd_event,
+// mouse_event), which delivers it to whatever has the focus, WebView2's page
+// included. Nothing here brings a window forward but the click: the Alt pressed
+// and let go before a SetForegroundWindow, as the first version did, puts the
+// menu bar of a window that is in front by then in menu mode, where the keys
+// after it go. Test variant only: testhooks.ts imports it, and nothing else
+// does.
 
 import { dlopen, FFIType } from "bun:ffi";
 
 const KEYEVENTF_KEYUP = 0x2;
+const MOUSEEVENTF_MOVE = 0x1;
 const MOUSEEVENTF_LEFTDOWN = 0x2;
 const MOUSEEVENTF_LEFTUP = 0x4;
+const MOUSEEVENTF_ABSOLUTE = 0x8000;
+const GW_HWNDNEXT = 2;
+const GW_CHILD = 5;
+const GWL_EXSTYLE = -20;
 const VK: Record<string, number> = { ctrl: 0x11, shift: 0x10, alt: 0x12 };
 
 let user32: ReturnType<typeof load> | null = null;
 function load() {
 	return dlopen("user32.dll", {
 		keybd_event: { args: [FFIType.u8, FFIType.u8, FFIType.u32, FFIType.u64], returns: FFIType.void },
-		SetForegroundWindow: { args: [FFIType.u64], returns: FFIType.i32 },
 		GetForegroundWindow: { args: [], returns: FFIType.u64 },
 		GetLastInputInfo: { args: [FFIType.ptr], returns: FFIType.i32 },
 		ClientToScreen: { args: [FFIType.u64, FFIType.ptr], returns: FFIType.i32 },
@@ -31,6 +38,10 @@ function load() {
 		GetSystemMetrics: { args: [FFIType.i32], returns: FFIType.i32 },
 		GetDpiForWindow: { args: [FFIType.u64], returns: FFIType.u32 },
 		IsChild: { args: [FFIType.u64, FFIType.u64], returns: FFIType.i32 },
+		GetCursorPos: { args: [FFIType.ptr], returns: FFIType.i32 },
+		GetWindow: { args: [FFIType.u64, FFIType.u32], returns: FFIType.u64 },
+		IsWindowVisible: { args: [FFIType.u64], returns: FFIType.i32 },
+		GetWindowLongPtrW: { args: [FFIType.u64, FFIType.i32], returns: FFIType.i64 },
 	}).symbols;
 }
 const u = () => (user32 ??= load());
@@ -42,20 +53,6 @@ function vkOf(k: string): number {
 	const c = k.toUpperCase();
 	if (!/^[A-Z0-9]$/.test(c)) throw new Error(`no key named ${k}`);
 	return c.charCodeAt(0);
-}
-
-/**
- * Brings `hwnd` to the front: an Alt pressed and let go first, so this process
- * received the last input event, which Windows asks of a process that sets
- * the foreground window. Says whether it is in front.
- */
-export function toFront(hwnd: bigint): boolean {
-	// Not again for a window in front: an Alt there would put its menu bar in menu mode, where typed keys go.
-	if (isFront(hwnd)) return true;
-	key(VK["alt"]!, false);
-	key(VK["alt"]!, true);
-	u().SetForegroundWindow(hwnd);
-	return isFront(hwnd);
 }
 
 /** Whether `hwnd` is the window in front. */
@@ -87,19 +84,24 @@ export function type(text: string): void {
 /**
  * A left click at `x`, `y` of `hwnd`'s client area (device pixels): where it
  * lands takes the focus, and its window comes to the front, as a person's
- * click brings it (SetForegroundWindow alone was refused once on the arm64
- * runner, the foreground lock's doing). Says where on the screen.
+ * click brings it. Each half carries the point itself (absolute, normalized to
+ * the primary screen), not the cursor's place a SetCursorPos left. Says where
+ * on the screen, and where the cursor is after.
  */
-export function click(hwnd: bigint, x: number, y: number): { x: number; y: number } {
+export function click(hwnd: bigint, x: number, y: number): { x: number; y: number; cursor: number[] } {
 	const point = new Int32Array([x, y]);
 	if (!u().ClientToScreen(hwnd, point)) throw new Error("ClientToScreen failed");
 	if (!u().SetCursorPos(point[0]!, point[1]!)) throw new Error("SetCursorPos failed");
-	u().mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0n);
-	u().mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0n);
-	return { x: point[0]!, y: point[1]! };
+	const nx = Math.round((point[0]! * 65535) / Math.max(1, u().GetSystemMetrics(0) - 1));
+	const ny = Math.round((point[1]! * 65535) / Math.max(1, u().GetSystemMetrics(1) - 1));
+	u().mouse_event(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_LEFTDOWN, nx, ny, 0, 0n);
+	u().mouse_event(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_LEFTUP, nx, ny, 0, 0n);
+	const cursor = new Int32Array(2);
+	u().GetCursorPos(cursor);
+	return { x: point[0]!, y: point[1]!, cursor: [...cursor] };
 }
 
-/** The window in front, by its process and title: what a refused SetForegroundWindow left there. */
+/** The window in front, by its process and title: where a window's keys went when it was not. */
 export function foreground(): { pid: number; title: string } {
 	const hwnd = u().GetForegroundWindow();
 	const pid = new Uint32Array(1);
@@ -132,16 +134,16 @@ function describeWindow(hwnd: bigint, top: bigint) {
 /**
  * Where input to `hwnd` goes, for a check whose keys never reached a page:
  * the window under the point a click lands on (`x`, `y` on the screen), the
- * window that has the keyboard focus on the thread in front
- * (GetGUIThreadInfo), the window's rectangle, the screen's size and the
- * window's DPI. Test variant only.
+ * window that has the keyboard focus on the window's own thread and the
+ * thread's flags (GetGUIThreadInfo: 0x4 a menu bar's menu mode), the window's
+ * rectangle, the screen's size and the window's DPI. Test variant only.
  */
 export function inputTargets(hwnd: bigint, at: { x: number; y: number } | null) {
-	const front = u().GetForegroundWindow();
-	const thread = u().GetWindowThreadProcessId(front, null);
+	const thread = u().GetWindowThreadProcessId(hwnd, null);
 	// GUITHREADINFO: cbSize, flags, then hwndActive, hwndFocus, ... (pointer-sized, 8-aligned on 64-bit).
 	const info = new BigUint64Array(9);
-	new Uint32Array(info.buffer)[0] = 72;
+	const head = new Uint32Array(info.buffer, 0, 2);
+	head[0] = 72;
 	const got = u().GetGUIThreadInfo(thread, info) !== 0;
 	const rect = new Int32Array(4);
 	u().GetWindowRect(hwnd, rect);
@@ -150,9 +152,33 @@ export function inputTargets(hwnd: bigint, at: { x: number; y: number } | null) 
 		underClick: point === null ? null : describeWindow(u().WindowFromPoint(point), hwnd),
 		focus: got ? describeWindow(info[2]!, hwnd) : null,
 		active: got ? describeWindow(info[1]!, hwnd) : null,
+		flags: got ? head[1]! : null,
 		rect: [...rect],
 		screen: [u().GetSystemMetrics(0), u().GetSystemMetrics(1)],
 		dpi: u().GetDpiForWindow(hwnd),
 		arch: process.arch,
 	};
+}
+
+/**
+ * The windows within `hwnd`, each with its class, process, rectangle, whether
+ * it is visible and its extended style (WS_EX_TRANSPARENT, 0x20, lets a click
+ * through), to a few levels: where a click into the page can land.
+ */
+export function windowTree(hwnd: bigint, depth = 4): unknown[] {
+	const out: unknown[] = [];
+	let child = depth > 0 ? u().GetWindow(hwnd, GW_CHILD) : 0n;
+	for (let n = 0; child && n < 32; n++) {
+		const rect = new Int32Array(4);
+		u().GetWindowRect(child, rect);
+		out.push({
+			...describeWindow(child, hwnd),
+			rect: [...rect],
+			visible: u().IsWindowVisible(child) !== 0,
+			exStyle: Number(u().GetWindowLongPtrW(child, GWL_EXSTYLE)),
+			children: windowTree(child, depth - 1),
+		});
+		child = u().GetWindow(child, GW_HWNDNEXT);
+	}
+	return out;
 }

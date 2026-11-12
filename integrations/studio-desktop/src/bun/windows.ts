@@ -15,7 +15,7 @@ import type { Notice } from "../shared/rpc.ts";
 import { LINK_OUT, linkOut, newWindowPreload, openLink } from "./opener.ts";
 import { sessionPreload, type StudioSession } from "./session.ts";
 import { goesWithWindow, inUse, removeStoreFolder, storeClosed, storeOpened, sweepStores, webview2Root } from "./stores.ts";
-import { guardPreload } from "./webview2.ts";
+import { guardPreload, keysToPage } from "./webview2.ts";
 
 let cascade = 0;
 
@@ -37,6 +37,25 @@ export function counted(win: BrowserWindow<any>): void {
 		shown.delete(win.id);
 		if (shown.size === 0) setImmediate(() => shown.size === 0 && lastClosed());
 	});
+}
+
+/**
+ * Windows: the keyboard focus put in `view`'s page, the page `win` shows, once
+ * it has loaded and whenever the window is activated, where the window is in
+ * front and the focus is in no page; never by bringing a window forward
+ * (webview2.ts's `keysToPage`, `checks/menu.mjs`). Every window the app makes
+ * is given it, as every one is `counted`: each takes keys in its page.
+ */
+export function focusesPage(win: BrowserWindow<any>, view: BrowserView): void {
+	keysToPage(
+		win,
+		view as any,
+		async () => {
+			const ptr = win.ptr;
+			return ptr ? (await import("./win32.ts")).keyFocus(BigInt(ptr as unknown as number)) : null;
+		},
+		__TESTABLE__ ? (f, moved) => void import("./testhooks.ts").then((h) => h.pageFocus(win, f, moved)) : undefined,
+	);
 }
 
 /** What the app does once its last window has closed (index.ts: quit, on Windows and Linux). */
@@ -206,6 +225,7 @@ export async function openStudioWindow(opts: { key: string; title: string; sessi
 		// sends `Access-Control-Allow-Origin: *`: it could read the app's own pages.
 		allowedProtocols: { views: false, appData: false },
 	});
+	focusesPage(win, view);
 	// Stay on the server's origin; everything else goes to the browser.
 	holdTo(view, `${origin}/*`);
 	const last = { at: 0 };
@@ -252,6 +272,7 @@ export async function showNotice(n: Notice, onAction: (id: string) => void = () 
 		frame: frame(540, 330),
 	});
 	counted(win);
+	focusesPage(win, win.webview);
 	holdTo(win.webview, "views://notice/*");
 	(win.webview as any).on("host-message", (e: any) => {
 		const d = detailOf(e);

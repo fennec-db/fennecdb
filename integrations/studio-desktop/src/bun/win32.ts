@@ -13,7 +13,9 @@
 //     (associate.ts);
 //   - a variable taken out of the process's environment block, which WebView2
 //     reads and a delete from the app's `process.env` did not reach
-//     (webview2.ts).
+//     (webview2.ts);
+//   - where a window's keyboard focus is, which decides whether the app moves
+//     it into the window's page (webview2.ts's `keysToPage`).
 // Only the main process on Windows loads it; nothing here runs elsewhere, and
 // `node --test` never imports it (bun:ffi is Bun's).
 //
@@ -100,7 +102,12 @@ function load() {
 		RegDeleteTreeW: { args: [FFIType.u64, FFIType.ptr], returns: FFIType.i32 },
 		RegDeleteKeyValueW: { args: [FFIType.u64, FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
 	});
-	return { k: kernel32.symbols, a: advapi32.symbols, n: ntdll.symbols, s: shell32.symbols };
+	const user32 = dlopen("user32.dll", {
+		GetForegroundWindow: { args: [], returns: FFIType.u64 },
+		GetWindowThreadProcessId: { args: [FFIType.u64, FFIType.ptr], returns: FFIType.u32 },
+		GetGUIThreadInfo: { args: [FFIType.u32, FFIType.ptr], returns: FFIType.i32 },
+	});
+	return { k: kernel32.symbols, a: advapi32.symbols, n: ntdll.symbols, s: shell32.symbols, u: user32.symbols };
 }
 const win = () => (libs ??= load());
 
@@ -161,6 +168,36 @@ export function unsetEnvironment(name: string): void {
 /** Whether this process's environment block holds `name` (asked for a size of 0, a held one, empty too, answers at least 1). */
 export function inEnvironment(name: string): boolean {
 	return win().k.GetEnvironmentVariableW(wide(name), null, 0) !== 0;
+}
+
+/** GUITHREADINFO's flags: a menu bar, a popup menu or the system menu has the thread's input. */
+const GUI_MENU_MODES = 0x4 | 0x8 | 0x10;
+
+/**
+ * Where the keyboard focus of `hwnd`, a top-level window of the app, is
+ * (webview2.ts's `KeyFocus`): whether it is the window in front, whether a
+ * menu has its thread's input, and whether the focus is on a window of this
+ * process or none. A page is WebView2's window, of WebView2's own process, so
+ * a focus on one of ours is where no key reaches a page: the bare window, its
+ * view's container. Asked of the window's own thread (GetGUIThreadInfo), which
+ * is Electrobun's UI thread, not the one this runs on.
+ */
+export function keyFocus(hwnd: bigint): { front: boolean; menu: boolean; onWindow: boolean } {
+	const { u } = win();
+	const thread = u.GetWindowThreadProcessId(hwnd, null);
+	// GUITHREADINFO: cbSize, flags, then hwndActive, hwndFocus, ... (pointer-sized, 8-aligned on 64-bit).
+	const info = new BigUint64Array(9);
+	const head = new Uint32Array(info.buffer, 0, 2);
+	head[0] = info.byteLength;
+	if (!thread || !u.GetGUIThreadInfo(thread, info)) return { front: false, menu: false, onWindow: false };
+	const focus = info[2]!;
+	let onWindow = focus === 0n;
+	if (!onWindow) {
+		const pid = new Uint32Array(1);
+		u.GetWindowThreadProcessId(focus, pid);
+		onWindow = pid[0] === process.pid;
+	}
+	return { front: u.GetForegroundWindow() === hwnd, menu: (head[1]! & GUI_MENU_MODES) !== 0, onWindow };
 }
 
 /** This user's SID, which no other user of the machine has. */

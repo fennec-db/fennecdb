@@ -1,8 +1,9 @@
 // What the app asks of WebView2 on Windows that Electrobun 2.0.4 does not:
 // none of WebView2's variables from the environment the app was started from,
-// and a page that loaded before its preload loaded again. Pure: `node --test`
-// holds it on every system (test/webview2.test.ts); the running app's half is
-// checks/latepreload.mjs on the Windows runners.
+// a page that loaded before its preload loaded again, and the keyboard focus
+// in a window's page. Pure: `node --test` holds it on every system
+// (test/webview2.test.ts); the running app's half is checks/latepreload.mjs
+// and checks/menu.mjs on the Windows runners.
 
 /**
  * The WEBVIEW2_* variables of `env` (names case-blind, as Windows reads them),
@@ -57,4 +58,65 @@ export function guardPreload(view: GuardedView, platform: NodeJS.Platform = proc
 		if (++asked > PRELOAD_TRIES) return;
 		view.executeJavascript(PRELOAD_CHECK);
 	});
+}
+
+/** Where a window's keyboard focus is, as Windows says (win32.ts's `keyFocus`). */
+export type KeyFocus = {
+	/** The window is the one in front. */
+	front: boolean;
+	/** A menu bar, a popup menu or the system menu has its thread's input. */
+	menu: boolean;
+	/** The focus is on a window of the app's own process, or on none: in no page. */
+	onWindow: boolean;
+};
+
+/** Whether the focus is moved into the page: a window in front, no menu open, the focus in no page. */
+export const movesFocus = (f: KeyFocus | null): boolean => f !== null && f.front && !f.menu && f.onWindow;
+
+/** The part of an Electrobun window `keysToPage` uses. */
+export type FocusedWindow = { on(event: "focus", handler: () => void): void; activate(): void };
+
+/**
+ * Windows: the keyboard focus put in the page of `win` (its view `view`) once
+ * the page has loaded and each time the window is activated, where the window
+ * is in front and the focus is in no page. Activating a window, Windows'
+ * DefWindowProc puts the focus on the window itself (WM_ACTIVATE), and a
+ * WebView2 page is a child window of another process, which takes it only
+ * when the host moves it there (the controller's MoveFocus); Electrobun 2.0.4
+ * does that only in `activate()` (activateWindow's FocusActiveView,
+ * win/nativeWrapper.cpp:11496), not on WM_ACTIVATE (:6074) nor once a view is
+ * made. On the Windows arm64 runner the main window, in front, took typed keys
+ * into nothing: the system took them, the focus was on the bare window
+ * (GetGUIThreadInfo), and the page saw none until `activate()`, after which it
+ * saw all of them. `activate()` also brings the window forward, by
+ * AttachThreadInput to the thread in front where SetForegroundWindow is
+ * refused, so it is asked only of a window already in front and never brings
+ * one forward: a window behind another program's stays there, and its page is
+ * given the focus when the user brings it forward (its "focus" event). A menu
+ * that has the input is left to it. Not on macOS and Linux: there the page is the
+ * window's own view, which AppKit makes its first responder and GTK gives the
+ * window's focus, and `activate()` would bring the app forward over another.
+ */
+export function keysToPage(
+	win: FocusedWindow,
+	view: { on(event: "did-navigate", handler: () => void): void },
+	look: () => KeyFocus | null | Promise<KeyFocus | null>,
+	said: (f: KeyFocus | null, moved: boolean) => void = () => {},
+	platform: NodeJS.Platform = process.platform,
+): void {
+	if (platform !== "win32") return;
+	const give = async () => {
+		const f = await look();
+		const moved = movesFocus(f);
+		if (moved) {
+			try {
+				win.activate();
+			} catch {
+				// The window closed since: there is no page to give the focus to.
+			}
+		}
+		said(f, moved);
+	};
+	view.on("did-navigate", give);
+	win.on("focus", give);
 }
