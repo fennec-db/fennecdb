@@ -4,7 +4,7 @@
 // written there. The platform projects come from `flutter create .` here;
 // CI makes them and builds the app for Android and the iOS simulator.
 import 'package:fennecdb_flutter/fennecdb_flutter.dart';
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:path_provider/path_provider.dart';
 
 Future<void> main() async {
