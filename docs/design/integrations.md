@@ -1045,12 +1045,14 @@ window and the app's words are each system's, and the app has its icon there.
   each key's effect asserted and taken once, by the menu bar or the page,
   never both; on Linux, which has no input a check can press as a person's
   under xvfb, dispatched in the page. Where the main window opened behind
-  another program's (on the arm64 runner, once the firewall asked nothing, a
-  "Microsoft account" window was in front when `menu` started; `run.mjs` says
-  when another program's window comes to the front), the app leaves it there,
-  and the check brings it forward as a person would, by a click on its title
-  bar at a point no other window lies over: the app's look at that activation
-  is then the one that moves the focus, the other half of the rule. Nothing
+  another program's, the app leaves it there, and the check brings it forward
+  as a person would, by a click on its title bar at a point no other window
+  lies over: the app's look at that activation is then the one that moves the
+  focus, the other half of the rule. (The windows-11-arm image comes up with a
+  "Microsoft account" sign-in window of its own, WWAHost.exe started before the
+  job, in front of every window and over the main window's whole title bar;
+  `desktop.yml` closes it before the checks, as a person closes it, and
+  `run.mjs` says when another program's window is in front.) Nothing
   else of the check's own brings a window forward or moves its focus: no Alt (the first version pressed and let
   go of one before a SetForegroundWindow, which can put the menu bar of a
   window in front by then in menu mode, where keys go), no activation, and no keys

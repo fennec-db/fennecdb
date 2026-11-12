@@ -360,6 +360,24 @@ jobs:
       - name: Build the test variant
         run: FENNEC_DESKTOP_TEST_BUILD=1 npm run build
 
+      # The windows-11-arm image comes up with a "Microsoft account" sign-in window of
+      # its own (WWAHost.exe, started before the job) in front of every window the
+      # checks open: `menu` found the app's main window behind it, its title bar
+      # under it. Closed as a person closes it (CloseMainWindow), ended only where it
+      # does not close; run.mjs says if another program's window is in front after.
+      - name: The runner's own sign-in prompt closed
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $shown = { Get-Process WWAHost -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } }
+          $w = & $shown
+          if (-not $w) { 'no sign-in prompt'; exit 0 }
+          foreach ($p in $w) { '{0} {1}, started {2}: "{3}", asked to close: {4}' -f $p.Id, $p.ProcessName, $p.StartTime.ToUniversalTime().ToString('o'), $p.MainWindowTitle, $p.CloseMainWindow() }
+          $until = (Get-Date).AddSeconds(15)
+          while ((& $shown) -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 200 }
+          $left = & $shown
+          if ($left) { 'not closed in 15 s: ended'; $left | Stop-Process -Force } else { 'closed' }
+
       - name: The scripted checks
         run: |
           if [ "$RUNNER_OS" = Linux ]; then

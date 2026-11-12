@@ -212,9 +212,7 @@ export async function closeProgram(pid) {
 /**
  * Windows: the dimming windows on the screen, each program that shows one
  * asked to close its window (`closeWindowOf`), never killed: the shell's
- * picker hosts outlive their windows, and in the run that killed them a
- * "Microsoft account" window was in front when `menu` started. What was there,
- * what each answered, and
+ * picker hosts outlive their windows. What was there, what each answered, and
  * whether the screen was clear within 15 s; null where nothing dimmed it.
  */
 export async function clearDimming() {
