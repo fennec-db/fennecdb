@@ -258,7 +258,8 @@ async function run(c: any) {
 		// The main window's "Show in folder".
 		case "reveal": await revealPath(c.path); break;
 		// Windows: keys pressed into a window, as a person's are (testkeys.ts): the
-		// window brought to the front, then `type` typed or `chord` pressed.
+		// window brought to the front, a `click` at a point of its page, then `type`
+		// typed or `chord` pressed.
 		case "keys": {
 			const page = win(c.key);
 			if (!page || process.platform !== "win32") {
@@ -266,10 +267,12 @@ async function run(c: any) {
 				break;
 			}
 			const k = await import("./testkeys.ts");
-			const front = k.toFront(BigInt(page.win.ptr as unknown as number));
+			const hwnd = BigInt(page.win.ptr as unknown as number);
+			const front = k.toFront(hwnd);
+			const clicked = c.click ? k.click(hwnd, c.click[0], c.click[1]) : null;
 			if (c.type) k.type(c.type);
 			if (c.chord) k.chord(c.chord);
-			report("keys-result", { key: c.key, front, type: c.type ?? null, chord: c.chord ?? null });
+			report("keys-result", { key: c.key, front, clicked, type: c.type ?? null, chord: c.chord ?? null });
 			break;
 		}
 		case "quit": Utils.quit(); break;

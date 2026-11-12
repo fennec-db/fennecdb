@@ -1,12 +1,15 @@
 // Windows: keys pressed into a window of the app as a person's would be, for
-// `checks/menu.mjs`: the window brought to the front, then each key down and
-// up through the system's input stream (keybd_event), which delivers it to
+// `checks/menu.mjs`: the window brought to the front, a click where a person
+// would click to put the focus in its page, then each key down and up through
+// the system's input stream (keybd_event, mouse_event), which delivers it to
 // whatever has the focus in that window, WebView2's page included. Test
 // variant only: testhooks.ts imports it, and nothing else does.
 
 import { dlopen, FFIType } from "bun:ffi";
 
 const KEYEVENTF_KEYUP = 0x2;
+const MOUSEEVENTF_LEFTDOWN = 0x2;
+const MOUSEEVENTF_LEFTUP = 0x4;
 const VK: Record<string, number> = { ctrl: 0x11, shift: 0x10, alt: 0x12 };
 
 let user32: ReturnType<typeof load> | null = null;
@@ -15,6 +18,9 @@ function load() {
 		keybd_event: { args: [FFIType.u8, FFIType.u8, FFIType.u32, FFIType.u64], returns: FFIType.void },
 		SetForegroundWindow: { args: [FFIType.u64], returns: FFIType.i32 },
 		GetForegroundWindow: { args: [], returns: FFIType.u64 },
+		ClientToScreen: { args: [FFIType.u64, FFIType.ptr], returns: FFIType.i32 },
+		SetCursorPos: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+		mouse_event: { args: [FFIType.u32, FFIType.u32, FFIType.u32, FFIType.u32, FFIType.u64], returns: FFIType.void },
 	}).symbols;
 }
 const u = () => (user32 ??= load());
@@ -61,4 +67,14 @@ export function type(text: string): void {
 		key(vkOf(c), false);
 		key(vkOf(c), true);
 	}
+}
+
+/** A left click at `x`, `y` of `hwnd`'s client area (device pixels): where it lands takes the focus. Says where on the screen. */
+export function click(hwnd: bigint, x: number, y: number): { x: number; y: number } {
+	const point = new Int32Array([x, y]);
+	if (!u().ClientToScreen(hwnd, point)) throw new Error("ClientToScreen failed");
+	if (!u().SetCursorPos(point[0]!, point[1]!)) throw new Error("SetCursorPos failed");
+	u().mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0n);
+	u().mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0n);
+	return { x: point[0]!, y: point[1]! };
 }

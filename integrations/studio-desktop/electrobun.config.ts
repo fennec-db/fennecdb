@@ -85,11 +85,6 @@ export default {
 			// verifies and restores its backups: put here by scripts/get-server.sh.
 			[`bin/fennec-server${exe}`]: `bin/fennec-server${exe}`,
 			[`bin/fennec${exe}`]: `bin/fennec${exe}`,
-			// What a .fennec file's registration shows it with (src/bun/associate.ts):
-			// Explorer takes an .ico, a desktop entry a PNG. macOS's is the bundle's
-			// .icns, from Info.plist.
-			...(process.platform === "win32" ? { "icon/icon.ico": "icon/icon.ico" } : {}),
-			...(process.platform === "linux" ? { "icon/icon.png": "icon/icon.png" } : {}),
 		},
 		mac: {
 			bundleCEF: false,
@@ -103,6 +98,8 @@ export default {
 		},
 		// The app's icon there, made from icon/icon.svg as the macOS iconset is
 		// (scripts/make-icon.sh): the launcher's, the shortcuts' and the windows'.
+		// Hutch puts it in the app too (Resources/app.ico; Resources/appIcon.png),
+		// which a .fennec file's registration shows (src/bun/associate.ts).
 		linux: {
 			bundleCEF: false,
 			icon: "icon/icon.png",

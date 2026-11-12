@@ -25,7 +25,7 @@ const FILE = data('menu', 5);
 const app = startApp('menu', { FENNEC_DESKTOP_LAUNCHER: '1' });
 await waitFor((l) => l.what === 'page-text' && l.key === 'launcher' && /Open file/.test(l.text), 60000, 'the main window drawn');
 
-/** Presses `what` into window `key` and says whether the app's menu then did `action`, within `ms`. */
+/** Presses `chord` into window `key` and says whether the app's menu then did `action`, within `ms`. */
 async function chordReaches(key, chord, action, ms = 8000) {
   const n = lines().length;
   cmd({ cmd: 'keys', key, chord });
@@ -40,29 +40,43 @@ async function chordReaches(key, chord, action, ms = 8000) {
 }
 
 if (WIN) {
-  step('the control: text typed into the main window reaches its page');
-  const focused = await evalIn('launcher', `const f = document.getElementById('find'); f.value = ''; f.focus(); return document.activeElement && document.activeElement.id`);
-  assert.equal(focused.value, 'find');
+  /** A click into the main window's search box, where a person's click puts the focus in the page: its point in device pixels. */
+  const findAt = async () => (await evalIn('launcher', `const f = document.getElementById('find'); f.value = ''; f.blur(); const r = f.getBoundingClientRect(); return [Math.round((r.left + r.width / 2) * devicePixelRatio), Math.round((r.top + r.height / 2) * devicePixelRatio)]`)).value;
+
+  step('the window in front, nothing in its page clicked: Ctrl+N');
+  const windowOnly = await chordReaches('launcher', 'ctrl+n', 'new');
+  log('Ctrl+N reached the menu with the window in front:', windowOnly);
+  if (lines().some((l) => l.what === 'window-created' && l.key === 'newdb')) {
+    const n = lines().length;
+    cmd({ cmd: 'close', key: 'newdb' });
+    await waitFor((l, i) => i >= n && l.what === 'window-close' && l.key === 'newdb', 15000, 'the new-database window closed');
+  }
+
+  step('the control: a click into the search box and text typed reach the page');
   let n = lines().length;
-  cmd({ cmd: 'keys', key: 'launcher', type: 'fen' });
+  cmd({ cmd: 'keys', key: 'launcher', click: await findAt(), type: 'fen' });
   const typed = await waitFor((l, i) => i >= n && l.what === 'keys-result', 15000, 'typed');
+  log('clicked at', JSON.stringify(typed.clicked), 'in front:', typed.front);
   assert.equal(typed.front, true, 'the main window was brought to the front');
   await until(async () => (await evalIn('launcher', `return document.getElementById('find').value`)).value === 'fen', 10000, 'the search box holds what was typed');
   log('typed text reaches the page: WebView2 has the focus');
 
   step('Ctrl+N, Ctrl+O and Ctrl+Shift+O with the page focused');
   cmd({ cmd: 'answer', kind: 'file', path: null });
-  const found = {
-    'ctrl+n': await chordReaches('launcher', 'ctrl+n', 'new'),
-    'ctrl+o': await chordReaches('launcher', 'ctrl+o', 'open'),
-    'ctrl+shift+o': await chordReaches('launcher', 'ctrl+shift+o', 'launcher'),
-  };
-  log('reached the menu with WebView2 focused:', JSON.stringify(found));
-  n = lines().length;
-  cmd({ cmd: 'open', path: FILE });
-  await waitStudio(`file:${FILE}`);
-  const inStudio = await chordReaches(`file:${FILE}`, 'ctrl+n', 'new');
-  log('Ctrl+N in a studio window reached the menu:', inStudio);
+  const found = {};
+  for (const [chord, action] of [['ctrl+n', 'new'], ['ctrl+o', 'open'], ['ctrl+shift+o', 'launcher']]) {
+    n = lines().length;
+    cmd({ cmd: 'keys', key: 'launcher', click: await findAt(), chord });
+    const pressed = await waitFor((l, i) => i >= n && l.what === 'keys-result', 15000, `${chord} pressed`);
+    assert.equal(pressed.front, true);
+    try {
+      await waitFor((l, i) => i >= n && l.what === 'menu' && l.action === action, 8000, `the menu's ${action}`);
+      found[chord] = true;
+    } catch {
+      found[chord] = false;
+    }
+    log(chord, 'reached the menu with the page focused:', found[chord], 'the search box holds', JSON.stringify((await evalIn('launcher', `return document.getElementById('find').value`)).value));
+  }
   log('WebView2 windows of its own:', JSON.stringify(webviewWindows()));
   await quit(app);
 } else {

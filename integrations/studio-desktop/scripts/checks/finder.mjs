@@ -30,7 +30,8 @@
 //     written beside it;
 //   - Linux: the app run from a folder whose name would run a command in a
 //     shell registers itself there, and a double-click starts that copy with
-//     the file, the name whole, and runs nothing;
+//     the file, the name whole, and runs nothing; that copy removed, its entry
+//     is ignored (TryExec) and the double-click starts nothing;
 //   - the registration removed again, and the double-click starts nothing.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -38,7 +39,7 @@ import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, 
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
-  APP, CONTROL, D, EXE, LINUX, MAC, R, REPORT, assertClean, cmd, data, describe, doubleClick, forgetRegistration, lines, logName, mine, quit, registration, startApp, step, until, waitFor, waitNone, waitNotice, waitStudio, log,
+  APP, CONTROL, D, EXE, LINUX, MAC, R, REPORT, WIN, assertClean, cmd, data, describe, doubleClick, forgetRegistration, lines, logName, mine, procs, quit, registration, startApp, step, until, waitFor, waitNotice, waitStudio, log,
 } from './lib.mjs';
 
 assertClean('before');
@@ -98,14 +99,33 @@ if (MAC) {
 /** The app's main processes (its Bun running main.js) now. */
 const mains = () => mine().filter((p) => /main\.js/.test(p.command));
 
-/** A double-click that must start nothing: refused by the system, nothing of the app running, nothing reported. */
+/**
+ * A double-click that must start nothing of the app. Linux's `gio open` says no
+ * (no program for the type). Windows hands a file of no known type to "Open
+ * with" (the Unknown class's openas verb: OpenWith.exe, the "How do you want to
+ * open this file?" dialog), so there that is what must start: the event that
+ * the shell found no handler, which is then closed.
+ */
 async function refused(path, why) {
   rmSync(REPORT, { force: true });
+  const before = new Set(WIN ? procs().map((p) => p.pid) : []);
   const r = doubleClick(path);
-  log(`the double-click: status ${r.status}: ${r.said.split('\n').slice(-2).join(' ')}`);
-  assert.notEqual(r.status, 0, `${why}: the system refuses the double-click (${r.said})`);
-  // What must not happen: the app starting all the same. The system said no before this, so a short look.
-  await waitNone((l) => l.what === 'launch', 1500, `${why}: the app was started`);
+  log(`the double-click: status ${r.status}${r.said ? `: ${r.said.split('\n').slice(-2).join(' ')}` : ''}`);
+  if (WIN && r.status === 0) {
+    const asked = await until(() => procs().find((p) => !before.has(p.pid) && /\\OpenWith\.exe/i.test(p.command)), 30000, `${why}: Windows asking what to open the file with`);
+    log(`Windows asks what to open it with: ${asked.command}`);
+    for (const p of procs().filter((q) => !before.has(q.pid) && /\\OpenWith\.exe/i.test(q.command))) {
+      try {
+        process.kill(p.pid, 'SIGKILL');
+      } catch {
+        // gone
+      }
+    }
+  } else {
+    assert.notEqual(r.status, 0, `${why}: the system refuses the double-click (${r.said})`);
+  }
+  // The system has said what it does with the file; the app would have said it was started first.
+  assert.equal(lines().filter((l) => l.what === 'launch').length, 0, `${why}: the app was started`);
   assert.equal(mains().length, 0, `${why}: nothing of the app runs:\n${describe(mine())}`);
 }
 
@@ -205,7 +225,8 @@ if (LINUX) {
   // A hard-linked copy of the installed app (no second 100 MB): its launcher's own path is the
   // folder's, which the registration names. The marker is what `$(...)` would make in a shell.
   const marker = `fennec-finder-marker-${process.pid}`;
-  const odd = join(R, `odd "q" \`id\` $(cd$IFS~;touch$IFS${marker}) 50%f \\b`);
+  // No backslash: Bun 1.4.0 reads one in its script's path as a separator, and cannot start from such a folder at all.
+  const odd = join(R, `odd "q" 'a' \`id\` $(cd$IFS~;touch$IFS${marker}) 50%f`);
   rmSync(odd, { recursive: true, force: true });
   mkdirSync(odd, { recursive: true });
   const copied = spawnSync('cp', ['-al', APP, join(odd, 'app')], { encoding: 'utf8' });
@@ -224,6 +245,10 @@ if (LINUX) {
     await waitFor((x) => x.what === 'server-started' && x.path === FILE, 60000, 'the file opened');
     await quit({ exited: Promise.resolve() });
     assert.ok(!existsSync(join(homedir(), marker)), 'nothing ran the folder\'s name');
+
+    step('Linux: that copy removed, its entry (TryExec) is ignored: the double-click starts nothing, rather than a launcher that is gone');
+    rmSync(odd, { recursive: true, force: true });
+    await refused(FILE, 'with the launcher the entry names gone');
   } finally {
     rmSync(join(homedir(), marker), { force: true });
     rmSync(odd, { recursive: true, force: true });

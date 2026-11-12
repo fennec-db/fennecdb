@@ -252,9 +252,10 @@ export async function registerSelf(identifier: string, name: string): Promise<Re
 	if (process.platform !== "win32" && process.platform !== "linux") return { wrote: [], ran: [], skipped: "macOS takes the document type from Info.plist" };
 	const { PATHS } = await import("electrobun/main");
 	const bin = dirname(process.execPath);
-	const icons = join(PATHS.RESOURCES_FOLDER, "app", "icon");
+	// The icon Hutch puts in the app from build.linux.icon or build.win.icon (electrobun.config.ts):
+	// the one Electrobun's own menu entry and Start-menu shortcut show.
 	if (process.platform === "linux") {
-		return registerLinux({ identifier, name, launcher: join(bin, "launcher"), icon: join(icons, "icon.png") }, dataHome(process.env, homedir()));
+		return registerLinux({ identifier, name, launcher: join(bin, "launcher"), icon: join(PATHS.RESOURCES_FOLDER, "appIcon.png") }, dataHome(process.env, homedir()));
 	}
 	const w = await import("./win32.ts");
 	const reg: Registry = {
@@ -263,5 +264,5 @@ export async function registerSelf(identifier: string, name: string): Promise<Re
 		write: w.writeUserString,
 		changed: w.associationsChanged,
 	};
-	return registerWindows({ identifier, name, launcher: join(bin, "launcher.exe"), icon: join(icons, "icon.ico") }, reg, existsSync);
+	return registerWindows({ identifier, name, launcher: join(bin, "launcher.exe"), icon: join(PATHS.RESOURCES_FOLDER, "app.ico") }, reg, existsSync);
 }
