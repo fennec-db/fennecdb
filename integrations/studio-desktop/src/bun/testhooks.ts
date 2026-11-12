@@ -268,8 +268,13 @@ async function run(c: any) {
 			}
 			const k = await import("./testkeys.ts");
 			const hwnd = BigInt(page.win.ptr as unknown as number);
-			const front = k.toFront(hwnd);
+			let front = k.toFront(hwnd);
 			const clicked = c.click ? k.click(hwnd, c.click[0], c.click[1]) : null;
+			// A click's activation is handled by the window's own thread, this one: it is waited for.
+			for (let i = 0; !front && clicked && i < 50; i++) {
+				await Bun.sleep(40);
+				front = k.isFront(hwnd);
+			}
 			if (c.type) k.type(c.type);
 			if (c.chord) k.chord(c.chord);
 			report("keys-result", { key: c.key, front, clicked, type: c.type ?? null, chord: c.chord ?? null });

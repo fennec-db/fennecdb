@@ -43,8 +43,11 @@ export function toFront(hwnd: bigint): boolean {
 	key(VK["alt"]!, false);
 	key(VK["alt"]!, true);
 	u().SetForegroundWindow(hwnd);
-	return u().GetForegroundWindow() === hwnd;
+	return isFront(hwnd);
 }
+
+/** Whether `hwnd` is the window in front. */
+export const isFront = (hwnd: bigint) => u().GetForegroundWindow() === hwnd;
 
 /** A chord (`"ctrl+shift+o"`): its modifiers held while its key goes down and up. */
 export function chord(spec: string): void {
@@ -69,7 +72,12 @@ export function type(text: string): void {
 	}
 }
 
-/** A left click at `x`, `y` of `hwnd`'s client area (device pixels): where it lands takes the focus. Says where on the screen. */
+/**
+ * A left click at `x`, `y` of `hwnd`'s client area (device pixels): where it
+ * lands takes the focus, and its window comes to the front, as a person's
+ * click brings it (SetForegroundWindow alone was refused once on the arm64
+ * runner, the foreground lock's doing). Says where on the screen.
+ */
 export function click(hwnd: bigint, x: number, y: number): { x: number; y: number } {
 	const point = new Int32Array([x, y]);
 	if (!u().ClientToScreen(hwnd, point)) throw new Error("ClientToScreen failed");

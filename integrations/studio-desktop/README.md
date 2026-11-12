@@ -222,8 +222,9 @@ And what it does on the desktop there (phase 3): a `.fennec` double-clicked in
 Explorer or a file manager opens in it, read back from its launcher, and the
 app registers itself for that at every start ([A file from the
 desktop](#a-file-from-the-desktop); [Uninstall](#uninstall)); the File menu's
-keys are Ctrl on Windows, and on Linux, which has no application menu, the
-main window's buttons are the File menu; the icon is `icon/icon.ico` and
+keys are Ctrl, taken by the main window's page (WebView2 keeps them from the
+menu bar), and on Linux, which has no application menu, the main window's
+buttons are the File menu; the icon is `icon/icon.ico` and
 `icon/icon.png`, made from `icon/icon.svg` on a Mac (`sh scripts/make-icon.sh
 rasters`) and kept in git, since neither system has an SVG renderer of its own
 (`test/icon.test.ts` holds them to the SVG).
@@ -330,7 +331,7 @@ script says which hashes a mismatch is.
    | `opener` | Linux: a link and a folder whose names run `touch` in a shell (the control: through `sh -c`, as Electrobun hands them, the marker is made): handed to a stand-in `xdg-open`, each is one argument, made inert, and no marker; handed to the real one, which can start nothing, no marker |
    | `keyring` | Linux: on a session bus with no Secret Service, and on one whose keyring has no default collection, saving a token is refused in words within seconds (libsecret alone waited 25 s), kept in no file, and a connection saved before is refused, nothing sent to its server |
    | `finder` | macOS: `open -a <app> <file>` with the app not running: the file arrives as `open-url`, spaces and non-ASCII letters included. Windows and Linux: a double-click as close as a runner allows (the shell's ShellExecuteEx on the file; `gio open`): **with the registration taken away as [Uninstall](#uninstall) says, it starts nothing** (the control); a start of the app registers it, as the system then reads it back (the ProgID's command, `.fennec`'s default; the entry, the type GIO gives a `.fennec`), and a second start writes nothing; with the app not running, the double-click starts it with the file, which opens with no main window over it, its own arguments Bun's and `main.js` alone and the file read back from the launcher whole; with it running, a second file's is handed by the instance it starts to the one there, which quits; a `.fennec` that is not a database is said in words, nothing written beside it; on Linux, the app run from a folder whose name would run a command in a shell is started there by the double-click, the name whole and nothing run, and once that copy is gone its entry is ignored; removed again, the double-click starts nothing |
-   | `menu` | Windows and Linux. Windows: text typed into the main window as a person types it reaches its page (the control), then Ctrl+N, Ctrl+O and Ctrl+Shift+O with the page focused, and Ctrl+N in a studio window. Linux, with no application menu: New database, Open file… (the dialog answered by the check), a file's Open in the Databases list and Remote connections, each the main window's own button; the main window closed and shown again by starting the app a second time |
+   | `menu` | Windows and Linux. Windows, the keys pressed as a person's (a click into the page, then each key through the system's input): text typed into the search box arrives (the control), then Ctrl+N opens the new-database window, Ctrl+O the file the dialog is answered with, Ctrl+Shift+O Remote connections, each once, saying whether the menu bar or the page took it, and no window of WebView2's own opens. Linux, with no application menu: New database, Open file… (the dialog answered by the check), a file's Open in the Databases list and Remote connections, each the main window's own button, then the same three keys dispatched in the page; the main window closed and shown again by starting the app a second time |
 
    `ONLY=files,remote npm run checks` runs a subset (with the test variant
    built: `FENNEC_DESKTOP_TEST_BUILD=1 npm run build`). A failure's logs are in
@@ -523,7 +524,11 @@ shown over it.
   user can reach it; one line of JSON) and quits before it reads a list.
 
 **The menus.** The File menu's accelerators are CmdOrCtrl: Command on macOS,
-Ctrl in the menu bar Electrobun gives each window on Windows. Linux has no
+Ctrl in the menu bar Electrobun gives each window on Windows. There they reach
+no menu item while a page has the focus, which is always (WebView2's page is a
+window of another process, and Electrobun 2.0.4 takes none of its keys), so
+the main window takes Ctrl+N, Ctrl+O and Ctrl+Shift+O in its own page, on
+Linux too; a studio window's menu bar works with the mouse. Linux has no
 application menu (Electrobun 2.0.4), so the main window's own buttons do what
 macOS's File menu does: New database, Open file…, the Databases list (Open
 Recent), Remote connections (Connect to a Server…); with the main window

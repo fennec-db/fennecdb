@@ -223,10 +223,14 @@ await quit({ exited: Promise.resolve() });
 if (LINUX) {
   step('Linux: the app run from a folder whose name a shell would run: registered there, started there by a double-click, the name whole');
   // A hard-linked copy of the installed app (no second 100 MB): its launcher's own path is the
-  // folder's, which the registration names. The marker is what `$(...)` would make in a shell.
+  // folder's, which the registration names. The marker is what the backquotes would make in a
+  // shell, in the home folder (`cd` alone goes there). Neither `$` nor `;` nor a backslash is in the
+  // name: the app does not start from such a folder at all. Its launcher puts its folder in
+  // LD_LIBRARY_PATH, which the loader splits at `:` and `;` and reads `$` in (with `$(...)` in the
+  // name Electrobun's core could not open its native library: FileNotFound), and Bun 1.4.0 reads a
+  // backslash in its script's path as a separator (ENOENT reading .../b/app/Resources/main.js).
   const marker = `fennec-finder-marker-${process.pid}`;
-  // No backslash: Bun 1.4.0 reads one in its script's path as a separator, and cannot start from such a folder at all.
-  const odd = join(R, `odd "q" 'a' \`id\` $(cd$IFS~;touch$IFS${marker}) 50%f`);
+  const odd = join(R, `odd "q" 'a' \`cd&&touch ${marker}\` 50%f`);
   rmSync(odd, { recursive: true, force: true });
   mkdirSync(odd, { recursive: true });
   const copied = spawnSync('cp', ['-al', APP, join(odd, 'app')], { encoding: 'utf8' });

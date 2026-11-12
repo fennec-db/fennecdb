@@ -831,16 +831,30 @@ keys are each system's, and the app has its icon there.
   `CmdOrCtrl+N`, `+O` and `+Shift+O`, Command and Ctrl. Windows gives each
   window a menu bar, and translates accelerators in the main process's
   message loop (TranslateAccelerator), which sees the keys of its own
-  windows; WebView2 in a window is another process's window. MENU_RESULT.
+  windows; WebView2 in a window is another process's window. Measured on the
+  Windows runners: with the main window in front and with a click into its
+  page (text typed after it arrived in the search box), Ctrl+N, Ctrl+O and
+  Ctrl+Shift+O reached no menu item, and nothing else either (no WebView2
+  window of its own): WebView2 has the keys, and Electrobun 2.0.4 handles none
+  of its AcceleratorKeyPressed. So the main window takes the File menu's keys
+  in its own page on Windows and Linux (src/launcher/index.ts, not on macOS,
+  whose menu bar takes Command's first); a key the menu did take would never
+  reach the page, so none runs twice. A studio window's page is a server's,
+  with the event bridge alone: its menu bar works with the mouse, its keys do
+  nothing. Not taken: a preload that sends them over the event bridge, which
+  any page can send on as well, so a server's page could open the Open dialog
+  at will.
   Linux has no application menu ("Application menus are not supported on
   Linux", linux/nativeWrapper.cpp), so the main window's own buttons are its
   File menu: New database, Open file…, the Databases list's Open (Open Recent),
   Remote connections (Connect to a Server…); with no Dock, the main window
   closed is shown again by starting the app a second time, which asks the one
-  there. `menu` presses each of them, and on Windows the keys as a person's
-  (testkeys.ts: SetForegroundWindow after an Alt, a click where a person would
-  click, keybd_event), its control the text typed into the main window's
-  search box arriving in the page.
+  there. `menu` presses each of them, and the keys: on Windows as a person's
+  (testkeys.ts: a click into the page, which also brings the window to the
+  front, where SetForegroundWindow was once refused on the arm64 runner, then
+  keybd_event), its control the text typed into the search box arriving in
+  the page; on Linux, which has no input a check can press as a person's
+  under xvfb, dispatched in the page.
 - **Icons.** `icon/icon.ico` (16, 24, 32, 48, 64, 128 and 256 pixels, each a
   PNG entry, 48.9 KB) and `icon/icon.png` (512 pixels, 69.2 KB), made from
   `icon/icon.svg` by `scripts/make-icon.sh rasters` on a Mac (sips draws the
