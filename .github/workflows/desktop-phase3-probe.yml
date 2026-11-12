@@ -1,0 +1,99 @@
+name: desktop-phase3-probe
+
+# TEMPORARY (phase 3 of #578, removed before the pull request is ready): the
+# test variant built on the four Windows and Linux runners and the checks this
+# phase adds run alone, with what the system holds printed beside them.
+on:
+  push:
+    branches: [desktop-integration]
+    paths:
+      - 'integrations/studio-desktop/**'
+      - '.github/workflows/desktop-phase3-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: probe on ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Windows x64, os: windows-latest }
+          - { name: Windows arm64, os: windows-11-arm }
+          - { name: Linux x64, os: ubuntu-24.04 }
+          - { name: Linux arm64, os: ubuntu-24.04-arm }
+    defaults:
+      run:
+        shell: bash
+        working-directory: integrations/studio-desktop
+    env:
+      STUDIO_SERVER_RELEASE: '0.2.0'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Where the checks write
+        run: echo "SD_DIR=$RUNNER_TEMP/fennec-desktop-checks" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          mirrors=$( { sed -n 's|^[a-z]*://\([^/]*\)/.*|\1|p' /etc/apt/apt-mirrors.txt 2>/dev/null; sed -n 's|^URIs: *[a-z]*://\([^/ ]*\).*|\1|p' /etc/apt/sources.list.d/*.sources 2>/dev/null; } | sort -u)
+          for h in $mirrors; do
+            timeout 5 getent hosts "$h" >/dev/null && continue
+            for a in $(dig +short +time=3 +tries=2 @1.1.1.1 "$h" A | grep -E '^[0-9.]+$'); do echo "$a $h"; done | sudo tee -a /etc/hosts
+          done
+          packages="libgtk-3-0t64 libwebkit2gtk-4.1-0 libayatana-appindicator3-1 librsvg2-2 xvfb dbus-x11 gnome-keyring libsecret-1-0 libsecret-tools xdg-utils shared-mime-info desktop-file-utils libglib2.0-bin"
+          sudo -E apt-get install -y -q $packages || { sudo -E apt-get update -q && sudo -E apt-get install -y -q $packages; }
+      - uses: actions/cache@v6
+        with:
+          path: integrations/studio-desktop/.hutch-home
+          key: desktop-hutch-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('integrations/studio-desktop/package-lock.json', 'integrations/studio-desktop/hutch.config.ts', 'integrations/studio-desktop/hutch-pin.json') }}
+      - run: npm ci --ignore-scripts --no-audit --no-fund --loglevel=error
+      - run: sh scripts/get-server.sh "$STUDIO_SERVER_RELEASE"
+      - name: Unit tests (the new ones)
+        run: node --test --test-reporter=spec test/handover.test.ts test/associate.test.ts test/instance.test.ts test/icon.test.ts
+      - name: Build the test variant
+        run: FENNEC_DESKTOP_TEST_BUILD=1 npm run build
+      - name: The build's files
+        run: |
+          find build-test -maxdepth 6 \( -name '*.ico' -o -name '*.png' -o -name '*.desktop' -o -name 'launcher*' -o -name 'icon*' \) | head -50
+      - name: The checks of this phase
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            dbus-run-session -- sh -c 'printf checks | gnome-keyring-daemon --unlock --components=secrets >/dev/null && ONLY=warmup,finder,menu xvfb-run -a -s "-screen 0 1600x1000x24" node scripts/checks/run.mjs'
+          else
+            ONLY=warmup,finder,menu node scripts/checks/run.mjs
+          fi
+      - name: What the system holds
+        if: always()
+        run: |
+          set +e
+          if [ "$RUNNER_OS" = Linux ]; then
+            ls -la ~/.local/share/applications ~/.local/share/mime/packages 2>&1
+            for f in ~/.local/share/applications/*.desktop; do echo "== $f"; cat "$f"; done
+            find ~/.local/share/dev.fennecdb.studio.test/stable/app -maxdepth 3 | head -60
+          else
+            find "$LOCALAPPDATA/dev.fennecdb.studio.test/stable/app" -maxdepth 3 | head -60
+            reg query 'HKCU\Software\Classes\.fennec' //s
+            reg query 'HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall' //s | grep -i -A8 fennec
+            pwsh -NoProfile -Command "Get-ChildItem \"\$env:APPDATA\Microsoft\Windows\Start Menu\Programs\" -Recurse -Filter *.lnk | ForEach-Object { \$s = (New-Object -ComObject WScript.Shell).CreateShortcut(\$_.FullName); '{0} -> {1} {2} icon {3}' -f \$_.FullName, \$s.TargetPath, \$s.Arguments, \$s.IconLocation }"
+          fi
+      - name: The logs of the checks
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: probe-logs-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/fennec-desktop-checks/logs
+          retention-days: 7
+          if-no-files-found: ignore

@@ -257,6 +257,21 @@ async function run(c: any) {
 		}
 		// The main window's "Show in folder".
 		case "reveal": await revealPath(c.path); break;
+		// Windows: keys pressed into a window, as a person's are (testkeys.ts): the
+		// window brought to the front, then `type` typed or `chord` pressed.
+		case "keys": {
+			const page = win(c.key);
+			if (!page || process.platform !== "win32") {
+				report("keys-result", { key: c.key, error: page ? "Windows alone" : "no such window" });
+				break;
+			}
+			const k = await import("./testkeys.ts");
+			const front = k.toFront(BigInt(page.win.ptr as unknown as number));
+			if (c.type) k.type(c.type);
+			if (c.chord) k.chord(c.chord);
+			report("keys-result", { key: c.key, front, type: c.type ?? null, chord: c.chord ?? null });
+			break;
+		}
 		case "quit": Utils.quit(); break;
 	}
 }

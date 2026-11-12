@@ -13,8 +13,10 @@
 
 import Electrobun, { Utils } from "electrobun/main";
 import { anythingOpen, isQuitting, openFile, serversBusy, stopAll } from "./app.ts";
+import { registerSelf } from "./associate.ts";
 import { sweepSecrets } from "./clipboard.ts";
-import { claimInstance, instancePath, pipeName, runtimeFolder, type PipeSecurity } from "./instance.ts";
+import { launched, pathsOf } from "./handover.ts";
+import { claimInstance, instancePath, pipeName, runtimeFolder, type Ask, type PipeSecurity } from "./instance.ts";
 import { startMenu } from "./menu.ts";
 import { closeLauncher, launcherOpen, showLauncher } from "./pages.ts";
 import { sweepLeftStores } from "./windows.ts";
@@ -53,19 +55,34 @@ async function guard(): Promise<{ path: string; pipe?: PipeSecurity } | null> {
 	}
 }
 
+// Windows and Linux: the files the system handed the launcher, a `.fennec`
+// double-clicked (handover.ts; macOS's come as `open-url`, below).
+const launch = await launched();
+const handed = pathsOf(launch);
+if (__TESTABLE__) {
+	// What reached this process, said as it is: the check holds the hand-over to it.
+	(await import("./testhooks.ts")).report("launch", {
+		argv: process.argv,
+		ppid: process.ppid,
+		launcherPid: process.env["ELECTROBUN_LAUNCHER_PID"] ?? null,
+		env: Object.keys(process.env).sort(),
+		launched: launch,
+		handed,
+	});
+}
+
+/** What another instance asked: to show the main window, or to open the files it was handed. */
+function asked(ask: Ask) {
+	if (__TESTABLE__) void import("./testhooks.ts").then((h) => h.report("instance-asked", { ask }));
+	if ("open" in ask) for (const path of ask.open) void openFile(path);
+	else void showLauncher();
+}
+
 // One instance at a time (instance.ts): a second asks the first to show its
-// main window and quits before it opens anything or reads its lists.
+// main window, or to open what it was handed, and quits before it opens
+// anything or reads its lists.
 const where = await guard();
-const claim = where
-	? await claimInstance(
-			where.path,
-			() => {
-				if (__TESTABLE__) void import("./testhooks.ts").then((h) => h.report("instance-asked"));
-				void showLauncher();
-			},
-			where.pipe,
-		)
-	: "unguarded";
+const claim = where ? await claimInstance(where.path, asked, where.pipe, handed.length ? { open: handed } : { show: true }) : "unguarded";
 if (__TESTABLE__) (await import("./testhooks.ts")).report("instance", { path: where?.path ?? null, claim });
 if (claim === "another") {
 	if (__TESTABLE__) (await import("./testhooks.ts")).report("second-instance");
@@ -75,6 +92,19 @@ if (claim === "another") {
 }
 // Windows: the file windows' stores a run that ended left behind (stores.ts), by the one instance alone.
 if (claim === "alone") void sweepLeftStores();
+// Windows and Linux: a `.fennec` opens in this app (associate.ts), pointed at
+// where it runs from now; written only where it differs, by the one instance.
+if (claim !== "another") {
+	void registerSelf(__KEYCHAIN_SERVICE__, __APP_NAME__).then(
+		(done) => {
+			if (__TESTABLE__) void import("./testhooks.ts").then((h) => h.report("registered", done));
+		},
+		(e) => {
+			console.error(`.fennec files were not registered to open here: ${(e as Error).message}`);
+			if (__TESTABLE__) void import("./testhooks.ts").then((h) => h.report("registered", { error: (e as Error).message }));
+		},
+	);
+}
 
 const started = Date.now();
 /** The launcher was shown because nothing else was opening, not because someone asked for it. */
@@ -135,6 +165,11 @@ let opened = false;
 if (__TESTABLE__) {
 	const hooks = await import("./testhooks.ts");
 	opened = await hooks.boot();
+}
+// The files a double-click handed this, the one instance, as Finder's arrive on macOS.
+if (handed.length) {
+	opened = true;
+	for (const path of handed) void openFile(path);
 }
 // A launch from Finder with a file arrives as `open-url` a moment after the
 // process starts: wait for it before showing the launcher over the file's window.

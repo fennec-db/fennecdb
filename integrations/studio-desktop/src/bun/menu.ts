@@ -1,4 +1,8 @@
-// The application menu. Accelerators are Command plus the key.
+// The application menu: macOS's menu bar, and on Windows a menu bar in each
+// window (Electrobun 2.0.4 has none on Linux, where the main window's buttons
+// do what its File menu does). Accelerators are CmdOrCtrl: Command on macOS,
+// Ctrl on Windows. A bare key was Command on macOS alone, and "shift+o" was
+// Shift and O with no Command anywhere.
 
 import { basename } from "node:path";
 import { ApplicationMenu } from "electrobun/main";
@@ -16,15 +20,15 @@ export function refreshMenu() {
 		{
 			label: "File",
 			submenu: [
-				{ label: "New Database…", action: "new", accelerator: "n" } as any,
-				{ label: "Open…", action: "open", accelerator: "o" },
+				{ label: "New Database…", action: "new", accelerator: "CmdOrCtrl+N" } as any,
+				{ label: "Open…", action: "open", accelerator: "CmdOrCtrl+O" },
 				{
 					label: "Open Recent",
 					submenu: recents.length
 						? recents.map((r) => ({ label: basename(r.path), action: "open-recent", data: { path: r.path } }))
 						: [{ label: "No recent files", enabled: false }],
 				},
-				{ label: "Connect to a Server…", action: "launcher", accelerator: "shift+o" } as any,
+				{ label: "Connect to a Server…", action: "launcher", accelerator: "CmdOrCtrl+Shift+O" } as any,
 				{ type: "separator" },
 				{ role: "close" },
 			],

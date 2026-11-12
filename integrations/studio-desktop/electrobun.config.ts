@@ -27,6 +27,7 @@ const notarize =
 		(set("ELECTROBUN_APPLEID") && set("ELECTROBUN_APPLEIDPASS") && set("ELECTROBUN_TEAMID")));
 
 const identifier = test ? "dev.fennecdb.studio.test" : "dev.fennecdb.studio";
+const name = test ? "fennec studio test" : "fennec studio";
 
 // The release's Windows zip names its programs with `.exe` (scripts/get-server.sh
 // puts them in bin/ so). Hutch builds only for the system it runs on, so that
@@ -35,13 +36,13 @@ const exe = process.platform === "win32" ? ".exe" : "";
 
 export default {
 	app: {
-		name: test ? "fennec studio test" : "fennec studio",
+		name,
 		identifier,
 		version,
 		description: "fennec studio as a desktop app: make, open, serve and back up database files, or connect to a server.",
 		// A double-click on a .fennec file in Finder arrives as an `open-url`
-		// event with a file: URL (macOS only; Windows and Linux file
-		// associations are not implemented by Electrobun 2.0.4).
+		// event with a file: URL. Electrobun 2.0.4 registers it on macOS alone:
+		// on Windows and Linux the app registers itself (src/bun/associate.ts).
 		fileAssociations: [{ name: "fennecdb database", ext: ["fennec"], role: "Editor" }],
 	},
 	runtime: {
@@ -62,6 +63,8 @@ export default {
 				__TESTABLE__: JSON.stringify(test),
 				// The Keychain service the saved servers' tokens go under.
 				__KEYCHAIN_SERVICE__: JSON.stringify(identifier),
+				// The name a .fennec file's registration gives the app (Windows, Linux).
+				__APP_NAME__: JSON.stringify(name),
 			},
 		},
 		views: {
@@ -82,6 +85,11 @@ export default {
 			// verifies and restores its backups: put here by scripts/get-server.sh.
 			[`bin/fennec-server${exe}`]: `bin/fennec-server${exe}`,
 			[`bin/fennec${exe}`]: `bin/fennec${exe}`,
+			// What a .fennec file's registration shows it with (src/bun/associate.ts):
+			// Explorer takes an .ico, a desktop entry a PNG. macOS's is the bundle's
+			// .icns, from Info.plist.
+			...(process.platform === "win32" ? { "icon/icon.ico": "icon/icon.ico" } : {}),
+			...(process.platform === "linux" ? { "icon/icon.png": "icon/icon.png" } : {}),
 		},
 		mac: {
 			bundleCEF: false,
@@ -93,11 +101,15 @@ export default {
 			createDmg: !test,
 			icons: "icon.iconset",
 		},
+		// The app's icon there, made from icon/icon.svg as the macOS iconset is
+		// (scripts/make-icon.sh): the launcher's, the shortcuts' and the windows'.
 		linux: {
 			bundleCEF: false,
+			icon: "icon/icon.png",
 		},
 		win: {
 			bundleCEF: false,
+			icon: "icon/icon.ico",
 		},
 	},
 	// No update feed yet: Electrobun makes bsdiff patches only against a

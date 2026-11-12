@@ -2,6 +2,15 @@
 # icon/icon.svg -> icon.iconset/, which Electrobun turns into the .icns
 # (build.mac.icons), with the tools macOS has: sips draws the SVG and
 # resizes, nothing is downloaded.
+#
+# `make-icon.sh rasters` makes, from the same render, what Windows and Linux
+# are given instead (build.win.icon, build.linux.icon, and what a .fennec
+# file's registration shows: src/bun/associate.ts): icon/icon.ico (16 to 256
+# pixels, each a PNG) and icon/icon.png (512), with icon/rasters.json naming
+# the SVG they were made from. Those are kept in git, since neither system has
+# an SVG renderer of its own to make them where they are built; after a change
+# to the SVG, run this on a Mac and commit the three (test/icon.test.ts fails
+# until then).
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -21,6 +30,19 @@ if ! sips -s format png "$svg" --out "$big/1024.png" >/dev/null 2>&1; then
     exit 1
   }
   mv "$big/$(basename "$svg").png" "$big/1024.png"
+fi
+
+if [ "${1:-}" = rasters ]; then
+  sizes="16 24 32 48 64 128 256"
+  for size in $sizes; do
+    sips -z "$size" "$size" "$big/1024.png" --out "$big/ico-$size.png" >/dev/null
+  done
+  sips -z 512 512 "$big/1024.png" --out icon/icon.png >/dev/null
+  # shellcheck disable=SC2086 # the sizes, one word each
+  node scripts/make-ico.mjs icon/icon.ico $(for size in $sizes; do printf '%s ' "$big/ico-$size.png"; done)
+  node scripts/make-ico.mjs --record icon
+  echo "icon/icon.ico ($(wc -c < icon/icon.ico | tr -d ' ') bytes, $sizes) and icon/icon.png (512, $(wc -c < icon/icon.png | tr -d ' ') bytes) from $svg"
+  exit 0
 fi
 
 rm -rf "$set_dir"

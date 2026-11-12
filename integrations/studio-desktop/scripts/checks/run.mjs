@@ -16,7 +16,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { closeSync, mkdirSync, openSync, rmSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
-import { APP_DATA, D, HERE, POWERSHELL, WIN, describe, freshState, keepEvidence, mine, now, procs, sleep } from './lib.mjs';
+import { APP_DATA, D, HERE, POWERSHELL, WIN, describe, forgetRegistration, freshState, keepEvidence, mine, now, procs, sleep } from './lib.mjs';
 
 /**
  * Every check, in the order they run, and the systems one does not run on:
@@ -50,12 +50,10 @@ const CHECKS = [
   { name: 'backups' },
   { name: 'opener', skip: LINUX_ONLY },
   { name: 'keyring', skip: LINUX_ONLY },
+  { name: 'finder' },
   {
-    name: 'finder',
-    skip: {
-      linux: "phase 3: a file handed to the app by the desktop; Electrobun 2.0.4's launcher drops its arguments (upstream #483, #554)",
-      win32: "phase 3: a file handed to the app by Explorer; Electrobun 2.0.4's launcher drops its arguments (upstream #483, #554)",
-    },
+    name: 'menu',
+    skip: { darwin: "macOS's File menu is the menu bar's, which AppKit hands its Command keys to before any page" },
   },
 ];
 const only = (process.env.ONLY ?? '').split(',').filter(Boolean);
@@ -68,6 +66,16 @@ const LIMIT_MS = 240_000;
 // run, so `warmup` is a first launch (and on Windows and Linux installs the app again into it);
 // each check then starts with no state of it (`freshState`).
 rmSync(APP_DATA, { recursive: true, force: true });
+// On Windows and Linux every start of the test variant registers `.fennec` to open in it (src/bun/associate.ts):
+// what a run before left goes now, and this run's at its end, so a machine is left as it was.
+forgetRegistration();
+process.on('exit', () => {
+  try {
+    forgetRegistration();
+  } catch (e) {
+    console.log(`the test variant's registration was not all removed: ${e.message}`);
+  }
+});
 rmSync(join(D, 'data'), { recursive: true, force: true });
 mkdirSync(join(D, 'data'), { recursive: true });
 mkdirSync(join(D, 'logs'), { recursive: true });

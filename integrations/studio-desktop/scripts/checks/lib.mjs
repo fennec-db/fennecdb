@@ -536,3 +536,113 @@ export function assertClean(when) {
   const left = mine();
   if (left.length) throw new Error(`${when}: processes left behind:\n${describe(left)}`);
 }
+
+/**
+ * Windows and Linux: what the test variant's registration of `.fennec` is
+ * (src/bun/associate.ts writes it at each start), by the names the README's
+ * "Uninstall" gives a user to remove it by.
+ */
+export const PROG_ID = `${IDENTIFIER}.fennec`;
+export const MIME_TYPE = 'application/x-fennecdb';
+const DATA_HOME = process.env.XDG_DATA_HOME && process.env.XDG_DATA_HOME.startsWith('/') ? process.env.XDG_DATA_HOME : join(homedir(), '.local', 'share');
+export const DESKTOP_FILE = join(DATA_HOME, 'applications', `${IDENTIFIER}.desktop`);
+export const MIME_FILE = join(DATA_HOME, 'mime', 'packages', `${IDENTIFIER}.xml`);
+
+/** `reg` with an argument vector, its output and status: Windows' own registry tool, which the README's removal uses too. */
+export function reg(args) {
+  const r = spawnSync('reg', args, { encoding: 'utf8', timeout: 30000 });
+  if (r.error) throw new Error(`reg ${args.join(' ')}: ${r.error.message}`);
+  return { status: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+}
+
+/** A REG_SZ of HKCU (`name` null: the key's default), or null where there is none. */
+export function regValue(key, name) {
+  const r = reg(['query', `HKCU\\${key}`, ...(name === null ? ['/ve'] : ['/v', name])]);
+  if (r.status !== 0) return null;
+  const m = /REG_SZ[ \t]*(.*?)\r?$/m.exec(r.out);
+  return m ? m[1] : null;
+}
+
+/**
+ * The test variant's registration, as the system holds it: on Windows the
+ * values under HKCU\Software\Classes; on Linux the two files, and what GIO
+ * makes of them (a `.fennec` file's type, the programs for that type).
+ */
+export function registration(sample) {
+  if (WIN) {
+    return {
+      progId: regValue(`Software\\Classes\\${PROG_ID}`, null),
+      icon: regValue(`Software\\Classes\\${PROG_ID}\\DefaultIcon`, null),
+      command: regValue(`Software\\Classes\\${PROG_ID}\\shell\\open\\command`, null),
+      listed: regValue(`Software\\Classes\\.fennec\\OpenWithProgids`, PROG_ID) !== null,
+      default: regValue('Software\\Classes\\.fennec', null),
+    };
+  }
+  const read = (p) => (existsSync(p) ? readFileSync(p, 'utf8') : null);
+  const gio = (args) => {
+    const r = spawnSync('gio', args, { encoding: 'utf8', timeout: 30000 });
+    return r.error ? `gio: ${r.error.message}` : `${r.stdout ?? ''}${r.stderr ?? ''}`.trim();
+  };
+  return {
+    desktop: read(DESKTOP_FILE),
+    mime: read(MIME_FILE),
+    type: sample ? gio(['info', '-a', 'standard::content-type', sample]).match(/standard::content-type: (\S+)/)?.[1] ?? null : null,
+    programs: gio(['mime', MIME_TYPE]),
+  };
+}
+
+/** Runs one of the system's tools on the registration and says how it ended; one not installed is said, not failed. */
+function tool(argv) {
+  const r = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout: 60000 });
+  if (r.error?.code === 'ENOENT') return `${argv[0]}: not installed`;
+  if (r.error || r.status !== 0) throw new Error(`${argv.join(' ')}: ${r.error?.message ?? `status ${r.status}: ${r.stderr}`}`);
+  return `${argv[0]}: done`;
+}
+
+/**
+ * The test variant's registration gone, as the README tells a user to remove
+ * the app's: on Windows its ProgID, its line in `.fennec`'s list, and
+ * `.fennec`'s default where that is its own (`reg delete`); on Linux its two
+ * files, and the system's caches made again without them. What another
+ * program registered is left.
+ */
+export function forgetRegistration() {
+  if (MAC) return [];
+  if (WIN) {
+    const done = [];
+    if (reg(['delete', `HKCU\\Software\\Classes\\${PROG_ID}`, '/f']).status === 0) done.push(PROG_ID);
+    if (reg(['delete', 'HKCU\\Software\\Classes\\.fennec\\OpenWithProgids', '/v', PROG_ID, '/f']).status === 0) done.push('.fennec\\OpenWithProgids');
+    if (regValue('Software\\Classes\\.fennec', null) === PROG_ID && reg(['delete', 'HKCU\\Software\\Classes\\.fennec', '/ve', '/f']).status === 0) done.push('.fennec default');
+    return done;
+  }
+  const done = [];
+  for (const f of [DESKTOP_FILE, MIME_FILE]) {
+    if (existsSync(f)) {
+      rmSync(f);
+      done.push(f);
+    }
+  }
+  done.push(tool(['update-mime-database', join(DATA_HOME, 'mime')]));
+  if (existsSync(join(DATA_HOME, 'applications'))) done.push(tool(['update-desktop-database', join(DATA_HOME, 'applications')]));
+  return done;
+}
+
+/**
+ * A double-click on `path`, as close as a runner allows: on Windows the
+ * shell's own ShellExecuteEx on the file (.NET's Process.Start with
+ * UseShellExecute, which Explorer's double-click is, with no dialog on a
+ * failure), on Linux `gio open`, GNOME's (GDesktopAppInfo, the program the
+ * file's type names). The hooks' variables go along in the environment, which
+ * a program the system starts from here inherits. The path goes as data: in
+ * the environment on Windows, an argument on Linux.
+ */
+export function doubleClick(path, env = {}) {
+  const all = { ...process.env, FENNEC_DESKTOP_REPORT: REPORT, FENNEC_DESKTOP_CONTROL: CONTROL, ...env };
+  if (WIN) {
+    const ps = "$i = New-Object System.Diagnostics.ProcessStartInfo; $i.FileName = $env:FENNEC_CHECK_OPEN; $i.UseShellExecute = $true; [void][System.Diagnostics.Process]::Start($i)";
+    const r = spawnSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', ps], { env: { ...all, FENNEC_CHECK_OPEN: path }, encoding: 'utf8', timeout: 60000 });
+    return { status: r.status, said: `${r.stdout ?? ''}${r.stderr ?? ''}${r.error ? r.error.message : ''}`.trim() };
+  }
+  const r = spawnSync('gio', ['open', path], { env: all, encoding: 'utf8', timeout: 60000 });
+  return { status: r.status, said: `${r.stdout ?? ''}${r.stderr ?? ''}${r.error ? r.error.message : ''}`.trim() };
+}

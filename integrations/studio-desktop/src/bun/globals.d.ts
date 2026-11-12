@@ -4,3 +4,5 @@
 declare const __TESTABLE__: boolean;
 /** The Keychain service saved servers' tokens go under: the app's identifier. */
 declare const __KEYCHAIN_SERVICE__: string;
+/** The app's name as the system shows it: the test variant's is its own. */
+declare const __APP_NAME__: string;
