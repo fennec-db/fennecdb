@@ -137,6 +137,11 @@ on:
         description: 'A release tag (v0.2.0) to bundle the server of and attach the app to: the DMG signed where the desktop-signing Environment holds the secrets, unsigned (ad hoc) where it does not, and the Windows and Linux downloads; from main only. Empty: this checkout (macOS) or 0.2.0 (Windows, Linux), nothing attached.'
         required: false
         default: ''
+      systems:
+        description: 'all, or windows-linux: the Mac is left out, for a release whose DMG is attached already (a DMG built again is another file, and a release keeps the one it has), its Windows and Linux downloads attached alone.'
+        type: choice
+        options: [all, windows-linux]
+        default: all
 
 env:
   CARGO_TERM_COLOR: always
@@ -147,6 +152,9 @@ permissions:
 jobs:
   app:
     name: app (build, unit tests, checks)
+    # Left out only by a dispatch that asks for Windows and Linux alone; then
+    # `sign` does not run either, and `attach-unsigned` attaches no DMG.
+    if: github.event.inputs.systems != 'windows-linux'
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
@@ -253,9 +261,8 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-  # Windows and Linux (the header): built and checked, nothing shipped. A
-  # dispatch that names a release is a maintainer attaching the Mac's DMG, and
-  # skips them.
+  # Windows and Linux (the header): built and checked; a dispatch from main
+  # that names a release attaches their downloads (`attach-unsigned`).
   other-systems:
     name: app on ${{ matrix.name }} (build, unit tests, checks, the download)
     runs-on: ${{ matrix.os }}
