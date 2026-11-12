@@ -112,7 +112,10 @@ assert.equal(reads.value.own, 'read 200', "the control: the studio's own origin 
 assert.equal(reads.value.shared, 'refused', 'fetch: an answer of another origin, though it allows any reader');
 assert.equal(reads.value.secret, 'refused', 'fetch: one that allows none');
 assert.equal(reads.value.xhr, 'refused', 'XHR: the same');
-// WebKit may leave a refused frame an empty document of the studio's own: what must not be read is the other origin's.
+// A refused frame is left a document the page may read: an empty one in WebKit
+// (its title ""), WebView2's error page on Windows, where the policy is off
+// (its title the host, "127.0.0.1", on both runners). What must not be read is
+// the other origin's, and the other origin is asked nothing (below).
 assert.notEqual(reads.value.frame, 'read another origin', 'a frame of another origin: its document');
 assert.deepEqual(otherAsked, [], 'no request reached the other origin: the CSP refused each before it left, not the same-origin policy after');
 other.close();
