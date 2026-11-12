@@ -70,8 +70,12 @@ its epoch milliseconds, ordered by their values — and a text and bytes
 order by their bytes. A comparison — <code>=</code>, <code>&lt;</code>,
 <code>in</code>, <code>has</code>, in a filter or anywhere else — finds a
 value of one kind equal to none of another, but for a text beside a time,
-which it reads as the time it names (<a href="#time">Time</a>), and
-<code>greatest</code> and <code>least</code> choose as it does: beside a
+which it reads as the time it names (<a href="#time">Time</a>), and a list
+of numbers from 0 to 255 beside a <code>bytes</code> field, which it reads
+as the bytes it writes — as JSON writes bytes out, so
+<code>where sketch = [104, 105]</code> finds the row a page read them from,
+through a <code>@hash</code> or not. <code>greatest</code> and
+<code>least</code> choose as a comparison does: beside a
 <code>timestamp</code> field, <code>greatest(at, $1)</code> with
 <code>$1</code> an ISO text is the later of the two times. What the
 order finds equal is one value wherever values are told apart: one

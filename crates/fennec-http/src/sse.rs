@@ -692,8 +692,15 @@ impl Expiry {
                 Box::new(Expr::Cmp(CmpOp::Gt, field(), past(told))),
             );
         }
+        // The window first: the shape -- a token's rules, then its own
+        // terms -- runs only over the rows that reached their time since
+        // the last look, each one the stream could read then, and never
+        // over one long expired and not yet swept, which a term of the
+        // shape failing by its fields would tell without the `expired`
+        // grant (access.md, *The rules are asked before the caller's
+        // terms*).
         if let (false, Some(shape)) = (self.everything, shape) {
-            f = Expr::And(Box::new(shape.clone()), Box::new(f));
+            f = Expr::And(Box::new(f), Box::new(shape.clone()));
         }
         let sel = Select {
             collection: self.collection.clone(),

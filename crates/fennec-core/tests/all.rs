@@ -8,6 +8,7 @@ mod aggregate;
 mod alter;
 mod analytics;
 mod analytics_docs;
+mod and_terms;
 mod approx;
 mod autocompact;
 mod blocks;

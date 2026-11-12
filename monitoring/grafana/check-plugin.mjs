@@ -235,7 +235,11 @@ for (const a of dashboard.annotations.list) {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ query: { ...panels[1].targets[0], vars }, from, to, intervalMs, maxDataPoints }),
   });
-  assert.equal(explain.status, 200, `explain: ${explain.text}`);
-  assert.ok(explain.body.plan.length > 0, 'explain gave no plan');
-  console.log(`ok  explain, as the editor asks it: ${explain.body.plan.length} lines of plan`);
+  // The data source holds a scoped token, and a plan counts rows a token's
+  // rules hide from it, so the server refuses `explain` to one (#593): the
+  // editor shows that refusal, in the server's words, and nothing of a plan.
+  assert.equal(explain.status, 400, `explain: ${explain.text}`);
+  assert.match(explain.body.error, /\(403\): `explain` is the server token's/, `explain: ${explain.text}`);
+  assert.equal(explain.body.plan, undefined, `explain gave a plan: ${explain.text}`);
+  console.log(`ok  explain, as the editor asks it: refused to the scoped token, in the server's words`);
 }
