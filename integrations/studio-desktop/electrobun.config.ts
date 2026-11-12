@@ -48,9 +48,10 @@ export default {
 	runtime: {
 		// The default quits the process as the last window closes, right after the
 		// close handlers return: too soon for a server to finish its SIGTERM
-		// (sync + checkpoint) while we still hold its lock. The app stays up
-		// with no window, as a macOS document app does, and stops the servers
-		// itself on quit (src/bun/index.ts).
+		// (sync + checkpoint) while we still hold its lock. On macOS the app
+		// stays up with no window, as a document app does; on Windows and Linux
+		// its last window closed is a quit of its own; either way it stops the
+		// servers itself before it goes (src/bun/index.ts).
 		exitOnLastWindowClosed: false,
 	},
 	build: {

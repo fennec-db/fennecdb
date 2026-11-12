@@ -321,9 +321,10 @@ in an `async` function, so the main process's JavaScript, every server's
 supervision and the quit handler stood still until someone clicked (a check that
 never clicked held the app for good). `exitOnLastWindowClosed` is false: the
 default quits as the last window's close handlers return, too soon for a
-server's SIGTERM to finish while the app still holds its lock; the app stays in
-the Dock, as a document app does, and stops its servers itself on quit
-(`before-quit` held until they have). A second open of a file the app is still
+server's SIGTERM to finish while the app still holds its lock; on macOS the app
+stays in the Dock, as a document app does, and on Windows and Linux its last
+window closed is a quit of its own (Desktop integration, below); either way it
+stops its servers itself on quit (`before-quit` held until they have). A second open of a file the app is still
 starting a server for waits for that one, and so does a second click on a saved
 server while it is being looked at (a few seconds, up to the probe's timeout):
 both are in `starting`, one open of a thing at a time.
@@ -853,9 +854,9 @@ has.
   59 to 113 ms on arm64 (one each in 43104202430, 43107758866 and
   43109301246).
 
-Desktop integration (phase 3 of #578, nothing shipped). A `.fennec` opens from
-Explorer and a file manager, the app registers itself for that, the menus'
-keys are each system's, and the app has its icon there.
+Desktop integration (phase 3 of #578). A `.fennec` opens from Explorer and a
+file manager, the app registers itself for that, the menus' keys, the last
+window and the app's words are each system's, and the app has its icon there.
 
 - **What reaches the app.** Electrobun 2.0.4 registers a document type on
   macOS alone, and its launcher, the one program a registration can name,
@@ -909,9 +910,9 @@ keys are each system's, and the app has its icon there.
   was found, so Tauri is not taken up again.
 - **Who registers it: the app, at every start.** Electrobun's installer and
   Setup.exe run nothing of the app's, the release's zip and tarball (phase 4)
-  are unpacked anywhere with no installer at all, and an installer of our own
-  (`install.ps1 -App`, `install.sh --app`) would cover its own copies alone
-  and point nowhere once one was moved. So the one instance writes it at each
+  are unpacked anywhere with no installer at all, and the install scripts
+  (`install.ps1 -App`, `install.sh --app`) cover their own copies alone and
+  would point nowhere once one was moved. So the one instance writes it at each
   start (`associate.ts`), only what differs from what is there: a moved copy
   points it at itself the next time it runs, and a start that changes nothing
   writes nothing (`finder` holds a second start to no write). On Windows,
@@ -947,16 +948,25 @@ keys are each system's, and the app has its icon there.
   which knows no `.fennec`, so the check drives `gio open`, which GNOME's
   file manager is. KDE's (KService's cache over the same entries) is not
   checked.
-- **What is left.** Electrobun's uninstaller (Windows' Apps settings, the
-  launcher's `--uninstall`) removes its own records and knows nothing of
-  these. On Windows the ProgID's command then names a launcher that is gone,
-  and a double-click says Windows cannot find it, until the three `reg delete`
-  lines in the README's Uninstall; on Linux `TryExec` has GIO ignore the
-  entry once its launcher is gone (`finder` removes the copy an entry names and
-  the double-click starts nothing), so nothing points nowhere, and the two
-  files stay, for the README's two `rm`s. The app has no uninstall of its own
-  to remove them in: whether to give it one (an item in the main window, or
-  install.ps1's own removal once phase 4 lands) is the owner's to decide.
+- **What is left.** The download is the app unpacked, with no uninstaller
+  (phase 4); removing its folder, and the shortcut or menu entry the install
+  scripts made, leaves the registration, and so would Electrobun's
+  uninstaller (Windows' Apps settings, the launcher's `--uninstall`), which
+  removes its own records alone. On Windows the ProgID's command then names a
+  launcher that is gone, and a double-click says Windows cannot find it, until
+  the three `reg delete` lines in the README's Uninstall and the studio page's
+  Windows tab; on Linux `TryExec` has GIO ignore the entry once its launcher is
+  gone (`finder` removes the copy an entry names and the double-click starts
+  nothing), so nothing points nowhere, and the two files stay, for the two
+  `rm`s there. The owner's decision: those lines are the uninstall for now,
+  written out in both places with every key and file, and an uninstall entry
+  of the app's own is a later phase's. The per-start registration was asked
+  whether it could drop one that names a path no longer there, cheaply: it has
+  none to drop. It writes one ProgID and one entry for its identifier, pointed
+  at the copy that starts, so a copy moved or removed is written over by the
+  next start of any other; once the last copy is gone, nothing of the app runs
+  to remove it. (`.fennec`'s default naming a ProgID whose program is gone is
+  already taken over, above.)
 - **The checks.** `finder` drives the double-click as close as a runner
   allows: on Windows .NET's Process.Start with UseShellExecute, which is the
   shell's ShellExecuteEx, as Explorer's double-click is; on Linux `gio open`.
@@ -1014,6 +1024,40 @@ keys are each system's, and the app has its icon there.
   (GetLastInputInfo unchanged), and on Linux, which has no input a check can
   press as a person's under xvfb, dispatched in the page. Keys the system
   took that never reached the page fail it.
+- **The last window.** macOS keeps an app with no window in the Dock, and the
+  app stays there as a document app does, a served database still running.
+  Windows and Linux have no Dock: an app whose last window closed is gone from
+  the taskbar and the switcher, and the convention is that it quits. So there
+  the last window closed is a quit (`onLastWindowClosed`, index.ts): the same
+  `Utils.quit()` File, Quit makes, whose `before-quit` holds it until every
+  server has stopped by its one shutdown (the end of its stdin on Windows,
+  SIGTERM on Linux, each writing its checkpoint, a hard kill only 30 s on), a
+  served database's too. It is the owner's choice from the platforms'
+  convention; a served database needs a window left open there. Not
+  Electrobun's `exitOnLastWindowClosed`, which quits as the close handlers
+  return, before any server has stopped (above). Every window the app makes
+  is counted (`counted`, windows.ts: the main window, the new-database
+  window, a notice, a studio window), and the count is read on the next turn
+  after a close, with nothing opening (`anythingOpen`): a notice's Try again
+  closes the notice, the last window then, and opens its file, which makes a
+  window of its own, so that quits nothing. `lastwindow` holds both systems'
+  rules, the notice's Try again with the app left up, and on Windows and
+  Linux the quit: `last-window-closed`, the window's and the served
+  database's servers each stopped with exit 0, nothing of the app left. The
+  checks that close a file's only window and open it again (`files`,
+  `environment`) show the main window too, and `menu` closes Linux's main
+  window with a file's open.
+- **The app's words.** The main window named the computer "This Mac" (its
+  side bar, the Databases section, the serve sheet's reach and metrics, a
+  served database's card) and its button "Reveal in Finder". Each system's own
+  word is used: "This PC", as Windows' Explorer names it, and "This computer"
+  on Linux, whose desktops each name it their own way; "Show in Explorer" and
+  "Open its folder" (`xdg-open` opens the folder there). They come with the
+  main window's first list (`Overview.machine`, `.reveal`; `thisMachine`,
+  `revealLabel`), the HTML's own being macOS's; the credential store's name
+  already came so. `pages` holds the words on each system and, on Windows and
+  Linux, no Mac, Finder or Keychain left in any section of the main window;
+  the notices name none.
 - **Icons.** `icon/icon.ico` (16, 24, 32, 48, 64, 128 and 256 pixels, each a
   PNG entry, 48.9 KB) and `icon/icon.png` (512 pixels, 69.2 KB), made from
   `icon/icon.svg` by `scripts/make-icon.sh rasters` on a Mac (sips draws the

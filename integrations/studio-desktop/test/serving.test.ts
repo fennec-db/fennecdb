@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { commandShown, DEFAULT_SETTINGS, factsOf, parsePort, serverArgs, servePlan, settingsFrom, snippets, taskPlan, windowPlan } from "../src/bun/serving.ts";
+import { commandShown, DEFAULT_SETTINGS, factsOf, parsePort, serverArgs, servePlan, settingsFrom, snippets, taskPlan, thisMachine, windowPlan } from "../src/bun/serving.ts";
 
 const FILE = "/Users/me/Data/shop.fennec";
 
@@ -67,8 +67,15 @@ test("settings read back from state.json are settings, whatever was there", () =
 });
 
 test("what a served database's card says", () => {
-	assert.equal(factsOf(DEFAULT_SETTINGS, "250"), "This Mac only · token required · synced every 250 ms · studio on · compacts by itself");
+	assert.equal(factsOf(DEFAULT_SETTINGS, "250", "This Mac"), "This Mac only · token required · synced every 250 ms · studio on · compacts by itself");
+	assert.equal(factsOf(DEFAULT_SETTINGS, "250"), `${thisMachine()} only · token required · synced every 250 ms · studio on · compacts by itself`);
 	assert.equal(factsOf({ ...DEFAULT_SETTINGS, reach: "lan", mcp: true }, "always"), "Your network · token required · every write synced · studio on · compacts by itself · MCP on");
+});
+
+test("the computer the app runs on, as each system names it", () => {
+	assert.equal(thisMachine("darwin"), "This Mac");
+	assert.equal(thisMachine("win32"), "This PC");
+	assert.equal(thisMachine("linux"), "This computer");
 });
 
 test("the snippets an app connects with carry the address and never the token", () => {

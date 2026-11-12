@@ -27,7 +27,10 @@ in an allowlisted environment (never argv; names compared case-blind on
 Windows), its stdin a pipe the app holds (`--exit-on-stdin-close`: none
 outlives the app, `kill -9` included); it is stopped by SIGTERM, on Windows
 by the end of that stdin (SIGTERM is TerminateProcess there, no checkpoint),
-a hard kill only for one not ended 30 s later (`process.ts`). Only
+a hard kill only for one not ended 30 s later (`process.ts`). On Windows and
+Linux the last window closed quits the app as File, Quit does, its servers
+stopped first, while nothing is opening; every window the app makes is
+`counted` (`onLastWindowClosed`, `checks/lastwindow.mjs`); macOS's stays. Only
 `session.ts` gives a page a token, a frozen `window.fennecHost` defined
 where `location.origin` is the server's alone. A studio window is
 `sandbox: true` (the event bridge only) and held to its origin, one with
@@ -58,9 +61,9 @@ each argument a path opened as Open… opens one, never run or read as a command
 a second instance hands its paths to the first over that channel. The app
 registers itself, for its user, at every start of the one instance and only
 what differs, never over another program's default, an entry whose launcher
-is gone ignored on Linux (`TryExec`), and what an uninstall leaves is the
-README's (`associate.ts`, `checks/finder.mjs`, its control the registration
-taken away). A saved server's token is in the system's
+is gone ignored on Linux (`TryExec`), and what an uninstall leaves, every
+key and file, is the README's and the studio page's (`associate.ts`,
+`checks/finder.mjs`, its control the registration taken away). A saved server's token is in the system's
 credential store alone with its address (`token.ts`), never sent elsewhere
 or along a redirect: on Windows kept on the machine (`win32.ts`), on Linux
 refused in words where no Secret Service with a default collection answers

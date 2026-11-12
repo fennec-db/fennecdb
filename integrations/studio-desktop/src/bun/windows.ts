@@ -19,6 +19,34 @@ import { guardPreload } from "./webview2.ts";
 
 let cascade = 0;
 
+/** Every window of the app open now, by id: the main window, a new-database window, a notice, a studio window. */
+const shown = new Set<number>();
+let lastClosed: () => void = () => {};
+
+/**
+ * Counts `win` among the app's windows until it closes; the last one closing
+ * calls what `onLastWindowClosed` was given. Every window the app makes is
+ * counted (pages.ts, and here), or closing the others would quit the app
+ * under it on Windows and Linux. Called on the next turn, after whatever
+ * closed it has run on: a notice's Try again closes the notice, then opens the
+ * file, which is in `starting` from then on.
+ */
+export function counted(win: BrowserWindow<any>): void {
+	shown.add(win.id);
+	win.on("close", () => {
+		shown.delete(win.id);
+		if (shown.size === 0) setImmediate(() => shown.size === 0 && lastClosed());
+	});
+}
+
+/** What the app does once its last window has closed (index.ts: quit, on Windows and Linux). */
+export function onLastWindowClosed(f: () => void): void {
+	lastClosed = f;
+}
+
+/** How many windows the app has open. */
+export const windowsShown = () => shown.size;
+
 /**
  * A window held to one address: every navigation anywhere else is refused
  * (`^*` denies all, the second rule allows `pattern`, a glob). The whole of
@@ -142,6 +170,7 @@ export async function openStudioWindow(opts: { key: string; title: string; sessi
 	const extra = hooks?.pagePreload(origin) ?? "";
 	const f = frame(1280, 820);
 	const win = new BrowserWindow({ title: opts.title, url: null, html: null, frame: f, sandbox: true, allowedProtocols: { views: false, appData: false } });
+	counted(win);
 	// The window's own view, blank and in the shared store, under the page's.
 	// Windows and Linux remove it: their Electrobun removes a view on its UI
 	// thread, in order after making it. macOS keeps it. There Electrobun 2.0.4
@@ -222,6 +251,7 @@ export async function showNotice(n: Notice, onAction: (id: string) => void = () 
 		sandbox: true,
 		frame: frame(540, 330),
 	});
+	counted(win);
 	holdTo(win.webview, "views://notice/*");
 	(win.webview as any).on("host-message", (e: any) => {
 		const d = detailOf(e);

@@ -20,7 +20,7 @@ import { claimInstance, instancePath, pipeName, runtimeFolder, type Ask, type Pi
 import { startMenu } from "./menu.ts";
 import { closeLauncher, launcherOpen, showLauncher } from "./pages.ts";
 import { webview2Variables } from "./webview2.ts";
-import { sweepLeftStores } from "./windows.ts";
+import { onLastWindowClosed, sweepLeftStores, windowsShown } from "./windows.ts";
 
 /**
  * Where this user's one instance listens (instance.ts), and on Windows the
@@ -169,6 +169,20 @@ Electrobun.events.on("before-quit", (event: any) => {
 	event.response = { allow: false };
 	void stopAll().finally(() => Utils.quit());
 });
+
+// Windows and Linux: closing the last window quits the app, as their apps do
+// (no Dock keeps one running with none): the quit above, which stops every
+// server first, a served database's too, each by the one shutdown. Not while
+// something is opening, which makes a window of its own (a notice's Try
+// again), nor on macOS, where the app stays in the Dock.
+if (process.platform !== "darwin") {
+	onLastWindowClosed(async () => {
+		const hooks = __TESTABLE__ ? await import("./testhooks.ts") : null;
+		if (isQuitting() || anythingOpen() || windowsShown() > 0) return;
+		hooks?.report("last-window-closed", { busy: serversBusy() });
+		Utils.quit();
+	});
+}
 
 for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
 	process.on(sig, () => {

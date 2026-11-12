@@ -1,10 +1,11 @@
 # fennec studio, desktop (beta)
 
-[fennec studio](../../site/content/docs/studio.html) as a Mac app: open a
-`.fennec` file with nothing to start, make a new database, serve one to the
-apps on this Mac or your network, back it up and restore it, or keep saved
-connections to servers. It is **a window on a studio a `fennec-server`
-serves**, not a second implementation of it: the app bundles `fennec-server`
+[fennec studio](../../site/content/docs/studio.html) as a desktop app, on
+macOS, Windows and Linux: open a `.fennec` file with nothing to start, make a
+new database, serve one to the apps on this computer or your network, back it
+up and restore it, or keep saved connections to servers. It is **a window on
+a studio a `fennec-server` serves**, not a second implementation of it: the
+app bundles `fennec-server`
 and the `fennec` shell, starts a server per open or served file, and shows its
 own `/_studio/` page, so what the window does is what the studio does in a
 browser. Nothing of a database is written by the app itself: a server makes a
@@ -274,7 +275,11 @@ app registers itself for that at every start ([A file from the
 desktop](#a-file-from-the-desktop); [Uninstall](#uninstall)); the File menu's
 keys are Ctrl, taken by the main window's page (WebView2 keeps them from the
 menu bar), and on Linux, which has no application menu, the main window's
-buttons are the File menu; the icon is `icon/icon.ico` and
+buttons are the File menu; closing the last window quits the app, every
+server stopped first as File, Quit stops them (there is no Dock to keep it
+running with none; macOS's stays); the main window says "This PC" or "This
+computer" where macOS's says "This Mac", and Show in Explorer or Open its folder
+for Reveal in Finder; the icon is `icon/icon.ico` and
 `icon/icon.png`, made from `icon/icon.svg` on a Mac (`sh scripts/make-icon.sh
 rasters`) and kept in git, since neither system has an SVG renderer of its own
 (`test/icon.test.ts` holds them to the SVG).
@@ -369,11 +374,12 @@ script says which hashes a mismatch is.
    | `warmup` | the first launch of a build (below) |
    | `files` | open, edit through the studio's own form, a second open only shows the window, close stops the server with exit 0, reopen has the edit (also at once, while the first server is still stopping); a file another program holds is a message and **Try again** works once it lets go; a missing file, a folder, a file that is not a database and an empty one are said before any server is started, and nothing is written beside them; a quit right after a close waits for that server, and it ends with exit 0 |
    | `server-dies` | `kill -9` the server under a window: a message, the window closed, **Open again** works |
+   | `lastwindow` | a file's window closed with a notice left, and that notice closed by its **Try again**, the last window then, quit nothing: the file it was about opens; then the last window closed: on macOS the app stays, a served database still running; on Windows and Linux the app quits, the window's server and a served database's each stopped by its own shutdown with exit 0, and nothing of the app is left |
    | `orphan` | the app killed with two files open, one opened after the other, and a third served: **the descriptor tables, read while the app is alive (lsof on macOS, `/proc` and `ss` on Linux), say the write end of each server's stdin is the app's alone** (a control starts a process that does hold another's and requires the reading to find it), then every server ends by itself (the end of its stdin), the served one too, and every file is free for another program. On Windows, which has no table a check reads, the kill, the ending and the free files alone. A process is not stopped: on a hosted macOS runner a SIGSTOPped server made `ps` hang, and the job with it |
    | `sandbox` | the session is `window.fennecHost`, frozen, in the page's own world, and in no storage; the studio has no sign-in form and no Sign out; only the event bridge in a studio window, no navigating off its origin; **the studio reads no answer of another origin**, one that allows any reader neither, by fetch, XHR or a frame, and that origin is asked nothing (its CSP refuses each before it leaves; the studio's own origin answers, the control), on Windows too, where WebView2 runs with `--disable-web-security`; **a non-web address is dropped by the app** (the page asked, and nothing reached the system) and the first web link is handed to the browser, which the rate limit of one in three seconds does not explain. WebKitGTK raises nothing for a script's `window.open`, so on Linux the page-to-app step is not shown: nothing is opened and the window stays, and the app's filter is asked directly (`open-link`); on Windows the app's preload takes the request (`link-out`) and **no window of WebView2's own is opened** |
    | `hostile` | a saved server's page that has no CSP (a stand-in that answers the app's probe as fennec-server does): **it reads no answer of another origin that does not allow it** (fetch, XHR, a frame's document; one that allows any reader is read, the control), on macOS and Linux; on Windows, where Electrobun starts WebView2 with `--disable-web-security`, that the switch is there still, so the check fails once it is gone. **No window is opened for it**, whichever way it asks, from its document or any frame it makes: `window.open` and `document.open` with three arguments; a link with a target, outside the document, in a shadow root clicked by script (at it or its text), under `<base target>`, an image map's area, SVG's link; a form with a target by `submit()`, `requestSubmit()` with a `formtarget`, its button's `click()`, one in a shadow root; and a frame at once, by its index, of about:blank, srcdoc (its own script too), `document.write`, a data: or a blob: address, its own origin or another, a frame in a frame, a frame's own detached link, form and `document.open`. Each asks for an address of the stand-in's, which no window loads; on Windows no window of WebView2's own is drawn. On Windows the app is started with three `WEBVIEW2_*` variables: none is left in its environment block, and no window gets the store one names |
    | `latepreload` | Windows: a studio window whose first document has no bridge (made so by the test variant, as a preload WebView2 added late leaves it) is loaded again and shows the studio with its bridge and session; with the guard turned off, the control, the same window stays silent |
-   | `pages` | the launcher, the new-database window and a notice window cannot be navigated anywhere else (a web page, a file, another of the app's pages): without the rule, the launcher goes to example.com; their CSP refuses a string the page itself would eval (a string timer, compiled after the check's script returned: WebView2 lets the check's own script eval) and inline script; the one instance listens where its user alone can (on Windows a pipe whose DACL, read back, is one entry for its user's SID), and a second asks it to show itself and quits; on Windows the launcher's `window.open` opens no window of WebView2's own |
+   | `pages` | the main window in the system's words: "This Mac", "This PC" or "This computer", Reveal in Finder, Show in Explorer or Open its folder, and on Windows and Linux no Mac, Finder or Keychain left in any of its sections; the launcher, the new-database window and a notice window cannot be navigated anywhere else (a web page, a file, another of the app's pages): without the rule, the launcher goes to example.com; their CSP refuses a string the page itself would eval (a string timer, compiled after the check's script returned: WebView2 lets the check's own script eval) and inline script; the one instance listens where its user alone can (on Windows a pipe whose DACL, read back, is one entry for its user's SID), and a second asks it to show itself and quits; on Windows the launcher's `window.open` opens no window of WebView2's own |
    | `storage` | what a window keeps (the studio's history, theme) is its own, **read from a second window on the same origin** (`store-window`, a test hook): a window in another store does not see a file window's, one in the same store does (the control); two saved servers on one address do not share it; a saved server's survives its window; **a removed connection's store, opened again under its id, is empty**, whether or not a window was open on it; on Windows each store's folder is gone once it was taken away, a closed file window's too |
    | `environment` | the server is started with the allowlist and its token, whatever the app was started with (`OTEL_*`, `FENNEC_JWT_SECRET`, and the checks' own variables stay out), read back by a stand-in server: a shell script, or on Windows a program built by the Bun Hutch fetched (the app's own copy carries its icon, which Bun refuses as a program's base); there `Path` and `SystemRoot` reach it, and what Windows sets in any process (a control started with `SystemRoot` alone says what: `PROCESSOR_ARCHITECTURE` on arm64) is allowed |
    | `remote` | saved servers: token in the system's credential store (asked by name: `security`, `secret-tool`, `cmdkey`; on Windows kept on this machine) and in no `state.json` or process argument; the studio signed in; every failure in words (wrong token, no token, studio off, unreachable, a redirect that the token does not follow); an address changed without a token forgets the saved one, and nothing is sent to the new address; edit; Check now, with no window; two clicks open one window; remove deletes the store's item |
@@ -383,7 +389,7 @@ script says which hashes a mismatch is.
    | `opener` | Linux: a link and a folder whose names run `touch` in a shell (the control: through `sh -c`, as Electrobun hands them, the marker is made): handed to a stand-in `xdg-open`, each is one argument, made inert, and no marker; handed to the real one, which can start nothing (its default for links asked first, `xdg-mime`), no marker |
    | `keyring` | Linux: on a session bus with no Secret Service, and on one whose keyring has no default collection, saving a token is refused in words within seconds (libsecret alone waited 25 s), kept in no file, and a connection saved before is refused, nothing sent to its server |
    | `finder` | macOS: `open -a <app> <file>` with the app not running: the file arrives as `open-url`, spaces and non-ASCII letters included; and handed over late (the test variant holds it until the launcher is up), the launcher is closed and the file's window opens, its own blank view kept (a removal of it crashed the app here once, on a hosted runner). Windows and Linux: a double-click as close as a runner allows (the shell's ShellExecuteEx on the file; `gio open`): **with the registration taken away as [Uninstall](#uninstall) says, it starts nothing** (the control); a start of the app registers it, as the system then reads it back (the ProgID's command, `.fennec`'s default; the entry, the type GIO gives a `.fennec`), and a second start writes nothing; with the app not running, the double-click starts it with the file, which opens with no main window over it, its own arguments Bun's and `main.js` alone and the file read back from the launcher whole; with it running, a second file's is handed by the instance it starts to the one there, which quits; a `.fennec` that is not a database is said in words, nothing written beside it; on Linux, the app run from a folder whose name would run a command in a shell is started there by the double-click, the name whole and nothing run, and once that copy is gone its entry is ignored; removed again, the double-click starts nothing |
-   | `menu` | Windows and Linux. Windows, the keys pressed as a person's (a click into the page, then each key through the system's input): text typed into the search box arrives (the control; where the system takes none of the keys, as on the arm64 runner, they are dispatched in the page instead and the log says so), then Ctrl+N opens the new-database window, Ctrl+O the file the dialog is answered with, Ctrl+Shift+O Remote connections, each once, saying whether the menu bar or the page took it, and no window of WebView2's own opens. Linux, with no application menu: New database, Open file… (the dialog answered by the check), a file's Open in the Databases list and Remote connections, each the main window's own button, then the same three keys dispatched in the page; the main window closed and shown again by starting the app a second time |
+   | `menu` | Windows and Linux. Windows, the keys pressed as a person's (a click into the page, then each key through the system's input): text typed into the search box arrives (the control; where the system takes none of the keys, as on the arm64 runner, they are dispatched in the page instead and the log says so), then Ctrl+N opens the new-database window, Ctrl+O the file the dialog is answered with, Ctrl+Shift+O Remote connections, each once, saying whether the menu bar or the page took it, and no window of WebView2's own opens. Linux, with no application menu: New database, Open file… (the dialog answered by the check), a file's Open in the Databases list and Remote connections, each the main window's own button, then the same three keys dispatched in the page; the main window closed while a file's is open, and shown again by starting the app a second time |
 
    `ONLY=files,remote npm run checks` runs a subset (with the test variant
    built: `FENNEC_DESKTOP_TEST_BUILD=1 npm run build`). A failure's logs are in
@@ -592,12 +598,23 @@ Linux too; a studio window's menu bar works with the mouse. Linux has no
 application menu (Electrobun 2.0.4), so the main window's own buttons do what
 macOS's File menu does: New database, Open file…, the Databases list (Open
 Recent), Remote connections (Connect to a Server…); with the main window
-closed, starting the app again shows it.
+closed and a file's still open, starting the app again shows it.
+
+**The last window.** On macOS the app stays when its last window closes, in
+the Dock, as a document app does, a served database still running, until
+File, Quit. Windows and Linux have no Dock to keep an app with no window, so
+there closing the last window quits the app, as their apps do: the quit File,
+Quit is, every server stopped first by its own shutdown (the end of its stdin
+on Windows, SIGTERM on Linux, each writing its checkpoint), a served
+database's too, so serve a database with a window of the app left open. A
+window closed while something is opening (a notice's **Try again**) quits
+nothing: that open makes a window of its own. Every window the app makes is
+counted (`counted`, windows.ts); `lastwindow` holds both.
 
 ## Serving a database
 
 The main window's serve sheet (Databases, **Serve…**) starts a server on a
-file for the apps on this Mac or the network:
+file for the apps on this computer or the network:
 
 * **A port**, empty for any free one (port 0, named by the server's
   `listening on:` line; the apps then need the address again after each start),
@@ -620,7 +637,7 @@ file for the apps on this Mac or the network:
   `clipboard.ts`); **New token** keeps a new one, taken at the next start.
 * **Beside the data**: `--studio`, `--auto-compact off` when compaction is
   unticked (on by default, 0.5, the server's own), `--mcp`, `--metrics
-  127.0.0.1:0` (on this Mac whoever reaches the data), and **when a write is
+  127.0.0.1:0` (on this computer whoever reaches the data), and **when a write is
   safe on disk**. "What the app runs" is the command, its secrets as dots.
 * **One server a file.** Serving a file open in a window closes the window
   (its server stops), starts the served one and opens the window again on it;
@@ -922,16 +939,27 @@ which needs the signing identity and bundle id to stay fixed.
 
 ## Uninstall
 
-On Windows and Linux the app registers `.fennec` itself, at each start,
-for its user alone ([A file from the desktop](#a-file-from-the-desktop)), and
-Electrobun's uninstaller (Windows' Apps settings, or `launcher --uninstall`)
-knows nothing of it. What it leaves, and how to take it away:
+On macOS, move `fennec studio.app` to the Trash; Info.plist was its `.fennec`
+registration, and it goes with it.
 
-* **Windows**, under `HKEY_CURRENT_USER\Software\Classes`: the ProgID
-  `dev.fennecdb.studio.fennec`, its line in `.fennec\OpenWithProgids`, and
-  `.fennec`'s default where that names it. Left alone, a double-clicked
-  `.fennec` says Windows cannot find the launcher. From a Command Prompt or
-  PowerShell:
+On Windows and Linux removing the app's folder (`stable\app` or `stable/app`
+below, or wherever a zip or tarball was unpacked) and the shortcut or menu
+entry `install.ps1 -App` or `install.sh --app` made, as they print, leaves the
+`.fennec` registration the app writes itself at each start, for its user
+alone ([A file from the desktop](#a-file-from-the-desktop)), and the app has no
+uninstall of its own yet ([Not yet](#not-yet)). Nothing else on the machine
+writes or removes it. What it is, exactly, and how to take it away:
+
+* **Windows**, three things under `HKEY_CURRENT_USER\Software\Classes`, nothing
+  of the machine's:
+  - the key `dev.fennecdb.studio.fennec` (the ProgID: its name, its
+    `DefaultIcon`, and `shell\open\command` naming the launcher);
+  - the value `dev.fennecdb.studio.fennec` in `.fennec\OpenWithProgids`;
+  - `.fennec`'s default value, where it took it (it names the ProgID: `reg
+    query HKCU\Software\Classes\.fennec /ve` says so).
+
+  Left alone, a double-clicked `.fennec` says Windows cannot find the launcher.
+  From a Command Prompt or PowerShell:
 
   ```
   reg delete HKCU\Software\Classes\dev.fennecdb.studio.fennec /f
@@ -939,22 +967,39 @@ knows nothing of it. What it leaves, and how to take it away:
   reg delete HKCU\Software\Classes\.fennec /ve /f
   ```
 
-  (the last only where `reg query HKCU\Software\Classes\.fennec /ve` says
-  `dev.fennecdb.studio.fennec`).
-* **Linux**, under `~/.local/share` (`$XDG_DATA_HOME`):
-  `applications/dev.fennecdb.studio.desktop` and
-  `mime/packages/dev.fennecdb.studio.xml`. The entry's `TryExec` names the
-  launcher, so once that is gone the desktop ignores it: nothing points
-  nowhere. To take both away:
+  (the last only where the query above names the ProgID: another program's is
+  not the app's to remove). A program you picked for `.fennec` ("Always use
+  this app") is Explorer's own record, under
+  `Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.fennec`,
+  never written by the app, and stays Explorer's.
+* **Linux**, two files under `~/.local/share` (`$XDG_DATA_HOME` where that is
+  set): `applications/dev.fennecdb.studio.desktop` (hidden from the menus;
+  `install.sh`'s menu entry is `applications/fennecstudio.desktop`) and
+  `mime/packages/dev.fennecdb.studio.xml`, then the two caches made again
+  without them. The entry's `TryExec` names the launcher, so once that is gone
+  the desktop ignores it and nothing points nowhere; to take both away:
 
   ```bash
   rm ~/.local/share/applications/dev.fennecdb.studio.desktop ~/.local/share/mime/packages/dev.fennecdb.studio.xml
   update-mime-database ~/.local/share/mime; update-desktop-database ~/.local/share/applications
   ```
 
-A copy moved elsewhere and started there points the registration at itself.
-The test variant's (`dev.fennecdb.studio.test`) is removed by `run.mjs` at the
-start and the end of every run.
+What else the app keeps is its user's data, left on purpose: the folder above
+the app (`%LOCALAPPDATA%\dev.fennecdb.studio`, `~/.local/share/dev.fennecdb.studio`:
+the recent files, saved connections and served databases in `stable/state.json`,
+and the pages' stores; on Linux WebKit's cache in `~/.cache/dev.fennecdb.studio`
+too), and the tokens in the credential store (Windows: `cmdkey /list`, the
+targets that start `dev.fennecdb.studio/`, each removed by `cmdkey
+/delete:<target>`; Linux: `secret-tool clear service dev.fennecdb.studio`).
+Your database files are wherever you made them, and nothing of the app removes
+them.
+
+The registration names the copy that started last: a copy moved elsewhere and
+started there points it at itself. So while any copy runs there is nothing
+stale for it to drop, and once the last is removed none runs to drop it: the
+lines above are the uninstall until the app has one of its own. The test
+variant's (`dev.fennecdb.studio.test`) is removed by `run.mjs` at the start and
+the end of every run.
 
 ## Not yet
 

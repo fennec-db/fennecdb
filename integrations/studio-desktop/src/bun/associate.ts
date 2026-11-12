@@ -7,8 +7,8 @@
 // what differs from what is there: so it holds for a copy unpacked anywhere, a
 // copy moved (its next start points the registration at where it now is) and
 // Electrobun's installer alike, none of which runs anything of the app's when
-// it places it. An installer of our own (install.ps1 -App, install.sh --app)
-// would cover its own copies alone.
+// it places it. The install scripts (install.ps1 -App, install.sh --app) cover
+// their own copies alone.
 //
 //   - Windows, under HKCU\Software\Classes: a ProgID `<identifier>.fennec`
 //     (its name, its DefaultIcon, and `shell\open\command` = `"<launcher>"
@@ -28,8 +28,11 @@
 //     any, each started with an argument vector. Nothing is made the type's
 //     default: a program the user picked (mimeapps.list) stays theirs.
 //
-// What is left when the app goes is said in the README ("Uninstall"):
-// Electrobun's uninstaller knows nothing of it. Pure but for the writes, which
+// What is left when the app goes, every key and file, and how to remove it,
+// is the README's ("Uninstall") and the studio page's: removing the app's
+// folder, or Electrobun's uninstaller, leaves it, and there is nothing stale
+// for a start to drop, since every start points it at the copy that runs
+// (docs/design/integrations.md, "What is left"). Pure but for the writes, which
 // are handed in, so `node --test` holds the contents and the Linux writes
 // (test/associate.test.ts); the Windows writes are win32.ts's, held by
 // `checks/finder.mjs`.

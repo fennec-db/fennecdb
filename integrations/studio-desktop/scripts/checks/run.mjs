@@ -33,6 +33,7 @@ const CHECKS = [
   { name: 'warmup' },
   { name: 'files' },
   { name: 'server-dies' },
+  { name: 'lastwindow' },
   { name: 'orphan' },
   { name: 'sandbox' },
   { name: 'hostile' },

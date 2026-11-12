@@ -128,6 +128,10 @@ function render() {
 	$("keychain").textContent = `Tokens are stored in ${o.keychain}.`;
 	storeName = o.keychain;
 	for (const e of document.querySelectorAll(".store-name")) e.textContent = storeName;
+	// The system's own words: "This PC" on Windows, "This computer" on Linux, Explorer for Finder.
+	for (const e of document.querySelectorAll(".machine")) e.textContent = o.machine;
+	for (const e of document.querySelectorAll(".machine-lower")) e.textContent = o.machine.replace(/^This/, "this");
+	$("db-reveal").textContent = o.reveal;
 }
 
 // ------------------------------------------------------------------ databases

@@ -42,7 +42,7 @@ import {
 import { copySecret, SECRET_ON_CLIPBOARD_MS, type Clipboard } from "./clipboard.ts";
 import { newWindowPreload, reveal } from "./opener.ts";
 import { DEFAULT_SYNC, isSync, settingsFrom, SYNC_NOTES, type Sync } from "./serving.ts";
-import { holdTo, pageFrame } from "./windows.ts";
+import { counted, holdTo, pageFrame } from "./windows.ts";
 
 /** The dialogs. A test variant answers from the checks (testhooks.ts) instead of opening one. */
 async function pick(kind: "file" | "folder" | "key", startingFolder: string): Promise<string | null> {
@@ -212,6 +212,7 @@ export async function showLauncher() {
 		// What is left empty is no preload, as the shipped build had.
 		preload: newWindowPreload() + (hooks?.pagePreloadFor("launcher") ?? "") || undefined,
 	});
+	counted(launcher);
 	holdTo(launcher.webview, "views://launcher/*");
 	hooks?.watchPage(launcher, "launcher");
 	launcher.on("close", () => {
@@ -283,6 +284,7 @@ export async function showNewDatabase() {
 		// What is left empty is no preload, as the shipped build had.
 		preload: newWindowPreload() + (hooks?.pagePreloadFor("newdb") ?? "") || undefined,
 	});
+	counted(newdb);
 	holdTo(newdb.webview, "views://newdb/*");
 	hooks?.watchPage(newdb, "newdb");
 	newdb.on("close", () => {

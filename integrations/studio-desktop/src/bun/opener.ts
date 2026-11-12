@@ -193,6 +193,11 @@ export async function openLink(link: string): Promise<unknown> {
 	return (await utils()).openExternal(link);
 }
 
+/** What the button that shows a file in the file manager says, in each system's words. */
+export function revealLabel(platform: string = process.platform): string {
+	return platform === "darwin" ? "Reveal in Finder" : platform === "win32" ? "Show in Explorer" : "Open its folder";
+}
+
 /** Shows `path` (a database file, or a folder) in the file manager. */
 export async function reveal(path: string): Promise<unknown> {
 	if (process.platform === "linux") return runFirst(linuxOpeners(fileUri(folderOf(path))));

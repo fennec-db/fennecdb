@@ -65,7 +65,8 @@ const LEAKS = {
   AWS_SECRET_ACCESS_KEY: 'leak-aws',
   GITHUB_TOKEN: 'leak-gh',
 };
-const app = startApp('environment', { FENNEC_SERVER_BIN: WRAP, FENNEC_DESKTOP_OPEN: SMALL, ...LEAKS });
+// The main window too: on Windows and Linux closing the last window quits the app (lastwindow.mjs), and this closes the file's and opens it again.
+const app = startApp('environment', { FENNEC_SERVER_BIN: WRAP, FENNEC_DESKTOP_OPEN: SMALL, FENNEC_DESKTOP_LAUNCHER: '1', ...LEAKS });
 await waitFor((l) => l.what === 'server-started', 60000, 'the server started');
 await waitStudio(`file:${SMALL}`);
 

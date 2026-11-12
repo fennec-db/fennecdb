@@ -33,7 +33,7 @@ export type Figures = {
 export type ServedRow = {
 	state: "running" | "starting" | "stopping" | "stopped";
 	settings: ServeSettings;
-	/** Where an app on this Mac reaches it, while it runs. */
+	/** Where an app on this computer reaches it, while it runs. */
 	url: string | null;
 	/** Where another machine reaches it, while it runs on the network. */
 	networkUrls: string[];
@@ -74,6 +74,10 @@ export type Overview = {
 	checks: Record<string, Check>;
 	open: string[];
 	keychain: string;
+	/** The computer the app runs on, as its system names it: "This Mac", "This PC", "This computer". */
+	machine: string;
+	/** The file manager's button: "Reveal in Finder", "Show in Explorer", "Open its folder". */
+	reveal: string;
 	/** `fennec-server 0.1.12`, the server the app carries. */
 	bundled: string;
 	/** The home folder, which a path under it is shown with as ~. */
