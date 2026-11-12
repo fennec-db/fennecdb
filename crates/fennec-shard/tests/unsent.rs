@@ -94,7 +94,7 @@ fn send(addr: &str, extra: &str, body: &str) -> (u16, String, String) {
     let mut s = TcpStream::connect(addr).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
     let req = format!(
-        "POST /t/acme/query HTTP/1.1\r\nHost: t\r\nConnection: close\r\n{extra}\
+        "POST /t/acme/query HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{extra}\
          Content-Length: {}\r\n\r\n{body}",
         body.len()
     );
@@ -140,7 +140,7 @@ fn told_may_have_run((status, head, body): &(u16, String, String)) {
 }
 
 /// One request's head and body, read off a stand-in node's connection.
-fn read_request(conn: &mut BufReader<TcpStream>) -> String {
+pub(crate) fn read_request(conn: &mut BufReader<TcpStream>) -> String {
     let mut head = String::new();
     loop {
         let mut line = String::new();
@@ -156,7 +156,8 @@ fn read_request(conn: &mut BufReader<TcpStream>) -> String {
     head + std::str::from_utf8(&body).unwrap()
 }
 
-const ANSWERED: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\n{}";
+pub(crate) const ANSWERED: &[u8] =
+    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\n{}";
 
 /// A stand-in node at `node`, answering the router's first write: the
 /// router keeps the connection, which is returned.

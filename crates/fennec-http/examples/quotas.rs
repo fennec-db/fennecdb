@@ -55,7 +55,7 @@ impl Client {
 
     fn send(&mut self, method: &str, target: &str, body: &[u8]) -> u16 {
         let head = format!(
-            "{method} {target} HTTP/1.1\r\nHost: q\r\nContent-Length: {}\r\n\r\n",
+            "{method} {target} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
             body.len()
         );
         self.out.write_all(head.as_bytes()).unwrap();

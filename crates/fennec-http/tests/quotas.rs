@@ -105,7 +105,7 @@ fn call(port: u16, method: &str, target: &str, body: &str, headers: &[(&str, &st
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
     let mut req = format!(
-        "{method} {target} HTTP/1.1\r\nHost: t\r\nConnection: close\r\nContent-Length: {}\r\n",
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n",
         body.len()
     );
     for (k, v) in headers {
@@ -398,7 +398,7 @@ fn try_subscribe(port: u16, tenant: &str) -> Result<TcpStream, String> {
     s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
     write!(
         s,
-        "GET /t/{tenant}/notes/changes HTTP/1.1\r\nHost: t\r\n\r\n"
+        "GET /t/{tenant}/notes/changes HTTP/1.1\r\nHost: localhost\r\n\r\n"
     )
     .unwrap();
     let mut seen = String::new();

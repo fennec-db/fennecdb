@@ -342,7 +342,7 @@ fn call(addr: &str, method: &str, target: &str, body: &str, extra: &str) -> (u16
     let mut s = TcpStream::connect(addr).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
     let req = format!(
-        "{method} {target} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n{extra}\
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{extra}\
          Content-Length: {}\r\n\r\n{body}",
         body.len()
     );
@@ -473,7 +473,7 @@ fn claim(front: &str, owner: &str) -> TcpStream {
     c.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
     write!(
         c,
-        "POST /t/acme/query HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\
+        "POST /t/acme/query HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
          Fennec-Wait: 30000\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     )

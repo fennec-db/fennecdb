@@ -136,7 +136,7 @@ fn ask(port: u16, method: &str, target: &str, body: &str, extra: &str) -> Answer
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     write!(
         s,
-        "{method} {target} HTTP/1.1\r\nHost: t\r\n{extra}Content-Length: {}\r\n\
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\n{extra}Content-Length: {}\r\n\
          Connection: close\r\n\r\n{body}",
         body.len()
     )
@@ -189,7 +189,7 @@ fn a_nodes_gzip_passes_through_the_router_as_it_was_written() {
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     write!(
         s,
-        "GET /t/acme/notes/changes HTTP/1.1\r\nHost: t\r\n{GZIP}\r\n"
+        "GET /t/acme/notes/changes HTTP/1.1\r\nHost: localhost\r\n{GZIP}\r\n"
     )
     .unwrap();
     let mut got = Vec::new();

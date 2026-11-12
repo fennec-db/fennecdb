@@ -134,7 +134,7 @@ fn plain(port: u16, method: &str, target: &str, headers: &str, body: &str) -> An
     let mut s = connect(port);
     write!(
         s,
-        "{method} {target} HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {ROOT}\r\n{headers}\
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {ROOT}\r\n{headers}\
          Connection: close\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     )
@@ -208,7 +208,7 @@ fn a_kept_alive_connection_reads_on_right_after_the_trailers() {
     let mut all = Vec::new();
     // Chunked with trailers, plain, chunked again, plain closing it.
     all.extend_from_slice(
-        format!("POST /query HTTP/1.1\r\nHost: t\r\n{auth}Transfer-Encoding: chunked\r\nTrailer: Checksum\r\n\r\n")
+        format!("POST /query HTTP/1.1\r\nHost: localhost\r\n{auth}Transfer-Encoding: chunked\r\nTrailer: Checksum\r\n\r\n")
             .as_bytes(),
     );
     for piece in chunks_of(put.as_bytes(), 5, "Checksum: 1\r\n") {
@@ -216,20 +216,22 @@ fn a_kept_alive_connection_reads_on_right_after_the_trailers() {
     }
     all.extend_from_slice(
         format!(
-            "POST /query HTTP/1.1\r\nHost: t\r\n{auth}Content-Length: {}\r\n\r\n{count}",
+            "POST /query HTTP/1.1\r\nHost: localhost\r\n{auth}Content-Length: {}\r\n\r\n{count}",
             count.len()
         )
         .as_bytes(),
     );
     all.extend_from_slice(
-        format!("POST /batch HTTP/1.1\r\nHost: t\r\n{auth}Transfer-Encoding: chunked\r\n\r\n")
-            .as_bytes(),
+        format!(
+            "POST /batch HTTP/1.1\r\nHost: localhost\r\n{auth}Transfer-Encoding: chunked\r\n\r\n"
+        )
+        .as_bytes(),
     );
     for piece in chunks_of(batch.as_bytes(), 11, "") {
         all.extend_from_slice(&piece);
     }
     all.extend_from_slice(
-        format!("GET /notes?count HTTP/1.1\r\nHost: t\r\n{auth}Connection: close\r\n\r\n")
+        format!("GET /notes?count HTTP/1.1\r\nHost: localhost\r\n{auth}Connection: close\r\n\r\n")
             .as_bytes(),
     );
     // One write: every request in the server's reader at once.
@@ -262,7 +264,7 @@ fn a_refusal_of_the_head_is_read_whole_while_its_body_is_unread() {
         for i in 0..3 {
             let mut s = connect(port);
             let head = format!(
-                "POST /query HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {ROOT}\r\n{header}\
+                "POST /query HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {ROOT}\r\n{header}\
                  Content-Length: {UNREAD}\r\n\r\n"
             );
             let sent = s
@@ -288,7 +290,7 @@ fn a_framing_read_two_ways_is_refused_and_the_connection_closed() {
     let port = start(|c| c.max_body = 1 << 10);
     let put = query("put notes {t: 'smuggled'}");
     let next = format!(
-        "POST /query HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {ROOT}\r\nContent-Length: {}\r\n\r\n{put}",
+        "POST /query HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {ROOT}\r\nContent-Length: {}\r\n\r\n{put}",
         put.len()
     );
     let cases: &[(&str, &str, u16)] = &[
@@ -340,7 +342,7 @@ fn a_framing_read_two_ways_is_refused_and_the_connection_closed() {
         // A request the refused one's body would be read as, after it.
         write!(
             s,
-            "POST /query HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {ROOT}\r\n{headers}\r\n{body}{next}"
+            "POST /query HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {ROOT}\r\n{headers}\r\n{body}{next}"
         )
         .unwrap();
         // Closed with the rest unread: what came before the reset is read.

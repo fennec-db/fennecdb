@@ -103,7 +103,7 @@ fn in_front_of(n: &Node, cors: Option<&str>) -> u16 {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     write!(
         s,
-        "PUT /_shard/nodes/n1 HTTP/1.1\r\nHost: t\r\n{root}Content-Length: {}\r\n\
+        "PUT /_shard/nodes/n1 HTTP/1.1\r\nHost: localhost\r\n{root}Content-Length: {}\r\n\
          Connection: close\r\n\r\n{body}",
         body.len()
     )
@@ -185,7 +185,7 @@ fn ask(port: u16, method: &str, target: &str, origin: Option<&str>, extra: &str)
     let origin = origin.map_or(String::new(), |o| format!("Origin: {o}\r\n"));
     write!(
         s,
-        "{method} {target} HTTP/1.1\r\nHost: t\r\n{origin}{extra}Content-Length: 0\r\n\
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\n{origin}{extra}Content-Length: 0\r\n\
          Connection: close\r\n\r\n"
     )
     .unwrap();
@@ -311,7 +311,7 @@ fn the_connection_ceiling_tells_a_page_when_to_come_back() {
     let mut held = TcpStream::connect(("127.0.0.1", port)).unwrap();
     held.set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
-    write!(held, "GET /nosuch HTTP/1.1\r\nHost: t\r\n\r\n").unwrap();
+    write!(held, "GET /nosuch HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
     let mut first = [0u8; 12];
     held.read_exact(&mut first).unwrap();
     assert_eq!(&first, b"HTTP/1.1 404");
@@ -345,7 +345,7 @@ fn a_request_written_after_the_routers_refusal_is_read_off_not_reset() {
     let mut held = TcpStream::connect(("127.0.0.1", port)).unwrap();
     held.set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
-    write!(held, "GET /nosuch HTTP/1.1\r\nHost: t\r\n\r\n").unwrap();
+    write!(held, "GET /nosuch HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
     let mut first = [0u8; 12];
     held.read_exact(&mut first).unwrap();
     assert_eq!(&first, b"HTTP/1.1 404");
@@ -357,8 +357,9 @@ fn a_request_written_after_the_routers_refusal_is_read_off_not_reset() {
         let r = read_answer(&mut c);
         assert_eq!(r.status, 503, "{}", r.body);
         assert_eq!(r.one("retry-after"), Some("1"));
-        let head =
-            format!("POST /t/acme/query HTTP/1.1\r\nHost: t\r\nContent-Length: {BODY}\r\n\r\n");
+        let head = format!(
+            "POST /t/acme/query HTTP/1.1\r\nHost: localhost\r\nContent-Length: {BODY}\r\n\r\n"
+        );
         c.write_all(head.as_bytes())
             .unwrap_or_else(|e| panic!("{i}: the head: {e}"));
         c.write_all(&vec![b' '; BODY])
@@ -424,7 +425,7 @@ fn a_forwarded_answer_tells_the_routers_rule_once() {
     let body = format!("{{\"query\":\"{create}\"}}");
     write!(
         s,
-        "POST /t/acme/query HTTP/1.1\r\nHost: t\r\nOrigin: {APP}\r\nContent-Length: {}\r\n\
+        "POST /t/acme/query HTTP/1.1\r\nHost: localhost\r\nOrigin: {APP}\r\nContent-Length: {}\r\n\
          Connection: close\r\n\r\n{body}",
         body.len()
     )
@@ -438,7 +439,7 @@ fn a_forwarded_answer_tells_the_routers_rule_once() {
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     write!(
         s,
-        "GET /t/acme/notes/changes HTTP/1.1\r\nHost: t\r\nOrigin: {APP}\r\n\r\n"
+        "GET /t/acme/notes/changes HTTP/1.1\r\nHost: localhost\r\nOrigin: {APP}\r\n\r\n"
     )
     .unwrap();
     let mut head = Vec::new();
@@ -476,4 +477,301 @@ fn without_http_cors_the_nodes_headers_pass_through() {
     let r = ask(port, "OPTIONS", "/t/nosuch/query", Some(APP), PREFLIGHT);
     assert_eq!(r.status, 404);
     r.tells_nothing();
+}
+
+/// A router with no `--token`, answering browsers from `cors`, its port.
+fn open_router(cors: Option<&str>) -> u16 {
+    fennec_http::audit::set_delay(0);
+    let cfg = Config {
+        addr: "127.0.0.1:0".into(),
+        cors: cors.map(String::from),
+        ..Config::default()
+    };
+    let router = Router::new(Directory::in_memory(), cfg);
+    let listener = router.bind().unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let _ = router.serve_on(listener);
+    });
+    port
+}
+
+/// One request on a connection of its own, under `host`, with the header
+/// lines `extra` and `body`.
+fn send(port: u16, method: &str, target: &str, host: &str, extra: &str, body: &str) -> Answer {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write!(
+        s,
+        "{method} {target} HTTP/1.1\r\nHost: {host}\r\n{extra}Content-Length: {}\r\n\
+         Connection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    read_answer(&mut s)
+}
+
+/// A router with no `--token` answers `/_shard/` -- the directory, every
+/// node's admin token in it, a query across every tenant, a tenant's
+/// delete -- to whoever reaches it: held, as a server asking for no token
+/// is, to this machine's names and its own pages or `--http-cors`'s, on
+/// every route, a forward's too.
+#[test]
+fn an_open_router_answers_only_this_machines_name_and_its_pages() {
+    let n = node("open-router", None);
+    let port = open_router(Some(APP));
+    let local = "localhost";
+    let body = format!(r#"{{"addr":"{}","token":"adm"}}"#, n.addr);
+    let r = send(port, "PUT", "/_shard/nodes/n1", local, "", &body);
+    assert_eq!(r.status, 201, "{}", r.body);
+
+    // A rebound name reads nothing of the directory, writes nothing to it.
+    let rebound = "evil.example:8090";
+    let r = send(port, "GET", "/_shard/nodes", rebound, "", "");
+    assert_eq!(r.status, 403, "{}", r.body);
+    assert!(!r.body.contains("adm"), "{}", r.body);
+    assert!(r.body.contains("or give it --token"), "{}", r.body);
+    let r = send(port, "PUT", "/_shard/tenants/acme", rebound, "", "");
+    assert_eq!(r.status, 403, "{}", r.body);
+    let q = r#"{"query":"collections"}"#;
+    let r = send(port, "POST", "/_shard/query", rebound, "", q);
+    assert_eq!(r.status, 403, "{}", r.body);
+    // Another site's page, by a simple request.
+    let evil = format!("Origin: {EVIL}\r\nContent-Type: text/plain\r\n");
+    let r = send(port, "PUT", "/_shard/tenants/acme", local, &evil, "");
+    assert_eq!(r.status, 403, "{}", r.body);
+    let r = send(port, "GET", "/_shard/tenants", local, "", "");
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(!r.body.contains("acme"), "{}", r.body);
+
+    // This machine's name, a client with no origin and the page
+    // `--http-cors` names are answered.
+    let r = send(port, "PUT", "/_shard/tenants/acme", local, "", "");
+    assert_eq!(r.status, 201, "{}", r.body);
+    let app = format!("Origin: {APP}\r\n");
+    let r = send(port, "GET", "/_shard/tenants", "127.0.0.1", &app, "");
+    assert_eq!(r.status, 200, "{}", r.body);
+    r.tells(APP);
+
+    // A forward is held to it too, at the router.
+    let make = r#"{"query":"create collection notes (title text)"}"#;
+    let r = send(port, "POST", "/t/acme/query", local, &app, make);
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = send(port, "GET", "/t/acme/notes", rebound, "", "");
+    assert_eq!(r.status, 403, "{}", r.body);
+    let drop = r#"{"query":"drop collection notes"}"#;
+    let r = send(port, "POST", "/t/acme/query", local, &evil, drop);
+    assert_eq!(r.status, 403, "{}", r.body);
+    let r = send(port, "GET", "/t/acme/collections", local, "", "");
+    assert!(r.body.contains("\"notes\""), "{}", r.body);
+}
+
+/// A node with no token asks a page's origin, and a router in front of it
+/// with `--http-cors` answers for the page: the origin it lets in goes to
+/// the node unnamed, which has no `--http-cors` of its own, and any other
+/// goes on for the node to refuse.
+#[test]
+fn a_router_answers_for_the_origins_it_lets_in_to_an_open_node() {
+    let n = node("vouched", None);
+    let port = in_front_of(&n, Some(APP));
+    let app = format!("Origin: {APP}\r\n");
+    let make = r#"{"query":"create collection notes (title text)"}"#;
+    let r = send(port, "POST", "/t/acme/query", "localhost", &app, make);
+    assert_eq!(r.status, 200, "{}", r.body);
+    r.tells(APP);
+    // The router's own page under a name of this machine: its studio's.
+    let own = format!("Origin: http://127.0.0.1:{port}\r\n");
+    let host = format!("127.0.0.1:{port}");
+    let r = send(port, "GET", "/t/acme/notes", &host, &own, "");
+    assert_eq!(r.status, 200, "{}", r.body);
+
+    let evil = format!("Origin: {EVIL}\r\nContent-Type: text/plain\r\n");
+    let drop = r#"{"query":"drop collection notes"}"#;
+    let r = send(port, "POST", "/t/acme/query", "localhost", &evil, drop);
+    assert_eq!(r.status, 403, "{}", r.body);
+    assert!(r.body.contains("--http-cors"), "{}", r.body);
+    let r = send(port, "GET", "/t/acme/collections", "localhost", "", "");
+    assert!(r.body.contains("\"notes\""), "{}", r.body);
+}
+
+/// A router with `--token` asks a page nothing of its own routes: a page
+/// holds no token. A forward's node judges the page, told the name the
+/// router was reached by (below).
+#[test]
+fn a_router_with_a_token_asks_a_page_nothing_of_its_own_routes() {
+    let port = router(Directory::in_memory(), None, 0);
+    let root = "Authorization: Bearer root\r\n";
+    let r = send(
+        port,
+        "GET",
+        "/_shard/nodes",
+        "router.example:8090",
+        root,
+        "",
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    let evil = format!("{root}Origin: {EVIL}\r\n");
+    let r = send(port, "GET", "/_shard/tenants", "router.example", &evil, "");
+    assert_eq!(r.status, 200, "{}", r.body);
+}
+
+/// An open router without `--http-cors` tells a page the node's rule,
+/// passed through: a forward's origin is the node's to judge, its `Host`
+/// the router's, and the router's own routes answer no page of another
+/// origin.
+#[test]
+fn an_open_router_without_http_cors_leaves_a_forwards_origin_to_its_node() {
+    let n = node("open-plain", Some(APP));
+    let port = open_router(None);
+    let body = format!(r#"{{"addr":"{}","token":"adm"}}"#, n.addr);
+    let r = send(port, "PUT", "/_shard/nodes/n1", "localhost", "", &body);
+    assert_eq!(r.status, 201, "{}", r.body);
+    let r = send(port, "PUT", "/_shard/tenants/acme", "localhost", "", "");
+    assert_eq!(r.status, 201, "{}", r.body);
+
+    let app = format!("Origin: {APP}\r\n");
+    let make = r#"{"query":"create collection notes (title text)"}"#;
+    let r = send(port, "POST", "/t/acme/query", "localhost", &app, make);
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.one("access-control-allow-origin"), Some(APP));
+    // Another origin, refused by the node, its answer passed through.
+    let evil = format!("Origin: {EVIL}\r\nContent-Type: text/plain\r\n");
+    let drop = r#"{"query":"drop collection notes"}"#;
+    let r = send(port, "POST", "/t/acme/query", "localhost", &evil, drop);
+    assert_eq!(r.status, 403, "{}", r.body);
+    // A rebound name, refused by the router.
+    let r = send(port, "GET", "/t/acme/notes", "evil.example", "", "");
+    assert_eq!(r.status, 403, "{}", r.body);
+    assert!(r.body.contains("give it --token"), "{}", r.body);
+    // The router's own routes are its own: no page of another origin.
+    let r = send(port, "GET", "/_shard/tenants", "localhost", &app, "");
+    assert_eq!(r.status, 403, "{}", r.body);
+    let r = send(port, "GET", "/t/acme/collections", "localhost", "", "");
+    assert!(r.body.contains("\"notes\""), "{}", r.body);
+}
+
+/// A router with `--token` asks a page nothing on a forward, and a node
+/// with no data token saw only the router's address for itself: a page
+/// whose name was rebound to the router read a tenant's rows, its streams
+/// and `/_changes` through it. The router names the `Host` its client
+/// reached it by in `X-Forwarded-Host`, in place of any the client sent,
+/// and the node asks that as it asks its own.
+#[test]
+fn a_token_router_tells_an_open_node_the_name_its_client_reached_it_by() {
+    let n = node("forwarded-host", None);
+    let port = in_front_of(&n, None);
+    let make = r#"{"query":"create collection notes (title text)"}"#;
+    let r = send(port, "POST", "/t/acme/query", "localhost", "", make);
+    assert_eq!(r.status, 200, "{}", r.body);
+
+    let rebound = "evil.example:8090";
+    for target in [
+        "/t/acme/notes",
+        "/t/acme/notes/changes",
+        "/t/acme/_changes",
+        "/t/acme/collections",
+    ] {
+        let r = send(port, "GET", target, rebound, "", "");
+        assert_eq!(r.status, 403, "{target}: {}", r.body);
+        assert!(r.body.contains("Host `evil.example:8090`"), "{}", r.body);
+        assert!(r.body.contains("give it --http-token"), "{}", r.body);
+        // One naming this machine, sent by the page itself, is no use.
+        let forged = "X-Forwarded-Host: localhost\r\n";
+        let r = send(port, "GET", target, rebound, forged, "");
+        assert_eq!(r.status, 403, "{target}: {}", r.body);
+    }
+    // A write, a same-origin page's sending no `Origin`.
+    let drop = r#"{"query":"drop collection notes"}"#;
+    let r = send(port, "POST", "/t/acme/query", rebound, "", drop);
+    assert_eq!(r.status, 403, "{}", r.body);
+
+    // This machine's names pass, through the router as straight to the
+    // node; a client's own header naming another is replaced, as any is.
+    let own = format!("127.0.0.1:{port}");
+    for host in ["localhost", "app.localhost:8090", own.as_str()] {
+        let r = send(port, "GET", "/t/acme/notes", host, "", "");
+        assert_eq!(r.status, 200, "{host}: {}", r.body);
+    }
+    let other = "X-Forwarded-Host: evil.example\r\n";
+    let r = send(port, "GET", "/t/acme/notes", "localhost", other, "");
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = send(port, "GET", "/t/acme/collections", "localhost", "", "");
+    assert!(r.body.contains("\"notes\""), "{}", r.body);
+}
+
+/// A relay to the home region's router carries the name the first
+/// router's client reached it by: the router it relays to keeps it, the
+/// request marked by the `--token` both hold, and its node is told the
+/// page's name rather than the first router's for the second. Sent to
+/// that router straight, a client's own is replaced as at any.
+#[test]
+fn a_relay_keeps_the_name_its_client_reached_the_first_router_by() {
+    use crate::unsent::{read_request, ANSWERED};
+    use std::io::BufReader;
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+
+    // A stand-in node, answering every request and handing on its head.
+    let stand_in = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (heads, asked) = mpsc::channel::<String>();
+    let at = stand_in.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        for conn in stand_in.incoming() {
+            let Ok(conn) = conn else { return };
+            let heads = heads.clone();
+            std::thread::spawn(move || {
+                let mut conn = BufReader::new(conn);
+                loop {
+                    let head = read_request(&mut conn);
+                    if heads.send(head).is_err() || conn.get_mut().write_all(ANSWERED).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    let forwarded = |head: &str| -> Vec<String> {
+        head.lines()
+            .filter_map(|l| l.split_once(':'))
+            .filter(|(k, _)| k.trim().eq_ignore_ascii_case("x-forwarded-host"))
+            .map(|(_, v)| v.trim().to_string())
+            .collect()
+    };
+    let next = || asked.recv_timeout(Duration::from_secs(30)).unwrap();
+
+    // The home region's router, holding `acme` on the stand-in.
+    let home = router(placed_at(&at), None, 0);
+    // The router in front, relaying `acme` to home's.
+    let mut d = Directory::in_memory();
+    d.set_region("us", Some(&[format!("http://127.0.0.1:{home}")]))
+        .unwrap();
+    d.place_home("acme", "us").unwrap();
+    let front = router(d, None, 0);
+
+    let forged = "X-Forwarded-Host: localhost\r\n";
+    let r = send(
+        front,
+        "GET",
+        "/t/acme/notes",
+        "evil.example:8090",
+        forged,
+        "",
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    let head = next();
+    assert_eq!(forwarded(&head), ["evil.example:8090"], "{head}");
+    // Its own `Host` is its address, as a node's is.
+    assert!(head.contains(&format!("Host: {at}")), "{head}");
+
+    let r = send(
+        home,
+        "GET",
+        "/t/acme/notes",
+        "localhost",
+        "X-Forwarded-Host: x.example\r\n",
+        "",
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    let head = next();
+    assert_eq!(forwarded(&head), ["localhost"], "{head}");
 }

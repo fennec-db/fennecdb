@@ -136,7 +136,7 @@ fn call_with(
     body: Option<&str>,
     headers: &[(&str, &str)],
 ) -> Res {
-    let mut req = format!("{method} {target} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n");
+    let mut req = format!("{method} {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n");
     for (k, v) in headers {
         req.push_str(&format!("{k}: {v}\r\n"));
     }
@@ -1163,7 +1163,7 @@ fn the_connection_ceiling_refuses_with_the_cors_headers() {
     // One connection held, answered once so it is surely counted.
     let mut held = TcpStream::connect(("127.0.0.1", h.port)).unwrap();
     held.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    held.write_all(b"GET /articles?count HTTP/1.1\r\nHost: t\r\n\r\n")
+    held.write_all(b"GET /articles?count HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .unwrap();
     let mut first = [0u8; 12];
     held.read_exact(&mut first).unwrap();
@@ -1171,7 +1171,10 @@ fn the_connection_ceiling_refuses_with_the_cors_headers() {
     // The refusal is written as the connection is taken, before a request
     // is read; the request, written as a client writes it, is read off
     // after it (`a_request_written_after_the_ceilings_refusal_...`).
-    let out = raw(h.port, "GET /articles?count HTTP/1.1\r\nHost: t\r\n\r\n");
+    let out = raw(
+        h.port,
+        "GET /articles?count HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
     let r = parse_res(&out);
     assert_eq!(r.status, 503, "{}", r.body);
     assert_eq!(
@@ -1198,7 +1201,8 @@ fn written_after_the_refusal(port: u16) -> std::result::Result<String, String> {
     let mut out = String::new();
     c.read_to_string(&mut out)
         .map_err(|e| format!("the answer: {e}"))?;
-    let head = format!("POST /query HTTP/1.1\r\nHost: t\r\nContent-Length: {LATE_BODY}\r\n\r\n");
+    let head =
+        format!("POST /query HTTP/1.1\r\nHost: localhost\r\nContent-Length: {LATE_BODY}\r\n\r\n");
     c.write_all(head.as_bytes())
         .map_err(|e| format!("the head: {e}"))?;
     c.write_all(&vec![b' '; LATE_BODY])
@@ -1245,7 +1249,7 @@ fn a_request_written_after_the_ceilings_refusal_is_read_off_not_reset() {
     });
     let mut held = TcpStream::connect(("127.0.0.1", h.port)).unwrap();
     held.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    held.write_all(b"GET /articles?count HTTP/1.1\r\nHost: t\r\n\r\n")
+    held.write_all(b"GET /articles?count HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .unwrap();
     let mut first = [0u8; 12];
     held.read_exact(&mut first).unwrap();
@@ -1258,7 +1262,7 @@ fn a_request_written_after_the_ceilings_refusal_is_read_off_not_reset() {
         assert_eq!(r.header("Fennec-Unserved"), Some("ceiling"), "{out}");
     }
     // The held connection is the server's still.
-    held.write_all(b"GET /articles?count HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+    held.write_all(b"GET /articles?count HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .unwrap();
     let mut rest = String::new();
     let _ = held.read_to_string(&mut rest);
@@ -1287,7 +1291,10 @@ fn a_connection_with_no_thread_is_answered_503_and_told_when_to_come_back() {
         let _ = server.serve_on(listener);
     });
     fail.next(1);
-    let out = raw(port, "GET /articles?count HTTP/1.1\r\nHost: t\r\n\r\n");
+    let out = raw(
+        port,
+        "GET /articles?count HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
     let r = parse_res(&out);
     assert_eq!(r.status, 503, "{out:?}");
     assert_eq!(r.header("Retry-After"), Some("1"), "{out}");
@@ -1308,8 +1315,8 @@ fn keep_alive_serves_two_requests_on_one_connection() {
     let mut s = TcpStream::connect(("127.0.0.1", h.port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     s.write_all(
-        b"GET /articles?count HTTP/1.1\r\nHost: t\r\n\r\n\
-          GET /articles?year=eq.1999&count HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+        b"GET /articles?count HTTP/1.1\r\nHost: localhost\r\n\r\n\
+          GET /articles?year=eq.1999&count HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
     )
     .unwrap();
     let mut out = String::new();
@@ -1343,7 +1350,7 @@ fn oversized_bodies_are_refused_by_their_length_or_their_chunks() {
     // two within it, read as its length would have it read.
     let chunked = |parts: &[&str]| {
         let mut req = String::from(
-            "POST /articles HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n",
+            "POST /articles HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n",
         );
         for p in parts {
             req.push_str(&format!("{:x}\r\n{p}\r\n", p.len()));

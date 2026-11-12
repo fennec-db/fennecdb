@@ -268,7 +268,12 @@ an agent's calls as they hold a client's requests.</p>
     <code>--http-cors</code> names, is refused (403). A server that asks for no
     token answers only a <code>Host</code> naming this machine —
     <code>localhost</code> or an address — so a page whose name was rebound to
-    127.0.0.1 reaches nothing.</li>
+    127.0.0.1 reaches nothing. Such a server asks both of every route, not
+    <code>/_mcp</code> alone (<a href="/docs/http-access#open-servers">A server
+    with no token</a>); <code>/_mcp</code> asks the origin of a server with a
+    token too. The server's own origin has its scheme: behind a proxy that ends
+    TLS in front of a plain listener, a page on the proxy's
+    <code>https://</code> origin is named with <code>--http-cors</code>.</li>
   <li><b>HTTPS is the server's, and the bridge dials it.</b> With
     <code>--tls-cert</code> and <code>--tls-key</code> the server serves
     <code>/_mcp</code> over HTTPS (<a href="/docs/server#tls">HTTPS</a>), and an

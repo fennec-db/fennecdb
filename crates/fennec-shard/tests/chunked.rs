@@ -115,12 +115,13 @@ fn a_chunked_body_goes_on_to_the_node_by_its_length() {
     let client = std::thread::spawn(move || {
         let mut s = TcpStream::connect(&front).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
-        let mut all = b"POST /t/acme/query HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\
+        let mut all =
+            b"POST /t/acme/query HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\
                         Trailer: Checksum\r\nTE: trailers\r\n\r\n"
-            .to_vec();
+                .to_vec();
         all.extend_from_slice(&chunks_of(&sent, 5));
         all.extend_from_slice(
-            b"GET /t/acme/notes HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+            b"GET /t/acme/notes HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
         );
         s.write_all(&all).unwrap();
         let mut out = String::new();
@@ -166,7 +167,7 @@ fn the_router_s_refusal_of_a_head_is_read_whole_while_its_body_is_unread() {
             let mut s = TcpStream::connect(&front).unwrap();
             s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
             let head = format!(
-                "POST /t/acme/query HTTP/1.1\r\nHost: t\r\n{header}Content-Length: {UNREAD}\r\n\r\n"
+                "POST /t/acme/query HTTP/1.1\r\nHost: localhost\r\n{header}Content-Length: {UNREAD}\r\n\r\n"
             );
             let sent = s
                 .write_all(head.as_bytes())
@@ -196,8 +197,8 @@ fn a_framing_read_two_ways_is_the_router_s_400_sent_nowhere() {
         s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
         write!(
             s,
-            "POST /t/acme/query HTTP/1.1\r\nHost: t\r\n{framing}\r\n0\r\n\r\n\
-             DELETE /t/acme/notes/1 HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n"
+            "POST /t/acme/query HTTP/1.1\r\nHost: localhost\r\n{framing}\r\n0\r\n\r\n\
+             DELETE /t/acme/notes/1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n"
         )
         .unwrap();
         let mut out = String::new();
@@ -209,7 +210,7 @@ fn a_framing_read_two_ways_is_the_router_s_400_sent_nowhere() {
     let client = std::thread::spawn(move || {
         let mut s = TcpStream::connect(&front2).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
-        s.write_all(b"GET /t/acme/notes HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+        s.write_all(b"GET /t/acme/notes HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
             .unwrap();
         let mut out = String::new();
         let _ = s.read_to_string(&mut out);

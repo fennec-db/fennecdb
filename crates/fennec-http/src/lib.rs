@@ -783,6 +783,35 @@ fn is_remote(addr: &str) -> bool {
     }
 }
 
+/// Why a listener that asks for no token refuses `req` for where it comes
+/// from ([`cors::foreign`]), as a 403, or `None`. Open is no `--http-token`
+/// and no JSON Web Tokens: a tenant node with `--admin-token` alone runs
+/// every tenant's statements for anyone, as a file's server with no token
+/// does, and is asked so on every route -- a router or a replica reaching
+/// it by another name than this machine's reaches its data so too, and
+/// takes a token there, as does one behind a router its clients reach by
+/// such a name, which the router names in `X-Forwarded-Host`
+/// ([`cors::foreign_host`]). A `--metrics` listener answers its scrape to
+/// the admin token too, so that one makes it no longer open.
+///
+/// A server with a token is left as it was: a page sends no
+/// `Authorization` to another origin without a preflight, which CORS
+/// refuses but for `--http-cors`'s origin, and a rebound page does not
+/// hold the token, so neither runs anything there.
+fn open_refusal(cfg: &Config, backend: &Backend, req: &Request) -> Option<Response> {
+    let scrape_token = matches!(backend, Backend::Metrics { .. }) && cfg.admin_token.is_some();
+    if cfg.token.is_some() || cfg.access.is_some() || scrape_token {
+        return None;
+    }
+    cors::foreign(
+        cfg.cors.as_deref(),
+        Some("--http-token"),
+        cfg.tls.is_some(),
+        req,
+    )
+    .map(|why| Response::error(403, &why))
+}
+
 /// A single connection: reads consecutive requests on a keep-alive
 /// connection, holding its `slot` under `--max-connections` until it ends.
 fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cfg: &Config) {
@@ -896,6 +925,21 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
             && cors_allows(cfg, &req)
         {
             let resp = cors(Response::empty(204), cfg);
+            if resp.write(&mut out, keep_alive, head_only).is_err() || !keep_alive {
+                return;
+            }
+            continue;
+        }
+
+        // A server that asks for no token answers only under this
+        // machine's name, and a page only from its own origin or the one
+        // `--http-cors` names ([`open_refusal`]): before any route is
+        // chosen, a tenant looked up, a body parsed or a lock taken. Past
+        // the two above, which read nothing: the health check answers a
+        // constant, and a preflight the headers every answer carries.
+        if let Some(refused) = open_refusal(cfg, backend, &req) {
+            audit::http(&req, refused.status, peer);
+            let resp = cors(refused, cfg);
             if resp.write(&mut out, keep_alive, head_only).is_err() || !keep_alive {
                 return;
             }

@@ -187,7 +187,7 @@ impl Client {
         body: &[u8],
     ) -> (u16, Vec<u8>) {
         let mut head = format!(
-            "{method} {target} HTTP/1.1\r\nHost: b\r\nContent-Length: {}\r\n",
+            "{method} {target} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n",
             body.len()
         );
         if let Some(t) = auth {
@@ -222,7 +222,8 @@ impl Client {
     /// [`Client::send`]'s `GET` with one header line more, `extra`: the
     /// request the global entry sends a router.
     fn get_with(&mut self, target: &str, extra: &str) -> u16 {
-        let head = format!("GET {target} HTTP/1.1\r\nHost: b\r\nContent-Length: 0\r\n{extra}\r\n");
+        let head =
+            format!("GET {target} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n{extra}\r\n");
         self.out.write_all(head.as_bytes()).unwrap();
         let mut line = String::new();
         self.reader.read_line(&mut line).unwrap();
@@ -256,7 +257,7 @@ impl Client {
         body: &[u8],
     ) -> (u16, Vec<u8>, Option<u64>) {
         let mut head = format!(
-            "{method} {target} HTTP/1.1\r\nHost: b\r\nContent-Length: {}\r\n",
+            "{method} {target} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n",
             body.len()
         );
         for (k, v) in headers {

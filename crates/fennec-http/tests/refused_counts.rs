@@ -28,7 +28,7 @@ impl Kept {
 
     /// `GET target`'s status and body.
     fn get(&mut self, target: &str) -> (u16, String) {
-        write!(self.w, "GET {target} HTTP/1.1\r\nHost: t\r\n\r\n").unwrap();
+        write!(self.w, "GET {target} HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
         let mut line = String::new();
         self.r.read_line(&mut line).unwrap();
         let status = line.split_whitespace().nth(1).unwrap().parse().unwrap();
@@ -67,7 +67,7 @@ impl Kept {
 fn refused_with(port: u16) -> String {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    s.write_all(b"GET /collections HTTP/1.1\r\nHost: t\r\n\r\n")
+    s.write_all(b"GET /collections HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .unwrap();
     let mut out = String::new();
     let _ = s.read_to_string(&mut out);

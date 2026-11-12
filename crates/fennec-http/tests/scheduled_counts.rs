@@ -87,7 +87,7 @@ fn post(port: u16, token: &str, query: &str) -> (u16, String) {
     s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
     write!(
         s,
-        "POST /query HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\nContent-Length: \
+        "POST /query HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Length: \
          {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
@@ -104,7 +104,7 @@ fn get(port: u16, token: Option<&str>, target: &str) -> (u16, String) {
     let auth = token.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
     write!(
         s,
-        "GET {target} HTTP/1.1\r\nHost: x\r\n{auth}Connection: close\r\n\r\n"
+        "GET {target} HTTP/1.1\r\nHost: localhost\r\n{auth}Connection: close\r\n\r\n"
     )
     .unwrap();
     let mut out = String::new();

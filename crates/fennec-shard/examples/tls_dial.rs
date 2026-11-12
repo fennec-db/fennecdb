@@ -169,7 +169,7 @@ fn ask(c: &mut BufReader<TcpStream>, req: &[u8], body: &mut Vec<u8>) -> u16 {
 
 fn request(method: &str, path: &str, body: &str) -> Vec<u8> {
     let mut r = format!(
-        "{method} {path} HTTP/1.1\r\nHost: b\r\nContent-Length: {}\r\n\r\n",
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
         body.len()
     )
     .into_bytes();

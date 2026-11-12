@@ -113,10 +113,18 @@ quickstart_tests() {
     fi
     python3 "$here/docs_check.py" programs
 
+    # The machine by its address, as a container reaches it: a server that
+    # asks for no token, as the Quickstart's, answers only a Host naming
+    # this machine or an address, and host.docker.internal is neither.
+    # Docker writes the address host-gateway stands for into the
+    # container's hosts file.
+    machine=$(docker run --rm --add-host=host.docker.internal:host-gateway python:3.13-slim \
+        getent ahostsv4 host.docker.internal | awk 'NR == 1 { print $1 }')
+    [ -n "$machine" ] || { echo "no address for host.docker.internal" >&2; exit 1; }
     for lang in python java php ruby; do
         serve "quickstart-$lang" insecure
         python3 "$here/docs_check.py" seed "$local_url"
-        qs_copy "$lang" "http://host.docker.internal:$port"
+        qs_copy "$lang" "http://$machine:$port"
         case $lang in
             python) out=$(container python:3.13-slim "$dir/qs-python" \
                 "cp -r /fennecdb /tmp/fennecdb &&

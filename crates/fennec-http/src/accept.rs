@@ -817,7 +817,8 @@ mod tests {
             let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
             c.set_read_timeout(Some(std::time::Duration::from_secs(10)))
                 .unwrap();
-            c.write_all(b"GET / HTTP/1.1\r\nHost: t\r\n\r\n").unwrap();
+            c.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .unwrap();
             let (s, _) = l.accept().unwrap();
             // The request in before the refusal, as a client's is: the
             // peek waits for it, the one segment it went in.
@@ -873,7 +874,8 @@ mod tests {
         c.read_to_string(&mut out)
             .map_err(|e| format!("the answer: {e}"))?;
         assert!(out.starts_with("HTTP/1.1 503 "), "{out}");
-        let head = format!("POST /query HTTP/1.1\r\nHost: t\r\nContent-Length: {BODY}\r\n\r\n");
+        let head =
+            format!("POST /query HTTP/1.1\r\nHost: localhost\r\nContent-Length: {BODY}\r\n\r\n");
         c.write_all(head.as_bytes())
             .map_err(|e| format!("the head: {e}"))?;
         c.write_all(&vec![b' '; BODY])

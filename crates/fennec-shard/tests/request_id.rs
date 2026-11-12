@@ -18,7 +18,7 @@ fn call(addr: &str, target: &str, body: &str, extra: &str) -> (u16, Vec<String>)
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     write!(
         s,
-        "POST {target} HTTP/1.1\r\nHost: x\r\n{extra}Content-Length: {}\r\n\
+        "POST {target} HTTP/1.1\r\nHost: localhost\r\n{extra}Content-Length: {}\r\n\
          Connection: close\r\n\r\n{body}",
         body.len()
     )

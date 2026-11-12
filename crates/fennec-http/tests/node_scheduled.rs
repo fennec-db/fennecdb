@@ -863,7 +863,7 @@ fn query(port: u16, tenant: &str, q: &str) -> (u16, String) {
     s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
     write!(
         s,
-        "POST /t/{tenant}/query HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: \
+        "POST /t/{tenant}/query HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: \
          close\r\n\r\n{body}",
         body.len()
     )

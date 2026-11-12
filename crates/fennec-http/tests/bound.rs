@@ -121,7 +121,7 @@ impl Node {
             .collect();
         write!(
             s,
-            "{method} {target} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\n{extra}\
+            "{method} {target} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n{extra}\
              Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         )
@@ -758,7 +758,7 @@ fn a_claim_held_on_a_derived_collection_is_answered_by_the_write_making_its_row(
         s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
         write!(
             s,
-            "POST /query HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {ROOT}\r\n\
+            "POST /query HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {ROOT}\r\n\
              Fennec-Wait: 20000\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         )

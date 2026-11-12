@@ -82,7 +82,7 @@ fn call(port: u16, method: &str, target: &str, body: &[u8], auth: Option<&str>) 
     let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
     s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let mut req = format!(
-        "{method} {target} HTTP/1.1\r\nHost: t\r\nConnection: close\r\nContent-Length: {}\r\n",
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n",
         body.len()
     );
     if let Some(a) = auth {
@@ -412,8 +412,10 @@ fn each_tenant_has_its_own_change_sequence() {
     let seed = |t: &str| -> String {
         let mut s = TcpStream::connect(("127.0.0.1", n.port)).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-        s.write_all(format!("GET /t/{t}/notes/changes HTTP/1.1\r\nHost: t\r\n\r\n").as_bytes())
-            .unwrap();
+        s.write_all(
+            format!("GET /t/{t}/notes/changes HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes(),
+        )
+        .unwrap();
         let mut buf = String::new();
         let mut chunk = [0u8; 4096];
         while !buf.contains("event: seed") || !buf.ends_with("\n\n") {
@@ -439,7 +441,7 @@ fn deleting_a_tenant_ends_its_streams_and_removes_the_file() {
 
     let mut s = TcpStream::connect(("127.0.0.1", n.port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    s.write_all(b"GET /t/acme/notes/changes HTTP/1.1\r\nHost: t\r\n\r\n")
+    s.write_all(b"GET /t/acme/notes/changes HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .unwrap();
     let mut buf = String::new();
     let mut chunk = [0u8; 4096];
@@ -809,7 +811,7 @@ fn reclaim(port: u16, tenant: &str, ids: &[&str]) -> Res {
 fn stream_on(port: u16, tenant: &str) -> TcpStream {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    let ask = format!("GET /t/{tenant}/notes/changes HTTP/1.1\r\nHost: t\r\n\r\n");
+    let ask = format!("GET /t/{tenant}/notes/changes HTTP/1.1\r\nHost: localhost\r\n\r\n");
     s.write_all(ask.as_bytes()).unwrap();
     let mut buf = String::new();
     let mut chunk = [0u8; 4096];
@@ -891,7 +893,7 @@ fn a_later_file_at_the_place_is_not_taken_back() {
     let mut s = TcpStream::connect(("127.0.0.1", n.port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     s.write_all(
-        b"PUT /_admin/tenants/acme HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\
+        b"PUT /_admin/tenants/acme HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
           Authorization: Bearer adm\r\nFennec-Instance: 00000000000000cd\r\n\
           Content-Length: 0\r\n\r\n",
     )
@@ -958,7 +960,7 @@ fn chunked_call(
     s.set_nodelay(true).unwrap();
     write!(
         s,
-        "{method} {target} HTTP/1.1\r\nHost: t\r\nConnection: close\r\nAuthorization: {auth}\r\n\
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: {auth}\r\n\
          Transfer-Encoding: chunked\r\n\r\n"
     )
     .unwrap();

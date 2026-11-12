@@ -110,7 +110,7 @@ impl Node {
         s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         write!(
             s,
-            "{method} {target} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\n{headers}\
+            "{method} {target} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n{headers}\
              Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         )
@@ -825,7 +825,7 @@ fn masked_stream(pin_all: bool) {
         .unwrap();
     write!(
         s,
-        "GET /orders/changes HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {c}\r\n\r\n"
+        "GET /orders/changes HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {c}\r\n\r\n"
     )
     .unwrap();
     let mut heard = String::new();

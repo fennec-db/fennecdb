@@ -288,7 +288,7 @@ impl Client {
 
     fn post_to(&mut self, path: &str, body: &[u8]) -> u16 {
         let head = format!(
-            "POST {path} HTTP/1.1\r\nHost: p\r\nAuthorization: Bearer {}\r\n\
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\n\
              Content-Length: {}\r\n\r\n",
             self.token,
             body.len()
@@ -671,7 +671,7 @@ fn follow(addr: &str, token: &str) {
     let mut s = TcpStream::connect(addr).unwrap();
     write!(
         s,
-        "GET /positions/changes HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\n\r\n"
+        "GET /positions/changes HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\r\n"
     )
     .unwrap();
     let mut heard = Vec::new();
@@ -817,7 +817,7 @@ fn hear(addr: &str, token: &str, target: &str, heard: &Arc<std::sync::atomic::At
     let mut s = TcpStream::connect(addr).unwrap();
     write!(
         s,
-        "GET {target} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\n\r\n"
+        "GET {target} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\r\n"
     )
     .unwrap();
     let mut seen = Vec::new();

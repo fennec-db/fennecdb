@@ -139,7 +139,7 @@ fn call(addr: &str, method: &str, path: &str, body: &str, auth: Option<&str>) ->
     let auth = auth.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
     write!(
         s,
-        "{method} {path} HTTP/1.1\r\nHost: x\r\n{auth}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\n{auth}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
     .unwrap();
@@ -169,7 +169,7 @@ impl Client {
     fn query(&mut self, tenant: &str, q: &str) -> u16 {
         let body = format!("{{\"query\":\"{}\"}}", q.replace('"', "\\\""));
         let req = format!(
-            "POST /t/{tenant}/query HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{body}",
+            "POST /t/{tenant}/query HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
         self.r.get_mut().write_all(req.as_bytes()).unwrap();
