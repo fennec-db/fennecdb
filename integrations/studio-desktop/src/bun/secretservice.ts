@@ -219,16 +219,22 @@ export async function askSecretService(env: Record<string, string | undefined> =
 	const deadline = Date.now() + ms;
 	let last: StoreAnswer = { ok: false, why: "no-bus", detail: "no session bus answered" };
 	for (const path of paths) {
-		const left = deadline - Date.now();
-		if (left <= 0) break;
-		last = await askOne(path, left, uid);
+		if (deadline - Date.now() <= 0) break;
+		last = await askOne(path, deadline, ms, uid);
 		// A bus that answered has said what there is; only a bus that could not be reached is passed over.
 		if (last.ok || last.why !== "no-bus") return last;
 	}
 	return last;
 }
 
-function askOne(path: string, ms: number, uid: number): Promise<StoreAnswer> {
+/**
+ * One bus asked, until `deadline` (Date.now()'s) has passed: `ms` is the whole
+ * bound, for the words. The timer is set again for what is left where it fires
+ * before the deadline by that clock: Node counts a timer by its monotonic
+ * clock in whole milliseconds, and the time left was read in whole ones too,
+ * so a 300 ms bound fired at 299 by Date.now() (the Linux arm64 runner).
+ */
+function askOne(path: string, deadline: number, ms: number, uid: number): Promise<StoreAnswer> {
 	return new Promise((resolve) => {
 		let socket: Socket | undefined;
 		let done = false;
@@ -241,10 +247,15 @@ function askOne(path: string, ms: number, uid: number): Promise<StoreAnswer> {
 			socket?.destroy();
 			resolve(a);
 		};
-		const timer = setTimeout(
-			() => finish({ ok: false, why: authed ? "no-answer" : "no-bus", detail: `${authed ? `${SECRET_SERVICE} did not answer` : "the session bus did not answer"} within ${(ms / 1000).toFixed(1)} s` }),
-			ms,
-		);
+		const late = () => {
+			const left = deadline - Date.now();
+			if (left > 0) {
+				timer = setTimeout(late, left);
+				return;
+			}
+			finish({ ok: false, why: authed ? "no-answer" : "no-bus", detail: `${authed ? `${SECRET_SERVICE} did not answer` : "the session bus did not answer"} within ${(ms / 1000).toFixed(1)} s` });
+		};
+		let timer = setTimeout(late, Math.max(0, deadline - Date.now()));
 		const CALL = 2;
 		try {
 			socket = connect({ path });

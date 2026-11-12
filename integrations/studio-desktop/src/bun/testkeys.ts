@@ -3,9 +3,9 @@
 // each key down and up through the system's input stream (keybd_event,
 // mouse_event), which delivers it to whatever has the focus, WebView2's page
 // included. Nothing here brings a window forward but the click: the Alt pressed
-// and let go before a SetForegroundWindow, as the first version did, puts the
-// menu bar of a window that is in front by then in menu mode, where the keys
-// after it go. Test variant only: testhooks.ts imports it, and nothing else
+// and let go before a SetForegroundWindow, as the first version did, can put
+// the menu bar of a window that is in front by then in menu mode, where the
+// keys after it go. Test variant only: testhooks.ts imports it, and nothing else
 // does.
 
 import { dlopen, FFIType } from "bun:ffi";

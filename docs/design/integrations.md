@@ -1001,9 +1001,13 @@ window and the app's words are each system's, and the app has its icon there.
   page (text typed after it arrived in the search box), Ctrl+N, Ctrl+O and
   Ctrl+Shift+O reached no menu item, and nothing else either (no WebView2
   window of its own): WebView2 has the keys, and Electrobun 2.0.4 handles none
-  of its AcceleratorKeyPressed. (The arm64 runner takes none of the keys a
-  check presses: the session's last input, GetLastInputInfo, does not move,
-  and typed text never arrives; there the keys are dispatched in the page.) So the main window takes the File menu's keys
+  of its AcceleratorKeyPressed. (On the arm64 runner the system took the keys
+  a check typed, GetLastInputInfo moving, and the page got none of them: it
+  had not the focus, `document.hasFocus()` false, which was on the bare window,
+  GetGUIThreadInfo's focus the top-level BasicWindowClass; after Electrobun's
+  `activate()` it was in WebView2's Chrome_WidgetWin_1 and the same text
+  arrived, three keys seen. Fixed by the app, below: keys in a window's page.)
+  So the main window takes the File menu's keys
   in its own page on Windows and Linux (src/launcher/index.ts, not on macOS,
   whose menu bar takes Command's first); a key the menu did take would never
   reach the page, so none runs twice. A studio window's page is a server's,
@@ -1017,13 +1021,52 @@ window and the app's words are each system's, and the app has its icon there.
   Remote connections (Connect to a Server…); with no Dock, the main window
   closed is shown again by starting the app a second time, which asks the one
   there. `menu` presses each of them, and the keys: on Windows as a person's
-  (testkeys.ts: a click into the page, which also brings the window to the
-  front, then keybd_event), its control the text typed into the search box
-  arriving in the page, each key's effect asserted and taken once, by the menu
-  bar or the page, never both; where the system takes none of the keys
-  (GetLastInputInfo unchanged), and on Linux, which has no input a check can
-  press as a person's under xvfb, dispatched in the page. Keys the system
-  took that never reached the page fail it.
+  (testkeys.ts: keybd_event, and a click as a mouse's, absolute, which also
+  brings the window to the front), its control twice -- text typed into the
+  main window as it opened, with no click, arriving in its search box, then a
+  click into its page reaching the page and text typed after it arriving --
+  each key's effect asserted and taken once, by the menu bar or the page,
+  never both; on Linux, which has no input a check can press as a person's
+  under xvfb, dispatched in the page. Nothing of the check's own brings a
+  window forward or moves its focus: no Alt (the first version pressed and let
+  go of one before a SetForegroundWindow, which can put the menu bar of a
+  window in front by then in menu mode, where keys go), no activation, and no keys
+  dispatched in the page on Windows, where the first version did so when the
+  system seemed to take none, a reading that ran ahead of the system's input
+  thread and hid the arm64 runner's failure. Keys or a click the page did not
+  get fail it, with what the page saw, the click's point and the window
+  under it, the focus and the menu mode of the window's thread, the windows
+  within it and the app's looks at its focus.
+- **Keys in a window's page (Windows).** Activating a window, Windows'
+  DefWindowProc puts the keyboard focus on the window itself (WM_ACTIVATE),
+  and a WebView2 page is a child window of WebView2's process, which has the
+  focus only when the host moves it there (the controller's MoveFocus).
+  Electrobun 2.0.4 moves it only in `activate()` (activateWindow's
+  FocusActiveView, win/nativeWrapper.cpp:11496): not on WM_ACTIVATE (:6074),
+  which it passes to DefWindowProc, and not once a view is made, which comes
+  after its window was shown and activated. So a window shown in front had the
+  focus on the bare window, and what a user typed before clicking into the
+  page reached nothing (measured on the arm64 runner, above). The app moves it
+  itself (`keysToPage`, webview2.ts; `focusesPage`, windows.ts, given every
+  window the app makes): once a window's page has loaded (`did-navigate`) and
+  at each of its activations (its `focus` event), where GetGUIThreadInfo on the
+  window's own thread says the focus is on a window of the app's process or
+  none (no page: a page's window is WebView2's process's) and no menu has its
+  input, it calls `activate()`. That call also brings a window forward, by
+  AttachThreadInput to the thread in front where SetForegroundWindow is
+  refused, so it is made only for a window that is the one in front
+  (GetForegroundWindow) and never brings one forward: a window behind another
+  program's stays behind, and its page is given the focus when the user
+  brings it forward. What it does not change: Electrobun makes every window
+  activated (`activate` defaults to true), by the same AttachThreadInput, so a
+  window that opens while the user is in another program, a file handed over
+  late, comes forward as it did before; and between the look and the call, a
+  few milliseconds, the user may switch away, which the call would undo. On
+  macOS and Linux the page is the window's own view, which AppKit makes its
+  first responder and GTK gives the window's focus, and `activate()` would
+  bring the app forward over another: nothing is done there (`menu` cannot
+  press keys as a person's on either). `test/webview2.test.ts` holds the
+  rule, `menu` the running app on both Windows runners.
 - **The last window.** macOS keeps an app with no window in the Dock, and the
   app stays there as a document app does, a served database still running.
   Windows and Linux have no Dock: an app whose last window closed is gone from
@@ -1077,9 +1120,20 @@ window and the app's words are each system's, and the app has its icon there.
   icon's images), `Resources\app.ico` 48 892; Linux's `Setup.tar.gz`
   41 806 525 -> 41 875 912 (+69 387, +0.17%; the second +69 315), the update
   archive +69 236 and +69 187 (Hutch's two copies of the PNG are one in
-  zstd's window). The build also writes the icon into the app's own `bun.exe`
-  (Bun then refuses that copy as the base of a program: `environment`'s
-  stand-in is built by the toolchain's). macOS's is the iconset it had. Without them the launcher, its shortcut, its menu entry and
+  zstd's window). The build also writes the icon's images into the app's own
+  `bun.exe`, read from the x64 download: RT_ICON 1 to 7 are the .ico's seven
+  images and RT_GROUP_ICON 1 names them, as in `launcher.exe`, but Bun's own
+  group, the named `IDI_MYICON`, stays, and still names RT_ICON 1 as its one
+  256-pixel image of 270 600 bytes, which is now the app's 16-pixel one; a
+  named group comes before a numbered one, so it is the icon Windows draws for
+  that file, the 16-pixel image (its hash, `environment`'s, is neither the
+  toolchain Bun's nor the launcher's, on both runners). The write leaves the
+  security directory naming Bun's signature at 88 815 616, 10 328 bytes, in a
+  file of 88 594 432: Windows reads it as NotSigned (the toolchain's is Valid),
+  and Bun refuses that copy as the base of a program (InvalidSecurityDirectory:
+  `environment`'s stand-in is built by the toolchain's). Whether a window's
+  taskbar button or Task Manager shows that icon, Electrobun setting none of
+  its own, is not measured. macOS's is the iconset it had. Without them the launcher, its shortcut, its menu entry and
   each window show a default program's icon, and a `.fennec` file none.
 
 Toolchain. `electrobun init` installed Hutch (the build tool) in `~/.hutch` and

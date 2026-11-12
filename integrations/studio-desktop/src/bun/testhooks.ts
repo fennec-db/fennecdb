@@ -291,8 +291,8 @@ async function run(c: any) {
 		// Windows: keys pressed into a window, as a person's are (testkeys.ts): a
 		// `click` into its page (near its top left corner), which brings it to the
 		// front as a person's does, then `type` typed or `chord` pressed. Nothing
-		// else brings it forward: no Alt pressed (where the window was in front
-		// already, one put its menu bar in menu mode, which took what came after),
+		// else brings it forward: no Alt pressed (with the window in front by then,
+		// one can put its menu bar in menu mode, which takes the keys after it),
 		// no SetForegroundWindow, no activation. Keys go only into a window in front.
 		case "keys": {
 			const page = win(c.key);

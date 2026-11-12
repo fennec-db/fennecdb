@@ -30,7 +30,12 @@ by the end of that stdin (SIGTERM is TerminateProcess there, no checkpoint),
 a hard kill only for one not ended 30 s later (`process.ts`). On Windows and
 Linux the last window closed quits the app as File, Quit does, its servers
 stopped first, while nothing is opening; every window the app makes is
-`counted` (`onLastWindowClosed`, `checks/lastwindow.mjs`); macOS's stays. Only
+`counted` (`onLastWindowClosed`, `checks/lastwindow.mjs`); macOS's stays. On
+Windows each window's page is given the keyboard focus once it loads and at
+each activation, only from a window already in front and never by bringing
+one forward (`focusesPage`, `keysToPage`); `checks/menu.mjs` types into the
+main window as it opened and clicks into its page as a person would, never
+activating a window or dispatching keys in the page there. Only
 `session.ts` gives a page a token, a frozen `window.fennecHost` defined
 where `location.origin` is the server's alone. A studio window is
 `sandbox: true` (the event bridge only) and held to its origin, one with
