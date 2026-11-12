@@ -18,7 +18,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { BUN, D, HERE, SERVER, WIN, assertClean, cmd, data, lines, quit, startApp, step, waitFor, waitStudio, log } from './lib.mjs';
+import { BUN, D, EXE, HERE, SERVER, WIN, assertClean, cmd, data, lines, quit, startApp, step, waitFor, waitStudio, log } from './lib.mjs';
 
 assertClean('before');
 const SMALL = data('small', 20);
@@ -33,8 +33,9 @@ if (WIN) {
       `import { writeFileSync } from "node:fs";`,
       `import { spawn } from "node:child_process";`,
       // `--env-to <file>`: its environment written there, and nothing started (the control below).
-      `const out = process.argv[2] === "--env-to" ? process.argv[3] : ${JSON.stringify(SEEN)};`,
-      `writeFileSync(out, Object.entries(process.env).map(([k, v]) => k + "=" + v).join("\\n") + "\\n");`,
+      // Only a server on a file is written down: the main window asks `--version` too, with none of it.
+      `const out = process.argv[2] === "--env-to" ? process.argv[3] : process.argv.includes("--file") ? ${JSON.stringify(SEEN)} : null;`,
+      `if (out) writeFileSync(out, Object.entries(process.env).map(([k, v]) => k + "=" + v).join("\\n") + "\\n");`,
       `if (process.argv[2] === "--env-to") process.exit(0);`,
       `const child = spawn(${JSON.stringify(SERVER)}, process.argv.slice(2), { stdio: "inherit" });`,
       `child.on("exit", (code) => process.exit(code ?? 1));`,
@@ -47,11 +48,17 @@ if (WIN) {
   // What the icon's write left of the app's copy: its publisher's signature, as Windows reads it.
   const signature = (f) => spawnSync('powershell', ['-NoProfile', '-Command', '$s = Get-AuthenticodeSignature -LiteralPath $env:FENNEC_CHECK_FILE; "{0} {1}" -f $s.Status, $s.SignerCertificate.Subject'], { encoding: 'utf8', env: { ...process.env, FENNEC_CHECK_FILE: f } }).stdout.trim();
   log(`the toolchain's Bun: ${signature(bun)}; the app's: ${signature(BUN)}`);
+  // And whose icon each shows (the first icon of each, drawn and hashed alike): the app's Bun with
+  // the launcher's, which the build gives the app's icon, is the build's write.
+  const icons = spawnSync('powershell', ['-NoProfile', '-Command', "Add-Type -AssemblyName System.Drawing; foreach ($f in $env:FENNEC_CHECK_FILES -split '\\|') { $m = New-Object System.IO.MemoryStream; [System.Drawing.Icon]::ExtractAssociatedIcon($f).ToBitmap().Save($m, [System.Drawing.Imaging.ImageFormat]::Png); [System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash($m.ToArray())).Replace('-', '').Substring(0, 16) }"], { encoding: 'utf8', env: { ...process.env, FENNEC_CHECK_FILES: [bun, BUN, EXE].join('|') } });
+  const [ofToolchain, ofApp, ofLauncher] = icons.stdout.trim().split(/\r?\n/);
+  log(`their icons: the toolchain's Bun ${ofToolchain}, the app's ${ofApp}, the app's launcher ${ofLauncher}${icons.stderr ? ` (${icons.stderr.trim()})` : ''}`);
   const built = spawnSync(bun, ['build', '--compile', source, '--outfile', WRAP], { encoding: 'utf8', timeout: 120000 });
   assert.equal(built.status, 0, `the stand-in built: ${built.stderr}${built.stdout}`);
 } else {
-  // `env -0` would be exact, and is not on every system; one a line is enough for names.
-  writeFileSync(WRAP, `#!/bin/sh\nenv > '${SEEN}'\nexec '${SERVER}' "$@"\n`);
+  // `env -0` would be exact, and is not on every system; one a line is enough for names. Only a
+  // server on a file is written down: the main window asks `--version` too, with none of it.
+  writeFileSync(WRAP, `#!/bin/sh\ncase " $* " in *" --file "*) env > '${SEEN}' ;; esac\nexec '${SERVER}' "$@"\n`);
   chmodSync(WRAP, 0o755);
 }
 

@@ -696,6 +696,17 @@ export function doubleClick(path, env = {}) {
     const r = spawnSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', ps], { env: { ...all, FENNEC_CHECK_OPEN: path }, encoding: 'utf8', timeout: 60000 });
     return { status: r.status, said: `${r.stdout ?? ''}${r.stderr ?? ''}${r.error ? r.error.message : ''}`.trim() };
   }
-  const r = spawnSync('gio', ['open', path], { env: all, encoding: 'utf8', timeout: 60000 });
-  return { status: r.status, said: `${r.stdout ?? ''}${r.stderr ?? ''}${r.error ? r.error.message : ''}`.trim() };
+  // gio's output goes to a file of its own, not a pipe: the app it starts inherits gio's stdout and
+  // stderr, and spawnSync waits for a pipe's every writer, so with pipes each double-click that
+  // started the app returned only at the timeout, a minute on, gio long gone.
+  const out = join(D, 'logs', `double-click-${++clicks}.log`);
+  const fd = openSync(out, 'w');
+  let r;
+  try {
+    r = spawnSync('gio', ['open', path], { env: all, stdio: ['ignore', fd, fd], timeout: 60000 });
+  } finally {
+    closeSync(fd);
+  }
+  return { status: r.status, said: `${readFileSync(out, 'utf8')}${r.error ? r.error.message : ''}`.trim() };
 }
+let clicks = 0;
