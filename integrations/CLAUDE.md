@@ -38,7 +38,16 @@ the same filter (`newWindowPreload`, `checks/sandbox.mjs`). No path or link the
 app hands the system goes through a shell: on Linux `xdg-open` with an
 argument vector, never Electrobun's `openExternal` or `showItemInFolder`
 (`opener.ts`, `checks/opener.mjs`). One instance a user listens where only
-that user can (`instance.ts`). A saved server's token is in the system's
+that user can (`instance.ts`). A `.fennec` double-clicked on Windows or Linux
+is read back from the launcher, the app's parent, which drops its arguments,
+only where that parent is the launcher beside the app's Bun (`handover.ts`),
+each argument a path opened as Open… opens one, never run or read as a command;
+a second instance hands its paths to the first over that channel. The app
+registers itself, for its user, at every start of the one instance and only
+what differs, never over another program's default, an entry whose launcher
+is gone ignored on Linux (`TryExec`), and what an uninstall leaves is the
+README's (`associate.ts`, `checks/finder.mjs`, its control the registration
+taken away). A saved server's token is in the system's
 credential store alone with its address (`token.ts`), never sent elsewhere
 or along a redirect: on Windows kept on the machine (`win32.ts`), on Linux
 refused in words where no Secret Service with a default collection answers

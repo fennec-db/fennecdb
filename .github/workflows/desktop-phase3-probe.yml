@@ -97,3 +97,45 @@ jobs:
           path: ${{ runner.temp }}/fennec-desktop-checks/logs
           retention-days: 7
           if-no-files-found: ignore
+
+  # What the icons cost the download: the shipped build of this branch and of
+  # main, side by side on one runner, the artifacts' and the app's sizes.
+  size:
+    name: size on ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Windows x64, os: windows-latest }
+          - { name: Linux x64, os: ubuntu-24.04 }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          path: branch
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: main
+          path: main
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - name: Build both
+        run: |
+          for side in main branch; do
+            ( cd "$side/integrations/studio-desktop" && npm ci --ignore-scripts --no-audit --no-fund --loglevel=error && sh scripts/get-server.sh 0.2.0 >/dev/null && npm run build >/dev/null 2>&1 || { echo "$side: build failed"; exit 1; } )
+          done
+      - name: Sizes
+        run: |
+          for side in main branch; do
+            echo "== $side"
+            ls -l "$side/integrations/studio-desktop/artifacts"
+            find "$side/integrations/studio-desktop/build" -maxdepth 1 -mindepth 1 -type d | while read -r d; do echo "$d: $(du -sb "$d" 2>/dev/null | cut -f1 || du -sk "$d")"; done
+            find "$side/integrations/studio-desktop/build" \( -name '*.ico' -o -name 'appIcon.png' -o -name 'icon.png' -o -name 'launcher.exe' -o -name '*-Setup.exe' \) -exec ls -l {} \;
+          done

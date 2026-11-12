@@ -240,6 +240,24 @@ $("db-stop").addEventListener("click", () => selected && void run(ask.stopServer
 $("open").addEventListener("click", () => void run(ask.chooseFile({})));
 $("new").addEventListener("click", () => void run(ask.newDatabase({})));
 
+// The File menu's keys in the main window itself, where no menu takes them
+// first: Linux has no application menu, and on Windows the page is WebView2's,
+// a window of another process, whose keys the menu bar's accelerators never
+// see. macOS's menu bar takes its Command keys before any page, so there this
+// is never asked. A key the menu did take never reaches the page: no action
+// runs twice.
+if (!/Macintosh/.test(navigator.userAgent)) {
+	document.addEventListener("keydown", (e) => {
+		if (!e.ctrlKey || e.altKey || e.metaKey || e.repeat) return;
+		const k = e.key.toLowerCase();
+		if (k === "n" && !e.shiftKey) void run(ask.newDatabase({}));
+		else if (k === "o" && !e.shiftKey) void run(ask.chooseFile({}));
+		else if (k === "o" && e.shiftKey) show("connections");
+		else return;
+		e.preventDefault();
+	});
+}
+
 // ------------------------------------------------------------------ servers
 
 let tab: keyof Snippets = "curl";

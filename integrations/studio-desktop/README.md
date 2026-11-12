@@ -15,8 +15,8 @@ Beta, macOS on Apple silicon only. The shell is [Electrobun](https://electrobun.
 Intel Mac build. Windows and Linux (x64 and arm64 each) are on the way and not
 downloadable yet: CI builds the app there and runs its unit tests and the
 checks that pass there ([Windows and Linux](#windows-and-linux)), and what is
-missing before it ships is in the plan in #578 (file associations and the
-menus, then the installers).
+missing before it ships is in the plan in #578 (the downloads and their
+installers, phase 4).
 A release's DMG is unsigned, signed ad hoc and not notarized
 ([Download](#download)), until a maintainer adds the secrets
 ([below](#signing-and-notarization)); an app you build here opens as it is.
@@ -183,9 +183,8 @@ Windows runners it said it was done and started nothing).
 What does not run there is skipped by name, never silently, each with its
 reason, and where a later phase of the plan (#578) brings it, that phase: the
 checks' list is in `scripts/checks/run.mjs` and a run prints each as SKIP
-(`release`, which reads a macOS bundle's payload, until phase 4; `finder`, a
-file handed over by the desktop, phase 3; `opener` and `keyring`, Linux's
-alone). A unit test that cannot hold on a system says why beside it: the tree
+(`release`, which reads a macOS bundle's payload, until phase 4; `opener` and
+`keyring`, Linux's alone; `menu`, Windows' and Linux's). A unit test that cannot hold on a system says why beside it: the tree
 digest's executable bit (Windows keeps none), a Unix socket's leftovers and
 folder modes on Windows, and D-Bus off Linux.
 
@@ -218,6 +217,16 @@ What the app does otherwise there (phase 2):
 * **WebView2 keeps each window's store in a folder** and Electrobun's clear
   there empties another window's: the app removes a removed connection's
   folder, and a file window's, once no window is in it.
+
+And what it does on the desktop there (phase 3): a `.fennec` double-clicked in
+Explorer or a file manager opens in it, read back from its launcher, and the
+app registers itself for that at every start ([A file from the
+desktop](#a-file-from-the-desktop); [Uninstall](#uninstall)); the File menu's
+keys are Ctrl on Windows, and on Linux, which has no application menu, the
+main window's buttons are the File menu; the icon is `icon/icon.ico` and
+`icon/icon.png`, made from `icon/icon.svg` on a Mac (`sh scripts/make-icon.sh
+rasters`) and kept in git, since neither system has an SVG renderer of its own
+(`test/icon.test.ts` holds them to the SVG).
 
 ### The toolchain stays in this directory
 
@@ -320,7 +329,8 @@ script says which hashes a mismatch is.
    | `backups` | a backup with nothing running (a server for it alone, stopped with exit 0, no window) and one through the window's own server; verify; a restore into a new file that opens with the rows; never over a file there or the open one; a key made with `fennec key` (0600, never written over), a sealed backup that is no database in the clear, verified and restored; a new database from a folder of backups; a database served with `--sync off`, refused with the reason |
    | `opener` | Linux: a link and a folder whose names run `touch` in a shell (the control: through `sh -c`, as Electrobun hands them, the marker is made): handed to a stand-in `xdg-open`, each is one argument, made inert, and no marker; handed to the real one, which can start nothing, no marker |
    | `keyring` | Linux: on a session bus with no Secret Service, and on one whose keyring has no default collection, saving a token is refused in words within seconds (libsecret alone waited 25 s), kept in no file, and a connection saved before is refused, nothing sent to its server |
-   | `finder` | `open -a <app> <file>` with the app not running: the file arrives as `open-url`, spaces and non-ASCII letters included |
+   | `finder` | macOS: `open -a <app> <file>` with the app not running: the file arrives as `open-url`, spaces and non-ASCII letters included. Windows and Linux: a double-click as close as a runner allows (the shell's ShellExecuteEx on the file; `gio open`): **with the registration taken away as [Uninstall](#uninstall) says, it starts nothing** (the control); a start of the app registers it, as the system then reads it back (the ProgID's command, `.fennec`'s default; the entry, the type GIO gives a `.fennec`), and a second start writes nothing; with the app not running, the double-click starts it with the file, which opens with no main window over it, its own arguments Bun's and `main.js` alone and the file read back from the launcher whole; with it running, a second file's is handed by the instance it starts to the one there, which quits; a `.fennec` that is not a database is said in words, nothing written beside it; on Linux, the app run from a folder whose name would run a command in a shell is started there by the double-click, the name whole and nothing run, and once that copy is gone its entry is ignored; removed again, the double-click starts nothing |
+   | `menu` | Windows and Linux. Windows: text typed into the main window as a person types it reaches its page (the control), then Ctrl+N, Ctrl+O and Ctrl+Shift+O with the page focused, and Ctrl+N in a studio window. Linux, with no application menu: New database, Open file… (the dialog answered by the check), a file's Open in the Databases list and Remote connections, each the main window's own button; the main window closed and shown again by starting the app a second time |
 
    `ONLY=files,remote npm run checks` runs a subset (with the test variant
    built: `FENNEC_DESKTOP_TEST_BUILD=1 npm run build`). A failure's logs are in
@@ -472,6 +482,52 @@ already a database, to the main window's serve sheet instead of a studio
 window. (SQLite and PostgreSQL, which the design offers here too, are not
 built yet: `fennec import` writes a file itself, and the app would have to hold
 it to the single-writer rule another way.)
+
+### A file from the desktop
+
+A `.fennec` double-clicked in Finder, Explorer or a file manager opens in a
+window of the app, started for it if it is not running; the main window is not
+shown over it.
+
+* **macOS** hands the file over as an `open-url` event, from the document type
+  Electrobun writes into Info.plist (`app.fileAssociations`).
+* **Windows and Linux** start the program a registration names with the file as
+  its argument, and Electrobun 2.0.4 writes no registration there, and its
+  launcher, the one program a registration can name, starts the app's main
+  process with none of its own arguments (upstream #483, #554). It stays that
+  process's parent for as long as the app runs, waiting on it, so **the app
+  reads the file back from its launcher** (`handover.ts`): `/proc/<parent>/cmdline`
+  on Linux; on Windows the launcher's command line, through the system, split
+  by the rules the launcher's own runtime splits it by. Only a parent that is
+  the `launcher` beside the app's own Bun is read. Each argument is a path,
+  opened as Open… opens one (a file that is not a database is said in words);
+  nothing of it is run or read as a command, and no shell is on the way.
+* **The app registers itself** (`associate.ts`), at every start of the one
+  instance, for its user alone, writing only what differs: so a copy unpacked
+  anywhere, a copy moved and started again, and an installed one each point it
+  at themselves. On Windows, under `HKEY_CURRENT_USER\Software\Classes`, a
+  ProgID `dev.fennecdb.studio.fennec` whose open command is `"<launcher>" "%1"`,
+  with the app's icon, listed in `.fennec\OpenWithProgids` and made `.fennec`'s
+  default only where there is none, it is the app's already, or it names a
+  program that is gone; a program you picked yourself ("Always use this app")
+  is Explorer's own record and wins. On Linux, under `~/.local/share`, the
+  shared-mime-info type `application/x-fennecdb` for `*.fennec` and a desktop
+  entry for it (`MimeType=`, `Exec="<launcher>" %f`, hidden from the menus,
+  where Electrobun's own entry is, and `TryExec=<launcher>`, so an entry whose
+  launcher is gone is ignored), then `update-mime-database` and
+  `update-desktop-database` where they are installed; nothing is made the
+  type's default, which stays yours to pick. [Uninstall](#uninstall) says what
+  it leaves.
+* **With the app running**, a double-click starts a second instance, which
+  hands the paths to the one there over the single-instance channel (only its
+  user can reach it; one line of JSON) and quits before it reads a list.
+
+**The menus.** The File menu's accelerators are CmdOrCtrl: Command on macOS,
+Ctrl in the menu bar Electrobun gives each window on Windows. Linux has no
+application menu (Electrobun 2.0.4), so the main window's own buttons do what
+macOS's File menu does: New database, Open file…, the Databases list (Open
+Recent), Remote connections (Connect to a Server…); with the main window
+closed, starting the app again shows it.
 
 ## Serving a database
 
@@ -799,6 +855,42 @@ items, once the app is signed, are readable only by it or by `bun` run by any
 program of the user (above); that they keep their access across an update,
 which needs the signing identity and bundle id to stay fixed.
 
+## Uninstall
+
+On Windows and Linux the app registers `.fennec` itself, at each start,
+for its user alone ([A file from the desktop](#a-file-from-the-desktop)), and
+Electrobun's uninstaller (Windows' Apps settings, or `launcher --uninstall`)
+knows nothing of it. What it leaves, and how to take it away:
+
+* **Windows**, under `HKEY_CURRENT_USER\Software\Classes`: the ProgID
+  `dev.fennecdb.studio.fennec`, its line in `.fennec\OpenWithProgids`, and
+  `.fennec`'s default where that names it. Left alone, a double-clicked
+  `.fennec` says Windows cannot find the launcher. From a Command Prompt or
+  PowerShell:
+
+  ```
+  reg delete HKCU\Software\Classes\dev.fennecdb.studio.fennec /f
+  reg delete HKCU\Software\Classes\.fennec\OpenWithProgids /v dev.fennecdb.studio.fennec /f
+  reg delete HKCU\Software\Classes\.fennec /ve /f
+  ```
+
+  (the last only where `reg query HKCU\Software\Classes\.fennec /ve` says
+  `dev.fennecdb.studio.fennec`).
+* **Linux**, under `~/.local/share` (`$XDG_DATA_HOME`):
+  `applications/dev.fennecdb.studio.desktop` and
+  `mime/packages/dev.fennecdb.studio.xml`. The entry's `TryExec` names the
+  launcher, so once that is gone the desktop ignores it: nothing points
+  nowhere. To take both away:
+
+  ```bash
+  rm ~/.local/share/applications/dev.fennecdb.studio.desktop ~/.local/share/mime/packages/dev.fennecdb.studio.xml
+  update-mime-database ~/.local/share/mime; update-desktop-database ~/.local/share/applications
+  ```
+
+A copy moved elsewhere and started there points the registration at itself.
+The test variant's (`dev.fennecdb.studio.test`) is removed by `run.mjs` at the
+start and the end of every run.
+
 ## Not yet
 
 * From the design: import from SQLite or PostgreSQL, a folder of tenants
@@ -808,10 +900,10 @@ which needs the signing identity and bundle id to stay fixed.
 * Updates: Electrobun makes bsdiff patches against a release it can download,
   and nothing is published; a new version is a new DMG.
 * Intel Macs, and a Windows or Linux download. The app builds and is checked
-  there (Windows and Linux, above); still to come are a `.fennec` handed over
-  by the desktop (Electrobun's launcher drops its arguments) and the menus
-  (phase 3), then the installers and their checks (phase 4), and a signing
-  hook on Windows (Hutch does not sign there).
+  there (Windows and Linux, above); still to come are the installers and their
+  checks (phase 4), and a signing hook on Windows (Hutch does not sign there).
+* An uninstall of the app's own on Windows and Linux: Electrobun's leaves the
+  `.fennec` registration behind ([Uninstall](#uninstall)).
 * A stable origin for a file: the server listens on a port the system picks.
   A window's store is its own, so nothing a file's page keeps (its theme, its
   history) carries to the next open of the file.
