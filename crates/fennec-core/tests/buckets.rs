@@ -259,7 +259,10 @@ fn rows_a_bucket_gave_answer_as_the_scan_without_its_equality() {
         if filter.starts_with("b = [104, 105]") || filter.starts_with("b = $3") {
             let found = answer("plain").unwrap();
             assert!(!found.is_empty(), "{filter}");
-            assert!(found.iter().all(|id| (id - 1) % 3 != 1), "{filter}: {found:?}");
+            assert!(
+                found.iter().all(|id| (id - 1) % 3 != 1),
+                "{filter}: {found:?}"
+            );
         }
         let count = |c: &str| {
             let stmt = fennec_ql::parse_one(&format!("get {c} where {filter} count")).unwrap();

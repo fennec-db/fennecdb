@@ -368,7 +368,9 @@ fn a_term_that_fails_never_runs_over_an_expired_row() {
             Statement::Select(s) => s.filter.unwrap(),
             _ => unreachable!(),
         };
-        let Changes::Batch(b) = db.changes_since("e", seq, Some(&filter), None, &[]).unwrap()
+        let Changes::Batch(b) = db
+            .changes_since("e", seq, Some(&filter), None, &[])
+            .unwrap()
         else {
             panic!("reseed");
         };
