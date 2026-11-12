@@ -14,8 +14,8 @@ one (`access::and`), so a term that fails never runs over a row they hide,
 and an upsert's row is judged before its `else set` reads it
 (`Hook::before_upsert`). The order is fennec-core's to keep: it tests an
 `and`'s terms that may fail as written, each after every term before it
-(`Filter::bind`, `Test::And`, `Filter::chain`, `Filter::without`), only a
-term that cannot fail (`Test::may_fail`) moving ahead of them, and `@ttl`'s
+(`Filter::bind`, `Test::And`, `Chain`, `Filter::without`), only a
+term that cannot fail (`Test::rank`) moving ahead of them, and `@ttl`'s
 `alive` first (`answer_filter`); a planner ordering terms by cost must keep
 it, or a failing term is an oracle again. `explain` is the server
 token's (403): a plan counts rows before the rules hold them. A scoped

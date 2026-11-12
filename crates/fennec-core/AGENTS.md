@@ -217,9 +217,9 @@ An `in` takes buckets only when every element resolves, else the scan.
 **[A filter is bound to its collection once a
 query.](../../docs/design/indexes.md#bound-filters)** What `Filter` cannot bind
 stays `eval`: an error at the first row, never over none. An `and`'s
-terms that may fail (`Test::may_fail`) are tested as written, each after
+terms that may fail (`Test::rank`) are tested as written, each after
 every term before it, only those that cannot moving ahead of them
-(`Filter::chain`, `Filter::without`): fennec-http's access binds the order,
+(`Chain`, `Filter::without`): fennec-http's access binds the order,
 a scoped token's rules written first. A stream's look
 binds a filter holding a long `in` list once a look, its lists kept for
 the next (`Database::changes_held`, `Lists`, their sets alone), where it
@@ -231,7 +231,9 @@ which compares an int, a float and a time by their true values
 (`value::tie`), never as two `f64`s alone, every index's keys and
 `Value::key_as` with it, and any other two kinds by kind (`type_rank`), a
 time below every text; a comparison, `greatest` and `least` read a text
-beside a time as the time it names, either side (`Value::cmp_read`), never
+beside a time as the time it names, either side, and a list of numbers
+from 0 to 255 beside bytes as the bytes it writes, a stream's `eval` as a
+filter (`Value::cmp_read`, `bytes_beside`), never
 the order, an index stepping aside where its keys cannot say it
 (`key_as`, `lookup_key`). A
 `NaN` equals a `NaN` and is above every other number, `+inf` included --

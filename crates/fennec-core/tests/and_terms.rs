@@ -1,4 +1,4 @@
-//! An `and`'s terms are tested in an order of their own (`Filter::chain`):
+//! An `and`'s terms are tested in an order of their own (`Chain`):
 //! of the terms before the first that may fail -- one the bound filter
 //! evaluates, a division, a call, a field it does not know -- each single
 //! test first and then each `or`; from that one on, each where it was
@@ -122,6 +122,38 @@ fn a_term_that_cannot_fail_stays_behind_one_that_may() {
             let got = answer(&db, c, filter, "count", &[]);
             assert!(got.is_err(), "{c} {filter}: {got:?}");
             let written = answer(&db, c, &format!("not (not ({filter}))"), "count", &[]);
+            assert_eq!(got, written, "{c} {filter}");
+        }
+    }
+    // A term may fail by what it holds (`Test::rank`): an `or` with a
+    // division in either side, an `and` under a `not` with one, and a
+    // `not` of one. Each stays where it was written, `n != 3` behind it.
+    for filter in [
+        "(published = true or 1 / (n - 3) > -9) and n != 3",
+        "(1 / (n - 3) > -9 or published = true) and n != 3",
+        "not (n >= 0 and 1 / (n - 3) > 5) and n != 3",
+        "(published = true or author = \"a\") and not (n >= 0 and 1 / (n - 3) > 5) and n != 3",
+    ] {
+        for c in ["hashed", "plain"] {
+            let got = answer(&db, c, filter, "count", &[]);
+            assert!(got.is_err(), "{c} {filter}: {got:?}");
+            let written = answer(&db, c, &format!("not (not ({filter}))"), "count", &[]);
+            assert_eq!(got, written, "{c} {filter}");
+        }
+    }
+    // A `not` of a term that fails over every row a rule's `or` hides is
+    // still asked after the rule, never moved ahead of it with the plain
+    // term beside it.
+    let rule = "(published = true or author = \"a\")";
+    let hidden = "1 / (case when published = true or author = \"a\" then 1 else 0 end) = 2";
+    for filter in [
+        format!("{rule} and not ({hidden}) and n != 3"),
+        format!("{rule} and not (n >= 0 and {hidden}) and n != 3"),
+    ] {
+        for c in ["hashed", "plain"] {
+            let got = answer(&db, c, &filter, "order id", &[]);
+            assert!(got.is_ok(), "{c} {filter}: {got:?}");
+            let written = answer(&db, c, &format!("not (not ({filter}))"), "order id", &[]);
             assert_eq!(got, written, "{c} {filter}");
         }
     }

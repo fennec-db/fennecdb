@@ -16753,7 +16753,10 @@ const IN_SET_AT: usize = 8;
 /// JSON writes bytes out: compared by kind, `b = [104, 105]` found the row
 /// through the bucket and not in the scan, and with a term beside it,
 /// tested without the bucket's equality (`Filter::without`), found it
-/// through the bucket where the browser module and the scan did not.
+/// through the bucket where the browser module and the scan did not. A
+/// comparison reads it so wherever it meets bytes (`Value::cmp_read`), a
+/// stream's `eval` and a `case` too; read here, a row's bytes meet bytes
+/// and no list is read again at each.
 fn as_field(c: &Collection, slot: Slot, v: &mut Value) {
     let Slot::At(p) = slot else { return };
     match (&c.schema.fields[p].ty, v) {

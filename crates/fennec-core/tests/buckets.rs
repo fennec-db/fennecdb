@@ -194,6 +194,7 @@ fn rows_a_bucket_gave_answer_as_the_scan_without_its_equality() {
         &mut db,
         "create collection plain (k text, f float, h text nocase, n int, b bytes)",
     );
+    let cursor = db.change_seq();
     for c in ["hashed", "plain"] {
         for i in 0..40 {
             run(
@@ -271,5 +272,50 @@ fn rows_a_bucket_gave_answer_as_the_scan_without_its_equality() {
                 .map_err(|e| e.to_string())
         };
         assert_eq!(count("hashed"), count("plain"), "{filter}");
+        if !filter.starts_with("b ") && !filter.contains(" b ") {
+            continue;
+        }
+        // A stream's test of a changed row (`changes_since`, `eval`'s) and
+        // a select list's item read the list beside bytes as the query's
+        // filter does: compared by kind, a stream seeded the row and then
+        // told its subscriber it was deleted.
+        for c in ["hashed", "plain"] {
+            let rows = answer(c).unwrap();
+            let shape = match fennec_ql::parse_one(&format!("get {c} where {filter}")).unwrap() {
+                Statement::Select(s) => s.filter.unwrap(),
+                _ => unreachable!(),
+            };
+            let streamed = |b: Changes| match b {
+                Changes::Batch(b) => {
+                    assert_eq!(b.puts.rows.len() + b.dels.len(), 40, "{c} {filter}");
+                    b.puts.rows.iter().map(|r| r.id).collect::<Vec<_>>()
+                }
+                Changes::Reseed => panic!("{c} {filter}: a reseed"),
+            };
+            let since = db.changes_since(c, cursor, Some(&shape), None, &params);
+            assert_eq!(
+                streamed(since.unwrap()),
+                rows,
+                "{c} {filter}: changes_since"
+            );
+            if !filter.contains('$') {
+                let written = db.written_after(c, cursor).unwrap().unwrap();
+                let held = db.changes_held(c, written, Some(&shape), None, None);
+                assert_eq!(streamed(held.unwrap()), rows, "{c} {filter}: changes_held");
+            }
+            let sql = format!("get {c} select id, {filter} as hit order id");
+            let listed = db
+                .query(&fennec_ql::parse_one(&sql).unwrap(), &params)
+                .unwrap_or_else(|e| panic!("{sql}: {e}"));
+            let hits: Vec<u64> = listed
+                .rows()
+                .unwrap()
+                .rows
+                .iter()
+                .filter(|r| r.values[1] == Value::Bool(true))
+                .map(|r| r.id)
+                .collect();
+            assert_eq!(hits, rows, "{sql}");
+        }
     }
 }

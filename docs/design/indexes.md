@@ -355,9 +355,32 @@ and the browser module answered `[]`. The bound filter now reads the value
 beside a `bytes` field as the field's `@hash` does (`as_field`, an `in`'s
 items too), so the bucket, the scan and the module all answer the row
 (`tests/buckets.rs`, and
-`web/fennec.test.js` for the module): 83 bytes of the browser module. An
-`eval` of the same comparison -- under a `case`, beside a call -- still
-compares by kind; no index answers one there.
+`web/fennec.test.js` for the module): 83 bytes of the browser module.
+
+Its review found `eval` still comparing by kind, and `eval` is a stream's
+test of a changed row wherever its shape holds no long `in` list
+(`changes_since`, fennec-http's `sse.rs`): over a `bytes` field, with a
+`@hash` or without, `b = [104, 105]` answered the row in a query and in
+`changes_held` and nothing in `changes_since`, so a stream seeded the row
+and then told its subscriber it was deleted; `b != [104, 105]` the other
+way round, and a select list's `b = [104, 105]` and a `case` disagreed with
+the filter too. A comparison now reads a list of numbers from 0 to 255, or
+a vector of them, beside bytes as the bytes it writes wherever it meets
+them (`Value::cmp_read`'s `bytes_beside`, through `Value::key_as`), `=`,
+`<`, `in` and `has` alike, in a list too; a list of anything else still
+orders by kind. It is asked in `cmp_kinds`' last arm, where two kinds no
+other arm compares fall to their ranks, and out of line, so no comparison
+of two kinds that compare pays for it; the bound filter still reads the
+list once a query (`as_field`), so a scan's row meets bytes. The order,
+`cmp_value`, is untouched. `tests/buckets.rs` holds `changes_since`,
+`changes_held` and a select list's item to the query's rows. The browser
+module grew 278 bytes (853 535 -> 853 813), 93 gzip and 68 brotli, and
+the module with no feature the same 278; comparing through `cmp_value`
+after the conversion, rather than the two slices, was 14 bytes more.
+Natively a scan of 100 000 rows by a float, a time and an expression
+(`make instr-compare PKG=fennec-core EXAMPLE=orders`, eight identities a
+build) took 0.38%, 0.44% and 0.25% fewer instructions, two or three a row,
+the comparison's code laid out anew; none took more.
 
 **An `and`'s terms are laid out by what may fail** (`Chain`, `Test::rank`).
 `Filter::new` and `Filter::without` bind an `and`'s terms in the order
