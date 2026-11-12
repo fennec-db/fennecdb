@@ -101,11 +101,11 @@ export function keysToPage(
 	win: FocusedWindow,
 	view: { on(event: "did-navigate", handler: () => void): void },
 	look: () => KeyFocus | null | Promise<KeyFocus | null>,
-	said: (f: KeyFocus | null, moved: boolean) => void = () => {},
+	said: (f: KeyFocus | null, moved: boolean, why: "loaded" | "activated") => void = () => {},
 	platform: NodeJS.Platform = process.platform,
 ): void {
 	if (platform !== "win32") return;
-	const give = async () => {
+	const give = async (why: "loaded" | "activated") => {
 		const f = await look();
 		const moved = movesFocus(f);
 		if (moved) {
@@ -115,8 +115,8 @@ export function keysToPage(
 				// The window closed since: there is no page to give the focus to.
 			}
 		}
-		said(f, moved);
+		said(f, moved, why);
 	};
-	view.on("did-navigate", give);
-	win.on("focus", give);
+	view.on("did-navigate", () => void give("loaded"));
+	win.on("focus", () => void give("activated"));
 }

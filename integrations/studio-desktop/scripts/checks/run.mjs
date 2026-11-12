@@ -16,7 +16,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { closeSync, mkdirSync, openSync, rmSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
-import { APP_DATA, D, HERE, POWERSHELL, WIN, clearDimming, describe, forgetRegistration, freshState, keepEvidence, mine, now, procs, sleep } from './lib.mjs';
+import { APP_DATA, D, HERE, POWERSHELL, WIN, clearDimming, describe, screenNow, forgetRegistration, freshState, keepEvidence, mine, now, procs, sleep } from './lib.mjs';
 
 /**
  * Every check, in the order they run, and the systems one does not run on:
@@ -104,9 +104,20 @@ const system = process.platform;
 // Windows: a picker of the shell's left on the screen dims every window under it and takes every
 // click (lib.mjs's `dimWindows`): what the run found there is said and closed, and a check that
 // leaves one fails, the picker closed for the checks after it.
+// And the window in front when it is another program's and was not after the check before: a
+// window of the app's opens behind it, which the app leaves there (`menu` then brings its main
+// window forward by its title bar), so where one comes from is said.
+let lastFront = null;
+function frontNow(after) {
+  const { front } = screenNow();
+  const theirs = front && front.pid !== 0 && front.name !== 'bun' && front.name !== 'explorer';
+  if (theirs && (front.pid !== lastFront?.pid)) console.log(`${after}: another program's window is in front: ${JSON.stringify(front)}`);
+  lastFront = front;
+}
 if (WIN) {
   const found = await clearDimming();
   console.log(found ? `the screen as the run found it, dimmed: ${JSON.stringify(found)}` : 'the screen as the run found it: nothing dims it');
+  frontNow('the run starts');
 }
 const results = [];
 for (const { name, skip } of chosen) {
@@ -161,6 +172,7 @@ for (const { name, skip } of chosen) {
     if (mine().length) console.log(`still running 30 s after the kill:\n${describe(mine())}`);
   }
   const dimmed = WIN ? await clearDimming() : null;
+  if (WIN) frontNow(`after ${name}`);
   if (dimmed) console.log(`${name} left the screen dimmed by another program's picker; closing it: ${JSON.stringify(dimmed)}`);
   results.push({ name, ok: code === 0 && left.length === 0 && !dimmed, ms: Date.now() - t0 });
 }

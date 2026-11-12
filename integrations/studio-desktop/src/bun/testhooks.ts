@@ -164,9 +164,9 @@ export function noticeShown(win: BrowserWindow, n: Notice) {
  * `focusesPage`), and whether it moved it into the page: the check waits for
  * this before it types into a window as it opened.
  */
-export function pageFocus(w: BrowserWindow, f: unknown, moved: boolean) {
+export function pageFocus(w: BrowserWindow, f: unknown, moved: boolean, why: string) {
 	const key = [...pages].find(([, p]) => p.win === w)?.[0] ?? null;
-	report("page-focus", { key, win: w.id, focus: f, moved });
+	report("page-focus", { key, win: w.id, why, focus: f, moved });
 }
 
 /** The text an app page shows, reported when it changes. */
@@ -304,8 +304,16 @@ async function run(c: any) {
 			const hwnd = BigInt(page.win.ptr as unknown as number);
 			const before = k.lastInput();
 			let front = k.isFront(hwnd);
-			// A point near the page's top left corner, inside it at any scale.
-			const clicked = c.click ? k.click(hwnd, 8, 8) : null;
+			// A point near the page's top left corner, inside it at any scale; or, with `title`, a point of
+			// its title bar no other window lies over, as a person brings a window forward without
+			// touching its page.
+			let clicked: ReturnType<typeof k.click> | null;
+			try {
+				clicked = c.title ? k.clickTitle(hwnd) : c.click ? k.click(hwnd, 8, 8) : null;
+			} catch (e) {
+				report("keys-result", { key: c.key, error: (e as Error).message, front, targets: k.inputTargets(hwnd, null), inFront: k.foreground(), self: process.pid });
+				break;
+			}
 			// Whether the system took the click: the raw input thread takes it after mouse_event returns.
 			let clickTaken = clicked ? k.lastInput() !== before : null;
 			for (let i = 0; clicked && !clickTaken && i < 25; i++) {

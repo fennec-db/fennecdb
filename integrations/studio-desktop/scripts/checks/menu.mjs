@@ -8,11 +8,14 @@
 // do there what the menu does, never twice; which one did is said. The keys
 // are pressed as a person's are (testkeys.ts: each key through the system's
 // input stream, a click as a mouse's), and nothing of the check's own brings a
-// window forward or moves its focus. First the control, twice: text typed into
-// the main window as it opened, with no click, arrives in its search box (the
-// app put the keyboard focus in its page: windows.ts's `focusesPage`; on the
-// arm64 runner it was on the bare window, and typed keys reached nothing), and
-// a click into its page reaches the page, text typed after it too. Either
+// window forward or moves its focus but as a person's clicks do. First the
+// control, twice: text typed into the main window as it opened, with no click
+// into its page, arrives in its search box (the app put the keyboard focus in
+// its page: windows.ts's `focusesPage`; on the arm64 runner it was on the bare
+// window, and typed keys reached nothing; where the window opened behind
+// another program's, which the app leaves there, a click on its title bar
+// brings it forward first, and the app's look at that activation moves the
+// focus), and a click into its page reaches the page, text typed after it too. Either
 // failing fails the check, saying what the page saw and where the system's
 // input went, so a chord that does nothing is the app's failing, not the keys'.
 //
@@ -109,11 +112,27 @@ if (WIN) {
 
   // What of the system's input reaches the page at all, for a failure's message.
   await evalIn('launcher', `window.__seen = { mouse: 0, keys: 0 }; document.addEventListener('mousedown', () => window.__seen.mouse++, true); document.addEventListener('keydown', () => window.__seen.keys++, true); return true`);
-  step('the control: the main window as it opened takes text typed, with no click, into its search box');
-  // The event the keys wait for: the page has the system's focus (the app moved it there once
-  // the page loaded with the window in front). Nothing of the check's own moves it.
-  const focused = await until(async () => (await pageSaw()).focused, 30000, "the main window's page focused").then(() => true, () => false);
-  if (!focused) assert.fail(`the main window's page never had the focus, with nothing clicked (the page: ${JSON.stringify(await pageSaw())}; ${await whereInputGoes()})`);
+  step('the control: the main window as it opened takes text typed, with no click into its page, into its search box');
+  // The app's look once the page loaded says whether the window opened in front. Behind another
+  // program's window (on the arm64 runner a "Microsoft account" window was in front), the app
+  // leaves it there, and a person brings it forward with a click on its title bar, not its page:
+  // so does the check, and the app's look at that activation is the one that moves the focus.
+  const loaded = await waitFor((l) => l.what === 'page-focus' && l.key === 'launcher' && l.why === 'loaded', 30000, "the app's look at the main window once its page loaded");
+  if (!loaded.focus?.front) {
+    const n = lines().length;
+    cmd({ cmd: 'last-input', key: 'launcher' });
+    const was = await waitFor((l, i) => i >= n && l.what === 'last-input', 15000, 'what is in front');
+    log(`the main window opened behind another program's window (in front: ${JSON.stringify(was.front)}), and the app left it there; brought forward by a click on its title bar`);
+    const t = lines().length;
+    cmd({ cmd: 'keys', key: 'launcher', title: true });
+    const r = await waitFor((l, i) => i >= t && l.what === 'keys-result', 15000, 'the click on the title bar');
+    if (!r.front) assert.fail(`a click on the main window's title bar did not bring it forward (${JSON.stringify(r)})`);
+    const act = await waitFor((l, i) => i >= t && l.what === 'page-focus' && l.key === 'launcher' && l.why === 'activated' && l.focus?.front, 15000, "the app's look at the main window once it was brought forward");
+    log(`brought forward by its title bar (${JSON.stringify(r.clicked)}): the app ${act.moved ? 'moved the focus into its page' : `found ${JSON.stringify(act.focus)}`}`);
+  }
+  // The event the keys wait for: the page has the system's focus. Nothing of the check's own moves it.
+  const focused = await until(async () => (await pageSaw()).focused, 15000, "the main window's page focused").then(() => true, () => false);
+  if (!focused) assert.fail(`the main window's page never had the focus, with nothing clicked in it (the page: ${JSON.stringify(await pageSaw())}; ${await whereInputGoes()})`);
   await typeFen('typed into the main window as it opened');
   const typed = await pageSaw();
   assert.ok(typed.seen.keys >= 3 && typed.seen.mouse === 0, `the page saw the three keys and no click (${JSON.stringify(typed)})`);

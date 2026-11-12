@@ -1039,12 +1039,19 @@ window and the app's words are each system's, and the app has its icon there.
   there. `menu` presses each of them, and the keys: on Windows as a person's
   (testkeys.ts: keybd_event, and a click as a mouse's, absolute, which also
   brings the window to the front), its control twice -- text typed into the
-  main window as it opened, with no click, arriving in its search box, then a
-  click into its page reaching the page and text typed after it arriving --
+  main window as it opened, with no click into its page, arriving in its
+  search box, then a click into its page reaching the page and text typed
+  after it arriving --
   each key's effect asserted and taken once, by the menu bar or the page,
   never both; on Linux, which has no input a check can press as a person's
-  under xvfb, dispatched in the page. Nothing of the check's own brings a
-  window forward or moves its focus: no Alt (the first version pressed and let
+  under xvfb, dispatched in the page. Where the main window opened behind
+  another program's (on the arm64 runner, once the firewall asked nothing, a
+  "Microsoft account" window was in front when `menu` started; `run.mjs` says
+  when another program's window comes to the front), the app leaves it there,
+  and the check brings it forward as a person would, by a click on its title
+  bar at a point no other window lies over: the app's look at that activation
+  is then the one that moves the focus, the other half of the rule. Nothing
+  else of the check's own brings a window forward or moves its focus: no Alt (the first version pressed and let
   go of one before a SetForegroundWindow, which can put the menu bar of a
   window in front by then in menu mode, where keys go), no activation, and no keys
   dispatched in the page on Windows, where the first version did so when the

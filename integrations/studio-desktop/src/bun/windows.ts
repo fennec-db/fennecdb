@@ -54,7 +54,7 @@ export function focusesPage(win: BrowserWindow<any>, view: BrowserView): void {
 			const ptr = win.ptr;
 			return ptr ? (await import("./win32.ts")).keyFocus(BigInt(ptr as unknown as number)) : null;
 		},
-		__TESTABLE__ ? (f, moved) => void import("./testhooks.ts").then((h) => h.pageFocus(win, f, moved)) : undefined,
+		__TESTABLE__ ? (f, moved, why) => void import("./testhooks.ts").then((h) => h.pageFocus(win, f, moved, why)) : undefined,
 	);
 }
 

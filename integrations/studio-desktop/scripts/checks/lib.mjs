@@ -159,13 +159,26 @@ export function procs() {
  * click into its main window's page landed on it.
  */
 export function dimWindows() {
+  return screenNow().dims;
+}
+
+/**
+ * Windows: what is on the screen that a check's input meets, through one
+ * PowerShell: the dimming windows (`dimWindows`) and the window in front, by
+ * its process, the program's name, when it started and its title.
+ */
+export function screenNow() {
   const ps = [
-    `Add-Type -Namespace FennecCheck -Name Dim -MemberDefinition '[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowExW(IntPtr parent, IntPtr after, string cls, string title); [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h); [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid); [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, int[] r);'`,
+    `Add-Type -Namespace FennecCheck -Name Dim -MemberDefinition '[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowExW(IntPtr parent, IntPtr after, string cls, string title); [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h); [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid); [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, int[] r); [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr h, System.Text.StringBuilder s, int n);'`,
+    `function Started($p) { if ($p.StartTime) { $p.StartTime.ToUniversalTime().ToString('o') } else { '-' } }`,
     `$h = [IntPtr]::Zero`,
-    `while (($h = [FennecCheck.Dim]::FindWindowExW([IntPtr]::Zero, $h, 'Shell_SystemDim', $null)) -ne [IntPtr]::Zero) { $o = 0; [void][FennecCheck.Dim]::GetWindowThreadProcessId($h, [ref]$o); $r = New-Object int[] 4; [void][FennecCheck.Dim]::GetWindowRect($h, $r); $p = Get-Process -Id $o -ErrorAction SilentlyContinue; '{0} {1} {2} {3} {4}' -f $o, $p.ProcessName, $(if ($p.StartTime) { $p.StartTime.ToUniversalTime().ToString('o') } else { '-' }), [FennecCheck.Dim]::IsWindowVisible($h), ($r -join ',') }`,
+    `while (($h = [FennecCheck.Dim]::FindWindowExW([IntPtr]::Zero, $h, 'Shell_SystemDim', $null)) -ne [IntPtr]::Zero) { $o = 0; [void][FennecCheck.Dim]::GetWindowThreadProcessId($h, [ref]$o); $r = New-Object int[] 4; [void][FennecCheck.Dim]::GetWindowRect($h, $r); $p = Get-Process -Id $o -ErrorAction SilentlyContinue; 'D {0} {1} {2} {3} {4}' -f $o, $p.ProcessName, (Started $p), [FennecCheck.Dim]::IsWindowVisible($h), ($r -join ',') }`,
+    `$f = [FennecCheck.Dim]::GetForegroundWindow(); $o = 0; [void][FennecCheck.Dim]::GetWindowThreadProcessId($f, [ref]$o); $t = New-Object System.Text.StringBuilder 256; [void][FennecCheck.Dim]::GetWindowTextW($f, $t, 256); $p = Get-Process -Id $o -ErrorAction SilentlyContinue; 'F {0} {1} {2} {3}' -f $o, $p.ProcessName, (Started $p), $t.ToString()`,
   ].join('; ');
-  const r = spawnSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', timeout: 60000 });
-  return (r.stdout ?? '').split(/\r?\n/).map((l) => /^(\d+) (\S*) (\S+) (True|False) (.*)$/.exec(l.trim())).filter(Boolean).map((m) => ({ pid: +m[1], name: m[2], started: m[3], visible: m[4] === 'True', rect: m[5] }));
+  const out = (spawnSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', timeout: 60000 }).stdout ?? '').split(/\r?\n/).map((l) => l.trim());
+  const dims = out.map((l) => /^D (\d+) (\S*) (\S+) (True|False) (.*)$/.exec(l)).filter(Boolean).map((m) => ({ pid: +m[1], name: m[2], started: m[3], visible: m[4] === 'True', rect: m[5] }));
+  const f = out.map((l) => /^F (\d+) (\S*) (\S+) ?(.*)$/.exec(l)).find(Boolean);
+  return { dims, front: f ? { pid: +f[1], name: f[2], started: f[3], title: f[4] } : null };
 }
 
 /**

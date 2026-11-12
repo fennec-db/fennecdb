@@ -90,8 +90,8 @@ test("the focus is moved into the page only from a window in front, with no menu
 test("on Windows a window's page is given the focus once it loads and at each activation, and only then", async () => {
 	const w = fakeWindow();
 	let focus = at({});
-	const said: boolean[] = [];
-	keysToPage(w.win, w.view, () => focus, (_f, moved) => said.push(moved), "win32");
+	const said: string[] = [];
+	keysToPage(w.win, w.view, () => focus, (_f, moved, why) => said.push(`${why} ${moved}`), "win32");
 	await w.fire("did-navigate");
 	assert.equal(w.activated, 1, "the page loaded, the window in front, the focus on the bare window");
 	focus = at({ onWindow: false });
@@ -104,7 +104,7 @@ test("on Windows a window's page is given the focus once it loads and at each ac
 	focus = at({});
 	await w.fire("focus");
 	assert.equal(w.activated, 2, "activated by the user, the focus on the bare window: moved into the page");
-	assert.deepEqual(said, [true, false, false, false, true], "every look is said, moved or not");
+	assert.deepEqual(said, ["loaded true", "activated false", "activated false", "loaded false", "activated true"], "every look is said, why and whether moved");
 });
 
 test("a window closed before its look is no failure", async () => {

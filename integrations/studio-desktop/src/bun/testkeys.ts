@@ -19,6 +19,8 @@ const MOUSEEVENTF_ABSOLUTE = 0x8000;
 const GW_HWNDNEXT = 2;
 const GW_CHILD = 5;
 const GWL_EXSTYLE = -20;
+const SM_CYCAPTION = 4;
+const SM_CYMENU = 15;
 const VK: Record<string, number> = { ctrl: 0x11, shift: 0x10, alt: 0x12 };
 
 let user32: ReturnType<typeof load> | null = null;
@@ -102,14 +104,39 @@ export function click(hwnd: bigint, x: number, y: number): { x: number; y: numbe
 	return { x: point[0]!, y: point[1]!, cursor: [...cursor] };
 }
 
-/** The window in front, by its process and title: where a window's keys went when it was not. */
-export function foreground(): { pid: number; title: string } {
+/** The window in front, by its process, its title and, another program's, its program: where a window's keys went when it was not. */
+export function foreground(): { pid: number; title: string; image?: string } {
 	const hwnd = u().GetForegroundWindow();
 	const pid = new Uint32Array(1);
 	u().GetWindowThreadProcessId(hwnd, pid);
 	const title = new Uint16Array(256);
 	const n = u().GetWindowTextW(hwnd, title, title.length);
-	return { pid: pid[0]!, title: Buffer.from(title.buffer, 0, Math.max(0, n) * 2).toString("utf16le") };
+	const other = pid[0]! !== 0 && pid[0]! !== process.pid;
+	return { pid: pid[0]!, title: Buffer.from(title.buffer, 0, Math.max(0, n) * 2).toString("utf16le"), ...(other ? { image: imageOf(pid[0]!) } : {}) };
+}
+
+/**
+ * A left click on `hwnd`'s title bar, at the first point along it, from its
+ * left, where the window under the point is `hwnd` itself (no other window
+ * lies over it): the middle of the caption, above the menu bar and the client
+ * area (ClientToScreen of the client's top, less SM_CYMENU and half of
+ * SM_CYCAPTION). As a person brings a window forward without touching its
+ * page. Says where, and the window it found there.
+ */
+export function clickTitle(hwnd: bigint): { x: number; y: number; cursor: number[]; hit: unknown } {
+	const top = new Int32Array([0, 0]);
+	if (!u().ClientToScreen(hwnd, top)) throw new Error("ClientToScreen failed");
+	const rect = new Int32Array(4);
+	u().GetWindowRect(hwnd, rect);
+	const y = top[1]! - u().GetSystemMetrics(SM_CYMENU) - Math.round(u().GetSystemMetrics(SM_CYCAPTION) / 2);
+	const at = (x: number) => BigInt.asUintN(64, (BigInt(y) << 32n) | BigInt.asUintN(32, BigInt(x)));
+	const screenRight = u().GetSystemMetrics(0);
+	for (let x = rect[0]! + 60; x < Math.min(rect[2]!, screenRight) - 160; x += 40) {
+		if (u().WindowFromPoint(at(x)) !== hwnd) continue;
+		const done = click(hwnd, x - top[0]!, y - top[1]!);
+		return { ...done, hit: describeWindow(hwnd, hwnd) };
+	}
+	throw new Error(`no point of the title bar at y ${y} is the window's own: another window lies over all of it`);
 }
 
 /**
