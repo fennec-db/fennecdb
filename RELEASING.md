@@ -131,7 +131,11 @@ nothing reaches a registry before the notes have had a read.
    check them. A download's name is never replaced (a re-run of the job finds
    its own there and goes on, and a failed job's download is attached by
    re-running it), and `SHA256SUMS` is missing for the moment `--clobber`
-   replaces it, so not while `packages.yml` is reading it. Then, once each:
+   replaces it, so not while `packages.yml` is reading it. A DMG built again
+   is another file, so a release whose DMG is attached already and whose
+   Windows and Linux downloads are not (a release from before they shipped)
+   takes them with `-f systems=windows-linux`: the Mac's job does not run and
+   the release keeps its DMG. Then, once each:
    `curl -fsSL https://fennecdb.com/install.sh | sh -s -- --app` on a Mac
    with Apple silicon and on a Linux desktop, and `& ([scriptblock]::Create((irm
    https://fennecdb.com/install.ps1))) -App` on Windows; open the DMG from the
