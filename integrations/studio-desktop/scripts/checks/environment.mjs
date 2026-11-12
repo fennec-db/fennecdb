@@ -18,7 +18,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { D, HERE, SERVER, WIN, assertClean, cmd, data, lines, quit, startApp, step, waitFor, waitStudio, log } from './lib.mjs';
+import { BUN, D, HERE, SERVER, WIN, assertClean, cmd, data, lines, quit, startApp, step, waitFor, waitStudio, log } from './lib.mjs';
 
 assertClean('before');
 const SMALL = data('small', 20);
@@ -44,6 +44,9 @@ if (WIN) {
   const toolchain = Object.keys(pin[`windows-${process.arch}`]?.runtime ?? {}).find((k) => k.startsWith('toolchains/bun/'));
   assert.ok(toolchain, `hutch-pin.json pins a Bun for windows-${process.arch}`);
   const bun = join(HERE, '.hutch-home', toolchain, 'bun.exe');
+  // What the icon's write left of the app's copy: its publisher's signature, as Windows reads it.
+  const signature = (f) => spawnSync('powershell', ['-NoProfile', '-Command', '$s = Get-AuthenticodeSignature -LiteralPath $env:FENNEC_CHECK_FILE; "{0} {1}" -f $s.Status, $s.SignerCertificate.Subject'], { encoding: 'utf8', env: { ...process.env, FENNEC_CHECK_FILE: f } }).stdout.trim();
+  log(`the toolchain's Bun: ${signature(bun)}; the app's: ${signature(BUN)}`);
   const built = spawnSync(bun, ['build', '--compile', source, '--outfile', WRAP], { encoding: 'utf8', timeout: 120000 });
   assert.equal(built.status, 0, `the stand-in built: ${built.stderr}${built.stdout}`);
 } else {

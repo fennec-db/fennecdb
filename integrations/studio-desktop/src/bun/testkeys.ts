@@ -18,6 +18,7 @@ function load() {
 		keybd_event: { args: [FFIType.u8, FFIType.u8, FFIType.u32, FFIType.u64], returns: FFIType.void },
 		SetForegroundWindow: { args: [FFIType.u64], returns: FFIType.i32 },
 		GetForegroundWindow: { args: [], returns: FFIType.u64 },
+		GetLastInputInfo: { args: [FFIType.ptr], returns: FFIType.i32 },
 		ClientToScreen: { args: [FFIType.u64, FFIType.ptr], returns: FFIType.i32 },
 		SetCursorPos: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
 		mouse_event: { args: [FFIType.u32, FFIType.u32, FFIType.u32, FFIType.u32, FFIType.u64], returns: FFIType.void },
@@ -99,4 +100,14 @@ export function foreground(): { pid: number; title: string } {
 	const title = new Uint16Array(256);
 	const n = u().GetWindowTextW(hwnd, title, title.length);
 	return { pid: pid[0]!, title: Buffer.from(title.buffer, 0, Math.max(0, n) * 2).toString("utf16le") };
+}
+
+/**
+ * The tick of the last input the session took (GetLastInputInfo), injected
+ * input included: unchanged after keys pressed, the system took none of them
+ * (seen on the windows-11-arm runner, where typed text never reached a page).
+ */
+export function lastInput(): number {
+	const info = new Uint32Array([8, 0]);
+	return u().GetLastInputInfo(info) ? info[1]! : -1;
 }

@@ -268,6 +268,7 @@ async function run(c: any) {
 			}
 			const k = await import("./testkeys.ts");
 			const hwnd = BigInt(page.win.ptr as unknown as number);
+			const before = k.lastInput();
 			let front = k.toFront(hwnd);
 			// A point near the page's top left corner, inside it at any scale: the click is for the focus.
 			const clicked = c.click ? k.click(hwnd, 8, 8) : null;
@@ -278,7 +279,13 @@ async function run(c: any) {
 			}
 			if (c.type) k.type(c.type);
 			if (c.chord) k.chord(c.chord);
-			report("keys-result", { key: c.key, front, clicked, type: c.type ?? null, chord: c.chord ?? null, ...(front ? {} : { inFront: k.foreground(), self: process.pid }) });
+			// Whether the system took any of it: the raw input thread takes it after this returns.
+			let taken = k.lastInput() !== before;
+			for (let i = 0; !taken && i < 25; i++) {
+				await Bun.sleep(20);
+				taken = k.lastInput() !== before;
+			}
+			report("keys-result", { key: c.key, front, clicked, taken, type: c.type ?? null, chord: c.chord ?? null, ...(front ? {} : { inFront: k.foreground(), self: process.pid }) });
 			break;
 		}
 		case "quit": Utils.quit(); break;

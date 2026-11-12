@@ -9,7 +9,10 @@
 // are pressed as a person's are (testkeys.ts: the window brought to the front,
 // a click into its page, each key through the system's input stream), and the
 // control is text typed the same way arriving in the page's search box, so a
-// chord that does nothing is the app's failing, not the keys'.
+// chord that does nothing is the app's failing, not the keys'. Where the system
+// takes none of the keys pressed (GetLastInputInfo unchanged: the windows-11-arm
+// runner), they are dispatched in the page instead, as on Linux, and the log
+// says so; keys the system took and the page never got fail the check.
 //
 // Linux has no application menu (Electrobun 2.0.4: "Application menus are not
 // supported on Linux"): the main window's own buttons do what macOS's File
@@ -36,6 +39,26 @@ const connectionsShown = async () => (await evalIn('launcher', `return !document
 /** Back to the Databases section, as its button does. */
 const databasesShown = () => evalIn('launcher', `document.querySelector('.nav[data-section=databases]').click(); return true`);
 
+/** Ctrl+N, Ctrl+O and Ctrl+Shift+O dispatched in the main window's page, each asserted by what it does. */
+async function dispatchedKeys() {
+  await databasesShown();
+  const key = (k, shift = false) => evalIn('launcher', `document.dispatchEvent(new KeyboardEvent('keydown', {key: ${JSON.stringify(k)}, ctrlKey: true, shiftKey: ${shift}, bubbles: true, cancelable: true})); return true`);
+  let n = lines().length;
+  await key('n');
+  await waitFor((l, i) => i >= n && l.what === 'window-created' && l.key === 'newdb', 30000, 'Ctrl+N: the new-database window');
+  cmd({ cmd: 'close', key: 'newdb' });
+  await waitFor((l, i) => i >= n && l.what === 'window-close' && l.key === 'newdb', 15000, 'the new-database window closed');
+  n = lines().length;
+  cmd({ cmd: 'answer', kind: 'file', path: FILE });
+  await key('o');
+  await waitFor((l, i) => i >= n && l.what === 'server-started' && l.path === FILE, 30000, 'Ctrl+O: the file opened');
+  await waitStudio(`file:${FILE}`, n);
+  cmd({ cmd: 'close', key: `file:${FILE}` });
+  await waitFor((l, i) => i >= n && l.what === 'server-stopped', 30000, 'its window closed');
+  await key('O', true);
+  await until(connectionsShown, 10000, 'Ctrl+Shift+O: Remote connections shown');
+}
+
 if (WIN) {
   /** Window `key` in front, and the focus in its page: a click near the page's top left corner, as a person's click puts it there. */
   async function focusPage() {
@@ -58,12 +81,26 @@ if (WIN) {
   }
 
   step('the control: a click into the page and text typed reach its search box');
+  // What of the system's input reaches the page at all, for the failure's message.
+  await evalIn('launcher', `window.__seen = { mouse: 0, keys: 0 }; document.addEventListener('mousedown', () => window.__seen.mouse++, true); document.addEventListener('keydown', () => window.__seen.keys++, true); return true`);
   await focusPage();
   await evalIn('launcher', `const f = document.getElementById('find'); f.value = ''; f.focus(); return document.activeElement === f`);
-  let n = lines().length;
+  const n = lines().length;
   cmd({ cmd: 'keys', key: 'launcher', type: 'fen' });
-  await waitFor((l, i) => i >= n && l.what === 'keys-result', 15000, 'typed');
-  await until(async () => (await evalIn('launcher', `return document.getElementById('find').value`)).value === 'fen', 10000, 'the search box holds what was typed');
+  const typed = await waitFor((l, i) => i >= n && l.what === 'keys-result', 15000, 'typed');
+  const arrived = await until(async () => (await evalIn('launcher', `return document.getElementById('find').value`)).value === 'fen', 10000, 'the search box holds what was typed').then(() => true, () => false);
+  if (!arrived) {
+    const seen = (await evalIn('launcher', `return window.__seen`)).value;
+    // Keys the system took and the page never got are the app's failing; keys the system took
+    // none of are this machine's (GetLastInputInfo unchanged), and leave the menu bar's question open.
+    assert.equal(typed.taken, false, `the system took the keys typed and the page got none of them (the page saw ${JSON.stringify(seen)})`);
+    log(`the system took none of the keys this check pressed (GetLastInputInfo unchanged; the page saw ${JSON.stringify(seen)}): no key is pressed as a person's on this machine, and the keys are dispatched in the page instead`);
+    step('the File menu\'s keys in the main window, dispatched in its page: Ctrl+N, Ctrl+O, Ctrl+Shift+O');
+    await dispatchedKeys();
+    await quit(app);
+    log('clean');
+    process.exit(0);
+  }
   log('typed text reaches the page: WebView2 has the focus');
 
   cmd({ cmd: 'answer', kind: 'file', path: FILE });
@@ -126,20 +163,8 @@ if (WIN) {
   const shown = await evalIn('launcher', `document.querySelector('.nav[data-section=connections]').click(); return !document.getElementById('connections').hidden && Boolean(document.getElementById('conn-add'))`);
   assert.equal(shown.value, true, 'the connections section and its Add are shown');
 
-  step('the File menu\'s keys in the main window: Ctrl+N, Ctrl+O, Ctrl+Shift+O');
-  await databasesShown();
-  const key = (k, shift = false) => evalIn('launcher', `document.dispatchEvent(new KeyboardEvent('keydown', {key: ${JSON.stringify(k)}, ctrlKey: true, shiftKey: ${shift}, bubbles: true, cancelable: true})); return true`);
-  n = lines().length;
-  await key('n');
-  await waitFor((l, i) => i >= n && l.what === 'window-created' && l.key === 'newdb', 30000, 'Ctrl+N: the new-database window');
-  cmd({ cmd: 'close', key: 'newdb' });
-  await waitFor((l, i) => i >= n && l.what === 'window-close' && l.key === 'newdb', 15000, 'the new-database window closed');
-  n = lines().length;
-  cmd({ cmd: 'answer', kind: 'file', path: FILE });
-  await key('o');
-  await waitFor((l, i) => i >= n && l.what === 'server-started' && l.path === FILE, 30000, 'Ctrl+O: the file opened');
-  await key('O', true);
-  await until(connectionsShown, 10000, 'Ctrl+Shift+O: Remote connections shown');
+  step('the File menu\'s keys in the main window, dispatched in its page: Ctrl+N, Ctrl+O, Ctrl+Shift+O');
+  await dispatchedKeys();
 
   step('the main window closed, then shown again by starting the app a second time');
   n = lines().length;

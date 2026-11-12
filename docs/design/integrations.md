@@ -836,11 +836,13 @@ keys are each system's, and the app has its icon there.
   window a menu bar, and translates accelerators in the main process's
   message loop (TranslateAccelerator), which sees the keys of its own
   windows; WebView2 in a window is another process's window. Measured on the
-  Windows runners: with the main window in front and with a click into its
+  Windows x64 runner: with the main window in front and with a click into its
   page (text typed after it arrived in the search box), Ctrl+N, Ctrl+O and
   Ctrl+Shift+O reached no menu item, and nothing else either (no WebView2
   window of its own): WebView2 has the keys, and Electrobun 2.0.4 handles none
-  of its AcceleratorKeyPressed. So the main window takes the File menu's keys
+  of its AcceleratorKeyPressed. (The arm64 runner takes none of the keys a
+  check presses: the session's last input, GetLastInputInfo, does not move,
+  and typed text never arrives; there the keys are dispatched in the page.) So the main window takes the File menu's keys
   in its own page on Windows and Linux (src/launcher/index.ts, not on macOS,
   whose menu bar takes Command's first); a key the menu did take would never
   reach the page, so none runs twice. A studio window's page is a server's,
@@ -855,10 +857,12 @@ keys are each system's, and the app has its icon there.
   closed is shown again by starting the app a second time, which asks the one
   there. `menu` presses each of them, and the keys: on Windows as a person's
   (testkeys.ts: a click into the page, which also brings the window to the
-  front, where SetForegroundWindow was once refused on the arm64 runner, then
-  keybd_event), its control the text typed into the search box arriving in
-  the page; on Linux, which has no input a check can press as a person's
-  under xvfb, dispatched in the page.
+  front, then keybd_event), its control the text typed into the search box
+  arriving in the page, each key's effect asserted and taken once, by the menu
+  bar or the page, never both; where the system takes none of the keys
+  (GetLastInputInfo unchanged), and on Linux, which has no input a check can
+  press as a person's under xvfb, dispatched in the page. Keys the system
+  took that never reached the page fail it.
 - **Icons.** `icon/icon.ico` (16, 24, 32, 48, 64, 128 and 256 pixels, each a
   PNG entry, 48.9 KB) and `icon/icon.png` (512 pixels, 69.2 KB), made from
   `icon/icon.svg` by `scripts/make-icon.sh rasters` on a Mac (sips draws the
@@ -870,14 +874,17 @@ keys are each system's, and the app has its icon there.
   Setup.exe and keeps it as `Resources\app.ico`, and keeps the PNG as
   `Resources/appIcon.png` and `Resources/app/icon.png`; Electrobun's Start-menu
   shortcut and menu entry show them, and the registration names those copies
-  rather than adding its own. What they cost, a shipped build of this branch
-  beside one of main's on the same x64 runner: Windows' `Setup.zip` 39 897 737
-  -> 40 014 917 bytes (+117 180, +0.29%), its update archive +72 129,
-  `launcher.exe` and the Setup.exe +49 664 each (the icon's images), the
-  installed app +292 480; Linux's `Setup.tar.gz` 41 806 525 -> 41 875 912
-  (+69 387, +0.17%), the update archive +69 236 (Hutch's two copies of the
-  PNG are one in zstd's window), the installed app +207 662. macOS's is the
-  iconset it had. Without them the launcher, its shortcut, its menu entry and
+  rather than adding its own. What they cost, the release build of this
+  branch beside main's on the same x64 runner, twice (the two differ by
+  timestamps alone): Windows' `Setup.zip` 39 897 737 -> 40 014 917 bytes
+  (+117 180, +0.29%; the second +120 113), its update archive (`.tar.zst`)
+  +72 129 and +72 083, `launcher.exe` and the Setup.exe +49 664 each (the
+  icon's images), `Resources\app.ico` 48 892; Linux's `Setup.tar.gz`
+  41 806 525 -> 41 875 912 (+69 387, +0.17%; the second +69 315), the update
+  archive +69 236 and +69 187 (Hutch's two copies of the PNG are one in
+  zstd's window). The build also writes the icon into the app's own `bun.exe`
+  (Bun then refuses that copy as the base of a program: `environment`'s
+  stand-in is built by the toolchain's). macOS's is the iconset it had. Without them the launcher, its shortcut, its menu entry and
   each window show a default program's icon, and a `.fennec` file none.
 
 Toolchain. `electrobun init` installed Hutch (the build tool) in `~/.hutch` and
