@@ -2164,8 +2164,18 @@ fn texts_into(out: &mut String, list: Option<&[String]>) {
     out.push(']');
 }
 
-fn and(filter: Option<Expr>, more: Option<Expr>) -> Option<Expr> {
-    match (filter, more) {
+/// `first and then`, `first` asked of a row before `then`: the engine binds
+/// an `and` as written and stops at its first false (`Test::And`, `eval`
+/// alike), so a rule passed as `first` keeps every term of `then` from a
+/// row it hides. A caller's term that fails -- a division by zero, an int
+/// past 64 bits -- fails the statement, and run over a row before the rule
+/// it told the caller what that row held: `id = $1 and 1 / (case when body
+/// >= $2 then 0 else 1 end) = 1` answered 400 or `[]` by another user's
+/// note, a binary search away from any of its fields. So the rules go
+/// first wherever a caller's terms meet them, as `fields::hold` puts
+/// `showing_f` before a term reading a withheld field.
+fn and(first: Option<Expr>, then: Option<Expr>) -> Option<Expr> {
+    match (first, then) {
         (Some(a), Some(b)) => Some(Expr::And(Box::new(a), Box::new(b))),
         (a, b) => a.or(b),
     }
@@ -2218,7 +2228,7 @@ fn hold(pos: &[Bound], neg: &[Bound], e: &mut Expr, pass: bool) {
             let rules = if pass { pos } else { neg };
             sel.filter = match granted(rules, &sel.collection, READ) {
                 None => Some(Expr::Lit(Value::Bool(false))),
-                Some(read) => and(sel.filter.take(), read),
+                Some(read) => and(read, sel.filter.take()),
             };
             if let Some(f) = &mut sel.filter {
                 hold(pos, neg, f, pass);
@@ -2862,13 +2872,14 @@ impl Scope {
         denied(format!("this token may not {what} `{collection}`"))
     }
 
-    /// The read filter of `collection`, ANDed into `filter`; a collection
+    /// The read filter of `collection`, ANDed in before `filter`, which is
+    /// asked of a row only once the rules passed it ([`and`]); a collection
     /// the token is granted nothing on does not exist for it.
     pub fn restrict(&self, collection: &str, filter: Option<Expr>) -> Result<Option<Expr>> {
         let f = self
             .filter(collection, READ)
             .ok_or_else(|| self.refused(collection, "read"))?;
-        Ok(and(filter, f))
+        Ok(and(f, filter))
     }
 
     /// A subscription's filter as its stream reads it: each inner `get` of
@@ -2955,7 +2966,7 @@ impl Scope {
             return Ok(filter);
         }
         match self.filter(collection, EXPIRED) {
-            Some(f) => Ok(and(filter, f)),
+            Some(f) => Ok(and(f, filter)),
             None if !self.known(collection) => Err(self.refused(collection, "read")),
             None => Err(denied(format!(
                 "this token may not read the rows of `{collection}` past their time: \
@@ -3003,8 +3014,9 @@ impl Scope {
             .ok_or_else(|| self.refused(collection, verb))
     }
 
-    /// A write's filter, with the read rules ANDed in when it answers its
-    /// rows (`returning`): what a write hands back is a read, as
+    /// A write's rules `f`, with the read rules ANDed in when it answers
+    /// its rows (`returning`) -- the statement's own filter going after
+    /// both ([`and`]) -- what a write hands back being a read, as
     /// PostgreSQL's `RETURNING` is held to the `SELECT` policies.
     /// `writable` asked that a read rule exists; an update rule wider than
     /// the read one would otherwise answer rows the token cannot `get`.
@@ -3071,8 +3083,21 @@ impl Scope {
     ) -> Result<Statement> {
         Ok(match stmt {
             Statement::Select(sel) => Statement::Select(self.select(sel, params, Some(mask))?),
+            // A plan counts what an index chose before the rules held it --
+            // `filter: the hash index on email, 1 rows` of a row the token
+            // may not read -- and which index it names is a comparison of
+            // two such counts: the planner takes the smaller set, so under
+            // `owner = $jwt.sub` it named `email`'s exactly where no row
+            // held the address. Counts held back would leave that. Held to
+            // the rules first, so that a collection the token is granted
+            // nothing on is missing here as for its `get`, then refused.
             Statement::Explain(sel) => {
-                Statement::Explain(self.select(sel, params, Some(&mut None))?)
+                self.select(sel, params, Some(&mut None))?;
+                return Err(denied(
+                    "`explain` is the server token's: a plan counts rows this token's rules \
+                     hide from it"
+                        .into(),
+                ));
             }
             Statement::Put {
                 collection,
@@ -3149,8 +3174,11 @@ impl Scope {
                 }
                 self.inner(&mut filter, params)?;
                 let filter = self.reaping(&collection, filter)?;
+                // The rules first: no term of the statement's is asked of a
+                // row they keep from it ([`and`]).
+                let rules = self.returning(&collection, &pick, Some(&set), f);
                 Statement::Update {
-                    filter: self.returning(&collection, &pick, Some(&set), and(filter, f)),
+                    filter: and(rules, filter),
                     collection,
                     set,
                     require,
@@ -3170,8 +3198,9 @@ impl Scope {
                 }
                 self.inner(&mut filter, params)?;
                 let filter = self.reaping(&collection, filter)?;
+                let rules = self.returning(&collection, &pick, None, f);
                 Statement::Delete {
-                    filter: self.returning(&collection, &pick, None, and(filter, f)),
+                    filter: and(rules, filter),
                     collection,
                     require,
                     pick,
@@ -3734,6 +3763,25 @@ pub struct Check {
     registry: Registry,
 }
 
+impl Check {
+    /// Whether `old`, a row a write would go over, is one `scope` may
+    /// update, or why not.
+    fn updatable(
+        scope: &Scope,
+        schema: &Schema,
+        old: &Document,
+        registry: &Registry,
+    ) -> Result<()> {
+        if scope.admits(schema, UPDATE, old, registry)? {
+            return Ok(());
+        }
+        Err(denied(format!(
+            "the row of `{}` holding that value is outside what this token may update",
+            schema.name
+        )))
+    }
+}
+
 impl Hook for Check {
     fn name(&self) -> &str {
         "access"
@@ -3774,14 +3822,19 @@ impl Hook for Check {
         // The row written over is one the token may update: a `set` found
         // it through the token's filter, and an upsert by the value it
         // holds, which is any row's -- PostgreSQL's `ON CONFLICT DO UPDATE`
-        // asks the row the same of its `USING`.
-        if !scope.admits(schema, UPDATE, old, &self.registry)? {
-            return Err(denied(format!(
-                "the row of `{}` holding that value is outside what this token may update",
-                schema.name
-            )));
-        }
+        // asks the row the same of its `USING`. An upsert's was asked once
+        // already, before its `else set` read it (`before_upsert`), and is
+        // asked again here as every row is: the hook keeps no note of the
+        // rows it judged.
+        Self::updatable(&scope, schema, old, &self.registry)?;
         scope.overwrites(schema, old, doc, &self.registry)
+    }
+    fn before_upsert(&self, schema: &Schema, old: &Document) -> Result<()> {
+        let Some(scope) = CURRENT.with(|c| c.borrow().as_ref().map(|c| Arc::clone(&c.scope)))
+        else {
+            return Ok(());
+        };
+        Self::updatable(&scope, schema, old, &self.registry)
     }
     /// It judges whoever writes: a binding's writes, its text's authority,
     /// pass over it once [`Self::waking`] let the binding run.

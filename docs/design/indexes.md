@@ -206,7 +206,17 @@ alone. Every filter over the collection -- each `lookup` level's, an
 inner `get`'s, a `set`'s and a `del`'s, `changes_since`'s shape -- has
 `not (field <= now - ttl)` ANDed in (`Database::alive`): a `not` so the
 planner never takes it for a range, and a row whose field is null, with
-no time to expire from, lives. `now` is the system's clock natively and
+no time to expire from, lives. It goes in first, ahead of every term of
+the filter -- `answer_filter`, `changes_since`, `changes_held`, and a
+stream's expiry step asks its window before its shape: ANDed in after, a
+term failing by a field of a row (`1 / n` over `n = 0`) ran over a row
+past its time and not yet swept, and told its writer what it held -- a
+scoped token without the `expired` grant among them (access.md, *The
+rules are asked before the caller's terms*). It is one comparison, which
+cannot fail, of a field the filter reads, and no equality, `in` or range,
+so no plan is another; `tests/ttl.rs` and fennec-http's
+`a_stream_s_shape_never_runs_over_a_row_long_past_its_time` hold it.
+`now` is the system's clock natively and
 `Database::set_clock`'s where set -- the browser module's, handed
 `Date.now()` (`db.now`) as `fennec_query`'s last argument, and refused
 without one rather than answered at a time it was not. A server's
@@ -303,6 +313,90 @@ Reading an `order`'s keys with the filter's own pass, rather than finding
 each matched row again (`order_ids`), took 6 to 9% off an ordered scan
 natively but made the unordered ones 4 to 6% slower in the browser and the
 module 1.9 KB larger, so it is not in.
+
+**The rows an equality's bucket gave are tested without it**
+(`Database::candidates_held`, `Filter::without`). The scan's path
+(`matching_ids_to`: a `get`, its `count` and page, a `set`, a `del`) tested
+the rows a `@hash` bucket or the id index gave with the whole filter, the
+equality that chose them among its terms, though every one holds it: the
+bucket is that equality's whole answer, as `is_bare_equality` already takes
+it to be where the filter is that term alone. Natively the filter is now
+bound without it, the other terms laid out as any `and`'s are (`Chain`,
+below), so each that may fail is asked of the rows it was and fails where
+it failed; a union of buckets (`in`), a range, a
+box and an index over several fields are no one term's answer and leave the
+filter whole. A scoped token's rules made it a cost: fennec-http asks them
+before the statement's own terms (access.md, *The rules are asked before
+the caller's terms*), so `owner = $jwt.sub`, whose bucket is a scoped read's
+usual rows, was asked again of each. Over 100 000 rows, five owners and the
+rule's bucket of 20 000, main's engine with the rule last against this one
+with it first (medians of three runs in turns, each of 15 rounds, load under
+2 on 8 cores, `Database::query` alone): a count by a term matching one row
+711 -> 595 us, where the rule asked first without it took 924; one matching
+half 837 -> 617; `like` 1 229 -> 1 066; a page of 20 711 -> 602; where the
+statement's own equality gave the rows 8.6 -> 7.1 us, its page 8.8 -> 7.3;
+an `in` 20.7 -> 18.6, the rule refusing four rows in five before it; a row
+by id the same, 4.84 -> 4.78. Most of it is the field no longer read: a
+term left out that no other reads takes its field out of
+`Store::read_fields`' pass. The browser module, which holds no token's
+rules, binds the filter whole as before: 33 bytes more of it (852 824 ->
+852 857, brotli 70), inside the layout's own noise.
+
+Left out so, the equality is the bucket's to answer, and a bucket and the
+scan must read its value alike. A `bytes` field's did not: `Value::key_as`
+reads a list of numbers from 0 to 255, or a vector of them, as the bytes
+it writes -- as the write path takes it and as JSON writes bytes out -- and
+so found the bucket of `b = [104, 105]`, while the bound test compared the
+row's bytes with the list by kind, never equal. A bare `b = $1` answered
+the row through the `@hash` and nothing through the scan before any of
+this; with a term beside it, the bucket's rows tested without the
+equality, `b = [104, 105] and n >= 0` answered `[1]` where main, the scan
+and the browser module answered `[]`. The bound filter now reads the value
+beside a `bytes` field as the field's `@hash` does (`as_field`, an `in`'s
+items too), so the bucket, the scan and the module all answer the row
+(`tests/buckets.rs`, and
+`web/fennec.test.js` for the module): 83 bytes of the browser module.
+
+Its review found `eval` still comparing by kind, and `eval` is a stream's
+test of a changed row wherever its shape holds no long `in` list
+(`changes_since`, fennec-http's `sse.rs`): over a `bytes` field, with a
+`@hash` or without, `b = [104, 105]` answered the row in a query and in
+`changes_held` and nothing in `changes_since`, so a stream seeded the row
+and then told its subscriber it was deleted; `b != [104, 105]` the other
+way round, and a select list's `b = [104, 105]` and a `case` disagreed with
+the filter too. A comparison now reads a list of numbers from 0 to 255, or
+a vector of them, beside bytes as the bytes it writes wherever it meets
+them (`Value::cmp_read`'s `bytes_beside`, through `Value::key_as`), `=`,
+`<`, `in` and `has` alike, in a list too; a list of anything else still
+orders by kind. It is asked in `cmp_kinds`' last arm, where two kinds no
+other arm compares fall to their ranks, and out of line, so no comparison
+of two kinds that compare pays for it; the bound filter still reads the
+list once a query (`as_field`), so a scan's row meets bytes. The order,
+`cmp_value`, is untouched. `tests/buckets.rs` holds `changes_since`,
+`changes_held` and a select list's item to the query's rows. The browser
+module grew 278 bytes (853 535 -> 853 813), 93 gzip and 68 brotli, and
+the module with no feature the same 278; comparing through `cmp_value`
+after the conversion, rather than the two slices, was 14 bytes more.
+Natively a scan of 100 000 rows by a float, a time and an expression
+(`make instr-compare PKG=fennec-core EXAMPLE=orders`, eight identities a
+build) took 0.38%, 0.44% and 0.25% fewer instructions, two or three a row,
+the comparison's code laid out anew; none took more.
+
+**An `and`'s terms are laid out by what may fail** (`Chain`, `Test::rank`).
+`Filter::new` and `Filter::without` bind an `and`'s terms in the order
+written and lay them out for the test: of those before the first that may
+fail -- a `Test::Eval`, the one test that asks what can fail -- each single
+test first and then each `or`; from that one on, each where it was
+written. So a term that may fail runs over the rows the same terms before
+it pass, and fails or not as it did; the rest ask nothing that fails, and
+only a row's time is another. It is what lets a scoped token's rules go
+first at no cost where they are an `or` no index answers -- the order, the
+measurements and why a term that cannot fail stays behind one that may are
+in access.md, *The engine keeps the order*. A stream's look binds as
+written: the sets it keeps are paired with its lists in the order bound
+(`into_held`). `tests/and_terms.rs` holds every layout to the filter
+written under `not (not ...)`, which binds as it stands, failures
+included.
 
 A stream's look tests the rows written since its cursor through a bound
 filter too, where the filter reads another collection and holds a long
