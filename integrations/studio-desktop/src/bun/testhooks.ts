@@ -306,7 +306,17 @@ async function run(c: any) {
 				await Bun.sleep(20);
 				taken = k.lastInput() !== before;
 			}
-			report("keys-result", { key: c.key, front, clicked, taken, type: c.type ?? null, chord: c.chord ?? null, ...(front ? {} : { inFront: k.foreground(), self: process.pid }) });
+			report("keys-result", { key: c.key, front, clicked, before, taken, type: c.type ?? null, chord: c.chord ?? null, ...(front ? {} : { inFront: k.foreground(), self: process.pid }) });
+			break;
+		}
+		// The session's last input now (GetLastInputInfo's tick), for a check that waited for keys it pressed.
+		case "last-input": {
+			if (process.platform !== "win32") {
+				report("last-input", { error: "Windows alone" });
+				break;
+			}
+			const k = await import("./testkeys.ts");
+			report("last-input", { tick: k.lastInput(), front: k.foreground(), self: process.pid });
 			break;
 		}
 		case "quit": Utils.quit(); break;

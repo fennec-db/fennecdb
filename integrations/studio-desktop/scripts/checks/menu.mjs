@@ -20,7 +20,8 @@
 // Recent (the Databases list), Connect to a Server… (Remote connections); its
 // keys, dispatched in the page (X has no input this check can press as a
 // person's); and the main window itself shown again by starting the app a
-// second time, the way back to it with no menu and no Dock.
+// second time, the way back to it with no menu and no Dock while a file's
+// window is open (with none, closing it quits the app: lastwindow.mjs).
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { CONTROL, EXE, REPORT, WIN, assertClean, cmd, data, evalIn, lines, log, quit, startApp, step, until, waitFor, waitStudio, webviewWindows } from './lib.mjs';
@@ -90,10 +91,18 @@ if (WIN) {
   const typed = await waitFor((l, i) => i >= n && l.what === 'keys-result', 15000, 'typed');
   const arrived = await until(async () => (await evalIn('launcher', `return document.getElementById('find').value`)).value === 'fen', 10000, 'the search box holds what was typed').then(() => true, () => false);
   if (!arrived) {
-    const seen = (await evalIn('launcher', `return window.__seen`)).value;
+    const seen = (await evalIn('launcher', `return { seen: window.__seen, focused: document.hasFocus(), active: document.activeElement && document.activeElement.id, visible: document.visibilityState }`)).value;
+    // Whether the system took them, read after the wait for the page, not at once: the raw input
+    // thread takes keys after keybd_event returns, and the app's own reading right after is
+    // only a first look (`typed.taken`).
+    const k = lines().length;
+    cmd({ cmd: 'last-input' });
+    const last = await waitFor((l, i) => i >= k && l.what === 'last-input', 15000, 'the last input asked');
+    const taken = last.tick !== typed.before;
+    log(`the keys typed: ${JSON.stringify(typed)}; the session's last input ${typed.before} before, ${last.tick} now (in front: ${JSON.stringify(last.front)}, this app ${last.self}); the page: ${JSON.stringify(seen)}`);
     // Keys the system took and the page never got are the app's failing; keys the system took
     // none of are this machine's (GetLastInputInfo unchanged), and leave the menu bar's question open.
-    assert.equal(typed.taken, false, `the system took the keys typed and the page got none of them (the page saw ${JSON.stringify(seen)})`);
+    assert.equal(taken, false, `the system took the keys typed and the page got none of them (the page saw ${JSON.stringify(seen)})`);
     log(`the system took none of the keys this check pressed (GetLastInputInfo unchanged; the page saw ${JSON.stringify(seen)}): no key is pressed as a person's on this machine, and the keys are dispatched in the page instead`);
     step('the File menu\'s keys in the main window, dispatched in its page: Ctrl+N, Ctrl+O, Ctrl+Shift+O');
     await dispatchedKeys();
@@ -166,7 +175,11 @@ if (WIN) {
   step('the File menu\'s keys in the main window, dispatched in its page: Ctrl+N, Ctrl+O, Ctrl+Shift+O');
   await dispatchedKeys();
 
-  step('the main window closed, then shown again by starting the app a second time');
+  step('the main window closed while a file\'s is open, then shown again by starting the app a second time');
+  // The file's window is left, or closing the main window, the last, would quit the app (lastwindow.mjs).
+  n = lines().length;
+  cmd({ cmd: 'open', path: FILE });
+  await waitStudio(`file:${FILE}`, n);
   n = lines().length;
   cmd({ cmd: 'close', key: 'launcher' });
   await waitFor((l, i) => i >= n && l.what === 'window-close' && l.key === 'launcher', 15000, 'the main window closed');
