@@ -1050,9 +1050,11 @@ window and the app's words are each system's, and the app has its icon there.
   lies over: the app's look at that activation is then the one that moves the
   focus, the other half of the rule. (The windows-11-arm image comes up with a
   "Microsoft account" sign-in window of its own, WWAHost.exe started before the
-  job, in front of every window and over the main window's whole title bar;
-  `desktop.yml` closes it before the checks, as a person closes it, and
-  `run.mjs` says when another program's window is in front.) Nothing
+  job, in front of every window and over the main window's whole title bar,
+  though not among the visible windows when a step before the checks looked;
+  `desktop.yml` asks each WWAHost window to close then, and ends a WWAHost
+  still running 15 s on, and `run.mjs` says when another program's window is
+  in front.) Nothing
   else of the check's own brings a window forward or moves its focus: no Alt (the first version pressed and let
   go of one before a SetForegroundWindow, which can put the menu bar of a
   window in front by then in menu mode, where keys go), no activation, and no keys
