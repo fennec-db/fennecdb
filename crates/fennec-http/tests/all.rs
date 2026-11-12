@@ -33,6 +33,7 @@ mod reach;
 mod replication;
 mod request_rate;
 mod require;
+mod rules_first;
 mod scheduled;
 mod schema;
 mod server;

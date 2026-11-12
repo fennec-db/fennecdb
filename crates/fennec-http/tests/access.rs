@@ -22,6 +22,7 @@ board  write                                  for moderator
 struct Node {
     port: u16,
     access: Arc<Access>,
+    db: Arc<RwLock<Database>>,
 }
 
 fn start() -> Node {
@@ -59,13 +60,14 @@ fn start_on(policy: &str, setup: &[&str], f: fn(&mut Database)) -> Node {
         access: Some(Arc::clone(&access)),
         ..Config::default()
     };
-    let server = Server::new(Arc::new(RwLock::new(db)), cfg);
+    let db = Arc::new(RwLock::new(db));
+    let server = Server::new(Arc::clone(&db), cfg);
     let listener = server.bind().unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
         let _ = server.serve_on(listener);
     });
-    Node { port, access }
+    Node { port, access, db }
 }
 
 impl Node {
@@ -98,6 +100,24 @@ impl Node {
         fennec_core::json::escape_into(&mut body, sql);
         body.push('}');
         self.call(Some(token), "POST", "/query", &body)
+    }
+
+    /// The plan of the read `sql` as `token`'s scope rewrites it, the
+    /// engine's to tell in process: a scoped `explain` is refused over
+    /// HTTP, its plan counting rows the rules hide.
+    fn plan_as(&self, token: &str, sql: &str) -> String {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let scope = self.access.scope(token, now).unwrap();
+        let Statement::Select(sel) = scope.rewrite(fennec_ql::parse_one(sql).unwrap()).unwrap()
+        else {
+            panic!("{sql}: not a read")
+        };
+        let db = self.db.read().unwrap();
+        let rows = db.query(&Statement::Explain(sel), &[]).unwrap();
+        format!("{:?}", rows.rows().unwrap().rows)
     }
 }
 
@@ -246,8 +266,12 @@ fn two_users_see_and_change_only_their_own_rows() {
     assert!(body.contains("\"count\":2"), "{body}");
     let (_, body) = n.query(&alice, r#"get notes where owner = "bob""#);
     assert_eq!(count(&body, "\"bob\""), 0, "{body}");
-    let (_, body) = n.query(&alice, r#"explain get notes where owner = "bob""#);
-    assert!(!body.is_empty());
+    // Nor is she told a plan, which counts the rows an index chose before
+    // her rules held them: bob's note, by the index on `owner`.
+    let (status, body) = n.query(&alice, r#"explain get notes where owner = "bob""#);
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("`explain` is the server token's"), "{body}");
+    assert!(!body.contains("rows,"), "{body}");
 
     // A set or del reaches only the token's own rows.
     let (status, body) = n.call(Some(&alice), "PATCH", "/notes/all", r#"{"title":"mine"}"#);
@@ -1238,11 +1262,13 @@ fn a_scoped_match_filter_reads_only_the_tokens_rows() {
     // The server's own token counts every row holding it.
     let (_, every) = n.query(ROOT, r#"get memos match body "initech" count"#);
     assert_eq!(every.trim(), r#"[{"count":202}]"#);
-    // Nor does `explain` tell her how many rows the words reached: the
-    // rows she kept alone.
+    // Nor is she told how many rows the words reached: her `explain` is
+    // refused, and the statement as her scope rewrites it, explained in
+    // process, says the rows she kept alone.
     let ask = r#"explain get memos match body "initech" count"#;
     let (status, plan) = n.query(&alice, ask);
-    assert_eq!(status, 200, "{plan}");
+    assert_eq!(status, 403, "{plan}");
+    let plan = n.plan_as(&alice, r#"get memos match body "initech" count"#);
     assert!(plan.contains("a filter: 2 rows kept"), "{plan}");
     assert!(!plan.contains("202") && !plan.contains("scored"), "{plan}");
     let (_, plan) = n.query(ROOT, ask);
