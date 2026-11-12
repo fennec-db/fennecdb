@@ -127,3 +127,22 @@ def test_a_held_claim_given_up_closes_its_connection():
                 await db.query(f"drop collection if exists {name}")
 
     run(go())
+
+
+@pytest.mark.parametrize("key", ["a\r\nb", "a\nb", "a\x00b", "k\r\n\r\n{\"query\":\"del users\"}"])
+def test_an_idempotency_key_with_a_line_break_or_nul_is_refused(key):
+    # The async client writes its head raw; a key must not end its line.
+    async def go():
+        async with AsyncClient(URL, TOKEN) as db:
+            with pytest.raises(ValueError, match="Idempotency-Key"):
+                db.with_idempotency_key(key)
+            with pytest.raises(ValueError, match="Idempotency-Key") as e:
+                await db.query("collections", idempotency_key=key)
+            assert key not in str(e.value)
+            with pytest.raises(ValueError, match="Idempotency-Key"):
+                await db.batch([("collections", [])], idempotency_key=key)
+            # Nothing was sent: no connection was opened.
+            assert db._s.conn is None
+            assert await db.with_idempotency_key("plain-key-1").query("collections") is not None
+
+    run(go())

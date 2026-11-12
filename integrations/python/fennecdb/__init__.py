@@ -1053,6 +1053,22 @@ def _answer(status: int, raw: bytes) -> Any:
     )
 
 
+# The async client writes its request head as joined text, so the check
+# `http.client` makes for the sync client is its own to make: a CR, LF or NUL
+# in a value would end the line, or the head, and let what follows pose as a
+# header or a body. Stricter than `http.client`, which lets a folded line
+# through; nothing here needs one.
+_ILLEGAL_HEADER_VALUE = re.compile(r"[\r\n\x00]")
+
+
+def _header_value(name: str, value: Any) -> Any:
+    """`value`, or a `ValueError` naming the header (never the value's bytes)
+    when it holds a CR, LF or NUL."""
+    if isinstance(value, str) and _ILLEGAL_HEADER_VALUE.search(value):
+        raise ValueError(f"the {name} header's value holds a CR, LF or NUL")
+    return value
+
+
 class AsyncClient:
     """fennec-server's HTTP endpoint over asyncio: `Client`'s calls, awaited.
 
@@ -1105,6 +1121,7 @@ class AsyncClient:
         over this client's connection."""
         if not isinstance(key, str) or not key:
             raise ValueError("an idempotency key is a text, not empty")
+        _header_value("Idempotency-Key", key)
         copy = object.__new__(AsyncClient)
         copy.__dict__.update(self.__dict__)
         copy.idempotency_key = key
@@ -1191,6 +1208,7 @@ class AsyncClient:
         read: bool = False,
     ) -> Any:
         key = key or self.idempotency_key
+        _header_value("Idempotency-Key", key)
         held = _wait_ms(wait) if wait else None
         # As `Client._post`'s: what may run twice -- a read the builder made,
         # one sent near, a write under a key -- goes again after a reset too.
@@ -1353,6 +1371,12 @@ class AsyncClient:
     ) -> tuple[int, dict]:
         """The request sent, over a connection opened where none is kept,
         and the answer's status and headers."""
+        # Before a connection is opened or a byte written.
+        _header_value("Authorization", self.token)
+        _header_value("Idempotency-Key", key)
+        _header_value("Fennec-Wait", held)
+        for name, value in extra.items():
+            _header_value(str(name), value)
         if self._s.conn is None:
             self._s.conn = await asyncio.open_connection(
                 self._host, self._port, ssl=self._tls, server_hostname=self._host if self._tls else None
