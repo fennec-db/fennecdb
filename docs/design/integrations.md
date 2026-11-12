@@ -347,8 +347,8 @@ store, to be shown to a new connection that got the same id's store (ids are
 random, but the README promised removal clears). The list is explicit
 (`STORE_KINDS`), the connection's own window is closed first (a page writes
 again while its store is cleared), and the Keychain item goes before the store. The blank view Electrobun made for the window is
-removed (`win.webview.remove()`; kept, idle memory was about 20 MB more, a second
-WebKit view per window). `checks/storage.mjs` holds it by reading a store from
+removed on Windows and Linux and kept on macOS (the window's own view, below).
+`checks/storage.mjs` holds the stores apart by reading a store from
 outside the window that wrote it: a test hook (`store-window`) opens a second
 window on the same server's origin in the store it is told, so under one shared
 store (the thing the partitions are for) the file window's history would show,
@@ -356,6 +356,45 @@ and a window in the very same store is the positive control. A removed
 connection's store, opened again under its id, is empty, with a window open on
 it at the removal or not. Two saved servers on one address do not share, a saved
 server's survives its window, the page is the window's size and has focus.
+
+The window's own view. `BrowserWindow` makes a blank view in the default store
+under the page's. Windows and Linux remove it (`win.webview.remove()`): their
+Electrobun removes a view on its UI thread, in order after making it (Linux by
+`g_idle_add`, Windows through `dispatchWebviewOperation`). **macOS keeps it.**
+There Electrobun 2.0.4 makes a view's WKWebView in a block WKWebViewImpl's
+`initWithWebviewId:` queues on the main queue (`dispatch_async`), and
+`webviewRemove` runs at once on the thread that asks, Bun's, with no hop to the
+main thread. A removal straight after the window, as the app asked until now,
+mostly did nothing: `-remove` returns while `self.webView` is nil, and the view
+made after it stayed (a probe of the WKWebViewImpl's `nsView` through libobjc,
+read at the removal: not made for the first window of every launch, and for
+later ones 0 of 40 in one session, 2 of 60 beside six busy loops, 40 of 40 in
+another). Falling inside the block, it cleared `webView` under it, and the
+block's last `objc_setAssociatedObject(self.webView, "WKWebViewImpl", self,
+...)` was handed nil: SIGSEGV at 0x0 in that block (`libNativeWrapper`, offset
+0x16fd8). The finder check met it once on a hosted runner (run 43182618196, the
+crash report among its evidence: the app died 0.8 s into its second launch,
+which shows the launcher first and so warms WebKit, and the check saw only a
+server that never started). Here a pause before the removal did it: 0 to 4.9 ms,
+0.1 ms more each round of a file window opened and closed with the launcher up,
+crashed 3 sessions of 4 (at rounds 35 to 88), and a fixed 3 ms a fourth, each at
+the same frame and offset. Removed after the page's view is made, it is safe, as
+that is `initWebview`'s `dispatch_sync` onto the main queue, which runs the
+blank view's block first (1 020 rounds with the same pauses: every view made at
+its removal, none crashed); but then it costs every open the removal's work and
+frees nothing. On an M1 at load 1.4 to 2.0, the 50-row file opened 8 times a
+session with the launcher up: 239-241 ms to the studio's collections kept,
+267-273 ms removed (medians, 4 sessions each, interleaved); a launch with the
+file 407-417 ms against 423-436 ms (3 each); idle RSS 256-258 MB after a launch
+and 316-319 MB after the opens, either way. So it is kept, held to no address
+(`^*`, which Electrobun sets on the main thread after the block); it loads
+nothing, so the default store gets nothing from it, and the core removes it with
+the window. The test variant reports whether a window kept it (`own-view`, read
+when the window is made), and `waitStudio` holds every studio window a check
+opens to it: kept on macOS, removed elsewhere. Put back straight after the
+window, the removal fails the finder check on its first window, whatever the
+timing. A failed check also says now whether the app still runs (`context`),
+which the timeout did not.
 
 The saved server. The probe asks `/_studio/` (served before any token), then
 `/_whoami` **without** the token and sends it only if fennecdb's own 401 (a JSON
@@ -1162,8 +1201,11 @@ view made in it). The two were measured side by side afterwards, the commit
 before and this one, interleaved, on a Mac whose load other jobs moved between
 2 and 25: launch to the studio and idle memory are the same within that noise
 (for the 50-row file, idle RSS 215-246 MB before and 212-219 MB after, medians of
-five); with the window's own blank view left under the page's it was about 20 MB
-more, which is why it is removed.
+five). A blank view left under the page's was measured then as about 20 MB more,
+which is why it was removed; but that removal did nothing on the launch with a
+file those figures take (the window's own view, above), so both sides kept the
+view, and the difference was the load. Measured again with it removed for
+certain, it frees nothing on macOS, and there it is kept.
 
 ## deploy
 

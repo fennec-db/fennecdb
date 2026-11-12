@@ -132,6 +132,16 @@ export function watchStudio({ win, view }: StudioWindow, key: string) {
 	});
 }
 
+/**
+ * Whether a studio window's own view (Electrobun's blank one, under the page's)
+ * is still the window's once the window is made: kept on macOS, where removing
+ * it raced the main thread making it and crashed the app; removed on Windows
+ * and Linux (windows.ts).
+ */
+export function ownView(win: BrowserWindow, key: string) {
+	report("own-view", { key, kept: Boolean(win.webview) });
+}
+
 export function noticeShown(win: BrowserWindow, n: Notice) {
 	const key = `notice:${++notices}`;
 	pages.set(key, { win, view: win.webview });
