@@ -10,7 +10,10 @@
 //     machine the user signs in to (secrets.ts);
 //   - the launcher's command line, which holds the file Explorer handed it
 //     (handover.ts), and the registration that has Explorer hand it one
-//     (associate.ts).
+//     (associate.ts);
+//   - a variable taken out of the process's environment block, which WebView2
+//     reads and a delete from the app's `process.env` did not reach
+//     (webview2.ts).
 // Only the main process on Windows loads it; nothing here runs elsewhere, and
 // `node --test` never imports it (bun:ffi is Bun's).
 //
@@ -72,6 +75,8 @@ function load() {
 		lstrlenW: { args: [FFIType.u64], returns: FFIType.i32 },
 		OpenProcess: { args: [FFIType.u32, FFIType.i32, FFIType.u32], returns: FFIType.u64 },
 		QueryFullProcessImageNameW: { args: [FFIType.u64, FFIType.u32, FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
+		SetEnvironmentVariableW: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
+		GetEnvironmentVariableW: { args: [FFIType.ptr, FFIType.ptr, FFIType.u32], returns: FFIType.u32 },
 	});
 	const ntdll = dlopen("ntdll.dll", {
 		NtQueryInformationProcess: { args: [FFIType.u64, FFIType.u32, FFIType.ptr, FFIType.u32, FFIType.ptr], returns: FFIType.i32 },
@@ -135,6 +140,27 @@ function tokenSid(kind: typeof TOKEN_USER | typeof TOKEN_OWNER): string {
 	} finally {
 		k.CloseHandle(handle[0]!);
 	}
+}
+
+/**
+ * Takes `name` out of this process's own environment block, the one Windows'
+ * calls read and WebView2 reads when Electrobun makes a view. Not `delete
+ * process.env[name]` alone: on both Windows runners the app, started
+ * de-elevated with WEBVIEW2_USER_DATA_FOLDER and deleting it so, still had
+ * WebView2 make that folder, though a Worker of the same Bun outside the app
+ * took a name out of the block by the same delete; why is not known
+ * (docs/design/integrations.md#studio-desktop).
+ */
+export function unsetEnvironment(name: string): void {
+	win().k.SetEnvironmentVariableW(wide(name), null);
+	// Judged by what the block holds after, not by the call's BOOL: a name the
+	// block never held fails the call, and is what was asked.
+	if (inEnvironment(name)) throw new Error(`${name} is still in the environment`);
+}
+
+/** Whether this process's environment block holds `name` (asked for a size of 0, a held one, empty too, answers at least 1). */
+export function inEnvironment(name: string): boolean {
+	return win().k.GetEnvironmentVariableW(wide(name), null, 0) !== 0;
 }
 
 /** This user's SID, which no other user of the machine has. */

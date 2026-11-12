@@ -88,6 +88,12 @@ if (MAC) {
   await launch(false);
   await quit({ exited: Promise.resolve() });
 
+  // Here the launcher has warmed WebKit, so the file window's own blank view is
+  // made within a few milliseconds of the window: a removal of it from Bun's
+  // thread fell inside them once on a hosted runner and crashed the app, which
+  // this step saw only as a server that never started (src/bun/windows.ts). On
+  // macOS the app keeps that view now, and `waitStudio` holds it to that in both
+  // steps, so a removal put back fails here at once, whatever the timing.
   step('the same, the file handed over late: the launcher was shown first, and is closed when the file comes');
   assert.equal(await launch(true), true, 'the launcher was up before the file came (the test holds it back until it is)');
   step('quit');

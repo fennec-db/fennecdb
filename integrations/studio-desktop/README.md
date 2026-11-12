@@ -10,13 +10,14 @@ own `/_studio/` page, so what the window does is what the studio does in a
 browser. Nothing of a database is written by the app itself: a server makes a
 new file, `fennec backup` takes an image, `fennec restore` makes a file of one.
 
-Beta, macOS on Apple silicon only. The shell is [Electrobun](https://electrobun.dev)
-2.0.4 (a Bun main process and the system's WKWebView); its build tool ships no
-Intel Mac build. Windows and Linux (x64 and arm64 each) are on the way and not
-downloadable yet: CI builds the app there and runs its unit tests and the
-checks that pass there ([Windows and Linux](#windows-and-linux)), and what is
-missing before it ships is in the plan in #578 (the downloads and their
-installers, phase 4).
+Beta, macOS on Apple silicon, Windows and Linux (x64 and arm64 each). The
+shell is [Electrobun](https://electrobun.dev) 2.0.4 (a Bun main process and the
+system's WKWebView, WebView2 on Windows, WebKitGTK 4.1 on Linux); its build
+tool ships no Intel Mac build. On Windows and Linux CI builds the app, runs its
+unit tests and the checks that pass there, and makes and checks the download
+([Windows and Linux](#windows-and-linux)); a `.fennec` opens there from
+Explorer or a file manager ([A file from the desktop](#a-file-from-the-desktop)),
+and what is still missing is under [Not yet](#not-yet).
 A release's DMG is unsigned, signed ad hoc and not notarized
 ([Download](#download)), until a maintainer adds the secrets
 ([below](#signing-and-notarization)); an app you build here opens as it is.
@@ -60,6 +61,42 @@ A release carries the app as `fennec-studio-v<version>-macos-arm64.dmg`
   then System Settings, Privacy & Security, **Open Anyway** beside fennec
   studio, once. From a terminal, `xattr -cr "/Applications/fennec studio.app"`
   takes the quarantine off instead.
+
+On **Windows and Linux** a release carries the app as
+`fennec-studio-v<version>-windows-<x64|arm64>.zip` and
+`fennec-studio-v<version>-linux-<x64|arm64>.tar.xz`, in its `SHA256SUMS` too:
+one folder, `fennec-studio`, the app unpacked, which runs where it is unpacked
+(`bin\launcher.exe`, `bin/launcher`). The one-liners put it where Electrobun's
+own installer would, with a Start-menu shortcut or a menu entry, no
+administrator and no `sudo`, refusing an app running from there:
+
+```powershell
+& ([scriptblock]::Create((irm https://fennecdb.com/install.ps1))) -App   # %LOCALAPPDATA%\dev.fennecdb.studio\stable\app
+```
+
+```bash
+curl -fsSL https://fennecdb.com/install.sh | sh -s -- --app   # ~/.local/share/dev.fennecdb.studio/stable/app
+```
+
+Linux needs glibc 2.38 and WebKitGTK 4.1 (Ubuntu 24.04, Debian 13, Fedora 39
+and later), which the script asks for before it downloads anything, saying what
+to install where one is missing. Neither download is signed: `install.ps1`
+takes the zip with no mark of the web, where a browser's copy is stopped once
+by SmartScreen (More info, Run anyway) and refused where Smart App Control is
+on. Electrobun's own installers are not shipped: Windows' `Setup.exe` did not
+end on the runners, and both keep the whole payload again for an updater the
+app does not have (the design file has the rest).
+
+```bash
+make studio-desktop-dist   # on Windows (Git's bash) or Linux: the zip or tarball in artifacts/dist/, then checks/dist.mjs on it
+```
+
+There `scripts/checks/dist.mjs` hands over to `dist-archive.mjs`: the one
+folder, a launcher that is not the extractor, no test hook, started where it
+is unpacked, then installed through `install.ps1 -App` or `install.sh --app`
+from a release laid out on the machine and started by the shortcut's or the
+menu entry's own target, unchanged by either run but for the launcher's own
+log, `bin\app.log`, which Electrobun writes beside itself on Windows.
 
 **What the DMG holds.** Electrobun's stable build is a self-extractor: a
 launcher and the app as a `.tar.zst` in its Resources, which the first launch
@@ -147,11 +184,13 @@ npm run typecheck && npm run test:unit
 
 ### Windows and Linux
 
-Built and checked on CI, nothing shipped yet: `desktop.yml`'s `other-systems`
-job builds the shipped app and the test variant on `windows-latest`,
-`windows-11-arm`, `ubuntu-24.04` and `ubuntu-24.04-arm`, with a release's server
-and shell, and runs the type check, the unit tests and the scripted checks that
-pass there. The same by hand, from this directory (on Windows in Git's bash):
+Built, checked and shipped from CI: `desktop.yml`'s `other-systems` job builds
+the shipped app and the test variant on `windows-latest`, `windows-11-arm`,
+`ubuntu-24.04` and `ubuntu-24.04-arm`, with a release's server and shell, runs
+the type check, the unit tests and the scripted checks that pass there, and
+makes and checks the download ([Download](#download)), which a release
+dispatch attaches. The same by hand, from this directory (on Windows in Git's
+bash):
 
 ```bash
 npm ci --ignore-scripts
@@ -160,6 +199,7 @@ npm run build                              # the shipped build, an installer
 npm run typecheck && npm run test:unit
 FENNEC_DESKTOP_TEST_BUILD=1 npm run build  # the test variant
 npm run checks                             # Linux: on an X display, a session bus and an unlocked Secret Service
+sh scripts/dist.sh && node scripts/checks/dist.mjs   # the download, and held as it ships (Linux: xdotool)
 ```
 
 Linux takes WebKitGTK 4.1 and glibc 2.38 (Ubuntu 24.04, Debian 13, Fedora 39
@@ -169,7 +209,7 @@ checks `xvfb`, `dbus-x11`, `gnome-keyring` and `libsecret-tools`, run as CI runs
 them: `dbus-run-session -- sh -c 'printf
 <password> | gnome-keyring-daemon --unlock --components=secrets && xvfb-run -a
 node scripts/checks/run.mjs'`. Windows takes WebView2 (part of Windows 11). The
-`make` targets are the Mac's (the icon, the DMG).
+`make` targets but `studio-desktop-dist` are the Mac's (the icon, the DMG).
 
 A stable build there is an installer, not an app that runs where it is: on
 Windows `build/stable-win-<arch>/fennec studio-Setup.exe` (and
@@ -183,8 +223,8 @@ Windows runners it said it was done and started nothing).
 What does not run there is skipped by name, never silently, each with its
 reason, and where a later phase of the plan (#578) brings it, that phase: the
 checks' list is in `scripts/checks/run.mjs` and a run prints each as SKIP
-(`release`, which reads a macOS bundle's payload, until phase 4; `opener` and
-`keyring`, Linux's alone; `menu`, Windows' and Linux's). A unit test that cannot hold on a system says why beside it: the tree
+(`opener` and `keyring`, Linux's alone; `latepreload`, Windows' alone;
+`menu`, Windows' and Linux's, macOS's File menu being the menu bar's). A unit test that cannot hold on a system says why beside it: the tree
 digest's executable bit (Windows keeps none), a Unix socket's leftovers and
 folder modes on Windows, and D-Bus off Linux.
 
@@ -210,10 +250,20 @@ What the app does otherwise there (phase 2):
   Service with a login keyring, asked first and bounded, so no store is said
   in words within seconds, never taken for "no token", and a token is kept
   in no file instead.
-* **A page's request for a new window** (`window.open`, a link with a target)
-  is taken by the app on Windows: Electrobun leaves it to WebView2, which
-  opens a window of its own, held to no address and alive after the app quit.
-  A studio window's goes to the browser through the same filter as on macOS.
+* **A page's request for a new window** is taken by the app on Windows, in
+  every frame, whichever way the page names one (`window.open`, `document.open`
+  with three arguments, a link or a form with a target, `<base target>`, a
+  script's click or submit): Electrobun leaves it to WebView2, which opens a
+  window of its own, held to no address and alive after the app quit. A studio
+  window's goes to the browser through the same filter as on macOS.
+* **WebView2 reads other origins' answers for a page** on Windows: Electrobun
+  starts it with `--disable-web-security`, and a variable can only add to its
+  switches. The studio's own CSP keeps the studio from such reads (the
+  `sandbox` check holds it there); a saved server's page that has none is not
+  kept from them there. Until Electrobun
+  lets the switch go (or the app moves to its CEF renderer, about 170 MB more),
+  connect the Windows app to servers you trust. No `WEBVIEW2_*` variable the app
+  was started with reaches WebView2.
 * **WebView2 keeps each window's store in a folder** and Electrobun's clear
   there empties another window's: the app removes a removed connection's
   folder, and a file window's, once no window is in it.
@@ -320,7 +370,9 @@ script says which hashes a mismatch is.
    | `files` | open, edit through the studio's own form, a second open only shows the window, close stops the server with exit 0, reopen has the edit (also at once, while the first server is still stopping); a file another program holds is a message and **Try again** works once it lets go; a missing file, a folder, a file that is not a database and an empty one are said before any server is started, and nothing is written beside them; a quit right after a close waits for that server, and it ends with exit 0 |
    | `server-dies` | `kill -9` the server under a window: a message, the window closed, **Open again** works |
    | `orphan` | the app killed with two files open, one opened after the other, and a third served: **the descriptor tables, read while the app is alive (lsof on macOS, `/proc` and `ss` on Linux), say the write end of each server's stdin is the app's alone** (a control starts a process that does hold another's and requires the reading to find it), then every server ends by itself (the end of its stdin), the served one too, and every file is free for another program. On Windows, which has no table a check reads, the kill, the ending and the free files alone. A process is not stopped: on a hosted macOS runner a SIGSTOPped server made `ps` hang, and the job with it |
-   | `sandbox` | the session is `window.fennecHost`, frozen, in the page's own world, and in no storage; the studio has no sign-in form and no Sign out; only the event bridge in a studio window, no navigating off its origin; **a non-web address is dropped by the app** (the page asked, and nothing reached the system) and the first web link is handed to the browser, which the rate limit of one in three seconds does not explain. WebKitGTK raises nothing for a script's `window.open`, so on Linux the page-to-app step is not shown: nothing is opened and the window stays, and the app's filter is asked directly (`open-link`); on Windows the app's preload takes the request (`link-out`) and **no window of WebView2's own is opened** |
+   | `sandbox` | the session is `window.fennecHost`, frozen, in the page's own world, and in no storage; the studio has no sign-in form and no Sign out; only the event bridge in a studio window, no navigating off its origin; **the studio reads no answer of another origin**, one that allows any reader neither, by fetch, XHR or a frame, and that origin is asked nothing (its CSP refuses each before it leaves; the studio's own origin answers, the control), on Windows too, where WebView2 runs with `--disable-web-security`; **a non-web address is dropped by the app** (the page asked, and nothing reached the system) and the first web link is handed to the browser, which the rate limit of one in three seconds does not explain. WebKitGTK raises nothing for a script's `window.open`, so on Linux the page-to-app step is not shown: nothing is opened and the window stays, and the app's filter is asked directly (`open-link`); on Windows the app's preload takes the request (`link-out`) and **no window of WebView2's own is opened** |
+   | `hostile` | a saved server's page that has no CSP (a stand-in that answers the app's probe as fennec-server does): **it reads no answer of another origin that does not allow it** (fetch, XHR, a frame's document; one that allows any reader is read, the control), on macOS and Linux; on Windows, where Electrobun starts WebView2 with `--disable-web-security`, that the switch is there still, so the check fails once it is gone. **No window is opened for it**, whichever way it asks, from its document or any frame it makes: `window.open` and `document.open` with three arguments; a link with a target, outside the document, in a shadow root clicked by script (at it or its text), under `<base target>`, an image map's area, SVG's link; a form with a target by `submit()`, `requestSubmit()` with a `formtarget`, its button's `click()`, one in a shadow root; and a frame at once, by its index, of about:blank, srcdoc (its own script too), `document.write`, a data: or a blob: address, its own origin or another, a frame in a frame, a frame's own detached link, form and `document.open`. Each asks for an address of the stand-in's, which no window loads; on Windows no window of WebView2's own is drawn. On Windows the app is started with three `WEBVIEW2_*` variables: none is left in its environment block, and no window gets the store one names |
+   | `latepreload` | Windows: a studio window whose first document has no bridge (made so by the test variant, as a preload WebView2 added late leaves it) is loaded again and shows the studio with its bridge and session; with the guard turned off, the control, the same window stays silent |
    | `pages` | the launcher, the new-database window and a notice window cannot be navigated anywhere else (a web page, a file, another of the app's pages): without the rule, the launcher goes to example.com; their CSP refuses a string the page itself would eval (a string timer, compiled after the check's script returned: WebView2 lets the check's own script eval) and inline script; the one instance listens where its user alone can (on Windows a pipe whose DACL, read back, is one entry for its user's SID), and a second asks it to show itself and quits; on Windows the launcher's `window.open` opens no window of WebView2's own |
    | `storage` | what a window keeps (the studio's history, theme) is its own, **read from a second window on the same origin** (`store-window`, a test hook): a window in another store does not see a file window's, one in the same store does (the control); two saved servers on one address do not share it; a saved server's survives its window; **a removed connection's store, opened again under its id, is empty**, whether or not a window was open on it; on Windows each store's folder is gone once it was taken away, a closed file window's too |
    | `environment` | the server is started with the allowlist and its token, whatever the app was started with (`OTEL_*`, `FENNEC_JWT_SECRET`, and the checks' own variables stay out), read back by a stand-in server: a shell script, or on Windows a program built by the Bun Hutch fetched (the app's own copy carries its icon, which Bun refuses as a program's base); there `Path` and `SystemRoot` reach it, and what Windows sets in any process (a control started with `SystemRoot` alone says what: `PROCESSOR_ARCHITECTURE` on arm64) is allowed |
@@ -330,7 +382,7 @@ script says which hashes a mismatch is.
    | `backups` | a backup with nothing running (a server for it alone, stopped with exit 0, no window) and one through the window's own server; verify; a restore into a new file that opens with the rows; never over a file there or the open one; a key made with `fennec key` (0600, never written over), a sealed backup that is no database in the clear, verified and restored; a new database from a folder of backups; a database served with `--sync off`, refused with the reason |
    | `opener` | Linux: a link and a folder whose names run `touch` in a shell (the control: through `sh -c`, as Electrobun hands them, the marker is made): handed to a stand-in `xdg-open`, each is one argument, made inert, and no marker; handed to the real one, which can start nothing (its default for links asked first, `xdg-mime`), no marker |
    | `keyring` | Linux: on a session bus with no Secret Service, and on one whose keyring has no default collection, saving a token is refused in words within seconds (libsecret alone waited 25 s), kept in no file, and a connection saved before is refused, nothing sent to its server |
-   | `finder` | macOS: `open -a <app> <file>` with the app not running: the file arrives as `open-url`, spaces and non-ASCII letters included. Windows and Linux: a double-click as close as a runner allows (the shell's ShellExecuteEx on the file; `gio open`): **with the registration taken away as [Uninstall](#uninstall) says, it starts nothing** (the control); a start of the app registers it, as the system then reads it back (the ProgID's command, `.fennec`'s default; the entry, the type GIO gives a `.fennec`), and a second start writes nothing; with the app not running, the double-click starts it with the file, which opens with no main window over it, its own arguments Bun's and `main.js` alone and the file read back from the launcher whole; with it running, a second file's is handed by the instance it starts to the one there, which quits; a `.fennec` that is not a database is said in words, nothing written beside it; on Linux, the app run from a folder whose name would run a command in a shell is started there by the double-click, the name whole and nothing run, and once that copy is gone its entry is ignored; removed again, the double-click starts nothing |
+   | `finder` | macOS: `open -a <app> <file>` with the app not running: the file arrives as `open-url`, spaces and non-ASCII letters included; and handed over late (the test variant holds it until the launcher is up), the launcher is closed and the file's window opens, its own blank view kept (a removal of it crashed the app here once, on a hosted runner). Windows and Linux: a double-click as close as a runner allows (the shell's ShellExecuteEx on the file; `gio open`): **with the registration taken away as [Uninstall](#uninstall) says, it starts nothing** (the control); a start of the app registers it, as the system then reads it back (the ProgID's command, `.fennec`'s default; the entry, the type GIO gives a `.fennec`), and a second start writes nothing; with the app not running, the double-click starts it with the file, which opens with no main window over it, its own arguments Bun's and `main.js` alone and the file read back from the launcher whole; with it running, a second file's is handed by the instance it starts to the one there, which quits; a `.fennec` that is not a database is said in words, nothing written beside it; on Linux, the app run from a folder whose name would run a command in a shell is started there by the double-click, the name whole and nothing run, and once that copy is gone its entry is ignored; removed again, the double-click starts nothing |
    | `menu` | Windows and Linux. Windows, the keys pressed as a person's (a click into the page, then each key through the system's input): text typed into the search box arrives (the control; where the system takes none of the keys, as on the arm64 runner, they are dispatched in the page instead and the log says so), then Ctrl+N opens the new-database window, Ctrl+O the file the dialog is answered with, Ctrl+Shift+O Remote connections, each once, saying whether the menu bar or the page took it, and no window of WebView2's own opens. Linux, with no application menu: New database, Open file… (the dialog answered by the check), a file's Open in the Databases list and Remote connections, each the main window's own button, then the same three keys dispatched in the page; the main window closed and shown again by starting the app a second time |
 
    `ONLY=files,remote npm run checks` runs a subset (with the test variant
@@ -397,7 +449,8 @@ thing in the list below that has to be looked at with a real certificate.
 | `src/bun/pages.ts` | the main window (`launcher` in the code, as it began) and the new-database window and what they may ask (`src/shared/rpc.ts`) |
 | `src/bun/messages.ts`, `remote.ts`, `names.ts`, `dbfile.ts`, `env.ts`, `token.ts`, `listening.ts` | every failure in words, the probe of a saved server, the check of a new name and of a first collection, what a file is, the environment of what the app starts, a token and the address (or the file) it is for, the lines of a server's stderr the app acts on: pure, unit-tested |
 | `src/bun/secrets.ts`, `store.ts` | the system's credential store (`Bun.secrets`; on Windows written by the app, kept on the machine, `win32.ts`; on Linux asked first, `secretservice.ts`) and `state.json` |
-| `src/bun/opener.ts` | a link and a folder handed to the system, never through a shell (on Linux `xdg-open` with an argument vector), and on Windows the preload that takes a page's request for a new window before WebView2 opens one of its own: pure but for the spawn, unit-tested |
+| `src/bun/opener.ts` | a link and a folder handed to the system, never through a shell (on Linux `xdg-open` with an argument vector), and on Windows the preload, in every document of a window, that takes each way a page names a new window before WebView2 opens one of its own: pure but for the spawn, unit-tested |
+| `src/bun/webview2.ts` | Windows: the `WEBVIEW2_*` variables taken out of the app's environment before its first window, and the guard that loads a page again where WebView2 ran it before its preload: pure, unit-tested |
 | `src/bun/stores.ts` | which data store a window gets, and on Windows the store folders removed once no window is in them: pure but for the files, unit-tested |
 | `src/bun/instance.ts`, `clipboard.ts` | one instance of the app at a time; a token copied to the clipboard cleared a minute later: pure but for a socket (a pipe on Windows) and a clipboard handed in, unit-tested |
 | `src/launcher`, `src/newdb`, `src/notice`, `src/ui` | the app's own pages |
@@ -460,7 +513,14 @@ its page's view is made in it (`windows.ts`) with a store of its own: a name
 without `persist:` for a file (a store that exists for the window), and
 `persist:remote-<id>` for a saved server (kept between runs, apart from every
 other saved server's, and cleared when the connection is removed). Electrobun's
-own view of the window, blank and in the shared store, is removed first.
+own view of the window, blank and in the shared store, is removed on Windows
+and Linux and kept on macOS, where it loads nothing and may navigate nowhere:
+Electrobun 2.0.4 there makes the view on the main thread after the window
+returns and removes it at once on the app's own thread, so a removal straight
+after the window mostly did nothing and, falling while the view was being
+made, crashed the app; removed once surely made, it cost an open about 28 ms
+and freed no memory. The test variant reports it (`own-view`), and every check
+that waits for a studio window holds it to that (`waitStudio`).
 
 **New database…** is a small window of the app's own (Electrobun has no save
 panel): the folder from the folder dialog, a name, and the app creates the
@@ -903,12 +963,12 @@ start and the end of every run.
   archives and Start it when I log in (both above, for their reasons).
 
 * Updates: Electrobun makes bsdiff patches against a release it can download,
-  and nothing is published; a new version is a new DMG.
-* Intel Macs, and a Windows or Linux download. The app builds and is checked
-  there (Windows and Linux, above); still to come are the installers and their
-  checks (phase 4), and a signing hook on Windows (Hutch does not sign there).
-* An uninstall of the app's own on Windows and Linux: Electrobun's leaves the
-  `.fennec` registration behind ([Uninstall](#uninstall)).
+  and nothing is published; a new version is a new DMG, zip or tarball.
+* Intel Macs. And on Windows and Linux: a signing hook on Windows (Hutch does
+  not sign there: Authenticode is the owner's sixth decision in
+  docs/design/windows.md), an uninstall of the app's own (removing its folder
+  leaves the `.fennec` registration: [Uninstall](#uninstall)), a `.deb` or
+  `.rpm`.
 * On Linux the app does not start from a folder whose path holds a `$` or a
   backslash (seen: Electrobun's core could not load its native library under
   `$(...)`, and Bun 1.4.0 reads a backslash in its script's path as a

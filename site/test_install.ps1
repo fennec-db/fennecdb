@@ -15,7 +15,13 @@
 # run through iex it leaves the session's settings as they were, and a
 # failure there fails the line; a copy cut short at any point runs
 # nothing; and tools/install-ps1-check.ps1 passes the script and fails a copy
-# made to run a command. It prints what Windows does with the mark: whether
+# made to run a command. With -App it installs the app from the release's
+# zip of it (a stand-in: a folder holding a copy of ping.exe as its
+# launcher) into LOCALAPPDATA with a Start-menu shortcut in APPDATA, each the
+# test's own, again over it keeping the app's own files beside it, from a
+# folder whose marked zip leaves no mark, and through the scriptblock the
+# docs give; and refuses a tampered zip, a release with no app and an app
+# running from its place, each installing nothing. It prints what Windows does with the mark: whether
 # Invoke-WebRequest marks what it downloads, and whether Expand-Archive
 # carries a zip's mark onto what it unpacks.
 
@@ -135,13 +141,30 @@ try {
     New-Item -ItemType Directory -Path $rel, (Join-Path $site 'latest\download') | Out-Null
     Copy-Item -LiteralPath $Zip -Destination $rel
     $sum = Sha256 (Join-Path $rel $name)
-    # A tarball's line before the zip's, as release.yml's SHA256SUMS has them.
-    $sums = "$('0' * 64)  fennec-v$Version-x86_64-unknown-linux-musl.tar.gz`n$sum  $name`n"
+    # The app's zip for this processor, as desktop.yml attaches it: a
+    # stand-in, the folder fennec-studio holding a launcher (a copy of
+    # ping.exe, which runs from anywhere and can be kept running) and the
+    # main process's file.
+    $appArch = if ($target -eq 'aarch64-pc-windows-msvc') { 'arm64' } else { 'x64' }
+    $appName = "fennec-studio-v$Version-windows-$appArch.zip"
+    $standIn = Join-Path $work 'appsrc\fennec-studio'
+    New-Item -ItemType Directory -Path (Join-Path $standIn 'bin'), (Join-Path $standIn 'Resources\app\bun') | Out-Null
+    Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\PING.EXE') -Destination (Join-Path $standIn 'bin\launcher.exe')
+    [IO.File]::WriteAllText((Join-Path $standIn 'Resources\app\bun\index.js'), '// the stand-in app')
+    Compress-Archive -Path $standIn -DestinationPath (Join-Path $rel $appName)
+    $appSum = Sha256 (Join-Path $rel $appName)
+    # A tarball's line before the zip's, as release.yml's SHA256SUMS has them,
+    # and the app's appended after them, as desktop.yml appends it.
+    $sums = "$('0' * 64)  fennec-v$Version-x86_64-unknown-linux-musl.tar.gz`n$sum  $name`n$appSum  $appName`n"
     [IO.File]::WriteAllText((Join-Path $rel 'SHA256SUMS'), $sums)
     Copy-Item -LiteralPath (Join-Path $rel 'SHA256SUMS') -Destination (Join-Path $site 'latest\download')
     $from = Join-Path $work 'from'
     New-Item -ItemType Directory -Path $from | Out-Null
-    Copy-Item -LiteralPath (Join-Path $rel $name), (Join-Path $rel 'SHA256SUMS') -Destination $from
+    Copy-Item -LiteralPath (Join-Path $rel $name), (Join-Path $rel $appName), (Join-Path $rel 'SHA256SUMS') -Destination $from
+    # A release with the programs and no app.
+    $noApp = Join-Path $site 'download\v0.0.1'
+    New-Item -ItemType Directory -Path $noApp | Out-Null
+    [IO.File]::WriteAllText((Join-Path $noApp 'SHA256SUMS'), "$sum  fennec-v0.0.1-$target.zip`n")
     # A release with no Windows build, as every one before it.
     $old = Join-Path $work 'oldsite'
     New-Item -ItemType Directory -Path (Join-Path $old 'latest\download') | Out-Null
@@ -350,6 +373,107 @@ server.serve_forever()
         Expect "$tag from a folder with no SHA256SUMS: fails" ($rc -ne 0)
         Expect "$tag from a folder with no SHA256SUMS: installs nothing" (-not (Test-Path (Inst fromnothing)))
 
+        # The app, -App: into a LOCALAPPDATA and an APPDATA of the test's own.
+        function AppInstall([string] $n, [hashtable] $vars = @{}, [string[]] $flag = @('-App')) {
+            $local = Join-Path $work "$tag-$n-local"
+            $roaming = Join-Path $work "$tag-$n-roaming"
+            New-Item -ItemType Directory -Force -Path $local, $roaming | Out-Null
+            $v = @{ LOCALAPPDATA = $local; APPDATA = $roaming }
+            foreach ($k in $vars.Keys) { $v[$k] = $vars[$k] }
+            return (Install $n $v $flag)
+        }
+        function Stable([string] $n) { Join-Path $work "$tag-$n-local\dev.fennecdb.studio\stable" }
+        function AppDir([string] $n) { Join-Path (Stable $n) 'app' }
+        function Lnk([string] $n) { Join-Path $work "$tag-$n-roaming\Microsoft\Windows\Start Menu\Programs\fennec studio.lnk" }
+        function Target([string] $lnk) {
+            $shell = New-Object -ComObject WScript.Shell
+            try { return $shell.CreateShortcut($lnk).TargetPath } finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell) }
+        }
+        function Names([string] $dir) { (@(Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.Name } | Sort-Object) -join ' ') }
+
+        $rc = AppInstall app
+        $launcher = Join-Path (AppDir app) 'bin\launcher.exe'
+        Expect "$tag -App: exit 0" ($rc -eq 0) (Out app)
+        Expect "$tag -App: checked the sum" ((Out app).Contains("Checksum ok ($appSum)")) (Out app)
+        Expect "$tag -App: says where it installed the app" ((Out app).Contains("Installed fennec studio $Version (beta) in $(AppDir app).")) (Out app)
+        Expect "$tag -App: the app is there" ((Test-Path -LiteralPath $launcher) -and (Test-Path -LiteralPath (Join-Path (AppDir app) 'Resources\app\bun\index.js')))
+        Expect "$tag -App: nothing beside it" ((Names (Stable app)) -eq 'app') (Names (Stable app))
+        Expect "$tag -App: a Start-menu shortcut" (Test-Path -LiteralPath (Lnk app))
+        Expect "$tag -App: the shortcut starts the app" ((Target (Lnk app)) -eq $launcher) (Target (Lnk app))
+        Expect "$tag -App: says how to start it" ((Out app).Contains("& '$launcher'")) (Out app)
+        Expect "$tag -App: the programs not installed" (-not (Test-Path (Inst app)))
+
+        # Again over it: the app's own files beside it are kept.
+        [IO.File]::WriteAllText((Join-Path (Stable app) 'state.json'), '{}')
+        $rc = AppInstall app
+        Expect "$tag -App again, over the first: exit 0" ($rc -eq 0) (Out app)
+        Expect "$tag -App again: the app's state beside it kept, no staging left" ((Names (Stable app)) -eq 'app state.json') (Names (Stable app))
+        $rc = AppInstall appflag @{} @('--app')
+        Expect "$tag --app, spelled so: exit 0" ($rc -eq 0) (Out appflag)
+
+        # The app running from its place is not replaced under it.
+        $runningApp = Start-Process -FilePath $launcher -ArgumentList '-n', '120', '127.0.0.1' -NoNewWindow -PassThru `
+            -RedirectStandardOutput (Join-Path $work "$tag-ping.out") -RedirectStandardError (Join-Path $work "$tag-ping.err")
+        try {
+            $deadline = (Get-Date).AddSeconds(30)
+            while (-not (Get-Process -Id $runningApp.Id -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }
+            $binBefore = Names (Join-Path (AppDir app) 'bin')
+            $rc = AppInstall app
+            Expect "$tag -App while it runs: refused" ($rc -ne 0) (Out app)
+            Expect "$tag -App while it runs: says to quit it" ((Out app).Contains('is running from')) (Out app)
+            Expect "$tag -App while it runs: the app left as it was" ((Names (Join-Path (AppDir app) 'bin')) -eq $binBefore -and (Test-Path -LiteralPath $launcher))
+        } finally {
+            Stop-Process -Id $runningApp.Id -Force -ErrorAction SilentlyContinue
+            $runningApp.WaitForExit()
+        }
+
+        # A zip that is not the one the sums name, a release with no app, and
+        # a latest release with no Windows build.
+        $servedApp = Join-Path $rel $appName
+        Copy-Item -LiteralPath $servedApp -Destination "$servedApp.good"
+        [IO.File]::AppendAllText($servedApp, 'x')
+        $rc = AppInstall apptampered
+        Copy-Item -LiteralPath "$servedApp.good" -Destination $servedApp -Force
+        Remove-Item -LiteralPath "$servedApp.good"
+        Expect "$tag -App, a tampered zip: refused" ($rc -ne 0)
+        Expect "$tag -App, a tampered zip: names the checksum" ((Out apptampered).Contains('checksum')) (Out apptampered)
+        Expect "$tag -App, a tampered zip: installs nothing" (-not (Test-Path (Stable apptampered)) -and -not (Test-Path (Lnk apptampered)))
+        $rc = AppInstall appnone @{ FENNEC_VERSION = '0.0.1' }
+        Expect "$tag -App, a release with no app: refused" ($rc -ne 0)
+        Expect "$tag -App, a release with no app: says so" ((Out appnone).Contains("release v0.0.1 lists no fennec-studio-v0.0.1-windows-$appArch.zip")) (Out appnone)
+        Expect "$tag -App, a release with no app: installs nothing" (-not (Test-Path (Stable appnone)))
+        $rc = AppInstall appold @{ FENNEC_BASE_URL = $oldBase }
+        Expect "$tag -App, a latest release with no Windows build: refused" ($rc -ne 0)
+        Expect "$tag -App, a latest release with no Windows build: installs nothing" (-not (Test-Path (Stable appold)))
+
+        # From a folder whose zip a browser marked: nothing installed carries the mark.
+        $fromApp = Join-Path $from $appName
+        Mark $fromApp
+        $rc = AppInstall appfrom @{ FENNEC_BASE_URL = $null; FENNEC_FROM = $from }
+        Expect "$tag -App from a folder: exit 0" ($rc -eq 0) (Out appfrom)
+        Expect "$tag -App from a folder: the zip there was marked" (Marked $fromApp)
+        Expect "$tag -App from a folder: the launcher carries no mark" ((Test-Path -LiteralPath (Join-Path (AppDir appfrom) 'bin\launcher.exe')) -and -not (Marked (Join-Path (AppDir appfrom) 'bin\launcher.exe')))
+
+        # As the docs give it: the script made a script block and called with -App.
+        $sbDriver = Join-Path $work "$tag-sb.ps1"
+        [IO.File]::WriteAllText($sbDriver, @'
+$path = $args[0]
+$before = "$ErrorActionPreference $ProgressPreference $([Net.ServicePointManager]::SecurityProtocol) $(Get-Location)"
+& ([scriptblock]::Create([IO.File]::ReadAllText($path))) -App
+$after = "$ErrorActionPreference $ProgressPreference $([Net.ServicePointManager]::SecurityProtocol) $(Get-Location)"
+if ($before -ne $after) { Write-Host "session changed: [$before] -> [$after]"; exit 3 }
+if (Get-Command Install-Fennec -ErrorAction SilentlyContinue) { Write-Host 'a function of the script is left defined'; exit 4 }
+Write-Host 'session unchanged'
+'@)
+        $sbLocal = Join-Path $work "$tag-sb-local"
+        $sbRoaming = Join-Path $work "$tag-sb-roaming"
+        New-Item -ItemType Directory -Force -Path $sbLocal, $sbRoaming | Out-Null
+        $sbOut = Join-Path $work "$tag-sb.out"
+        $rc = Run $shell @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $sbDriver, $script) $sbOut @{ FENNEC_BASE_URL = $base; LOCALAPPDATA = $sbLocal; APPDATA = $sbRoaming }
+        Expect "$tag -App through a script block: exit 0" ($rc -eq 0) (Text $sbOut)
+        Expect "$tag -App through a script block: installed" (Test-Path -LiteralPath (Join-Path $sbLocal 'dev.fennecdb.studio\stable\app\bin\launcher.exe')) (Text $sbOut)
+        Expect "$tag -App through a script block: the session as it was" ((Text $sbOut).Contains('session unchanged')) (Text $sbOut)
+
         # A base URL that is not https, or not this machine's.
         $n = 0
         foreach ($url in @(
@@ -465,6 +589,7 @@ Write-Host "cuts run: $count"
             'add-type in Install-Fennec'          = $text.Replace($call, "Add-Type -TypeDefinition 'public class FennecX {}'`n        $call")
             'a command after a closing brace'     = ([regex]'(?m)^}(?=\r?$)').Replace($text, '}; New-Item -ItemType Directory -Path pwned', 1)
             'a command before the call'           = $text.Replace('Install-Fennec @args', "New-Item -ItemType Directory -Path pwned`nInstall-Fennec @args")
+            'the shell object running a program'  = $text.Replace('$s.Save()', "`$s.Save()`n        `$shell.Run('cmd.exe')")
         }
         $checked = Join-Path $work "$tag-check.ps1"
         [IO.File]::WriteAllText($checked, $text)

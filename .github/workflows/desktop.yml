@@ -15,7 +15,20 @@ name: desktop
 # checks that run there (Linux's under xvfb-run, on a D-Bus session with
 # gnome-keyring's Secret Service unlocked). scripts/checks/run.mjs says which
 # checks a system skips, each with its reason and the phase that brings it.
-# Nothing they build is shipped or attached; no other job needs them.
+# Each then makes the download (phase 4): the shipped app unpacked from the
+# build's payload as one folder, a zip on Windows and a tarball on Linux
+# (scripts/dist.sh), held as it ships (scripts/checks/dist.mjs): started where
+# it is unpacked, then installed through install.ps1 -App or install.sh --app
+# from a release laid out on the runner and started from where they put it.
+#
+# A RELEASE: started by hand from main with a release's tag, every build job
+# uses that release's server and shell and runs every check, and
+# `attach-unsigned` attaches what nothing signs -- Windows' and Linux's four
+# downloads, fennec-studio-v<version>-<windows|linux>-<x64|arm64>.<zip|tar.xz>,
+# where all four jobs passed, and the Mac's DMG where the signing job signed
+# nothing -- each line appended to the release's SHA256SUMS in one write
+# (scripts/attach.sh). A dispatch from another branch builds and checks them
+# all and attaches nothing.
 #
 # THE DOWNLOAD is unsigned until there is a Developer ID: the app unpacked
 # and signed ad hoc as a whole (scripts/dist.sh says why it cannot ship as
@@ -91,9 +104,11 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/desktop.yml'
-      # The installer's --app path, which the app job runs on the DMG it makes.
+      # The installers' app paths, which the app job runs on the DMG it makes
+      # and the other systems' jobs on their zip or tarball.
       - 'site/install.sh'
       - 'site/test_install.sh'
+      - 'site/install.ps1'
   push:
     branches: [main]
     paths:
@@ -115,10 +130,11 @@ on:
       - '.github/workflows/desktop.yml'
       - 'site/install.sh'
       - 'site/test_install.sh'
+      - 'site/install.ps1'
   workflow_dispatch:
     inputs:
       release:
-        description: 'A release tag (v0.2.0) to bundle the server of and attach the DMG to: signed where the desktop-signing Environment holds the secrets, unsigned (ad hoc) where it does not; from main only. Empty: this checkout, nothing attached.'
+        description: 'A release tag (v0.2.0) to bundle the server of and attach the app to: the DMG signed where the desktop-signing Environment holds the secrets, unsigned (ad hoc) where it does not, and the Windows and Linux downloads; from main only. Empty: this checkout (macOS) or 0.2.0 (Windows, Linux), nothing attached.'
         required: false
         default: ''
 
@@ -241,8 +257,7 @@ jobs:
   # dispatch that names a release is a maintainer attaching the Mac's DMG, and
   # skips them.
   other-systems:
-    name: app on ${{ matrix.name }} (build, unit tests, checks)
-    if: github.event.inputs.release == ''
+    name: app on ${{ matrix.name }} (build, unit tests, checks, the download)
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
@@ -260,12 +275,17 @@ jobs:
         working-directory: integrations/studio-desktop
     env:
       # The release whose server and shell these jobs bundle, its asset checked against its
-      # SHA256SUMS. The macOS job bundles this checkout's; here the app is what is under test.
-      STUDIO_SERVER_RELEASE: '0.2.0'
+      # SHA256SUMS: the one a dispatch names, whose download is attached to it, else 0.2.0.
+      # The macOS job bundles this checkout's; here the app is what is under test.
+      STUDIO_SERVER_RELEASE: ${{ github.event.inputs.release || '0.2.0' }}
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+
+      # A dispatch's input goes into a release's name and a URL: only a release's name gets past this.
+      - name: The release asked for is a release's name
+        run: printf '%s' "$STUDIO_SERVER_RELEASE" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::release is a tag such as v0.2.0"; exit 1; }
 
       # Where the checks keep their data, reports and logs, so a failure can upload them.
       - name: Where the checks write
@@ -334,6 +354,37 @@ jobs:
           else
             node scripts/checks/run.mjs
           fi
+
+      # The download (the header, phase 4): the shipped app unpacked from its build's
+      # payload, a zip here on Windows and a tarball on Linux (scripts/dist.sh), then held
+      # as it ships (scripts/checks/dist.mjs): the folder and its launcher, no test hook,
+      # started where it is unpacked, installed through install.ps1 -App or install.sh
+      # --app from a release laid out on this runner, and started from where they put it.
+      # On Linux the window is found with xdotool, on the session bus and X display the
+      # checks above had.
+      - name: The download, made and held as it ships
+        timeout-minutes: 15
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sh scripts/dist.sh
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo -E apt-get install -y -q xdotool desktop-file-utils || { sudo -E apt-get update -q && sudo -E apt-get install -y -q xdotool desktop-file-utils; }
+            dbus-run-session -- xvfb-run -a -s "-screen 0 1600x1000x24" node scripts/checks/dist.mjs
+          else
+            node scripts/checks/dist.mjs
+          fi
+
+      # What a release attaches (attach-unsigned), and for a reviewer to try. A browser's
+      # download of the zip is marked, and SmartScreen asks once before the app runs; one
+      # install.ps1 -App takes is not.
+      - name: The download
+        uses: actions/upload-artifact@v7
+        with:
+          name: fennec-studio-app-${{ runner.os }}-${{ runner.arch }}
+          path: integrations/studio-desktop/artifacts/dist/fennec-studio-*
+          retention-days: 7
+          if-no-files-found: error
 
       - name: The logs of the checks
         if: failure()
@@ -555,87 +606,73 @@ jobs:
           done
           gh release upload "v$version" dist/fennec-studio-v"$version"-*.dmg --clobber -R "$GITHUB_REPOSITORY"
 
-  # The unsigned DMG, where nothing signed one: a dispatch from main naming a
-  # release, whose signing job ran and found no secrets (signed wins; a signing
-  # job that failed, or was not approved, attaches nothing). Like `attach`, it
-  # holds the write permission and no secret, checks nothing out and runs
-  # nothing but `gh`. The DMG is the one the app job built with that release's
-  # server and held to every check. Its line is appended to the release's
-  # SHA256SUMS, which is how install.sh finds and checks it: every line the
-  # file had is kept byte for byte (`cmp` holds it, and the file is read back),
-  # so no sum anyone took from it changes, and an asset of the DMG's name is
-  # never replaced -- one there already is this run's (a re-run, its SHA-256
-  # the same) or the job fails. A published release's other assets are
-  # release.yml's and are not touched. While `--clobber` replaces
-  # SHA256SUMS (a delete, then an upload: GitHub cannot write an asset in
-  # place) the release has none for a moment, and an install then fails
-  # saying so; one at a time per release (`concurrency`).
+  # What nothing signs, attached to the release a dispatch from main names:
+  # Windows' and Linux's four downloads, where every one of their jobs passed
+  # (a release has all four or none of them), and the Mac's DMG, where the
+  # signing job ran and found no secrets (signed wins; a signing job that
+  # failed, or was not approved, attaches no DMG -- and does not hold back the
+  # others, which nothing signs). Like `attach`, it holds the write permission
+  # and no secret; it checks out one file, scripts/attach.sh (main's, as this
+  # workflow is; no token kept), and runs nothing but it and `gh`. Each file is
+  # the one a build job made with that release's server and held to every
+  # check. Their lines are appended to the release's SHA256SUMS, which is how
+  # install.sh and install.ps1 find and check them, in one write: every line
+  # the file had is kept byte for byte (held, and the file read back), so no
+  # sum anyone took from it changes, and an asset of a download's name is never
+  # replaced -- one there already is this run's (a re-run, its SHA-256 the
+  # same) or the job fails before it writes anything
+  # (test/attach.test.ts). A published release's other assets are
+  # release.yml's and are not touched. While `--clobber` replaces SHA256SUMS
+  # (a delete, then an upload: GitHub cannot write an asset in place) the
+  # release has none for a moment, and an install then fails saying so; one
+  # at a time per release (`concurrency`).
   attach-unsigned:
-    name: attach the unsigned DMG to the release
-    needs: [app, sign]
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.event.inputs.release != '' && needs.sign.outputs.signed != 'true'
+    name: attach what nothing signs to the release
+    needs: [app, sign, other-systems]
+    # Whatever the other jobs did, so that one system's failure does not hold
+    # back another's download; what each step below attaches is its own job's.
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.event.inputs.release != '' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     concurrency:
       group: desktop-attach-${{ github.event.inputs.release }}
       cancel-in-progress: false
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout: integrations/studio-desktop/scripts/attach.sh
+          sparse-checkout-cone-mode: false
+
+      - name: The Mac's DMG, where the signing job ran and signed nothing
+        if: needs.app.result == 'success' && needs.sign.result == 'success' && needs.sign.outputs.signed != 'true'
+        uses: actions/download-artifact@v8
         with:
           name: fennec-studio-unsigned-dmg
           path: dist
 
-      - name: Attach, its line appended to SHA256SUMS
+      - name: Windows' and Linux's downloads, where all four jobs passed
+        if: needs.other-systems.result == 'success'
+        uses: actions/download-artifact@v8
+        with:
+          pattern: fennec-studio-app-*
+          merge-multiple: true
+          path: dist
+
+      - name: Attach, each line appended to SHA256SUMS
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE: ${{ github.event.inputs.release }}
         run: |
           set -eu
-          printf '%s' "$RELEASE" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::release is a tag such as v0.2.0"; exit 1; }
-          version="${RELEASE#v}"
-          tag="v$version"
-          name="fennec-studio-v$version-macos-arm64.dmg"
-          [ -f dist/fennec-studio-macos-arm64.dmg ] || { echo "::error::the app job's artifact holds no fennec-studio-macos-arm64.dmg"; exit 1; }
-          mv dist/fennec-studio-macos-arm64.dmg "dist/$name"
-          sum=$(cd dist && sha256sum "$name" | cut -d' ' -f1)
-          echo "$name: $(wc -c < "dist/$name") bytes, SHA-256 $sum"
-
-          have=$(gh release view "$tag" -R "$GITHUB_REPOSITORY" --json assets -q '.assets[].name')
-          printf '%s\n' "$have" | grep -qxF SHA256SUMS || { echo "::error::release $tag has no SHA256SUMS to list the DMG in"; exit 1; }
-          mkdir -p release readback
-          gh release download "$tag" -R "$GITHUB_REPOSITORY" -p SHA256SUMS -D release
-          listed=$(awk -v n="$name" '{ f = $2; sub(/^\*/, "", f); if (f == n) print $1 }' release/SHA256SUMS)
-
-          # The DMG: uploaded, or this run's there already (a re-run).
-          if printf '%s\n' "$have" | grep -qxF "$name"; then
-            gh release download "$tag" -R "$GITHUB_REPOSITORY" -p "$name" -D release
-            [ "$(sha256sum "release/$name" | cut -d' ' -f1)" = "$sum" ] || { echo "::error::release $tag has a $name already, not this run's: a release's assets are never replaced"; exit 1; }
-            echo "$name is on the release already, this run's"
-          else
-            gh release upload "$tag" "dist/$name" -R "$GITHUB_REPOSITORY"
-          fi
-
-          # Its line: there already with this sum, or appended.
-          if [ -n "$listed" ]; then
-            [ "$listed" = "$sum" ] || { echo "::error::SHA256SUMS lists $name with $listed, not $sum"; exit 1; }
-            echo "SHA256SUMS lists it already"
-            exit 0
-          fi
-          cp release/SHA256SUMS dist/SHA256SUMS
-          [ -z "$(tail -c 1 dist/SHA256SUMS)" ] || echo >> dist/SHA256SUMS
-          printf '%s  %s\n' "$sum" "$name" >> dist/SHA256SUMS
-          old=$(wc -c < release/SHA256SUMS)
-          cmp -n "$old" release/SHA256SUMS dist/SHA256SUMS
-          [ "$(grep -c . dist/SHA256SUMS)" -eq "$(( $(grep -c . release/SHA256SUMS) + 1 ))" ]
-          gh release upload "$tag" dist/SHA256SUMS --clobber -R "$GITHUB_REPOSITORY"
-          gh release download "$tag" -R "$GITHUB_REPOSITORY" -p SHA256SUMS -D readback
-          cmp dist/SHA256SUMS readback/SHA256SUMS
-          echo "SHA256SUMS of $tag now ends with:"
-          tail -n 1 readback/SHA256SUMS
-          {
-            echo "### $name attached to $tag"
-            echo
-            echo "$(wc -c < "dist/$name") bytes, SHA-256 \`$sum\`, listed in the release's SHA256SUMS."
-          } >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p dist
+          set -- dist/fennec-studio-*
+          [ -e "$1" ] || { echo "::error::nothing to attach: the jobs that make the downloads failed"; exit 1; }
+          others=$(ls dist | grep -cE '^fennec-studio-(windows|linux)-' || true)
+          case $others in
+            0 | 4) ;;
+            *) echo "::error::Windows' and Linux's downloads are four, and the artifacts hold: $(ls dist | tr '\n' ' ')"; exit 1 ;;
+          esac
+          sh integrations/studio-desktop/scripts/attach.sh "$RELEASE" "$@"

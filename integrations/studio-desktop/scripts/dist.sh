@@ -6,6 +6,12 @@
 #     default: build/stable-macos-arm64/fennec studio.app
 #              artifacts/dist/fennec-studio-macos-arm64.dmg
 #
+# On Windows and Linux, the app unpacked in a zip or a tarball instead (below):
+#
+#   scripts/dist.sh
+#     artifacts/dist/fennec-studio-windows-<x64|arm64>.zip   (Git's bash)
+#     artifacts/dist/fennec-studio-linux-<x64|arm64>.tar.xz
+#
 # Unpacked before it ships. Electrobun's stable build is a self-extractor: a
 # launcher (the extractor, linker-signed ad hoc) and the app as a .tar.zst in
 # its Resources, which the first launch unpacks into the bundle itself. That
@@ -35,6 +41,93 @@ die() {
   echo "dist: $*" >&2
   exit 1
 }
+
+# Windows and Linux: the folder Electrobun's installer would leave, and no
+# installer. A stable build there is an installer, not an app (the build
+# folder's launcher is the extractor, and the payload a .tar.zst in its
+# Resources): on Windows `<name>-Setup.exe`, which on the runners said it had
+# installed the app and then neither started it nor ended, and which a
+# browser's download meets SmartScreen with; on Linux `installer`, which
+# installs over a running copy and starts the app itself. Both also keep the
+# whole payload again as a tar for an updater the app does not have (123 MB
+# beside a 118 MB app on Linux). So the download is the payload unpacked --
+# the files the installer copies into <appdata>/dev.fennecdb.studio/stable/app
+# -- as one folder, fennec-studio, which runs where it is unpacked, and which
+# install.ps1 -App and install.sh --app put where the installer would
+# (checks/dist.mjs holds both). A zip on Windows, which Expand-Archive and
+# Explorer open, written by Windows' own tar.exe (libarchive's bsdtar: Git's
+# writes none), as tools/windows-zip.sh writes the programs'; a tarball on
+# Linux, its modes kept, compressed with xz, which every desktop there has: the
+# x64 app was 36.8 MB so, 50.6 MB as gzip -9 and 40.2 MB as zstd -19 (Electrobun's
+# own installer 41.8 MB), and a zip's deflate is all Expand-Archive reads.
+archive() {
+  case $(uname -s) in
+    Linux) sys=linux ;;
+    *) sys=windows ;;
+  esac
+  # The build Hutch made on this machine, named for its processor: on
+  # windows-11-arm Git's bash runs emulated and `uname -m` says x86_64.
+  set -- build/stable-*-*/*/Resources/*.tar.zst
+  [ "$#" -eq 1 ] && [ -f "$1" ] || die "build/ holds no single stable build's payload (Resources/*.tar.zst): build it first (npm run build)"
+  payload=$1
+  dir=${payload#build/stable-}
+  dir=${dir%%/*}
+  case $dir in
+    linux-x64 | linux-arm64 | win-x64 | win-arm64) ;;
+    *) die "build/stable-$dir is not a Windows or Linux build" ;;
+  esac
+  arch=${dir#*-}
+  case $dir in
+    linux-*) [ "$sys" = linux ] || die "a Linux build, and this is not Linux" ;;
+    *) [ "$sys" = windows ] || die "a Windows build, and this is not Windows" ;;
+  esac
+  name=fennec-studio-$sys-$arch
+  if [ "$sys" = windows ]; then ext=zip; else ext=tar.xz; fi
+  out=artifacts/dist/$name.$ext
+  work=build/dist
+  rm -rf "$work"
+  mkdir -p "$work/unpacked" "$(dirname "$out")"
+
+  # zstd through Node's own zlib (22.15 and later): the same on both systems,
+  # where a zstd program may or may not be on the PATH.
+  node -e 'const z = require("node:zlib"), f = require("node:fs"); f.writeFileSync(process.argv[2], z.zstdDecompressSync(f.readFileSync(process.argv[1])))' "$payload" "$work/payload.tar" ||
+    die "could not decompress $payload"
+  if [ "$sys" = windows ]; then
+    tar=$(cygpath -u "${SYSTEMROOT:-C:\\Windows}")/System32/tar.exe
+  else
+    tar=tar
+  fi
+  (cd "$work/unpacked" && "$tar" -xf ../payload.tar) || die "could not unpack $payload"
+  rm -f "$work/payload.tar"
+  set -- "$work"/unpacked/*
+  [ "$#" -eq 1 ] && [ -d "$1" ] || die "the payload holds more than the app's folder: $*"
+  mv "$1" "$work/unpacked/fennec-studio"
+  app=$work/unpacked/fennec-studio
+  if [ "$sys" = windows ]; then launcher=$app/bin/launcher.exe; else launcher=$app/bin/launcher; fi
+  [ -f "$launcher" ] || die "the payload holds no launcher ($launcher)"
+  [ -f "$app/Resources/app/bun/index.js" ] || die "the payload holds no app (Resources/app/bun/index.js)"
+  set -- "$app"/Resources/*.tar.zst
+  [ ! -e "$1" ] || die "the unpacked app holds a payload of its own"
+
+  rm -f "$out"
+  if [ "$sys" = windows ]; then
+    # Deflate at its best where this tar.exe's libarchive takes the option.
+    (cd "$work/unpacked" && { "$tar" -a -c --options zip:compression-level=9 -f "../$name.zip" fennec-studio ||
+      { rm -f "../$name.zip" && "$tar" -a -c -f "../$name.zip" fennec-studio; }; }) || die "could not write the zip"
+  else
+    (cd "$work/unpacked" && tar -c --owner=0 --group=0 --numeric-owner fennec-studio | xz -9 >"../$name.tar.xz") || die "could not write the tarball"
+  fi
+  mv "$work/$name.$ext" "$out"
+  echo "dist: $out, the app unpacked from $(basename "$payload"): $(wc -c <"$out" | tr -d ' ') bytes, $(du -sk "$app" | cut -f1) KB unpacked"
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$out"; fi
+}
+
+case $(uname -s) in
+  Linux | MINGW* | MSYS* | CYGWIN*)
+    archive
+    exit 0
+    ;;
+esac
 
 src=${1:-build/stable-macos-arm64/fennec studio.app}
 out=${2:-artifacts/dist/fennec-studio-macos-arm64.dmg}

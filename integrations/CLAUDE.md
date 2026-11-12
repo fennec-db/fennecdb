@@ -33,10 +33,23 @@ where `location.origin` is the server's alone. A studio window is
 `sandbox: true` (the event bridge only) and held to its origin, one with
 the RPC bridge to its `views://` folder (`holdTo`); on Windows, where
 Electrobun leaves a page's request for a new window to WebView2 (a window of
-its own, held to nothing), a preload takes it first, a studio window's to
-the same filter (`newWindowPreload`, `checks/sandbox.mjs`). No path or link the
-app hands the system goes through a shell: on Linux `xdg-open` with an
-argument vector, never Electrobun's `openExternal` or `showItemInFolder`
+its own, held to nothing), a preload in every document of a window, every
+frame's, takes each way a page names one first -- `window.open`,
+`document.open` with three arguments, and a link or form whose own,
+submitter's or `<base>` target is another window, by a click, `click()`,
+`dispatchEvent`, `submit()` or `requestSubmit()` -- a studio window's to the
+same filter (`newWindowPreload`, `checks/hostile.mjs`), and a page that loaded
+before its preload is loaded again (`guardPreload`, `checks/latepreload.mjs`).
+There WebView2 runs with Electrobun's `--disable-web-security`, which no
+variable takes away (`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` only adds, and
+an elevated app's is ignored): `hostile` holds a page to its origin's reads
+on macOS and Linux, and on Windows fails once the switch is gone, so the
+reads are held there too, and `sandbox` holds a studio window's to its own
+origin by its CSP on every system; no `WEBVIEW2_*` variable the app was
+started with reaches it, each taken out of the process's environment block
+(`webview2.ts`, `win32.ts`), never by `process.env` alone, whose delete did
+not reach WebView2. No path or link the app hands the system goes through a
+shell: on Linux `xdg-open` with an argument vector, never Electrobun's `openExternal` or `showItemInFolder`
 (`opener.ts`, `checks/opener.mjs`). One instance a user listens where only
 that user can (`instance.ts`). A `.fennec` double-clicked on Windows or Linux
 is read back from the launcher, the app's parent, which drops its arguments,
@@ -72,10 +85,15 @@ Environment given its reviewer and `main` rule before its secrets
 Electrobun's self-extractor (a quarantined copy must run read-only), each
 Mach-O and then the bundle signed ad hoc (`scripts/dist.sh`), held as it
 ships by `checks/dist.mjs`: its signature, no hook, a launch and quit from
-the read-only image and from a copy left unchanged. It is attached only
-from `main`, where the signing job ran and signed nothing, by a job with no
-secret; its line is appended to `SHA256SUMS`, which only grows, and a DMG
-there is never replaced.
+the read-only image and from a copy left unchanged. Windows' zip and Linux's
+tarball, x64 and arm64, are the payload unpacked too, one folder, never
+Electrobun's installer (`scripts/dist.sh`), held by `checks/dist-archive.mjs`:
+no hook, started where it is unpacked and where `install.ps1 -App` or
+`install.sh --app` put it from a release laid out on the runner, unchanged by
+either run but for the launcher's own log (`bin\app.log`, on Windows). A release's downloads are attached only from `main`, the DMG
+where the signing job ran and signed nothing, by a job with no secret
+(`scripts/attach.sh`): their lines are appended to `SHA256SUMS` in one write,
+which only grows, and an asset there is never replaced.
 
 **[Grafana's data source binds a dashboard's values; it never splices
 them.](../docs/design/integrations.md#grafana)** Names become `$n`s

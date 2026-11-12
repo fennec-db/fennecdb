@@ -15,6 +15,7 @@ import type { Notice } from "../shared/rpc.ts";
 import { LINK_OUT, linkOut, newWindowPreload, openLink } from "./opener.ts";
 import { sessionPreload, type StudioSession } from "./session.ts";
 import { goesWithWindow, inUse, removeStoreFolder, storeClosed, storeOpened, sweepStores, webview2Root } from "./stores.ts";
+import { guardPreload } from "./webview2.ts";
 
 let cascade = 0;
 
@@ -34,32 +35,10 @@ let cascade = 0;
  */
 export function holdTo(view: BrowserView, pattern: string) {
 	view.setNavigationRules(["^*", pattern]);
-	preloaded(view);
-}
-
-/** How many times a page is asked for its preload: its first load and two loads again. */
-const PRELOAD_TRIES = 3;
-
-/**
- * Windows: a page that loaded without its preload is loaded again. Electrobun
- * 2.0.4 adds a view's preload (AddScriptToExecuteOnDocumentCreated, which
- * completes later) and navigates in the same call, without waiting for it
- * (win/nativeWrapper.cpp:7828 and 8077), so the first document can load
- * before the script is there: on the x64 runner a saved server's window,
- * opened again at once, loaded with no event bridge (and so no session and
- * no guard for new windows) and never reported. Once it has navigated the
- * page is asked through ExecuteScript, which needs no preload, whether
- * Electrobun's bridge is there, and loaded again if not, the preload being in
- * place by then; at most PRELOAD_TRIES times a view, so one that never gets it
- * is not loaded for ever.
- */
-function preloaded(view: BrowserView) {
-	if (process.platform !== "win32") return;
-	let asked = 0;
-	(view as any).on("did-navigate", () => {
-		if (++asked > PRELOAD_TRIES) return;
-		view.executeJavascript(`if(typeof window.__electrobunSendToHost!=="function")location.reload();`);
-	});
+	// Windows: a page that loaded before its preload is loaded again (webview2.ts).
+	// The test variant can be told not to, as the control of checks/latepreload.mjs.
+	if (__TESTABLE__ && process.env["FENNEC_DESKTOP_NO_PRELOAD_GUARD"] === "1") return;
+	guardPreload(view as any);
 }
 
 function frame(width: number, height: number) {
@@ -149,23 +128,37 @@ export type StudioWindow = { win: BrowserWindow; view: BrowserView };
  * of its own: `persist:remote-<id>` for a saved server (kept between runs, and
  * apart from every other saved server's), a name without `persist:` for a file
  * (a store that exists only for this window; on Windows a folder no other
- * window is given, stores.ts). The window's own view is removed first, which
- * costs nothing: with it kept, idle memory was 20 MB more. The partition is
- * in use from before the view is made until the window has closed, and no
- * store is removed while it is (stores.ts).
+ * window is given, stores.ts). The window's own view is removed on Windows
+ * and Linux and kept on macOS (below). The partition is in use from before
+ * the view is made until the window has closed, and no store is removed while
+ * it is (stores.ts).
  */
 export async function openStudioWindow(opts: { key: string; title: string; session: StudioSession; partition: string }): Promise<StudioWindow> {
 	const { origin } = opts.session;
 	// The origin is the pattern the window is held to, where `*` is a wildcard.
 	if (/[*?]/.test(origin)) throw new Error(`not a server origin: ${origin}`);
+	const hooks = __TESTABLE__ ? await import("./testhooks.ts") : null;
 	// A hook that reports what the page shows is a preload too, and only the test variant has it.
-	const extra = __TESTABLE__ ? (await import("./testhooks.ts")).pagePreload(origin) : "";
+	const extra = hooks?.pagePreload(origin) ?? "";
 	const f = frame(1280, 820);
 	const win = new BrowserWindow({ title: opts.title, url: null, html: null, frame: f, sandbox: true, allowedProtocols: { views: false, appData: false } });
-	// The window's own view, blank and in the shared store, is not wanted under
-	// the page's: it would be a second web view per window for nothing, and the
-	// shared store is the one thing this is made to avoid.
-	win.webview?.remove();
+	// The window's own view, blank and in the shared store, under the page's.
+	// Windows and Linux remove it: their Electrobun removes a view on its UI
+	// thread, in order after making it. macOS keeps it. There Electrobun 2.0.4
+	// makes a view's WKWebView in a block it queues on the main thread, and
+	// `remove()` runs at once on this thread (Bun's): asked here, it mostly
+	// removed nothing (the view, made after it, stayed: every first window of a
+	// launch kept it so), and when it fell inside that block it took the view
+	// from under it, a SIGSEGV in -[WKWebViewImpl initWithWebviewId:...]
+	// _block_invoke (the finder check, once, on a hosted runner whose launcher
+	// had warmed WebKit; a pause of a few ms before the removal does it here).
+	// Removed once surely made (after the page's view, as the main thread runs
+	// in order), it cost a warm open about 28 ms of 240 and freed no memory
+	// (docs/design/integrations.md). Kept, it loads nothing, so the shared store
+	// gets nothing from it, and it may navigate nowhere (`^*`, on the main
+	// thread after it is made). `own-view` holds this (testhooks.ts, `waitStudio`).
+	if (process.platform === "darwin") win.webview?.setNavigationRules(["^*"]);
+	else win.webview?.remove();
 	storeOpened(opts.partition);
 	win.on("close", () => {
 		storeClosed(opts.partition);
@@ -200,7 +193,8 @@ export async function openStudioWindow(opts: { key: string; title: string; sessi
 		});
 	}
 	const studio = { win, view };
-	if (__TESTABLE__) (await import("./testhooks.ts")).watchStudio(studio, opts.key);
+	hooks?.ownView(win, opts.key);
+	hooks?.watchStudio(studio, opts.key);
 	return studio;
 }
 

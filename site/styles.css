@@ -1511,10 +1511,11 @@ html:not(.js) .dl-sys > .lang-tabs { display: none; }
 .dl-one .code code { font-size: 12.5px; white-space: pre; overflow-wrap: normal; }
 .dl-else { margin: 20px 0 0; padding: 16px 0 0; border-top: 1px solid var(--rule); color: var(--sand-dim); font-size: 14.5px; line-height: 1.6; }
 .dl-else code { color: var(--sand-2); }
-.dl-app-other, .dl-sys-win, .dl-sys-lin { display: none; }
-.dl-other .dl-app-mac { display: none; }
+.dl-app-other, .dl-sys-win, .dl-sys-lin, .dl-for-win, .dl-for-lin { display: none; }
+.dl-other .dl-app-mac, .dl-other .dl-sys-mac { display: none; }
 .dl-other .dl-app-other { display: block; }
 .dl-is-win .dl-sys-win, .dl-is-lin .dl-sys-lin { display: inline; }
+.dl-is-win .dl-for-win, .dl-is-lin .dl-for-lin { display: block; }
 
 .dl-hero-shot { min-width: 0; margin: 0; }
 .dl-win { margin: 0; overflow: hidden; border: 1px solid var(--rule-hot); border-radius: 12px; background: #0A0716; box-shadow: 0 50px 100px -50px rgba(0,0,0,.95), 0 30px 80px -50px rgba(255,122,61,.45); }

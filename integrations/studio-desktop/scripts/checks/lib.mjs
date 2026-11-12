@@ -191,10 +191,21 @@ export function cmd(o) {
 let current = '';
 /** Names the log a failure prints the tail of, for a check that starts the app some other way than startApp. */
 export const logName = (name) => void (current = name);
-/** What a failure prints: the tail of the app's own log and of what it reported. */
+/**
+ * What a failure prints: the tail of the app's own log and of what it reported,
+ * and whether the app still runs. An app LaunchServices started (`open -a`,
+ * checks/finder.mjs) writes no log here, so a crash showed as a timeout and
+ * nothing else; run.mjs keeps the crash report beside the logs.
+ */
 function context() {
   const tail = (file, n) => (existsSync(file) ? readFileSync(file, 'utf8').split('\n').slice(-n).join('\n') : '(none)');
-  return `\n--- app log (${current}) ---\n${tail(`${D}/logs/${current}.app.log`, 25)}\n--- last reports ---\n${lines().slice(-12).map((l) => JSON.stringify(l).slice(0, 220)).join('\n')}`;
+  let running;
+  try {
+    running = describe(mine()) || '(none: the app has exited, or crashed; a crash report, if one was written, is kept as <check>.crash-*)';
+  } catch (e) {
+    running = `(not listed: ${e.message})`;
+  }
+  return `\n--- app log (${current}) ---\n${tail(`${D}/logs/${current}.app.log`, 25)}\n--- last reports ---\n${lines().slice(-12).map((l) => JSON.stringify(l).slice(0, 220)).join('\n')}\n--- the app's processes ---\n${running}`;
 }
 
 /** The first report line `pred` accepts, waiting for it as long as `ms`: an event is waited for, never slept to. */
@@ -248,9 +259,34 @@ export async function evalIn(key, js, ms = 15000) {
 /** A page's visible text, whitespace squeezed. */
 export const textOf = async (key) => (await evalIn(key, `return document.body.innerText.replace(/\\s+/g,' ')`)).value;
 
-/** The studio in window `key` showing a database, signed in, in a report after the `after`th. */
+/**
+ * The studio in window `key` showing a database, signed in, in a report after
+ * the `after`th; and that window's own view where the app leaves it (`ownViewHeld`).
+ */
 export async function waitStudio(key, after = 0, ms = 30000) {
-  return waitFor((l, i) => i >= after && l.detail?.type === 'state' && l.detail.loaded && l.key === key, ms, `the studio loaded in ${key}`);
+  const loaded = (l, i) => i >= after && l.detail?.type === 'state' && l.detail.loaded && l.key === key;
+  const hit = await waitFor(loaded, ms, `the studio loaded in ${key}`);
+  ownViewHeld(key, lines().findIndex(loaded));
+  return hit;
+}
+
+/**
+ * The blank view Electrobun made for the studio window `key` (`own-view`, the
+ * last one for `key` before the `before`th report: that window's): kept on
+ * macOS, removed on Windows and Linux (src/bun/windows.ts). On macOS a removal
+ * of it, asked from Bun's thread while the main thread still made it, crashed
+ * the app (the finder check, once, on a hosted runner), and asked earlier did
+ * nothing; read once the window is made, so the order is the code's, never
+ * the scheduler's.
+ */
+export function ownViewHeld(key, before = Infinity) {
+  const own = lines()
+    .slice(0, before)
+    .filter((l) => l.what === 'own-view' && l.key === key)
+    .pop();
+  if (!own) throw new Error(`no own-view report for ${key}${context()}`);
+  if (MAC && !own.kept) throw new Error(`${key}: its own view was removed; on macOS a removal races the main thread making the view, and crashed the app${context()}`);
+  if (!MAC && own.kept) throw new Error(`${key}: its own view was kept; Windows and Linux remove it${context()}`);
 }
 /** The last state a studio window reported. */
 export const lastState = (key) => lines().filter((l) => l.detail?.type === 'state' && l.key === key).pop()?.detail;
@@ -404,6 +440,19 @@ export function webviewWindows() {
   const r = spawnSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', timeout: 60000 });
   if (r.status !== 0) throw new Error(`the windows were not listed: ${r.stderr || r.error}`);
   return r.stdout.trim().split(/\r?\n/).filter(Boolean);
+}
+
+/**
+ * Windows: the command lines of the test variant's WebView2 browser processes
+ * (one an environment: a process with no --type=), each as its switches. What
+ * the app's arguments reached, where WebView2 was started with them.
+ */
+export function webviewBrowserSwitches() {
+  const dir = `'${USER_DATA.replace(/'/g, "''")}'`;
+  const ps = `Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains(${dir}) -and -not $_.CommandLine.Contains(' --type=') } | ForEach-Object { $_.CommandLine }`;
+  const r = spawnSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', timeout: 60000 });
+  if (r.status !== 0) throw new Error(`WebView2's processes were not listed: ${r.stderr || r.error}`);
+  return r.stdout.trim().split(/\r?\n/).filter(Boolean).map((cl) => cl.match(/--[A-Za-z0-9-]+(=("[^"]*"|\S*))?/g) ?? []);
 }
 
 /** The Bun the test variant bundles: what a check runs a script of the app's own with (src/bun/win32.ts), or builds a stand-in program with. */

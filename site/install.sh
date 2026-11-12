@@ -3,7 +3,8 @@
 #
 #   curl -fsSL https://fennecdb.com/install.sh | sh
 #
-# Or, on a Mac with Apple silicon, the fennec studio app (beta) instead:
+# Or the fennec studio app (beta) instead, on a Mac with Apple silicon or on
+# Linux (x86_64 or arm64, glibc 2.38 and WebKitGTK 4.1):
 #
 #   curl -fsSL https://fennecdb.com/install.sh | sh -s -- --app
 #
@@ -20,6 +21,12 @@
 # against SHA256SUMS before it attaches it (read-only), and copies the app
 # into ~/Applications: no sudo, and nothing else is touched. A file curl
 # downloads carries no quarantine, so macOS opens the app without asking.
+# On Linux it first asks whether the system has what the app needs (glibc
+# 2.38 and WebKitGTK 4.1) and says what to install where it does not; then it
+# takes the release's tarball of the app, checks it the same way, and puts
+# the app in ~/.local/share/dev.fennecdb.studio/stable/app, where the app's
+# own installer would, with an entry in your applications menu: no sudo, and
+# nothing else is touched.
 #
 # Settings, all optional:
 #
@@ -60,8 +67,10 @@ Install fennecdb (fennec, the shell, and fennec-server) from a release.
 
   FENNEC_VERSION  X.Y.Z; the latest release when unset
   FENNEC_INSTALL  installs into $FENNEC_INSTALL/bin; default ~/.fennecdb
-  --app           the fennec studio app (beta) into ~/Applications instead,
-                  on macOS with Apple silicon
+  --app           the fennec studio app (beta) instead: into ~/Applications
+                  on macOS with Apple silicon; on Linux (x86_64 or arm64,
+                  glibc 2.38 and WebKitGTK 4.1) into
+                  ~/.local/share/dev.fennecdb.studio, with a menu entry
 
 macOS and Linux on arm64 and x86_64. On Windows, PowerShell installs the
 zip: irm https://fennecdb.com/install.ps1 | iex (or run this inside WSL).
@@ -100,17 +109,91 @@ detect_target() {
 }
 
 # The app's platform: macOS on Apple silicon, a Rosetta shell's included
-# (it says x86_64 there). Its build tool makes no other build of it.
+# (it says x86_64 there), or Linux on x86_64 or arm64 with what the app links.
+# Its build tool makes no other build of it (no Intel Mac's). Sets app_os and
+# app_arch, as the release names the app's file, and target, the programs'
+# tarball by which the latest release is found.
 app_platform() {
     os=$(uname -s)
     cpu=$(uname -m)
-    if [ "$os" = Darwin ]; then
-        case $cpu in
-            arm64) return 0 ;;
-            x86_64) [ "$(sysctl -n hw.optional.arm64 2>/dev/null || true)" != 1 ] || return 0 ;;
-        esac
+    app_os=
+    app_arch=
+    case $os in
+        Darwin)
+            case $cpu in
+                arm64) app_os=macos ;;
+                x86_64) [ "$(sysctl -n hw.optional.arm64 2>/dev/null || true)" != 1 ] || app_os=macos ;;
+            esac
+            if [ -n "$app_os" ]; then
+                app_arch=arm64
+                target=aarch64-apple-darwin
+                return 0
+            fi
+            ;;
+        Linux)
+            case $cpu in
+                x86_64 | amd64) app_arch=x64 arch=x86_64 ;;
+                arm64 | aarch64) app_arch=arm64 arch=aarch64 ;;
+            esac
+            if [ -n "$app_arch" ]; then
+                app_os=linux
+                target=$arch-unknown-linux-musl
+                linux_app_needs
+                return 0
+            fi
+            ;;
+        MINGW* | MSYS* | CYGWIN* | Windows_NT)
+            die "on Windows, PowerShell installs the app: & ([scriptblock]::Create((irm https://fennecdb.com/install.ps1))) -App. Nothing was installed."
+            ;;
+    esac
+    die "the fennec studio app is for macOS on Apple silicon (arm64) and for Linux on x86_64 and arm64, and this is $os on $cpu: nothing was installed. The studio itself runs in a browser wherever fennec-server does: install it without --app and start it with --studio."
+}
+
+# Whether the loader finds the library $1: in its cache (ldconfig -p; it is
+# in /sbin on some systems, off a user's PATH), or, where there is no
+# ldconfig, in the usual folders.
+has_lib() {
+    if listing=$(PATH=$PATH:/sbin:/usr/sbin ldconfig -p 2>/dev/null); then
+        printf '%s\n' "$listing" | grep -F -q -- "$1 ("
+        return
     fi
-    die "the fennec studio app is for macOS on Apple silicon (arm64), and this is $os on $cpu: nothing was installed. The studio itself runs in a browser wherever fennec-server does: install it without --app and start it with --studio."
+    for d in /usr/lib/*-linux-gnu /lib/*-linux-gnu /usr/lib64 /lib64 /usr/lib /lib; do
+        [ ! -e "$d/$1" ] || return 0
+    done
+    return 1
+}
+
+# What the app needs of a Linux, asked before anything is downloaded. Its
+# native library is built against glibc 2.38 (it takes GLIBC_2.38 symbols)
+# and links WebKitGTK 4.1 and AyatanaAppIndicator, with GTK 3: Ubuntu 24.04,
+# Debian 13, Fedora 39 and later have them; Ubuntu 22.04 (glibc 2.35),
+# Debian 12 (2.36) and RHEL 9 (WebKitGTK 4.0 alone) do not. Each lack is said
+# with what to do about it, and nothing is installed.
+linux_app_needs() {
+    glibc=$(getconf GNU_LIBC_VERSION 2>/dev/null || true)
+    case $glibc in
+        "glibc "[0-9]*.[0-9]*) glibc=${glibc#glibc } ;;
+        *) die "the fennec studio app needs glibc 2.38 or later, and this Linux has no glibc (musl, as Alpine's?): nothing was installed. Ubuntu 24.04, Debian 13, Fedora 39 and later run it. Here the studio runs in a browser: install without --app and start fennec-server with --studio." ;;
+    esac
+    major=${glibc%%.*}
+    minor=${glibc#*.}
+    minor=${minor%%[!0-9]*}
+    case $major in *[!0-9]* | "") die "could not read this glibc's version, '$glibc': nothing was installed" ;; esac
+    case $minor in *[!0-9]* | "") die "could not read this glibc's version, '$glibc': nothing was installed" ;; esac
+    if [ "$major" -lt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -lt 38 ]; }; then
+        die "the fennec studio app needs glibc 2.38 or later, and this Linux has $glibc: nothing was installed. Ubuntu 24.04, Debian 13, Fedora 39 and later run it; Ubuntu 22.04, Debian 12 and RHEL 9 do not. Here the studio runs in a browser: install without --app and start fennec-server with --studio."
+    fi
+    missing=
+    for lib in libwebkit2gtk-4.1.so.0 libayatana-appindicator3.so.1; do
+        has_lib "$lib" || missing="$missing $lib"
+    done
+    [ -z "$missing" ] || die "the fennec studio app needs WebKitGTK 4.1 and AyatanaAppIndicator, and this system has no$missing: nothing was installed. Install them, then run this again:
+  Ubuntu, Debian:  sudo apt install libwebkit2gtk-4.1-0 libayatana-appindicator3-1
+  Fedora:          sudo dnf install webkit2gtk4.1 libayatana-appindicator-gtk3
+  Arch:            sudo pacman -S webkit2gtk-4.1 libayatana-appindicator"
+    # The app comes as a .tar.xz, which tar hands to xz.
+    command -v xz >/dev/null 2>&1 ||
+        die "the app comes as a .tar.xz, and this system has no xz to unpack it: nothing was installed. Install xz (Ubuntu, Debian: sudo apt install xz-utils; Fedora: sudo dnf install xz), then run this again."
 }
 
 # fetch URL FILE. Over https each tool is held to https and TLS 1.2 or later,
@@ -208,7 +291,7 @@ cleanup() {
 # and the DMG let go, the copy's signature checked (ad hoc: no Developer ID
 # signs it, but it must hold), and only then put in ~/Applications, over the
 # one there by rename, so a failure leaves that one as it was.
-install_app() {
+install_app_macos() {
     for tool in hdiutil ditto codesign ps; do
         command -v "$tool" >/dev/null 2>&1 || die "needs '$tool'"
     done
@@ -282,6 +365,105 @@ install_app() {
     say "The app: https://fennecdb.com/docs/studio#desktop"
 }
 
+# The app on Linux, from the release's tarball: checked against SHA256SUMS
+# before it is unpacked, unpacked beside its place and renamed into it, over
+# the one there by rename, so a failure leaves that one as it was. Its place
+# is the one Electrobun's own installer uses, so the two never make two
+# copies, and the folder above it is the app's own (state.json), never
+# touched. Then its entry in the applications menu, written beside and
+# renamed into place.
+install_app_linux() {
+    command -v ps >/dev/null 2>&1 || die "needs 'ps'"
+    [ -n "${HOME:-}" ] || die "HOME is not set: the app goes into ~/.local/share"
+    # XDG_DATA_HOME where it is set, and absolute: the spec ignores a relative one.
+    data=${XDG_DATA_HOME:-}
+    case $data in /*) ;; *) data=$HOME/.local/share ;; esac
+    root=$data/dev.fennecdb.studio/stable
+    dest=$root/app
+    apps=$data/applications
+    entry=$apps/fennecstudio.desktop
+
+    name=fennec-studio-v$version-linux-$app_arch.tar.xz
+    want=$(awk -v n="$name" '{ f = $2; sub(/^\*/, "", f); if (f == n) { print $1; exit } }' "$sums")
+    [ -n "$want" ] || die "release v$version lists no $name: it has no Linux app yet"
+
+    # A running app's files are not replaced under it: a process whose
+    # command starts with the app's bin/ (its launcher, its Bun), as macOS's.
+    if ps -A -ww -o args= 2>/dev/null |
+        running="$dest/bin/" awk 'index($0, ENVIRON["running"]) == 1 { found = 1 } END { exit !found }'; then
+        die "fennec studio is running from $dest: quit it, then run this again"
+    fi
+
+    say "Downloading $name"
+    fetch "$base/download/v$version/$name" "$tmp/$name" ||
+        die "could not download $base/download/v$version/$name"
+    got=$(sha256_of "$tmp/$name")
+    if [ "$got" != "$want" ]; then
+        die "the checksum of $name is $got, SHA256SUMS says $want: nothing was installed"
+    fi
+    say "Checksum ok ($want)"
+
+    mkdir -p "$root" || die "could not make $root"
+    stage=$root/.app-install.$$
+    rm -rf "$stage"
+    mkdir "$stage" || die "could not write in $root"
+    tar -xJf "$tmp/$name" -C "$stage" || die "could not unpack $name"
+    src=$stage/fennec-studio
+    [ -f "$src/bin/launcher" ] && [ -f "$src/Resources/app/bun/index.js" ] ||
+        die "$name holds no app (fennec-studio/bin/launcher): nothing was installed"
+
+    if [ -e "$dest" ]; then
+        mv "$dest" "$stage/previous" || die "could not move the app at $dest aside: nothing was installed"
+    fi
+    if ! mv "$src" "$dest"; then
+        if [ -e "$stage/previous" ] && ! mv "$stage/previous" "$dest"; then
+            kept=$stage/previous
+            stage=
+            die "could not write $dest, nor put the one that was there back: it is $kept"
+        fi
+        die "could not write $dest"
+    fi
+    rm -rf "$stage"
+    stage=
+
+    # The menu entry: Exec is the launcher's path in double quotes, which a
+    # path holding a quote, a backslash, a dollar, a backquote or a percent
+    # sign would need escaped twice over (the entry spec's string and its
+    # Exec quoting); such a path gets no entry, and is said.
+    case $dest in
+        *'"'* | *\\* | *'$'* | *'`'* | *'%'* | *'
+'*)
+            noentry=1
+            ;;
+        *)
+            noentry=
+            mkdir -p "$apps" || die "installed the app, but could not make $apps for its menu entry"
+            staged=$apps/.fennecstudio.desktop.$$
+            if ! printf '%s\n' '[Desktop Entry]' 'Version=1.0' 'Type=Application' 'Name=fennec studio' \
+                'Comment=Make, open, serve and back up fennecdb databases, or connect to a server.' \
+                "Exec=\"$dest/bin/launcher\"" 'Terminal=false' 'StartupWMClass=fennecstudio' \
+                'Categories=Development;Database;' >"$staged" || ! mv -f "$staged" "$entry"; then
+                rm -f "$staged"
+                die "installed the app, but could not write its menu entry, $entry"
+            fi
+            ;;
+    esac
+
+    say ""
+    say "Installed fennec studio $version (beta) in $dest."
+    if [ -n "$noentry" ]; then
+        say "Its folder's path holds a character a menu entry cannot name, so it has none."
+        say "Start it with:"
+    else
+        say "Open it from your applications menu, fennec studio, or:"
+    fi
+    say ""
+    say "  \"$dest/bin/launcher\""
+    say ""
+    say "To remove it: rm -rf \"$dest\" \"$entry\""
+    say "The app: https://fennecdb.com/docs/studio#desktop"
+}
+
 main() {
     app=
     for arg in "$@"; do
@@ -342,9 +524,9 @@ main() {
     done
 
     if [ -n "$app" ]; then
+        # The latest release is found by this system's tarball of the
+        # programs, as for the shell (app_platform sets the target).
         app_platform
-        # The latest release is found by its macOS tarball, as for the shell.
-        target=aarch64-apple-darwin
     else
         detect_target
     fi
@@ -377,7 +559,10 @@ main() {
     fi
 
     if [ -n "$app" ]; then
-        install_app
+        case $app_os in
+            macos) install_app_macos ;;
+            linux) install_app_linux ;;
+        esac
         return 0
     fi
 

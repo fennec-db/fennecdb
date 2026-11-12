@@ -19,6 +19,7 @@ import { launched, pathsOf } from "./handover.ts";
 import { claimInstance, instancePath, pipeName, runtimeFolder, type Ask, type PipeSecurity } from "./instance.ts";
 import { startMenu } from "./menu.ts";
 import { closeLauncher, launcherOpen, showLauncher } from "./pages.ts";
+import { webview2Variables } from "./webview2.ts";
 import { sweepLeftStores } from "./windows.ts";
 
 /**
@@ -52,6 +53,26 @@ async function guard(): Promise<{ path: string; pipe?: PipeSecurity } | null> {
 	} catch (e) {
 		console.error(`no single-instance guard: ${(e as Error).message}`);
 		return null;
+	}
+}
+
+// Windows: none of WebView2's variables from the environment the app was
+// started from reaches its windows (webview2.ts); taken out of the process's
+// environment block before the first. Where that fails, no page is shown.
+if (process.platform === "win32") {
+	try {
+		const names = webview2Variables(process.env);
+		if (names.length) {
+			const w = await import("./win32.ts");
+			for (const name of names) {
+				w.unsetEnvironment(name);
+				delete process.env[name];
+			}
+		}
+	} catch (e) {
+		console.error(`WebView2's variables could not be taken out: ${(e as Error).message}`);
+		Utils.quit();
+		await new Promise(() => {});
 	}
 }
 
