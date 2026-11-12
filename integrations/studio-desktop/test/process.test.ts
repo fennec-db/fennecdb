@@ -7,16 +7,16 @@ import { after, test } from "node:test";
 import { AlreadyOpen, PortTaken, randomToken, StartFailed, startServer, type Child, type FileServer, type Spawn } from "../src/bun/process.ts";
 import { DEFAULT_SETTINGS, servePlan, taskPlan, windowPlan, type Plan } from "../src/bun/serving.ts";
 import { missing, nodeSpawn, SERVER } from "./node-spawn.ts";
-import { argvOf, WINDOWS_STOP } from "./platform.ts";
+import { argvOf } from "./platform.ts";
 
 // The real fennec-server, started through the app's own start (process.ts) on
 // port 0, as a window's and a served database's servers are: where it listens,
 // that the token is in its environment and not its arguments, that a stop is
-// the server's own shutdown (exit 0, the lock let go), and that a file another
-// server holds, and a port another program holds, are said as what they are.
+// the server's own shutdown (exit 0, the lock let go: SIGTERM, on Windows the
+// end of its stdin), and that a file another server holds, and a port another
+// program holds, are said as what they are.
 
-// Each of these stops a server and holds the stop to exit 0 (`database` makes its file so).
-const skip = missing() || WINDOWS_STOP || false;
+const skip = missing() || false;
 const work = mkdtempSync(join(tmpdir(), "fennec-desktop-process-"));
 const running: FileServer[] = [];
 after(async () => {
@@ -55,7 +55,8 @@ test("a window's server: loopback, any port, the token in its environment and in
 	assert.equal(await status(`${s.local}/_whoami`), 401);
 	assert.equal(await status(`${s.local}/_whoami`, "not-the-token"), 401);
 	assert.match(s.log(), /listening on: http:\/\/127\.0\.0\.1/);
-	assert.equal(await s.stop(), 0, "SIGTERM: the server's own shutdown, exit 0");
+	// TerminateProcess, what a SIGTERM is on Windows, would be exit 1.
+	assert.equal(await s.stop(), 0, "SIGTERM, or the end of its stdin on Windows: the server's own shutdown, exit 0");
 	// The lock went with it: another server takes the file at once.
 	const again = await start(windowPlan(file, "250"), randomToken());
 	assert.equal(again.replicationToken, null, "no backups set up: no stream, and no /_changes");
@@ -148,6 +149,7 @@ const writes =
 				return code;
 			},
 			kill: () => end((code = 0)),
+			endStdin: () => end((code = 0)),
 		};
 	};
 

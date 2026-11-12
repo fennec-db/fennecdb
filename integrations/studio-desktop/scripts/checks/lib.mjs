@@ -388,6 +388,44 @@ export const STORES = MAC
     : [join(USER_DATA, 'WebView2')];
 /** Where WebKit keeps the test variant's data stores on macOS. */
 export const WEBKIT = STORES[0];
+/** Windows: the folder WebView2 keeps the persistent partition `persist:<name>` in (src/bun/stores.ts, Electrobun's own naming for the plain names the app gives). */
+export const partitionDir = (partition) => join(USER_DATA, 'WebView2', 'Partitions', partition.replace(/^persist:/, ''));
+
+/**
+ * Windows: the top-level windows of the app's WebView2 processes (the app's own
+ * windows are bun.exe's), which a popup WebView2 opened by itself would be.
+ */
+export function webviewWindows() {
+  const dir = `'${USER_DATA.replace(/'/g, "''")}'`;
+  const ps = `$ids = @(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains(${dir}) } | ForEach-Object { $_.ProcessId }); if ($ids.Count) { Get-Process -Id $ids -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | ForEach-Object { '{0} {1}' -f $_.Id, $_.MainWindowTitle } }`;
+  const r = spawnSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', timeout: 60000 });
+  if (r.status !== 0) throw new Error(`the windows were not listed: ${r.stderr || r.error}`);
+  return r.stdout.trim().split(/\r?\n/).filter(Boolean);
+}
+
+/** The Bun the test variant bundles: what a check runs a script of the app's own with (src/bun/win32.ts), or builds a stand-in program with. */
+export const BUN = MAC ? `${APP}/Contents/MacOS/bun` : join(APP, 'bin', WIN ? 'bun.exe' : 'bun');
+
+/**
+ * Whether the system's credential store holds the test variant's item `name`,
+ * asked of the store by name and never for the secret: `security` on macOS
+ * (attributes, no `-w`), `secret-tool` on Linux (libsecret's attributes
+ * `service` and `account`, which Bun.secrets keeps), `cmdkey` on Windows (the
+ * generic credential `<service>/<name>`). On Windows also how it is kept:
+ * `local`, kept on this machine and never roamed with a profile.
+ */
+export function credential(name) {
+  if (MAC) return { there: spawnSync('security', ['find-generic-password', '-s', IDENTIFIER, '-a', name], { stdio: 'ignore', timeout: 30000 }).status === 0 };
+  if (LINUX) {
+    const r = spawnSync('secret-tool', ['lookup', 'service', IDENTIFIER, 'account', name], { stdio: ['ignore', 'ignore', 'pipe'], encoding: 'utf8', timeout: 30000 });
+    if (r.error || (r.status !== 0 && r.status !== 1)) throw new Error(`secret-tool lookup: ${r.error?.message ?? `status ${r.status}: ${r.stderr}`}`);
+    return { there: r.status === 0 };
+  }
+  const r = spawnSync('cmdkey', [`/list:${IDENTIFIER}/${name}`], { encoding: 'utf8', timeout: 30000 });
+  if (r.error || r.status !== 0) throw new Error(`cmdkey /list: ${r.error?.message ?? `status ${r.status}`}`);
+  const there = /Target:/.test(r.stdout);
+  return { there, local: there && /Local machine persistence/i.test(r.stdout), said: r.stdout.replace(/\s+/g, ' ').trim() };
+}
 
 /**
  * The test variant's items in the system's credential store, every one or

@@ -50,7 +50,9 @@ import {
 	windows,
 } from "./app.ts";
 import { DEFAULT_SETTINGS } from "./serving.ts";
-import { showLauncher, showNewDatabase } from "./pages.ts";
+import { revealPath, showLauncher, showNewDatabase } from "./pages.ts";
+import { linkOut, openLink } from "./opener.ts";
+import { filePartition } from "./stores.ts";
 import { openStudioWindow, type StudioWindow } from "./windows.ts";
 
 const T0 = Date.now();
@@ -69,9 +71,15 @@ const detailOf = (e: any): any => e?.data?.detail ?? e?.data;
 const pages = new Map<string, { win: BrowserWindow; view: BrowserView }>();
 let notices = 0;
 
-/** A link out, which a check must not send the machine's browser to. */
-export function external(url: string) {
+/**
+ * A link out, which a check must not send the machine's browser to: reported,
+ * and handed to the system's opener only where a check asks for that
+ * (FENNEC_DESKTOP_REAL_OPEN=1, `checks/opener.mjs`, whose opener is a stand-in
+ * or a browser that cannot start), with what the opener did.
+ */
+export async function external(url: string) {
 	report("external", { url });
+	if (process.env["FENNEC_DESKTOP_REAL_OPEN"] === "1") report("external-done", { url, done: await openLink(url) });
 }
 
 /** Reports what the studio in a window shows, until the check stops looking. */
@@ -234,11 +242,21 @@ async function run(c: any) {
 			const of = c.of ? windows.get(c.of) : undefined;
 			const origin = of?.server?.origin ?? c.origin;
 			const token = of?.server?.token ?? c.token;
-			const partition = c.connection ? remotePartition(c.connection) : (c.partition ?? `file-${crypto.randomUUID()}`);
+			const partition = c.connection ? remotePartition(c.connection) : (c.partition ?? filePartition());
 			await openStudioWindow({ key: c.key, title: c.key, session: { origin, token, tenant: null }, partition });
 			report("store-window-opened", { key: c.key, partition });
 			break;
 		}
+		// A link as a studio window's page would ask for one, through the same filter
+		// (a script's window.open raises no new-window-open on WebKitGTK or WebView2).
+		case "open-link": {
+			const link = linkOut(c.url, { at: 0 });
+			report("link-out", { url: c.url, link });
+			if (link) await external(link);
+			break;
+		}
+		// The main window's "Show in folder".
+		case "reveal": await revealPath(c.path); break;
 		case "quit": Utils.quit(); break;
 	}
 }

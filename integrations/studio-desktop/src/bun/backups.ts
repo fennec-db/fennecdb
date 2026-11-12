@@ -24,8 +24,10 @@
 // the runner it is handed (Bun's in the app, Node's in test/backups.test.ts,
 // which drives the real binaries).
 
-import { closeSync, constants, copyFileSync, existsSync, fsyncSync, linkSync, mkdirSync, mkdtempSync, openSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { closeSync, constants, copyFileSync, existsSync, fsyncSync, linkSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { childEnvironment } from "./env.ts";
 import { kindOfFile } from "./dbfile.ts";
 
@@ -171,7 +173,95 @@ function deviceOf(path: string): number {
 	}
 }
 
-const within = (path: string, folder: string) => path === folder || path.startsWith(folder.endsWith("/") ? folder : `${folder}/`);
+/** Is `path` `folder` or under it? By the system's own paths: `\` and case-blind on Windows. */
+const within = (path: string, folder: string) => {
+	const rel = relative(folder, path);
+	return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+};
+
+/**
+ * Who besides its owner may read the key at `path`, or null: what a key's
+ * warning names. A Unix says it by the mode (`fennec key` writes 0600). A
+ * Windows file's mode is nothing (every one reads 0666); who may read it is
+ * its DACL, which `fennec key` makes its owner's alone, and a key copied in
+ * inherits its folder's. That is read as the server reads a TLS key's
+ * (fennec-http's `owner_only::open_to`): open where an entry lets one of the
+ * groups that hold every user read it.
+ */
+export function othersMayRead(path: string, platform: NodeJS.Platform = process.platform): string | null {
+	if (platform !== "win32") {
+		const mode = statSync(path, { throwIfNoEntry: false })?.mode ?? 0;
+		return mode & 0o077 ? `its permissions are ${(mode & 0o777).toString(8)}` : null;
+	}
+	const who = openTo(daclOf(path));
+	return who ? `${who} may, by its permissions` : null;
+}
+
+/**
+ * The file's DACL as SDDL (`D:PAI(A;;FA;;;S-1-5-...)...`), from `icacls
+ * <file> /save`: no language's names in it, the SIDs as they are. Null where
+ * it cannot be read, which no warning is said for.
+ */
+function daclOf(path: string): string | null {
+	const dir = mkdtempSync(join(tmpdir(), "fennec-acl-"));
+	try {
+		const out = join(dir, "acl");
+		const r = spawnSync("icacls", [path, "/save", out, "/Q"], { stdio: "ignore", timeout: 10_000, windowsHide: true });
+		if (r.status !== 0) return null;
+		// UTF-16LE, a line of the file's name and then its DACL.
+		const text = readFileSync(out).toString("utf16le").replace(/^﻿/, "");
+		return text.split(/\r?\n/).find((l) => l.startsWith("D:")) ?? null;
+	} catch {
+		return null;
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+}
+
+/** The groups that hold every user of a machine, by SID and by SDDL's own name for each, widest first (owner_only.rs's OPEN). */
+const OPEN: [string[], string][] = [
+	[["S-1-1-0", "WD"], "every user (Everyone)"],
+	[["S-1-5-11", "AU"], "every signed-in user (Authenticated Users)"],
+	[["S-1-5-32-545", "BU"], "the machine's users (Users)"],
+];
+/** SDDL's names for access rights, as masks. */
+const RIGHTS: Record<string, number> = {
+	GA: 0x10000000, GR: 0x80000000, GW: 0x40000000, GX: 0x20000000,
+	FA: 0x1f01ff, FR: 0x120089, FW: 0x120116, FX: 0x1200a0,
+	RC: 0x20000, SD: 0x10000, WD: 0x40000, WO: 0x80000,
+	CC: 0x1, DC: 0x2, LC: 0x4, SW: 0x8, RP: 0x10, WP: 0x20, DT: 0x40, LO: 0x80, CR: 0x100,
+	KA: 0xf003f, KR: 0x20019, KW: 0x20006, KX: 0x20019,
+};
+/** What lets an entry's holder read a file's bytes: FILE_READ_DATA, and the generic rights that map onto it. */
+const READS = 0x1 | 0x80000000 | 0x10000000;
+
+/**
+ * Which of the every-user groups `dacl` (SDDL) lets read the file, widest
+ * first, or null: an allowing entry that grants a read, unless a denying one
+ * before it denied it (Everyone's denial is every group's); an entry that only
+ * passes to what a folder holds counts for nothing. No DACL at all
+ * (`D:NO_ACCESS_CONTROL`) is every user's. Pure: test/backups.test.ts holds it.
+ */
+export function openTo(dacl: string | null): string | null {
+	if (!dacl) return null;
+	if (/^D:[A-Z_]*NO_ACCESS_CONTROL/.test(dacl)) return OPEN[0]![1];
+	const denied = OPEN.map(() => false);
+	const open = OPEN.map(() => false);
+	for (const m of dacl.matchAll(/\(([^)]*)\)/g)) {
+		const [kind = "", flags = "", rights = "", , , sid = ""] = m[1]!.split(";");
+		if (flags.includes("IO")) continue;
+		const mask = rights.startsWith("0x") ? Number.parseInt(rights, 16) : (rights.match(/../g) ?? []).reduce((a, r) => a | (RIGHTS[r] ?? 0), 0);
+		if (!(mask & READS)) continue;
+		const i = OPEN.findIndex(([names]) => names.includes(sid));
+		if (i < 0) continue;
+		if (kind === "D") {
+			if (i === 0) denied.fill(true);
+			else denied[i] = true;
+		} else if (kind === "A" && !denied[i]) open[i] = true;
+	}
+	const at = open.indexOf(true);
+	return at < 0 ? null : OPEN[at]![1];
+}
 
 /**
  * Whether `keyFile` is kept apart from the backups in `dir` of the database at
@@ -185,9 +275,16 @@ const within = (path: string, folder: string) => path === folder || path.startsW
  * their own are there to be carried off, and the key must not go with them;
  * beside the live database, a key on the same disk shows nothing the database
  * itself does not. A key others may read is a warning, not a refusal: the
- * shell's `fennec key` writes 0600, and one copied in may have lost that.
+ * shell's `fennec key` makes it its owner's alone, and one copied in may have
+ * lost that (`othersMayRead`, by the system's own permissions).
  */
-export function keyPlacement(dir: string, keyFile: string, database: string, dev: (path: string) => number = deviceOf): { refuse?: string; warn?: string } {
+export function keyPlacement(
+	dir: string,
+	keyFile: string,
+	database: string,
+	dev: (path: string) => number = deviceOf,
+	readers: (path: string) => string | null = othersMayRead,
+): { refuse?: string; warn?: string } {
 	const key = resolved(keyFile);
 	const folder = resolved(dir);
 	const stem = basename(database).replace(/\.fennec$/i, "");
@@ -197,8 +294,11 @@ export function keyPlacement(dir: string, keyFile: string, database: string, dev
 	if (backupsDisk !== dev(database) && dev(key) === backupsDisk) {
 		return { refuse: "The key is on the disk the backups go to, which is not the database's: whoever takes that disk has both. Keep the key on another disk." };
 	}
-	const mode = statSync(key, { throwIfNoEntry: false })?.mode ?? 0;
-	if (mode & 0o077) return { warn: `Others on this Mac may read the key (its permissions are ${(mode & 0o777).toString(8)}): chmod 600 it, as fennec key makes one.` };
+	const others = readers(key);
+	if (others) {
+		const fix = process.platform === "win32" ? "make it yours alone, as fennec key makes one" : "chmod 600 it, as fennec key makes one";
+		return { warn: `Others on this computer may read the key (${others}): ${fix}.` };
+	}
 	return {};
 }
 

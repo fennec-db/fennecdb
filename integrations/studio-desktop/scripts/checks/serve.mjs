@@ -4,11 +4,10 @@
 // shutdown, its output, what another program holding the file or the port
 // does to it, a server that dies, and what a relaunch starts: nothing.
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import {
-  assertClean, cmd, data, evalIn, forgetServeItems, IDENTIFIER, lines, mine, pressNotice, procs, quit, sleep, startApp, startServer, step, until, USER_DATA, waitFor, waitNone, waitNotice, waitStudio, log,
+  assertClean, cmd, credential, data, evalIn, forgetServeItems, lines, mine, pressNotice, procs, quit, sleep, startApp, startServer, step, until, USER_DATA, waitFor, waitNone, waitNotice, waitStudio, log,
 } from './lib.mjs';
 
 assertClean('before');
@@ -18,7 +17,8 @@ const HELD = data('held-by-another', 5);
 
 const state = () => JSON.parse(readFileSync(`${USER_DATA}/state.json`, 'utf8'));
 const entry = (path) => state().databases.find((d) => d.path === path);
-const keychainHas = (name) => spawnSync('security', ['find-generic-password', '-s', IDENTIFIER, '-a', name], { stdio: 'ignore' }).status === 0;
+/** The system's credential store holds item `name` of the test variant's (lib.mjs). */
+const keychainHas = (name) => credential(name).there;
 /** What the app answered to `c`, by the report it writes for it. */
 async function ask(c, what, ms = 30000) {
   const n = lines().length;
@@ -26,8 +26,8 @@ async function ask(c, what, ms = 30000) {
   return waitFor((l, i) => i >= n && l.what === what && (l.path === undefined || c.path === undefined || l.path === c.path), ms, what);
 }
 const status = async (url, token) => (await fetch(url, { headers: token ? { authorization: `Bearer ${token}` } : {} })).status;
-/** The fennec-server processes on `path`: the app's (under its bundle) and any other. */
-const serversOn = (path) => procs().filter((p) => /fennec-server /.test(p.command) && p.command.includes(`--file ${path} `));
+/** The fennec-server processes on `path` (`fennec-server.exe` on Windows): the app's (under its bundle) and any other. */
+const serversOn = (path) => procs().filter((p) => /fennec-server(\.exe)? /.test(p.command) && p.command.includes(`--file ${path} `));
 const freePort = () =>
   new Promise((resolve) => {
     const s = createServer().listen(0, '127.0.0.1', () => {
@@ -49,8 +49,13 @@ cmd({ cmd: 'close', key: `file:${FILE}` });
 await waitFor((l, i) => i >= n && l.what === 'server-stopped' && l.key === `file:${FILE}`, 15000, 'its window\'s server stopped');
 
 step('the serve sheet, from the Databases list: the command it shows holds no token, and Show shows the Keychain\'s');
-await until(async () => (await evalIn('launcher', `return document.querySelector('tr[data-path="${FILE}"]') !== null`)).value, 10000, 'the row');
-await evalIn('launcher', `[...document.querySelector('tr[data-path="${FILE}"]').querySelectorAll('button')].find((b) => b.textContent === 'Serve…').click()`);
+// The row by its path compared as a string: in a selector a Windows path's `\f` is a form feed
+// once in the script, which no CSS string holds, so querySelector threw, and the error's text was
+// taken for the row found. Only `true` is the row.
+const theRow = `[...document.querySelectorAll('tr[data-path]')].find((t) => t.dataset.path === ${JSON.stringify(FILE)})`;
+await until(async () => (await evalIn('launcher', `return ${theRow} !== undefined`)).value === true, 10000, 'the row');
+const clicked = await evalIn('launcher', `[...${theRow}.querySelectorAll('button')].find((b) => b.textContent === 'Serve…').click(); return true`);
+assert.equal(clicked.value, true, `Serve… clicked: ${clicked.value}`);
 const command = await until(async () => (await evalIn('launcher', `return document.getElementById('sheet').open && document.getElementById('command').textContent`)).value, 10000, 'the sheet open, with its command');
 // No backups set up for it: no replication token, which would answer /_changes to the data token too.
 assert.match(command, /^FENNEC_HTTP_TOKEN=•••• fennec-server --file /);

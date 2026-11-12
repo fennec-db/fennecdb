@@ -2,7 +2,7 @@
 // studio needs: no bridge to the main process, no leaving its server's
 // origin, links out go to the browser (here: reported, not opened).
 import assert from 'node:assert/strict';
-import { assertClean, data, evalIn, lines, quit, startApp, step, waitFor, waitNone, waitStudio, log } from './lib.mjs';
+import { MAC, WIN, assertClean, cmd, data, evalIn, lines, quit, startApp, step, waitFor, waitNone, waitStudio, webviewWindows, log } from './lib.mjs';
 
 assertClean('before');
 const SMALL = data('small', 50);
@@ -64,26 +64,57 @@ const where = await evalIn(KEY, `return location.href + ' | ' + document.title`)
 log('after location.href = https://example.com:', where.value);
 assert.ok(where.value.startsWith(started.origin), `still on ${started.origin}: ${where.value}`);
 
+// WebKit on macOS hands a script's `window.open` to the app as `new-window-open`.
+// On Windows the app's preload takes it first and sends it over the event bridge
+// (`link-out`, src/bun/opener.ts): Electrobun handles no WebView2 NewWindowRequested,
+// and WebView2 then opens a window of its own, which outlived the app on both
+// runners. WebKitGTK raises nothing for a popup no user gesture asked for, so
+// there the page-to-app hop is not shown, only that nothing was opened and the
+// window stayed. The filter it reaches is the same code on every system:
+// test/opener.test.ts holds it (web addresses alone, one in three seconds), and
+// the `open-link` hook below drives it in the running app on Linux.
+const RAISED = MAC || WIN;
+const askedOf = (l) => (l.what === 'new-window-open' && /file:|fennec-check:/.test(l.data)) || (l.what === 'page' && l.key === KEY && l.detail?.type === 'link-out' && /^(file:|fennec-check:)/.test(l.detail.url));
 step('an address that is not http(s) is not handed to the system, and the first one that is, is: the address was what held the others back');
 // Before any web link, so that the rate limit below has nothing to do with it.
 const mNon = lines().length;
 await evalIn(KEY, `window.open("file:///etc/passwd"); window.open("javascript:alert(1)"); window.open("fennec-check://x/y"); return 1`);
 await waitNone((l, i) => i >= mNon && l.what === 'external', 1500, 'a non-web link was handed to the system');
-// The page did ask: the app was told of at least one of them, and dropped it.
-const asked = lines().slice(mNon).filter((l) => l.what === 'new-window-open' && /file:|fennec-check:/.test(l.data));
+const asked = lines().slice(mNon).filter(askedOf);
 log('asked of the app and not handed on:', asked.length, 'of the 3');
-assert.ok(asked.length > 0, 'the app was asked to open a non-web address, so the filter is what refused it');
-// The control: a web link, the window's first, goes to the browser at once.
-const mWeb = lines().length;
-await evalIn(KEY, `window.open("https://example.com/"); return 1`);
-const ext = await waitFor((l, i) => i >= mWeb && l.what === 'external', 10000, 'the link out');
-assert.equal(ext.url, 'https://example.com/');
+if (RAISED) {
+  // The page did ask: the app was told of at least one of them, and dropped it.
+  assert.ok(asked.length > 0, 'the app was asked to open a non-web address, so the filter is what refused it');
+  // The control: a web link, the window's first, goes to the browser at once.
+  const mWeb = lines().length;
+  await evalIn(KEY, `window.open("https://example.com/"); return 1`);
+  const ext = await waitFor((l, i) => i >= mWeb && l.what === 'external', 10000, 'the link out');
+  assert.equal(ext.url, 'https://example.com/');
+} else {
+  log(`${process.platform}: a script's window.open raised no new-window-open (${asked.length} seen); the app's filter, asked directly:`);
+  for (const [url, link] of [
+    ['file:///etc/passwd', null],
+    ['fennec-check://x/y', null],
+    ['https://example.com/?q=$(id)', 'https://example.com/?q=%24(id)'],
+  ]) {
+    const m = lines().length;
+    cmd({ cmd: 'open-link', url });
+    const out = await waitFor((l, i) => i >= m && l.what === 'link-out' && l.url === url, 10000, `the filter's answer for ${url}`);
+    assert.equal(out.link, link, url);
+    if (link) assert.equal((await waitFor((l, i) => i >= m && l.what === 'external', 10000, 'the link out')).url, link);
+  }
+}
 assert.ok((await evalIn(KEY, `return location.href`)).value.startsWith(started.origin), 'the window stayed');
 
 step('a page cannot ask for links without end: a window is given one in three seconds');
 const mRepeat = lines().length;
 await evalIn(KEY, `window.open("https://example.com/a"); window.open("https://example.com/b"); return 1`);
 await waitNone((l, i) => i >= mRepeat && l.what === 'external', 1500, 'a second link within the gap was handed to the browser');
+if (WIN) {
+  // Both were asked of the app (the gap held them back, not WebView2), and no window of WebView2's own was opened for any request above.
+  assert.equal(lines().slice(mRepeat).filter((l) => l.what === 'page' && l.key === KEY && l.detail?.type === 'link-out').length, 2, 'both links reached the app');
+  assert.deepEqual(webviewWindows(), [], 'no window WebView2 opened by itself');
+}
 
 step('quit');
 await quit(app);

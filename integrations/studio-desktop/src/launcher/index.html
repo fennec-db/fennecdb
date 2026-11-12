@@ -155,7 +155,7 @@
               <button type="button" id="snippet-copy" class="end">Copy</button>
             </div>
             <pre id="snippet"></pre>
-            <span class="hint">The token stays out of the snippet: copy it from Settings, or read it from your Keychain.</span>
+            <span class="hint">The token stays out of the snippet: copy it from Settings, or read it from <span class="store-name">your Keychain</span>.</span>
           </div>
           <div class="card">
             <div class="title-row"><h3>Server output</h3><button type="button" id="log-full" class="quiet end">Show full log</button></div>
@@ -171,7 +171,7 @@
       <header class="head">
         <div>
           <h1 id="connections-title">Remote connections</h1>
-          <p class="sub">Servers and routers elsewhere. Each opens in its own studio window; tokens live in your Keychain.</p>
+          <p class="sub">Servers and routers elsewhere. Each opens in its own studio window; tokens live in <span class="store-name">your Keychain</span>.</p>
         </div>
         <div class="actions"><button type="button" id="conn-add">Add a connection</button></div>
       </header>
@@ -186,12 +186,12 @@
           <label>Address <input name="url" placeholder="https://db.example.com" required spellcheck="false"></label>
           <span class="hint">Changing the address forgets the saved token, so it never reaches another server by accident.</span>
           <p class="hint warn" id="clear" hidden>This address is plain http: the token would cross the network unencrypted. Use https:// unless the server is on a network you trust.</p>
-          <label><span>Token: <span id="token-note">kept in your Keychain</span></span><input name="token" type="password" placeholder="kept in your Keychain" spellcheck="false"></label>
+          <label><span>Token: <span id="token-note">kept in the credential store</span></span><input name="token" type="password" placeholder="kept in the credential store" spellcheck="false"></label>
           <div class="field" id="last-check-box" hidden><span class="label">Last check</span><span id="last-check"></span></div>
           <div class="buttons spread">
             <button type="button" id="conn-remove" class="danger" hidden>Remove</button>
             <span class="actions">
-              <button type="button" id="forget-token" hidden title="Remove the token saved for this server from the keychain; the connection stays">Forget token</button>
+              <button type="button" id="forget-token" hidden title="Remove the token saved for this server from the credential store; the connection stays">Forget token</button>
               <button type="button" id="cancel-edit" hidden>Cancel</button>
               <button type="button" id="conn-check" hidden>Check now</button>
               <button type="submit" id="save">Save connection</button>
@@ -309,7 +309,7 @@
         <button type="button" id="tok-copy">Copy</button>
         <button type="button" id="tok-new">New token</button>
       </div>
-      <span class="hint">Kept in your Keychain. The server gets it in its environment, never on its command line.</span>
+      <span class="hint">Kept in <span class="store-name">your Keychain</span>. The server gets it in its environment, never on its command line.</span>
     </div>
     <fieldset>
       <legend>When a write is safe on disk</legend>
