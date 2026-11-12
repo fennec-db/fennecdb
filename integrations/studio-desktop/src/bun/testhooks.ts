@@ -306,7 +306,7 @@ async function run(c: any) {
 				await Bun.sleep(20);
 				taken = k.lastInput() !== before;
 			}
-			report("keys-result", { key: c.key, front, clicked, before, taken, type: c.type ?? null, chord: c.chord ?? null, ...(front ? {} : { inFront: k.foreground(), self: process.pid }) });
+			report("keys-result", { key: c.key, front, clicked, before, taken, type: c.type ?? null, chord: c.chord ?? null, targets: k.inputTargets(hwnd, clicked), ...(front ? {} : { inFront: k.foreground(), self: process.pid }) });
 			break;
 		}
 		// The session's last input now (GetLastInputInfo's tick), for a check that waited for keys it pressed.
@@ -316,9 +316,13 @@ async function run(c: any) {
 				break;
 			}
 			const k = await import("./testkeys.ts");
-			report("last-input", { tick: k.lastInput(), front: k.foreground(), self: process.pid });
+			const page = c.key ? win(c.key) : undefined;
+			report("last-input", { tick: k.lastInput(), front: k.foreground(), self: process.pid, ...(page ? { targets: k.inputTargets(BigInt(page.win.ptr as unknown as number), null) } : {}) });
 			break;
 		}
+		// Electrobun's own activation of a window, which moves the keyboard focus into its page
+		// (FocusActiveView, the WebView2 controller's MoveFocus) where the system's does not.
+		case "activate": win(c.key)?.win.activate(); report("activated", { key: c.key }); break;
 		case "quit": Utils.quit(); break;
 	}
 }

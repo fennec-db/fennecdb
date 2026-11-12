@@ -24,6 +24,13 @@ function load() {
 		mouse_event: { args: [FFIType.u32, FFIType.u32, FFIType.u32, FFIType.u32, FFIType.u64], returns: FFIType.void },
 		GetWindowThreadProcessId: { args: [FFIType.u64, FFIType.ptr], returns: FFIType.u32 },
 		GetWindowTextW: { args: [FFIType.u64, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+		WindowFromPoint: { args: [FFIType.u64], returns: FFIType.u64 },
+		GetClassNameW: { args: [FFIType.u64, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+		GetGUIThreadInfo: { args: [FFIType.u32, FFIType.ptr], returns: FFIType.i32 },
+		GetWindowRect: { args: [FFIType.u64, FFIType.ptr], returns: FFIType.i32 },
+		GetSystemMetrics: { args: [FFIType.i32], returns: FFIType.i32 },
+		GetDpiForWindow: { args: [FFIType.u64], returns: FFIType.u32 },
+		IsChild: { args: [FFIType.u64, FFIType.u64], returns: FFIType.i32 },
 	}).symbols;
 }
 const u = () => (user32 ??= load());
@@ -110,4 +117,42 @@ export function foreground(): { pid: number; title: string } {
 export function lastInput(): number {
 	const info = new Uint32Array([8, 0]);
 	return u().GetLastInputInfo(info) ? info[1]! : -1;
+}
+
+/** A window as a check can name it: its process, its class and whether it is `top` or in it. */
+function describeWindow(hwnd: bigint, top: bigint) {
+	if (!hwnd) return null;
+	const pid = new Uint32Array(1);
+	u().GetWindowThreadProcessId(hwnd, pid);
+	const name = new Uint16Array(256);
+	const n = u().GetClassNameW(hwnd, name, name.length);
+	return { pid: pid[0]!, class: Buffer.from(name.buffer, 0, Math.max(0, n) * 2).toString("utf16le"), ours: hwnd === top || u().IsChild(top, hwnd) !== 0 };
+}
+
+/**
+ * Where input to `hwnd` goes, for a check whose keys never reached a page:
+ * the window under the point a click lands on (`x`, `y` on the screen), the
+ * window that has the keyboard focus on the thread in front
+ * (GetGUIThreadInfo), the window's rectangle, the screen's size and the
+ * window's DPI. Test variant only.
+ */
+export function inputTargets(hwnd: bigint, at: { x: number; y: number } | null) {
+	const front = u().GetForegroundWindow();
+	const thread = u().GetWindowThreadProcessId(front, null);
+	// GUITHREADINFO: cbSize, flags, then hwndActive, hwndFocus, ... (pointer-sized, 8-aligned on 64-bit).
+	const info = new BigUint64Array(9);
+	new Uint32Array(info.buffer)[0] = 72;
+	const got = u().GetGUIThreadInfo(thread, info) !== 0;
+	const rect = new Int32Array(4);
+	u().GetWindowRect(hwnd, rect);
+	const point = at ? BigInt.asUintN(64, (BigInt(at.y) << 32n) | BigInt.asUintN(32, BigInt(at.x))) : null;
+	return {
+		underClick: point === null ? null : describeWindow(u().WindowFromPoint(point), hwnd),
+		focus: got ? describeWindow(info[2]!, hwnd) : null,
+		active: got ? describeWindow(info[1]!, hwnd) : null,
+		rect: [...rect],
+		screen: [u().GetSystemMetrics(0), u().GetSystemMetrics(1)],
+		dpi: u().GetDpiForWindow(hwnd),
+		arch: process.arch,
+	};
 }

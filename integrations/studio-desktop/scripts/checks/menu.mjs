@@ -96,10 +96,24 @@ if (WIN) {
     // thread takes keys after keybd_event returns, and the app's own reading right after is
     // only a first look (`typed.taken`).
     const k = lines().length;
-    cmd({ cmd: 'last-input' });
+    cmd({ cmd: 'last-input', key: 'launcher' });
     const last = await waitFor((l, i) => i >= k && l.what === 'last-input', 15000, 'the last input asked');
     const taken = last.tick !== typed.before;
-    log(`the keys typed: ${JSON.stringify(typed)}; the session's last input ${typed.before} before, ${last.tick} now (in front: ${JSON.stringify(last.front)}, this app ${last.self}); the page: ${JSON.stringify(seen)}`);
+    log(`the keys typed: ${JSON.stringify(typed)}; the session's last input ${typed.before} before, ${last.tick} now (in front: ${JSON.stringify(last.front)}, this app ${last.self}, where input goes: ${JSON.stringify(last.targets)}); the page: ${JSON.stringify(seen)}`);
+    if (taken) {
+      // Whether the focus is what the page lacks: Electrobun's own activation moves it into the
+      // page (the controller's MoveFocus), then the same text is typed again, with no click.
+      const a = lines().length;
+      cmd({ cmd: 'activate', key: 'launcher' });
+      await waitFor((l, i) => i >= a && l.what === 'activated', 15000, 'the main window activated');
+      await evalIn('launcher', `const f = document.getElementById('find'); f.value = ''; f.focus(); return true`);
+      const b = lines().length;
+      cmd({ cmd: 'keys', key: 'launcher', type: 'fen' });
+      const again = await waitFor((l, i) => i >= b && l.what === 'keys-result', 15000, 'typed again');
+      const arrivedNow = await until(async () => (await evalIn('launcher', `return document.getElementById('find').value`)).value === 'fen', 10000, 'the search box holds what was typed').then(() => true, () => false);
+      const seenNow = (await evalIn('launcher', `return { seen: window.__seen, focused: document.hasFocus() }`)).value;
+      log(`after Electrobun's activation: the text ${arrivedNow ? 'arrived' : 'did not arrive'}; the page: ${JSON.stringify(seenNow)}; where input goes: ${JSON.stringify(again.targets)}`);
+    }
     // Keys the system took and the page never got are the app's failing; keys the system took
     // none of are this machine's (GetLastInputInfo unchanged), and leave the menu bar's question open.
     assert.equal(taken, false, `the system took the keys typed and the page got none of them (the page saw ${JSON.stringify(seen)})`);
