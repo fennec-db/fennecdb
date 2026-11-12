@@ -27,6 +27,9 @@ const FILE = data('menu', 5);
 
 const app = startApp('menu', { FENNEC_DESKTOP_LAUNCHER: '1' });
 await waitFor((l) => l.what === 'page-text' && l.key === 'launcher' && /Open file/.test(l.text), 60000, 'the main window drawn');
+// Its script run, which takes the keys: the HTML's own text is there before (seen on Windows: a
+// Ctrl+N pressed before the script loaded did nothing).
+await until(async () => (await evalIn('launcher', `return document.getElementById('bundled').textContent.length > 0`)).value === true, 30000, "the main window's script run");
 
 /** Whether the connections section is the one shown. */
 const connectionsShown = async () => (await evalIn('launcher', `return !document.getElementById('connections').hidden`)).value === true;
@@ -34,46 +37,62 @@ const connectionsShown = async () => (await evalIn('launcher', `return !document
 const databasesShown = () => evalIn('launcher', `document.querySelector('.nav[data-section=databases]').click(); return true`);
 
 if (WIN) {
-  /** A click into the main window's search box, where a person's click puts the focus in the page: its point in device pixels. */
-  const findAt = async () => (await evalIn('launcher', `const f = document.getElementById('find'); f.value = ''; f.blur(); const r = f.getBoundingClientRect(); return [Math.round((r.left + r.width / 2) * devicePixelRatio), Math.round((r.top + r.height / 2) * devicePixelRatio)]`)).value;
-  /** `chord` pressed with the main window's page focused, after the `after`th report; whether the menu (not the page) took it. */
-  async function press(chord, menuAction) {
+  /** Window `key` in front, and the focus in its page: a click near the page's top left corner, as a person's click puts it there. */
+  async function focusPage() {
     const n = lines().length;
-    cmd({ cmd: 'keys', key: 'launcher', click: await findAt(), chord });
-    const pressed = await waitFor((l, i) => i >= n && l.what === 'keys-result', 15000, `${chord} pressed`);
-    assert.equal(pressed.front, true, `the main window was brought to the front for ${chord}`);
-    return { n, menu: () => lines().some((l, i) => i >= n && l.what === 'menu' && l.action === menuAction) };
+    cmd({ cmd: 'keys', key: 'launcher', click: true });
+    const r = await waitFor((l, i) => i >= n && l.what === 'keys-result', 15000, 'the click');
+    assert.equal(r.front, true, `the main window was brought to the front by the click (in front: ${JSON.stringify(r.inFront)}, this app ${r.self})`);
+  }
+  /** `chord` pressed with the main window's page focused; what came of it. */
+  async function press(chord) {
+    await databasesShown();
+    await focusPage();
+    // What the page itself sees of the keys, recorded where the check can read it.
+    await evalIn('launcher', `window.__keys = []; if (!window.__keysOn) { window.__keysOn = true; document.addEventListener('keydown', (e) => window.__keys.push((e.ctrlKey ? 'ctrl+' : '') + (e.shiftKey ? 'shift+' : '') + e.key.toLowerCase()), true); } return true`);
+    const n = lines().length;
+    cmd({ cmd: 'keys', key: 'launcher', chord });
+    const r = await waitFor((l, i) => i >= n && l.what === 'keys-result', 15000, `${chord} pressed`);
+    assert.equal(r.front, true, `the main window in front for ${chord}`);
+    return n;
   }
 
-  step('the control: a click into the search box and text typed reach the page');
-  const n = lines().length;
-  cmd({ cmd: 'keys', key: 'launcher', click: await findAt(), type: 'fen' });
-  const typed = await waitFor((l, i) => i >= n && l.what === 'keys-result', 15000, 'typed');
-  assert.equal(typed.front, true, 'the main window was brought to the front');
+  step('the control: a click into the page and text typed reach its search box');
+  await focusPage();
+  await evalIn('launcher', `const f = document.getElementById('find'); f.value = ''; f.focus(); return document.activeElement === f`);
+  let n = lines().length;
+  cmd({ cmd: 'keys', key: 'launcher', type: 'fen' });
+  await waitFor((l, i) => i >= n && l.what === 'keys-result', 15000, 'typed');
   await until(async () => (await evalIn('launcher', `return document.getElementById('find').value`)).value === 'fen', 10000, 'the search box holds what was typed');
   log('typed text reaches the page: WebView2 has the focus');
 
-  step('Ctrl+N with the page focused: the new-database window');
-  const newdb = await press('ctrl+n', 'new');
-  await waitFor((l, i) => i >= newdb.n && l.what === 'window-created' && l.key === 'newdb', 20000, 'the new-database window');
-  log(`Ctrl+N taken by ${newdb.menu() ? 'the menu bar' : 'the page'}`);
-  cmd({ cmd: 'close', key: 'newdb' });
-  await waitFor((l, i) => i >= newdb.n && l.what === 'window-close' && l.key === 'newdb', 15000, 'the new-database window closed');
-
-  step('Ctrl+O with the page focused: Open… (the dialog answered by the check)');
   cmd({ cmd: 'answer', kind: 'file', path: FILE });
-  const open = await press('ctrl+o', 'open');
-  const opened = await waitFor((l, i) => i >= open.n && l.what === 'server-started', 30000, 'the file opened');
-  assert.equal(opened.path, FILE);
-  log(`Ctrl+O taken by ${open.menu() ? 'the menu bar' : 'the page'}`);
-  await waitStudio(`file:${FILE}`, open.n);
-  cmd({ cmd: 'close', key: `file:${FILE}` });
-  await waitFor((l, i) => i >= open.n && l.what === 'server-stopped', 30000, 'its window closed');
-
-  step('Ctrl+Shift+O with the page focused: Connect to a Server…');
-  const connect = await press('ctrl+shift+o', 'launcher');
-  await until(async () => connect.menu() || (await connectionsShown()), 10000, 'Remote connections shown, or the menu asked');
-  log(`Ctrl+Shift+O taken by ${connect.menu() ? 'the menu bar' : 'the page'}`);
+  const effects = {
+    'ctrl+n': ['the new-database window', (i0) => lines().some((l, i) => i >= i0 && l.what === 'window-created' && l.key === 'newdb')],
+    'ctrl+o': ['the file the dialog is answered with, opened', (i0) => lines().some((l, i) => i >= i0 && l.what === 'server-started' && l.path === FILE)],
+    'ctrl+shift+o': ['Remote connections', async () => connectionsShown()],
+  };
+  for (const [chord, [what, done]] of Object.entries(effects)) {
+    step(`${chord} with the page focused: ${what}`);
+    const i0 = await press(chord);
+    await until(async () => done(i0), 15000, `${chord}: ${what}`);
+    const seen = (await evalIn('launcher', `return window.__keys || []`)).value;
+    const menu = lines().some((l, i) => i >= i0 && l.what === 'menu');
+    // The menu bar's accelerator takes a key before the page would see it: both is twice.
+    assert.ok(!(menu && seen.includes(chord)), `${chord} taken once, by the menu bar or the page (the page saw ${JSON.stringify(seen)})`);
+    log(`${chord} taken by ${menu ? 'the menu bar' : 'the page'}`);
+    if (lines().some((l, i) => i >= i0 && l.what === 'window-created' && l.key === 'newdb')) {
+      const k = lines().length;
+      cmd({ cmd: 'close', key: 'newdb' });
+      await waitFor((l, i) => i >= k && l.what === 'window-close' && l.key === 'newdb', 15000, 'the new-database window closed');
+    }
+    if (lines().some((l, i) => i >= i0 && l.what === 'server-started' && l.path === FILE)) {
+      await waitStudio(`file:${FILE}`, i0);
+      const k = lines().length;
+      cmd({ cmd: 'close', key: `file:${FILE}` });
+      await waitFor((l, i) => i >= k && l.what === 'server-stopped', 30000, 'its window closed');
+    }
+  }
   assert.deepEqual(webviewWindows(), [], 'no key opened a window of WebView2\'s own');
   await quit(app);
 } else {
@@ -99,6 +118,9 @@ if (WIN) {
   const clicked = await evalIn('launcher', `const row = [...document.querySelectorAll('#db-rows tr')].find(r => r.title === ${JSON.stringify(FILE)}); if (!row) return 'no row'; [...row.querySelectorAll('button')].find(b => b.textContent.trim() === 'Open').click(); return 'clicked'`);
   assert.equal(clicked.value, 'clicked', 'the file is listed with an Open of its own');
   await waitFor((l, i) => i >= n && l.what === 'server-started' && l.path === FILE, 30000, 'the file opened again from the list');
+  await waitStudio(`file:${FILE}`, n);
+  cmd({ cmd: 'close', key: `file:${FILE}` });
+  await waitFor((l, i) => i >= n && l.what === 'server-stopped', 30000, 'its window closed');
 
   step('Connect to a Server…: Remote connections, its form');
   const shown = await evalIn('launcher', `document.querySelector('.nav[data-section=connections]').click(); return !document.getElementById('connections').hidden && Boolean(document.getElementById('conn-add'))`);

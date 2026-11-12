@@ -8,14 +8,17 @@
 // is a stand-in that writes its own environment down and runs the real one: a
 // shell script on macOS and Linux, and on Windows, where a script is no program
 // the app can start without a shell, a program built from a few lines by the
-// app's own Bun (`bun build --compile`), the real server its child with the
+// Bun the app ships (`bun build --compile`), the real server its child with the
 // stand-in's stdin, so the app's stop by its end reaches it. (A shipped app
-// does not read FENNEC_SERVER_BIN: checks/release.mjs.)
+// does not read FENNEC_SERVER_BIN: checks/release.mjs.) That Bun is the one
+// Hutch fetched, not the app's copy: the build writes the app's icon into that
+// copy, and Bun then refuses it as the base of a program ("Error adding Bun
+// section to PE file: InvalidSecurityDirectory").
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { BUN, D, SERVER, WIN, assertClean, cmd, data, lines, quit, startApp, step, waitFor, waitStudio, log } from './lib.mjs';
+import { D, HERE, SERVER, WIN, assertClean, cmd, data, lines, quit, startApp, step, waitFor, waitStudio, log } from './lib.mjs';
 
 assertClean('before');
 const SMALL = data('small', 20);
@@ -37,7 +40,11 @@ if (WIN) {
       `child.on("exit", (code) => process.exit(code ?? 1));`,
     ].join('\n'),
   );
-  const built = spawnSync(BUN, ['build', '--compile', source, '--outfile', WRAP], { encoding: 'utf8', timeout: 120000 });
+  const pin = JSON.parse(readFileSync(join(HERE, 'hutch-pin.json'), 'utf8'));
+  const toolchain = Object.keys(pin[`windows-${process.arch}`]?.runtime ?? {}).find((k) => k.startsWith('toolchains/bun/'));
+  assert.ok(toolchain, `hutch-pin.json pins a Bun for windows-${process.arch}`);
+  const bun = join(HERE, '.hutch-home', toolchain, 'bun.exe');
+  const built = spawnSync(bun, ['build', '--compile', source, '--outfile', WRAP], { encoding: 'utf8', timeout: 120000 });
   assert.equal(built.status, 0, `the stand-in built: ${built.stderr}${built.stdout}`);
 } else {
   // `env -0` would be exact, and is not on every system; one a line is enough for names.

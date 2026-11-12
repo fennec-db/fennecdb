@@ -21,6 +21,8 @@ function load() {
 		ClientToScreen: { args: [FFIType.u64, FFIType.ptr], returns: FFIType.i32 },
 		SetCursorPos: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
 		mouse_event: { args: [FFIType.u32, FFIType.u32, FFIType.u32, FFIType.u32, FFIType.u64], returns: FFIType.void },
+		GetWindowThreadProcessId: { args: [FFIType.u64, FFIType.ptr], returns: FFIType.u32 },
+		GetWindowTextW: { args: [FFIType.u64, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
 	}).symbols;
 }
 const u = () => (user32 ??= load());
@@ -40,6 +42,8 @@ function vkOf(k: string): number {
  * the foreground window. Says whether it is in front.
  */
 export function toFront(hwnd: bigint): boolean {
+	// Not again for a window in front: an Alt there would put its menu bar in menu mode, where typed keys go.
+	if (isFront(hwnd)) return true;
 	key(VK["alt"]!, false);
 	key(VK["alt"]!, true);
 	u().SetForegroundWindow(hwnd);
@@ -85,4 +89,14 @@ export function click(hwnd: bigint, x: number, y: number): { x: number; y: numbe
 	u().mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0n);
 	u().mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0n);
 	return { x: point[0]!, y: point[1]! };
+}
+
+/** The window in front, by its process and title: what a refused SetForegroundWindow left there. */
+export function foreground(): { pid: number; title: string } {
+	const hwnd = u().GetForegroundWindow();
+	const pid = new Uint32Array(1);
+	u().GetWindowThreadProcessId(hwnd, pid);
+	const title = new Uint16Array(256);
+	const n = u().GetWindowTextW(hwnd, title, title.length);
+	return { pid: pid[0]!, title: Buffer.from(title.buffer, 0, Math.max(0, n) * 2).toString("utf16le") };
 }

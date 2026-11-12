@@ -96,13 +96,16 @@ export function takesDefault(current: string | null, ours: string, commandOf: (p
 	return program !== "" && !exists(program);
 }
 
-/** A desktop entry's Exec argument for `path`: quoted, with what its quoting and its string escapes read, and a field code's `%`, escaped. */
+/** A desktop entry's Exec argument for `path`: quoted, with what its quoting and its string escapes read escaped. */
 export function execArg(path: string): string {
 	if (CONTROL.test(path)) throw new Error(`not registered: ${path} holds a control character`);
+	// GIO checks the program before it expands field codes, so it looks for `%%` where the
+	// file has `%` and ignores the entry: a launcher path with a `%` is not registered.
+	if (path.includes("%")) throw new Error(`not registered: ${path} holds a %, which GIO would look for as %%`);
 	// Inside quotes `"`, `` ` ``, `$` and `\` take a backslash; then the value is a
-	// string, whose own escape doubles every backslash; `%` is a field code's.
+	// string, whose own escape doubles every backslash.
 	const quoted = `"${path.replace(/["`$\\]/g, (c) => `\\${c}`)}"`;
-	return quoted.replace(/\\/g, "\\\\").replace(/%/g, "%%");
+	return quoted.replace(/\\/g, "\\\\");
 }
 
 /** A desktop entry's string value (Icon=, TryExec=): only its escapes. */

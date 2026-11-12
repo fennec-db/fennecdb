@@ -88,15 +88,23 @@ const xdg = join(D, 'xdg');
 mkdirSync(join(xdg, 'share', 'applications'), { recursive: true });
 mkdirSync(join(xdg, 'config'), { recursive: true });
 writeFileSync(join(xdg, 'share', 'applications', 'gone.desktop'), '[Desktop Entry]\nType=Application\nName=Gone\nExec=/nonexistent/opener %u\nMimeType=x-scheme-handler/http;x-scheme-handler/https;inode/directory;\n');
-writeFileSync(join(xdg, 'config', 'mimeapps.list'), '[Default Applications]\nx-scheme-handler/http=gone.desktop\nx-scheme-handler/https=gone.desktop\ninode/directory=gone.desktop\n');
-app = startApp('opener-real', {
-  FENNEC_DESKTOP_REAL_OPEN: '1',
-  FENNEC_DESKTOP_LAUNCHER: '1',
+const defaults = '[Default Applications]\nx-scheme-handler/http=gone.desktop\nx-scheme-handler/https=gone.desktop\ninode/directory=gone.desktop\n';
+writeFileSync(join(xdg, 'config', 'mimeapps.list'), defaults);
+// xdg-utils 1.1.3 without a desktop takes a data folder's mimeinfo.cache over the mimeapps.list
+// above, and the system's lists the runner's Firefox once desktop-file-utils is installed: the
+// folder before it says the same (seen: Firefox started, and xdg-open waited on it).
+writeFileSync(join(xdg, 'share', 'applications', 'defaults.list'), defaults);
+writeFileSync(join(xdg, 'share', 'applications', 'mimeinfo.cache'), defaults.replace('[Default Applications]', '[MIME Cache]').replace(/\.desktop\n/g, '.desktop;\n'));
+const realEnv = {
   BROWSER: '/bin/false',
   XDG_CURRENT_DESKTOP: '',
   XDG_DATA_DIRS: `${join(xdg, 'share')}:${process.env.XDG_DATA_DIRS || '/usr/local/share:/usr/share'}`,
   XDG_CONFIG_HOME: join(xdg, 'config'),
-});
+};
+// What xdg-open will pick, asked first: a user's own cache (~/.local/share comes first) could name a browser.
+const picked = spawnSync('xdg-mime', ['query', 'default', 'x-scheme-handler/https'], { encoding: 'utf8', env: { ...process.env, ...realEnv } });
+assert.equal(picked.stdout.trim(), 'gone.desktop', `xdg-open would start what it picks for a link: ${picked.stdout.trim() || picked.stderr.trim()}`);
+app = startApp('opener-real', { FENNEC_DESKTOP_REAL_OPEN: '1', FENNEC_DESKTOP_LAUNCHER: '1', ...realEnv });
 await waitFor((l) => l.what === 'ready', 60000, 'ready');
 n = lines().length;
 cmd({ cmd: 'open-link', url: LINK });

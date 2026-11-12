@@ -258,8 +258,8 @@ async function run(c: any) {
 		// The main window's "Show in folder".
 		case "reveal": await revealPath(c.path); break;
 		// Windows: keys pressed into a window, as a person's are (testkeys.ts): the
-		// window brought to the front, a `click` at a point of its page, then `type`
-		// typed or `chord` pressed.
+		// window brought to the front, a `click` into its page (near its top left
+		// corner), then `type` typed or `chord` pressed.
 		case "keys": {
 			const page = win(c.key);
 			if (!page || process.platform !== "win32") {
@@ -269,7 +269,8 @@ async function run(c: any) {
 			const k = await import("./testkeys.ts");
 			const hwnd = BigInt(page.win.ptr as unknown as number);
 			let front = k.toFront(hwnd);
-			const clicked = c.click ? k.click(hwnd, c.click[0], c.click[1]) : null;
+			// A point near the page's top left corner, inside it at any scale: the click is for the focus.
+			const clicked = c.click ? k.click(hwnd, 8, 8) : null;
 			// A click's activation is handled by the window's own thread, this one: it is waited for.
 			for (let i = 0; !front && clicked && i < 50; i++) {
 				await Bun.sleep(40);
@@ -277,7 +278,7 @@ async function run(c: any) {
 			}
 			if (c.type) k.type(c.type);
 			if (c.chord) k.chord(c.chord);
-			report("keys-result", { key: c.key, front, clicked, type: c.type ?? null, chord: c.chord ?? null });
+			report("keys-result", { key: c.key, front, clicked, type: c.type ?? null, chord: c.chord ?? null, ...(front ? {} : { inFront: k.foreground(), self: process.pid }) });
 			break;
 		}
 		case "quit": Utils.quit(); break;

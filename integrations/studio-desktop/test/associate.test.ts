@@ -156,12 +156,12 @@ test("Linux: the entry opens the launcher with the file, hidden from the menus, 
 });
 
 test("Linux: a launcher in a folder a shell would read is one argument, read back whole", () => {
-	for (const odd of ['/h/odd "q" `id` $(cd$IFS~;touch$IFS/m) 50%f \\b/app/bin/launcher', "/h/a'b/launcher", "/h/ü ş/launcher", "/h/\\\\/launcher"]) {
-		const arg = execArg(odd);
-		assert.deepEqual(readExec(`${arg} %f`), [odd, "%f"], odd);
-		assert.doesNotMatch(arg.replace(/%%/g, ""), /%[a-zA-Z]/, "no field code in it");
+	for (const odd of ['/h/odd "q" `id` $(cd$IFS~;touch$IFS/m) \\b/app/bin/launcher', "/h/a'b/launcher", "/h/ü ş/launcher", "/h/\\\\/launcher"]) {
+		assert.deepEqual(readExec(`${execArg(odd)} %f`), [odd, "%f"], odd);
 	}
 	assert.throws(() => execArg("/h/a\nb/launcher"), /control/);
+	// GIO looks for the program before it expands `%%`: it would look for a folder that is not there.
+	assert.throws(() => execArg("/h/50%f/launcher"), /GIO/);
 	assert.match(desktopEntry({ ...LINUX_APP, icon: "/h/a\\b/icon.png" }), /^Icon=\/h\/a\\\\b\/icon\.png$/m, "a backslash is a string's escape");
 });
 

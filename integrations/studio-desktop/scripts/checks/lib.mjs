@@ -173,7 +173,10 @@ export const describe = (list) => list.map((p) => `${p.pid} (ppid ${p.ppid}) ${p
 
 export function lines() {
   if (!existsSync(REPORT)) return [];
-  return readFileSync(REPORT, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  // Whole lines alone: the app may be writing the last one as it is read (seen on Linux arm64,
+  // a page's text cut at byte 1127).
+  const text = readFileSync(REPORT, 'utf8');
+  return text.slice(0, text.lastIndexOf('\n') + 1).split('\n').filter(Boolean).map((l) => JSON.parse(l));
 }
 /**
  * Sends the app a command. The lines one look of the app finds run in turn,

@@ -782,7 +782,9 @@ keys are each system's, and the app has its icon there.
   and a desktop entry `applications/<identifier>.desktop` with
   `MimeType=application/x-fennecdb;`, `Exec="<launcher>" %f` (quoted and
   escaped as the specification reads it: the string's escapes, then its
-  quoting, and a field code's `%`), `NoDisplay=true` (Electrobun's own entry,
+  quoting; a launcher path holding a `%` is not registered, since GIO looks
+  for the program before it expands the `%%` the specification asks for, and
+  ignored such an entry on the runners), `NoDisplay=true` (Electrobun's own entry,
   `fennecstudio.desktop`, with no `MimeType` and no `%f`, is the one in the
   menus) and `TryExec=<launcher>`; each written by a rename, and then
   `update-mime-database` and `update-desktop-database`, each started with an
@@ -816,13 +818,15 @@ keys are each system's, and the app has its icon there.
   registers it, the double-click starts the app with the file, which opens
   with no main window over it; a second file's is handed to the instance
   there; a `.fennec` that is not a database is said; on Linux, the app run
-  from a folder named `odd "q" 'a' \`id\` $(cd$IFS~;touch$IFS<marker>) 50%f`
-  registers itself there and a double-click starts that very launcher with the
-  file, the name whole and no marker, and once the copy is removed the entry
-  is ignored; the registration removed again, nothing starts. (A backslash is
-  not in that name: Bun 1.4.0 reads one in its script's path as a separator,
-  and an app in such a folder does not start at all, "ENOENT reading
-  .../b/app/Resources/main.js".) `run.mjs` removes the test variant's
+  from a folder named `odd "q" 'a' \`cd&&touch <marker>\`` registers itself
+  there and a double-click starts that very launcher with the file, the name
+  whole and no marker, and once the copy is removed the entry is ignored; the
+  registration removed again, nothing starts. The app does not start at all
+  from a folder whose name holds a backslash (Bun 1.4.0 reads one in its
+  script's path as a separator: "ENOENT reading .../b/app/Resources/main.js")
+  or `$(...)` (Electrobun's core could not open its native library,
+  FileNotFound: its launcher puts the folder in `LD_LIBRARY_PATH`, where the
+  loader reads `$` and splits at `:` and `;`), so the name holds neither. `run.mjs` removes the test variant's
   registration at the start and the end of every run.
 - **Menus.** The File menu's accelerators were a bare letter, which
   Electrobun makes Command on macOS and Ctrl on Windows (its
@@ -866,7 +870,15 @@ keys are each system's, and the app has its icon there.
   Setup.exe and keeps it as `Resources\app.ico`, and keeps the PNG as
   `Resources/appIcon.png` and `Resources/app/icon.png`; Electrobun's Start-menu
   shortcut and menu entry show them, and the registration names those copies
-  rather than adding its own. SIZE_RESULT.
+  rather than adding its own. What they cost, a shipped build of this branch
+  beside one of main's on the same x64 runner: Windows' `Setup.zip` 39 897 737
+  -> 40 014 917 bytes (+117 180, +0.29%), its update archive +72 129,
+  `launcher.exe` and the Setup.exe +49 664 each (the icon's images), the
+  installed app +292 480; Linux's `Setup.tar.gz` 41 806 525 -> 41 875 912
+  (+69 387, +0.17%), the update archive +69 236 (Hutch's two copies of the
+  PNG are one in zstd's window), the installed app +207 662. macOS's is the
+  iconset it had. Without them the launcher, its shortcut, its menu entry and
+  each window show a default program's icon, and a `.fennec` file none.
 
 Toolchain. `electrobun init` installed Hutch (the build tool) in `~/.hutch` and
 appended two lines to `~/.zshrc`, and the npm package's resolver would, were

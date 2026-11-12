@@ -492,8 +492,8 @@ shown over it.
 
 * **macOS** hands the file over as an `open-url` event, from the document type
   Electrobun writes into Info.plist (`app.fileAssociations`).
-* **Windows and Linux** start the program a registration names with the file as
-  its argument, and Electrobun 2.0.4 writes no registration there, and its
+* **Windows and Linux** start the program a registration names, with the file
+  as its argument. Electrobun 2.0.4 writes no registration there, and its
   launcher, the one program a registration can name, starts the app's main
   process with none of its own arguments (upstream #483, #554). It stays that
   process's parent for as long as the app runs, waiting on it, so **the app
@@ -514,8 +514,8 @@ shown over it.
   is Explorer's own record and wins. On Linux, under `~/.local/share`, the
   shared-mime-info type `application/x-fennecdb` for `*.fennec` and a desktop
   entry for it (`MimeType=`, `Exec="<launcher>" %f`, hidden from the menus,
-  where Electrobun's own entry is, and `TryExec=<launcher>`, so an entry whose
-  launcher is gone is ignored), then `update-mime-database` and
+  which show Electrobun's own entry, and `TryExec=<launcher>`, so an entry
+  whose launcher is gone is ignored), then `update-mime-database` and
   `update-desktop-database` where they are installed; nothing is made the
   type's default, which stays yours to pick. [Uninstall](#uninstall) says what
   it leaves.
@@ -909,6 +909,16 @@ start and the end of every run.
   checks (phase 4), and a signing hook on Windows (Hutch does not sign there).
 * An uninstall of the app's own on Windows and Linux: Electrobun's leaves the
   `.fennec` registration behind ([Uninstall](#uninstall)).
+* On Linux the app does not start from a folder whose path holds a `$` or a
+  backslash (seen: Electrobun's core could not load its native library under
+  `$(...)`, and Bun 1.4.0 reads a backslash in its script's path as a
+  separator), nor, by the loader's rules for the `LD_LIBRARY_PATH` its
+  launcher sets, a `:` or a `;`; and it does not register one holding a `%`,
+  which GIO would look for as `%%`. The installed places hold none of them.
+* On Windows a file handed to the app while it runs opens in a window that
+  may not come to the front (the shell lets the program it starts take the
+  foreground, and that is the second instance, which quits); not seen on CI,
+  which has no one at the screen.
 * A stable origin for a file: the server listens on a port the system picks.
   A window's store is its own, so nothing a file's page keeps (its theme, its
   history) carries to the next open of the file.
