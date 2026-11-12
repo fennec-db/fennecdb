@@ -586,6 +586,45 @@ fn a_row_reaching_its_ttl_is_told_as_a_deletion_at_its_time() {
     }
 }
 
+/// A stream's shape runs over no row past its time but those reaching it
+/// since its last look, and its seed over none: `@ttl`'s window, and a
+/// read's `alive`, are asked before the shape's terms. Asked after, a term
+/// failing by a field -- `1 / n` over a row's `n = 0` -- ran over a row
+/// long past its time and not yet swept, the stream's `error` telling what
+/// it held, as a scoped token's term would without the `expired` grant.
+/// The window holds most of the collection, so the look scans rather than
+/// read its range of the index, and meets the old row first.
+#[test]
+fn a_stream_s_shape_never_runs_over_a_row_long_past_its_time() {
+    let mut db = Database::new();
+    let create = "create collection positions (n int, seen timestamp @ttl(1000ms))";
+    db.execute(&fennec_ql::parse_one(create).unwrap()).unwrap();
+    let h = start_over(db, Config::default());
+    let now = now_ms();
+    // Row 1 went 500 ms ago; rows 2 to 4 go in 600 ms.
+    let (st, body) = post(
+        h.port,
+        "/query",
+        &format!(
+            r#"{{"query":"put positions [{{n: 0, seen: $1}}, {{n: 1, seen: $2}}, {{n: 2, seen: $2}}, {{n: 3, seen: $2}}]","params":[{},{}]}}"#,
+            now - 1500,
+            now - 400
+        ),
+    );
+    assert_eq!(st, 200, "{body}");
+    let mut s = Sub::open(h.port, "/positions/changes?where=1+%2F+n+%3E%3D+0");
+    let (name, data) = s.next().expect("seed");
+    assert_eq!((name.as_str(), count(&data, "rows")), ("seed", 3), "{data}");
+    let mut told = Vec::new();
+    while told.len() < 3 {
+        let (name, data) = s.next_within(Duration::from_secs(10)).expect("a change");
+        assert_eq!(name, "change", "{data}");
+        told.extend(dels(&data));
+    }
+    told.sort_unstable();
+    assert_eq!(told, [2, 3, 4]);
+}
+
 // ------------------------------------------------------------------- batch
 
 #[test]

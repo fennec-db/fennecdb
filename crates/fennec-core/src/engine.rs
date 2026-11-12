@@ -4125,6 +4125,11 @@ pub struct TextIndexStats {
     pub bytes: usize,
 }
 
+/// `explain`'s words for a set an equality's bucket gave, which
+/// `Database::candidates_held` reads back to know that it did.
+const BY_ID: &str = "the id index";
+const BY_HASH: &str = "the hash index on";
+
 /// The candidate set for a filter on `id`, or `None` when the index cannot
 /// answer it.
 ///
@@ -6106,13 +6111,15 @@ impl Database {
         };
         // A row past its time is gone for the subscriber as for any read:
         // one that changed and expired is a deletion, and the sweep's
-        // delete of it later is one it was already told of.
+        // delete of it later is one it was already told of. Asked first,
+        // as a query asks it (`answer_filter`): no term of the shape runs
+        // over an expired row.
         let alive = self.alive(collection)?;
         let shape;
         let filter = match (filter, alive) {
             (f, None) => f,
             (Some(f), Some(a)) => {
-                shape = Expr::And(Box::new(f.clone()), Box::new(a));
+                shape = Expr::And(Box::new(a), Box::new(f.clone()));
                 Some(&shape)
             }
             (None, Some(a)) => {
@@ -6193,22 +6200,22 @@ impl Database {
         }
         let test = filter.map(|f| Filter::taking(c, f, &ctx, Some(&mut taking)));
         let changes = changed_rows(c, written.ids, written.seq, columns, &mut |id| {
-            if let Some(t) = &test {
-                if !t.matches(id, &ctx)? {
+            // One comparison, evaluated: a second bound filter was a
+            // second copy of the bound test's code. First, as a query asks
+            // it (`answer_filter`): no term of the shape runs over an
+            // expired row.
+            if let Some(a) = &alive {
+                let mut row = StoreRow {
+                    store: &c.store,
+                    schema: &c.schema,
+                    id,
+                };
+                if !truthy(&eval(a, &mut row, &ctx)?) {
                     return Ok(false);
                 }
             }
-            // One comparison, evaluated: a second bound filter was a
-            // second copy of the bound test's code.
-            match &alive {
-                Some(a) => {
-                    let mut row = StoreRow {
-                        store: &c.store,
-                        schema: &c.schema,
-                        id,
-                    };
-                    Ok(truthy(&eval(a, &mut row, &ctx)?))
-                }
+            match &test {
+                Some(t) => t.matches(id, &ctx),
                 None => Ok(true),
             }
         });
@@ -9925,8 +9932,17 @@ impl Database {
             if filter.as_mut().is_some_and(|f| f.answer_expired(&past)) {
                 return Ok(());
             }
+            // First: a row past its time is out of every read but the
+            // `expired` grant's, and a term after it that fails -- a
+            // division, a parameter not sent -- never runs over it. ANDed
+            // in last, a scoped token's term failing by a field of a row
+            // its rules admit, expired and not yet swept, told that row
+            // without the grant (access.md, *The rules are asked before
+            // the caller's terms*). One comparison, which cannot fail, of
+            // a field the filter reads; it is no equality, `in` or range,
+            // so no plan is another.
             *filter = Some(match filter.take() {
-                Some(f) => Expr::And(Box::new(f), Box::new(Expr::Not(past))),
+                Some(f) => Expr::And(Box::new(Expr::Not(past)), Box::new(f)),
                 None => Expr::Not(past),
             });
         }
@@ -11012,8 +11028,29 @@ impl Database {
 
         let mut out = Vec::new();
         let tested;
+        // The rows an equality's bucket gave each hold it, and are tested
+        // without it. Under a token's rules it is mostly the rule's own,
+        // `owner = $jwt.sub` over its bucket, which fennec-http asks before
+        // the statement's terms: asked again of each row, a scoped count
+        // over a bucket of 20 000 of 100 000 rows by a term of the
+        // statement's matching one took 712 -> 924 us; without it 595, its
+        // field no longer read (indexes.md, *Bound filters*). The browser
+        // module holds no rules, and binds the filter whole.
+        #[cfg(not(target_arch = "wasm32"))]
+        let (found, test) = {
+            let mut held = None;
+            let found = self.candidates_held(c, f, params, range_want, &mut held)?;
+            let test = match held {
+                Some(eq) => Filter::without(c, f, &ctx, eq, params),
+                None => Filter::new(c, f, &ctx),
+            };
+            (found, test)
+        };
+        #[cfg(target_arch = "wasm32")]
         let test = Filter::new(c, f, &ctx);
-        let scanned = match self.filter_candidates(c, f, params, range_want)? {
+        #[cfg(target_arch = "wasm32")]
+        let found = self.filter_candidates(c, f, params, range_want)?;
+        let scanned = match found {
             // The filter is exactly what the index answered: no row needs a
             // second look.
             Some((mut b, true)) => {
@@ -11075,6 +11112,23 @@ impl Database {
         params: &[Value],
         want: usize,
     ) -> Result<Option<(Vec<DocId>, bool)>> {
+        self.candidates_held(c, f, params, want, &mut None)
+    }
+
+    /// [`Self::filter_candidates`], and natively in `held` the equality --
+    /// its field and value -- whose bucket the rows are where one is: every
+    /// row holds it, as the bucket is a bare equality's whole answer
+    /// ([`Expr::is_bare_equality`]), so a test of them need not ask it
+    /// ([`Filter::without`]). The browser module, which holds no token's
+    /// rules, tests the whole filter as it did.
+    fn candidates_held<'f>(
+        &self,
+        c: &Collection,
+        f: &'f Expr,
+        params: &'f [Value],
+        want: usize,
+        held: &mut Option<(&'f str, &'f Value)>,
+    ) -> Result<Option<(Vec<DocId>, bool)>> {
         // Hash index pushdown. The candidate set is picked from the smallest
         // of the indexable equalities in the `and` chain.
         let mut eqs = Vec::new();
@@ -11084,6 +11138,7 @@ impl Database {
         // one over several fields said whole.
         let mut source: (&str, &str) = ("", "");
         let mut composed_said: Option<String> = None;
+        let mut given = None;
         for (field, val) in eqs {
             if field == "id" {
                 let Some(hit) = id_candidates(&c.store, &[val]) else {
@@ -11095,7 +11150,8 @@ impl Database {
                     .unwrap_or(true)
                 {
                     candidates = Some(hit);
-                    source = ("the id index", "id");
+                    source = (BY_ID, "id");
+                    given = Some((field, val));
                 }
                 continue;
             }
@@ -11119,7 +11175,8 @@ impl Database {
                 .unwrap_or(true)
             {
                 candidates = Some(bucket);
-                source = ("the hash index on", field);
+                source = (BY_HASH, field);
+                given = Some((field, val));
             }
         }
 
@@ -11352,6 +11409,14 @@ impl Database {
             }
         }
 
+        // The equality's bucket, unless an `in`, a range, a box or an index
+        // over several fields took its place.
+        #[cfg(not(target_arch = "wasm32"))]
+        if composed_said.is_none() && (source.0 == BY_ID || source.0 == BY_HASH) {
+            *held = given;
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = (held, given);
         Ok(candidates.map(|mut b| {
             b.sort_unstable();
             b.retain(|id| c.store.contains(*id));
@@ -14388,6 +14453,16 @@ impl Database {
         let Some(old) = c.store.read(schema, id)? else {
             return Ok(false);
         };
+        // An upsert's row was found by the value it holds, no hook's rule
+        // asked of it: judged before its `else set` reads it
+        // ([`crate::plugin::Hook::before_upsert`]). A `set`'s rows met the
+        // rules in its filter. The browser module registers no hook.
+        #[cfg(not(target_arch = "wasm32"))]
+        if new.is_some() {
+            for h in hooks {
+                h.before_upsert(schema, &old)?;
+            }
+        }
         let mut doc = updated(schema, &old, assigns, ctx, new)?;
         ask_hooks(hooks, schema, WriteOp::Update, &mut doc)?;
         for h in hooks {
@@ -16671,6 +16746,17 @@ const IN_SET_AT: usize = 8;
 /// text naming no time stays one, above every time, as those indexes rank
 /// it (`SortedIndex::by_kind`). Read at every row, `t > $1` with a text
 /// over 100 000 times took 3.8 times the instructions.
+///
+/// A list of numbers from 0 to 255 beside a `bytes` field -- as a list or
+/// as a vector's `f32`s, by where it stood -- is the bytes it writes, as
+/// the write path and the field's `@hash` read it (`Value::key_as`) and as
+/// JSON writes bytes out: compared by kind, `b = [104, 105]` found the row
+/// through the bucket and not in the scan, and with a term beside it,
+/// tested without the bucket's equality (`Filter::without`), found it
+/// through the bucket where the browser module and the scan did not. A
+/// comparison reads it so wherever it meets bytes (`Value::cmp_read`), a
+/// stream's `eval` and a `case` too; read here, a row's bytes meet bytes
+/// and no list is read again at each.
 fn as_field(c: &Collection, slot: Slot, v: &mut Value) {
     let Slot::At(p) = slot else { return };
     match (&c.schema.fields[p].ty, v) {
@@ -16680,17 +16766,22 @@ fn as_field(c: &Collection, slot: Slot, v: &mut Value) {
         }
         // `has`'s one item.
         (DataType::List(t), v) if **t == DataType::Timestamp => crate::query::read_time(v),
+        (ty @ DataType::Bytes, v) if matches!(v, Value::List(_) | Value::Vector(_)) => {
+            if let Some(b) = v.clone().key_as(ty) {
+                *v = b;
+            }
+        }
         _ => {}
     }
 }
 
-/// Whether the field `slot` reads holds times, alone or in a list: what
-/// [`as_field`] reads a written text beside.
-fn holds_times(c: &Collection, slot: Slot) -> bool {
+/// Whether [`as_field`] reads a value written beside the field `slot`
+/// reads: one holding times, alone or in a list, or bytes.
+fn reads_written(c: &Collection, slot: Slot) -> bool {
     let Slot::At(p) = slot else { return false };
     match &c.schema.fields[p].ty {
         DataType::List(t) => **t == DataType::Timestamp,
-        t => *t == DataType::Timestamp,
+        t => matches!(t, DataType::Timestamp | DataType::Bytes),
     }
 }
 
@@ -16788,6 +16879,102 @@ enum Test<'q> {
     Eval(&'q Expr),
 }
 
+impl Test<'_> {
+    /// Where it goes in an `and` ([`Chain`]), by two bits: 1 for more than
+    /// one test -- an `or`, an `and` under a `not` -- and 2 for one that
+    /// may fail: one that evaluates anything ([`Test::Eval`]), the one
+    /// test that asks what may -- a field or a path the schema does not
+    /// read, a parameter not sent or not a list, arithmetic past 64 bits, a
+    /// pattern ending in its escape, a point that is none. Every other
+    /// compares a value the row holds with one bound once a query, which
+    /// fails over no row.
+    fn rank(&self) -> u8 {
+        match self {
+            Test::Eval(_) => 2,
+            Test::And(a, b) | Test::Or(a, b) => 1 | a.rank() | b.rank(),
+            Test::Not(a) => a.rank(),
+            _ => 0,
+        }
+    }
+}
+
+/// The terms of an `and`, bound in the order written and laid out for the
+/// test ([`Filter::new`], [`Filter::without`]): of those before the first
+/// that may fail ([`Test::rank`]), each single test first and then each
+/// `or`, in their order; from that one on, each where it was written.
+///
+/// A term runs over the rows every term before it passes, and fails there
+/// alone: fennec-http asks a scoped token's rules before any term of its
+/// own, so a term failing by a field of a row -- a division, an int past 64
+/// bits -- never runs over one the rules hide (access.md, *The rules are
+/// asked before the caller's terms*). Laid out so, a term that may fail is
+/// asked of the rows it was, the same terms before it, and fails or not as
+/// it did; the others ask nothing that fails, and only the time a row takes
+/// is another. A term that cannot fail stays behind one that may, which may
+/// be a rule's -- a call over a field -- whose rows a term of the caller's
+/// moved ahead of it would choose. The rules' `or`, `published = true or
+/// author = $jwt.sub` over posts nine in ten published, was asked before a
+/// scan's rare term of the statement's at every row: a count over 100 000
+/// rows took 3.77 ms with main's rule last, 4.82 with the rules first, and
+/// 3.60 laid out so; a page of 20 3.73, 4.84 and 3.53.
+///
+/// Two `and`s, each of its terms as met: `first`, the single tests ahead
+/// of the first term that may fail, and `then`, every other term -- the
+/// `or`s ahead of it, which come before it, then it and every term after.
+/// A list of the tests, laid out after, was 199 bytes more of the browser
+/// module, which the whole of it takes 595 of.
+#[derive(Default)]
+struct Chain<'q> {
+    first: Option<Test<'q>>,
+    then: Option<Test<'q>>,
+    /// A term that may fail was met.
+    failing: bool,
+}
+
+impl<'q> Chain<'q> {
+    /// Binds `e`, a term of an `and` -- or an `and`, its terms in turn --
+    /// and lays it out.
+    fn place(
+        &mut self,
+        c: &Collection,
+        e: &'q Expr,
+        ctx: &EvalCtx,
+        positions: &mut Vec<usize>,
+        paths: &mut Vec<(usize, &'q str)>,
+    ) {
+        if let Expr::And(a, b) = e {
+            self.place(c, a, ctx, positions, paths);
+            self.place(c, b, ctx, positions, paths);
+            return;
+        }
+        let t = Filter::bind(c, e, ctx, positions, paths, None);
+        let rank = t.rank();
+        self.failing |= rank & 2 != 0;
+        let part = match self.failing || rank != 0 {
+            false => &mut self.first,
+            true => &mut self.then,
+        };
+        *part = Some(and_of(part.take(), t));
+    }
+
+    /// The `and` laid out; `f`, evaluated, where it held no term.
+    fn tests(self, f: &'q Expr) -> Test<'q> {
+        match (self.first, self.then) {
+            (a, Some(b)) => and_of(a, b),
+            (Some(a), None) => a,
+            (None, None) => Test::Eval(f),
+        }
+    }
+}
+
+/// `a and b`, or `b` where there is no `a`.
+fn and_of<'q>(a: Option<Test<'q>>, b: Test<'q>) -> Test<'q> {
+    match a {
+        Some(a) => Test::And(Box::new(a), Box::new(b)),
+        None => b,
+    }
+}
+
 /// What a [`Test::Pattern`] matches a row's text against: the pattern
 /// and its escape, and the fold both sides are compared by.
 struct Pattern {
@@ -16839,7 +17026,61 @@ impl<'q> Filter<'q> {
     ) -> Filter<'q> {
         let mut positions = Vec::new();
         let mut paths = Vec::new();
-        let root = Filter::bind(c, f, ctx, &mut positions, &mut paths, taking);
+        let root = match (taking, f) {
+            // A stream's look binds as written: the sets it keeps are
+            // paired with its lists in the order they were bound
+            // (`into_held`).
+            (None, Expr::And(..)) => {
+                let mut chain = Chain::default();
+                chain.place(c, f, ctx, &mut positions, &mut paths);
+                chain.tests(f)
+            }
+            (taking, f) => Filter::bind(c, f, ctx, &mut positions, &mut paths, taking),
+        };
+        Filter::made(c, root, positions, paths)
+    }
+
+    /// [`Filter::new`] of `f` but for its `and` term `field = value`, which
+    /// every row it will test holds: the rows its bucket gave
+    /// ([`Database::candidates_held`]). The other terms laid out as a
+    /// [`Chain`] lays them, so that each that may fail is asked of
+    /// the rows it was, and what fails fails alike: the term left out is a
+    /// comparison with a value, which fails over no row.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn without(
+        c: &'q Collection,
+        f: &'q Expr,
+        ctx: &EvalCtx,
+        (field, value): (&str, &Value),
+        params: &[Value],
+    ) -> Filter<'q> {
+        let mut terms = Vec::new();
+        f.conjuncts(&mut terms);
+        let held = terms.iter().position(|t| {
+            t.equality_key(params)
+                .is_some_and(|(k, v)| k == field && std::ptr::eq(v, value))
+        });
+        // A filter of that term alone was answered by its bucket.
+        let (Some(at), true) = (held, terms.len() > 1) else {
+            return Filter::new(c, f, ctx);
+        };
+        terms.remove(at);
+        let (mut positions, mut paths) = (Vec::new(), Vec::new());
+        let mut chain = Chain::default();
+        for t in terms {
+            chain.place(c, t, ctx, &mut positions, &mut paths);
+        }
+        Filter::made(c, chain.tests(f), positions, paths)
+    }
+
+    /// The filter of `root`, which reads the fields at `positions` and the
+    /// paths `paths`, in the order they were bound.
+    fn made(
+        c: &'q Collection,
+        root: Test<'q>,
+        mut positions: Vec<usize>,
+        paths: Vec<(usize, &'q str)>,
+    ) -> Filter<'q> {
         let mut index_of = vec![usize::MAX; c.schema.fields.len()];
         for (i, p) in positions.iter_mut().enumerate() {
             index_of[*p] = i;
@@ -17005,10 +17246,10 @@ impl<'q> Filter<'q> {
                         (None, _) => return Test::Eval(e),
                     }
                 }
-                // Read after, a time field's alone: asked of each item,
-                // 1 000 lists' lookups in a `[float]` field's `@hash` took
-                // 0.2% more instructions.
-                if let Some(s) = s.filter(|s| holds_times(c, *s)) {
+                // Read after, a time field's and a bytes field's alone: asked
+                // of each item, 1 000 lists' lookups in a `[float]` field's
+                // `@hash` took 0.2% more instructions.
+                if let Some(s) = s.filter(|s| reads_written(c, *s)) {
                     values.iter_mut().for_each(|v| as_field(c, s, v));
                 }
                 let long = values.len() >= IN_SET_AT;

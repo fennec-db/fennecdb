@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-fennec-core's invariants -- storage, writes, indexes, the HNSW graph, vector and text search, `lookup` and aggregates, and the browser module's builds -- for code in `crates/fennec-core/`. The engine's lock and blocks -- prepared blocks and pinned reads -- are in [src/engine/CLAUDE.md](src/engine/CLAUDE.md), beside their code. The rules every change meets, and where every other area's are, are in the root's [CLAUDE.md](../../CLAUDE.md).
+fennec-core's invariants -- storage, writes, indexes, the HNSW graph, vector and text search, `lookup` and aggregates, and the browser module's builds -- for code in `crates/fennec-core/`. The engine's lock and blocks -- prepared blocks and pinned reads -- are in [src/engine/CLAUDE.md](src/engine/CLAUDE.md), beside their code; the text index's words -- the tokenizer's fold and the table of words -- in [src/text/CLAUDE.md](src/text/CLAUDE.md): read it before changing `text.rs` or `text/`. The rules every change meets, and where every other area's are, are in the root's [CLAUDE.md](../../CLAUDE.md).
 
 ## Invariants
 
@@ -159,9 +159,9 @@ message, where `Error::reason` reads it back up to the first `` (` `` --
 never a field beside it -- for every answer's `reason`.
 
 **[`if absent else set` is an upsert; `put <c> $n` takes a parameter's
-documents.](../../docs/design/writes.md#upserts)** Scoped, the row it sets
-passes the update filter (`Check::before_overwrite`) and `$n`'s documents
-go in first (`Statement::with_documents`); a sync replica refuses a
+documents.](../../docs/design/writes.md#upserts)** Scoped, its row passes
+the update filter before it is read (`Hook::before_upsert`) and `$n`'s
+documents go in first (`Statement::with_documents`); a sync replica refuses a
 document naming neither id nor key (`UPSERT_KEY`).
 
 **[A `set` or a `del` picks its rows with `order` and `limit`, and
@@ -205,17 +205,22 @@ module keeps one map.
 
 **[`@ttl` is an ordered index whose rows expire, and every read leaves them
 out at once.](../../docs/design/indexes.md#ttl)** Every filter must have
-`Database::alive` ANDed in; a server sweeps (`fennec_http::sweep`) a row a
-pass past its time (`sweep::GRACE`), never a replica, a following tenant
-or the browser, and a scoped token reads `expired()` only by the `expired`
-grant.
+`Database::alive` ANDed in first, ahead of every term (`answer_filter`,
+`changes_since`, `changes_held`, `sse::Expiry::step`'s window); a server
+sweeps (`fennec_http::sweep`) a row a pass past its time (`sweep::GRACE`),
+never a replica, a following tenant or the browser, and a scoped token
+reads `expired()` only by the `expired` grant.
 
 **[Only an `and` chain reaches an index.](../../docs/design/indexes.md#index-reach)**
 An `in` takes buckets only when every element resolves, else the scan.
 
 **[A filter is bound to its collection once a
 query.](../../docs/design/indexes.md#bound-filters)** What `Filter` cannot bind
-stays `eval`: an error at the first row, never over none. A stream's look
+stays `eval`: an error at the first row, never over none. An `and`'s
+terms that may fail (`Test::rank`) are tested as written, each after
+every term before it, only those that cannot moving ahead of them
+(`Chain`, `Filter::without`): fennec-http's access binds the order,
+a scoped token's rules written first. A stream's look
 binds a filter holding a long `in` list once a look, its lists kept for
 the next (`Database::changes_held`, `Lists`, their sets alone), where it
 reads another collection.
@@ -226,7 +231,9 @@ which compares an int, a float and a time by their true values
 (`value::tie`), never as two `f64`s alone, every index's keys and
 `Value::key_as` with it, and any other two kinds by kind (`type_rank`), a
 time below every text; a comparison, `greatest` and `least` read a text
-beside a time as the time it names, either side (`Value::cmp_read`), never
+beside a time as the time it names, either side, and a list of numbers
+from 0 to 255 beside bytes as the bytes it writes, a stream's `eval` as a
+filter (`Value::cmp_read`, `bytes_beside`), never
 the order, an index stepping aside where its keys cannot say it
 (`key_as`, `lookup_key`). A
 `NaN` equals a `NaN` and is above every other number, `+inf` included --
@@ -381,32 +388,13 @@ rules, `@ttl`'s `alive` -- as a `where`'s rows are
 `tests/match_filter.rs` holds it to the ranking's ids, and every form to
 `id in (get ... match ... select id)` where that list, the ranking's first
 10 000 rows, holds them all. It keeps no row ceiling (a ranking keeps
-`MAX_MATCH_ROWS`), its rows charged to a call, and a scoped token's
-`explain` tells the rows it kept alone; `rerank`, `order _score`, marks
+`MAX_MATCH_ROWS`), its rows charged to a call, and `explain` under
+`within` tells the rows it kept alone; `rerank`, `order _score`, marks
 beside `count` and an ungrouped aggregate's `limit` without `order` are
 refused.
 
-**[`@text` matches whole words unless told
-otherwise.](../../docs/design/text.md#tokenizer)** It folds `I`, `İ`, `ı`, `i`
-together and a Latin or Greek letter to its base letter (`sutlac` is
-`Sütlaç`) at index and query time, through `text/fold.rs`,
-`tools/fold/gen.py`'s alone (`--check`); unspaced scripts go by grams
-(`text::grams`). `@text(accents)` (kind 11, a byte of flags) also indexes
-a word its accents make another as written (`text::WRITTEN`), by
-`indexed_terms` around a tokenizer that tests no flag, case deciding it no
-more than the fold. Ranking, `facet`, `highlight()` and `fuzzy` read a
-query through `read_words` (`query_terms`): a word typed with accents its
-spelling only where a row the statement reads holds it
-(`TextIndex::holds`, a scoped token's `within`), never a row it cannot,
-else its fold. Nothing else folds: `=`, `like`, `nocase`, collations and
-the other indexes compare as they did.
-
 **[The text index is derived and never
 persisted.](../../docs/design/text.md#text-index-is-derived)**
-
-**[A text index's words are a table of their own
-(`text/terms.rs`).](../../docs/design/text.md#term-table)** `memory_bytes`
-counts each list's allocation past its bytes (`ALLOC`).
 
 **[`fuzzy` and `prefix` walk a sorted copy of the
 words.](../../docs/design/text.md#fuzzy-and-prefix)** Every write keeps it up

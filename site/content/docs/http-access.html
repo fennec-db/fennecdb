@@ -581,6 +581,32 @@ messages   read,insert  where room in (get members select room where user = $jwt
     spelling, in the ranking, its facets and its marks alike: a spelling
     only another user's rows write leaves the token's word read as every
     spelling.</li>
+  <li id="scoped-rules-first"><b>The rules are asked first.</b> A row
+    meets the token's rules before any condition of the statement's own,
+    in a <code>where</code>, a <code>lookup</code> level, an inner
+    <code>get</code>, a <code>set</code> or <code>del</code>, REST's
+    <code>?where=</code> and a subscription's shape alike, so a condition
+    that fails — a division by zero, a number past 64 bits — is never
+    worked out over a row the token may not read: <code>get notes where id
+    = 17 and 1 / (case when body &gt;= "m" then 0 else 1 end) = 1</code> is
+    <code>[]</code> whatever another user's note 17 holds. A row past its
+    <code>@ttl</code> is left out before either, so such a condition never
+    meets one without the <code>expired</code> grant. An upsert's
+    <code>else set</code> reads the row holding its value only once the
+    token may update it, and is refused (403) before it reads one it may
+    not. Conditions that cannot fail — a field compared with a value, an
+    <code>in</code> list, <code>like</code> — may be tested in another
+    order where that is faster; the answer is the same.</li>
+  <li id="scoped-explain"><b><code>explain</code> is the server token's.</b>
+    A scoped token's <code>explain</code> is refused (403, <code>`explain`
+    is the server token's: a plan counts rows this token's rules hide from
+    it</code>) through <code>/query</code>, <code>/batch</code> and MCP's
+    <code>query</code> tool: a plan counts the rows an index found before
+    the rules held them, and which index it names compares two such
+    counts, so it would tell a user whether another user's row holds a
+    value. A collection the token is granted nothing on is still answered
+    404, as for a <code>get</code>. The server's own token explains as
+    before.</li>
   <li><b><a href="http-reference.html#subscriptions">Subscriptions</a></b> are told only of rows they were sent: a scoped
     subscriber hears of a row leaving its shape only if the row was in it,
     so the ids other users write never reach it — rows leaving as a rule

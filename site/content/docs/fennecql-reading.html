@@ -288,6 +288,9 @@ rows: 20
   <li><b>It runs the query</b>, because some choices depend on the data.</li>
   <li><b>The wording is for reading</b>, not parsing; it may change between
     versions.</li>
+  <li><b>It is the server token's.</b> Over HTTP a <a
+    href="http-access.html#scoped-explain">scoped token</a> is refused it
+    (403): its counts are of rows before the token's rules hold them.</li>
 </ul>
 
 <details class="deep"><summary>A worked explain over a million events</summary>
