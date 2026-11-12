@@ -274,9 +274,7 @@ Covers `crates/fennec-core/`; the browser module's rules bind `crates/fennec-was
 - `nocase` text compares by its case fold wherever it compares.
 - `match` prunes with MaxScore.
 - Beside `order`, `count` or an aggregate, `match` is a filter: the rows its ranking scores above zero.
-- `@text` matches whole words unless told otherwise.
 - The text index is derived and never persisted.
-- A text index's words are a table of their own (`text/terms.rs`).
 - `fuzzy` and `prefix` walk a sorted copy of the words.
 - `rerank` deliberately uses no index.
 - `fuse` adds ranks, not scores.
@@ -301,6 +299,14 @@ Covers `crates/fennec-core/src/engine/`.
 - A block's documents are built beside the readers
 - A long read is pinned, and read with no lock held
 
+### `crates/fennec-core/src/text/CLAUDE.md`
+
+Covers `crates/fennec-core/src/text/`; its rules bind `text.rs`'s tokenizer and its reading of a query too.
+
+*Text*
+- `@text` matches whole words unless told otherwise.
+- A text index's words are a table of their own (`text/terms.rs`).
+
 ### `crates/fennec-ql/CLAUDE.md`
 
 Covers `crates/fennec-ql/` and the shell in `crates/fennec-cli/`; its rules bind fennec-core's statements, schemas and named statements (`declared.rs`, `named.rs`, `engine/stored.rs`) and fennec-http's `/_call` too.
@@ -321,7 +327,7 @@ Covers `crates/fennec-ql/` and the shell in `crates/fennec-cli/`; its rules bind
 
 ### `crates/fennec-http/CLAUDE.md`
 
-Covers `crates/fennec-http/`; access binds fennec-core's hooks (`plugin::Hook`, `Check`) and its own collections' names (`declared::OWN`), an open server's rule fennec-shard's router (`cors::foreign`, `cors::vouched`), replication fennec-core's `wal` and `changes_in`, held writes its wakes (`changes.rs`).
+Covers `crates/fennec-http/`, access aside (below); an open server's rule binds fennec-shard's router (`cors::foreign`, `cors::vouched`), replication fennec-core's `wal` and `changes_in`, held writes its wakes (`changes.rs`).
 
 *Replication and archives*
 - Replication ships only what is on disk, by the change counter.
@@ -329,15 +335,6 @@ Covers `crates/fennec-http/`; access binds fennec-core's hooks (`plugin::Hook`, 
 - `/_changes` reads the writes on disk, documents and all
 - A read can wait for a write on a replica
 - An archive and a backup can be sealed
-
-*Access*
-- A scoped token is held to its rules at every level, twice for writes.
-- A rule may read another collection, answered before each statement.
-- A collection whose name starts with `_` is the server's, out of every rule's reach.
-- A token is bound to the tenant it names.
-- A token is taken only from the issuers, for the audiences and clients, a server was told.
-- An empty token is no token.
-- A server that asks for no token answers only under this machine's name, and a page only of its own origin or `--http-cors`'s.
 
 *Quotas and retries*
 - A tenant is held to its quota by its node, a block as it lands.
@@ -363,6 +360,7 @@ Covers `crates/fennec-http/`; access binds fennec-core's hooks (`plugin::Hook`, 
 - `--tls-cert` and `--tls-key` make a listener HTTPS alone
 - Every HTTP dial takes HTTPS by its URL.
 - The OpenAPI document is held to the routes.
+- A server that asks for no token answers only under this machine's name, and a page only of its own origin or `--http-cors`'s.
 
 *Held writes*
 - `Fennec-Wait` holds a `set` or a `del` that writes nothing until it can
@@ -378,10 +376,16 @@ Covers `crates/fennec-http/src/mcp/`.
 
 ### `crates/fennec-http/src/access/CLAUDE.md`
 
-Covers `crates/fennec-http/src/access/`.
+Covers `crates/fennec-http/src/access.rs` and `src/access/`; access binds fennec-core's hooks (`plugin::Hook`, `Check`), its `Filter` -- the order an `and`'s terms are tested in, `@ttl`'s `alive` first (`Chain`, `answer_filter`) -- and its own collections' names (`declared::OWN`), and every path a token's statement takes, a stream's among them (`sse.rs`).
 
 *Access*
+- A scoped token is held to its rules at every level, twice for writes.
 - A field a read rule withholds is held out of what a statement does.
+- A rule may read another collection, answered before each statement.
+- A collection whose name starts with `_` is the server's, out of every rule's reach.
+- A token is bound to the tenant it names.
+- A token is taken only from the issuers, for the audiences and clients, a server was told.
+- An empty token is no token.
 
 ### `crates/fennec-server/CLAUDE.md`
 

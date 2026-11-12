@@ -564,9 +564,12 @@ impl Value {
     /// list or an object too, one naming none above every time. Whichever
     /// side it came from -- a literal, a parameter, a json field's ISO
     /// text, a text field's: `where j.at > now() - 1d` compares two times.
-    /// Never an order: a time equals the text naming it and the int 0 the
-    /// time 0, while the text ranks above every int, so a sort by it could
-    /// panic, and `order coalesce(t, j)` did (docs/design/indexes.md#sorted).
+    /// And a list of numbers from 0 to 255 beside bytes is the bytes it
+    /// writes ([`bytes_beside`]), in a stream's test and a `case` as in a
+    /// query's filter. Never an order: a time equals the text naming it and
+    /// the int 0 the time 0, while the text ranks above every int, so a
+    /// sort by it could panic, and `order coalesce(t, j)` did
+    /// (docs/design/indexes.md#sorted).
     #[inline]
     pub fn cmp_read(&self, other: &Value) -> std::cmp::Ordering {
         self.cmp_kinds::<true>(other)
@@ -684,11 +687,40 @@ impl Value {
                     None => nan_order(a, b),
                 },
                 // Incomparable types fall back to type rank. This used to
-                // return Equal: `year = "abc"` matched every row.
-                _ => self.type_rank().cmp(&other.type_rank()),
+                // return Equal: `year = "abc"` matched every row. A
+                // comparison reads a list of byte numbers beside bytes
+                // first ([`bytes_beside`]), here where no two kinds that
+                // compare pay for the question.
+                _ => match READ.then(|| bytes_beside(self, other)).flatten() {
+                    Some(o) => o,
+                    None => self.type_rank().cmp(&other.type_rank()),
+                },
             },
         }
     }
+}
+
+/// Bytes beside a list of numbers from 0 to 255 -- a list, or a vector's
+/// `f32`s, by where it was read -- as a comparison reads them: the list as
+/// the bytes it writes ([`Value::key_as`]), as JSON writes bytes out and
+/// the bound filter reads a value beside a `bytes` field once a query
+/// (`engine::as_field`). Compared by kind, `b = [104, 105]` found the row
+/// in a query and not in a stream's `eval`, which then told a subscriber
+/// the row it had seeded was deleted. A list of other numbers, or of
+/// other values, is none: `None`, and the two order by kind. Out of line:
+/// no comparison of two other kinds pays for the conversion's code.
+#[inline(never)]
+fn bytes_beside(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+    let (bytes, list, flip) = match (a, b) {
+        (Value::Bytes(x), l @ (Value::List(_) | Value::Vector(_))) => (x, l, false),
+        (l @ (Value::List(_) | Value::Vector(_)), Value::Bytes(y)) => (y, l, true),
+        _ => return None,
+    };
+    let Some(Value::Bytes(read)) = list.clone().key_as(&DataType::Bytes) else {
+        return None;
+    };
+    let o = bytes[..].cmp(&read[..]);
+    Some(if flip { o.reverse() } else { o })
 }
 
 /// A time `t` beside a text, as a comparison reads them: the text as the
@@ -1317,8 +1349,9 @@ mod tests {
     }
 
     /// A comparison reads a text beside a time as the time it names, either
-    /// side, in a list and an object too, one naming none above every time;
-    /// any other two values it takes as the order does.
+    /// side, in a list and an object too, one naming none above every time,
+    /// and a list of numbers from 0 to 255 beside bytes as the bytes it
+    /// writes; any other two values it takes as the order does.
     #[test]
     fn a_comparison_reads_a_text_beside_a_time() {
         let text = |t: &str| Value::Text(t.into());
@@ -1335,6 +1368,20 @@ mod tests {
         let object = |v: Value| Value::Object(vec![("at".into(), v)]);
         assert_eq!(object(epoch.clone()).cmp_read(&object(t0.clone())), Equal);
         assert_eq!(list(t0.clone()).cmp_value(&list(epoch.clone())), Less);
+        let hi = Value::Bytes(b"hi".to_vec());
+        let ints = |v: &[i64]| Value::List(v.iter().map(|&i| Value::Int(i)).collect());
+        assert_eq!(hi.cmp_read(&ints(&[104, 105])), Equal);
+        assert_eq!(ints(&[104, 105]).cmp_read(&hi), Equal);
+        assert_eq!(hi.cmp_read(&Value::Vector(vec![104.0, 105.0])), Equal);
+        assert_eq!(hi.cmp_read(&ints(&[104, 106])), Less);
+        assert_eq!(ints(&[104]).cmp_read(&hi), Less);
+        assert_eq!(hi.cmp_read(&ints(&[])), Greater);
+        assert_eq!(list(hi.clone()).cmp_read(&list(ints(&[104, 105]))), Equal);
+        // Not bytes: the two order by kind, as the order takes them.
+        for other in [ints(&[104, 256]), ints(&[-1]), Value::Vector(vec![104.5])] {
+            assert_eq!(hi.cmp_read(&other), hi.cmp_value(&other), "{other:?}");
+        }
+        assert_eq!(hi.cmp_value(&ints(&[104, 105])), Less);
         for a in edges() {
             for b in edges() {
                 let reads = matches!(
@@ -1343,6 +1390,8 @@ mod tests {
                         | (Value::Text(_), Value::Timestamp(_))
                         | (Value::List(_), Value::List(_))
                         | (Value::Object(_), Value::Object(_))
+                        | (Value::Bytes(_), Value::List(_) | Value::Vector(_))
+                        | (Value::List(_) | Value::Vector(_), Value::Bytes(_))
                 );
                 if !reads {
                     assert_eq!(a.cmp_read(&b), a.cmp_value(&b), "{a:?} {b:?}");

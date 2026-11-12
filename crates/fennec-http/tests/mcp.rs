@@ -1031,6 +1031,25 @@ fn a_scoped_token_s_agent_sees_what_its_query_sees() {
     );
     let (err, _) = n.call(Some(&bob), "query", r#"{"query":"get secrets"}"#);
     assert!(err);
+    // Its rules are asked of a row before the query's own terms: one
+    // failing over alice's row says nothing of what it holds.
+    for pivot in ["m", "z"] {
+        let q = format!(
+            r#"{{"query":"get docs where id = 1 and 1 / (case when body >= '{pivot}' then 0 else 1 end) = 1"}}"#
+        );
+        let (err, s) = n.call(Some(&bob), "query", &q);
+        assert!(!err, "{pivot}: {s:?}");
+        assert_eq!(at(&s, &["count"]), &Value::Int(0), "{pivot}");
+    }
+    // Nor is it told a plan, which counts the rows they hide.
+    let (err, s) = n.call(Some(&bob), "query", r#"{"query":"explain get docs"}"#);
+    assert!(err && int(at(&s, &["status"])) == 403, "{s:?}");
+    assert!(
+        text(at(&s, &["error"])).contains("`explain` is the server token's"),
+        "{s:?}"
+    );
+    let (err, s) = n.call(Some(ROOT), "query", r#"{"query":"explain get docs"}"#);
+    assert!(!err, "{s:?}");
 
     // A write is held to the rules as the row it writes: bob's put is
     // his, and alice's row is not his to change.

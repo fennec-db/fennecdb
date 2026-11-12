@@ -1,6 +1,6 @@
 # Text
 
-The long form of the invariants [crates/fennec-core/CLAUDE.md](../../crates/fennec-core/CLAUDE.md) lists under *Text*: collations, `nocase`, `match` and `match` as a filter, the text index, `fuzzy` and `prefix`, `rerank`, `fuse`, `highlight()` and facets. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-core/CLAUDE.md](../../crates/fennec-core/CLAUDE.md) lists under *Text*: collations, `nocase`, `match` and `match` as a filter, the text index, `fuzzy` and `prefix`, `rerank`, `fuse`, `highlight()` and facets. The tokenizer's and the term table's rules moved word for word to [crates/fennec-core/src/text/CLAUDE.md](../../crates/fennec-core/src/text/CLAUDE.md), beside `text/fold.rs` and `text/terms.rs`, to make room in fennec-core's for the order a filter's terms are tested in (indexes.md, *Bound filters*). Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Collations
 
@@ -189,9 +189,11 @@ query of one or two words, under the bitmap's bar, retires what it did.
 What bounded it before bounds it and errors as it did: a word `fuzzy` or
 `prefix` reads as more than `MAX_EXPANSIONS` words, `--call-max-rows`,
 and the ranking's 10 000 rows wherever `match` still ranks. `explain`
-says how many rows the words scored and how many the filter kept; to a
-scoped token it says the kept alone, since the words reach rows it cannot
-read.
+says how many rows the words scored and how many the filter kept; under
+`within` it says the kept alone, since the words reach rows the token
+cannot read. A scoped token's own `explain` is refused since (access.md,
+*The rules are asked before the caller's terms*): the line stays for a
+scoped statement explained in process, as `tests/access.rs` explains one.
 
 A plain ordered `get`, which runs none of this code, ran 4% slower in the
 first timing run (4.88 -> 5.08 us, in every pair), and the branch's binary

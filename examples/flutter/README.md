@@ -22,7 +22,7 @@ todo list; this is the fuller app every language's example is
 
 ## Prerequisites
 
-Flutter 3.22 or newer, and Xcode or the Android SDK for the platform you run.
+Flutter 3.47 or newer, and Xcode or the Android SDK for the platform you run.
 
 ## Run
 
