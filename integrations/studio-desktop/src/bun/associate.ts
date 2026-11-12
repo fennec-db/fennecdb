@@ -37,7 +37,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, join, posix } from "node:path";
 import { windowsArgv } from "./handover.ts";
 
 /** The file type, as each system names it. */
@@ -145,7 +145,7 @@ export function mimePackage(): string {
 /** Linux: where the data home is, by the XDG rule (an absolute $XDG_DATA_HOME, else ~/.local/share). */
 export const dataHome = (env: Record<string, string | undefined>, home: string) => {
 	const set = env["XDG_DATA_HOME"];
-	return set && isAbsolute(set) ? set : join(home, ".local", "share");
+	return set && posix.isAbsolute(set) ? set : posix.join(home, ".local", "share");
 };
 
 /** Linux: the files the registration is, in `data`. */

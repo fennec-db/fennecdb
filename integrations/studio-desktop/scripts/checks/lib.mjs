@@ -622,7 +622,8 @@ export function forgetRegistration() {
       done.push(f);
     }
   }
-  done.push(tool(['update-mime-database', join(DATA_HOME, 'mime')]));
+  // Each made again where the app could have made it: on a folder that is not there, update-mime-database fails.
+  if (existsSync(join(DATA_HOME, 'mime', 'packages'))) done.push(tool(['update-mime-database', join(DATA_HOME, 'mime')]));
   if (existsSync(join(DATA_HOME, 'applications'))) done.push(tool(['update-desktop-database', join(DATA_HOME, 'applications')]));
   return done;
 }
