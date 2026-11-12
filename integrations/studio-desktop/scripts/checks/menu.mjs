@@ -90,7 +90,9 @@ if (WIN) {
     cmd({ cmd: 'keys', key: 'launcher', click: true });
     const r = await waitFor((l, i) => i >= n && l.what === 'keys-result', 15000, `${what}: the click`);
     const got = r.front && (await until(async () => (await pageSaw()).seen.mouse > before, 10000, 'the page got the click').then(() => true, () => false));
-    if (!got) assert.fail(`${what}: the page did not get the click, or the main window was not brought to the front by it (the click: ${JSON.stringify(r)}; the page: ${JSON.stringify(await pageSaw())}; ${await whereInputGoes()})`);
+    // A window of another program over the page where the click lands takes it: the screen's, not the app's.
+    const over = r.targets?.underClick && !r.targets.underClick.ours ? `a window of another program lay over the page where the click landed (${JSON.stringify(r.targets.underClick)}); ` : '';
+    if (!got) assert.fail(`${what}: the page did not get the click, or the main window was not brought to the front by it: ${over}the click: ${JSON.stringify(r)}; the page: ${JSON.stringify(await pageSaw())}; ${await whereInputGoes()}`);
   }
   /** `chord` pressed with the main window's page clicked into; what came of it. */
   async function press(chord) {

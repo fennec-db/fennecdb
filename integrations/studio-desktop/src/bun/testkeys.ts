@@ -9,6 +9,7 @@
 // does.
 
 import { dlopen, FFIType } from "bun:ffi";
+import { processCommandLine } from "./win32.ts";
 
 const KEYEVENTF_KEYUP = 0x2;
 const MOUSEEVENTF_MOVE = 0x1;
@@ -121,14 +122,24 @@ export function lastInput(): number {
 	return u().GetLastInputInfo(info) ? info[1]! : -1;
 }
 
-/** A window as a check can name it: its process, its class and whether it is `top` or in it. */
+/** A window as a check can name it: its process, its class and whether it is `top` or in it; one of another program's, its program too. */
 function describeWindow(hwnd: bigint, top: bigint) {
 	if (!hwnd) return null;
 	const pid = new Uint32Array(1);
 	u().GetWindowThreadProcessId(hwnd, pid);
 	const name = new Uint16Array(256);
 	const n = u().GetClassNameW(hwnd, name, name.length);
-	return { pid: pid[0]!, class: Buffer.from(name.buffer, 0, Math.max(0, n) * 2).toString("utf16le"), ours: hwnd === top || u().IsChild(top, hwnd) !== 0 };
+	const ours = hwnd === top || u().IsChild(top, hwnd) !== 0;
+	return { pid: pid[0]!, class: Buffer.from(name.buffer, 0, Math.max(0, n) * 2).toString("utf16le"), ours, ...(ours ? {} : { image: imageOf(pid[0]!) }) };
+}
+
+/** A process's program, or why it is not known. */
+function imageOf(pid: number): string {
+	try {
+		return processCommandLine(pid).image;
+	} catch (e) {
+		return `(${(e as Error).message})`;
+	}
 }
 
 /**

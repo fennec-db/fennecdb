@@ -974,8 +974,13 @@ window and the app's words are each system's, and the app has its icon there.
   the same double-click starts nothing of the app: on Linux gio says no
   program is registered for the type (`application/octet-stream` there); on
   Windows the shell hands a file of no known type to the Unknown class's
-  openas verb, `OpenWith.exe`, which is the event waited for (then closed);
-  `cmd /c start` would do the same through cmd. Then the app's first start
+  openas verb, `OpenWith.exe` (`cmd /c start` would do the same through
+  cmd), which is the event waited for, then closed as a person closes it
+  (CloseMainWindow, its WM_CLOSE; a kill only where it has no window or does
+  not end), and no dimming window of the shell's (Shell_SystemDim) it brought
+  may be left. It was ended by a kill, and on the windows-11-arm runner the
+  click `menu` made next into its main window's page landed on a
+  Shell_SystemDim window of another process lying over it. Then the app's first start
   registers it, the double-click starts the app with the file, which opens
   with no main window over it; a second file's is handed to the instance
   there; a `.fennec` that is not a database is said; on Linux, the app run
