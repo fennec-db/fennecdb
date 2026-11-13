@@ -2188,6 +2188,29 @@ frees goes to whoever asks first, mostly the trickler cut from it -- these
 bounds hold a connection to its request's time, not a client to its share
 of the slots.
 
+Instruction counts, `make instr-compare` over `--bin` builds of
+`served.rs` (fennec-http) and `routed.rs` (fennec-shard: a tenant's row by
+id through a router in front of a node), each against origin/main f104d32e
+with this branch's example copied in; 8 re-signed identities a build, 7
+rounds, each run started under a 1-minute load of 4, macOS arm64, rustc
+1.99.1; instructions a request, the mean of each build's 8 identities'
+medians:
+
+| program, mode | main | this branch | difference | SE | |
+|---|---|---|---|---|---|
+| `served` `file` | 119 269.4 | 120 703.4 | +1 434.0 (+1.20%) | 1 136.9 | inside 2 SE |
+| `served` `node` | 124 584.1 | 124 579.4 | -4.7 (-0.00%) | 254.6 | inside 2 SE |
+| `served` `put` | 145 641.3 | 146 069.5 | +428.2 (+0.29%) | 245.0 | inside 2 SE |
+| `served` `pipelined` | 76 673.0 | 76 810.9 | +137.9 (+0.18%) | 245.3 | inside 2 SE |
+| `routed` `read` | 287 584.2 | 288 338.8 | +754.6 (+0.26%) | 768.1 | inside 2 SE |
+| `routed` `pipelined` | 244 535.4 | 245 214.4 | +679.0 (+0.28%) | 437.3 | inside 2 SE |
+
+Every difference is inside 2 standard errors. `file` is noisy: its two
+builds' identities spread 118 000.7 to 122 835.4 (main) and 118 330.8 to
+124 049.6 (this branch), the SE 1 136.9, so its +1.20% is not a figure the
+run supports as a cost; the other five modes, with SEs of 245 to 768, read
+-0.00% to +0.29%.
+
 ## Dialing HTTPS
 
 **Every HTTP dial takes HTTPS by its URL** (`fennec_http::dial`). An
