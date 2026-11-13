@@ -1,6 +1,7 @@
 // A replica against a real fennec-server the tests start (Servers.swift):
 // macOS alone, since the iOS simulator's tests cannot start a process.
 #if os(macOS)
+    import Foundation
     import Testing
 
     @testable import FennecDB
@@ -32,7 +33,6 @@
         try await db.from("tasks").select("title").order("title").rows().compactMap { $0["title"]?.string }
     }
 
-
     @Suite(.serialized) struct Sync {
         @Test func theSeedFillsTheReplicaWithTheShape() async throws {
             let s = try await Server("seed")
@@ -48,13 +48,15 @@
         }
 
         /// What a provider whose issuer is out of reach throws.
-        struct Unreachable: Error {}
+        struct Unreachable: LocalizedError {
+            var errorDescription: String? { "the issuer is out of reach" }
+        }
 
         /// A 401 hands the provider why -- no token sent (`hadToken` false)
         /// -- and the status says the same while the sync waits. A provider
-        /// that threw, its issuer out of reach, is asked again at
-        /// `resume()`; the token it hands over then refused too, it is asked
-        /// once more after a wait, as `attempt` 2.
+        /// that threw, its issuer out of reach, is named by the status's
+        /// error and asked again at `resume()`; the token it hands over then
+        /// refused too, it is asked once more after a wait, as `attempt` 2.
         @Test func aTokenProviderIsHandedWhyATokenIsWanted() async throws {
             let s = try await Server("token", token: "right")
             defer { s.stop() }
@@ -75,13 +77,44 @@
                 })
             let first = TokenRefusal(hadToken: false, attempt: 1)
             try await eventually("the first ask") { asked.get().count == 1 }
-            try await eventually("the status naming it") { await db.replica!.refresh().error?.tokenRefusal == first }
+            try await eventually("the status naming the provider's failure") {
+                await db.replica!.refresh().error?.message == "the token provider failed: the issuer is out of reach"
+            }
+            #expect(db.replica!.status.error?.tokenRefusal == first)
             db.replica!.resume()
             await db.replica!.ready()
             #expect(asked.get() == [first, first, TokenRefusal(hadToken: true, attempt: 2)])
             #expect(asked.get().allSatisfy { !$0.expired })
             #expect(TokenRefusal(errorCode: "token_expired").expired)
             #expect(await db.replica!.refresh().error?.tokenRefusal == nil)
+            #expect(try await titles(db) == ["one", "two"])
+            try await db.close()
+        }
+
+        /// A provider at work is called once: `resume()` while it is asks
+        /// nothing, nor does the ask after the app's own token, refused,
+        /// waited for -- the provider's answer answers it, and the replica
+        /// goes on.
+        @Test func aTokenProviderAtWorkIsCalledOnce() async throws {
+            let s = try await Server("token-once", token: "right")
+            defer { s.stop() }
+            let asked = Box<[TokenRefusal]>([])
+            let released = Box(false)
+            let db = try await Fennec.sync(
+                url: s.url, shapes: [open], path: try scratch("sync-token-once"),
+                tokenProvider: { refusal in
+                    asked.set { $0 + [refusal] }
+                    for _ in 0..<2000 where !released.get() { try await Task.sleep(nanoseconds: 10_000_000) }
+                    return "right"
+                })
+            try await eventually("the first ask") { asked.get().count == 1 }
+            db.replica!.resume()
+            db.replica!.setToken("wrong")
+            try await eventually("the ask after the wait") { await db.replica!.refresh().error?.tokenRefusal?.attempt == 2 }
+            db.replica!.resume()
+            released.set { _ in true }
+            await db.replica!.ready()
+            #expect(asked.get() == [TokenRefusal(hadToken: false, attempt: 1)])
             #expect(try await titles(db) == ["one", "two"])
             try await db.close()
         }

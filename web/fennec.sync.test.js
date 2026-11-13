@@ -1455,8 +1455,8 @@ test("a replica's tokenProvider is handed why a token is wanted", { skip, concur
     // A token no key of the server's signed: refused, never an expiry, past
     // its `exp` or not -- and the one handed over refused too, asked for
     // again no sooner than a second later, `attempt` 2. A provider that
-    // throws then hands over nothing: the status says what it was asked,
-    // and `setOnline(true)` asks it again.
+    // throws then hands over nothing: the status says it failed and what it
+    // was asked, and `setOnline(true)` asks it again.
     const told = [];
     const at = [];
     const forged = () => jwt('another-secret-of-32-bytes-or-more!', { sub: 'alice', exp: now() + 600 });
@@ -1481,10 +1481,37 @@ test("a replica's tokenProvider is handed why a token is wanted", { skip, concur
     assert.ok(at[1] - at[0] >= 1000, `asked again after ${at[1] - at[0]} ms`);
     assert.equal(refused.status()[0].errorCode, null);
     assert.deepEqual(said(refused.status()[0].tokenRefusal), second);
-    assert.match(refused.status()[0].error, /refused the token/);
+    assert.equal(refused.status()[0].error, 'the token provider failed: the issuer is out of reach');
     refused.setOnline(true);
     await until(() => told.length === 3, 'the token asked for again');
     assert.deepEqual(told[2], second);
+
+    // A provider at work is called once: `setOnline(true)` while it is asks
+    // nothing, nor does the ask after the app's own token, refused, waited
+    // for -- the provider's answer answers it, and the replica goes on.
+    let gate;
+    const held = new Promise((r) => (gate = r));
+    const once = [];
+    const slow = await sync({
+      url: s.url,
+      local: await Fennec.open(wasm),
+      leader: false,
+      shapes: [{ collection: 'notes' }],
+      tokenProvider: async (r) => {
+        once.push(said(r));
+        await held;
+        return jwt(secret, { sub: 'alice', exp: now() + 600 });
+      },
+    });
+    opened.push(slow);
+    await until(() => once.length === 1, 'the provider asked');
+    slow.setOnline(true);
+    slow.setToken(await forged());
+    await until(() => slow.status()[0].tokenRefusal?.attempt === 2, 'the ask after the wait');
+    slow.setOnline(true);
+    gate();
+    await slow.ready();
+    assert.deepEqual(once, [{ errorCode: null, expired: false, hadToken: false, attempt: 1 }]);
 
     // Started with no token: asked for one, told none was sent.
     const bare = [];

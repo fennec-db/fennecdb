@@ -448,10 +448,12 @@ class Fennec {
   /// ([TokenRefusal]): it asks the issuer for a fresh one at every 401, and
   /// completes with an error where it gets none -- the issuer out of reach,
   /// or refusing, where the app signs out; nothing is sent until a token is
-  /// handed over, and a provider that failed is asked again at `resume()`
-  /// or `setOnline(true)`. [path] is one account's: a replica is never
-  /// opened for another. A function of no argument is no longer taken
-  /// (before 1.0 it was): `(_) => refresh()` for it.
+  /// handed over. A provider that failed, or handed over an empty token, is
+  /// named by the status's error ("the token provider failed: ...") and
+  /// asked again at `resume()` or `setOnline(true)`; it is called once at a
+  /// time. [path] is one account's: a replica is never opened for another.
+  /// A function of no argument is no longer taken (before 1.0 it was):
+  /// `(_) => refresh()` for it.
   static Future<Fennec> openSynced({
     required String url,
     String? token,

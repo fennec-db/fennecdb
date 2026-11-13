@@ -181,8 +181,10 @@ extension Fennec {
     /// server answers 401, handed why (`TokenRefusal`): it asks the issuer
     /// for a fresh one at every 401, and throws where it gets none -- the
     /// issuer out of reach, or refusing, where the app signs out; nothing is
-    /// sent until a token is handed over, and a provider that threw is
-    /// asked again at `resume()` or `setOnline(true)`. `path` is one
+    /// sent until a token is handed over. A provider that threw, or handed
+    /// over an empty token, is named by the status's error ("the token
+    /// provider failed: ...") and asked again at `resume()` or
+    /// `setOnline(true)`; it is called once at a time. `path` is one
     /// account's: a replica is never opened for another.
     public static func sync(
         url: String, token: String? = nil, shapes: [Shape], path: String, options: Options = [],
@@ -237,6 +239,9 @@ public final class Replica: NSObject, URLSessionDataDelegate, @unchecked Sendabl
     private var watchers: [UUID: AsyncStream<SyncStatus>.Continuation] = [:]
     private var refusalWatchers: [UUID: AsyncStream<Refusal>.Continuation] = [:]
     private var stopped = false
+    /// The provider is at work, on the queue's word: one call is out at a
+    /// time.
+    private var providing = false
 
     init(db: Fennec, url: String, token: String?, provider: (@Sendable (TokenRefusal) async throws -> String)?) {
         self.db = db
@@ -335,15 +340,15 @@ public final class Replica: NSObject, URLSessionDataDelegate, @unchecked Sendabl
 
     /// The network as the platform sees it (`NWPathMonitor`): offline closes
     /// the streams and sends nothing; online comes back at once, the
-    /// backoff forgotten, and asks the provider again for a token it asked
-    /// for and did not get -- a provider that threw, its issuer out of
-    /// reach -- but not before the wait the server's refusal of the last
-    /// one began.
+    /// backoff forgotten, and asks the provider again for a token it did
+    /// not hand over -- it threw, its issuer out of reach -- but not while
+    /// it is still at work, nor before the wait the server's refusal of the
+    /// last one began.
     public func setOnline(_ online: Bool) { signal(["online": .bool(online)]) }
 
     /// What an app calls as it comes back to the foreground: the streams a
     /// suspension cut are opened again at once, from their cursors, and a
-    /// token asked for and not handed over is asked for again.
+    /// provider that failed is asked for a token again.
     public func resume() { setOnline(true) }
 
     /// The server itself, for what the replica does not hold.
@@ -435,12 +440,23 @@ public final class Replica: NSObject, URLSessionDataDelegate, @unchecked Sendabl
             case "token":
                 // Why the core asks: the code the 401 named, whether the
                 // refused request carried a token, and the asks in a row.
-                if let provider {
+                // One call out at a time: asked again while at work -- the
+                // app's own `setToken` went on and was refused meanwhile --
+                // a provider would mint twice for one refusal, and the
+                // second token, coming late, end the wait the first one's
+                // refusal began. Its answer answers this ask too.
+                if let provider, !providing {
+                    providing = true
                     let refusal = TokenRefusal(
                         errorCode: a["code"]?.string, hadToken: a["had_token"]?.bool ?? true,
                         attempt: a["attempt"]?.int ?? 1)
                     Task {
-                        if let t = try? await provider(refusal) { self.setToken(t) }
+                        do {
+                            let t = try await provider(refusal)
+                            self.provided(t.isEmpty ? nil : t, why: "it handed over no token")
+                        } catch {
+                            self.provided(nil, why: error.localizedDescription)
+                        }
                     }
                 }
             case "changed":
@@ -456,6 +472,27 @@ public final class Replica: NSObject, URLSessionDataDelegate, @unchecked Sendabl
             case "status": reload()
             default: break
             }
+        }
+    }
+
+    /// The provider's answer: its token handed over, or the engine told
+    /// none came and why (`{"token_failed":..}`), which the status's error
+    /// says -- `resume()` asks again. On the queue with the call's end, so
+    /// an ask the engine makes before the answer reaches it is this call's.
+    private func provided(_ token: String?, why: String) {
+        let fields: Row
+        if let token {
+            fields = ["token": .string(token)]
+            lock.lock()
+            self.token = token
+            lock.unlock()
+        } else {
+            fields = ["token_failed": .string(why)]
+        }
+        let bytes = Array(Value.object(fields).json.utf8)
+        queue.async {
+            self.providing = false
+            self.feed(UInt32(FENNEC_SYNC_SIGNAL), 0, bytes: bytes)
         }
     }
 

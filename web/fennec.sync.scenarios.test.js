@@ -124,6 +124,11 @@ class Run {
     this.open = [];
     this.posts = [];
     this.timers = new Set();
+    // The provider's call out, `{res, rej}`: one is out at a time, and a
+    // second while it is fails the scenario (`askedTwice`).
+    this.asking = null;
+    this.askedTwice = false;
+    this.closed = false;
     this.db = null;
     this.idb = fakeIndexedDB();
     this.clear();
@@ -144,14 +149,20 @@ class Run {
 
   /**
    * An answer given only at the next `release`, the request out meanwhile:
-   * an abort before then rejects it, as a real fetch's does.
+   * an abort before then rejects it, as a real fetch's does, and it is
+   * given to no one -- opened at the `release`, it was a stream no shape
+   * held, which the next event went to.
    */
   hold(answer, signal) {
     return new Promise((res, rej) => {
-      const abort = () => rej(new DOMException('aborted', 'AbortError'));
+      const give = () => res(answer());
+      const abort = () => {
+        this.held = this.held.filter((g) => g !== give);
+        rej(new DOMException('aborted', 'AbortError'));
+      };
       if (signal?.aborted) return abort();
       signal?.addEventListener('abort', abort, { once: true });
-      this.held.push(() => res(answer()));
+      this.held.push(give);
     });
   }
 
@@ -233,6 +244,7 @@ class Run {
     this.posts = [];
     this.held = [];
     this.timers.clear();
+    this.asking = null;
     globalThis.indexedDB = this.idb;
     globalThis.IDBKeyRange = KeyRange;
     try {
@@ -244,12 +256,15 @@ class Run {
         persist: 'scenario',
         shapes: structuredClone(this.shapes),
         fetch: this.fetch,
-        // Handed a `TokenRefusal`: its `expired` is its code's, always.
+        // Handed a `TokenRefusal`: its `expired` is its code's, always. Its
+        // answer is the script's: a `token` step's, or a `token_failed`
+        // step's error.
         tokenProvider: (r) => {
+          this.askedTwice ||= this.asking !== null;
           this.tokenAsked = true;
           this.token = { code: r.errorCode, had_token: r.hadToken, attempt: r.attempt };
           if (r.expired !== (r.errorCode === 'token_expired')) this.token.expired = r.expired;
-          return new Promise(() => {});
+          return new Promise((res, rej) => (this.asking = { res, rej }));
         },
         onRefused: (e) => this.refused.push({ status: e.status, quota: e.quota ?? null, reason: e.reason ?? null }),
       });
@@ -332,7 +347,8 @@ class Run {
         break;
       case 'restart':
         await this.settle();
-        this.db.close();
+        if (!this.closed) this.db.close();
+        this.closed = false;
         if (st.shapes) this.shapes = st.shapes;
         this.startToken = 'token' in st ? st.token : 't0';
         await this.start();
@@ -394,8 +410,22 @@ class Run {
       case 'online':
         this.db.setOnline(st.online);
         break;
+      // The provider's answer to the ask out, or the app's own handover.
       case 'token':
-        this.db.setToken(st.token);
+        if (this.asking) {
+          this.asking.res(st.token);
+          this.asking = null;
+        } else this.db.setToken(st.token);
+        break;
+      // The provider asked threw, or handed over none.
+      case 'token_failed':
+        if (!this.asking) throw new Error('a provider fails with no ask out');
+        this.asking.rej(new Error(st.error));
+        this.asking = null;
+        break;
+      case 'stop':
+        this.db.close();
+        this.closed = true;
         break;
       case 'schema':
         this.collections = JSON.stringify(st.collections);
@@ -424,8 +454,15 @@ class Run {
     if ('quota' in e) matches(e.quota, this.db.status()[0].quota, binds, 'quota');
     if ('token_asked' in e) matches(e.token_asked, this.tokenAsked, binds, 'token_asked');
     if ('token' in e) matches(e.token, this.token, binds, 'token');
+    if (this.askedTwice) throw new Error('a token asked for while the ask before was out');
     // A provider handed an `expired` its code does not say, whatever the step expects.
     if (this.token && 'expired' in this.token) throw new Error(`token: expired ${this.token.expired} for code ${this.token.code}`);
+    // A text the status's last error says, null for none.
+    if ('status_error' in e) {
+      const said = this.db.status()[0].error;
+      const ok = e.status_error === null ? said === null : typeof said === 'string' && said.includes(e.status_error);
+      if (!ok) throw new Error(`status_error: expected ${JSON.stringify(e.status_error)}, got ${JSON.stringify(said)}`);
+    }
     if ('code' in e) matches(e.code, this.db.status()[0].errorCode, binds, 'code');
     // What the status says the sync waits on a token for: the last ask's
     // three, null where it waits on none or waits before asking.
@@ -470,7 +507,7 @@ for (const sc of file.scenarios) {
       }
       passed.push(sc.name);
     } finally {
-      run.db?.close();
+      if (!run.closed) run.db?.close();
       restore();
     }
   });

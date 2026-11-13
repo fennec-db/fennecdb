@@ -299,6 +299,11 @@ struct Run {
     token_asked: bool,
     /// What the token action said: its `code`, `had_token` and `attempt`.
     token: Value,
+    /// A token action not answered yet by a `token` or `token_failed`
+    /// step: one ask is out at a time, and a second while it is fails the
+    /// scenario (`asked_twice`).
+    asking: bool,
+    asked_twice: bool,
     waits: Vec<Value>,
     error: Option<String>,
     /// The reason the error said, a `require <n> else '<reason>'`'s.
@@ -399,7 +404,13 @@ impl Run {
                     _ => self.open(id, &path),
                 }
             }
-            "cancel" => self.streams.retain(|s| s.0 != id),
+            // An answer held for a stream ended meanwhile is given to no
+            // one, as a fetch aborted rejects: opened at the `release`, it
+            // was a stream no shape held, which the next event went to.
+            "cancel" => {
+                self.streams.retain(|s| s.0 != id);
+                self.held.retain(|h| h.1 != id);
+            }
             "wait" => {
                 self.timers.push(id);
                 self.waits.push(Value::Int(int(member(a, "ms"))));
@@ -413,6 +424,8 @@ impl Run {
                 ),
             ])),
             "token" => {
+                self.asked_twice |= self.asking;
+                self.asking = true;
                 self.token_asked = true;
                 let said = |k: &str| member(a, k).cloned().unwrap_or(Value::Null);
                 self.token = obj(vec![
@@ -446,6 +459,7 @@ impl Run {
         self.posts.clear();
         self.timers.clear();
         self.held.clear();
+        self.asking = false;
         let config = self.config();
         match Sync::start(&mut self.db, &config) {
             Ok(s) => self.sync = Some(s),
@@ -610,7 +624,10 @@ impl Run {
                     .signal(&mut self.db, &format!("{{\"online\":{on}}}"))
                     .unwrap();
             }
+            // The provider's answer to the ask out, or the app's own
+            // handover: to the core, a token either way.
             "token" => {
+                self.asking = false;
                 let t = text(member(step, "token"));
                 self.sync
                     .as_mut()
@@ -619,6 +636,28 @@ impl Run {
                         &mut self.db,
                         &json::to_string(&obj(vec![("token", Value::Text(t))])),
                     )
+                    .unwrap();
+            }
+            // The provider asked threw, or handed over none: the binding
+            // tells the core why.
+            "token_failed" => {
+                assert!(self.asking, "a provider fails with no ask out");
+                self.asking = false;
+                let why = text(member(step, "error"));
+                self.sync
+                    .as_mut()
+                    .unwrap()
+                    .signal(
+                        &mut self.db,
+                        &json::to_string(&obj(vec![("token_failed", Value::Text(why))])),
+                    )
+                    .unwrap();
+            }
+            "stop" => {
+                self.sync
+                    .as_mut()
+                    .unwrap()
+                    .signal(&mut self.db, r#"{"stop":true}"#)
                     .unwrap();
             }
             "schema" => {
@@ -689,6 +728,9 @@ impl Run {
         if let Some(e) = member(expect, "token") {
             matches(e, &self.token, binds, "token")?;
         }
+        if self.asked_twice {
+            return Err("a token asked for while the ask before was out".into());
+        }
         // What the status says the sync waits on a token for: the last
         // ask's three, null where it waits on none or waits before asking.
         if let Some(e) = member(expect, "token_refusal") {
@@ -704,6 +746,25 @@ impl Run {
                 ]),
             };
             matches(e, &r, binds, "token_refusal")?;
+        }
+        // A text the status's last error says, null for none.
+        if let Some(e) = member(expect, "status_error") {
+            let st = json::parse_json(&self.sync.as_ref().ok_or("no sync")?.status()).unwrap();
+            let said = member(&st, "error")
+                .and_then(|e| member(e, "message"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            match (e, &said) {
+                (Value::Null, Value::Null) => {}
+                (Value::Text(want), Value::Text(got)) if got.contains(want.as_str()) => {}
+                _ => {
+                    return Err(format!(
+                        "status_error: expected {}, got {}",
+                        json::to_string(e),
+                        json::to_string(&said)
+                    ))
+                }
+            }
         }
         if let Some(e) = member(expect, "code") {
             let st = json::parse_json(&self.sync.as_ref().ok_or("no sync")?.status()).unwrap();
@@ -799,6 +860,8 @@ fn run(file: &Value, sc: &Value) -> Check {
         refused: vec![],
         token_asked: false,
         token: Value::Null,
+        asking: false,
+        asked_twice: false,
         waits: vec![],
         error: None,
         reason: None,

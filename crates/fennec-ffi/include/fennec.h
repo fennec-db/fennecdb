@@ -135,19 +135,25 @@ int32_t fennec_warm(uint64_t handle, const uint8_t *only, size_t only_len, char 
  * where the token's exp passed; "had_token" whether the refused request
  * carried a token; "attempt" the asks in a row since the server last took
  * the token held (a 2xx, a stream opened), 2 and on where the token
- * signalled at the last was refused too, an expiry starting it at 1 again.
- * Past 1 the action comes after a wait, 1 s doubling to 60 s: a token
- * minted again at once is refused for what minting does not change (a key
- * the server has not fetched yet, an nbf its clock has not reached). An
- * app asks its issuer for a fresh token at every one, whatever the code,
- * and signs out only where the issuer refuses to issue one: the server
- * keeps no list of revoked tokens. A file is one account's -- its path
- * names the account, and it is never opened for another -- and a sign-out
- * keeps it, for that account's next sign-in to send its pending writes. A
- * 401 to a request sent with a token since replaced is sent again with the
- * new one, no action; {"online":true} asks again for a token asked for and
- * not signalled (a provider that failed), not during the wait. A binding
- * reading only "do" asks for a token at every one.
+ * signalled at the last was refused too, an expiry starting it at 1 again
+ * for the token the server took last or the first signalled since (any
+ * other was minted expired: a clock ahead of the issuer's). Past 1 the
+ * action comes after a wait, 1 s doubling to 60 s, which the same token
+ * signalled again does not end: a token minted again at once is refused
+ * for what minting does not change (a key the server has not fetched yet,
+ * an nbf its clock has not reached). An app asks its issuer for a fresh
+ * token at every one, whatever the code, and signs out only where the
+ * issuer refuses to issue one: the server keeps no list of revoked tokens.
+ * A file is one account's -- its path names the account, and it is never
+ * opened for another -- and a sign-out keeps it, for that account's next
+ * sign-in to send its pending writes. A 401 to a request sent with a token
+ * since replaced is sent again with the new one, no action. One ask is out
+ * at a time: a binding answers it with {"token":..}, or with
+ * {"token_failed":"why"} where its provider threw or handed over none --
+ * the status's error says so -- and calls its provider once at a time, a
+ * token action meanwhile answered by that call; then {"online":true} asks
+ * again, never while an ask is out or during the wait.
+ * A binding reading only "do" asks for a token at every one.
  * Once started, a write through fennec_query to a synced collection is
  * applied at once and queued for the server in the same block.
  */
@@ -157,7 +163,8 @@ int32_t fennec_warm(uint64_t handle, const uint8_t *only, size_t only_len, char 
 #define FENNEC_SYNC_BYTES 3    /* a piece of a stream's body */
 #define FENNEC_SYNC_CLOSED 4   /* a stream ended (or never opened): why */
 #define FENNEC_SYNC_TIMER 5    /* a wait ran out */
-#define FENNEC_SYNC_SIGNAL 6   /* {"online":bool} | {"token":".."} | {"stop":true} */
+#define FENNEC_SYNC_SIGNAL 6   /* {"online":bool} | {"token":".."} | {"stop":true}
+                                  | {"token_failed":".."}: the provider gave none */
 
 /* config: {"url":..,"token":..,"seed":"<32 hex>","shapes":[{collection,where?,select?,key?}]}. */
 int32_t fennec_sync_start(uint64_t handle, const uint8_t *config, size_t config_len,
@@ -173,7 +180,8 @@ int32_t fennec_sync_feed(uint64_t handle, uint32_t kind, uint64_t id, int32_t st
  * the error null or {"message":..,"status":S,"quota":..|null,"code":..|null,
  * "had_token":B|null,"attempt":N|null}, its code the one the 401 a token is
  * wanted for named ("token_expired"), had_token and attempt the token
- * action's once one was asked for, null while the wait before it runs.
+ * action's once one was asked for, null while the wait before it runs; its
+ * message "the token provider failed: <why>" after {"token_failed":..}.
  */
 int32_t fennec_sync_status(uint64_t handle, char **out, size_t *out_len);
 

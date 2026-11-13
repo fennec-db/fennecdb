@@ -32,14 +32,17 @@
 //!   token's `exp` passed; `had_token` whether the refused request carried
 //!   a token at all; `attempt` the asks in a row since the server last took
 //!   the token held, 2 and on where the one handed over at the last ask was
-//!   refused too, an expiry starting it at 1 again. A binding asks its
-//!   issuer for a token at every one, whatever the code: the server keeps
-//!   no list of revoked tokens, so only the issuer knows a session ended.
-//!   Past 1 the action comes after a wait, 1 s doubling to 60 s
-//!   ([`TOKEN_BACKOFF_MS`]); a refusal of a token since replaced is sent
-//!   again with the new one, never asked about; and `{"online":true}` asks
-//!   again where the binding was asked and none came -- a provider that
-//!   failed
+//!   refused too, an expiry starting it at 1 again for the token the server
+//!   took last or the first handed over since ([`Sync::want_token`]). A
+//!   binding asks its issuer for a token at every one, whatever the code:
+//!   the server keeps no list of revoked tokens, so only the issuer knows a
+//!   session ended. Past 1 the action comes after a wait, 1 s doubling to
+//!   60 s ([`TOKEN_BACKOFF_MS`]), which the same token handed over again
+//!   does not end; a refusal of a token since replaced is sent again with
+//!   the new one, never asked about. One ask is out at a time: a binding
+//!   answers it with `{"token":..}`, or with `{"token_failed":".."}` where
+//!   its provider threw or handed over none -- the status's error says so
+//!   -- and only then does `{"online":true}` ask again
 //! - `{"do":"changed"}`: the replica changed, live queries look again
 //! - `{"do":"refused","status":S,"message":..,"query":..,"quota":..,"reason":..}`:
 //!   the server refused a write, which was put back; `quota` is there where
@@ -204,14 +207,28 @@ enum Timer {
     Token,
 }
 
-/// Why the sync waits on a token: the token action's members, and whether
-/// the binding was asked yet -- it is not while the wait before a second
-/// ask runs.
+/// Why the sync waits on a token: the token action's members, and where
+/// the ask stands.
 struct Want {
     code: Option<String>,
     had_token: bool,
     attempt: u32,
-    asked: bool,
+    stage: Stage,
+}
+
+/// Where the ask for a token stands.
+#[derive(Clone, Copy, PartialEq)]
+enum Stage {
+    /// The wait before the binding is asked runs ([`TOKEN_BACKOFF_MS`]).
+    Waiting,
+    /// The binding was asked and has not answered. One ask is out at a
+    /// time: asked again meanwhile, a provider still at work would be
+    /// called twice for one refusal, and the second token, coming late,
+    /// would end the wait the first one's refusal began.
+    Out,
+    /// The binding said none came (`{"token_failed":..}`): its provider
+    /// threw or handed over none, and `{"online":true}` asks again.
+    Failed,
 }
 
 struct Fault {
@@ -331,6 +348,11 @@ pub struct Sync {
     /// The token last refused for its expiry ([`Sync::token_gen`]): refused
     /// for its expiry again, it was handed back as it was.
     expired_gen: Option<u64>,
+    /// The token the server last took ([`Sync::answered`]), and the first
+    /// one handed over since, which it has not: an expiry of either starts
+    /// the count over ([`Sync::want_token`]).
+    taken: Option<u64>,
+    untaken: Option<u64>,
     /// Why the sync waits on a token, while it does.
     want: Option<Want>,
     shapes: Vec<Shape>,
@@ -871,10 +893,13 @@ impl Sync {
 
         let mut sync = Sync {
             url,
+            // The token started with is the first one handed over.
+            untaken: token.as_ref().map(|_| 0),
             token,
             token_gen: 0,
             token_asks: 0,
             expired_gen: None,
+            taken: None,
             want: None,
             shapes,
             queue: Vec::new(),
@@ -1099,6 +1124,8 @@ impl Sync {
     fn answered(&mut self, status: u16, carried: Option<u64>) {
         if (200..300).contains(&status) && carried == self.carried() {
             self.token_asks = 0;
+            self.taken = carried;
+            self.untaken = None;
         }
     }
 
@@ -1121,32 +1148,40 @@ impl Sync {
     /// after a wait where the token handed over at the last ask was refused
     /// too: one minted again at once is refused for what minting does not
     /// change, and a provider that hands one over at every ask would loop
-    /// at the network's speed. An expiry is no such refusal: a fresh token
-    /// cures it however many were asked for before -- one handed over
-    /// offline may run out before it is sent -- so it starts the count
-    /// again, unless the token refused is the one already refused for its
-    /// expiry, handed back as it was. Asked already, a second 401 -- a
-    /// stream's at the `exp` beside a write's -- asks nothing more.
+    /// at the network's speed. An expiry of a token that was good is no
+    /// such refusal, and starts the count again: of the token the server
+    /// took last, which ran out in use, and of the first handed over since,
+    /// which may have run out before it was sent -- a replica offline. Any
+    /// other token refused for its expiry was minted expired, as every
+    /// one is where the server's clock runs ahead of the issuer's by a
+    /// token's lifetime or an issuer sets `exp` wrong, and asked for again
+    /// at once each would cost an issuer's call a round trip, from every
+    /// device: it counts, as does the token already refused for its expiry,
+    /// handed back as it was. Asked already, a second 401 -- a stream's at
+    /// the `exp` beside a write's -- asks nothing more.
     fn want_token(&mut self, code: Option<String>, carried: Option<u64>) {
         if self.paused {
             return;
         }
         self.paused = true;
-        if code.as_deref() == Some(TOKEN_EXPIRED)
-            && carried.is_some()
+        let expired = code.as_deref() == Some(TOKEN_EXPIRED) && carried.is_some();
+        if expired
             && carried != self.expired_gen
+            && (carried == self.taken || carried == self.untaken)
         {
-            self.expired_gen = carried;
             self.token_asks = 1;
         } else {
             self.token_asks += 1;
+        }
+        if expired {
+            self.expired_gen = carried;
         }
         let attempt = self.token_asks;
         let want = Want {
             code,
             had_token: carried.is_some(),
             attempt,
-            asked: false,
+            stage: Stage::Waiting,
         };
         if attempt == 1 {
             self.want = Some(want);
@@ -1171,12 +1206,17 @@ impl Sync {
 
     /// Asks the binding for the token wanted:
     /// `{"do":"token","code":..,"had_token":B,"attempt":N}`, the status's
-    /// error naming the same three.
+    /// error naming the same three. A sync stopped asks nothing, as the
+    /// page's closed does: a provider called after the app closed the
+    /// database would mint a token no one sends.
     fn ask(&mut self) {
+        if self.stopped {
+            return;
+        }
         let Some(w) = self.want.as_mut() else {
             return;
         };
-        w.asked = true;
+        w.stage = Stage::Out;
         let message = match (w.code.as_deref(), w.had_token) {
             (Some(TOKEN_EXPIRED), _) => "the token expired (401): a fresh one is wanted",
             (_, false) => "the server wants a token (401): none was sent",
@@ -1996,7 +2036,8 @@ impl Sync {
         self.kick(db);
     }
 
-    /// `{"online":bool}`, `{"token":".."}` or `{"stop":true}`.
+    /// `{"online":bool}`, `{"token":".."}`, `{"token_failed":".."}` or
+    /// `{"stop":true}`.
     pub fn signal(&mut self, db: &mut Database, json_text: &str) -> Result<()> {
         let v = json::parse_json(json_text)?;
         if let Some(Value::Text(t)) = shape::member(&v, "token") {
@@ -2005,17 +2046,56 @@ impl Sync {
             // one handed over again keeps its number, and is asked about
             // again where it is refused again.
             let t = Some(t.clone()).filter(|t| !t.is_empty());
-            if t != self.token {
+            let again = t == self.token;
+            if !again {
                 self.token = t;
                 self.token_gen += 1;
+                if self.untaken.is_none() {
+                    self.untaken = self.carried();
+                }
             }
-            if self.paused {
+            // The token just refused, handed over again while the wait
+            // before the next ask runs -- an app handing back its cached
+            // one at the status's code -- is the token the wait is for: it
+            // stands, or every wait is skipped.
+            let waiting = again
+                && self
+                    .want
+                    .as_ref()
+                    .is_some_and(|w| w.stage == Stage::Waiting);
+            if self.paused && !waiting {
                 self.paused = false;
                 self.fault = None;
-                // Handed over before the wait for a second ask ran out:
-                // it is what the ask would have brought.
+                // Another token handed over before the wait for a second
+                // ask ran out: it is what the ask would have brought.
                 self.want = None;
                 self.timers.retain(|t| t.1 != Timer::Token);
+            }
+        }
+        // The binding asked and none came: its provider threw, or handed
+        // over none. The status says so, and the ask is no longer out, so
+        // `{"online":true}` asks again. One answering an ask the sync no
+        // longer waits on -- another token came, or a wait began since --
+        // says nothing of the token wanted now.
+        if let Some(Value::Text(why)) = shape::member(&v, "token_failed") {
+            if let Some(w) = self
+                .want
+                .as_mut()
+                .filter(|w| self.paused && w.stage == Stage::Out)
+            {
+                w.stage = Stage::Failed;
+                let message = match why.as_str() {
+                    "" => "the token provider failed".to_string(),
+                    why => format!("the token provider failed: {why}"),
+                };
+                self.fault = Some(Fault {
+                    message,
+                    status: 401,
+                    connection: true,
+                    quota: None,
+                    code: w.code.clone(),
+                    asked: Some((w.had_token, w.attempt)),
+                });
             }
         }
         match shape::member(&v, "online") {
@@ -2047,10 +2127,11 @@ impl Sync {
                 // A token asked for and not handed over is asked for
                 // again: a provider that threw -- its issuer out of reach
                 // with the network -- hands over nothing, and the sync
-                // would wait for good. Not while the wait before a second
-                // ask runs: that is the server's refusal, which the network
-                // says nothing of.
-                if self.paused && self.want.as_ref().is_some_and(|w| w.asked) {
+                // would wait for good. Not while the ask is out, which
+                // would call a provider still at work a second time; nor
+                // while the wait before a second ask runs: that is the
+                // server's refusal, which the network says nothing of.
+                if self.paused && self.want.as_ref().is_some_and(|w| w.stage == Stage::Failed) {
                     self.ask();
                 }
             }

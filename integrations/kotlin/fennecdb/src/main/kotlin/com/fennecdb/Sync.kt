@@ -194,12 +194,13 @@ data class Refusal @JvmOverloads constructor(
  * [tokenProvider] is asked for a token when the server answers 401, handed
  * why ([TokenRefusal]): it asks the issuer for a fresh one at every 401,
  * and throws where it gets none -- the issuer out of reach, or refusing,
- * where the app signs out; nothing is sent until a token is handed over,
- * and a provider that threw is asked again at `resume()` or
- * `setOnline(true)`. [path] is one account's: a replica is never opened for
- * another. A lambda asking nothing, `{ refresh() }`, still takes; a
- * reference to a function of none, `::refresh`, no longer does:
- * `{ refresh() }` for it.
+ * where the app signs out; nothing is sent until a token is handed over.
+ * A provider that threw, or handed over an empty token, is named by the
+ * status's error ("the token provider failed: ...") and asked again at
+ * `resume()` or `setOnline(true)`; it is called once at a time. [path] is
+ * one account's: a replica is never opened for another. A lambda asking
+ * nothing, `{ refresh() }`, still takes; a reference to a function of none,
+ * `::refresh`, no longer does: `{ refresh() }` for it.
  */
 suspend fun Fennec.Companion.sync(
     url: String,
@@ -255,6 +256,9 @@ class Replica internal constructor(
 
     @Volatile private var stopped = false
 
+    /** The provider is at work, on the queue's word: one call is out at a time. */
+    private var providing = false
+
     /** The status now and at every change; `status.value` never waits. */
     val status: StateFlow<SyncStatus> = current.asStateFlow()
 
@@ -290,15 +294,16 @@ class Replica internal constructor(
     /**
      * The network as the platform sees it (`ConnectivityManager`): offline
      * closes the streams and sends nothing; online comes back at once, the
-     * backoff forgotten, and asks the provider again for a token it asked
-     * for and did not get -- a provider that threw, its issuer out of reach
-     * -- but not before the wait the server's refusal of the last one began.
+     * backoff forgotten, and asks the provider again for a token it did not
+     * hand over -- it threw, its issuer out of reach -- but not while it is
+     * still at work, nor before the wait the server's refusal of the last
+     * one began.
      */
     fun setOnline(online: Boolean) = signal(mapOf("online" to online))
 
     /**
      * What an app calls in `onStart`: the streams a stop cut are opened again at once, from their
-     * cursors, and a token asked for and not handed over is asked for again.
+     * cursors, and a provider that failed is asked for a token again.
      */
     fun resume() = setOnline(true)
 
@@ -355,11 +360,20 @@ class Replica internal constructor(
                 "wait" -> queue.schedule({ feed(KIND_TIMER, id) }, r.long("ms") ?: 0, TimeUnit.MILLISECONDS)
                 // Why the core asks: the code the 401 named, whether the
                 // refused request carried a token, and the asks in a row.
-                "token" -> provider?.let { p ->
+                // One call out at a time: asked again while at work -- the
+                // app's own `setToken` went on and was refused meanwhile --
+                // a provider would mint twice for one refusal, and the
+                // second token, coming late, end the wait the first one's
+                // refusal began. Its answer answers this ask too.
+                "token" -> provider?.takeIf { !providing }?.let { p ->
+                    providing = true
                     val refusal = TokenRefusal(r.string("code"), r.bool("had_token") ?: true, r.int("attempt") ?: 1)
                     Thread {
-                        runCatching { kotlinx.coroutines.runBlocking { p(refusal) } }.getOrNull()?.let { setToken(it) }
-                    }.start()
+                        val got = runCatching { kotlinx.coroutines.runBlocking { p(refusal) } }
+                        val token = got.getOrNull()?.takeIf { it.isNotEmpty() }
+                        val why = got.exceptionOrNull()?.let { it.message ?: it.toString() } ?: "it handed over no token"
+                        provided(token, why)
+                    }.apply { isDaemon = true }.start()
                 }
                 "changed" -> db.lives.touch()
                 "refused" -> refused.tryEmit(
@@ -370,6 +384,21 @@ class Replica internal constructor(
                 )
                 "status" -> reload()
             }
+        }
+    }
+
+    /**
+     * The provider's answer: its token handed over, or the engine told none
+     * came and why (`{"token_failed":..}`), which the status's error says --
+     * `resume()` asks again. On the queue with the call's end, so an ask the
+     * engine makes before the answer reaches it is this call's.
+     */
+    private fun provided(token: String?, why: String) {
+        if (token != null) this.token = token
+        val bytes = Json.write(if (token != null) mapOf("token" to token) else mapOf("token_failed" to why)).encodeToByteArray()
+        later {
+            providing = false
+            feed(KIND_SIGNAL, 0, bytes = bytes)
         }
     }
 

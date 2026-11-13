@@ -1,5 +1,6 @@
 package com.fennecdb
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -143,10 +144,10 @@ class SyncTest {
     /**
      * A 401 hands the provider why -- no token sent (`hadToken` false) --
      * and the status says the same while the sync waits. A provider that
-     * threw, its issuer out of reach, is asked again at `resume()`; the
-     * token it hands over then refused too, it is asked once more after a
-     * wait, as `attempt` 2. A lambda asking nothing, as before 1.0, still
-     * takes.
+     * threw, its issuer out of reach, is named by the status's error and
+     * asked again at `resume()`; the token it hands over then refused too,
+     * it is asked once more after a wait, as `attempt` 2. A lambda asking
+     * nothing, as before 1.0, still takes.
      */
     @Test
     fun aTokenProviderIsHandedWhyATokenIsWanted() = runBlocking {
@@ -162,7 +163,10 @@ class SyncTest {
         })
         val first = TokenRefusal(hadToken = false, attempt = 1)
         eventually("the first ask") { asked.size == 1 }
-        eventually("the status naming it") { db.replica!!.refresh().error?.tokenRefusal == first }
+        eventually("the status naming the provider's failure") {
+            db.replica!!.refresh().error?.message == "the token provider failed: the issuer is out of reach"
+        }
+        assertEquals(first, db.replica!!.status.value.error?.tokenRefusal)
         db.replica!!.resume()
         db.replica!!.ready()
         assertEquals(listOf(first, first, TokenRefusal(hadToken = true, attempt = 2)), asked.toList())
@@ -176,6 +180,33 @@ class SyncTest {
         before.replica!!.ready()
         assertEquals(listOf("one", "two"), titles(before))
         before.close()
+    }
+
+    /**
+     * A provider at work is called once: `resume()` while it is asks
+     * nothing, nor does the ask after the app's own token, refused, waited
+     * for -- the provider's answer answers it, and the replica goes on.
+     */
+    @Test
+    fun aTokenProviderAtWorkIsCalledOnce() = runBlocking {
+        val s = Server("token-once", token = "right").also { servers.add(it) }
+        val asked = Collections.synchronizedList(mutableListOf<TokenRefusal>())
+        val gate = CompletableDeferred<Unit>()
+        val db = Fennec.sync(url = s.url, shapes = listOf(open), path = path("token-once"), tokenProvider = { refusal ->
+            asked.add(refusal)
+            gate.await()
+            "right"
+        })
+        eventually("the first ask") { asked.size == 1 }
+        db.replica!!.resume()
+        db.replica!!.setToken("wrong")
+        eventually("the ask after the wait") { db.replica!!.refresh().error?.tokenRefusal?.attempt == 2 }
+        db.replica!!.resume()
+        gate.complete(Unit)
+        db.replica!!.ready()
+        assertEquals(listOf(TokenRefusal(hadToken = false, attempt = 1)), asked.toList())
+        assertEquals(listOf("one", "two"), titles(db))
+        db.close()
     }
 
     @Test

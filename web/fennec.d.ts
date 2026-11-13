@@ -1833,9 +1833,12 @@ export interface SyncOptions<S extends AnySchema<S> = Schema> {
    * refuses to issue one. Where the token handed over was refused too
    * (`attempt` past 1: a key the server has not fetched yet, an `nbf` its
    * clock has not reached, a misconfiguration) the sync asks again after
-   * 1 s doubling to 60 s. A provider that throws (told to `onError`)
-   * hands over nothing, and is asked again at `setOnline(true)` -- the
-   * page's `online` event.
+   * 1 s doubling to 60 s. A provider that throws (told to `onError`) or
+   * hands over no token leaves the sync waiting, `status()`'s `error`
+   * reading `the token provider failed: …`, and is asked again at
+   * `setOnline(true)` -- the page's `online` event. It is called once at a
+   * time: while it is at work nothing asks it again, and what it hands
+   * over answers every ask meanwhile.
    */
   tokenProvider?: (refusal: TokenRefusal) => string | Promise<string>;
   fetch?: typeof globalThis.fetch;
@@ -1919,7 +1922,9 @@ export interface TokenRefusal {
    * took the token held: 1, then 2 and on where the token handed over at
    * the last ask was refused too -- asked after 1 s doubling to 60 s,
    * since a token minted again at once is refused for what minting does
-   * not change. An expiry starts it at 1 again. No reason to sign out.
+   * not change. An expiry of the token the server took last, or of the
+   * first handed over since, starts it at 1 again; any other was minted
+   * expired, and counts. No reason to sign out.
    */
   readonly attempt: number;
 }
@@ -1947,12 +1952,14 @@ export declare class FennecSync<S extends AnySchema<S> = Schema, Rel extends Rel
   status(): ShapeStatus[];
   /**
    * A new token: requests carry it from here on, and what a 401 stopped
-   * goes on. An empty one is none.
+   * goes on. An empty one is none. The token just refused, handed over
+   * again while the wait before the next ask runs, does not end the wait.
    */
   setToken(token: string): void;
   /**
    * The network gone (`false`: the streams end, writes wait) or back
-   * (`true`: what waited goes at once). A page has it from `online` and
+   * (`true`: what waited goes at once, and a `tokenProvider` that threw or
+   * handed over none is asked again). A page has it from `online` and
    * `offline` on its own.
    */
   setOnline(online: boolean): void;

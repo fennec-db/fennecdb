@@ -144,9 +144,9 @@ void main() {
 
   // A 401 hands the provider why -- no token sent (`hadToken` false) -- and
   // the status says the same while the sync waits. A provider that failed,
-  // its issuer out of reach, is asked again at `resume()`; the token it
-  // hands over then refused too, it is asked once more after a wait, as
-  // `attempt` 2.
+  // its issuer out of reach, is named by the status's error and asked again
+  // at `resume()`; the token it hands over then refused too, it is asked
+  // once more after a wait, as `attempt` 2.
   test('a token provider is handed why a token is wanted', () async {
     final s = await Server.start('token', token: 'right');
     servers.add(s);
@@ -165,13 +165,48 @@ void main() {
         });
     const first = TokenRefusal(hadToken: false);
     await eventually('the first ask', () => asked.length == 1);
-    await eventually('the status naming it', () async => (await db.replica!.refresh()).error?.tokenRefusal == first);
+    await eventually(
+        "the status naming the provider's failure",
+        () async =>
+            (await db.replica!.refresh()).error?.message ==
+            'the token provider failed: SocketException: the issuer is out of reach');
+    expect(db.replica!.status.error?.tokenRefusal, first);
     db.replica!.resume();
     await db.replica!.ready();
     expect(asked, [first, first, const TokenRefusal(hadToken: true, attempt: 2)]);
     expect((await db.replica!.refresh()).error?.tokenRefusal, isNull);
     expect(asked.where((r) => r.expired || r.errorCode != null), isEmpty);
     expect(const TokenRefusal(errorCode: 'token_expired').expired, isTrue);
+    expect(await titles(db), ['one', 'two']);
+    await db.close();
+  });
+
+  // A provider at work is called once: `resume()` while it is asks nothing,
+  // nor does the ask after the app's own token, refused, waited for -- the
+  // provider's answer answers it, and the replica goes on.
+  test('a token provider at work is called once', () async {
+    final s = await Server.start('token-once', token: 'right');
+    servers.add(s);
+    final asked = <TokenRefusal>[];
+    final gate = Completer<void>();
+    final db = await Fennec.openSynced(
+        url: s.url,
+        shapes: [open],
+        path: await scratch('sync-token-once'),
+        tokenProvider: (refusal) async {
+          asked.add(refusal);
+          await gate.future;
+          return 'right';
+        });
+    await eventually('the first ask', () => asked.length == 1);
+    db.replica!.resume();
+    db.replica!.setToken('wrong');
+    await eventually(
+        'the ask after the wait', () async => (await db.replica!.refresh()).error?.tokenRefusal?.attempt == 2);
+    db.replica!.resume();
+    gate.complete();
+    await db.replica!.ready();
+    expect(asked, [const TokenRefusal(hadToken: false)]);
     expect(await titles(db), ['one', 'two']);
     await db.close();
   });

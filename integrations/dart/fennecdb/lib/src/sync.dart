@@ -203,6 +203,10 @@ class Replica {
   Future<void> _chain = Future.value();
   var _stopped = false;
 
+  /// The provider is at work, in the chain's order: one call is out at a
+  /// time.
+  var _providing = false;
+
   Replica._(this._db, String url, this._token, this._provider)
       : _url = url.endsWith('/') ? url.substring(0, url.length - 1) : url;
 
@@ -243,14 +247,15 @@ class Replica {
 
   /// The network as the platform sees it (connectivity_plus, say): offline
   /// closes the streams and sends nothing; online comes back at once, the
-  /// backoff forgotten, and asks the provider again for a token it asked for
-  /// and did not get -- a provider that threw, its issuer out of reach --
-  /// but not before the wait the server's refusal of the last one began.
+  /// backoff forgotten, and asks the provider again for a token it did not
+  /// hand over -- it threw, its issuer out of reach -- but not while it is
+  /// still at work, nor before the wait the server's refusal of the last one
+  /// began.
   void setOnline(bool online) => _signalJson({'online': online});
 
   /// What an app calls as it is resumed (`AppLifecycleState.resumed`): the
   /// streams a pause cut are opened again at once, from their cursors, and a
-  /// token asked for and not handed over is asked for again.
+  /// provider that failed is asked for a token again.
   void resume() => setOnline(true);
 
   /// The server itself, for what the replica does not hold.
@@ -320,16 +325,23 @@ class Replica {
           });
         case 'token':
           // Why the core asks: the code the 401 named, whether the refused
-          // request carried a token, and the asks in a row.
+          // request carried a token, and the asks in a row. One call out at
+          // a time: asked again while at work -- the app's own `setToken`
+          // went on and was refused meanwhile -- a provider would mint twice
+          // for one refusal, and the second token, coming late, end the wait
+          // the first one's refusal began. Its answer answers this ask too.
           final p = _provider;
-          if (p != null) {
+          if (p != null && !_providing) {
+            _providing = true;
             final refusal = TokenRefusal(
                 errorCode: a['code'] as String?,
                 hadToken: a['had_token'] as bool? ?? true,
                 attempt: a['attempt'] as int? ?? 1);
             // A provider that fails, even before it returns a future, hands
-            // over nothing: `resume()` or `setOnline(true)` asks it again.
-            Future.sync(() => p(refusal)).then(setToken, onError: (_) {});
+            // over nothing: the core is told why, and `resume()` or
+            // `setOnline(true)` asks it again.
+            Future.sync(() => p(refusal)).then((t) => _provided(t.isEmpty ? null : t, 'it handed over no token'),
+                onError: (Object e) => _provided(null, '$e'));
           }
         case 'changed':
           _db.lives.touch();
@@ -342,6 +354,20 @@ class Replica {
           await _reload();
       }
     }
+  }
+
+  /// The provider's answer: its token handed over, or the engine told none
+  /// came and why (`{"token_failed":..}`), which the status's error says --
+  /// `resume()` asks again. In the chain with the call's end, so an ask the
+  /// engine makes before the answer reaches it is this call's.
+  void _provided(String? token, String why) {
+    if (token != null) _token = token;
+    final bytes = utf8.encode(jsonEncode(token != null ? {'token': token} : {'token_failed': why}));
+    if (_stopped) return;
+    _serial(() {
+      _providing = false;
+      return _feed(_kSignal, 0, bytes: bytes);
+    });
   }
 
   Future<void> _reload() async {
