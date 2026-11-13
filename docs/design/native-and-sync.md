@@ -131,10 +131,12 @@ a time in order; 0/408/429/5xx retry with backoff (250 ms doubling to 15 s,
 30% jitter) or the `retry_after` a quota names where longer, 401 asks for
 a token -- `{"do":"token","code":..,"had_token":B,"attempt":N}`, the code
 the server named (`token_expired` where the token's `exp` passed), whether
-the refused request carried a token and the asks in a row, the status's
-error naming the same `code`, and a 401 to a request sent with a token
-since replaced sent again with the new one, unasked
-([access.md](access.md#expired-tokens)) -- a
+the refused request carried a token and the asks in a row since the server
+last took the token held, after 1 s doubling to 60 s where the token handed
+over was refused too, the status's error naming the same three, a 401 to a
+request sent with a token since replaced sent again with the new one,
+unasked, and `{"online":true}` asking again where the provider was asked
+and nothing came ([access.md](access.md#expired-tokens)) -- a
 507 naming a tenant's quota and any other 4xx are a refusal put
 back (below). A
 replica reopened sends its queue before opening its streams. An update of
@@ -195,10 +197,12 @@ fsync `sync()`.
 **The browser's sync and the native core are held to one scenario file.**
 Moving `FennecSync` onto `fennec_abi::sync` was measured at +21 KB brotli of
 the browser module, so the two are written apart, and
-`integrations/sync-scenarios.json` says what both do: 98 scenarios, each a
+`integrations/sync-scenarios.json` says what both do: 106 scenarios, each a
 script of shapes, app writes and server events -- a seed, a change, a
 stream dropped, the status each write's request is answered with, a seed
-past the horizon, the network's signal, a token -- with what the replica,
+past the horizon, the network's signal, a token, an answer held back until
+the script releases it (a stream's open or `GET /collections` answered
+after a token was handed over) -- with what the replica,
 the queue, the requests sent (method, path, body, the idempotency key
 reused or new), the timers and the refusals are after every step.
 `crates/fennec-abi/tests/scenarios.rs` drives the sans-IO core through it,

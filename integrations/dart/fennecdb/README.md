@@ -69,16 +69,10 @@ as a `?`'s parameter.
 final db = await Fennec.openSynced(
   url: 'https://api.example.com', token: jwt,
   shapes: [Shape('todos', where: {'owner': me}, key: 'key')],
-  path: '${dir.path}/todos.fennec',
-  tokenProvider: (refusal) async {
-    // The one handed over refused too: sign out, the file kept.
-    if (refusal.attempt > 1) {
-      await signOut();
-      throw StateError('signed out');
-    }
-    // Expired or not, a fresh token: the issuer refusing throws.
-    return refreshToken();
-  },
+  path: '${dir.path}/${account.id}.fennec', // one account's replica
+  // A fresh token at every 401, whatever the code: it throws where the
+  // issuer refuses -- the session ended, and the app signs out there.
+  tokenProvider: (refusal) => refreshToken(force: refusal.expired),
 );
 await db.replica!.ready();
 ```
@@ -86,19 +80,23 @@ await db.replica!.ready();
 A `401` asks `tokenProvider` for a token, handed a `TokenRefusal`: the
 code the server named (`errorCode`, `token_expired` where the token's `exp`
 passed), `expired`, whether the refused request carried a token
-(`hadToken`) and the asks in a row (`attempt`). A fresh token from the
-issuer cures an expiry and most 401s naming no code -- a key rotation, a
-token not valid yet, an older server's expiry, none sent -- so the provider
-refreshes at both, and signs out only where the issuer refuses or at an
-`attempt` past 1. A sign-out keeps a file whose status says `pending`
-writes: deleting it loses them. `replica.status`'s error names the
-`errorCode` too, and a `FennecRemote` refusal its body's code as
-`FennecException.errorCode`.
+(`hadToken`) and the asks in a row since the server last took the token
+held (`attempt`). The provider asks the issuer for a fresh token at every
+one: a 401 alone is never a sign-out, since the server keeps no list of
+revoked tokens -- the app signs out where the issuer refuses to issue one.
+Where the token handed over is refused too (`attempt` past 1: a key the
+server has not fetched yet, an `nbf` its clock has not reached), the sync
+asks again after 1 s doubling to 60 s. A provider that fails is asked again
+at `resume()` or `setOnline(true)`. A file is one account's -- its path
+names the account, and it is never opened for another -- and signing out
+keeps it, for that account's next sign-in to send its `pending` writes.
+`replica.status`'s error names the `errorCode` and the `tokenRefusal` too,
+and a `FennecRemote` refusal its body's code as `FennecException.errorCode`.
 
-**Changed before 1.0:** `tokenProvider` takes the `TokenRefusal`, and a
-function of no argument is no longer taken -- Dart has no overloading to
-keep the old form beside it. Write `(_) => refreshToken()` where the
-provider reads none of it.
+**Changed before 1.0** (CHANGELOG.md): `tokenProvider` takes the
+`TokenRefusal`, and a function of no argument is no longer taken -- Dart
+has no overloading to keep the old form beside it. Write
+`(_) => refreshToken()` where the provider reads none of it.
 
 The same `Fennec`: reads and live queries are the file's, a write to a
 shape's collection shows at once and is sent -- queued in the file while

@@ -763,22 +763,26 @@ alice reads                                [{"title":"alice note"}] [200]</pre>
     yet, none at all -- names no code. The code is told only of a token
     whose signature and audience checked out, so a forged token past its
     <code>exp</code> is refused for its signature.</li>
-  <li><b>A 401 naming no code is no sign-out by itself.</b> A fresh token
-    from the issuer cures many of them: a token signed with a key the server
-    has not fetched yet (<code>no key has the token's kid</code>, behind a
-    rotation above), a replica offline past its old key's removal, a token
-    whose <code>nbf</code> a clock behind the server's has not reached, a
-    request sent before any token was handed over, and every expiry from a
-    server older than this release, which names no code. The server keeps no
-    list of revoked tokens: a session ends where it was issued. So an app
-    refreshes at <code>token_expired</code>, asks its issuer for a fresh
-    token at a 401 naming none as well, and signs out only where the issuer
-    refuses, or where the token it just minted is refused again. A replica's
-    sync hands its <code>tokenProvider</code> what it needs to tell these
-    apart (<a href="/docs/sync#refusals-retries-and-offline">Sync</a>,
-    <a href="/docs/mobile#sync">mobile</a>); a replica holding writes the
-    server has not taken keeps them through a sign-out, and deleting it
-    loses them.</li>
+  <li><b>A 401 is no sign-out by itself.</b> The server keeps no list of
+    revoked tokens: only the issuer knows that a session ended. So an app
+    asks its issuer for a fresh token at every 401, whatever the code, and
+    signs out where the issuer refuses to issue one. A fresh token cures an
+    expiry, a token signed with a key the server has since dropped (a
+    replica offline past a rotation), a request sent before any token was
+    handed over, and every expiry from a server older than this release,
+    which names no code. It does not cure a key the server has not fetched
+    yet (<code>no key has the token's kid</code>, behind a rotation above,
+    until the next fetch), a token whose <code>nbf</code> the server's clock
+    has not reached, or an issuer, audience or client the server does not
+    take: a token minted again at once is refused the same, and a replica's
+    sync waits before it asks again, 1 s doubling to 60 s. It hands its
+    <code>tokenProvider</code> what it needs to tell these apart
+    (<a href="/docs/sync#token-refusals">Sync</a>,
+    <a href="/docs/mobile#sync">mobile</a>). A replica belongs to one
+    account -- its file or <code>persist</code> key names the account, and it
+    is never opened for another -- and signing out keeps it, for that
+    account's next sign-in to send the writes the server has not taken;
+    deleting it loses them.</li>
   <li><b><code>--jwt-max-age &lt;s&gt;</code></b> refuses a token whose
     <code>exp</code> lies further ahead than that: set to 3600, a provider
     configured for day-long tokens is refused, and the fix is at the provider,

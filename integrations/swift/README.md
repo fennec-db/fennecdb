@@ -91,15 +91,11 @@ as a `?`'s parameter.
 ```swift
 let db = try await Fennec.sync(url: "https://api.example.com", token: jwt,
                               shapes: [Shape("todos", where: ["owner": me], key: "key")],
-                              path: docs.appendingPathComponent("todos.fennec").path,
+                              path: docs.appendingPathComponent("\(account.id).fennec").path,
                               tokenProvider: { refusal in
-                                  // The one handed over refused too: sign out, the file kept.
-                                  if refusal.attempt > 1 {
-                                      try await signOut()
-                                      throw CancellationError()
-                                  }
-                                  // Expired or not, a fresh token: the issuer refusing throws.
-                                  return try await refreshToken()
+                                  // A fresh token at every 401, whatever the code: it throws
+                                  // where the issuer refuses -- the session ended.
+                                  try await refreshToken(force: refusal.expired)
                               })
 await db.replica!.ready()
 ```
@@ -107,15 +103,18 @@ await db.replica!.ready()
 A `401` asks `tokenProvider` for a token, handed a `TokenRefusal`: the
 code the server named (`errorCode`, "token_expired" where the token's `exp`
 passed), `expired`, whether the refused request carried a token
-(`hadToken`) and the asks in a row (`attempt`). A fresh token from the
-issuer cures an expiry and most 401s naming no code -- a key rotation, a
-token not valid yet, an older server's expiry, none sent -- so the provider
-refreshes at both, and signs out only where the issuer refuses or at an
-`attempt` past 1. A sign-out keeps a file whose status says `pending`
-writes: deleting it loses them. `replica.status`'s error names the
-`errorCode` too, and a `FennecRemote` refusal its body's code as
-`FennecError.errorCode`. A provider of no argument, as before 1.0, still
-compiles, deprecated.
+(`hadToken`) and the asks in a row since the server last took the token
+held (`attempt`). The provider asks the issuer for a fresh token at every
+one: a 401 alone is never a sign-out, since the server keeps no list of
+revoked tokens -- the app signs out where the issuer refuses to issue one.
+Where the token handed over is refused too (`attempt` past 1: a key the
+server has not fetched yet, an `nbf` its clock has not reached), the sync
+asks again after 1 s doubling to 60 s. A provider that throws is asked
+again at `resume()` or `setOnline(true)`. A file is one account's -- its
+path names the account, and it is never opened for another -- and signing
+out keeps it, for that account's next sign-in to send its `pending` writes.
+`replica.status`'s error names the `errorCode` and the `tokenRefusal` too,
+and a `FennecRemote` refusal its body's code as `FennecError.errorCode`.
 
 The same `Fennec`: reads and live queries are the file's, a write to a
 shape's collection shows at once and is sent -- queued in the file while
@@ -232,6 +231,21 @@ one thing written into the text -- is ASCII letters, digits and `_`, a
 letter first, at most 59 bytes (`invalid statement name: "..."`); a list, a
 text or a number as the arguments or the claims is refused, the builder's
 words held to `integrations/builder-golden.json`.
+
+## Changed before 1.0
+
+1.0 freezes the API; these broke before it:
+
+- `Fennec.sync`'s `tokenProvider` is handed a `TokenRefusal`. The form
+  taking none, kept a while as a deprecated overload, is gone: write
+  `{ _ in try await refreshToken() }` where the provider reads none of it.
+- A 401 never asks the app to sign out: the provider asks its issuer for a
+  fresh token at every one, the sync waiting 1 s doubling to 60 s before
+  it asks again where the token handed over was refused too, and
+  `resume()` asks again for a token a provider that threw never handed
+  over.
+- `SyncStatus.Failure` has `errorCode` and `tokenRefusal`, and
+  `FennecError` a refusal's `errorCode`.
 
 ## Building and testing
 

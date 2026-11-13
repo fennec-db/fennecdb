@@ -106,14 +106,19 @@ expired","code":"token_expired"}` (`refusal_code`, in `authenticate`), and
 a stream ended at the `exp` says the same (`sse::EXPIRED`); the `exp` is
 asked after the signature and whom the token is for (`Access::verify`), so
 the code is told only of a token this server took until then. A client
-reads the code alone, never the words, and a 401 naming none is no
-sign-out: a fresh token cures a key rotation, a clock behind, an older
-server's expiry. So a replica's sync hands its provider the code, whether
-the refused request carried a token and the asks in a row (`TokenRefusal`,
-the token action's `code`, `had_token`, `attempt`), asks once while it
-waits, and sends a request refused for a token since replaced again,
-unasked (`fennec_abi::sync`, `web/fennec.js`, held by the scenario file);
-every SDK names the code `errorCode`.
+reads the code alone, never the words, and no 401 is a sign-out: the
+server keeps no list of revoked tokens, so an app asks its issuer at every
+one and signs out where the issuer refuses. So a replica's sync hands its
+provider the code, whether the refused request carried a token and the
+asks in a row since the server took the token held -- a 2xx or a stream
+opened, never a 408, 429 or 5xx (`TokenRefusal`, the token action's
+`code`, `had_token`, `attempt`) -- asks once while it waits, after 1 s
+doubling to 60 s where the token handed over was refused too (an expiry
+starting at 1, unless of the token already refused for one), again at
+`{"online":true}` where nothing came, and sends a request refused for a
+token since replaced again, unasked (`fennec_abi::sync`, `web/fennec.js`,
+held by the scenario file); a replica is one account's, its key or path
+naming it; every SDK names the code `errorCode`.
 
 **[An empty token is no token.](../../../../docs/design/access.md#empty-tokens)**
 A variable set empty is unset (`env_secret`, fennec-shard's `env`); a token

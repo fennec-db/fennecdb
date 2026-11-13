@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+Changed before 1.0, which freezes the API:
+
+- `tokenProvider` is handed a `TokenRefusal` -- `errorCode`, `expired`,
+  `hadToken`, `attempt` -- and a function of no argument is no longer taken:
+  write `(_) => refresh()` where the provider reads none of it.
+- A 401 never asks the app to sign out: the provider asks its issuer for a
+  fresh token at every one, and signs out where the issuer refuses. Where
+  the token handed over is refused too (`attempt` past 1), the sync asks
+  again after 1 s doubling to 60 s; an expiry starts the count at 1 again,
+  and only a 2xx to the token held, or a stream that opens, resets it.
+- `resume()` and `setOnline(true)` ask again for a token asked for and not
+  handed over: a provider that failed no longer leaves the sync waiting
+  for good.
+- `SyncFailure.errorCode` and `SyncFailure.tokenRefusal` say what the sync
+  waits on a token for, and `FennecException.errorCode` is a refusal's
+  code.
+- A replica is one account's: its file's path names the account, and it is
+  never opened for another.
+
 ## 0.2.0
 
 The release notes: https://github.com/fennec-db/fennecdb/releases/tag/v0.2.0

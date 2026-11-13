@@ -224,7 +224,7 @@ answers it -- once, whatever the network did meanwhile.</p>
 <tbody>
 <tr><td>2xx</td><td>landed: it leaves the queue, its promise resolves</td></tr>
 <tr><td>nothing (the network failed), <code>408</code>, <code>429</code>, <code>5xx</code></td><td>kept and sent again under its key, after 250 ms doubling to 15 s -- or after the <code>Retry-After</code> the server names, where that is longer: a tenant's quota, a tenant being moved or failed over</td></tr>
-<tr><td><code>401</code></td><td>kept; nothing is sent until a new token (<code>tokenProvider</code>, <code>setToken</code>). The provider is handed why (<code>TokenRefusal</code>, <a href="#token-refusals">below</a>): a fresh token from the issuer, and the sync goes on where it stopped</td></tr>
+<tr><td><code>401</code></td><td>kept; nothing is sent until a new token (<code>tokenProvider</code>, <code>setToken</code>). The provider is handed why (<code>TokenRefusal</code>, <a href="#token-refusals">below</a>) and asks the issuer for a fresh token, and the sync goes on where it stopped -- where the token it handed over is refused too, after 1 s doubling to 60 s</td></tr>
 <tr><td><code>507</code> naming a tenant's quota of <code>bytes</code> or <code>rows</code></td><td>refused: put back, its promise rejects, <code>onRefused</code> is told with <code>e.quota</code>, and the writes behind it go on</td></tr>
 <tr><td>any other <code>4xx</code></td><td>refused: put back, its promise rejects, <code>onRefused</code> is told -- with <code>e.reason</code> where it is a <code>412</code> and the write's <code>require</code> said why</td></tr>
 </tbody>
@@ -237,14 +237,8 @@ const db = await sync({
   url: 'https://api.example.com',
   token: await auth.token(),                       // sent from the first request on
   shapes: [{ collection: 'tasks', key: 'key' }],
-  persist: 'tasks',                                // writes survive a reload
-  tokenProvider: async ({ attempt }) => {          // asked on a 401
-    if (attempt > 1) {                             // the one handed over refused too
-      await auth.signOut();                        // the replica and its writes kept
-      throw new Error('signed out');               // hand over none: nothing is sent
-    }
-    return auth.refresh();                         // the issuer refusing throws: signed out
-  },
+  persist: `tasks:${auth.userId}`,                 // one account's replica: writes survive a reload
+  tokenProvider: () => auth.refresh(),             // asked at every 401: the issuer's fresh token
   onRefused: (e) => toast(e.quota ? 'This workspace is full' : e.reason ?? `${e.status}: ${e.message}`),
 });
 await db.pushed();                                 // every write answered
@@ -255,22 +249,45 @@ await db.pushed();                                 // every write answered
 (<code>'token_expired'</code> where the token's <code>exp</code> passed, null
 for none; <a href="/docs/auth#expiry">Expiry</a>), <code>expired</code>, that
 code's, <code>hadToken</code>, whether the refused request carried a token
-at all, and <code>attempt</code>, how many times in a row it is asked with
-the server taking nothing between. At <code>expired</code> it refreshes the
-token, and the replica goes on where it stopped, its queue sent under the
-keys it kept. At a 401 naming no code it asks the issuer for a fresh token
-too: a key rotation, a token not valid yet, an older server's expiry and a
-request sent before any token (<code>hadToken</code> false) are each cured
-by one. It signs out only where the issuer refuses, or at an
-<code>attempt</code> past 1 -- the token it just handed over refused too,
-which another from the issuer will not change. A 401 to a request sent
-before a new token was handed over is not asked about: the request goes
-again with the new one. Signing out, an app keeps the replica while
-<code>status()</code> says <code>pending</code> writes, for the account's
-next sign-in to send under the keys they kept; deleting its
-<code>persist</code> key loses them. An app that hands its tokens over with
-<code>setToken</code> instead reads the same from <code>status()</code>:
-the <code>error</code> and its <code>errorCode</code>.</p>
+at all, and <code>attempt</code>, how many times in a row it is asked since
+the server last took the token held. It asks the issuer for a fresh token
+at every one, whatever the code -- forcing a refresh at
+<code>expired</code>, where a cached token is the one refused -- and the
+replica goes on where it stopped, its queue sent under the keys it kept.
+A 401 alone is never a sign-out: the server keeps no list of revoked
+tokens, so only the issuer knows that a session ended, and the app signs
+out where the issuer refuses to issue a token. A fresh token cures an
+expiry, a key the server has since dropped, an older server's expiry and a
+request sent before any token (<code>hadToken</code> false). It cannot cure
+a key the server has not fetched yet, an <code>nbf</code> its clock has not
+reached or a misconfiguration: where the token just handed over is refused
+too (<code>attempt</code> past 1), the sync asks again after 1 s doubling to
+60 s, so a provider that hands over a token at every ask asks the issuer
+once a minute, not at the network's speed. An expiry starts the count at 1
+again -- a token handed over offline may run out before it is sent -- and
+so does the server taking the token held, a 2xx or a stream that opens;
+a 408, 429 or 5xx does not, as it may come before the token is read. A 401 to a
+request sent before a new token was handed over is not asked about: the
+request goes again with the new one.</p>
+
+<p><b>A provider that throws</b> -- the issuer out of reach -- hands over
+nothing, and the sync waits: the page's <code>online</code> event, or
+<code>setOnline(true)</code>, asks it again with the same
+<code>TokenRefusal</code>, though not before a wait the server's refusal
+began. An app that hands its tokens over with <code>setToken</code> instead
+reads the same from <code>status()</code>: the <code>error</code>, its
+<code>errorCode</code>, and <code>tokenRefusal</code>, what the sync waits
+on a token for.</p>
+
+<p id="one-account"><b>One replica, one account.</b> A replica holds one
+account's rows and the writes it made: its <code>persist</code> key -- or a
+<code>local</code>'s file -- names the account, and it is never opened for
+another. On a browser two people share, the second signing in over the
+first's replica would send the writes left in it under their own token and
+be shown its rows. Signing out, an app closes the replica and keeps it
+while <code>status()</code> says <code>pending</code> writes, for that
+account's next sign-in to send under the keys they kept; deleting it loses
+them.</p>
 
 <p><b>A <code>require</code>'s reason.</b> A write given
 <code>{ require: 1, reason: 'the task was taken' }</code> sends its <code>else
@@ -292,7 +309,8 @@ rather than make the row twice.</p>
 <p><b>Offline.</b> A write made while the server cannot be reached waits in
 the queue; the page's <code>online</code> event, or
 <code>setOnline(true)</code>, sends it at once, the backoff forgotten -- unless
-the server said when to come back (below) -- and
+the server said when to come back (below) -- asks again for a token asked
+for and not handed over, and
 <code>offline</code> or <code>setOnline(false)</code> closes the streams.
 Writes left from before go before the streams open again, so what they
 bring holds them.</p>
@@ -644,7 +662,7 @@ import type { FennecSchema } from './fennec-schema.js';
 const db = await sync<FennecSchema>({
   url: 'https://api.example.com',
   shapes: [{ collection: 'tasks', where: { status: 'open' }, key: 'key' }],
-  persist: 'tasks',           // the replica, its cursors and its unsent writes
+  persist: `tasks:${userId}`, // one account's replica, its cursors and its unsent writes
 });
 await db.ready();
 

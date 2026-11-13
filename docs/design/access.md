@@ -1001,49 +1001,106 @@ told only of a token this server took until then: a forged token past its
 the code telling a sender of a token no key here made nothing it did not
 know.
 
-**A 401 naming no code is no sign-out.** The first form of this told an app
+**A 401 alone is never a sign-out.** The first form of this told an app
 to refresh at `token_expired` and sign out -- deleting the replica -- at
-any other 401. A fresh token from the issuer cures many of those: a token
-signed with a key the server has not fetched yet (`no key has the token's
-kid`, behind a rotation, [auth.html](../../site/content/docs/auth.html)), a
-replica offline past its old key's removal, an `nbf` a clock behind the
-server's has not reached, a request sent before any token was handed over,
-and every expiry from a v0.2.0 server, which names no code. The server keeps
-no list of revoked tokens, so a session ends at its issuer, and deleting the
-file lost the writes the server had not taken. The guidance is now the same
-everywhere it is given (auth.html, sync.html, mobile.html, `fennec.h`,
-`fennec.d.ts`, the bindings' READMEs): refresh at `token_expired`; at a 401
-naming none ask the issuer for a fresh token too; sign out only where the
-issuer refuses, or where a token just minted is refused again; and never
-delete a replica whose `pending` is not 0 on a 401 alone.
+any other 401, and the second to sign out where a token just minted was
+refused again. The server keeps no list of revoked tokens, so only the
+issuer knows that a session ended: an app asks it for a fresh token at
+every 401, whatever the code, and signs out where it refuses to issue one.
+A fresh token cures an expiry, a token signed with a key the server has
+since dropped (a replica offline past a rotation), a request sent before
+any token was handed over, and every expiry from a v0.2.0 server, which
+names no code. It cures nothing that minting does not change: a key the
+server has not fetched yet (`no key has the token's kid` until the
+refresh job's next run, every five minutes in
+[auth.html](../../site/content/docs/auth.html)), an `nbf` its clock has not
+reached, an issuer, audience or client it does not take. Those a token
+minted again at once meets the same -- the "refused again" the second form
+signed out at, for a lag a minute would have ended -- and the sync waits
+them out (below). The guidance is the same everywhere it is given
+(auth.html, sync.html, mobile.html, `fennec.h`, `fennec.d.ts`, the
+bindings' READMEs and `TokenRefusal`'s comments).
 
-**The provider is handed a value, not a flag.** Telling "a token just
-minted is refused again" from "an expiry" takes more than one bool, and a
-bool frozen at 1.0 could carry neither "no token was sent" nor a later
-code. So the core's action is `{"do":"token","code":..|null,"had_token":B,
-"attempt":N}` and every binding hands its provider a `TokenRefusal` of the
-same three -- `errorCode`, `hadToken`, `attempt` -- and `expired`, derived
-from the code: a Swift struct, a Kotlin class that is not a data class (a
-`copy` and `componentN`s would freeze its shape), a Dart class and, in the
-browser, a frozen object. `attempt` counts the asks in a row with no request
-the server took between (`token_asks`, `#tokenAsks`, reset by any answer
-but a 401 to the token held): 2 is a token handed over at the last ask and
-refused too, the "refused again" a provider signs out at, which it could
-otherwise tell only by a clock. A code the core does not know is passed on
-as it came, so a later server's code reaches an app without a new core. The
-status's error keeps `code`, the server's member, for an app that hands its
-tokens over with a signal rather than a provider.
+**A replica is one account's.** Its `persist` key or file path names the
+account, and it is never opened for another. Kept through a sign-out for
+its writes' sake, a replica opened under one key for every account would,
+on a browser two people share, have sent the first's queue under the
+second's token and shown the second the first's rows: `sync({persist:
+'tasks', token: B})` restores what A left. Signing out closes the replica
+and keeps it, for that account's next sign-in to send under the keys its
+writes kept; deleting it loses them.
+
+**The provider is handed a value, not a flag.** A bool frozen at 1.0 could
+carry neither "no token was sent" nor a later code, nor how many tokens
+were tried. So the core's action is `{"do":"token","code":..|null,
+"had_token":B,"attempt":N}` and every binding hands its provider a
+`TokenRefusal` of the same three -- `errorCode`, `hadToken`, `attempt` --
+and `expired`, derived from the code: a Swift struct, a Kotlin class that
+is not a data class (a `copy` and `componentN`s would freeze its shape), a
+Dart class and, in the browser, a frozen object. `attempt` counts the asks
+in a row since the server last took the token held (`token_asks`,
+`#tokenAsks`): a 2xx to a request carrying it, or a stream it opened
+(`answered`). Nothing else resets it. A 408, a 429 or a 5xx may come before
+a token is read -- the 503 at the connection ceiling, a router's while a
+tenant moves -- and reset there, a fresh token refused, then a 503, then
+refused again was a first ask again, the wait (below) never reached. A
+code the core does not know is passed on as it came, so a later server's
+code reaches an app without a new core. The status's error says what the
+last ask said (`code`, `had_token`, `attempt`; every SDK's
+`tokenRefusal`), for an app that hands its tokens over with a signal
+rather than a provider: `had_token` and `attempt` are null while the wait
+before an ask runs, as the provider has not been asked.
+
+**A token refused again is asked for again after a wait.** Where the token
+handed over at the last ask is refused too, the next ask comes after 1 s
+doubling to 60 s, 30% jitter on top (`TOKEN_BACKOFF_MS`, the same numbers
+in `#wantToken`), a wait the network's coming back keeps, as it keeps a
+server's `retry_after`: the network says nothing of why a token was
+refused. A second is the soonest a token minted again could fare better --
+an `nbf` a clock or two ahead -- and a minute between asks is what a fleet
+of devices can put to an issuer's token endpoint for as long as a key is
+not fetched or an audience is wrong, a fix landing within a minute. The
+network's own backoff, 250 ms to 15 s, would have asked four times a
+minute a device; and with no wait at all, a provider that hands over a
+token at every ask, reading no `attempt`, looped -- a 401, a token, a 401
+-- at the network's speed. The wait is the core's, held by the scenario
+file, rather than each provider's: the provider no longer decides
+anything from `attempt`, which a provider written for the second form
+ignored.
+
+**An expiry is no escalation.** A fresh token cures an expiry however many
+were asked for before, so `token_expired` starts the count at 1 again and
+asks at once: a token handed over while the replica was offline may run
+out before it is sent, and counted as refused again it would have waited
+and, under the second form, signed the user out. The one exception is the
+token already refused for its expiry, handed back as it was
+(`expired_gen`, `#expiredGen`) -- a provider reading a cached token by a
+clock behind the server's: refused for its expiry again, it counts, and the
+next ask waits.
+
+**A provider that failed is asked again.** A provider that throws -- its
+issuer out of reach with the network -- hands over nothing, and the sync
+waited for a token no one would ask for again. Now `{"online":true}` asks
+again where the provider was asked and nothing came, with the same three:
+the platform's network signal, the page's `online` event and the
+bindings' `resume()` at the foreground, which each binding already sends.
+Not while the wait before an ask runs, which is the server's refusal. A
+signal for the provider's failure was not taken: each binding would have
+had to send it, through `fennec.h`, and an app's own `setToken` flow has no
+failure to tell. A provider still at work when the signal comes is asked a
+second time; the first token handed over wins, the second is one more.
 
 **A 401 to a token since replaced is no refusal of the token held.** Each
 request and stream remembers the token it carried (`Sync::carried`, a
 number bumped at each other token handed over; `#carried` in the page), and
 a 401 to one sent before the token now held is sent again with that one,
-the binding asked nothing (`token_refused`). Asked, an app counting a fresh
-token refused again would have signed out at a write's 401 that crossed the
-handover. And a 401 while a token is already asked for asks nothing more
-(`want_token` returns while `paused`, as `#wantToken` did): a stream's end
-at the `exp` beside a write's 401 is one question, and asked twice a
-provider would count the second as its fresh token refused.
+the binding asked nothing (`token_refused`): counted, a write's 401 that
+crossed the handover would have made the next ask wait. The same token
+handed over again keeps its number, so its refusal is asked about rather
+than sent again unasked, which would loop. And a 401 while a token is
+already asked for asks nothing more (`want_token` returns while `paused`,
+as `#wantToken` did): a stream's end at the `exp` beside a write's 401 is
+one question, and asked twice it would count as a token refused again.
 
 The code is a member of the body, beside the words: the words are a
 person's and may be put otherwise, and a page on another origin reads a
@@ -1081,22 +1138,32 @@ Nothing is measured beside it: the stream asks the time where it did, at
 the head of each look, the event a constant 23 bytes longer written once a
 stream; a request pays nothing until it is refused, and a refusal compares
 its words with one constant; the sync notes a token's number at each send,
-a branch. `access.rs`'s `only_an_expired_token_is_told_by_its_code` (a
+a branch, and the wait is a timer it asks for only at a token refused
+again. `access.rs`'s `only_an_expired_token_is_told_by_its_code` (a
 forged, early, malformed, empty and foreign-audience token past its `exp`
 or not), `tests/access.rs`'s
 `an_expired_token_is_told_by_its_code_and_no_other_refusal_is` (a request,
 a stream's open, `/_whoami`) and `a_subscription_ends_when_its_token_expires`
 (the stream's end), the core's `a_refusal_code_is_read_from_the_body_alone`,
-eleven scenarios both runners play (a stream ended at the `exp` with the
+nineteen scenarios both runners play (a stream ended at the `exp` with the
 code and without it, a write and a stream's open and `GET /collections`
-refused for an expiry, a replica started with no token, a fresh token
-refused again and the count starting over, a write's and a stream's 401 to
-a token since replaced sent again unasked, a second 401 while asked, a code
-no client knows), `web/fennec.client.test.js` (`errorCode` on a refusal and
-a stream's end), `web/fennec.sync.test.js`'s replicas against a server (an
-expiry at the stream's end and at its open on Node's own fetch, a forged
-token refused twice, none sent), each binding's provider against a server
-(Swift, Kotlin, Dart) and each SDK's refusal naming its code fail without
+refused for an expiry, a replica started with no token, a token refused
+again asked for after a wait and the count starting over at a 2xx but not
+a 503, the wait doubling to its cap, a stream that opens starting the count
+over, an expiry after a token handed over offline asked for at once, the
+same token handed back refused for its expiry again, a write's and a
+stream's 401 to a token since replaced sent again unasked, a stream's open
+and `GET /collections` answered 401 after the token was replaced -- an
+answer the runners hold back -- the same token handed over again while a
+write is out, a second 401 while asked, a token asked for again when the
+network comes back, a code no client knows), `web/fennec.client.test.js`
+(`errorCode` on a refusal and a stream's end), `web/fennec.sync.test.js`'s
+replicas against a server (an expiry at the stream's end and at its open on
+Node's own fetch, a forged token refused twice, the second ask no sooner
+than a second later and asked again at `setOnline(true)`, none sent), each
+binding's provider against a server (Swift, Kotlin, Dart: a provider that
+threw asked again at `resume()`, the status's `tokenRefusal`, the wait
+before `attempt` 2) and each SDK's refusal naming its code fail without
 it.
 
 ## Empty tokens
