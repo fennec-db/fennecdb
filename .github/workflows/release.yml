@@ -598,15 +598,19 @@ jobs:
   # `latest` on ghcr.io, once `manifest` has made `<version>`, the list it
   # copies. tools/image-latest.sh moves it, as packages.yml's `image-latest`
   # does once the release is published, so whichever of the two runs second
-  # moves it: at the tag's push the release is a draft, and this says so and
-  # ends; a release published before its image jobs passed -- packages.yml's
-  # run found no `<version>` and failed saying so -- gets `latest` here, in
-  # this run made again once they pass. Never a draft or a pre-release, and
-  # never any version but the newest published release's, so a dispatch for
-  # an old tag leaves it. A job of its own, in the same concurrency group as
-  # packages.yml's, one a version: the group's pending job is cancelled by
-  # the next one queued, which must never be the job making `<version>`, nor
-  # a newer release's move cancelled by an old tag's dispatch.
+  # moves it: at the tag's push the release is `publish`'s draft, which this
+  # job's token, reading alone, cannot see -- the script asks the API for the
+  # release by its tag, a 404 for a draft whatever the token -- and this
+  # says it is not published yet and ends; a release published before its
+  # image jobs passed -- packages.yml's run found no `<version>` and failed
+  # saying so -- gets `latest` here, once this run's failed jobs are re-run
+  # (a new run would push the arch tags again under new digests). Never a
+  # draft or a pre-release, and never any version but the newest published
+  # release's, so a dispatch for an old tag leaves it. A job of its own, in
+  # the same concurrency group as packages.yml's, one a version: the group's
+  # pending job is cancelled by the next one queued, which must never be the
+  # job making `<version>`, nor a newer release's move cancelled by an old
+  # tag's dispatch.
   image-latest:
     name: image (latest)
     needs: manifest
