@@ -18,6 +18,7 @@ import { Fennec, sync, connect, inc, FennecError } from './fennec.js';
 import { fennecTable, text, integer, index, rename } from './schema.js';
 import { installIndexedDB } from './idb.fake.js';
 import * as client from './client.js';
+import { needs } from './ci-prereq.mjs';
 
 const wasm = await readFile(new URL('./fennec.wasm', import.meta.url)).catch(() => null);
 async function binary(name) {
@@ -34,6 +35,7 @@ async function binary(name) {
 }
 const bin = await binary('fennec-server');
 const shardBin = await binary('fennec-shard');
+needs(['web/fennec.wasm', wasm, 'make wasm'], ['fennec-server', bin, 'cargo build'], ['fennec-shard', shardBin, 'cargo build']);
 
 const skip = !wasm
   ? 'no web/fennec.wasm (make wasm)'

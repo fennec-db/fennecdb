@@ -33,12 +33,19 @@ fn make(name: &str, sql: &str) -> Option<PathBuf> {
     }
 }
 
-/// Sets up the fixture, or skips the test when `sqlite3` is missing.
+/// Sets up the fixture, or skips the test when `sqlite3` is missing (a panic under CI).
 macro_rules! fixture {
     ($name:expr, $sql:expr) => {
         match make($name, $sql) {
             Some(p) => p,
             None => {
+                // A runner that skipped these reported a green job that read
+                // no SQLite file; GitHub's images ship sqlite3.
+                assert!(
+                    std::env::var_os("CI").is_none(),
+                    "sqlite3 not found under CI: `{}` would test nothing",
+                    $name
+                );
                 eprintln!("sqlite3 not found, `{}` skipped", $name);
                 return;
             }

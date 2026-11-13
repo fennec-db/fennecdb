@@ -171,9 +171,10 @@ jobs:
           key: ${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: ${{ matrix.os }}-cargo-
 
-      # The browser bundle comes first: web/fennec.sync.test.js and the
-      # end-to-end half of web/fennec.test.js skip themselves when
-      # web/fennec.wasm is missing, so without this the JS side is a no-op.
+      # The browser bundle comes first: the JS suites skip themselves on a
+      # machine with no web/fennec.wasm and throw under CI (web/ci-prereq.mjs),
+      # and `make test` fails on a skipped or ignored test past
+      # tools/skips-allowlist.json's count (tools/skips_check.py).
       # The module without the indexes is what web/fennec.test.js hands the
       # full one's files to, and back, and holds its `near` to the full
       # one's `near ... exact`.
