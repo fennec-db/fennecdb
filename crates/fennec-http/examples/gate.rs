@@ -19,17 +19,23 @@
 //! op's inputs are made before the loop, so what is counted is the engine's
 //! work. A name is its family's: `core-*` the engine through `Database`,
 //! `ql-*` the parser, `http-*` a request through `fennec_http::handle`,
-//! `file-*` a file's open and compaction. A workload's statements are
-//! FennecQL texts, which 1.x keeps, so the same program builds against main
-//! and a pull request alike; each workload stands for the claim the table
-//! in docs/design/benchmarks.md names.
+//! `file-*` a file's open and compaction, `sync-*` a replica's sync. A
+//! workload's statements are FennecQL texts, which 1.x keeps, so the same
+//! program builds against main and a pull request alike; each workload
+//! stands for the claim the table in docs/design/benchmarks.md names.
+//!
+//! Beside the count, the program tallies what its loop asks of the
+//! allocator (`Counting`): the calls, and the bytes they ask for, printed
+//! as a `heap:` line the gate's driver reads.
 
 use fennec_core::prelude::*;
 use fennec_http::access::{Access, CheckPlugin};
 use fennec_http::http::{Method, Request};
 use fennec_http::Config;
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -64,6 +70,7 @@ const WORKLOADS: &[(&str, usize, Setup)] = &[
     ("http-scoped-insert", 1_000, http_scoped_insert),
     ("file-open", 1, file_open),
     ("file-compact", 1, file_compact),
+    ("sync-apply", 20, sync_apply),
 ];
 
 fn main() {
@@ -78,10 +85,15 @@ fn main() {
         eprintln!("usage: gate --list | gate WORKLOAD");
         std::process::exit(2);
     };
+    if let Some(bytes) = leak_asked() {
+        leak(bytes);
+        println!("leaked {bytes} bytes before the setup");
+    }
     let dir = std::env::temp_dir().join(format!("fennec-gate-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let mut body = setup(&dir, ops);
     let t = Instant::now();
+    let before = Heap::now();
     callgrind::request(callgrind::START_INSTRUMENTATION);
     callgrind::request(callgrind::TOGGLE_COLLECT);
     for i in 0..ops {
@@ -89,14 +101,129 @@ fn main() {
     }
     callgrind::request(callgrind::TOGGLE_COLLECT);
     callgrind::request(callgrind::STOP_INSTRUMENTATION);
+    let heap = Heap::now().since(&before);
     let took = t.elapsed();
     println!(
         "{name} {ops} ops, {:.0} ns an op",
         took.as_nanos() as f64 / ops as f64
     );
+    println!(
+        "heap: calls={} bytes={} zeroed={} grown={}",
+        heap.calls, heap.bytes, heap.zeroed, heap.grown
+    );
     // The data is let go of uncounted, and natively in no time worth one.
     drop(body);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The global allocator: `System`'s -- musl's in the build the gate counts --
+/// with every call counted, and the bytes each asks for. Callgrind's figure
+/// prices a call into the allocator at what the base's runs paid one
+/// (docs/design/benchmarks.md#the-gate), so what grows inside a call with
+/// the calls the same goes unseen there: an allocation past its size class,
+/// a `Vec` grown by `realloc`'s copies, `calloc`'s zeroing. The bytes see
+/// it, and depend on the code alone, never on where the heap put a block:
+/// an allocation's size, a `realloc`'s growth and a zeroed allocation's
+/// size each count once. A counter is an atomic, as a workload's threads
+/// share them, and the same few instructions a call in both builds.
+struct Counting;
+
+static CALLS: AtomicU64 = AtomicU64::new(0);
+static BYTES: AtomicU64 = AtomicU64::new(0);
+static ZEROED: AtomicU64 = AtomicU64::new(0);
+static GROWN: AtomicU64 = AtomicU64::new(0);
+
+// SAFETY: each call is `System`'s own, under the caller's contract; the
+// counters beside it touch no memory the allocator hands out.
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        CALLS.fetch_add(1, Relaxed);
+        BYTES.fetch_add(layout.size() as u64, Relaxed);
+        // SAFETY: the caller's layout, as `GlobalAlloc::alloc` takes it.
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        CALLS.fetch_add(1, Relaxed);
+        BYTES.fetch_add(layout.size() as u64, Relaxed);
+        ZEROED.fetch_add(layout.size() as u64, Relaxed);
+        // SAFETY: as `alloc`.
+        unsafe { System.alloc_zeroed(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        CALLS.fetch_add(1, Relaxed);
+        // SAFETY: `ptr` came from this allocator with `layout`.
+        unsafe { System.dealloc(ptr, layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        CALLS.fetch_add(1, Relaxed);
+        let grown = new_size.saturating_sub(layout.size()) as u64;
+        BYTES.fetch_add(grown, Relaxed);
+        GROWN.fetch_add(grown, Relaxed);
+        // SAFETY: `ptr` came from this allocator with `layout`.
+        unsafe { System.realloc(ptr, layout, new_size) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: Counting = Counting;
+
+/// The allocator's tallies at a moment; two of them, a stretch's.
+struct Heap {
+    calls: u64,
+    bytes: u64,
+    zeroed: u64,
+    grown: u64,
+}
+
+impl Heap {
+    fn now() -> Heap {
+        Heap {
+            calls: CALLS.load(Relaxed),
+            bytes: BYTES.load(Relaxed),
+            zeroed: ZEROED.load(Relaxed),
+            grown: GROWN.load(Relaxed),
+        }
+    }
+
+    fn since(&self, start: &Heap) -> Heap {
+        Heap {
+            calls: self.calls - start.calls,
+            bytes: self.bytes - start.bytes,
+            zeroed: self.zeroed - start.zeroed,
+            grown: self.grown - start.grown,
+        }
+    }
+}
+
+/// The heap-shift control's leak (docs/design/benchmarks.md#the-gate),
+/// asked for by `FENNEC_GATE_LEAK=<bytes>`: this program alone reads it,
+/// and the gate's runs never set it.
+fn leak_asked() -> Option<usize> {
+    let v = std::env::var("FENNEC_GATE_LEAK").ok()?;
+    Some(
+        v.parse()
+            .unwrap_or_else(|_| panic!("FENNEC_GATE_LEAK is a count of bytes: {v:?}")),
+    )
+}
+
+/// `bytes` held for good before the setup, in blocks of six size classes,
+/// so that every later allocation lands elsewhere in musl's groups: the
+/// same program over another heap layout, which a change anywhere makes.
+/// The figure with the allocator priced, and the bytes, must not move.
+fn leak(bytes: usize) {
+    const SIZES: [usize; 6] = [24, 56, 120, 248, 504, 1_016];
+    let (mut left, mut i) = (bytes, 0);
+    while left > 0 {
+        let n = SIZES[i % SIZES.len()].min(left);
+        // Out of the optimizer's sight, or an allocation never read is
+        // one it may leave out.
+        std::mem::forget(black_box(Vec::<u8>::with_capacity(n)));
+        left -= n;
+        i += 1;
+    }
 }
 
 /// Callgrind's client requests (valgrind's `callgrind.h`): a word of magic
@@ -801,8 +928,9 @@ fn scoped_server(
     (server, tokens)
 }
 
-/// `get t where id = ...` under a scoped token (`t read`), one of 1 000
-/// subjects in turn (`rows.rs`'s `scoped`).
+/// `get t where id = ...` under a scoped token (`t read`), one of CALLERS
+/// subjects in turn (`rows.rs`'s `scoped` asks as 1 000: CALLERS says why
+/// the gate does not).
 fn http_scoped_get(dir: &Path, ops: usize) -> Box<dyn FnMut(usize)> {
     let (server, tokens) = scoped_server(dir, "t read\n", |i| format!(r#"{{"sub":"user-{i}"}}"#));
     let root = format!("Bearer {ROOT}");
@@ -932,5 +1060,68 @@ fn file_compact(dir: &Path, _: usize) -> Box<dyn FnMut(usize)> {
     let compact = stmt("compact");
     Box::new(move |_| {
         black_box(db.execute(&compact).unwrap());
+    })
+}
+
+// ------------------------------------------------------------------ sync
+
+/// A sync replica's row as the server's stream sends it (`sync_bench.rs`'s
+/// text row), its `n` the change that wrote it.
+fn synced_row(id: usize, n: usize) -> String {
+    format!(
+        r#"{{"id":{id},"key":"k{id}","title":"a title of some forty characters, {id}","n":{n}}}"#
+    )
+}
+
+/// A change event of 100 rows, ids `first` on, as `seq`.
+fn change_event(seq: usize, first: usize) -> Vec<u8> {
+    let rows: Vec<String> = (first..first + 100).map(|id| synced_row(id, seq)).collect();
+    format!(
+        "event: change\ndata: {{\"seq\":{seq},\"puts\":[{}],\"dels\":[],\"schema\":false}}\n\n",
+        rows.join(",")
+    )
+    .into_bytes()
+}
+
+/// A replica's sync applying a change of 100 rows (`make sync-bench`'s
+/// "of 100 rows"): the event's bytes read off the stream, its rows parsed
+/// and written over the 1 000 the replica holds, with the shape's cursor,
+/// in one block, into a file as an app keeps its replica.
+fn sync_apply(dir: &Path, ops: usize) -> Box<dyn FnMut(usize)> {
+    let mut db = file_db(dir, "replica.fennec");
+    run(
+        &mut db,
+        "create collection t (key text @hash, title text, n int)",
+        &[],
+    );
+    let config = r#"{"url":"http://s","seed":"00","shapes":[{"collection":"t","key":"key"}]}"#;
+    let mut sync = fennec_abi::sync::Sync::start(&mut db, config).unwrap();
+    sync.actions();
+    sync.opened(&mut db, 1, 200, "");
+    sync.bytes(
+        &mut db,
+        1,
+        b"event: seed\ndata: {\"seq\":1,\"rows\":[]}\n\n",
+    );
+    sync.actions();
+    for b in 0..10 {
+        sync.bytes(&mut db, 1, &change_event(2 + b, 1 + b * 100));
+        sync.actions();
+    }
+    // A change refused stops the stream and says why in the status, and
+    // the loop would count a refusal's work: held to the rows it wrote.
+    let held = db.query(&stmt("get t select id"), &[]).unwrap();
+    let held = held.rows().map_or(0, |r| r.rows.len());
+    assert!(
+        held == 1_000 && sync.status().contains("\"error\":null"),
+        "the replica took its changes: {held} rows, {}",
+        sync.status()
+    );
+    let events: Vec<Vec<u8>> = (0..ops)
+        .map(|i| change_event(12 + i, 1 + i % 10 * 100))
+        .collect();
+    Box::new(move |i| {
+        sync.bytes(&mut db, 1, &events[i]);
+        black_box(sync.actions());
     })
 }
