@@ -9,13 +9,14 @@ on:
         description: 'Tag to build and release'
         required: true
 
-# Every job reads alone but the three that publish, each naming the one
+# Every job reads alone but the four that publish, each naming the one
 # write it uses: `publish` contents (the release, the Go module's tag),
-# `image-push` and `manifest` packages (ghcr.io). A job that builds holds no
-# write and its checkout keeps no token: the crates' build scripts (ring,
-# cc, ...), Gradle's plugins and the image's build run there, and what they
-# make reaches a job that writes only as an artifact. tools/workflow_check.py
-# holds every workflow to that (docs/design/integrations.md#workflows).
+# `image-push`, `manifest` and `image-latest` packages (ghcr.io). A job
+# that builds holds no write and its checkout keeps no token: the crates'
+# build scripts (ring, cc, ...), Gradle's plugins and the image's build run
+# there, and what they make reaches a job that writes only as an artifact.
+# tools/workflow_check.py holds every workflow to that, a job that writes
+# running only what it lists (docs/design/integrations.md#workflows).
 permissions:
   contents: read
 
@@ -381,14 +382,14 @@ jobs:
             dist/*.rpm
           if-no-files-found: error
 
-  # The server's image, ghcr.io/<owner>/fennec-server, in three jobs: this
+  # The server's image, ghcr.io/<owner>/fennec-server, in four jobs: this
   # one builds each architecture's on a runner of its own, `image-push`
-  # pushes each under an arch-suffixed tag, and `manifest` stitches them
-  # together as `<version>`; `latest` follows once the release is
-  # published (packages.yml's `image-latest`). A runner of each
-  # architecture is the reason there is no QEMU
-  # step -- emulating a Rust build is many times slower than a second
-  # runner. The build holds no write and its checkout keeps no token: the
+  # pushes each under an arch-suffixed tag, `manifest` stitches them
+  # together as `<version>`, and `image-latest` moves `latest` to it once
+  # the release is published (or packages.yml's `image-latest` does). A
+  # runner of each architecture is the reason there is no QEMU step --
+  # emulating a Rust build is many times slower than a second runner. The
+  # build holds no write and its checkout keeps no token: the
   # crates' build scripts run in the image's cargo build. Each image is run
   # on the runner that built it before it is kept (tools/image-check.sh:
   # its `--version`, and the server its own CMD starts turning healthy by
@@ -545,10 +546,7 @@ jobs:
   # The multi-arch tag, `<version>`, made from the two pushed above: a
   # manifest list written on ghcr.io, nothing built or run. Only once
   # `publish` has drafted the release, which follows every job that builds
-  # its files, `binaries` among them. `latest` is not moved here: a draft is
-  # no release yet, and a run cannot know from its tag whether a newer
-  # release is out. packages.yml's `image-latest` moves it once the release
-  # is published, never to a pre-release and never back to an older one.
+  # its files, `binaries` among them. `latest` follows in `image-latest`.
   #
   # On ubuntu-24.04, as `image-push`: `imagetools create` writes a Docker
   # manifest list from two Docker v2 manifests, as v0.2.0's `0.2.0` is, and
@@ -596,6 +594,51 @@ jobs:
             exit 1
           fi
           echo "$IMAGE:$version: a Docker manifest list of linux/amd64 $amd and linux/arm64 $arm"
+
+  # `latest` on ghcr.io, once `manifest` has made `<version>`, the list it
+  # copies. tools/image-latest.sh moves it, as packages.yml's `image-latest`
+  # does once the release is published, so whichever of the two runs second
+  # moves it: at the tag's push the release is a draft, and this says so and
+  # ends; a release published before its image jobs passed -- packages.yml's
+  # run found no `<version>` and failed saying so -- gets `latest` here, in
+  # this run made again once they pass. Never a draft or a pre-release, and
+  # never any version but the newest published release's, so a dispatch for
+  # an old tag leaves it. A job of its own, in the same concurrency group as
+  # packages.yml's, one a version: the group's pending job is cancelled by
+  # the next one queued, which must never be the job making `<version>`, nor
+  # a newer release's move cancelled by an old tag's dispatch.
+  image-latest:
+    name: image (latest)
+    needs: manifest
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: image-latest-${{ github.event.inputs.tag || github.ref_name }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/fennec-server
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      # This workflow's own commit's, as `image`'s check is: a dispatch for a
+      # tag from before the script has none.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: workflow
+          persist-credentials: false
+          sparse-checkout: tools/image-latest.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Log in to ghcr.io
+        env:
+          TOKEN: ${{ github.token }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Move latest, where this is the newest published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: workflow/tools/image-latest.sh "$IMAGE" "$TAG"
 
   # The one job writing to the repository: the release and its assets, and
   # the Go module's tag, pushed with the checkout's token. It builds nothing:

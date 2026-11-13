@@ -78,6 +78,12 @@ jobs:
           python3 tools/workflow_check.py
           python3 tools/test_workflow_check.py
 
+      # The move of the image's `latest` both release workflows run, against
+      # stand-ins for gh and docker: never to a draft, a pre-release or back,
+      # failing where the list it copies is not there yet.
+      - name: tools/image-latest.sh moves latest to the newest published release alone
+        run: python3 tools/test_image_latest.py
+
   clippy:
     name: clippy
     runs-on: ubuntu-latest
@@ -1030,7 +1036,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: shellcheck
-        run: shellcheck --shell=sh site/install.sh site/test_install.sh tools/install-nfpm.sh tools/install-flutter.sh tools/linux-packages.sh tools/linux-packages-check.sh tools/windows-zip.sh tools/image-check.sh
+        run: shellcheck --shell=sh site/install.sh site/test_install.sh tools/install-nfpm.sh tools/install-flutter.sh tools/linux-packages.sh tools/linux-packages-check.sh tools/windows-zip.sh tools/image-check.sh tools/image-latest.sh
 
       - name: The installer, its checksum and its refusals
         run: sh site/test_install.sh

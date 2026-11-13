@@ -10,8 +10,9 @@ name: packages
 # the release a draft so its notes get a read, and publishing the draft is
 # the moment the packages follow it. So do Homebrew's formula
 # (fennec-db/homebrew-tap, with HOMEBREW_TAP_TOKEN, the `homebrew` job) and
-# the image's `latest` tag on ghcr.io (`image-latest`). A registry keeps
-# what it is given, so
+# the image's `latest` tag on ghcr.io (`image-latest`, which release.yml's
+# own `image-latest` stands in for where this runs before the image is
+# there). A registry keeps what it is given, so
 # nothing goes to one before every package has been built, installed and
 # used (integrations/packages.sh). Each registry takes a token when its
 # secret is set -- NPM_TOKEN, PYPI_API_TOKEN -- and this workflow's OIDC
@@ -582,22 +583,30 @@ jobs:
   # `latest` on ghcr.io, the tag an image named without one pulls, moved to
   # this release's `<version>` (the list of both architectures release.yml's
   # `manifest` made) once the release is published, as the Homebrew tap
-  # follows it, and not when its tag is pushed: a draft is no release yet. A
-  # draft or a pre-release is not offered (a 1.0.0-rc.N would hand every
-  # untagged pull a release candidate), and neither is any version but the
-  # newest published release's (`sort -V` over the release list): a
+  # follows it, and not when its tag is pushed: a draft is no release yet.
+  # tools/image-latest.sh moves it, as release.yml's own `image-latest` does
+  # once `manifest` has made `<version>`, so whichever of the two runs
+  # second moves it: a release published before its image jobs passed finds
+  # no `<version>` here, and this fails saying so (RELEASING.md, step 4).
+  # Never a draft or a pre-release (a 1.0.0-rc.N would hand every untagged
+  # pull a release candidate), and never any version but the newest
+  # published release's (`sort -V` over the release list and this tag): a
   # dispatch for an old tag, or two releases published close together and
   # finished out of order, must not move it back. It copies a list ghcr.io
   # holds already -- `imagetools create` from one list writes those bytes
   # under the new tag -- and holds `latest` to that list's digest after.
   # Nothing is built or run, and no secret is read: the job's own token,
   # `packages: write`. On ubuntu-24.04, the Docker release.yml's image jobs
-  # push with. One run at a time.
+  # push with. One run a version at a time, in one group with release.yml's
+  # move of that version: a group's pending job is cancelled by the next one
+  # queued, and an old tag's dispatch must not cancel a newer release's
+  # move. Two versions' runs may meet, and the script leaves `latest` on the
+  # newer.
   image-latest:
     name: image (latest)
     runs-on: ubuntu-24.04
     concurrency:
-      group: image-latest
+      group: image-latest-${{ github.event.inputs.tag || github.event.release.tag_name }}
       cancel-in-progress: false
     permissions:
       contents: read
@@ -606,52 +615,24 @@ jobs:
       IMAGE: ghcr.io/${{ github.repository_owner }}/fennec-server
       RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
     steps:
-      - name: Whether this is the newest published release
-        id: go
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EVENT_PRERELEASE: ${{ github.event.release.prerelease }}
-        run: |
-          set -eu
-          version="${RELEASE_TAG#v}"
-          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::notice::$RELEASE_TAG is not a release version: latest names releases only"
-            echo "set=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          state=$(gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --json isDraft,isPrerelease -q '"\(.isDraft) \(.isPrerelease)"')
-          if [ "$EVENT_PRERELEASE" = true ] || [ "$state" != "false false" ]; then
-            echo "::notice::$RELEASE_TAG is a draft or a pre-release: latest names published releases only"
-            echo "set=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          newest=$(gh release list -R "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases -L 1000 \
-            --json tagName -q '.[].tagName' | sed -n 's/^v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' | sort -V | tail -n 1)
-          if [ "$newest" != "$version" ]; then
-            echo "::warning::$version is not the newest published release, $newest: latest is not moved back"
-            echo "latest is left on the newest published release, $newest, not moved to $version" >> "$GITHUB_STEP_SUMMARY"
-            echo "set=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "set=true" >> "$GITHUB_OUTPUT"
+      # This workflow's own commit's, as `homebrew`'s files are: a dispatch
+      # for a tag from before the script has none.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: workflow
+          persist-credentials: false
+          sparse-checkout: tools/image-latest.sh
+          sparse-checkout-cone-mode: false
 
       - name: Log in to ghcr.io
-        if: steps.go.outputs.set == 'true'
         env:
           TOKEN: ${{ github.token }}
         run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
 
-      - name: Move latest to this release's image
-        if: steps.go.outputs.set == 'true'
-        run: |
-          set -eu
-          version="${RELEASE_TAG#v}"
-          digest() { docker buildx imagetools inspect --format '{{json .Manifest}}' "$1" | jq -r .digest; }
-          want=$(digest "$IMAGE:$version")
-          docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:$version"
-          got=$(digest "$IMAGE:latest")
-          if [ "$got" != "$want" ]; then
-            echo "::error::$IMAGE:latest is $got, not $version's list $want"
-            exit 1
-          fi
-          echo "$IMAGE:latest is $version, $got" | tee -a "$GITHUB_STEP_SUMMARY"
+      # The release says what it is: the event carries whether it is a
+      # pre-release, and the script asks the release too.
+      - name: Move latest, where this is the newest published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_PRERELEASE: ${{ github.event.release.prerelease }}
+        run: workflow/tools/image-latest.sh "$IMAGE" "$RELEASE_TAG"

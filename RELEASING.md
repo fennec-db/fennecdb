@@ -90,7 +90,9 @@ nothing reaches a registry before the notes have had a read.
    published, run `irm https://fennecdb.com/install.ps1 | iex` once on a
    Windows machine and the Quickstart's Windows line, as the other
    installs are run once more.
-4. Read the draft, then publish it: `gh release edit vX.Y.Z --draft=false`.
+4. Read the draft, then publish it, once step 3's run has passed
+   `image (manifest)`, the job that makes the image's `X.Y.Z`:
+   `gh release edit vX.Y.Z --draft=false`.
    `packages.yml` builds the three packages again, installs them where a user
    would and uses them (`integrations/packages.sh`), and only then publishes
    `fennecdb` to PyPI, `@fennecdb/web`, `@fennecdb/react`,
@@ -115,9 +117,15 @@ nothing reaches a registry before the notes have had a read.
    pre-release, and for a version older than the tap's formula (the tap is
    never moved back, whichever release is dispatched or published late), and
    one run pushes at a time. The image's `latest` follows the same way
-   (`image-latest`): moved to `X.Y.Z`'s list once the release is published,
-   only where it is the newest published release, never for a draft, a
-   pre-release or an older version.
+   (`image-latest`, `tools/image-latest.sh`): moved to `X.Y.Z`'s list once
+   the release is published, only where it is the newest published release,
+   never for a draft, a pre-release or an older version. Where a release
+   was published before `image (manifest)` made `X.Y.Z` -- its image jobs
+   failed -- `packages.yml`'s `image (latest)` fails, saying `X.Y.Z` is not
+   on ghcr.io yet: run `release.yml` again for the tag once the image is
+   fixed (`gh workflow run release.yml -f tag=vX.Y.Z`, or re-run its failed
+   jobs), and its own `image (latest)` moves `latest` once `manifest` has
+   made the list. Of the two, the one that runs second moves it.
    The `.deb` and `.rpm` need no step of their own: step 3 built them, and
    publishing the draft is what makes them downloadable.
 5. Once the release is published and `packages.yml`'s run is done, attach the
