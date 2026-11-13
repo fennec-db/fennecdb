@@ -1362,8 +1362,8 @@ binary or an image whose `--version` says it.
   another node: the router never takes one back or follows over it, and
   its node is no place for that tenant's replica (Tenants without a
   replica, Files left on nodes). In a region of three nodes, two failed
-  over in turn, a tenant is left without a copy -- and stays on its
-  primary if that dies -- until an operator removes the files `POST
+  over in turn, a tenant is left without a copy -- its primary lost, it
+  stays there writing nothing -- until an operator removes the files `POST
   /_shard/replicas` lists under `left` (`DELETE /_admin/tenants/<t>` on the
   node, where the directory places neither the tenant nor its replica) and
   asks for a repair again. `make chaos` does that as an operator would.
