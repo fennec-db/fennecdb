@@ -104,7 +104,8 @@ dated "measured at" note. The YCSB runs migrated from the old wide file took
 their commit from the first commit that held the line, which is where the
 results were committed, not necessarily the build measured. A figure no
 recorded run backs is a `hand` run on the machine `hand-measured`, its
-commit the one that first wrote the figure into a page; the release
+commit and date those of when the figure was first published, not of a
+build that measured it; the release
 candidates' nights replace those rows with measured runs.
 `tools/bench_record.py` appends a run's values in the schema. Docker's VM syncs a
 write in 0.08-0.10 ms where the Mac's `F_FULLFSYNC` takes 3.9

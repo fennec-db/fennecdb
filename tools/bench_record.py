@@ -39,9 +39,11 @@ def main():
     ap.add_argument("--run", required=True, help="a run id, new for each measurement")
     ap.add_argument("--cell", required=True, help="what was measured, colon-separated parts")
     ap.add_argument("--machine", default=os.environ.get("FENNEC_BENCH_MACHINE") or socket.gethostname().split(".")[0])
-    ap.add_argument("--date", default=datetime.date.today().isoformat())
+    ap.add_argument("--date", default=datetime.datetime.now(datetime.timezone.utc).date().isoformat())
     ap.add_argument("values", nargs="+", metavar="metric=value")
     args = ap.parse_args()
+    if not args.machine.strip():
+        sys.exit("no machine name: set FENNEC_BENCH_MACHINE or pass --machine")
     if args.family in ("superseded",) or "/" in args.family:
         sys.exit("a family is a file's name under results/, not superseded or a path")
     rows = []
