@@ -52,7 +52,8 @@ jobs:
           persist-credentials: false
 
       # rust-toolchain.toml also asks for wasm32, which this job does not need
-      # but which costs one small download; the channel pin is worth keeping.
+      # but which costs one small download; the release it pins is the one CI
+      # tested and the image builds with (tools/toolchain_check.py).
       - name: Install the pinned toolchain
         run: |
           rustup show

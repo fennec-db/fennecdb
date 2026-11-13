@@ -51,6 +51,15 @@ jobs:
       - name: Only fennec-tls and fennec-bench take dependencies from outside the workspace
         run: python3 tools/deps_check.py
 
+      # The compiler CI tests with is the one that ships: rust-toolchain.toml
+      # names an exact release, and every Dockerfile's rust image is that
+      # release, by digest, the toolchain file kept in the build; the images
+      # that ship or run the regions' checks name a digest in every FROM.
+      - name: rust-toolchain.toml names an exact release, and every image builds with it
+        run: |
+          python3 tools/test_toolchain_check.py
+          python3 tools/toolchain_check.py
+
       # docs/design/benchmarks.md#instruction-counts: the measuring is
       # macOS's and runs by hand (make instr-compare); a copy's UUID, the
       # refusals keeping a build's output untouched, the figures and a
@@ -70,8 +79,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # rust-toolchain.toml follows stable, so a new release can bring a new
-      # lint; this job is where that shows, rather than in someone's editor.
+      # rust-toolchain.toml names an exact release: a new one, and the lints
+      # it brings, comes in a pull request of its own, and shows here first.
       - name: Install the pinned toolchain
         run: |
           rustup show
@@ -152,8 +161,9 @@ jobs:
         if: matrix.os == 'macos-latest'
         run: sh site/test_install.sh
 
-      # rust-toolchain.toml pins stable and asks for wasm32-unknown-unknown;
-      # `rustup show` is what installs both before the first cargo call.
+      # rust-toolchain.toml pins an exact release and asks for
+      # wasm32-unknown-unknown; `rustup show` is what installs both before
+      # the first cargo call.
       - name: Install the pinned toolchain
         run: rustup show
 
