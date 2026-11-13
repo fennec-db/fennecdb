@@ -1399,6 +1399,72 @@ test('a live query over HTTP follows the writes a scoped token may read, and no 
   }
 });
 
+// A replica's sync tells its tokenProvider why a token is wanted: the
+// server said the token's `exp` passed (`token_expired`) -- a fresh token,
+// and the sync goes on -- or refused the token otherwise, a session ended,
+// at which an app signs out. Told alike, an app took an expiry for a
+// session ended and deleted what the replica held.
+test("a replica's tokenProvider is told a token's expiry from its refusal", { skip, concurrency: false }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'fennec-sync-expiry-'));
+  const secret = 'web-tests-jwt-secret-of-32-bytes-or-more';
+  const policy = join(dir, 'policy.txt');
+  await writeFile(policy, 'notes read,write where owner = $jwt.sub\n');
+  const s = await listening(bin, ['--http', '127.0.0.1:0', '--http-token', 'root', '--jwt-secret', secret, '--policy', policy], 'fennec-http');
+  const now = () => Math.floor(Date.now() / 1000);
+  let db;
+  let refused;
+  try {
+    const root = client.connect(s.url, { token: 'root' });
+    await root.run('create collection notes (owner text @hash, title text)');
+    const asked = [];
+    db = await sync({
+      url: s.url,
+      token: await jwt(secret, { sub: 'alice', exp: now() + 3 }),
+      local: await Fennec.open(wasm),
+      leader: false,
+      shapes: [{ collection: 'notes' }],
+      tokenProvider: (expired) => {
+        asked.push(expired);
+        return jwt(secret, { sub: 'alice', exp: now() + 600 });
+      },
+    });
+    await db.ready();
+    // The stream is ended at the token's `exp`: a token is asked for as
+    // expired, and the stream opened again with the fresh one hears the
+    // next write.
+    await until(() => asked.length === 1, "the token asked for at its exp", 15000);
+    await root.run('put notes {owner: "alice", title: "after"}');
+    await until(async () => (await db.from('notes').rows()).some((r) => r.title === 'after'), 'the write after the fresh token');
+    assert.deepEqual(asked, [true]);
+    assert.equal(db.status()[0].code, null);
+
+    // A token no key of the server's signed: refused, never an expiry, past
+    // its `exp` or not.
+    const told = [];
+    refused = await sync({
+      url: s.url,
+      token: await jwt('another-secret-of-32-bytes-or-more!', { sub: 'alice', exp: now() + 600 }),
+      local: await Fennec.open(wasm),
+      leader: false,
+      shapes: [{ collection: 'notes' }],
+      tokenProvider: (expired) => {
+        told.push(expired);
+        throw new FennecError('signed out');
+      },
+      onError: () => {},
+    });
+    await until(() => told.length === 1, 'the token asked for at its refusal');
+    assert.deepEqual(told, [false]);
+    assert.equal(refused.status()[0].code, null);
+    assert.match(refused.status()[0].error, /refused the token/);
+  } finally {
+    db?.close();
+    refused?.close();
+    s.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 // `/batch` and `Idempotency-Key` through the client: the shop's checkout
 // posted them with a `fetch` of its own.
 test('a batch over HTTP lands whole, once a key, and names the statement that stopped it', { skip: bin ? false : 'no fennec-server binary (cargo build)', concurrency: false }, async () => {

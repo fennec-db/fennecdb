@@ -703,11 +703,12 @@ messages   read,insert  where room in (get members select room where user = $jwt
     subscription is checked when it opens, and
     ended at its token's <code>exp</code> with
     <code>event: error</code> and
-    <code>{"error":"the token has expired","status":401}</code>: the
-    client takes it as a refused request, fetches a fresh token and opens
-    the stream again (<code>FennecHttp.live</code>, <code>subscribe</code>,
-    the sync layer, Go's <code>*Error</code> and .NET's
-    <code>Event.Status</code>). Without it a stream outlived its token, and
+    <code>{"error":"the token has expired","status":401,"code":"token_expired"}</code>:
+    the client takes it as a request refused for its token's expiry --
+    whose 401 names the same code, which no other refusal does -- fetches
+    a fresh token and opens the stream again (<code>FennecHttp.live</code>,
+    <code>subscribe</code>, the sync layer, Go's <code>*Error</code> and
+    .NET's <code>Event.Status</code>). Without it a stream outlived its token, and
     a member taken off a team heard the team until the client went away.
     No other request is held open past its token, nor before it: a read,
     a subscription or a <code>/_changes</code> page sent with

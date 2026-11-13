@@ -224,7 +224,7 @@ answers it -- once, whatever the network did meanwhile.</p>
 <tbody>
 <tr><td>2xx</td><td>landed: it leaves the queue, its promise resolves</td></tr>
 <tr><td>nothing (the network failed), <code>408</code>, <code>429</code>, <code>5xx</code></td><td>kept and sent again under its key, after 250 ms doubling to 15 s -- or after the <code>Retry-After</code> the server names, where that is longer: a tenant's quota, a tenant being moved or failed over</td></tr>
-<tr><td><code>401</code></td><td>kept; nothing is sent until a new token (<code>tokenProvider</code>, <code>setToken</code>)</td></tr>
+<tr><td><code>401</code></td><td>kept; nothing is sent until a new token (<code>tokenProvider</code>, <code>setToken</code>). The provider is told <code>expired</code>: <code>true</code> where the server said the token's <code>exp</code> passed (<code>"code":"token_expired"</code>) -- hand it a fresh one and the sync goes on -- <code>false</code> where it refused the token otherwise, a session ended or revoked: sign out</td></tr>
 <tr><td><code>507</code> naming a tenant's quota of <code>bytes</code> or <code>rows</code></td><td>refused: put back, its promise rejects, <code>onRefused</code> is told with <code>e.quota</code>, and the writes behind it go on</td></tr>
 <tr><td>any other <code>4xx</code></td><td>refused: put back, its promise rejects, <code>onRefused</code> is told -- with <code>e.reason</code> where it is a <code>412</code> and the write's <code>require</code> said why</td></tr>
 </tbody>
@@ -237,11 +237,26 @@ const db = await sync({
   url: 'https://api.example.com',
   shapes: [{ collection: 'tasks', key: 'key' }],
   persist: 'tasks',                                // writes survive a reload
-  tokenProvider: () => auth.refresh(),             // asked on a 401
+  tokenProvider: async (expired) => {              // asked on a 401
+    if (expired) return auth.refresh();            // its exp passed: a fresh one, and on
+    await auth.signOut();                          // refused otherwise: the session ended
+    throw new Error('signed out');                 // hand over none: nothing is sent
+  },
   onRefused: (e) => toast(e.quota ? 'This workspace is full' : e.reason ?? `${e.status}: ${e.message}`),
 });
 await db.pushed();                                 // every write answered
 </pre>
+
+<p><b>An expired token or a session ended.</b> The server answers a token
+past its <code>exp</code> 401 with <code>"code":"token_expired"</code>, and
+ends a stream at it with the same (<a href="/docs/auth#expiry">Expiry</a>);
+every other 401 names no code. So the provider is told which:
+<code>expired</code>, refresh the token and the replica goes on where it
+stopped, its queue sent under the keys it kept; otherwise sign out --
+the session ended or was revoked, which a refreshed token does not undo.
+While it waits, <code>status()</code> says the
+<code>error</code> and its <code>code</code>, <code>'token_expired'</code>
+or <code>null</code>.</p>
 
 <p><b>A <code>require</code>'s reason.</b> A write given
 <code>{ require: 1, reason: 'the task was taken' }</code> sends its <code>else

@@ -127,8 +127,14 @@ int32_t fennec_warm(uint64_t handle, const uint8_t *only, size_t only_len, char 
  *   {"do":"request","id":N,"method":..,"url":..,"headers":{..},"body":..|null}
  *   {"do":"stream","id":N,"url":..,"headers":{..}}   an SSE body, fed as it comes
  *   {"do":"cancel","id":N}     {"do":"wait","id":N,"ms":M}     {"do":"token"}
+ *   {"do":"token","code":"token_expired"}
  *   {"do":"changed"}           {"do":"status"}
- *   {"do":"refused","status":S,"message":..,"query":..}
+ *   {"do":"refused","status":S,"message":..,"query":..,"quota":..,"reason":..}
+ * A token action is a 401: nothing is sent until a token is signalled.
+ * With "code":"token_expired" the server said the token's exp passed, and
+ * a fresh token cures it; without, the server refused the token otherwise
+ * -- a session ended or revoked -- and an app signs out. A binding reading
+ * only "do" asks for a token at both, as before the code was told.
  * Once started, a write through fennec_query to a synced collection is
  * applied at once and queued for the server in the same block.
  */
@@ -149,7 +155,11 @@ int32_t fennec_sync_feed(uint64_t handle, uint32_t kind, uint64_t id, int32_t st
                         uint64_t seq, const uint8_t *bytes, size_t len,
                         char **out, size_t *out_len);
 
-/* {"state":"online"|"offline"|"catching_up","pending":N,"error":..,"shapes":[..]}. */
+/*
+ * {"state":"online"|"offline"|"catching_up","pending":N,"error":..,"shapes":[..]},
+ * the error null or {"message":..,"status":S,"quota":..|null,"code":..|null},
+ * its code "token_expired" while a token is wanted for that.
+ */
 int32_t fennec_sync_status(uint64_t handle, char **out, size_t *out_len);
 
 /* Frees text a call wrote through `out`. */

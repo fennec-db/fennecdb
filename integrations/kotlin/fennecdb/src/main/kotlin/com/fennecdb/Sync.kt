@@ -63,9 +63,16 @@ data class SyncStatus(
     /**
      * An error, and its HTTP status (0: the network, or the replica). [quota] is the tenant's quota the
      * server named, null for none: a stream refused by the quota of `streams` leaves the replica OFFLINE
-     * as the network does, and this tells the two apart.
+     * as the network does, and this tells the two apart. [code] is the code the server named, null for
+     * none: "token_expired" while the sync waits for a token because its `exp` passed, which a fresh
+     * token cures; a 401 naming none is a token, or a session, the server no longer takes.
      */
-    data class Failure @JvmOverloads constructor(val message: String, val status: Int, val quota: String? = null)
+    data class Failure @JvmOverloads constructor(
+        val message: String,
+        val status: Int,
+        val quota: String? = null,
+        val code: String? = null,
+    )
 
     data class ShapeState(val collection: String, val cursor: Long, val seeded: Boolean, val connected: Boolean)
 
@@ -82,7 +89,9 @@ data class SyncStatus(
                 else -> State.CATCHING_UP
             },
             v.int("pending") ?: 0,
-            v.row("error")?.let { Failure(it.string("message") ?: "", it.int("status") ?: 0, it.string("quota")) },
+            v.row("error")?.let {
+                Failure(it.string("message") ?: "", it.int("status") ?: 0, it.string("quota"), it.string("code"))
+            },
             (v.list("shapes") ?: emptyList()).map {
                 val s = it as Row
                 ShapeState(s.string("collection") ?: "", s.long("cursor") ?: 0, s.bool("seeded") == true, s.bool("connected") == true)
@@ -125,7 +134,11 @@ data class Refusal @JvmOverloads constructor(
  * The requests and the change stream are `HttpURLConnection`'s, the JDK's
  * and Android's own, with the system's TLS: Android refuses cleartext HTTP
  * by default, and a server is reached through TLS in front of it.
- * [tokenProvider] is asked for a fresh token when the server answers 401.
+ * [tokenProvider] is asked for a token when the server answers 401, told
+ * whether the token's `exp` passed (`expired`: refresh it, and the sync
+ * goes on) or the server refused it otherwise -- a session ended or
+ * revoked, where an app signs out and throws rather than hand over the
+ * same token again.
  */
 suspend fun Fennec.Companion.sync(
     url: String,
@@ -133,7 +146,7 @@ suspend fun Fennec.Companion.sync(
     shapes: List<Shape>,
     path: String,
     flags: Int = 0,
-    tokenProvider: (suspend () -> String)? = null,
+    tokenProvider: (suspend (expired: Boolean) -> String)? = null,
 ): Fennec = withContext(Dispatchers.IO) {
     val db = Fennec.open(path, flags)
     try {
@@ -168,7 +181,7 @@ class Replica internal constructor(
     private val db: Fennec,
     url: String,
     @Volatile private var token: String?,
-    private val provider: (suspend () -> String)?,
+    private val provider: (suspend (expired: Boolean) -> String)?,
 ) {
     private val url = url.trimEnd('/')
     private val handle = db.handle
@@ -274,9 +287,12 @@ class Replica internal constructor(
                 "stream" -> stream(id, r)
                 "cancel" -> connections.remove(id)?.let { c -> Thread { c.disconnect() }.start() }
                 "wait" -> queue.schedule({ feed(KIND_TIMER, id) }, r.long("ms") ?: 0, TimeUnit.MILLISECONDS)
+                // `code` names the token's expiry ("token_expired"); a 401
+                // naming none is a token the server no longer takes.
                 "token" -> provider?.let { p ->
+                    val expired = r.string("code") == "token_expired"
                     Thread {
-                        runCatching { kotlinx.coroutines.runBlocking { p() } }.getOrNull()?.let { setToken(it) }
+                        runCatching { kotlinx.coroutines.runBlocking { p(expired) } }.getOrNull()?.let { setToken(it) }
                     }.start()
                 }
                 "changed" -> db.lives.touch()

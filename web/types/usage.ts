@@ -400,11 +400,29 @@ export async function remote() {
 
   const replica = await sync<Schema>({ url: 'http://127.0.0.1:8080', shapes: [{ collection: 'articles' }] });
   await replica.from('articles').where('year', 2024).rows();
+  // Told whether the token expired: refreshed then, signed out otherwise; a
+  // provider asking nothing, as before, still takes.
+  const signOut = async () => {};
+  await sync<Schema>({
+    url: 'http://127.0.0.1:8080',
+    shapes: [{ collection: 'articles' }],
+    tokenProvider: async (expired) => {
+      if (expired) return 'fresh';
+      await signOut();
+      throw new Error('signed out');
+    },
+  });
+  await sync<Schema>({ url: 'http://127.0.0.1:8080', shapes: [{ collection: 'articles' }], tokenProvider: () => 'fresh' });
+  // @ts-expect-error -- a provider is told a boolean, never a token's text
+  void sync<Schema>({ url: 'http://127.0.0.1:8080', shapes: [{ collection: 'articles' }], tokenProvider: (t: string) => t });
+  const code: string | null = replica.status()[0].code;
+  expect<string | null>(code);
 
   try {
     await http.rows('get nothing');
   } catch (e) {
     if (e instanceof FennecError) expect<string>(e.message);
+    if (e instanceof FennecError && e.status === 401 && e.code === 'token_expired') expect<string>(e.code);
   }
 
   // Live queries over the server: a builder query knows what it reads, a

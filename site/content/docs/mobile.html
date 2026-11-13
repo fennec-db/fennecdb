@@ -416,7 +416,7 @@ static and instance member of one name.</p>
 <tr><td>status</td><td><code>replica.status</code>, <code>statuses()</code> (an <code>AsyncStream</code>)</td><td><code>replica.status</code> (a <code>StateFlow</code>)</td><td><code>replica.status</code>, <code>statuses</code> (a <code>Stream</code>)</td></tr>
 <tr><td>first seed, writes answered</td><td colspan="3"><code>ready()</code>, <code>pushed()</code></td></tr>
 <tr><td>refused writes</td><td><code>refusals()</code></td><td><code>refusals</code> (a <code>SharedFlow</code>)</td><td><code>refusals</code></td></tr>
-<tr><td>a new token</td><td colspan="3"><code>setToken(jwt)</code>, or a <code>tokenProvider</code> asked on a <code>401</code></td></tr>
+<tr><td>a new token</td><td colspan="3"><code>setToken(jwt)</code>, or a <code>tokenProvider</code> asked on a <code>401</code>, told <code>expired</code></td></tr>
 <tr><td>the network</td><td colspan="3"><code>setOnline(bool)</code>, <code>resume()</code></td></tr>
 <tr><td>the server itself</td><td colspan="3"><code>replica.remote</code> (<a href="#connect">below</a>)</td></tr>
 </tbody>
@@ -427,6 +427,50 @@ static and instance member of one name.</p>
 <code>catchingUp</code> (connecting, seeding, or sending the writes left
 from before), how many writes the server has not answered, and the last
 error.</p>
+
+<p>A <code>401</code> stops the sending until a token is handed over, and
+asks <code>tokenProvider</code> for one, told whether the token expired. The
+server answers a token past its <code>exp</code> with
+<code>"code":"token_expired"</code>, and ends a stream at it with the same
+(<a href="/docs/auth#expiry">Expiry</a>): <code>expired</code> is true, and
+the provider refreshes the token -- the replica goes on where it stopped,
+its waiting writes sent under the keys they kept. Any other
+<code>401</code> is a token the server no longer takes, a session ended or
+revoked: <code>expired</code> is false, and the app signs out -- deleting
+the file if it holds an account's rows -- and throws rather than hand over
+the same token again. The status's error names the <code>code</code> too,
+<code>token_expired</code> or none, for an app that hands its tokens over
+with <code>setToken</code>.</p>
+
+<div class="langs" data-langs>
+
+<div class="lang" data-name="Swift">
+<pre data-lang="swift">let db = try await Fennec.sync(url: url, token: jwt, shapes: shapes, path: path,
+                              tokenProvider: { expired in
+                                  if expired { return try await auth.refresh() }
+                                  try await auth.signOut()       // the session ended
+                                  throw CancellationError()
+                              })</pre>
+</div>
+
+<div class="lang" data-name="Kotlin">
+<pre data-lang="kotlin">val db = Fennec.sync(url = url, token = jwt, shapes = shapes, path = path,
+                    tokenProvider = { expired ->
+                        if (expired) auth.refresh()
+                        else { auth.signOut(); throw CancellationException("signed out") }
+                    })</pre>
+</div>
+
+<div class="lang" data-name="Dart">
+<pre data-lang="dart">final db = await Fennec.openSynced(url: url, token: jwt, shapes: shapes, path: path,
+    tokenProvider: (expired) async {
+      if (expired) return auth.refresh();
+      await auth.signOut();                     // the session ended
+      throw StateError('signed out');
+    });</pre>
+</div>
+
+</div>
 
 <details class="deep"><summary>How the sync core and the bindings divide the work</summary>
 <p>What to ask, what an answer means and what is written are one state
@@ -446,7 +490,8 @@ not made again. A server's answer of <code>0</code> (no answer),
 backoff, 250 ms doubling to 15 s, or after the wait a tenant's quota (to
 the millisecond, <code>retry_after_ms</code>), a move or a failover
 (<code>retry_after</code>) names where that is longer; a
-<code>401</code> asks for a token; a <code>507</code> naming a tenant's
+<code>401</code> asks for a token, the action naming
+<code>"code":"token_expired"</code> where the server did; a <code>507</code> naming a tenant's
 quota, and any other <code>4xx</code>, is a refusal, and the writes behind
 it go on
 (<a href="sync.html#refusals-retries-and-offline">why</a>). The status's

@@ -288,6 +288,9 @@ struct Run {
     opened: Vec<Value>,
     refused: Vec<Value>,
     token_asked: bool,
+    /// Whether the token was asked for as expired: the action naming the
+    /// server's `token_expired`.
+    token_expired: bool,
     waits: Vec<Value>,
     error: Option<String>,
     /// The reason the error said, a `require <n> else '<reason>'`'s.
@@ -402,7 +405,10 @@ impl Run {
                     member(a, "reason").cloned().unwrap_or(Value::Null),
                 ),
             ])),
-            "token" => self.token_asked = true,
+            "token" => {
+                self.token_asked = true;
+                self.token_expired = text(member(a, "code")) == fennec_abi::sync::TOKEN_EXPIRED;
+            }
             "changed" | "status" => {}
             other => panic!("an action of no kind: {other}"),
         }
@@ -443,6 +449,7 @@ impl Run {
         self.refused.clear();
         self.waits.clear();
         self.token_asked = false;
+        self.token_expired = false;
         self.error = None;
         self.reason = None;
         let shape_collection = |run: &Run| -> String {
@@ -480,7 +487,7 @@ impl Run {
             "error" => {
                 let c = shape_collection(self);
                 let mut data = Vec::new();
-                for k in ["error", "status"] {
+                for k in ["error", "status", "code"] {
                     if let Some(v) = member(step, k) {
                         data.push((k, v.clone()));
                     }
@@ -625,6 +632,17 @@ impl Run {
         if let Some(e) = member(expect, "token_asked") {
             matches(e, &Value::Bool(self.token_asked), binds, "token_asked")?;
         }
+        if let Some(e) = member(expect, "token_expired") {
+            matches(e, &Value::Bool(self.token_expired), binds, "token_expired")?;
+        }
+        if let Some(e) = member(expect, "code") {
+            let st = json::parse_json(&self.sync.as_ref().ok_or("no sync")?.status()).unwrap();
+            let c = member(&st, "error")
+                .and_then(|e| member(e, "code"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            matches(e, &c, binds, "code")?;
+        }
         if let Some(Value::List(e)) = member(expect, "waits") {
             if e.len() != self.waits.len() {
                 return Err(format!(
@@ -707,6 +725,7 @@ fn run(file: &Value, sc: &Value) -> Check {
         opened: vec![],
         refused: vec![],
         token_asked: false,
+        token_expired: false,
         waits: vec![],
         error: None,
         reason: None,

@@ -546,6 +546,14 @@ export declare class FennecError extends Error {
    * token's rules.
    */
   status?: number;
+  /**
+   * What a program tells the refusal by, where the server named a code
+   * beside its words: `token_expired` on a 401 for a token past its `exp`
+   * -- a request's, or the event ending a stream (`live`, `subscribe`) at
+   * it -- which a fresh token cures. A 401 naming no code is a token, or a
+   * session, the server no longer takes: sign out.
+   */
+  code?: 'token_expired' | (string & {});
   /** A write the server refused: the text of its first statement. */
   query?: string;
   /**
@@ -1809,8 +1817,15 @@ export interface SyncOptions<S extends AnySchema<S> = Schema> {
   /** Where the local module's collation data comes from (`Fennec.open`). */
   collation?: CollationSource;
   token?: string;
-  /** Asked for a new token when the server answers 401; until then nothing is sent. */
-  tokenProvider?: () => string | Promise<string>;
+  /**
+   * Asked for a new token when the server answers 401; until one is handed
+   * over nothing is sent. `expired` is true where the server said the
+   * token's `exp` passed (`token_expired`): refresh it, and the sync goes
+   * on. False where it refused the token otherwise -- a session ended or
+   * revoked, a key it no longer takes -- where an app signs out and throws
+   * (told to `onError`) rather than hand over the same token again.
+   */
+  tokenProvider?: (expired: boolean) => string | Promise<string>;
   fetch?: typeof globalThis.fetch;
   /**
    * IndexedDB key: the replica is stored there with its cursors and the
@@ -1850,6 +1865,12 @@ export interface ShapeStatus {
    * `streams` is not `connected`, as one the network dropped is not.
    */
   quota: NonNullable<FennecError['quota']> | null;
+  /**
+   * The code the error names: `token_expired` while the sync waits for a
+   * token because the server said its `exp` passed, null for a token
+   * refused otherwise, and for every other error.
+   */
+  code: NonNullable<FennecError['code']> | null;
   leader: boolean;
 }
 
@@ -1874,7 +1895,10 @@ export declare class FennecSync<S extends AnySchema<S> = Schema, Rel extends Rel
   /** Resolves once the server has answered every write made so far. */
   pushed(): Promise<void>;
   status(): ShapeStatus[];
-  /** A new token: requests carry it from here on, and what a 401 stopped goes on. */
+  /**
+   * A new token: requests carry it from here on, and what a 401 stopped
+   * goes on. An empty one is none.
+   */
   setToken(token: string): void;
   /**
    * The network gone (`false`: the streams end, writes wait) or back

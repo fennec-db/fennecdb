@@ -70,10 +70,21 @@ final db = await Fennec.openSynced(
   url: 'https://api.example.com', token: jwt,
   shapes: [Shape('todos', where: {'owner': me}, key: 'key')],
   path: '${dir.path}/todos.fennec',
-  tokenProvider: refreshToken,
+  // The token's exp passed: a fresh one, and the sync goes on. Refused
+  // otherwise: the session ended.
+  tokenProvider: (expired) async {
+    if (expired) return refreshToken();
+    await signOut();
+    throw StateError('signed out');
+  },
 );
 await db.replica!.ready();
 ```
+
+A `401` asks `tokenProvider` for a token, told whether the server said the
+token's `exp` passed (its code `token_expired`) or refused it otherwise --
+a session ended or revoked, where an app signs out rather than hand over
+the same token again; `replica.status`'s error names the `code` too.
 
 The same `Fennec`: reads and live queries are the file's, a write to a
 shape's collection shows at once and is sent -- queued in the file while

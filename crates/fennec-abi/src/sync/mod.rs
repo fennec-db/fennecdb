@@ -26,7 +26,11 @@
 //!   bytes fed as they come
 //! - `{"do":"cancel","id":N}`: the stream ends
 //! - `{"do":"wait","id":N,"ms":M}`: a timer
-//! - `{"do":"token"}`: the server said 401, a fresh token is wanted
+//! - `{"do":"token"}`: the server said 401, a fresh token is wanted;
+//!   `{"do":"token","code":"token_expired"}` where it said the token's
+//!   `exp` passed ([`TOKEN_EXPIRED`]): a fresh token cures that, where a
+//!   401 naming no code is a token, or a session, the server no longer
+//!   takes -- an app refreshes at the one and signs out at the other
 //! - `{"do":"changed"}`: the replica changed, live queries look again
 //! - `{"do":"refused","status":S,"message":..,"query":..,"quota":..,"reason":..}`:
 //!   the server refused a write, which was put back; `quota` is there where
@@ -60,6 +64,14 @@ use std::collections::HashSet;
 /// Where the temporary ids of optimistic rows start: far from a server's,
 /// as `web/fennec.js` has it.
 pub const TEMP_BASE: i64 = 1 << 52;
+
+/// The code fennec-server tells a token past its `exp` by, on a request's
+/// 401 and on the `error` event that ends a stream at the `exp`
+/// (fennec-http's `access::EXPIRED_CODE`): the one refusal of a token a
+/// fresh token cures. Told apart, an app refreshes at it and signs out at a
+/// 401 naming no code; told alike, a replica took an expiry for a session
+/// ended and deleted its file.
+pub const TOKEN_EXPIRED: &str = "token_expired";
 
 /// Backoff: from this, doubling, up to [`BACKOFF_MAX_MS`], with 30% jitter
 /// so a server back up is not met by every client at once.
@@ -170,6 +182,9 @@ struct Fault {
     /// app tells "the server holds this tenant to its share" from "the
     /// network is gone" in a status that reads `offline` for both.
     quota: Option<String>,
+    /// The code the server named, where it named one: [`TOKEN_EXPIRED`],
+    /// which the status tells an app as the token action does.
+    code: Option<&'static str>,
 }
 
 /// What an answer says beyond its words, read from the body fennec-server
@@ -187,6 +202,9 @@ struct Said {
     retry_ms: u64,
     /// What a `require <n> else '<reason>'` the server found unmet said.
     reason: Option<String>,
+    /// The code the server tells the refusal by, where it has one
+    /// ([`TOKEN_EXPIRED`]).
+    code: Option<String>,
 }
 
 fn said(body: &str) -> Said {
@@ -218,7 +236,15 @@ fn said(body: &str) -> Said {
         quota,
         retry_ms: (ms as u64).min(RETRY_AFTER_MAX_MS),
         reason: text("reason"),
+        code: text("code"),
     }
+}
+
+/// Whether a 401's body, or the `error` event that ended a stream, names
+/// the token's expiry by its code ([`TOKEN_EXPIRED`]), never by its words:
+/// a 401 naming no code is told as a token refused.
+fn expired(body: &str) -> bool {
+    said(body).code.as_deref() == Some(TOKEN_EXPIRED)
 }
 
 /// A small generator for keys, seeded by the binding from the platform's
@@ -995,18 +1021,29 @@ impl Sync {
             status,
             connection,
             quota,
+            code: None,
         });
         self.once("{\"do\":\"status\"}");
     }
 
-    fn want_token(&mut self) {
+    /// A 401: nothing is sent until a token is handed over, and the binding
+    /// is asked for one -- as for a token whose `exp` passed where the
+    /// server said so ([`expired`]), the action and the status naming
+    /// [`TOKEN_EXPIRED`], and as for a token refused otherwise.
+    fn want_token(&mut self, expired: bool) {
         self.paused = true;
-        self.fault(
-            "the server refused the token (401): a fresh one is wanted",
-            401,
-            true,
-        );
-        self.once("{\"do\":\"token\"}");
+        let message = match expired {
+            true => "the token expired (401): a fresh one is wanted",
+            false => "the server refused the token (401): a fresh one is wanted",
+        };
+        self.fault(message, 401, true);
+        if let Some(f) = self.fault.as_mut() {
+            f.code = expired.then_some(TOKEN_EXPIRED);
+        }
+        self.once(match expired {
+            true => "{\"do\":\"token\",\"code\":\"token_expired\"}",
+            false => "{\"do\":\"token\"}",
+        });
     }
 
     // ------------------------------------------------------------ status
@@ -1029,8 +1066,9 @@ impl Sync {
     }
 
     /// `{"state":"online"|"offline"|"catching_up","pending":N,"error":..,"shapes":[..]}`,
-    /// the error `{"message","status","quota"}`, `quota` null unless a
-    /// tenant's quota was named.
+    /// the error `{"message","status","quota","code"}`, `quota` null unless
+    /// a tenant's quota was named, `code` null unless the server named one
+    /// ([`TOKEN_EXPIRED`]).
     pub fn status(&self) -> String {
         let mut out = format!(
             "{{\"state\":\"{}\",\"pending\":{},\"error\":",
@@ -1045,6 +1083,11 @@ impl Sync {
                 out.push_str(&format!(",\"status\":{},\"quota\":", f.status));
                 match &f.quota {
                     Some(q) => json::escape_into(&mut out, q),
+                    None => out.push_str("null"),
+                }
+                out.push_str(",\"code\":");
+                match f.code {
+                    Some(c) => json::escape_into(&mut out, c),
                     None => out.push_str("null"),
                 }
                 out.push('}');
@@ -1212,7 +1255,7 @@ impl Sync {
     fn on_schemas(&mut self, db: &mut Database, status: u16, body: &str) {
         match status {
             200..=299 => {}
-            401 => return self.want_token(),
+            401 => return self.want_token(expired(body)),
             _ => {
                 let why = message(status, body);
                 let said = said(body);
@@ -1302,7 +1345,7 @@ impl Sync {
                 }
                 self.landed(db, n, seq);
             }
-            401 => self.want_token(),
+            401 => self.want_token(said.code.as_deref() == Some(TOKEN_EXPIRED)),
             // A tenant past its quota of bytes or rows: waiting makes no
             // room, deleting does, and a write that only deletes always
             // lands. Held, this write would hold every write behind it --
@@ -1647,7 +1690,7 @@ impl Sync {
             }
             401 => {
                 self.drop_stream(i, false);
-                self.want_token();
+                self.want_token(expired(body));
             }
             // A 429 of the tenant's `streams` quota among them: the shape is
             // not live, so the status reads `offline` as it does for the
@@ -1685,13 +1728,14 @@ impl Sync {
             if self.shapes[i].stream != Some(id) {
                 break;
             }
-            // The server ends a stream at its token's `exp` with a 401: the
-            // token is refused as a request's would be, so a fresh one is
-            // wanted before the stream opens again -- retried with the same
-            // token, it was refused at every attempt.
+            // The server ends a stream at its token's `exp` with a 401 and
+            // `token_expired`: the token is refused as a request's would
+            // be, so a fresh one is wanted before the stream opens again --
+            // retried with the same token, it was refused at every attempt.
+            // A 401 naming no code is a token refused, as a request's is.
             if ev.name == "error" && stream_status(&ev.data) == Some(401) {
                 self.drop_stream(i, true);
-                self.want_token();
+                self.want_token(expired(&ev.data));
                 return;
             }
             let r = match ev.name.as_str() {
@@ -2693,6 +2737,31 @@ mod tests {
         ] {
             let s = said(body);
             assert_eq!((s.quota, s.retry_ms), (None, 0), "{body}");
+        }
+    }
+
+    /// An expiry is told by the server's code, on a request's 401 and on
+    /// the event ending a stream; its words alone, or any other code, are a
+    /// token refused -- an app signs out at that.
+    #[test]
+    fn an_expiry_is_told_by_its_code_alone() {
+        for body in [
+            r#"{"error":"the token has expired","code":"token_expired"}"#,
+            r#"{"error":"the token has expired","status":401,"code":"token_expired"}"#,
+            r#"{"code":"token_expired"}"#,
+        ] {
+            assert!(expired(body), "{body}");
+        }
+        for body in [
+            r#"{"error":"the token has expired","status":401}"#,
+            r#"{"error":"invalid or missing token"}"#,
+            r#"{"error":"x","code":"token_revoked"}"#,
+            r#"{"code":7}"#,
+            r#"{"code":""}"#,
+            "token_expired",
+            "",
+        ] {
+            assert!(!expired(body), "{body}");
         }
     }
 }

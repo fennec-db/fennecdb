@@ -4663,6 +4663,10 @@
      "error": {
       "type": "string"
      },
+     "code": {
+      "type": "string",
+      "description": "What a program tells the refusal by, where it has one: token_expired, a token past its exp (401), which a fresh token cures; a 401 naming none is a token no longer good."
+     },
      "retry_after": {
       "type": "integer",
       "description": "Seconds to wait, as Retry-After says."
@@ -5401,7 +5405,7 @@
     }
    },
    "Unauthorized": {
-    "description": "No token, or a wrong one.",
+    "description": "No token, or a wrong one; code token_expired where the token's exp passed, which a fresh token cures.",
     "headers": {
      "WWW-Authenticate": {
       "schema": {

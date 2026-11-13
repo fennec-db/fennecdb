@@ -98,7 +98,10 @@ to rows the token may read, and of no other (<a href="/docs/http-reference#subsc
 A token refused, or lapsed under an open stream -- the server ends a stream
 at its token's <code>exp</code> -- is a <code>FennecError</code> of status
 401 to <code>onError</code>, and the live query stops there, for the app to
-open it again with a fresh token.</p>
+open it again with a fresh token: its <code>code</code> is
+<code>'token_expired'</code> where the token's <code>exp</code> passed, and
+missing where the token was refused otherwise, at which an app signs out
+(<a href="/docs/auth#expiry">Expiry</a>).</p>
 </details>
 
 <p>Each way in the table has a full example in the repository, the same Notes app:

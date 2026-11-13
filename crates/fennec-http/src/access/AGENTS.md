@@ -1,6 +1,6 @@
 # AGENTS.md
 
-fennec-http's access -- scoped tokens and their rules, field lists, the server's own collections, tenant binding and whom a token is for -- for code in `crates/fennec-http/src/access.rs` and `crates/fennec-http/src/access/`, which binds fennec-core's hooks (`plugin::Hook`, `Check`), its `Filter` -- the order it tests an `and`'s terms in -- and its own collections' names (`declared::OWN`) too; the rest of fennec-http's rules are in [its AGENTS.md](../../AGENTS.md), the rules every change meets in the root's [AGENTS.md](../../../../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
+fennec-http's access -- scoped tokens and their rules, field lists, the server's own collections, tenant binding, whom a token is for and its expiry -- for code in `crates/fennec-http/src/access.rs` and `crates/fennec-http/src/access/`, which binds fennec-core's hooks (`plugin::Hook`, `Check`), its `Filter` -- the order it tests an `and`'s terms in -- and its own collections' names (`declared::OWN`) too, and how a replica's sync reads a 401 (`fennec_abi::sync`, `web/fennec.js`); the rest of fennec-http's rules are in [its AGENTS.md](../../AGENTS.md), the rules every change meets in the root's [AGENTS.md](../../../../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
 
 ## Invariants
 
@@ -98,6 +98,18 @@ the start under `--jwt-keys`); a `--jwt-*` flag without keys is refused. A polic
 where not a word (`claim_name`): a path into a nested object, or an
 unquoted name running into `-` or `:`, is refused at startup, never read; a
 role is the word after the last `for` or a quoted name (`role_of`).
+
+**[A token past its `exp` is told so by a code, and no other refusal
+is.](../../../../docs/design/access.md#expired-tokens)** A request whose
+token's `exp` passed is answered 401 `{"error":"the token has
+expired","code":"token_expired"}` (`refusal_code`, in `authenticate`), and
+a stream ended at the `exp` says the same (`sse::EXPIRED`); the `exp` is
+asked after the signature and whom the token is for (`Access::verify`), so
+the code is told only of a token this server took until then. A replica
+refreshes its token at `token_expired` and signs out at any other 401, so
+a refusal a fresh token does not cure never carries it, and a client reads
+the code alone, never the words (`fennec_abi::sync::TOKEN_EXPIRED`,
+`web/fennec.js`'s, held by the scenario file).
 
 **[An empty token is no token.](../../../../docs/design/access.md#empty-tokens)**
 A variable set empty is unset (`env_secret`, fennec-shard's `env`); a token

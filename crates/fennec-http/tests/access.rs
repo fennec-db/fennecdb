@@ -1513,7 +1513,8 @@ fn an_update_grant_names_the_fields_it_may_change() {
 /// A subscription outlived its token: a stream opened with a token whose
 /// `exp` was two seconds away still delivered a change written four seconds
 /// later, while the same token's `get` was 401. It is ended at the `exp`
-/// now, with an `error` event a client takes as a refusal (401).
+/// now, with an `error` event a client takes as a refusal (401) for its
+/// token's expiry (`token_expired`), as it does the token's next request.
 #[test]
 fn a_subscription_ends_when_its_token_expires() {
     let n = start();
@@ -1548,7 +1549,7 @@ fn a_subscription_ends_when_its_token_expires() {
     assert!(
         heard.contains(
             r#"event: error
-data: {"error":"the token has expired","status":401}"#
+data: {"error":"the token has expired","status":401,"code":"token_expired"}"#
         ),
         "{heard}"
     );
@@ -1578,7 +1579,64 @@ data: {"error":"the token has expired","status":401}"#
     assert!(closed, "the stream stayed open: {heard}");
     assert!(!heard[ended..].contains("after"), "{heard}");
     // And the token's own request is refused, as the stream was ended.
-    assert_eq!(n.call(Some(&alice), "GET", "/notes", "").0, 401);
+    assert_eq!(
+        n.call(Some(&alice), "GET", "/notes", ""),
+        (
+            401,
+            r#"{"error":"the token has expired","code":"token_expired"}"#.into()
+        )
+    );
+}
+
+/// A replica told an expired token and a session ended alike took the one
+/// for the other, and deleted its file where a fresh token would have done.
+/// A token this server took until its `exp` is refused past it with
+/// `token_expired`, on a request and on a stream's open; every other
+/// refusal -- a key that signed nothing here, a token not valid yet, a
+/// malformed one, an empty one, none -- names no code, past an `exp` or
+/// not.
+#[test]
+fn an_expired_token_is_told_by_its_code_and_no_other_refusal_is() {
+    let n = start();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let expired = n.token(&format!(r#"{{"sub":"alice","exp":{}}}"#, now - 5));
+    let said = r#"{"error":"the token has expired","code":"token_expired"}"#;
+    for (method, target, body) in [
+        ("GET", "/notes", ""),
+        ("POST", "/query", r#"{"query":"get notes"}"#),
+        ("GET", "/notes/changes", ""),
+        ("GET", "/_whoami", ""),
+    ] {
+        let (status, answer) = n.call(Some(&expired), method, target, body);
+        assert_eq!((status, answer.as_str()), (401, said), "{method} {target}");
+    }
+
+    let foreign = Access::new(&[7u8; 32], POLICY).unwrap();
+    let forged = |exp: u64| {
+        foreign
+            .mint(&format!(r#"{{"sub":"alice","exp":{exp}}}"#))
+            .unwrap()
+    };
+    let early = n.token(&format!(
+        r#"{{"sub":"alice","nbf":{},"exp":{}}}"#,
+        now + 600,
+        now + 900
+    ));
+    for token in [
+        Some(forged(now - 5)),
+        Some(forged(now + 600)),
+        Some(early),
+        Some("not.a.token".into()),
+        Some(String::new()),
+        None,
+    ] {
+        let (status, answer) = n.call(token.as_deref(), "GET", "/notes/changes", "");
+        assert_eq!(status, 401, "{token:?}: {answer}");
+        assert!(!answer.contains("code"), "{token:?}: {answer}");
+    }
 }
 
 /// `FennecHttp.live` opens a stream of a shape that holds nothing

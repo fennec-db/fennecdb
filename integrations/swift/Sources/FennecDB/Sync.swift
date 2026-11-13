@@ -47,6 +47,11 @@ public struct SyncStatus: Sendable, Equatable {
         /// refused by the quota of `streams` leaves the replica `offline`
         /// as the network does, and this tells the two apart.
         public let quota: String?
+        /// The code the server named, nil for none: "token_expired" while
+        /// the sync waits for a token because its `exp` passed, which a
+        /// fresh token cures; a 401 naming none is a token, or a session,
+        /// the server no longer takes.
+        public let code: String?
     }
 
     public struct ShapeState: Sendable, Equatable {
@@ -80,7 +85,9 @@ public struct SyncStatus: Sendable, Equatable {
         state = State(rawValue: v["state"]?.string ?? "") ?? .catchingUp
         pending = v["pending"]?.int ?? 0
         error = v["error"]?.object.map {
-            Failure(message: $0["message"]?.string ?? "", status: $0["status"]?.int ?? 0, quota: $0["quota"]?.string)
+            Failure(
+                message: $0["message"]?.string ?? "", status: $0["status"]?.int ?? 0, quota: $0["quota"]?.string,
+                code: $0["code"]?.string)
         }
         shapes = (v["shapes"]?.array ?? []).map {
             ShapeState(
@@ -124,11 +131,14 @@ extension Fennec {
     /// The requests and the change stream are made by `URLSession`, with the
     /// system's TLS: iOS's App Transport Security refuses plain `http://`
     /// to anything but a local address, and a server is reached through
-    /// TLS in front of it. `tokenProvider` is asked for a fresh token when
-    /// the server answers 401.
+    /// TLS in front of it. `tokenProvider` is asked for a token when the
+    /// server answers 401, told whether the token's `exp` passed
+    /// (`expired`: refresh it, and the sync goes on) or the server refused
+    /// it otherwise -- a session ended or revoked, where an app signs out
+    /// and throws rather than hand over the same token again.
     public static func sync(
         url: String, token: String? = nil, shapes: [Shape], path: String, options: Options = [],
-        tokenProvider: (@Sendable () async throws -> String)? = nil
+        tokenProvider: (@Sendable (_ expired: Bool) async throws -> String)? = nil
     ) async throws -> Fennec {
         let db = try await open(path: path, options: options)
         do {
@@ -168,7 +178,7 @@ public final class Replica: NSObject, URLSessionDataDelegate, @unchecked Sendabl
     private weak var db: Fennec?
     private let handle: UInt64
     private let url: String
-    private let provider: (@Sendable () async throws -> String)?
+    private let provider: (@Sendable (_ expired: Bool) async throws -> String)?
     private let queue = DispatchQueue(label: "dev.fennecdb.sync")
     private var session: URLSession!
     private let lock = NSLock()
@@ -180,7 +190,7 @@ public final class Replica: NSObject, URLSessionDataDelegate, @unchecked Sendabl
     private var refusalWatchers: [UUID: AsyncStream<Refusal>.Continuation] = [:]
     private var stopped = false
 
-    init(db: Fennec, url: String, token: String?, provider: (@Sendable () async throws -> String)?) {
+    init(db: Fennec, url: String, token: String?, provider: (@Sendable (_ expired: Bool) async throws -> String)?) {
         self.db = db
         self.handle = db.handle
         self.url = url.hasSuffix("/") ? String(url.dropLast()) : url
@@ -371,9 +381,12 @@ public final class Replica: NSObject, URLSessionDataDelegate, @unchecked Sendabl
                 let ms = a["ms"]?.int ?? 0
                 queue.asyncAfter(deadline: .now() + .milliseconds(ms)) { self.feed(UInt32(FENNEC_SYNC_TIMER), id) }
             case "token":
+                // `code` names the token's expiry ("token_expired"); a 401
+                // naming none is a token the server no longer takes.
                 if let provider {
+                    let expired = a["code"]?.string == "token_expired"
                     Task {
-                        if let t = try? await provider() { self.setToken(t) }
+                        if let t = try? await provider(expired) { self.setToken(t) }
                     }
                 }
             case "changed":

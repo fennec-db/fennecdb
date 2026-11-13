@@ -316,6 +316,25 @@ const NO_ISSUER: &str = "the token names no issuer (iss) this server takes";
 const NO_AUDIENCE: &str = "the token names no audience (aud) this server takes";
 const NO_CLIENT: &str = "the token names no client (azp, or client_id) this server takes";
 
+/// What a token past its `exp` is refused with: its words, and beside them
+/// the code a client tells it by (`{"error":..,"code":"token_expired"}`),
+/// the one refusal of a token that a fresh token cures. Every other -- a
+/// signature no key makes, an issuer, audience or client not taken, a token
+/// not valid yet, none at all -- names no code: the token, or the session
+/// behind it, is no good, and a replica that refreshes at the one signs out
+/// at the others. Asked after the signature and whom the token is for
+/// (`Access::verify`), so it is told only of a token this server took
+/// until its `exp`; a stream ended at the `exp` says the same
+/// (`sse::EXPIRED`).
+pub const EXPIRED_WHY: &str = "the token has expired";
+pub const EXPIRED_CODE: &str = "token_expired";
+
+/// The code a refusal of a token is told by beside its words, where it has
+/// one: [`EXPIRED_CODE`] for [`EXPIRED_WHY`], `None` for every other.
+pub fn refusal_code(why: &str) -> Option<&'static str> {
+    (why == EXPIRED_WHY).then_some(EXPIRED_CODE)
+}
+
 impl Demands {
     /// Whether `claims` name an issuer, an audience and a client this
     /// server takes, where it was told any. An empty text names none, as
@@ -1066,7 +1085,7 @@ impl Access {
                 })
         };
         match seconds("exp") {
-            Some(exp) if now as f64 >= exp => return Err("the token has expired"),
+            Some(exp) if now as f64 >= exp => return Err(EXPIRED_WHY),
             Some(exp) if self.demands.max_age.is_some_and(|m| exp > (now + m) as f64) => {
                 return Err("the token's exp is further ahead than this server takes")
             }
@@ -4214,6 +4233,50 @@ mod tests {
         let early = a.mint(r#"{"sub":"alice","nbf":5000}"#).unwrap();
         assert!(a.verify(&early, 1_000).is_err());
         assert!(Access::new(b"short", "").is_err());
+    }
+
+    /// A replica refreshes its token at one refusal and signs out at the
+    /// others, so only a token's expiry is told by a code -- and only of a
+    /// token this server took until its `exp`: one no key signed, or one
+    /// for another audience, is refused for that before its `exp` is read,
+    /// past it or not. A stream ended at the `exp` says the same.
+    #[test]
+    fn only_an_expired_token_is_told_by_its_code() {
+        let a = access("");
+        let good = a.mint(r#"{"sub":"alice","exp":2000}"#).unwrap();
+        assert_eq!(
+            refusal_code(a.verify(&good, 2_000).unwrap_err()),
+            Some(EXPIRED_CODE)
+        );
+        let other = Access::new(&[7u8; 32], "").unwrap();
+        let forged = other.mint(r#"{"sub":"alice","exp":2000}"#).unwrap();
+        let early = a.mint(r#"{"sub":"alice","nbf":5000,"exp":9000}"#).unwrap();
+        for (token, now) in [
+            (forged.as_str(), 3_000),
+            (forged.as_str(), 1_000),
+            (early.as_str(), 1_000),
+            ("not.a.token", 3_000),
+            ("", 3_000),
+        ] {
+            let why = a.verify(token, now).unwrap_err();
+            assert_eq!(refusal_code(why), None, "{why}");
+        }
+        let picky = access("").demanding(Demands {
+            audiences: vec!["notes-api".into()],
+            ..Demands::default()
+        });
+        let foreign = picky
+            .mint(r#"{"sub":"alice","aud":"other","exp":2000}"#)
+            .unwrap();
+        let why = picky.verify(&foreign, 3_000).unwrap_err();
+        assert_eq!((why, refusal_code(why)), (NO_AUDIENCE, None));
+        let Ok(Value::Object(said)) = fennec_core::json::parse_json(crate::sse::EXPIRED) else {
+            panic!("{}", crate::sse::EXPIRED)
+        };
+        let said = |k: &str| said.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        assert_eq!(said("error"), Some(Value::Text(EXPIRED_WHY.into())));
+        assert_eq!(said("code"), Some(Value::Text(EXPIRED_CODE.into())));
+        assert_eq!(said("status"), Some(Value::Int(401)));
     }
 
     /// A token with no `exp` was taken for ever: one that leaked could be

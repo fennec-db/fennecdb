@@ -429,14 +429,18 @@ class Fennec {
   /// member of one name, and [sync] is the fsync. The requests and the
   /// change stream are `dart:io`'s `HttpClient`'s, with the platform's TLS:
   /// iOS and Android refuse cleartext HTTP by default. [tokenProvider] is
-  /// asked for a fresh token when the server answers 401.
+  /// asked for a token when the server answers 401, told whether the
+  /// token's `exp` passed (`expired`: refresh it, and the sync goes on) or
+  /// the server refused it otherwise -- a session ended or revoked, where
+  /// an app signs out and completes with an error rather than hand over
+  /// the same token again.
   static Future<Fennec> openSynced({
     required String url,
     String? token,
     required List<Shape> shapes,
     required String path,
     int flags = 0,
-    Future<String> Function()? tokenProvider,
+    Future<String> Function(bool expired)? tokenProvider,
   }) =>
       _openSynced(url: url, token: token, shapes: shapes, path: path, flags: flags, tokenProvider: tokenProvider);
 

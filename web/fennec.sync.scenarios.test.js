@@ -102,6 +102,7 @@ class Run {
     this.refused = [];
     this.waits = [];
     this.tokenAsked = false;
+    this.tokenExpired = false;
     this.error = null;
     this.reason = null;
   }
@@ -185,8 +186,10 @@ class Run {
         persist: 'scenario',
         shapes: structuredClone(this.shapes),
         fetch: this.fetch,
-        tokenProvider: () => {
+        // Told whether the server said the token's `exp` passed.
+        tokenProvider: (expired) => {
           this.tokenAsked = true;
+          this.tokenExpired = expired === true;
           return new Promise(() => {});
         },
         onRefused: (e) => this.refused.push({ status: e.status, quota: e.quota ?? null, reason: e.reason ?? null }),
@@ -283,6 +286,7 @@ class Run {
       case 'error': {
         const data = { error: st.error };
         if ('status' in st) data.status = st.status;
+        if ('code' in st) data.code = st.code;
         this.event(st.shape ?? 0, 'error', data);
         break;
       }
@@ -349,6 +353,8 @@ class Run {
     if (e.refused) matches(e.refused.map((r) => (typeof r === 'number' ? { status: r, quota: null } : r)), this.refused, binds, 'refused');
     if ('quota' in e) matches(e.quota, this.db.status()[0].quota, binds, 'quota');
     if ('token_asked' in e) matches(e.token_asked, this.tokenAsked, binds, 'token_asked');
+    if ('token_expired' in e) matches(e.token_expired, this.tokenExpired, binds, 'token_expired');
+    if ('code' in e) matches(e.code, this.db.status()[0].code, binds, 'code');
     if (e.waits) {
       assert.equal(this.waits.length, e.waits.length, `waits: ${e.waits.length} expected, ${JSON.stringify(this.waits)} asked`);
       e.waits.forEach(([lo, hi], i) => {

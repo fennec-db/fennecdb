@@ -429,8 +429,9 @@ pub fn serve(
     // token's next request would be refused. Kept open, it went on
     // delivering what the token could no longer read -- a member taken
     // off a team heard the team until the client went away. The `error`
-    // event says 401, which a client takes as it takes a refused request:
-    // a fresh token, then the stream again.
+    // event says 401 and `token_expired`, which a client takes as it takes
+    // a request refused for its token's expiry: a fresh token, then the
+    // stream again.
     let expires = who.scope().and_then(|s| s.expires_ms());
     let left = || expires.map(|at| Duration::from_millis(at.saturating_sub(now_ms())));
     // The one shutdown wakes the stream to end it, its end over TLS a
@@ -1573,8 +1574,13 @@ fn seed_rows(
 }
 
 /// The last event of a stream whose token's `exp` passed: what a refused
-/// request says, and its status, for a client to fetch a fresh token on.
-pub const EXPIRED: &str = r#"{"error":"the token has expired","status":401}"#;
+/// request says (`access::EXPIRED_WHY`), its status, and the code a client
+/// tells an expiry by (`access::EXPIRED_CODE`), for it to fetch a fresh
+/// token on -- where a 401 naming no code is a token, or a session, no
+/// longer good. A constant written once, so the stream's look pays nothing
+/// for it; `access`'s tests hold it to those two.
+pub const EXPIRED: &str =
+    r#"{"error":"the token has expired","status":401,"code":"token_expired"}"#;
 
 /// Out of line: a stream reads the time at a dozen places, and with the
 /// reads that count a list's second from its answer's end, inlined at each,

@@ -129,7 +129,11 @@ describes: `_sync_shapes` (cursors), `_sync_queue` (unanswered writes, their
 keys and undo), `_sync_temps` (rows under temporary ids). Writes go one at
 a time in order; 0/408/429/5xx retry with backoff (250 ms doubling to 15 s,
 30% jitter) or the `retry_after` a quota names where longer, 401 asks for
-a token, a 507 naming a tenant's quota and any other 4xx are a refusal put
+a token -- `{"do":"token","code":"token_expired"}` where the server said
+the token's `exp` passed, which a fresh token cures, and `{"do":"token"}`
+for a token refused otherwise, at which an app signs out, the status's
+error naming the same `code` ([access.md](access.md#expired-tokens)) -- a
+507 naming a tenant's quota and any other 4xx are a refusal put
 back (below). A
 replica reopened sends its queue before opening its streams. An update of
 an unanswered insert reaches the server's copy by its key as well
@@ -189,7 +193,7 @@ fsync `sync()`.
 **The browser's sync and the native core are held to one scenario file.**
 Moving `FennecSync` onto `fennec_abi::sync` was measured at +21 KB brotli of
 the browser module, so the two are written apart, and
-`integrations/sync-scenarios.json` says what both do: 84 scenarios, each a
+`integrations/sync-scenarios.json` says what both do: 91 scenarios, each a
 script of shapes, app writes and server events -- a seed, a change, a
 stream dropped, the status each write's request is answered with, a seed
 past the horizon, the network's signal, a token -- with what the replica,

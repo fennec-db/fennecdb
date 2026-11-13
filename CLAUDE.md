@@ -376,7 +376,7 @@ Covers `crates/fennec-http/src/mcp/`.
 
 ### `crates/fennec-http/src/access/CLAUDE.md`
 
-Covers `crates/fennec-http/src/access.rs` and `src/access/`; access binds fennec-core's hooks (`plugin::Hook`, `Check`), its `Filter` -- the order an `and`'s terms are tested in, `@ttl`'s `alive` first (`Chain`, `answer_filter`) -- and its own collections' names (`declared::OWN`), and every path a token's statement takes, a stream's among them (`sse.rs`).
+Covers `crates/fennec-http/src/access.rs` and `src/access/`; access binds fennec-core's hooks (`plugin::Hook`, `Check`), its `Filter` -- the order an `and`'s terms are tested in, `@ttl`'s `alive` first (`Chain`, `answer_filter`) -- and its own collections' names (`declared::OWN`), and every path a token's statement takes, a stream's among them (`sse.rs`), and how a replica's sync reads a 401 (`fennec_abi::sync`, `web/fennec.js`).
 
 *Access*
 - A scoped token is held to its rules at every level, twice for writes.
@@ -385,6 +385,7 @@ Covers `crates/fennec-http/src/access.rs` and `src/access/`; access binds fennec
 - A collection whose name starts with `_` is the server's, out of every rule's reach.
 - A token is bound to the tenant it names.
 - A token is taken only from the issuers, for the audiences and clients, a server was told.
+- A token past its `exp` is told so by a code, and no other refusal is.
 - An empty token is no token.
 
 ### `crates/fennec-server/CLAUDE.md`

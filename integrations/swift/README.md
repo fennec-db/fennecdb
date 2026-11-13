@@ -92,9 +92,20 @@ as a `?`'s parameter.
 let db = try await Fennec.sync(url: "https://api.example.com", token: jwt,
                               shapes: [Shape("todos", where: ["owner": me], key: "key")],
                               path: docs.appendingPathComponent("todos.fennec").path,
-                              tokenProvider: { try await refreshToken() })
+                              tokenProvider: { expired in
+                                  // The token's exp passed: a fresh one, and the sync goes on.
+                                  if expired { return try await refreshToken() }
+                                  // Refused otherwise: the session ended.
+                                  try await signOut()
+                                  throw CancellationError()
+                              })
 await db.replica!.ready()
 ```
+
+A `401` asks `tokenProvider` for a token, told whether the server said the
+token's `exp` passed (its code `token_expired`) or refused it otherwise --
+a session ended or revoked, where an app signs out rather than hand over
+the same token again; `replica.status`'s error names the `code` too.
 
 The same `Fennec`: reads and live queries are the file's, a write to a
 shape's collection shows at once and is sent -- queued in the file while

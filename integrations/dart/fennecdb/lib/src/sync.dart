@@ -41,9 +41,16 @@ class SyncFailure {
   /// by the quota of `streams` leaves the replica offline as the network
   /// does, and this tells the two apart.
   final String? quota;
-  const SyncFailure(this.message, this.status, [this.quota]);
+
+  /// The code the server named, null for none: `token_expired` while the
+  /// sync waits for a token because its `exp` passed, which a fresh token
+  /// cures; a 401 naming none is a token, or a session, the server no
+  /// longer takes.
+  final String? code;
+  const SyncFailure(this.message, this.status, [this.quota, this.code]);
   @override
-  String toString() => 'SyncFailure($status${quota == null ? '' : ', $quota'}): $message';
+  String toString() =>
+      'SyncFailure($status${quota == null ? '' : ', $quota'}${code == null ? '' : ', $code'}): $message';
 }
 
 class ShapeState {
@@ -81,7 +88,10 @@ class SyncStatus {
         _ => SyncState.catchingUp,
       },
       v['pending'] as int? ?? 0,
-      e == null ? null : SyncFailure(e['message'] as String? ?? '', e['status'] as int? ?? 0, e['quota'] as String?),
+      e == null
+          ? null
+          : SyncFailure(
+              e['message'] as String? ?? '', e['status'] as int? ?? 0, e['quota'] as String?, e['code'] as String?),
       [
         for (final s in (v['shapes'] as List? ?? const []).cast<Map<String, Object?>>())
           ShapeState(s['collection'] as String, s['cursor'] as int, s['seeded'] == true, s['connected'] == true),
@@ -120,7 +130,7 @@ class Replica {
   final Fennec _db;
   final String _url;
   String? _token;
-  final Future<String> Function()? _provider;
+  final Future<String> Function(bool expired)? _provider;
   final HttpClient _client = HttpClient()..connectionTimeout = const Duration(seconds: 10);
   final _requests = <int, HttpClientRequest>{};
   final _streams = <int, StreamSubscription<List<int>>>{};
@@ -243,9 +253,11 @@ class Replica {
             if (!_stopped) _serial(() => _feed(_kTimer, id));
           });
         case 'token':
+          // `code` names the token's expiry (`token_expired`); a 401
+          // naming none is a token the server no longer takes.
           final p = _provider;
           if (p != null) {
-            p().then(setToken, onError: (_) {});
+            p(a['code'] == 'token_expired').then(setToken, onError: (_) {});
           }
         case 'changed':
           _db.lives.touch();
@@ -346,7 +358,7 @@ Future<Fennec> _openSynced({
   required List<Shape> shapes,
   required String path,
   int flags = 0,
-  Future<String> Function()? tokenProvider,
+  Future<String> Function(bool expired)? tokenProvider,
 }) async {
   final db = await Fennec.open(path, flags: flags);
   try {
