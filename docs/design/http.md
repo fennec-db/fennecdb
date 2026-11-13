@@ -2044,7 +2044,9 @@ next one already in the buffer, reads no clock and sets no timeout: no
 more than before. A body of many reads pays a clock read a read and about
 two `setsockopt`s a request. A bound past what `Instant` can name -- a
 timeout of centuries, which `+` panics at -- is none (`checked_add`), the
-idle timeout's alone.
+idle timeout's alone. Release builds on macOS arm64: `fennec-server` grew
+one 16 KB page (6 908 256 -> 6 924 784 bytes), `fennec-shard` nothing
+(6 013 824 both).
 
 *Over TLS.* rustls's `Stream::read` reads the socket again inside one call
 until a record is whole, so a timeout set for a read bounds each of those
