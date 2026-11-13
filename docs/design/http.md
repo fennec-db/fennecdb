@@ -1725,6 +1725,24 @@ instr-compare EXAMPLE=served`) counts a request through a served
 connection, read off a socket and answered on it, where `replays.rs` and
 `rows.rs` count `handle` alone.
 
+Instruction counts, `make instr-compare EXAMPLE=served` (`BIN` main's
+`served`, built from origin/main f104d32e with this branch's `served.rs`
+copied in, against this branch's; 8 re-signed identities a build, 7 rounds,
+each run started under a 1-minute load of 4, macOS arm64, rustc 1.99.1),
+instructions a request, the mean of each build's 8 identities' medians:
+
+| mode | main | this branch | difference | SE | |
+|---|---|---|---|---|---|
+| `file` | 128 702.0 | 129 117.4 | +415.4 (+0.32%) | 304.1 | inside 2 SE |
+| `node` | 135 693.2 | 135 700.2 | +6.9 (+0.01%) | 205.3 | inside 2 SE |
+| `put` | 154 821.4 | 154 936.4 | +115.0 (+0.07%) | 188.5 | inside 2 SE |
+| `pipelined` | 74 136.9 | 74 383.1 | +246.1 (+0.33%) | 181.7 | inside 2 SE |
+
+Every difference is inside 2 standard errors, so none reads as a change
+the method can tell from its noise; the bound it can see is about 2 SE,
+±363 to ±608 instructions a request, the same order as the 500 the
+method's rule names.
+
 ## Chunked bodies
 
 **A chunked body grows as it comes, held to the ceiling; a
