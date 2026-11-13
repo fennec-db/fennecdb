@@ -2343,9 +2343,10 @@ fn listed(db: &Database, sel: Select, rule: &Bound) -> Result<Vec<Expr>> {
     let paged = sel.aggregate.is_empty() || groups;
     // A grouped read folds every row of its filter and works out every
     // group before its page is cut (`aggregate`), so a first read to 1 002
-    // groups cost what one to 100 001 does: read again past it, 100 000
-    // groups of a row each took 1.14 G instructions, where read once they
-    // take 0.60 G. It is read once, to where a statement's own would stop.
+    // groups cost nearly what one to 100 001 does: read again past it,
+    // 100 000 groups of a row each took 1.14 G instructions, where read
+    // once they take 0.60 G. It is read once, to where a statement's own
+    // would stop.
     let first = match groups {
         true => MAX_SUBQUERY_VALUES + 1,
         false => past,

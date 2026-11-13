@@ -697,25 +697,25 @@ a row. A `group` form stops at 100 000 groups, which bound the groups and
 not the rows folded into them, and is read once: a grouped read folds
 every row of its filter and works out every group before its page is cut
 (`aggregate`: `selected_ids`, `fold`, `rows`, then `page`), so the first
-read #623 made of it, to 1 002 groups, cost what its re-read to 100 001
-did. Read once, 100 000 groups of a row each cost 0.60 G instructions
-where read twice they cost 1.14 G, 1 004 groups 6.4 M where 14.8 M, and
-100 001 groups, refused, 0.60 G where 1.13 G (this branch built before
-and after the change, medians of nine, two runs each, the load at 24 to
-57; that pair read the 100 000 rows row by row in 224 M). One refusal
-costs more: a list whose first 1 002 groups already held more than 1 000
-values was refused after the first read, its other groups never sorted
-nor made rows, and over 100 000 groups of a room each it costs 0.61 G
-where it cost 0.54 G, a list refused on every statement of its token
-either way. None of these figures is the most a list can cost: a `group`
-form and a plain list read grouped are bounded in groups or values, not
-in the rows they read, so a filter of a million rows folds a million, and
-a re-read row by row with `order` sorts every row of its filter before it
-takes its 100 001, unless an ordered index on that field walks it to its
-page (`walk_order`). The bound is on values, not on the rows a filter
-holds: a token whose rule's filter holds many rows pays for them in every
-statement, and is served better by a narrower filter or the membership
-kept in the rows. The refusal names the rule,
+read #623 made of it, to 1 002 groups, cost nearly what its re-read to
+100 001 did. Read once, 100 000 groups of a row each cost 0.60 G
+instructions where read twice they cost 1.14 G, 1 004 groups 6.4 M where
+14.8 M, and 100 001 groups, refused, 0.60 G where 1.13 G (this branch
+built before and after the change, medians of nine, two runs each, the
+load at 24 to 57; that pair read the 100 000 rows row by row in 224 M).
+One refusal costs more: a list whose first 1 002 groups already held more
+than 1 000 values was refused after the first read, its other groups
+never sorted nor made rows, and over 100 000 groups of a room each it
+costs 0.61 G where it cost 0.54 G, a list refused on every statement of
+its token either way. None of these figures is the most a list can cost:
+a `group` form and a plain list read grouped are bounded in groups or
+values, not in the rows they read, so a filter of a million rows folds a
+million, and a re-read row by row with `order` sorts every row of its
+filter before it takes its 100 001, unless an ordered index on that field
+walks it to its page (`walk_order`). The bound is on values, not on the
+rows a filter holds: a token whose rule's filter holds many rows pays for
+them in every statement, and is served better by a narrower filter or the
+membership kept in the rows. The refusal names the rule,
 by its collection and its filter as the policy writes it -- which
 `/_whoami` shows the token too -- beside the inner `get` and the bound
 (`past_bound`), where it named the inner collection alone; `distinct`
