@@ -450,31 +450,35 @@ impl IndexKind {
             _ => {}
         }
         // What a statement and a declaration are held to as they are read,
-        // held here where no parser read it -- SQL's `vector(n)`, `fennec
-        // import`, a schema built in code: a dimension of either kind,
-        // whatever the index, and an `@hnsw`'s `m`. In the browser module
-        // every spec comes through the parser or SQL's `with (m = ..)`,
-        // which bound `m` (2 to 100) already: asked there too, it was 0.2 KB
-        // of it. A sparse vector is a vector here, as a word of the message
-        // naming its kind was another 0.1 KB.
-        let (DataType::Sparse(d) | DataType::Vector(d, _)) = ty else {
-            return Ok(());
-        };
-        if *d == 0 || *d > MAX_DIM {
-            return Err(Error::Type(format!(
-                "`{field}`: a vector's dimension is 1 to {MAX_DIM}"
-            )));
+        // held here where no parser read it -- SQL's `vector(n)` and its
+        // arrays, `fennec import --cast`, a schema built in code -- by the
+        // test a file's schema is read with ([`out_of_range`]), so no write
+        // takes what an open then refuses: a dimension of either kind at any
+        // depth of lists, whatever the index, and an `@hnsw`'s `m`. In the
+        // browser module too, where the decoder holds the test already: its
+        // own `m` test was 0.2 KB of the module, and so was not asked there.
+        if let Some(why) = out_of_range(field, ty, self) {
+            return Err(Error::Type(why));
         }
-        match self {
-            IndexKind::Vector(s)
-                if cfg!(not(target_arch = "wasm32")) && !(2..=MAX_M).contains(&s.m) =>
-            {
-                Err(Error::Type(format!(
-                    "`{field}`: @hnsw's `m` is 2 to {MAX_M}"
-                )))
+        // A beam a 32-bit reader of the file holds whole or refuses
+        // (`codec::get_usize`), as every parser holds it already: built in
+        // code past it on a 64-bit target, it was written, and a page
+        // replicating the file refused its schema. A 32-bit `usize` -- the
+        // browser module's -- holds no more.
+        #[cfg(target_pointer_width = "64")]
+        if let IndexKind::Vector(s) = self {
+            for (what, n) in [
+                ("ef_construction", s.ef_construction),
+                ("ef_search", s.ef_search),
+            ] {
+                if n > u32::MAX as usize {
+                    return Err(Error::Type(format!(
+                        "`{field}`: @hnsw's `{what}` is at most 4294967295, not {n}"
+                    )));
+                }
             }
-            _ => Ok(()),
         }
+        Ok(())
     }
 }
 
@@ -1316,7 +1320,9 @@ impl Schema {
                 != 0;
             *pos += 1;
             let index = decode_index(buf, pos)?;
-            decoded_within(&fname, &ty, &index)?;
+            if let Some(why) = out_of_range(&fname, &ty, &index) {
+                return Err(Error::Corrupt(why));
+            }
             if ty == DataType::Json {
                 let n = get_uvarint(buf, pos)? as usize;
                 for _ in 0..n {
@@ -1346,24 +1352,35 @@ impl Schema {
     }
 }
 
-/// A field of a schema read off the bytes -- a file's, a primary's record a
-/// replica applies -- held to the ranges the language reads the same
-/// numbers in (`Parser::int_in`): a vector's dimension 1 to [`MAX_DIM`],
-/// wherever its type holds one, and an `@hnsw`'s `m` 2 to [`MAX_M`]. Past
-/// them the record is damage or a file made to hurt: read as written, a
-/// 77-byte file declaring `m` = 2^40 had the open's index ask for 2m links
-/// a node, and the process was killed; a `vector<N>` past `MAX_DIM`
-/// reserved N floats for each vector the open read. In the browser module
-/// too, whose page replica applies its server's schema records. One
-/// message, as `int_in` writes one, its ranges written out: formatted, the
-/// bounds were two numbers more, and a literal's `i32` brought `i32`'s
-/// formatting into the module, 307 bytes.
+/// Where a field's numbers pass the ranges the language reads them in
+/// (`Parser::int_in`), as the refusal says it -- "`e`: a vector's
+/// dimension is 1 to 1000000000, not 0" -- or `None` within them: a
+/// vector's dimension, of either kind and at any depth of lists, 1 to
+/// [`MAX_DIM`], and an `@hnsw`'s `m` 2 to [`MAX_M`]. The one test a schema
+/// meets where it is made ([`IndexKind::check`], an `Error::Type`) and
+/// where it is read off the bytes -- a file's, a primary's record a replica
+/// applies -- ([`Schema::decode`], an `Error::Corrupt`), so an open takes
+/// whatever a write took. With a test each, the check held a field's own
+/// vector alone: SQL's `vector(1000000001)[]` and `Schema::new`'s
+/// `[vector<0>]` were taken and written, and the file was refused as damage
+/// at its next open, by every replica and every page replicating it.
+///
+/// Off the bytes, past the ranges the record is damage or a file made to
+/// hurt: read as written, a 77-byte file declaring `m` = 2^40 had the
+/// open's index ask for 2m links a node, and the process was killed; a
+/// `vector<N>` past `MAX_DIM` reserved N floats for each vector the open
+/// read. In the browser module too, whose page replica applies its server's
+/// schema records. One message, as `int_in` writes one, its ranges written
+/// out: formatted, the bounds were two numbers more, and a literal's `i32`
+/// brought `i32`'s formatting into the module, 307 bytes.
 #[inline(never)]
-fn decoded_within(field: &str, ty: &DataType, index: &IndexKind) -> Result<()> {
+fn out_of_range(field: &str, ty: &DataType, index: &IndexKind) -> Option<String> {
     const _: () = assert!(
         MAX_DIM == 1_000_000_000 && MAX_M == 32_767,
         "the refusals' texts name the ranges"
     );
+    // A list is the one type holding another, so a dimension at any depth
+    // is its innermost's.
     let dim = match ty.innermost() {
         DataType::Vector(d, _) | DataType::Sparse(d) => *d,
         _ => 1,
@@ -1377,9 +1394,9 @@ fn decoded_within(field: &str, ty: &DataType, index: &IndexKind) -> Result<()> {
     } else if !(2..=MAX_M).contains(&m) {
         ("@hnsw's `m` is 2 to 32767", m)
     } else {
-        return Ok(());
+        return None;
     };
-    Err(Error::Corrupt(format!("`{field}`: {range}, not {n}")))
+    Some(format!("`{field}`: {range}, not {n}"))
 }
 
 /// An index's kind as a schema writes it, behind its field.

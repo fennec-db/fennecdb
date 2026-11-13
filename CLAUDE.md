@@ -121,7 +121,9 @@ dimension, a beam, `fuse k`, a count -- is read as written or refused
 naming its range (`Parser::int_in`, within `u32`), never clamped nor cut
 to a 32-bit `usize`; a list's elements too, each read as written and
 refused naming the field and the element. A schema read off the bytes is
-held to the same ranges, `Error::Corrupt` past them (`Schema::decode`).
+held to the same ranges, `Error::Corrupt` past them (`Schema::decode`), by
+the one test every schema a write makes meets (`schema::out_of_range`), a
+list's dimension too: no read refuses what a write took.
 
 **[Profiles differ on purpose.](docs/design/crates.md#profiles)**
 `fennec-cli` takes `cli` (`panic = abort`), `fennec-server` `release`: a

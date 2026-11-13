@@ -180,10 +180,15 @@ the same ranges (`declared::index`, and `declared::type_named`, whose
 `dimension` reads the digits in a `u32`, checked at each: folded in a
 32-bit build's `usize` -- the native library's on a 32-bit device --
 `vector<4294967297>` wrapped to 1). What no parser reads -- SQL's
-`vector(n)`, `fennec import --vector`, a schema built in code -- meets
-`IndexKind::check`'s `MAX_DIM`, and natively its `MAX_M`: in the browser
-module every spec comes through the parser or SQL's `with (m = ..)`, which
-holds `m` to pgvector's 2 to 100 and `ef_construction` to 4 to 1 000. A
+`vector(n)` and its arrays (`vector(n)[]`, `[3]`, `array`), `fennec import
+--vector` and `--cast`, a schema built in code -- meets `IndexKind::check`,
+which holds a dimension at any depth of lists and an `@hnsw`'s `m` by the
+test a file's schema is read with (`schema::out_of_range`, *A file's schema
+is held to the same ranges*, below), in the browser module too; and,
+natively, a beam built in code to `u32::MAX`, past which a 32-bit reader of
+the file -- a page replicating it, the native library on a 32-bit device --
+refuses the schema (`codec::get_usize`). SQL's `with (m = ..)` holds `m` to
+pgvector's 2 to 100 and `ef_construction` to 4 to 1 000. A
 dimension or a parameter a file's schema holds is read whole or the file
 refused (`codec::get_usize`, through `get_within` at the target's width,
 which its test runs at a wasm32 build's), and a dimension and an `m` within
@@ -226,8 +231,22 @@ floats for each vector an open read (`fill_in_turn`). So `Schema::decode`
 holds each field's dimension, wherever its type holds one (`[vector<N>]`
 too), to 1 to `MAX_DIM`, and its `@hnsw`'s `m` to 2 to `MAX_M`, the
 ranges `Parser::int_in` reads them in, and refuses the record as damage
-naming the field and the range (`schema::decoded_within`: "`v`: @hnsw's
-`m` is 2 to 32767, not 1099511627776"), in the browser module too. A graph
+naming the field and the range (`schema::out_of_range`: "`v`: @hnsw's
+`m` is 2 to 32767, not 1099511627776"), in the browser module too. The
+test is the one `IndexKind::check` asks of every schema a write makes, so
+no open refuses what a write took. With a test each, the check held a
+field's own vector alone: SQL's `create table t (e vector(1000000001)[])`
+and `Schema::new`'s `[vector<0>]` were taken and written, and at the next
+open the file was refused as damage, by every replica and every page
+replicating it -- a server's file one DDL statement from not opening at its
+restart (the review's finding). `whatever_a_write_takes_an_open_reads_back`
+makes a schema at each edge of the ranges, a field's own vector and a
+list's at every depth, every way one is made -- `Schema::new`, FennecQL's
+`create` and `alter`, SQL's arrays, a declaration -- and reads each one
+taken back from the image as it was made; in code the write and the read
+take exactly the same fields. One test for both took 79 bytes off the
+browser module (855 790 to 855 711; gzip 78, brotli 113): the check's own
+refusal of a dimension went, and `m` is asked there for nothing. A graph
 record carries its own `m`, which sized its node's links before the open
 held its spec to the field's: it is held to the same range, the graph
 rebuilt from the documents otherwise. `tests/damage.rs` makes such files
@@ -244,9 +263,12 @@ That takes back a promise. A collection main made with an `m` past
 file is now refused at the open as any other file holding those numbers:
 told apart from a crafted one it cannot be, the check being the bytes', and
 fennecdb is alpha, with no file of a user's to keep
-(`a_field_made_out_of_range_before_is_refused_at_the_open`). An alter
-refuses only the field it changes: every field it holds was read within
-the ranges.
+(`a_field_made_out_of_range_before_is_refused_at_the_open`). So is a list
+of vectors past the range that a version before made -- v0.2.0's check
+held none below the list, and took SQL's `vector(1000000001)[]`, `fennec
+import --cast e=[vector<1000000001>]` and `Schema::new`'s `[vector<0>]`.
+An alter refuses only the field it changes: every field it holds was read
+within the ranges.
 
 *Grammar epoch 3.* A named statement is stored as its text and read again
 at every open ([named-statements.md](named-statements.md#what-is-built),

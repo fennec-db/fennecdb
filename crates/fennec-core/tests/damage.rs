@@ -306,8 +306,12 @@ fn a_frame_putting_an_id_no_write_gives_is_refused_where_a_file_is_opened_and_ap
 /// mapped -- and where a replica applies the record, before a document is
 /// read. Read as written, a file of a few dozen bytes declaring `m` = 2^40
 /// and holding one vector had the open's index ask for 2^41 links a node,
-/// and the process was killed. No `create` makes such a field, so one a
-/// version before the bounds made is refused alike: fennecdb is alpha.
+/// and the process was killed. No `create` makes such a field --
+/// `Schema::new` asks the decoder's own test (`schema::out_of_range`), a
+/// list's dimension too -- so one a version before made is refused alike,
+/// a list of vectors past the range among them, which `Schema::new` and
+/// SQL's `vector(1000000001)[]` took until the check held a list's
+/// dimension as the decoder does: fennecdb is alpha.
 #[test]
 fn a_schema_past_the_languages_ranges_is_refused_where_a_file_is_opened_and_applied() {
     let hnsw = |dim: usize, m: usize| {
@@ -345,9 +349,15 @@ fn a_schema_past_the_languages_ranges_is_refused_where_a_file_is_opened_and_appl
     .into_iter()
     .enumerate()
     {
-        // Made as no `create` makes it -- `Schema::new` refuses the field
-        // -- and as a crafted file holds it: a create takes the schema it
-        // is handed, and its record is the file's.
+        // Made as no `create` makes it -- `Schema::new` refuses the field,
+        // with the words the open refuses it with -- and as a crafted file
+        // or a version before holds it: a create takes the schema it is
+        // handed, and its record is the file's.
+        let written = Schema::new("w", vec![Field::new("n", DataType::Int), field.clone()]);
+        match written {
+            Err(Error::Type(m)) => assert_eq!(m, says),
+            other => panic!("{says}: written {:?}", other.map(|_| ())),
+        }
         let sink = Records::default();
         let mut db = Database::with_sink(Box::new(sink.clone()));
         let mut schema = Schema::new("w", vec![Field::new("n", DataType::Int)]).unwrap();

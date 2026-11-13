@@ -495,12 +495,17 @@ fn field(collection: &str, v: &Value) -> Result<(Field, Vec<Field>)> {
     let at = cat(&[collection, ".", &fname]);
     let ty = match member(o, "type") {
         Some(Value::Text(t)) => type_named(t).ok_or_else(|| {
-            // Past the lists a value read back may nest, named as the
-            // parser names it, rather than as a type there is not.
-            const _: () = assert!(crate::codec::MAX_DEPTH == 64);
-            match t.bytes().take_while(|&b| b == b'[').count() > crate::codec::MAX_DEPTH {
-                true => bad(&at, "has a list type nesting more than 64 levels deep"),
-                false => bad(&at, "has a type there is not"),
+            // Past the lists a value read back may nest, or a dimension past
+            // its range at any depth of them, named with the limit as the
+            // parser and `Schema::new` name it, rather than as a type there
+            // is not.
+            const _: () = assert!(crate::codec::MAX_DEPTH == 64 && MAX_DIM == 1_000_000_000);
+            if t.bytes().take_while(|&b| b == b'[').count() > crate::codec::MAX_DEPTH {
+                bad(&at, "has a list type nesting more than 64 levels deep")
+            } else if past_dimension(t) {
+                bad(&at, "has a vector's dimension that is not 1 to 1000000000")
+            } else {
+                bad(&at, "has a type there is not")
             }
         })?,
         _ => return Err(bad(&at, "has no `type`")),
@@ -687,6 +692,29 @@ pub fn type_named(s: &str) -> Option<DataType> {
         ty = DataType::List(Box::new(ty));
     }
     Some(ty)
+}
+
+/// Whether `t` spells a vector's or a sparse vector's type as [`type_named`]
+/// reads one, inside its lists, but for a dimension whose digits name no
+/// number from 1 to `MAX_DIM`: the one reason `type_named` refused it,
+/// which the refusal names with the range.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn past_dimension(t: &str) -> bool {
+    let mut s = t;
+    while let Some(inner) = s.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+        s = inner;
+    }
+    let digits = match s.strip_prefix("vector<") {
+        Some(r) => r.strip_suffix(", f16>").or_else(|| r.strip_suffix('>')),
+        None => s.strip_prefix("sparse<").and_then(|r| r.strip_suffix('>')),
+    };
+    // Leading zeros aside, as `dimension` reads them: `00000000003` is 3,
+    // refused for its eleven digits, a spelling no type has.
+    let within = |d: &str| {
+        dimension(d.trim_start_matches('0').as_bytes())
+            .is_some_and(|n| (1..=MAX_DIM as u32).contains(&n))
+    };
+    digits.is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()) && !within(d))
 }
 
 /// [`type_named`] past its lists' brackets.
@@ -1879,6 +1907,36 @@ mod tests {
             type_named("sparse<1000000000>"),
             Some(DataType::Sparse(1_000_000_000))
         );
+        // Refused naming the field and the range, at any depth of lists, as
+        // the parser and `Schema::new` name it; a spelling no type has is
+        // said so still.
+        let declared = |ty: &str| {
+            parse(&format!(
+                r#"{{"format":1,"collections":[{{"name":"t","fields":[{{"name":"e","type":"{ty}"}}]}}]}}"#
+            ))
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default()
+        };
+        for ty in [
+            "vector<0>",
+            "[vector<1000000001, f16>]",
+            "[[sparse<4294967297>]]",
+            "[sparse<00000000000>]",
+        ] {
+            let e = declared(ty);
+            let says = "t.e has a vector's dimension that is not 1 to 1000000000";
+            assert!(e.ends_with(says), "{ty}: {e}");
+        }
+        for ty in [
+            "[vector<00000000003>]",
+            "[vector<3, f32>]",
+            "[vector<x>]",
+            "sparse<3, f16>",
+        ] {
+            let e = declared(ty);
+            assert!(e.ends_with("t.e has a type there is not"), "{ty}: {e}");
+        }
         let hnsw = |ix: &str| {
             parse(&format!(
                 r#"{{"format":1,"collections":[{{"name":"t","fields":[{{"name":"e","type":"vector<3>","index":{{"kind":"hnsw",{ix}}}}}]}}]}}"#
