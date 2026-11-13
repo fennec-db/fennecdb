@@ -70,9 +70,9 @@ jobs:
         run: python3 tools/test_openapi_compat.py
 
       # docs/design/integrations.md#workflows: every action pinned by its
-      # commit, every workflow's permissions said, no job that writes runs
-      # a build, every secret read under an environment; and the checker
-      # held to a failing workflow of each kind.
+      # commit, every workflow's permissions said, a job that writes running
+      # only what the check lists, every secret read under an environment;
+      # and the checker held to a failing workflow of each kind.
       - name: Every workflow's actions pinned, its jobs' writes kept from its builds and its secrets in environments
         run: |
           python3 tools/workflow_check.py

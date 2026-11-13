@@ -19,22 +19,26 @@ file, line and job:
 - Every workflow says `permissions:` at its top, so a job that names none
   gets those and not whatever the repository's default is that day.
 - A job holding any write -- its own `permissions:`, or the workflow's
-  where it names none; `id-token: write` is one -- runs no build. A build
-  runs code from outside the repository with the job's token in reach:
-  crates' build scripts (ring, cc), Gradle's and SwiftPM's plugins, npm's
-  install scripts, a package's own commands. It runs in a job that reads
-  alone, and hands what it made to the job that writes as an artifact
-  (release.yml's `image` and `image-push`). What is read is the commands a
-  step's `run:` runs, read as its shell reads them (Shell): cargo, gradle,
-  maven, make, xcodebuild, npx; an npm, pnpm or yarn install, script or
-  build; docker, swift, dotnet, go, flutter or dart building; pip
-  installing; a script named for building or packaging (`build-aar.sh`,
-  `package.sh`); then an action that builds or sets Gradle up, and a local
-  action (`./...`), whose steps this check does not read. A word inside
-  quotes, an echo's text, a comment or a here-document `cat` writes is no
-  command; `$(...)`, `sh -c '...'` and a here-document a shell reads are.
-  What a script runs inside is not read: a script that builds under another
-  name is kept out of a job that writes by its caller. WRITE_AND_BUILD
+  where it names none; `id-token: write` is one -- runs only what this
+  check lists, each entry with the reason it builds nothing. A build runs
+  code from outside the repository with the job's token in reach: crates'
+  build scripts (ring, cc), Gradle's and SwiftPM's plugins, npm's install
+  scripts, a package's own commands. It runs in a job that reads alone,
+  and hands what it made to the job that writes as an artifact
+  (release.yml's `image` and `image-push`). What is read is every command
+  a step's `run:` runs, read as its shell reads it (Shell): each must be
+  the shell's own, a function the script defines, a program
+  WRITE_COMMANDS lists put to a use it lists (`docker push`, never `docker
+  build`; `npm publish --ignore-scripts`), or a script WRITE_SCRIPTS lists
+  by its path; and each action a step uses one WRITE_ACTIONS lists.
+  Anything else is a finding -- a program or a use not listed, a local
+  action or an image, a shell reading a script piped to it, a step under
+  another `shell:` -- so a build under a name no one has listed is refused
+  all the same: the check fails closed. A word inside quotes, an echo's
+  text, a comment or a here-document `cat` writes is no command; `$(...)`,
+  `${X:-$(...)}`, `sh -c '...'`, `eval`, `trap`, and a here-document a
+  shell reads (`sh <<EOF`, `bash -s arg <<EOF`) are. What a listed script
+  runs inside is not read: its entry says what it runs. WRITE_AND_BUILD
   lists a job let off, with its reason.
 - A job that reads a stored secret (`secrets.<NAME>` in an expression,
   `secrets: inherit`) names an `environment:`, which holds the secret and
@@ -43,6 +47,13 @@ file, line and job:
   at a workflow's top level reaches every job and is refused there.
   `secrets.GITHUB_TOKEN` is the job's own token, bounded by its
   `permissions:`. REPOSITORY_SECRETS lists a job let off, with its reason.
+
+An entry of a list that nothing needs is a finding too, since it would let
+off whatever next took its name: a job let off that no longer needs it,
+that is gone, or whose workflow is gone or renamed; an action MAJOR_TAGS
+lets off that no pin names by its major alone; a script WRITE_SCRIPTS lists
+that no job that writes runs. Those that look across every workflow are
+held where every one is read, the default.
 
 The workflows are read by a reader of the YAML they are written in --
 block and flow collections, plain, quoted and block scalars, comments --
@@ -72,9 +83,10 @@ REPOSITORY_SECRETS = {
     " create it unprotected, a setting no pull request should change",
 }
 
-# Jobs that may hold a write and run a build, by (workflow file, job id),
-# each with the reason it may. None: every job that writes takes what it
-# publishes from a job that built it reading alone.
+# Jobs that may hold a write and run what WRITE_COMMANDS, WRITE_SCRIPTS
+# and WRITE_ACTIONS do not hold (a build among it), by (workflow file, job
+# id), each with the reason it may. None: every job that writes takes what
+# it publishes from a job that built it reading alone.
 WRITE_AND_BUILD = {}
 
 # Actions whose pin may name a major tag alone (`# v2`), by their repository
@@ -557,8 +569,9 @@ VERSION = re.compile(r"v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?(?:\s|$)")
 MAJOR = re.compile(r"v?\d+(?:\s|$)")
 
 
-def pinned(value):
-    """Why a `uses:` value is not pinned, or None where it is."""
+def pinned(value, majors=None):
+    """Why a `uses:` value is not pinned, or None where it is; an action
+    MAJOR_TAGS lets off goes into `majors`."""
     v = str(value).strip()
     if v.startswith("./"):
         return None
@@ -572,8 +585,10 @@ def pinned(value):
         return "pin it to its 40-hex commit, the tag in a comment (`@<sha> # v1.2.3`)"
     if VERSION.match(value.comment):
         return None
-    repo = "/".join(action.split("/")[:2])
-    if repo in MAJOR_TAGS and MAJOR.match(value.comment):
+    repo = "/".join(action.split("/")[:2]).lower()
+    if repo in {r.lower() for r in MAJOR_TAGS} and MAJOR.match(value.comment):
+        if majors is not None:
+            majors.add(repo)
         return None
     if MAJOR.match(value.comment) or re.match(r"v?\d+\.\d+(?:\s|$)", value.comment):
         return (f"the pin's comment names `{value.comment.split()[0]}`, not the commit's most specific"
@@ -591,9 +606,12 @@ SEPARATORS = ("&&", "||", ";;&", ";;", ";&", "|&", "|", "&", ";", "(", ")", "\n"
 REDIRECTIONS = ("&>>", "&>", "<<<", "<<-", "<<", ">>", ">&", "<&", "<>", ">|", "<", ">")
 OPERATORS = sorted(SEPARATORS + REDIRECTIONS, key=len, reverse=True)
 CASE_ENDS = (";;", ";&", ";;&")
-# Words a shell reads as its own where a command could start.
+# Words a shell reads as its own where a command could start. `[[` is a
+# command of its own (`parse`), whose `&&` and `<` are its own too.
 KEYWORDS = {"if", "then", "else", "elif", "fi", "do", "done", "while", "until", "!", "{", "}",
-            "time", "esac", "[[", "]]"}
+            "time", "esac"}
+# Words after which the next one starts a command.
+LEADS = KEYWORDS - {"fi", "done", "esac", "}"}
 ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\[[^]]*\])?\+?=")
 
 
@@ -602,9 +620,11 @@ class Shell:
     each a list of its words, quotes taken off and expansions left as
     written, with the bodies of the here-documents it reads. A word inside
     quotes, an argument such as an echo's text, a comment or a here-document
-    is no command; the commands of `$(...)`, backquotes, `<(...)` and an
+    is no command; the commands of `$(...)`, backquotes, `<(...)`, a
+    parameter's default (`${X:-$(...)}`), an arithmetic expansion and an
     unquoted here-document's substitutions run, and are read too
-    (`commands`). PowerShell's text (`pwsh`) is read the same way, its
+    (`commands`), as are the names of the functions it defines
+    (`functions`). PowerShell's text (`pwsh`) is read the same way, its
     backquote an escape and its here-strings text. A quote or a
     substitution that does not close runs to the script's end: a script is
     read, never refused for its shell."""
@@ -620,15 +640,25 @@ class Shell:
         self.delimiter = None  # a `<<` waiting for its delimiter: (token index, strip tabs)
         self.word = None
         self.quoted = False
+        self.functions = set()
 
     def commands(self):
         """[(words, here-document bodies)] for each simple command, those of
         the scripts inside its words after its own."""
         self.lex()
-        out = parse(self.tokens, self.bodies)
+        out = parse(self.tokens, self.bodies, self.functions)
         for text in self.inner:
-            out += Shell(text, self.pwsh).commands()
+            inner = Shell(text, self.pwsh)
+            out += inner.commands()
+            self.functions |= inner.functions
         return out
+
+    def command_start(self):
+        """Whether a word here would be a command's first."""
+        if not self.tokens:
+            return True
+        kind, text = self.tokens[-1]
+        return text in SEPARATORS if kind == "op" else text in LEADS
 
     def add(self, text):
         self.word = (self.word or "") + text
@@ -684,6 +714,13 @@ class Shell:
                 close = self.closing(self.i + 1)
                 self.inner.append(s[self.i + 2:close])  # a process substitution runs
                 self.add(s[self.i:close + 1])
+                self.i = close + 1
+            elif c == "(" and nxt == "(" and not self.pwsh and self.word is None and self.command_start():
+                # `(( n++ ))`, an arithmetic command: its text is no command,
+                # and what it substitutes runs.
+                close = self.closing(self.i)
+                self.inner += substitutions(s[self.i + 2:max(close - 1, self.i + 2)], False)
+                self.tokens.append(("word", "(("))
                 self.i = close + 1
             elif c in "{}" and self.pwsh:
                 self.end()  # a script block's braces stand between its commands
@@ -805,6 +842,7 @@ class Shell:
         s, at = self.s, self.i
         if s.startswith("$((", at) and not self.pwsh:
             close = self.closing(at + 1)
+            self.inner += substitutions(s[at + 3:max(close - 1, at + 3)], False)
             self.i = close + 1
             return s[at:close + 1]
         if s.startswith("$(", at):
@@ -813,8 +851,17 @@ class Shell:
             self.i = close + 1
             return s[at:close + 1]
         if s.startswith("${", at):
+            # To its brace, past the substitutions inside, which run:
+            # `${TAG:-$(git describe)}`.
             depth, i = 0, at + 1
             while i < len(s):
+                if s.startswith("$(", i):
+                    i = self.closing(i + 1) + 1
+                    continue
+                if s[i] == "`" and not self.pwsh:
+                    close = s.find("`", i + 1)
+                    i = len(s) if close < 0 else close + 1
+                    continue
                 if s[i] == "{":
                     depth += 1
                 elif s[i] == "}":
@@ -826,6 +873,8 @@ class Shell:
                     i = len(s) if close < 0 else close
                 i += 1
             self.i = min(i + 1, len(s))
+            if not self.pwsh:
+                self.inner += substitutions(s[at + 2:self.i - 1], False)
             return s[at:self.i]
         if s.startswith("$'", at) and not self.pwsh:
             i, out = at + 2, ""
@@ -886,14 +935,18 @@ def substitutions(text, pwsh):
     return found
 
 
-def parse(tokens, bodies):
+def parse(tokens, bodies, functions=None):
     """A script's tokens as its simple commands: (words, here-document
     bodies) for each. Keywords and assignments before a command, a
     redirection and the file it names, a `for` loop's list and a `case`'s
-    patterns are no words of one."""
+    patterns are no words of one; a `[[ ... ]]` is one command, its `&&`
+    and `<` its own; a function's definition (`name() {`, `function name`)
+    is none, its name put in `functions`, and its body's commands are read
+    where they stand."""
     out, words, read = [], [], []
     cases = []  # each open `case`: "head", "pattern" or "body"
     skip = False  # in a `for` or `select` head, to its line's end
+    functions = set() if functions is None else functions
 
     def flush():
         nonlocal words, read
@@ -915,6 +968,11 @@ def parse(tokens, bodies):
             at += 1
             continue
         if kind == "op":
+            if text == "(" and len(words) == 1 and not read and tokens[at + 1:at + 2] == [("op", ")")]:
+                functions.add(words[0])  # `name() { ...; }`
+                words = []
+                at += 2
+                continue
             if text in REDIRECTIONS:
                 if at in bodies:
                     read.append(bodies[at])
@@ -931,6 +989,15 @@ def parse(tokens, bodies):
             at += 1
             continue
         if not words:
+            if text == "[[":
+                test = [text]
+                at += 1
+                while at < len(tokens) and tokens[at] != ("word", "]]"):
+                    test.append(tokens[at][1])
+                    at += 1
+                words = test + ["]]"]
+                at += 1
+                continue
             if text == "case":
                 cases.append("head")
                 at += 1
@@ -940,6 +1007,8 @@ def parse(tokens, bodies):
                 at += 1
                 continue
             if text in ("for", "select", "function"):
+                if text == "function" and at + 1 < len(tokens) and tokens[at + 1][0] == "word":
+                    functions.add(tokens[at + 1][1])
                 skip = text != "function"
                 at += 2 if text == "function" else 1
                 continue
@@ -957,7 +1026,7 @@ def parse(tokens, bodies):
 WRAPPERS = {
     "sudo": {"-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T", "--user", "--group"},
     "doas": {"-u", "-C"},
-    "env": {"-u", "-C", "-S", "--unset", "--chdir", "--split-string"},
+    "env": {"-u", "-C", "--unset", "--chdir"},
     "nohup": set(), "exec": {"-a"}, "builtin": set(), "time": {"-f", "-o"},
     "nice": {"-n", "--adjustment"}, "stdbuf": {"-i", "-o", "-e"},
     "xargs": {"-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s", "--arg-file", "--delimiter",
@@ -966,7 +1035,6 @@ WRAPPERS = {
 }
 SHELLS = {"sh", "bash", "dash", "zsh", "ksh", "ash"}
 POWERSHELLS = {"pwsh", "powershell"}
-INTERPRETERS = SHELLS | POWERSHELLS | {"python", "python3", "node", "deno", "bun", "ruby", "perl", "source", "."}
 
 
 def name_of(word):
@@ -975,24 +1043,10 @@ def name_of(word):
     return re.sub(r"\.(?:exe|cmd|bat)$", "", name)
 
 
-def operands(args, valued=()):
-    """A command's words that are no option, an option's value passed over."""
-    out, at = [], 0
-    while at < len(args):
-        word = args[at]
-        if word == "--":
-            return out + args[at + 1:]
-        if word.startswith("-") and len(word) > 1:
-            at += 2 if word in valued else 1
-            continue
-        out.append(word)
-        at += 1
-    return out
-
-
 def unwrapped(words):
     """The command a command runs: past `sudo`, `env` and the like, their
-    options and assignments; [] for `command -v`, which runs nothing."""
+    options and assignments (`env -S 'a b'` runs `a b`); [] for `command
+    -v`, which runs nothing."""
     while words:
         while words and ASSIGNMENT.match(words[0]):
             words = words[1:]
@@ -1003,31 +1057,64 @@ def unwrapped(words):
             return words
         if name == "command" and any(w in ("-v", "-V") for w in words[1:2]):
             return []
-        at = 1
+        at, split = 1, []
         while at < len(words) and words[at].startswith("-") and len(words[at]) > 1:
             if words[at] == "--":
                 at += 1
                 break
+            if name == "env" and (words[at] in ("-S", "--split-string") or words[at].startswith("--split-string=")):
+                given = words[at].partition("=")[2] if "=" in words[at] else " ".join(words[at + 1:at + 2])
+                split = given.split()
+                at += 1 if "=" in words[at] else 2
+                break
             at += 2 if words[at] in WRAPPERS[name] else 1
-        if name == "timeout" and at < len(words):
+        if name == "timeout" and at < len(words) and not split:
             at += 1  # its duration
-        words = words[at:]
+        words = split + words[at:]
     return words
+
+
+def shell_options(args):
+    """A POSIX shell's option letters and its operands, the first of which
+    ends its options: `bash -eo pipefail -c 'x' name` is ("eoc", ["x",
+    "name"])."""
+    flags, at = "", 0
+    while at < len(args):
+        a = args[at]
+        if a in ("-", "--"):
+            at += 1
+            break
+        if a in ("--rcfile", "--init-file"):
+            at += 2
+            continue
+        if a.startswith("--"):
+            at += 1
+            continue
+        if not re.fullmatch(r"[-+][A-Za-z]+", a):
+            break
+        if a[0] == "-":
+            flags += a[1:]
+        at += 1 + a.count("o") + a.count("O")  # `-o pipefail`: a value each
+    return flags, args[at:]
 
 
 def handed(words, read):
     """The scripts a command hands a shell to run: `sh -c '...'`, `eval
-    ...`, `pwsh -Command '...'`, or the here-documents a shell reads as its
-    script. Each (text, whether PowerShell's)."""
+    ...`, `trap '...' EXIT`, `pwsh -Command '...'`, or the here-documents a
+    shell reads as its script (`sh <<EOF`, `bash -s arg <<EOF`). Each (text,
+    whether PowerShell's)."""
     name = name_of(words[0])
     args = words[1:]
     if name == "eval":
         return [(" ".join(args), False)]
+    if name == "trap":
+        given = args[1:] if args[:1] == ["--"] else args
+        return [(given[0], False)] if given and not given[0].startswith("-") else []
     if name in SHELLS:
-        given = operands(args, {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"})
-        if any(re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", a) for a in args):
+        flags, given = shell_options(args)
+        if "c" in flags:
             return [(given[0], False)] if given else []
-        return [] if given else [(body, False) for body in read]
+        return [(body, False) for body in read] if "s" in flags or not given else []
     if name in POWERSHELLS:
         for at, a in enumerate(args):
             if a.lower() in ("-command", "-c") and at + 1 < len(args):
@@ -1035,90 +1122,198 @@ def handed(words, read):
     return []
 
 
-# A script, by its extension, and one named for building or packaging
-# (`build-aar.sh`, `package.sh`, `linux-packages.sh`, `pack.ps1`).
-SCRIPT = re.compile(r"\.(?:sh|bash|ps1|py|js|mjs|cjs|ts)$", re.I)
-BUILD_NAME = re.compile(r"build|packag|(?:^|[-_.])pack(?:[-_.]|$)", re.I)
-NPM = {"install", "i", "in", "add", "ci", "clean-install", "ic", "install-clean", "isntall", "rebuild", "rb",
-       "update", "up", "upgrade", "dedupe", "link", "ln", "run", "run-script", "rum", "urn", "test", "t", "tst",
-       "start", "stop", "restart", "install-test", "it", "install-ci-test", "cit", "exec", "x", "pack", "build"}
-# pnpm and yarn run a package's script by its bare name (`yarn lint`), so
-# every command of theirs builds but these.
-PNPM_YARN_READS = {"publish", "npm", "info", "view", "config", "cache", "version", "why", "list", "ls",
-                   "outdated", "audit", "login", "logout", "whoami", "help"}
-SUBCOMMANDS = {
-    "swift": {"build", "test", "run"},
-    "dotnet": {"build", "pack", "publish", "test", "run", "restore", "msbuild"},
-    "go": {"build", "install", "run", "test", "generate"},
-    "pip": {"install", "wheel", "download"},
-    "pip3": {"install", "wheel", "download"},
-    "flutter": {"build", "test", "run", "drive"},
-    "dart": {"compile", "run", "test"},
-}
-ANY_USE = {"cargo": "cargo", "gradle": "gradle", "gradlew": "gradle", "mvn": "maven", "mvnw": "maven",
-           "make": "make", "gmake": "make", "xcodebuild": "xcodebuild", "npx": "npx", "bunx": "npx"}
-DOCKER_VALUED = {"-H", "--host", "-c", "--context", "--config", "-l", "--log-level",
-                 "--tlscacert", "--tlscert", "--tlskey"}
+# How deep a script handed to a shell inside another is read; one deeper is
+# a finding, not a pass.
+DEPTH = 8
 
 
-def build_of(words):
-    """What a command builds, named for a finding, or None."""
-    name = name_of(words[0])
-    args = words[1:]
-    if name in ANY_USE:
-        return ANY_USE[name]
-    given = operands(args)
-    first = given[0] if given else None
-    if name == "npm" and first in NPM:
-        return "an npm, pnpm or yarn install, script or build"
-    if name in ("pnpm", "yarn") and not set(args) & {"--version", "-v", "--help", "-h"} \
-            and (first not in PNPM_YARN_READS if first else name == "yarn"):
-        return "an npm, pnpm or yarn install, script or build"
-    if name in SUBCOMMANDS and first in SUBCOMMANDS[name]:
-        return f"{'pip' if name == 'pip3' else name} {first}"
-    if name == "docker":
-        given = operands(args, DOCKER_VALUED)
-        if given[:1] in (["build"], ["bake"]) or given[:2] in (
-                ["buildx", "build"], ["buildx", "bake"], ["image", "build"], ["builder", "build"]) \
-                or given[:1] == ["compose"] and ("build" in given or "--build" in args):
-            return "docker build"
-    if name in ("python", "python3"):
-        if args[:2] == ["-m", "build"]:
-            return "python -m build"
-        if args[:1] == ["-m"] and args[1:2] in (["pip"], ["pip3"]) and args[2:3] and args[2] in SUBCOMMANDS["pip"]:
-            return f"pip {args[2]}"
-    script = None
-    if SCRIPT.search(words[0]):
-        script = words[0]
-    elif name in INTERPRETERS:
-        script = next((a for a in operands(args, {"-m", "-c", "-e", "-o", "-Command", "-command"})
-                       if SCRIPT.search(a)), None)
-    if script and posixpath.basename(script.replace("\\", "/")).lower() == "setup.py":
-        return "setup.py"
-    if script and BUILD_NAME.search(posixpath.basename(script.replace("\\", "/"))):
-        return "a build or package script"
-    return None
-
-
-def run_commands(text, pwsh=False, depth=0):
-    """Every command a `run:` script runs, as its words: its own, theirs
-    inside its substitutions, and those of each script one of them hands a
-    shell."""
+def scan(text, pwsh=False, depth=0):
+    """Every command a `run:` script runs -- its own, those inside its
+    substitutions, and those of each script one of them hands a shell -- as
+    (words, here-document bodies), the commands that run another taken off;
+    and the names of the functions it defines."""
+    shell = Shell(text, pwsh)
     out = []
-    for words, read in Shell(text, pwsh).commands():
+    for words, read in shell.commands():
         words = unwrapped(words)
         if not words:
             continue
-        out.append(words)
-        if depth < 8:
-            for script, ps in handed(words, read):
-                out += run_commands(script, ps, depth + 1)
-    return out
+        out.append((words, read))
+        scripts = handed(words, read)
+        if scripts and depth == DEPTH:
+            out.append(([f"a script handed to a shell {DEPTH} deep"], []))
+            continue
+        for script, ps in scripts:
+            inner, functions = scan(script, ps, depth + 1)
+            out += inner
+            shell.functions |= functions
+    return out, shell.functions
 
 
-# Actions that build, or set up what only a build runs: a job that sets
-# Gradle up runs it.
-BUILD_ACTIONS = re.compile(r"(?:docker/(?:build-push|bake)-action|gradle/actions/setup-gradle|gradle/gradle-build-action)@")
+# What a job holding a write runs (rule 3): each program its `run:` scripts
+# call, by the name it is called by, with the reason it builds nothing, and
+# for one that does more than that the uses it is put to here, checked by
+# its words (`docker push`, never `docker build`). What is not here is a
+# finding: a program, or a use of one, no one has said builds nothing is
+# refused before anyone has thought to name it, so a build under a name not
+# yet seen fails the check, not the token. Adding one is a change that
+# states what it runs.
+SHELL_OWN = "the shell's own: it runs no program"
+TEXT = "reads, writes or moves files and text, and runs no program"
+
+
+def uses(*listed):
+    """A check holding a program's words to the uses written here, each its
+    first words as a command writes them, no option before them."""
+    def check(name, args):
+        if any(tuple(args[:len(use)]) == use for use in listed):
+            return None
+        return f"`{' '.join([name] + args[:2])}`, a use of {name} WRITE_COMMANDS does not list"
+    return check
+
+
+def npm_use(name, args):
+    why = uses(("view",), ("publish",))(name, args)
+    if why is None and args[0] == "publish" and "--ignore-scripts" not in args:
+        why = "`npm publish` without `--ignore-scripts`, under which a package's own scripts run"
+    return why
+
+
+def git_use(name, args):
+    why = uses(("config",), ("checkout",), ("commit",), ("push",), ("tag",), ("ls-remote",))(name, args)
+    if why is None and args[0] == "config" and args[1:2] not in (["user.name"], ["user.email"]):
+        why = (f"`git config {' '.join(args[1:2])}`: git's configuration names the programs it starts"
+               " (hooks, filters, aliases), and only the committer is set here")
+    return why
+
+
+# tar's options that start a program.
+TAR_RUNS = ("--to-command", "--use-compress-program", "--checkpoint-action", "--info-script",
+            "--new-volume-script", "--rsh-command", "--rmt-command")
+
+
+def tar_use(name, args):
+    for at, a in enumerate(args):
+        # `-xzf`, or `xzf` as tar's first word: short options, of which -I
+        # and -F name a program.
+        letters = a[1:] if re.fullmatch(r"-[A-Za-z]+", a) else a if at == 0 and re.fullmatch(r"[A-Za-z]+", a) else ""
+        if a.startswith(TAR_RUNS) or set(letters) & {"I", "F"}:
+            return f"`tar {a}`, an option that starts a program"
+    return None
+
+
+WRITE_COMMANDS = {
+    "[": (SHELL_OWN, None), "[[": (SHELL_OWN, None), "((": (SHELL_OWN, None), "test": (SHELL_OWN, None),
+    "echo": (SHELL_OWN, None), "printf": (SHELL_OWN, None), "set": (SHELL_OWN, None),
+    "exit": (SHELL_OWN, None), "continue": (SHELL_OWN, None), "break": (SHELL_OWN, None),
+    "return": (SHELL_OWN, None), "true": (SHELL_OWN, None), "false": (SHELL_OWN, None),
+    ":": (SHELL_OWN, None), "cd": (SHELL_OWN, None), "shift": (SHELL_OWN, None),
+    "export": (SHELL_OWN, None), "unset": (SHELL_OWN, None), "local": (SHELL_OWN, None),
+    "read": (SHELL_OWN, None), "readonly": (SHELL_OWN, None), "wait": (SHELL_OWN, None),
+    "eval": ("the shell's own, the script it is handed read here as the step's own", None),
+    "trap": ("the shell's own, the script it is handed read here as the step's own", None),
+    "basename": (TEXT, None), "cat": (TEXT, None), "grep": (TEXT, None), "ls": (TEXT, None),
+    "mkdir": (TEXT, None), "mv": (TEXT, None), "tr": (TEXT, None),
+    "sha256sum": ("sums the files a release attaches, and runs no program", None),
+    "jq": ("reads and writes JSON, and runs no program", None),
+    "tar": ("lists or unpacks an archive (npm's tarballs, read for their manifest); an option that"
+            " starts a program (-I, --to-command, ...) is refused", tar_use),
+    "gh": ("GitHub's CLI, for the repository's releases and pull requests (`gh release`, `gh pr`),"
+           " which write through GitHub's API and run nothing of the repository's; an extension, or"
+           " any other command, is refused", uses(("release",), ("pr",))),
+    "git": ("the repository's history alone -- config of the committer, checkout, commit, push, tag,"
+            " ls-remote -- which runs no code of the commit's: a program git starts is named by its"
+            " configuration, which nothing but the committer is set in (`-c` before the command is"
+            " refused too)", git_use),
+    "docker": ("the registry's side alone: log in, load the file `docker save` wrote, push, read what"
+               " it holds (`info`, `version`, `image inspect`), and write or read a manifest list on"
+               " the registry (`buildx imagetools`); it builds no image and runs none",
+               uses(("login",), ("push",), ("load",), ("info",), ("version",), ("image", "inspect"),
+                    ("buildx", "imagetools", "create"), ("buildx", "imagetools", "inspect"))),
+    "npm": ("looks a version up (`npm view`) and publishes a tarball `build` packed, with"
+            " `--ignore-scripts`: no script of a package's runs where the token is", npm_use),
+    "dotnet": ("`dotnet nuget push` of the .nupkg `nuget-pack` made: no project is restored, built"
+               " or run", uses(("nuget", "push"))),
+    "node": ("`node -p` or `-e` on the workflow's own expression, reading a package's manifest; a"
+             " script file, `--run` or a package's binary is refused",
+             uses(("-p",), ("-e",), ("--print",), ("--eval",))),
+}
+
+# Scripts of the repository a job holding a write runs, by their path
+# (wherever the repository is checked out: `workflow/tools/x.sh`), each with
+# what it runs. What a script runs inside is not read here: its entry says,
+# and a change to it is read as one.
+WRITE_SCRIPTS = {
+    "integrations/swift/set-binary.sh": "writes a version and a 64-hex checksum into Package.swift"
+    " with Python's standard library, from a here-document of its own: it builds nothing",
+    "integrations/studio-desktop/scripts/attach.sh": "attaches the app's downloads to a published"
+    " release with gh, and appends their lines to SHA256SUMS: it builds nothing and runs nothing it"
+    " downloads",
+    "tools/image-latest.sh": "moves ghcr.io's `latest` with gh, docker's `buildx imagetools` and jq:"
+    " it builds no image and runs none",
+}
+
+# Actions a job holding a write may use, by their path (`owner/repo` and a
+# directory in it, any case), each with the reason it builds nothing. A
+# local action (`./...`) and a `docker://` image are code this check does
+# not read, and are refused.
+WRITE_ACTIONS = {
+    "actions/checkout": "puts a commit's files in place and runs none of them",
+    "actions/download-artifact": "takes what a job that read alone made, and runs none of it",
+    "actions/setup-node": "puts Node and npm on PATH (npm's trusted publishing wants 11.5) and"
+    " installs no package",
+    "NuGet/login": "trades the job's OIDC token for a nuget.org key, and runs nothing of the"
+    " repository's",
+    "pypa/gh-action-pypi-publish": "uploads the files it is given with twine, from its own image"
+    " pinned under the commit, and builds nothing",
+}
+
+
+def listed_script(word):
+    """The WRITE_SCRIPTS entry a command's word names by its path, or None."""
+    path = word.replace("\\", "/")
+    while path.startswith("./"):
+        path = path[2:]
+    return next((s for s in WRITE_SCRIPTS if path == s or path.endswith("/" + s)), None)
+
+
+def refusal(words, read, functions, seen=None):
+    """What a job holding a write may not run in this command -- its words,
+    the commands that run another taken off, and the here-documents it
+    reads -- or None where it may: a function the script defines, a shell
+    whose script is read here or listed, or a program WRITE_COMMANDS lists,
+    put to a use it lists."""
+    first, args = words[0], words[1:]
+    name = name_of(first)
+
+    def script(path):
+        listed = listed_script(path)
+        if listed and seen is not None:
+            seen.scripts.add(listed)
+        return None if listed else f"`{path}`, a program or script by its path WRITE_SCRIPTS does not list"
+
+    if first in functions:
+        return None
+    if name in SHELLS:
+        flags, given = shell_options(args)
+        if "c" in flags or ("s" in flags or not given) and read:
+            return None  # its script is read: `handed`
+        if "s" in flags or not given:
+            return f"`{name}` reading its script from its input, which this check cannot read"
+        return script(given[0])
+    if name in (".", "source"):
+        return script(args[0] if args else "")
+    if name in POWERSHELLS:
+        if any(a.lower() in ("-command", "-c") for a in args):
+            return None  # its script is read: `handed`
+        given = [a for a in args if not a.startswith("-")]
+        return script(given[-1]) if given else f"`{name}` reading its script from its input, which this check cannot read"
+    if "/" in first.replace("\\", "/"):
+        return script(first)
+    if name not in WRITE_COMMANDS:
+        return f"`{name}`, a program WRITE_COMMANDS does not list"
+    check = WRITE_COMMANDS[name][1]
+    return check(name, args) if check else None
 
 
 def shell_of(step, job, doc):
@@ -1136,23 +1331,40 @@ def shell_of(step, job, doc):
     return "pwsh" if "windows" in str(job.get("runs-on", "")).lower() else "bash"
 
 
-def builds(job, doc=None):
-    """What a job runs that builds: (line, what) for each, once a step."""
+def off_list(job, doc=None, seen=None):
+    """What a job holding a write runs that the lists do not hold: (line,
+    what) for each, once a step."""
     found = []
+
+    def add(line, what):
+        if (line, what) not in found:
+            found.append((line, what))
+
+    actions = {a.lower() for a in WRITE_ACTIONS}
+    called = job.get("uses")
+    if isinstance(called, Scalar) and not str(called).strip().startswith("./"):
+        add(called.line, f"the workflow `{str(called).strip()}`, whose jobs this check does not read")
     for step in steps(job):
-        uses = step.get("uses")
-        if isinstance(uses, Scalar) and BUILD_ACTIONS.match(uses):
-            found.append((uses.line, str(uses)))
-        if isinstance(uses, Scalar) and str(uses).strip().startswith("./"):
-            found.append((uses.line, f"the local action {str(uses).strip()}, whose steps this check"
-                                     " does not read"))
+        uses_ = step.get("uses")
+        if isinstance(uses_, Scalar):
+            action = str(uses_).strip()
+            if action.startswith("./"):
+                add(uses_.line, f"the local action `{action}`, whose steps this check does not read")
+            elif action.startswith("docker://"):
+                add(uses_.line, f"the image `{action}`, whose code this check does not read")
+            elif action.partition("@")[0].lower() not in actions:
+                add(uses_.line, f"the action `{action.partition('@')[0]}`, which WRITE_ACTIONS does not list")
         run = step.get("run")
         if isinstance(run, Scalar):
-            pwsh = shell_of(step, job, doc or Mapping(1)) in ("pwsh", "powershell")
-            for words in run_commands(str(run), pwsh):
-                what = build_of(words)
-                if what and (run.line, what) not in found:
-                    found.append((run.line, what))
+            shell = shell_of(step, job, doc or Mapping(1))
+            if shell not in SHELLS | POWERSHELLS:
+                add(run.line, f"a script under `shell: {shell}`, which this check does not read")
+                continue
+            commands, functions = scan(str(run), shell in POWERSHELLS)
+            for words, read in commands:
+                what = refusal(words, read, functions, seen)
+                if what:
+                    add(run.line, what)
     return found
 
 
@@ -1203,8 +1415,19 @@ def secrets_read(node):
     return found
 
 
-def check_text(text, name):
-    """The findings for one workflow's text, each `name:line: why`."""
+class Seen:
+    """What the workflows read so far needed of the lists: the actions let
+    off a pin naming their major alone, and the scripts a job that writes
+    ran."""
+
+    def __init__(self):
+        self.majors = set()
+        self.scripts = set()
+
+
+def check_text(text, name, seen=None):
+    """The findings for one workflow's text, each `name:line: why`; what it
+    needed of the lists goes into `seen`."""
     try:
         doc = read(text)
     except Unreadable as e:
@@ -1212,6 +1435,7 @@ def check_text(text, name):
     if not isinstance(doc, Mapping):
         return [f"{name}:1: a workflow is a mapping"]
     findings = []
+    seen = Seen() if seen is None else seen
 
     if "permissions" not in doc:
         findings.append(f"{name}:1: no `permissions:` at the top: a job naming none gets the"
@@ -1239,21 +1463,22 @@ def check_text(text, name):
         uses = [job["uses"]] if isinstance(job.get("uses"), Scalar) else []
         uses += [s["uses"] for s in steps(job) if isinstance(s.get("uses"), Scalar)]
         for u in uses:
-            why = pinned(u)
+            why = pinned(u, seen.majors)
             if why:
                 findings.append(f"{name}:{u.line}: job `{job_id}` uses {u}: {why}")
 
         held = writes(job["permissions"] if "permissions" in job else top)
-        built = builds(job, doc) if held else []
+        off = off_list(job, doc, seen) if held else []
         if (base, job_id) in WRITE_AND_BUILD:
-            if not built:
-                findings.append(f"{where}: WRITE_AND_BUILD lets it off, and it runs no build beside a"
-                                " write: take it out")
+            if not off:
+                findings.append(f"{where}: WRITE_AND_BUILD lets it off, and it runs nothing beside a"
+                                " write that the lists do not hold: take it out")
         else:
-            for line, what in built:
+            for line, what in off:
                 findings.append(f"{name}:{line}: job `{job_id}` holds {', '.join(held)} write and runs"
-                                f" {what}: build in a job that reads alone, and hand what it made"
-                                " to the job that writes as an artifact")
+                                f" {what}: a job that writes runs only what the check lists, each with"
+                                " the reason it builds nothing; build in a job that reads alone and hand"
+                                " what it made to this one as an artifact")
 
         read_ = secrets_read(job)
         if str(job.get("secrets", "")).strip() == "inherit":
@@ -1281,16 +1506,53 @@ def check_text(text, name):
     return findings
 
 
+def stale(names, seen):
+    """The entries of the lists that nothing among every workflow there is
+    (`names`) needs, each a finding: a job let off in a workflow that is
+    gone or was renamed, an action MAJOR_TAGS lets off that no pin names by
+    its major alone, a script WRITE_SCRIPTS lists that no job that writes
+    runs. Each would let off whatever next took its name."""
+    here = "tools/workflow_check.py"
+    found = []
+    for listed, allowlist in (("REPOSITORY_SECRETS", REPOSITORY_SECRETS), ("WRITE_AND_BUILD", WRITE_AND_BUILD)):
+        for workflow_, job_id in allowlist:
+            if workflow_ not in names:
+                found.append(f"{here}: {listed} lets off job `{job_id}` of {workflow_}, which is no"
+                             " workflow here (gone, or renamed): take it out")
+    for repo in MAJOR_TAGS:
+        if repo.lower() not in seen.majors:
+            found.append(f"{here}: MAJOR_TAGS lets off {repo}, and no pin of it names a major tag alone:"
+                         " take it out")
+    for script in WRITE_SCRIPTS:
+        if script not in seen.scripts:
+            found.append(f"{here}: WRITE_SCRIPTS lists {script}, which no job that writes runs: take it out")
+    return found
+
+
+def check_texts(files, whole=True):
+    """The findings for workflows, [(name, text)]; where they are every
+    workflow there is (`whole`), an entry of a list none of them needs is
+    one too (`stale`)."""
+    seen, findings = Seen(), []
+    for name, text in files:
+        findings += check_text(text, name, seen)
+    if whole:
+        findings += stale({pathlib.PurePath(name).name for name, _ in files}, seen)
+    return findings
+
+
 def main():
-    paths = [pathlib.Path(p) for p in sys.argv[1:]] or sorted(
-        p for p in WORKFLOWS.iterdir() if p.suffix in (".yml", ".yaml"))
-    findings = []
+    given = [pathlib.Path(p) for p in sys.argv[1:]]
+    paths = given or sorted(p for p in WORKFLOWS.iterdir() if p.suffix in (".yml", ".yaml"))
+    files = []
     for path in paths:
         try:
             shown = path.resolve().relative_to(ROOT)
         except ValueError:
             shown = path
-        findings += check_text(path.read_text(encoding="utf-8"), str(shown))
+        files.append((str(shown), path.read_text(encoding="utf-8")))
+    # The lists are held to the workflows only where every one was read.
+    findings = check_texts(files, whole=not given)
     for f in findings:
         print(f, file=sys.stderr)
     if findings:
@@ -1299,7 +1561,8 @@ def main():
     names = {p.name for p in paths}
     let_off = sum(1 for listed in (REPOSITORY_SECRETS, WRITE_AND_BUILD) for f, _ in listed if f in names)
     print(f"workflow_check: {len(paths)} workflows, every action pinned by its commit, every"
-          " workflow's permissions said, no job that writes builds, every secret read under an environment"
+          " workflow's permissions said, every job that writes running only what is listed, every"
+          " secret read under an environment"
           + (f" ({let_off} let off by name, each with its reason)" if let_off else ""))
 
 

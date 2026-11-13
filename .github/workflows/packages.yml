@@ -135,8 +135,12 @@ jobs:
             fi
             # `./`: a bare `dist/x.tgz` is read as GitHub's `owner/repo`
             # shorthand -- 0.1.5's first publish went to `git ls-remote
-            # github.com/dist/...` and stopped there.
-            npm publish "./$pkg" --access public --provenance
+            # github.com/dist/...` and stopped there. `--ignore-scripts`: no
+            # script of a package's runs where this job's token is. A tarball
+            # runs none as it is published, but a folder would run its
+            # `prepublishOnly` and `prepack`, and the flag says so where
+            # tools/workflow_check.py can read it.
+            npm publish "./$pkg" --access public --provenance --ignore-scripts
           done
 
   # NuGet's `FennecDb`: packed, installed from the .nupkg into a console app
