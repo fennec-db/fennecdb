@@ -31,6 +31,12 @@ on:
       minutes:
         description: 'Minutes of faults a seed'
         default: '10'
+  # TEMPORARY, removed in the next commit: GitHub dispatches only a workflow
+  # on the default branch, so the fix's run is this push's -- seeds 2001 to
+  # 2006 of 3 minutes, the first three those that failed before it.
+  push:
+    branches: [v1-t9-chaos]
+    paths: ['.github/workflows/chaos.yml']
 
 permissions:
   contents: read
@@ -73,8 +79,8 @@ jobs:
       matrix:
         share: [1, 2, 3]
     env:
-      SEEDS_ALL: ${{ inputs.seeds || '50' }}
-      CHAOS_MINUTES: ${{ inputs.minutes || '10' }}
+      SEEDS_ALL: ${{ inputs.seeds || (github.event_name == 'push' && '6') || '50' }}
+      CHAOS_MINUTES: ${{ inputs.minutes || (github.event_name == 'push' && '3') || '10' }}
       # The kit's own lease. Three nodes at a CPU each, three routers at a
       # half and the driver at one are 5.5 CPUs of quota on a runner of 4:
       # a lease of 2 s, missed under that load, failed a node over that no
@@ -123,8 +129,9 @@ jobs:
           count=$(( each + (k <= extra ? 1 : 0) ))
           before=$(( (k - 1) * each + (k - 1 < extra ? k - 1 : extra) ))
           echo "SEEDS=$count" >> "$GITHUB_ENV"
-          echo "SEED0=$(( GITHUB_RUN_NUMBER * 1000 + before + 1 ))" >> "$GITHUB_ENV"
-          echo "share $k: $count seed(s) from $(( GITHUB_RUN_NUMBER * 1000 + before + 1 )), $CHAOS_MINUTES min each"
+          run=$GITHUB_RUN_NUMBER; [ "$GITHUB_EVENT_NAME" = push ] && run=2
+          echo "SEED0=$(( run * 1000 + before + 1 ))" >> "$GITHUB_ENV"
+          echo "share $k: $count seed(s) from $(( run * 1000 + before + 1 )), $CHAOS_MINUTES min each"
       - name: Chaos
         if: env.SEEDS != '0'
         env:
