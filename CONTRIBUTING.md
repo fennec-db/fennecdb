@@ -31,9 +31,10 @@ run it from under System Settings → Privacy & Security → Developer Tools
 missing), and start the terminal again.
 
 **Build with one toolchain.** The Makefile takes rustup's `cargo`, which reads
-`rust-toolchain.toml`; a Homebrew `cargo` earlier in `PATH` is another
-compiler, and each switch between the two rebuilds everything -- and on macOS
-has every binary checked again.
+`rust-toolchain.toml` -- the exact release CI tests with and the images build
+with, never `stable` -- and installs it on first use; a Homebrew `cargo`
+earlier in `PATH` is another compiler, and each switch between the two
+rebuilds everything -- and on macOS has every binary checked again.
 
 Narrower runs:
 
