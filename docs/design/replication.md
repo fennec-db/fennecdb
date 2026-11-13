@@ -157,7 +157,9 @@ record was a window only until the copy's first write applied after it.
 each copy the file as a kill leaves it, the page cache without the
 process's buffer, and open it again; each fails without its half of the
 fix. The cost is one fsync more for each follow that changes what a file
-is, and some 30 bytes more in an image's own rename. The image's buffer is
+is, some 30 bytes more in an image's own rename, and 768 bytes of
+`fennec-server`'s `__text` (4 818 432 to 4 819 200, 16 bytes on the file;
+macOS arm64, release). The image's buffer is
 grown by the record alone: a `Vec` grown its own way took twice a large
 image's size.
 
