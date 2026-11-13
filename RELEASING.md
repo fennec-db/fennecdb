@@ -120,12 +120,16 @@ nothing reaches a registry before the notes have had a read.
    (`image-latest`, `tools/image-latest.sh`): moved to `X.Y.Z`'s list once
    the release is published, only where it is the newest published release,
    never for a draft, a pre-release or an older version. Where a release
-   was published before `image (manifest)` made `X.Y.Z` -- its image jobs
-   failed -- `packages.yml`'s `image (latest)` fails, saying `X.Y.Z` is not
-   on ghcr.io yet: run `release.yml` again for the tag once the image is
-   fixed (`gh workflow run release.yml -f tag=vX.Y.Z`, or re-run its failed
-   jobs), and its own `image (latest)` moves `latest` once `manifest` has
-   made the list. Of the two, the one that runs second moves it.
+   was published before `image (manifest)` made `X.Y.Z`,
+   `packages.yml`'s `image (latest)` fails, saying `X.Y.Z` is not on
+   ghcr.io yet. If the tag's `release.yml` run was still going, nothing
+   needs re-running: its own `image (latest)` moves `latest` once
+   `manifest` has made the list. If its image jobs failed, re-run that
+   run's failed jobs (`gh run rerun <run-id> --failed`), not a new
+   `gh workflow run`: a new run builds the images again and pushes the arch
+   tags under new digests. A re-run within a day pushes the images `image`
+   saved; after that they are gone, and `image` must run again too. Of the
+   two `image (latest)` jobs, the one that runs second moves it.
    The `.deb` and `.rpm` need no step of their own: step 3 built them, and
    publishing the draft is what makes them downloadable.
 5. Once the release is published and `packages.yml`'s run is done, attach the

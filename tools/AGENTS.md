@@ -44,9 +44,13 @@ moves to the newest published release alone, never a draft, a pre-release
 or back, as the formula does: `tools/image-latest.sh`, which
 `packages.yml`'s `image-latest` runs once the release is published and
 `release.yml`'s once `manifest` has made `<version>`, so whichever runs
-second moves it, and one finding no `<version>` fails saying so, never
-green (`tools/test_image_latest.py`); a new channel names what it installs
-by its checksum. A release job that builds runs with `contents: read` and
+second moves it; both jobs' tokens read alone and see no draft, so it reads
+the release by its tag through the API, which answers a draft with a 404
+whatever the token (`gh release view` fails on one), and takes no error but
+that 404 and the registry's `not found` for an answer, failing on any
+other, as one finding no `<version>` fails saying so, never green
+(`tools/test_image_latest.py`, under dash); a new channel names what it
+installs by its checksum. A release job that builds runs with `contents: read` and
 a checkout keeping no token (`binaries`, `windows`, `wasm`, `android`,
 `linux-packages`, `image`): the crates' build scripts run there, and only
 the jobs that publish write (`publish`, `image-push`, `manifest`,
