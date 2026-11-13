@@ -17,12 +17,20 @@ promoted by `POST /_replication/promote` and the units switched at once;
 
 **[`make chaos` breaks a region by seed, one fault at a time, and holds its
 history to an oracle.](../docs/design/integrations.md#the-chaos-drill)**
-Each fault heals, and every replica's rows equal its primary's, before the
-next; at the end the YCSB register checker passes, every append answered
-is found and none refused, and no history gives a change two writes or
-answers an older term after a newer (`drill/oracle.py`, held by
-`drill/test_oracle.py`). A violation is a bug or a window the design
-names, reported by its seed, never a check loosened; every container,
-the driver's too, under `--cpus` and `--memory`. Its nodes run the one
-build naming `test-clock` (`Dockerfile`'s `chaos`), which says so in
-`--version`, a release's package check refusing it.
+Each fault lands -- drawn again where it did not, three misses in a row
+failing the seed, every kind landed once -- and heals, no netem left (read
+back) and every replica's rows equal its primary's, before the next; at
+the end the YCSB register checker passes, every write and append answered
+is found -- a register write's value in the ledger `wl` its block lands --
+and none refused, and no term names two histories nor a history two terms,
+no change is given two writes and no older term answers after a newer
+(`drill/oracle.py`, held by `drill/test_oracle.py`). A write lost fails the
+seed but in the window the design names (`documented`: answered while its
+span's fault held the promoted copy behind, or in a term a failover of that
+span began), where it is counted and named; a violation is reported by its
+seed, never a check loosened or a window widened. Every container, the
+driver's too, under `--cpus` and `--memory`, at the kit's lease. Its nodes
+run the one build naming `test-clock` (`Dockerfile`'s `chaos`): no default
+reaches it and nothing else builds with it (`tools/release_features_check.py`,
+CI's fmt job), and `release.yml` refuses a tarball's or the image's
+`fennec-server` whose `--version` says more than its version.

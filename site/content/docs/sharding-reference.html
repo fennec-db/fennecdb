@@ -627,7 +627,12 @@ copies catch up; a move's source killed, paused or cut off mid-move; a
 node's clock jumped hours or days. After each fault heals, every replica
 must hold its primary's rows. At the end every read must have found a
 value a write could have left (YCSB's register checker), every answered
-append must be there, and no tenant may have been written by two primaries
-at once. Fifty seeds of ten minutes run every week; a failure names its
-seed, which draws the same schedule again.</p>
+write and append must be there -- each register write lands its value in a
+ledger in the same block, so a write written over before anyone read it is
+found too -- and no tenant may have been written by two primaries at once.
+The one loss allowed is the one a failover is documented to make: a write
+answered while its replica was behind, which the run counts and names. A
+fault that did not land is drawn again, and every kind lands once a seed.
+Fifty seeds of ten minutes run every week at the kit's lease of 5 s; a
+failure names its seed, which draws the same schedule again.</p>
 </details>

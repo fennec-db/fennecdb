@@ -563,10 +563,20 @@ node's tenants have their copy on the standby) -- and the router's log,
 which says why each has none:
 
 - **A node failed over** (`FennecNodeFailedOver`). Its own tenants were
-  promoted on their replicas, and the replicas it held are gone: none of
-  them has a copy until the node answers again (A node back), when its
-  files follow the new primaries. A node gone for good: `POST
-  /_shard/replicas` gives them copies on the nodes left.
+  promoted on their replicas, and the replicas it held were taken off
+  their records: none of them has a copy until a repair places one -- the
+  router's own as a node answers again (A node back), or `POST
+  /_shard/replicas`. As the node answers again, the tenants it lost follow
+  their new primaries from it; the replica copies it held come back only
+  where no repair placed their tenants' copies elsewhere first. Once one
+  has -- another node back before it, an operator's repair -- each copy it
+  held is a file left on it with no identity to take it back by, which no
+  repair follows over or deletes (Files left on nodes), and its node is no
+  place for that tenant's replica: in a region of three nodes, two failed
+  over in turn, a tenant can be left with no node for a copy until you
+  remove those files and run `POST /_shard/replicas` again (Known gaps). A
+  node gone for good: `POST /_shard/replicas` gives them copies on the
+  nodes left.
 - **A replica that did not take**: `tenant `t` has no replica yet: `eu-b`
   answered 503 ...; a repair tries again`, or `did not answer`. The router
   tries again by itself 2, 4, 8 s ... later, up to a minute apart, eight
@@ -1258,11 +1268,17 @@ source over and jumps a node's clock -- one fault at a time, every
 replica's rows checked against its primary's after each. At the end every
 answered write must be found, every read must have found a value a write
 could have left, and no tenant may have been written by two primaries at
-once. `make chaos SEEDS=5 SEED0=40 CHAOS_MINUTES=10` runs seeds 40 to 44
-for ten minutes each; a failed seed names itself, and the same seed draws
-the same schedule again. Every container, the driver's too, is held to
-`--cpus` and `--memory`. Its nodes run a test build of fennec-server
-(`test-clock`), never one a release ships.
+once -- but for a write a failover lost while its replica was behind, the
+window *A node lost* names, which the run counts and names rather than
+fails. Each fault must land, drawn again where it did not, and every kind
+lands once. `make chaos SEEDS=5 SEED0=40 CHAOS_MINUTES=10` runs seeds 40
+to 44 for ten minutes each; a failed seed names itself, and the same seed
+draws the same schedule again; `CHAOS_KEEP=1` leaves a failed seed's
+containers for a look and stops there. Every container, the driver's too,
+is held to `--cpus` and `--memory`, at the kit's lease of 5 s
+(`CHAOS_LEASE`). Its nodes run a test build of fennec-server
+(`test-clock`), never one a release ships: `release.yml` refuses a
+binary or an image whose `--version` says it.
 
 ## Known gaps
 
@@ -1340,6 +1356,20 @@ the same schedule again. Every container, the driver's too, is held to
   back. A process stopped after the second check sends a success whenever
   it runs again.
 
+- **Copies a failed node held, once a repair placed them elsewhere.** A
+  node failed over leaves the replica copies it held behind as files noted
+  with no identity, once a repair has placed their tenants' copies on
+  another node: the router never takes one back or follows over it, and
+  its node is no place for that tenant's replica (Tenants without a
+  replica, Files left on nodes). In a region of three nodes, two failed
+  over in turn, a tenant is left without a copy -- and stays on its
+  primary if that dies -- until an operator removes the files `POST
+  /_shard/replicas` lists under `left` (`DELETE /_admin/tenants/<t>` on the
+  node, where the directory places neither the tenant nor its replica) and
+  asks for a repair again. `make chaos` does that as an operator would.
+  The fix proposed for 1.0 keeps each replica's identity in the directory,
+  so a repair takes such a copy back or follows over it by itself
+  (docs/design/tenants.md, *A detached copy taken back by its identity*).
 - **No scrape-only token.** `/_metrics` takes a node's data or admin token,
   a router's `--token`.
 - **No per-tenant replica lag** on a node's `/_metrics`
