@@ -1399,67 +1399,103 @@ test('a live query over HTTP follows the writes a scoped token may read, and no 
   }
 });
 
-// A replica's sync tells its tokenProvider why a token is wanted: the
-// server said the token's `exp` passed (`token_expired`) -- a fresh token,
-// and the sync goes on -- or refused the token otherwise, a session ended,
-// at which an app signs out. Told alike, an app took an expiry for a
-// session ended and deleted what the replica held.
-test("a replica's tokenProvider is told a token's expiry from its refusal", { skip, concurrency: false }, async () => {
+// A replica's sync hands its tokenProvider why a token is wanted, against a
+// real server and Node's own fetch: the token's `exp` passed
+// (`token_expired`) -- at the stream's end, and at a stream refused at its
+// open, whose body a fetch throws away once the stream is cancelled, so it
+// is read first -- or a token refused otherwise, one handed over refused
+// again (`attempt` 2), and none sent at all (`hadToken` false).
+test("a replica's tokenProvider is handed why a token is wanted", { skip, concurrency: false }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'fennec-sync-expiry-'));
   const secret = 'web-tests-jwt-secret-of-32-bytes-or-more';
   const policy = join(dir, 'policy.txt');
   await writeFile(policy, 'notes read,write where owner = $jwt.sub\n');
   const s = await listening(bin, ['--http', '127.0.0.1:0', '--http-token', 'root', '--jwt-secret', secret, '--policy', policy], 'fennec-http');
   const now = () => Math.floor(Date.now() / 1000);
-  let db;
-  let refused;
+  const said = (r) => ({ errorCode: r.errorCode, expired: r.expired, hadToken: r.hadToken, attempt: r.attempt });
+  const opened = [];
   try {
     const root = client.connect(s.url, { token: 'root' });
     await root.run('create collection notes (owner text @hash, title text)');
     const asked = [];
-    db = await sync({
+    const db = await sync({
       url: s.url,
       token: await jwt(secret, { sub: 'alice', exp: now() + 3 }),
       local: await Fennec.open(wasm),
       leader: false,
       shapes: [{ collection: 'notes' }],
-      tokenProvider: (expired) => {
-        asked.push(expired);
+      tokenProvider: (r) => {
+        asked.push(said(r));
         return jwt(secret, { sub: 'alice', exp: now() + 600 });
       },
     });
+    opened.push(db);
     await db.ready();
     // The stream is ended at the token's `exp`: a token is asked for as
     // expired, and the stream opened again with the fresh one hears the
     // next write.
-    await until(() => asked.length === 1, "the token asked for at its exp", 15000);
+    await until(() => asked.length === 1, 'the token asked for at its exp', 15000);
     await root.run('put notes {owner: "alice", title: "after"}');
     await until(async () => (await db.from('notes').rows()).some((r) => r.title === 'after'), 'the write after the fresh token');
-    assert.deepEqual(asked, [true]);
-    assert.equal(db.status()[0].code, null);
+    assert.deepEqual(asked, [{ errorCode: 'token_expired', expired: true, hadToken: true, attempt: 1 }]);
+    assert.equal(db.status()[0].errorCode, null);
+
+    // A stream refused at its open for its token's expiry: the body read
+    // before the stream is cancelled names the code, which an abort first
+    // threw away -- the provider told nothing of an expiry.
+    db.setToken(await jwt(secret, { sub: 'alice', exp: now() - 5 }));
+    db.setOnline(false);
+    db.setOnline(true);
+    await until(() => asked.length === 2, 'the token asked for at the open');
+    assert.deepEqual(asked[1], { errorCode: 'token_expired', expired: true, hadToken: true, attempt: 1 });
+    await root.run('put notes {owner: "alice", title: "reopened"}');
+    await until(async () => (await db.from('notes').rows()).some((r) => r.title === 'reopened'), 'the write after the open');
 
     // A token no key of the server's signed: refused, never an expiry, past
-    // its `exp` or not.
+    // its `exp` or not -- and the one handed over refused too, `attempt` 2,
+    // where an app signs out.
     const told = [];
-    refused = await sync({
+    const forged = () => jwt('another-secret-of-32-bytes-or-more!', { sub: 'alice', exp: now() + 600 });
+    const refused = await sync({
       url: s.url,
-      token: await jwt('another-secret-of-32-bytes-or-more!', { sub: 'alice', exp: now() + 600 }),
+      token: await forged(),
       local: await Fennec.open(wasm),
       leader: false,
       shapes: [{ collection: 'notes' }],
-      tokenProvider: (expired) => {
-        told.push(expired);
-        throw new FennecError('signed out');
+      tokenProvider: (r) => {
+        told.push(said(r));
+        if (r.attempt > 1) throw new FennecError('signed out');
+        return forged();
       },
       onError: () => {},
     });
-    await until(() => told.length === 1, 'the token asked for at its refusal');
-    assert.deepEqual(told, [false]);
-    assert.equal(refused.status()[0].code, null);
+    opened.push(refused);
+    await until(() => told.length === 2, 'the token asked for twice');
+    assert.deepEqual(told, [
+      { errorCode: null, expired: false, hadToken: true, attempt: 1 },
+      { errorCode: null, expired: false, hadToken: true, attempt: 2 },
+    ]);
+    assert.equal(refused.status()[0].errorCode, null);
     assert.match(refused.status()[0].error, /refused the token/);
+
+    // Started with no token: asked for one, told none was sent.
+    const bare = [];
+    const unsigned = await sync({
+      url: s.url,
+      local: await Fennec.open(wasm),
+      leader: false,
+      shapes: [{ collection: 'notes' }],
+      tokenProvider: (r) => {
+        bare.push(said(r));
+        return jwt(secret, { sub: 'alice', exp: now() + 600 });
+      },
+    });
+    opened.push(unsigned);
+    await unsigned.ready();
+    assert.deepEqual(bare, [{ errorCode: null, expired: false, hadToken: false, attempt: 1 }]);
+    assert.ok((await unsigned.from('notes').rows()).some((r) => r.title === 'reopened'));
   } finally {
-    db?.close();
-    refused?.close();
+    for (const d of opened) d.close();
     s.close();
     await rm(dir, { recursive: true, force: true });
   }

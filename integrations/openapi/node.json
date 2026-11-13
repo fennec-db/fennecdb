@@ -4665,7 +4665,7 @@
      },
      "code": {
       "type": "string",
-      "description": "What a program tells the refusal by, where it has one: token_expired, a token past its exp (401), which a fresh token cures; a 401 naming none is a token no longer good."
+      "description": "What a program tells the refusal by, where it has one: token_expired, a token past its exp (401), which a fresh token cures. A later server may name others; a 401 naming none may be cured by a fresh token too."
      },
      "retry_after": {
       "type": "integer",

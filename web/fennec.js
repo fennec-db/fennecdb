@@ -1529,10 +1529,11 @@ const NO_SEQ = Number.MAX_SAFE_INTEGER;
 const RETRY_AFTER_MAX_MS = 3_600_000;
 /**
  * The code fennec-server tells a token past its `exp` by, on a request's
- * 401 and on the `error` event ending a stream at the `exp`: the one
- * refusal of a token a fresh token cures. A 401 naming no code is a token,
- * or a session, the server no longer takes -- told alike, an app took an
- * expiry for a session ended. The native core's `TOKEN_EXPIRED`.
+ * 401 and on the `error` event ending a stream at the `exp`: an app
+ * refreshes the token silently at it. A 401 naming no code may be cured by
+ * a fresh token too -- a key rotation, a token not valid yet, an older
+ * server's expiry, none sent -- so it never means "sign out" by itself.
+ * The native core's `TOKEN_EXPIRED`.
  */
 const TOKEN_EXPIRED = 'token_expired';
 
@@ -1558,13 +1559,12 @@ function said(body) {
     retryMs: Math.min(Math.floor(wait), RETRY_AFTER_MAX_MS),
     // What a `require n else '<reason>'` the server found unmet said.
     reason: typeof reason === 'string' && reason ? reason : null,
-    // The code the server tells the refusal by: `TOKEN_EXPIRED`.
+    // The code the server tells the refusal by, read from the body alone,
+    // never its words, and passed on as it came: `TOKEN_EXPIRED`, or a
+    // later server's.
     code: typeof code === 'string' && code ? code : null,
   };
 }
-
-/** Whether a 401's body, or a stream's `error` event, names the token's expiry by its code. */
-const expiredIn = (body) => said(body).code === TOKEN_EXPIRED;
 
 /** A key's text, as the native core writes it: a text as it is, else its JSON. */
 const keyText = (k) => (typeof k === 'string' ? k : JSON.stringify(k));
@@ -1619,16 +1619,24 @@ class SyncQuery extends Query {
  * one at a time and in order, each under an `Idempotency-Key` it keeps until
  * the server answers; no answer, a 408, a 429 or a 5xx is tried again with
  * backoff -- or after the `retry_after` a quota's 429 or a move's 503 names,
- * where longer -- a 401 asks for a token, told whether its `exp` passed
- * (`token_expired`) or it was refused otherwise, and a 507 naming a
- * tenant's quota and any other 4xx are a refusal, put back. Moving this
- * layer onto that core instead was measured at +21 KB brotli.
+ * where longer -- a 401 asks the `tokenProvider` for a token, handed a
+ * `TokenRefusal` (`errorCode`, `expired`, `hadToken`, `attempt`), and a 507
+ * naming a tenant's quota and any other 4xx are a refusal, put back. Moving
+ * this layer onto that core instead was measured at +21 KB brotli.
  */
 export class FennecSync {
   #local;
   #remote;
   #url;
   #token;
+  /**
+   * Bumped at each other token handed over: what a request carried is this
+   * number (`#carried`), so a 401 to one sent before is told from a refusal
+   * of the token held now.
+   */
+  #tokenGen = 0;
+  /** How many times in a row a token was asked for, the server taking no request with one between. */
+  #tokenAsks = 0;
   #fetch;
   #shapes = new Map();
   #lives;
@@ -1749,15 +1757,19 @@ export class FennecSync {
       // The tenant's quota the error names: a stream over the `streams`
       // quota is not connected, as one the network dropped is not.
       quota: this.#fault?.quota ?? null,
-      // The code the error names: `token_expired` once the token's `exp`
-      // passed, where a 401 naming none is a token no longer taken.
-      code: this.#fault?.code ?? null,
+      // The code a 401 the sync waits on for a token named: `token_expired`
+      // once the token's `exp` passed, null for none.
+      errorCode: this.#fault?.code ?? null,
       leader: this.#leader,
     }));
   }
 
   /** A new token: the requests from here on carry it, and what a 401 stopped goes on. */
   setToken(token) {
+    // Another token than the one held: a 401 to what was sent with that one
+    // is no longer a refusal of the token held. The same one handed over
+    // again keeps its number, and is asked about again where refused again.
+    if ((token || null) !== this.#token) this.#tokenGen++;
     this.#token = token || null;
     this.#remote = new FennecHttp(this.#url, { token: this.#token, fetch: this.#fetch });
     if (this.#paused) {
@@ -2203,21 +2215,58 @@ export class FennecSync {
     if (this.#fault?.connection) this.#fault = null;
   }
 
+  /** The token a request sent now carries: the number of the one handed over last, null for none. */
+  #carried() {
+    return this.#token ? this.#tokenGen : null;
+  }
+
   /**
-   * A 401: nothing is sent until a token is handed over, and the
-   * `tokenProvider` is asked for one, told whether the server said the
-   * token's `exp` passed (`expired`, its code `token_expired`) -- a fresh
-   * token cures that -- or refused it otherwise, a session ended or
-   * revoked, at which an app signs out.
+   * The server answered a request, or a stream's head, that carried
+   * `carried` with `status`: an answer but a 401 to the token held took
+   * it, and a later ask is a first one again.
    */
-  #wantToken(expired) {
+  #answered(status, carried) {
+    if (status !== 0 && status !== 401 && carried === this.#carried()) this.#tokenAsks = 0;
+  }
+
+  /**
+   * A 401 to a request, or a stream, that carried `carried`. Sent before a
+   * token handed over since -- or none -- it goes again with that one, the
+   * provider asked nothing: the refusal is of a token no longer held, and
+   * asked, an app that signs out at a token refused right after it was
+   * minted would have taken this for that. Returns whether it asked.
+   */
+  #tokenRefused(code, carried) {
+    if (carried !== this.#carried()) return false;
+    this.#wantToken(code, carried !== null);
+    return true;
+  }
+
+  /**
+   * Nothing is sent until a token is handed over, and the `tokenProvider`
+   * is asked for one, handed a `TokenRefusal`: the code the 401 named
+   * (`errorCode`, `token_expired` where the token's `exp` passed), whether
+   * that is an expiry (`expired`), whether the refused request carried a
+   * token (`hadToken`), and how many times in a row it is asked, the
+   * server taking nothing between (`attempt`: 2 where the token it handed
+   * over was refused too). Asked already, a second 401 -- a stream's at
+   * the `exp` beside a write's -- asks nothing more.
+   */
+  #wantToken(code, hadToken) {
     if (this.#paused) return;
     this.#paused = true;
-    if (expired) this.#setFault('the token expired (401): a fresh one is wanted', 401, true, null, TOKEN_EXPIRED);
-    else this.#setFault('the server refused the token (401): a fresh one is wanted', 401, true);
+    const attempt = ++this.#tokenAsks;
+    const expired = code === TOKEN_EXPIRED;
+    const message = expired
+      ? 'the token expired (401): a fresh one is wanted'
+      : hadToken
+        ? 'the server refused the token (401): a fresh one is wanted'
+        : 'the server wants a token (401): none was sent';
+    this.#setFault(message, 401, true, null, code);
     if (this.#tokenProvider) {
+      const refusal = Object.freeze({ errorCode: code, expired, hadToken, attempt });
       Promise.resolve()
-        .then(() => this.#tokenProvider(expired))
+        .then(() => this.#tokenProvider(refusal))
         .then((t) => t && !this.#closed && this.setToken(t), (e) => this.#onError?.(e));
     }
   }
@@ -2230,10 +2279,13 @@ export class FennecSync {
   async #schemas() {
     if (this.#schemaBusy || this.#schemaWaiting || this.#paused) return;
     this.#schemaBusy = true;
+    const carried = this.#carried();
     const [status, , body] = await this.#call('GET', '/collections', null, {});
     this.#schemaBusy = false;
     if (this.#closed) return;
-    if (status === 401) return this.#wantToken(expiredIn(body));
+    this.#answered(status, carried);
+    // Refused for a token since replaced, it is asked again with that one.
+    if (status === 401) return this.#tokenRefused(said(body).code, carried) || this.#kick();
     try {
       if (status < 200 || status > 299) throw new FennecError(`could not read the server's collections: ${why(status, body)}`);
       await this.#make(JSON.parse(body));
@@ -2320,16 +2372,20 @@ export class FennecSync {
     if (!op) return;
     this.#sending = true;
     const type = op.path === '/batch' ? 'application/x-ndjson' : 'application/json';
+    const carried = this.#carried();
     const [status, seq, body] = await this.#call('POST', op.path, op.body, { 'content-type': type, 'idempotency-key': op.key });
     this.#sending = false;
     if (this.#closed) return;
+    this.#answered(status, carried);
     const s = status >= 200 && status < 300 ? null : said(body);
     if (!s) {
       this.#sendAttempt = 0;
       this.#clearConnectionFault();
       this.#landed(op, seq);
     } else if (status === 401) {
-      this.#wantToken(s.code === TOKEN_EXPIRED);
+      // Kept either way; refused for a token since replaced, it goes again
+      // with that one as the kick below pumps.
+      this.#tokenRefused(s.code, carried);
     } else if (status === 507 && s.quota) {
       // A tenant past its quota of bytes or rows: waiting makes no room,
       // deleting does, and a write that only deletes always lands. Held,
@@ -2801,14 +2857,20 @@ export class FennecSync {
     // names -- a 429 of the `streams` quota is waited out by its
     // `retry_after`, since asked again sooner it is only refused again.
     let refusal = { status: 0, quota: null, retryMs: 0 };
+    const carried = this.#carried();
     try {
       const res = await this.#fetch(this.#streamUrl(s), { headers: this.#headers(), signal: ctl.signal });
       if (s.stream !== ctl) return;
+      this.#answered(res.status, carried);
       if (res.status === 401) {
-        this.#cancel(s);
-        // Read for its code: a token past its `exp` is refused at the open too.
+        // Read for its code -- a token past its `exp` is refused at the open
+        // too -- before the stream is cancelled: the abort throws the body
+        // away, and a fetch read after it is told nothing.
         const text = await res.text().catch(() => '');
-        return this.#wantToken(expiredIn(text));
+        if (s.stream !== ctl) return;
+        this.#cancel(s);
+        // Opened with a token since replaced, it opens again with that one.
+        return this.#tokenRefused(said(text).code, carried) || this.#kick();
       }
       if (!res.ok || !res.body) {
         const text = await res.text().catch(() => '');
@@ -2823,10 +2885,11 @@ export class FennecSync {
         if (s.stream !== ctl) return;
         // The server ends a stream at its token's `exp` with a 401 and
         // `token_expired`: a fresh token is wanted before it opens again,
-        // as for a request. A 401 naming no code is a token refused.
+        // as for a request. One opened with a token since replaced opens
+        // again with that one, the provider asked nothing.
         if (ev.name === 'error' && /"status":\s*401\b/.test(ev.data)) {
           this.#cancel(s);
-          return this.#wantToken(expiredIn(ev.data));
+          return this.#tokenRefused(said(ev.data).code, carried) || this.#kick();
         }
         await this.#onEvent(s, ev);
       }

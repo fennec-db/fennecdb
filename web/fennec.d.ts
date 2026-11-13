@@ -547,13 +547,16 @@ export declare class FennecError extends Error {
    */
   status?: number;
   /**
-   * What a program tells the refusal by, where the server named a code
-   * beside its words: `token_expired` on a 401 for a token past its `exp`
-   * -- a request's, or the event ending a stream (`live`, `subscribe`) at
-   * it -- which a fresh token cures. A 401 naming no code is a token, or a
-   * session, the server no longer takes: sign out.
+   * The code the server named beside its words, its body's `code`: what a
+   * program tells the refusal by. `token_expired` on a 401 for a token
+   * past its `exp` -- a request's, or the event ending a stream (`live`,
+   * `subscribe`) at it -- which a fresh token cures; a 401 naming none may
+   * be cured by one too (a key rotation, a token not valid yet), so it is
+   * no sign-out by itself. Every SDK names it so -- Python's `error_code`,
+   * Go's and .NET's `ErrorCode` -- whose `code`, where there is one, is
+   * the status's name or the library's own error kind.
    */
-  code?: 'token_expired' | (string & {});
+  errorCode?: 'token_expired' | (string & {});
   /** A write the server refused: the text of its first statement. */
   query?: string;
   /**
@@ -1816,16 +1819,22 @@ export interface SyncOptions<S extends AnySchema<S> = Schema> {
   wasm?: string | BufferSource | WebAssembly.Module;
   /** Where the local module's collation data comes from (`Fennec.open`). */
   collation?: CollationSource;
+  /** Sent from the first request on; none, and the first 401 asks `tokenProvider` with `hadToken` false. */
   token?: string;
   /**
-   * Asked for a new token when the server answers 401; until one is handed
-   * over nothing is sent. `expired` is true where the server said the
-   * token's `exp` passed (`token_expired`): refresh it, and the sync goes
-   * on. False where it refused the token otherwise -- a session ended or
-   * revoked, a key it no longer takes -- where an app signs out and throws
-   * (told to `onError`) rather than hand over the same token again.
+   * Asked for a token when the server answers 401: until one is handed
+   * over nothing is sent, and the writes wait in the replica. Handed why
+   * (`TokenRefusal`). At `expired` refresh the token, and the sync goes on
+   * where it stopped. At a 401 naming no code ask the issuer for a fresh
+   * one too: a key rotation, a token not valid yet, an older server's
+   * expiry and none sent are each cured by one. Sign out only where the
+   * issuer refuses, or at an `attempt` past 1 -- the token handed over at
+   * the last ask refused too: throw (told to `onError`) and nothing more
+   * is sent. A replica whose `pending` writes are not 0 keeps them through
+   * a sign-out, for the account's next sign-in to send; deleting its
+   * `persist` key loses them.
    */
-  tokenProvider?: (expired: boolean) => string | Promise<string>;
+  tokenProvider?: (refusal: TokenRefusal) => string | Promise<string>;
   fetch?: typeof globalThis.fetch;
   /**
    * IndexedDB key: the replica is stored there with its cursors and the
@@ -1866,12 +1875,36 @@ export interface ShapeStatus {
    */
   quota: NonNullable<FennecError['quota']> | null;
   /**
-   * The code the error names: `token_expired` while the sync waits for a
-   * token because the server said its `exp` passed, null for a token
-   * refused otherwise, and for every other error.
+   * The code a 401 the sync waits on for a token named (`TokenRefusal`'s
+   * `errorCode`): `token_expired` where the token's `exp` passed, null for
+   * none and for every other error -- for an app that hands its tokens
+   * over with `setToken` rather than a provider.
    */
-  code: NonNullable<FennecError['code']> | null;
+  errorCode: NonNullable<FennecError['errorCode']> | null;
   leader: boolean;
+}
+
+/**
+ * Why a replica's `tokenProvider` is asked for a token: the server answered
+ * 401, and nothing is sent until one is handed over.
+ */
+export interface TokenRefusal {
+  /**
+   * The code the server named beside its words (its body's `code`), null
+   * for none: `token_expired` where the token's `exp` passed. A later
+   * server may name others; a 401 naming none is no sign-out by itself.
+   */
+  readonly errorCode: 'token_expired' | (string & {}) | null;
+  /** The token's `exp` passed (`errorCode` is `token_expired`): refresh it, and the sync goes on. */
+  readonly expired: boolean;
+  /** Whether the refused request carried a token: false for one sent before any was handed over. */
+  readonly hadToken: boolean;
+  /**
+   * How many times in a row the provider is asked, the server taking no
+   * request between: 1, then 2 where the token handed over at the last
+   * ask was refused too -- one more from the issuer will not do better.
+   */
+  readonly attempt: number;
 }
 
 /** Batch context: the same surface as `db`, but writes are accumulated. */

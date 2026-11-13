@@ -568,8 +568,8 @@ fn authenticate(
     // The audit line names the check that failed -- one of the server's own
     // texts, never a value of the token. A token past its `exp` is told so
     // by a code as well (`token_expired`), which no other refusal carries:
-    // a replica refreshes its token at the one and signs out at the others,
-    // and told both alike it took an expiry for a session ended.
+    // a client refreshes at it without a second thought, and asks its
+    // issuer at the others, which a fresh token may or may not cure.
     let refuse = |why: &'static str| {
         audit::refusal(why);
         match access::refusal_code(why) {

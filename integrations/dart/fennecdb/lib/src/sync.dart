@@ -42,15 +42,60 @@ class SyncFailure {
   /// does, and this tells the two apart.
   final String? quota;
 
-  /// The code the server named, null for none: `token_expired` while the
-  /// sync waits for a token because its `exp` passed, which a fresh token
-  /// cures; a 401 naming none is a token, or a session, the server no
-  /// longer takes.
-  final String? code;
-  const SyncFailure(this.message, this.status, [this.quota, this.code]);
+  /// The code a 401 the sync waits on for a token named (the server's
+  /// body's `code`, [TokenRefusal.errorCode]), null for none:
+  /// `token_expired` where the token's `exp` passed -- for an app that hands
+  /// its tokens over with `setToken` rather than a provider.
+  final String? errorCode;
+  const SyncFailure(this.message, this.status, [this.quota, this.errorCode]);
   @override
   String toString() =>
-      'SyncFailure($status${quota == null ? '' : ', $quota'}${code == null ? '' : ', $code'}): $message';
+      'SyncFailure($status${quota == null ? '' : ', $quota'}${errorCode == null ? '' : ', $errorCode'}): $message';
+}
+
+/// Why a replica asks its `tokenProvider` for a token: the server answered
+/// 401, and nothing is sent until one is handed over.
+///
+/// At [expired] refresh the token, and the sync goes on where it stopped. At
+/// a 401 naming no code ask the issuer for a fresh one too: a key rotation, a
+/// token not valid yet, an older server's expiry and none sent are each
+/// cured by one. Sign out only where the issuer refuses, or at an [attempt]
+/// past 1 -- the token handed over at the last ask refused too. A replica
+/// whose `pending` writes are not 0 keeps them through a sign-out, for the
+/// account's next sign-in to send; deleting its file loses them.
+class TokenRefusal {
+  /// The code the server named beside its words (its body's `code`), null
+  /// for none: `token_expired` where the token's `exp` passed. A later
+  /// server may name others; a 401 naming none is no sign-out by itself.
+  final String? errorCode;
+
+  /// Whether the refused request carried a token: false for one sent before
+  /// any was handed over.
+  final bool hadToken;
+
+  /// How many times in a row the provider is asked, the server taking no
+  /// request between: 1, then 2 where the token handed over at the last ask
+  /// was refused too -- one more from the issuer will not do better.
+  final int attempt;
+
+  const TokenRefusal({this.errorCode, this.hadToken = true, this.attempt = 1});
+
+  /// The code fennec-server tells a token past its `exp` by.
+  static const tokenExpired = 'token_expired';
+
+  /// The token's `exp` passed ([errorCode] is `token_expired`): refresh it,
+  /// and the sync goes on.
+  bool get expired => errorCode == tokenExpired;
+
+  @override
+  bool operator ==(Object other) =>
+      other is TokenRefusal && other.errorCode == errorCode && other.hadToken == hadToken && other.attempt == attempt;
+
+  @override
+  int get hashCode => Object.hash(errorCode, hadToken, attempt);
+
+  @override
+  String toString() => 'TokenRefusal(errorCode: $errorCode, hadToken: $hadToken, attempt: $attempt)';
 }
 
 class ShapeState {
@@ -130,7 +175,7 @@ class Replica {
   final Fennec _db;
   final String _url;
   String? _token;
-  final Future<String> Function(bool expired)? _provider;
+  final Future<String> Function(TokenRefusal refusal)? _provider;
   final HttpClient _client = HttpClient()..connectionTimeout = const Duration(seconds: 10);
   final _requests = <int, HttpClientRequest>{};
   final _streams = <int, StreamSubscription<List<int>>>{};
@@ -253,11 +298,15 @@ class Replica {
             if (!_stopped) _serial(() => _feed(_kTimer, id));
           });
         case 'token':
-          // `code` names the token's expiry (`token_expired`); a 401
-          // naming none is a token the server no longer takes.
+          // Why the core asks: the code the 401 named, whether the refused
+          // request carried a token, and the asks in a row.
           final p = _provider;
           if (p != null) {
-            p(a['code'] == 'token_expired').then(setToken, onError: (_) {});
+            final refusal = TokenRefusal(
+                errorCode: a['code'] as String?,
+                hadToken: a['had_token'] as bool? ?? true,
+                attempt: a['attempt'] as int? ?? 1);
+            p(refusal).then(setToken, onError: (_) {});
           }
         case 'changed':
           _db.lives.touch();
@@ -358,7 +407,7 @@ Future<Fennec> _openSynced({
   required List<Shape> shapes,
   required String path,
   int flags = 0,
-  Future<String> Function(bool expired)? tokenProvider,
+  Future<String> Function(TokenRefusal refusal)? tokenProvider,
 }) async {
   final db = await Fennec.open(path, flags: flags);
   try {

@@ -315,4 +315,25 @@ void main() {
     expect(off.seen, hasLength(1));
     expect(() => Fennec.connect(off.url, retry: const RetryPolicy(attempts: 0)), throwsA(isA<FennecException>()));
   });
+
+  // The code the server named is the error's `errorCode` -- never `code`,
+  // the library's kind -- and a refusal naming none has none; neither is
+  // sent again.
+  test('a refusal names the server\'s code', () async {
+    final s = await Stub.start([
+      Answer(401, '{"error":"the token has expired","code":"token_expired"}'),
+      Answer(401, '{"error":"invalid or missing token"}'),
+    ]);
+    addTearDown(s.close);
+    final db = Fennec.connect(s.url, token: 't');
+    expect(
+        await failure(() => db.from('docs').rows()),
+        isA<FennecException>()
+            .having((e) => e.status, 'status', 401)
+            .having((e) => e.code, 'code', FennecCode.denied)
+            .having((e) => e.errorCode, 'errorCode', 'token_expired'));
+    expect(await failure(() => db.from('docs').rows()),
+        isA<FennecException>().having((e) => e.status, 'status', 401).having((e) => e.errorCode, 'errorCode', isNull));
+    expect(s.seen, hasLength(2));
+  });
 }

@@ -24,7 +24,7 @@ import kotlin.test.assertTrue
  * binary `cargo build -p fennec-server` makes, named by `fennec.server` (or
  * `FENNEC_SERVER`), as `make kotlin-test` passes it.
  */
-class Server(name: String, private val tenantRows: Int? = null) {
+class Server(name: String, private val tenantRows: Int? = null, private val token: String? = null) {
     private val dir: File = Files.createTempDirectory("fennecdb-kotlin-$name").toFile()
     private val file = File(dir, "server.fennec").path
     private var process: Process? = null
@@ -58,7 +58,8 @@ class Server(name: String, private val tenantRows: Int? = null) {
             null -> listOf("--file", file)
             else -> listOf("--dir", file, "--admin-token", "adm", "--tenant-max-rows", "$tenantRows")
         }
-        val p = ProcessBuilder(listOf(binary, "--http", "127.0.0.1:$port", "--sync", "always") + at)
+        val asks = token?.let { listOf("--http-token", it) } ?: emptyList()
+        val p = ProcessBuilder(listOf(binary, "--http", "127.0.0.1:$port", "--sync", "always") + at + asks)
             .redirectOutput(ProcessBuilder.Redirect.DISCARD)
             .start()
         process = p
@@ -84,7 +85,7 @@ class Server(name: String, private val tenantRows: Int? = null) {
     /** Started again over its file, on the port it had. */
     fun restart() = start(port)
 
-    fun run(text: String): Answer = Fennec.connect(url).runBlocking(text)
+    fun run(text: String): Answer = Fennec.connect(url, token).runBlocking(text)
 
     fun stop() {
         kill()
@@ -137,6 +138,33 @@ class SyncTest {
         s.kill()
         assertEquals(2L, db.from("tasks").count())
         db.close()
+    }
+
+    /**
+     * A 401 hands the provider why: no token sent (`hadToken` false), then
+     * the one it handed over refused too (`attempt` 2), where an app signs
+     * out -- here it hands over the server's token instead. A lambda asking
+     * nothing, as before 1.0, still takes.
+     */
+    @Test
+    fun aTokenProviderIsHandedWhyATokenIsWanted() = runBlocking {
+        val s = Server("token", token = "right").also { servers.add(it) }
+        val asked = Collections.synchronizedList(mutableListOf<TokenRefusal>())
+        val db = Fennec.sync(url = s.url, shapes = listOf(open), path = path("token"), tokenProvider = { refusal ->
+            asked.add(refusal)
+            if (refusal.attempt > 1) "right" else "wrong"
+        })
+        db.replica!!.ready()
+        assertEquals(listOf(TokenRefusal(hadToken = false, attempt = 1), TokenRefusal(hadToken = true, attempt = 2)), asked.toList())
+        assertTrue(asked.none { it.expired || it.errorCode != null })
+        assertTrue(TokenRefusal("token_expired").expired)
+        assertEquals(listOf("one", "two"), titles(db))
+        db.close()
+
+        val before = Fennec.sync(url = s.url, token = "wrong", shapes = listOf(open), path = path("token-before"), tokenProvider = { "right" })
+        before.replica!!.ready()
+        assertEquals(listOf("one", "two"), titles(before))
+        before.close()
     }
 
     @Test

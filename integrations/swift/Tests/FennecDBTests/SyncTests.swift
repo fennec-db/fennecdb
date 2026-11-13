@@ -32,6 +32,14 @@
         try await db.from("tasks").select("title").order("title").rows().compactMap { $0["title"]?.string }
     }
 
+    /// An app's call written before 1.0, its provider asking nothing: it
+    /// compiles still -- the deprecated overload, which a call naming no
+    /// provider never reaches -- and asks the server as before.
+    @available(*, deprecated, message: "an app's call from before 1.0, kept on purpose")
+    func syncAsBefore(_ url: String, _ path: String) async throws -> Fennec {
+        try await Fennec.sync(url: url, token: "wrong", shapes: [open], path: path, tokenProvider: { "right" })
+    }
+
     @Suite(.serialized) struct Sync {
         @Test func theSeedFillsTheReplicaWithTheShape() async throws {
             let s = try await Server("seed")
@@ -44,6 +52,33 @@
             try await s.kill()
             #expect(try await db.from("tasks").count() == 2)
             try await db.close()
+        }
+
+        /// A 401 hands the provider why: no token sent (`hadToken` false),
+        /// then the one it handed over refused too (`attempt` 2), where an
+        /// app signs out -- here it hands over the server's token instead.
+        @Test func aTokenProviderIsHandedWhyATokenIsWanted() async throws {
+            let s = try await Server("token", token: "right")
+            defer { s.stop() }
+            let asked = Box<[TokenRefusal]>([])
+            let db = try await Fennec.sync(
+                url: s.url, shapes: [open], path: try scratch("sync-token"),
+                tokenProvider: { refusal in
+                    asked.set { $0 + [refusal] }
+                    return refusal.attempt > 1 ? "right" : "wrong"
+                })
+            await db.replica!.ready()
+            #expect(asked.get() == [TokenRefusal(hadToken: false, attempt: 1), TokenRefusal(hadToken: true, attempt: 2)])
+            #expect(asked.get().allSatisfy { !$0.expired })
+            #expect(TokenRefusal(errorCode: "token_expired").expired)
+            #expect(try await titles(db) == ["one", "two"])
+            try await db.close()
+
+            // Deprecated, so this line warns: the warning is the point.
+            let before = try await syncAsBefore(s.url, try scratch("sync-token-before"))
+            await before.replica!.ready()
+            #expect(try await titles(before) == ["one", "two"])
+            try await before.close()
         }
 
         @Test func aLiveQueryRunsAgainOnAServerWrite() async throws {

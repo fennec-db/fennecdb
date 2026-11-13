@@ -62,18 +62,33 @@ class FennecException implements Exception {
   /// told the [reason] and no name; null otherwise.
   final String? binding;
 
+  /// The code a server named beside its words, its body's `code`
+  /// ([FennecRemote]): `token_expired` on a 401 for a token past its `exp`,
+  /// which a fresh token from its issuer cures. A later server may name
+  /// others; null for none, and for the library's own. Not [code], the
+  /// library's error kind: every SDK names the server's this way.
+  final String? errorCode;
+
   FennecException(this.code, this.message, [this.exact, this.reason, this.binding])
       : status = null,
         at = null,
         completed = null,
         quota = null,
-        retryAfter = null;
+        retryAfter = null,
+        errorCode = null;
 
   /// A server's refusal: its status and, for a batch, where it stopped; for
   /// a tenant's quota, which one and how long to wait; for a `require`, the
   /// reason it gave; for a statement bound to the write, its name.
   FennecException.http(this.code, this.message,
-      {required int this.status, this.at, this.completed, this.quota, this.retryAfter, this.reason, this.binding})
+      {required int this.status,
+      this.at,
+      this.completed,
+      this.quota,
+      this.retryAfter,
+      this.reason,
+      this.binding,
+      this.errorCode})
       : exact = null;
 
   @override
@@ -429,18 +444,19 @@ class Fennec {
   /// member of one name, and [sync] is the fsync. The requests and the
   /// change stream are `dart:io`'s `HttpClient`'s, with the platform's TLS:
   /// iOS and Android refuse cleartext HTTP by default. [tokenProvider] is
-  /// asked for a token when the server answers 401, told whether the
-  /// token's `exp` passed (`expired`: refresh it, and the sync goes on) or
-  /// the server refused it otherwise -- a session ended or revoked, where
-  /// an app signs out and completes with an error rather than hand over
-  /// the same token again.
+  /// asked for a token when the server answers 401, handed why
+  /// ([TokenRefusal]): it refreshes at `expired` and at a 401 naming no
+  /// code, and completes with an error -- the app signed out -- where the
+  /// issuer refuses or at an `attempt` past 1; nothing is sent until a
+  /// token is handed over. A function of no argument is no longer taken
+  /// (before 1.0 it was): `(_) => refresh()` for it.
   static Future<Fennec> openSynced({
     required String url,
     String? token,
     required List<Shape> shapes,
     required String path,
     int flags = 0,
-    Future<String> Function(bool expired)? tokenProvider,
+    Future<String> Function(TokenRefusal refusal)? tokenProvider,
   }) =>
       _openSynced(url: url, token: token, shapes: shapes, path: path, flags: flags, tokenProvider: tokenProvider);
 

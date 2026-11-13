@@ -126,15 +126,22 @@ int32_t fennec_warm(uint64_t handle, const uint8_t *only, size_t only_len, char 
  * actions each call writes, a JSON array of
  *   {"do":"request","id":N,"method":..,"url":..,"headers":{..},"body":..|null}
  *   {"do":"stream","id":N,"url":..,"headers":{..}}   an SSE body, fed as it comes
- *   {"do":"cancel","id":N}     {"do":"wait","id":N,"ms":M}     {"do":"token"}
- *   {"do":"token","code":"token_expired"}
+ *   {"do":"cancel","id":N}     {"do":"wait","id":N,"ms":M}
+ *   {"do":"token","code":..|null,"had_token":B,"attempt":N}
  *   {"do":"changed"}           {"do":"status"}
  *   {"do":"refused","status":S,"message":..,"query":..,"quota":..,"reason":..}
  * A token action is a 401: nothing is sent until a token is signalled.
- * With "code":"token_expired" the server said the token's exp passed, and
- * a fresh token cures it; without, the server refused the token otherwise
- * -- a session ended or revoked -- and an app signs out. A binding reading
- * only "do" asks for a token at both, as before the code was told.
+ * "code" is the one the server named, null for none -- "token_expired"
+ * where the token's exp passed; "had_token" whether the refused request
+ * carried a token; "attempt" the asks in a row with no request taken
+ * between, 2 where the token signalled at the last was refused too. A
+ * fresh token from its issuer cures an expiry and most 401s naming no code
+ * (a key rotation, a token not valid yet, an older server's expiry, none
+ * sent): an app refreshes at both, and signs out only where its issuer
+ * refuses or at an attempt past 1 -- never deleting a file whose status
+ * says pending writes on a 401 alone. A 401 to a request sent with a token
+ * since replaced is sent again with the new one, no action. A binding
+ * reading only "do" asks for a token at every one.
  * Once started, a write through fennec_query to a synced collection is
  * applied at once and queued for the server in the same block.
  */
@@ -158,7 +165,7 @@ int32_t fennec_sync_feed(uint64_t handle, uint32_t kind, uint64_t id, int32_t st
 /*
  * {"state":"online"|"offline"|"catching_up","pending":N,"error":..,"shapes":[..]},
  * the error null or {"message":..,"status":S,"quota":..|null,"code":..|null},
- * its code "token_expired" while a token is wanted for that.
+ * its code the one the 401 a token is wanted for named ("token_expired").
  */
 int32_t fennec_sync_status(uint64_t handle, char **out, size_t *out_len);
 

@@ -277,8 +277,12 @@ struct Run {
     shapes: Value,
     collections: String,
     up: bool,
+    /// The token the replica starts with, `None` for none.
+    start_token: Option<String>,
     /// The status and body the next stream opened is answered with.
     stream_status: Option<(u16, String)>,
+    /// The status and body the next `GET /collections` is answered with.
+    schema_status: Option<(u16, String)>,
     /// Open streams: id -> collection.
     streams: Vec<(u64, String)>,
     posts: VecDeque<u64>,
@@ -288,9 +292,8 @@ struct Run {
     opened: Vec<Value>,
     refused: Vec<Value>,
     token_asked: bool,
-    /// Whether the token was asked for as expired: the action naming the
-    /// server's `token_expired`.
-    token_expired: bool,
+    /// What the token action said: its `code`, `had_token` and `attempt`.
+    token: Value,
     waits: Vec<Value>,
     error: Option<String>,
     /// The reason the error said, a `require <n> else '<reason>'`'s.
@@ -299,8 +302,12 @@ struct Run {
 
 impl Run {
     fn config(&self) -> String {
+        let token = match &self.start_token {
+            Some(t) => json::to_string(&Value::Text(t.clone())),
+            None => "null".into(),
+        };
         format!(
-            r#"{{"url":"{URL}","token":"t0","seed":"0123456789abcdef0123456789abcdef","shapes":{}}}"#,
+            r#"{{"url":"{URL}","token":{token},"seed":"0123456789abcdef0123456789abcdef","shapes":{}}}"#,
             json::to_string(&self.shapes)
         )
     }
@@ -357,9 +364,10 @@ impl Run {
                 self.requests.push(obj(r));
                 if method == "GET" {
                     let sync = self.sync.as_mut().unwrap();
-                    match self.up {
-                        true => sync.response(&mut self.db, id, 200, 0, &self.collections),
-                        false => sync.response(&mut self.db, id, 0, 0, "connection refused"),
+                    match (self.up, self.schema_status.take()) {
+                        (false, _) => sync.response(&mut self.db, id, 0, 0, "connection refused"),
+                        (true, Some((s, body))) => sync.response(&mut self.db, id, s, 0, &body),
+                        (true, None) => sync.response(&mut self.db, id, 200, 0, &self.collections),
                     }
                 } else {
                     self.posts.push_back(id);
@@ -407,7 +415,12 @@ impl Run {
             ])),
             "token" => {
                 self.token_asked = true;
-                self.token_expired = text(member(a, "code")) == fennec_abi::sync::TOKEN_EXPIRED;
+                let said = |k: &str| member(a, k).cloned().unwrap_or(Value::Null);
+                self.token = obj(vec![
+                    ("code", said("code")),
+                    ("had_token", said("had_token")),
+                    ("attempt", said("attempt")),
+                ]);
             }
             "changed" | "status" => {}
             other => panic!("an action of no kind: {other}"),
@@ -449,7 +462,7 @@ impl Run {
         self.refused.clear();
         self.waits.clear();
         self.token_asked = false;
-        self.token_expired = false;
+        self.token = Value::Null;
         self.error = None;
         self.reason = None;
         let shape_collection = |run: &Run| -> String {
@@ -459,11 +472,19 @@ impl Run {
             let n = int(member(step, "shape")) as usize;
             text(member(&shapes[n], "collection"))
         };
+        // `"token"` on a start: the token the replica starts with, null for
+        // none; "t0" where it names none.
+        let start_token = |step: &Value| match member(step, "token") {
+            Some(Value::Text(t)) => Some(t.clone()),
+            Some(_) => None,
+            None => Some("t0".to_string()),
+        };
         match text(member(step, "do")).as_str() {
             "start" => {
                 if let Some(s) = member(step, "shapes") {
                     self.shapes = s.clone();
                 }
+                self.start_token = start_token(step);
                 self.start();
             }
             "restart" => {
@@ -471,6 +492,7 @@ impl Run {
                 if let Some(s) = member(step, "shapes") {
                     self.shapes = s.clone();
                 }
+                self.start_token = start_token(step);
                 self.start();
             }
             "seed" | "change" => {
@@ -541,12 +563,16 @@ impl Run {
                 }
             }
             "net" => self.up = matches!(member(step, "up"), Some(Value::Bool(true))),
-            "stream_status" => {
+            "stream_status" | "schema_status" => {
                 let body = match member(step, "body") {
                     Some(b) => json::to_string(b),
                     None => "{\"error\":\"refused\"}".into(),
                 };
-                self.stream_status = Some((int(member(step, "status")) as u16, body));
+                let answer = Some((int(member(step, "status")) as u16, body));
+                match text(member(step, "do")).as_str() {
+                    "stream_status" => self.stream_status = answer,
+                    _ => self.schema_status = answer,
+                }
             }
             "online" => {
                 let on = matches!(member(step, "online"), Some(Value::Bool(true)));
@@ -632,8 +658,8 @@ impl Run {
         if let Some(e) = member(expect, "token_asked") {
             matches(e, &Value::Bool(self.token_asked), binds, "token_asked")?;
         }
-        if let Some(e) = member(expect, "token_expired") {
-            matches(e, &Value::Bool(self.token_expired), binds, "token_expired")?;
+        if let Some(e) = member(expect, "token") {
+            matches(e, &self.token, binds, "token")?;
         }
         if let Some(e) = member(expect, "code") {
             let st = json::parse_json(&self.sync.as_ref().ok_or("no sync")?.status()).unwrap();
@@ -717,7 +743,9 @@ fn run(file: &Value, sc: &Value) -> Check {
                 .unwrap(),
         ),
         up: true,
+        start_token: Some("t0".into()),
         stream_status: None,
+        schema_status: None,
         streams: vec![],
         posts: VecDeque::new(),
         timers: vec![],
@@ -725,7 +753,7 @@ fn run(file: &Value, sc: &Value) -> Check {
         opened: vec![],
         refused: vec![],
         token_asked: false,
-        token_expired: false,
+        token: Value::Null,
         waits: vec![],
         error: None,
         reason: None,

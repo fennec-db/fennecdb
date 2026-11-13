@@ -1588,9 +1588,9 @@ data: {"error":"the token has expired","status":401,"code":"token_expired"}"#
     );
 }
 
-/// A replica told an expired token and a session ended alike took the one
-/// for the other, and deleted its file where a fresh token would have done.
-/// A token this server took until its `exp` is refused past it with
+/// A replica told an expired token and any other refusal alike could not
+/// refresh at the one without a second thought, nor be careful at the
+/// others. A token this server took until its `exp` is refused past it with
 /// `token_expired`, on a request and on a stream's open; every other
 /// refusal -- a key that signed nothing here, a token not valid yet, a
 /// malformed one, an empty one, none -- names no code, past an `exp` or

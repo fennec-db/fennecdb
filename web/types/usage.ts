@@ -34,6 +34,7 @@ import {
   type Sparse,
   type Statements,
   type Timestamp,
+  type TokenRefusal,
   type TypedCall,
   type TypedFrom,
   type Vector,
@@ -400,29 +401,51 @@ export async function remote() {
 
   const replica = await sync<Schema>({ url: 'http://127.0.0.1:8080', shapes: [{ collection: 'articles' }] });
   await replica.from('articles').where('year', 2024).rows();
-  // Told whether the token expired: refreshed then, signed out otherwise; a
+  // Handed why it is asked: refreshed at an expiry and at a 401 naming no
+  // code, signed out where a token just handed over is refused again; a
   // provider asking nothing, as before, still takes.
   const signOut = async () => {};
   await sync<Schema>({
     url: 'http://127.0.0.1:8080',
+    token: 'first',
     shapes: [{ collection: 'articles' }],
-    tokenProvider: async (expired) => {
-      if (expired) return 'fresh';
-      await signOut();
-      throw new Error('signed out');
+    tokenProvider: async ({ expired, hadToken, attempt, errorCode }) => {
+      expect<boolean>(expired);
+      expect<boolean>(hadToken);
+      expect<string | null>(errorCode);
+      if (attempt > 1) {
+        await signOut();
+        throw new Error('signed out');
+      }
+      return 'fresh';
     },
   });
   await sync<Schema>({ url: 'http://127.0.0.1:8080', shapes: [{ collection: 'articles' }], tokenProvider: () => 'fresh' });
-  // @ts-expect-error -- a provider is told a boolean, never a token's text
+  const asked = (r: TokenRefusal) => (r.errorCode === 'token_expired' ? 'refreshed' : 'fresh');
+  await sync<Schema>({ url: 'http://127.0.0.1:8080', shapes: [{ collection: 'articles' }], tokenProvider: asked });
+  // @ts-expect-error -- a provider is handed a TokenRefusal, never a boolean
+  void sync<Schema>({ url: 'http://127.0.0.1:8080', shapes: [{ collection: 'articles' }], tokenProvider: (expired: boolean) => String(expired) });
+  // @ts-expect-error -- nor a token's text
   void sync<Schema>({ url: 'http://127.0.0.1:8080', shapes: [{ collection: 'articles' }], tokenProvider: (t: string) => t });
-  const code: string | null = replica.status()[0].code;
+  void sync<Schema>({
+    url: 'http://127.0.0.1:8080',
+    shapes: [{ collection: 'articles' }],
+    tokenProvider: (r) => {
+      // @ts-expect-error -- read-only: what the server said is not the provider's to change
+      r.attempt = 1;
+      return 'fresh';
+    },
+  });
+  const code: string | null = replica.status()[0].errorCode;
   expect<string | null>(code);
+  // @ts-expect-error -- the status's code is `errorCode`, as every SDK names the server's
+  void replica.status()[0].code;
 
   try {
     await http.rows('get nothing');
   } catch (e) {
     if (e instanceof FennecError) expect<string>(e.message);
-    if (e instanceof FennecError && e.status === 401 && e.code === 'token_expired') expect<string>(e.code);
+    if (e instanceof FennecError && e.status === 401 && e.errorCode === 'token_expired') expect<string>(e.errorCode);
   }
 
   // Live queries over the server: a builder query knows what it reads, a

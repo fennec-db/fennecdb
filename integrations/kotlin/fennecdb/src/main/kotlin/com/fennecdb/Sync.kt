@@ -63,15 +63,16 @@ data class SyncStatus(
     /**
      * An error, and its HTTP status (0: the network, or the replica). [quota] is the tenant's quota the
      * server named, null for none: a stream refused by the quota of `streams` leaves the replica OFFLINE
-     * as the network does, and this tells the two apart. [code] is the code the server named, null for
-     * none: "token_expired" while the sync waits for a token because its `exp` passed, which a fresh
-     * token cures; a 401 naming none is a token, or a session, the server no longer takes.
+     * as the network does, and this tells the two apart. [errorCode] is the code a 401 the sync waits on
+     * for a token named (the server's body's `code`, [TokenRefusal.errorCode]), null for none:
+     * "token_expired" where the token's `exp` passed -- for an app that hands its tokens over with
+     * `setToken` rather than a provider.
      */
     data class Failure @JvmOverloads constructor(
         val message: String,
         val status: Int,
         val quota: String? = null,
-        val code: String? = null,
+        val errorCode: String? = null,
     )
 
     data class ShapeState(val collection: String, val cursor: Long, val seeded: Boolean, val connected: Boolean)
@@ -107,6 +108,53 @@ data class SyncStatus(
  * where one refused it (a 412): the app says "the seat was taken" rather than "refused"; null where
  * the statement gave none.
  */
+/**
+ * Why a replica asks its `tokenProvider` for a token: the server answered
+ * 401, and nothing is sent until one is handed over.
+ *
+ * At [expired] refresh the token, and the sync goes on where it stopped. At
+ * a 401 naming no code ask the issuer for a fresh one too: a key rotation, a
+ * token not valid yet, an older server's expiry and none sent are each cured
+ * by one. Sign out only where the issuer refuses, or at an [attempt] past 1
+ * -- the token handed over at the last ask refused too. A replica whose
+ * `pending` writes are not 0 keeps them through a sign-out, for the
+ * account's next sign-in to send; deleting its file loses them.
+ *
+ * A plain class, not a data class: what a later server says can be added to
+ * it without a `copy` or a `componentN` whose shape callers compiled against.
+ */
+class TokenRefusal @JvmOverloads constructor(
+    /**
+     * The code the server named beside its words (its body's `code`), null
+     * for none: "token_expired" where the token's `exp` passed. A later
+     * server may name others; a 401 naming none is no sign-out by itself.
+     */
+    val errorCode: String? = null,
+    /** Whether the refused request carried a token: false for one sent before any was handed over. */
+    val hadToken: Boolean = true,
+    /**
+     * How many times in a row the provider is asked, the server taking no
+     * request between: 1, then 2 where the token handed over at the last ask
+     * was refused too -- one more from the issuer will not do better.
+     */
+    val attempt: Int = 1,
+) {
+    /** The token's `exp` passed ([errorCode] is "token_expired"): refresh it, and the sync goes on. */
+    val expired: Boolean get() = errorCode == TOKEN_EXPIRED
+
+    override fun equals(other: Any?) =
+        other is TokenRefusal && other.errorCode == errorCode && other.hadToken == hadToken && other.attempt == attempt
+
+    override fun hashCode() = (errorCode.hashCode() * 31 + hadToken.hashCode()) * 31 + attempt
+
+    override fun toString() = "TokenRefusal(errorCode=$errorCode, hadToken=$hadToken, attempt=$attempt)"
+
+    companion object {
+        /** The code fennec-server tells a token past its `exp` by. */
+        const val TOKEN_EXPIRED = "token_expired"
+    }
+}
+
 data class Refusal @JvmOverloads constructor(
     val status: Int,
     val message: String,
@@ -134,11 +182,12 @@ data class Refusal @JvmOverloads constructor(
  * The requests and the change stream are `HttpURLConnection`'s, the JDK's
  * and Android's own, with the system's TLS: Android refuses cleartext HTTP
  * by default, and a server is reached through TLS in front of it.
- * [tokenProvider] is asked for a token when the server answers 401, told
- * whether the token's `exp` passed (`expired`: refresh it, and the sync
- * goes on) or the server refused it otherwise -- a session ended or
- * revoked, where an app signs out and throws rather than hand over the
- * same token again.
+ * [tokenProvider] is asked for a token when the server answers 401, handed
+ * why ([TokenRefusal]): it refreshes at `expired` and at a 401 naming no
+ * code, and throws -- the app signed out -- where the issuer refuses or at
+ * an `attempt` past 1; nothing is sent until a token is handed over. A
+ * lambda asking nothing, `{ refresh() }`, still takes; a reference to a
+ * function of none, `::refresh`, no longer does: `{ refresh() }` for it.
  */
 suspend fun Fennec.Companion.sync(
     url: String,
@@ -146,7 +195,7 @@ suspend fun Fennec.Companion.sync(
     shapes: List<Shape>,
     path: String,
     flags: Int = 0,
-    tokenProvider: (suspend (expired: Boolean) -> String)? = null,
+    tokenProvider: (suspend (TokenRefusal) -> String)? = null,
 ): Fennec = withContext(Dispatchers.IO) {
     val db = Fennec.open(path, flags)
     try {
@@ -181,7 +230,7 @@ class Replica internal constructor(
     private val db: Fennec,
     url: String,
     @Volatile private var token: String?,
-    private val provider: (suspend (expired: Boolean) -> String)?,
+    private val provider: (suspend (TokenRefusal) -> String)?,
 ) {
     private val url = url.trimEnd('/')
     private val handle = db.handle
@@ -287,12 +336,12 @@ class Replica internal constructor(
                 "stream" -> stream(id, r)
                 "cancel" -> connections.remove(id)?.let { c -> Thread { c.disconnect() }.start() }
                 "wait" -> queue.schedule({ feed(KIND_TIMER, id) }, r.long("ms") ?: 0, TimeUnit.MILLISECONDS)
-                // `code` names the token's expiry ("token_expired"); a 401
-                // naming none is a token the server no longer takes.
+                // Why the core asks: the code the 401 named, whether the
+                // refused request carried a token, and the asks in a row.
                 "token" -> provider?.let { p ->
-                    val expired = r.string("code") == "token_expired"
+                    val refusal = TokenRefusal(r.string("code"), r.bool("had_token") ?: true, r.int("attempt") ?: 1)
                     Thread {
-                        runCatching { kotlinx.coroutines.runBlocking { p(expired) } }.getOrNull()?.let { setToken(it) }
+                        runCatching { kotlinx.coroutines.runBlocking { p(refusal) } }.getOrNull()?.let { setToken(it) }
                     }.start()
                 }
                 "changed" -> db.lives.touch()

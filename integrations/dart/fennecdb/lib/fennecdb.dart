@@ -20,6 +20,7 @@ export 'src/fennec.dart'
         SyncState,
         SyncStatus,
         SyncFailure,
+        TokenRefusal,
         ShapeState,
         Refusal,
         Replica,

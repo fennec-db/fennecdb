@@ -28,6 +28,40 @@ public struct Shape: Sendable {
     }
 }
 
+/// Why a replica asks its `tokenProvider` for a token: the server answered
+/// 401, and nothing is sent until one is handed over.
+///
+/// At `expired` refresh the token, and the sync goes on where it stopped.
+/// At a 401 naming no code ask the issuer for a fresh one too: a key
+/// rotation, a token not valid yet, an older server's expiry and none sent
+/// are each cured by one. Sign out only where the issuer refuses, or at an
+/// `attempt` past 1 -- the token handed over at the last ask refused too.
+/// A replica whose `pending` writes are not 0 keeps them through a sign-out,
+/// for the account's next sign-in to send; deleting its file loses them.
+public struct TokenRefusal: Sendable, Equatable {
+    /// The code the server named beside its words (its body's `code`), nil
+    /// for none: "token_expired" where the token's `exp` passed. A later
+    /// server may name others; a 401 naming none is no sign-out by itself.
+    public let errorCode: String?
+    /// Whether the refused request carried a token: false for one sent
+    /// before any was handed over.
+    public let hadToken: Bool
+    /// How many times in a row the provider is asked, the server taking no
+    /// request between: 1, then 2 where the token handed over at the last
+    /// ask was refused too -- one more from the issuer will not do better.
+    public let attempt: Int
+
+    /// The token's `exp` passed (`errorCode` is "token_expired"): refresh
+    /// it, and the sync goes on.
+    public var expired: Bool { errorCode == "token_expired" }
+
+    public init(errorCode: String? = nil, hadToken: Bool = true, attempt: Int = 1) {
+        self.errorCode = errorCode
+        self.hadToken = hadToken
+        self.attempt = attempt
+    }
+}
+
 /// Where a replica stands with its server.
 public struct SyncStatus: Sendable, Equatable {
     public enum State: String, Sendable {
@@ -47,11 +81,11 @@ public struct SyncStatus: Sendable, Equatable {
         /// refused by the quota of `streams` leaves the replica `offline`
         /// as the network does, and this tells the two apart.
         public let quota: String?
-        /// The code the server named, nil for none: "token_expired" while
-        /// the sync waits for a token because its `exp` passed, which a
-        /// fresh token cures; a 401 naming none is a token, or a session,
-        /// the server no longer takes.
-        public let code: String?
+        /// The code a 401 the sync waits on for a token named (the
+        /// server's body's `code`, `TokenRefusal.errorCode`), nil for none:
+        /// "token_expired" where the token's `exp` passed -- for an app that
+        /// hands its tokens over with `setToken` rather than a provider.
+        public let errorCode: String?
     }
 
     public struct ShapeState: Sendable, Equatable {
@@ -87,7 +121,7 @@ public struct SyncStatus: Sendable, Equatable {
         error = v["error"]?.object.map {
             Failure(
                 message: $0["message"]?.string ?? "", status: $0["status"]?.int ?? 0, quota: $0["quota"]?.string,
-                code: $0["code"]?.string)
+                errorCode: $0["code"]?.string)
         }
         shapes = (v["shapes"]?.array ?? []).map {
             ShapeState(
@@ -132,13 +166,13 @@ extension Fennec {
     /// system's TLS: iOS's App Transport Security refuses plain `http://`
     /// to anything but a local address, and a server is reached through
     /// TLS in front of it. `tokenProvider` is asked for a token when the
-    /// server answers 401, told whether the token's `exp` passed
-    /// (`expired`: refresh it, and the sync goes on) or the server refused
-    /// it otherwise -- a session ended or revoked, where an app signs out
-    /// and throws rather than hand over the same token again.
+    /// server answers 401, handed why (`TokenRefusal`): it refreshes at
+    /// `expired` and at a 401 naming no code, and throws -- the app signed
+    /// out -- where the issuer refuses or at an `attempt` past 1; nothing
+    /// is sent until a token is handed over.
     public static func sync(
         url: String, token: String? = nil, shapes: [Shape], path: String, options: Options = [],
-        tokenProvider: (@Sendable (_ expired: Bool) async throws -> String)? = nil
+        tokenProvider: (@Sendable (TokenRefusal) async throws -> String)? = nil
     ) async throws -> Fennec {
         let db = try await open(path: path, options: options)
         do {
@@ -166,6 +200,20 @@ extension Fennec {
         }
     }
 
+    /// A provider asking nothing, as before 1.0: it is handed no
+    /// `TokenRefusal`, so it refreshes at every 401 and cannot tell a token
+    /// just handed over refused again. Not optional and with no default,
+    /// so a call naming no provider, or `nil`, is the one above.
+    @available(*, deprecated, message: "tokenProvider is handed a TokenRefusal: write { refusal in ... }, or { _ in ... }")
+    public static func sync(
+        url: String, token: String? = nil, shapes: [Shape], path: String, options: Options = [],
+        tokenProvider: @escaping @Sendable () async throws -> String
+    ) async throws -> Fennec {
+        try await sync(
+            url: url, token: token, shapes: shapes, path: path, options: options,
+            tokenProvider: { (_: TokenRefusal) in try await tokenProvider() })
+    }
+
     /// A replica's sync, when the database is one (`Fennec.sync`).
     public var replica: Replica? { syncing }
 }
@@ -178,7 +226,7 @@ public final class Replica: NSObject, URLSessionDataDelegate, @unchecked Sendabl
     private weak var db: Fennec?
     private let handle: UInt64
     private let url: String
-    private let provider: (@Sendable (_ expired: Bool) async throws -> String)?
+    private let provider: (@Sendable (TokenRefusal) async throws -> String)?
     private let queue = DispatchQueue(label: "dev.fennecdb.sync")
     private var session: URLSession!
     private let lock = NSLock()
@@ -190,7 +238,7 @@ public final class Replica: NSObject, URLSessionDataDelegate, @unchecked Sendabl
     private var refusalWatchers: [UUID: AsyncStream<Refusal>.Continuation] = [:]
     private var stopped = false
 
-    init(db: Fennec, url: String, token: String?, provider: (@Sendable (_ expired: Bool) async throws -> String)?) {
+    init(db: Fennec, url: String, token: String?, provider: (@Sendable (TokenRefusal) async throws -> String)?) {
         self.db = db
         self.handle = db.handle
         self.url = url.hasSuffix("/") ? String(url.dropLast()) : url
@@ -381,12 +429,14 @@ public final class Replica: NSObject, URLSessionDataDelegate, @unchecked Sendabl
                 let ms = a["ms"]?.int ?? 0
                 queue.asyncAfter(deadline: .now() + .milliseconds(ms)) { self.feed(UInt32(FENNEC_SYNC_TIMER), id) }
             case "token":
-                // `code` names the token's expiry ("token_expired"); a 401
-                // naming none is a token the server no longer takes.
+                // Why the core asks: the code the 401 named, whether the
+                // refused request carried a token, and the asks in a row.
                 if let provider {
-                    let expired = a["code"]?.string == "token_expired"
+                    let refusal = TokenRefusal(
+                        errorCode: a["code"]?.string, hadToken: a["had_token"]?.bool ?? true,
+                        attempt: a["attempt"]?.int ?? 1)
                     Task {
-                        if let t = try? await provider(expired) { self.setToken(t) }
+                        if let t = try? await provider(refusal) { self.setToken(t) }
                     }
                 }
             case "changed":

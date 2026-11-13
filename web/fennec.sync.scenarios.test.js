@@ -79,6 +79,33 @@ function sorted(o, at) {
   assert.deepEqual(keys, [...keys].sort(), `${at}: fields in alphabetical order, or the platforms render them apart`);
 }
 
+/**
+ * An answer as a real fetch gives it: its body thrown away once `signal`
+ * aborts, a read begun after that rejecting. A stand-in whose body outlived
+ * the abort hid a stream refused at its open whose body was read only after
+ * the stream was cancelled -- told nothing, on Node's own fetch.
+ */
+function answered(text, status, signal, headers = {}) {
+  const body = new ReadableStream({
+    start(ctl) {
+      const abort = () => {
+        try {
+          ctl.error(new DOMException('aborted', 'AbortError'));
+        } catch {
+          /* already ended */
+        }
+      };
+      if (signal?.aborted) return abort();
+      signal?.addEventListener('abort', abort, { once: true });
+      // Queued and closed: an abort before the queue is read errors the
+      // stream all the same, its chunks dropped, as a fetch drops a body.
+      ctl.enqueue(new TextEncoder().encode(text));
+      ctl.close();
+    },
+  });
+  return new Response(body, { status, headers });
+}
+
 // ------------------------------------------------------------------- run
 
 /** The app, its replica, and the network as the script plays it. */
@@ -87,7 +114,11 @@ class Run {
     this.shapes = sc.shapes ?? file.shapes;
     this.collections = JSON.stringify(sc.collections ?? file.collections);
     this.up = true;
+    // The token the replica starts with: "t0" unless a start names one,
+    // null for none.
+    this.startToken = 't0';
     this.streamStatus = null;
+    this.schemaStatus = null;
     this.open = [];
     this.posts = [];
     this.timers = new Set();
@@ -102,7 +133,9 @@ class Run {
     this.refused = [];
     this.waits = [];
     this.tokenAsked = false;
-    this.tokenExpired = false;
+    // What the provider was handed: `{code, had_token, attempt}`, as the
+    // native core's token action says them.
+    this.token = null;
     this.error = null;
     this.reason = null;
   }
@@ -116,7 +149,7 @@ class Run {
       if (this.streamStatus) {
         const { status, body } = this.streamStatus;
         this.streamStatus = null;
-        return Promise.resolve(new Response(body, { status }));
+        return Promise.resolve(answered(body, status, init.signal));
       }
       const c = path.slice(1).split('/')[0];
       let ctl;
@@ -141,9 +174,11 @@ class Run {
     this.requests.push(r);
     if (r.method === 'GET') {
       if (!this.up) return Promise.reject(new TypeError('connection refused'));
-      return Promise.resolve(new Response(this.collections, { status: 200 }));
+      const { status, body } = this.schemaStatus ?? { status: 200, body: this.collections };
+      this.schemaStatus = null;
+      return Promise.resolve(answered(body, status, init.signal));
     }
-    return new Promise((res, rej) => this.posts.push({ res, rej }));
+    return new Promise((res, rej) => this.posts.push({ res, rej, signal: init.signal }));
   };
 
   /** Timers the core would ask for: a backoff waits for `fire`, a frame's tick runs at once. */
@@ -180,16 +215,17 @@ class Run {
     try {
       this.db = await sync({
         url: URL_,
-        token: 't0',
+        token: this.startToken ?? undefined,
         local: await Fennec.open(wasm),
         leader: false,
         persist: 'scenario',
         shapes: structuredClone(this.shapes),
         fetch: this.fetch,
-        // Told whether the server said the token's `exp` passed.
-        tokenProvider: (expired) => {
+        // Handed a `TokenRefusal`: its `expired` is its code's, always.
+        tokenProvider: (r) => {
           this.tokenAsked = true;
-          this.tokenExpired = expired === true;
+          this.token = { code: r.errorCode, had_token: r.hadToken, attempt: r.attempt };
+          if (r.expired !== (r.errorCode === 'token_expired')) this.token.expired = r.expired;
           return new Promise(() => {});
         },
         onRefused: (e) => this.refused.push({ status: e.status, quota: e.quota ?? null, reason: e.reason ?? null }),
@@ -268,12 +304,14 @@ class Run {
     switch (st.do) {
       case 'start':
         if (st.shapes) this.shapes = st.shapes;
+        this.startToken = 'token' in st ? st.token : 't0';
         await this.start();
         break;
       case 'restart':
         await this.settle();
         this.db.close();
         if (st.shapes) this.shapes = st.shapes;
+        this.startToken = 'token' in st ? st.token : 't0';
         await this.start();
         break;
       case 'seed':
@@ -305,7 +343,7 @@ class Run {
         if (!st.status) p.rej(new TypeError('connection reset'));
         else {
           const body = st.body !== undefined ? JSON.stringify(st.body) : '{}';
-          p.res(new Response(body, { status: st.status, headers: st.seq ? { 'fennec-seq': String(st.seq) } : {} }));
+          p.res(answered(body, st.status, p.signal, st.seq ? { 'fennec-seq': String(st.seq) } : {}));
         }
         break;
       }
@@ -319,8 +357,12 @@ class Run {
         this.up = st.up;
         break;
       case 'stream_status':
-        this.streamStatus = { status: st.status, body: st.body !== undefined ? JSON.stringify(st.body) : '{"error":"refused"}' };
+      case 'schema_status': {
+        const answer = { status: st.status, body: st.body !== undefined ? JSON.stringify(st.body) : '{"error":"refused"}' };
+        if (st.do === 'stream_status') this.streamStatus = answer;
+        else this.schemaStatus = answer;
         break;
+      }
       case 'online':
         this.db.setOnline(st.online);
         break;
@@ -353,8 +395,10 @@ class Run {
     if (e.refused) matches(e.refused.map((r) => (typeof r === 'number' ? { status: r, quota: null } : r)), this.refused, binds, 'refused');
     if ('quota' in e) matches(e.quota, this.db.status()[0].quota, binds, 'quota');
     if ('token_asked' in e) matches(e.token_asked, this.tokenAsked, binds, 'token_asked');
-    if ('token_expired' in e) matches(e.token_expired, this.tokenExpired, binds, 'token_expired');
-    if ('code' in e) matches(e.code, this.db.status()[0].code, binds, 'code');
+    if ('token' in e) matches(e.token, this.token, binds, 'token');
+    // A provider handed an `expired` its code does not say, whatever the step expects.
+    if (this.token && 'expired' in this.token) throw new Error(`token: expired ${this.token.expired} for code ${this.token.code}`);
+    if ('code' in e) matches(e.code, this.db.status()[0].errorCode, binds, 'code');
     if (e.waits) {
       assert.equal(this.waits.length, e.waits.length, `waits: ${e.waits.length} expected, ${JSON.stringify(this.waits)} asked`);
       e.waits.forEach(([lo, hi], i) => {

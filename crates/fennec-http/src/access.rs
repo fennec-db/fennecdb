@@ -318,11 +318,12 @@ const NO_CLIENT: &str = "the token names no client (azp, or client_id) this serv
 
 /// What a token past its `exp` is refused with: its words, and beside them
 /// the code a client tells it by (`{"error":..,"code":"token_expired"}`),
-/// the one refusal of a token that a fresh token cures. Every other -- a
-/// signature no key makes, an issuer, audience or client not taken, a token
-/// not valid yet, none at all -- names no code: the token, or the session
-/// behind it, is no good, and a replica that refreshes at the one signs out
-/// at the others. Asked after the signature and whom the token is for
+/// at which an app refreshes the token without a second thought. Every
+/// other -- a signature no key makes, an issuer, audience or client not
+/// taken, a token not valid yet, none at all -- names no code, since this
+/// server cannot tell which of them a fresh token cures (a key rotation, a
+/// clock behind) and which it does not; a client asks its issuer at those
+/// too. Asked after the signature and whom the token is for
 /// (`Access::verify`), so it is told only of a token this server took
 /// until its `exp`; a stream ended at the `exp` says the same
 /// (`sse::EXPIRED`).
@@ -4235,10 +4236,10 @@ mod tests {
         assert!(Access::new(b"short", "").is_err());
     }
 
-    /// A replica refreshes its token at one refusal and signs out at the
-    /// others, so only a token's expiry is told by a code -- and only of a
-    /// token this server took until its `exp`: one no key signed, or one
-    /// for another audience, is refused for that before its `exp` is read,
+    /// Only a token's expiry is told by a code, a refusal an app cures
+    /// with a fresh token without a second thought -- and only of a token
+    /// this server took until its `exp`: one no key signed, or one for
+    /// another audience, is refused for that before its `exp` is read,
     /// past it or not. A stream ended at the `exp` says the same.
     #[test]
     fn only_an_expired_token_is_told_by_its_code() {

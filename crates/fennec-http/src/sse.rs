@@ -1576,8 +1576,7 @@ fn seed_rows(
 /// The last event of a stream whose token's `exp` passed: what a refused
 /// request says (`access::EXPIRED_WHY`), its status, and the code a client
 /// tells an expiry by (`access::EXPIRED_CODE`), for it to fetch a fresh
-/// token on -- where a 401 naming no code is a token, or a session, no
-/// longer good. A constant written once, so the stream's look pays nothing
+/// token on. A constant written once, so the stream's look pays nothing
 /// for it; `access`'s tests hold it to those two.
 pub const EXPIRED: &str =
     r#"{"error":"the token has expired","status":401,"code":"token_expired"}"#;
