@@ -7,10 +7,10 @@
 //! `Authorization` into /_shard/ and passed the check that keeps a router
 //! with no token off a public address.
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Lines, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStderr, Command, Stdio};
 
 fn scratch(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("fennec-shard-tokens-{tag}-{}", std::process::id()));
@@ -19,18 +19,37 @@ fn scratch(tag: &str) -> PathBuf {
     d
 }
 
+/// A router listening: the process, where, and what it says from then on.
+type Heard = (Child, String, Lines<BufReader<ChildStderr>>);
+/// A router that ended before it listened: its exit code, and what it said.
+type Ended = (Option<i32>, String);
+
 /// The router listening, and where; or everything it said before it ended.
 fn router(listen: &str, dir: &Path, env: &[(&str, &str)]) -> Result<(Child, String), String> {
-    router_with(listen, dir, &[], env)
+    router_with(listen, dir, &[], env).map_err(|(_, said)| said)
 }
 
-/// [`router`] with `args` after its own.
+/// [`router`] with `args` after its own; ended, its exit code beside what
+/// it said.
 fn router_with(
     listen: &str,
     dir: &Path,
     args: &[&str],
     env: &[(&str, &str)],
-) -> Result<(Child, String), String> {
+) -> Result<(Child, String), Ended> {
+    let (child, addr, _) = router_heard(listen, dir, args, env)?;
+    Ok((child, addr))
+}
+
+/// [`router_with`], and what it says from then on: its stderr read on,
+/// open while it runs, where a line written to a pipe closed would be a
+/// write refused.
+fn router_heard(
+    listen: &str,
+    dir: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Result<Heard, Ended> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_fennec-shard"))
         .env_remove("FENNEC_SHARD_TOKEN")
         .env_remove("FENNEC_SHARD_ENTRY_TOKEN")
@@ -46,12 +65,12 @@ fn router_with(
     let mut lines = BufReader::new(child.stderr.take().unwrap()).lines();
     loop {
         let Some(Ok(line)) = lines.next() else {
-            let _ = child.wait();
-            return Err(said);
+            let code = child.wait().ok().and_then(|s| s.code());
+            return Err((code, said));
         };
         if let Some((_, rest)) = line.split_once("listening on: http://") {
             let addr = rest.split_whitespace().next().unwrap().to_string();
-            return Ok((child, addr));
+            return Ok((child, addr, lines));
         }
         said.push_str(&line);
         said.push('\n');
@@ -59,8 +78,16 @@ fn router_with(
 }
 
 fn status(addr: &str, target: &str, token: Option<&str>) -> u16 {
+    status_with(addr, target, token, &[])
+}
+
+/// [`status`] with header lines of its own.
+fn status_with(addr: &str, target: &str, token: Option<&str>, headers: &[(&str, &str)]) -> u16 {
     let mut s = TcpStream::connect(addr).unwrap();
-    let auth = token.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
+    let mut auth = token.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
+    for (k, v) in headers {
+        auth.push_str(&format!("{k}: {v}\r\n"));
+    }
     write!(
         s,
         "GET {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{auth}\r\n"
@@ -200,10 +227,14 @@ fn a_short_token_is_refused_outside_loopback() {
                     let _ = child.wait();
                     panic!("{flag} of 31 bytes was taken past loopback, listening on {addr}");
                 }
-                Err(said) => assert!(
-                    said.contains(&format!("{flag} (")) && said.contains("shorter than 32 bytes"),
-                    "{args:?} {env:?}: {said}"
-                ),
+                Err((code, said)) => {
+                    assert_eq!(code, Some(2), "{args:?} {env:?}: {said}");
+                    assert!(
+                        said.contains(&format!("{flag} ("))
+                            && said.contains("shorter than 32 bytes"),
+                        "{args:?} {env:?}: {said}"
+                    );
+                }
             }
             assert!(
                 !dir.join("shard.fennec").exists(),
@@ -230,7 +261,7 @@ fn a_short_token_is_refused_outside_loopback() {
             let _ = child.kill();
             let _ = child.wait();
         }
-        Err(said) => assert!(
+        Err((_, said)) => assert!(
             said.contains("could not listen") && !said.contains("shorter than"),
             "{said}"
         ),
@@ -246,9 +277,40 @@ fn a_short_token_is_refused_outside_loopback() {
         "dirs",
     ];
     let (mut child, addr) = router_with("127.0.0.1:0", &scratch("loopback"), &short_ones, &[])
-        .unwrap_or_else(|said| panic!("short tokens on loopback were refused:\n{said}"));
+        .unwrap_or_else(|(_, said)| panic!("short tokens on loopback were refused:\n{said}"));
     let asked = status(&addr, "/_shard/nodes", Some("root"));
     let _ = child.kill();
     let _ = child.wait();
     assert_eq!(asked, 200);
+}
+
+/// On loopback a short token is taken, and the first request a proxy in
+/// front sent (`X-Forwarded-For`) warns of it, once, naming the flag; a
+/// request carrying no such header warns of nothing.
+#[test]
+fn a_short_token_on_loopback_is_warned_of_through_a_proxy() {
+    const WARNING: &str = "warning: a request came through a proxy or a router";
+    let dir = scratch("proxied");
+    let (mut child, addr, lines) = router_heard("127.0.0.1:0", &dir, &["--token", "root"], &[])
+        .unwrap_or_else(|(_, said)| panic!("the router did not start:\n{said}"));
+    let proxy = [("X-Forwarded-For", "203.0.113.9")];
+    let asked = [
+        status_with(&addr, "/_shard/nodes", Some("root"), &[]),
+        status_with(&addr, "/_shard/nodes", Some("root"), &proxy),
+        status_with(&addr, "/_shard/nodes", Some("root"), &proxy),
+    ];
+    // Each line is written before its request's answer: once the router is
+    // gone, every one it wrote is read.
+    let _ = child.kill();
+    let said: Vec<String> = lines.map_while(Result::ok).collect();
+    let _ = child.wait();
+    assert_eq!(asked, [200, 200, 200]);
+    let warned: Vec<&String> = said.iter().filter(|l| l.contains(WARNING)).collect();
+    assert_eq!(warned.len(), 1, "{said:?}");
+    assert!(
+        warned[0].contains("(it carries X-Forwarded-For)")
+            && warned[0].contains("--token (FENNEC_SHARD_TOKEN) is shorter than 32 bytes"),
+        "{}",
+        warned[0]
+    );
 }

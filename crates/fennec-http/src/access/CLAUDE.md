@@ -112,5 +112,10 @@ past loopback (`fennec_http::short_token`), naming the flag, its variable
 and the minimum: `--http-token` and `--admin-token` on `--http` and
 `--metrics`, `--replication-token` on `--http`, the router's `--token`,
 `--entry-token` and `--replication-token` on `--listen`. A new token flag
-joins those lists. On loopback any length is taken (`make server
-TOKEN=secret`); `--insecure` waives nothing.
+joins those lists. Loopback is judged of the addresses the listener is
+bound on, its name looked up once (`fennec_http::Listen`), never bound by
+its text again, and a name not looked up is past loopback. On loopback any
+length is taken (`make server TOKEN=secret`), one shorter warned of once,
+at the first request a proxy or a router sent (`kept_short`, `proxied`: a
+load and a branch a request, nothing refused), as is a hook's secret
+shorter (`Hook::short`); `--insecure` waives nothing.

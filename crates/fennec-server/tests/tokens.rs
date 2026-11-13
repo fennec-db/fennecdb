@@ -6,7 +6,12 @@
 //! no token; an empty one given as a flag is refused at the start, since
 //! `/_admin/` reads a request with no `Authorization` as an empty token.
 
-use crate::support::{start, start_env, tmp, try_start, try_start_env, Http};
+use crate::support::{ask_to_stop, command_env, ended, start, start_env, tmp, try_start, Http};
+use std::time::Duration;
+
+/// Long enough for a loaded machine; an exit is waited for, not slept
+/// through.
+const EXIT: Duration = Duration::from_secs(30);
 
 #[test]
 fn the_admin_token_is_read_from_the_environment() {
@@ -127,18 +132,19 @@ fn a_short_token_is_refused_outside_loopback() {
     let file = path.to_str().unwrap();
     let node_path = tmp("tokens", "short-node");
     let node = node_path.to_str().unwrap();
-    let refused = |args: &[&str], env: &[(&str, &str)], flag: &str| {
-        let log = match try_start_env(args, env) {
-            Ok(server) => panic!(
-                "{flag} of 31 bytes was taken past loopback, port {}",
-                server.port
-            ),
-            Err(log) => log,
-        };
+    // Refused with the flags (2), as every flag is, never the 1 of a port
+    // that could not be had.
+    let refused = |args: &[&str], env: &[(&str, &str)], flag: &str| -> String {
+        let (code, log) = ended(command_env(args, env), EXIT);
+        assert_eq!(
+            code, 2,
+            "{flag} of 31 bytes past loopback: {args:?} {env:?}\n{log}"
+        );
         assert!(
             log.contains(&format!("{flag} (")) && log.contains("shorter than 32 bytes"),
             "{args:?} {env:?}: {log}"
         );
+        log
     };
     for (flag, var, store) in [
         ("--http-token", "FENNEC_HTTP_TOKEN", ["--file", file]),
@@ -155,12 +161,32 @@ fn a_short_token_is_refused_outside_loopback() {
         refused(&past, &[(var, &short)], flag);
     }
     for flag in ["--http-token", "--admin-token"] {
-        refused(
-            &["--file", file, "--metrics", "0.0.0.0:0", flag, &short],
-            &[],
-            flag,
-        );
+        let metrics = [
+            "--file",
+            file,
+            "--http",
+            "127.0.0.1:0",
+            "--metrics",
+            "0.0.0.0:0",
+        ];
+        refused(&[&metrics[..], &[flag, &short]].concat(), &[], flag);
     }
+    // A name that could not be looked up is judged past loopback, never
+    // taken for it: here `localhost` with a port that is no number, which
+    // fails the lookup before any resolver is asked.
+    let unlooked = [
+        "--file",
+        file,
+        "--http",
+        "localhost:http-port",
+        "--http-token",
+        "secret",
+    ];
+    let log = refused(&unlooked, &[], "--http-token");
+    assert!(
+        log.contains("(on localhost:http-port, which could not be looked up"),
+        "{log}"
+    );
     assert!(!path.exists() && !node_path.exists(), "a store was opened");
 
     // 32 bytes pass the check past loopback: the server goes on to its
@@ -201,4 +227,45 @@ fn a_short_token_is_refused_outside_loopback() {
     ]);
     let mut admin = Http::open(server.port).with_token("adm");
     assert_eq!(admin.ask("GET", "/_admin/stats", "").status, 200);
+}
+
+/// On loopback a short token is taken, and the first request that comes
+/// through a proxy or a router -- `Forwarded`, `X-Forwarded-For` or the
+/// router's `X-Forwarded-Host` -- warns of it, once, naming the flag: past
+/// the proxy the guesses come from past this machine. A request carrying
+/// none of them warns of nothing, nor does any request to a server whose
+/// tokens are 32 bytes or more.
+#[test]
+fn a_short_token_on_loopback_is_warned_of_through_a_proxy() {
+    const WARNING: &str = "warning: a request came through a proxy or a router";
+    let through = [
+        ("X-Forwarded-For", "203.0.113.9"),
+        ("x-forwarded-host", "db.example.com"),
+        ("Forwarded", "for=203.0.113.9;proto=https"),
+    ];
+    let log_of = |token: &str| {
+        let mut server = start(&["--http-token", token, "--auth-delay", "0"]);
+        let mut http = server.http().with_token(token);
+        assert_eq!(http.ask("GET", "/_schema", "").status, 200);
+        for header in through {
+            assert_eq!(http.ask_with("GET", "/_schema", "", &[header]).status, 200);
+        }
+        // Stopped, and every line it wrote read: the warning, written before
+        // its request's answer, is among them where it was written at all.
+        ask_to_stop(&mut server.child);
+        let (code, log) = server.exited(EXIT).expect("the server went on");
+        assert_eq!(code, 0, "{log}");
+        assert!(log.contains("shutting down"), "{log}");
+        log
+    };
+    let log = log_of("secret");
+    assert_eq!(log.matches(WARNING).count(), 1, "{log}");
+    let line = log.lines().find(|l| l.contains(WARNING)).unwrap();
+    assert!(
+        line.contains("(it carries X-Forwarded-For)")
+            && line.contains("--http-token (FENNEC_HTTP_TOKEN) is shorter than 32 bytes"),
+        "{line}"
+    );
+    let log = log_of(&"t".repeat(32));
+    assert!(!log.contains(WARNING), "{log}");
 }

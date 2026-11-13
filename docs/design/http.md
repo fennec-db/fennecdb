@@ -584,7 +584,8 @@ no longer its count's and those passed over let go once they are more than
 half as many as the counts (`Table::kept`) -- three places looked at a
 refusal on the whole, where a scan for the oldest was a pass over 10 000
 counts for each new address, under the lock every verified token takes
-while any count is held. Its buffer holds 16 384 places of 48 bytes at
+while any count is held; the one refusal that sweeps looks at them all, its
+tail measured in [access.md](access.md#short-tokens). Its buffer holds 16 384 places of 48 bytes at
 most, 768 KiB beside a full table's 10 000 counts of 56 bytes in 16 384
 buckets (some 900 KiB, as before); swept at twice the counts it reached
 32 768. A new address is not made to

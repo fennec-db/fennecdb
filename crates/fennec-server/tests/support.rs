@@ -204,11 +204,27 @@ pub fn start_piped(args: &[&str]) -> Server {
         .unwrap_or_else(|log| panic!("fennec-server ended before it listened:\n{log}"))
 }
 
+/// `cmd` without the token variables this process inherited
+/// (`FENNEC_*_TOKEN`): a server a test starts reads only the tokens the
+/// test gives it. One exported in a developer's shell stood in for a flag a
+/// test left out -- a short one there refused at the start for a flag the
+/// test never named.
+pub fn without_tokens(cmd: &mut Command) -> &mut Command {
+    for (name, _) in std::env::vars_os() {
+        if let Some(name) = name.to_str() {
+            if name.starts_with("FENNEC_") && name.ends_with("_TOKEN") {
+                cmd.env_remove(name);
+            }
+        }
+    }
+    cmd
+}
+
 /// [`try_start_env`] with `stdin` as the server's stdin.
 pub fn try_start_with(args: &[&str], env: &[(&str, &str)], stdin: Stdio) -> Result<Server, String> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_fennec-server"));
     own_group(&mut cmd);
-    cmd.envs(env.iter().copied());
+    without_tokens(&mut cmd).envs(env.iter().copied());
     if !args.contains(&"--http") {
         cmd.args(["--http", "127.0.0.1:0"]);
     }
@@ -535,7 +551,15 @@ pub fn ended(mut child: Child, within: Duration) -> (i32, String) {
 /// `/dev/null` and stderr piped: for a start that must end of its own
 /// accord ([`ended`]).
 pub fn command(args: &[&str]) -> Child {
-    own_group(&mut Command::new(env!("CARGO_BIN_EXE_fennec-server")))
+    command_env(args, &[])
+}
+
+/// [`command`] with variables of its own in the server's environment, the
+/// token variables this process inherited taken out ([`without_tokens`]).
+pub fn command_env(args: &[&str], env: &[(&str, &str)]) -> Child {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_fennec-server"));
+    without_tokens(own_group(&mut cmd))
+        .envs(env.iter().copied())
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

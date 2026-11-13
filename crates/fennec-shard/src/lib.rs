@@ -46,7 +46,7 @@ use fennec_http::replication::{self, Replication};
 use metrics::Route;
 use std::collections::HashSet;
 use std::io::{BufReader, Write};
-use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -747,21 +747,25 @@ impl Router {
     /// Opens the listener. As with the nodes, a non-loopback address needs
     /// a token: `/_shard/` can move and delete every tenant.
     pub fn bind(&self) -> std::io::Result<TcpListener> {
-        let remote = match self.cfg.addr.to_socket_addrs() {
-            Ok(mut it) => it.any(|a| !a.ip().is_loopback()),
-            Err(_) => false,
-        };
-        if remote && self.cfg.token.is_none() && !self.cfg.insecure {
+        self.bind_on(&fennec_http::Listen::look_up(&self.cfg.addr))
+    }
+
+    /// [`Router::bind`] on `listen`, its name looked up once: judged of the
+    /// addresses it is bound on, never of a second lookup's. The binary
+    /// looks `--listen` up as it starts, its tokens' lengths judged by the
+    /// same lookup (`fennec_http::short_token`).
+    pub fn bind_on(&self, listen: &fennec_http::Listen) -> std::io::Result<TcpListener> {
+        if listen.binds_past_loopback() && self.cfg.token.is_none() && !self.cfg.insecure {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 format!(
                     "{} is not a loopback address and there is no --token: \
                      /_shard/ would let anyone move and delete tenants",
-                    self.cfg.addr
+                    listen.given()
                 ),
             ));
         }
-        TcpListener::bind(&self.cfg.addr)
+        listen.bind()
     }
 
     pub fn serve_on(self: &Arc<Router>, listener: TcpListener) -> std::io::Result<()> {
@@ -1842,6 +1846,9 @@ impl Router {
             // The client's id, or one made here, which the node is sent
             // (`Pool::send`) and answers with.
             fennec_http::request_id::begin_request(&req);
+            // A proxy in front of a router on loopback holding a token
+            // shorter than 32 bytes: warned of once (a load and a branch).
+            fennec_http::proxied(&req);
             let arrived = Instant::now();
             // The client another router relayed this for, believed from a
             // router holding the same `--token` alone ([`region`]): it

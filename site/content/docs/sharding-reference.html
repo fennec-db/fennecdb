@@ -437,7 +437,13 @@ that, and a router whose <code>--listen</code> is beyond it its
 named (exit 2). A refused token waits by its client's address, an IPv6 one
 by its /64, but a client may hold many addresses; <code>openssl rand -hex
 32</code> makes a token. On loopback any length is taken, as this page's
-examples on 127.0.0.1 are.</p>
+examples on 127.0.0.1 are. But a node on 127.0.0.1 behind a router on the
+same machine is reached through the router by every client of it, and a
+router on 127.0.0.1 behind a TLS proxy by every client of the proxy: give
+their tokens 32 bytes too. Either logs a warning, once, at the first
+request through the router or the proxy (<code>X-Forwarded-Host</code>,
+which the router sends on every forward, <code>X-Forwarded-For</code> or
+<code>Forwarded</code>) while it holds a shorter one.</p>
 
 <details class="deep"><summary>The three tokens, and JWTs on a node</summary>
 <p>Three, each for a different job. Data requests carry whatever the nodes'

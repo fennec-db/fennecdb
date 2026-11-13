@@ -171,7 +171,9 @@ entry's from FENNEC_SHARD_ENTRY_TOKEN and the replication token from
 FENNEC_SHARD_REPLICATION_TOKEN: argv shows up in `ps`. Each one set and empty
 is unset. Where --listen is past loopback each is 32 bytes at least, refused
 at the start otherwise, since guesses there may come from any number of
-addresses: `openssl rand -hex 32` makes one. On loopback any length is taken.
+addresses: `openssl rand -hex 32` makes one. On loopback any length is taken;
+behind a TLS proxy, which reaches the router from past this machine, give
+each 32 bytes too: a shorter one is warned of at the first request it sends.
 ";
 
 fn fail(msg: &str) -> ! {
@@ -451,8 +453,12 @@ fn main() {
     // Past loopback each is 32 bytes at least, as a node's tokens are
     // (`fennec_http::short_token`), from the flag or its variable: a refused
     // guess at one waits, but by its address alone, and every one is taken
-    // on --listen.
-    for (flag, token) in [
+    // on --listen -- looked up once, here, judged of the addresses that
+    // lookup answered and bound on them (`Router::bind_on`), a name not
+    // looked up judged past loopback. One shorter on loopback is warned of
+    // as the first request comes through a proxy (`fennec_http::kept_short`).
+    let listen = fennec_http::Listen::look_up(&cfg.addr);
+    let tokens = [
         ("--token (FENNEC_SHARD_TOKEN)", cfg.token.as_deref()),
         (
             "--entry-token (FENNEC_SHARD_ENTRY_TOKEN)",
@@ -462,11 +468,17 @@ fn main() {
             "--replication-token (FENNEC_SHARD_REPLICATION_TOKEN)",
             replication_token.as_deref(),
         ),
-    ] {
-        if let Some(refused) = fennec_http::short_token(flag, token, &[cfg.addr.as_str()]) {
+    ];
+    for (flag, token) in tokens {
+        if let Some(refused) = fennec_http::short_token(flag, token, &[&listen]) {
             fail(&refused);
         }
     }
+    let short: Vec<String> = (tokens.iter())
+        .filter(|(_, token)| token.is_some_and(|t| fennec_http::too_short(t.len())))
+        .map(|(flag, _)| flag.to_string())
+        .collect();
+    fennec_http::kept_short(&short);
     let replicating = replication_token.as_deref().is_some_and(|t| !t.is_empty());
     if replica_of.is_some() && !replicating {
         fail("--replica-of needs --replication-token: the primary asks for it");
@@ -597,7 +609,7 @@ fn main() {
         (None, Some(repl)) => Router::replicated(dir, cfg, repl),
         (None, None) => Router::new(dir, cfg),
     };
-    let listener = match router.bind() {
+    let listener = match router.bind_on(&listen) {
         Ok(l) => l,
         Err(e) => fail(&format!("could not listen: {e}")),
     };

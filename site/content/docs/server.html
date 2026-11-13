@@ -165,6 +165,15 @@ proxy was reached by:</p>
     page's name from the server, so a page whose DNS name was rebound to the
     proxy reaches the server through it: a server reached past this machine
     needs a token, behind a proxy or not.</li>
+  <li><b>Behind a proxy or a router, a token is 32 bytes too.</b> A server
+    on 127.0.0.1 takes a token of any length (<a href="#token-length">token
+    length</a>), but a proxy in front, or a router on the same machine
+    relaying to it, reaches it for anyone who reaches them: every guess
+    comes through, and behind a plain proxy every refusal waits by the
+    proxy's address, which any client's good token clears. Give it
+    <code>openssl rand -hex 32</code>. A server holding a shorter one logs a
+    warning, once, at the first request carrying <code>Forwarded</code>,
+    <code>X-Forwarded-For</code> or <code>X-Forwarded-Host</code>.</li>
 </ul>
 
 <div class="note trap">
@@ -185,10 +194,21 @@ deliberately with <code>--insecure</code>.</p>
 <code>--replication-token</code> shorter than that, given as the flag or its
 variable, stops the server at the start (exit 2), naming the flag. A refused
 guess waits, but only by its address, and a client may hold many:
-<code>openssl rand -hex 32</code> makes a token long enough. On loopback any
+<code>openssl rand -hex 32</code> makes a token long enough. Loopback is
+judged of the addresses the listener is bound on, its name looked up once;
+a name that cannot be looked up counts as past loopback. On loopback any
 length is taken, so <code>make server TOKEN=secret</code> and a machine's
 own tests run as they are; <code>--insecure</code> does not waive the
-length.</p>
+length. Behind a proxy or a router, give the token 32 bytes all the same
+(<a href="#behind-a-proxy">Behind a proxy</a>): the server warns once a
+request comes through one while it holds a shorter one.</p>
+
+<p>A webhook's secret (<a href="/docs/webhooks">Webhooks</a>) shorter than
+32 bytes is taken, and warned of: at the start where <code>--http</code> is
+past loopback, through a proxy as a short token is, and on a node as a
+tenant's secret is set. Stripe's and Svix's are long enough as they come;
+a GitHub secret is yours to choose, so make it with <code>openssl rand -hex
+32</code>.</p>
 
 <p>With <code>--jwt-secret</code> (HS256, at least 32 bytes) or
 <code>--jwt-keys</code> (a JWKS file: <code>oct</code> keys for HS256,
