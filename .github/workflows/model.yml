@@ -1,17 +1,22 @@
 # The engine held to its model far longer than a pull request holds it
-# (crates/fennec-core/tests/model.rs, docs/design/conventions.md, "The
-# model"): `make test` runs 200 seeds of 1 000 steps in each build; this
-# runs 1 000 seeds of 100 000 steps, in the build with every index and in
-# the one without them, 125 seeds a job. Each run takes seeds no run took
-# before -- from its run number times 1 000, or from `first` by hand -- so
-# four green weeks are 4 000 seeds no pull request saw.
+# (crates/fennec-core/tests/model.rs; docs/design/engine.md, "The model"):
+# `make test` runs 200 seeds of 1 000 steps in each build; this runs 1 000
+# seeds of 100 000 steps, in the build with every index and in the one
+# without them, 125 seeds a job. Each run takes seeds no run took before --
+# from its run number times 1 000, or from `first` by hand -- so four green
+# weeks are 4 000 seeds no pull request saw. Its graph runs fill a graph
+# with 2 200 vectors, past the 1 024 nodes from which a batch links in
+# parallel and the 2 048 a bit index learns its centres from, where `make
+# test`'s fill one with 48.
 #
 # A divergence fails its job, which prints the seed, the step and what
 # differed, the command that runs the seed again and the steps it shrank
 # to: a bug of the engine's, fixed with a test of its own, or of the
-# model's. Built as a release, with the checks a debug build makes -- an
-# overflow, a debug assertion -- which panic into the report; about half
-# an hour a job, never on a pull request and not a required check.
+# model's. Each seed is named as it starts and as it ends, so a job that
+# hangs or runs out of time names the seeds it never finished. Built as a
+# release, with the checks a debug build makes -- an overflow, a debug
+# assertion -- which panic into the report; about forty minutes a job,
+# never on a pull request and not a required check.
 name: engine model
 
 on:
@@ -44,6 +49,7 @@ jobs:
     env:
       FENNEC_MODEL_SEEDS: 125
       FENNEC_MODEL_OPS: 100000
+      FENNEC_MODEL_GRAPH: 2200
       FENNEC_MODEL_PROGRESS: 1
       # A divergence 100 000 steps in replays in seconds: half an hour
       # shrinks it to the steps it needs, or near.

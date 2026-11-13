@@ -11,9 +11,15 @@
 //! what the statement answered, what every row holds, the record it
 //! appended and the change counter, and which rows a read finds -- every
 //! index, `@hash`, `@sorted`, `@unique`, an index over several fields,
-//! `@ttl`, `@text`, the graph, `@inverted` and `@geo`, held to the plain
-//! scan of a twin field holding the same values, as `tests/nan.rs` holds
-//! them, and to the model.
+//! `@ttl`, `@text`, the graph -- over `f32`s, int8 and bit codes and
+//! halves, and beside `@ttl` and `@unique` -- `@inverted` and `@geo`, held
+//! to the plain scan of a twin field holding the same values, as
+//! `tests/nan.rs` holds them, and to the model; `near` through the graph
+//! and exactly, to a limit and over a filter's rows. Now and then a graph
+//! run fills a collection of its own with `FENNEC_MODEL_GRAPH` vectors
+//! (48), writes some again, searches each kind of graph and empties it,
+//! in one block: the weekly run's 2 200 pass the 1 024 nodes past which a
+//! batch links in parallel and the 2 048 a bit index codes from.
 //!
 //! `make test` runs 200 seeds of 1 000 steps, in the full build and in the
 //! one without the indexes (`tests/features.rs`), and
@@ -30,10 +36,11 @@
 //! ```
 //!
 //! `FENNEC_MODEL_FIRST` moves where the seeds start, `FENNEC_MODEL_THREADS`
-//! says how many run at once, and `FENNEC_MODEL_PROGRESS=1` prints a line as
-//! each tenth of the seeds is done. A divergence prints its seed and step,
-//! and the steps shrunk to the fewest that still diverge the same way
-//! (within `FENNEC_MODEL_SHRINK_SECS`, 120 by default), as FennecQL and the
+//! says how many run at once, and `FENNEC_MODEL_PROGRESS=1` names each seed
+//! as it starts and as it ends. A divergence prints its seed and step, the
+//! command that runs it again as the weekly run built it, and the steps
+//! shrunk to the fewest that still diverge the same way (within
+//! `FENNEC_MODEL_SHRINK_SECS`, 120 by default), as FennecQL and the
 //! operations around it.
 
 use fennec_core::prelude::{Database, Error, Response, Sink, Statement, Value};
@@ -99,9 +106,14 @@ enum C {
     A,
     B,
     T,
+    /// A graph run's ([`Step::Graph`]), empty but within one.
+    Z,
 }
 
+/// The collections the generator draws statements over.
 const COLLECTIONS: [C; 3] = [C::A, C::B, C::T];
+/// Every collection: what an open or a crash may change.
+const ALL: [C; 4] = [C::A, C::B, C::T, C::Z];
 
 impl C {
     fn name(self) -> &'static str {
@@ -109,6 +121,7 @@ impl C {
             C::A => "a",
             C::B => "b",
             C::T => "t",
+            C::Z => "z",
         }
     }
 }
@@ -119,6 +132,11 @@ enum Ty {
     Text,
     Time,
     Vector,
+    /// A vector of halves, `vector<3, f16>`.
+    Half,
+    /// A graph run's vectors, eight wide, and as halves.
+    Wide,
+    WideHalf,
     Sparse,
     Point,
 }
@@ -130,8 +148,21 @@ impl Ty {
             Ty::Text => "text",
             Ty::Time => "timestamp",
             Ty::Vector => "vector<3>",
+            Ty::Half => "vector<3, f16>",
+            Ty::Wide => "vector<8>",
+            Ty::WideHalf => "vector<8, f16>",
             Ty::Sparse => "sparse<6>",
             Ty::Point => "geo",
+        }
+    }
+
+    /// How far a score may stand from the cosine of the vector as written:
+    /// a field of halves holds each component rounded, and scores the
+    /// vector made unit length in halves.
+    fn slack(self) -> f64 {
+        match self {
+            Ty::Half | Ty::WideHalf => 4e-3,
+            _ => 1e-5,
         }
     }
 }
@@ -144,10 +175,20 @@ enum Ix {
     Unique,
     Text,
     Graph,
+    /// A graph over int8 codes, and over bit codes: `near` orders the
+    /// candidates by the documents' own vectors.
+    Int8,
+    Bit,
     Inverted,
     Geo,
     /// `@ttl`: the collection's `ttl` says for how long.
     Ttl,
+    /// A graph run's three, each linking with a narrower beam than the
+    /// defaults (`m` 16, `ef_construction` 200): thousands of vectors a
+    /// run, where `b`'s graphs hold a few.
+    Run,
+    RunBit,
+    RunInt8,
 }
 
 impl Ix {
@@ -159,9 +200,22 @@ impl Ix {
             Ix::Unique => " @unique",
             Ix::Text => " @text",
             Ix::Graph => " @hnsw(cosine)",
+            Ix::Int8 => " @hnsw(cosine, quant=int8)",
+            Ix::Bit => " @hnsw(cosine, quant=bit)",
             Ix::Inverted => " @inverted",
             Ix::Geo => " @geo",
+            Ix::Run => " @hnsw(cosine, m=8, ef_construction=32)",
+            Ix::RunBit => " @hnsw(cosine, quant=bit, m=8, ef_construction=32)",
+            Ix::RunInt8 => " @hnsw(cosine, quant=int8, m=8, ef_construction=32)",
         }
+    }
+
+    /// Whether it is a graph, `@hnsw`, of any kind.
+    fn graph(self) -> bool {
+        matches!(
+            self,
+            Ix::Graph | Ix::Int8 | Ix::Bit | Ix::Run | Ix::RunBit | Ix::RunInt8
+        )
     }
 
     /// Whether this build makes the index: one it is made without is
@@ -170,7 +224,7 @@ impl Ix {
         match self {
             Ix::Sorted => cfg!(feature = "sorted"),
             Ix::Text => cfg!(feature = "text"),
-            Ix::Graph => cfg!(feature = "vector"),
+            ix if ix.graph() => cfg!(feature = "vector"),
             Ix::Inverted => cfg!(feature = "sparse"),
             Ix::Geo => cfg!(feature = "geo") && cfg!(feature = "sorted"),
             _ => true,
@@ -204,6 +258,9 @@ struct Coll {
     next_id: u64,
     /// How long after `at` a row of `t` is past its time, in milliseconds.
     ttl: Option<i64>,
+    /// The ids rows lately left, the newest last: a write naming one makes
+    /// the row again, where an index may still hold what it held.
+    freed: Vec<u64>,
 }
 
 /// The twins: fields written the same value each write, one answered by
@@ -215,6 +272,14 @@ const P: [&str; 2] = ["p2", "p"];
 const Q: [&str; 2] = ["q2", "q"];
 const L: [&str; 2] = ["loc2", "loc"];
 const AT: [&str; 2] = ["at2", "at"];
+/// `b`'s vectors, each a graph of another kind: over `f32`s, over int8
+/// codes, over bit codes -- the vectors whole until it holds 2 048, as a
+/// graph run's does in the weekly run -- and over halves. Each is held to
+/// `near ... exact` and to the model, as the scan's twin is to an index.
+const V: [&str; 4] = ["v", "v8", "vb", "vh"];
+/// A graph run's vectors, a graph of each kind: over `f32`s, over bit
+/// codes, and over int8 codes of halves.
+const Z: [&str; 3] = ["e", "eb", "eh"];
 /// The names `alter` adds, renames and drops; the twins stay as made.
 const EXTRA: [&str; 4] = ["x0", "x1", "x2", "x3"];
 const TTL: i64 = 10_000;
@@ -253,6 +318,19 @@ impl Coll {
             rows: BTreeMap::new(),
             next_id: 1,
             ttl: None,
+            freed: Vec::new(),
+        }
+    }
+
+    /// The row `id` taken out -- deleted, swept or let go of past its time
+    /// -- and its id kept among the freed.
+    fn let_go(&mut self, id: u64) {
+        if self.rows.remove(&id).is_some() {
+            self.freed.retain(|f| *f != id);
+            if self.freed.len() == 4 {
+                self.freed.remove(0);
+            }
+            self.freed.push(id);
         }
     }
 
@@ -385,7 +463,7 @@ fn fits(ty: Ty, v: &Value) -> Option<Value> {
         | (Ty::Int, Value::Int(_))
         | (Ty::Text, Value::Text(_))
         | (Ty::Time, Value::Timestamp(_))
-        | (Ty::Vector, Value::Vector(_))
+        | (Ty::Vector | Ty::Half | Ty::Wide | Ty::WideHalf, Value::Vector(_))
         | (Ty::Sparse, Value::Sparse(..))
         | (Ty::Point, Value::List(_)) => Some(v.clone()),
         (Ty::Time, Value::Int(t)) => Some(Value::Timestamp(*t)),
@@ -475,7 +553,7 @@ fn fail<T>(k: Kind) -> Result<T, Out> {
 
 #[derive(Clone, Debug)]
 struct Model {
-    cs: [Coll; 3],
+    cs: [Coll; 4],
     clock: i64,
     /// The change counter: one a row written, set, deleted or let go of
     /// past its time, and one a schema change (`Database::change_seq`,
@@ -509,6 +587,9 @@ impl Model {
                 field("g", Ty::Int, Ix::None),
                 field("body", Ty::Text, Ix::Text),
                 field("v", Ty::Vector, Ix::Graph),
+                field("v8", Ty::Vector, Ix::Int8),
+                field("vb", Ty::Vector, Ix::Bit),
+                field("vh", Ty::Half, Ix::Graph),
                 field("sp", Ty::Sparse, Ix::Inverted),
             ],
         );
@@ -523,11 +604,24 @@ impl Model {
                 field("at2", Ty::Time, Ix::None),
                 field("k", Ty::Int, Ix::Unique),
                 field("m", Ty::Int, Ix::None),
+                // Beside `@ttl` and `@unique`: a `put` letting go of a row
+                // past its time that it wrote itself, its vector waiting
+                // for the batch, left the vector in the graph.
+                field("w", Ty::Vector, Ix::Graph),
             ],
         );
         t.ttl = Some(TTL);
+        let z = Coll::new(
+            "z",
+            vec![
+                field("n", Ty::Int, Ix::None),
+                field("e", Ty::Wide, Ix::Run),
+                field("eb", Ty::Wide, Ix::RunBit),
+                field("eh", Ty::WideHalf, Ix::RunInt8),
+            ],
+        );
         Model {
-            cs: [a, b, t],
+            cs: [a, b, t, z],
             clock: START,
             writes: 0,
         }
@@ -613,7 +707,7 @@ impl Model {
                 self.writes += ids.len() as u64;
                 let coll = self.coll_mut(*c);
                 for id in &ids {
-                    coll.rows.remove(id);
+                    coll.let_go(*id);
                 }
                 Ok(want)
             }
@@ -820,7 +914,7 @@ impl Model {
             if let (Some(cut), true) = (cut, unique) {
                 for other in coll.holders(&row, named.unwrap_or(0)) {
                     if coll.expired(other, cut) {
-                        coll.rows.remove(&other);
+                        coll.let_go(other);
                         gone += 1;
                     }
                 }
@@ -911,7 +1005,7 @@ impl Model {
         if let (Some(cut), true) = (cut, coll.has_unique()) {
             for other in coll.holders(&row, id) {
                 if coll.expired(other, cut) {
-                    coll.rows.remove(&other);
+                    coll.let_go(other);
                     gone += 1;
                 }
             }
@@ -1459,6 +1553,29 @@ fn tail(
     s
 }
 
+/// `get <c> select id [where ...] near <field> <q> [exact] [limit <l>]`.
+fn near_text(
+    c: C,
+    field: &str,
+    q: &str,
+    filter: &Option<F>,
+    exact: bool,
+    limit: Option<u64>,
+) -> String {
+    let mut s = format!("get {} select id", c.name());
+    if let Some(f) = filter {
+        let _ = write!(s, " where {}", f.text());
+    }
+    let _ = write!(s, " near {field} {q}");
+    if exact {
+        s.push_str(" exact");
+    }
+    if let Some(l) = limit {
+        let _ = write!(s, " limit {l}");
+    }
+    s
+}
+
 fn returning(ret: &Option<Ret>) -> String {
     match ret {
         None => String::new(),
@@ -1615,8 +1732,16 @@ enum Read {
     },
     /// `match` beside `order`: the rows holding the word.
     Match(&'static str),
-    /// `near v` over every row it reaches, through the graph and exactly.
-    Near([f32; 3]),
+    /// `near` over a vector field -- each of `b`'s, `t`'s `w` -- through
+    /// the graph and exactly, over the rows a filter keeps where drawn, to
+    /// a limit where drawn.
+    Near {
+        c: C,
+        field: &'static str,
+        q: [f32; 3],
+        filter: Option<F>,
+        limit: Option<u64>,
+    },
     /// `near sp`, through `@inverted` and exactly.
     Sparse(Value, Option<u64>),
 }
@@ -1652,10 +1777,19 @@ impl Read {
                 format!("get {}{} count", c.name(), tail(filter, &[], None, 0, None))
             }
             Read::Match(w) => format!("get b select id match body \"{w}\" order id"),
-            Read::Near(q) => format!(
-                "get b select id near v {} [and exact]",
-                lit(&Value::Vector(q.to_vec()))
-            ),
+            Read::Near {
+                c,
+                field,
+                q,
+                filter,
+                limit,
+            } => {
+                let q = lit(&Value::Vector(q.to_vec()));
+                format!(
+                    "{} [and exact]",
+                    near_text(*c, field, &q, filter, false, *limit)
+                )
+            }
             Read::Sparse(q, limit) => format!(
                 "get b select id near sp {}{} [and exact]",
                 lit(q),
@@ -1683,6 +1817,9 @@ enum Step {
     /// records, as `Cut` says, then opened again.
     Crash(usize, Cut),
     Check(Vec<Read>),
+    /// A graph run ([`World::graph`]): `z` filled with this many vectors,
+    /// drawn from the seed, searched and emptied again, in one block.
+    Graph(u64, u64),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1719,6 +1856,9 @@ impl Step {
                 "-- check: {}",
                 reads.iter().map(Read::text).collect::<Vec<_>>().join("; ")
             ),
+            Step::Graph(seed, rows) => {
+                format!("-- a graph run: {rows} vectors drawn from {seed} (World::graph)")
+            }
         }
     }
 }
@@ -1743,7 +1883,7 @@ fn drawn(r: &mut Rng, m: &Model, c: C, name: &str) -> Value {
             let words: Vec<&str> = (0..1 + r.upto(3)).map(|_| *r.pick(&WORDS)).collect();
             Value::Text(words.join(" "))
         }
-        "v" => Value::Vector(r.pick(&VECTORS).to_vec()),
+        "v" | "v8" | "vb" | "vh" | "w" => Value::Vector(r.pick(&VECTORS).to_vec()),
         "sp" => {
             let mut es = Vec::new();
             for i in 0..6u32 {
@@ -1789,28 +1929,26 @@ fn groups(m: &Model, c: C) -> Vec<Vec<String>> {
             g
         }
         C::B => {
-            let mut g = vec![
-                names(&["g"]),
-                names(&["body"]),
-                names(&["v"]),
-                names(&["sp"]),
-            ];
+            let mut g = vec![names(&["g"]), names(&["body"]), names(&V), names(&["sp"])];
             if cfg!(feature = "geo") {
                 g.push(names(&L));
             }
             g
         }
-        C::T => vec![names(&AT), names(&["k"]), names(&["m"])],
+        C::T => vec![names(&AT), names(&["k"]), names(&["m"]), names(&["w"])],
+        // A graph run writes its own rows.
+        C::Z => Vec::new(),
     }
 }
 
-/// An id a write names: one a row holds, one past the last handed out, or
-/// one below it that may be free.
+/// An id a write names: one a row holds, one a row lately left, one past
+/// the last handed out, or one below it that may be free.
 fn named_id(r: &mut Rng, m: &Model, c: C) -> u64 {
     let coll = m.coll(c);
     let ids: Vec<u64> = coll.rows.keys().copied().collect();
     match r.below(10) {
-        0..=5 if !ids.is_empty() => *r.pick(&ids),
+        0..=4 if !ids.is_empty() => *r.pick(&ids),
+        5 if !coll.freed.is_empty() => *r.pick(&coll.freed),
         6 | 7 => coll.next_id + r.below(3),
         _ => 1 + r.below(coll.next_id),
     }
@@ -1975,7 +2113,36 @@ fn page(r: &mut Rng, m: &Model, c: C, share: u64) -> (Vec<(String, bool)>, Optio
 
 fn put(r: &mut Rng, m: &Model, c: C) -> St {
     let n = if r.one_in(4) { 2 + r.upto(2) } else { 1 };
-    let docs = (0..n).map(|_| doc(r, m, c)).collect();
+    let mut docs: Vec<Doc> = (0..n).map(|_| doc(r, m, c)).collect();
+    // A later document of the statement meeting an earlier one: its id,
+    // the row written twice, or its unique values, which take a row the
+    // earlier one made -- and let it go where it was past its time.
+    if n > 1 && r.one_in(2) {
+        let j = 1 + r.upto(n - 1);
+        let i = r.upto(j);
+        match r.one_in(3) {
+            true if docs[i].id.is_some() => docs[j].id = docs[i].id,
+            _ => {
+                let unique: Vec<String> = m
+                    .coll(c)
+                    .fields
+                    .iter()
+                    .filter(|f| f.ix == Ix::Unique)
+                    .flat_map(|f| {
+                        groups(m, c)
+                            .into_iter()
+                            .filter(move |g| g.contains(&f.name))
+                    })
+                    .flatten()
+                    .collect();
+                for name in unique {
+                    let held = docs[i].values.iter().find(|(f, _)| *f == name).cloned();
+                    docs[j].values.retain(|(f, _)| *f != name);
+                    docs[j].values.extend(held);
+                }
+            }
+        }
+    }
     let how = match r.below(20) {
         0..=10 => How::Put,
         11..=14 => How::Insert,
@@ -2301,8 +2468,32 @@ fn twins(r: &mut Rng, m: &Model, c: C, twins: &[&'static str]) -> Read {
     }
 }
 
+/// `near` over one of the vector fields, `t`'s as often as `b`'s four: the
+/// rows a `put` lets go of past their time are `t`'s.
+fn near(r: &mut Rng, m: &Model) -> Read {
+    let fields = [
+        (C::B, "v"),
+        (C::B, "v8"),
+        (C::B, "vb"),
+        (C::B, "vh"),
+        (C::T, "w"),
+        (C::T, "w"),
+        (C::T, "w"),
+        (C::T, "w"),
+    ];
+    let (c, field) = *r.pick(&fields);
+    Read::Near {
+        c,
+        field,
+        q: *r.pick(&VECTORS),
+        filter: r.one_in(3).then(|| filter(r, m, c, 0)),
+        limit: r.one_in(2).then(|| 1 + r.below(4)),
+    }
+}
+
 fn read(r: &mut Rng, m: &Model) -> Read {
-    match r.below(12) {
+    match r.below(13) {
+        12 => near(r, m),
         0..=2 => twins(r, m, C::A, &N),
         3 => twins(r, m, C::A, &U),
         4 if m.coll(C::A).composites.iter().any(|k| k.keys == ["p", "q"]) => {
@@ -2330,7 +2521,7 @@ fn read(r: &mut Rng, m: &Model) -> Read {
         5 | 6 => twins(r, m, C::T, &AT),
         7 => match r.below(4) {
             0 if cfg!(feature = "text") => Read::Match(r.pick(&WORDS)),
-            1 => Read::Near(*r.pick(&VECTORS)),
+            1 => near(r, m),
             2 if cfg!(feature = "geo") => Read::Twins {
                 c: C::B,
                 filter: Some(F::Within("loc2".into(), bbox(r))),
@@ -2370,8 +2561,14 @@ fn read(r: &mut Rng, m: &Model) -> Read {
     }
 }
 
-fn step(r: &mut Rng, m: &Model) -> Step {
+/// `graph`: how many vectors a graph run fills `z` with. A run of thousands
+/// is drawn as much less often as it is larger: at 2 200, one in some
+/// 22 000 steps, four or five a weekly seed. One in 1 000, 8 seeds of
+/// 10 000 steps in the weekly run's build took 154.1 G instructions where
+/// runs of 48 took 56.5 G: some 1.2 G a run.
+fn step(r: &mut Rng, m: &Model, graph: u64) -> Step {
     match r.below(1000) {
+        0 if r.below(graph.div_ceil(100)) == 0 => Step::Graph(r.next(), graph),
         0..=379 => Step::Run(write(r, m)),
         380..=409 => Step::Run(failing(r, m)),
         410..=499 => Step::Block(block(r, m)),
@@ -2590,6 +2787,7 @@ impl World {
                 }
                 return Ok(());
             }
+            Step::Graph(seed, rows) => self.graph(*seed, *rows)?,
         }
         if !matches!(step, Step::Reopen | Step::Crash(..) | Step::Clock(_)) {
             self.landed(before)?;
@@ -2710,6 +2908,144 @@ impl World {
         Ok(())
     }
 
+    /// A graph run: `z` filled with `n` vectors drawn from `seed` in one
+    /// `put` -- 2 200 in the weekly run, so that past the first 1 024 its
+    /// batch links in parallel and past 2 048 the bit index codes its
+    /// vectors -- a second `put` writing some rows again, one twice, and
+    /// some new, linking in parallel into the graph the first made; rows
+    /// deleted; each graph searched to a limit, over a filter's rows --
+    /// few, or most -- and over every row, through the graph and exactly;
+    /// and `z` emptied. One block, one record: the model's `z` is as empty
+    /// after it as before, its counter moved by every row written and
+    /// deleted.
+    fn graph(&mut self, seed: u64, n: u64) -> Result<(), Halt> {
+        // What a statement of the run answers: a count, or a search's rows
+        // -- the field, the query, the rows it may answer and the limit --
+        // held to the best scores where it is exact.
+        enum Ask {
+            Count(usize),
+            Near(&'static str, Vec<f32>, Vec<(u64, Vec<f32>)>, u64, bool),
+        }
+        let mut r = Rng::seeded(seed);
+        // Eight components, each a quarter from -1 to 1, which a half holds
+        // exactly: some 43 million vectors, so few rows share one.
+        let vector = |r: &mut Rng| loop {
+            let v: Vec<f32> = (0..8).map(|_| r.range(-4, 4) as f32 / 4.0).collect();
+            if v.iter().any(|x| *x != 0.0) {
+                break v;
+            }
+        };
+        let doc = |id: u64, v: &[f32]| {
+            let v = lit(&Value::Vector(v.to_vec()));
+            format!("{{id: {id}, n: {}, e: {v}, eb: {v}, eh: {v}}}", id % 7)
+        };
+        let mut sts: Vec<(String, Ask)> = Vec::new();
+        let mut rows: BTreeMap<u64, Vec<f32>> = BTreeMap::new();
+        let mut docs = Vec::with_capacity(n as usize);
+        for id in 1..=n {
+            let v = vector(&mut r);
+            docs.push(doc(id, &v));
+            rows.insert(id, v);
+        }
+        sts.push((
+            format!("put z [{}]", docs.join(", ")),
+            Ask::Count(docs.len()),
+        ));
+        // Rows written again and new ones, one id twice: the batch written
+        // into the graph the first `put` made.
+        docs.clear();
+        let twice = 1 + r.below(n);
+        for i in 0..4 + r.upto(6) {
+            let id = match (i, r.one_in(3)) {
+                (0 | 1, _) => twice,
+                (_, true) => n + 1 + r.below(4),
+                (_, false) => 1 + r.below(n),
+            };
+            let v = vector(&mut r);
+            docs.push(doc(id, &v));
+            rows.insert(id, v);
+        }
+        sts.push((
+            format!("put z [{}]", docs.join(", ")),
+            Ask::Count(docs.len()),
+        ));
+        let gone: Vec<u64> = (0..1 + n / 8).map(|_| 1 + r.below(n + 4)).collect();
+        let taken = gone.iter().filter(|id| rows.remove(id).is_some()).count();
+        let list: Vec<String> = gone.iter().map(u64::to_string).collect();
+        sts.push((
+            format!("del z where id in [{}]", list.join(", ")),
+            Ask::Count(taken),
+        ));
+        for field in Z {
+            for _ in 0..2 {
+                // A row's own vector now and then, which it scores 1 to.
+                let q = match r.one_in(3) && !rows.is_empty() {
+                    true => rows.values().nth(r.upto(rows.len())).cloned().unwrap(),
+                    false => vector(&mut r),
+                };
+                let (filter, keep): (Option<F>, fn(u64) -> bool) = match r.below(3) {
+                    0 => (None, |_| true),
+                    1 => (Some(F::Cmp("n".into(), Op::Ne, Value::Int(3))), |id| {
+                        id % 7 != 3
+                    }),
+                    _ => (Some(F::Cmp("n".into(), Op::Eq, Value::Int(3))), |id| {
+                        id % 7 == 3
+                    }),
+                };
+                let kept: Vec<(u64, Vec<f32>)> = rows
+                    .iter()
+                    .filter(|(id, _)| keep(**id))
+                    .map(|(id, v)| (*id, v.clone()))
+                    .collect();
+                let limit = 1 + r.below(10);
+                let ql = lit(&Value::Vector(q.clone()));
+                for exact in [false, true] {
+                    let text = near_text(C::Z, field, &ql, &filter, exact, Some(limit));
+                    let ask = Ask::Near(field, q.clone(), kept.clone(), limit, exact);
+                    sts.push((text, ask));
+                }
+            }
+        }
+        sts.push(("del z where id > 0".to_string(), Ask::Count(rows.len())));
+        let writes = sts.iter().fold(0, |w, (_, a)| match a {
+            Ask::Count(k) => w + *k as u64,
+            Ask::Near(..) => w,
+        });
+        // A statement as a divergence names it: the first `put`'s text is
+        // thousands of rows.
+        let named = |text: &str| match text.len() > 300 {
+            true => format!("{} ... ({} bytes)", &text[..300], text.len()),
+            false => text.to_string(),
+        };
+        let parsed = sts
+            .iter()
+            .map(|(text, _)| self.parse(text))
+            .collect::<Result<Vec<_>, _>>()?;
+        let refs: Vec<(&Statement, &[Value])> = parsed.iter().map(|s| (s, &[][..])).collect();
+        let answers = match self.db.execute_block(&refs) {
+            Ok(a) => a,
+            Err((i, e)) => return diverged("graph", format!("{}: {e}", named(&sts[i].0))),
+        };
+        for ((text, ask), got) in sts.iter().zip(answers) {
+            match (ask, got) {
+                (Ask::Count(k), Response::Affected(m)) if *k == m => {}
+                (Ask::Near(field, q, kept, limit, exact), Response::Rows(rs)) => {
+                    let hits: Vec<(u64, Option<f32>)> =
+                        rs.rows.iter().map(|r| (r.id, r.score)).collect();
+                    let slack = self
+                        .m
+                        .coll(C::Z)
+                        .field(field)
+                        .map_or(1e-5, |f| f.ty.slack());
+                    near_held(text, &hits, q, kept, Some(*limit), slack, *exact)?;
+                }
+                (_, got) => return diverged("graph", format!("{}: {got:?}", named(text))),
+            }
+        }
+        self.m.writes += writes;
+        Ok(())
+    }
+
     fn sweep(&mut self) -> Result<(), Halt> {
         let want = self.m.past_their_time(C::T);
         let now = self.m.clock;
@@ -2730,7 +3066,7 @@ impl World {
         self.m.writes += want.len() as u64;
         let coll = self.m.coll_mut(C::T);
         for id in want {
-            coll.rows.remove(&id);
+            coll.let_go(id);
         }
         Ok(())
     }
@@ -2822,9 +3158,15 @@ impl World {
             Step::Run(st) => vec![st.coll()],
             Step::Block(sts) | Step::Begin(sts, _) => sts.iter().map(St::coll).collect(),
             Step::Sweep => vec![C::T],
-            _ => COLLECTIONS.to_vec(),
+            Step::Graph(..) => vec![C::Z],
+            _ => ALL.to_vec(),
         };
-        for c in COLLECTIONS.into_iter().filter(|c| touched.contains(c)) {
+        // What each graph holds, asked once a step.
+        let stats = match cfg!(feature = "vector") {
+            true => self.db.stats(),
+            false => Vec::new(),
+        };
+        for c in ALL.into_iter().filter(|c| touched.contains(c)) {
             let coll = self.m.coll(c);
             let columns = coll.columns();
             let rows = |ids: Vec<u64>| {
@@ -2835,6 +3177,36 @@ impl World {
             let text = format!("get {}", c.name());
             let want = Want::Rows(columns.clone(), rows(self.m.visible(c)));
             held_as("state", &text, &want, &self.query(&text)?)?;
+            // Each graph holds a document for every row holding its field's
+            // vector, those past their time among them, and none other: a
+            // vector a `put` left waiting for a row it took out again, or
+            // wrote over with none, was linked as the statement ended, for
+            // a row that held none -- which `near` answered only once the
+            // id held a row again, if ever.
+            if cfg!(feature = "vector") {
+                let held = stats.iter().find(|s| s.name == c.name());
+                for f in coll.fields.iter().filter(|f| f.ix.graph()) {
+                    let want = coll
+                        .rows
+                        .values()
+                        .filter(|r| r.contains_key(&f.name))
+                        .count();
+                    let got = held
+                        .and_then(|s| s.vector_indexes.iter().find(|v| v.field == f.name))
+                        .map(|v| v.count);
+                    if got != Some(want) {
+                        return diverged(
+                            "graph",
+                            format!(
+                                "`{}.{}`'s graph holds {got:?} documents, where {want} rows \
+                                 hold its vector",
+                                c.name(),
+                                f.name
+                            ),
+                        );
+                    }
+                }
+            }
             if c == C::T {
                 let text = "get t where expired()";
                 let want = match coll.ttl.is_none() && !coll.rows.is_empty() {
@@ -2926,44 +3298,57 @@ impl World {
                     );
                 }
             }
-            Read::Near(qv) => {
-                let b = self.m.coll(C::B);
-                let want: Vec<u64> = self
-                    .m
-                    .visible(C::B)
-                    .into_iter()
-                    .filter(|id| b.rows[id].contains_key("v"))
-                    .collect();
-                let q = lit(&Value::Vector(qv.to_vec()));
-                let mut graph = self.hits(&format!("get b select id near v {q}"))?;
-                let mut exact = self.hits(&format!("get b select id near v {q} exact"))?;
-                graph.sort_by_key(|h| h.0);
-                exact.sort_by_key(|h| h.0);
-                let ids: Vec<u64> = graph.iter().map(|h| h.0).collect();
-                if ids != want || bits(&graph) != bits(&exact) {
+            Read::Near {
+                c,
+                field,
+                q,
+                filter,
+                limit,
+            } => {
+                let coll = self.m.coll(*c);
+                let slack = coll.field(field).map_or(1e-5, |f| f.ty.slack());
+                let rows: Vec<(u64, Vec<f32>)> =
+                    model(self.m.pick(*c, filter.as_ref(), &[], None, 0))?
+                        .into_iter()
+                        .filter_map(|id| match coll.rows[&id].get(*field) {
+                            Some(Value::Vector(v)) => Some((id, v.clone())),
+                            _ => None,
+                        })
+                        .collect();
+                let ql = lit(&Value::Vector(q.to_vec()));
+                let texts =
+                    [false, true].map(|exact| near_text(*c, field, &ql, filter, exact, *limit));
+                let graph = self.hits(&texts[0])?;
+                let exact = self.hits(&texts[1])?;
+                near_held(&texts[0], &graph, q, &rows, *limit, slack, true)?;
+                near_held(&texts[1], &exact, q, &rows, *limit, slack, true)?;
+                // The graph finds what `exact` measures, to the bit: every
+                // row and its score where nothing limits them, the scores
+                // where a limit leaves ties to either.
+                let same = match limit {
+                    None => {
+                        let by_id = |h: &[(u64, Option<f32>)]| {
+                            let mut h = bits(h);
+                            h.sort_unstable();
+                            h
+                        };
+                        by_id(&graph) == by_id(&exact)
+                    }
+                    Some(_) => {
+                        let scores = |h: &[(u64, Option<f32>)]| {
+                            let mut s: Vec<Option<u32>> =
+                                h.iter().map(|h| h.1.map(f32::to_bits)).collect();
+                            s.sort_unstable();
+                            s
+                        };
+                        scores(&graph) == scores(&exact)
+                    }
+                };
+                if !same {
                     return diverged(
                         "near",
-                        format!(
-                            "near v {q}\n  model: {want:?}\n  graph: {graph:?}\n  exact: {exact:?}"
-                        ),
+                        format!("{}\n  graph: {graph:?}\n  exact: {exact:?}", texts[0]),
                     );
-                }
-                // Each score is the row's own vector's: a vector the graph
-                // still holds for a row written since, which `exact` reads
-                // too, answers the row with another's score.
-                for (id, score) in &exact {
-                    let Some(Value::Vector(v)) = b.rows[id].get("v") else {
-                        continue;
-                    };
-                    let cos = cosine(qv, v);
-                    if score.is_none_or(|s| (f64::from(s) - cos).abs() > 1e-5) {
-                        return diverged(
-                            "near",
-                            format!(
-                                "near v {q}: row {id} scored {score:?}, its vector {v:?} {cos}"
-                            ),
-                        );
-                    }
                 }
             }
             Read::Sparse(q, limit) => {
@@ -3017,6 +3402,70 @@ fn bits(hits: &[(u64, Option<f32>)]) -> Vec<(u64, Option<u32>)> {
     hits.iter()
         .map(|(id, s)| (*id, s.map(f32::to_bits)))
         .collect()
+}
+
+/// A `near` answer held to `rows`, the rows it may answer with their
+/// vectors: as many as `limit` leaves of them, none twice, nearest first,
+/// each scored by its own vector's cosine to `q` within `slack` -- a vector
+/// the graph still held for a row written since, or for one gone, scores
+/// a row by a vector it does not hold. `best`: the scores are the best the
+/// rows have, in order, as an exact search's are and a graph's over a few
+/// rows; over thousands the graph may miss one, and is held to the rest.
+fn near_held(
+    text: &str,
+    hits: &[(u64, Option<f32>)],
+    q: &[f32],
+    rows: &[(u64, Vec<f32>)],
+    limit: Option<u64>,
+    slack: f64,
+    best: bool,
+) -> Result<(), Halt> {
+    let mut top: Vec<f64> = rows.iter().map(|(_, v)| cosine(q, v)).collect();
+    top.sort_by(|a, b| b.total_cmp(a));
+    top.truncate(limit.map_or(usize::MAX, |l| l as usize));
+    let wrong = |why: String| {
+        let some = &hits[..hits.len().min(12)];
+        diverged(
+            "near",
+            format!(
+                "{text}\n  {why}\n  engine: {some:?}, of {} rows",
+                rows.len()
+            ),
+        )
+    };
+    if hits.len() != top.len() {
+        return wrong(format!(
+            "{} rows answered, where {} are",
+            hits.len(),
+            top.len()
+        ));
+    }
+    let mut seen = Vec::with_capacity(hits.len());
+    let mut last = f64::INFINITY;
+    for (i, (id, score)) in hits.iter().enumerate() {
+        let Some((_, v)) = rows.iter().find(|(r, _)| r == id) else {
+            return wrong(format!("row {id}: no row it may answer holds a vector"));
+        };
+        if seen.contains(id) {
+            return wrong(format!("row {id} twice"));
+        }
+        seen.push(*id);
+        let cos = cosine(q, v);
+        let Some(s) = score.map(f64::from) else {
+            return wrong(format!("row {id} unscored"));
+        };
+        let held =
+            (s - cos).abs() <= slack && s <= last + slack && (!best || (s - top[i]).abs() <= slack);
+        if !held {
+            return wrong(format!(
+                "row {id}, answered {i}th, scored {s}: its vector {v:?} scores {cos}, \
+                 the {i}th best {}",
+                top[i]
+            ));
+        }
+        last = s;
+    }
+    Ok(())
 }
 
 fn create(coll: &Coll) -> String {
@@ -3195,7 +3644,7 @@ fn shrink(mut steps: Vec<Step>, what: &str, budget: Duration) -> Vec<Step> {
 
 /// What a divergence prints: the seed and step that replay it whole, and
 /// the steps shrunk.
-fn report(seed: u64, steps: &[Step], d: &Divergence) -> String {
+fn report(seed: u64, graph: u64, steps: &[Step], d: &Divergence) -> String {
     let budget = Duration::from_secs(knob("FENNEC_MODEL_SHRINK_SECS", 120));
     let shrunk = shrink(steps.to_vec(), d.what, budget);
     let mut s = format!(
@@ -3210,10 +3659,15 @@ fn report(seed: u64, steps: &[Step], d: &Divergence) -> String {
         true => "--test all",
         false => "--no-default-features --features std-fs,language --test features",
     };
+    // Built as the weekly run builds it: a release, with the checks a
+    // debug build makes, whose panics -- an overflow, an assertion -- are
+    // divergences a plain release passes over.
     let _ = writeln!(
         s,
         "  the whole run again: FENNEC_MODEL_SEED={seed} FENNEC_MODEL_OPS={} \
-         cargo test -p fennec-core --release {build} model::",
+         FENNEC_MODEL_GRAPH={graph} CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
+         CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true cargo test -p fennec-core --release \
+         {build} model::",
         steps.len()
     );
     let _ = writeln!(
@@ -3234,8 +3688,9 @@ fn report(seed: u64, steps: &[Step], d: &Divergence) -> String {
     s
 }
 
-/// One seed's run of `n` steps, each drawn against the model as it stands.
-fn run_seed(seed: u64, n: usize) -> Result<(), String> {
+/// One seed's run of `n` steps, each drawn against the model as it stands,
+/// a graph run's of `graph` vectors.
+fn run_seed(seed: u64, n: usize, graph: u64) -> Result<(), String> {
     let mut r = Rng::seeded(seed);
     let mut steps: Vec<Step> = Vec::with_capacity(n);
     let at = Cell::new(0);
@@ -3243,7 +3698,7 @@ fn run_seed(seed: u64, n: usize) -> Result<(), String> {
         let mut w = World::new();
         for i in 0..n {
             at.set(i);
-            steps.push(step(&mut r, &w.m));
+            steps.push(step(&mut r, &w.m, graph));
             w.step(&steps[i]).map_err(|h| (i, h))?;
         }
         Ok(())
@@ -3266,17 +3721,22 @@ fn run_seed(seed: u64, n: usize) -> Result<(), String> {
              {why}\n  {}",
             steps.last().map(Step::text).unwrap_or_default()
         )),
-        Halt::Diverged(d) => Err(report(seed, &steps, &d)),
+        Halt::Diverged(d) => Err(report(seed, graph, &steps, &d)),
     }
 }
 
 /// `FENNEC_MODEL_SEEDS` seeds from `FENNEC_MODEL_FIRST` -- or the one
-/// `FENNEC_MODEL_SEED` names -- of `FENNEC_MODEL_OPS` steps each, run on
-/// `FENNEC_MODEL_THREADS` threads, the first divergence shrunk and told.
+/// `FENNEC_MODEL_SEED` names -- of `FENNEC_MODEL_OPS` steps each, a graph
+/// run of `FENNEC_MODEL_GRAPH` vectors, run on `FENNEC_MODEL_THREADS`
+/// threads, the first divergence shrunk and told.
 #[test]
 fn the_engine_answers_as_its_model() {
     fennec_ql::install();
     let ops = knob("FENNEC_MODEL_OPS", 1_000) as usize;
+    // A few dozen, which `make test` builds a graph of in a blink; the
+    // weekly run's 2 200 pass the 1 024 nodes past which a batch links in
+    // parallel and the 2 048 a bit index learns its centres from.
+    let graph = knob("FENNEC_MODEL_GRAPH", 48).max(1);
     let seeds: Vec<u64> = match std::env::var("FENNEC_MODEL_SEED") {
         Ok(s) => vec![s.trim().parse().expect("FENNEC_MODEL_SEED is a number")],
         Err(_) => {
@@ -3299,17 +3759,27 @@ fn the_engine_answers_as_its_model() {
                     let Some(&seed) = seeds.get(next.fetch_add(1, Atomic::Relaxed)) else {
                         break;
                     };
-                    if let Err(report) = run_seed(seed, ops) {
+                    // Each seed named as it starts and as it ends: a job
+                    // that hangs, or runs out of time, names the seeds it
+                    // never finished.
+                    let started = Instant::now();
+                    if progress {
+                        eprintln!(
+                            "model: seed {seed} starts, {ops} steps, at {:.0} s",
+                            began.elapsed().as_secs_f64()
+                        );
+                    }
+                    if let Err(report) = run_seed(seed, ops, graph) {
                         stop.store(true, Atomic::Relaxed);
                         failed.lock().unwrap().get_or_insert(report);
                         break;
                     }
                     let n = done.fetch_add(1, Atomic::Relaxed) + 1;
-                    if progress && n * 10 / seeds.len() != (n - 1) * 10 / seeds.len() {
+                    if progress {
                         eprintln!(
-                            "model: {n} of {} seeds of {ops} steps, {:.0} s",
-                            seeds.len(),
-                            began.elapsed().as_secs_f64()
+                            "model: seed {seed} done in {:.1} s, {n} of {} seeds",
+                            started.elapsed().as_secs_f64(),
+                            seeds.len()
                         );
                     }
                 }

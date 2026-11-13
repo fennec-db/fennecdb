@@ -8,7 +8,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 
 - [crates.md](crates.md) -- zero dependencies, limits that error rather than truncate, and the build profiles
 - [storage.md](storage.md) -- the mapped file, the handover of writes to it, a block's spills, compaction and the file format
-- [engine.md](engine.md) -- the single writer, a block's documents built beside the readers, long reads pinned, and a block as one record
+- [engine.md](engine.md) -- the single writer, a block's documents built beside the readers, long reads pinned, a block as one record, and the model every write and index is held to
 - [durability.md](durability.md) -- a storage error stopping writes, buffered writes written behind the lock, the sync log, the power cut that holds it on Linux, and the one shutdown
 - [replication.md](replication.md) -- replication, a node's tenants archived over one stream, `/_changes`, `Fennec-After`, sealed archives and `--follow`
 - [tenants.md](tenants.md) -- scaling out by tenant, the router's directory, moves, failovers and leases, and replicas tried again
@@ -199,3 +199,4 @@ A proposal holds no invariant until it is built, and is listed apart:
 154. [A scoped caller is held to `--request-rate` before anything runs](quotas.md#a-callers-request-rate) (added after the move, under *Quotas and retries*)
 155. [An answer past `--http-gzip` goes as gzip where its client takes it, never one carrying a tag](http.md#compressed-answers) (added after the move, under *The HTTP server*)
 156. [A server that asks for no token answers only under this machine's name, and a page only of its own origin or `--http-cors`'s](http.md#open-servers) (added after the move, under *Access*)
+157. [A write form or an index kind the engine gains is drawn in `tests/model.rs`](engine.md#the-model) (added after the move, under *Writes*)
