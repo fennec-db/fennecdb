@@ -328,25 +328,20 @@ fn a_trickled_head_over_tls_is_cut_at_its_deadline() {
     assert!(took < Duration::from_secs(20), "{took:?}");
 }
 
-/// A request's record trickled in parts, a byte every 50 ms through a
-/// proxy, each part well inside the idle timeout, is cut at
-/// `--header-timeout`: rustls reads the socket again inside one read until
-/// a record is whole, so a timeout set a read bounded each part, never the
-/// record, and one read lasted as long as the bytes came
-/// (`fennec_tls::TlsStream::read_by`). No byte of the request was read: the
-/// connection ends with nothing written, as a silence before a request does.
-#[test]
-fn a_record_trickled_in_parts_is_cut_at_the_heads_time() {
+/// A [`proxy`]'s gate: what the client sends passed on at once.
+const AT_ONCE: usize = usize::MAX;
+/// A [`proxy`]'s gate: a byte every 50 ms.
+const TRICKLED: usize = usize::MAX - 1;
+
+/// Between a client and the server at `port`, a proxy passing on what the
+/// client sends as `gate` says -- [`AT_ONCE`], [`TRICKLED`], or a count:
+/// that many bytes at once, then nothing until the gate changes -- and
+/// all the server sends at once, its end too. Its port.
+fn proxy(port: u16, gate: Arc<std::sync::atomic::AtomicUsize>) -> u16 {
     use std::net::TcpListener;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    let within = Duration::from_millis(600);
-    let (port, _server) = start(|c| c.header_timeout = Some(within));
-    // Between the client and the server, a proxy passing what the client
-    // sends on at once, or a byte every 50 ms once `slow`.
+    use std::sync::atomic::Ordering::SeqCst;
     let front = TcpListener::bind("127.0.0.1:0").unwrap();
     let front_port = front.local_addr().unwrap().port();
-    let slow = Arc::new(AtomicBool::new(false));
-    let slowed = Arc::clone(&slow);
     std::thread::spawn(move || {
         let (mut from, _) = front.accept().unwrap();
         let mut to = TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -361,18 +356,71 @@ fn a_record_trickled_in_parts_is_cut_at_the_heads_time() {
             if n == 0 {
                 break;
             }
-            for &b in &buf[..n] {
-                if slowed.load(Ordering::SeqCst) {
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                if to.write_all(&[b]).is_err() {
-                    return;
+            let mut i = 0;
+            while i < n {
+                let passed = match gate.load(SeqCst) {
+                    AT_ONCE => to.write_all(&buf[i..n]).map(|()| n - i),
+                    TRICKLED => {
+                        std::thread::sleep(Duration::from_millis(50));
+                        to.write_all(&buf[i..=i]).map(|()| 1)
+                    }
+                    0 => {
+                        std::thread::sleep(Duration::from_millis(5));
+                        Ok(0)
+                    }
+                    // Taken from the count only where the test did not
+                    // change the gate meanwhile.
+                    g => match gate.compare_exchange(g, g - g.min(n - i), SeqCst, SeqCst) {
+                        Ok(_) => {
+                            let k = g.min(n - i);
+                            to.write_all(&buf[i..i + k]).map(|()| k)
+                        }
+                        Err(_) => Ok(0),
+                    },
+                };
+                match passed {
+                    Ok(k) => i += k,
+                    Err(_) => return,
                 }
             }
         }
     });
-    let mut s = dial(front_port).unwrap();
-    slow.store(true, Ordering::SeqCst);
+    front_port
+}
+
+/// A connection to the server at `port` through a [`proxy`] whose gate is
+/// `gate`, a first request answered over it: the handshake's last flight,
+/// the client's, is through the proxy before the test closes the gate.
+/// `dial` returns once the client is done with the handshake, and a gate
+/// closed then held the client's `Finished`, the server's handshake ending
+/// as the gate opened -- a first record that came whole after it.
+fn handshaken(
+    port: u16,
+    gate: &Arc<std::sync::atomic::AtomicUsize>,
+) -> BufReader<fennec_tls::TlsStream> {
+    let mut r = BufReader::new(dial(proxy(port, Arc::clone(gate))).unwrap());
+    let a = ask(&mut r, "/query", &query("collections"));
+    assert_eq!(a.status, 200, "{}", a.text());
+    r
+}
+
+/// A request's record trickled in parts, a byte every 50 ms through a
+/// proxy, each part well inside the idle timeout, is cut at
+/// `--header-timeout` from its first part: rustls reads the socket again
+/// inside one read until a record is whole, so a timeout set a read
+/// bounded each part, never the record, and one read lasted as long as the
+/// bytes came (`fennec_tls::TlsStream::read_by`). No byte of the request
+/// was read: the connection ends with nothing written, as a silence before
+/// a request does.
+#[test]
+fn a_record_trickled_in_parts_is_cut_at_the_requests_time() {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    let within = Duration::from_millis(600);
+    let (port, _server) = start(|c| c.header_timeout = Some(within));
+    let gate = Arc::new(AtomicUsize::new(AT_ONCE));
+    let mut r = handshaken(port, &gate);
+    let s = r.get_mut();
+    gate.store(TRICKLED, SeqCst);
     let started = Instant::now();
     // One record of some 120 bytes: six seconds at a byte every 50 ms.
     s.write_all(&request("/query", &query("collections"), &[]))
@@ -381,6 +429,7 @@ fn a_record_trickled_in_parts_is_cut_at_the_heads_time() {
     let mut got = Vec::new();
     let ended = s.read_to_end(&mut got);
     let took = started.elapsed();
+    gate.store(AT_ONCE, SeqCst);
     // Ended by the server -- its `close_notify`, its end, or a reset for
     // the bytes it left unread -- never by this read's own 30 s.
     if let Err(e) = &ended {
@@ -394,6 +443,48 @@ fn a_record_trickled_in_parts_is_cut_at_the_heads_time() {
     }
     // Cut before the record was whole: unanswered.
     assert!(got.is_empty(), "{}", String::from_utf8_lossy(&got));
+    assert!(took >= within, "{took:?}");
+}
+
+/// Over TLS a request's time runs from its first record's first part, as a
+/// plain one's from its first byte: the time a first record took to come
+/// whole is spent, not given again. The record's first byte, 3 s of
+/// nothing, then its rest: whole within the 5 s asked. The rest of the
+/// head goes 7.5 s after the first byte, unless an answer came first: the
+/// request is cut at 5 s and the 40 ms its bytes earned, 408, where a time
+/// started at the record's end ran to 8 s and answered it 200. The time is
+/// the property here, the cut held to seconds before the rest is sent.
+#[test]
+fn a_requests_time_over_tls_runs_from_its_first_records_first_part() {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    let within = Duration::from_secs(5);
+    let (port, _server) = start(|c| c.header_timeout = Some(within));
+    let gate = Arc::new(AtomicUsize::new(AT_ONCE));
+    let mut r = handshaken(port, &gate);
+    let s = r.get_mut();
+    // The next request's first record, its line and its host: its first
+    // byte passed on alone.
+    gate.store(1, SeqCst);
+    let started = Instant::now();
+    s.write_all(b"POST /query HTTP/1.1\r\nHost: localhost\r\n")
+        .unwrap();
+    s.flush().unwrap();
+    std::thread::sleep(Duration::from_secs(3));
+    gate.store(AT_ONCE, SeqCst);
+    let rest = started + Duration::from_millis(7500);
+    let body = query("collections");
+    let answered = s
+        .readable(rest.saturating_duration_since(Instant::now()))
+        .unwrap();
+    if !answered {
+        let mut tail = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+        tail.extend_from_slice(&body);
+        s.write_all(&tail).unwrap();
+        s.flush().unwrap();
+    }
+    let a = answer(&mut r);
+    let took = started.elapsed();
+    assert_eq!(a.status, 408, "{} after {took:?}", a.text());
     assert!(took >= within, "{took:?}");
 }
 

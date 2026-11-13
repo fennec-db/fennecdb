@@ -1,14 +1,16 @@
-//! The connections a router answered as it took them, counted by why:
-//! `fennec_router_connections_refused_total{reason}`. A binary of its own:
-//! the counts are the process's -- the router's and any node's in it alike
-//! -- and the other tests' servers refuse too. No node here, so the count
-//! is the router's alone.
+//! The connections a router answered as it took them, counted by why --
+//! `fennec_router_connections_refused_total{reason}` -- and those it ended
+//! for a client too slow: `fennec_router_client_timeouts_total{reason}`. A
+//! binary of its own: the counts are the process's -- the router's and any
+//! node's in it alike -- and the other tests' servers refuse and cut too.
+//! No node here, so the counts are the router's alone, and neither test
+//! makes what the other counts.
 
 use fennec_shard::directory::Directory;
 use fennec_shard::{Config, Router};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// A keep-alive connection, the scrapes asked over it: past the ceiling,
 /// a new connection would be refused, the scrape's own among them.
@@ -54,9 +56,20 @@ impl Kept {
 
     /// The count of connections refused for `reason`.
     fn refused(&mut self, reason: &str) -> u64 {
+        self.count("fennec_router_connections_refused_total", reason)
+    }
+
+    /// The counts of connections ended for a slow client: `header`, `idle`
+    /// and `write`.
+    fn timed_out(&mut self) -> [u64; 3] {
+        ["header", "idle", "write"].map(|r| self.count("fennec_router_client_timeouts_total", r))
+    }
+
+    /// `family`'s sample for `reason`.
+    fn count(&mut self, family: &str, reason: &str) -> u64 {
         let (status, body) = self.get("/_metrics");
         assert_eq!(status, 200, "{body}");
-        let line = format!("fennec_router_connections_refused_total{{reason=\"{reason}\"}} ");
+        let line = format!("{family}{{reason=\"{reason}\"}} ");
         body.lines()
             .find_map(|l| l.strip_prefix(line.as_str()))
             .and_then(|n| n.parse().ok())
@@ -115,4 +128,53 @@ fn a_refused_connection_is_counted_by_why() {
     assert!(out.contains("too many connections"), "{out}");
     assert_eq!(scrape.refused("ceiling"), ceiling + 1);
     assert_eq!(scrape.refused("no_thread"), no_thread + 1);
+}
+
+/// A head trickled a byte every 50 ms is cut at the router's
+/// `--header-timeout` with its own 408, counted under `header` before the
+/// answer is read, the other reasons not; nothing is refused, so the count
+/// of refusals beside it holds.
+#[test]
+fn a_slow_client_is_counted_by_the_bound_it_ran_past() {
+    fennec_http::audit::set_delay(0);
+    let cfg = Config {
+        addr: "127.0.0.1:0".into(),
+        header_timeout: Some(Duration::from_millis(300)),
+        ..Config::default()
+    };
+    let router = Router::new(Directory::in_memory(), cfg);
+    let listener = router.bind().unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let _ = router.serve_on(listener);
+    });
+    let mut scrape = Kept::open(&addr);
+    let [header, idle, write] = scrape.timed_out();
+
+    let mut s = TcpStream::connect(&addr).unwrap();
+    s.set_nodelay(true).unwrap();
+    s.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+    s.write_all(b"GET /t/acme/notes HTTP/1.1\r\nX-Trickled: ")
+        .unwrap();
+    let (started, mut out, mut buf) = (Instant::now(), Vec::new(), [0u8; 512]);
+    while started.elapsed() < Duration::from_secs(30) {
+        match s.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => out.extend_from_slice(&buf[..n]),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                if out.is_empty() && s.write_all(b"a").is_err() {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    let out = String::from_utf8_lossy(&out);
+    assert!(out.starts_with("HTTP/1.1 408 "), "{out}");
+    assert_eq!(scrape.timed_out(), [header + 1, idle, write]);
 }

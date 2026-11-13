@@ -1672,13 +1672,15 @@ fn a_trickled_head_is_cut_at_its_deadline() {
     served_again(h.port);
 }
 
-/// A body trickled a byte at a time is cut as a head is: within
-/// `--header-timeout` of the request's first byte while its first 64 KiB
-/// are not in, and past them at the time its bytes earned, a second each
-/// KiB (`conn::BODY_RATE`). A body coming at twice that is read whole.
+/// A body trickled a byte at a time is cut as a head is: at
+/// `--header-timeout` from the request's first byte and a second more for
+/// each KiB that came (`conn::MIN_RATE`), head and body alike, from the
+/// first byte. A body coming at twice that rate is read whole, short of
+/// 64 KiB as past it: a 100 KiB write from a 32 kbit/s link was cut at ten
+/// seconds where the first 64 KiB earned nothing.
 #[test]
 fn a_trickled_body_is_cut() {
-    use fennec_http::conn::{BODY_RATE, FREE};
+    use fennec_http::conn::MIN_RATE;
     let within = Duration::from_millis(600);
     let h = start(
         Config {
@@ -1699,17 +1701,22 @@ fn a_trickled_body_is_cut() {
     assert!(took >= within, "{took:?}");
     served_again(h.port);
 
-    // Past the first 64 KiB by one KiB, at once: a second more earned.
+    // A KiB of it at once: a second more earned.
     let mut sent = declared(1 << 20);
-    sent.resize(sent.len() + FREE as usize + BODY_RATE as usize, b' ');
+    sent.resize(sent.len() + MIN_RATE as usize, b' ');
     let (answer, took) = trickled(h.port, &sent, vec![b' '; 600], every);
     assert!(answer.starts_with("HTTP/1.1 408"), "{answer}");
     assert!(took >= within + Duration::from_secs(1), "{took:?}");
     served_again(h.port);
 
-    // At twice the rate past the first 64 KiB: read whole and answered. A
-    // statement padded with the whitespace JSON allows before its `}`.
-    let len = FREE as usize + 3 * BODY_RATE as usize;
+    // At twice the rate: read whole and answered, its 10 KiB short of the
+    // 64 KiB a head may be. Its first 2 KiB at once, then 128 bytes every
+    // 62.5 ms for four seconds: the time its bytes earn runs ahead of them
+    // by `within` and the two seconds the first 2 KiB earned, and grows, so
+    // a stall of this client's on a loaded machine has seconds to spare.
+    // A statement padded with the whitespace JSON allows before its `}`.
+    let len = 10 * MIN_RATE as usize;
+    let ahead = 2 * MIN_RATE as usize;
     let mut body = br#"{"query":"collections""#.to_vec();
     body.resize(len - 1, b' ');
     body.push(b'}');
@@ -1717,12 +1724,9 @@ fn a_trickled_body_is_cut() {
     s.set_nodelay(true).unwrap();
     s.set_read_timeout(Some(ANSWER_WITHIN)).unwrap();
     s.write_all(&declared(len)).unwrap();
-    s.write_all(&body[..FREE as usize]).unwrap();
+    s.write_all(&body[..ahead]).unwrap();
     let paced = Instant::now();
-    for (i, part) in body[FREE as usize..]
-        .chunks(BODY_RATE as usize / 8)
-        .enumerate()
-    {
+    for (i, part) in body[ahead..].chunks(MIN_RATE as usize / 8).enumerate() {
         // Each part at its own time: a sleep a loaded machine stretched is
         // never carried on to the next.
         let at = paced + Duration::from_millis(1000 / 16) * (i as u32 + 1);

@@ -143,10 +143,10 @@ pub struct Config {
     pub max_body: usize,
     /// Silence ceiling while waiting for the next request on a keep-alive connection.
     pub idle_timeout: Option<Duration>,
-    /// `--header-timeout`: a request's head whole, and its body's start up
-    /// to [`conn::FREE`], from its first byte; past them its body earns a
-    /// second more for every [`conn::BODY_RATE`] bytes ([`conn::Paced`]).
-    /// `None`: no bound but the idle timeout's on each read.
+    /// `--header-timeout`: a request's time from its first byte, head and
+    /// body, and a second more for every [`conn::MIN_RATE`] bytes that came
+    /// ([`conn::Paced`]). `None`: no bound but the idle timeout's on each
+    /// read.
     pub header_timeout: Option<Duration>,
     /// `--write-timeout`: the longest one write of an answer waits for its
     /// client to take any of it ([`conn::WRITE_TIMEOUT`]): the write that

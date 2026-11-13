@@ -561,11 +561,14 @@ impl Conn {
     /// sending can block, so it is that which is finished under the hold.
     pub fn write_or_hold<G>(&self, buf: &[u8], hold: impl FnOnce() -> G) -> io::Result<usize> {
         match self {
+            // The blocking write's timeout is the stream's bound, counted
+            // as an answer's is ([`stalled`]); the first, not blocking,
+            // would block as often as its client is behind.
             Conn::Plain(s) => match (&*s).write(buf) {
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     let _held = hold();
                     s.set_nonblocking(false)?;
-                    let r = (&*s).write(buf);
+                    let r = (&*s).write(buf).map_err(stalled);
                     s.set_nonblocking(true)?;
                     r
                 }
@@ -578,7 +581,7 @@ impl Conn {
                 if tls.has_unsent() {
                     let _held = hold();
                     t.sock.set_nonblocking(false)?;
-                    let r = tls.flush();
+                    let r = tls.flush().map_err(stalled);
                     t.sock.set_nonblocking(true)?;
                     r?;
                 }
@@ -635,8 +638,9 @@ impl Conn {
     }
 }
 
-/// `--header-timeout`'s default: a request's head whole, from its first
-/// byte, as a handshake has [`HANDSHAKE`].
+/// `--header-timeout`'s default: a request's time from its first byte,
+/// before what its bytes earn ([`MIN_RATE`]), as a handshake has
+/// [`HANDSHAKE`].
 pub const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// `--write-timeout`'s default: the longest a write of an answer waits for
@@ -647,31 +651,38 @@ pub const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 /// twice this.
 pub const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// What of a request comes in its head's time alone: the most a head may
-/// be ([`crate::http::MAX_HEADER_BYTES`]), or a head and the start of its
-/// body.
-pub const FREE: u64 = crate::http::MAX_HEADER_BYTES as u64;
-
-/// The least a body comes at past [`FREE`], in bytes a second: each that
-/// many bytes earn a second more. Twice Apache's `mod_reqtimeout` floor
-/// (500): a slow link's upload is far above it, a trickle far below.
-pub const BODY_RATE: u64 = 1024;
+/// The least a request comes at, in bytes a second: from its first byte,
+/// each that many bytes -- its head's and its body's alike -- earn it a
+/// second more past `--header-timeout`, as Apache's `mod_reqtimeout` earns
+/// a request's (`MinRate`), at twice its floor of 500. A slow link's
+/// upload is far above it -- 32 kbit/s is near 4 KiB a second -- and a
+/// trickle far below. A head, 64 KiB at most
+/// ([`crate::http::MAX_HEADER_BYTES`]), is whole within 74 s of its first
+/// byte so. Where a request's first 64 KiB earned nothing, a 100 KiB write
+/// from such a link was cut at ten seconds: it had to come at 6.4 KiB a
+/// second.
+pub const MIN_RATE: u64 = 1024;
 
 /// A served connection's reader, each request read in time
 /// ([`Paced::waiting`] before it): the wait for its first byte bounded by
 /// the idle timeout, a read at a time, as before; from that byte the
-/// request -- its head whole, and its body's start up to [`FREE`] -- by
-/// `--header-timeout` (`within`), and past them a second more for every
-/// [`BODY_RATE`] bytes come. A client trickling a head or a body a byte
-/// inside the idle timeout held its thread and its `--max-connections`
-/// slot as long as it liked: the idle timeout bounded each read, never a
-/// request. A request read whole by one read -- its head and body in one
-/// segment, or a next one in the buffer already -- pays nothing for it:
-/// the clock is read and the socket's timeout set by a read past a
-/// request's first alone, and the idle timeout set again only at the next
-/// request's first read. Over TLS a record coming in parts is bounded the
-/// same way (`fennec_tls::TlsStream::read_by`): rustls reads the socket
-/// again inside one read until a record is whole.
+/// request, head and body, within `--header-timeout` (`within`) and a
+/// second more for every [`MIN_RATE`] bytes come -- a deadline growing as
+/// the bytes come, so a client keeping the rate is never cut, however long
+/// its request. A client trickling a head or a body a byte inside the idle
+/// timeout held its thread and its `--max-connections` slot as long as it
+/// liked: the idle timeout bounded each read, never a request. A request
+/// its first read takes whole -- head and body in what one read of the
+/// `BufReader`'s 8 KiB buffer brings -- or a next one in the buffer already
+/// pays nothing for it: the clock is read and the socket's timeout set by
+/// a read past a request's first alone, and the idle timeout set again
+/// only at the next request's first read. A request's time runs from its
+/// second read, at once after its first, which returned as its first bytes
+/// came; over TLS, where a first record may come in parts, from that
+/// record's first part (`fennec_tls::TlsStream::read_by`, which holds a
+/// record in parts to the same bound: rustls reads the socket again inside
+/// one read until a record is whole). A request cut, and a write timed
+/// out, is counted by why ([`Timeout`]).
 pub struct Paced<'a> {
     conn: &'a Conn,
     idle: Option<Duration>,
@@ -691,14 +702,16 @@ enum Pace {
     /// Its first bytes read, its clock not started: read on from the
     /// buffer, a request reads the clock never.
     Begun,
-    /// Read since this moment, its second read's.
-    Since(std::time::Instant),
+    /// Its time runs out here, before what its bytes earned: its first
+    /// byte's moment and `--header-timeout`. `None`: past what `Instant`
+    /// can name, no bound.
+    Due(Option<std::time::Instant>),
 }
 
 impl<'a> Paced<'a> {
     /// `conn` read with `idle` the wait for a request and `within` its
-    /// head's time (`None`, the idle timeout's a read alone, as before);
-    /// the socket's read timeout is `idle` as it comes.
+    /// time before its bytes earn more (`None`, the idle timeout's a read
+    /// alone, as before); the socket's read timeout is `idle` as it comes.
     pub fn new(conn: &'a Conn, idle: Option<Duration>, within: Option<Duration>) -> Paced<'a> {
         Paced {
             conn,
@@ -728,35 +741,31 @@ impl<'a> Paced<'a> {
     #[inline(never)]
     fn timed(&mut self, buf: &mut [u8], within: Duration) -> io::Result<usize> {
         use std::time::Instant;
-        let since = match self.pace {
-            Pace::Since(at) => at,
+        let due = match self.pace {
+            Pace::Due(due) => due,
+            // The request's second read, at once after its first, which
+            // returned as its first bytes came: its time starts here.
             _ => {
-                let now = Instant::now();
-                self.pace = Pace::Since(now);
-                now
+                let due = Instant::now().checked_add(within);
+                self.pace = Pace::Due(due);
+                due
             }
         };
         loop {
-            let earned = Duration::from_millis(
-                self.came.saturating_sub(FREE).saturating_mul(1000) / BODY_RATE,
-            );
             let now = Instant::now();
             // A bound past what the clock can name -- a timeout of
             // centuries, which `+` would panic at -- is none.
-            let by = since.checked_add(within.saturating_add(earned));
+            let by = due.and_then(|due| due.checked_add(earned(self.came)));
             let left = by.map(|by| by.saturating_duration_since(now));
             if left == Some(Duration::ZERO) {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "the request was not sent in time",
-                ));
+                return Err(cut());
             }
             // A silence past the idle timeout ends a request part way, as
             // it did before: the wait is the idle timeout, set already,
             // where it is the nearer bound, else the time left -- set where
-            // a wait could run past `by` by more than an eighth of the
-            // head's time, or where the time left grew well past the wait
-            // set, a body's bytes having earned it more.
+            // a wait could run past `by` by more than an eighth of
+            // `--header-timeout`, or where the time left grew well past the
+            // wait set, the request's bytes having earned it more.
             let near = left.filter(|&left| self.idle.is_none_or(|idle| left < idle));
             match near {
                 None if self.set.is_some() => self.untimed()?,
@@ -778,17 +787,19 @@ impl<'a> Paced<'a> {
             }
             let got = match self.conn {
                 Conn::Plain(s) => (&*s).read(buf),
-                // A record in parts by the nearer bound too: where the
-                // idle timeout is, whole within it.
+                // A record in parts by the nearer bound too: the request's,
+                // the record's bytes earning as they come, as a plain
+                // request's do; where the idle timeout is nearer, whole
+                // within it, a silence's, earning nothing.
                 #[cfg(feature = "tls")]
                 Conn::Tls(t) => {
-                    let until = match near {
-                        Some(_) => by,
-                        None => self.idle.and_then(|idle| now.checked_add(idle)),
+                    let (until, rate) = match near {
+                        Some(_) => (by, MIN_RATE),
+                        None => (self.idle.and_then(|idle| now.checked_add(idle)), 0),
                     };
                     let mut tls = t.tls.borrow_mut();
                     match until {
-                        Some(until) => tls.read_by(buf, fennec_tls::By::At(until)),
+                        Some(until) => tls.read_by(buf, &mut fennec_tls::By::At(until), rate),
                         None => tls.read(buf),
                     }
                 }
@@ -802,15 +813,42 @@ impl<'a> Paced<'a> {
                 }
                 // The time left ran out: `by` looked at again. The idle
                 // timeout's is the silence that ends a request, as before.
-                Err(e)
-                    if self.set.is_some()
-                        && matches!(
-                            e.kind(),
-                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                        ) => {}
+                Err(e) if self.set.is_some() && timed_out(&e) => {}
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
+                Err(e) => return Err(silent(e)),
             }
+        }
+    }
+
+    /// A request's first read over TLS: a record that comes in parts is
+    /// held to the request's time, which starts at its first part -- the
+    /// clock read there by `read_by`, never where the record came whole --
+    /// its bytes earning as they come. Started at the second read, as a
+    /// plain request's is, a first record trickled for nine seconds earned
+    /// nine more. One not whole in its time is cut before a byte of the
+    /// request was read: its connection ends with nothing written, as a
+    /// silence before a request's first byte does.
+    #[cfg(feature = "tls")]
+    fn first_record(
+        &mut self,
+        tls: &RefCell<fennec_tls::TlsStream>,
+        buf: &mut [u8],
+        within: Duration,
+    ) -> io::Result<usize> {
+        let mut by = fennec_tls::By::Within(within);
+        let read = tls.borrow_mut().read_by(buf, &mut by, MIN_RATE);
+        let begun = match by {
+            fennec_tls::By::At(due) => Some(due),
+            fennec_tls::By::Within(_) => None,
+        };
+        match read {
+            Ok(n) if n > 0 => {
+                self.pace = begun.map_or(Pace::Begun, |due| Pace::Due(Some(due)));
+                self.came = n as u64;
+                Ok(n)
+            }
+            Err(e) if begun.is_some() && timed_out(&e) => Err(cut()),
+            read => read,
         }
     }
 }
@@ -825,28 +863,108 @@ impl Read for Paced<'_> {
         if self.set.is_some() {
             self.untimed()?;
         }
-        let n = match self.conn {
-            Conn::Plain(s) => (&*s).read(buf)?,
-            // A first record coming in parts is the head's to bound, from
-            // its first part (`within` is `None` here past a first read).
+        let conn = self.conn;
+        let read = match conn {
+            Conn::Plain(s) => (&*s).read(buf),
+            // `within` is `None` here past a first read.
             #[cfg(feature = "tls")]
             Conn::Tls(t) => match self.within {
-                Some(within) => t
-                    .tls
-                    .borrow_mut()
-                    .read_by(buf, fennec_tls::By::Within(within))?,
-                None => t.tls.borrow_mut().read(buf)?,
+                Some(within) => return self.first_record(&t.tls, buf, within),
+                None => t.tls.borrow_mut().read(buf),
             },
             #[cfg(not(feature = "tls"))]
             Conn::Tls(t) => match *t {},
         };
-        if n > 0 && first {
-            self.pace = Pace::Begun;
-            self.came = n as u64;
+        match read {
+            Ok(n) => {
+                if n > 0 && first {
+                    self.pace = Pace::Begun;
+                    self.came = n as u64;
+                }
+                Ok(n)
+            }
+            // The wait for a request's first byte.
+            Err(e) if first => Err(e),
+            // Past it, with no `--header-timeout`: a silence part way.
+            Err(e) => Err(silent(e)),
         }
-        Ok(n)
     }
 }
+
+/// What `came` bytes of a request earn it past `--header-timeout`: a
+/// second each [`MIN_RATE`].
+#[inline]
+fn earned(came: u64) -> Duration {
+    Duration::from_millis(came.saturating_mul(1000) / MIN_RATE)
+}
+
+/// Whether `e` is a socket's timeout run out: EAGAIN, or Windows' own.
+#[inline]
+fn timed_out(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    )
+}
+
+/// A request not whole in its time ([`Timeout::Header`]), counted: the
+/// error its read ends with, a 408 -- before a byte of it, the end.
+#[cold]
+#[inline(never)]
+fn cut() -> io::Error {
+    crate::metrics::timed_out(Timeout::Header);
+    io::Error::new(io::ErrorKind::TimedOut, "the request was not sent in time")
+}
+
+/// `e`, a read's past a request's first byte: a timeout is the idle
+/// timeout's, the silence that ends a request part way
+/// ([`Timeout::Idle`]), counted.
+#[cold]
+#[inline(never)]
+fn silent(e: io::Error) -> io::Error {
+    if timed_out(&e) {
+        crate::metrics::timed_out(Timeout::Idle);
+    }
+    e
+}
+
+/// `e`, a write's to a served connection: a timeout is a client that took
+/// nothing for `--write-timeout`, or a stream's own bound
+/// ([`Timeout::Write`]), counted -- the connection ends at it. Its socket
+/// is blocking, a write's `WouldBlock` the timeout's: a stream writing
+/// without blocking does so through [`Conn::write_or_hold`].
+#[cold]
+#[inline(never)]
+fn stalled(e: io::Error) -> io::Error {
+    if timed_out(&e) {
+        crate::metrics::timed_out(Timeout::Write);
+    }
+    e
+}
+
+/// Why a served connection was ended for its client's slowness, as
+/// `reason` labels it in `/_metrics` (`fennec_client_timeouts_total`,
+/// `fennec_router_client_timeouts_total`): the bound it ran past, named by
+/// its flag. A connection silent between requests is closed uncounted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Timeout {
+    /// `--header-timeout`: a request not whole in its time ([`Paced`]),
+    /// answered 408 -- or, a first record over TLS not whole before a byte
+    /// of the request was read, ended with nothing written.
+    Header = 0,
+    /// `--idle-timeout`: a request silent part way, answered 408.
+    Idle = 1,
+    /// `--write-timeout`: a write its client took nothing of -- a stream's
+    /// by its own bound -- the connection ended at it.
+    Write = 2,
+}
+
+/// [`Timeout`] as `reason` labels it, in its order.
+pub const TIMEOUTS: [(Timeout, &str); 3] = [
+    (Timeout::Header, "header"),
+    (Timeout::Idle, "idle"),
+    (Timeout::Write, "write"),
+];
 
 /// Why a connection to an HTTPS listener ended before its handshake did,
 /// as `reason` labels it in `/_metrics` (`fennec_tls_handshakes_failed_total`,
@@ -968,6 +1086,8 @@ impl Read for &Conn {
     }
 }
 
+/// A write that timed out is counted ([`stalled`]): one look at the
+/// result, its error alone going further.
 impl Write for &Conn {
     #[inline]
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
@@ -978,6 +1098,7 @@ impl Write for &Conn {
             #[cfg(not(feature = "tls"))]
             Conn::Tls(t) => match *t {},
         }
+        .map_err(stalled)
     }
 
     /// Plain, one `writev`; over TLS the slices are one plaintext, a small
@@ -991,6 +1112,7 @@ impl Write for &Conn {
             #[cfg(not(feature = "tls"))]
             Conn::Tls(t) => match *t {},
         }
+        .map_err(stalled)
     }
 
     #[inline]
@@ -998,7 +1120,7 @@ impl Write for &Conn {
         match *self {
             Conn::Plain(_) => Ok(()),
             #[cfg(feature = "tls")]
-            Conn::Tls(t) => t.noted(t.tls.borrow_mut().flush()),
+            Conn::Tls(t) => t.noted(t.tls.borrow_mut().flush()).map_err(stalled),
             #[cfg(not(feature = "tls"))]
             Conn::Tls(t) => match *t {},
         }

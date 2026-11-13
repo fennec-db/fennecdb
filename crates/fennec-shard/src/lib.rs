@@ -63,9 +63,9 @@ pub struct Config {
     pub max_body: usize,
     pub idle_timeout: Option<Duration>,
     /// `--header-timeout`: a client's request read in time as a node reads
-    /// one ([`fennec_http::conn::Paced`]): its head whole from its first
-    /// byte, its body at [`fennec_http::conn::BODY_RATE`] past the start.
-    /// `None`: no bound but the idle timeout's on each read.
+    /// one ([`fennec_http::conn::Paced`]): within it of its first byte and
+    /// a second more for every [`fennec_http::conn::MIN_RATE`] bytes that
+    /// came. `None`: no bound but the idle timeout's on each read.
     pub header_timeout: Option<Duration>,
     /// `--write-timeout`: the longest one write to a client -- an answer,
     /// a relayed stream -- waits for it to take any of it: the write that

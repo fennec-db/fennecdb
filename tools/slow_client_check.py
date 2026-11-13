@@ -9,17 +9,18 @@ clients each hold a connection badly, a third of them each way, for SECS:
   * body: a head declaring a mebibyte, then its body a byte every TRICKLE;
   * reader: forty answers of a mebibyte asked at once, none read.
 
-Each is cut at its bound -- `--header-timeout` from its first byte for a
-head or a body under 64 KiB, the head's 408 read; two write timeouts and
-the time its answers take to fill the sockets for a reader -- and comes
-back, a refusal past the ceiling (503) waiting its Retry-After. One client
-asks a request every 50 ms on a connection kept alive from the start, as a
-pooled client does: it must see no failure and a p99 under a second. Every
-connection's life is held to its bound. A fresh connection asked every
-5 s is told, not held: with twice the ceiling trickling, a slot a cut
-frees goes to whoever asks first, mostly the trickler it was cut from --
-these bounds hold a connection to its request's time, not a client to its
-share of the slots, which is a cap a peer address in front.
+Each is cut at its bound -- `--header-timeout` from its first byte and the
+milliseconds its trickled bytes earned (a second a KiB), its 408 read; two
+write timeouts and the time its answers take to fill the sockets for a
+reader -- and comes back, a refusal past the ceiling (503) waiting its
+Retry-After. One client asks a request every 50 ms on a connection kept
+alive from the start, as a pooled client does: it must see no failure and
+a p99 under a second. Every connection's life is held to its bound. A
+fresh connection asked every 5 s is told, not held: with twice the
+ceiling trickling, a slot a cut frees goes to whoever asks first, mostly
+the trickler it was cut from -- these bounds hold a connection to its
+request's time, not a client to its share of the slots, which is a cap a
+peer address in front.
 
 Bounded: connections at most 2 x MAX at once, each coming back no sooner
 than its refusal's wait; the server is started with --exit-on-stdin-close

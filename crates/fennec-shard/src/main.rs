@@ -77,11 +77,11 @@ usage: fennec-shard [options]
                             a minute, 5 s at most; 0 turns it off. default: 100
       --max-connections <n> ceiling on concurrent connections  default: 1000
       --max-body <MiB>      request body ceiling  default: 64
-      --header-timeout <s>  a client's request head whole, from its first
-                            byte, and its body's first 64 KiB with it; past
-                            them a body comes at 1 KiB a second at least, or
-                            the request is answered 408 and its connection
-                            ended (0 = only the 60 s a read)  default: 10
+      --header-timeout <s>  a client's request's time from its first byte,
+                            and a second more for each KiB of it that came,
+                            head and body alike: slower than 1 KiB a second,
+                            it is answered 408 and its connection ended
+                            (0 = only the 60 s a read)  default: 10
       --write-timeout <s>   the longest a write to a client, an answer or a
                             relayed stream, waits for it to take any of it:
                             a client reading nothing is let go within twice

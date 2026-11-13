@@ -1,6 +1,7 @@
 //! Slow clients of the router, held as a node holds its own
 //! (fennec-http's `tests/server.rs`): a head or a body trickled is cut at
-//! the router's `--header-timeout` with a 408, and an answer never read
+//! the router's `--header-timeout` from its first byte, and a second for
+//! each KiB that came, with a 408, and an answer never read
 //! ends its connection at `--write-timeout`; each gives its slot back. A
 //! client sending a byte a while, or reading nothing, held a router thread
 //! and a `--max-connections` slot as long as it liked.
@@ -157,7 +158,7 @@ fn a_trickled_head_is_cut_at_its_deadline() {
 
 #[test]
 fn a_trickled_body_is_cut() {
-    use fennec_http::conn::{BODY_RATE, FREE};
+    use fennec_http::conn::MIN_RATE;
     let within = Duration::from_millis(600);
     let f = front("body", |c| c.header_timeout = Some(within));
     let every = Duration::from_millis(50);
@@ -168,9 +169,9 @@ fn a_trickled_body_is_cut() {
     assert!(took >= within, "{took:?}");
     served_again(f.port);
 
-    // Past the first 64 KiB by one KiB, at once: a second more earned.
+    // A KiB of it at once: a second more earned, from the first byte.
     let mut sent = declared.to_vec();
-    sent.resize(sent.len() + FREE as usize + BODY_RATE as usize, b' ');
+    sent.resize(sent.len() + MIN_RATE as usize, b' ');
     let (answer, took) = trickled(f.port, &sent, vec![b' '; 600], every);
     assert!(answer.starts_with("HTTP/1.1 408"), "{answer}");
     assert!(took >= within + Duration::from_secs(1), "{took:?}");

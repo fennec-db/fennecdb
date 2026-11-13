@@ -103,10 +103,10 @@ usage: fennec-server [options]
                             default: 100. Every connection is a thread
       --idle-timeout <s>    close a keep-alive connection silent for this
                             long (0 = never)  default: 60
-      --header-timeout <s>  a request's head whole, from its first byte, and
-                            its body's first 64 KiB with it; past them a
-                            body comes at 1 KiB a second at least, or the
-                            request is answered 408 and its connection ended
+      --header-timeout <s>  a request's time from its first byte, and a
+                            second more for each KiB of it that came, head
+                            and body alike: slower than 1 KiB a second, it
+                            is answered 408 and its connection ended
                             (0 = only --idle-timeout, a read at a time)
                             default: 10
       --write-timeout <s>   the longest a write of an answer waits for its

@@ -641,7 +641,7 @@ file before and after and how long it held the lock.</p>
 <tr><td><code>--max-connections</code></td><td class="n">100</td><td>Refuses connections past it.</td></tr>
 <tr><td><code>--max-memory &lt;MiB&gt;</code></td><td class="n">off</td><td>Refuses writes that would grow the data past it; reads go on.</td></tr>
 <tr><td><code>--idle-timeout &lt;s&gt;</code></td><td class="n">60</td><td>Closes a quiet keep-alive connection (0 = never).</td></tr>
-<tr><td><code>--header-timeout &lt;s&gt;</code></td><td class="n">10</td><td>A request's head must come whole within it of its first byte, with its body's first 64 KiB; past them a body comes at 1 KiB a second at least. Else 408, and the connection is closed (0 = only <code>--idle-timeout</code>, a read at a time).</td></tr>
+<tr><td><code>--header-timeout &lt;s&gt;</code></td><td class="n">10</td><td>A request must come within it of its first byte, and a second more for each KiB that came, head and body alike: a client sending 1 KiB a second or more is never cut. Else 408, and the connection is closed (0 = only <code>--idle-timeout</code>, a read at a time).</td></tr>
 <tr><td><code>--write-timeout &lt;s&gt;</code></td><td class="n">30</td><td>The longest a write of an answer waits for its client to take any of it: a client that reads nothing is let go within twice this (0 = never).</td></tr>
 <tr><td><code>--http-max-streams</code></td><td class="n">64</td><td>Ceiling on a database's subscriptions, counted apart; on a tenant node, each tenant's.</td></tr>
 </tbody>
@@ -658,12 +658,17 @@ connection ended after the answer, so a client writing its request as the
 answer comes reads the 503, not a reset (over <a href="#tls">TLS</a> it is told
 an alert instead); <code>--idle-timeout</code> closes
 a quiet connection. A client that sends slowly, or reads nothing, holds its
-connection no longer than its request's time: the head whole within
-<code>--header-timeout</code> of its first byte, a body at 1 KiB a second past its
-first 64 KiB (a 64 MiB one within about 18 hours, a gibibyte image within
-12 days), and each write of an answer taken in part within
-<code>--write-timeout</code>, a client reading nothing let go within twice it --
-over HTTPS too, a record that comes in parts held to the same bound. A
+connection no longer than its request's time: within
+<code>--header-timeout</code> of its first byte and a second more for each KiB
+that came, head and body alike, so a client keeping 1 KiB a second -- a
+mobile link at 32 kbit/s sends four -- is never cut, and a trickle is (a
+head, 64 KiB at most, is whole within 74 s; a 64 MiB body within about
+18 hours, a gibibyte image within 12 days); and each write of an answer
+taken in part within <code>--write-timeout</code>, a client reading nothing let
+go within twice it -- over HTTPS too, a request's time running from its
+first record's first byte and a record that comes in parts held to the
+same bound. Each such cut is counted
+(<a href="/docs/monitoring#what-is-counted"><code>fennec_client_timeouts_total</code></a>). A
 subscription holds a thread for as long as it lasts, so subscriptions are
 counted apart as well, under <code>--http-max-streams</code>, a database's
 own: on a tenant node each tenant's, where <code>--max-connections</code> is
