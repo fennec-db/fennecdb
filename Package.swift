@@ -30,7 +30,10 @@ let ffi: Target =
 
 let package = Package(
     name: "FennecDB",
-    platforms: [.macOS(.v12), .iOS(.v15)],
+    // The XCFramework's own minimums: macOS 11 is the lowest
+    // aarch64-apple-darwin builds for. URLSession's async `data(for:)`, the
+    // one call here newer than that, the SDK back-deploys to 10.15.
+    platforms: [.macOS(.v11), .iOS(.v15)],
     products: [
         .library(name: "FennecDB", targets: ["FennecDB"])
     ],

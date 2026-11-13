@@ -5,13 +5,18 @@
 #   FennecFFI.xcframework        a static library a slice, with the header and
 #                                a module map: what Package.swift takes in
 #                                place of the release's download
-#   dynamic/FennecFFI.xcframework  (--dynamic, zipped as FennecFFIDynamic) FennecFFI.framework a slice, the
-#                                shared library: what the Flutter plugin's
-#                                pods vendor
+#   dynamic/FennecFFI.xcframework  (--dynamic) FennecFFI.framework a slice,
+#                                the shared library: what an app that
+#                                embeds the framework itself takes, and
+#                                the Flutter plugin's iOS pod vendors
+#   dynamic/libfennec_ffi.dylib  macOS's framework binary as a plain dylib:
+#                                what the plugin's macOS pod vendors --
+#                                zipped with the XCFramework as
+#                                FennecFFIDynamic
 #
 #   integrations/swift/build-xcframework.sh            macOS, iOS, the simulator
 #   integrations/swift/build-xcframework.sh --macos    macOS alone, this machine's arch
-#   integrations/swift/build-xcframework.sh --dynamic  the frameworks instead
+#   integrations/swift/build-xcframework.sh --dynamic  the frameworks and the dylib instead
 #   integrations/swift/build-xcframework.sh --zip      and the zip a release
 #                                                      attaches (the static one
 #                                                      with its checksum)
@@ -31,6 +36,17 @@
 # cannot be found". A dynamic framework is what Flutter's own docs give an
 # FFI plugin with a prebuilt binary: CocoaPods embeds it, nothing is
 # force-loaded, and Dart opens `FennecFFI.framework/FennecFFI`.
+#
+# Why the dylib. pub keeps no symbolic link: it packs what one points at. A
+# macOS framework is versioned -- its binary in Versions/A, reached through
+# Versions/Current and the top level -- so the plugin went out with that
+# binary three times in each copy of the XCFramework (0.2.0: 34.5 MB
+# packed, 65.7 MB unpacked). On macOS the plugin vendors one file instead,
+# which CocoaPods embeds and signs as it does a framework and Dart opens by
+# its name; the XCFramework keeps its macOS framework for the apps that
+# embed it themselves. No XCFramework can hold the dylib beside the
+# frameworks: `xcodebuild -create-xcframework` refuses frameworks and
+# libraries in one.
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -39,8 +55,10 @@ CARGO=${CARGO:-$(test -x "$HOME/.cargo/bin/cargo" && echo "$HOME/.cargo/bin/carg
 RUSTUP=${RUSTUP:-$(test -x "$HOME/.cargo/bin/rustup" && echo "$HOME/.cargo/bin/rustup" || echo rustup)}
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)
 # The platforms Package.swift and the pods declare: the objects say so too,
-# rather than Rust's own defaults.
-export IPHONEOS_DEPLOYMENT_TARGET=15.0 MACOSX_DEPLOYMENT_TARGET=12.0
+# rather than Rust's own defaults. macOS 11 is the lowest
+# aarch64-apple-darwin builds for; an app built for it asked for 11, where
+# the objects said 12.
+export IPHONEOS_DEPLOYMENT_TARGET=15.0 MACOSX_DEPLOYMENT_TARGET=11.0
 
 macos_only=false
 zip=false
@@ -62,6 +80,7 @@ NAME=FennecFFI
 if $dynamic; then XDIR="$OUT/dynamic"; ZIPNAME=FennecFFIDynamic; else XDIR="$OUT"; ZIPNAME=FennecFFI; fi
 mkdir -p "$XDIR"
 XC="$XDIR/$NAME.xcframework"
+DYLIB="$XDIR/libfennec_ffi.dylib"
 
 # One static library a target, the lib alone: `cargo build` would link the
 # cdylib too, which for iOS needs its SDK.
@@ -173,6 +192,18 @@ dynamic_slice() {
   echo "$id  $(wc -c < "$bin") bytes (FennecFFI.framework)" >&2
 }
 
+# The macOS slice's framework binary as a plain dylib, its install name its
+# own, which the app finds through @rpath in its Frameworks directory. Named
+# anew rather than linked twice; a new name voids the linker's ad-hoc
+# signature, so it is taken off first and the dylib signed again.
+macos_dylib() {
+  cp "$XC/$1/FennecFFI.framework/Versions/A/FennecFFI" "$DYLIB"
+  codesign --remove-signature "$DYLIB"
+  install_name_tool -id @rpath/libfennec_ffi.dylib "$DYLIB"
+  codesign --sign - "$DYLIB"
+  echo "macos  $(wc -c < "$DYLIB") bytes (libfennec_ffi.dylib)" >&2
+}
+
 slice() {
   if $dynamic; then dynamic_slice "$@"; else
     id=$1
@@ -212,6 +243,7 @@ entry() {
 }
 
 rm -rf "$XC"
+if $dynamic; then rm -f "$DYLIB"; fi
 mkdir -p "$XC"
 if $macos_only; then
   # This machine's architecture alone: what `swift test` links.
@@ -221,6 +253,7 @@ if $macos_only; then
   esac
   slice "macos-$arch" MacOSX "$host"
   entries=$(entry "macos-$arch" macos "" "$arch")
+  macos="macos-$arch"
 else
   slice macos-arm64_x86_64 MacOSX aarch64-apple-darwin x86_64-apple-darwin
   slice ios-arm64 iPhoneOS aarch64-apple-ios
@@ -230,7 +263,9 @@ else
     entry ios-arm64 ios "" arm64
     entry ios-arm64_x86_64-simulator ios simulator arm64 x86_64
   )
+  macos="macos-arm64_x86_64"
 fi
+if $dynamic; then macos_dylib "$macos"; fi
 
 cat > "$XC/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -249,14 +284,17 @@ $entries
 </plist>
 EOF
 echo "$XC"
+if $dynamic; then echo "$DYLIB"; fi
 
 if $zip; then
   # The zip a release attaches. -X leaves out the extra attributes, and -y
   # keeps a macOS framework's links as links. The static one's checksum is
-  # what Package.swift names it by; the dynamic one is the Flutter plugin's
-  # and named by nothing.
+  # what Package.swift names it by; the dynamic one, the XCFramework and
+  # the dylib, is named by nothing.
   rm -f "$OUT/$ZIPNAME.xcframework.zip"
-  (cd "$XDIR" && zip -qrXy "$OUT/$ZIPNAME.xcframework.zip" "$NAME.xcframework")
+  if $dynamic; then members="$NAME.xcframework libfennec_ffi.dylib"; else members="$NAME.xcframework"; fi
+  # shellcheck disable=SC2086
+  (cd "$XDIR" && zip -qrXy "$OUT/$ZIPNAME.xcframework.zip" $members)
   echo "$OUT/$ZIPNAME.xcframework.zip  $(wc -c < "$OUT/$ZIPNAME.xcframework.zip") bytes"
   if ! $dynamic; then
     sum=$(swift package compute-checksum "$OUT/$ZIPNAME.xcframework.zip")

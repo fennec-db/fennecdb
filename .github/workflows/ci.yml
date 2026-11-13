@@ -67,6 +67,12 @@ jobs:
       - name: tools/instr's UUID copies, figures and trace deltas
         run: python3 tools/instr/test_instr.py
 
+      # docs/design/integrations.md#flutter-plugin: the check the Flutter
+      # plugin's job runs on the packed plugin refuses each way 0.2.0's
+      # archive shipped a library again and passes prepare.sh's layout.
+      - name: tools/flutter_archive_check.py refuses a library packed twice or for another platform
+        run: python3 tools/test_flutter_archive_check.py
+
       # docs/design/http.md#compatibility: the checker the test job runs on
       # the served documents finds each kind of break, lets each addition
       # through, and holds BREAKS and the committed baseline.
@@ -1169,7 +1175,7 @@ jobs:
           integrations/ffi-sizes.sh x86_64-unknown-linux-gnu aarch64-linux-android armv7-linux-androideabi x86_64-linux-android \
             | tee -a "$GITHUB_STEP_SUMMARY"
 
-      # Flutter is pinned here, in the Apple job and in packages.yml: `stable`
+      # Flutter is pinned here, in the plugin's job and in packages.yml: `stable`
       # alone floats, and 3.50.0 (2026-11-11) deprecated
       # package:flutter/material.dart, which `flutter analyze` fails on in the
       # examples (#590). Raised by hand, once the examples take what a new
@@ -1224,9 +1230,10 @@ jobs:
           if-no-files-found: ignore
 
   # The same on Apple's platforms: every slice of the XCFramework, the Swift
-  # package's tests on macOS and on an iOS simulator, the library's size
-  # linked for each target, and the Flutter plugin's example built for the
-  # simulator. The runner has Xcode.
+  # package's tests on macOS and on an iOS simulator, and the library's size
+  # linked for each target. The runner has Xcode. The Flutter plugin's
+  # example is built from what this job and the Android one made, packed,
+  # in the job after both (flutter-plugin).
   mobile-apple:
     name: mobile (Swift, iOS, XCFramework)
     runs-on: macos-latest
@@ -1254,9 +1261,10 @@ jobs:
       - name: XCFramework (macOS, iOS, the simulator)
         run: integrations/swift/build-xcframework.sh --zip
 
-      # FennecFFI.framework a slice, the shared library: what the Flutter
-      # plugin's pods vendor and CocoaPods embeds.
-      - name: Dynamic XCFramework (the Flutter plugin's)
+      # FennecFFI.framework a slice, and the macOS one's binary as a plain
+      # libfennec_ffi.dylib beside it: what the Flutter plugin's pods vendor
+      # and CocoaPods embeds.
+      - name: Dynamic XCFramework and macOS's dylib (the Flutter plugin's)
         run: integrations/swift/build-xcframework.sh --dynamic --zip
 
       # Package.swift takes the XCFramework just built; the sync tests
@@ -1298,21 +1306,6 @@ jobs:
           integrations/ffi-sizes.sh aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios aarch64-apple-darwin x86_64-apple-darwin \
             | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: 3.50.0
-          cache: true
-
-      - name: The Flutter plugin in an iOS app
-        run: |
-          set -eu
-          integrations/dart/fennecdb_flutter/prepare.sh
-          cd integrations/dart/fennecdb_flutter/example
-          flutter create --platforms=ios --project-name fennecdb_flutter_example .
-          rm -rf test
-          flutter build ios --simulator --debug --no-codesign
-
       - uses: actions/upload-artifact@v7
         with:
           name: fennecdb-xcframework
@@ -1333,3 +1326,89 @@ jobs:
           path: integrations/swift/build/ios-tests.xcresult
           retention-days: 7
           if-no-files-found: ignore
+
+  # The Flutter plugin as pub.dev gets it (docs/design/integrations.md#flutter-plugin):
+  # packed from what the two jobs above made as packages.yml packs it from a
+  # release -- the dynamic XCFramework with macOS's dylib beside it, and the
+  # AAR's .so for each ABI, through prepare.sh, out of the repository, by
+  # pub's own packing -- and held to its sizes and to each platform's
+  # library once (tools/flutter_archive_check.py): pub keeps no symbolic
+  # link, and 0.2.0's archive carried the macOS binary six times. Then the
+  # example in that archive, on the plugin beside it, is built for macOS,
+  # where its integration test opens a file through the library the app
+  # embeds, and for the iOS simulator.
+  flutter-plugin:
+    name: mobile (the Flutter plugin as pub.dev gets it)
+    needs: [mobile-android, mobile-apple]
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    # Two builds of the example for macOS, one for the simulator: a hang
+    # fails within the job's bound rather than at the runner's six hours.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: fennecdb-xcframework
+          path: assets
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: fennecdb-android
+          path: assets
+
+      # Flutter 3.50.0, as the Android job pins it.
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: 3.50.0
+          cache: true
+
+      # packages.yml's "The native libraries, from the release" and its
+      # Publish's copy, the archive written where a publish would upload it
+      # (`--to-archive`; `--skip-validation`, as nothing is published, leaves
+      # the version of `fennecdb` it names unresolved).
+      - name: The plugin packed as packages.yml packs it, held to its sizes
+        run: |
+          set -euo pipefail
+          mkdir -p integrations/swift/build integrations/kotlin/android/build/jniLibs
+          unzip -q assets/FennecFFIDynamic.xcframework.zip -d integrations/swift/build/dynamic
+          unzip -q assets/fennecdb-android-*.aar 'jni/*' -d assets/aar
+          cp -R assets/aar/jni/. integrations/kotlin/android/build/jniLibs/
+          integrations/dart/fennecdb_flutter/prepare.sh
+          out="$RUNNER_TEMP/fennecdb_flutter"
+          cp -R integrations/dart/fennecdb_flutter "$out"
+          rm -f "$out/pubspec_overrides.yaml"
+          cp LICENSE "$out/"
+          (cd "$out" && flutter pub publish --skip-validation --to-archive="$RUNNER_TEMP/fennecdb_flutter.tar.gz")
+          python3 tools/flutter_archive_check.py "$RUNNER_TEMP/fennecdb_flutter.tar.gz" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # The archive unpacked: its example's `path: ../` is the plugin as
+      # packed, and `fennecdb` is this commit's (pubspec_overrides.yaml, in
+      # place of the example's own overrides). The release build is the app
+      # as it ships, both architectures, the dylib CocoaPods embedded; the
+      # integration test builds it again for this machine and runs it.
+      - name: The example on macOS, from the archive
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/unpacked"
+          tar -xzf "$RUNNER_TEMP/fennecdb_flutter.tar.gz" -C "$RUNNER_TEMP/unpacked"
+          cd "$RUNNER_TEMP/unpacked/example"
+          printf 'dependency_overrides:\n  fennecdb:\n    path: %s\n' "$GITHUB_WORKSPACE/integrations/dart/fennecdb" > pubspec_overrides.yaml
+          flutter create --platforms=macos,ios --project-name fennecdb_flutter_example .
+          rm -rf test
+          flutter build macos
+          lipo build/macos/Build/Products/Release/fennecdb_flutter_example.app/Contents/Frameworks/libfennec_ffi.dylib \
+            -verify_arch arm64 x86_64
+          flutter test integration_test -d macos
+
+      - name: The example on the iOS simulator, from the archive
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/unpacked/example"
+          flutter build ios --simulator --debug --no-codesign
+          test -f build/ios/iphonesimulator/Runner.app/Frameworks/FennecFFI.framework/FennecFFI

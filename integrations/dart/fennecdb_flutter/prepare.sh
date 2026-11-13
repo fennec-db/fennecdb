@@ -1,24 +1,55 @@
 #!/bin/sh
-# Puts the native library where each platform's project takes it from:
-# the dynamic XCFramework integrations/swift/build-xcframework.sh --dynamic
-# made (FennecFFI.framework a slice) into
-# ios/Frameworks and macos/Frameworks, and the .so for each ABI
-# integrations/kotlin/build-aar.sh made into android/src/main/jniLibs.
+# Puts the native library where each platform's project takes it from, each
+# platform's alone:
+#
+#   ios/Frameworks/FennecFFI.xcframework  its iOS slices: FennecFFI.framework
+#                                         for the device and the simulator
+#   macos/Libraries/libfennec_ffi.dylib   arm64 and x86_64
+#   android/src/main/jniLibs/<abi>/       libfennec_ffi.so for each ABI
+#
+# from what integrations/swift/build-xcframework.sh --dynamic made (the
+# XCFramework and the dylib beside it, a release's
+# FennecFFIDynamic.xcframework.zip) and integrations/kotlin/build-aar.sh.
 # Whichever of them is built is copied; a release builds both first.
+#
+# pub keeps no symbolic link -- it packs what one points at -- and every
+# file here goes to pub.dev: a platform given another's slices, or a
+# framework reached through links, is shipped again in full. CI packs the
+# plugin as packages.yml does and holds the archive to that
+# (tools/flutter_archive_check.py).
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../../.." && pwd)
-XC="$ROOT/integrations/swift/build/dynamic/FennecFFI.xcframework"
+DYN="$ROOT/integrations/swift/build/dynamic"
 JNI="$ROOT/integrations/kotlin/android/build/jniLibs"
 
-if [ -d "$XC" ]; then
-  for p in ios macos; do
-    rm -rf "$HERE/$p/Frameworks"
-    mkdir -p "$HERE/$p/Frameworks"
-    # -R copies a macOS framework's links as links.
-    cp -R "$XC" "$HERE/$p/Frameworks/"
-  done
-  echo "dynamic FennecFFI.xcframework -> ios/Frameworks, macos/Frameworks"
+if [ -d "$DYN/FennecFFI.xcframework" ]; then
+  src="$DYN/FennecFFI.xcframework"
+  dst="$HERE/ios/Frameworks/FennecFFI.xcframework"
+  rm -rf "$HERE/ios/Frameworks"
+  mkdir -p "$dst"
+  # The XCFramework's list of slices -- a <dict> each, as
+  # build-xcframework.sh writes it -- without macOS's, then the slices it
+  # still names. awk rather than a plist reader: this runs on Linux too.
+  awk '
+    /^\t\t<dict>$/ { entry = $0 "\n"; inside = 1; next }
+    inside { entry = entry $0 "\n" }
+    inside && /^\t\t<\/dict>$/ { inside = 0; if (entry !~ /<string>macos<\/string>/) printf "%s", entry; next }
+    !inside { print }
+  ' "$src/Info.plist" > "$dst/Info.plist"
+  ids=$(sed -n '/<key>LibraryIdentifier<\/key>/{n;s/.*<string>\(.*\)<\/string>.*/\1/p;}' "$dst/Info.plist")
+  for id in $ids; do cp -R "$src/$id" "$dst/"; done
+  if [ -n "$ids" ]; then
+    echo "FennecFFI.xcframework -> ios/Frameworks: $(echo "$ids" | tr '\n' ' ')"
+  else
+    rm -rf "$HERE/ios/Frameworks"
+  fi
+fi
+if [ -f "$DYN/libfennec_ffi.dylib" ]; then
+  rm -rf "$HERE/macos/Libraries"
+  mkdir -p "$HERE/macos/Libraries"
+  cp "$DYN/libfennec_ffi.dylib" "$HERE/macos/Libraries/"
+  echo "libfennec_ffi.dylib -> macos/Libraries"
 fi
 if [ -d "$JNI" ]; then
   rm -rf "$HERE/android/src/main/jniLibs"

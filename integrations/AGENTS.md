@@ -1,6 +1,6 @@
 # AGENTS.md
 
-The integrations' invariants -- outside packages and the builders, the desktop app, Grafana's data source -- for code in `integrations/`. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
+The integrations' invariants -- outside packages and the builders, the desktop app, Grafana's data source, the Flutter plugin's archive -- for code in `integrations/`. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
 
 ## Invariants
 
@@ -108,3 +108,21 @@ which only grows, and an asset there is never replaced.
 **[Grafana's data source binds a dashboard's values; it never splices
 them.](../docs/design/integrations.md#grafana)** Names become `$n`s
 (`fennecql.go`); only `get`, `select` and `explain` go out.
+
+**[The Flutter plugin ships each platform's library once, and no symbolic
+link.](../docs/design/integrations.md#flutter-plugin)** pub packs what a
+link points at, so `fennecdb_flutter/prepare.sh` gives `ios/` the dynamic
+XCFramework's iOS slices alone, its Info.plist written again, and `macos/`
+a plain `libfennec_ffi.dylib` (`vendored_libraries`; a macOS framework is
+versioned through links): the macOS framework's binary renamed, which
+`swift/build-xcframework.sh --dynamic` ships beside the XCFramework, as no
+XCFramework holds a framework and a library both; the XCFramework keeps
+that framework for apps that embed it themselves. CI's `flutter-plugin`
+job packs the plugin as `packages.yml` publishes it (`flutter pub publish
+--to-archive`), and `tools/flutter_archive_check.py` holds the archive to
+14 MB packed and 26 MB unpacked, no Mach-O or slice twice, each under its
+platform's directory and built for no newer a system than its pod
+declares; the example is built from that archive for macOS, where its
+integration test opens a file through the dylib the app embeds, and for
+the iOS simulator. Raising a ceiling is a pull request stating the
+measured cost.

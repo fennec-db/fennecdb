@@ -1,6 +1,6 @@
 # Integrations and deploy
 
-The long form of the invariants [integrations/CLAUDE.md](../../integrations/CLAUDE.md), [deploy/CLAUDE.md](../../deploy/CLAUDE.md) and [tools/CLAUDE.md](../../tools/CLAUDE.md) list under *Integrations and deploy*: `integrations/`, the Grafana data source, the desktop app, the `deploy/` kit and the install channels. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [integrations/CLAUDE.md](../../integrations/CLAUDE.md), [deploy/CLAUDE.md](../../deploy/CLAUDE.md) and [tools/CLAUDE.md](../../tools/CLAUDE.md) list under *Integrations and deploy*: `integrations/`, the Grafana data source, the desktop app, the `deploy/` kit, the install channels and the Flutter plugin's archive. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Integrations
 
@@ -1681,3 +1681,70 @@ The Windows zip and `site/install.ps1` are [windows.md](windows.md#6-a-windows-r
 `install.ps1 -App` (or `--app`) installs the app instead of the two programs. `irm | iex` hands a script no argument, so the line the docs give makes the downloaded text a script block and calls it with `-App`, `& ([scriptblock]::Create((irm https://fennecdb.com/install.ps1))) -App`: the same text, its functions defined in that block's scope and gone after it. The release is found as for the programs, by the zip of the machine's processor (or `FENNEC_VERSION`), and `fennec-studio-v<version>-windows-<x64|arm64>.zip`'s sum checked before anything reads it, from the URL or from `FENNEC_FROM` alike (`Get-FennecAsset`, which the programs' path takes too), its mark taken off. It refuses while a program runs from the app's place (`Get-Process`'s paths: Windows refuses to move a folder a running program's file is in), unpacks the zip into a staging folder beside that place, `%LOCALAPPDATA%\dev.fennecdb.studio\stable\app` (Electrobun's installer's, so one copy either way; the folder above it is the app's own and never touched), renames the old app aside and the new one into place, putting the old one back if that fails and saying where it is if it cannot, and sweeps what an earlier install could not remove. A Start-menu shortcut, `fennec studio.lnk` in `$env:APPDATA\...\Start Menu\Programs` (Electrobun's name too), is written through WScript.Shell's `CreateShortcut`, the one writer of the binary `.lnk` every Windows has; one that cannot be written is said, the app installed. No administrator, no `PATH`, no registry, and nothing it unpacked runs; there is no uninstall entry (Electrobun's installer writes one, with its own uninstaller), so it prints the two paths that remove the app. `site/test_install.ps1` holds it under both PowerShells with a stand-in (the folder `fennec-studio`, a copy of `ping.exe` as its launcher, which runs from anywhere and can be kept running): from a URL into a `LOCALAPPDATA` and an `APPDATA` of the test's own, the shortcut's target the launcher, nothing beside the app, the programs not installed; again over it, the app's `state.json` kept and no staging left; spelled `--app`; refused while the stand-in runs from its place, for a tampered zip, for a release with no app and for a latest release with no Windows build, each installing nothing; from a folder whose zip a browser marked, the launcher carrying no mark; and through the script block the docs give, the session's settings unchanged and no function of the script left defined. `checks/dist-archive.mjs` runs it on the real zip under Windows PowerShell 5.1 on each Windows runner and starts what it installed by the shortcut's target ([Studio desktop](#studio-desktop)).
 
 The packages are nfpm's (`packaging/nfpm.yaml`): one description makes both formats on a runner of either architecture with no dpkg or rpmbuild, where `rpmbuild` would have wanted a spec, a build root per architecture and its strip and requires scripts turned off for a prebuilt static binary. nfpm itself is the release binary `tools/install-nfpm.sh` pins by checksum (copied from the release's `checksums.txt`), shared by `release.yml` and CI. The deb's version carries nfpm's `release: 1` as its Debian revision (`0.1.11-1`, in the file's name too), `version_schema: semver` turns a pre-release's `-rc1` into `~rc1` in the package's version (`0.2.0~rc1-1`, an rpm's `0.2.0~rc1`; the file's name keeps the `-`), which sorts before `0.2.0` as a pre-release must, and `tools/linux-packages-check.sh` holds both packages to that form and to the ordering (`dpkg --compare-versions`, `rpm.vercmp`). `SOURCE_DATE_EPOCH` fixes the files' times: the same tarballs gave the same `.deb`, byte for byte, from nfpm on a Mac and on Linux, but the `.rpm` records the build host's name, so two machines' rpms differ by that and by nothing else. The files are `/usr/bin/fennec`, `/usr/bin/fennec-server` and the licence where each distribution looks. Each architecture is packed on a runner of its own (with `contents: read` and no stored credentials), and `tools/linux-packages-check.sh` installs the packages in `debian:12-slim` and `fedora:42` of that architecture, asserts their metadata and that they depend on nothing -- every assertion printing what it found and what it wanted -- runs both binaries, removes the package and checks the files are gone, before the artifact is kept: a package that does not install stops the release. CI's `packaging` job does the same with the latest release's tarball and again with it named as a pre-release. The job's checkout is the workflow's own commit and not a dispatched tag, which may be from before the packaging files. There is no apt or yum repository, only files on the release.
+
+## Flutter plugin
+
+**The Flutter plugin ships each platform's library once, and no symbolic
+link.** pub keeps no link: it packs the file a link points at, so whatever
+reaches a binary through one goes out as another copy of it. Through 0.2.0,
+`prepare.sh` copied the whole dynamic XCFramework -- the iOS device's and
+the simulator's frameworks, and macOS's -- under `ios/` and again under
+`macos/`, and a macOS framework is versioned, its binary in `Versions/A`
+reached through `Versions/Current` and the top level. The archive pub.dev
+served held that 6.36 MB binary six times and each iOS one twice: 34 514 079
+bytes packed, 65 705 431 unpacked (main's, packed the same way on
+2026-11-13: 34 580 807 and 65 718 131). An app was no larger, since
+CocoaPods embeds one platform's slice, but nothing built a macOS app from
+what pub had made of the links.
+
+Now each platform's directory holds its own library alone: `ios/` the
+XCFramework's two iOS slices, its Info.plist written again to list only
+them (by awk, since `packages.yml` runs `prepare.sh` on Linux), `macos/` a
+plain `libfennec_ffi.dylib`, arm64 and x86_64, `android/` the `.so` of each
+ABI: 13 111 191 bytes packed and 24 596 463 unpacked, each Mach-O once
+(main's libraries, this layout, 2026-11-13). The ceilings
+`tools/flutter_archive_check.py` holds the archive to, 14 MB packed and 26
+MB unpacked, are the 1.0 plan's: the libraries once, with room for them to
+grow by about the 5% the plan gives a native library.
+
+macOS takes a dylib, the owner's choice over a framework: a framework
+without versions is iOS's layout, which code signing on macOS refuses.
+`build-xcframework.sh --dynamic` makes it from the macOS framework's
+binary, its install name rewritten to `@rpath/libfennec_ffi.dylib` and
+signed again ad hoc, rather than linking the library twice, and the
+release's `FennecFFIDynamic.xcframework.zip` holds it beside the
+XCFramework: 11 234 051 bytes where it was 7 991 814. The XCFramework
+keeps all three frameworks, macOS's included: vulpes embeds that one in
+its apps itself. Nor could the dylib go inside it: `xcodebuild
+-create-xcframework` stops at "an xcframework cannot contain both
+frameworks and libraries" (Xcode 26.3). The pod vendors the dylib
+(`vendored_libraries`): CocoaPods embeds a vendored dynamic library in the
+app's `Frameworks` with the script that embeds a framework, and signs it.
+Dart opens it by name, `DynamicLibrary.open('libfennec_ffi.dylib')`, which
+dyld looks up through the executable's `LC_RPATH`, Flutter's Runner's
+being `@executable_path/../Frameworks`: a bundle of that shape found the
+dylib, and a database opened, written and read through it, whether its
+executable linked the dylib or not, and without the rpath found nothing
+(macOS 26.1).
+
+The macOS slices are built for macOS 11, the lowest aarch64-apple-darwin
+builds for, where they said 12 (vulpes, an app on the library alone, asked
+for 11), and the iOS ones for iOS 15; the pods and `Package.swift` declare
+the same, and the check refuses a slice built for a newer system than its
+pod's `s.platform`, which is what CocoaPods holds an app to.
+
+CI's `flutter-plugin` job runs after the Android and Apple jobs, whose
+artifacts are a release's libraries: the AAR's `.so`s are built by the NDK
+on Linux, the XCFramework and the dylib on macOS. It takes them as
+`packages.yml` takes them from a release, runs `prepare.sh`, copies the
+plugin out of the repository -- pub lists a package inside a repository by
+the version control's own listing, and the libraries `prepare.sh` copies
+are ignored there, so a copy under `target/` packed to nothing -- and packs
+it with pub itself: `flutter pub publish --to-archive` writes the archive a
+publish would upload, and `--skip-validation` leaves the version of
+`fennecdb` it names unresolved, which before a release is on no registry.
+The example in that archive is then built on the plugin beside it, for
+macOS -- the release build both architectures, then its integration test,
+which opens a file through the dylib the app embeds -- and for the iOS
+simulator. Before this job the iOS app was built from `prepare.sh`'s output
+in the repository, as the Android one still is, and no macOS app at all.

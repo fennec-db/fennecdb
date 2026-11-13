@@ -25,8 +25,10 @@ nothing reaches a registry before the notes have had a read.
    it from main, tests it on macOS and an iOS simulator, keeps it as its
    artifact and opens a pull request writing its checksum into
    `Package.swift` (`integrations/swift/set-binary.sh`). It keeps the
-   Flutter plugin's `FennecFFIDynamic.xcframework.zip` beside it, built from
-   the same commit and named by nothing. Merge it.
+   `FennecFFIDynamic.xcframework.zip` beside it -- the frameworks, and
+   macOS's binary again as a plain `libfennec_ffi.dylib`, which the Flutter
+   plugin's macOS pod vendors -- built from the same commit and named by
+   nothing. Merge it.
 3. Tag what was merged and push the tag:
    `git tag vX.Y.Z origin/main && git push origin vX.Y.Z`.
    `release.yml` builds the binaries for Linux and macOS, the Windows zips
