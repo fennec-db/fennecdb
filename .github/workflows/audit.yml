@@ -1,0 +1,107 @@
+# What packages.yml publishes, audited for known advisories in what it
+# depends on: the npm packages' runtime (and peer) dependencies, the Go
+# module's reachable code and standard library, FennecDb's NuGet graph, and
+# the Kotlin and Dart packages' declared dependencies by OSV. Not part of
+# ci.yml and never a merge-queue check: an advisory with no fix yet must not
+# block unrelated changes. It runs on a change to what it reads, weekly (where
+# a new advisory is found and read) and by hand. Accepted advisories live in
+# tools/audit-ignore.json, each with a reason and an expiry that fails the run.
+name: audit
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/audit.yml'
+      - 'tools/osv_check.py'
+      - 'tools/test_osv_check.py'
+      - 'tools/audit-ignore.json'
+      - 'web/package.json'
+      - 'integrations/react/package.json'
+      - 'integrations/react/package-lock.json'
+      - 'integrations/cloudflare/package.json'
+      - 'integrations/cloudflare/package-lock.json'
+      - 'integrations/langchain/package.json'
+      - 'integrations/langchain/package-lock.json'
+      - 'integrations/go/go.mod'
+      - 'integrations/go/go.sum'
+      - 'integrations/dotnet/FennecDb/FennecDb.csproj'
+      - 'integrations/dotnet/FennecDb/packages.lock.json'
+      - 'integrations/kotlin/**/build.gradle.kts'
+      - 'integrations/dart/**/pubspec.yaml'
+  schedule:
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: audit (published packages' dependencies)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: The ignore list and the audit's own tests
+        run: |
+          python3 -I tools/test_osv_check.py
+          python3 -I tools/osv_check.py --ignores
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24'
+
+      # A package with no lockfile (@fennecdb/web has no dependency at all) is
+      # audited from the one npm resolves for it, in a copy. `npm audit` exits
+      # 1 on any finding, so its JSON is read against the ignore list instead.
+      - name: npm audit of each published npm package
+        run: |
+          for d in web integrations/react integrations/cloudflare integrations/langchain; do
+            echo "== $d"
+            work="$RUNNER_TEMP/audit-$(basename "$d")"
+            mkdir -p "$work"
+            cp "$d/package.json" "$work/"
+            if [ -f "$d/package-lock.json" ]; then cp "$d/package-lock.json" "$work/"; fi
+            (cd "$work" && npm install --package-lock-only --ignore-scripts --no-audit --no-fund >/dev/null)
+            (cd "$work" && npm audit --omit=dev --json > audit.json || true)
+            python3 -I tools/osv_check.py --npm-audit "$work/audit.json"
+          done
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: stable
+          cache: false
+
+      # The newest toolchain: go.mod's `go 1.22` is the oldest a user may
+      # build with, and a fixed standard-library advisory is theirs to take.
+      # The module has no requires, so this audits the standard library.
+      - name: govulncheck of the Go module
+        working-directory: integrations/go
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          "$(go env GOPATH)/bin/govulncheck" -format json ./... > "$RUNNER_TEMP/govuln.json"
+          cd "$GITHUB_WORKSPACE"
+          python3 -I tools/osv_check.py --govulncheck "$RUNNER_TEMP/govuln.json"
+
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '8.0.x'
+
+      # `dotnet list` exits 0 whatever it finds, and prints NU1900 and a clean
+      # text when it could not fetch the advisories: osv_check.py fails on
+      # either, and on a project that never said it has no vulnerable packages.
+      - name: FennecDb's NuGet packages, transitive ones included
+        working-directory: integrations/dotnet/FennecDb
+        run: |
+          dotnet restore
+          dotnet list package --vulnerable --include-transitive 2>&1 | tee "$RUNNER_TEMP/nuget.txt"
+          cd "$GITHUB_WORKSPACE"
+          python3 -I tools/osv_check.py --nuget "$RUNNER_TEMP/nuget.txt"
+
+      - name: Kotlin's and Dart's dependencies by OSV
+        run: |
+          python3 -I tools/osv_check.py --self-test
+          python3 -I tools/osv_check.py
