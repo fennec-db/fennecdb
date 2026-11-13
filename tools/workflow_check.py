@@ -1269,6 +1269,14 @@ WRITE_ACTIONS = {
 }
 
 
+# The list a refusal says does not hold what a job ran (`a program
+# WRITE_COMMANDS does not list`): its finding says that listing it, with its
+# reason, is the way for what builds nothing. A refusal naming none -- a
+# local action, `npm publish` without `--ignore-scripts` -- has no entry
+# that would let it by.
+UNLISTED = re.compile(r"\b(WRITE_COMMANDS|WRITE_SCRIPTS|WRITE_ACTIONS) does not list\b")
+
+
 def listed_script(word):
     """The WRITE_SCRIPTS entry a command's word names by its path, or None."""
     path = word.replace("\\", "/")
@@ -1475,10 +1483,13 @@ def check_text(text, name, seen=None):
                                 " write that the lists do not hold: take it out")
         else:
             for line, what in off:
+                unlisted = UNLISTED.search(what)
                 findings.append(f"{name}:{line}: job `{job_id}` holds {', '.join(held)} write and runs"
                                 f" {what}: a job that writes runs only what the check lists, each with"
                                 " the reason it builds nothing; build in a job that reads alone and hand"
-                                " what it made to this one as an artifact")
+                                " what it made to this one as an artifact"
+                                + (f", or list it in {unlisted.group(1)} with its reason, if it builds"
+                                   " nothing" if unlisted else ""))
 
         read_ = secrets_read(job)
         if str(job.get("secrets", "")).strip() == "inherit":

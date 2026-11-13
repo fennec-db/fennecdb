@@ -429,6 +429,28 @@ class WritesAndBuilds(unittest.TestCase):
         self.assertEqual(len(got), 1, got)
         self.assertIn("runs the workflow `org/repo/.github/workflows/build.yml@", got[0])
 
+    def test_a_refusal_names_the_list_an_entry_would_go_in(self):
+        # What no list holds may be listed, if it builds nothing: the
+        # finding names the list. What no entry would let by names none.
+        for run, uses, listed in (
+                ("cargo build", None, "WRITE_COMMANDS"),
+                ("npm run build", None, "WRITE_COMMANDS"),
+                ("./gradlew assemble", None, "WRITE_SCRIPTS"),
+                ("echo hi", f"docker/build-push-action@{PIN} # v6.18.0", "WRITE_ACTIONS"),
+                ("npm publish ./web", None, None),
+                ("tar -I zstd -xf x.tar.zst", None, None),
+                ("echo hi", "./.github/actions/setup", None)):
+            with self.subTest(run=run, uses=uses):
+                got = self.job("contents: write", run, uses=uses)
+                self.assertEqual(len(got), 1, got)
+                self.assertIn("build in a job that reads alone and hand what it made to this one as an"
+                              " artifact", got[0])
+                if listed:
+                    self.assertTrue(got[0].endswith(f"as an artifact, or list it in {listed} with its reason,"
+                                                    " if it builds nothing"), got[0])
+                else:
+                    self.assertNotIn("or list it in", got[0])
+
     def test_a_local_action_beside_a_write(self):
         # Its steps are another file's, which this check does not read.
         uses = "./.github/actions/setup"
