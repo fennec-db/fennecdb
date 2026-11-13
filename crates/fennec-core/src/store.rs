@@ -851,16 +851,19 @@ impl Store {
         self.index.get(id)
     }
 
-    /// Whether `id`'s record was appended since `mark`: in a segment opened
-    /// since, or past where the last one ended then (a payload follows its
-    /// frame's head, so one at the mark itself is older). One in the mapped
-    /// file is older too: a block spills between its statements.
-    pub fn wrote_since(&self, mark: &Mark, id: DocId) -> bool {
-        self.index.get(id).is_some_and(|l| {
-            let seg = l.seg as usize;
-            l.seg & MAPPED == 0
-                && (seg >= mark.segments || (seg + 1 == mark.segments && l.off as usize > mark.len))
-        })
+    /// Whether `id`'s record lies at or past `first`'s, which the running
+    /// statement appended: appended since, as the segments are appended
+    /// to in order. A statement's records are all in memory -- a block
+    /// spills, and a store hands over to the file, only between
+    /// statements -- so one in the mapped file is older.
+    pub fn wrote_after(&self, first: DocId, id: DocId) -> bool {
+        match (self.index.get(first), self.index.get(id)) {
+            (Some(f), Some(l)) => {
+                debug_assert!(f.seg & MAPPED == 0, "a statement's record is in memory");
+                l.seg & MAPPED == 0 && (l.seg, l.off) >= (f.seg, f.off)
+            }
+            _ => false,
+        }
     }
 
     /// Points `id` at `loc`, or at nothing: where it was before a write

@@ -10120,7 +10120,9 @@ impl Database {
     /// `set` taking its value was refused, naming a row no read shows
     /// (`tests/model.rs`). The row `doc` writes is never among them
     /// (`unique_holders`): a reaper's `set` of a row past its time sets
-    /// it, one write.
+    /// it, one write. `waiting`: a `put`'s documents whose vectors wait for
+    /// its batch, and whether a preparation keeps them
+    /// ([`Self::link_written`]).
     fn let_go_expired(
         &mut self,
         collection: &str,
@@ -10128,6 +10130,7 @@ impl Database {
         doc: &Document,
         cut: (usize, i64),
         hooks: &[Arc<dyn crate::plugin::Hook>],
+        waiting: Option<(&mut Vec<Document>, bool)>,
     ) -> Result<()> {
         let c = &self.collections[collection];
         let mut gone = Vec::new();
@@ -10136,10 +10139,43 @@ impl Database {
                 gone.push(other);
             }
         }
+        // A row the same `put` wrote has its vector waiting in the batch,
+        // not in the graph: the batch is linked first, so the row takes its
+        // vector out with it as any row does. Left waiting, it was linked
+        // as the statement ended, for a row gone -- answered by `near`, and
+        // by `exact`, once the id held a row again -- where a replica's
+        // apply, linking its batch before a frame naming an id it holds
+        // (`VectorBatch`), had none (`tests/model.rs`).
+        if let Some((written, prepared)) = waiting {
+            let first = written.first().map(|w| w.id);
+            let ours = |f| gone.iter().any(|&d| c.store.wrote_after(f, d));
+            if first.is_some_and(|f| !c.vectors.is_empty() && ours(f)) {
+                self.link_written(collection, written, prepared);
+            }
+        }
         for other in gone {
             self.erase(collection, schema, (other, false), hooks)?;
         }
         Ok(())
+    }
+
+    /// The vectors of the documents a `put` wrote so far linked now, ahead
+    /// of its end ([`Self::index_written`]), and the documents let go of --
+    /// or kept by the preparation they came from, `prepared` -- as at its
+    /// end: a document is about to write over one of their rows, take one
+    /// out, or set a row as an upsert. Out of line: a `put` comes here only
+    /// where a document meets a row an earlier one wrote, or upserts.
+    #[cold]
+    #[inline(never)]
+    fn link_written(&mut self, collection: &str, written: &mut Vec<Document>, prepared: bool) {
+        self.index_written(collection, written);
+        #[cfg(not(target_arch = "wasm32"))]
+        match prepared {
+            true => self.preparation.spend(written),
+            false => written.clear(),
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = prepared;
     }
 
     /// The test a row of `collection` passes while it lives, at the time a
@@ -10677,11 +10713,10 @@ impl Database {
     ) -> Result<usize> {
         // The collection looked up once, and its hooks borrowed rather than
         // copied: a lookup by name is a hash of the name, and the copy an
-        // allocation, every statement. Whether it keeps a graph is read
-        // there too: looked up again, it was 68 instructions of a `put`.
-        let (schema, cid, bound, graphs) = {
+        // allocation, every statement.
+        let (schema, cid, bound) = {
             let c = self.collection(collection)?;
-            (c.schema.clone(), c.id, c.bound, !c.vectors.is_empty())
+            (c.schema.clone(), c.id, c.bound)
         };
         // What a row of it may be: made, and -- by a `put`, or an upsert's
         // `else set` -- written over. A write over an expired row makes
@@ -10762,22 +10797,29 @@ impl Database {
         };
 
         let mut n = 0usize;
+        // The documents written, whose vectors wait to be linked as a batch
+        // ([`Self::index_written`]). A row whose record lies at or past the
+        // first one's is one of theirs ([`Store::wrote_after`]): a write
+        // over it or taking it out links them first ([`Self::link_written`]).
+        // Asked of that first document's record, a `put` holds nothing more
+        // across its documents: a lone `put` over REST is 4 instructions of
+        // the program's own more than before any batch was linked first,
+        // where the store's mark held from the batch's start -- seven words
+        // -- and whether the collection keeps a graph made it 10.
         let mut written: Vec<Document> = Vec::with_capacity(built.len());
-        // Where the store stood as `written` took its first document, in a
-        // collection keeping a graph: a row whose record lies past it has
-        // its vector waiting there.
-        let mut since = None;
+        #[cfg(not(target_arch = "wasm32"))]
+        let prepared = ready.is_some();
+        #[cfg(target_arch = "wasm32")]
+        let prepared = false;
         for (i, mut doc) in built.into_iter().enumerate() {
             #[cfg(target_arch = "wasm32")]
             let _ = i;
             if let (Some(cut), true) = (expiry, unique) {
-                self.let_go_expired(collection, &schema, &doc, cut, hooks)?;
+                let waiting = Some((&mut written, prepared));
+                self.let_go_expired(collection, &schema, &doc, cut, hooks, waiting)?;
             }
             let mut c = self.collections.get_mut(collection).unwrap();
             let mark = c.store.mark();
-            if graphs && written.is_empty() {
-                since = Some(mark);
-            }
             // The row an upsert sets rather than the document written.
             let mut held = None;
             let named = doc.id != 0;
@@ -10888,24 +10930,13 @@ impl Database {
                         // vector leaves the graph here. Left waiting, it
                         // was linked as the statement ended, over a row
                         // holding another vector or none, and `near` found
-                        // it (`tests/model.rs`). One look at the offset
+                        // it (`tests/model.rs`). Two looks at the offset
                         // index a row written over, and only beside a graph
                         // and a batch.
-                        if !written.is_empty()
-                            && since.is_some_and(|m| c.store.wrote_since(&m, doc.id))
-                        {
-                            self.index_written(collection, &mut written);
-                            #[cfg(not(target_arch = "wasm32"))]
-                            match ready {
-                                Some(_) => self.preparation.spend(&mut written),
-                                None => written.clear(),
-                            }
-                            // The store as it stood before this document,
-                            // which nothing has written to since its mark:
-                            // taken again rather than kept, a mark is seven
-                            // words a `put` would hold across its hooks.
+                        let ours = |f| !c.vectors.is_empty() && c.store.wrote_after(f, doc.id);
+                        if written.first().is_some_and(|w| ours(w.id)) {
+                            self.link_written(collection, &mut written, prepared);
                             c = self.collections.get_mut(collection).unwrap();
-                            since = Some(c.store.mark());
                         }
                         c.unindex_doc(old, Some(&doc));
                     }
@@ -10973,12 +11004,7 @@ impl Database {
                 continue;
             };
             if !written.is_empty() {
-                self.index_written(collection, &mut written);
-                #[cfg(not(target_arch = "wasm32"))]
-                match ready {
-                    Some(_) => self.preparation.spend(&mut written),
-                    None => written.clear(),
-                }
+                self.link_written(collection, &mut written, prepared);
             }
             if self.set_row(
                 collection,
@@ -14540,8 +14566,9 @@ impl Database {
         // was 29 instructions of a set by id over REST.
         let c = match c.unique_clash(&doc) {
             Err(Error::Duplicate(why)) => match self.expiry_in(schema) {
+                // A `set` indexes its vector as it writes: nothing waits.
                 Some(cut) => {
-                    self.let_go_expired(collection, schema, &doc, cut, hooks)?;
+                    self.let_go_expired(collection, schema, &doc, cut, hooks, None)?;
                     let c = self.collections.get_mut(collection).unwrap();
                     c.unique_clash(&doc)?;
                     c
