@@ -995,7 +995,10 @@ fn keys_alone(sel: &mut Select) {
 }
 
 /// pgvector's text of a vector, `[1, 2.5, 3]`, or why it is none: a number
-/// past a float's range named as every reader names one.
+/// past a float's range named as every reader names one -- but in a stored
+/// definition's text, which reads it as it did (`crate::stored_float`): the
+/// SQL holding it is read at the open, and a definition stored with `<#>
+/// '[1, 1e400]'` was marked broken.
 #[inline(never)]
 fn pgvector_text(t: &str) -> std::result::Result<Vec<f32>, String> {
     let bad = || "a vector written as text is pgvector's `'[1, 2, 3]'`".to_string();
@@ -1008,12 +1011,13 @@ fn pgvector_text(t: &str) -> std::result::Result<Vec<f32>, String> {
         let n = n.trim_ascii();
         match fennec_core::num::read_f64(n) {
             Ok(x) => out.push(x as f32),
-            Err(why) => {
-                return Err(match why.range() {
-                    Some(range) => format!("number `{}` {range}", fennec_core::num::shown(n)),
-                    None => bad(),
-                })
-            }
+            Err(why) => match (crate::stored_float(n, why), why.range()) {
+                (Some(x), _) => out.push(x as f32),
+                (None, Some(range)) => {
+                    return Err(format!("number `{}` {range}", fennec_core::num::shown(n)))
+                }
+                (None, None) => return Err(bad()),
+            },
         }
     }
     Ok(out)

@@ -59,22 +59,23 @@ fn one_definition(stmt: Statement) -> Result<fennec_core::named::Definition> {
 ///
 /// A number past a float's range, which every other reading refuses, reads
 /// here as it read before it was refused -- `1e400` an infinity, `1e-400`
-/// 0 (`lexer::float_token`) -- so a definition stored then reads to the
-/// tree its digest was taken of, under the grammar epoch it was stored
-/// with, rather than being marked broken; a new one holding one is refused
-/// at its `create statement`.
+/// 0, a literal's and pgvector's text of a vector's alike
+/// ([`stored_float`]) -- so a definition stored then reads to the tree its
+/// digest was taken of, under the grammar epoch it was stored with, rather
+/// than being marked broken; a new one holding one is refused at its
+/// `create statement`.
 #[cfg(feature = "statements")]
 pub fn stored_definition(text: &str) -> Result<(u64, fennec_core::named::Definition)> {
-    /// Set back as the reading ends, a panic's unwinding too: the thread's
-    /// next text is read afresh.
-    struct Reading;
+    /// What the thread's reading was, set back as this one ends, a panic's
+    /// unwinding too: a text read afresh after it is refused again, and one
+    /// it was read inside of reads on as it did.
+    struct Reading(bool);
     impl Drop for Reading {
         fn drop(&mut self) {
-            STORED.with(|s| s.set(false));
+            STORED.with(|s| s.set(self.0));
         }
     }
-    STORED.with(|s| s.set(true));
-    let _reading = Reading;
+    let _reading = Reading(STORED.with(|s| s.replace(true)));
     let quick = definition(text)?;
     let digest = quick.digest()?;
     if !text.contains('[') {
@@ -91,8 +92,37 @@ pub fn stored_definition(text: &str) -> Result<(u64, fennec_core::named::Definit
 thread_local! {
     /// Whether this thread is reading a stored definition's text
     /// ([`stored_definition`]), which reads a number past a float's range as
-    /// it read before one was refused.
+    /// it read before one was refused ([`stored_float`]).
     pub(crate) static STORED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The number `text` past a float's range (`why`) as a stored definition's
+/// text reads it: as it read before one was refused, `1e400` an infinity
+/// and `1e-400` 0, each with its sign; `None` in a text read afresh, which
+/// refuses it, and for a text that is no number. Every reader of a number
+/// in FennecQL's text asks it -- a literal's token (`lexer::float_token`)
+/// and pgvector's text of a vector (`parser::pgvector_text`) -- or a
+/// definition stored before holding one is read as no tree, and marked
+/// broken at the open. `near`'s text of a vector and a sparse vector's
+/// stay texts in the tree, their digest the text's either way, and are read
+/// as a call runs them, which refuses such a number then in the range's
+/// words (`near_vector`, `sparse::parse`).
+#[inline]
+pub(crate) fn stored_float(text: &str, why: fennec_core::num::Unread) -> Option<f64> {
+    #[cfg(feature = "statements")]
+    if STORED.with(std::cell::Cell::get) {
+        use fennec_core::num::Unread;
+        let neg = text.starts_with('-');
+        return match why {
+            Unread::TooLarge if neg => Some(f64::NEG_INFINITY),
+            Unread::TooLarge => Some(f64::INFINITY),
+            Unread::TooSmall if neg => Some(-0.0),
+            Unread::TooSmall => Some(0.0),
+            Unread::Malformed => None,
+        };
+    }
+    let _ = (text, why);
+    None
 }
 
 /// Installs [`stored_definition`] as the process's reader of stored named
@@ -791,6 +821,25 @@ mod tests {
     fn errors_are_positional() {
         let e = parse_one("get docs where").unwrap_err().to_string();
         assert!(e.contains("position"), "{e}");
+    }
+
+    /// A stored definition's reading sets back what the thread's reading
+    /// was: a text read afresh after it is refused again, after a reading
+    /// that failed too, and one read inside another reads on as it did.
+    #[cfg(feature = "statements")]
+    #[test]
+    fn a_stored_reading_sets_back_what_the_thread_read() {
+        use std::cell::Cell;
+        let big = "create statement big() as get t where x < 1e400 select id";
+        let stored = || STORED.with(Cell::get);
+        assert!(stored_definition(big).is_ok() && !stored());
+        assert!(stored_definition("create statement").is_err() && !stored());
+        assert!(parse_one(big).is_err());
+        STORED.with(|s| s.set(true));
+        assert!(stored_definition(big).is_ok() && stored());
+        assert!(parse_one(big).is_ok());
+        STORED.with(|s| s.set(false));
+        assert!(parse_one(big).is_err());
     }
 
     /// Recursive descent used to overflow the stack on a deep expression. A

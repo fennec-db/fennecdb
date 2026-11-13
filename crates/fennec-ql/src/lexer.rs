@@ -296,9 +296,8 @@ fn unlexed(
 /// is refused, where it read as an infinity or 0. A named statement's
 /// stored text reads one as it read before -- the infinity, the 0 -- so a
 /// definition a file holds reads to the tree its digest was taken of,
-/// under the grammar epoch it was stored with
-/// (`crate::stored_definition`); a text read afresh, a `create statement`'s
-/// among them, is refused.
+/// under the grammar epoch it was stored with (`crate::stored_float`); a
+/// text read afresh, a `create statement`'s among them, is refused.
 #[inline]
 pub(crate) fn float_token(text: &str, at: usize) -> Result<f64> {
     match fennec_core::num::read_f64(text) {
@@ -308,28 +307,19 @@ pub(crate) fn float_token(text: &str, at: usize) -> Result<f64> {
 }
 
 /// [`float_token`]'s number that is none, apart: a refusal is rare, and its
-/// words are not worth a number's registers.
+/// words are not worth a number's registers. Named by its first 40
+/// characters past them, a malformed one too (`num::shown`): a statement of
+/// one 64 MiB number is not told back whole.
 #[cold]
 #[inline(never)]
 fn unread(text: &str, at: usize, why: fennec_core::num::Unread) -> Result<f64> {
-    #[cfg(feature = "statements")]
-    if crate::STORED.with(std::cell::Cell::get) {
-        use fennec_core::num::Unread;
-        let neg = text.starts_with('-');
-        match why {
-            Unread::TooLarge if neg => return Ok(f64::NEG_INFINITY),
-            Unread::TooLarge => return Ok(f64::INFINITY),
-            Unread::TooSmall if neg => return Ok(-0.0),
-            Unread::TooSmall => return Ok(0.0),
-            Unread::Malformed => {}
-        }
+    if let Some(x) = crate::stored_float(text, why) {
+        return Ok(x);
     }
+    let shown = fennec_core::num::shown(text);
     Err(Error::Query(match why.range() {
-        Some(range) => {
-            let shown = fennec_core::num::shown(text);
-            format!("position {at}: number `{shown}` {range}")
-        }
-        None => format!("position {at}: invalid decimal number `{text}`"),
+        Some(range) => format!("position {at}: number `{shown}` {range}"),
+        None => format!("position {at}: invalid decimal number `{shown}`"),
     }))
 }
 

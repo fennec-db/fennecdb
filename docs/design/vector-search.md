@@ -190,11 +190,24 @@ naming it, where it was and the range (`num::Unread`): JSON's "number
 1.7976931348623157e308 either side of 0" (a body's, a parameter's, a
 document's, a json field's, a vector's), FennecQL's at its position, the
 query string's naming the field, a sparse vector's weight, pgvector's text
-of a vector, and an import's naming the row and field or the column -- a
-`numeric` holds 1e400, and a
-SQLite text may -- the infinities and `NaN` PostgreSQL and SQLite spell as
-words kept as before. A number written past 40 characters is named by its
-first 40 and its length. Rounding to the nearest decides the ends: past
+of a vector, `near`'s text of a vector as a call reads it ("the near
+vector: number ..."), and an import's naming the row and field or the
+column -- a `numeric` holds 1e400, a `jsonb` one too, and a SQLite text
+may -- the infinities and `NaN` PostgreSQL and SQLite spell as words kept
+as before. A reader handed a text it reads as JSON, whose own words for
+one it cannot read would call the number a malformed text -- `near`'s
+"unparseable text", an import's "expected JSON" -- passes the range's
+refusal on as said, telling it by the range's words that end it
+(`num::past_range`), their bytes compared: a search for a pattern of
+several bytes brings the string searcher into the module (7.8 KB,
+`Error::reason`). Rejected: the refusal made an `Error::Type` for such a
+reader to tell apart by its kind -- the native library hands a binding
+the kind as its code (`FENNEC_TYPE`, `FENNEC_QUERY`), so a parameter's
+`1e400` would have answered another than a literal's -- and the two
+texts asked of `Unread::range` in a closure, 142 bytes of the module
+where the constants compared are 47. A number written past 40 characters
+is named by its first 40 and its length, a malformed one too. Rounding
+to the nearest decides the ends: past
 the largest `f64` but under the midpoint above it (`1.7976931348623158e308`)
 reads as the largest, and anything from just past half the smallest
 subnormal (`2.4703282292062328e-324`, `3e-324`) as it, while that half
@@ -213,12 +226,13 @@ the digest main gave it ([named-statements.md](named-statements.md#what-is-built
 *A float past its range*). A vector's component is still the `f32` of the
 number read, and a number within an `f64`'s range past an `f32`'s is that
 `f32`'s infinity or 0, as a `vector<N, f16>`'s past ±65 504 is its own
-(`site/content/docs/limits.html`). The module grew 2 030 bytes, 963 of
+(`site/content/docs/limits.html`). The module grew 2 090 bytes, 808 of
 them brotli's (`make size-report`): the reader 1 923 where the one that
 shifted was 2 982, `exact` 757, `near` 536 and `rounded` 308, the
 multipliers out of line 688 where `float_into` gave back 584, the readers'
-words some 830 (FennecQL's, pgvector's text, a sparse weight, JSON's) and
-360 of data.
+words some 780 (FennecQL's, pgvector's text, a sparse weight, JSON's),
+`near`'s text and the test telling the range's words apart 93
+(`near_vector` 46, `past_range` 47), and 376 of data.
 
 **A list of numbers is read as written.** An `[int]`, a `[float]` and a
 `[timestamp]` keep each element as written, or refuse the statement naming

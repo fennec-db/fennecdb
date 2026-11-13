@@ -395,3 +395,51 @@ fn a_float_past_its_range_is_refused_naming_it() {
     let back = fennec_core::json::parse(&out).unwrap();
     assert!(format!("{back:?}").contains("Float(-5e-324)"), "{back:?}");
 }
+
+/// `near`'s text of a vector is read as the query runs, and a number past a
+/// float's range in it is refused in the range's words, as every reader
+/// refuses one, at its byte in the text as written -- where it was called
+/// unparseable text -- and a sparse vector's weight so too; a text that is
+/// no vector is still unparseable. A malformed float is named by its first
+/// 40 characters past them, as one past the range is.
+#[test]
+fn near_s_text_names_a_number_past_the_range() {
+    let large = "is past a float's range: a float is at most 1.7976931348623157e308 either \
+                 side of 0";
+    let small = "is past a float's range: a float is 0 or at least 5e-324 either side of 0";
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection t (v vector<2> @hnsw(cosine), s sparse<3> @inverted)",
+    )
+    .unwrap();
+    run(&mut db, "put t {id: 1, v: [1, 0], s: '{1:0.5}/3'}").unwrap();
+    for (sql, says) in [
+        (
+            "get t near v '[1, 1e400]' limit 1",
+            format!("the near vector: number `1e400` at byte 4 {large}"),
+        ),
+        (
+            "get t near v '  [-1e-400, 1]' limit 1",
+            format!("the near vector: number `-1e-400` at byte 3 {small}"),
+        ),
+        (
+            "get t near s '{1:1e400}/3' limit 1",
+            format!("sparse vector `{{1:1e400}}/3`: a weight {large}"),
+        ),
+        (
+            "get t near v 'hello' limit 1",
+            "near expects a vector, unparseable text: hello".to_string(),
+        ),
+    ] {
+        let e = db.query(&parse_one(sql).unwrap(), &[]).expect_err(sql);
+        assert!(e.to_string().contains(&says), "{sql}: {e}");
+    }
+    let digits = "9".repeat(45);
+    let e = refused(&format!("get t where x < {digits}e"));
+    let named = format!(
+        "position 16: invalid decimal number `{}... (46 characters)`",
+        &digits[..40]
+    );
+    assert!(e.contains(&named), "{e}");
+}

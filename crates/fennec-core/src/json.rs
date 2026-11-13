@@ -742,13 +742,17 @@ fn parse_value_at(s: &str, i: &mut usize, depth: usize) -> Result<Value> {
 
 /// The refusal of the number `text` at byte `at`: one past a float's range
 /// named with it and where it was, as an int past its range is -- read as
-/// an infinity, 1e400 went back out as `null`, and 1e-400 as 0.
+/// an infinity, 1e400 went back out as `null`, and 1e-400 as 0 -- its
+/// words ending in the range's, which a reader of a text handed in tells
+/// apart by (`num::past_range`). Named by its first 40 characters past
+/// them, a malformed one too (`num::shown`).
 #[cold]
 #[inline(never)]
 fn unread(text: &str, at: usize, why: crate::num::Unread) -> Error {
+    let shown = crate::num::shown(text);
     Error::Query(match why.range() {
-        Some(range) => format!("number `{}` at byte {at} {range}", crate::num::shown(text)),
-        None => format!("invalid number `{text}`"),
+        Some(range) => format!("number `{shown}` at byte {at} {range}"),
+        None => format!("invalid number `{shown}`"),
     })
 }
 
@@ -1673,6 +1677,20 @@ mod tests {
         let whole = format!("1{}", "0".repeat(400));
         let head = format!("number `1{}... (401 characters)` at byte 0", "0".repeat(39));
         refused(parse(&whole).map(drop), format!("{head} {large}"));
+        // Its words end in the range's, which a reader of a text handed in
+        // tells it apart by (`num::past_range`); a malformed number's do
+        // not, and name it by its first 40 characters too.
+        let Err(Error::Query(m)) = parse("[1, -1e-400]") else {
+            panic!("not a query error")
+        };
+        assert!(crate::num::past_range(&m), "{m}");
+        let malformed = format!("1{}", "-1".repeat(30));
+        let Err(Error::Query(m)) = parse(&malformed) else {
+            panic!("not a query error")
+        };
+        assert!(!crate::num::past_range(&m), "{m}");
+        let named = format!("invalid number `{}... (61 characters)`", &malformed[..40]);
+        assert_eq!(m, named);
         assert_eq!(
             parse_params("[1.7976931348623157e308, -5e-324, -0e999]").unwrap(),
             [

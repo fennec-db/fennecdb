@@ -331,7 +331,15 @@ pub(crate) fn parse_cell(raw: &[u8], kind: &Kind, column: &str) -> Result<Value>
             Value::Float(v)
         }
         Kind::Text => Value::Text(text(raw)),
-        Kind::Json => fennec_core::json::parse_json(&text(raw)).map_err(|_| bad("JSON"))?,
+        // A `jsonb` keeps its numbers as `numeric`s, so one holds 1e400: a
+        // number past a float's range named with the column, as a float
+        // column's is (`num::past_range`), not as text that is no JSON.
+        Kind::Json => fennec_core::json::parse_json(&text(raw)).map_err(|e| match e {
+            Error::Query(m) if fennec_core::num::past_range(&m) => {
+                Error::Type(format!("`{column}`: {m}"))
+            }
+            _ => bad("JSON"),
+        })?,
         Kind::Point => {
             let s = text(raw);
             let (x, y) = s
@@ -1003,6 +1011,14 @@ mod tests {
         assert_eq!(float("-0").unwrap(), Value::Float(-0.0));
         let e = float("1.2.3").unwrap_err().to_string();
         assert!(e.contains("`price` expected a decimal"), "{e}");
+        // A `jsonb` keeps its numbers as `numeric`s too: one past the range
+        // is named with the column, not called a text that is no JSON.
+        let json = |raw: &str| parse_cell(raw.as_bytes(), &Kind::Json, "meta");
+        let e = json(r#"{"a": [1, 1e400]}"#).unwrap_err().to_string();
+        let says = "`meta`: number `1e400` at byte 10 is past a float's range";
+        assert!(e.contains(says), "{e}");
+        let e = json(r#"{"a": 1.2.3}"#).unwrap_err().to_string();
+        assert!(e.contains("`meta` expected JSON"), "{e}");
     }
 
     #[test]

@@ -75,7 +75,9 @@ counts, alone or in a block (`Undo::Statements`), kept by every image,
 With the feature an open reads its text back (`fennec_ql::install`) and
 holds its digest, the quick read's, running the text read as written
 (`stored_definition`), a float past its range read as it was stored, an
-infinity or 0, where every other text refuses it (`lexer::float_token`). A schema change's commit holds its `depends`: refused
+infinity or 0, where every other text refuses it: every reader of a number
+in a text asks `stored_float`, a token's and pgvector's text's.
+A schema change's commit holds its `depends`: refused
 naming it, or marked broken (`Database::internally`, an apply, an open),
 never failing; the mark is derived, never stored. A replacement keeps the
 old tree's contract; a writing body reads through an index or says `scans`

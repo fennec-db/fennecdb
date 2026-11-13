@@ -116,21 +116,37 @@ pub enum Unread {
     TooSmall,
 }
 
+/// What a refusal says after a number past the largest `f64`.
+const TOO_LARGE: &str =
+    "is past a float's range: a float is at most 1.7976931348623157e308 either side of 0";
+
+/// What a refusal says after a number nearer 0 than the smallest `f64`.
+const TOO_SMALL: &str = "is past a float's range: a float is 0 or at least 5e-324 either side of 0";
+
 impl Unread {
     /// What a refusal says after the number, for one past a float's range;
     /// `None` for a malformed one, which each reader words its own way.
     pub fn range(self) -> Option<&'static str> {
         match self {
             Unread::Malformed => None,
-            Unread::TooLarge => Some(
-                "is past a float's range: a float is at most 1.7976931348623157e308 \
-                 either side of 0",
-            ),
-            Unread::TooSmall => {
-                Some("is past a float's range: a float is 0 or at least 5e-324 either side of 0")
-            }
+            Unread::TooLarge => Some(TOO_LARGE),
+            Unread::TooSmall => Some(TOO_SMALL),
         }
     }
+}
+
+/// Whether a refusal's words `m` are those of a number past a float's
+/// range, whichever reader wrote them: they end in the range's
+/// ([`Unread::range`]). What a reader of a text handed in passes on as
+/// said -- `near`'s text of a vector, an imported json cell -- where its
+/// own words for a text it cannot read ("unparseable", "expected JSON")
+/// would call a number past the range a malformed text. The end's bytes
+/// compared, never the words searched for: a search for a pattern of
+/// several bytes brings the string searcher into the browser module (7.8
+/// KB, `Error::reason`). The two texts compared as constants: asked of
+/// [`Unread::range`] in a closure, it was 142 bytes of the module.
+pub fn past_range(m: &str) -> bool {
+    m.ends_with(TOO_LARGE) || m.ends_with(TOO_SMALL)
 }
 
 /// A number's text as a refusal names it: whole up to 40 characters, and

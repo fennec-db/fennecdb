@@ -18394,11 +18394,19 @@ fn near_vector(v: Value) -> Result<Vec<f32>> {
     let items = match v {
         Value::Vector(v) => return Ok(v),
         Value::List(items) => items,
-        Value::Text(s) => match crate::json::parse(s.trim()) {
+        // Untrimmed: the reader steps over the spaces `trim` would, and a
+        // refusal's byte is then the text's as written.
+        Value::Text(s) => match crate::json::parse(&s) {
             // The JSON parser already reduces a numeric array to a vector;
             // a mixed array comes back as a list and is checked below.
             Ok(Value::Vector(v)) => return Ok(v),
             Ok(Value::List(items)) => items,
+            // A number past a float's range, named in the range's words as
+            // every reader names one (`num::past_range`), never "unparseable
+            // text": the text is a vector's, one of its numbers no float.
+            Err(Error::Query(m)) if crate::num::past_range(&m) => {
+                return Err(Error::Type(format!("the near vector: {m}")))
+            }
             _ => {
                 return Err(Error::Type(format!(
                     "near expects a vector, unparseable text: {s}"
