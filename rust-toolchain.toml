@@ -1,3 +1,9 @@
+# An exact release, never `stable`: the compiler CI tests with is the one that
+# ships. `stable` moved under main's CI with no change of ours -- 1.100.0's
+# Unicode tables failed fennec-core's case tests on every pull request the
+# day it came out. The Dockerfiles build on the rust image of this same
+# release, by digest, and tools/toolchain_check.py holds them alike; a bump
+# is a pull request of its own.
 [toolchain]
-channel = "stable"
+channel = "1.99.1"
 targets = ["wasm32-unknown-unknown"]
