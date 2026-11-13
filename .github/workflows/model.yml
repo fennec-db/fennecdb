@@ -15,8 +15,9 @@
 # model's. Each seed is named as it starts and as it ends, so a job that
 # hangs or runs out of time names the seeds it never finished. Built as a
 # release, with the checks a debug build makes -- an overflow, a debug
-# assertion -- which panic into the report; about forty minutes a job,
-# never on a pull request and not a required check.
+# assertion -- which panic into the report; ten to twenty minutes a job
+# (docs/design/engine.md), never on a pull request and not a required
+# check.
 name: engine model
 
 on:

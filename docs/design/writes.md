@@ -28,23 +28,46 @@ core already rendered and applied `insert` (`render_put`'s `insert`);
 write `insert_new`.
 
 A `put` writing one row twice -- an id it names twice, or one it hands out
-and then names -- leaves the row the last document's, its vector or none.
-A statement's vectors wait for the batch linked as it ends
+and then names -- leaves the row the last document's, its vector or none;
+and a `put` letting go of a row past its time that it wrote itself -- a
+later document taking the `@unique` value an earlier one wrote with a
+time already past ([below](#arithmetic-in-set)) -- leaves no vector of
+the row. A statement's vectors wait for the batch linked as it ends
 (`index_written`), so the second document took the row out of a graph the
 first one's vector was not in yet, and the batch then linked that vector
-over a row holding another or none: `near`, `exact` too, found the row by
-a vector it no longer held until the file was opened again. Where a
-document writes over a row whose record lies past the store's mark as the
-batch began (`Store::wrote_since`), the batch is linked first, as an
-upsert's is and a replica's apply links its own at an id met twice
-(`VectorBatch`); the row's vector then leaves the graph as any row's does.
-A `put` over rows of a collection keeping a graph pays one look at the
-offset index a row it writes over; a lone `put` over REST 10 instructions
-of the program's own, 544 to 554 in `Database::put` (an lldb trace of one
-call, `tools/instr/trace.py`). Kept for every collection, the store's mark
--- seven words -- cost 22, and whether the collection keeps a graph looked
-up by its name again 68 more (`tests/model.rs` found the bug;
-`tests/blocks.rs`, `a_row_a_put_writes_twice_holds_its_last_vector_or_none`).
+over a row holding another or none, or for a row gone: `near`, `exact`
+too, found the row by a vector it no longer held -- the one let go of
+once its id held a row again -- until the file was opened again, where a
+replica, whose apply links its batch before a frame naming an id in it
+(`VectorBatch`), held none. Where a document writes over a row, or lets
+go of one, whose record lies at or past the batch's first document's
+(`Store::wrote_after`), the batch is linked first (`link_written`), as an
+upsert's is; the row's vector then leaves the graph as any row's does. A
+`set`, a `del` and a statement a write wakes meet no batch: a `set` links
+its vector as it writes, and a block that defers places each vector in a
+node as its `put` ends, which a row taken out or written over takes with
+it. Asked of the batch's first document's record, the test holds nothing
+across a `put`'s documents, and costs two looks at the offset index a row
+written over or let go of, only beside a graph and a batch. A lone `put`
+over REST is 4 instructions of the program's own more than before
+either fix, 544 to 548 in `Database::put`, and a `put` of 100 documents
+writing over rows 685 more, 6.85 a document, 28 911 to 29 632 (an lldb
+trace of one call, `tools/instr/trace.py`: the 30th of
+`fennec_http::handle` in `replays put`, of `Database::put` in
+`replays batch`); a set by id 2 fewer, 248 to 246 in `set_row` (the 30th
+PATCH of `rows patch`). The graph is asked before the batch's first
+document is read, which a collection holding none answers at once: read
+first, it cost the 100 documents 880. The first form, the store's mark
+held from the batch's start -- seven words -- and whether the collection
+keeps a graph read beside it, cost a lone `put` 10 and the 100 documents
+983, and forms before it more: the mark held for every collection 22,
+the graph looked up again by the collection's name 68 (`tests/model.rs`
+found the first bug, a review the second, which the model found too once
+it held each graph's count to its rows; `tests/blocks.rs`,
+`a_row_a_put_writes_twice_holds_its_last_vector_or_none` and
+`a_row_a_put_lets_go_of_takes_its_waiting_vector_with_it`, every form of
+`put`, lone, in a block, in one that defers and in one prepared as
+`/batch` prepares it, held to a replica).
 
 ## Arithmetic in set
 

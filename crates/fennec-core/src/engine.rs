@@ -10804,8 +10804,9 @@ impl Database {
         // Asked of that first document's record, a `put` holds nothing more
         // across its documents: a lone `put` over REST is 4 instructions of
         // the program's own more than before any batch was linked first,
-        // where the store's mark held from the batch's start -- seven words
-        // -- and whether the collection keeps a graph made it 10.
+        // and a `put` of 100 documents writing over rows 685, where the
+        // store's mark held from the batch's start -- seven words -- and
+        // whether the collection keeps a graph made them 10 and 983.
         let mut written: Vec<Document> = Vec::with_capacity(built.len());
         #[cfg(not(target_arch = "wasm32"))]
         let prepared = ready.is_some();
@@ -10932,9 +10933,11 @@ impl Database {
                         // holding another vector or none, and `near` found
                         // it (`tests/model.rs`). Two looks at the offset
                         // index a row written over, and only beside a graph
-                        // and a batch.
-                        let ours = |f| !c.vectors.is_empty() && c.store.wrote_after(f, doc.id);
-                        if written.first().is_some_and(|w| ours(w.id)) {
+                        // and a batch, the graph asked first: reading the
+                        // batch's first document first cost a `put` of 100
+                        // documents writing over rows 195 instructions more.
+                        let ours = |w: &Document| c.store.wrote_after(w.id, doc.id);
+                        if !c.vectors.is_empty() && written.first().is_some_and(ours) {
                             self.link_written(collection, &mut written, prepared);
                             c = self.collections.get_mut(collection).unwrap();
                         }

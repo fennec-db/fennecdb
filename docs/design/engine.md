@@ -902,11 +902,15 @@ instructions to 154.1 G.
 
 What it costs (`/usr/bin/time -l`, instructions retired): `make test`'s
 200 seeds of 1 000 steps, in the debug build, 423.1 G with every index and
-336.5 G without, where before `b`'s and `t`'s vectors, the reads over
-them and the graphs' counts they took 321.9 G and 298.6 G -- on CI's four
-vCPUs some 25 to 45 s each, as the first runs' 20 to 35. The weekly
-run's build, 8 seeds of 50 000 steps: 305.2 G against 240.5 G, about
-forty minutes a job where it was half an hour.
+336.5 G without, 88 and 71 s of CPU here, where before the vectors in
+every kind of graph, the reads over them, the graph runs, the documents
+of a `put` meeting each other and the graphs' counts they took 321.9 G
+and 298.6 G, 65 and 63 s -- on CI's four vCPUs some 25 to 45 s each,
+within the minute. In the weekly run's build one seed of 100 000 steps
+takes 78.1 G and 7.8 s of CPU here, where it took 63.1 G and 6.7 s: a
+job's 125 seeds, some 31 a thread, are four minutes of this machine's
+CPU a thread, ten to twenty on a runner's slower vCPUs with the build, of
+the 180 a job may take.
 
 Its first runs found two bugs, each fixed with a test of its own: a `set`
 refused a `@unique` value a row past its time held, which a `put` took
