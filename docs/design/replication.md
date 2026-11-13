@@ -35,7 +35,46 @@ in V5's drill on CI; `tests/replication.rs` holds a promotion beside a
 lookup that never ends (30 s on main, the 5 s of the dial's bound with the
 dial not walked away from) and beside a primary that takes the connection
 and never answers (the follower's 10 s of silence where the stream reached
-`halt` only with the head). A durable
+`halt` only with the head). The session looks at the halt before each
+message it reads (`Follower::session`), as an archiver's looks at its
+stop (`archive.rs`, `node_archive.rs`), and never at the socket's cut
+alone: the cut is a `shutdown` through a duplicate of the socket
+(`try_clone`), which on Unix shares the socket, every read after it
+reading its end, and on Windows (`WSADuplicateSocket`) ends a read already
+waiting but not one begun after it -- that read reads on, the primary's
+keep-alive every 2 s (`ALIVE`) keeping it short of its 10 s of silence. A
+follower between two reads at the halt -- landing a write, its fsync under
+`--sync always`, or not yet back at its read -- so followed on for good,
+and the halt waited for it for good: five runs of `windows (http)` between
+2026-11-08 and 11-13 hung until cancelled, 1 to 6 hours each, every one in
+a test halting a follower just after a write landed on it
+(`a_stream_and_changes_sent_after_a_write_wait_for_it_on_a_replica`, which
+halts three times; a restarted replica; a compaction beside a replica; a
+copy taking an image) or promoting one
+(`node_archive::a_promoted_tenant_is_archived_on_its_new_history_without_an_image`).
+On Unix it never showed: of 4 500 runs of the first under load, on macOS
+and in Docker on Linux, none hung. Now a halt between reads ends the
+session at once, and one whose look came just before the cut ends it after
+the next message, a keep-alive at most 2 s on. `tests/replication.rs`'
+`a_halt_ends_a_follower_held_between_two_reads` holds a follower in its
+hello's callback, past its read, until the cut has reached the primary's
+side of a relay between them, then lets it go; with a cut that leaves later
+reads alone, as Windows' does (on macOS, `Shutdown::Write` in its place),
+the loop as it was read on and the test failed at its 20 s, the hung test
+failing at its first halt, and fennec-http's whole suite hung where
+Windows' had, in `node_archive`'s promotion (and in `dials`' replica over
+HTTPS, halted as it follows). With the loop looking at the flag every one
+passes under that stand-in but the promotion beside a primary that never
+answers, which asks the cut to end a read already waiting: Windows' does,
+the test passing there, and `Shutdown::Write` does not. The tests' halts
+are bounded (`halt`, 20 s) and a stream's first event is read within 30 s
+as a whole (`first_event`), so a hang fails in seconds naming what did not
+end. Rejected: cancelling the read on Windows
+at each turn of the halt's wait (`CancelIoEx`, as `conn::end_all` ends a
+TLS connection's) -- Windows' own call, behind `tls` today, for a read the
+flag ends within one message; and a read timeout under `ALIVE` -- a wake
+for every follower, every second, to look at a flag the primary's next
+message brings it to anyway. A durable
 write is answered once every stream has written it into its socket
 (`Feed::wait_sent` in the `Tee`'s durability, `SENT_WAIT` a second at
 most, a stream that missed it `lagging` and not waited for until it

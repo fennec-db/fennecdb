@@ -13,10 +13,17 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Every job is bounded (`timeout-minutes`): the next 5 minutes at or above
+# both twice its median and its slowest plus 2 minutes, over 100 green runs
+# (2026-11-13). Unbounded, a hang held its runner the 6 hours GitHub allows
+# -- windows (http) hung five times in a week, a follower's halt waiting for
+# a thread that read on (docs/design/replication.md#replication). A job
+# that grows past its bound moves the bound in the same change.
 jobs:
   fmt:
     name: fmt
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
 
@@ -76,6 +83,7 @@ jobs:
   clippy:
     name: clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -146,6 +154,7 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -289,6 +298,7 @@ jobs:
   windows:
     name: windows (single writer)
     runs-on: windows-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
 
@@ -323,6 +333,7 @@ jobs:
   windows-core:
     name: windows (core)
     runs-on: windows-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
@@ -404,6 +415,7 @@ jobs:
   windows-server:
     name: windows (server)
     runs-on: windows-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -451,6 +463,7 @@ jobs:
   windows-http:
     name: windows (http)
     runs-on: windows-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -498,12 +511,15 @@ jobs:
   windows-release:
     name: windows (release zip, ${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.minutes }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { arch: x86_64, os: windows-latest, target: x86_64-pc-windows-msvc }
-          - { arch: aarch64, os: windows-11-arm, target: aarch64-pc-windows-msvc }
+          # Each leg bounded by its own time: the arm runner's installer
+          # step takes 25 minutes where x86_64's takes 2.
+          - { arch: x86_64, os: windows-latest, target: x86_64-pc-windows-msvc, minutes: 15 }
+          - { arch: aarch64, os: windows-11-arm, target: aarch64-pc-windows-msvc, minutes: 55 }
     defaults:
       run:
         shell: bash
@@ -577,6 +593,7 @@ jobs:
     name: size (browser module)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
         with:
@@ -595,6 +612,7 @@ jobs:
   integrations:
     name: integrations (python, react)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
@@ -699,6 +717,7 @@ jobs:
   examples:
     name: examples (Node, Python, Go, .NET, Rust)
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
 
@@ -732,6 +751,7 @@ jobs:
   shop:
     name: examples (shop)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
@@ -767,6 +787,7 @@ jobs:
   ledger:
     name: examples (ledger)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -802,6 +823,7 @@ jobs:
   saas:
     name: examples (saas)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -874,6 +896,7 @@ jobs:
   dispatch:
     name: examples (dispatch)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -910,6 +933,7 @@ jobs:
   analytics:
     name: examples (analytics)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -1016,6 +1040,7 @@ jobs:
   packaging:
     name: packaging (installer, Homebrew formula, .deb and .rpm)
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
 
@@ -1079,6 +1104,7 @@ jobs:
   build:
     name: build (release + cli profile)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 

@@ -12,9 +12,12 @@ writes (`writes_in`); the history and a tail's graphs, which move none, are
 never sent. A durable write waits for every stream keeping up
 (`Feed::wait_sent`, `SENT_WAIT` at most, a lagging one not waited for); a
 promotion halts the follower before it forks, and a following database
-refuses writes (`Error::ReadOnly`). A panic applying the primary's records
-is a write the follower could not apply, caught with the lock held
-(`Follower::session`): never a thread gone, which a halt waits for.
+refuses writes (`Error::ReadOnly`). The follower's session looks at a halt
+before each message it reads, as an archiver's does, never at the
+socket's cut alone: on Windows a cut ends only a read already waiting. A
+panic applying the primary's records is a write the follower could not
+apply, caught with the lock held (`Follower::session`): never a thread
+gone, which a halt waits for.
 
 **[A node's tenants are archived over one stream](../../docs/design/replication.md#a-nodes-archive)**
 (`fennec_http::node_stream`), a sender on each open tenant's feed:
