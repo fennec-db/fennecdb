@@ -41,11 +41,14 @@ step('every app page drew with its stylesheet: app.css sets --bg on :root, which
 // A page is views://<page>/index.html, where <page> is the URL's host, and `..` cannot climb above
 // a host: a link to ../ui/app.css went to views://<page>/ui/app.css, a file the bundle never had,
 // and the pages drew in browser defaults while every check passed (hiding by [hidden] is the
-// browser's own rule, so a computed `display` says nothing about the stylesheet).
+// browser's own rule, so a computed `display` says nothing about the stylesheet). --bg in effect
+// is the proof the rules applied; the sheet's rules are not counted, since views://ui is another
+// host than the page's and WebKitGTK keeps a sheet from another host unreadable (cssRules throws)
+// while it applies it.
 for (const key of ['launcher', 'newdb', notice.key]) {
-  const r = await evalIn(key, `return JSON.stringify({ bg: getComputedStyle(document.documentElement).getPropertyValue('--bg').trim(), sheets: [...document.styleSheets].filter((s) => { try { return s.cssRules.length > 0 } catch { return false } }).length })`);
+  const r = await evalIn(key, `return JSON.stringify({ bg: getComputedStyle(document.documentElement).getPropertyValue('--bg').trim(), sheets: [...document.styleSheets].map((s) => s.href) })`);
   const { bg, sheets } = JSON.parse(r.value);
-  assert.ok(bg !== '' && sheets > 0, `${key}: its stylesheet did not load (--bg "${bg}", ${sheets} sheets with rules)`);
+  assert.ok(bg !== '' && sheets.some((h) => h?.endsWith('/ui/app.css')), `${key}: its stylesheet did not load (--bg "${bg}", sheets ${JSON.stringify(sheets)})`);
 }
 
 /**
