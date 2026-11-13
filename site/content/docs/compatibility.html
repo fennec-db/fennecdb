@@ -1,0 +1,75 @@
+<!--
+title: Compatibility and upgrades — fennecdb
+description: What fennecdb 1.x promises not to break: the file, FennecQL, the HTTP API, the C library, the JS types, the SDKs, the sync protocol, the CLI and the metrics; the upgrade order and the support window.
+-->
+
+<h1>Compatibility and upgrades</h1>
+<p class="kicker">From 1.0 a release only adds to what is listed here. A change
+that would break one of them waits for 2.0.</p>
+
+<h2>What 1.x promises</h2>
+
+<p>A 1.x release <em>grows</em> a surface: a new record kind in the file, a
+new route or optional field, a flag, a statement. It never changes or removes
+what was there. A feature is deprecated in a minor, kept for the rest of 1.x
+and removed only in 2.0. 0.x releases promise nothing.</p>
+
+<table>
+<thead><tr><th>Surface</th><th>What holds</th><th>Checked by</th></tr></thead>
+<tbody>
+<tr><td>The file</td><td>1.x opens every file written from v0.2.0 on, and a file a 1.x wrote opens in every later 1.x. Record kinds 1 to 14 and type tags 0 to 18 keep their meaning; a new one takes the next number (<a href="file-format.html">File format</a>).</td><td>Fixture files opened by every later build; the power-cut runs on Linux and Windows. A directory per release is still to come.</td></tr>
+<tr><td>FennecQL</td><td>No text that parsed reads as another statement. A stored statement keeps its meaning, so the grammar epoch stays 4.</td><td>The corpus of 7 620 statements (<code>make fennecql-corpus</code>); a check by canonical digest is to come.</td></tr>
+<tr><td>HTTP API</td><td>It only grows: no route, parameter, field or status removed or narrowed. The OpenAPI document the server serves is held to it.</td><td><code>make openapi-check</code>, on every pull request.</td></tr>
+<tr><td>C library</td><td><code>fennec.h</code>'s functions and <code>FENNEC_*</code> codes keep their prototypes and values.</td><td>The library's tests check the codes; a dump of the prototypes is to come.</td></tr>
+<tr><td>JavaScript types</td><td><code>fennec.d.ts</code> and <code>client.d.ts</code> only gain declarations.</td><td><code>make types-check</code>, and the builder's and schema's golden files.</td></tr>
+<tr><td>The SDKs</td><td>Python, JavaScript, Go, .NET, Swift, Kotlin and Dart keep the public names they ship at 1.0.</td><td>Each SDK's tests; a dump per language and a run against servers of other versions are to come.</td></tr>
+<tr><td>Sync</td><td>A replica of one release syncs with a server of another.</td><td><code>make sync-scenarios-check</code>: both runners pass every scenario.</td></tr>
+<tr><td>Command line and metrics</td><td>A flag, an exit code or a metric name is not removed or renamed.</td><td>Each command's tests; a list held against the main branch is to come.</td></tr>
+<tr><td>Release files</td><td>The names of the archives, zips, packages and checksums.</td><td>The release workflow's checks of each file.</td></tr>
+<tr><td>Stored data in a page</td><td>What a page keeps in IndexedDB or OPFS restores in every later 1.x.</td><td>The browser tests; real Chrome, Firefox and Safari runs are to come.</td></tr>
+</tbody>
+</table>
+
+<h2>What is not frozen</h2>
+
+<ul>
+  <li>The Rust crates' API. None is published; use fennecdb through the
+    server, the shell, the C library or the browser module.</li>
+  <li>The browser module's exports, which belong to <code>@fennecdb/web</code>
+    and ship with its glue.</li>
+  <li>How a page lays out its IndexedDB or OPFS data. Only that the data
+    restores.</li>
+  <li>The studio's pages and the desktop app (beta).</li>
+</ul>
+
+<h2>Upgrading</h2>
+
+<p>Upgrade replicas before primaries, and roll forward. For a cluster the
+order is archivers, routers, nodes holding replicas or standbys, then
+primaries (<a href="sharding-reference.html">Sharding reference</a>).</p>
+
+<ul>
+  <li>A newer replica follows an older primary.</li>
+  <li>An older replica that meets a record kind or type tag it does not know
+    stops and names it, for example <code>record kind 13 is not a
+    write</code>. It never reads it as something else.</li>
+  <li>Such a record appears when a feature is first used, not when it is
+    installed: the first <code>create statement</code>, a field with a second
+    index. The release notes name each, so upgrade every reader first.</li>
+  <li>An older binary refuses a file a newer one has written to. Going back is
+    safe only before a feature's first use.</li>
+</ul>
+
+<h2>The grammar epoch</h2>
+
+<p>A named statement is stored as its text with the grammar epoch it was parsed
+under. An open parses it again and, where the result differs, marks it broken
+until it is defined again. The epoch is 4, as it was in v0.2.0, and it stays 4
+through 1.x. Raising it is a major version, and its notes name the stored
+statements it breaks.</p>
+
+<h2>Support</h2>
+
+<p>The latest 1.x minor gets every fix. The previous minor gets security fixes
+for six months after the next one is released. Release candidates are tagged
+<code>1.0.0-rc.N</code>.</p>

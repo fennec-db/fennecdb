@@ -137,6 +137,7 @@ NAV = [
         ("docs/http-access", "HTTP security and scoped access"),
         ("docs/limits", "Limits"),
         ("docs/file-format", "File format"),
+        ("docs/compatibility", "Compatibility and upgrades"),
     ]),
     ("Operate", [
         ("docs/server", "Server"),

@@ -372,6 +372,36 @@ field of it is read another way.
 | `fennec-vX.Y.Z-x86_64-pc-windows-msvc.zip`, `fennec-vX.Y.Z-aarch64-pc-windows-msvc.zip` on the release | `tools/windows-zip.sh` | `fennec.exe` and `fennec-server.exe`, the C runtime linked in; unsigned |
 | `https://fennecdb.com/install.ps1` | `site/install.ps1` | the Windows installer: the release's zip, checked against `SHA256SUMS`, into `%LOCALAPPDATA%\fennecdb\bin`; with `-App`, the app's zip, checked the same way, into `%LOCALAPPDATA%\dev.fennecdb.studio\stable\app` with a Start-menu shortcut; deployed with the site, not with a release |
 
+## 1.0
+
+From 1.0.0 on a release only grows what [the compatibility
+contract](docs/design/compatibility.md) freezes; a break is a major
+version. Release candidates are tagged `1.0.0-rc.N`, and the owner pushes
+every tag. Before a 1.x tag, check:
+
+1. `make openapi-check` is green against the previous 1.x tag's documents,
+   and `make types-check`, `make builder-golden`, `make schema-golden` and
+   `make sync-scenarios-check` leave the tree as it was (a golden file
+   only gains lines).
+2. `make fennecql-corpus` finds no text reading as another tree, and
+   `GRAMMAR_EPOCH` (`crates/fennec-core/src/named.rs`) is still 4.
+3. `fennec.h`'s prototypes, `web/fennec.d.ts`, `web/client.d.ts`, each
+   SDK's public names, the CLI flags and exit codes, and `/_metrics` names
+   only gained entries. Where a dump is not built yet (T5 of the 1.0 plan)
+   diff them by hand against the previous tag.
+4. HEAD opens every file written from v0.2.0 on (`tests/language.fennec`,
+   `tests/statements.fennec`; T2 adds each release's own), and
+   `make upgrade-check` passes: an older replica stops by name on a record
+   kind or tag it does not know. The notes name any feature whose first use
+   moves the file format, and say that replicas upgrade before primaries.
+5. No asset of the table above is renamed or dropped.
+6. The size ceilings hold against the 1.0 baseline (the browser module
+   +3.5%, native libraries and binaries +5%), and the notes state the
+   measured cost where one was raised.
+
+The previous minor gets security fixes for six months after the next
+minor's release; a `release/1.N` branch is cut when a backport needs one.
+
 ## Once: the desktop app's signing Environment
 
 The Mac app (`integrations/studio-desktop`) is signed and notarized by

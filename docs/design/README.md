@@ -34,6 +34,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 
 The conventions hold no invariant of the code, and are listed apart:
 
+- [compatibility.md](compatibility.md) -- what 1.x freezes (the file, FennecQL, the API, `fennec.h`, the JS types, the SDKs, the sync protocol, CLI flags, metrics, release assets), the check that holds each, the upgrade order, the grammar epoch and the support window
 - [conventions.md](conventions.md) -- where tests live and which run alone, a test that fails on one run, Chrome's launch, the clock, ports, and the docs a change a user meets owes
 
 A proposal holds no invariant until it is built, and is listed apart:
