@@ -8,8 +8,11 @@ name: packages
 # `fennecdb_flutter` (with PUB_CREDENTIALS) go out when
 # a release is published -- not when its tag is pushed: release.yml leaves
 # the release a draft so its notes get a read, and publishing the draft is
-# the moment the packages follow it. So does Homebrew's formula
-# (fennec-db/homebrew-tap, with HOMEBREW_TAP_TOKEN, the `homebrew` job). A registry keeps what it is given, so
+# the moment the packages follow it. So do Homebrew's formula
+# (fennec-db/homebrew-tap, with HOMEBREW_TAP_TOKEN, the `homebrew` job) and
+# the image's `latest` tag on ghcr.io (`image-latest`, which release.yml's
+# own `image-latest` stands in for where this runs before the image is
+# there). A registry keeps what it is given, so
 # nothing goes to one before every package has been built, installed and
 # used (integrations/packages.sh). Each registry takes a token when its
 # secret is set -- NPM_TOKEN, PYPI_API_TOKEN -- and this workflow's OIDC
@@ -35,14 +38,14 @@ jobs:
     name: build and check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Install the pinned toolchain
         run: rustup show
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
 
@@ -53,7 +56,7 @@ jobs:
           make wasm
           integrations/packages.sh dist-packages
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: packages
           path: dist-packages/dist/
@@ -69,7 +72,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: packages
           path: dist
@@ -84,7 +87,7 @@ jobs:
       # it is empty.
       # `skip-existing`: a dispatch after a run that failed part of the way
       # uploads again what already went out, and PyPI refuses a file twice.
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           packages-dir: pypi/
           password: ${{ secrets.PYPI_API_TOKEN }}
@@ -100,7 +103,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: packages
           path: dist
@@ -110,7 +113,7 @@ jobs:
       # registry has nothing to hold the setting -- so NPM_TOKEN, when the
       # secret is there, carries that one publish; RELEASING.md says when to
       # delete it.
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
@@ -132,8 +135,12 @@ jobs:
             fi
             # `./`: a bare `dist/x.tgz` is read as GitHub's `owner/repo`
             # shorthand -- 0.1.5's first publish went to `git ls-remote
-            # github.com/dist/...` and stopped there.
-            npm publish "./$pkg" --access public --provenance
+            # github.com/dist/...` and stopped there. `--ignore-scripts`: no
+            # script of a package's runs where this job's token is. A tarball
+            # runs none as it is published, but a folder would run its
+            # `prepublishOnly` and `prepack`, and the flag says so where
+            # tools/workflow_check.py can read it.
+            npm publish "./$pkg" --access public --provenance --ignore-scripts
           done
 
   # NuGet's `FennecDb`: packed, installed from the .nupkg into a console app
@@ -151,7 +158,7 @@ jobs:
     name: NuGet (pack and use)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
           persist-credentials: false
@@ -164,7 +171,7 @@ jobs:
           RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
         run: integrations/dotnet/package.sh dist-nuget
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nuget
           path: dist-nuget/FennecDb.*.nupkg
@@ -180,14 +187,14 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: nuget
           path: dist-nuget
 
       # The nuget.org account's name, not an email. The action masks the
       # key before it sets the output.
-      - uses: NuGet/login@v1
+      - uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
         id: login
         continue-on-error: true
         with:
@@ -241,7 +248,7 @@ jobs:
             echo "set=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.keys.outputs.set == 'true'
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
@@ -252,13 +259,13 @@ jobs:
           rustup show
           rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
 
-      - uses: actions/setup-java@v6
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         if: steps.keys.outputs.set == 'true'
         with:
           distribution: temurin
           java-version: '17'
 
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
         if: steps.keys.outputs.set == 'true'
         with:
           gradle-version: '8.10.2'
@@ -352,16 +359,36 @@ jobs:
             echo "set=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.keys.outputs.set == 'true'
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
-      - uses: subosito/flutter-action@v2
+      # Flutter 3.50.0 as ci.yml's mobile jobs install it, from Flutter's own
+      # archive held to its sum (tools/install-flutter.sh), and not by
+      # subosito/flutter-action, whose own steps run actions/cache@v5 by its
+      # tag. The installer is this workflow's own commit's, as `homebrew`'s
+      # files are: a dispatch for a tag from before it has none. Not cached:
+      # a job that publishes takes nothing another run wrote, and the
+      # archive is held to its sum each time.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.keys.outputs.set == 'true'
         with:
-          channel: stable
-          flutter-version: 3.50.0
+          path: workflow
+          persist-credentials: false
+          sparse-checkout: tools/install-flutter.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Flutter 3.50.0
+        if: steps.keys.outputs.set == 'true'
+        env:
+          RELEASES: https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json
+          SHA256: 6ea2d806fd57269ae783e6788e2a81fc26eaad782f1e0d0ff38623bb765ff9f5
+        run: |
+          sdk="$RUNNER_TOOL_CACHE/flutter-3.50.0"
+          workflow/tools/install-flutter.sh 3.50.0 "$RELEASES" "$SHA256" "$sdk"
+          echo "FLUTTER_ROOT=$sdk/flutter" >> "$GITHUB_ENV"
+          printf '%s\n' "$sdk/flutter/bin" "$sdk/flutter/bin/cache/dart-sdk/bin" >> "$GITHUB_PATH"
 
       - name: The native libraries, from the release
         if: steps.keys.outputs.set == 'true'
@@ -490,7 +517,7 @@ jobs:
 
       # This workflow's own commit, not the tag's: the formula is written from
       # the release's SHA256SUMS, and a tag from before the script has none.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.go.outputs.set == 'true'
         with:
           persist-credentials: false
@@ -556,3 +583,60 @@ jobs:
             commit --quiet -m "fennecdb ${RELEASE_TAG#v}"
           git push --quiet origin "HEAD:$branch"
           echo "fennecdb ${RELEASE_TAG#v} is in $GITHUB_REPOSITORY_OWNER/homebrew-tap, branch $branch" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # `latest` on ghcr.io, the tag an image named without one pulls, moved to
+  # this release's `<version>` (the list of both architectures release.yml's
+  # `manifest` made) once the release is published, as the Homebrew tap
+  # follows it, and not when its tag is pushed: a draft is no release yet.
+  # tools/image-latest.sh moves it, as release.yml's own `image-latest` does
+  # once `manifest` has made `<version>`, so whichever of the two runs
+  # second moves it: a release published before its image jobs passed finds
+  # no `<version>` here, and this fails saying so (RELEASING.md, step 4).
+  # Never a draft or a pre-release (a 1.0.0-rc.N would hand every untagged
+  # pull a release candidate), and never any version but the newest
+  # published release's (`sort -V` over the release list and this tag): a
+  # dispatch for an old tag, or two releases published close together and
+  # finished out of order, must not move it back. It copies a list ghcr.io
+  # holds already -- `imagetools create` from one list writes those bytes
+  # under the new tag -- and holds `latest` to that list's digest after.
+  # Nothing is built or run, and no secret is read: the job's own token,
+  # `packages: write`. On ubuntu-24.04, the Docker release.yml's image jobs
+  # push with. One run a version at a time, in one group with release.yml's
+  # move of that version: a group's pending job is cancelled by the next one
+  # queued, and an old tag's dispatch must not cancel a newer release's
+  # move. Two versions' runs may meet, and the script leaves `latest` on the
+  # newer.
+  image-latest:
+    name: image (latest)
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: image-latest-${{ github.event.inputs.tag || github.event.release.tag_name }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/fennec-server
+      RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+    steps:
+      # This workflow's own commit's, as `homebrew`'s files are: a dispatch
+      # for a tag from before the script has none.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: workflow
+          persist-credentials: false
+          sparse-checkout: tools/image-latest.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Log in to ghcr.io
+        env:
+          TOKEN: ${{ github.token }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      # The release says what it is: the event carries whether it is a
+      # pre-release, and the script asks the release too.
+      - name: Move latest, where this is the newest published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_PRERELEASE: ${{ github.event.release.prerelease }}
+        run: workflow/tools/image-latest.sh "$IMAGE" "$RELEASE_TAG"

@@ -699,6 +699,11 @@ other monitoring systems</a>.</p>
 <p>The image's command is <code>--http 0.0.0.0:8080 --file
 /data/data.fennec --sync 250</code>.</p>
 
+<p>A name without a tag pulls <code>latest</code>, the newest published
+release: it moves once a release is published, never to a release candidate
+or back to an older version. Name <code>:{{version}}</code> where a deploy
+must not change under you.</p>
+
 <ul>
   <li><b>Set a token.</b> Without one it refuses to listen beyond
     localhost.</li>

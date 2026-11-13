@@ -36,7 +36,12 @@ nothing reaches a registry before the notes have had a read.
    was made in and run before it is kept, `tools/windows-zip-check.ps1`),
    the `fennec-web`
    bundle, the Android AAR (`fennecdb-android-X.Y.Z.aar`, the native library
-   for each ABI inside) and the multi-arch image on ghcr.io, takes the
+   for each ABI inside) and the multi-arch image on ghcr.io as
+   `X.Y.Z` -- each architecture's run on the runner that built it before
+   it is pushed, its `--version` and its server healthy by its own
+   HEALTHCHECK (`tools/image-check.sh`), pushed from Docker's classic image
+   store and read back, each tag and the list held to v0.2.0's Docker v2
+   manifests and gzip layers; `latest` waits for step 4 -- takes the
    XCFramework zips step 2's run kept -- the static one held to the checksum the tag's
    `Package.swift` names, and stopping the release where none matches --
    and drafts the release with all of them and their checksums. It also
@@ -49,8 +54,10 @@ nothing reaches a registry before the notes have had a read.
    the same commit: a Go module in a subdirectory is fetched by a tag that
    names it, so that tag is the Go SDK's release (`go get
    github.com/fennec-db/fennecdb/integrations/go@vX.Y.Z`), and there is no
-   registry to publish to. A release built again, by the tag or by a
-   dispatch, replaces the assets of a draft; a published release's are never
+   registry to publish to. A release built again -- a job of its run
+   retried, or a dispatch for its tag; the tag itself is never moved
+   (*GitHub*, below) -- replaces the assets of a draft; a published
+   release's are never
    replaced, and it only gets the files it has no asset of, with a warning
    that its `SHA256SUMS` does not list them. The Homebrew formula, `install.sh`,
    `install.ps1` and the packages name the release's files by checksum, and a
@@ -83,7 +90,9 @@ nothing reaches a registry before the notes have had a read.
    published, run `irm https://fennecdb.com/install.ps1 | iex` once on a
    Windows machine and the Quickstart's Windows line, as the other
    installs are run once more.
-4. Read the draft, then publish it: `gh release edit vX.Y.Z --draft=false`.
+4. Read the draft, then publish it, once step 3's run has passed
+   `image (manifest)`, the job that makes the image's `X.Y.Z`:
+   `gh release edit vX.Y.Z --draft=false`.
    `packages.yml` builds the three packages again, installs them where a user
    would and uses them (`integrations/packages.sh`), and only then publishes
    `fennecdb` to PyPI, `@fennecdb/web`, `@fennecdb/react`,
@@ -107,7 +116,20 @@ nothing reaches a registry before the notes have had a read.
    skips with a notice where the secret is not set, for a draft or a
    pre-release, and for a version older than the tap's formula (the tap is
    never moved back, whichever release is dispatched or published late), and
-   one run pushes at a time.
+   one run pushes at a time. The image's `latest` follows the same way
+   (`image-latest`, `tools/image-latest.sh`): moved to `X.Y.Z`'s list once
+   the release is published, only where it is the newest published release,
+   never for a draft, a pre-release or an older version. Where a release
+   was published before `image (manifest)` made `X.Y.Z`,
+   `packages.yml`'s `image (latest)` fails, saying `X.Y.Z` is not on
+   ghcr.io yet. If the tag's `release.yml` run was still going, nothing
+   needs re-running: its own `image (latest)` moves `latest` once
+   `manifest` has made the list. If its image jobs failed, re-run that
+   run's failed jobs (`gh run rerun <run-id> --failed`), not a new
+   `gh workflow run`: a new run builds the images again and pushes the arch
+   tags under new digests. A re-run within a day pushes the images `image`
+   saved; after that they are gone, and `image` must run again too. Of the
+   two `image (latest)` jobs, the one that runs second moves it.
    The `.deb` and `.rpm` need no step of their own: step 3 built them, and
    publishing the draft is what makes them downloadable.
 5. Once the release is published and `packages.yml`'s run is done, attach the
@@ -423,10 +445,11 @@ token without access -- 0.1.5's dispatch stopped there -- and
 `https://registry.npmjs.org/-/org/fennecdb/package` says `Scope not found`
 until the organization exists. On PyPI, an API token for the whole account,
 since a token scoped to a project cannot make the project on its first
-upload. Then, pasting each when asked:
+upload. Then, pasting each when asked, each into the environment of the
+job that reads it and not the repository's (GitHub, below):
 
-    gh secret set NPM_TOKEN -R fennec-db/fennecdb
-    gh secret set PYPI_API_TOKEN -R fennec-db/fennecdb
+    gh secret set NPM_TOKEN --env npm -R fennec-db/fennecdb
+    gh secret set PYPI_API_TOKEN --env pypi -R fennec-db/fennecdb
 
 After the first upload the PyPI token can be replaced by one scoped to
 `fennecdb`. A release published before the secrets were set gets its
@@ -448,7 +471,7 @@ trusts a workflow only for a package that already exists, so each package's
 first version goes out with a token:
 
 1. Make a granular access token with read and write on `@fennecdb` and store it
-   as the repository secret `NPM_TOKEN`.
+   as `NPM_TOKEN`, a secret of the `npm` environment.
 2. Publish the release: the four `@fennecdb` packages go out with it.
 3. On npmjs.com, for each of the four, *Settings*, *Trusted publishing*,
    GitHub Actions: `fennec-db/fennecdb`, workflow `packages.yml`, environment
@@ -490,10 +513,12 @@ By hand, as the owner:
 Where the exchange fails the job uses `NUGET_API_KEY` if it is set (under
 *API Keys*, a key with that scope for the glob pattern `FennecDb`, which
 expires within 365 days); with neither it fails, naming the exchange's
-failure, and the other registries go on. A key left from before the policy
-is better deleted (`gh secret delete NUGET_API_KEY -R fennec-db/fennecdb`):
-a key for another package's name only fails the push where the exchange
-does. A release published before either was set gets its package from a
+failure, and the other registries go on. A key kept for that is a secret
+of the `nuget` environment (`gh secret set NUGET_API_KEY --env nuget -R
+fennec-db/fennecdb`), not the repository's; once the policy has pushed a
+release it is better deleted, the repository's too (`gh secret delete
+NUGET_API_KEY -R fennec-db/fennecdb`): a key for another package's name only
+fails the push where the exchange does. A release published before either was set gets its package from a
 dispatch: `gh workflow run packages.yml -f tag=vX.Y.Z`.
 
 **Go.** Nothing to set up: the module is fetched from the repository by its
@@ -527,15 +552,21 @@ bundle `packages.yml` makes, with no Gradle plugin. Once:
    (`gpg --quick-gen-key "fennecdb releases" rsa4096 sign never`), send its
    public half to a key server the Portal reads
    (`gpg --keyserver keyserver.ubuntu.com --send-keys <id>`), and store the
-   private half, armored, and its passphrase:
+   private half, armored, and its passphrase.
 
-       gpg --armor --export-secret-keys <id> | gh secret set SIGNING_KEY -R fennec-db/fennecdb
-       gh secret set SIGNING_PASSWORD -R fennec-db/fennecdb
-       gh secret set MAVEN_CENTRAL_USERNAME -R fennec-db/fennecdb
-       gh secret set MAVEN_CENTRAL_PASSWORD -R fennec-db/fennecdb
+The Portal has no trusted publishing, so these four stay secrets, kept in
+the `maven` environment and not the repository's: limit it to `main` and
+`v*` tags first (the NuGet section's three commands, naming `maven`), then
 
-The upload is `publishingType=AUTOMATIC`: the Portal releases the
-deployment once it validates, and a version is there for good.
+       gpg --armor --export-secret-keys <id> | gh secret set SIGNING_KEY --env maven -R fennec-db/fennecdb
+       gh secret set SIGNING_PASSWORD --env maven -R fennec-db/fennecdb
+       gh secret set MAVEN_CENTRAL_USERNAME --env maven -R fennec-db/fennecdb
+       gh secret set MAVEN_CENTRAL_PASSWORD --env maven -R fennec-db/fennecdb
+
+and delete any of the same names from the repository's secrets (`gh secret
+delete SIGNING_KEY -R fennec-db/fennecdb`, and so on). The upload is
+`publishingType=AUTOMATIC`: the Portal releases the deployment once it
+validates, and a version is there for good.
 
 **pub.dev.** pub.dev's automated publishing trusts only a workflow started
 by a tag's push, and `packages.yml` follows a published release, so it
@@ -543,9 +574,12 @@ publishes with an account's credentials. Signed in to pub.dev as the account
 that will own `fennecdb` and `fennecdb_flutter` (a verified publisher,
 `fennecdb.dev` or the like, can own them after): `dart pub login` on any
 machine writes `pub-credentials.json` (`~/Library/Application
-Support/dart/` on macOS, `~/.config/dart/` on Linux); then
+Support/dart/` on macOS, `~/.config/dart/` on Linux); then, the `pub`
+environment limited to `main` and `v*` tags first (the NuGet section's
+three commands, naming `pub`),
 
-    gh secret set PUB_CREDENTIALS -R fennec-db/fennecdb < <that file>
+    gh secret set PUB_CREDENTIALS --env pub -R fennec-db/fennecdb < <that file>
+    gh secret delete PUB_CREDENTIALS -R fennec-db/fennecdb # the repository's, if there is one
 
 The first publish creates both packages. The credentials hold a refresh
 token: logging out of that machine's pub (`dart pub logout`) revokes it,
@@ -638,7 +672,50 @@ time the workflow runs. A required reviewer on them makes a publish wait for a s
 yes. `homebrew`, which holds a secret of its own, and `pypi` and `nuget`,
 whose policies PyPI and nuget.org trust, are limited to `main` and `v*`
 tags (the Homebrew, PyPI and NuGet sections above), and `npm` too since its
-packages publish by trusted publishing.
+packages publish by trusted publishing; `maven` and `pub` hold their
+secrets and are limited the same way. A job reads only the secrets of the
+environment it names, and a repository secret of the same name too: each
+is moved by setting it in its environment (`gh secret set <NAME> --env
+<environment> -R fennec-db/fennecdb`) and then deleting the repository's
+(`gh secret delete <NAME> -R fennec-db/fennecdb`), its environment limited
+first, since a secret in an environment with no rules is read by a job of
+any branch that names it. `tools/workflow_check.py` refuses a job that
+reads a secret and names no environment, but for one it lets off by name
+with the reason.
+
+`site.yml`'s deploy is that one, until its environment exists: the
+Cloudflare secrets (`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, and
+`CLOUDFLARE_AI_TOKEN` where there is one: site/README.md) are the
+repository's, which any branch's workflow reads. A workflow naming an
+environment that does not exist makes GitHub create it at its next run,
+with no rules, so the owner creates `site` first, limited to `main` alone:
+
+    gh api -X PUT repos/fennec-db/fennecdb/environments/site \
+      -F 'deployment_branch_policy[protected_branches]=false' \
+      -F 'deployment_branch_policy[custom_branch_policies]=true'
+    gh api -X POST repos/fennec-db/fennecdb/environments/site/deployment-branch-policies -f name=main -f type=branch
+
+then a pull request puts the line back in `site.yml`'s `deploy`
+(`environment: { name: site, url: https://fennecdb.com }`) and drops the job
+from `REPOSITORY_SECRETS` in `tools/workflow_check.py`, which fails while
+the entry outlives its reason; once it has merged, the three secrets move
+into `site` as above.
+
+The repository's own settings hold what the workflows cannot. Every action
+a workflow runs is pinned to a commit (`docs/design/integrations.md#workflows`);
+GitHub refuses one that is not, a pull request's workflow among them, once
+the Actions setting says so:
+
+    gh api -X PUT repos/fennec-db/fennecdb/actions/permissions \
+      -F enabled=true -f allowed_actions=all -F sha_pinning_required=true
+
+A `v*` tag is what `release.yml` builds and SwiftPM, Go's checksum database
+and the packages name, so it is created by the owner alone, deleted by the
+owner alone, and moved by nobody: under *Settings*, *Rules*, *Rulesets*,
+a tag ruleset on `v*` restricting creations and deletions with the
+repository's admins as its bypass, and a second restricting updates with
+none. A tag pushed by mistake is never moved: the owner deletes it, or the
+next version replaces it.
 
 **After the first publish.** The docs install what a registry holds: PyPI's
 `fennecdb` since 0.1.5 (`pip install "fennecdb[langchain]"`). Until

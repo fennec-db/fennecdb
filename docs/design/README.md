@@ -30,7 +30,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [lookup-and-aggregates.md](lookup-and-aggregates.md) -- `lookup`, `required`, keys of several fields, folded levels, select-list expressions, HyperLogLog and time zones
 - [native-and-sync.md](native-and-sync.md) -- `fennec-ffi`, the sans-IO sync core and the scenario file both sync runners are held to
 - [router.md](router.md) -- the router's CORS, its pooled connections, the cuts a failover makes, the leading router's and its followers', and queries across tenants
-- [integrations.md](integrations.md) -- `integrations/`, the Grafana data source, the desktop app, the `deploy/` kit and the install channels (Homebrew, `install.sh`, `.deb` and `.rpm`)
+- [integrations.md](integrations.md) -- `integrations/`, the Grafana data source, the desktop app, the `deploy/` kit, the install channels (Homebrew, `install.sh`, `.deb` and `.rpm`) and the workflows' pinned actions, permissions and secrets
 
 The conventions hold no invariant of the code, and are listed apart:
 
@@ -199,3 +199,4 @@ A proposal holds no invariant until it is built, and is listed apart:
 154. [A scoped caller is held to `--request-rate` before anything runs](quotas.md#a-callers-request-rate) (added after the move, under *Quotas and retries*)
 155. [An answer past `--http-gzip` goes as gzip where its client takes it, never one carrying a tag](http.md#compressed-answers) (added after the move, under *The HTTP server*)
 156. [A server that asks for no token answers only under this machine's name, and a page only of its own origin or `--http-cors`'s](http.md#open-servers) (added after the move, under *Access*)
+157. [A workflow runs actions pinned by commit, and a job that writes builds nothing](integrations.md#workflows) (added after the move, under *Integrations and deploy*)

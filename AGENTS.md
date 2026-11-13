@@ -480,10 +480,11 @@ Covers `deploy/`.
 
 ### `tools/CLAUDE.md`
 
-Covers `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/windows-zip.sh`, `tools/windows-zip-check.ps1`, `tools/install-ps1-check.ps1`, `site/install.sh`, `site/install.ps1` and `.github/workflows/`'s `release.yml` and `packages.yml`.
+Covers `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/windows-zip.sh`, `tools/windows-zip-check.ps1`, `tools/install-ps1-check.ps1`, `tools/image-check.sh`, `tools/image-latest.sh`, `site/install.sh`, `site/install.ps1` and `.github/workflows/`'s `release.yml` and `packages.yml`; its workflow rule binds every file of `.github/workflows/` (`tools/workflow_check.py`, `tools/install-flutter.sh`) and `.github/dependabot.yml`.
 
 *Integrations and deploy*
 - A release is installed from its own files, each checked before it is used.
+- A workflow runs actions pinned by commit, and a job that writes builds nothing.
 
 ### `crates/fennec-bench/CLAUDE.md`
 

@@ -10,6 +10,11 @@ run-name: Swift binary for v${{ inputs.version }}
 # that is merged, the merge is tagged, and release.yml attaches this very
 # zip -- found by its run, held to the checksum the tag's manifest names.
 # RELEASING.md has the order.
+#
+# The build and the pull request are two jobs: the build runs the crates'
+# build scripts, SwiftPM and the tests with a token that reads alone and a
+# checkout keeping none, and hands the zip's checksum to the job that holds
+# the writes, which builds nothing (tools/workflow_check.py).
 on:
   workflow_dispatch:
     inputs:
@@ -18,8 +23,7 @@ on:
         required: true
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -28,8 +32,12 @@ jobs:
   build:
     name: XCFramework for v${{ inputs.version }}
     runs-on: macos-latest
+    outputs:
+      checksum: ${{ steps.sum.outputs.checksum }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: The version is the workspace's
         run: |
@@ -70,7 +78,7 @@ jobs:
           integrations/swift/test-strict.sh
           integrations/swift/test-ios.sh
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: xcframework-v${{ inputs.version }}
           path: |
@@ -80,14 +88,33 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
+      - name: The zip's checksum, for the pull request
+        id: sum
+        run: echo "checksum=$(cat integrations/swift/build/FennecFFI.xcframework.zip.checksum)" >> "$GITHUB_OUTPUT"
+
+  # The pull request writing that checksum into Package.swift, from the
+  # commit the build was made from (this run's). The checksum reaches the
+  # script in the environment, never spliced into it, and set-binary.sh
+  # takes 64 hex digits alone; the checkout keeps its token for the push.
+  pull-request:
+    name: pull request for v${{ inputs.version }}
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
       - name: Open the pull request naming its checksum
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SUM: ${{ needs.build.outputs.checksum }}
         run: |
           set -eu
-          v="${{ inputs.version }}"
-          sum=$(cat integrations/swift/build/FennecFFI.xcframework.zip.checksum)
-          integrations/swift/set-binary.sh "$v" "$sum"
+          v="$VERSION"
+          integrations/swift/set-binary.sh "$v" "$SUM"
           branch="swift-binary-v$v"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
