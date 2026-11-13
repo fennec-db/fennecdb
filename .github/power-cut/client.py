@@ -26,27 +26,35 @@ checks before it found (DIR/state.json): every acknowledged write there and
 whole; a write in flight at the cut there whole or not at all; a batch, and
 a spill, all there or none of it; every acknowledged `Idempotency-Key`
 answered again as it was, `Idempotent-Replayed`, never made twice; and a new
-write taken. `--commit` makes what it found the state the next cut is held
-to. The token is read from --token-file, never printed.
+write taken. A cut that came with no write in flight landed between writes
+and held none of that to a write cut short: it fails as the rig's (`RIG`).
+`--commit` makes what it found the state the next cut is held to. The token
+is read from --token-file, never printed.
 
 `--sync-ms 250` holds a server under `--sync 250`, which answers a write
 before it is on disk, to what that promises instead: a thread more reads
 `/_changes` (the server under `--cdc`), which hands a consumer only what an
 fsync has covered, and notes each page as it comes. Every write a page held
 must be there after the cut; an acknowledged write may be gone only if no
-page held it, and only if it was acknowledged within the last sync's window
-of the cut: 250 ms, the sync that was under way when it landed and the one
-that would have covered it (`Check.window`). What the cut kept is a prefix
-of the writes, by the change each was answered as. The load leaves out the
-spills and the compacts there: its durability is the syncer's, not a
-compact's, and a 20 MiB page would hold the reader up past the next sync.
+page held it, and only if it was answered within 250 ms and two syncs' own
+time of the cut, a fixed bound (`SYNC_OWN`); and no page may come later
+than `GAP_CEILING` after the one before it, nor the cut after the last
+(`Check.window`). Neither number is read from the pages being judged. What
+the cut kept is a prefix of the writes, by the change each was answered as.
+The load leaves out the spills and the compacts there: its durability is
+the syncer's, not a compact's, and a 20 MiB page would hold the reader up
+past the next sync.
 
 `--prefix /t/<tenant>` writes to a `--dir` node's tenant, `--name` keeping
 its files apart (DIR/state-<name>.json, DIR/events-N-<name>.jsonl). `replica`
 reads a replica of it as the cut left it (DIR/replica-N-<name>.json), and
 `check --replica-url` holds that to the primary as it came back -- the
-replica holds nothing the primary lost -- then waits for the replica to
-reach the primary and finds the two the same.
+replica holds nothing the primary lost, and was near the tip when the
+primary went (`STANDBY_LAG`), the acknowledged writes it lacked counted:
+what a promotion at the cut would have lost -- then waits for the replica
+to reach the primary and finds the two the same.
+
+    python3 test_client.py   # the check's own tests, Check.window's among them
 """
 
 import argparse
@@ -86,15 +94,45 @@ OPS_SYNCED = "ssbc"
 # a page as it gives, so that a page is one sync's writes.
 CHANGES_WAIT_MS = 30_000
 CHANGES_LIMIT = 10_000
-# What the window's bound allows beyond the syncs it reads from the pages:
-# a page's way to the host and the reader's turn between two requests, which
-# can make a gap look shorter than its sync by as much (`Check.window`).
-SLACK = 0.05
-# The gaps between pages, before the cut, the last sync's time is read from:
-# a compact's hand-over between two syncs leaves a gap shorter than a sync,
-# and a page held up by the reader one longer; the longest of the last few
-# is a sync's whole time.
-GAPS = 4
+# `--sync <ms>`'s window is held to fixed numbers, never to what the pages
+# being judged show: a bound read from their gaps grew with any stall, and a
+# syncer stopped 3 s before the cut, its acknowledged writes lost from 3.0 s
+# before it, passed against a bound of 3 058 ms; one syncing every second,
+# its writes lost from 907 ms before the cut, against 1 708 ms (#627's
+# review; test_client.py holds both, failed).
+#
+# A sync's own time: the syncer's wake after its sleep, the writes taken
+# under the write lock and the fsync after it (`run_syncer`). Measured from
+# the pages of run 43438990710's five cuts, 257 to 259 ms apart at the
+# median and 261 to 271 ms at most: 250 ms of sleep and 7 to 9 ms of
+# syncing at the median, 21 ms at most. Allowed 50 ms, more than twice the
+# longest: a write gone that was answered past the bound, 250 ms and two
+# syncs' own time (`Check.window`), is a sync that came late or did not
+# cover it. The 29 ms a sync is allowed past the longest seen, 58 ms over
+# the two, is the bound's only slack.
+SYNC_OWN = 0.05
+# The longest a page may come after the one before it, after the first
+# acknowledged write, or the cut after the last page: one sync's period is
+# 250 ms and its own time, and a page seen during the reader's turn later
+# by as much as the turn (34 ms at most in that run, the longest gap 271
+# ms). A second is four times the interval and nearly four times the
+# longest gap seen, so a gap past it is no runner's slow moment but a sync
+# 750 ms late: a syncer stopped, stuck or slowed past it. A slower syncer
+# under it is held by the loss bound, whenever a cut takes a write answered
+# past that.
+GAP_CEILING = 1.0
+# How far behind the node's tip the standby may be at a cut: it is held to
+# the node only as far as it had followed it, so one far behind would pass
+# its check for that alone. A durable write is answered once every stream
+# keeping up has put it into its socket; a stream that has not within a
+# second is let lag, and not waited for until it catches up (`SENT_WAIT`,
+# replication.rs). So a standby keeping up lacks at a cut only what the
+# guest's sockets held when it went, and one lacking a write answered a
+# second before the cut is one the node had stopped waiting for. Its lag is
+# how long before the cut the oldest acknowledged write it lacked was
+# answered. Run 43438990710's standby was 0 to 51 changes behind the node
+# as it came back, the 40 of a spill in flight at the cut among them.
+STANDBY_LAG = 1.0
 # How long a replica is waited for to reach the primary after a check: four
 # waits of `Fennec-Wait`'s 30 s, the most a read may wait.
 REPLICA_WAITS = 4
@@ -511,6 +549,12 @@ class Check:
         if len(self.bad) <= 40:
             print(f"BAD {what}")
 
+    def rig(self, what):
+        """A cut that did not test what it was for -- the rig's failure,
+        not the server's, and the cut's all the same: it held nothing."""
+        self.bad.append(what)
+        print(f"RIG {what}")
+
     def sends(self, op):
         return [e for e in self.sent.values() if e["op"] == op]
 
@@ -587,16 +631,32 @@ class Check:
                 print(f"LOAD {what} took {min(ms):.0f} to {max(ms):.0f} ms")
         if self.cut_at is not None:
             first = min(e["t"] for e in self.ev)
-            print(f"LOAD the cut came {self.cut_at - first:.2f} s after the load began")
-            flight = [q for q in self.sent if q not in self.acked]
-            for q in sorted(flight):
+            flight = self.in_flight()
+            print(f"LOAD the cut came {self.cut_at - first:.2f} s after the load began, {len(flight)} writes in flight")
+            for q in sorted(self.sent):
                 e = self.sent[q]
+                if q in self.acked:
+                    continue
                 if e["t"] <= self.cut_at:
                     print(f"INFLIGHT {names[e['op']]} q={q}, sent {self.cut_at - e['t']:.3f} s before the cut")
                 elif e["t"] <= self.killed:
                     print(f"INFLIGHT {names[e['op']]} q={q}, sent as QEMU was killed")
                 else:
                     print(f"AFTER {names[e['op']]} q={q}, tried {e['t'] - self.killed:.3f} s after the cut")
+            if not flight:
+                self.rig(
+                    f"cut {self.args.cut} landed between writes: none was in flight when QEMU was killed, "
+                    "so it held nothing to a write cut short"
+                )
+
+    def in_flight(self):
+        """The writes in flight at the cut: sent no later than the host's
+        clock after `kill -9`, and never answered -- the INFLIGHT lines. A
+        write sent after it (AFTER) found QEMU gone. One sent between the
+        clock before the kill and the one after it counts: under `--sync
+        250` every write in flight at run 43438990710's cuts was sent
+        then, the writes before it all answered."""
+        return [q for q, e in self.sent.items() if q not in self.acked and e["t"] <= self.killed]
 
     def gone(self, e, what, disk):
         """A write of this cut that is not there: a finding, unless the
@@ -812,15 +872,21 @@ class Check:
             print("PROBE a new write taken and read back")
 
     def window(self):
-        """`--sync <ms>`'s promise, held: a write the cut took was answered
-        within the sync's window of it. The syncer sleeps `ms` after each
-        sync, then takes what was written and makes it durable; a write
-        landing just after a sync took its writes waits out that sync, the
-        sleep and the next. So an acknowledged write the cut took was
-        answered no longer before the cut than `ms`, the last completed
-        sync's time and the time the one under way at the cut had run. The
-        syncs' times are read from the pages: each came once a sync was
-        done, `ms` and the sync's own time after the one before. What the cut
+        """`--sync <ms>`'s promise, held to fixed numbers: a write the cut
+        took was answered within the sync's window of it, and the syncs
+        came. The syncer sleeps `ms` after each sync, then takes what was
+        written under the write lock and fsyncs it once the lock is let go
+        (`run_syncer`); a write landing just after a sync took its writes
+        waits out the rest of that sync, the sleep and the whole of the
+        next. So an acknowledged write the cut took was answered no longer
+        before it than `ms` and two syncs' own time, each allowed `SYNC_OWN`
+        -- the host's clock read before the kill, earlier than the guest's
+        end, and at the write's answer, later than its landing, only shorten
+        the span measured. And each page came once a sync was done, `ms` and
+        its own time after the one before: no gap between pages, after the
+        first acknowledged write or before the cut is past `GAP_CEILING`,
+        or a sync came late. Neither bound is read from the pages: a bound
+        read from them grew with the stall it was to find. What the cut
         kept is a prefix of the writes: no write it took landed before one
         it kept."""
         a = self.args
@@ -832,10 +898,19 @@ class Check:
             self.fail(f"the /_changes reader was handed {len(ats)} page(s): nothing to hold the window to")
             return
         gaps = [y - x for x, y in zip(ats, ats[1:])]
-        recent = gaps[-GAPS:]
-        took = max(0.0, max(recent) - self.sync)
-        running = max(0.0, cut - ats[-1] - self.sync)
-        bound = self.sync + took + running + SLACK
+        spans = [(g, f"between pages {i} and {i + 1}") for i, g in enumerate(gaps, 1)]
+        writes = [e["t"] for q, e in self.acked.items() if self.sent[q]["op"] != "k"]
+        if writes:
+            spans.insert(0, (ats[0] - min(writes), "from the first acknowledged write to the first page"))
+        spans.append((cut - ats[-1], "from the last page to the cut"))
+        longest = max(spans)
+        late = [s for s in spans if s[0] > GAP_CEILING]
+        if late:
+            self.fail(
+                f"a late sync: {len(late)} gap(s) past the ceiling of {GAP_CEILING * 1000:.0f} ms, "
+                f"the longest {longest[0] * 1000:.0f} ms {longest[1]}"
+            )
+        bound = self.sync + 2 * SYNC_OWN
         med = sorted(gaps)[len(gaps) // 2]
         # How long an acknowledged write took to reach the disk: from its
         # answer to the first page reaching the change it landed as.
@@ -873,8 +948,8 @@ class Check:
                 if lost
                 else "no acknowledged write gone with the cut"
             )
-            + f"; the bound {self.sync * 1000:.0f} + {took * 1000:.0f} (the last sync) + {running * 1000:.0f} (the one under way) "
-            f"+ {SLACK * 1000:.0f} = {bound * 1000:.0f} ms"
+            + f"; the bound {self.sync * 1000:.0f} + 2 x {SYNC_OWN * 1000:.0f} (two syncs' own time) = {bound * 1000:.0f} ms"
+            + f"; the longest gap {longest[0] * 1000:.0f} ms, {longest[1]}, against a ceiling of {GAP_CEILING * 1000:.0f} ms"
         )
         if span > bound:
             self.fail(f"an acknowledged write answered {span * 1000:.0f} ms before the cut is gone: past the window's {bound * 1000:.0f} ms ({lost[0][2]})")
@@ -922,6 +997,36 @@ class Check:
             print(
                 f"REPLICA as the cut left it: change {snap['seq']}, {len(snap['docs'])} documents; "
                 f"the primary came back at change {seq} holding every one"
+            )
+        self.standby_near(snap["seq"], seq)
+
+    def standby_near(self, held, back):
+        """The standby against the node's tip at the cut: the acknowledged
+        writes above the change it held -- what a promotion at the cut
+        would have lost, every one answered as durable -- counted, and how
+        long before the cut the oldest of them was answered held to
+        `STANDBY_LAG`. The cuts before this one's left it at the node's
+        change (`replica_after`), so only this cut's writes can be above
+        it."""
+        a = self.args
+        acked = [(e["t"], e["seq"]) for q, e in self.acked.items() if e.get("seq") is not None and self.sent[q]["op"] != "k"]
+        above = sorted(x for x in acked if x[1] > held)
+        tip = max((s for _, s in acked), default=held)
+        lag = self.cut_at - above[0][0] if above and self.cut_at is not None else 0.0
+        print(
+            f"STANDBY cut {a.cut} {a.label}{' ' + a.prefix if a.prefix else ''}: held change {held}, "
+            f"{max(0, tip - held)} behind the last acknowledged ({tip}) and {max(0, back - held)} behind the node as it came back ({back}); "
+            + (
+                f"{len(above)} acknowledged writes above it, the oldest answered {lag * 1000:.0f} ms before the cut: "
+                "what a promotion at the cut would have lost"
+                if above
+                else "no acknowledged write above it: a promotion at the cut would have lost none"
+            )
+        )
+        if lag > STANDBY_LAG:
+            self.rig(
+                f"the standby lacked a write the node acknowledged {lag * 1000:.0f} ms before cut {a.cut}, "
+                f"past {STANDBY_LAG * 1000:.0f} ms: so far behind, it held nothing of the node's last {lag:.1f} s to it"
             )
 
     def replica_after(self):

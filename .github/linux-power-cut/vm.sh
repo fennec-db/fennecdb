@@ -9,7 +9,10 @@
 # (cache.direct=on: O_DIRECT on the host) stays. A cut marked `lost` also
 # rebuilds the data disk as of the last flush the guest asked for
 # (blklogwrites, replay.py): a disk whose volatile write cache was lost,
-# which is what `--sync always` and the sync log's fdatasync must survive.
+# which is what `--sync always` and the sync log's fdatasync must survive,
+# and every write a `/_changes` page under `--sync 250` handed over -- a
+# page comes once its fsync returned, so only this disk tells an fsync that
+# reached the disk from one that left its writes in the disk's cache.
 # Windows' rig (.github/windows-power-cut/vm.sh) is this one's counterpart;
 # the load, the check and the replay are both's (.github/power-cut/).
 #
@@ -55,9 +58,10 @@ case $MODE in
     *) echo "MODE is always, sync250 or dir, not $MODE" >&2; exit 2 ;;
 esac
 # What the checks are run for: the file (""), or a node's tenants by name.
-# The second tenant takes a lighter load beside the first's -- single puts,
-# batches and rewrites, no spill nor compact -- so that the node's syncs
-# and the standby's streams carry two files' writes at once.
+# The second tenant takes single puts, batches and rewrites beside the
+# first's whole load -- no spill nor compact, so none holds its writes up,
+# and it makes about half as many again as the first -- so that the node's
+# syncs and the standby's streams carry two files' writes at once.
 TENANTS=("")
 [ "$MODE" = dir ] && TENANTS=(a b)
 NODE=/d/n
@@ -524,12 +528,12 @@ boot_check() {
         if ! client "$t" check --cut "$n" --label "$label" --cut-time "$(tr '\n' ' ' < "$VM/cut-$n.time")" $commit "${rep[@]}" \
                 > "$checked" 2>&1; then
             cat "$checked"
-            grep -E '^(VERDICT|BAD)' "$checked" >> "$VM/summary.txt" || true
+            grep -E '^(VERDICT|BAD|RIG)' "$checked" >> "$VM/summary.txt" || true
             keep "$n-$label"
             return 1
         fi
         cat "$checked"
-        grep -E '^(VERDICT|DOCS|CHURN|SPILL|IDEM|LOAD|BATCH|INFLIGHT|PROBE|WARM|SYNCS|WINDOW|LOST|REPLICA)' "$checked" >> "$VM/summary.txt"
+        grep -E '^(VERDICT|DOCS|CHURN|SPILL|IDEM|LOAD|BATCH|INFLIGHT|PROBE|WARM|SYNCS|WINDOW|LOST|REPLICA|STANDBY)' "$checked" >> "$VM/summary.txt"
     done
     [ "$MODE" = dir ] && lock_held "$n-$label" "$NODE/${TENANTS[0]}.fennec"
     say "TIMING cut${n}_${label}_check=$(( $(now) - t0 ))s"

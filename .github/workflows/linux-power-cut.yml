@@ -6,20 +6,23 @@
 # writes to it, five times; after each the guest boots, the server opens
 # the same file -- the sync log beside it applied, the path a durable write
 # takes on Linux and no other system -- and what it promised is checked
-# there, no batch half there. Two of the cuts also lose the disk's volatile
-# cache: the disk rebuilt as of the last flush the guest asked for (QEMU's
-# blklogwrites, replay.py), checked the same way. Four guests, a matrix
-# entry each:
+# there, no batch half there; a cut with no write in flight fails as the
+# rig's. Two of the cuts also lose the disk's volatile cache: the disk
+# rebuilt as of the last flush the guest asked for (QEMU's blklogwrites,
+# replay.py), checked the same way. Four guests, a matrix entry each:
 #
 #   - `--sync always` on ext4, and on XFS: every acknowledged write there;
 #   - `--sync 250`, the default, on ext4: every write `/_changes` handed
 #     over as on disk there, an acknowledged write gone only if it was
-#     answered within the sync's window of the cut, and what the cut kept a
-#     prefix of the writes;
+#     answered within 250 ms and two syncs' own time of the cut, a fixed
+#     bound, no sync later than a second after the one before, and what
+#     the cut kept a prefix of the writes;
 #   - a `--dir` node of two tenants under `--sync always` on ext4, followed
 #     by a standby node on the runner, which the cut leaves running: every
-#     acknowledged write there when the node reopens, the standby holding
-#     nothing the node lost, and the same rows once it follows again.
+#     acknowledged write there when the node reopens, the standby near the
+#     node's tip and holding nothing the node lost -- the acknowledged
+#     writes it lacked, what a promotion would have lost, counted -- and
+#     the same rows once it follows again.
 #
 # .github/linux-power-cut/ holds the guest's side, .github/power-cut/ the
 # host's files both systems' rigs run.
@@ -28,9 +31,11 @@
 # check: by hand, weekly, and on a push to main that touches the durability
 # code -- the file and its flushes (fs, fs/windows), the sync log, the
 # engine's flush and commit (engine.rs, its handover and the maintenance
-# beside it), the lock, the server's syncer and what a primary sends its
-# replicas once an fsync covered it (replication.rs). A release needs its
-# last run green (RELEASING.md).
+# beside it), the lock, the server's syncer, what a primary sends its
+# replicas once an fsync covered it (replication.rs) and what `/_changes`
+# hands a consumer as on disk (cdc.rs), which the `--sync 250` guest's
+# check reads its syncs from. A release needs its last run green
+# (RELEASING.md).
 name: linux power cut
 
 on:
@@ -49,6 +54,7 @@ on:
       - 'crates/fennec-abi/src/lock.rs'
       - 'crates/fennec-server/src/durability.rs'
       - 'crates/fennec-http/src/replication.rs'
+      - 'crates/fennec-http/src/cdc.rs'
       - '.github/linux-power-cut/**'
       - '.github/power-cut/**'
       - '.github/workflows/linux-power-cut.yml'
