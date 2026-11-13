@@ -56,8 +56,8 @@ path = "tests/quotas.rs"
 name = "join_lists"
 path = "tests/join_lists.rs"
 
-# Apart: the count of connections refused as they were taken is the
-# process's own.
+# Apart: the counts of connections refused as they were taken, and of
+# those ended for a client too slow, are the process's own.
 [[test]]
 name = "refused_counts"
 path = "tests/refused_counts.rs"

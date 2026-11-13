@@ -19,6 +19,7 @@ mod regions;
 mod replicas;
 mod request_rate;
 mod router;
+mod slow_clients;
 mod standby;
 mod tls;
 mod tls_nodes;

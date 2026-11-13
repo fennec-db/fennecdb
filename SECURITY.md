@@ -47,6 +47,14 @@ In scope, and worth reporting:
   expected to reject a damaged or hostile file, not to be exploited by it.
 - Query text reaching an identifier or a value without validation, from any
   client surface.
+- A connection held past its request's time by a slow peer. A request is
+  read within `--header-timeout` of its first byte and a second more for
+  each KiB of it that came -- a pace of 1 KiB a second, head and body alike
+  -- and a write of an answer waits `--write-timeout` at most for its
+  client to take any of it, over HTTPS too; a way to hold a thread and a
+  `--max-connections` slot past them is a vulnerability. A peer holding
+  many connections, each within its bounds, is not: a cap per address is
+  the operator's, in front.
 
 ## What is documented behaviour, not a vulnerability
 

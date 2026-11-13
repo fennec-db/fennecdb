@@ -129,6 +129,10 @@ struct Shard {
     /// a row a binding each, and the writes a binding refused.
     bound_runs: AtomicU64,
     bound_refused: AtomicU64,
+    /// Connections ended for their client's slowness, by
+    /// [`crate::conn::Timeout`] (`fennec_client_timeouts_total`): counted on
+    /// the connection's thread, as its statements are.
+    timeouts: [AtomicU64; 3],
 }
 
 #[allow(clippy::declare_interior_mutable_const)]
@@ -137,6 +141,7 @@ const SHARD: Shard = Shard {
     slow: ZERO,
     bound_runs: ZERO,
     bound_refused: ZERO,
+    timeouts: [ZERO; 3],
 };
 
 static SHARDS: [Shard; SHARD_COUNT] = [SHARD; SHARD_COUNT];
@@ -311,6 +316,14 @@ pub(crate) fn scheduled(
     let _ = write!(run, ",{rows}]");
     let shape = format!("schedule {name}");
     slow_line(micros, true, failed, tenant, &shape, None, Some(&run));
+}
+
+/// Counts a connection this thread serves ended for its client's slowness
+/// ([`crate::conn::Timeout`]): a connection's once, as it ends -- a cut
+/// request before its 408 is written.
+#[cold]
+pub(crate) fn timed_out(why: crate::conn::Timeout) {
+    SHARDS[shard()].timeouts[why as usize].fetch_add(1, Ordering::Relaxed);
 }
 
 /// What the statements bound to the writes of the request this thread
@@ -630,6 +643,7 @@ fn render(source: Source) -> String {
     );
     connections_refused(&mut out, "fennec_connections_refused_total");
     handshakes_failed(&mut out, "fennec_tls_handshakes_failed_total");
+    client_timeouts(&mut out, "fennec_client_timeouts_total");
     let held = crate::waits::totals();
     out.family(
         "fennec_held_requests",
@@ -809,6 +823,21 @@ pub fn handshakes_failed(out: &mut Text, name: &str) {
     );
     for (why, reason) in FAILURES {
         out.sample(name, &[("reason", reason)], handshakes_failed(why));
+    }
+}
+
+/// The connections ended for their client's slowness, by the bound each
+/// ran past ([`crate::conn::Timeout`]), as `name`: a node's family, and
+/// the router's under its own -- the process's counts, every shard's.
+pub fn client_timeouts(out: &mut Text, name: &str) {
+    out.family(
+        name,
+        "counter",
+        "Connections ended because their client was too slow, by the bound it ran past: header (a request not whole within --header-timeout of its first byte and a second more for each KiB that came, answered 408), idle (a request silent part way for --idle-timeout, answered 408), write (an answer or a stream its client took nothing of for --write-timeout, a stream for its own bound). A connection silent between requests is closed uncounted.",
+    );
+    for (why, reason) in crate::conn::TIMEOUTS {
+        let n: u64 = SHARDS.iter().map(|s| load(&s.timeouts[why as usize])).sum();
+        out.sample(name, &[("reason", reason)], n);
     }
 }
 

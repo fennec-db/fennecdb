@@ -1,6 +1,6 @@
 # The HTTP server
 
-The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md), [crates/fennec-http/src/mcp/CLAUDE.md](../../crates/fennec-http/src/mcp/CLAUDE.md) (MCP's, moved there to make room) and [studio/CLAUDE.md](../../studio/CLAUDE.md) list under *The HTTP server*: the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, connections no thread is made for and chunked bodies (both added after the move), the OpenAPI document and the compatibility it is held to, and compressed answers (added after it too) -- and the open server's rule its CLAUDE.md lists under *Access* (added after the move as well), beside MCP's guard it grew from. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md), [crates/fennec-http/src/mcp/CLAUDE.md](../../crates/fennec-http/src/mcp/CLAUDE.md) (MCP's, moved there to make room) and [studio/CLAUDE.md](../../studio/CLAUDE.md) list under *The HTTP server*: the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, connections no thread is made for, chunked bodies and slow clients (each added after the move), the OpenAPI document and the compatibility it is held to, and compressed answers (added after it too) -- and the open server's rule its CLAUDE.md lists under *Access* (added after the move as well), beside MCP's guard it grew from. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Studio
 
@@ -747,6 +747,13 @@ a file's scheduler or a node's -- so they are one set of atomics, nothing
 contending for them. They are written only once a look was made
 (`schedule::LOOKED`), so a server that never held a schedule scrapes the
 bytes it did before them.
+
+The client timeouts (`fennec_client_timeouts_total`, the router's
+`fennec_router_client_timeouts_total`, [Slow clients](#slow-clients)) are
+in the shards too, counted on the connection's thread where its bound ran
+out, before a 408 is written. Each is a connection's once, so one set of
+atomics would have done, as the failed handshakes' is one; a shard costs
+no more and asks no exception.
 
 ## Statement counts
 
@@ -1995,6 +2002,214 @@ stream's wait, nothing on a request's.
 on a signal, the next connections taking the new certificate, is a
 follow-up. What fennecdb dials takes HTTPS by its URL
 ([below](#dialing-https)).
+
+## Slow clients
+
+**A request is read in time, and an answer written in time**
+(`conn::Paced`, `fennec_tls::TlsStream::read_by`, `Config::header_timeout`,
+`Config::write_timeout`; the router's connections alike). A connection was
+bounded by `--idle-timeout` a read at a time alone: a head or a body
+trickled a byte inside it, or an answer its client never read, held the
+connection's thread and its `--max-connections` slot as long as the client
+liked, on a node and on the router -- only a TLS handshake was bounded as a
+whole ([TLS](#tls)). Now:
+
+- *A request comes within `--header-timeout` (10 s) of its first byte and
+  a second more for every KiB that came* (`conn::MIN_RATE`), its head's
+  bytes and its body's alike: a deadline that grows as the bytes come, so
+  a client at 1 KiB a second or more is never cut, however long its
+  request, and a trickle is cut once the clock spends more than its bytes
+  earn. It is Apache's `mod_reqtimeout` model (`MinRate`), which earns
+  from the first byte too, here at twice its floor of 500 bytes a second
+  and with ten seconds where Apache gives twenty. Apache times the head
+  and the body apart, the body's clock started again at its first byte
+  and the head's capped at 40 s; here one deadline runs from the request's
+  first byte, and the head is bounded by its size, 64 KiB at most: whole
+  within 74 s. A chunked body is held alike, its framing's bytes earning
+  as its data's do. Past the deadline the request is 408, as one cut off
+  by the idle timeout was, and the connection ended as a refused one is
+  (`end_refused`), its slot given back. The idle timeout still bounds each
+  read: a silence past it mid-request is 408, and the wait for a request's
+  first byte is its alone.
+- *A write of an answer waits `--write-timeout` (30 s) at most for its
+  client to take any of it*: `SO_SNDTIMEO`, set once a connection, so an
+  answer pays nothing for it. A blocking `send` that waited so long
+  returns what went in, or fails where nothing did: the write that filled
+  the socket's buffers returns, the next fails, and the connection ends --
+  a client that reads nothing is let go within twice the timeout, one
+  reading a little at a time is not cut. A stream sets its own
+  (`Config::stream_write_timeout`, replication's `SILENCE`) and ends the
+  connection after it; the router's relay of a node's stream is held to
+  the router's.
+
+The first version held a request's first 64 KiB -- its head and its
+body's start -- to `--header-timeout` alone, those bytes earning nothing,
+and only a body past them to the rate: for its first ten seconds a request
+had to come at 6.4 KiB a second, where the rate said one. A mobile replica
+on a 32 to 64 kbit/s link (4 to 8 KB a second) pushing a 100 KiB write was
+cut at ten seconds, and its outbox, which retries a 408 and sends its
+writes in order, stalled on that write at every retry. Earning from the
+first byte gives up the head's bound of ten seconds: a client keeping the
+rate may spend 74 s on a head of 64 KiB, a slot as long as a body that
+slow held already.
+
+*Where the bound is kept.* `Paced` is the reader under the connection's
+`BufReader`, told each request is next (`waiting`). A request's first read
+is a plain read under the idle timeout, as before, and returns as the
+request's first bytes come. The clock is read at a read past it alone: the
+request's second read, which follows its first at once -- the parse of
+what the first brought between them -- starts its time (`Pace::Due`), and
+the socket's read timeout is then set to the time left, set again only
+where a wait could run past the deadline by more than an eighth of
+`--header-timeout`, or where the request's bytes made the time left grow
+well past the wait set; the idle timeout is put back at the next request's
+first read. A request its first read takes whole -- head and body within
+the 8 KiB the `BufReader` reads at once -- or a next one already in the
+buffer, reads no clock and sets no timeout: no more than before. A larger
+request, or one of several reads, pays a clock read a read and about two
+`setsockopt`s. A bound past what `Instant` can name -- a timeout of
+centuries, which `+` panics at -- is none (`checked_add`), the idle
+timeout's alone. Release builds on macOS arm64, stripped, against main
+at its pinned toolchain: `fennec-server` 6 908 256 -> 6 924 800 bytes
+(+16 544, one 16 KB page), `fennec-shard` 6 013 824 -> 6 046 960
+(+33 136, two). The code under them is 4.2 KB more without TLS and 9.8 KB
+with it, `read_by` and the first record's clock among it (`__text` of
+`served.rs`'s and `routed.rs`'s builds); the rest is pages, which a
+segment grows by whole.
+
+*Over TLS.* rustls's `Stream::read` reads the socket again inside one call
+until a record is whole, so a timeout set for a read bounds each of those
+reads, never the record: a peer sending a record a byte inside the timeout
+held one `read` as long as it liked, before a request's first plaintext as
+after it -- the handshake met the same. `TlsStream::read_by` reads a
+record's first part under the socket's own timeout, as `read` does, and
+each part after it within the time left -- `By::Within` the request's time
+from its first part where no request has begun, `By::At` a request's
+deadline after -- the socket's timeout put back after, the part that came
+kept in rustls's buffer; plaintext already there is read with no read of
+the socket. A request over TLS runs from its first record's first part:
+`read_by` reads the clock there and leaves its `By::Within` as `By::At`
+that moment and the timeout, from which `Paced` runs the request. Started
+at the second read, as a plain request's is, a first record trickled for
+nine seconds earned nine more, and HTTPS kept a weaker promise than plain
+HTTP. A record's bytes earn as they come (`read_by`'s `rate`), where its
+plaintext counts only once the record is whole: held to the bound alone, a
+16 KiB record had to come at 1.6 KiB a second. A request whose first
+record is not whole in its time has had no byte read: its connection ends
+with nothing written, as a silence before a request's first byte does;
+one cut later is 408. Where the idle timeout is nearer than the request's
+deadline, a record is whole within it, earning nothing: a silence's bound.
+
+*Counted.* `fennec_client_timeouts_total{reason}`, the router's
+`fennec_router_client_timeouts_total`, counts each connection so ended by
+the bound it ran past, named by its flag: `header` (the request's time --
+over TLS a first record not whole too), `idle` (a request silent part
+way), `write` (a write its client took nothing of: `--write-timeout`, or a
+stream's own bound, an event stream's `stream_write_timeout` or a node
+stream's `SILENCE`). Each is counted where its bound is found run out --
+`Paced`'s reads, `&Conn`'s writes and `write_or_hold`'s blocking one -- on
+the connection's thread, in its shard ([Metrics](#metrics)), before a 408
+is written: a cut is a connection's once. A connection silent between
+requests is closed uncounted, keep-alive's and no client's slowness. A
+write's `WouldBlock` is its timeout's: a served socket blocks, and a
+stream writing without blocking goes through `write_or_hold`, whose first
+write would block as often as its client is behind. A process counts its
+node's and its router's connections alike, as its refusals.
+
+Rejected: a deadline from the `Content-Length` declared, which hands a
+client declaring a gibibyte twelve days before its body's first byte and
+leaves a chunked body unbounded -- the bytes that came earn the time
+instead; a deadline looked at between reads with no timeout set, which a
+read waiting out the idle timeout overshoots by as much -- 70 s, not 10;
+a bound on the whole request (Node's `requestTimeout`), which cuts a large
+upload on a slow link where a rate lets it through; a head bounded apart,
+as Apache's 40 s, which its size bounds already; a request's first 64 KiB
+earning nothing, the first version, above; and a deadline on a whole
+answer, which would cut a gibibyte image moved across regions over a slow
+link: a client that keeps reading, however slowly, is not cut, as a
+stream's is not. A cap of connections a peer address, which bounds what a
+client with bandwidth to spend can hold, is not done: these bounds hold
+each connection to its request's time, not a client to its share of the
+slots.
+
+Tests: `tests/server.rs`'s `a_trickled_head_is_cut_at_its_deadline` (a
+header a byte every 50 ms, each inside the 60 s idle timeout: 408 at the
+600 ms asked, and the slot of a ceiling of one served again),
+`a_trickled_body_is_cut` (a body trickled from its start, cut at the
+request's time; a KiB of it sent at once, a second later; one of 10 KiB
+coming at twice the rate, its first 2 KiB at once, read whole and
+answered with seconds to spare, where the first version cut it at the
+600 ms), `an_unread_answer_frees_its_slot` (forty answers of a mebibyte
+asked and none read: the slot served again once a write took nothing for
+the 300 ms asked) and `a_header_timeout_past_the_clock_is_none`
+(`Duration::MAX`, a mebibyte's body answered); `tests/tls.rs`'s
+`a_trickled_head_over_tls_is_cut_at_its_deadline` (a record a byte: 408),
+`a_record_trickled_in_parts_is_cut_at_the_requests_time` (a request's one
+record a byte every 50 ms through a proxy: ended unanswered at the 600 ms
+asked, where rustls's read lasted the six seconds the record took) and
+`a_requests_time_over_tls_runs_from_its_first_records_first_part` (a first
+record's first byte, 3 s of nothing, then its rest: the request cut at
+the 5 s asked, 408, before the rest of its head goes at 7.5 s, where a
+time started at the record's end answered it 200); fennec-tls's
+`read_by_bounds_a_record_that_comes_in_parts` (a record of some 220 bytes
+a byte every 50 ms, each well inside the socket's ten seconds: cut at the
+400 ms asked, its `By::Within` left `At` the bound from its first part,
+then read whole once the rest came, its first part kept) and
+`read_by_earns_a_records_time_by_its_bytes` (150 bytes of a record at
+once and the rest held: cut no sooner than the 400 ms and the 750 ms they
+earned at 200 a second). `tests/refused_counts.rs`, a binary apart, counts
+a trickled head under `header`, a half head on a server with no
+`--header-timeout` under `idle` and forty unread answers under `write`,
+each once and the others not. fennec-shard's `tests/slow_clients.rs` holds
+the router to `tests/server.rs`'s three, by name, and its
+`tests/refused_counts.rs` counts its trickled head. Before, a byte every
+50 ms was never cut, each read inside the idle timeout, and the unread
+answers held the one slot until their client went.
+
+*Under load.* `make slow-client-check` (`tools/slow_client_check.py`)
+runs a release `fennec-server` on loopback at `--max-connections 50` and,
+for five minutes, twice as many clients holding connections badly -- a
+third trickling a head a byte every half second, a third a body declared a
+mebibyte, a third asking forty 1 MiB answers and reading none -- each back
+as soon as it is cut, a refusal (503) after its `Retry-After`, beside one
+client asking a row every 50 ms on a connection kept alive from the start.
+It fails on that client's failure or a p99 past a second, and on a
+trickler living past its bound or answered other than 408; its server and
+its loops end with it (`--exit-on-stdin-close`, the Makefile's trap). On
+macOS arm64, under a 1-minute load of 30 to 50 from other sessions'
+builds: the kept-alive client 5 298 requests, p50 0.3 ms, p99 9.0 ms, none
+failed; 625 heads and 569 bodies cut at 10.0 to 10.1 s, each 408; 50
+readers let go at 60.6 to 60.8 s, twice the write timeout; 15 257 refusals
+met. That run was the first version's; earning from the first byte moves
+a trickle's cut by milliseconds, a byte every half second earning 2 ms a
+second. A fresh connection every 5 s was refused 57 times of 59: a slot a
+cut
+frees goes to whoever asks first, mostly the trickler cut from it -- these
+bounds hold a connection to its request's time, not a client to its share
+of the slots.
+
+Instruction counts, `make instr-compare` over `--bin` builds of
+`served.rs` (fennec-http) and `routed.rs` (fennec-shard: a tenant's row by
+id through a router in front of a node), each against origin/main f104d32e
+with this branch's example copied in; 8 re-signed identities a build, 7
+rounds, each run started under a 1-minute load of 4, macOS arm64, rustc
+1.99.1; instructions a request, the mean of each build's 8 identities'
+medians:
+
+| program, mode | main | this branch | difference | SE | |
+|---|---|---|---|---|---|
+| `served` `file` | 119 269.4 | 120 703.4 | +1 434.0 (+1.20%) | 1 136.9 | inside 2 SE |
+| `served` `node` | 124 584.1 | 124 579.4 | -4.7 (-0.00%) | 254.6 | inside 2 SE |
+| `served` `put` | 145 641.3 | 146 069.5 | +428.2 (+0.29%) | 245.0 | inside 2 SE |
+| `served` `pipelined` | 76 673.0 | 76 810.9 | +137.9 (+0.18%) | 245.3 | inside 2 SE |
+| `routed` `read` | 287 584.2 | 288 338.8 | +754.6 (+0.26%) | 768.1 | inside 2 SE |
+| `routed` `pipelined` | 244 535.4 | 245 214.4 | +679.0 (+0.28%) | 437.3 | inside 2 SE |
+
+Every difference is inside 2 standard errors. `file` is noisy: its two
+builds' identities spread 118 000.7 to 122 835.4 (main) and 118 330.8 to
+124 049.6 (this branch), the SE 1 136.9, so its +1.20% is not a figure the
+run supports as a cost; the other five modes, with SEs of 245 to 768, read
+-0.00% to +0.29%.
 
 ## Dialing HTTPS
 

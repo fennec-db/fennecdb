@@ -524,7 +524,14 @@ HTTPS itself once it is given a certificate.</p>
     ceiling — is answered the same 503, with <code>Retry-After</code>, and
     counted (<code>fennec_connections_refused_total{reason="no_thread"}</code>).</li>
   <li>A keep-alive connection silent for 60 s is closed
-    (<code>--idle-timeout &lt;s&gt;</code>, 0 for never).</li>
+    (<code>--idle-timeout &lt;s&gt;</code>, 0 for never). A request must come
+    within 10 s of its first byte and a second more for each KiB that came,
+    head and body alike -- 1 KiB a second at least
+    (<code>--header-timeout &lt;s&gt;</code>) -- else 408; a write of an answer
+    waits 30 s at most for its client to take any of it, so a client that
+    reads nothing is let go within a minute (<code>--write-timeout &lt;s&gt;</code>).
+    A slow client holds a connection's thread for its request's time, not
+    for as long as it likes.</li>
 </ul>
 </details>
 

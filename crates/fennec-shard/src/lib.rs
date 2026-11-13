@@ -40,7 +40,7 @@ pub mod upstream;
 
 use directory::{Directory, Node, State};
 use fennec_core::prelude::*;
-use fennec_http::conn::Conn;
+use fennec_http::conn::{Conn, Paced};
 use fennec_http::http::{self, Method, Request, Response};
 use fennec_http::replication::{self, Replication};
 use metrics::Route;
@@ -62,6 +62,17 @@ pub struct Config {
     pub max_connections: usize,
     pub max_body: usize,
     pub idle_timeout: Option<Duration>,
+    /// `--header-timeout`: a client's request read in time as a node reads
+    /// one ([`fennec_http::conn::Paced`]): within it of its first byte and
+    /// a second more for every [`fennec_http::conn::MIN_RATE`] bytes that
+    /// came. `None`: no bound but the idle timeout's on each read.
+    pub header_timeout: Option<Duration>,
+    /// `--write-timeout`: the longest one write to a client -- an answer,
+    /// a relayed stream -- waits for it to take any of it: the write that
+    /// filled the socket's buffers returns what went in, the next, taking
+    /// nothing, fails and ends the connection, within twice this.
+    /// `None`: for ever.
+    pub write_timeout: Option<Duration>,
     /// Connect and read bound when talking to a node.
     pub upstream_timeout: Duration,
     /// Whether a tenant created on a node in no pair gets a replica of its
@@ -152,6 +163,8 @@ impl Default for Config {
             max_connections: 1000,
             max_body: 64 << 20,
             idle_timeout: Some(Duration::from_secs(60)),
+            header_timeout: Some(fennec_http::conn::HEADER_TIMEOUT),
+            write_timeout: Some(fennec_http::conn::WRITE_TIMEOUT),
             upstream_timeout: Duration::from_secs(60),
             replicas: false,
             auto_failover: None,
@@ -1814,13 +1827,20 @@ impl Router {
         // unwinding too, as a node's.
         let _slot = slot;
         let _ = conn.set_read_timeout(self.cfg.idle_timeout);
+        // Once a connection, as a node's: a write the client takes nothing
+        // of for this long returns what went in, the next fails, and the
+        // connection ends.
+        let _ = conn.set_write_timeout(self.cfg.write_timeout);
         let peer = conn.peer_addr().ok();
         fennec_http::audit::connection(if conn.is_tls() { "https" } else { "http" }, peer);
         fennec_http::trace::connection(conn.local_addr().ok(), peer);
         let mut out = &conn;
         let _open = metrics::Connection::open();
-        let mut reader = BufReader::new(&conn);
+        // Each request read in time, as a node reads one.
+        let paced = Paced::new(&conn, self.cfg.idle_timeout, self.cfg.header_timeout);
+        let mut reader = BufReader::new(paced);
         loop {
+            reader.get_mut().waiting();
             let req = match http::read_request(&mut reader, self.cfg.max_body) {
                 Ok(Some(r)) => r,
                 Ok(None) => return,
