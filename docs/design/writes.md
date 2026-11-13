@@ -27,6 +27,25 @@ core already rendered and applied `insert` (`render_put`'s `insert`);
 `integrations/sync-scenarios.json` holds both runners to it with the
 write `insert_new`.
 
+A `put` writing one row twice -- an id it names twice, or one it hands out
+and then names -- leaves the row the last document's, its vector or none.
+A statement's vectors wait for the batch linked as it ends
+(`index_written`), so the second document took the row out of a graph the
+first one's vector was not in yet, and the batch then linked that vector
+over a row holding another or none: `near`, `exact` too, found the row by
+a vector it no longer held until the file was opened again. Where a
+document writes over a row whose record lies past the store's mark as the
+batch began (`Store::wrote_since`), the batch is linked first, as an
+upsert's is and a replica's apply links its own at an id met twice
+(`VectorBatch`); the row's vector then leaves the graph as any row's does.
+A `put` over rows of a collection keeping a graph pays one look at the
+offset index a row it writes over; a lone `put` over REST 10 instructions
+of the program's own, 544 to 554 in `Database::put` (an lldb trace of one
+call, `tools/instr/trace.py`). Kept for every collection, the store's mark
+-- seven words -- cost 22, and whether the collection keeps a graph looked
+up by its name again 68 more (`tests/model.rs` found the bug;
+`tests/blocks.rs`, `a_row_a_put_writes_twice_holds_its_last_vector_or_none`).
+
 ## Arithmetic in set
 
 **A `set` reads the row it writes, and every write says what it did.**
@@ -71,7 +90,16 @@ without a 409 that aborts a `/batch` or an exception to catch. A row past
 its `@ttl` is out of a write's way as of every read: an insert naming its
 id writes over it, and a `@unique` value it holds is let go of with it, the
 row deleted in the same statement (`expired`, `erase`); left to the
-sweeper, a lock that expired stayed held up to a minute. The builders
+sweeper, a lock that expired stayed held up to a minute. A `set` and an
+upsert's `else set` taking such a value let go of the row as a `put`
+does, once `@unique` finds the clash, and ask again (`set_row`,
+`let_go_expired`): until they did, the `set` was refused as a duplicate,
+naming a row no read shows (`tests/model.rs` found it; `tests/writes.rs`,
+`a_set_takes_a_unique_value_a_row_past_its_time_held`). Asked only at a
+clash, a `set` meeting none pays nothing -- a set by id over REST is 2
+instructions of the program's own fewer, 248 to 246 in `set_row` (an lldb
+trace of one call, `tools/instr/trace.py`) -- where asked of every
+statement, the expiry cost it 29. The builders
 render `inc(n)` as `f: coalesce(f, 0) + $k` and `expr(text, ...)` with its
 `?`s bound, every SDK to the golden file. The browser module grew
 7.9 KB, 2.7 KB brotli: the parser's arithmetic, the binding, `if

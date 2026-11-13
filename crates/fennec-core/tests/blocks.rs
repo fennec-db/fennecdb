@@ -764,3 +764,78 @@ fn a_block_put_back_leaves_no_vector_waiting() {
     assert_eq!(db.unlinked(), 0);
     assert_eq!(nearest(&db, 5_050, false)[0], 5_050);
 }
+
+/// A `put` writing a row twice -- an id it names twice, or one it hands out
+/// and then names -- leaves the graph holding the vector the row ended
+/// with, or none. A statement's vectors wait for the batch linked as it
+/// ends: the second document took the row out of a graph the first's
+/// vector was not in yet, and the batch then linked that vector over a row
+/// holding another or none, which `near` answered -- `exact` too, reading
+/// the graph's vectors -- until the file was opened again
+/// (`tests/model.rs` found it). In a block that defers, the same.
+#[test]
+fn a_row_a_put_writes_twice_holds_its_last_vector_or_none() {
+    for defers in [false, true] {
+        let mut db = Database::new();
+        exec(
+            &mut db,
+            "create collection d (v vector<3> @hnsw(cosine), g int)",
+            &[],
+        );
+        if defers {
+            db.begin().unwrap();
+        }
+        for sql in [
+            // The second document holds no vector.
+            "put d [{id: 1, v: [1, 1, 0]}, {id: 1, g: 1}]",
+            // Id 2 handed out, then named.
+            "put d [{v: [0, 0, 1]}, {id: 2, g: 2}]",
+            // The second's vector stays.
+            "put d [{id: 3, v: [1, 0, 0]}, {id: 3, v: [0, 1, 0]}]",
+        ] {
+            exec(&mut db, sql, &[]);
+        }
+        if defers {
+            db.commit().unwrap();
+        }
+        // Refused once both are written, a row new or held is put back
+        // whole, the vector it held or none: a lone statement by itself,
+        // one in a block by the block's rollback.
+        for sql in [
+            "put d [{id: 4, v: [1, 1, 0]}, {id: 4, v: [0, 0, 1]}] require 3",
+            "put d [{id: 3, v: [1, 1, 0]}, {id: 3, g: 3}] require 3",
+        ] {
+            if defers {
+                db.begin().unwrap();
+            }
+            let refused = db.execute_with(&stmt(sql), &[]);
+            assert!(
+                matches!(refused, Err(Error::Unmet(_))),
+                "{sql}: {refused:?}"
+            );
+            if defers {
+                db.rollback();
+            }
+        }
+        for (q, want) in [
+            ("[0, 1, 0]", 1.0),
+            ("[1, 1, 0]", std::f32::consts::FRAC_1_SQRT_2),
+            ("[0, 0, 1]", 0.0),
+        ] {
+            for way in ["", " exact"] {
+                let sql = format!("get d select id near v {q}{way}");
+                let hits: Vec<(u64, Option<f32>)> = db
+                    .query(&stmt(&sql), &[])
+                    .unwrap()
+                    .rows()
+                    .unwrap()
+                    .rows
+                    .iter()
+                    .map(|r| (r.id, r.score))
+                    .collect();
+                let held = matches!(hits.as_slice(), [(3, Some(s))] if (s - want).abs() < 1e-6);
+                assert!(held, "defers {defers}: {sql}: {hits:?}");
+            }
+        }
+    }
+}

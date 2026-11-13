@@ -557,7 +557,9 @@ id (`tests/blocks.rs`, `a_hook_changing_a_documents_id_is_refused`). Then
 the row written over leaves the indexes whose field changes (`unindex_doc`), the
 frame is appended, the document goes into the scalar indexes
 (`index_scalar`), and after the statement's documents their vectors go into
-the graph in a batch or are left waiting (`index_written`). A `set` -- an
+the graph in a batch or are left waiting (`index_written`), the batch
+linked first where a document writes over a row it holds
+([writes.md](writes.md#insert-and-put)). A `set` -- an
 upsert's too -- reads its row, asks the hooks and `@unique`, remembers,
 then the same: the row out, the frame, the document in, its vector first
 (`index_doc`). A `del` -- a sweep's, a `put`'s over an expired row --
@@ -844,3 +846,27 @@ guard and with it), each 8 copies under random UUIDs of 7 runs
 guard against 13 217.7 without (SE 27.6 for the difference) and
 12 371.4 against 12 370.1 a thousand an `apply` (SE 20.3), main's
 13 727.8 and 12 798.7.
+
+`tests/model.rs` holds blocks, and every other write, to a model of the
+rows, a `BTreeMap` a collection: seeded runs of `put`, `insert`, upserts,
+`set` and `del` picking rows with `order` and `limit`, `require` and
+`returning`; blocks that land, blocks refused part way and blocks rolled
+back; alters, indexes made and dropped, compacts, checkpoints, `@ttl` moved
+by `set_clock` and its sweep; reopens, and the file cut at a step's end --
+there, zeros after it, the record after it torn or zeroed from inside. Each
+answer, every row after each step, each record a step appends, what an open
+takes of a cut file and the change counter -- a row a write, a schema
+change one, taken back with the file and never reused -- are held to the
+model's, and every index's answer to the scan's over a twin field holding
+the same values (as `tests/nan.rs` holds them), in the build with every
+index and in the one without them (`tests/features.rs`). A divergence
+names its seed, its step and what differed, and the steps it shrinks to
+(`shrink`, halves then single steps, a statement of a block at a time).
+`make test` runs 200 seeds of 1 000 steps in each build;
+`.github/workflows/model.yml` 1 000 seeds of 100 000 in each, a week,
+seeds no run took before. Its first runs found two bugs, each fixed with a
+test of its own: a `set` refused a
+`@unique` value a row past its time held, which a `put` took
+([writes.md](writes.md#arithmetic-in-set)), and a `put` writing one row
+twice linked its first document's vector over the row
+([writes.md](writes.md#insert-and-put)).

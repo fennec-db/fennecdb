@@ -554,10 +554,12 @@ neither does a tenant that follows another node. The server's
 it), so a binary from before it refuses the file rather than hand out the
 rows past their time. A write takes the place of a row past its time:
 an <code>insert</code> naming its id writes over it, and a
-<code>@unique</code> value it holds is let go of with it, the row deleted
-in the same statement — so a lock taken by <code>insert</code> and left to
-expire can be taken again at once (<a href="/docs/redis#lock">Instead of
-Redis</a>). BM25's statistics count the row until the sweep.</p>
+<code>@unique</code> value it holds is let go of with it — by a
+<code>put</code>, a <code>set</code> or an upsert's <code>else set</code>
+taking the value — the row deleted in the same statement, so a lock taken
+by <code>insert</code> and left to expire can be taken again at once
+(<a href="/docs/redis#lock">Instead of Redis</a>). BM25's statistics count
+the row until the sweep.</p>
 
 <h3 id="reaper">Reading what expired: the reaper</h3>
 

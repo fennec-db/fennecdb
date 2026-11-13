@@ -10096,6 +10096,52 @@ impl Database {
             .find_map(|f| f.index.ttl().map(|ttl| (f.name.as_str(), ttl)))
     }
 
+    /// Where a write finds a row of a collection with `schema` past its
+    /// time: the `@ttl` field's position, and now less the ttl, at or
+    /// before which the field puts a row past it. `None` for a collection
+    /// whose rows do not expire, and without a clock -- the browser module
+    /// handed none -- where no row is past its time for a write.
+    fn expiry_in(&self, schema: &Schema) -> Option<(usize, i64)> {
+        let (at, ttl) = schema
+            .fields
+            .iter()
+            .enumerate()
+            .find_map(|(i, f)| f.index.ttl().map(|ttl| (i, ttl)))?;
+        let now = self.now().ok()?;
+        Some((at, now.saturating_sub(ttl.min(i64::MAX as u64) as i64)))
+    }
+
+    /// Lets go of each row past its time (`@ttl`) at `cut`
+    /// ([`Self::expiry_in`]) holding one of `doc`'s `@unique` values: out of
+    /// every read, such a row is out of a write's way, and its value with
+    /// it. A `put` asks before its clash, a `set` and an upsert's `else
+    /// set` once they meet one: held, a lock taken and left to expire
+    /// stayed held until the sweeper came by, up to a minute later, and a
+    /// `set` taking its value was refused, naming a row no read shows
+    /// (`tests/model.rs`). The row `doc` writes is never among them
+    /// (`unique_holders`): a reaper's `set` of a row past its time sets
+    /// it, one write.
+    fn let_go_expired(
+        &mut self,
+        collection: &str,
+        schema: &Schema,
+        doc: &Document,
+        cut: (usize, i64),
+        hooks: &[Arc<dyn crate::plugin::Hook>],
+    ) -> Result<()> {
+        let c = &self.collections[collection];
+        let mut gone = Vec::new();
+        for (_, other) in c.unique_holders(doc)? {
+            if expired(c, other, cut)? {
+                gone.push(other);
+            }
+        }
+        for other in gone {
+            self.erase(collection, schema, (other, false), hooks)?;
+        }
+        Ok(())
+    }
+
     /// The test a row of `collection` passes while it lives, at the time a
     /// read is answered (`@ttl`): `not (field <= now - ttl)`, so a row whose
     /// field is null -- which has no time to expire from -- lives, and none
@@ -10631,10 +10677,11 @@ impl Database {
     ) -> Result<usize> {
         // The collection looked up once, and its hooks borrowed rather than
         // copied: a lookup by name is a hash of the name, and the copy an
-        // allocation, every statement.
-        let (schema, cid, bound) = {
+        // allocation, every statement. Whether it keeps a graph is read
+        // there too: looked up again, it was 68 instructions of a `put`.
+        let (schema, cid, bound, graphs) = {
             let c = self.collection(collection)?;
-            (c.schema.clone(), c.id, c.bound)
+            (c.schema.clone(), c.id, c.bound, !c.vectors.is_empty())
         };
         // What a row of it may be: made, and -- by a `put`, or an upsert's
         // `else set` -- written over. A write over an expired row makes
@@ -10706,40 +10753,31 @@ impl Database {
         // `insert` and left to expire stayed held until the sweeper came
         // by, up to a minute later.
         let unique = schema.has_unique();
-        // Without a clock -- the browser module handed none -- no row is
-        // past its time for a write, as before. A write waking a binding
-        // asks too: a `put` over an expired row makes one, as every read
-        // saw it gone, and a binding is told what every read saw.
-        let expiry = match (insert || unique || wake)
-            .then(|| self.ttl_of(collection))
-            .flatten()
-        {
-            Some((f, ttl)) => self.now().ok().map(|now| {
-                let cut = now.saturating_sub(ttl.min(i64::MAX as u64) as i64);
-                (schema.field_pos(f).unwrap_or(0), cut)
-            }),
-            None => None,
+        // A write waking a binding asks too: a `put` over an expired row
+        // makes one, as every read saw it gone, and a binding is told what
+        // every read saw.
+        let expiry = match insert || unique || wake {
+            true => self.expiry_in(&schema),
+            false => None,
         };
 
         let mut n = 0usize;
         let mut written: Vec<Document> = Vec::with_capacity(built.len());
+        // Where the store stood as `written` took its first document, in a
+        // collection keeping a graph: a row whose record lies past it has
+        // its vector waiting there.
+        let mut since = None;
         for (i, mut doc) in built.into_iter().enumerate() {
             #[cfg(target_arch = "wasm32")]
             let _ = i;
             if let (Some(cut), true) = (expiry, unique) {
-                let c = &self.collections[collection];
-                let mut gone = Vec::new();
-                for (_, other) in c.unique_holders(&doc)? {
-                    if expired(c, other, cut)? {
-                        gone.push(other);
-                    }
-                }
-                for other in gone {
-                    self.erase(collection, &schema, (other, false), hooks)?;
-                }
+                self.let_go_expired(collection, &schema, &doc, cut, hooks)?;
             }
-            let c = self.collections.get_mut(collection).unwrap();
+            let mut c = self.collections.get_mut(collection).unwrap();
             let mark = c.store.mark();
+            if graphs && written.is_empty() {
+                since = Some(mark);
+            }
             // The row an upsert sets rather than the document written.
             let mut held = None;
             let named = doc.id != 0;
@@ -10843,6 +10881,32 @@ impl Database {
                 if held.is_none() {
                     // Drop the old index entries when overwriting.
                     if let Some(old) = &old {
+                        // A row this statement wrote has its vector waiting
+                        // in `written`, not in the graph: the batch is
+                        // linked first, as an upsert links it below and a
+                        // replica's apply does an id met twice, so the old
+                        // vector leaves the graph here. Left waiting, it
+                        // was linked as the statement ended, over a row
+                        // holding another vector or none, and `near` found
+                        // it (`tests/model.rs`). One look at the offset
+                        // index a row written over, and only beside a graph
+                        // and a batch.
+                        if !written.is_empty()
+                            && since.is_some_and(|m| c.store.wrote_since(&m, doc.id))
+                        {
+                            self.index_written(collection, &mut written);
+                            #[cfg(not(target_arch = "wasm32"))]
+                            match ready {
+                                Some(_) => self.preparation.spend(&mut written),
+                                None => written.clear(),
+                            }
+                            // The store as it stood before this document,
+                            // which nothing has written to since its mark:
+                            // taken again rather than kept, a mark is seven
+                            // words a `put` would hold across its hooks.
+                            c = self.collections.get_mut(collection).unwrap();
+                            since = Some(c.store.mark());
+                        }
                         c.unindex_doc(old, Some(&doc));
                     }
                     #[cfg(not(target_arch = "wasm32"))]
@@ -14469,8 +14533,23 @@ impl Database {
             h.before_overwrite(schema, &old, &doc)?;
         }
         // An update makes a duplicate as a put does: `set email = "a"`
-        // over two documents is refused at the second.
-        c.unique_clash(&doc)?;
+        // over two documents is refused at the second. A value rows past
+        // their time hold is let go of with them, as a `put`'s is
+        // ([`Self::let_go_expired`]), asked once a clash is found: a `set`
+        // meeting none pays nothing for it -- asked of every statement, it
+        // was 29 instructions of a set by id over REST.
+        let c = match c.unique_clash(&doc) {
+            Err(Error::Duplicate(why)) => match self.expiry_in(schema) {
+                Some(cut) => {
+                    self.let_go_expired(collection, schema, &doc, cut, hooks)?;
+                    let c = self.collections.get_mut(collection).unwrap();
+                    c.unique_clash(&doc)?;
+                    c
+                }
+                None => return Err(Error::Duplicate(why)),
+            },
+            r => r.map(|_| c)?,
+        };
         // Remembered before the row leaves the indexes ([`Block::remember`]).
         if let Some(b) = &mut self.block {
             b.remember(cid, id, c.store.loc(id), c.store.mark());

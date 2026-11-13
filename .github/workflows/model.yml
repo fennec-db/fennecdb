@@ -1,0 +1,88 @@
+# The engine held to its model far longer than a pull request holds it
+# (crates/fennec-core/tests/model.rs, docs/design/conventions.md, "The
+# model"): `make test` runs 200 seeds of 1 000 steps in each build; this
+# runs 1 000 seeds of 100 000 steps, in the build with every index and in
+# the one without them, 125 seeds a job. Each run takes seeds no run took
+# before -- from its run number times 1 000, or from `first` by hand -- so
+# four green weeks are 4 000 seeds no pull request saw.
+#
+# A divergence fails its job, which prints the seed, the step and what
+# differed, the command that runs the seed again and the steps it shrank
+# to: a bug of the engine's, fixed with a test of its own, or of the
+# model's. Built as a release, with the checks a debug build makes -- an
+# overflow, a debug assertion -- which panic into the report; about half
+# an hour a job, never on a pull request and not a required check.
+name: engine model
+
+on:
+  workflow_dispatch:
+    inputs:
+      first:
+        description: The first of the 1 000 seeds (by default the run's number times 1 000)
+        required: false
+        default: ''
+  schedule:
+    - cron: '37 2 * * 0'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engine-model-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  model:
+    name: model (${{ matrix.build }}, shard ${{ matrix.shard }} of 0-7)
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        build: [indexes, scan]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    env:
+      FENNEC_MODEL_SEEDS: 125
+      FENNEC_MODEL_OPS: 100000
+      FENNEC_MODEL_PROGRESS: 1
+      # A divergence 100 000 steps in replays in seconds: half an hour
+      # shrinks it to the steps it needs, or near.
+      FENNEC_MODEL_SHRINK_SECS: 1800
+      CARGO_PROFILE_RELEASE_LTO: 'false'
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
+      CARGO_PROFILE_RELEASE_STRIP: 'false'
+      CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+      CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: 'true'
+      CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS: 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: rustup show
+      - name: The seeds
+        env:
+          FIRST: ${{ inputs.first }}
+          RUN: ${{ github.run_number }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          base="${FIRST:-$((RUN * 1000))}"
+          if ! [[ "$base" =~ ^[0-9]{1,15}$ ]]; then
+            echo "::error::first is a number of seeds, not '$base'"
+            exit 1
+          fi
+          first=$((base + SHARD * FENNEC_MODEL_SEEDS))
+          echo "FENNEC_MODEL_FIRST=$first" >> "$GITHUB_ENV"
+          echo "seeds $first to $((first + FENNEC_MODEL_SEEDS - 1)), $FENNEC_MODEL_OPS steps each"
+      - name: Build
+        run: |
+          case "${{ matrix.build }}" in
+            indexes) cargo test -p fennec-core --release --test all --no-run ;;
+            scan) cargo test -p fennec-core --release --no-default-features --features std-fs,language --test features --no-run ;;
+          esac
+      - name: The model
+        run: |
+          case "${{ matrix.build }}" in
+            indexes) cargo test -p fennec-core --release --test all model::the_engine -- --nocapture ;;
+            scan) cargo test -p fennec-core --release --no-default-features --features std-fs,language --test features model:: -- --nocapture ;;
+          esac
