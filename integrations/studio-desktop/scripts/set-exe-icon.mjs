@@ -153,13 +153,20 @@ export function withIcon(exe, ico) {
     const s = p.sections.find((x) => x.va === rva);
     if (!s) throw new Error('the resource directory does not start a section: not rewritten');
     const blob = resourceSection(leaves, s.va);
-    if (blob.length > Math.min(s.rawsize, s.vsize)) throw new Error(`the new resources (${blob.length} bytes) do not fit the section (${Math.min(s.rawsize, s.vsize)})`);
+    if (blob.length <= Math.min(s.rawsize, s.vsize)) {
+      file.fill(0, s.raw, s.raw + s.rawsize);
+      blob.copy(file, s.raw);
+      file.writeUInt32LE(blob.length, rsrcDir + 4);
+      return file;
+    }
+    // It does not fit (a build that wrote its own icon first leaves a section
+    // sized to it, 8 bytes short here): the old one is emptied and renamed, the
+    // resources go in a new one.
     file.fill(0, s.raw, s.raw + s.rawsize);
-    blob.copy(file, s.raw);
-    file.writeUInt32LE(blob.length, rsrcDir + 4);
-    return file;
+    file.fill(0, s.header, s.header + 8);
+    file.write('.rsrc.o', s.header, 'latin1');
   }
-  // No resources: a section of its own, after the last.
+  // No resources, or none that fit: a section of its own, after the last.
   const last = p.sections.reduce((a, b) => (b.va > a.va ? b : a));
   const va = align(last.va + Math.max(last.vsize, last.rawsize), p.sectionAlign);
   const blob = resourceSection(leaves, va);

@@ -18,11 +18,11 @@ const SIZES = [16, 32, 48, 256];
 const WANT = new Map((icoImages(ico) as { width: number; data: Buffer }[]).map((i) => [i.width, i.data]));
 
 /** A PE32+ with a .text section and, if `rsrc` is given, a .rsrc section holding it (a resource tree already laid out). */
-function pe(rsrc?: { va: number; bytes: Buffer }): Buffer {
+function pe(rsrc?: { va: number; bytes: Buffer }, room = 0x10000): Buffer {
 	const headers = 0x200;
 	const text = Buffer.alloc(0x200, 0x90);
 	const sections = rsrc ? 2 : 1;
-	const rsrcRaw = rsrc ? Buffer.concat([rsrc.bytes, Buffer.alloc(0x10000 - rsrc.bytes.length)]) : Buffer.alloc(0);
+	const rsrcRaw = rsrc ? Buffer.concat([rsrc.bytes, Buffer.alloc(room - rsrc.bytes.length)]) : Buffer.alloc(0);
 	const file = Buffer.alloc(headers + text.length + rsrcRaw.length);
 	file.write("MZ", 0, "latin1");
 	file.writeUInt32LE(0x80, 0x3c);
@@ -57,7 +57,7 @@ function pe(rsrc?: { va: number; bytes: Buffer }): Buffer {
 }
 
 /** Bun's shape: a named RT_GROUP_ICON naming one 256-pixel RT_ICON, and a version resource (16) beside them. */
-function bunLike(): Buffer {
+function bunLike(room?: number): Buffer {
 	const va = 0x2000;
 	const b = Buffer.alloc(0x400);
 	const u16 = (at: number, v: number) => b.writeUInt16LE(v, at);
@@ -98,7 +98,7 @@ function bunLike(): Buffer {
 	// the group's name: a length, then its UTF-16
 	b.writeUInt16LE(3, 0x300);
 	b.write("IDI", 0x302, "utf16le");
-	return pe({ va, bytes: b });
+	return pe({ va, bytes: b }, room);
 }
 
 test("a file with no resources is given the app's icon at every size", () => {
@@ -131,6 +131,15 @@ test("a file with Bun's one 256-pixel icon fails, and has it replaced, its other
 	const rest = (readResources(done) as { type: number; data: Buffer }[]).filter((r) => r.type === 16);
 	assert.deepEqual(
 		rest.map((r) => r.data.toString()),
+		["version"],
+	);
+});
+
+test("a section too small for the icon is left empty and the resources go in a new one", () => {
+	const done = withIcon(bunLike(0x400), ico);
+	assert.deepEqual(iconProblems(iconGroups(done), SIZES, WANT), []);
+	assert.deepEqual(
+		(readResources(done) as { type: number; data: Buffer }[]).filter((r) => r.type === 16).map((r) => r.data.toString()),
 		["version"],
 	);
 });
