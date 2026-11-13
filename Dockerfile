@@ -12,18 +12,22 @@
 # manager, no libc.
 
 # ----------------------------------------------------------------- build
-FROM rust:alpine AS build
+# The release rust-toolchain.toml names, by digest: the compiler CI tests
+# with is the one the image ships. tools/toolchain_check.py fails CI when
+# the two name different releases, or a FROM here names no digest.
+FROM rust:1.99.1-alpine@sha256:44819b27be4c97b0e4d7203bd2e02c4820f97700211b6a37fb4c246a2de59383 AS build
 
 RUN apk add --no-cache musl-dev rsync
 
 WORKDIR /src
+# rust-toolchain.toml governs this build as it does every other: it names
+# this image's own release, and the wasm32 target it asks for -- which no
+# binary here needs, 99 MB of the build stage alone -- is added in a layer
+# of its own, kept until the file changes, rather than by rustup at every
+# build's first cargo call.
+COPY rust-toolchain.toml ./
+RUN rustup toolchain install --no-self-update
 COPY . .
-
-# rust-toolchain.toml also asks for the wasm32 target; that is pointless for
-# the server build and makes it download a fresh toolchain instead of using
-# the image's own. The channel is already "stable", so dropping it loses no
-# version pin.
-RUN rm -f rust-toolchain.toml
 
 # On Alpine the host target is already *-linux-musl: a plain `--release`
 # gives a static binary, and since we name no target, arm64/amd64 both come
