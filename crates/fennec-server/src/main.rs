@@ -103,6 +103,16 @@ usage: fennec-server [options]
                             default: 100. Every connection is a thread
       --idle-timeout <s>    close a keep-alive connection silent for this
                             long (0 = never)  default: 60
+      --header-timeout <s>  a request's head whole, from its first byte, and
+                            its body's first 64 KiB with it; past them a
+                            body comes at 1 KiB a second at least, or the
+                            request is answered 408 and its connection ended
+                            (0 = only --idle-timeout, a read at a time)
+                            default: 10
+      --write-timeout <s>   the longest a write of an answer waits for its
+                            client to take any of it: a client reading
+                            nothing is let go within twice this (0 = never)
+                            default: 30
       --max-memory <MiB>    data footprint ceiling (0 = off, the default).
                             Above it, writes stop with 507; reads, `del`
                             and `compact` keep working. A third of the
@@ -632,6 +642,17 @@ fn main() {
                     fail(&format!("--idle-timeout expects seconds, got `{v}`"))
                 });
                 http_cfg.idle_timeout = (secs > 0).then(|| Duration::from_secs(secs));
+            }
+            "--header-timeout" | "--write-timeout" => {
+                let v = next(&mut i, flag);
+                let secs: u64 = v
+                    .parse()
+                    .unwrap_or_else(|_| fail(&format!("{flag} expects seconds, got `{v}`")));
+                let bound = (secs > 0).then(|| Duration::from_secs(secs));
+                match flag {
+                    "--header-timeout" => http_cfg.header_timeout = bound,
+                    _ => http_cfg.write_timeout = bound,
+                }
             }
             "--max-memory" => {
                 let v = next(&mut i, "--max-memory");
@@ -1201,6 +1222,8 @@ fn main() {
         admin_token: http_cfg.admin_token.clone(),
         insecure: http_cfg.insecure,
         idle_timeout: http_cfg.idle_timeout,
+        header_timeout: http_cfg.header_timeout,
+        write_timeout: http_cfg.write_timeout,
         // The same certificate: no listener of a server told to speak
         // HTTPS is plain, so a token a scrape sends never goes in the clear.
         tls: http_cfg.tls.clone(),

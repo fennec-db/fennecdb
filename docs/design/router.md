@@ -343,6 +343,22 @@ and the pool, the exchange and an answer's reads are generic over the
 transport (`upstream::Wire`), so a plain request runs no match on it
 ([http.md](http.md#dialing-https)).
 
+A client's side of the router is held in time as a node's is
+([http.md](http.md#slow-clients)): its requests read through
+`fennec_http::conn::Paced` -- a head whole within `--header-timeout` of its
+first byte, a body at 1 KiB a second past its first 64 KiB, else the
+router's own 408, nothing sent on -- and `--write-timeout` set once a
+connection, so an answer the client takes nothing of, and a node's stream
+relayed to a client that stopped reading (`io::copy`, which held a router
+thread for as long before), end the connection. Every 408 and every cut
+is the router's alone: a request it did not read whole is sent to no
+node, and a node's answer it could not hand on is its own connection's to
+cut (`relayed.is_err()`, no `close_notify` over TLS). The router's
+`--max-connections` is a thousand, a node's a hundred: a slot held by a
+slow client is the router's to give back, not a node's. fennec-shard's
+`tests/slow_clients.rs` is fennec-http's three tests, through a router of
+one slot in front of a node.
+
 ## Failover cuts
 
 **A failover ends what the router has out to the node for the tenants it

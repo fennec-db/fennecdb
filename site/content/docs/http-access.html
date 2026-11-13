@@ -81,7 +81,11 @@ collide with a field named <code>all</code>.</p>
 <p>Limits are shared with <code>fennec-server</code> (<code>--max-connections</code>,
 <code>--idle-timeout</code>: a connection silent that long between requests is
 closed with nothing written, and one that went silent part way through a
-request is answered 408); the body ceiling is 64 MiB and the header block
+request is answered 408; <code>--header-timeout</code>: a head not whole within
+10 s of its first byte, or a body slower than 1 KiB a second past its first
+64 KiB, is answered 408 too; <code>--write-timeout</code>: a write of an
+answer waits 30 s at most for its client to take any of it, a client reading
+nothing let go within twice that); the body ceiling is 64 MiB and the header block
 64 KiB. A body may come <code>Transfer-Encoding: chunked</code>, held to the
 same ceiling chunk by chunk (<a href="/docs/http-reference#bodies">Request
 bodies</a>). A field whose name matches a clause name

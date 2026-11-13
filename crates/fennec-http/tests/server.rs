@@ -1595,6 +1595,206 @@ fn idle_timeout_closes_the_connection_without_a_word() {
     assert!(sent.starts_with("HTTP/1.1 408"), "{sent}");
 }
 
+/// A request whose first `sent` bytes go at once, then `trickled` a byte
+/// every `every`, until the server answers and ends the connection: its
+/// answer, and how long after the first byte the end came. The trickle
+/// stops at the answer or after 30 s, a bound on a server that never cuts.
+fn trickled(port: u16, sent: &[u8], trickled: Vec<u8>, every: Duration) -> (String, Duration) {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_nodelay(true).unwrap();
+    s.set_read_timeout(Some(ANSWER_WITHIN)).unwrap();
+    let started = Instant::now();
+    s.write_all(sent).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let (mut w, stopped) = (s.try_clone().unwrap(), Arc::clone(&stop));
+    let trickle = std::thread::spawn(move || {
+        for b in trickled {
+            std::thread::sleep(every);
+            if stopped.load(Ordering::SeqCst)
+                || started.elapsed() > Duration::from_secs(30)
+                || w.write_all(&[b]).is_err()
+            {
+                return;
+            }
+        }
+    });
+    let mut answer = Vec::new();
+    let _ = s.read_to_end(&mut answer);
+    let took = started.elapsed();
+    stop.store(true, Ordering::SeqCst);
+    trickle.join().unwrap();
+    (String::from_utf8_lossy(&answer).into_owned(), took)
+}
+
+/// The slot of a ceiling of one given back: a request on a connection of
+/// its own answered 200, each refused one (503) asked again, 30 s at most.
+fn served_again(port: u16) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match Conn::open(port).ask("GET", "/collections", "") {
+            Ok((200, _)) => return,
+            other => {
+                assert!(
+                    Instant::now() < deadline,
+                    "the slot was never given back: {other:?}"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+}
+
+/// A head trickled a byte at a time, each well inside the idle timeout, is
+/// cut at `--header-timeout` from its first byte: 408, the connection
+/// ended and its slot given back. The idle timeout bounded each read alone,
+/// so a client sending a byte a while held its thread and its
+/// `--max-connections` slot as long as it liked.
+#[test]
+fn a_trickled_head_is_cut_at_its_deadline() {
+    let within = Duration::from_millis(600);
+    let h = start(
+        Config {
+            max_connections: 1,
+            header_timeout: Some(within),
+            ..Config::default()
+        },
+        Database::new(),
+    );
+    let header = b"X-Trickled: ".iter().copied().chain([b'a'; 600]).collect();
+    let (answer, took) = trickled(
+        h.port,
+        b"GET /collections HTTP/1.1\r\nHost: localhost\r\n",
+        header,
+        Duration::from_millis(50),
+    );
+    assert!(answer.starts_with("HTTP/1.1 408"), "{answer}");
+    assert!(took >= within, "{took:?}");
+    served_again(h.port);
+}
+
+/// A body trickled a byte at a time is cut as a head is: within
+/// `--header-timeout` of the request's first byte while its first 64 KiB
+/// are not in, and past them at the time its bytes earned, a second each
+/// KiB (`conn::BODY_RATE`). A body coming at twice that is read whole.
+#[test]
+fn a_trickled_body_is_cut() {
+    use fennec_http::conn::{BODY_RATE, FREE};
+    let within = Duration::from_millis(600);
+    let h = start(
+        Config {
+            max_connections: 1,
+            header_timeout: Some(within),
+            ..Config::default()
+        },
+        Database::new(),
+    );
+    let every = Duration::from_millis(50);
+    let declared = |len: usize| {
+        format!("POST /query HTTP/1.1\r\nHost: localhost\r\nContent-Length: {len}\r\n\r\n")
+            .into_bytes()
+    };
+    // From the start.
+    let (answer, took) = trickled(h.port, &declared(1 << 20), vec![b' '; 600], every);
+    assert!(answer.starts_with("HTTP/1.1 408"), "{answer}");
+    assert!(took >= within, "{took:?}");
+    served_again(h.port);
+
+    // Past the first 64 KiB by one KiB, at once: a second more earned.
+    let mut sent = declared(1 << 20);
+    sent.resize(sent.len() + FREE as usize + BODY_RATE as usize, b' ');
+    let (answer, took) = trickled(h.port, &sent, vec![b' '; 600], every);
+    assert!(answer.starts_with("HTTP/1.1 408"), "{answer}");
+    assert!(took >= within + Duration::from_secs(1), "{took:?}");
+    served_again(h.port);
+
+    // At twice the rate past the first 64 KiB: read whole and answered. A
+    // statement padded with the whitespace JSON allows before its `}`.
+    let len = FREE as usize + 3 * BODY_RATE as usize;
+    let mut body = br#"{"query":"collections""#.to_vec();
+    body.resize(len - 1, b' ');
+    body.push(b'}');
+    let mut s = TcpStream::connect(("127.0.0.1", h.port)).unwrap();
+    s.set_nodelay(true).unwrap();
+    s.set_read_timeout(Some(ANSWER_WITHIN)).unwrap();
+    s.write_all(&declared(len)).unwrap();
+    s.write_all(&body[..FREE as usize]).unwrap();
+    let paced = Instant::now();
+    for (i, part) in body[FREE as usize..]
+        .chunks(BODY_RATE as usize / 8)
+        .enumerate()
+    {
+        // Each part at its own time: a sleep a loaded machine stretched is
+        // never carried on to the next.
+        let at = paced + Duration::from_millis(1000 / 16) * (i as u32 + 1);
+        std::thread::sleep(at.saturating_duration_since(Instant::now()));
+        s.write_all(part).unwrap();
+    }
+    let mut answer = String::new();
+    let mut r = BufReader::new(s);
+    r.read_line(&mut answer).unwrap();
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+}
+
+/// An answer its client never reads ends its connection once a write of it
+/// takes nothing for `--write-timeout`, and gives its slot back: a client
+/// that asked for answers past what the sockets hold and read none held
+/// its thread and its `--max-connections` slot for good.
+#[test]
+fn an_unread_answer_frees_its_slot() {
+    let mut db = Database::new();
+    db.execute(&fennec_ql::parse_one("create collection t (s text)").unwrap())
+        .unwrap();
+    let row = format!("put t {{id: 1, s: '{}'}}", "x".repeat(1 << 20));
+    db.execute(&fennec_ql::parse_one(&row).unwrap()).unwrap();
+    let write_within = Duration::from_millis(300);
+    let h = start(
+        Config {
+            max_connections: 1,
+            write_timeout: Some(write_within),
+            ..Config::default()
+        },
+        db,
+    );
+    // Forty answers of a mebibyte asked at once, and none read.
+    let mut s = TcpStream::connect(("127.0.0.1", h.port)).unwrap();
+    s.set_read_timeout(Some(ANSWER_WITHIN)).unwrap();
+    let started = Instant::now();
+    s.write_all(&b"GET /t/1 HTTP/1.1\r\nHost: localhost\r\n\r\n".repeat(40))
+        .unwrap();
+    served_again(h.port);
+    assert!(started.elapsed() >= write_within, "{:?}", started.elapsed());
+    // The unread client's connection was ended: what was sent is read off,
+    // then its end.
+    let mut rest = Vec::new();
+    let read = s.read_to_end(&mut rest);
+    assert!(
+        !matches!(&read, Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)),
+        "{read:?}"
+    );
+    assert!(rest.len() < 40 << 20, "{}", rest.len());
+}
+
+/// A `--header-timeout` past what the clock can name is no bound, never a
+/// panic at `+` in the connection's thread: a body read in many reads, the
+/// first of them 8 KiB at most, is answered.
+#[test]
+fn a_header_timeout_past_the_clock_is_none() {
+    let h = start(
+        Config {
+            header_timeout: Some(Duration::MAX),
+            ..Config::default()
+        },
+        Database::new(),
+    );
+    let mut body = String::from(r#"{"query":"collections""#);
+    body.extend(std::iter::repeat_n(' ', (1 << 20) - body.len() - 1));
+    body.push('}');
+    assert_eq!(
+        Conn::open(h.port).ask("POST", "/query", &body).unwrap().0,
+        200
+    );
+}
+
 /// `GET /_health` answers with no token and takes no lock: a probe that
 /// queried would wait out a long `compact`, and a healthy server would look
 /// dead.

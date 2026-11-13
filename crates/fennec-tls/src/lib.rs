@@ -694,6 +694,17 @@ macro_rules! with_stream {
     };
 }
 
+/// When a record that comes in parts must be whole ([`TlsStream::read_by`]).
+#[derive(Clone, Copy, Debug)]
+pub enum By {
+    /// By this moment.
+    At(Instant),
+    /// Within this of its first part, read first by the socket's own
+    /// timeout: the clock is read only once a part came and more is waited
+    /// for.
+    Within(Duration),
+}
+
 /// A connection whose handshake is done: plaintext in, plaintext out.
 pub struct TlsStream {
     conn: Conn,
@@ -790,6 +801,97 @@ impl TlsStream {
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
                 Err(e) => return Err(e),
             }
+        }
+    }
+
+    /// [`Read::read`], a record that comes in parts read by `by`: the first
+    /// read of the socket waits as the socket's timeout says, as `read`'s
+    /// does, and each one after it in the call -- the record not whole yet,
+    /// which `read` reads again inside one call until plaintext comes --
+    /// the time left at most, the socket's timeout put back after. A peer
+    /// sending a record a byte at a time, each inside the socket's timeout,
+    /// held a `read` as long as it liked; a served connection bounds a
+    /// request's head and body in time with this (fennec-http's
+    /// `conn::Paced`). A wait run out is `TimedOut`, the part that came
+    /// kept in rustls's buffer for the next read. Plaintext already
+    /// buffered is read with no read of the socket, as `read` reads it.
+    pub fn read_by(&mut self, buf: &mut [u8], by: By) -> io::Result<usize> {
+        let mut before = None;
+        let read = self.read_parts_by(buf, by, &mut before);
+        if let Some(before) = before {
+            unless_gone(self.sock.set_read_timeout(before))?;
+        }
+        read
+    }
+
+    /// [`Self::read_by`]'s reads, `before` the socket's timeout where they
+    /// changed it.
+    fn read_parts_by(
+        &mut self,
+        buf: &mut [u8],
+        by: By,
+        before: &mut Option<Option<Duration>>,
+    ) -> io::Result<usize> {
+        let mut deadline = None;
+        let mut bounded = false;
+        loop {
+            let (plain, closed) = self.processed()?;
+            if plain || closed {
+                return with_stream!(self, s => s.read(buf));
+            }
+            // What a post-handshake message asked to have sent (a key
+            // update's answer) goes out before the wait, as `read` sends it.
+            self.flush_tls()?;
+            if bounded {
+                // A bound past what the clock can name -- `Within`
+                // centuries, which `+` would panic at -- is none: the
+                // socket's own timeout a part, as `read`'s.
+                let at = *deadline.get_or_insert_with(|| match by {
+                    By::At(at) => Some(at),
+                    By::Within(within) => Instant::now().checked_add(within),
+                });
+                if let Some(at) = at {
+                    let left = at.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Err(io::Error::new(
+                            ErrorKind::TimedOut,
+                            "a TLS record not whole in time",
+                        ));
+                    }
+                    if before.is_none() {
+                        *before = Some(self.sock.read_timeout()?);
+                    }
+                    // A zero timeout is refused by the socket, and is
+                    // "forever" to the kernel.
+                    unless_gone(
+                        self.sock
+                            .set_read_timeout(Some(left.max(Duration::from_millis(1)))),
+                    )?;
+                }
+            }
+            let got = match &mut self.conn {
+                Conn::Client(c) => c.read_tls(&mut self.sock),
+                Conn::Server(c) => c.read_tls(&mut self.sock),
+            };
+            match got {
+                // The end: told as `read` tells it, `close_notify` or not.
+                Ok(0) => return with_stream!(self, s => s.read(buf)),
+                Ok(_) => {}
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                // The time left ran out in the read (EAGAIN, or Windows'
+                // timeout): the bound's, told as one.
+                Err(e)
+                    if matches!(deadline, Some(Some(_)))
+                        && matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
+                {
+                    return Err(io::Error::new(
+                        ErrorKind::TimedOut,
+                        "a TLS record not whole in time",
+                    ))
+                }
+                Err(e) => return Err(e),
+            }
+            bounded = true;
         }
     }
 
@@ -1260,6 +1362,94 @@ mod tests {
         // The trickle goes on for ten seconds: cut well before it ends.
         assert!(took < Duration::from_secs(5), "{took:?}");
         trickle.join().unwrap();
+    }
+
+    /// A record trickled a byte at a time, each well inside the socket's
+    /// timeout, is a `read_by` timed out at its bound, where `read` read
+    /// on as long as the bytes came; the part that came is kept, and read
+    /// whole once the rest comes, the socket's timeout put back.
+    #[test]
+    fn read_by_bounds_a_record_that_comes_in_parts() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let ca = ca("fennec test CA");
+        let server = server_for(&ca, &["localhost"]);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Between the client and the server, a proxy passing what the
+        // client sends on at once, or a byte every 50 ms while `slow`.
+        let front = TcpListener::bind("127.0.0.1:0").unwrap();
+        let front_port = front.local_addr().unwrap().port();
+        let slow = Arc::new(AtomicBool::new(false));
+        let slowed = Arc::clone(&slow);
+        thread::spawn(move || {
+            let (mut from, _) = front.accept().unwrap();
+            let mut to = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            to.set_nodelay(true).unwrap();
+            let (mut back_from, mut back_to) = (to.try_clone().unwrap(), from.try_clone().unwrap());
+            thread::spawn(move || {
+                let _ = io::copy(&mut back_from, &mut back_to);
+            });
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = from.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                for &b in &buf[..n] {
+                    if slowed.load(Ordering::SeqCst) {
+                        thread::sleep(Duration::from_millis(50));
+                    }
+                    if to.write_all(&[b]).is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+        let client = trusting(&ca);
+        let dialed = thread::spawn(move || dial(&client, front_port, "localhost").unwrap());
+        let (sock, _) = listener.accept().unwrap();
+        let mut s = server.accept_within(sock, Duration::from_secs(10)).unwrap();
+        let mut c = dialed.join().unwrap();
+        s.get_ref()
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+
+        // 200 bytes of plaintext, a record of some 220: eleven seconds a
+        // byte at a time, each 50 ms inside the socket's ten.
+        slow.store(true, Ordering::SeqCst);
+        let sent: Vec<u8> = (0..200u8).collect();
+        c.write_all(&sent).unwrap();
+        c.flush().unwrap();
+        let mut buf = [0u8; 256];
+        let within = Duration::from_millis(400);
+        let started = Instant::now();
+        let e = s.read_by(&mut buf, By::Within(within)).unwrap_err();
+        let took = started.elapsed();
+        assert_eq!(e.kind(), ErrorKind::TimedOut, "{e}");
+        assert!(took >= within, "{took:?}");
+        assert_eq!(
+            s.get_ref().read_timeout().unwrap(),
+            Some(Duration::from_secs(10)),
+            "the socket's timeout is put back"
+        );
+        // The rest at once: the record is read whole, its first part kept.
+        slow.store(false, Ordering::SeqCst);
+        let by = Instant::now() + Duration::from_secs(10);
+        let mut got = Vec::new();
+        while got.len() < sent.len() {
+            let n = s.read_by(&mut buf, By::At(by)).unwrap();
+            assert!(n > 0);
+            got.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(got, sent);
+
+        // A bound past what the clock can name is none, never a panic at
+        // `+`: a record of some 23 bytes in parts, read on under the
+        // socket's own timeout.
+        slow.store(true, Ordering::SeqCst);
+        c.write_all(b"x").unwrap();
+        c.flush().unwrap();
+        let n = s.read_by(&mut buf, By::Within(Duration::MAX)).unwrap();
+        assert_eq!(&buf[..n], b"x");
     }
 
     /// A client that finishes its handshake, writes and closes at once is

@@ -143,6 +143,18 @@ pub struct Config {
     pub max_body: usize,
     /// Silence ceiling while waiting for the next request on a keep-alive connection.
     pub idle_timeout: Option<Duration>,
+    /// `--header-timeout`: a request's head whole, and its body's start up
+    /// to [`conn::FREE`], from its first byte; past them its body earns a
+    /// second more for every [`conn::BODY_RATE`] bytes ([`conn::Paced`]).
+    /// `None`: no bound but the idle timeout's on each read.
+    pub header_timeout: Option<Duration>,
+    /// `--write-timeout`: the longest one write of an answer waits for its
+    /// client to take any of it ([`conn::WRITE_TIMEOUT`]): the write that
+    /// filled the socket's buffers returns what went in, the next, taking
+    /// nothing, fails and ends the connection -- a client that never reads
+    /// holds its thread and its `--max-connections` slot twice this at
+    /// most. A stream's is `stream_write_timeout`. `None`: for ever.
+    pub write_timeout: Option<Duration>,
     /// `sync` after every write (the equivalent of fennec-server's `--sync always`).
     pub sync_on_write: bool,
     /// How long a write's `Idempotency-Key` and answer are kept.
@@ -244,6 +256,8 @@ impl Default for Config {
             max_connections: 100,
             max_body: 64 << 20,
             idle_timeout: Some(Duration::from_secs(60)),
+            header_timeout: Some(conn::HEADER_TIMEOUT),
+            write_timeout: Some(conn::WRITE_TIMEOUT),
             sync_on_write: false,
             idempotency_ttl: Duration::from_secs(24 * 3600),
             max_streams: 64,
@@ -826,13 +840,19 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
     // finds its place free.
     let _slot = slot;
     let _ = conn.set_read_timeout(cfg.idle_timeout);
+    // Once a connection, so an answer pays nothing for it: a write the
+    // client takes nothing of for this long returns what went in, the next
+    // fails, and the connection ends. A stream sets its own.
+    let _ = conn.set_write_timeout(cfg.write_timeout);
     let peer = conn.peer_addr().ok();
     audit::connection(if conn.is_tls() { "https" } else { "http" }, peer);
     trace::connection(conn.local_addr().ok(), peer);
     // The reader and the answers borrow the one connection, as std's
     // `&TcpStream` reads and writes: no `dup` for a write half, and over
-    // TLS the one session both need.
-    let mut reader = BufReader::new(&conn);
+    // TLS the one session both need. Each request is read in time
+    // ([`conn::Paced`]).
+    let paced = conn::Paced::new(&conn, cfg.idle_timeout, cfg.header_timeout);
+    let mut reader = BufReader::new(paced);
     let mut out = &conn;
     // After the socket, so it is dropped first: a client that saw the
     // connection close finds it no longer counted. A scrape is not one of
@@ -850,6 +870,8 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
     };
 
     loop {
+        // The next request waited for under the idle timeout.
+        reader.get_mut().waiting();
         // With the `timing` feature the clock starts once the request's
         // first bytes are in, not while the connection waits for them.
         #[cfg(feature = "timing")]

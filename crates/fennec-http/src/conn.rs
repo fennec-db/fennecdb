@@ -635,6 +635,219 @@ impl Conn {
     }
 }
 
+/// `--header-timeout`'s default: a request's head whole, from its first
+/// byte, as a handshake has [`HANDSHAKE`].
+pub const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// `--write-timeout`'s default: the longest a write of an answer waits for
+/// its client to take any of it (`SO_SNDTIMEO`), as a stream's does
+/// (`Config::stream_write_timeout`). The write that filled the socket's
+/// buffers returns what went in once it has waited so long, and the next,
+/// taking nothing, fails: a client that reads nothing is let go within
+/// twice this.
+pub const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// What of a request comes in its head's time alone: the most a head may
+/// be ([`crate::http::MAX_HEADER_BYTES`]), or a head and the start of its
+/// body.
+pub const FREE: u64 = crate::http::MAX_HEADER_BYTES as u64;
+
+/// The least a body comes at past [`FREE`], in bytes a second: each that
+/// many bytes earn a second more. Twice Apache's `mod_reqtimeout` floor
+/// (500): a slow link's upload is far above it, a trickle far below.
+pub const BODY_RATE: u64 = 1024;
+
+/// A served connection's reader, each request read in time
+/// ([`Paced::waiting`] before it): the wait for its first byte bounded by
+/// the idle timeout, a read at a time, as before; from that byte the
+/// request -- its head whole, and its body's start up to [`FREE`] -- by
+/// `--header-timeout` (`within`), and past them a second more for every
+/// [`BODY_RATE`] bytes come. A client trickling a head or a body a byte
+/// inside the idle timeout held its thread and its `--max-connections`
+/// slot as long as it liked: the idle timeout bounded each read, never a
+/// request. A request read whole by one read -- its head and body in one
+/// segment, or a next one in the buffer already -- pays nothing for it:
+/// the clock is read and the socket's timeout set by a read past a
+/// request's first alone, and the idle timeout set again only at the next
+/// request's first read. Over TLS a record coming in parts is bounded the
+/// same way (`fennec_tls::TlsStream::read_by`): rustls reads the socket
+/// again inside one read until a record is whole.
+pub struct Paced<'a> {
+    conn: &'a Conn,
+    idle: Option<Duration>,
+    within: Option<Duration>,
+    pace: Pace,
+    /// Bytes of the request read since its first.
+    came: u64,
+    /// The read timeout this reader set for the request it reads; `None`
+    /// while the idle timeout stands.
+    set: Option<Duration>,
+}
+
+#[derive(Clone, Copy)]
+enum Pace {
+    /// Before the request's first byte.
+    Waiting,
+    /// Its first bytes read, its clock not started: read on from the
+    /// buffer, a request reads the clock never.
+    Begun,
+    /// Read since this moment, its second read's.
+    Since(std::time::Instant),
+}
+
+impl<'a> Paced<'a> {
+    /// `conn` read with `idle` the wait for a request and `within` its
+    /// head's time (`None`, the idle timeout's a read alone, as before);
+    /// the socket's read timeout is `idle` as it comes.
+    pub fn new(conn: &'a Conn, idle: Option<Duration>, within: Option<Duration>) -> Paced<'a> {
+        Paced {
+            conn,
+            idle,
+            within,
+            pace: Pace::Waiting,
+            came: 0,
+            set: None,
+        }
+    }
+
+    /// The next request is to be read: its first byte waited for under the
+    /// idle timeout.
+    #[inline]
+    pub fn waiting(&mut self) {
+        self.pace = Pace::Waiting;
+    }
+
+    /// The idle timeout back, where a request's reads set another.
+    #[cold]
+    fn untimed(&mut self) -> io::Result<()> {
+        self.set = None;
+        unless_gone(self.conn.set_read_timeout(self.idle))
+    }
+
+    /// A read past a request's first, by the time its bytes earn.
+    #[inline(never)]
+    fn timed(&mut self, buf: &mut [u8], within: Duration) -> io::Result<usize> {
+        use std::time::Instant;
+        let since = match self.pace {
+            Pace::Since(at) => at,
+            _ => {
+                let now = Instant::now();
+                self.pace = Pace::Since(now);
+                now
+            }
+        };
+        loop {
+            let earned = Duration::from_millis(
+                self.came.saturating_sub(FREE).saturating_mul(1000) / BODY_RATE,
+            );
+            let now = Instant::now();
+            // A bound past what the clock can name -- a timeout of
+            // centuries, which `+` would panic at -- is none.
+            let by = since.checked_add(within.saturating_add(earned));
+            let left = by.map(|by| by.saturating_duration_since(now));
+            if left == Some(Duration::ZERO) {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "the request was not sent in time",
+                ));
+            }
+            // A silence past the idle timeout ends a request part way, as
+            // it did before: the wait is the idle timeout, set already,
+            // where it is the nearer bound, else the time left -- set where
+            // a wait could run past `by` by more than an eighth of the
+            // head's time, or where the time left grew well past the wait
+            // set, a body's bytes having earned it more.
+            let near = left.filter(|&left| self.idle.is_none_or(|idle| left < idle));
+            match near {
+                None if self.set.is_some() => self.untimed()?,
+                None => {}
+                Some(left)
+                    if self.set.is_none_or(|set| {
+                        set > left.saturating_add(within / 8) || set < left / 2
+                    }) =>
+                {
+                    // A zero timeout is refused by the socket, and is
+                    // "forever" to the kernel.
+                    unless_gone(
+                        self.conn
+                            .set_read_timeout(Some(left.max(Duration::from_millis(1)))),
+                    )?;
+                    self.set = Some(left);
+                }
+                Some(_) => {}
+            }
+            let got = match self.conn {
+                Conn::Plain(s) => (&*s).read(buf),
+                // A record in parts by the nearer bound too: where the
+                // idle timeout is, whole within it.
+                #[cfg(feature = "tls")]
+                Conn::Tls(t) => {
+                    let until = match near {
+                        Some(_) => by,
+                        None => self.idle.and_then(|idle| now.checked_add(idle)),
+                    };
+                    let mut tls = t.tls.borrow_mut();
+                    match until {
+                        Some(until) => tls.read_by(buf, fennec_tls::By::At(until)),
+                        None => tls.read(buf),
+                    }
+                }
+                #[cfg(not(feature = "tls"))]
+                Conn::Tls(t) => match *t {},
+            };
+            match got {
+                Ok(n) => {
+                    self.came += n as u64;
+                    return Ok(n);
+                }
+                // The time left ran out: `by` looked at again. The idle
+                // timeout's is the silence that ends a request, as before.
+                Err(e)
+                    if self.set.is_some()
+                        && matches!(
+                            e.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                        ) => {}
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
+
+impl Read for Paced<'_> {
+    #[inline]
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let first = matches!(self.pace, Pace::Waiting);
+        if let (false, Some(within)) = (first, self.within) {
+            return self.timed(buf, within);
+        }
+        if self.set.is_some() {
+            self.untimed()?;
+        }
+        let n = match self.conn {
+            Conn::Plain(s) => (&*s).read(buf)?,
+            // A first record coming in parts is the head's to bound, from
+            // its first part (`within` is `None` here past a first read).
+            #[cfg(feature = "tls")]
+            Conn::Tls(t) => match self.within {
+                Some(within) => t
+                    .tls
+                    .borrow_mut()
+                    .read_by(buf, fennec_tls::By::Within(within))?,
+                None => t.tls.borrow_mut().read(buf)?,
+            },
+            #[cfg(not(feature = "tls"))]
+            Conn::Tls(t) => match *t {},
+        };
+        if n > 0 && first {
+            self.pace = Pace::Begun;
+            self.came = n as u64;
+        }
+        Ok(n)
+    }
+}
+
 /// Why a connection to an HTTPS listener ended before its handshake did,
 /// as `reason` labels it in `/_metrics` (`fennec_tls_handshakes_failed_total`,
 /// `fennec_router_tls_handshakes_failed_total`).

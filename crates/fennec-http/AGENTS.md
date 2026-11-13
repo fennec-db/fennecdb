@@ -225,6 +225,23 @@ line after the connection's work, which a panic skips; so is every count
 taken around a connection or a held request (`waits::Answering`, a
 `waits::Ticket` leaving its group).
 
+**[A request is read in time, and an answer written in
+time.](../../docs/design/http.md#slow-clients)** A served connection's
+requests, the router's too, are read through `conn::Paced`, told each
+(`waiting`): the wait for a request's first byte is the idle timeout's;
+from it the head whole and the body's first 64 KiB are
+`--header-timeout`'s, and past them a body earns a second each
+`conn::BODY_RATE` bytes, else 408 and `end_refused`; over TLS a record in
+parts is held to the same bound (`fennec_tls::TlsStream::read_by`). The
+clock is read and a timeout set by a read past a request's first alone:
+one read whole, or in the buffer already, pays nothing; a bound past what
+`Instant` can name is none, never a panic. `--write-timeout` is set once a
+connection; a stream setting its own ends the connection after, and a
+handler that sets the read timeout and serves on puts the idle timeout
+back first (`node_stream`): `Paced` takes it to stand. A new reader of a
+served connection goes through `Paced`, never a bare `BufReader` over the
+`Conn`.
+
 **[`--tls-cert` and `--tls-key` make a listener HTTPS
 alone](../../docs/design/http.md#tls)**, `--metrics` too, each handshake on its
 connection's thread (`Tls::handshake`, `conn::Conn::open`), a plain request

@@ -1,6 +1,6 @@
 # The HTTP server
 
-The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md), [crates/fennec-http/src/mcp/CLAUDE.md](../../crates/fennec-http/src/mcp/CLAUDE.md) (MCP's, moved there to make room) and [studio/CLAUDE.md](../../studio/CLAUDE.md) list under *The HTTP server*: the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, connections no thread is made for and chunked bodies (both added after the move), the OpenAPI document and the compatibility it is held to, and compressed answers (added after it too) -- and the open server's rule its CLAUDE.md lists under *Access* (added after the move as well), beside MCP's guard it grew from. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md), [crates/fennec-http/src/mcp/CLAUDE.md](../../crates/fennec-http/src/mcp/CLAUDE.md) (MCP's, moved there to make room) and [studio/CLAUDE.md](../../studio/CLAUDE.md) list under *The HTTP server*: the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, connections no thread is made for, chunked bodies and slow clients (each added after the move), the OpenAPI document and the compatibility it is held to, and compressed answers (added after it too) -- and the open server's rule its CLAUDE.md lists under *Access* (added after the move as well), beside MCP's guard it grew from. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Studio
 
@@ -1995,6 +1995,102 @@ stream's wait, nothing on a request's.
 on a signal, the next connections taking the new certificate, is a
 follow-up. What fennecdb dials takes HTTPS by its URL
 ([below](#dialing-https)).
+
+## Slow clients
+
+**A request is read in time, and an answer written in time**
+(`conn::Paced`, `fennec_tls::TlsStream::read_by`, `Config::header_timeout`,
+`Config::write_timeout`; the router's connections alike). A connection was
+bounded by `--idle-timeout` a read at a time alone: a head or a body
+trickled a byte inside it, or an answer its client never read, held the
+connection's thread and its `--max-connections` slot as long as the client
+liked, on a node and on the router -- only a TLS handshake was bounded as a
+whole ([TLS](#tls)). Now:
+
+- *A request's head whole, from its first byte, within `--header-timeout`*
+  (10 s), and its body's start with it up to 64 KiB (`conn::FREE`, the most
+  a head may be); past them a body comes at 1 KiB a second at least
+  (`conn::BODY_RATE`): each KiB earns a second more, so a body of `n`
+  bytes is read within the head's time and `(n - 64 KiB) / 1 KiB` seconds
+  -- a deadline scaled by its length -- and never slower than the rate on
+  average past its start, as Apache's `mod_reqtimeout` reads one
+  (`MinRate`, 500 bytes a second its floor): a chunked body alike. Past it
+  the request is 408, as one cut off by the idle timeout was, and the
+  connection ended as a refused one is (`end_refused`), its slot given
+  back. The idle timeout still bounds each read: a silence past it
+  mid-request is 408, and the wait for a request's first byte is its
+  alone.
+- *A write of an answer waits `--write-timeout` (30 s) at most for its
+  client to take any of it*: `SO_SNDTIMEO`, set once a connection, so an
+  answer pays nothing for it. A blocking `send` that waited so long
+  returns what went in, or fails where nothing did: the write that filled
+  the socket's buffers returns, the next fails, and the connection ends --
+  a client that reads nothing is let go within twice the timeout, one
+  reading a little at a time is not cut. A stream sets its own
+  (`Config::stream_write_timeout`, replication's `SILENCE`) and ends the
+  connection after it; the router's relay of a node's stream is held to
+  the router's.
+
+*Where the bound is kept.* `Paced` is the reader under the connection's
+`BufReader`, told each request is next (`waiting`). A request's first read
+is a plain read under the idle timeout, as before. The clock is read at a
+read past it alone, which starts the request's time (`Pace::Since`), and
+the socket's read timeout is then set to the time left -- set again only
+where a wait could run past the deadline by more than an eighth of the
+head's time, or where a body's bytes made the time left grow well past
+the wait set -- the idle timeout put back at the next request's first
+read. A request read in one read, its head and body in one segment, or a
+next one already in the buffer, reads no clock and sets no timeout: no
+more than before. A body of many reads pays a clock read a read and about
+two `setsockopt`s a request. A bound past what `Instant` can name -- a
+timeout of centuries, which `+` panics at -- is none (`checked_add`), the
+idle timeout's alone.
+
+*Over TLS.* rustls's `Stream::read` reads the socket again inside one call
+until a record is whole, so a timeout set for a read bounds each of those
+reads, never the record: a peer sending a record a byte inside the timeout
+held one `read` as long as it liked, before a request's first plaintext as
+after it -- the handshake met the same. `TlsStream::read_by` reads a
+record's first part under the socket's own timeout, as `read` does, and
+each part after it within the time left -- `By::Within` the head's time
+from its first part where no request has begun, `By::At` a request's
+deadline after -- the socket's timeout put back after, the part that came
+kept in rustls's buffer; plaintext already there is read with no read of
+the socket. `read_by_bounds_a_record_that_comes_in_parts` (fennec-tls)
+trickles a record of some 220 bytes a byte every 50 ms through a proxy,
+each well inside the socket's ten seconds: cut at the 400 ms asked, then
+read whole once the rest came, its first part kept.
+
+Rejected: a deadline from the `Content-Length` declared, which hands a
+client declaring a gibibyte twelve days before its body's first byte and
+leaves a chunked body unbounded -- the bytes that came earn the time
+instead; a deadline looked at between reads with no timeout set, which a
+read waiting out the idle timeout overshoots by as much -- 70 s, not 10;
+a bound on the whole request (Node's `requestTimeout`), which cuts a large
+upload on a slow link where a rate lets it through; a rate for the head as
+well, which the whole-head bound makes moot, a head being 64 KiB at most;
+and a deadline on a whole answer, which would cut a gibibyte image moved
+across regions over a slow link: a client that keeps reading, however
+slowly, is not cut, as a stream's is not. A cap of connections a peer
+address, which bounds what a client with bandwidth to spend can hold, is
+not done: these bounds hold each connection to its request's time, not a
+client to its share of the slots.
+
+Tests: `tests/server.rs`'s `a_trickled_head_is_cut_at_its_deadline` (a
+header a byte every 50 ms, each inside the 60 s idle timeout: 408 at the
+600 ms asked, and the slot of a ceiling of one served again),
+`a_trickled_body_is_cut` (a body trickled from its start, cut at the
+head's time; past its first 64 KiB by a KiB, a second later; one coming at
+twice the rate read whole and answered) and
+`an_unread_answer_frees_its_slot` (forty answers of a mebibyte asked and
+none read: the slot served again once a write took nothing for the 300 ms
+asked) and `a_header_timeout_past_the_clock_is_none` (`Duration::MAX`, a
+mebibyte's body answered); `tests/tls.rs`'s
+`a_trickled_head_over_tls_is_cut_at_its_deadline` (a record a byte).
+fennec-shard's `tests/slow_clients.rs` holds the router to the same three,
+by name. Before, a byte every 50 ms was never cut, each read inside the
+idle timeout, and the unread answers held the one slot until their client
+went.
 
 ## Dialing HTTPS
 

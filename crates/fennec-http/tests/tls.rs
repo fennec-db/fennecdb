@@ -297,6 +297,39 @@ fn a_handshake_past_its_bound_is_closed() {
     assert!(took < Duration::from_secs(20), "{took:?}");
 }
 
+/// A head trickled over TLS, a record a byte, each well inside the idle
+/// timeout, is cut at `--header-timeout` as a plain one is: its 408 read
+/// over TLS. rustls reads the socket again inside one read until a record
+/// is whole, so a timeout set a read bounded nothing there
+/// (`fennec_tls::TlsStream::read_by`).
+#[test]
+fn a_trickled_head_over_tls_is_cut_at_its_deadline() {
+    let within = Duration::from_millis(600);
+    let (port, _server) = start(|c| c.header_timeout = Some(within));
+    let mut s = dial(port).unwrap();
+    let started = Instant::now();
+    s.write_all(b"GET /collections HTTP/1.1\r\nHost: localhost\r\nX-Trickled: ")
+        .unwrap();
+    s.flush().unwrap();
+    // A byte a record every 50 ms, until the answer comes, or 30 s.
+    while started.elapsed() < Duration::from_secs(30) {
+        if s.write_all(b"a").and_then(|()| s.flush()).is_err() {
+            break;
+        }
+        match s.readable(Duration::from_millis(50)) {
+            Ok(false) => {}
+            Ok(true) | Err(_) => break,
+        }
+    }
+    let took = started.elapsed();
+    let mut got = Vec::new();
+    let _ = s.read_to_end(&mut got);
+    let got = String::from_utf8_lossy(&got);
+    assert!(got.starts_with("HTTP/1.1 408"), "{got}");
+    assert!(took >= within, "{took:?}");
+    assert!(took < Duration::from_secs(20), "{took:?}");
+}
+
 /// Plain HTTP to the HTTPS port is answered 400 in the clear, naming the
 /// scheme, and the connection ended after it -- read whole, no reset.
 #[test]

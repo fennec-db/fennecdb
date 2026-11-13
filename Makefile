@@ -25,7 +25,7 @@ WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --fe
 .PHONY: all test test-js upgrade-check openapi-lint openapi-check openapi-golden sync-scenarios-check fennecql-corpus builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-desktop studio-desktop-dist studio-desktop-test studio-highlight statements-bench gzip-bench replay-bench hook-bench instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \ lists-bench
 	python-test go-test dotnet-test languages-test examples-test recipes-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench entry-bench \
 	compare beir import-test follow-bench \
-	pgvector-up pgvector-down pgvector-tls docker docker-run docker-compact docker-down grafana-check deploy-check drill memory clean \
+	pgvector-up pgvector-down pgvector-tls docker docker-run docker-compact docker-down grafana-check slow-client-check deploy-check drill memory clean \
 	site site-serve site-deploy packaging-test
 
 all: test wasm
@@ -896,6 +896,21 @@ docker-compact:
 
 docker-down:
 	-docker rm -f fennecdb
+
+## Slow clients against a release fennec-server, bounded and on loopback:
+## 2 x MAX (50) clients for SECS (300) trickling a head, a body, or asking
+## answers and reading none, each cut at its bound (--header-timeout,
+## --write-timeout) and coming back, a refusal waiting its Retry-After,
+## beside one client asking a request every 50 ms on a kept-alive
+## connection, which must see no failure and a p99 under 1 s
+## (tools/slow_client_check.py; docs/design/http.md#slow-clients). The
+## server ends with the script (--exit-on-stdin-close), which is killed on
+## the way out. Run it on a quiet machine: the p99 is a time
+slow-client-check:
+	$(CARGO) build --release -p fennec-server
+	@python3 tools/slow_client_check.py --server target/release/fennec-server \
+	  --max $(or $(MAX),50) --secs $(or $(SECS),300) & pid=$$!; \
+	  trap 'kill $$pid 2>/dev/null' EXIT INT TERM; wait $$pid
 
 ## The "fennecdb data" Grafana dashboards end to end (Docker): monitoring/'s
 ## compose with fennec-server and Grafana's fennecdb-datasource built from this

@@ -82,7 +82,7 @@ href="/docs/sharding">Tenants and sharding</a>.</p>
 <tr><td><code>--no-mmap</code></td><td>Reads the file into memory instead of mapping it: for a network file system, or to have <code>--max-memory</code> count the documents too. On Windows a file on FAT32, exFAT or a network share is read so without it, as the server says at its start.</td></tr>
 <tr><td><code>--warm all|off|&lt;list&gt;</code></td><td>Builds the hash, text, ordered and sparse indexes after the open, beside the first requests, rather than on the first read of each. Default <code>all</code> for a file, <code>off</code> for a node's tenants (<a href="#warm">Warm-up</a>).</td></tr>
 <tr><td><code>--auto-compact &lt;ratio&gt;|off</code></td><td>Compacts a file on its own once this share of it is dead, beside the queries. Default <code>0.5</code> (<a href="#compaction">Compaction</a>).</td></tr>
-<tr><td><code>--max-connections</code>, <code>--idle-timeout</code>, <code>--max-memory</code></td><td><a href="#limits">Limits</a>.</td></tr>
+<tr><td><code>--max-connections</code>, <code>--idle-timeout</code>, <code>--header-timeout</code>, <code>--write-timeout</code>, <code>--max-memory</code></td><td><a href="#limits">Limits</a>.</td></tr>
 <tr><td><code>--http-cors</code>, <code>--http-read-only</code>, <code>--http-max-streams</code>, <code>--http-keepalive</code>, <code>--http-gzip</code>, <code>--http-gzip-local</code>, <code>--changes</code>, <code>--idempotency-ttl</code></td><td>The HTTP endpoint's options, each where it is described: <code>--http-cors</code> and <code>--http-read-only</code> under <a href="/docs/http-access#security">Security</a>, <code>--http-max-streams</code> under <a href="/docs/http-reference#subscriptions">Subscriptions</a>, <code>--http-gzip</code> and <code>--http-gzip-local</code> under <a href="/docs/http-reference#gzip">Compressed answers</a>, <code>--changes</code> under <a href="/docs/sync#dropped-connections-and-the-horizon">Dropped connections and the horizon</a>, <code>--idempotency-ttl</code> under <a href="/docs/http#idempotency">Retrying a write</a>; <code>--http-keepalive</code> is in <code>fennec-server --help</code>.</td></tr>
 <tr><td><code>--replication-token</code>, <code>--replica-of</code>, <code>--promote</code>, <code>--replication-buffer</code>, <code>--cdc</code></td><td><a href="/docs/replication">Replication</a> and <a href="/docs/microservices">change data capture</a>.</td></tr>
 <tr><td><code>--admin-token</code>, <code>--idle-close</code>, <code>--lease</code></td><td>A tenant node's (<a href="/docs/sharding-reference#the-node-fennec-server-dir">Sharding: reference</a>). The admin token is also read from <code>FENNEC_ADMIN_TOKEN</code>.</td></tr>
@@ -641,6 +641,8 @@ file before and after and how long it held the lock.</p>
 <tr><td><code>--max-connections</code></td><td class="n">100</td><td>Refuses connections past it.</td></tr>
 <tr><td><code>--max-memory &lt;MiB&gt;</code></td><td class="n">off</td><td>Refuses writes that would grow the data past it; reads go on.</td></tr>
 <tr><td><code>--idle-timeout &lt;s&gt;</code></td><td class="n">60</td><td>Closes a quiet keep-alive connection (0 = never).</td></tr>
+<tr><td><code>--header-timeout &lt;s&gt;</code></td><td class="n">10</td><td>A request's head must come whole within it of its first byte, with its body's first 64 KiB; past them a body comes at 1 KiB a second at least. Else 408, and the connection is closed (0 = only <code>--idle-timeout</code>, a read at a time).</td></tr>
+<tr><td><code>--write-timeout &lt;s&gt;</code></td><td class="n">30</td><td>The longest a write of an answer waits for its client to take any of it: a client that reads nothing is let go within twice this (0 = never).</td></tr>
 <tr><td><code>--http-max-streams</code></td><td class="n">64</td><td>Ceiling on a database's subscriptions, counted apart; on a tenant node, each tenant's.</td></tr>
 </tbody>
 </table>
@@ -655,7 +657,13 @@ gets 503 with <code>Retry-After</code>, its request read off and the
 connection ended after the answer, so a client writing its request as the
 answer comes reads the 503, not a reset (over <a href="#tls">TLS</a> it is told
 an alert instead); <code>--idle-timeout</code> closes
-a quiet connection. A
+a quiet connection. A client that sends slowly, or reads nothing, holds its
+connection no longer than its request's time: the head whole within
+<code>--header-timeout</code> of its first byte, a body at 1 KiB a second past its
+first 64 KiB (a 64 MiB one within about 18 hours, a gibibyte image within
+12 days), and each write of an answer taken in part within
+<code>--write-timeout</code>, a client reading nothing let go within twice it --
+over HTTPS too, a record that comes in parts held to the same bound. A
 subscription holds a thread for as long as it lasts, so subscriptions are
 counted apart as well, under <code>--http-max-streams</code>, a database's
 own: on a tenant node each tenant's, where <code>--max-connections</code> is

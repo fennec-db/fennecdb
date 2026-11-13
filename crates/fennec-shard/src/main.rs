@@ -77,6 +77,15 @@ usage: fennec-shard [options]
                             a minute, 5 s at most; 0 turns it off. default: 100
       --max-connections <n> ceiling on concurrent connections  default: 1000
       --max-body <MiB>      request body ceiling  default: 64
+      --header-timeout <s>  a client's request head whole, from its first
+                            byte, and its body's first 64 KiB with it; past
+                            them a body comes at 1 KiB a second at least, or
+                            the request is answered 408 and its connection
+                            ended (0 = only the 60 s a read)  default: 10
+      --write-timeout <s>   the longest a write to a client, an answer or a
+                            relayed stream, waits for it to take any of it:
+                            a client reading nothing is let go within twice
+                            this (0 = never)  default: 30
       --upstream-timeout <s> connect/read bound towards a node  default: 60
       --fanout-timeout <s>  the longest a query across tenants (POST /_shard/query)
                             runs, every call to a node within it; a request
@@ -300,6 +309,14 @@ fn main() {
             }
             "--max-body" => {
                 cfg.max_body = (number(next(&mut i, "--max-body"), "--max-body") as usize) << 20
+            }
+            flag @ ("--header-timeout" | "--write-timeout") => {
+                let secs = number(next(&mut i, flag), flag);
+                let bound = (secs > 0).then(|| Duration::from_secs(secs));
+                match flag {
+                    "--header-timeout" => cfg.header_timeout = bound,
+                    _ => cfg.write_timeout = bound,
+                }
             }
             "--upstream-timeout" => {
                 let secs = number(next(&mut i, "--upstream-timeout"), "--upstream-timeout");
