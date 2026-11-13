@@ -55,7 +55,8 @@ copy taking an image) or promoting one
 On Unix it never showed: of 4 500 runs of the first under load, on macOS
 and in Docker on Linux, none hung. Now a halt between reads ends the
 session at once, and one whose look came just before the cut ends it after
-the next message, a keep-alive at most 2 s on. `tests/replication.rs`'
+the next message: a keep-alive at most 2 s on from a live primary, or
+the session's 10 s of silence (`SILENCE`) from a stalled one. `tests/replication.rs`'
 `a_halt_ends_a_follower_held_between_two_reads` holds a follower in its
 hello's callback, past its read, until the cut has reached the primary's
 side of a relay between them, then lets it go; with a cut that leaves later

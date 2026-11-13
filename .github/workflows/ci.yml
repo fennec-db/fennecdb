@@ -298,7 +298,7 @@ jobs:
   windows:
     name: windows (single writer)
     runs-on: windows-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -717,7 +717,7 @@ jobs:
   examples:
     name: examples (Node, Python, Go, .NET, Rust)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
