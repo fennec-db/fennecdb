@@ -86,27 +86,6 @@ jobs:
           retention-days: 3
           if-no-files-found: error
 
-  # Temporary, taken out before the pull request: whether a
-  # ubuntu-24.04-arm runner gives a guest KVM, which an arm64 entry needs.
-  arm64-kvm:
-    name: KVM on ubuntu-24.04-arm (a probe)
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 10
-    steps:
-      - name: /dev/kvm
-        run: |
-          uname -a
-          lscpu | head -30
-          grep -m1 -i 'features' /proc/cpuinfo || true
-          ls -l /dev/kvm || echo "no /dev/kvm"
-          sudo dmesg | grep -i -E 'kvm|hyp|el2' || echo "nothing about KVM in dmesg"
-          sudo modprobe kvm 2>&1 || true
-          ls -l /dev/kvm || echo "no /dev/kvm after modprobe"
-          if [ -e /dev/kvm ]; then
-            sudo chmod 666 /dev/kvm
-            python3 -c "import fcntl, os; fd = os.open('/dev/kvm', os.O_RDWR); print('KVM_GET_API_VERSION', fcntl.ioctl(fd, 0xAE00)); print('KVM_CREATE_VM fd', fcntl.ioctl(fd, 0xAE01, 0))"
-          fi
-
   vm:
     name: Linux guest (${{ matrix.name }}), cut five times
     runs-on: ubuntu-latest
@@ -117,7 +96,10 @@ jobs:
         # (data=ordered), and XFS as mkfs.xfs does -- each journals its
         # metadata alone and orders a file's data its own way. `mode` is
         # what the guest serves (vm.sh): one file under `--sync always`, one
-        # under `--sync 250`, or a `--dir` node with a standby.
+        # under `--sync 250`, or a `--dir` node with a standby. No arm64
+        # entry: a ubuntu-24.04-arm runner is a Hyper-V guest whose kernel
+        # has no KVM ("HYP mode not available", run 43438990710;
+        # docs/design/durability.md).
         include:
           - { id: ext4, name: ext4, fs: ext4, mode: always }
           - { id: xfs, name: xfs, fs: xfs, mode: always }
