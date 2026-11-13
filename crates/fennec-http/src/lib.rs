@@ -849,20 +849,30 @@ pub fn too_short(len: usize) -> bool {
 /// Why `token`, given as `flag`, is refused, or `None`: shorter than
 /// [`TOKEN_MIN`] bytes where a listener taking it, on one of `on`, may be
 /// reached past loopback ([`Listen::past_loopback`]) -- a name that could
-/// not be looked up among them, so the question fails closed. A question of
-/// the flags alone, which `fennec-server` and `fennec-shard` ask of every
-/// token flag before they open anything; no token, an empty one -- refused
-/// apart, as no token -- and any token on loopback alone pass.
+/// not be looked up among them, so the question fails closed, the refusal
+/// saying first that it was not. A question of the flags alone, which
+/// `fennec-server` and `fennec-shard` ask of every token flag before they
+/// open anything; no token, an empty one -- refused apart, as no token --
+/// and any token on loopback alone pass.
 pub fn short_token(flag: &str, token: Option<&str>, on: &[&Listen]) -> Option<String> {
     token.filter(|t| too_short(t.len()))?;
     let listen = on.iter().find(|l| l.past_loopback())?;
-    let at = match &listen.looked {
-        Err(e) => format!("{}, which could not be looked up: {e}", listen.given),
-        Ok(_) => listen.given.clone(),
+    let given = &listen.given;
+    let refused = format!(
+        "{flag} is shorter than {TOKEN_MIN} bytes, the least a token taken past loopback \
+         (on {given}) may be: a shorter one can be guessed. Make one with `openssl rand -hex 32`"
+    );
+    // A name not looked up is what went wrong -- a typo, a resolver not
+    // answering yet -- and the length is refused only for it: said after
+    // the length, the refusal read as the length's alone.
+    let why = match &listen.looked {
+        Err(e) => e.to_string(),
+        Ok(addrs) if addrs.is_empty() => "no address".to_string(),
+        Ok(_) => return Some(refused),
     };
     Some(format!(
-        "{flag} is shorter than {TOKEN_MIN} bytes, the least a token taken past loopback \
-         (on {at}) may be: a shorter one can be guessed. Make one with `openssl rand -hex 32`"
+        "could not look up {given} ({why}), and a name not looked up is judged past \
+         loopback: {refused}"
     ))
 }
 
@@ -5509,10 +5519,10 @@ mod tests {
     }
 
     /// A name that could not be looked up is judged past loopback, so a
-    /// short token on it is refused, the refusal saying the name was not
-    /// looked up -- `localhost` with a port that is no number fails before
-    /// any resolver is asked -- and binds nothing: no listener, the lookup's
-    /// error, so no token is asked for there.
+    /// short token on it is refused, the refusal saying first that the name
+    /// was not looked up -- `localhost` with a port that is no number fails
+    /// before any resolver is asked -- and binds nothing: no listener, the
+    /// lookup's error, so no token is asked for there.
     #[test]
     fn a_name_not_looked_up_is_judged_past_loopback() {
         let on = Listen::look_up("localhost:http-port");
@@ -5521,7 +5531,8 @@ mod tests {
         let why = short_token("--http-token", Some("secret"), &[&on])
             .expect("a short token on a name not looked up was taken");
         assert!(
-            why.contains("localhost:http-port, which could not be looked up"),
+            why.starts_with("could not look up localhost:http-port (")
+                && why.contains("judged past loopback: --http-token is shorter than 32 bytes"),
             "{why}"
         );
         assert!(on.bind().is_err());
@@ -5536,7 +5547,11 @@ mod tests {
             looked: Ok(Vec::new()),
         };
         assert!(none.past_loopback() && !none.binds_past_loopback());
-        assert!(short_token("--http-token", Some("secret"), &[&none]).is_some());
+        let why = short_token("--http-token", Some("secret"), &[&none]).unwrap();
+        assert!(
+            why.starts_with("could not look up nowhere:8080 (no address)"),
+            "{why}"
+        );
     }
 
     /// The listener is bound on the addresses the lookup answered and was

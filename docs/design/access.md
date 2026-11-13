@@ -1036,9 +1036,18 @@ answer the one bound, and a lookup that failed was taken for loopback: a
 short token passed for a name the resolver did not answer at the judgment
 and answered with a public address at the bind. A name that cannot be
 looked up is judged past loopback now (`Listen::past_loopback`), so a
-short token on it is refused, the refusal saying the name was not looked
-up; it binds nothing (`binds_past_loopback`), the lookup's error the bind's
-at the start, as it was.
+short token on it is refused, the refusal saying first that the name was
+not looked up -- what went wrong, which a refusal naming the length alone
+hid; it binds nothing (`binds_past_loopback`), the lookup's error the
+bind's. Made as the flags are read, the lookup moved in file mode, whose
+listeners are bound after the open (a connection would wait in the backlog
+through it): a name the resolver did not answer as the server started -- a
+boot before DNS is up -- was looked up again at the bind and could be bound
+there, and now fails the start whatever the token, a unit's
+`Restart=on-failure` starting it again. The kit's units give `--http` and
+`--listen` an address, and start after `network-online.target`. A node
+binds before any tenant opens and the router after its directory's open,
+so theirs moved by little.
 
 On loopback any length is taken, for a listener this machine alone
 reaches: `make server TOKEN=secret`, the README's first server, runs as it
@@ -1116,9 +1125,10 @@ compose files' examples were given 32 bytes or more. `tests/tokens.rs` in
 fennec-server (each flag and its variable past loopback, exiting 2, the
 data and admin tokens refused on `--metrics` alone past it, a name not
 looked up judged past loopback, 32 bytes passing on an address no machine
-holds, short ones on loopback, the warning through a proxy once and never
-for long tokens) and in fennec-shard (its three likewise, and the router's
-warning), `a_short_secret_is_warned_of_and_taken` and
+holds, short ones on loopback, the warning through a proxy once, each
+header first to a server of its own, and never for long tokens) and in
+fennec-shard (its three likewise, and the router's warning at each header),
+`a_short_secret_is_warned_of_and_taken` and
 `a_tenants_short_secret_is_said_as_it_is_set` in fennec-server's
 `tests/hooks.rs`, and `a_token_past_loopback_is_32_bytes_at_least`,
 `a_name_not_looked_up_is_judged_past_loopback` and

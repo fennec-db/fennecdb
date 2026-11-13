@@ -173,7 +173,8 @@ fn a_short_token_is_refused_outside_loopback() {
     }
     // A name that could not be looked up is judged past loopback, never
     // taken for it: here `localhost` with a port that is no number, which
-    // fails the lookup before any resolver is asked.
+    // fails the lookup before any resolver is asked. The refusal says so
+    // before the length, which is refused only for it.
     let unlooked = [
         "--file",
         file,
@@ -184,7 +185,8 @@ fn a_short_token_is_refused_outside_loopback() {
     ];
     let log = refused(&unlooked, &[], "--http-token");
     assert!(
-        log.contains("(on localhost:http-port, which could not be looked up"),
+        log.contains("could not look up localhost:http-port (")
+            && log.find("could not look up") < log.find("shorter than 32 bytes"),
         "{log}"
     );
     assert!(!path.exists() && !node_path.exists(), "a store was opened");
@@ -231,24 +233,32 @@ fn a_short_token_is_refused_outside_loopback() {
 
 /// On loopback a short token is taken, and the first request that comes
 /// through a proxy or a router -- `Forwarded`, `X-Forwarded-For` or the
-/// router's `X-Forwarded-Host` -- warns of it, once, naming the flag: past
-/// the proxy the guesses come from past this machine. A request carrying
-/// none of them warns of nothing, nor does any request to a server whose
-/// tokens are 32 bytes or more.
+/// router's `X-Forwarded-Host` -- warns of it, once, naming the flag and the
+/// header: past the proxy the guesses come from past this machine. Each
+/// header comes first to a server of its own, so each is seen to warn, and
+/// the other two after it to warn no more. A request carrying none of them
+/// warns of nothing, nor does any request to a server whose tokens are 32
+/// bytes or more.
 #[test]
 fn a_short_token_on_loopback_is_warned_of_through_a_proxy() {
     const WARNING: &str = "warning: a request came through a proxy or a router";
+    // Each header as a client sent it -- one in lower case, as the name
+    // matches whatever its case -- and as the warning names it.
     let through = [
-        ("X-Forwarded-For", "203.0.113.9"),
-        ("x-forwarded-host", "db.example.com"),
-        ("Forwarded", "for=203.0.113.9;proto=https"),
+        ("X-Forwarded-For", "203.0.113.9", "X-Forwarded-For"),
+        ("x-forwarded-host", "db.example.com", "X-Forwarded-Host"),
+        ("Forwarded", "for=203.0.113.9;proto=https", "Forwarded"),
     ];
-    let log_of = |token: &str| {
+    // A server's log once it was sent a request with no such header, then
+    // each header, `first` first and the others in turn after it.
+    let log_of = |token: &str, first: usize| {
         let mut server = start(&["--http-token", token, "--auth-delay", "0"]);
         let mut http = server.http().with_token(token);
         assert_eq!(http.ask("GET", "/_schema", "").status, 200);
-        for header in through {
-            assert_eq!(http.ask_with("GET", "/_schema", "", &[header]).status, 200);
+        for i in 0..through.len() {
+            let (name, value, _) = through[(first + i) % through.len()];
+            let asked = http.ask_with("GET", "/_schema", "", &[(name, value)]);
+            assert_eq!(asked.status, 200, "{name}");
         }
         // Stopped, and every line it wrote read: the warning, written before
         // its request's answer, is among them where it was written at all.
@@ -258,14 +268,16 @@ fn a_short_token_on_loopback_is_warned_of_through_a_proxy() {
         assert!(log.contains("shutting down"), "{log}");
         log
     };
-    let log = log_of("secret");
-    assert_eq!(log.matches(WARNING).count(), 1, "{log}");
-    let line = log.lines().find(|l| l.contains(WARNING)).unwrap();
-    assert!(
-        line.contains("(it carries X-Forwarded-For)")
-            && line.contains("--http-token (FENNEC_HTTP_TOKEN) is shorter than 32 bytes"),
-        "{line}"
-    );
-    let log = log_of(&"t".repeat(32));
+    for (first, (_, _, named)) in through.iter().enumerate() {
+        let log = log_of("secret", first);
+        assert_eq!(log.matches(WARNING).count(), 1, "{named} first: {log}");
+        let line = log.lines().find(|l| l.contains(WARNING)).unwrap();
+        assert!(
+            line.contains(&format!("(it carries {named})"))
+                && line.contains("--http-token (FENNEC_HTTP_TOKEN) is shorter than 32 bytes"),
+            "{named} first: {line}"
+        );
+    }
+    let log = log_of(&"t".repeat(32), 0);
     assert!(!log.contains(WARNING), "{log}");
 }

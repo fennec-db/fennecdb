@@ -285,32 +285,44 @@ fn a_short_token_is_refused_outside_loopback() {
 }
 
 /// On loopback a short token is taken, and the first request a proxy in
-/// front sent (`X-Forwarded-For`) warns of it, once, naming the flag; a
-/// request carrying no such header warns of nothing.
+/// front sent -- `Forwarded`, `X-Forwarded-For` or `X-Forwarded-Host` --
+/// warns of it, once, naming the flag and the header. Each header comes
+/// first to a router of its own, so each is seen to warn, and the other two
+/// after it to warn no more; a request carrying none of them warns of
+/// nothing.
 #[test]
 fn a_short_token_on_loopback_is_warned_of_through_a_proxy() {
     const WARNING: &str = "warning: a request came through a proxy or a router";
-    let dir = scratch("proxied");
-    let (mut child, addr, lines) = router_heard("127.0.0.1:0", &dir, &["--token", "root"], &[])
-        .unwrap_or_else(|(_, said)| panic!("the router did not start:\n{said}"));
-    let proxy = [("X-Forwarded-For", "203.0.113.9")];
-    let asked = [
-        status_with(&addr, "/_shard/nodes", Some("root"), &[]),
-        status_with(&addr, "/_shard/nodes", Some("root"), &proxy),
-        status_with(&addr, "/_shard/nodes", Some("root"), &proxy),
+    // Each header as a client sent it -- one in lower case, as the name
+    // matches whatever its case -- and as the warning names it.
+    let through = [
+        ("X-Forwarded-For", "203.0.113.9", "X-Forwarded-For"),
+        ("x-forwarded-host", "db.example.com", "X-Forwarded-Host"),
+        ("Forwarded", "for=203.0.113.9;proto=https", "Forwarded"),
     ];
-    // Each line is written before its request's answer: once the router is
-    // gone, every one it wrote is read.
-    let _ = child.kill();
-    let said: Vec<String> = lines.map_while(Result::ok).collect();
-    let _ = child.wait();
-    assert_eq!(asked, [200, 200, 200]);
-    let warned: Vec<&String> = said.iter().filter(|l| l.contains(WARNING)).collect();
-    assert_eq!(warned.len(), 1, "{said:?}");
-    assert!(
-        warned[0].contains("(it carries X-Forwarded-For)")
-            && warned[0].contains("--token (FENNEC_SHARD_TOKEN) is shorter than 32 bytes"),
-        "{}",
-        warned[0]
-    );
+    for (first, (_, _, named)) in through.iter().enumerate() {
+        let dir = scratch(&format!("proxied-{first}"));
+        let (mut child, addr, lines) = router_heard("127.0.0.1:0", &dir, &["--token", "root"], &[])
+            .unwrap_or_else(|(_, said)| panic!("the router did not start:\n{said}"));
+        let mut asked = vec![status_with(&addr, "/_shard/nodes", Some("root"), &[])];
+        for i in 0..through.len() {
+            let (name, value, _) = through[(first + i) % through.len()];
+            let header = [(name, value)];
+            asked.push(status_with(&addr, "/_shard/nodes", Some("root"), &header));
+        }
+        // Each line is written before its request's answer: once the router
+        // is gone, every one it wrote is read.
+        let _ = child.kill();
+        let said: Vec<String> = lines.map_while(Result::ok).collect();
+        let _ = child.wait();
+        assert_eq!(asked, [200; 4], "{named} first: {said:?}");
+        let warned: Vec<&String> = said.iter().filter(|l| l.contains(WARNING)).collect();
+        assert_eq!(warned.len(), 1, "{named} first: {said:?}");
+        assert!(
+            warned[0].contains(&format!("(it carries {named})"))
+                && warned[0].contains("--token (FENNEC_SHARD_TOKEN) is shorter than 32 bytes"),
+            "{named} first: {}",
+            warned[0]
+        );
+    }
 }

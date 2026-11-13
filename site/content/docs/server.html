@@ -195,8 +195,11 @@ deliberately with <code>--insecure</code>.</p>
 variable, stops the server at the start (exit 2), naming the flag. A refused
 guess waits, but only by its address, and a client may hold many:
 <code>openssl rand -hex 32</code> makes a token long enough. Loopback is
-judged of the addresses the listener is bound on, its name looked up once;
-a name that cannot be looked up counts as past loopback. On loopback any
+judged of the addresses the listener is bound on, its name looked up once,
+as the server starts and before it opens anything; a name that cannot be
+looked up counts as past loopback. One the resolver cannot answer yet -- a
+boot before DNS is up -- fails the start whatever the token, which a
+systemd unit's <code>Restart=on-failure</code> tries again. On loopback any
 length is taken, so <code>make server TOKEN=secret</code> and a machine's
 own tests run as they are; <code>--insecure</code> does not waive the
 length. Behind a proxy or a router, give the token 32 bytes all the same
