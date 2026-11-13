@@ -23,18 +23,17 @@ the threshold stands above it: the control and the calibration over merged
 pull requests that set it are in the design document.
 
 Why the allocator is priced: musl's allocator takes a slot from a group of
-its size class, and gives the group back once its last slot is freed, so
-an op whose allocations fill and empty a group of their own pays for
-making and freeing the group each time -- a few hundred instructions more,
-with the same calls. Which ops do is the heap's layout, which any change
-to what a program keeps moves: the calibration's two merged pull requests
-that the plain count failed ran their own code to within 21 and 150
-instructions an op of their base's, and paid musl's group 400 to 1 150 more
-an op (+2 to +6%) on paths their code never reached. So each run's calls
-into the allocator (ALLOCATOR) are counted at what the base's runs paid a
-call, entry point by entry point: an allocation more or fewer moves the
-figure at the base's price, a group's making and freeing does not. The
-plain count stays in the table beside it.
+its size class, and gives the group back once its last slot is freed, so an
+op whose allocations fill and empty a group of their own pays for making
+and freeing the group each time -- a few hundred instructions more, with
+the same calls. Which ops do is the heap's layout, which any change to what
+a program keeps moves: the calibration's two merged pull requests that the
+plain count failed ran their own code within 0.34% of their base's, and
+paid musl's allocator 360 to 1 170 instructions more an op (+2 to +6%) with
+the same calls. So each run's calls into the allocator (ALLOCATOR) are
+counted at what the base's runs paid a call, entry point by entry point: an
+allocation more or fewer moves the figure at the base's price, a group's
+making and freeing does not. The plain count stays in the table beside it.
 
     python3 tools/perf_gate.py run --base origin/main     # make perf-gate
     python3 tools/perf_gate.py measure --base-bin B --head-bin H --out R.json

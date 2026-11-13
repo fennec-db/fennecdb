@@ -219,8 +219,10 @@ untouched, the figures and a trace's deltas.
 which is a pull request's base branch or the commit a merge group queues
 onto, and in the change -- and counts each of its workloads under
 valgrind's callgrind, five runs a side. A side's figure is the median of
-its runs' instructions; a workload whose figure is 1% or more above the
-base's fails the job (`tools/perf_gate.py`), unless the pull request adds
+its runs' instructions, each run's calls into the allocator counted at
+what the base's runs paid a call (*The allocator, priced*, below); a
+workload whose figure is 1% or more above the base's fails the job
+(`tools/perf_gate.py`), unless the pull request adds
 an entry to `PERF_ACCEPTED`, in the same file: the workload, the most it
 lets through (`"+1.8%"`) and why, in 40 characters at the least -- what the
 instructions buy, and what `make perf-gate` and `make instr-compare`
@@ -282,30 +284,104 @@ a side, eight at a time on a loaded M1 in Docker (aarch64 musl) -- 17 of 24
 workloads counted the same to the instruction, or within 0.03%, run after
 run; `group`, `near` and the filtered `near` within 0.5%; `facet` 15-18%
 and the three scoped requests 2-6% apart. Two things moved those, each
-found by diffing two runs' profiles by function. The clock: `--request-rate`'s window is
-swept once a second of the wall's time (`rate::Held::take`), forgetting the
-callers that asked nothing in it, and a caller forgotten is taken in anew
-at its next request. A thousand subjects in turn -- `rows.rs`'s -- took two
-seconds a turn under callgrind, and a hundred on a loaded machine more than
-one at times: how many each sweep forgot was the clock's, and a scoped
-request's count moved by 2 to 6% from one run to the next. Four subjects
-each ask again within milliseconds, and the sweep forgets none. The draw:
-std's hash tables take their keys at random in each process
-(`RandomState`), and a facet through a `@hash` index walks its buckets in
-the order the keys lay its table out, `order_rows`' pick of the ten most
-comparing as many times as that order makes it: one database's facet cost
-some 15% apart from one process to the next. Each op of `core-facet` asks
-the next of 256 databases, each with keys of its own (a thread's tables
-take its keys with the first moved by one, a new key each), and a run
-counts the mean of 256 draws. Ten runs a side then spread 1.1% for `facet`,
-0.03% for the scoped read, 0.8% and 1.0% for the scoped insert and set --
-the set within 0.04% over eight runs made one at a time -- and 0.4% for the
-filtered `near`: a step a workload's lookups pay or not, which the median
-of five takes, the threshold standing well above it.
+found by diffing two runs' profiles by function. The clock:
+`--request-rate`'s window is swept once a second of the wall's time
+(`rate::Held::take`), forgetting the callers that asked nothing in it, and
+a caller forgotten is taken in anew at its next request. A thousand
+subjects in turn -- `rows.rs`'s -- took two seconds a turn under callgrind,
+and a hundred on a loaded machine more than one at times: how many each
+sweep forgot was the clock's, and a scoped request's count moved by 2 to 6%
+from one run to the next. Four subjects each ask again within milliseconds,
+and the sweep forgets none. The draw: std's hash tables take their keys at
+random in each process (`RandomState`), and a facet through a `@hash` index
+walks its buckets in the order the keys lay its table out. Picking the ten
+most, `order_rows`' `select_nth_unstable_by` and its sort compare as many
+times as that order makes them, 87 to 92 a facet, every other function of
+it counting the same to the instruction (ten runs' profiles diffed by
+function, on x86_64): one database's facet cost 9.7% apart over ten
+processes. Each op of `core-facet` asks the next of 256 databases, each
+with keys of its own (a thread's tables take its keys with the first moved
+by one, a new key each), and the mean of 256 draws still spread 1.2% over
+ten runs, 0.70% between two sides' medians in the control: too near the
+threshold. So `core-facet` picks the commonest brand, a pass of 39
+comparisons whatever the order, its walk, counts and values counted as they
+were: ten runs within 0.003% (one database alone, 0.019%). The pick of ten
+is `core-lookup`'s -- the first ten of some 500 rows in id order, an order
+the seed fixes -- and the sort `core-group`'s, its 100 groups. In the local
+control ten runs a side spread 0.03% for the scoped read, 0.8% and 1.0% for
+the scoped insert and set -- the set within 0.04% over eight runs made one
+at a time -- and 0.4% for the filtered `near`: a step a workload's lookups
+pay or not, which the median of five takes, the threshold standing well
+above it.
 
-*The threshold.* CALIBRATION PENDING: the replays of merged pull requests
-`make instr-compare` judged neutral, and of known regressions, and the base
-held to itself twenty times, in this change's CI.
+*The allocator, priced.* musl's allocator hands out a slot of a group of
+its size class and frees the group once its last slot is freed, so an op
+whose allocations fill and empty a group of their own makes and frees that
+group each time -- `alloc_slot`, `nontrivial_free` and
+`__malloc_alloc_meta` running a few hundred instructions more, the calls
+the same. Which ops do is the heap's layout, every size and lifetime of
+what the program holds, and a change anywhere moves it. The calibration's
+plain counts failed two merged pull requests on it: at #474, `get t where
+id = $1` made the same 16 allocations and frees an op, its own code
+counting the same to the instruction, and paid 401 instructions more
+(+3.6%), every one of them the allocator's; #524's `PATCH` by a filter, its
+own code 18 instructions more, paid the allocator 1 146 more (+5.7%). The
+same pull requests' other paths moved the other way (#474's ordered read
+-2.0%), and #474's own first head, against its fix, -4.1% on a put: a
+regression of a few percent beside such a swing would pass the plain count.
+So each run's calls into the allocator -- `malloc`, `free`, `realloc` and
+the rest, from anything but the allocator itself (`ALLOCATOR`, read off the
+profile's call lines) -- are counted at what the base's five runs paid a
+call, entry point by entry point: an allocation more or fewer moves the
+figure by the base's price for it, a group's making and freeing by nothing.
+An entry point the base never called is counted as it cost. The plain
+count's delta stands beside the judged one (*as counted*), the difference
+the allocator's. Left out with it: an allocation made dearer by its size --
+a buffer grown past its size class, or past the 128 KB musl maps on its own
+-- pays the base's price here, where `make instr-compare` and the request
+benchmarks see it.
+
+*The threshold.* Set by a calibration in this change's CI: the gate
+replayed on six merged pull requests `make instr-compare` had judged
+neutral, which must pass; on three known regressions, each as it stood
+before it was fixed or undone, which must fail; and on the base held to
+itself -- two builds of one commit at two paths, as the job builds a change
+that moves no code, the binaries the same to the byte -- twenty times over.
+Each pair is its two commits built with this change's program and judged
+as the job judges, first by the plain count (run 43418039339) and then
+with the allocator priced and `core-facet` picking one (run 43449980626).
+A replay, two builds and 240 runs, took 99 to 167 s on a hosted runner.
+
+| pair (base → head) | expected | plain count | allocator priced | what decided it |
+|---|---|---|---|---|
+| the base against itself, 20 rounds | pass | pass | pass | plain: `core-facet` +0.70%, +0.37%, -0.27%, -0.45% (its pick of ten), every other workload within 0.08%; priced: `core-group` +0.04%, every other within 0.01%, `core-facet` 0.00% |
+| #531 (`088bc30f` → `de59fdd1`) | pass | pass | pass | nothing past 0.01% |
+| #506, #513's `v1`/`bc7636b2` (`edb629d2` → `bc7636b2`) | pass | pass | pass | `http-put` +0.23% |
+| #513 (`fb93539e` → `61fe4261`) | pass | pass | pass | nothing past +0.01%; `http-put` -0.77% |
+| #542 as merged (`4a157cdd` → `1dee77aa`) | pass | pass | pass | `http-patch` +0.20% |
+| #474 as merged (`d45afa21` → `e3d58955`) | pass | **fail** | pass | plain: `core-put` +4.30%, `core-get-id` +3.59%, `core-filter-limit` +3.44%, `http-get-row` +2.96%, `http-patch` +2.92%, `http-put-keyed` +1.02%, all musl's groups; priced: `http-put` +0.15% (25 an op), `http-patch` +0.12%, `core-put` +0.04% |
+| #524 (`a96bd554` → `c736b5c0`) | pass | **fail** | pass | plain: `http-patch` +5.71%, `http-scoped-set` +2.35%, `http-get-row` +1.94%, all musl's groups; priced: `ql-parse` +0.34% (its parser's own growth), `http-patch` +0.09%, `http-scoped-set` -0.97% (two allocations fewer) |
+| #511 undone (`82319b7f` → `9da6411e`) | fail | fail | fail | `core-json-page` +11.06% either way |
+| #542's first head (`de23ce27` → `0e05fe22`) | fail | fail | fail | `http-patch` +1.70%, `http-get-row` +1.12% either way |
+| #474's first head, against its fix (`e1d6a47c` → `41f293a9`) | fail | fail | fail | `http-scoped-insert` +2.12% plain, +3.25% priced; `http-scoped-set` +1.43%, +2.41%; `http-scoped-get` +1.45%, +1.11% |
+
+The bar stays +1%, on the figure with the allocator priced. The widest
+delta of a merged change was +0.34% -- #524's parser, its own code, which
+no request-level figure reads apart -- and the narrowest that decided a
+regression +1.11% (`http-scoped-get`) and +1.12% (`http-get-row`); the
+base against itself moved 0.04% at most. Each regression fails on the
+workloads that stand for it, and no merged change fails. The plain count
+failed two of the six merged changes on musl's groups alone, and
+understated #474's first head by 515 and 438 instructions an op on its
+scoped set and insert, a flip the other way: priced, they read +1 258 and
++1 263 an op, beside the +1 128 measured when it was found. Neither failure
+was a cost `make instr-compare` had missed: priced, both changes moved
+every `http-*` workload 0.15% at most. The gate reads finer than a
+request on macOS all the same -- an op of 9 000 to 35 000 instructions
+where `make instr-compare` resolves a request to about ±80 -- and a change
+that costs a workload 1% on purpose says so in `PERF_ACCEPTED`, with what
+the instructions buy and how they were measured: the rule is no loss, and
+a cost is justified where it is taken.
 
 *Why fennec-http's examples.* The program reaches every crate a request
 does and no more. In `fennec-bench`, its bundled SQLite, the MongoDB
@@ -330,7 +406,7 @@ figure measures; a hot path a page quotes gets one.
 | `core-lookup` | ten parents in id order, each with its children through a `@hash` | [`lookup`](lookup-and-aggregates.md#lookup), one bucket probe a parent (`make lookup-bench`) |
 | `core-match` | BM25 over two words, the ten best, of 10 000 documents of 30 words | `match … limit 10`, two words: 0.06 ms ([benchmarks-text.html](../../site/content/docs/benchmarks-text.html#text-search)) |
 | `core-fuzzy` | a word with a typo, its words within an edit | a word's neighbours, one edit: 14 µs ([benchmarks-text.html](../../site/content/docs/benchmarks-text.html#typos)) |
-| `core-facet` | the brands of every row through `@hash`, over 256 databases in turn | a facet over every row through `@hash`: 0.01 ms ([benchmarks-text.html](../../site/content/docs/benchmarks-text.html#text-search)) |
+| `core-facet` | the brands of every row through `@hash`, the commonest picked, over 256 databases in turn | a facet over every row through `@hash`: 0.01 ms ([benchmarks-text.html](../../site/content/docs/benchmarks-text.html#text-search)) |
 | `core-near` | the ten nearest of 4 000 64-dim vectors by the graph, a beam of 100 | `near` at a beam of 100 ([benchmarks-vector.html](../../site/content/docs/benchmarks-vector.html#scale), `make sweep`) |
 | `core-near-filtered` | the same under a `@hash` filter keeping 1% | a filter keeping 1%: 0.67 ms at a million ([benchmarks-vector.html](../../site/content/docs/benchmarks-vector.html#scale)) |
 | `core-json-page` | 1 000 rows of four floats written as JSON off the stored documents | [a plain `get` written from the stored rows](http.md#json-from-stored-rows) (`json_numbers.rs`) |
@@ -364,3 +440,11 @@ bound over it: no code changes, but a thread's tables take their keys in
 the order they are made, so a map added anywhere before a workload's moves
 every later one's keys, and a change's count would be one draw from the
 same spread, once a build, where five runs and their median read past it.
+More databases for `core-facet`'s pick of ten: 4 096 of them still spread
+0.29% over five runs, sixteen times the setup. An absolute floor beside the
+1% -- a delta failing only past so many instructions an op too -- for the
+allocator's swings: they ran 360 to 1 170 instructions an op, past
+#542's regression of 219 a read. The allocator left out of the count: an
+allocation more would cost only its call. A global allocator of the
+program's own, its cost a call fixed, in place of musl's: the build counted
+would no longer be the one that ships.

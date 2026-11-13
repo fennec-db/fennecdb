@@ -19,9 +19,12 @@ CI's `perf (instructions)` job counts each workload of
 `crates/fennec-http/examples/gate.rs` under callgrind in the base's static
 musl build and the pull request's -- one program, five runs a side -- and
 fails a median 1% or more above the base's (`tools/perf_gate.py`, judged by
-the base's copy). A cost taken on purpose is a `PERF_ACCEPTED` entry the
+the base's copy), each run's calls into the allocator counted at the base's
+cost a call: what a call costs moves with the heap's layout, the calls with
+the code. A cost taken on purpose is a `PERF_ACCEPTED` entry the
 pull request adds, naming the workload, the most it lets through and why;
 never the threshold, the runs or a workload changed to pass. A workload
-runs in process on one thread from a fixed seed, only its loop counted, and
-stands for a claim in the design file's table: a hot path a page quotes
-gets one.
+runs in process on one thread from a fixed seed, only its loop counted, the
+same count run after run but for a draw well inside the threshold (the
+base against itself, 0.1% at most), and stands for a claim in the design
+file's table: a hot path a page quotes gets one.

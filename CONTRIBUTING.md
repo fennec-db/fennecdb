@@ -120,12 +120,17 @@ A change must not make fennecdb slower, and CI holds it to that: the
 `match`, `fuzzy`, `facet`, `near`, a JSON page, the parser, requests through
 the HTTP handler, a file's open and its compaction — under callgrind, in
 main's build and the pull request's, and fails a workload 1% or more slower
-(`docs/design/benchmarks.md#the-gate`). `make perf-gate` runs it on Linux with
-valgrind; on macOS, in Docker. A change that costs instructions on purpose — a
-feature on a hot path — adds an entry to `PERF_ACCEPTED` in
-`tools/perf_gate.py`: the workload, the most it lets through and why, with what
-`make instr-compare` measured. The entry lets that workload through in that
-pull request alone, and stays as the record of it.
+(`docs/design/benchmarks.md#the-gate`). Each call into the allocator is
+counted at what main's build paid for one: what a call costs inside musl's
+allocator moves with the heap's layout, by hundreds of instructions on paths
+a change never touched, while an allocation more is the change's. The job's
+table shows the plain count beside it, and a failed job uploads each side's
+profile by function (`perf-profiles`) for `callgrind_annotate`. `make
+perf-gate` runs it on Linux with valgrind; on macOS, in Docker. A change that
+costs instructions on purpose — a feature on a hot path — adds an entry to
+`PERF_ACCEPTED` in `tools/perf_gate.py`: the workload, the most it lets
+through and why, with what `make instr-compare` measured. The entry lets that
+workload through in that pull request alone, and stays as the record of it.
 
 A change on a request path is measured before it is opened: `make
 instr-compare` holds two builds' instructions an op to each other on macOS,
