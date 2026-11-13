@@ -65,10 +65,12 @@ nothing reaches a registry before the notes have had a read.
    the sync log a durable write takes on Linux applied at each open -- on
    ext4 and on XFS under `--sync always` writes, compacts and spills, every
    acknowledged write read back; on ext4 under `--sync 250`, the default,
-   every write `/_changes` handed over read back and every write lost
-   answered within the sync's window of the cut; and a `--dir` node of two
-   tenants with a standby following it, every acknowledged write read back
-   and the standby holding nothing the node lost
+   every write `/_changes` handed over read back, every write lost
+   answered within 250 ms and two syncs' own time of the cut, no sync a
+   second late nor the syncer slowed; and a `--dir` node of two tenants
+   with a standby following it, every acknowledged write read back and
+   the standby near the node's tip and holding nothing the node lost; each
+   cut mid-write
    (docs/design/durability.md, "A power cut"): `gh run list --workflow
    linux-power-cut.yml --limit 1`, and if it ran before the commit being
    released, `gh workflow run linux-power-cut.yml --ref main` and wait for

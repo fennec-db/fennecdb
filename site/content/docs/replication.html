@@ -233,16 +233,22 @@ wrote past the fork.</p>
 lost in ten failovers. With the default <code>--sync 250</code>, a failover
 loses up to the last 250 ms of writes.</p>
 
-<p>A power cut, which takes the node's sockets with what they had not sent, is
-the same loss. Cut five times under each setting on a Linux guest (ext4), a
-primary under <code>--sync 250</code> lost 120 to 420 acknowledged writes a
-cut, the oldest answered 57 to 173 ms before it, within a bound of about 310
-ms (250 ms, the sync's own time, 50 ms of slack); every write its change feed
-had handed to a reader was still there, and what was kept was a prefix of the
-writes. A <code>--dir</code> node under <code>--sync always</code> lost no
-acknowledged write at any cut, and its standby, read as the cut left it, held
-nothing the node came back without (at most 51 changes behind) and held the
-same rows again within 3 s of the node's return.</p>
+<p>A power cut was measured on the primary, with no failover after it: no
+replica was promoted. Cut ten times on a Linux guest (ext4), in two runs, a
+primary under <code>--sync 250</code> lost 54 to 794 acknowledged writes a
+cut, none answered more than 316 ms before it — 250 ms plus the sync's own
+time — and kept every write its change feed had handed a reader, as a prefix
+of the writes. A <code>--dir</code> node under <code>--sync always</code> lost
+no acknowledged write at any cut. Its standby, read as each cut left it, held
+nothing the node came back without, and was 0 to 51 changes behind it, writes
+still unanswered at the cut, a 20 MiB spill among them. The second run counted
+the writes the node had answered as durable that the standby lacked: none, at
+all ten tenant cuts, so a promotion at any of them would have lost nothing.
+That was measured, not promised: a write answered as durable is on the
+primary's disk and in its socket to each replica, and a power cut can take the
+socket before it sends, where a killed process's kernel still delivers it.
+Once the node was back, the standby held the same rows again within 3.4 s of
+being asked.</p>
 
 <div class="tbl">
 <table>
