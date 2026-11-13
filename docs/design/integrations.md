@@ -188,6 +188,22 @@ from a case can be held to it.
   rendered in all seven languages and run through each SDK. Each sent its
   case's text and parameters.
 
+## Audit of the published packages' dependencies
+
+CI's `audit` job reads what `packages.yml` publishes for known advisories:
+`npm audit --omit=dev --audit-level=high` for `@fennecdb/web`, `react`,
+`cloudflare` and `langchain` (web has no lockfile and no dependency; its
+audit is of the one npm resolves in a copy), `govulncheck` (v1.1.4, on the
+newest Go: `go 1.22` in `go.mod` is the oldest a user may build with, and a
+standard-library fix is theirs to take) for the Go module, `dotnet list package
+--vulnerable --include-transitive` for `FennecDb` (it exits 0 whatever it
+finds, so the job reads its text), and `tools/osv_check.py` for Kotlin and
+Dart. The last asks api.osv.dev about the Maven coordinates the Gradle files
+pin and the newest version a Dart constraint admits, as no lockfile of a
+library is kept (`pubspec.lock` is ignored); a binary scanner with a pinned
+checksum would add a download for two dependencies. Test-only dependencies
+are not shipped and not audited here; Dependabot reads them.
+
 ## Grafana
 
 **Grafana's data source binds a dashboard's values; it never splices them**

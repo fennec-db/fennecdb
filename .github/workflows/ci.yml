@@ -980,6 +980,72 @@ jobs:
           docker cp fennec-server:/usr/local/bin/fennec-server "$RUNNER_TEMP/fennec-server"
           FENNEC_SERVER="$RUNNER_TEMP/fennec-server" go test -count=1 ./pkg/...
 
+  # What packages.yml publishes, audited for known advisories in what it
+  # depends on: the npm packages' runtime (and peer) dependencies, the Go
+  # module's reachable code and standard library, FennecDb's NuGet graph, and
+  # the Kotlin and Dart packages' declared dependencies by OSV. A new advisory
+  # fails the run on whichever change it lands beside, which is when it should
+  # be read: a published package keeps what it was given. Each tool is a
+  # pinned version; the actions are pinned by commit.
+  audit:
+    name: audit (published packages' dependencies)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24'
+
+      # A package with no lockfile (@fennecdb/web has no dependency at all) is
+      # audited from the one npm resolves for it, in a copy.
+      - name: npm audit of each published npm package
+        run: |
+          for d in web integrations/react integrations/cloudflare integrations/langchain; do
+            echo "== $d"
+            work="$RUNNER_TEMP/audit-$(basename "$d")"
+            mkdir -p "$work"
+            cp "$d/package.json" "$work/"
+            if [ -f "$d/package-lock.json" ]; then cp "$d/package-lock.json" "$work/"; fi
+            (cd "$work" && npm install --package-lock-only --ignore-scripts --no-audit --no-fund >/dev/null \
+              && npm audit --omit=dev --audit-level=high)
+          done
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: stable
+          cache: false
+
+      # The newest toolchain: go.mod's `go 1.22` is the oldest a user may
+      # build with, and a fixed standard-library advisory is theirs to take.
+      - name: govulncheck of the Go module
+        working-directory: integrations/go
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: FennecDb's NuGet packages, transitive ones included
+        working-directory: integrations/dotnet/FennecDb
+        run: |
+          dotnet restore
+          dotnet list package --vulnerable --include-transitive 2>&1 | tee "$RUNNER_TEMP/nuget.txt"
+          # `dotnet list` exits 0 whatever it finds.
+          if grep -q 'has the following vulnerable packages' "$RUNNER_TEMP/nuget.txt"; then exit 1; fi
+
+      - name: Kotlin's and Dart's dependencies by OSV
+        run: |
+          python3 -I tools/osv_check.py --self-test
+          python3 -I tools/osv_check.py
+
   # deploy/: the alert rules under promtool, every systemd unit booted in
   # two privileged containers running systemd, and the failover drill --
   # two regions in Docker, a node and a router killed, nothing acknowledged
