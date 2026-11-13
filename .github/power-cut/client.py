@@ -37,10 +37,12 @@ before it is on disk, to what that promises instead: a thread more reads
 fsync has covered, and notes each page as it comes. Every write a page held
 must be there after the cut; an acknowledged write may be gone only if no
 page held it, and only if it was answered within 250 ms and two syncs' own
-time of the cut, a fixed bound (`SYNC_OWN`); and no page may come later
-than `GAP_CEILING` after the one before it, nor the cut after the last
-(`Check.window`). Neither number is read from the pages being judged. What
-the cut kept is a prefix of the writes, by the change each was answered as.
+time of the cut, a fixed bound (`SYNC_OWN`); no page may come later than
+`GAP_CEILING` after the one before it, nor the cut after the last; and the
+pages must come every 250 ms and a median sync's own time (`SYNC_MEDIAN`)
+at the median (`Check.window`). None of these numbers is read from the
+pages being judged. What the cut kept is a prefix of the writes, by the
+change each was answered as.
 The load leaves out the spills and the compacts there: its durability is
 the syncer's, not a compact's, and a 20 MiB page would hold the reader up
 past the next sync.
@@ -102,24 +104,31 @@ CHANGES_LIMIT = 10_000
 # review; test_client.py holds both, failed).
 #
 # A sync's own time: the syncer's wake after its sleep, the writes taken
-# under the write lock and the fsync after it (`run_syncer`). Measured from
-# the pages of run 43438990710's five cuts, 257 to 259 ms apart at the
-# median and 261 to 271 ms at most: 250 ms of sleep and 7 to 9 ms of
-# syncing at the median, 21 ms at most. Allowed 50 ms, more than twice the
-# longest: a write gone that was answered past the bound, 250 ms and two
-# syncs' own time (`Check.window`), is a sync that came late or did not
-# cover it. The 29 ms a sync is allowed past the longest seen, 58 ms over
-# the two, is the bound's only slack.
-SYNC_OWN = 0.05
+# under the write lock and the fsync after it (`run_syncer`), read from the
+# pages as each gap less the 250 ms of sleep. Over the ten cuts of runs
+# 43438990710 and 43462058075, 7 to 9 ms at the median; at the longest 177
+# ms, a gap of 427 ms, and two back to back 282 ms, an acknowledged write
+# handed over 532 ms after its answer -- the runner's disk, early in a cut
+# after a boot or for a moment in the middle. Allowed 200 ms: the loss
+# bound, 250 ms and two syncs' own time (`Check.window`), is 650 ms, and
+# the 118 ms past the longest any write took to be handed over is its only
+# slack. A first bound of 50 ms a sync, 350 ms, passed the second run with
+# a write lost 316 ms before its cut, and a cut landing in its fourth cut's
+# slow syncs would have failed a server doing what it promises.
+SYNC_OWN = 0.2
+# The syncer's period at the median: 250 ms and the median sync's own time,
+# allowed 100 ms where ten cuts measured 7 to 9 (pages 257 to 259 ms apart).
+# The median is the slowed syncer's check: a few slow syncs leave it where
+# it was, and a syncer late at every sync -- every half second, whose
+# losses stay under the loss bound -- fails it at every cut.
+SYNC_MEDIAN = 0.1
 # The longest a page may come after the one before it, after the first
 # acknowledged write, or the cut after the last page: one sync's period is
 # 250 ms and its own time, and a page seen during the reader's turn later
-# by as much as the turn (34 ms at most in that run, the longest gap 271
-# ms). A second is four times the interval and nearly four times the
+# by as much as the turn (34 ms at most over the ten cuts, the longest gap
+# 427 ms). A second is four times the interval and more than twice the
 # longest gap seen, so a gap past it is no runner's slow moment but a sync
-# 750 ms late: a syncer stopped, stuck or slowed past it. A slower syncer
-# under it is held by the loss bound, whenever a cut takes a write answered
-# past that.
+# 750 ms late: a syncer stopped or stuck.
 GAP_CEILING = 1.0
 # How far behind the node's tip the standby may be at a cut: it is held to
 # the node only as far as it had followed it, so one far behind would pass
@@ -885,10 +894,11 @@ class Check:
         the span measured. And each page came once a sync was done, `ms` and
         its own time after the one before: no gap between pages, after the
         first acknowledged write or before the cut is past `GAP_CEILING`,
-        or a sync came late. Neither bound is read from the pages: a bound
-        read from them grew with the stall it was to find. What the cut
-        kept is a prefix of the writes: no write it took landed before one
-        it kept."""
+        or a sync came late, and at the median they came `ms` and
+        `SYNC_MEDIAN` apart at most, or the syncer was slowed. No bound is
+        read from the pages: one read from them grew with the stall it was
+        to find. What the cut kept is a prefix of the writes: no write it
+        took landed before one it kept."""
         a = self.args
         if self.cut_at is None:
             return
@@ -912,6 +922,12 @@ class Check:
             )
         bound = self.sync + 2 * SYNC_OWN
         med = sorted(gaps)[len(gaps) // 2]
+        if med > self.sync + SYNC_MEDIAN:
+            self.fail(
+                f"a slowed syncer: its pages came every {med * 1000:.0f} ms at the median, past "
+                f"{(self.sync + SYNC_MEDIAN) * 1000:.0f} ms, {self.sync * 1000:.0f} and a median sync's own time of "
+                f"{SYNC_MEDIAN * 1000:.0f} ms at most"
+            )
         # How long an acknowledged write took to reach the disk: from its
         # answer to the first page reaching the change it landed as.
         lags = []
@@ -950,6 +966,7 @@ class Check:
             )
             + f"; the bound {self.sync * 1000:.0f} + 2 x {SYNC_OWN * 1000:.0f} (two syncs' own time) = {bound * 1000:.0f} ms"
             + f"; the longest gap {longest[0] * 1000:.0f} ms, {longest[1]}, against a ceiling of {GAP_CEILING * 1000:.0f} ms"
+            + f"; the median {med * 1000:.0f} ms, against {(self.sync + SYNC_MEDIAN) * 1000:.0f}"
         )
         if span > bound:
             self.fail(f"an acknowledged write answered {span * 1000:.0f} ms before the cut is gone: past the window's {bound * 1000:.0f} ms ({lost[0][2]})")
@@ -1009,7 +1026,10 @@ class Check:
         change (`replica_after`), so only this cut's writes can be above
         it."""
         a = self.args
-        acked = [(e["t"], e["seq"]) for q, e in self.acked.items() if e.get("seq") is not None and self.sent[q]["op"] != "k"]
+        writes = [e for q, e in self.acked.items() if self.sent[q]["op"] != "k"]
+        acked = [(e["t"], e["seq"]) for e in writes if e.get("seq") is not None]
+        if writes and not acked:
+            self.rig(f"the node answered none of cut {a.cut}'s {len(writes)} writes with its change (`Fennec-Seq`): nothing to hold the standby to")
         above = sorted(x for x in acked if x[1] > held)
         tip = max((s for _, s in acked), default=held)
         lag = self.cut_at - above[0][0] if above and self.cut_at is not None else 0.0

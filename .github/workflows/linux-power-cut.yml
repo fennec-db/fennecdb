@@ -15,8 +15,9 @@
 #   - `--sync 250`, the default, on ext4: every write `/_changes` handed
 #     over as on disk there, an acknowledged write gone only if it was
 #     answered within 250 ms and two syncs' own time of the cut, a fixed
-#     bound, no sync later than a second after the one before, and what
-#     the cut kept a prefix of the writes;
+#     bound, no sync later than a second after the one before nor the
+#     syncs slowed at the median, and what the cut kept a prefix of the
+#     writes;
 #   - a `--dir` node of two tenants under `--sync always` on ext4, followed
 #     by a standby node on the runner, which the cut leaves running: every
 #     acknowledged write there when the node reopens, the standby near the

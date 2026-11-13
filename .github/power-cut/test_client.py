@@ -5,15 +5,16 @@ that answers with the rows the cut left, and the verdict asked.
 
     python3 .github/power-cut/test_client.py
 
-`--sync 250`'s window: a syncer that keeps its interval passes; one that
-stopped 3 s before the cut, one that syncs every second, and one stuck for
-a second and a half in the middle each fail -- the first two the cases PR
-#627's review found the window's bound, read from the pages being judged,
-letting pass (bounds of 3 058 and 1 708 ms; 3 050 and 1 707 here). A cut
-with no write in flight fails as the rig's, and so does a standby far
-behind the node; one at its tip counts what a promotion at the cut would
-have lost. The standard library alone, as client.py: ci.yml's fmt job
-runs it.
+`--sync 250`'s window: a syncer that keeps its interval passes, and so does
+one whose disk is slow for two syncs, as run 43462058075's was; one that
+stopped 3 s before the cut, one that syncs every second, one every half
+second and one stuck for a second and a half in the middle each fail --
+the first two the cases PR #627's review found the window's bound, read
+from the pages being judged, letting pass (bounds of 3 058 and 1 708 ms;
+3 050 and 1 707 here). A cut with no write in flight fails as the rig's,
+and so does a standby far behind the node; one at its tip counts what a
+promotion at the cut would have lost. The standard library alone, as
+client.py: ci.yml's fmt job runs it.
 """
 
 import argparse
@@ -46,11 +47,12 @@ class Rows:
         return []
 
 
-def load(interval, own, until, stop=None, stall=None, every=0.004):
+def load(interval, own, until, stop=None, stall=None, slow=None, every=0.004):
     """A cut's events and what the cut kept, for a syncer that sleeps
     `interval` after each sync, takes every write landed by then and hands
     its page over `own` later -- taking none from `stop` seconds into the
-    load, and none from `stall[0]` to `stall[1]`. A single put is answered
+    load, none from `stall[0]` to `stall[1]`, and the first sync taking its
+    writes from each of `slow`'s seconds in its own time. A single put is answered
     every `every` s from the load's start to the cut, `until` s in, each the
     next change; one more is sent as QEMU is killed, and never answered.
     The cut keeps every write a sync took whose page came before it."""
@@ -73,12 +75,15 @@ def load(interval, own, until, stop=None, stall=None, every=0.004):
     taken = 0
     at = prev = T0
     take = T0 + 0.1
+    slow = dict(slow or {})
     while True:
         if stall and stall[0] <= take - T0 < stall[1]:
             take = T0 + stall[1]
-        if (stop is not None and take - T0 >= stop) or take + own > cut_at:
+        due = [k for k in slow if k <= take - T0]
+        took = slow.pop(min(due)) if due else own
+        if (stop is not None and take - T0 >= stop) or take + took > cut_at:
             break
-        at = take + own
+        at = take + took
         new = [(s, i) for a, s, i in acks if a < take and s > taken]
         if new:
             taken = new[-1][0]
@@ -171,7 +176,7 @@ class Window(unittest.TestCase):
         bad = c.window(rows)
         lost = sorted(c.check.lost)
         self.assertAlmostEqual(cut_at - lost[0][0], 3.0, delta=0.005)
-        self.assertTrue(has(bad, "past the window's 350 ms"), bad)
+        self.assertTrue(has(bad, "past the window's 650 ms"), bad)
         self.assertTrue(has(bad, "a late sync") and has(bad, "from the last page to the cut"), bad)
 
     def test_a_syncer_every_second_fails(self):
@@ -186,8 +191,33 @@ class Window(unittest.TestCase):
         bad = c.window(rows)
         lost = sorted(c.check.lost)
         self.assertAlmostEqual(cut_at - lost[0][0], 0.907, delta=0.005)
-        self.assertTrue(has(bad, "past the window's 350 ms"), bad)
+        self.assertTrue(has(bad, "past the window's 650 ms"), bad)
         self.assertTrue(has(bad, "a late sync"), bad)
+        self.assertTrue(has(bad, "a slowed syncer"), bad)
+
+    def test_a_syncer_every_half_second_fails(self):
+        # Slowed under the ceiling, and its losses -- half a second at most
+        # -- under the bound: the median of its pages fails it at any cut.
+        ev, rows, cut_at, killed = load(0.5, 0.008, 9.0)
+        c = Cut(self, ev, cut_at, killed)
+        bad = c.window(rows)
+        self.assertFalse(has(bad, "past the window") or has(bad, "a late sync"), bad)
+        self.assertTrue(has(bad, "a slowed syncer: its pages came every 508 ms at the median"), bad)
+
+    def test_a_few_slow_syncs_pass(self):
+        # The runner's disk, as run 43462058075 met it: syncs of 105 and
+        # 177 ms back to back, then on time again; the cut just before the
+        # second's page, so that its first loss was answered as long before
+        # it as a write then took to be handed over, 532 ms.
+        slow = {3.0: 0.105, 3.3: 0.177}
+        ev, *_ = load(0.25, 0.008, 6.0, slow=slow)
+        pages = [e["at"] for e in ev if e["ev"] == "durable"]
+        slowest = next(y for x, y in zip(pages, pages[1:]) if y - x > 0.4)
+        ev, rows, cut_at, killed = load(0.25, 0.008, slowest - T0 - 0.001, slow=slow)
+        c = Cut(self, ev, cut_at, killed)
+        self.assertEqual(c.window(rows), [], c.out.getvalue())
+        lost = sorted(c.check.lost)
+        self.assertAlmostEqual(cut_at - lost[0][0], 0.531, delta=0.005)
 
     def test_a_syncer_stuck_in_the_middle_fails(self):
         # A sync 1.5 s late 4 s in, then on time again: no write lost past
@@ -253,6 +283,13 @@ class Standby(unittest.TestCase):
         tip = max(e["seq"] for e in c.check.acked.values())
         self.assertEqual(c(lambda: c.check.standby_near(tip, tip)), [])
         self.assertIn("a promotion at the cut would have lost none", c.out.getvalue())
+
+    def test_writes_answered_with_no_change_hold_the_standby_to_nothing(self):
+        c = self.cut()
+        for e in c.check.acked.values():
+            e.pop("seq")
+        bad = c(lambda: c.check.standby_near(0, 0))
+        self.assertTrue(has(bad, "with its change"), bad)
 
     def test_a_standby_far_behind_fails(self):
         # It lacks every write answered in the last 2 s: what it would
