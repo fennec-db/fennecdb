@@ -201,7 +201,7 @@ found and read) and by hand.
   `langchain` (web has no lockfile and no dependency; its audit is of the one
   npm resolves in a copy). Its JSON is read by `osv_check.py --npm-audit`,
   failing on high and critical advisories not in the ignore list.
-- `govulncheck` (v1.1.4, `-format json`, on the newest Go: `go 1.22` in
+- `govulncheck` (v1.9.0, `-format json`, on the newest Go: `go 1.22` in
   `go.mod` is the oldest a user may build with, and a standard-library fix is
   theirs to take). The Go module has no `require`, so what it audits is the
   standard library; a called vulnerability fails.
