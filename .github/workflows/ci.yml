@@ -199,6 +199,7 @@ jobs:
           # The studio editor's live highlighter is written from build.py's rules
           # and must colour every statement as the docs do.
           python3 site/test_highlight.py
+          python3 site/test_results.py
 
       # Rust first, then the JS tests -- `cargo test` is also what builds the
       # fennec-server binary that the sync tests run against.

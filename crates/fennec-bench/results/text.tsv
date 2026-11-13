@@ -1,0 +1,7 @@
+run	commit	machine	date	family	cell	metric	value
+hand	a02a7b94	hand-measured	2026-10-18	text	match:100000_docs_30_words	ms	0.06
+hand	a02a7b94	hand-measured	2026-10-18	text	facet:hash_100000_rows	ms	0.01
+hand	a02a7b94	hand-measured	2026-10-18	text	fuzzy:fiqa_one_edit	us	14
+hand	a02a7b94	hand-measured	2026-10-18	text	fuzzy:fiqa_two_edits	us	120
+hand	a02a7b94	hand-measured	2026-10-18	text	highlight:marks_per_row	min_us	1
+hand	a02a7b94	hand-measured	2026-10-18	text	highlight:marks_per_row	max_us	3

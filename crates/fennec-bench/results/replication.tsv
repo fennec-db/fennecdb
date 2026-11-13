@@ -1,0 +1,13 @@
+run	commit	machine	date	family	cell	metric	value
+hand	a02a7b94	hand-measured	2026-10-18	replication	replica:visible_after_primary:sync_always	p50_us	40
+hand	a02a7b94	hand-measured	2026-10-18	replication	tenant_standby:visible_after_router	p99_us	448
+hand	a02a7b94	hand-measured	2026-10-18	replication	tenant_standby:visible_after_router	p50_us	89
+hand	2b86ee0b	hand-measured	2026-10-18	replication	failover:20_tenants	median_min_ms	63.5
+hand	2b86ee0b	hand-measured	2026-10-18	replication	failover:20_tenants	median_max_ms	79
+hand	a02a7b94	hand-measured	2026-10-18	replication	tenant_move	tenant_mb	58.7
+hand	a02a7b94	hand-measured	2026-10-18	replication	tenant_move	under_s	0.3
+hand	decf119d	hand-measured	2026-10-18	replication	failover:region_cut_off	min_s	1.41
+hand	decf119d	hand-measured	2026-10-18	replication	failover:region_cut_off	max_s	1.7
+hand	a02a7b94	hand-measured	2026-10-18	replication	sync_core:put_alone	us	7.1
+hand	2b86ee0b	hand-measured	2026-10-18	replication	sync_core:apply_one_row	us	18.4
+hand	e902a038	hand-measured	2026-10-15	replication	read_replica:frankfurt_singapore	rtt_ms	158

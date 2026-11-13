@@ -1,0 +1,3 @@
+run	commit	machine	date	family	cell	metric	value
+hand	83d76860	hand-measured	2026-11-09	seed	seed_100000_rows:compressed_50mbit	s	0.6
+hand	83d76860	hand-measured	2026-11-09	seed	seed_100000_rows:plain_50mbit	s	2.6
