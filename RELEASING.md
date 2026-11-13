@@ -381,17 +381,19 @@ every tag. Before a 1.x tag, check:
 
 1. `make openapi-check` is green against the previous 1.x tag's documents,
    and `make types-check`, `make builder-golden`, `make schema-golden` and
-   `make sync-scenarios-check` leave the tree as it was (a golden file
-   only gains lines).
-2. `make fennecql-corpus` finds no text reading as another tree, and
+   `make sync-scenarios-check` pass. `openapi-check` asserts the API only
+   grew; the golden targets rewrite their files, so `git diff` must show no
+   changed or removed line in them, only added ones.
+2. `make fennecql-corpus` (by hand: no workflow runs it until T6) finds no text reading as another tree, and
    `GRAMMAR_EPOCH` (`crates/fennec-core/src/named.rs`) is still 4.
 3. `fennec.h`'s prototypes, `web/fennec.d.ts`, `web/client.d.ts`, each
    SDK's public names, the CLI flags and exit codes, and `/_metrics` names
-   only gained entries. Where a dump is not built yet (T5 of the 1.0 plan)
+   only gained entries. Where a dump is not built yet (T5 of the 1.0 plan,
+   which also dumps the CLI usage text, exit codes and metric names)
    diff them by hand against the previous tag.
 4. HEAD opens every file written from v0.2.0 on (`tests/language.fennec`,
    `tests/statements.fennec`; T2 adds each release's own), and
-   `make upgrade-check` passes: an older replica stops by name on a record
+   `make upgrade-check` (by hand, kind 13 alone; CI check: T3) passes: an older replica stops by name on a record
    kind or tag it does not know. The notes name any feature whose first use
    moves the file format, and say that replicas upgrade before primaries.
 5. No asset of the table above is renamed or dropped.

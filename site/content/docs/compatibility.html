@@ -17,15 +17,15 @@ and removed only in 2.0. 0.x releases promise nothing.</p>
 <table>
 <thead><tr><th>Surface</th><th>What holds</th><th>Checked by</th></tr></thead>
 <tbody>
-<tr><td>The file</td><td>1.x opens every file written from v0.2.0 on, and a file a 1.x wrote opens in every later 1.x. Record kinds 1 to 14 and type tags 0 to 18 keep their meaning; a new one takes the next number (<a href="file-format.html">File format</a>).</td><td>Fixture files opened by every later build; the power-cut runs on Linux and Windows. A directory per release is still to come.</td></tr>
-<tr><td>FennecQL</td><td>No text that parsed reads as another statement. A stored statement keeps its meaning, so the grammar epoch stays 4.</td><td>The corpus of 7 620 statements (<code>make fennecql-corpus</code>); a check by canonical digest is to come.</td></tr>
-<tr><td>HTTP API</td><td>It only grows: no route, parameter, field or status removed or narrowed. The OpenAPI document the server serves is held to it.</td><td><code>make openapi-check</code>, on every pull request.</td></tr>
+<tr><td>The file</td><td>1.x opens every file written from v0.2.0 on, and a file a 1.x wrote opens in every later 1.x. Record kinds 1 to 14 and type tags 0 to 18 keep their meaning; a new one takes the next number (<a href="file-format.html">File format</a>).</td><td>Fixture files opened by every later build (a change that rewrites one says why in its pull request); the power-cut runs on Linux and Windows. A directory per release is still to come.</td></tr>
+<tr><td>FennecQL</td><td>No text that parsed reads as another statement. A stored statement keeps its meaning, so the grammar epoch stays 4.</td><td>The corpus of 7 620 statements (<code>make fennecql-corpus</code>), run by hand at release time and not in CI; a CI check by canonical digest is to come.</td></tr>
+<tr><td>HTTP API</td><td>It only grows: no route, parameter, field or status removed or narrowed. The OpenAPI document the server serves is held to it.</td><td>The same steps as <code>make openapi-check</code>, on every pull request.</td></tr>
 <tr><td>C library</td><td><code>fennec.h</code>'s functions and <code>FENNEC_*</code> codes keep their prototypes and values.</td><td>The library's tests check the codes; a dump of the prototypes is to come.</td></tr>
 <tr><td>JavaScript types</td><td><code>fennec.d.ts</code> and <code>client.d.ts</code> only gain declarations.</td><td><code>make types-check</code>, and the builder's and schema's golden files.</td></tr>
 <tr><td>The SDKs</td><td>Python, JavaScript, Go, .NET, Swift, Kotlin and Dart keep the public names they ship at 1.0.</td><td>Each SDK's tests; a dump per language and a run against servers of other versions are to come.</td></tr>
 <tr><td>Sync</td><td>A replica of one release syncs with a server of another.</td><td><code>make sync-scenarios-check</code>: both runners pass every scenario.</td></tr>
-<tr><td>Command line and metrics</td><td>A flag, an exit code or a metric name is not removed or renamed.</td><td>Each command's tests; a list held against the main branch is to come.</td></tr>
-<tr><td>Release files</td><td>The names of the archives, zips, packages and checksums.</td><td>The release workflow's checks of each file.</td></tr>
+<tr><td>Command line and metrics</td><td>A flag, an exit code or a metric name is not removed or renamed.</td><td>Each command's tests; dumps of the usage text, exit codes and metric names are to come.</td></tr>
+<tr><td>Release files</td><td>The names of the archives, zips, packages and checksums.</td><td>CI checks the tarballs' and the Windows zip's names through the installers' tests; the release workflow checks each file; the rest by hand.</td></tr>
 <tr><td>Stored data in a page</td><td>What a page keeps in IndexedDB or OPFS restores in every later 1.x.</td><td>The browser tests; real Chrome, Firefox and Safari runs are to come.</td></tr>
 </tbody>
 </table>
@@ -49,7 +49,7 @@ order is archivers, routers, nodes holding replicas or standbys, then
 primaries (<a href="sharding-reference.html">Sharding reference</a>).</p>
 
 <ul>
-  <li>A newer replica follows an older primary.</li>
+  <li>A newer replica follows an older primary. This order is not yet checked in CI; a script drives it by hand for record kind 13.</li>
   <li>An older replica that meets a record kind or type tag it does not know
     stops and names it, for example <code>record kind 13 is not a
     write</code>. It never reads it as something else.</li>
