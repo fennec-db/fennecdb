@@ -910,7 +910,14 @@ fn a_row_a_put_lets_go_of_takes_its_waiting_vector_with_it() {
                 db.rollback();
             }
             assert_eq!(rows(&db, "get t", &[]), Vec::new(), "{how}: {refused}");
+            // Row 1 written again without a vector: a node the put-back
+            // left live is then found, where over no rows `near` answers
+            // none whatever the graph holds. Taken back, so the form below
+            // starts from an empty collection whose next id is 1.
+            db.begin().unwrap();
+            exec(&mut db, "put t {id: 1, k: 8}", &[]);
             assert_eq!(near(&db), none, "{how}: {refused}");
+            db.rollback();
             match how {
                 "lone" => exec(&mut db, form, &[]),
                 "block" => drop(block(&mut db, &[form.as_str()]).unwrap()),

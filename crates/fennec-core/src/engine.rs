@@ -10145,11 +10145,14 @@ impl Database {
         // as the statement ended, for a row gone -- answered by `near`, and
         // by `exact`, once the id held a row again -- where a replica's
         // apply, linking its batch before a frame naming an id it holds
-        // (`VectorBatch`), had none (`tests/model.rs`).
+        // (`VectorBatch`), had none (`tests/model.rs`). Asked of every
+        // document a `put` writes into a collection keeping `@unique` and
+        // `@ttl`, so a row going and the graph are asked before the batch's
+        // first document is read: the order `put_with` measured the cheaper
+        // where a document writes over a row.
         if let Some((written, prepared)) = waiting {
-            let first = written.first().map(|w| w.id);
-            let ours = |f| gone.iter().any(|&d| c.store.wrote_after(f, d));
-            if first.is_some_and(|f| !c.vectors.is_empty() && ours(f)) {
+            let ours = |w: &Document| gone.iter().any(|&d| c.store.wrote_after(w.id, d));
+            if !gone.is_empty() && !c.vectors.is_empty() && written.first().is_some_and(ours) {
                 self.link_written(collection, written, prepared);
             }
         }
@@ -14570,6 +14573,8 @@ impl Database {
         let c = match c.unique_clash(&doc) {
             Err(Error::Duplicate(why)) => match self.expiry_in(schema) {
                 // A `set` indexes its vector as it writes: nothing waits.
+                // In an upsert, `None` is right only because its `put`
+                // links the batch before it calls here.
                 Some(cut) => {
                     self.let_go_expired(collection, schema, &doc, cut, hooks, None)?;
                     let c = self.collections.get_mut(collection).unwrap();
