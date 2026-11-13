@@ -184,6 +184,17 @@ over the server token's was +2.2-4.4 us a `set`, +2.5-4.4 a row and
 +2.5-4.7 a page on main, +2.2-4.6, +2.5-3.9 and +2.7-4.8 with it (six
 runs each in turns, the machine loaded: the spread is the load's).
 
+**A rule is its `where`** (`rule`). A policy line's filter is parsed as
+the statement `get _ where <filter>` would be, and the rule kept its
+`where` alone: a clause after it -- `limit`, `order`, `match`, a list,
+`group ... having` -- parsed and was dropped, so `posts read where a = 1
+match body "x"` granted every row of `a = 1`, wider than written, and an
+inner `get` in a `having` there read a collection no check at startup saw,
+`_users` among them. Since #623 anything after the `where` but the role is
+refused at startup, naming the line
+(`an_inner_get_inside_a_value_is_refused_at_startup`): the select parsed
+must be `get _` and its filter, nothing else set.
+
 **A subject is a string** (`Access::scope`, `Scope::sub_not_text`). RFC
 7519 makes `sub` a StringOrURI, and a text that is not empty alone names a
 token's subject: the owner of its Idempotency-Keys (`idempotent::key`),
@@ -242,7 +253,28 @@ policy has an inner `get` gets beside the others at `scope`. Bound only for
 a place standing alone, `posts read where author not in (get bans select
 author)` under `bans read where severity >= $jwt.min` shrank its list by
 the ban of a `"high"` severity and read that author's post, which main held
-out. A comparison is held only where it is a condition, under `and`, `or`
+out. Counting the `not`s holds only where nothing else negates the
+`get`, so a rule's inner `get` stands under `and`, `or` and `not` alone
+(`inner_gets`): a value has no `not` to count, and `messages read where
+(room in (get bans select room)) = false` -- a deny list spelled without
+one -- bound `bans read where sev >= $jwt.min` as an allow list's, the ban
+of `"high"` left its list, and a token whose `min` is 3 read that room's
+messages, `[three, two]` where `not (room in (get bans select room))`
+answers `[three]` (`!= true`, `coalesce(...) = false` and `case when ...
+then false else true end` alike; v0.2.0, the first release binding by the
+`not`s -- v0.1.11 and v0.1.12 bound a rule one way wherever it stood). An
+inner `get` anywhere else -- a comparison, `is null`, an `in`'s list or
+left side, arithmetic, a call's argument, a `case` -- is refused at
+startup, naming the line, and so is one anywhere in an inner `get` but its
+`where`, which no list is answered from: the engine answers a `where`'s
+alone, and one in `having` or a computed column failed every statement of
+its token (`eval`, 400), its collection read by no check at startup. A
+deny list is written `not (... in (get ...))`
+(`an_inner_get_inside_a_value_is_refused_at_startup`). Reading `= false`
+and `!= true` as a `not` was the other way, not taken: a value has no
+polarity in general -- `case`, `coalesce`, a comparison with a field -- and
+a rule read two ways is one more way for them to part. A comparison is
+held only where it is a condition, under `and`, `or`
 and `not`, so one used as a value -- `(level <= $jwt.c) = false`, a
 `case`'s condition -- is refused at startup, and so is a claim inside a call
 or arithmetic, whose result's kind no rule can know until it runs:
@@ -606,7 +638,10 @@ RLS gives a policy's subquery none of a table no policy grants -- refused
 as missing, it would fail every read of `positions`). Rules reading each
 other's collections at any depth and whatever their roles, a `*` rule
 reading one, `new.` or `expired()` inside one, are refused at startup
-(`ring`). Under the lock that runs a statement, the rules of the
+(`ring`), and so is an inner `get` standing anywhere but under `and`, `or`
+and `not`, or in an inner `get` anywhere but its `where` (`inner_gets`;
+*An ordered comparison against a claim* above). Under the lock that runs
+a statement, the rules of the
 collections it reads or writes (`statement_reads`) are answered as the
 `in` lists they are (`bound`, through lib.rs's `scoped_under` and
 `run_bound`): the statement then holds lists the engine reads as any, and
@@ -646,7 +681,8 @@ nothing of the second -- closed, and wrong -- and 2 003 rows of 1 001 rooms
 a list of one rather than a refusal (`tests/reach.rs`,
 `a_rule_s_list_is_not_cut_at_its_first_rows`). Negated, the same cut
 failed open: a deny list, `not (room in (get bans select room where user =
-$jwt.sub limit 5000))` or the same `in` `= false`, read as 1 003 bans of
+$jwt.sub limit 5000))` (or the same `in` `= false`, since refused at
+startup), read as 1 003 bans of
 one room's alone held out that room, and the token read the messages of a
 second room it had banned (`a_deny_list_is_not_cut_open`, `[three, two]`
 where its rule admits `[three]`); `hold` binds an inner `get`'s rules for

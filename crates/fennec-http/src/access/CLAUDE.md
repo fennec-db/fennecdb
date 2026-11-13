@@ -39,7 +39,11 @@ side to its kind under any number of `not`s (`kind_held`), a row with no
 value answering as the rule written out; an inner `get`'s rules are bound
 for the `not`s it stands under (`hold`). Refused at startup: a claim in a
 call or arithmetic (`like`'s pattern aside) or compared in order inside a
-value (`claims_held`), and a policy writing its own `$<n>`. A tenant claim
+value (`claims_held`), an inner `get` standing anywhere but under `and`,
+`or` and `not` -- `(... in (get ...)) = false`, a call's argument, which
+has no `not` to bind it by -- or in an inner `get` anywhere but its `where`
+(`inner_gets`), a policy writing its own `$<n>`, and a clause after a
+rule's `where`, which no rule applies (`rule`). A tenant claim
 naming no tenant reaches none; a `sub` of `""`, or one no string, is no
 subject, a refusal needing one saying which (`sub_not_text`).
 

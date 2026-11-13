@@ -1398,6 +1398,25 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
         let Statement::Select(mut sel) = stmt else {
             unreachable!("a get parses as a select")
         };
+        // A rule is its `where`. A clause after it -- `limit`, `order`,
+        // `match`, a list, `group ... having` -- parsed and was dropped, so
+        // `posts read where a = 1 match body "x"` granted every row of `a =
+        // 1`, and an inner `get` in a `having` there read a collection no
+        // check here saw, `_users` among them.
+        let filter = sel.filter.take();
+        if sel
+            != (Select {
+                collection: "_".into(),
+                ..Select::default()
+            })
+        {
+            return Err(
+                "a rule's filter is its `where` alone: nothing follows it but \
+                        `for <role>`"
+                    .into(),
+            );
+        }
+        sel.filter = filter;
         if let Some(f) = &mut sel.filter {
             any_as_in(f);
             claims_held(f, true, &claims)?;
@@ -1407,7 +1426,7 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
         // ([`Scope::bound`]): a document being written is tested on its
         // own (`admits`), where no query runs.
         if let Some(f) = &sel.filter {
-            inner_gets(f, &mut reads)?;
+            inner_gets(f, true, &mut reads)?;
         }
         // Tested against a document on its own as well, where nothing
         // answers it; what a token may reap is the `expired` grant's.
@@ -1763,8 +1782,30 @@ fn role_of(rest: &str) -> std::result::Result<(&str, Option<String>), String> {
 /// not the row a write leaves, and `expired()` its rows past their time,
 /// which are the `expired` grant's: both refused. So is a ranking
 /// ([`ranking`]): a page of the best rows, never the set the filter holds.
-fn inner_gets(e: &Expr, out: &mut Vec<String>) -> std::result::Result<(), String> {
+/// An inner `get` stands as a condition -- under `and`, `or` and `not`
+/// alone from the top of its filter (`cond`) -- and inside another in its
+/// `where` alone ([`holds_get`]), the one place a list is answered from.
+fn inner_gets(e: &Expr, cond: bool, out: &mut Vec<String>) -> std::result::Result<(), String> {
     if let Expr::InSelect(_, sel) = e {
+        // [`bind_held`] and [`hold`] bind an inner `get`'s rules -- the read
+        // rules of what it reads, an ordered comparison with a claim among
+        // them -- for the `not`s it stands under, and a list under none as
+        // an allow list's: under `bans read where sev >= $jwt.min`, a ban
+        // of `"high"` is held out of an allow list and kept in a deny list.
+        // Spelled `(room in (get bans ...)) = false`, a deny list stood
+        // under no `not`, its list held that ban out, and the token read
+        // the room's messages, which `not (room in (get bans ...))` holds
+        // out. Inside a value -- `= false`, `!= true`, `case`, `coalesce`,
+        // a comparison with a field -- there is no `not` to count, so one
+        // is refused where the policy is read.
+        if !cond {
+            return Err(format!(
+                "a rule's `in (get {} ...)` stands inside a value: an inner `get` stands under \
+                 `and`, `or` and `not` alone, whose `not`s say how the rules of what it reads \
+                 are bound -- write a deny list `not (... in (get ...))`",
+                sel.collection
+            ));
+        }
         sel.check_subquery()
             .map_err(|e| format!("the filter: {e}"))?;
         // With no `limit`, a ranking answers its best `MAX_MATCH_ROWS` or
@@ -1788,6 +1829,13 @@ fn inner_gets(e: &Expr, out: &mut Vec<String>) -> std::result::Result<(), String
         if rest.max_param() > 0 {
             return Err("a rule's inner `get` takes `$jwt.<claim>` in its `where` alone".into());
         }
+        if holds_get(&rest) {
+            return Err(format!(
+                "a rule's `in (get {} ...)` holds an inner `get` outside its `where`: a list is \
+                 answered from a `where` alone, before the statement runs",
+                sel.collection
+            ));
+        }
         if let Some(f) = &filter {
             if f.asks_expired() {
                 return Err("a rule's filter takes no `expired()`: grant `expired`".into());
@@ -1799,19 +1847,46 @@ fn inner_gets(e: &Expr, out: &mut Vec<String>) -> std::result::Result<(), String
                     sel.collection
                 ));
             }
-            inner_gets(f, out)?;
+            inner_gets(f, true, out)?;
         }
         if !out.contains(&sel.collection) {
             out.push(sel.collection.clone());
         }
     }
+    // An `and`, an `or` and a `not` stand where they are; anything else --
+    // a comparison, an `in`'s list or left side, `is null`, arithmetic, a
+    // call, `case` -- reads its operands as values.
+    let cond = cond && matches!(e, Expr::And(..) | Expr::Or(..) | Expr::Not(_));
     let mut r = Ok(());
     e.each_child(&mut |c| {
         if r.is_ok() {
-            r = inner_gets(c, out);
+            r = inner_gets(c, cond, out);
         }
     });
     r
+}
+
+/// Whether an `in (get ...)` stands in `sel` outside its `where` -- an
+/// item of its list, a group key, `having`, an `order` key, a ranking's
+/// text or vector, a mark's argument. The engine answers one in a `where`
+/// alone, before the query runs, and refuses one it meets row by row
+/// (`eval`); a rule's list is answered ([`answer`]) and held to the
+/// token's rules ([`hold`]) from its `where` alone too. Let through, a
+/// list whose `having` read another collection failed every statement of
+/// its token (400), and what it read was out of the checks at startup, the
+/// ring's and the server's own collections'.
+fn holds_get(sel: &Select) -> bool {
+    let items = (sel.aggregate.iter().chain(&sel.computed)).map(|c| &c.expr);
+    let sorts = sel.order.iter().filter_map(|s| s.expr.as_ref());
+    let ranks = (sel.near.iter().map(|n| &n.vector))
+        .chain(sel.matcher.iter().map(|m| &m.query))
+        .chain(sel.rerank.iter().map(|r| &r.vector));
+    let marks = sel.marks.iter().flat_map(|m| &m.args);
+    (items.chain(&sel.group).chain(&sel.having))
+        .chain(sorts)
+        .chain(ranks)
+        .chain(marks)
+        .any(Expr::has_subquery)
 }
 
 /// The clause by which `sel` ranks its rows -- its answer a page of the
@@ -2040,7 +2115,10 @@ fn bind(e: &Expr, values: &[Value]) -> Expr {
 /// rows with no `level` that `not (level > $jwt.c)` admitted on main, and
 /// the server token's `not (level > 5)` admits.
 /// An inner `get`'s filter stands where its `in` does: under `not ... in`,
-/// a row of another kind is in its list and so held out.
+/// a row of another kind is in its list and so held out. The `not`s are
+/// all that negate it: a rule's inner `get` stands under `and`, `or` and
+/// `not` alone ([`inner_gets`]), where `(... in (get ...)) = false` was a
+/// deny list bound as an allow list.
 fn bind_held(e: &Expr, values: &[Value], pass: bool) -> Expr {
     let b = |x: &Expr| Box::new(bind_held(x, values, pass));
     match e {
@@ -2258,7 +2336,10 @@ fn granted(rules: &[Bound], collection: &str, op: u8) -> Option<Option<Expr>> {
 /// standing alone, and the list held out fewer rows: `author not in (get
 /// bans select author)` under `bans read where severity >= $jwt.min` read
 /// a post by an author banned with a `"high"` severity, which main held
-/// out. Bound for the `not`, the list keeps such a row.
+/// out. Bound for the `not`, the list keeps such a row. Counting the `not`s
+/// is enough because a rule's inner `get` stands under `and`, `or` and
+/// `not` alone ([`inner_gets`]): inside a value, `(author in (get bans
+/// ...)) = false`, the same list was held as an allow list's.
 fn hold(pos: &[Bound], neg: &[Bound], e: &mut Expr, pass: bool) {
     match e {
         Expr::Not(x) => hold(pos, neg, x, !pass),
