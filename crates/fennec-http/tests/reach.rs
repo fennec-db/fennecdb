@@ -487,6 +487,111 @@ fn a_rule_s_list_past_the_bound_is_refused() {
     assert_eq!(n.query(&bob, "get messages count").1, r#"[{"count":1}]"#);
 }
 
+/// An inner `get` that pages, groups or computes its column is read past
+/// the rows the bound first takes, its values told apart there, never cut
+/// at them: 1 003 memberships of `r1` and then one of `r2` are the list
+/// `["r1", "r2"]` in every form. Read as the first 1 002 rows alone, each
+/// form was `["r1"]`, and alice was shown nothing of `r2` -- closed, and
+/// wrong. 1 000 values over 2 002 rows are read; at 1 001 each form is
+/// refused, naming the bound and the rule.
+#[test]
+fn a_rule_s_list_is_not_cut_at_its_first_rows() {
+    for inner in [
+        "get members select room where user = $jwt.sub limit 5000",
+        "get members select room where user = $jwt.sub offset 1",
+        "get members select lower(room) as r where user = $jwt.sub",
+        "get members select room where user = $jwt.sub group room, n",
+    ] {
+        let n = start_with(
+            &format!("messages read where room in ({inner})\nmembers read where user = $jwt.sub\n"),
+            &[
+                "create collection members (room text @hash, user text @hash, n int)",
+                "create collection messages (room text @hash, text text)",
+                r#"put messages [{room: "r1", text: "one"}, {room: "r2", text: "two"}]"#,
+            ],
+        );
+        let rows: Vec<String> = (0..1_003)
+            .map(|i| format!(r#"{{room: "r1", user: "alice", n: {i}}}"#))
+            .chain([r#"{room: "r2", user: "alice", n: 5000}"#.to_string()])
+            .collect();
+        let r = n.query(ROOT, &format!("put members [{}]", rows.join(", ")));
+        assert_eq!(r.0, 200, "{}", r.1);
+        let alice = n.token(r#"{"sub":"alice"}"#);
+        let (status, body) = n.query(&alice, "get messages select text order text");
+        assert_eq!(
+            (status, body.as_str()),
+            (200, r#"[{"text":"one"},{"text":"two"}]"#),
+            "{inner}"
+        );
+        // 998 rooms more: 1 000 values, the bound, are read.
+        let more: Vec<String> = (0..998)
+            .map(|i| format!(r#"{{room: "x{i}", user: "alice", n: {}}}"#, 6000 + i))
+            .collect();
+        let r = n.query(ROOT, &format!("put members [{}]", more.join(", ")));
+        assert_eq!(r.0, 200, "{}", r.1);
+        let (status, body) = n.query(&alice, "get messages count");
+        assert_eq!(
+            (status, body.as_str()),
+            (200, r#"[{"count":2}]"#),
+            "{inner}"
+        );
+        // One more is past it.
+        let r = n.query(
+            ROOT,
+            r#"put members {room: "x-last", user: "alice", n: 9000}"#,
+        );
+        assert_eq!(r.0, 200, "{}", r.1);
+        let (status, body) = n.query(&alice, "get messages count");
+        assert_eq!(status, 400, "{inner}: {body}");
+        assert!(
+            body.contains("more than 1000 values")
+                && body.contains("get members")
+                && body.contains("the rule on `messages` where room in"),
+            "{inner}: {body}"
+        );
+    }
+}
+
+/// A rule's inner `get` that pages, groups or computes its column, read
+/// again, is read as far as a statement's own inner `get` of that kind --
+/// 100 000 rows -- and refused past them, naming the rule: a list of one
+/// room over 100 000 rows is read, over 100 001 refused, never cut there.
+#[test]
+fn a_rule_s_list_read_again_stops_where_a_statement_s_would() {
+    let a = Access::new(
+        SECRET,
+        "messages read where room in (get members select room where user = $jwt.sub limit 200000)\n\
+         members read where user = $jwt.sub\n",
+    )
+    .unwrap();
+    let scope = a.scope(&a.mint(r#"{"sub":"alice"}"#).unwrap(), 0).unwrap();
+    let mut db = Database::new();
+    for sql in [
+        "create collection members (room text, user text)",
+        "create collection messages (room text)",
+    ] {
+        db.execute(&fennec_ql::parse_one(sql).unwrap()).unwrap();
+    }
+    let docs: Vec<&str> = (0..10_000)
+        .map(|_| r#"{room: "r1", user: "alice"}"#)
+        .collect();
+    let put = fennec_ql::parse_one(&format!("put members [{}]", docs.join(", "))).unwrap();
+    for _ in 0..10 {
+        db.execute(&put).unwrap();
+    }
+    let read = fennec_ql::parse_one("get messages count").unwrap();
+    assert!(scope.bound(&db, &[&read]).is_ok());
+    let one = r#"put members {room: "r1", user: "alice"}"#;
+    db.execute(&fennec_ql::parse_one(one).unwrap()).unwrap();
+    let Err(Error::Query(why)) = scope.bound(&db, &[&read]) else {
+        panic!("100 001 rows read again are refused");
+    };
+    assert!(
+        why.contains("more than 100000 rows") && why.contains("the rule on `messages` where"),
+        "{why}"
+    );
+}
+
 /// Rules that read each other's collections, at any depth, are refused at
 /// startup, and so is what an inner `get` may not say; a chain is not a
 /// ring.

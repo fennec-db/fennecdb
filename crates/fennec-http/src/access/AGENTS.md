@@ -40,7 +40,8 @@ value answering as the rule written out; an inner `get`'s rules are bound
 for the `not`s it stands under (`hold`). Refused at startup: a claim in a
 call or arithmetic (`like`'s pattern aside) or compared in order inside a
 value (`claims_held`), and a policy writing its own `$<n>`. A tenant claim
-naming no tenant reaches none; a `sub` of `""` is no subject.
+naming no tenant reaches none; a `sub` of `""`, or one no string, is no
+subject, a refusal needing one saying which (`sub_not_text`).
 
 **[A field a read rule withholds is held out of what a statement
 does.](../../../../docs/design/access.md#field-lists)** `fields::hold` and
@@ -53,9 +54,10 @@ stream sends no row a write left showing the same (`sse::Seen`).
 statement.](../../../../docs/design/access.md#rules-reading-another-collection)**
 Its `in` lists are answered under each lock (`Scope::bound`), the scope
 `Check`, the mask and streams use; a list past `MAX_CLAIM_VALUES` is
-refused, never cut, and rules reading each other's collections, a `*` rule
-reading one, or `new.` or `expired()` in one are refused at startup
-(`ring`). A stream's filter reading another collection -- a rule's, or the
+refused naming its rule, never cut, nor made of the rows read before the
+bound stopped its `get` (`listed`), and rules reading each other's
+collections, a `*` rule reading one, or `new.` or `expired()` in one are
+refused at startup (`ring`). A stream's filter reading another collection -- a rule's, or the
 shape's own inner `get`, any token's -- is answered again at each look
 after a write to what it reads, once a row of it reached its `@ttl`, or
 a second after the read answering it ended where it reads the time -- the

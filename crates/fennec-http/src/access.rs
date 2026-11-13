@@ -187,7 +187,7 @@
 use crate::crypto::{b64url_decode, b64url_encode, ct_eq, hmac_sha256, P256Key, RsaKey};
 use fennec_core::named::Definition;
 use fennec_core::prelude::*;
-use fennec_core::query::{eval, truthy, CmpOp, EvalCtx, Pick, RowAccess};
+use fennec_core::query::{eval, truthy, CmpOp, EvalCtx, Pick, RowAccess, MAX_SUBQUERY_VALUES};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -2243,29 +2243,36 @@ fn hold(pos: &[Bound], neg: &[Bound], e: &mut Expr, pass: bool) {
 /// the engine answers a statement's own -- but held to
 /// [`MAX_CLAIM_VALUES`], a list claim's bound, since a rule's list is made
 /// before every statement its token sends, and refused past it rather than
-/// cut, which would hide rows the rule grants.
-fn answer(db: &Database, e: &mut Expr) -> Result<()> {
+/// cut, which would hide rows the rule grants. `rule` is the rule whose
+/// filter `e` is, which a refusal names.
+fn answer(db: &Database, e: &mut Expr, rule: &Bound) -> Result<()> {
     e.each_subquery_mut(&mut |x| {
         let Expr::InSelect(lhs, sel) = std::mem::replace(x, Expr::Lit(Value::Null)) else {
             unreachable!("each_subquery_mut hands an `in (get ...)`")
         };
         let mut sel = *sel;
         if let Some(f) = &mut sel.filter {
-            answer(db, f)?;
+            answer(db, f, rule)?;
         }
-        *x = Expr::In(lhs, listed(db, sel)?);
+        *x = Expr::In(lhs, listed(db, sel, rule)?);
         Ok(())
     })
 }
 
 /// The values an inner `get` with no inner `get` left lists, at most
-/// [`MAX_CLAIM_VALUES`] of them. A plain one -- one field, no page, no
-/// ranking -- is read up to the rows that could still be under the bound,
-/// and only one that fills them read again grouped by its field, its rows
-/// then its distinct values: a customer's few orders are a bucket's read,
-/// where grouping every list took a `set` under such a rule 4.5 -> 5.1 us
-/// (`make policy-bench`).
-fn listed(db: &Database, sel: Select) -> Result<Vec<Expr>> {
+/// [`MAX_CLAIM_VALUES`] of them, each counted once however many rows hold
+/// it. It is read up to the rows that could still be under the bound, and
+/// read again only where the bound, not its own `limit`, stopped that
+/// read: a plain one -- one field, no page, no ranking -- grouped by its
+/// field, its rows then its distinct values (a customer's few orders are a
+/// bucket's read, where grouping every list took a `set` under such a rule
+/// 4.5 -> 5.1 us, `make policy-bench`); one that pages, groups or computes
+/// its column, as far as the engine reads a statement's own inner `get` of
+/// that kind, [`MAX_SUBQUERY_VALUES`] rows, and refused past them. Its
+/// first rows alone were its list: 1 003 memberships of one room, then one
+/// of another, were a list of the first under `limit 5000`, and a token was
+/// shown none of the rows the rule granted it in the second.
+fn listed(db: &Database, sel: Select, rule: &Bound) -> Result<Vec<Expr>> {
     // Two past the bound tell that the list is past it: one may be a null.
     let past = MAX_CLAIM_VALUES + 2;
     let mut stmt = Statement::Select(sel);
@@ -2285,41 +2292,94 @@ fn listed(db: &Database, sel: Select) -> Result<Vec<Expr>> {
         Some(p) if plain && p.len() == 1 => Some(p[0].clone()),
         _ => None,
     };
-    if !ranked && (sel.aggregate.is_empty() || !sel.group.is_empty()) {
-        sel.limit = Some(Count::N(sel.limit.map_or(past, |l| l.at(&[]).min(past))));
+    // The rows the `get` asks for, `None` for every one: a rule's names no
+    // parameter there (`inner_gets`). `near` and `match` are bounded by
+    // their own pages, and an aggregate without `group` answers one row.
+    let asked = sel.limit.map(|l| l.at(&[]));
+    let paged = !ranked && (sel.aggregate.is_empty() || !sel.group.is_empty());
+    if paged {
+        sel.limit = Some(Count::N(asked.map_or(past, |l| l.min(past))));
     }
-    let mut rows = rows_of(db, &stmt)?;
-    if let (Some(column), true) = (column, rows.len() >= past) {
-        let Statement::Select(sel) = &mut stmt else {
-            unreachable!("made a select")
-        };
-        sel.aggregate = vec![
-            Column {
-                expr: Expr::Field(column.clone()),
-                name: column.clone(),
-            },
-            Column {
-                expr: Expr::Call("count".into(), Vec::new()),
-                name: "n".into(),
-            },
-        ];
-        sel.project = None;
-        sel.group = vec![Expr::Field(column)];
-        // An `in` list has no order.
-        sel.order.clear();
-        rows = rows_of(db, &stmt)?;
-    }
-    distinct(rows).ok_or_else(|| {
-        let Statement::Select(sel) = &stmt else {
-            unreachable!("made a select")
-        };
-        Error::Query(format!(
-            "a rule's `in (get {} ...)` lists more than {MAX_CLAIM_VALUES} values: a policy's \
-             list is held to that many, as a list claim is, and refused past it rather than cut \
-             -- narrow the inner `get`, or keep the membership in the rows themselves",
-            sel.collection
-        ))
+    let rows = rows_of(db, &stmt)?;
+    // The bound stopped the read, not the `get`: the rows after may hold
+    // values these do not.
+    let stopped = paged && rows.len() >= past && asked.is_none_or(|l| l > past);
+    let items = match (stopped, column) {
+        (false, _) => distinct(rows),
+        (true, Some(column)) => {
+            let Statement::Select(sel) = &mut stmt else {
+                unreachable!("made a select")
+            };
+            sel.aggregate = vec![
+                Column {
+                    expr: Expr::Field(column.clone()),
+                    name: column.clone(),
+                },
+                Column {
+                    expr: Expr::Call("count".into(), Vec::new()),
+                    name: "n".into(),
+                },
+            ];
+            sel.project = None;
+            sel.group = vec![Expr::Field(column)];
+            // An `in` list has no order.
+            sel.order.clear();
+            distinct(rows_of(db, &stmt)?)
+        }
+        // Past the bound among the rows read, it is refused without
+        // reading on; else read again, as far as a statement's would be.
+        (true, None) => match distinct(rows) {
+            None => None,
+            Some(_) => {
+                let Statement::Select(sel) = &mut stmt else {
+                    unreachable!("made a select")
+                };
+                let bound = MAX_SUBQUERY_VALUES + 1;
+                sel.limit = Some(Count::N(asked.map_or(bound, |l| l.min(bound))));
+                let rows = rows_of(db, &stmt)?;
+                if rows.len() > MAX_SUBQUERY_VALUES {
+                    return Err(past_bound(
+                        rule,
+                        &stmt,
+                        &format!(
+                            "reads more than {MAX_SUBQUERY_VALUES} rows, where a statement's own \
+                             inner `get` that pages, groups or computes its column stops too, and \
+                             is refused rather than cut -- narrow it, or select its field alone, \
+                             whose values count once however many rows hold them"
+                        ),
+                    ));
+                }
+                distinct(rows)
+            }
+        },
+    };
+    items.ok_or_else(|| {
+        past_bound(
+            rule,
+            &stmt,
+            &format!(
+                "lists more than {MAX_CLAIM_VALUES} values, a policy's bound as a list claim's, \
+                 and is refused rather than cut -- narrow the inner `get`, or keep the membership \
+                 in the rows themselves"
+            ),
+        )
     })
+}
+
+/// The refusal of `rule`'s list from `stmt`, its inner `get`, past a
+/// bound, `why` the rest of it: it names the rule by its collection and
+/// its filter as the policy writes it, which `/_whoami` shows its token
+/// too, and the inner `get`.
+fn past_bound(rule: &Bound, stmt: &Statement, why: &str) -> Error {
+    let Statement::Select(sel) = stmt else {
+        unreachable!("made a select")
+    };
+    Error::Query(format!(
+        "the rule on `{}` where {}: its `in (get {} ...)` {why}",
+        rule.collection.as_deref().unwrap_or("*"),
+        rule.text.as_deref().unwrap_or_default(),
+        sel.collection
+    ))
 }
 
 fn rows_of(db: &Database, stmt: &Statement) -> Result<Vec<Row>> {
@@ -2330,10 +2390,13 @@ fn rows_of(db: &Database, stmt: &Statement) -> Result<Vec<Row>> {
 }
 
 /// The first column's distinct values of `rows`, nulls left out; `None`
-/// past [`MAX_CLAIM_VALUES`].
+/// past [`MAX_CLAIM_VALUES`], told as soon as one passes it: the rows of a
+/// `get` read again run to [`MAX_SUBQUERY_VALUES`], and kept in order
+/// every value of those was another shift of the ones before.
 fn distinct(rows: Vec<Row>) -> Option<Vec<Expr>> {
-    let mut items: Vec<Expr> = Vec::with_capacity(rows.len());
-    let mut keys: Vec<Vec<u8>> = Vec::with_capacity(rows.len());
+    let room = rows.len().min(MAX_CLAIM_VALUES + 1);
+    let mut items: Vec<Expr> = Vec::with_capacity(room);
+    let mut keys: Vec<Vec<u8>> = Vec::with_capacity(room);
     let mut key = Vec::new();
     for row in rows {
         let Some(v) = row.values.into_iter().next().filter(|v| !v.is_null()) else {
@@ -2348,8 +2411,11 @@ fn distinct(rows: Vec<Row>) -> Option<Vec<Expr>> {
             Err(at) => keys.insert(at, key.clone()),
         }
         items.push(Expr::Lit(v));
+        if items.len() > MAX_CLAIM_VALUES {
+            return None;
+        }
     }
-    (items.len() <= MAX_CLAIM_VALUES).then_some(items)
+    Some(items)
 }
 
 /// The collections `stmt` reads or writes, each `lookup` level's and each
@@ -2479,6 +2545,17 @@ impl Scope {
     /// The `sub` claim, when the token has one.
     pub fn subject(&self) -> Option<&str> {
         self.subject.as_deref()
+    }
+
+    /// Whether the token holds a `sub` that is no text -- a number, a bool,
+    /// a list or an object -- which names no subject ([`Self::subject`]):
+    /// RFC 7519 makes `sub` a StringOrURI. A refusal needing a subject says
+    /// so, since "no subject" sent a token holding `"sub": 42` looking for
+    /// a claim it had. The token is taken as before, its rules reading the
+    /// claim as it holds it.
+    pub fn sub_not_text(&self) -> bool {
+        let sub = self.roles.0.iter().find(|(k, _)| k == "sub");
+        sub.is_some_and(|(_, v)| !matches!(v, Value::Text(_) | Value::Null))
     }
 
     /// Whether a `call` line grants the token's roles the statement `name`:
@@ -2809,7 +2886,7 @@ impl Scope {
             }
             let mut filter = r.filter.clone();
             if let Some(f) = &mut filter {
-                answer(db, f)?;
+                answer(db, f, r)?;
             }
             // What a transition asks of the row before is its filter's,
             // read off the answer rather than answered again.
