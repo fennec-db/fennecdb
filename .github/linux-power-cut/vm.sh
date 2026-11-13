@@ -436,10 +436,11 @@ lock_held() {
 # writing (`.beside` for a compact beside the database, `.compacting` for
 # one under the lock), which the next compact writes anew; ext4's own
 # lost+found (XFS keeps none). A node's directory holds each tenant's, its
-# identity (`<t>.instance`) and `schedules.hint`.
+# identity (`<t>.instance`) and `schedules.hint`, written again by rename
+# from `schedules.hint.writing`.
 kept_names() {
     if [ "$MODE" = dir ]; then
-        echo 'lost\+found|n|n/schedules\.hint|n/(a|b)\.instance|n/(a|b)\.fennec|n/(a|b)\.fennec\.(lock|sync|beside|compacting)'
+        echo 'lost\+found|n|n/schedules\.hint(\.writing)?|n/(a|b)\.instance|n/(a|b)\.fennec|n/(a|b)\.fennec\.(lock|sync|beside|compacting)'
     else
         echo 'lost\+found|t\.fennec|t\.fennec\.(lock|sync|beside|compacting)'
     fi
@@ -543,8 +544,9 @@ power_cut() {
         return 1
     fi
     # The loads are killed below once the cut stopped them; a step cancelled
-    # before leaves none behind either.
-    trap 'kill -9 ${lps[*]:-} 2>/dev/null || true' EXIT INT TERM
+    # or failing before leaves none behind either.
+    trap 'kill -9 ${lps[*]:-} 2>/dev/null || true' EXIT
+    trap 'kill -9 ${lps[*]:-} 2>/dev/null; exit 143' INT TERM
     for t in "${TENANTS[@]}"; do
         ops=()
         [ -n "$t" ] && [ "$t" != "${TENANTS[0]}" ] && ops=(--ops ssbc)

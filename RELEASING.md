@@ -60,12 +60,16 @@ nothing reaches a registry before the notes have had a read.
 
    **A power cut.** Every release needs the last run of
    `linux-power-cut.yml` green, as its Linux binaries are every release's:
-   the commit's fennec-server, built as `release.yml` builds it, in an
-   Ubuntu guest cut five times on ext4 and five on XFS under `--sync
-   always` writes, compacts and spills, twice each with its disk's cache
-   lost, the sync log a durable write
-   takes on Linux applied at each open and every acknowledged write read
-   back (docs/design/durability.md, "A power cut"): `gh run list --workflow
+   the commit's fennec-server, built as `release.yml` builds it, in four
+   Ubuntu guests cut five times each, twice with the disk's cache lost,
+   the sync log a durable write takes on Linux applied at each open -- on
+   ext4 and on XFS under `--sync always` writes, compacts and spills, every
+   acknowledged write read back; on ext4 under `--sync 250`, the default,
+   every write `/_changes` handed over read back and every write lost
+   answered within the sync's window of the cut; and a `--dir` node of two
+   tenants with a standby following it, every acknowledged write read back
+   and the standby holding nothing the node lost
+   (docs/design/durability.md, "A power cut"): `gh run list --workflow
    linux-power-cut.yml --limit 1`, and if it ran before the commit being
    released, `gh workflow run linux-power-cut.yml --ref main` and wait for
    it.
