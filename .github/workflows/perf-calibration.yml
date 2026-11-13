@@ -1,0 +1,104 @@
+# TEMPORARY -- removed before this pull request is marked ready. The perf
+# gate's calibration (docs/design/benchmarks.md#the-gate): the gate replayed
+# on merged pull requests make instr-compare judged neutral, which must all
+# pass, and on known regressions, which must all fail; and the base held to
+# itself, two builds of one commit at two paths as the gate builds them,
+# twenty times over, every delta under the threshold.
+name: perf calibration
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/perf-calibration.yml
+      - tools/perf_gate.py
+      - crates/fennec-http/examples/gate.rs
+
+permissions:
+  contents: read
+
+jobs:
+  pair:
+    name: calibration (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Neutral: merged, instr-compare's figures inside the noise.
+          - { name: "neutral #531", base: 088bc30f, head: de59fdd1 }
+          - { name: "neutral #524", base: a96bd554, head: c736b5c0 }
+          - { name: "neutral #506 (the #513 v1/bc7636b2 pair)", base: edb629d2, head: bc7636b2 }
+          - { name: "neutral #513", base: fb93539e, head: 61fe4261 }
+          - { name: "neutral #542 as merged", base: 4a157cdd, head: 1dee77aa }
+          - { name: "neutral #474 as merged", base: d45afa21, head: e3d58955 }
+          # Known regressions: each measured before it was fixed or undone.
+          - { name: "regression #511 undone (JSON numbers -8.7%)", base: 82319b7f, head: 9da6411e }
+          - { name: "regression #542 first head (read +1.41%, write +1.65%)", base: de23ce27, head: 0e05fe22 }
+          - { name: "regression #474 first head (scoped writes +1 128)", base: e1d6a47c, head: 41f293a9 }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install the pinned toolchain, the musl target, valgrind and musl-gcc
+        run: |
+          rustup show
+          rustup target add x86_64-unknown-linux-musl
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends valgrind musl-tools
+
+      - name: Replay the pair with this pull request's program
+        run: |
+          start=$(date +%s)
+          python3 tools/perf_gate.py run --base "${{ matrix.base }}" --head "${{ matrix.head }}" \
+            --target x86_64-unknown-linux-musl --work "$RUNNER_TEMP/perf" \
+            --out "$RUNNER_TEMP/perf/results.json" --no-check
+          echo "replayed in $(( $(date +%s) - start )) s"
+          python3 tools/perf_gate.py check "$RUNNER_TEMP/perf/results.json" --summary "$GITHUB_STEP_SUMMARY" \
+            && echo "CALIBRATION-VERDICT pass" || echo "CALIBRATION-VERDICT fail"
+          echo "CALIBRATION-RESULTS $(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))))' "$RUNNER_TEMP/perf/results.json")"
+
+  control:
+    name: control (part ${{ matrix.part }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Install the pinned toolchain, the musl target, valgrind and musl-gcc
+        run: |
+          rustup show
+          rustup target add x86_64-unknown-linux-musl
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends valgrind musl-tools
+
+      # Two builds of the base at two paths, as the gate builds a base and
+      # a pull request changing no code; five rounds of the gate's count
+      # over them a part, four parts: twenty.
+      - name: The base against itself, five rounds
+        run: |
+          W="$RUNNER_TEMP/perf"
+          python3 tools/perf_gate.py run --base HEAD^1 --head HEAD^1 --target x86_64-unknown-linux-musl \
+            --work "$W" --out "$W/r0.json" --no-check
+          bin=x86_64-unknown-linux-musl/release/examples/gate
+          cmp "$W/base-target/$bin" "$W/head-target/$bin" && echo "CALIBRATION-IDENTICAL yes" || echo "CALIBRATION-IDENTICAL no"
+          for i in 1 2 3 4 5; do
+            python3 tools/perf_gate.py measure --base-bin "$W/base-target/$bin" --head-bin "$W/head-target/$bin" \
+              --out "$W/r$i.json"
+            python3 tools/perf_gate.py check "$W/r$i.json" --summary "$GITHUB_STEP_SUMMARY" \
+              && echo "CALIBRATION-VERDICT pass" || echo "CALIBRATION-VERDICT fail"
+            echo "CALIBRATION-RESULTS $(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))))' "$W/r$i.json")"
+          done
