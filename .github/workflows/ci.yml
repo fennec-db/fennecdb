@@ -1030,7 +1030,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: shellcheck
-        run: shellcheck --shell=sh site/install.sh site/test_install.sh tools/install-nfpm.sh tools/linux-packages.sh tools/linux-packages-check.sh tools/windows-zip.sh
+        run: shellcheck --shell=sh site/install.sh site/test_install.sh tools/install-nfpm.sh tools/install-flutter.sh tools/linux-packages.sh tools/linux-packages-check.sh tools/windows-zip.sh tools/image-check.sh
 
       - name: The installer, its checksum and its refusals
         run: sh site/test_install.sh
@@ -1184,11 +1184,29 @@ jobs:
       # package:flutter/material.dart, which `flutter analyze` fails on in the
       # examples (#590). Raised by hand, once the examples take what a new
       # release asks: 3.50.0 after they moved to package:material_ui (#591).
-      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+      #
+      # Installed from Flutter's own archive by tools/install-flutter.sh,
+      # which holds it to the sum Flutter's list of its releases gives it
+      # and to the one written here (a raise is the version and its sum),
+      # and not by subosito/flutter-action: a composite action whose own
+      # steps run actions/cache@v5 by its tag, which no pin here reaches and
+      # which GitHub's sha_pinning_required refuses under a pinned commit
+      # too. The SDK is kept by its version and system, as that action's
+      # `cache: true` kept it, and on PATH as it put it.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          channel: stable
-          flutter-version: 3.50.0
-          cache: true
+          path: ${{ runner.tool_cache }}/flutter-3.50.0
+          key: flutter-3.50.0-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Flutter 3.50.0
+        env:
+          RELEASES: https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json
+          SHA256: 6ea2d806fd57269ae783e6788e2a81fc26eaad782f1e0d0ff38623bb765ff9f5
+        run: |
+          sdk="$RUNNER_TOOL_CACHE/flutter-3.50.0"
+          tools/install-flutter.sh 3.50.0 "$RELEASES" "$SHA256" "$sdk"
+          echo "FLUTTER_ROOT=$sdk/flutter" >> "$GITHUB_ENV"
+          printf '%s\n' "$sdk/flutter/bin" "$sdk/flutter/bin/cache/dart-sdk/bin" >> "$GITHUB_PATH"
 
       # The Dart package under Flutter's own Dart -- its sync tests against
       # a server run-tests.sh builds -- then the plugin's test.
@@ -1308,11 +1326,22 @@ jobs:
           integrations/ffi-sizes.sh aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios aarch64-apple-darwin x86_64-apple-darwin \
             | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+      # Flutter 3.50.0 as the Android job installs it, from the archive for
+      # macOS on Apple silicon.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          channel: stable
-          flutter-version: 3.50.0
-          cache: true
+          path: ${{ runner.tool_cache }}/flutter-3.50.0
+          key: flutter-3.50.0-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Flutter 3.50.0
+        env:
+          RELEASES: https://storage.googleapis.com/flutter_infra_release/releases/releases_macos.json
+          SHA256: ed2d08a3e3c023e84cbe9316d21bd88fda6ee9552f90c1eb4da41a07c170fb35
+        run: |
+          sdk="$RUNNER_TOOL_CACHE/flutter-3.50.0"
+          tools/install-flutter.sh 3.50.0 "$RELEASES" "$SHA256" "$sdk"
+          echo "FLUTTER_ROOT=$sdk/flutter" >> "$GITHUB_ENV"
+          printf '%s\n' "$sdk/flutter/bin" "$sdk/flutter/bin/cache/dart-sdk/bin" >> "$GITHUB_PATH"
 
       - name: The Flutter plugin in an iOS app
         run: |

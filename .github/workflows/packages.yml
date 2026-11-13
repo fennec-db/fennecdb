@@ -357,11 +357,31 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
-      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+      # Flutter 3.50.0 as ci.yml's mobile jobs install it, from Flutter's own
+      # archive held to its sum (tools/install-flutter.sh), and not by
+      # subosito/flutter-action, whose own steps run actions/cache@v5 by its
+      # tag. The installer is this workflow's own commit's, as `homebrew`'s
+      # files are: a dispatch for a tag from before it has none. Not cached:
+      # a job that publishes takes nothing another run wrote, and the
+      # archive is held to its sum each time.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.keys.outputs.set == 'true'
         with:
-          channel: stable
-          flutter-version: 3.50.0
+          path: workflow
+          persist-credentials: false
+          sparse-checkout: tools/install-flutter.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Flutter 3.50.0
+        if: steps.keys.outputs.set == 'true'
+        env:
+          RELEASES: https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json
+          SHA256: 6ea2d806fd57269ae783e6788e2a81fc26eaad782f1e0d0ff38623bb765ff9f5
+        run: |
+          sdk="$RUNNER_TOOL_CACHE/flutter-3.50.0"
+          workflow/tools/install-flutter.sh 3.50.0 "$RELEASES" "$SHA256" "$sdk"
+          echo "FLUTTER_ROOT=$sdk/flutter" >> "$GITHUB_ENV"
+          printf '%s\n' "$sdk/flutter/bin" "$sdk/flutter/bin/cache/dart-sdk/bin" >> "$GITHUB_PATH"
 
       - name: The native libraries, from the release
         if: steps.keys.outputs.set == 'true'
