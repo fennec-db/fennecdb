@@ -299,9 +299,7 @@ fn a_handshake_past_its_bound_is_closed() {
 
 /// A head trickled over TLS, a record a byte, each well inside the idle
 /// timeout, is cut at `--header-timeout` as a plain one is: its 408 read
-/// over TLS. rustls reads the socket again inside one read until a record
-/// is whole, so a timeout set a read bounded nothing there
-/// (`fennec_tls::TlsStream::read_by`).
+/// over TLS. A record coming in parts is the test below's.
 #[test]
 fn a_trickled_head_over_tls_is_cut_at_its_deadline() {
     let within = Duration::from_millis(600);
@@ -328,6 +326,75 @@ fn a_trickled_head_over_tls_is_cut_at_its_deadline() {
     assert!(got.starts_with("HTTP/1.1 408"), "{got}");
     assert!(took >= within, "{took:?}");
     assert!(took < Duration::from_secs(20), "{took:?}");
+}
+
+/// A request's record trickled in parts, a byte every 50 ms through a
+/// proxy, each part well inside the idle timeout, is cut at
+/// `--header-timeout`: rustls reads the socket again inside one read until
+/// a record is whole, so a timeout set a read bounded each part, never the
+/// record, and one read lasted as long as the bytes came
+/// (`fennec_tls::TlsStream::read_by`). No byte of the request was read: the
+/// connection ends with nothing written, as a silence before a request does.
+#[test]
+fn a_record_trickled_in_parts_is_cut_at_the_heads_time() {
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let within = Duration::from_millis(600);
+    let (port, _server) = start(|c| c.header_timeout = Some(within));
+    // Between the client and the server, a proxy passing what the client
+    // sends on at once, or a byte every 50 ms once `slow`.
+    let front = TcpListener::bind("127.0.0.1:0").unwrap();
+    let front_port = front.local_addr().unwrap().port();
+    let slow = Arc::new(AtomicBool::new(false));
+    let slowed = Arc::clone(&slow);
+    std::thread::spawn(move || {
+        let (mut from, _) = front.accept().unwrap();
+        let mut to = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        to.set_nodelay(true).unwrap();
+        let (mut back_from, mut back_to) = (to.try_clone().unwrap(), from.try_clone().unwrap());
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut back_from, &mut back_to);
+            let _ = back_to.shutdown(std::net::Shutdown::Write);
+        });
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = from.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            for &b in &buf[..n] {
+                if slowed.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                if to.write_all(&[b]).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    let mut s = dial(front_port).unwrap();
+    slow.store(true, Ordering::SeqCst);
+    let started = Instant::now();
+    // One record of some 120 bytes: six seconds at a byte every 50 ms.
+    s.write_all(&request("/query", &query("collections"), &[]))
+        .unwrap();
+    s.flush().unwrap();
+    let mut got = Vec::new();
+    let ended = s.read_to_end(&mut got);
+    let took = started.elapsed();
+    // Ended by the server -- its `close_notify`, its end, or a reset for
+    // the bytes it left unread -- never by this read's own 30 s.
+    if let Err(e) = &ended {
+        assert!(
+            !matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ),
+            "{e}"
+        );
+    }
+    // Cut before the record was whole: unanswered.
+    assert!(got.is_empty(), "{}", String::from_utf8_lossy(&got));
+    assert!(took >= within, "{took:?}");
 }
 
 /// Plain HTTP to the HTTPS port is answered 400 in the clear, naming the

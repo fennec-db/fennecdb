@@ -2056,10 +2056,13 @@ each part after it within the time left -- `By::Within` the head's time
 from its first part where no request has begun, `By::At` a request's
 deadline after -- the socket's timeout put back after, the part that came
 kept in rustls's buffer; plaintext already there is read with no read of
-the socket. `read_by_bounds_a_record_that_comes_in_parts` (fennec-tls)
-trickles a record of some 220 bytes a byte every 50 ms through a proxy,
-each well inside the socket's ten seconds: cut at the 400 ms asked, then
-read whole once the rest came, its first part kept.
+the socket. A request whose first record is not whole in the head's time
+has had no byte read: its connection ends with nothing written, as a
+silence before a request's first byte does; one cut later is 408.
+`read_by_bounds_a_record_that_comes_in_parts` (fennec-tls) trickles a
+record of some 220 bytes a byte every 50 ms through a proxy, each well
+inside the socket's ten seconds: cut at the 400 ms asked, then read whole
+once the rest came, its first part kept.
 
 Rejected: a deadline from the `Content-Length` declared, which hands a
 client declaring a gibibyte twelve days before its body's first byte and
@@ -2086,11 +2089,33 @@ twice the rate read whole and answered) and
 none read: the slot served again once a write took nothing for the 300 ms
 asked) and `a_header_timeout_past_the_clock_is_none` (`Duration::MAX`, a
 mebibyte's body answered); `tests/tls.rs`'s
-`a_trickled_head_over_tls_is_cut_at_its_deadline` (a record a byte).
+`a_trickled_head_over_tls_is_cut_at_its_deadline` (a record a byte: 408)
+and `a_record_trickled_in_parts_is_cut_at_the_heads_time` (a request's one
+record a byte every 50 ms through a proxy: ended unanswered at the 600 ms
+asked, where rustls's read lasted the six seconds the record took).
 fennec-shard's `tests/slow_clients.rs` holds the router to the same three,
 by name. Before, a byte every 50 ms was never cut, each read inside the
 idle timeout, and the unread answers held the one slot until their client
 went.
+
+*Under load.* `make slow-client-check` (`tools/slow_client_check.py`)
+runs a release `fennec-server` on loopback at `--max-connections 50` and,
+for five minutes, twice as many clients holding connections badly -- a
+third trickling a head a byte every half second, a third a body declared a
+mebibyte, a third asking forty 1 MiB answers and reading none -- each back
+as soon as it is cut, a refusal (503) after its `Retry-After`, beside one
+client asking a row every 50 ms on a connection kept alive from the start.
+It fails on that client's failure or a p99 past a second, and on a
+trickler living past its bound or answered other than 408; its server and
+its loops end with it (`--exit-on-stdin-close`, the Makefile's trap). On
+macOS arm64, under a 1-minute load of 30 to 50 from other sessions'
+builds: the kept-alive client 5 298 requests, p50 0.3 ms, p99 9.0 ms, none
+failed; 625 heads and 569 bodies cut at 10.0 to 10.1 s, each 408; 50
+readers let go at 60.6 to 60.8 s, twice the write timeout; 15 257 refusals
+met. A fresh connection every 5 s was refused 57 times of 59: a slot a cut
+frees goes to whoever asks first, mostly the trickler cut from it -- these
+bounds hold a connection to its request's time, not a client to its share
+of the slots.
 
 ## Dialing HTTPS
 
