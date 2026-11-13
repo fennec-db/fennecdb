@@ -636,8 +636,8 @@ page, grouped by its field for its distinct values (grouped every time, a
 computes its column as far as the engine reads a statement's own inner
 `get` of that kind, `MAX_SUBQUERY_VALUES` rows, refused past them as the
 engine refuses one, and refused without reading on where the rows read
-already hold more values than the bound). Until this change that second
-kind was its first 1 002 rows: under `limit 5000`, `offset 1`, `group
+already hold more values than the bound). Before #623 that second kind
+was its first 1 002 rows: under `limit 5000`, `offset 1`, `group
 room, n` or `select lower(room) as r`, 1 003 memberships of one room and
 then one of another were a list of the first room, and the token was shown
 nothing of the second -- closed, and wrong -- and 2 003 rows of 1 001 rooms
