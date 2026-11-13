@@ -1931,6 +1931,29 @@ a region that had no node left for a replica (the operator's repair above),
 and the oracle formatting a passing read's message with no write before
 it, which ended two seeds' checks -- their histories, checked again, held.
 
+*What the review's runs saw*, at a lease of 5 s on the same laptop, Docker
+otherwise idle and other agents' test suites holding its load at 60 to
+137, seeds 901 to 903 of 2 minutes each and 902 a second time: 27 faults,
+every kind in each seed, each landing at its first draw; the clock read
+the shift away on every copy of its node -- 3 599 982 to 3 599 985 ms of an
+hour ahead, 2 591 999 953 to 2 591 999 978 of 30 days, -86 400 031 and
+-86 400 077 of a day back -- and the system's clock again after. 901, 903
+and 902's second run passed: 24 settles with every replica's digest its
+primary's, 59 194 register writes, 26 260 appends and 46 321 reads
+answered, 38 operations whose outcome was unknown, no acknowledged write
+lost in the window the design names or out of it, 8 files left on nodes
+removed as the runbook's operator removes them. 902's first run stopped
+after its catch-up: t1's copy on n2 -- the old primary's file, which the
+router's repair had follow the new primary on n1 as n2 answered again,
+n2 then killed by the fault while that copy was behind -- held none of the
+primary's writes since the first kill for the 60 s the settle waits, every
+link read back clear and every node running, and n2 logged nothing of
+replication once it started again. CI's run before the review (43464712047,
+a lease of 2 s) stopped the same way on seed 1003, its copy on n1, while
+its two other seeds passed. A copy whose follow was answered and then cut
+by a kill does not follow after the restart: not the drill's, and not
+explained yet.
+
 ## Install channels
 
 **A release is installed from its own files, each checked before it is used.** Four ways to install `fennec` and `fennec-server` other than a registry or the image -- Homebrew's formula, `https://fennecdb.com/install.sh`, a `.deb` and an `.rpm`, and on Windows `https://fennecdb.com/install.ps1` -- all take the archives `release.yml` built (the musl tarballs for Linux, which are static, the two macOS ones, and the two Windows zips) and build nothing themselves. Each names what it installs by a SHA-256, which is what holds them to one source: the formula carries the four sums of `SHA256SUMS`, each installer checks the tarball or the zip against the sum of the release it came from, and the packages are made from those tarballs and listed in `SHA256SUMS` with the rest. Because all three name the release's files by checksum, a published release's assets are never replaced: re-running `release.yml` for a tag whose release is public (`publish`) uploads only the files the release has no asset of, with a warning that its `SHA256SUMS` does not list them, where a draft's are replaced as before. A rebuild is not byte for byte the first build (the Rust toolchain, the runner image), so a replaced tarball would have failed every `brew install` and every sum already taken from the old `SHA256SUMS`. The image jobs still push `:X.Y.Z` and `:latest` again on a re-run; the image is not named by a checksum anywhere here. One file of a published release is written again, and only by growing: `desktop.yml` appends the app's lines to `SHA256SUMS` -- the Mac's DMG, Windows' zips and Linux's tarballs -- every line before them kept byte for byte, and never replaces a download ([Studio desktop](#studio-desktop), The release).

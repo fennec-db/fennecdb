@@ -1122,6 +1122,9 @@ def inner():
             n = len(record["faults"]) + 1
             say(f"fault {n}: {kind}")
             got = fault()
+            # Why it did not land, said only where it did not.
+            if got.get("landed"):
+                got.pop("missed", None)
             got.update({"fault": kind, "at_s": round(at, 2), "healed_at_s": round(time.monotonic() - T0, 2)})
             record["faults"].append(got)
             say(f"  {json.dumps(got)}")
@@ -1276,7 +1279,7 @@ def summarize(record, ops, sched):
 
 def logs():
     for name in ["g1", *ROUTERS, *[n for n, _ in NODES]]:
-        p = subprocess.run(["docker", "logs", "--timestamps", "--tail", "400", cname(name)],
+        p = subprocess.run(["docker", "logs", "--timestamps", "--tail", "3000", cname(name)],
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
         with open(os.path.join(OUT, f"{name}.log"), "w") as f:
             f.write(p.stdout)
