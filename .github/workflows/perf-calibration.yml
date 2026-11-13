@@ -16,6 +16,13 @@ on:
 permissions:
   contents: read
 
+# Every build, of an old commit too, uses the toolchain main pins: an old
+# commit's rust-toolchain.toml says `stable`, which two parallel builds would
+# install at once and fail renaming a component file. It is installed once,
+# below, before any build starts.
+env:
+  RUSTUP_TOOLCHAIN: 1.99.1
+
 jobs:
   pair:
     name: calibration (${{ matrix.name }})
@@ -46,8 +53,7 @@ jobs:
 
       - name: Install the pinned toolchain, the musl target, valgrind and musl-gcc
         run: |
-          rustup show
-          rustup target add x86_64-unknown-linux-musl
+          rustup toolchain install 1.99.1 --profile minimal --target x86_64-unknown-linux-musl
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends valgrind musl-tools
 
@@ -80,8 +86,7 @@ jobs:
 
       - name: Install the pinned toolchain, the musl target, valgrind and musl-gcc
         run: |
-          rustup show
-          rustup target add x86_64-unknown-linux-musl
+          rustup toolchain install 1.99.1 --profile minimal --target x86_64-unknown-linux-musl
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends valgrind musl-tools
 

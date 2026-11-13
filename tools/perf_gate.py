@@ -446,6 +446,7 @@ def run(args):
             base_f = pool.submit(build, base_tree, args.target, os.path.join(work, "base-target"), args.cargo, log)
             head_bin, base_bin = head_f.result(), base_f.result()
         if head_bin is None:
+            log(f"replay {args.base} -> {args.head or 'this tree'}: the gate program does not build at the head")
             return 1
         programs = "this tree's"
         if base_bin is None and had:
@@ -453,7 +454,8 @@ def run(args):
             base_bin = build(base_tree, args.target, os.path.join(work, "base-target"), args.cargo, log)
             programs = "each tree's own"
         if base_bin is None:
-            log("the base builds no gate program: nothing to hold this tree to")
+            log(f"replay {args.base} -> {args.head or 'this tree'}: the base builds no gate program, "
+                "neither with this tree's nor its own: nothing to hold the head to")
             return 1
         log(f"counting {args.runs} runs a build of each workload, {args.jobs} at a time")
         scratch = tempfile.mkdtemp(prefix="scratch-", dir=work)
