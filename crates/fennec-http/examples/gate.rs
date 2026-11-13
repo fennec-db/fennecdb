@@ -74,7 +74,7 @@ fn main() {
         }
         return;
     }
-    let Some(&(name, ops, setup)) = WORKLOADS.iter().chain(LOOKS).find(|w| w.0 == arg) else {
+    let Some(&(name, ops, setup)) = WORKLOADS.iter().find(|w| w.0 == arg) else {
         eprintln!("usage: gate --list | gate WORKLOAD");
         std::process::exit(2);
     };
@@ -417,72 +417,25 @@ fn core_fuzzy(_: &Path, ops: usize) -> Box<dyn FnMut(usize)> {
     reads(db, "get d match body $1 fuzzy limit 10", queries)
 }
 
-/// TEMPORARY (the calibration's, removed with perf-calibration.yml): where
-/// `core-facet`'s count moves, unlisted -- each a facet's variant.
-const LOOKS: &[(&str, usize, Setup)] = &[
-    ("look-facet-top1", 512, |d, o| {
-        facet_look(d, o, FACETED, true, "top 1")
-    }),
-    ("look-facet-all", 512, |d, o| {
-        facet_look(d, o, FACETED, true, "")
-    }),
-    ("look-facet-one", 512, |d, o| {
-        facet_look(d, o, 1, true, "top 10")
-    }),
-    ("look-facet-one-top1", 512, |d, o| {
-        facet_look(d, o, 1, true, "top 1")
-    }),
-    ("look-facet-scan", 64, |d, o| {
-        facet_look(d, o, 1, false, "top 10")
-    }),
-    ("look-facet-4096", 4096, |d, o| {
-        facet_look(d, o, 4096, true, "top 10")
-    }),
-];
-
-fn facet_look(_: &Path, _: usize, n: usize, hashed: bool, top: &str) -> Box<dyn FnMut(usize)> {
-    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
-    let create = match hashed {
-        true => "create collection f (brand text @hash)",
-        false => "create collection f (brand text)",
-    };
-    let dbs: Vec<Database> = (0..n)
-        .map(|_| {
-            let mut db = Database::new();
-            run(&mut db, create, &[]);
-            let mut brands: Vec<u64> = (0..40).flat_map(|b| (0..=b).map(move |_| b)).collect();
-            for i in (1..brands.len()).rev() {
-                brands.swap(i, rng.below(i as u64 + 1) as usize);
-            }
-            let put = stmt("put f {brand: $1}");
-            for b in brands {
-                db.execute_with(&put, &[Value::Text(format!("brand {b}"))])
-                    .unwrap();
-            }
-            db
-        })
-        .collect();
-    let facet = stmt(&format!("get f select id limit 0 facet brand {top}"));
-    for db in &dbs {
-        db.query(&facet, &[]).unwrap();
-    }
-    Box::new(move |i| {
-        black_box(dbs[i % n].query(&facet, &[]).unwrap());
-    })
-}
-
 /// The databases `core-facet` asks in turn.
 const FACETED: usize = 256;
 
-/// The brands of every row, counted through the `@hash` buckets: a
-/// bucket's length a brand, the ten most picked by `order_rows`. The
-/// buckets come in the order of the index's table, which its hash keys
-/// lay out -- a draw a map, std's `RandomState` -- and the pick compares
-/// as many times as that order makes it: one database's facet costs from
-/// one process to the next some 15% apart. So each op asks the next of
-/// FACETED databases, each with its own keys, and a run counts the mean of
-/// as many draws: a sixteenth of one's spread. A facet's cost is its
-/// buckets', not its rows': each holds 40 brands, brand `b` on `b + 1` rows.
+/// The brands of every row, counted through the `@hash` buckets -- a
+/// bucket's length a brand -- and the commonest picked by `order_rows`.
+/// The buckets come in the order of the index's table, which its hash keys
+/// lay out, a draw a map (std's `RandomState`). Picking ten (`top 10`),
+/// `select_nth_unstable_by` and the sort compare as many times as that
+/// order makes them, 87 to 92 a facet: one database's facet cost 9.7%
+/// apart over ten processes, the mean of 256 of them still 1.2%. Picking
+/// one is a pass of 39 comparisons whatever the order, the walk and every
+/// value's decoding counted as before: 0.003% apart over ten runs. The
+/// pick of ten is counted by `core-lookup`, the first ten of some 500 rows
+/// in id order, which a seed fixes, and the sort by `core-group`'s 100
+/// groups. Each op still asks the next of FACETED databases, each with its
+/// own keys: what is left still steps with the table's layout, 12
+/// instructions an op apart over ten runs of one database, 2 of 256. A
+/// facet's cost is its buckets', not its rows': each holds 40 brands,
+/// brand `b` on `b + 1` rows.
 fn core_facet(_: &Path, _: usize) -> Box<dyn FnMut(usize)> {
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
     let dbs: Vec<Database> = (0..FACETED)
@@ -501,7 +454,7 @@ fn core_facet(_: &Path, _: usize) -> Box<dyn FnMut(usize)> {
             db
         })
         .collect();
-    let facet = stmt("get f select id limit 0 facet brand top 10");
+    let facet = stmt("get f select id limit 0 facet brand top 1");
     for db in &dbs {
         db.query(&facet, &[]).unwrap();
     }

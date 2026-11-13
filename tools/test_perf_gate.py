@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """tools/perf_gate.py: the gate's judgement on results of its own making --
 a synthetic +1% fails, an entry the pull request adds lets it through, one
-the base holds already does not, a median holds a seed's step -- and the
-reading of PERF_ACCEPTED as data, never run; then the committed list.
+the base holds already does not, a median holds a seed's step, an
+allocation's cost moving with the heap passes where an allocation more
+fails -- the reading of a profile's calls into the allocator, and of
+PERF_ACCEPTED as data, never run; then the committed list.
 
     python3 tools/test_perf_gate.py
 """
@@ -112,6 +114,77 @@ class Gate(unittest.TestCase):
         res["metric"] = "fsyncs"
         with self.assertRaises(ValueError):
             gate.judge(res, [])
+
+
+def allocating(res, name, base, head):
+    """Workload `name` of `res` given each side's runs as (total, calls,
+    instructions a call): `calls` mallocs and as many frees a run, each at
+    that price."""
+    w = res["workloads"][name]
+    w["allocator"] = {}
+    for side, runs in (("base", base), ("head", head)):
+        w[side] = sorted(t for t, _, _ in runs)
+        w["allocator"][side] = [[t, {"malloc": [c, c * p], "free": [c, c * p]}] for t, c, p in runs]
+    return res
+
+
+def row(res, name):
+    rows, _ = gate.judge(res, [])
+    return {r[0]: r for r in rows}[name]
+
+
+class Allocator(unittest.TestCase):
+    """The allocator's calls counted at the base's cost a call: a row's
+    delta (4) is judged, its plain count's (6) shown beside it."""
+
+    BASE_RUNS = [(BASE, 1_000, 150)] * 5
+
+    def test_an_allocations_cost_moving_with_the_heap_passes(self):
+        # The same calls, each 30 instructions dearer -- a group of musl's
+        # made and freed each op where the base's heap kept one -- +3% on
+        # the plain count, and the code's own work the same.
+        res = allocating(results(), "a", self.BASE_RUNS, [(BASE + 60_000, 1_000, 180)] * 5)
+        _, failed = verdicts(res)
+        self.assertFalse(failed)
+        r = row(res, "a")
+        self.assertAlmostEqual(r[4], 0.0)
+        self.assertAlmostEqual(r[6], 0.03)
+
+    def test_an_allocation_more_fails_at_the_bases_price(self):
+        # A hundred allocations more a run, each run cheaper by the heap's
+        # layout (120 a call against 150): -1.8% as counted, +1.5% at the
+        # base's price, which is what the code asks more.
+        res = allocating(results(), "a", self.BASE_RUNS, [(BASE - 36_000, 1_100, 120)] * 5)
+        v, failed = verdicts(res)
+        self.assertTrue(failed)
+        self.assertTrue(v["a"].startswith("FAILED"), v)
+        r = row(res, "a")
+        self.assertAlmostEqual(r[4], 0.015)
+        self.assertAlmostEqual(r[6], -0.018)
+
+    def test_an_entry_point_the_base_never_called_counts_as_it_cost(self):
+        res = allocating(results(), "a", self.BASE_RUNS, [(BASE + 50_000, 1_000, 150)] * 5)
+        for _, alloc in res["workloads"]["a"]["allocator"]["head"]:
+            alloc["realloc"] = [100, 50_000]
+        v, failed = verdicts(res)
+        self.assertTrue(failed, v)
+        self.assertAlmostEqual(row(res, "a")[4], 0.025)
+
+    def test_a_gain_in_the_code_passes_whatever_the_allocator_paid(self):
+        res = allocating(results(), "a", self.BASE_RUNS, [(BASE + 20_000, 1_000, 200)] * 5)
+        r = row(res, "a")
+        self.assertLess(r[4], 0)
+        self.assertGreater(r[6], 0)
+
+    def test_counts_not_of_the_runs_beside_them_are_refused(self):
+        res = allocating(results(), "a", self.BASE_RUNS, self.BASE_RUNS)
+        res["workloads"]["a"]["head"] = [BASE + 1] * 5
+        with self.assertRaises(ValueError):
+            gate.judge(res, [])
+
+    def test_results_without_the_allocators_counts_are_judged_as_counted(self):
+        r = row(results(a=0.01), "a")
+        self.assertAlmostEqual(r[4], r[6])
 
 
 class Entries(unittest.TestCase):
@@ -224,6 +297,56 @@ class Counting(unittest.TestCase):
         self.addCleanup(os.unlink, f.name)
         with self.assertRaises(ValueError):
             gate.totals(f.name)
+
+    def test_the_allocators_calls_are_read_off_the_call_lines(self):
+        # As the static musl build's profile writes them: names compressed
+        # to an id once named, `calls=` and the inclusive cost after it. A
+        # call between two entry points is the allocator's own, and a call
+        # to anything else is the program's.
+        out = textwrap.dedent(
+            """\
+            events: Ir
+            fn=(1) gate::core_put
+            3 40
+            cfn=(2) malloc
+            calls=3 +5
+            * 450
+            cfn=(3) <alloc::raw_vec::RawVecInner>::finish_grow
+            calls=1 +1
+            * 900
+            fn=(3)
+            1 10
+            cfn=(2)
+            calls=2 -3
+            +2 300
+            cfn=(4) realloc
+            calls=1 +4
+            * 520
+            fn=(5) posix_memalign
+            1 8
+            cfn=(6) aligned_alloc
+            calls=1 +2
+            * 140
+            fn=(7) free
+            0 6
+            cfn=(8) __libc_free
+            calls=5 +1
+            * 640
+            fn=(9) core::ptr::drop_glue::<Vec<u8>>
+            0 4
+            cfn=(7)
+            calls=5 +1
+            * 670
+            totals: 5000
+            """
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".callgrind", delete=False) as f:
+            f.write(out)
+        self.addCleanup(os.unlink, f.name)
+        self.assertEqual(
+            gate.allocator(f.name),
+            {"malloc": [5, 750], "realloc": [1, 520], "free": [5, 670]},
+        )
 
 
 class Committed(unittest.TestCase):

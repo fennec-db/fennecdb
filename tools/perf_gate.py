@@ -7,10 +7,12 @@ in this tree and in BASE's -- this tree's source copied in, so both sides
 run the same work -- for the static musl build that ships, in the release
 profile. Each workload runs RUNS (5) times a build under callgrind, its
 setup uncounted: the program asks callgrind to count as its loop starts and
-to stop as it ends. A build's figure for a workload is the median of its
-runs' instructions. A workload whose figure in this tree is THRESHOLD (1%)
-or more above BASE's fails the gate, unless the pull request adds an entry
-to PERF_ACCEPTED below naming it, the most it lets through and why.
+to stop as it ends. A run's figure is its instructions with the allocator's
+calls priced at the base's cost a call (below), and a build's figure for a
+workload the median of its runs'. A workload whose figure in this tree is
+THRESHOLD (1%) or more above BASE's fails the gate, unless the pull request
+adds an entry to PERF_ACCEPTED below naming it, the most it lets through and
+why.
 
 Why a median: std's hash tables draw their keys at random in each process
 (`RandomState`), and a hundred or so sit on the engine's paths. Whether two
@@ -19,6 +21,20 @@ stands some 80 instructions an op from the next -- 0.4-0.6% of a request of
 14 000 -- in a few steps. The median of five takes the commonest step, and
 the threshold stands above it: the control and the calibration over merged
 pull requests that set it are in the design document.
+
+Why the allocator is priced: musl's allocator takes a slot from a group of
+its size class, and gives the group back once its last slot is freed, so
+an op whose allocations fill and empty a group of their own pays for
+making and freeing the group each time -- a few hundred instructions more,
+with the same calls. Which ops do is the heap's layout, which any change
+to what a program keeps moves: the calibration's two merged pull requests
+that the plain count failed ran their own code to within 21 and 150
+instructions an op of their base's, and paid musl's group 400 to 1 150 more
+an op (+2 to +6%) on paths their code never reached. So each run's calls
+into the allocator (ALLOCATOR) are counted at what the base's runs paid a
+call, entry point by entry point: an allocation more or fewer moves the
+figure at the base's price, a group's making and freeing does not. The
+plain count stays in the table beside it.
 
     python3 tools/perf_gate.py run --base origin/main     # make perf-gate
     python3 tools/perf_gate.py measure --base-bin B --head-bin H --out R.json
@@ -61,6 +77,12 @@ PROGRAM = os.path.join("crates", "fennec-http", "examples", "gate.rs")
 THRESHOLD = 0.01
 # Runs a build of each workload: the figure is their median.
 RUNS = 5
+# The allocator's entry points, as the static musl build's profile names
+# them: a call into one from anything else is the program's allocation, its
+# instructions -- the entry point's and all it calls -- the allocator's,
+# priced at the base's cost a call. A call from one to another
+# (`posix_memalign` into `aligned_alloc`) is the allocator's own.
+ALLOCATOR = frozenset({"malloc", "free", "realloc", "calloc", "aligned_alloc", "posix_memalign", "memalign"})
 
 # Every workload a pull request made slower on purpose, in the order they
 # went out, never removed: the history of what the gate let through. An
@@ -143,10 +165,52 @@ def figure(runs):
     return int(statistics.median_low(runs))
 
 
+def prices(runs):
+    """What a call into each allocator entry point cost over `runs` -- a
+    side's [total, {entry: [calls, instructions]}] each -- pooled: {entry:
+    instructions a call}."""
+    calls, cost = {}, {}
+    for _, alloc in runs:
+        for e, (c, i) in alloc.items():
+            calls[e] = calls.get(e, 0) + c
+            cost[e] = cost.get(e, 0) + i
+    return {e: cost[e] / calls[e] for e in calls if calls[e]}
+
+
+def priced(runs, price):
+    """Each of `runs`' instructions with its calls into the allocator
+    counted at `price` a call, entry point by entry point. An entry point
+    `price` does not hold -- one the base's runs never called -- is counted
+    as it cost: there is no price to hold it to."""
+    out = []
+    for total, alloc in runs:
+        n = total
+        for e, (c, i) in alloc.items():
+            if e in price:
+                n += c * price[e] - i
+        out.append(n)
+    return out
+
+
+def figures_of(w):
+    """Workload `w`'s figures (base, head): each side's runs with the
+    allocator's calls at the base's price, or as counted where the results
+    hold no allocator's counts (a file written before they were kept)."""
+    alloc = w.get("allocator") or {}
+    if not (alloc.get("base") and alloc.get("head")):
+        return figure(w["base"]), figure(w["head"])
+    if sorted(t for t, _ in alloc["base"]) != sorted(w["base"]) or sorted(t for t, _ in alloc["head"]) != sorted(w["head"]):
+        raise ValueError("the allocator's counts are not those of the runs they stand beside")
+    price = prices(alloc["base"])
+    return figure(priced(alloc["base"], price)), figure(priced(alloc["head"], price))
+
+
 def judge(results, entries=(), threshold=THRESHOLD):
     """Each workload of `results` judged: (rows, failed), a row (name, ops,
-    base, head, delta, verdict) -- base and head figures for the whole loop,
-    delta a fraction or None. `entries` are the pull request's own."""
+    base, head, delta, verdict, counted) -- base and head figures for the
+    whole loop, the allocator's calls priced at the base's cost a call,
+    delta their change, a fraction or None, and counted the plain count's.
+    `entries` are the pull request's own."""
     if results.get("metric") != "instructions":
         raise ValueError(f"these results hold {results.get('metric')!r}, not instructions")
     names = set(results["workloads"])
@@ -161,19 +225,22 @@ def judge(results, entries=(), threshold=THRESHOLD):
         w = results["workloads"][name]
         base, head = w.get("base") or [], w.get("head") or []
         if not head:
-            rows.append((name, w["ops"], figure(base) if base else None, None, None, "not in this tree"))
+            rows.append((name, w["ops"], figure(base) if base else None, None, None, "not in this tree", None))
             continue
         if not base:
             why = "the base's build did not run it" if w.get("base_error") else "new"
-            rows.append((name, w["ops"], None, figure(head), None, f"{why}: held to nothing"))
+            rows.append((name, w["ops"], None, figure(head), None, f"{why}: held to nothing", None))
             continue
         if min(len(base), len(head)) < RUNS:
             # Fewer runs are a median the seeds move: a figure the base's
             # checker does not take, whatever the pull request's counting.
-            rows.append((name, w["ops"], figure(base), figure(head), None, f"FAILED: fewer than {RUNS} runs a side"))
+            rows.append(
+                (name, w["ops"], figure(base), figure(head), None, f"FAILED: fewer than {RUNS} runs a side", None)
+            )
             failed = True
             continue
-        b, h = figure(base), figure(head)
+        counted = figure(head) / figure(base) - 1
+        b, h = figures_of(w)
         delta = h / b - 1
         if delta < threshold:
             verdict = "ok"
@@ -185,7 +252,7 @@ def judge(results, entries=(), threshold=THRESHOLD):
         else:
             verdict = f"FAILED: +{threshold * 100:g}% or more"
             failed = True
-        rows.append((name, w["ops"], b, h, delta, verdict))
+        rows.append((name, w["ops"], b, h, delta, verdict, counted))
     return rows, failed
 
 
@@ -200,19 +267,22 @@ def table(results, rows):
     out = [
         f"### Instructions an op, base against this tree (median of {results.get('runs', '?')} callgrind runs)",
         "",
-        "| workload | ops | base | this tree | delta | runs' spread | verdict |",
-        "|---|---:|---:|---:|---:|---:|---|",
+        "| workload | ops | base | this tree | delta | as counted | runs' spread | verdict |",
+        "|---|---:|---:|---:|---:|---:|---:|---|",
     ]
-    for name, ops, b, h, delta, verdict in rows:
+    for name, ops, b, h, delta, verdict, counted in rows:
         w = results["workloads"][name]
         per = lambda x: f"{x / ops:,.0f}" if x is not None else "-"
-        d = f"{delta * 100:+.2f}%" if delta is not None else "-"
+        pct = lambda x: f"{x * 100:+.2f}%" if x is not None else "-"
         sp = " / ".join(f"{spread(w[s]) * 100:.2f}%" for s in ("base", "head") if w.get(s))
-        out.append(f"| {name} | {ops} | {per(b)} | {per(h)} | {d} | {sp} | {verdict} |")
+        out.append(f"| {name} | {ops} | {per(b)} | {per(h)} | {pct(delta)} | {pct(counted)} | {sp} | {verdict} |")
     out.append("")
     out.append(
         f"A workload fails at +{THRESHOLD * 100:g}% or more, unless the pull request adds a "
-        "PERF_ACCEPTED entry (tools/perf_gate.py) naming it: docs/design/benchmarks.md#the-gate."
+        "PERF_ACCEPTED entry (tools/perf_gate.py) naming it: docs/design/benchmarks.md#the-gate. "
+        "Its figures count each call into the allocator at what the base's runs paid a call; "
+        "*as counted* is the plain count's delta, the difference musl's groups made: an "
+        "allocation's cost moves with the heap's layout, its calls with the code."
     )
     return "\n".join(out) + "\n"
 
@@ -271,11 +341,49 @@ def totals(path):
     return n
 
 
+def allocator(path):
+    """The program's calls into the allocator in a callgrind output file:
+    {entry point: [calls, instructions]}, the instructions those calls ran
+    inclusive, an entry point's calls to another left out (ALLOCATOR). Read
+    off the file's call lines -- `cfn=` naming the callee, by its compressed
+    id once named, `calls=` the count, the line after it the instructions --
+    under the `fn=` that made them."""
+    names, found = {}, {}
+    fn = callee = None
+    calls = None
+
+    def name(text):
+        m = re.match(r"\((\d+)\)(?:\s+(.*))?$", text)
+        if not m:
+            return text
+        if m.group(2) is not None:
+            names[m.group(1)] = m.group(2)
+        return names.get(m.group(1))
+
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if line.startswith("fn="):
+                fn = name(line[3:])
+            elif line.startswith("cfn="):
+                callee = name(line[4:])
+            elif line.startswith("calls="):
+                calls = int(line[6:].split()[0])
+            elif calls is not None and line[:1] in tuple("0123456789+-*"):
+                if callee in ALLOCATOR and fn not in ALLOCATOR:
+                    got = found.setdefault(callee, [0, 0])
+                    got[0] += calls
+                    got[1] += int(line.split()[1])
+                calls = None
+    return found
+
+
 def one_run(binary, name, ops, scratch):
     """Runs workload `name` once under callgrind: the instructions its loop
-    counted, and the profile callgrind wrote, by function. Nothing counted
-    means valgrind passed the program's requests by -- a sequence of
-    `callgrind::request` not valgrind's -- and is refused."""
+    counted, its calls into the allocator (`allocator`), and the profile
+    callgrind wrote, by function. Nothing counted means valgrind passed the
+    program's requests by -- a sequence of `callgrind::request` not
+    valgrind's -- and is refused."""
     fd, out = tempfile.mkstemp(prefix=f"{name}.", suffix=".callgrind", dir=scratch)
     os.close(fd)
     cmd = [
@@ -290,7 +398,7 @@ def one_run(binary, name, ops, scratch):
     n = totals(out)
     if n <= 0:
         raise RuntimeError(f"{name}: callgrind counted nothing -- were the client requests seen?")
-    return n, out
+    return n, allocator(out), out
 
 
 def measure_bins(base_bin, head_bin, runs, jobs, scratch, log=print, profiles=None, only=None):
@@ -309,7 +417,11 @@ def measure_bins(base_bin, head_bin, runs, jobs, scratch, log=print, profiles=No
     results = {"metric": "instructions", "tool": "callgrind", "runs": runs, "workloads": {}}
     failed, files = {}, {}
     for name in names:
-        results["workloads"][name] = {"ops": sides["head"][name], "base": [], "head": []}
+        # `allocator`: each run's total beside its calls into the allocator,
+        # which the judgement prices at the base's cost a call.
+        results["workloads"][name] = {
+            "ops": sides["head"][name], "base": [], "head": [], "allocator": {"base": [], "head": []},
+        }
         if base_bin and name not in sides["base"]:
             failed[("base", name)] = f"{name}: the base's program has no such workload"
         elif base_bin and sides["base"][name] != sides["head"][name]:
@@ -332,8 +444,9 @@ def measure_bins(base_bin, head_bin, runs, jobs, scratch, log=print, profiles=No
         for fut in concurrent.futures.as_completed(futures):
             side, name = futures[fut]
             try:
-                n, path = fut.result()
+                n, alloc, path = fut.result()
                 results["workloads"][name][side].append(n)
+                results["workloads"][name]["allocator"][side].append([n, alloc])
                 files.setdefault((side, name), []).append((n, path))
             except RuntimeError as e:
                 failed.setdefault((side, name), str(e))
@@ -361,6 +474,7 @@ def measure_bins(base_bin, head_bin, runs, jobs, scratch, log=print, profiles=No
     # why: none of its base runs count.
     for (_, name), msg in failed.items():
         results["workloads"][name]["base"] = []
+        results["workloads"][name]["allocator"]["base"] = []
         results["workloads"][name]["base_error"] = msg[-600:]
     return results
 
