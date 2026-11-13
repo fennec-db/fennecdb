@@ -27,4 +27,5 @@ StreamBuilder(
 a file through the library the app embeds. In the repository, `prepare.sh`
 copies the libraries in from the Swift and Kotlin builds
 (`integrations/swift/build-xcframework.sh --dynamic`,
-`integrations/kotlin/build-aar.sh`).
+`integrations/kotlin/build-aar.sh`); `--platforms ios,macos,android`
+prepares those alone, the default is all three and a missing one an error.

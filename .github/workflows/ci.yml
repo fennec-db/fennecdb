@@ -1195,7 +1195,7 @@ jobs:
       - name: The Flutter plugin in an Android app
         run: |
           set -eu
-          integrations/dart/fennecdb_flutter/prepare.sh
+          integrations/dart/fennecdb_flutter/prepare.sh --platforms android
           cd integrations/dart/fennecdb_flutter/example
           flutter create --platforms=android --project-name fennecdb_flutter_example .
           rm -rf test

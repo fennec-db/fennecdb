@@ -10,9 +10,11 @@
 # from what integrations/swift/build-xcframework.sh --dynamic made (the
 # XCFramework and the dylib beside it, a release's
 # FennecFFIDynamic.xcframework.zip) and integrations/kotlin/build-aar.sh.
-# The XCFramework and the dylib are both required (a release's zip holds
-# both): one missing is an error naming it, never a plugin without it. The
-# jniLibs are copied when built.
+# A platform asked for needs its artifacts: one missing is an error naming
+# it, never a plugin without it. --platforms ios,macos,android (any subset,
+# comma separated) prepares those alone and asks nothing of the others, as
+# an Android-only job has no XCFramework; the default is every platform,
+# what publishing needs, so a missing slice fails the publish.
 #
 # pub keeps no symbolic link -- it packs what one points at -- and every
 # file here goes to pub.dev: a platform given another's slices, or a
@@ -20,14 +22,24 @@
 # plugin as packages.yml does and holds the archive to that
 # (tools/flutter_archive_check.py).
 set -eu
+PLATFORMS=ios,macos,android
+case "${1:-}" in
+  --platforms) [ $# -eq 2 ] || { echo "usage: prepare.sh [--platforms ios,macos,android]" >&2; exit 2; }
+    PLATFORMS=$2 ;;
+  "") ;;
+  *) echo "usage: prepare.sh [--platforms ios,macos,android]" >&2; exit 2 ;;
+esac
+for p in $(echo "$PLATFORMS" | tr ',' ' '); do
+  case "$p" in ios|macos|android) ;; *) echo "prepare.sh: unknown platform $p (ios, macos, android)" >&2; exit 2 ;; esac
+done
+want() { case ",$PLATFORMS," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../../.." && pwd)
 DYN="$ROOT/integrations/swift/build/dynamic"
 JNI="$ROOT/integrations/kotlin/android/build/jniLibs"
 
-[ -d "$DYN/FennecFFI.xcframework" ] || { echo "prepare.sh: $DYN/FennecFFI.xcframework is missing" >&2; exit 1; }
-[ -f "$DYN/libfennec_ffi.dylib" ] || { echo "prepare.sh: $DYN/libfennec_ffi.dylib is missing" >&2; exit 1; }
-if true; then
+if want ios; then
+  [ -d "$DYN/FennecFFI.xcframework" ] || { echo "prepare.sh: $DYN/FennecFFI.xcframework is missing" >&2; exit 1; }
   src="$DYN/FennecFFI.xcframework"
   dst="$HERE/ios/Frameworks/FennecFFI.xcframework"
   rm -rf "$HERE/ios/Frameworks"
@@ -52,13 +64,15 @@ if true; then
   done
   echo "FennecFFI.xcframework -> ios/Frameworks: $(echo "$ids" | tr '\n' ' ')"
 fi
-if true; then
+if want macos; then
+  [ -f "$DYN/libfennec_ffi.dylib" ] || { echo "prepare.sh: $DYN/libfennec_ffi.dylib is missing" >&2; exit 1; }
   rm -rf "$HERE/macos/Libraries"
   mkdir -p "$HERE/macos/Libraries"
   cp "$DYN/libfennec_ffi.dylib" "$HERE/macos/Libraries/"
   echo "libfennec_ffi.dylib -> macos/Libraries"
 fi
-if [ -d "$JNI" ]; then
+if want android; then
+  [ -d "$JNI" ] || { echo "prepare.sh: $JNI is missing" >&2; exit 1; }
   rm -rf "$HERE/android/src/main/jniLibs"
   cp -R "$JNI" "$HERE/android/src/main/jniLibs"
   echo "jniLibs -> android/src/main/jniLibs: $(ls "$HERE/android/src/main/jniLibs" | tr '\n' ' ')"
