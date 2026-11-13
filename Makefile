@@ -822,11 +822,17 @@ entry-bench:
 collate-bench:
 	$(CARGO) run --release -p fennec-bench --bin collate
 
-## Verifies the import's PostgreSQL arm against a live server, TLS on in it
+## Verifies the import's PostgreSQL arm and `--follow` against a live server,
+## TLS on in it: every `#[ignore]`d test of fennec-import's tests/pg.rs and
+## tests/follow.rs and of fennec-server's tests/follow.rs. CI's `postgres`
+## job runs its two cargo lines against a service container started as
+## `pgvector-up` starts this server, and fails unless each test ran and
+## passed. A failure prints the end of the server's log before it goes.
 import-test: pgvector-up
 	@$(MAKE) pgvector-tls && $(CARGO) test -p fennec-import --test all -- --ignored pg:: follow:: && \
 	  $(CARGO) test -p fennec-server --test all -- --ignored follow::; \
-	  status=$$?; $(MAKE) pgvector-down; exit $$status
+	  status=$$?; [ $$status -eq 0 ] || docker logs --tail 100 fennecbench-pg; \
+	  $(MAKE) pgvector-down; exit $$status
 
 ## `fennec import --follow` against a live server: commit-to-visible latency,
 ## how fast a burst drains, how long a cut stream takes to come back.
@@ -834,9 +840,6 @@ import-test: pgvector-up
 follow-bench:
 	$(CARGO) run --release -p fennec-import --example follow -- 10000 384
 
-## Starts PostgreSQL with pgvector for the comparison. `wal_level=logical`
-## is for `fennec import --follow` and its tests; it changes what is logged
-## for updates and deletes, not how the compared reads run.
 ## `fennec-server --follow` serving what it follows: commit to a subscriber of
 ## the collection, and a server killed while the table is written to,
 ## started again. Needs `make pgvector-up` first.
@@ -844,17 +847,33 @@ mirror-bench:
 	$(CARGO) build --release -p fennec-server
 	$(CARGO) run --release -p fennec-server --example mirror -- 10000
 
+## PostgreSQL 17 with pgvector 0.8.7, by the digest of the tag's index
+## (linux/amd64 and linux/arm64): ci.yml's `postgres` service names it too,
+## so CI and a developer's run start the same server, and a new one is a
+## change to both made on purpose. `make import-test
+## PG_IMAGE=pgvector/pgvector:pg18` tries another.
+PG_IMAGE ?= pgvector/pgvector:0.8.7-pg17@sha256:b513c48566e4777cd3370451400000c78eda6a08131d68f4c31d4a76f27bd8fd
+
+## Starts PostgreSQL with pgvector for the comparison. `wal_level=logical`
+## is for `fennec import --follow` and its tests; it changes what is logged
+## for updates and deletes, not how the compared reads run.
 ## --shm-size: a parallel HNSW build holds its graph in dynamic shared
 ## memory, up to maintenance_work_mem, which scale-bench sets to 1 800 MB so
-## that its graphs build in memory
+## that its graphs build in memory.
+## Ready once it answers over TCP, asked 120 times a second apart at most:
+## the image first runs a server of its own on the socket alone, for its
+## setup, and stops it, so a `pg_isready` over the socket could take that
+## one for this.
 pgvector-up:
 	docker run -d --name fennecbench-pg --rm \
 	  -e POSTGRES_PASSWORD=fennec -e POSTGRES_DB=fennecbench \
-	  -p 55432:5432 --shm-size=2g pgvector/pgvector:pg17 \
+	  -p 55432:5432 --shm-size=2g $(PG_IMAGE) \
 	  -c shared_buffers=1GB -c maintenance_work_mem=1GB \
 	  -c max_parallel_workers_per_gather=0 -c wal_level=logical
 	@echo "waiting for it to become ready..."
-	@until docker exec fennecbench-pg pg_isready -U postgres -d fennecbench >/dev/null 2>&1; do sleep 1; done
+	@n=0; until docker exec fennecbench-pg pg_isready -h 127.0.0.1 -U postgres -d fennecbench >/dev/null 2>&1; do \
+	  n=$$((n + 1)); if [ $$n -ge 120 ]; then docker logs fennecbench-pg; echo "not ready after $$n tries"; exit 1; fi; \
+	  sleep 1; done
 	@echo "postgres://postgres:fennec@127.0.0.1:55432/fennecbench"
 
 pgvector-down:
@@ -864,6 +883,9 @@ pgvector-down:
 ## with fennec-wire's test certificates -- a CA of their own, `localhost` --
 ## for `make import-test`'s TLS test. Off in `pgvector-up` itself: a libpq
 ## client's `prefer` would take it, and the benchmarks' figures with it.
+## The reload is a signal the server takes in its own time, so this ends
+## once a session over TCP is encrypted: a certificate the server refused
+## fails here, not in the test.
 PG ?= fennecbench-pg
 pgvector-tls:
 	@docker cp crates/fennec-wire/tests/certs/server.pem $(PG):/var/lib/postgresql/server.pem
@@ -873,6 +895,9 @@ pgvector-tls:
 	  -c "alter system set ssl_cert_file = '/var/lib/postgresql/server.pem'" \
 	  -c "alter system set ssl_key_file = '/var/lib/postgresql/server.key'" \
 	  -c "alter system set ssl = on" -c "select pg_reload_conf()" >/dev/null
+	@n=0; until docker exec $(PG) psql -qAtX "host=127.0.0.1 sslmode=require user=postgres dbname=postgres" -c "select 1" >/dev/null 2>&1; do \
+	  n=$$((n + 1)); if [ $$n -ge 30 ]; then docker logs --tail 20 $(PG); echo "TLS not on in $(PG) after $$n tries"; exit 1; fi; \
+	  sleep 1; done
 
 ## Builds the server image (static with musl, ~7 MB)
 docker:
