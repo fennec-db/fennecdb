@@ -1,24 +1,36 @@
 # A power cut under Linux, windows-power-cut.yml's counterpart
 # (docs/design/durability.md, "A power cut"): this commit's fennec-server,
-# built as the release builds it, under `--sync always` in an Ubuntu 24.04
-# guest (QEMU/KVM on the runner, the cloud image set up by cloud-init), its
-# file on a disk of its own -- ext4, and XFS beside it -- cut by `kill -9`
-# of QEMU at a random time while a client on the host writes to it, five
-# times; after each the guest
-# boots, the server opens the same file -- the sync log beside it applied,
-# the path a durable write takes on Linux and no other system -- and every
-# write it acknowledged is checked there, whole, no batch half there. Two
-# of the cuts also lose the disk's volatile cache: the disk rebuilt as of
-# the last flush the guest asked for (QEMU's blklogwrites, replay.py),
-# checked the same way. .github/linux-power-cut/ holds the guest's side,
-# .github/power-cut/ the host's files both systems' rigs run.
+# built as the release builds it, in an Ubuntu 24.04 guest (QEMU/KVM on the
+# runner, the cloud image set up by cloud-init), its file on a disk of its
+# own, cut by `kill -9` of QEMU at a random time while a client on the host
+# writes to it, five times; after each the guest boots, the server opens
+# the same file -- the sync log beside it applied, the path a durable write
+# takes on Linux and no other system -- and what it promised is checked
+# there, no batch half there. Two of the cuts also lose the disk's volatile
+# cache: the disk rebuilt as of the last flush the guest asked for (QEMU's
+# blklogwrites, replay.py), checked the same way. Four guests, a matrix
+# entry each:
+#
+#   - `--sync always` on ext4, and on XFS: every acknowledged write there;
+#   - `--sync 250`, the default, on ext4: every write `/_changes` handed
+#     over as on disk there, an acknowledged write gone only if it was
+#     answered within the sync's window of the cut, and what the cut kept a
+#     prefix of the writes;
+#   - a `--dir` node of two tenants under `--sync always` on ext4, followed
+#     by a standby node on the runner, which the cut leaves running: every
+#     acknowledged write there when the node reopens, the standby holding
+#     nothing the node lost, and the same rows once it follows again.
+#
+# .github/linux-power-cut/ holds the guest's side, .github/power-cut/ the
+# host's files both systems' rigs run.
 #
 # About a quarter of an hour, so never on a pull request and not a required
 # check: by hand, weekly, and on a push to main that touches the durability
 # code -- the file and its flushes (fs, fs/windows), the sync log, the
 # engine's flush and commit (engine.rs, its handover and the maintenance
-# beside it) and the lock. A release needs its last run green
-# (RELEASING.md).
+# beside it), the lock, the server's syncer and what a primary sends its
+# replicas once an fsync covered it (replication.rs). A release needs its
+# last run green (RELEASING.md).
 name: linux power cut
 
 on:
@@ -35,6 +47,8 @@ on:
       - 'crates/fennec-core/src/engine/handover.rs'
       - 'crates/fennec-core/src/engine/maintenance.rs'
       - 'crates/fennec-abi/src/lock.rs'
+      - 'crates/fennec-server/src/durability.rs'
+      - 'crates/fennec-http/src/replication.rs'
       - '.github/linux-power-cut/**'
       - '.github/power-cut/**'
       - '.github/workflows/linux-power-cut.yml'
@@ -72,16 +86,43 @@ jobs:
           retention-days: 3
           if-no-files-found: error
 
+  # Temporary, taken out before the pull request: whether a
+  # ubuntu-24.04-arm runner gives a guest KVM, which an arm64 entry needs.
+  arm64-kvm:
+    name: KVM on ubuntu-24.04-arm (a probe)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - name: /dev/kvm
+        run: |
+          uname -a
+          lscpu | head -30
+          grep -m1 -i 'features' /proc/cpuinfo || true
+          ls -l /dev/kvm || echo "no /dev/kvm"
+          sudo dmesg | grep -i -E 'kvm|hyp|el2' || echo "nothing about KVM in dmesg"
+          sudo modprobe kvm 2>&1 || true
+          ls -l /dev/kvm || echo "no /dev/kvm after modprobe"
+          if [ -e /dev/kvm ]; then
+            sudo chmod 666 /dev/kvm
+            python3 -c "import fcntl, os; fd = os.open('/dev/kvm', os.O_RDWR); print('KVM_GET_API_VERSION', fcntl.ioctl(fd, 0xAE00)); print('KVM_CREATE_VM fd', fcntl.ioctl(fd, 0xAE01, 0))"
+          fi
+
   vm:
-    name: Linux guest (${{ matrix.fs }}), cut five times
+    name: Linux guest (${{ matrix.name }}), cut five times
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # The data disk's file system: ext4 as mkfs.ext4 makes it
+        # `fs` is the data disk's file system: ext4 as mkfs.ext4 makes it
         # (data=ordered), and XFS as mkfs.xfs does -- each journals its
-        # metadata alone and orders a file's data its own way.
-        fs: [ext4, xfs]
+        # metadata alone and orders a file's data its own way. `mode` is
+        # what the guest serves (vm.sh): one file under `--sync always`, one
+        # under `--sync 250`, or a `--dir` node with a standby.
+        include:
+          - { id: ext4, name: ext4, fs: ext4, mode: always }
+          - { id: xfs, name: xfs, fs: xfs, mode: always }
+          - { id: sync-250, name: 'ext4, --sync 250', fs: ext4, mode: sync250 }
+          - { id: dir, name: 'ext4, a --dir node and its standby', fs: ext4, mode: dir }
     timeout-minutes: 60
     permissions:
       contents: read
@@ -96,6 +137,7 @@ jobs:
       IMAGE_SHA256: 04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94
       SEED: ${{ github.run_id }}-${{ github.run_attempt }}
       FS: ${{ matrix.fs }}
+      MODE: ${{ matrix.mode }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -157,18 +199,17 @@ jobs:
       - name: What each cut found
         if: always()
         run: .github/linux-power-cut/vm.sh summary
-      - name: Stop QEMU
+      - name: Stop QEMU and the standby
         if: always()
-        run: |
-          if [ -f "$VM/qemu.pid" ]; then kill -9 "$(cat "$VM/qemu.pid")" 2>/dev/null || true; fi
+        run: if [ -n "${VM:-}" ]; then .github/linux-power-cut/vm.sh stop; fi
       # The serial log, the client's record of every write and each check,
-      # the server's output, and on a failure the files the cut left as
-      # they were before the server opened them: never the token, the key,
+      # the servers' output, and on a failure the files the cut left as
+      # they were before the server opened them: never a token, the key,
       # the disks or the write logs.
       - uses: actions/upload-artifact@v7
         if: failure()
         with:
-          name: linux-power-cut-logs-${{ matrix.fs }}
+          name: linux-power-cut-logs-${{ matrix.id }}
           path: |
             ${{ env.VM }}/serial.log
             ${{ env.VM }}/summary.txt
@@ -176,6 +217,7 @@ jobs:
             ${{ env.VM }}/load-*.log
             ${{ env.VM }}/check-*.log
             ${{ env.VM }}/server-*.log
+            ${{ env.VM }}/standby.log
             ${{ env.VM }}/replay-*.log
             ${{ env.VM }}/files-*.txt
             ${{ env.VM }}/evidence/
