@@ -1959,7 +1959,11 @@ would have written it behind. The kill took the record, and the restart
 opened the file as a primary's, following nothing
 ([replication.md](replication.md#replication), *A restart reads a copy's
 role from its file*). A follow now syncs it before it is answered, and an
-image comes with it inside its rename.
+image comes with it inside its rename. CI's run after the fix (43493883363)
+drew seeds 2001 to 2006 at 3 minutes each, the three that had failed among
+them, and every seed passed: 69 faults, every kind in each seed and every
+catch-up restarting its node with copies behind, 75 settles with every
+replica's digest its primary's, and no acknowledged write lost.
 
 ## Install channels
 
