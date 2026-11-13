@@ -20,41 +20,52 @@ Docker network, every token in the environment as the drill's are:
 
 Each tenant gets a replica in another zone. Its clients -- threads of the
 driver, a connection each -- write registers (`put regs {id: k, v: <a value
-no other write writes>, at: now()}`), read them back and append rows of
-values of their own (`put log`), each operation recorded with when it was
+no other write writes>, at: now()}`, its value put in the ledger `wl` in the
+same block, one `/batch`), read them back and append rows of values of
+their own (`put log`), each operation recorded with when it was
 sent and answered and how: answered, refused (it did not run), or neither
 (it may have run). Meanwhile the seed's schedule applies one fault at a
 time, holds it, heals it and settles:
 
     kill        `docker kill` of a node, started again after a while
     pause       `docker pause` of a node for longer than a lease, or not
-    router      tc netem between a router and a node: delay, loss, or a
-                partition (all of it lost)
-    replica     tc netem between two nodes, the one a primary of tenants
-                the other holds the replicas of: delay, loss, or a partition
-    catch-up    a node killed, started again with its peers' links to it
-                slowed, and killed and started again while its copies catch
-                up with the primaries that took its tenants over
-    move        a tenant moved to the third node while its source is
-                killed, paused or cut off from the router, its image coming
-                over a slowed link: a failover during the move
-    clock       a node's clock jumped by hours or days, ahead or back
-                (`FENNEC_TEST_CLOCK`, crates/fennec-http/src/test_clock.rs:
-                Docker moves no container's wall clock)
+    router      tc netem between the region's router and a node: delay,
+                loss, or a partition (all of it lost)
+    replica     tc netem between two nodes a tenant's stream runs between,
+                its primary's and its replica's: delay, loss, or a partition
+    catch-up    a node holding a primary killed, started again with its
+                peers' links to it slowed, and killed and started again
+                while a copy on it catches up with the primary that took its
+                tenant over
+    move        a tenant moved to the third node, its source killed, paused
+                or cut off from the router once it is seen moving, its image
+                coming over a slowed link: a failover during the move
+    clock       the clock of a node holding a primary jumped by hours or
+                days, ahead or back, and every copy on it read back shifted,
+                and then not (`FENNEC_TEST_CLOCK`,
+                crates/fennec-http/src/test_clock.rs: Docker moves no
+                container's wall clock)
 
-To settle, every node runs again, every tenant is placed with a replica,
-the clients pause, and every replica's rows must equal its primary's (a
-digest of each). At the end the clients stop, every register is read once
-more, and the history is held to deploy/drill/oracle.py: the YCSB register
-checker, every append answered found and none refused found, and no tenant
+Each fault says whether it landed; one that did not is drawn again, three
+misses in a row failing the seed, and the run goes on past its minutes
+until every kind has landed once.
+
+To settle, every node runs again, no netem is left (read back), every
+tenant is placed with a replica, the clients pause, every replica's rows
+must equal its primary's (a digest of each), and each primary's term is
+read off a write to it. At the end the clients stop, every register is
+read once more, and the history is held to deploy/drill/oracle.py: the
+YCSB register checker, every write and append answered found and none
+refused found -- a write lost counted, not failed, only in the window a
+failover is documented to lose (`oracle.documented`) -- and no tenant
 written by two primaries at once. Exit status 0 when every seed passed.
 
 Knobs (environment): SEEDS (3), SEED0 (1), CHAOS_MINUTES of faults a seed
-(3), CHAOS_LEASE seconds (2), CHAOS_TENANTS (4), CHAOS_CLIENTS a tenant
-(2), CHAOS_RATE operations a second a client (40), CHAOS_IMAGE
+(3), CHAOS_LEASE seconds (5, the kit's), CHAOS_TENANTS (4), CHAOS_CLIENTS
+a tenant (2), CHAOS_RATE operations a second a client (40), CHAOS_IMAGE
 (fennec-kit-chaos), CHAOS_OUT a directory for each seed's result and, when
 it failed, its history and logs (a temporary one otherwise), CHAOS_KEEP=1
-to leave a failed seed's containers for a look.
+to leave a failed seed's containers for a look, and run no seed after it.
 
 The standard library alone.
 """
@@ -72,6 +83,7 @@ import tempfile
 import threading
 import time
 import traceback
+from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -81,7 +93,7 @@ IMAGE = os.environ.get("CHAOS_IMAGE", "fennec-kit-chaos")
 SEEDS = int(os.environ.get("SEEDS", "3"))
 SEED0 = int(os.environ.get("SEED0", "1"))
 MINUTES = float(os.environ.get("CHAOS_MINUTES", "3"))
-LEASE = int(os.environ.get("CHAOS_LEASE", "2"))
+LEASE = int(os.environ.get("CHAOS_LEASE", "5"))
 TENANTS = int(os.environ.get("CHAOS_TENANTS", "4"))
 CLIENTS = int(os.environ.get("CHAOS_CLIENTS", "2"))
 RATE = float(os.environ.get("CHAOS_RATE", "40"))
@@ -153,8 +165,15 @@ def outer():
             run = f"fchaos-{seed}-{secrets.token_hex(3)}"
             current[0] = run
             verdicts[seed] = one_seed(seed, run, out)
-            sweep(run)
             current[0] = None
+            if KEEP and not verdicts[seed]:
+                # Left as it stood for a look, and no seed after it run
+                # beside it.
+                say(f"CHAOS_KEEP=1: seed {seed}'s containers, volumes and network left, and no seed "
+                    f"after it run; `docker rm -f $(docker ps -aq --filter label=fennec-chaos={run})`, "
+                    f"then its volumes and network by the same label, when done")
+                break
+            sweep(run)
     except KeyboardInterrupt:
         say("interrupted")
     finally:
@@ -286,7 +305,9 @@ def ip(name):
     return docker("inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", cname(name))
 
 
-def call(host, method, path, body=None, token=None, timeout=10):
+def call(host, method, path, body=None, token=None, timeout=10, headers=False):
+    """(status, body), and the answer's headers, lowercased, with
+    `headers`."""
     c = http.client.HTTPConnection(host, 8090 if host in ROUTERS or host == "g1" else 8081, timeout=timeout)
     try:
         h = {}
@@ -298,7 +319,10 @@ def call(host, method, path, body=None, token=None, timeout=10):
             h["Content-Type"] = "application/json"
         c.request(method, path, body=data, headers=h)
         r = c.getresponse()
-        return r.status, r.read().decode("utf-8", "replace")
+        text = r.read().decode("utf-8", "replace")
+        if headers:
+            return r.status, text, {k.lower(): v for k, v in r.getheaders()}
+        return r.status, text
     finally:
         c.close()
 
@@ -307,9 +331,24 @@ def shard(router, method, path, body=None, timeout=10):
     return call(router, method, path, body, token=ROOT, timeout=timeout)
 
 
-def query(host, tenant, sql, params=None, timeout=10):
+def query(host, tenant, sql, params=None, timeout=10, headers=False):
     body = {"query": sql} if params is None else {"query": sql, "params": params}
-    return call(host, "POST", f"/t/{tenant}/query", body, token=DATA, timeout=timeout)
+    return call(host, "POST", f"/t/{tenant}/query", body, token=DATA, timeout=timeout, headers=headers)
+
+
+def history_of(headers):
+    """A write's `Fennec-History`, `<term>-<id, hex>`, as (term, id)."""
+    hist = headers.get("fennec-history")
+    if not hist:
+        return None
+    term, _, hid = hist.partition("-")
+    return int(term), int(hid, 16)
+
+
+def wall_ms(text):
+    """A timestamp as an answer writes it (RFC 3339, UTC), in milliseconds."""
+    when = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    return round(when.timestamp() * 1000)
 
 
 def rows_of(text):
@@ -387,7 +426,13 @@ def build_world():
         tenants.append(t)
     for t in tenants:
         until(lambda: query("r1", t, "get regs count")[0] == 200, f"{t} through r1")
-        for sql in ["create collection log (k int)", "create collection pad (b text)"]:
+        # `wl`: each register write's value, landed in its block -- the
+        # ledger a loss no read sees is found in. `probe`: one row, what
+        # a settle writes to learn the term a primary answers in, and a
+        # clock fault reads `now()` beside.
+        for sql in ["create collection log (k int)", "create collection pad (b text)",
+                    "create collection wl (k int)", "create collection probe (n int)",
+                    "put probe {id: 1, n: 0}"]:
             s, b = query("r1", t, sql)
             check(s == 200, f"{t}: {sql}: {s} {b}")
         for lo in range(1, PAD_ROWS + 1, 50):
@@ -448,13 +493,21 @@ class Client(threading.Thread):
         self.garbled = []
 
     def connect(self):
-        self.conn = http.client.HTTPConnection(ROUTERS[self.at], 8090, timeout=10)
+        # Past the routers' upstream timeout, so a request the router
+        # gives up on is its answer, not the client's.
+        self.conn = http.client.HTTPConnection(ROUTERS[self.at], 8090, timeout=UPSTREAM + 5)
         self.conn.connect()
 
-    def ask(self, sql, params):
+    def ask(self, sql, params, also=None):
         """(outcome, status, headers, body): `fail` for what cannot have run
-        -- a 4xx, a 503, no connection made -- `unknown` for what may have."""
-        body = json.dumps({"query": sql, "params": params})
+        -- a 4xx, a 503, no connection made -- `unknown` for what may have.
+        With `also`, a second statement and its parameters, the two go as
+        one `/batch`: one block, landed whole or not at all."""
+        if also is None:
+            path, body, kind = "query", json.dumps({"query": sql, "params": params}), "application/json"
+        else:
+            path, kind = "batch", "application/x-ndjson"
+            body = "\n".join(json.dumps({"query": q, "params": ps}) for q, ps in [(sql, params), also])
         if self.conn is None:
             try:
                 self.connect()
@@ -463,8 +516,8 @@ class Client(threading.Thread):
                 self.at = (self.at + 1) % len(ROUTERS)
                 return "fail", None, {}, f"no connection: {type(e).__name__}"
         try:
-            self.conn.request("POST", f"/t/{self.tenant}/query", body=body, headers={
-                "Authorization": f"Bearer {DATA}", "Content-Type": "application/json"})
+            self.conn.request("POST", f"/t/{self.tenant}/{path}", body=body, headers={
+                "Authorization": f"Bearer {DATA}", "Content-Type": kind})
         except (OSError, http.client.HTTPException) as e:
             # Some of it may have gone: what the server read of it may run.
             self.drop()
@@ -511,7 +564,10 @@ class Client(threading.Thread):
         s = time.monotonic()
         if roll < 0.45:
             v = unique()
-            outcome, status, h, text = self.ask("put regs {id: $1, v: $2, at: now()}", [key, v])
+            # The register and its ledger row, one block: every write
+            # answered is found in `wl` at the end, whatever wrote over it.
+            outcome, status, h, text = self.ask("put regs {id: $1, v: $2, at: now()}", [key, v],
+                                                ("put wl {id: $1, k: $2}", [v, key]))
             op = oracle.Op("w", self.tenant, key, v, s, time.monotonic(), outcome, why=status)
         elif roll < 0.8:
             outcome, status, h, text = self.ask("get regs where id = $1", [key])
@@ -533,10 +589,7 @@ class Client(threading.Thread):
         if outcome == "ok" and op.kind != "r":
             try:
                 op.seq = int(h["fennec-seq"]) if "fennec-seq" in h else None
-                hist = h.get("fennec-history")
-                if hist:
-                    term, _, hid = hist.partition("-")
-                    op.history = (int(term), int(hid, 16))
+                op.history = history_of(h)
             except ValueError:
                 # Answered, so it ran: kept as written, and the answer
                 # failed at the end.
@@ -586,6 +639,27 @@ def clear(name):
     docker("exec", cname(name), "sh", "-c", "tc qdisc del dev eth0 root 2>/dev/null; true", check_=False)
 
 
+def netem_on(name):
+    """The netem qdiscs `name` holds, as tc shows them; empty where none.
+    A container tc cannot be asked of fails the run: an answer nobody gave
+    is no link found clear."""
+    shown = docker("exec", cname(name), "tc", "qdisc", "show", "dev", "eth0")
+    return [line for line in shown.splitlines() if "netem" in line]
+
+
+def cleared(name):
+    """`clear`, until tc shows no netem on `name`, five tries; a fault's
+    link left delayed or cut would hold a copy behind as the digests are
+    compared, and pass or fail a check that faults no longer touch."""
+    for _ in range(5):
+        clear(name)
+        left = netem_on(name)
+        if not left:
+            return
+        time.sleep(0.2)
+    raise Failed(f"netem left on {name} after five clears: {left}")
+
+
 def link_spec(rng):
     kind = rng.choice(["delay", "loss", "partition", "delay+loss"])
     d = rng.randint(50, 400)
@@ -598,11 +672,29 @@ def link_spec(rng):
     }[kind]
 
 
+def now_on(node, t):
+    """`now()` as `node`'s copy of `t` -- primary or replica -- evaluates
+    it, in milliseconds; None where it does not answer."""
+    s, b = query(node, t, "get probe select now() as t limit 1")
+    if s != 200:
+        return None
+    rows = rows_of(b)
+    return wall_ms(rows[0]["t"]) if rows else None
+
+
 class Schedule:
     """The faults, drawn from the seed: each a function applying one, holding
-    it, and healing it, the run's record of it returned."""
+    it, and healing it, the run's record of it returned -- whether it landed
+    (`landed`, and `missed` saying why where it did not) and what it held
+    behind: `behind_on`, the nodes whose copies it killed, paused or made
+    catch up, and `links`, the pairs of nodes whose link it impaired, which
+    the oracle reads a lost write against (`oracle.documented`)."""
 
     WEIGHTS = {"kill": 2, "pause": 2, "router": 3, "replica": 3, "catch-up": 1, "move": 1, "clock": 1}
+    # A fault that did not land is drawn again, the same kind; one that
+    # misses this many times in a row fails the seed rather than pass it
+    # with a fault never made.
+    TRIES = 3
 
     def __init__(self, tenants):
         self.rng = random.Random(f"{SEED}/schedule")
@@ -611,60 +703,118 @@ class Schedule:
         # meets each; then by weight.
         self.first = list(self.WEIGHTS)
         self.rng.shuffle(self.first)
+        self.again = None
+        self.landed = {k: 0 for k in self.WEIGHTS}
+        self.missed = {k: 0 for k in self.WEIGHTS}
+        self.in_a_row = {k: 0 for k in self.WEIGHTS}
 
     def next(self):
-        if self.first:
+        if self.again:
+            kind, self.again = self.again, None
+        elif self.first:
             kind = self.first.pop()
         else:
             kinds = list(self.WEIGHTS)
             kind = self.rng.choices(kinds, [self.WEIGHTS[k] for k in kinds])[0]
         return kind, getattr(self, "f_" + kind.replace("-", "_"))
 
+    def took(self, kind, got):
+        """Counts what `kind` did; one that did not land is drawn again."""
+        if got.get("landed"):
+            self.landed[kind] += 1
+            self.in_a_row[kind] = 0
+            return
+        self.missed[kind] += 1
+        self.in_a_row[kind] += 1
+        if self.in_a_row[kind] >= self.TRIES:
+            raise Failed(f"fault {kind} did not land in {self.TRIES} tries in a row: {got.get('missed')}")
+        self.again = kind
+
+    def done(self):
+        """Every kind drawn and landed once, none waiting to be drawn again."""
+        return not self.first and self.again is None
+
     def hold(self, lo, hi):
         return round(self.rng.uniform(lo, hi) * LEASE, 2)
 
-    def node(self):
-        return self.rng.choice([n for n, _ in NODES])
+    def node(self, among=None):
+        return self.rng.choice(among or [n for n, _ in NODES])
+
+    def placements(self):
+        return {t: placement(t) for t in self.tenants}
 
     def f_kill(self):
         n, held = self.node(), self.hold(0.5, 4)
         docker("kill", cname(n))
+        try:
+            until(lambda: not state(n)[0], f"{n} to stop", within=10, every=0.05)
+            landed = True
+        except Failed:
+            landed = False
         time.sleep(held)
         restart(n)
-        return {"node": n, "down_s": held}
+        return {"node": n, "down_s": held, "landed": landed,
+                "missed": "the node still ran after docker kill", "behind_on": [n]}
 
     def f_pause(self):
         n, held = self.node(), self.hold(0.5, 3)
         docker("pause", cname(n))
+        try:
+            until(lambda: state(n)[1], f"{n} to pause", within=10, every=0.05)
+            paused = True
+        except Failed:
+            paused = False
         time.sleep(held)
         docker("unpause", cname(n))
-        return {"node": n, "paused_s": held, "past_lease": held > LEASE}
+        return {"node": n, "paused_s": held, "past_lease": held > LEASE, "landed": paused,
+                "missed": "docker pause left the node running", "behind_on": [n]}
 
     def f_router(self):
-        r = self.rng.choice(["r1", "r1", "r2"])
+        # The region's router, which leases the nodes and carries every
+        # client: its standby carries nothing, and a link of its cut is no
+        # fault anything meets.
+        r = "r1"
         n = self.node()
         kind, spec = link_spec(self.rng)
         held = self.hold(0.5, 3)
         netem(r, [ip(n)], spec)
         netem(n, [ip(r)], spec)
+        landed = bool(netem_on(r)) and bool(netem_on(n))
         time.sleep(held)
         clear(r)
         clear(n)
-        return {"router": r, "node": n, "link": kind, "netem": spec, "held_s": held}
+        return {"router": r, "node": n, "link": kind, "netem": spec, "held_s": held,
+                "landed": landed, "missed": "tc showed no netem on the link", "behind_on": [], "links": []}
 
     def f_replica(self):
-        a, b = self.rng.sample([n for n, _ in NODES], 2)
+        # A link a tenant's stream runs over: its primary's node and its
+        # replica's, as the router places them now.
+        ps = self.placements()
+        pairs = sorted({(p["node"], p["replica"]) for p in ps.values() if p.get("replica")})
+        if not pairs:
+            return {"landed": False, "missed": "no tenant had a replica to cut its link"}
+        a, b = self.rng.choice(pairs)
         kind, spec = link_spec(self.rng)
         held = self.hold(0.5, 3)
         netem(a, [ip(b)], spec)
         netem(b, [ip(a)], spec)
+        landed = bool(netem_on(a)) and bool(netem_on(b))
         time.sleep(held)
         clear(a)
         clear(b)
-        return {"nodes": [a, b], "link": kind, "netem": spec, "held_s": held}
+        streams = sorted(t for t, p in ps.items() if {p.get("node"), p.get("replica")} == {a, b})
+        return {"nodes": [a, b], "streams_of": streams, "link": kind, "netem": spec, "held_s": held,
+                "landed": landed, "missed": "tc showed no netem on the link", "behind_on": [],
+                "links": [[a, b]]}
 
     def f_catch_up(self):
-        n = self.node()
+        # A node holding a primary: failed over, it comes back as that
+        # tenant's copy and catches up -- from an image, its history forked
+        # past -- over the links slowed below. One holding replicas alone
+        # has them taken off as it is failed over, and placed elsewhere.
+        ps = self.placements()
+        primaries = sorted({p["node"] for p in ps.values() if p.get("node") in dict(NODES)})
+        n = self.node(primaries)
         others = [m for m, _ in NODES if m != n]
         down = self.hold(1.5, 3)
         docker("kill", cname(n))
@@ -697,24 +847,27 @@ class Schedule:
             seen = until(behind, f"a copy on {n} catching up", within=10 + 3 * LEASE, every=0.1)
         except Failed:
             seen = []
-        docker("kill", cname(n))
-        time.sleep(self.hold(0.1, 1))
-        restart(n)
+        if seen:
+            # Killed again while its copies catch up, and started again.
+            docker("kill", cname(n))
+            time.sleep(self.hold(0.1, 1))
+            restart(n)
         for m in others:
             clear(m)
-        return {"node": n, "down_s": down, "rate": rate, "restarted_while_behind": seen}
+        return {"node": n, "down_s": down, "rate": rate, "restarted_while_behind": seen,
+                "landed": bool(seen), "missed": f"no copy the router named on {n} was seen behind",
+                "behind_on": [n]}
 
     def f_move(self):
         moves = []
-        for t in self.tenants:
-            p = placement(t)
+        for t, p in self.placements().items():
             if p.get("state") == "active" and p.get("replica"):
                 to = [m for m, _ in NODES if m not in (p["node"], p["replica"])]
                 if to:
                     moves.append((t, p["node"], to[0]))
         if not moves:
-            return {"skipped": "no tenant to move"}
-        t, src, to = self.rng.choice(moves)
+            return {"landed": False, "missed": "no tenant active with a replica and a node free"}
+        t, src, to = self.rng.choice(sorted(moves))
         how = self.rng.choice(["kill", "pause", "partition"])
         rate = self.rng.choice(["256kbit", "512kbit"])
         netem(src, [ip("r1")], f"rate {rate}")
@@ -728,42 +881,80 @@ class Schedule:
                 answer["status"], answer["body"] = None, type(e).__name__
         mover = threading.Thread(target=move, daemon=True)
         mover.start()
-        moving = True
         try:
             until(lambda: placement(t).get("state") == "moving", f"{t} to be moving", within=10, every=0.05)
+            moving = True
         except Failed:
             moving = False
-        time.sleep(self.rng.uniform(0, 1.5))
-        held = self.hold(1.5, 3)
-        if how == "kill":
-            docker("kill", cname(src))
-        elif how == "pause":
-            docker("pause", cname(src))
-        else:
-            clear(src)
-            netem(src, [ip("r1")], "loss 100%")
-            netem("r1", [ip(src)], "loss 100%")
-        time.sleep(held)
-        if how == "kill":
-            restart(src)
-        elif how == "pause":
-            docker("unpause", cname(src))
-        else:
-            clear("r1")
+        held = 0
+        if moving:
+            # The source failed over while the tenant moves. A move that
+            # was never seen moving is not hit: the fault would be a plain
+            # kill, pause or cut, drawn again as a move.
+            time.sleep(self.rng.uniform(0, 1.5))
+            held = self.hold(1.5, 3)
+            if how == "kill":
+                docker("kill", cname(src))
+            elif how == "pause":
+                docker("pause", cname(src))
+            else:
+                clear(src)
+                netem(src, [ip("r1")], "loss 100%")
+                netem("r1", [ip(src)], "loss 100%")
+            time.sleep(held)
+            if how == "kill":
+                restart(src)
+            elif how == "pause":
+                docker("unpause", cname(src))
+            else:
+                clear("r1")
         clear(src)
         mover.join(timeout=150)
         return {"tenant": t, "from": src, "to": to, "source": how, "held_s": held, "rate": rate,
                 "moving_when_hit": moving, "move_answer": answer.get("status"),
-                "move_body": str(answer.get("body"))[:300]}
+                "move_body": str(answer.get("body"))[:300], "landed": moving,
+                "missed": f"{t} was never seen moving: the move ended, or was refused, first",
+                "behind_on": [src] if moving and how != "partition" else []}
 
     def f_clock(self):
-        n = self.node()
+        # A node holding a primary, so that the jump moves what a primary
+        # evaluates -- the registers' `at` -- besides its copies' reads.
+        ps = self.placements()
+        primaries = sorted({p["node"] for p in ps.values() if p.get("node") in dict(NODES)})
+        n = self.node(primaries)
+        copies = sorted(t for t, p in ps.items() if n in (p.get("node"), p.get("replica")))
         shift = self.rng.choice([-1, 1]) * self.rng.choice([3_600_000, 6 * 3_600_000, 86_400_000, 30 * 86_400_000])
         held = self.hold(1, 4)
         docker("exec", cname(n), "sh", "-c", f"echo {shift} > {CLOCK_FILE}")
+        # Landed once every copy on the node reads `now()` the shift away
+        # from the system's clock, a minute either way.
+        off = {}
+
+        def moved(want):
+            off.clear()
+            for t in copies:
+                got = now_on(n, t)
+                off[t] = None if got is None else got - round(time.time() * 1000)
+            return all(v is not None and abs(v - want) < 60_000 for v in off.values())
+
+        try:
+            until(lambda: moved(shift), f"{n}'s copies to read the shifted clock", within=10, every=0.1)
+            landed = True
+        except Failed:
+            landed = False
+        seen = dict(off)
         time.sleep(held)
         docker("exec", cname(n), "sh", "-c", f": > {CLOCK_FILE}")
-        return {"node": n, "shift_ms": shift, "held_s": held}
+        # And back: a tenant left at the shifted time stood still there,
+        # its slot busy as the shift ended (test_clock.rs).
+        try:
+            until(lambda: moved(0), f"{n}'s copies to read the system's clock again", within=20, every=0.1)
+        except Failed:
+            raise Failed(f"{n}'s clock stayed shifted after its shift ended, ms off by copy: {off}") from None
+        return {"node": n, "shift_ms": shift, "held_s": held, "copies": copies,
+                "landed": landed, "off_ms_while_shifted": seen,
+                "missed": f"{n}'s copies did not read the shifted clock: ms off by copy {seen}",
+                "behind_on": []}
 
 
 # ---------------------------------------------------------------- settling
@@ -771,22 +962,22 @@ class Schedule:
 
 def heal_all():
     """Whatever a fault left: every node and router running and unpaused,
-    no netem anywhere, every clock the system's."""
+    no netem anywhere -- read back, before any copy is compared -- and
+    every clock the system's."""
     for name in ["g1", *ROUTERS, *[n for n, _ in NODES]]:
         running, paused = state(name)
         if paused:
             docker("unpause", cname(name))
         if not running:
             restart(name)
-        if name != "g1":
-            clear(name)
+        cleared(name)
     for n, _ in NODES:
-        docker("exec", cname(n), "sh", "-c", f": > {CLOCK_FILE}", check_=False)
+        docker("exec", cname(n), "sh", "-c", f": > {CLOCK_FILE}")
 
 
 def copy_rows(node, t):
     rows = {}
-    for c in ["regs", "log"]:
+    for c in ["regs", "log", "wl"]:
         s, b = query(node, t, f"get {c}", timeout=30)
         if s != 200:
             raise Failed(f"{c} of {t} on {node}: {s} {b[:200]}")
@@ -878,10 +1069,27 @@ def settle(tenants, clients, record, why):
             digests[t] = {"primary": last["p"]["node"], "replica": last["p"]["replica"],
                           "digest": oracle.digest(last["a"]),
                           "rows": {c: len(r) for c, r in last["a"].items()}}
+        terms = {t: terms_of(t) for t in tenants}
         record["settles"].append({"after": why, "ms": round((time.monotonic() - began) * 1000),
-                                  "digests": digests})
+                                  "digests": digests, "placed": terms})
+        return terms
     finally:
         resume_all(clients)
+
+
+def terms_of(t):
+    """[primary, replica, [term, history id]]: the term `t`'s primary
+    answers a write in now, asked of the node itself, so the term is the
+    node's -- the clients paused, a write to `probe` that moves nothing
+    the oracle reads."""
+    def ask():
+        p = placement(t)
+        s, b, h = query(p["node"], t, "set probe {n: n + 1} where id = 1", headers=True)
+        if s != 200:
+            return None
+        # No Fennec-History: the root's, which no promotion forked yet.
+        return [p["node"], p.get("replica"), list(history_of(h) or (0, 0))]
+    return until(ask, f"the term {t}'s primary answers in", within=60, every=0.25)
 
 
 # ------------------------------------------------------------------- inner
@@ -892,33 +1100,50 @@ def inner():
               "clients_per_tenant": CLIENTS, "faults": [], "settles": [], "operator": [],
               "violations": []}
     clients = []
+    sched = None
     ok = False
     deadline = time.monotonic() + MINUTES * 60 + 600
     try:
         tenants = build_world()
+        placed = {t: terms_of(t) for t in tenants}
         clients = [Client(i, t) for i, t in enumerate(t for t in tenants for _ in range(CLIENTS))]
+        since = time.monotonic()
         for c in clients:
             c.start()
         time.sleep(2)
         sched = Schedule(tenants)
         ends = time.monotonic() + MINUTES * 60
-        while time.monotonic() < ends:
+        # The minutes of faults, and on until every kind has landed once.
+        while time.monotonic() < ends or not sched.done():
+            check(time.monotonic() < deadline, "the run outlasted its bound before every fault landed once")
             kind, fault = sched.next()
-            at = time.monotonic() - T0
-            say(f"fault {len(record['faults']) + 1}: {kind}")
+            began = time.monotonic()
+            at = began - T0
+            n = len(record["faults"]) + 1
+            say(f"fault {n}: {kind}")
             got = fault()
             got.update({"fault": kind, "at_s": round(at, 2), "healed_at_s": round(time.monotonic() - T0, 2)})
             record["faults"].append(got)
             say(f"  {json.dumps(got)}")
-            settle(tenants, clients, record, f"fault {len(record['faults'])} ({kind})")
-            check(time.monotonic() < deadline, "the run outlasted its bound")
+            sched.took(kind, got)
+            settled = settle(tenants, clients, record, f"fault {n} ({kind})")
+            # Its span, from the settle before it to its own, for the
+            # oracle to read a lost write against (oracle.documented).
+            to = time.monotonic()
+            WINDOWS.append({"n": n, "fault": kind, "from": since, "start": began, "to": to,
+                            "placed": placed, "behind_on": got.get("behind_on", []),
+                            "links": got.get("links", [])})
+            since, placed = to, settled
             time.sleep(sched.rng.uniform(1, 3))
         for c in clients:
             c.stop.set()
         for c in clients:
             c.join(timeout=30)
-        settle(tenants, [], record, "the clients stopped")
-        finals(tenants, clients, record)
+        final = settle(tenants, [], record, "the clients stopped")
+        ended = time.monotonic()
+        WINDOWS.append({"n": "end", "fault": "none", "from": since, "start": ended, "to": ended,
+                        "placed": placed, "behind_on": [], "links": []})
+        finals(tenants, clients, record, {t: v[2] for t, v in final.items()})
         ok = not record["violations"]
     except Failed as e:
         say(f"FAILED: {e}")
@@ -932,10 +1157,12 @@ def inner():
         for c in clients:
             c.stop.set()
         ops = [op for c in clients for op in c.ops]
-        summarize(record, ops)
+        record["windows"] = WINDOWS
+        summarize(record, ops, sched)
         if not ok:
             # Every operation and the final reads, which oracle.py reads
-            # back as they were checked (Op.from_json).
+            # back as they were checked (Op.from_json), the spans beside
+            # them in result.json.
             with open(os.path.join(OUT, "history.json"), "w") as f:
                 json.dump([op.to_json() for op in ops + FINAL_READS], f)
             logs()
@@ -949,14 +1176,18 @@ def inner():
 
 
 FINAL_READS = []
+# Each fault's span, from the settle before it to its own, with what the
+# settle before it found placed and what the fault held behind.
+WINDOWS = []
 
 
-def finals(tenants, clients, record):
+def finals(tenants, clients, record, final):
     """The clients stopped: every register read once more through the
-    router, and each primary's appends, for the oracle."""
+    router, and each primary's appends and ledger, for the oracle. `final`
+    is each tenant's [term, history id] as the last settle found it."""
     ops = [op for c in clients for op in c.ops]
     reads = FINAL_READS
-    found = {}
+    found = {"a": {}, "w": {}}
     for t in tenants:
         for k in range(1, REGISTERS + 1):
             s = time.monotonic()
@@ -964,23 +1195,38 @@ def finals(tenants, clients, record):
             check(st == 200, f"the final read of {t}/{k}: {st} {b[:200]}")
             rows = rows_of(b)
             reads.append(oracle.Op("r", t, k, rows[0]["v"] if rows else None, s, time.monotonic(), "ok"))
-        st, b = query("r1", t, "get log select id", timeout=60)
-        check(st == 200, f"the appends of {t}: {st} {b[:200]}")
-        found[t] = {r["id"] for r in rows_of(b)}
-        st, b = query("r1", t, "get log count", timeout=60)
-        check(st == 200 and rows_of(b)[0]["count"] == len(found[t]),
-              f"{t}'s appends read whole: {len(found[t])} of {b[:200]}")
-    history = ops + reads
+        for kind, c in [("a", "log"), ("w", "wl")]:
+            st, b = query("r1", t, f"get {c} select id", timeout=60)
+            check(st == 200, f"{t}'s {c}: {st} {b[:200]}")
+            found[kind][t] = {r["id"] for r in rows_of(b)}
+            st, b = query("r1", t, f"get {c} count", timeout=60)
+            check(st == 200 and rows_of(b)[0]["count"] == len(found[kind][t]),
+                  f"{t}'s {c} read whole: {len(found[kind][t])} of {b[:200]}")
     record["violations"] += [f"an answer that does not read: {g}" for c in clients for g in c.garbled][:20]
+    lost, ran = [], []
+    for kind in ("a", "w"):
+        lo, ra = oracle.check_kept(ops, found[kind], kind)
+        lost += lo
+        ran += ra
+    inside, outside = [], []
+    for op in lost:
+        within, why = oracle.documented(op, WINDOWS, final)
+        (inside if within else outside).append((op, why))
+    names = {"w": "register write", "a": "append"}
+    record["acknowledged_lost"] = {"outside_the_window": len(outside), "inside_the_window": len(inside)}
+    record["lost_inside_the_window"] = [f"{names[op.kind]} {op!r}: {why}" for op, why in inside]
+    record["violations"] += [f"{names[op.kind]} answered and lost: {op!r}: {why}" for op, why in outside[:20]]
+    if len(outside) > 20:
+        record["violations"].append(f"... {len(outside) - 20} more answered and lost")
+    record["violations"] += [f"{names[op.kind]} refused and found: {op!r}" for op in ran[:20]]
+    # A write lost inside the window may have been read before its
+    # failover, and a read after it find the value before it.
+    history = oracle.as_unknown(ops + reads, {op.value for op, _ in inside if op.kind == "w"})
     record["violations"] += [f"register: {v}" for v in oracle.check_registers(history)]
-    lost, ran = oracle.check_appends(ops, found)
-    record["violations"] += [f"append answered and lost: {op!r}" for op in lost[:20]]
-    record["violations"] += [f"append refused and found: {op!r}" for op in ran[:20]]
-    record["lost_appends"] = len(lost)
     record["violations"] += [f"epoch: {v}" for v in oracle.check_epochs(ops)]
 
 
-def summarize(record, ops):
+def summarize(record, ops, sched):
     counts = {}
     for op in ops:
         counts.setdefault(op.kind, {}).setdefault(op.outcome, 0)
@@ -994,13 +1240,28 @@ def summarize(record, ops):
     record["terms"] = {t: sorted(v) for t, v in sorted(terms.items())}
     print()
     print(f"== chaos seed {SEED} ({RUN}): {'PASSED' if not record['violations'] and 'failed' not in record else 'FAILED'} ==")
-    by_kind = {}
+    landed = {}
+    missed = {}
     for f in record["faults"]:
-        by_kind[f["fault"]] = by_kind.get(f["fault"], 0) + 1
-    print(f"faults {len(record['faults'])}: " + ", ".join(f"{k} {n}" for k, n in sorted(by_kind.items())))
+        into = landed if f.get("landed") else missed
+        into[f["fault"]] = into.get(f["fault"], 0) + 1
+    record["landed"], record["missed"] = landed, missed
+    print(f"faults {len(record['faults'])}, landed: " + ", ".join(f"{k} {n}" for k, n in sorted(landed.items())))
+    if missed:
+        print("drawn again, not landing: " + ", ".join(f"{k} {n}" for k, n in sorted(missed.items())))
+    if sched is not None:
+        never = sorted(k for k, n in sched.landed.items() if not n)
+        if never:
+            print(f"never landed: {', '.join(never)}")
     for name, c in record["operations"].items():
         print(f"{name}: " + ", ".join(f"{o} {n}" for o, n in sorted(c.items())))
     print(f"terms reached by tenant: {record['terms']}")
+    lost = record.get("acknowledged_lost")
+    if lost is not None:
+        print(f"acknowledged writes and appends lost: {lost['outside_the_window']} outside the window the "
+              f"design names, {lost['inside_the_window']} inside it")
+        for line in record["lost_inside_the_window"][:10]:
+            print(f"  inside the window: {line}")
     removed = sum(len(o["removed"]) for o in record["operator"])
     if removed:
         print(f"files left on nodes removed as the runbook's operator does: {removed}")
@@ -1010,6 +1271,7 @@ def summarize(record, ops):
         print(f"VIOLATION {v}")
     if "failed" in record:
         print(f"failed: {record['failed']}")
+
 
 
 def logs():

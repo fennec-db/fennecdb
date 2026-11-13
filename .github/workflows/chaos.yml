@@ -6,9 +6,11 @@
 # copies catch up, a move's source failed over, a node's clock jumped (a
 # test build's fennec-server, `test-clock`). After each fault heals every
 # replica's rows must be its primary's, and at the end the history must
-# pass the YCSB register checker, every append answered must be found, and
-# no tenant may have been written by two primaries at once
-# (deploy/drill/oracle.py, docs/design/integrations.md#the-chaos-drill).
+# pass the YCSB register checker, every write and append answered must be
+# found -- but one a failover lost while its replica was behind, the window
+# the design names, which is counted -- and no tenant may have been written
+# by two primaries at once (deploy/drill/oracle.py,
+# docs/design/integrations.md#the-chaos-drill).
 #
 # Fifty seeds of ten minutes a week: more than a hosted job's six hours, so
 # three jobs, each a share of the seeds, after one that builds the image
@@ -73,6 +75,13 @@ jobs:
     env:
       SEEDS_ALL: ${{ inputs.seeds || '50' }}
       CHAOS_MINUTES: ${{ inputs.minutes || '10' }}
+      # The kit's own lease. Three nodes at a CPU each, three routers at a
+      # half and the driver at one are 5.5 CPUs of quota on a runner of 4:
+      # a lease of 2 s, missed under that load, failed a node over that no
+      # fault touched -- in a replica fault's lag, a loss in the window the
+      # design names (deploy/drill/oracle.py's `documented`), and a seed
+      # failed that found no bug.
+      CHAOS_LEASE: '5'
       SHARE: ${{ matrix.share }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -98,9 +107,18 @@ jobs:
         run: python3 deploy/drill/test_oracle.py
       - name: This share's seeds
         run: |
+          # The inputs are a dispatcher's text: bash's arithmetic evaluates
+          # a variable's value as an expression, so `a[$(...)]` would run
+          # a command in $(( n / 3 )). Digits alone, or nothing runs.
+          case "$SEEDS_ALL" in
+            ''|*[!0-9]*) echo "seeds: not a whole number: [$SEEDS_ALL]" >&2; exit 1 ;;
+          esac
+          case "$CHAOS_MINUTES" in
+            ''|.|*[!0-9.]*|*.*.*) echo "minutes: not a number: [$CHAOS_MINUTES]" >&2; exit 1 ;;
+          esac
           # SEEDS_ALL split over three shares of consecutive seeds, the
           # first shares one more where it does not divide.
-          n=$SEEDS_ALL; k=$SHARE
+          n=$((10#$SEEDS_ALL)); k=$SHARE
           each=$(( n / 3 )); extra=$(( n % 3 ))
           count=$(( each + (k <= extra ? 1 : 0) ))
           before=$(( (k - 1) * each + (k - 1 < extra ? k - 1 : extra) ))

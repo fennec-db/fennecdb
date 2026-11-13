@@ -960,13 +960,16 @@ drill:
 ## seed kills and pauses nodes, delays, drops and cuts links between a router
 ## and a node and between two nodes (tc netem), kills a node again mid
 ## catch-up, fails a move's source over and jumps a node's clock (a test
-## build's, `test-clock`). After each fault heals every replica's rows are
-## held to its primary's; at the end the history is held to the YCSB register
-## checker, every append answered found, and no tenant written by two
+## build's, `test-clock`), each fault drawn again until it lands. After each
+## fault heals every replica's rows are held to its primary's; at the end the
+## history is held to the YCSB register checker, every write and append
+## answered found -- but one a failover lost while its replica was behind,
+## the window the design names, counted -- and no tenant written by two
 ## primaries at once (deploy/drill/oracle.py). The driver runs in a container
 ## too, removed with everything else however the run ends.
-## SEEDS (3) seeds from SEED0 (1), CHAOS_MINUTES (3) of faults each;
-## CHAOS_OUT=<dir> keeps each seed's result, and a failure's history and logs
+## SEEDS (3) seeds from SEED0 (1), CHAOS_MINUTES (3) of faults each, at a
+## lease of CHAOS_LEASE (5) s; CHAOS_OUT=<dir> keeps each seed's result, and a
+## failure's history and logs; CHAOS_KEEP=1 leaves a failed seed's containers
 SEEDS ?= 3
 SEED0 ?= 1
 CHAOS_MINUTES ?= 3
