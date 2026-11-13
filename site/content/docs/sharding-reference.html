@@ -233,10 +233,14 @@ node needs a data token beside its admin token: a node with none answers only
 under this machine's names (<a href="#cors">CORS through the router</a>), so
 it would refuse the router's own calls with 403.</p>
 
-<pre data-lang="bash">fennec-server --dir /data/n1 --http 0.0.0.0:8081 --admin-token a1 \
+<pre data-lang="bash">fennec-server --dir /data/n1 --http 0.0.0.0:8081 --admin-token "$ADMIN1" \
          --http-token "$DATA_TOKEN" --tls-cert node1.pem --tls-key node1.key
 curl -X PUT localhost:8090/_shard/nodes/n1 -H 'Authorization: Bearer root' \
-     -d '{"addr":"https://node1.internal:8081","token":"a1"}'</pre>
+     -d '{"addr":"https://node1.internal:8081","token":"'"$ADMIN1"'"}'</pre>
+
+<p>Listening past loopback, the node takes no token shorter than 32 bytes
+(<a href="#tokens">Tokens</a>): <code>ADMIN1=$(openssl rand -hex 32)</code>
+makes one.</p>
 
 <ul>
   <li><b>What goes over TLS.</b> Every call the router makes to that node:
@@ -284,16 +288,16 @@ it.</p>
 <tbody>
 <tr><td><code>-l, --listen &lt;address&gt;</code></td><td>Where the router listens. Port 0 takes one the system picks: the <code>listening on: http://&lt;address&gt;</code> line on stderr (<code>https://</code> with <code>--tls-cert</code>) names it. Default <code>127.0.0.1:8090</code>.</td></tr>
 <tr><td><code>-d, --directory &lt;path&gt;</code></td><td>The directory file: which node holds which tenant (<a href="#the-router-fennec-shard">The router</a>). Default <code>shard.fennec</code>. The router holds <code>&lt;path&gt;.lock</code> while it runs, as a node holds each open tenant's, so a second router or a shell over the file is refused, the holder named.</td></tr>
-<tr><td><code>--token &lt;value&gt;</code></td><td>Requires <code>Authorization: Bearer &lt;value&gt;</code> on <code>/_shard/</code>. Data requests pass their own <code>Authorization</code> through to the nodes, which check it against <code>--http-token</code> (<a href="#tokens">Tokens</a>). Without it the router answers only under this machine's name and to its own pages and its <code>--http-cors</code>'s (<a href="#cors">the router's CORS rule</a>).</td></tr>
+<tr><td><code>--token &lt;value&gt;</code></td><td>Requires <code>Authorization: Bearer &lt;value&gt;</code> on <code>/_shard/</code>. Data requests pass their own <code>Authorization</code> through to the nodes, which check it against <code>--http-token</code> (<a href="#tokens">Tokens</a>). Without it the router answers only under this machine's name and to its own pages and its <code>--http-cors</code>'s (<a href="#cors">the router's CORS rule</a>). Where <code>--listen</code> is past loopback, 32 bytes at least, as every token of the router's.</td></tr>
 <tr><td><code>--insecure</code></td><td>Allows a non-loopback address without <code>--token</code>. Off by default.</td></tr>
 <tr><td><code>--tls-cert &lt;pem&gt;</code></td><td>Serves clients HTTPS alone, with this certificate chain: the router's certificate first, then its intermediates. Needs <code>--tls-key</code>, both or neither; a file that cannot be read or parsed, or a key that is not the certificate's, is refused at the start. A plain HTTP request is answered 400, naming <code>https://</code>. Read at the start: a renewed certificate takes a restart (<a href="server.html#tls">HTTPS</a>).</td></tr>
 <tr><td><code>--tls-key &lt;pem&gt;</code></td><td>The private key of that certificate, PKCS#8, PKCS#1 or SEC1. The router ends the clients' TLS with it; what the router dials itself does not need it.</td></tr>
 <tr><td><code>--tls-ca &lt;pem&gt;</code></td><td>The CAs every <code>https://</code> the router dials is held to &mdash; its nodes, a region's routers, <code>--replica-of</code> and <code>--global</code> &mdash; in place of Mozilla's roots, which it trusts without the flag. A file that cannot be read, or holds no certificate, is refused at the start (<a href="#https-nodes">Nodes that serve HTTPS</a>).</td></tr>
 <tr><td><code>--http-cors &lt;origin&gt;</code></td><td><code>Access-Control-Allow-Origin</code> on every answer the router gives, its own and the nodes' it forwards, whose CORS headers it replaces, and a browser's preflight answered here (<a href="#cors">the router's CORS rule</a>).</td></tr>
 <tr><td><code>--studio</code></td><td>Serves fennec studio, the admin pages, at <code>/_studio/</code>: a tenant's collections and rows in a browser, through this router, with the token pasted in. Keep it on a private network. Off by default.</td></tr>
-<tr><td><code>--entry-token &lt;value&gt;</code></td><td>The global entry's <code>ENTRY_TOKEN</code>: a request whose <code>Fennec-Client</code> header carries the entry's mark for its address, made within 60 s of this clock, is that client's (<a href="sharding-entry.html#global-entry">One URL for every region</a>).</td></tr>
+<tr><td><code>--entry-token &lt;value&gt;</code></td><td>The global entry's <code>ENTRY_TOKEN</code>: a request whose <code>Fennec-Client</code> header carries the entry's mark for its address, made within 60 s of this clock, is that client's (<a href="sharding-entry.html#global-entry">One URL for every region</a>). Past loopback 32 bytes at least.</td></tr>
 <tr><td><code>--audit &lt;path&gt;</code></td><td>Appends a JSON line to this file for each request refused for its token and each <code>/_shard/</code> request that changes something.</td></tr>
-<tr><td><code>--auth-delay &lt;ms&gt;</code></td><td>How long a request refused for its token waits, doubled for each one from the same address within a minute, 5 s at most; 0 turns it off. Default <code>100</code>.</td></tr>
+<tr><td><code>--auth-delay &lt;ms&gt;</code></td><td>How long a request refused for its token waits, doubled for each one from the same address within a minute, 5 s at most; 0 turns it off. An IPv6 address counts as its /64. Default <code>100</code>.</td></tr>
 <tr><td><code>--max-connections &lt;n&gt;</code></td><td>Ceiling on concurrent connections. Default <code>1000</code>.</td></tr>
 <tr><td><code>--max-body &lt;MiB&gt;</code></td><td>Request body ceiling. Default <code>64</code>.</td></tr>
 <tr><td><code>--upstream-timeout &lt;s&gt;</code></td><td>Connect and read bound towards a node; to an <code>https://</code> node the TLS handshake is part of the connect, within the same bound. Default <code>60</code>.</td></tr>
@@ -307,7 +311,7 @@ it.</p>
 <tr><td><code>--otlp-endpoint &lt;url&gt;</code></td><td>Sends OpenTelemetry traces, OTLP over HTTP as JSON, to this collector: <code>http://</code>, or <code>https://</code> over TLS, its certificate held to <code>--tls-ca</code> or Mozilla's roots, a port left out 443. Also read from <code>OTEL_EXPORTER_OTLP_TRACES_ENDPOINT</code> and <code>OTEL_EXPORTER_OTLP_ENDPOINT</code>. Off by default.</td></tr>
 <tr><td><code>--otlp-header &lt;k=v&gt;</code></td><td>A header on every post, such as an API key; repeatable. Also read from <code>OTEL_EXPORTER_OTLP_HEADERS</code>.</td></tr>
 <tr><td><code>--trace-sample &lt;ratio&gt;</code></td><td>The share of the requests that start a trace here that are kept, 0 to 1. A request whose <code>traceparent</code> was sampled is traced whatever the ratio. The service is named by <code>OTEL_SERVICE_NAME</code> (<code>fennec-shard</code> by default). Default <code>1</code> with an endpoint.</td></tr>
-<tr><td><code>--replication-token &lt;value&gt;</code></td><td>Serves the directory to standby routers at <code>/_replication</code>, and presents this to a primary (<a href="sharding-failover.html#standby-router">A standby router</a>).</td></tr>
+<tr><td><code>--replication-token &lt;value&gt;</code></td><td>Serves the directory to standby routers at <code>/_replication</code>, and presents this to a primary (<a href="sharding-failover.html#standby-router">A standby router</a>). Past loopback 32 bytes at least.</td></tr>
 <tr><td><code>--replica-of &lt;url&gt;</code></td><td>Follows the primary router at <code>http://host:port</code>, or <code>https://host:port</code> over TLS: the directory arrives from it, <code>/_shard/</code> changes are refused here, and forwarding goes on as ever.</td></tr>
 <tr><td><code>--promote</code></td><td>Takes writes on a standby's directory file: its history forks here. A standby's file opens only with <code>--replica-of</code> or this. Off by default.</td></tr>
 <tr><td><code>--replication-buffer &lt;MiB&gt;</code></td><td>Directory writes kept for standbys that fall behind. Default <code>8</code>.</td></tr>
@@ -423,6 +427,17 @@ for managing the router. A user's JSON Web Token is bound to the tenant its
          --jwt-secret-file jwt.secret --policy policy.txt
 fennec-server --jwt-secret-file jwt.secret --mint-token '{"sub":"alice","tenant":"acme"}'
 </pre>
+
+<p id="token-length">Past loopback every token is 32 bytes at least. A node
+listening beyond loopback refuses at the start an <code>--http-token</code>,
+<code>--admin-token</code> or <code>--replication-token</code> shorter than
+that, and a router whose <code>--listen</code> is beyond it its
+<code>--token</code>, <code>--entry-token</code> or
+<code>--replication-token</code>, from the flag or its variable, the flag
+named (exit 2). A refused token waits by its client's address, an IPv6 one
+by its /64, but a client may hold many addresses; <code>openssl rand -hex
+32</code> makes a token. On loopback any length is taken, as this page's
+examples on 127.0.0.1 are.</p>
 
 <details class="deep"><summary>The three tokens, and JWTs on a node</summary>
 <p>Three, each for a different job. Data requests carry whatever the nodes'

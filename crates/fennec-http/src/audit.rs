@@ -22,7 +22,9 @@
 //! from an address within a minute, twice as long after each one more, 5 s
 //! at most. A token guessed went from as many tries as the round trips
 //! allow to about one every five seconds an address, and a client whose
-//! token is right is not slowed at all.
+//! token is right is not slowed at all. An IPv6 address is counted by its
+//! /64 (`counted_ip`), and a full table lets its oldest count go
+//! ([`ADDRESSES`]).
 //!
 //! **Only a token verified starts the count again** ([`verified`], called
 //! where a token is compared or a JWT's signature checked and found good).
@@ -44,9 +46,9 @@
 //! through the entry started that count again for everyone.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Write;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -60,9 +62,15 @@ static FAILING: AtomicU64 = AtomicU64::new(0);
 const MOST: Duration = Duration::from_secs(5);
 /// Failures further apart than this start the count again.
 const WINDOW: Duration = Duration::from_secs(60);
-/// Addresses remembered at most; past it the table starts again, which
-/// forgives every address once rather than grow without end.
-const ADDRESSES: usize = 10_000;
+/// Addresses remembered at most, each a few dozen bytes: past it the one
+/// refused longest ago goes as a new one comes (`Table::count`). The table
+/// was cleared whole there, and a client sending from that many addresses
+/// forgave every count with it -- its own guessing address's among them.
+/// Nor does a new address wait the longest, as one past the hooks' full
+/// table does (`hooks::Fails`): the clients of an app whose tokens expired
+/// together are each a 401 of their own, and each would wait 5 s to learn
+/// it should refresh.
+pub const ADDRESSES: usize = 10_000;
 
 /// Appends the events to `path` from now on.
 pub fn open(path: &std::path::Path) -> std::io::Result<()> {
@@ -856,17 +864,88 @@ pub(crate) type Failures = HashMap<(IpAddr, u64), (u32, Instant)>;
 /// The second key of a token's count: an address has one.
 const TOKENS: u64 = 0;
 
-/// The key a token's count is kept by: its address, an IPv4 address
-/// mapped into IPv6 as itself. A router listening on `[::]` sees a client reaching it over
+/// The address a refusal is counted by, a token's and a hook's event's
+/// alike: an IPv4 address mapped into IPv6 as itself, an IPv6 address by
+/// its /64. A router listening on `[::]` sees a client reaching it over
 /// IPv4 as `::ffff:a.b.c.d`, and the global entry names the same client
 /// `a.b.c.d`: kept apart, one client had two counts, and its good token
-/// through the entry cleared only one of them.
-fn counted_as(ip: IpAddr) -> (IpAddr, u64) {
-    (ip.to_canonical(), TOKENS)
+/// through the entry cleared only one of them. A /64 is the least a
+/// network is given -- the prefix SLAAC hands a link's hosts their
+/// addresses from, a provider a customer one or more -- and every one of
+/// its 2^64 addresses is theirs to send from: counted by the whole address,
+/// a client guessing tokens started each new one at the first wait. Hosts
+/// sharing a /64 share its count, as those behind a NAT share an IPv4's.
+pub(crate) fn counted_ip(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V6(v6) => IpAddr::V6(Ipv6Addr::from(u128::from(v6) & !u128::from(u64::MAX))),
+        v4 => v4,
+    }
 }
 
-fn failures() -> &'static Mutex<Failures> {
-    static F: OnceLock<Mutex<Failures>> = OnceLock::new();
+/// The key a token's count is kept by ([`counted_ip`]).
+fn counted_as(ip: IpAddr) -> (IpAddr, u64) {
+    (counted_ip(ip), TOKENS)
+}
+
+/// The tokens' counts, and the order they were refused in.
+#[derive(Default)]
+struct Table {
+    counts: Failures,
+    /// Each refusal's key and time, the oldest first. A key refused again,
+    /// or cleared, leaves its places before behind, passed over as they
+    /// come to the front -- their time no longer its count's -- so the first
+    /// place still its count's is the count refused longest ago, the one a
+    /// full table lets go. A place is pushed once and taken once, and those
+    /// passed over go once they are more than half as many as the counts
+    /// ([`Table::kept`]): a refusal costs the same however full the table
+    /// is, where a scan for the oldest was a pass over 10 000 counts for
+    /// each new address, under the lock every verified token takes while any
+    /// count is held.
+    order: VecDeque<((IpAddr, u64), Instant)>,
+}
+
+impl Table {
+    /// `key`'s count raised at `now`, the count refused longest ago let go
+    /// first where `key` is new to a full table.
+    fn count(&mut self, key: (IpAddr, u64), now: Instant) -> u32 {
+        let last = |counts: &Failures, k: &(IpAddr, u64), at: Instant| {
+            counts.get(k).is_some_and(|&(_, latest)| latest == at)
+        };
+        if self.counts.len() >= ADDRESSES && !self.counts.contains_key(&key) {
+            while let Some((oldest, at)) = self.order.pop_front() {
+                if last(&self.counts, &oldest, at) {
+                    self.counts.remove(&oldest);
+                    break;
+                }
+            }
+        }
+        let e = self.counts.entry(key).or_insert((0, now));
+        if now.duration_since(e.1) > WINDOW {
+            e.0 = 0;
+        }
+        e.0 = e.0.saturating_add(1);
+        e.1 = now;
+        let n = e.0;
+        self.order.push_back((key, now));
+        if self.order.len() > self.kept() {
+            let counts = &self.counts;
+            self.order.retain(|(k, at)| last(counts, k, *at));
+        }
+        n
+    }
+
+    /// The places [`Table::order`] holds at most before those passed over
+    /// go: half as many again as the counts, each sweep then taking a third
+    /// of them or more, three places looked at a refusal on the whole. At
+    /// twice the counts the queue's buffer reached 32 768 places of 48 bytes
+    /// beside a full table's 10 000 counts; at this, 16 384.
+    fn kept(&self) -> usize {
+        self.counts.len() + self.counts.len() / 2 + 1
+    }
+}
+
+fn failures() -> &'static Mutex<Table> {
+    static F: OnceLock<Mutex<Table>> = OnceLock::new();
     F.get_or_init(Default::default)
 }
 
@@ -874,22 +953,14 @@ fn failures() -> &'static Mutex<Failures> {
 /// counted.
 pub fn failed(peer: Option<IpAddr>) -> Duration {
     let base = DELAY_MS.load(Ordering::Relaxed);
-    let Some(ip) = peer.filter(|_| base > 0).map(counted_as) else {
+    let Some(key) = peer.filter(|_| base > 0).map(counted_as) else {
         return Duration::ZERO;
     };
-    let now = Instant::now();
-    let mut map = failures().lock().unwrap_or_else(|e| e.into_inner());
-    if map.len() >= ADDRESSES && !map.contains_key(&ip) {
-        map.clear();
-    }
-    FAILING.store(map.len() as u64 + 1, Ordering::Relaxed);
-    let e = map.entry(ip).or_insert((0, now));
-    if now.duration_since(e.1) > WINDOW {
-        e.0 = 0;
-    }
-    e.0 = e.0.saturating_add(1);
-    e.1 = now;
-    wait(base, e.0)
+    let mut table = failures().lock().unwrap_or_else(|e| e.into_inner());
+    // Read under the lock, so the places are in the order of their times.
+    let n = table.count(key, Instant::now());
+    FAILING.store(table.counts.len() as u64, Ordering::Relaxed);
+    wait(base, n)
 }
 
 /// What a refusal to `peer` would wait now, nothing counted. A test holds
@@ -901,11 +972,11 @@ pub fn failed(peer: Option<IpAddr>) -> Duration {
 /// of another address.
 pub fn would_wait(peer: Option<IpAddr>) -> Duration {
     let base = DELAY_MS.load(Ordering::Relaxed);
-    let Some(ip) = peer.filter(|_| base > 0).map(counted_as) else {
+    let Some(key) = peer.filter(|_| base > 0).map(counted_as) else {
         return Duration::ZERO;
     };
-    let map = failures().lock().unwrap_or_else(|e| e.into_inner());
-    let before = match map.get(&ip) {
+    let table = failures().lock().unwrap_or_else(|e| e.into_inner());
+    let before = match table.counts.get(&key) {
         Some(&(n, at)) if at.elapsed() <= WINDOW => n,
         _ => 0,
     };
@@ -953,9 +1024,10 @@ pub fn push_verified(head: &mut String) {
 /// A token from `peer` was verified: its count starts again.
 pub fn succeeded(peer: Option<IpAddr>) {
     if let Some(ip) = peer.filter(|_| FAILING.load(Ordering::Relaxed) > 0) {
-        let mut map = failures().lock().unwrap_or_else(|e| e.into_inner());
-        map.remove(&counted_as(ip));
-        FAILING.store(map.len() as u64, Ordering::Relaxed);
+        let key = counted_as(ip);
+        let mut table = failures().lock().unwrap_or_else(|e| e.into_inner());
+        table.counts.remove(&key);
+        FAILING.store(table.counts.len() as u64, Ordering::Relaxed);
     }
 }
 
@@ -1138,7 +1210,7 @@ mod tests {
         assert_eq!(would_wait(mapped).as_millis(), 400);
         succeeded(mapped);
         assert_eq!(would_wait(v4).as_millis(), 100);
-        // A real IPv6 address is its own.
+        // A real IPv6 address is its /64's, apart from every IPv4 one.
         let v6: Option<IpAddr> = Some("2001:db8::77".parse().unwrap());
         assert_eq!(failed(v6).as_millis(), 100);
         assert_eq!(would_wait(v4).as_millis(), 100);
@@ -1152,6 +1224,58 @@ mod tests {
         );
         let plain: IpAddr = "198.51.100.77".parse().unwrap();
         assert_eq!(check_client(&value, &key, 1_800_000_000), Ok(plain));
+    }
+
+    /// The key keeps an IPv6 address's first 64 bits, and an IPv4 address
+    /// whole, mapped into IPv6 or not.
+    #[test]
+    fn an_ipv6_address_is_counted_by_its_64() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        for (given, counted) in [
+            ("2001:db8:1:2:3:4:5:6", "2001:db8:1:2::"),
+            ("2001:db8:1:2:ffff:ffff:ffff:ffff", "2001:db8:1:2::"),
+            ("2001:db8:1:3::1", "2001:db8:1:3::"),
+            ("fe80::1", "fe80::"),
+            ("::1", "::"),
+            ("::ffff:198.51.100.7", "198.51.100.7"),
+            ("198.51.100.7", "198.51.100.7"),
+        ] {
+            assert_eq!(counted_ip(ip(given)), ip(counted), "{given}");
+        }
+    }
+
+    /// A key new to a full table lets go of the count refused longest ago,
+    /// and that one alone: a count refused again since stays, wherever its
+    /// first refusal stands in the order. The places are never more than
+    /// half as many again as the counts, however often one key is refused.
+    #[test]
+    fn a_full_table_lets_its_oldest_count_go() {
+        let key = |i: u32| (IpAddr::V4(i.into()), TOKENS);
+        let start = Instant::now();
+        let at = |i: u32| start + Duration::from_micros(i.into());
+        let mut t = Table::default();
+        let n = ADDRESSES as u32;
+        for i in 0..n {
+            assert_eq!(t.count(key(i), at(i)), 1);
+        }
+        // The first refused again: the second is the oldest now.
+        assert_eq!(t.count(key(0), at(n)), 2);
+        assert_eq!(t.count(key(n), at(n + 1)), 1);
+        assert_eq!(t.counts.len(), ADDRESSES);
+        assert!(!t.counts.contains_key(&key(1)), "the oldest went");
+        assert_eq!(t.counts[&key(0)].0, 2, "a count refused since stays");
+        assert!(t.counts.contains_key(&key(2)));
+        // One more lets the next go, and no other.
+        assert_eq!(t.count(key(n + 1), at(n + 2)), 1);
+        assert!(!t.counts.contains_key(&key(2)));
+        assert!(t.counts.contains_key(&key(3)));
+        for i in 0..5 * n {
+            t.count(key(0), at(n + 3 + i));
+            assert!(t.order.len() <= t.kept(), "{}", t.order.len());
+        }
+        assert!(t.order.capacity() <= 16_384, "{}", t.order.capacity());
+        assert_eq!(t.counts.len(), ADDRESSES);
+        assert_eq!(t.counts[&key(0)].0, 2 + 5 * n);
     }
 
     #[test]

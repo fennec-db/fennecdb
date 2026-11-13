@@ -57,6 +57,16 @@ These are deliberate, and README explains each one:
   (nginx, Caddy, stunnel).
 - **`--insecure` does what it says.** Binding to a non-loopback address without
   authentication is refused unless that flag is passed deliberately.
+- **A short token is taken on loopback alone.** Past loopback `fennec-server`
+  and `fennec-shard` refuse at the start a token shorter than 32 bytes --
+  `--http-token`, `--admin-token`, `--replication-token`, the router's
+  `--token`, `--entry-token` and `--replication-token`, or the variable each
+  is read from -- naming the flag; `--insecure` does not waive it. On
+  loopback any length is taken, so a short token there is the operator's
+  call. A refused token waits, 100 ms doubled to 5 s, by its address -- an
+  IPv6 address by its /64 -- in a table of 10 000 counts that lets the one
+  refused longest ago go when full: against a client holding more addresses
+  than that, the token's length is what holds.
 - **A token on the command line shows up in `ps`.** `FENNEC_HTTP_TOKEN`,
   `FENNEC_JWT_SECRET`, `--jwt-secret-file` and `FENNEC_REPLICATION_TOKEN` exist
   for that reason.

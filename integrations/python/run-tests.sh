@@ -13,7 +13,8 @@ cargo=${CARGO:-cargo}
 "$cargo" build -q -p fennec-server --manifest-path "$root/Cargo.toml"
 
 dir=$(mktemp -d)
-token=python-tests
+# 32 bytes at least: the server takes no shorter token past loopback.
+token=python-tests-token-of-32-bytes-at-least
 # A hooks file naming `stripe`, so a webhook consumer of it is listed armed
 # and one of any other hook not (test_call.py).
 printf 'whsec_python_tests' >"$dir/stripe.whsec"

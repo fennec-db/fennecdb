@@ -878,10 +878,11 @@ pgvector-tls:
 docker:
 	docker build -t fennecdb .
 
-## Starts the container: make docker-run TOKEN=secret
+## Starts the container: make docker-run TOKEN=<32 bytes or more>, such as
+## openssl rand -hex 32 makes: the server listens on 0.0.0.0 inside it.
 ## The memory limit must be at least 3x the data file (compact peak).
 docker-run: docker
-	@test -n "$(TOKEN)" || (echo "token required: make docker-run TOKEN=secret"; exit 1)
+	@test -n "$(TOKEN)" || (echo 'token required, 32 bytes or more: make docker-run TOKEN=$$(openssl rand -hex 32)'; exit 1)
 	docker run -d --name fennecdb --restart unless-stopped \
 	  -p 127.0.0.1:8080:8080 -v fennecdata:/data \
 	  -e FENNEC_HTTP_TOKEN=$(TOKEN) --memory 1g --memory-swap 1g fennecdb
@@ -890,7 +891,7 @@ docker-run: docker
 ## Compacts the running container's file: what deletes and rewrites left
 ## dead goes, and every graph holding tombstones is built again.
 docker-compact:
-	@test -n "$(TOKEN)" || (echo "token required: make docker-compact TOKEN=secret"; exit 1)
+	@test -n "$(TOKEN)" || (echo "token required: make docker-compact TOKEN=<the container's token>"; exit 1)
 	curl -fsS -H 'Authorization: Bearer $(TOKEN)' -d '{"query": "compact"}' \
 	  http://127.0.0.1:8080/query
 
@@ -906,14 +907,15 @@ docker-down:
 ## Grafana's /api/ds/query, through the Infinity data source and through the
 ## plugin, and held to fennec-server's own answer, the plugin's alert rule
 ## evaluated; then down with its volumes, whatever happened
-GRAFANA_CHECK = FENNEC_HTTP_TOKEN=grafana-check FENNEC_METRICS_TOKEN=grafana-check-scrape \
+GRAFANA_CHECK = FENNEC_HTTP_TOKEN=grafana-check-data-token-of-32-bytes \
+	FENNEC_METRICS_TOKEN=grafana-check-scrape-token-of-32-bytes \
 	FENNEC_JWT_SECRET=grafana-check-secret-of-32-bytes-at-least \
 	FENNEC_PORT=0 GRAFANA_PORT=0 PROMETHEUS_PORT=0 \
 	docker compose -p fennec-grafana-check-$$$$ -f monitoring/docker-compose.yml
 grafana-check:
 	@$(GRAFANA_CHECK) up -d --build && \
 	  GRAFANA_URL=http://$$($(GRAFANA_CHECK) port grafana 3000) \
-	  FENNEC_URL=http://$$($(GRAFANA_CHECK) port fennecdb 8080) FENNEC_HTTP_TOKEN=grafana-check \
+	  FENNEC_URL=http://$$($(GRAFANA_CHECK) port fennecdb 8080) FENNEC_HTTP_TOKEN=grafana-check-data-token-of-32-bytes \
 	    sh -c 'node monitoring/grafana/check.mjs && node monitoring/grafana/check-plugin.mjs'; \
 	  status=$$?; \
 	  if [ $$status -ne 0 ]; then $(GRAFANA_CHECK) logs --no-color --tail 60; fi; \

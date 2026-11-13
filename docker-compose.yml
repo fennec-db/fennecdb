@@ -1,11 +1,14 @@
 # fennecdb -- one version, one file, one writer.
 #
-#   FENNEC_HTTP_TOKEN=secret docker compose up -d
-#   curl -H 'Authorization: Bearer secret' -d '{"query": "collections"}' \
+#   export FENNEC_HTTP_TOKEN=$(openssl rand -hex 32)
+#   docker compose up -d
+#   curl -H "Authorization: Bearer $FENNEC_HTTP_TOKEN" -d '{"query": "collections"}' \
 #     http://127.0.0.1:8080/query
 #
-# The token is mandatory and `down`/`ps`/`logs` want it too; for lasting
-# use it is easier to keep an `.env` file beside it:  FENNEC_HTTP_TOKEN=secret
+# The token is mandatory, 32 bytes at least (the server listens on 0.0.0.0,
+# past loopback, inside the container), and `down`/`ps`/`logs` want it too;
+# for lasting use it is easier to keep it in an `.env` file beside this one:
+#   echo "FENNEC_HTTP_TOKEN=$(openssl rand -hex 32)" > .env
 #
 # `replicas` cannot be raised: two processes writing the same file corrupt
 # it. Scale vertically, or by tenant (fennec-server --dir behind fennec-shard).
@@ -22,8 +25,9 @@ services:
       - "127.0.0.1:8080:8080"
 
     environment:
-      # Token required: listening on 0.0.0.0 without one is refused.
-      FENNEC_HTTP_TOKEN: "${FENNEC_HTTP_TOKEN:?set a token first, e.g. FENNEC_HTTP_TOKEN=secret docker compose up -d}"
+      # Token required: listening on 0.0.0.0 without one, or with one shorter
+      # than 32 bytes, is refused.
+      FENNEC_HTTP_TOKEN: "${FENNEC_HTTP_TOKEN:?set a token of 32 bytes or more first, as openssl rand -hex 32 makes}"
 
     volumes:
       - fennecdata:/data

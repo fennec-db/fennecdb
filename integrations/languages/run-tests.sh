@@ -30,7 +30,8 @@ cargo=${CARGO:-cargo}
 
 dir=$(mktemp -d)
 port=
-token=language-tests
+# 32 bytes at least: the server takes no shorter token past loopback.
+token=language-tests-token-of-32-bytes
 server=
 trap 'stop; rm -rf "$dir"' EXIT INT TERM
 

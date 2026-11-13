@@ -6,7 +6,7 @@
 //! no token; an empty one given as a flag is refused at the start, since
 //! `/_admin/` reads a request with no `Authorization` as an empty token.
 
-use crate::support::{start_env, tmp, try_start, Http};
+use crate::support::{start, start_env, tmp, try_start, try_start_env, Http};
 
 #[test]
 fn the_admin_token_is_read_from_the_environment() {
@@ -114,4 +114,91 @@ fn a_secret_set_empty_in_the_environment_is_none() {
         .ask("GET", "/_replication/status", "")
         .status;
     assert_ne!(status, 200, "replication on with an empty token");
+}
+
+#[test]
+fn a_short_token_is_refused_outside_loopback() {
+    // 31 bytes past loopback, each token as a flag and as its variable:
+    // refused at the start, the flag and the minimum named, before the
+    // store is made. The data and admin tokens are taken on --metrics'
+    // listener too, and refused where that one alone is past loopback.
+    let short = "s".repeat(31);
+    let path = tmp("tokens", "short.fennec");
+    let file = path.to_str().unwrap();
+    let node_path = tmp("tokens", "short-node");
+    let node = node_path.to_str().unwrap();
+    let refused = |args: &[&str], env: &[(&str, &str)], flag: &str| {
+        let log = match try_start_env(args, env) {
+            Ok(server) => panic!(
+                "{flag} of 31 bytes was taken past loopback, port {}",
+                server.port
+            ),
+            Err(log) => log,
+        };
+        assert!(
+            log.contains(&format!("{flag} (")) && log.contains("shorter than 32 bytes"),
+            "{args:?} {env:?}: {log}"
+        );
+    };
+    for (flag, var, store) in [
+        ("--http-token", "FENNEC_HTTP_TOKEN", ["--file", file]),
+        ("--admin-token", "FENNEC_ADMIN_TOKEN", ["--dir", node]),
+        (
+            "--replication-token",
+            "FENNEC_REPLICATION_TOKEN",
+            ["--file", file],
+        ),
+    ] {
+        let given = [&store[..], &["--http", "0.0.0.0:0", flag, &short]].concat();
+        refused(&given, &[], flag);
+        let past = [&store[..], &["--http", "0.0.0.0:0"]].concat();
+        refused(&past, &[(var, &short)], flag);
+    }
+    for flag in ["--http-token", "--admin-token"] {
+        refused(
+            &["--file", file, "--metrics", "0.0.0.0:0", flag, &short],
+            &[],
+            flag,
+        );
+    }
+    assert!(!path.exists() && !node_path.exists(), "a store was opened");
+
+    // 32 bytes pass the check past loopback: the server goes on to its
+    // listener, here on an address of the documentation's, which no machine
+    // holds -- or listens there, unreached, where the system binds
+    // addresses it does not hold.
+    let (data, admin, repl) = ("d".repeat(32), "a".repeat(32), "r".repeat(32));
+    let args = [
+        "--dir",
+        node,
+        "--http",
+        "192.0.2.1:0",
+        "--http-token",
+        &data,
+        "--admin-token",
+        &admin,
+        "--replication-token",
+        &repl,
+    ];
+    if let Err(log) = try_start(&args) {
+        assert!(
+            log.contains("could not open the HTTP endpoint") && !log.contains("shorter than"),
+            "{log}"
+        );
+    }
+
+    // On loopback any length is taken: `make server TOKEN=secret`.
+    let node_path = tmp("tokens", "short-loopback");
+    let server = start(&[
+        "--dir",
+        node_path.to_str().unwrap(),
+        "--http-token",
+        "secret",
+        "--admin-token",
+        "adm",
+        "--replication-token",
+        "repl",
+    ]);
+    let mut admin = Http::open(server.port).with_token("adm");
+    assert_eq!(admin.ask("GET", "/_admin/stats", "").status, 200);
 }

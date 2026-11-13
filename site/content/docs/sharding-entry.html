@@ -16,7 +16,9 @@ would put a dispatch in every request's path.</p>
 
 <pre data-lang="bash"># entry/wrangler.jsonc: REGIONS, each region's routers, the one keeping its directory first
 cd integrations/cloudflare
-npx wrangler secret put ENTRY_TOKEN --config entry/wrangler.jsonc
+# 32 bytes or more: a router listening past loopback takes no shorter one
+ENTRY_TOKEN=$(openssl rand -hex 32)
+echo "$ENTRY_TOKEN" | npx wrangler secret put ENTRY_TOKEN --config entry/wrangler.jsonc
 # a Cloudflare Access service token, where Access guards the tunnels' hostnames
 npx wrangler secret put ACCESS_CLIENT_ID --config entry/wrangler.jsonc
 npx wrangler secret put ACCESS_CLIENT_SECRET --config entry/wrangler.jsonc

@@ -386,6 +386,7 @@ Covers `crates/fennec-http/src/access.rs` and `src/access/`; access binds fennec
 - A token is bound to the tenant it names.
 - A token is taken only from the issuers, for the audiences and clients, a server was told.
 - An empty token is no token.
+- A token taken past loopback is 32 bytes at least.
 
 ### `crates/fennec-server/CLAUDE.md`
 

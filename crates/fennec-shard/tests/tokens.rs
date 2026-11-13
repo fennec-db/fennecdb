@@ -21,6 +21,16 @@ fn scratch(tag: &str) -> PathBuf {
 
 /// The router listening, and where; or everything it said before it ended.
 fn router(listen: &str, dir: &Path, env: &[(&str, &str)]) -> Result<(Child, String), String> {
+    router_with(listen, dir, &[], env)
+}
+
+/// [`router`] with `args` after its own.
+fn router_with(
+    listen: &str,
+    dir: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Result<(Child, String), String> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_fennec-shard"))
         .env_remove("FENNEC_SHARD_TOKEN")
         .env_remove("FENNEC_SHARD_ENTRY_TOKEN")
@@ -28,6 +38,7 @@ fn router(listen: &str, dir: &Path, env: &[(&str, &str)]) -> Result<(Child, Stri
         .envs(env.iter().copied())
         .args(["--listen", listen, "--auth-delay", "0", "--directory"])
         .arg(dir.join("shard.fennec"))
+        .args(args)
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
@@ -159,4 +170,85 @@ fn the_router_takes_its_tokens_from_the_environment() {
         said.contains("--entry-token is --replication-token"),
         "{said}"
     );
+}
+
+#[test]
+fn a_short_token_is_refused_outside_loopback() {
+    // 31 bytes where --listen is past loopback, each token as a flag and as
+    // its variable: refused at the start, the flag and the minimum named,
+    // before the directory is opened. The router's own token beside the
+    // one asked about is long enough, or the address would be refused for
+    // want of one.
+    let short = "s".repeat(31);
+    let root = "t".repeat(32);
+    for (flag, var) in [
+        ("--token", "FENNEC_SHARD_TOKEN"),
+        ("--entry-token", "FENNEC_SHARD_ENTRY_TOKEN"),
+        ("--replication-token", "FENNEC_SHARD_REPLICATION_TOKEN"),
+    ] {
+        let others: &[&str] = match flag {
+            "--token" => &[],
+            _ => &["--token", &root],
+        };
+        let given = [others, &[flag, &short]].concat();
+        let by_var = [(var, short.as_str())];
+        for (args, env) in [(&given[..], &[][..]), (others, &by_var[..])] {
+            let dir = scratch("short");
+            match router_with("0.0.0.0:0", &dir, args, env) {
+                Ok((mut child, addr)) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("{flag} of 31 bytes was taken past loopback, listening on {addr}");
+                }
+                Err(said) => assert!(
+                    said.contains(&format!("{flag} (")) && said.contains("shorter than 32 bytes"),
+                    "{args:?} {env:?}: {said}"
+                ),
+            }
+            assert!(
+                !dir.join("shard.fennec").exists(),
+                "{flag}: the directory was opened"
+            );
+        }
+    }
+
+    // 32 bytes pass the check: the router goes on to its listener, here on
+    // an address of the documentation's, which no machine holds -- or
+    // listens there, unreached, where the system binds addresses it does
+    // not hold.
+    let (entry, dirs) = ("e".repeat(32), "d".repeat(32));
+    let long = [
+        "--token",
+        &root,
+        "--entry-token",
+        &entry,
+        "--replication-token",
+        &dirs,
+    ];
+    match router_with("192.0.2.1:0", &scratch("long"), &long, &[]) {
+        Ok((mut child, _)) => {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        Err(said) => assert!(
+            said.contains("could not listen") && !said.contains("shorter than"),
+            "{said}"
+        ),
+    }
+
+    // On loopback any length is taken.
+    let short_ones = [
+        "--token",
+        "root",
+        "--entry-token",
+        "entry",
+        "--replication-token",
+        "dirs",
+    ];
+    let (mut child, addr) = router_with("127.0.0.1:0", &scratch("loopback"), &short_ones, &[])
+        .unwrap_or_else(|said| panic!("short tokens on loopback were refused:\n{said}"));
+    let asked = status(&addr, "/_shard/nodes", Some("root"));
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(asked, 200);
 }

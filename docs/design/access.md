@@ -1,6 +1,6 @@
 # Access
 
-The long form of the invariants [crates/fennec-http/src/access/CLAUDE.md](../../crates/fennec-http/src/access/CLAUDE.md) lists under *Access* (moved there from `crates/fennec-http/CLAUDE.md` to make room, beside `access.rs` and `access/`): scoped tokens, field lists, rules reading another collection, the server's own collections, a token bound to its tenant, whom a token is for, and empty tokens. Each section below but *The server's own collections* and *Whom a token is for*, added after the move, is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-http/src/access/CLAUDE.md](../../crates/fennec-http/src/access/CLAUDE.md) lists under *Access* (moved there from `crates/fennec-http/CLAUDE.md` to make room, beside `access.rs` and `access/`): scoped tokens, field lists, rules reading another collection, the server's own collections, a token bound to its tenant, whom a token is for, empty tokens and short ones. Each section below but *The server's own collections*, *Whom a token is for* and *Short tokens*, added after the move, is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Scoped tokens
 
@@ -999,3 +999,60 @@ fennec-server, fennec-shard and fennec-cli and fennec-http's
 from `FENNEC_ADMIN_TOKEN` and a router `--replication-token` from
 `FENNEC_SHARD_REPLICATION_TOKEN`, the two that had no variable, so no token
 need be on a command line `ps` shows.
+
+## Short tokens
+
+**A token taken past loopback is 32 bytes at least.** The wait after a
+refusal ([http.md](http.md#audit)) is the one brake on guessing a token
+online, and it is an address's: 100 ms doubled to 5 s for one address, the
+first 100 ms again for the next. Past loopback the guesses come from as many
+addresses as a client holds -- an IPv6 /64 is one count now, but a cloud
+account or a botnet holds thousands of addresses apart -- and every token flag took any
+length: `--http-token secret`, six bytes of a word, falls to a dictionary at
+any of those rates, where the JWT secret beside it was held to 32 bytes from
+the start (`access::SHORT`). So `fennec-server` and `fennec-shard` refuse at
+the start (2), before the file or the directory is opened, a token shorter
+than `fennec_http::TOKEN_MIN` (32 bytes) where a listener taking it binds an
+address past loopback (`fennec_http::short_token`, asking `is_remote` as
+`exposed` does): the data and admin tokens on `--http` and `--metrics`,
+whose scrape takes both (`metrics::allowed`), the replication token on
+`--http` alone, and the router's `--token`, `--entry-token` -- the key of
+the entry's mark, which a guess of it forges for any address -- and
+`--replication-token` on `--listen`. The refusal names the flag beside
+the variable it is also read from (`--http-token (FENNEC_HTTP_TOKEN) is
+shorter than 32 bytes, ...`): an environment file's value is as short as a
+command line's. `openssl rand -hex 32`, which the refusal and the kit's env
+files suggest, makes 64 characters; 32 bytes of anything a person would
+type are past a guess at 5 s an address.
+
+On loopback any length is taken: a guess there comes from this machine,
+which holds the file anyway, and `make server TOKEN=secret`, the README's
+first server, runs as it is, as does every test's `secret` on 127.0.0.1.
+`--insecure` waives nothing: it lets a server listen past loopback with no
+token, which its name says, where a short token looks like protection and
+is not. The library leaves its embedder's tokens alone -- `Server::bind`
+and `Router::bind` refuse no token past loopback, as before, and a short
+one is the embedder's to choose, as `insecure` is.
+
+Rejected: *16 bytes*, the plan's other option -- 16 random bytes hold, but
+16 bytes of a word do not, and the minimum is met by people choosing a
+token, not by a generator; 32 is the JWT secret's already. *A token's
+entropy* read from its characters: a guess about a guess. *Loopback held
+too*: every local test, `make server TOKEN=secret` and the docs' first runs
+would need 32 bytes for no attacker. *The router refusing a node's short
+admin token* as `PUT /_shard/nodes` records it: a node past loopback
+refuses its own as it starts, so the router never holds one that is short
+there.
+
+It changed the CLI contract before 1.0 froze it (the 1.0 plan's G51): a
+deployment that listened past loopback with a shorter token stops at the
+start, its log naming the flag. The kit's own already made theirs long
+(`secrets.token_hex(16)` in the drill and `deploy/test/units.py`,
+`token_urlsafe(32)` in the power-cut rigs, 32 random bytes in the desktop
+app); the language and Python integration runs, `make grafana-check` and the
+compose files' examples were given 32 bytes or more. `tests/tokens.rs` in
+fennec-server (each flag and its variable past loopback, the data and admin
+tokens refused on `--metrics` alone past it, 32 bytes passing on an address
+no machine holds, short ones on loopback) and in fennec-shard (its three
+likewise), and `a_token_past_loopback_is_32_bytes_at_least` in fennec-http's
+`lib.rs`, fail without it.

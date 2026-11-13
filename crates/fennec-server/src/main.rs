@@ -25,7 +25,8 @@ usage: fennec-server [options]
                             under /t/<tenant>/
       --admin-token <value> token for /_admin/ (--dir only): create, delete,
                             freeze and move tenants. Without it, off. Also
-                            read from FENNEC_ADMIN_TOKEN: argv shows up in `ps`
+                            read from FENNEC_ADMIN_TOKEN: argv shows up in `ps`.
+                            Past loopback 32 bytes at least
       --idle-close <s>      close a tenant untouched for this long  default: 300
                             (0 = never). The next request reopens it
       --lease               write a tenant only while the router's lease names
@@ -123,7 +124,8 @@ usage: fennec-server [options]
                             roots, which it trusts without it
 
       --http-token <value>  require `Authorization: Bearer <value>`. Also read
-                            from FENNEC_HTTP_TOKEN: argv shows up in `ps`
+                            from FENNEC_HTTP_TOKEN: argv shows up in `ps`.
+                            Past loopback 32 bytes at least
       --jwt-secret <value>  also take HS256 JSON Web Tokens signed with this,
                             each held to --policy: which collections, which
                             rows (`where owner = $jwt.sub`). Also read from
@@ -305,7 +307,8 @@ usage: fennec-server [options]
                             status, and promotes a replica. With --dir every
                             tenant has one of its own under
                             /t/<tenant>/_replication. Refuses --sync off.
-                            Also read from FENNEC_REPLICATION_TOKEN
+                            Also read from FENNEC_REPLICATION_TOKEN. Past
+                            loopback 32 bytes at least
       --replica-of <url>    follow the primary at http://host:port, or
                             https://host:port over TLS (--tls-ca), and take
                             no write of its own (403). With --dir it
@@ -352,7 +355,10 @@ usage: fennec-server [options]
                             bound
 
 A token or key set empty in the environment is unset; one given empty as a
-flag is refused at the start.
+flag is refused at the start. A token taken where --http or --metrics is
+past loopback is 32 bytes at least, refused at the start otherwise, since
+guesses there may come from any number of addresses: `openssl rand -hex 32`
+makes one. On loopback any length is taken.
 
 With --tls-cert and --tls-key fennec-server serves HTTPS itself, no proxy
 in front needed; without them it speaks plain HTTP, for loopback or a TLS
@@ -1191,7 +1197,35 @@ fn main() {
     http_cfg.sync_on_write = sync == SyncPolicy::Always;
 
     // An endpoint on an open network without a token is a question of the
-    // flags alone, refused with them (2) before anything is opened.
+    // flags alone, refused with them (2) before anything is opened; so is a
+    // token taken there shorter than `fennec_http::TOKEN_MIN`, from the flag
+    // or its variable (`fennec_http::short_token`). The data and admin tokens
+    // are taken on --metrics' listener too, the replication token on the
+    // HTTP one alone.
+    let listeners: Vec<&str> = std::iter::once(http_cfg.addr.as_str())
+        .chain(metrics.as_deref())
+        .collect();
+    for (flag, token, on) in [
+        (
+            "--http-token (FENNEC_HTTP_TOKEN)",
+            http_cfg.token.as_deref(),
+            &listeners[..],
+        ),
+        (
+            "--admin-token (FENNEC_ADMIN_TOKEN)",
+            http_cfg.admin_token.as_deref(),
+            &listeners[..],
+        ),
+        (
+            "--replication-token (FENNEC_REPLICATION_TOKEN)",
+            replication_token.as_deref(),
+            &listeners[..1],
+        ),
+    ] {
+        if let Some(refused) = fennec_http::short_token(flag, token, on) {
+            fail(&refused);
+        }
+    }
     if let Some(refused) = fennec_http::exposed(&http_cfg, false) {
         fail(&format!("could not open the HTTP endpoint: {refused}"));
     }

@@ -783,6 +783,29 @@ fn is_remote(addr: &str) -> bool {
     }
 }
 
+/// The fewest bytes a token taken past loopback may hold, as many as an
+/// HS256 secret's (`access`). A refused guess waits ([`audit`]), but only
+/// by its address, and past loopback the guesses come from every address a
+/// client holds: 32 random bytes are beyond any number of them, a word is
+/// not. On loopback a guess comes from this machine, which holds the file
+/// anyway, so any length is taken there -- `make server TOKEN=secret`.
+pub const TOKEN_MIN: usize = 32;
+
+/// Why `token`, given as `flag`, is refused, or `None`: shorter than
+/// [`TOKEN_MIN`] bytes where a listener taking it binds one of `addrs` past
+/// loopback. A question of the flags alone, which `fennec-server` and
+/// `fennec-shard` ask of every token flag before they open anything; no
+/// token, an empty one -- refused apart, as no token -- and any token on
+/// loopback alone pass.
+pub fn short_token(flag: &str, token: Option<&str>, addrs: &[&str]) -> Option<String> {
+    token.filter(|t| !t.is_empty() && t.len() < TOKEN_MIN)?;
+    let addr = addrs.iter().find(|a| is_remote(a))?;
+    Some(format!(
+        "{flag} is shorter than {TOKEN_MIN} bytes, the least a token taken past loopback \
+         (on {addr}) may be: a shorter one can be guessed. Make one with `openssl rand -hex 32`"
+    ))
+}
+
 /// Why a listener that asks for no token refuses `req` for where it comes
 /// from ([`cors::foreign`]), as a 403, or `None`. Open is no `--http-token`
 /// and no JSON Web Tokens: a tenant node with `--admin-token` alone runs
@@ -5310,6 +5333,39 @@ mod tests {
         assert!(!is_remote("127.0.0.1:8080"));
         assert!(!is_remote("localhost:8080"));
         assert!(is_remote("0.0.0.0:8080"));
+    }
+
+    /// A token one byte short of the minimum is refused wherever a listener
+    /// taking it binds past loopback, naming the flag, the minimum and the
+    /// address; the minimum is taken, and so is any token on loopback alone.
+    /// An empty token is refused apart, as none, and no token is no question.
+    #[test]
+    fn a_token_past_loopback_is_32_bytes_at_least() {
+        let short = "s".repeat(TOKEN_MIN - 1);
+        let long = "s".repeat(TOKEN_MIN);
+        for addrs in [
+            &["0.0.0.0:8080"][..],
+            &["[::]:8080"],
+            &["192.0.2.1:8080"],
+            &["127.0.0.1:8080", "0.0.0.0:9464"],
+        ] {
+            let why = short_token("--http-token", Some(&short), addrs)
+                .unwrap_or_else(|| panic!("{addrs:?} took a short token"));
+            assert!(
+                why.starts_with("--http-token is shorter than 32 bytes"),
+                "{why}"
+            );
+            assert!(why.contains(addrs.last().unwrap()), "{why}");
+            assert_eq!(short_token("--http-token", Some(&long), addrs), None);
+        }
+        for addrs in [&["127.0.0.1:8080"][..], &["[::1]:8080", "localhost:9464"]] {
+            assert_eq!(short_token("--http-token", Some("secret"), addrs), None);
+        }
+        assert_eq!(
+            short_token("--http-token", Some(""), &["0.0.0.0:8080"]),
+            None
+        );
+        assert_eq!(short_token("--http-token", None, &["0.0.0.0:8080"]), None);
     }
 
     /// The look `handle` asks before its two token-less routes says yes to

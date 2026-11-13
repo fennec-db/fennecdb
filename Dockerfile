@@ -1,9 +1,10 @@
 # fennecdb -- the server (`fennec-server`), over HTTP
 #
 #   docker build -t fennecdb .
+#   export FENNEC_HTTP_TOKEN=$(openssl rand -hex 32)
 #   docker run -d --name fennecdb -p 127.0.0.1:8080:8080 -v fennecdata:/data \
-#     -e FENNEC_HTTP_TOKEN=secret --memory 1g fennecdb
-#   curl -H 'Authorization: Bearer secret' -d '{"query": "collections"}' \
+#     -e FENNEC_HTTP_TOKEN --memory 1g fennecdb
+#   curl -H "Authorization: Bearer $FENNEC_HTTP_TOKEN" -d '{"query": "collections"}' \
 #     http://127.0.0.1:8080/query
 #
 # Two stages: build statically with musl, then put the result into an *empty*
@@ -77,6 +78,7 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=120s --retries=3 \
 ENTRYPOINT ["/usr/local/bin/fennec-server"]
 
 # 0.0.0.0 is outside loopback: fennec-server refuses to listen on that address
-# without a token. Supply FENNEC_HTTP_TOKEN (or --jwt-secret and --policy),
-# or add --insecure deliberately. Overriding CMD drops all of these defaults.
+# without a token, or with one shorter than 32 bytes. Supply FENNEC_HTTP_TOKEN
+# (or --jwt-secret and --policy), or add --insecure deliberately. Overriding
+# CMD drops all of these defaults.
 CMD ["--http", "0.0.0.0:8080", "--file", "/data/data.fennec", "--sync", "250"]

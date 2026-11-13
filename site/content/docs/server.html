@@ -69,7 +69,7 @@ href="/docs/sharding">Tenants and sharding</a>.</p>
 <tr><td><code>-f, --file &lt;path&gt;</code></td><td>The database file. In memory without it. The server holds <code>&lt;path&gt;.lock</code> while it runs, so a second process over the file — another server, <code>fennec mcp --file</code>, an app through the native library, the <code>fennec</code> shell — is refused rather than let corrupt it, and told which process holds it. To look inside the file while the server runs, <code>fennec --read-only &lt;path&gt;</code> reads it as it stands, writing nothing. A file reached through a symbolic link is the file the link leads to, for its lock and for the checkpoints and compacts that write it anew, the link left a link; but a hard link is a name of its own, and a record lock does not cross a file system that does not pass it on: a Docker Desktop bind mount, a network file system keeping no locks. Open a file from one side of those only.</td></tr>
 <tr><td><code>--dir &lt;path&gt;</code></td><td>One file per tenant in this directory (<a href="/docs/sharding-reference#the-node-fennec-server-dir">Sharding reference</a>). Each open tenant holds <code>&lt;tenant&gt;.fennec.lock</code>, as <code>--file</code> holds its file's, so a shell or an app over a tenant's file is refused while the node has it open, and the node is refused it while they do. A deleted tenant's lock file stays, for the name made again.</td></tr>
 <tr><td><code>--http &lt;address&gt;</code></td><td>Where to listen. Default <code>127.0.0.1:8080</code>.</td></tr>
-<tr><td><code>--http-token &lt;value&gt;</code></td><td>Requires <code>Authorization: Bearer &lt;value&gt;</code>. Also read from <code>FENNEC_HTTP_TOKEN</code>, since <code>argv</code> shows up in <code>ps</code>.</td></tr>
+<tr><td><code>--http-token &lt;value&gt;</code></td><td>Requires <code>Authorization: Bearer &lt;value&gt;</code>. Also read from <code>FENNEC_HTTP_TOKEN</code>, since <code>argv</code> shows up in <code>ps</code>. Past loopback 32 bytes at least, as every token is (<a href="#token-length">Security</a>).</td></tr>
 <tr><td><code>--tls-cert &lt;pem&gt;</code>, <code>--tls-key &lt;pem&gt;</code></td><td>Serves HTTPS alone, with this certificate chain (the server's certificate first, then its intermediates) and its private key; both or neither. <code>--metrics</code> speaks it too. Read at the start: a renewed certificate takes a restart (<a href="#tls">HTTPS</a>).</td></tr>
 <tr><td><code>--tls-ca &lt;pem&gt;</code></td><td>The CAs every <code>https://</code> this server dials is held to, in place of Mozilla's roots, which it trusts without the flag: a replica's <code>--replica-of</code> primary, <code>--otlp-endpoint</code>, a tenant's primary. A PEM file of one or more CAs, for a private CA (<a href="#dialing-https">Dialing HTTPS</a>).</td></tr>
 <tr><td><code>--jwt-secret</code>, <code>--jwt-secret-file</code>, <code>--jwt-keys</code>, <code>--jwt-require-exp</code>, <code>--jwt-max-age</code>, <code>--jwt-tenant-claim</code>, <code>--jwt-unbound-tenants</code>, <code>--policy</code></td><td>Tokens held to rules: which collections, which rows (<a href="#security">Security</a>).</td></tr>
@@ -179,6 +179,17 @@ and writes everything. The comparison is constant time. Listening on a
 non-loopback address with no token is refused outright; it can be opened
 deliberately with <code>--insecure</code>.</p>
 
+<p id="token-length">Past loopback a token is 32 bytes at least. Where
+<code>--http</code> or <code>--metrics</code> listens beyond loopback, an
+<code>--http-token</code>, <code>--admin-token</code> or
+<code>--replication-token</code> shorter than that, given as the flag or its
+variable, stops the server at the start (exit 2), naming the flag. A refused
+guess waits, but only by its address, and a client may hold many:
+<code>openssl rand -hex 32</code> makes a token long enough. On loopback any
+length is taken, so <code>make server TOKEN=secret</code> and a machine's
+own tests run as they are; <code>--insecure</code> does not waive the
+length.</p>
+
 <p>With <code>--jwt-secret</code> (HS256, at least 32 bytes) or
 <code>--jwt-keys</code> (a JWKS file: <code>oct</code> keys for HS256,
 <code>RSA</code> keys for an identity provider's RS256 and <code>EC</code>
@@ -231,7 +242,10 @@ admin token let anyone into <code>/_admin/</code>.</p>
 
 <p>A request refused for its token waits before it is answered — 100 ms,
 twice as long for each refusal from the same address within a minute, 5 s at
-most (<code>--auth-delay</code>; 0 turns it off). A token the server
+most (<code>--auth-delay</code>; 0 turns it off). An IPv6 address counts as
+its /64, the least a network is given, any of whose addresses a client
+there may send from; the server keeps 10 000 counts, and past them lets the
+one refused longest ago go. A token the server
 verifies clears its address's count; an answer that looked at no token,
 whatever <code>Authorization</code> it carried, clears nothing. <code>--audit
 &lt;path&gt;</code> appends a JSON line for each refused request, each change
@@ -692,16 +706,18 @@ other monitoring systems</a>.</p>
 
 <p>The image is 7 MB: the binary and nothing else.</p>
 
-<pre data-lang="bash">docker run -d --name fennecdb -v fennecdata:/data \
-  -p 127.0.0.1:8080:8080 -e FENNEC_HTTP_TOKEN=a-token \
+<pre data-lang="bash">export FENNEC_HTTP_TOKEN=$(openssl rand -hex 32)
+docker run -d --name fennecdb -v fennecdata:/data \
+  -p 127.0.0.1:8080:8080 -e FENNEC_HTTP_TOKEN \
   ghcr.io/fennec-db/fennec-server</pre>
 
 <p>The image's command is <code>--http 0.0.0.0:8080 --file
 /data/data.fennec --sync 250</code>.</p>
 
 <ul>
-  <li><b>Set a token.</b> Without one it refuses to listen beyond
-    localhost.</li>
+  <li><b>Set a token of 32 bytes or more.</b> Without one, or with a shorter
+    one, it refuses to listen beyond localhost, which a container's
+    <code>0.0.0.0</code> is.</li>
   <li><b>Run one instance per file.</b> Two writers corrupt it: on Kubernetes,
     a <code>StatefulSet</code> with one replica.</li>
   <li><b>Write every flag out</b> when you override the command, or the data

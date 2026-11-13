@@ -1415,8 +1415,9 @@ fn fails() -> &'static Mutex<Fails> {
     F.get_or_init(Default::default)
 }
 
-/// A count's key: the address, canonical as `audit`'s are, and the name's
-/// digest -- odd, so no name's is the count of the paths naming none, 0.
+/// A count's key: the address as `audit`'s are counted -- canonical, an IPv6
+/// one's /64 (`audit::counted_ip`) -- and the name's digest -- odd, so no
+/// name's is the count of the paths naming none, 0.
 fn keyed(ip: IpAddr, name: Option<Named>) -> (IpAddr, u64) {
     let digested = |n: Named| {
         let mut d = digest(n.tenant.unwrap_or("").as_bytes());
@@ -1427,7 +1428,7 @@ fn keyed(ip: IpAddr, name: Option<Named>) -> (IpAddr, u64) {
         }
         d | 1
     };
-    (ip.to_canonical(), name.map_or(0, digested))
+    (crate::audit::counted_ip(ip), name.map_or(0, digested))
 }
 
 /// Entries with a refusal counted: a verified event asks the table only

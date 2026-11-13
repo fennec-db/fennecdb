@@ -25,7 +25,8 @@ usage: fennec-shard [options]
                             default: shard.fennec
       --token <value>       require `Authorization: Bearer <value>` on /_shard/.
                             Data requests pass their own Authorization through
-                            to the nodes, which check it against --http-token
+                            to the nodes, which check it against --http-token.
+                            Past loopback 32 bytes at least
       --insecure            allow a non-loopback address without --token
       --tls-cert <pem>      serve clients HTTPS alone, with this certificate
       --tls-key <pem>       chain and its private key, both or neither. Read
@@ -68,7 +69,8 @@ usage: fennec-shard [options]
                             then put it in the Worker (ENTRY_TOKEN); between
                             the two every request is served, and its client
                             counted by Cloudflare's address, as bad_mark in
-                            fennec_router_entry_clients_total
+                            fennec_router_entry_clients_total. Past loopback
+                            32 bytes at least
       --audit <path>        append a JSON line to this file for each request
                             refused for its token and each /_shard/ request
                             that changes something
@@ -122,7 +124,8 @@ usage: fennec-shard [options]
                             is traced whatever the ratio. The service is
                             named by OTEL_SERVICE_NAME  default: fennec-shard
       --replication-token <value>  serve the directory to standby routers at
-                            /_replication, and present this to a primary
+                            /_replication, and present this to a primary.
+                            Past loopback 32 bytes at least
       --replica-of <url>    follow the primary router at http://host:port
                             (https:// over TLS): the directory arrives from
                             it, /_shard/ changes are refused here, and
@@ -166,7 +169,9 @@ usage: fennec-shard [options]
 The token is also read from the FENNEC_SHARD_TOKEN environment variable, the
 entry's from FENNEC_SHARD_ENTRY_TOKEN and the replication token from
 FENNEC_SHARD_REPLICATION_TOKEN: argv shows up in `ps`. Each one set and empty
-is unset.
+is unset. Where --listen is past loopback each is 32 bytes at least, refused
+at the start otherwise, since guesses there may come from any number of
+addresses: `openssl rand -hex 32` makes one. On loopback any length is taken.
 ";
 
 fn fail(msg: &str) -> ! {
@@ -442,6 +447,25 @@ fn main() {
              entry one of its own",
         ),
         _ => {}
+    }
+    // Past loopback each is 32 bytes at least, as a node's tokens are
+    // (`fennec_http::short_token`), from the flag or its variable: a refused
+    // guess at one waits, but by its address alone, and every one is taken
+    // on --listen.
+    for (flag, token) in [
+        ("--token (FENNEC_SHARD_TOKEN)", cfg.token.as_deref()),
+        (
+            "--entry-token (FENNEC_SHARD_ENTRY_TOKEN)",
+            cfg.entry_token.as_deref(),
+        ),
+        (
+            "--replication-token (FENNEC_SHARD_REPLICATION_TOKEN)",
+            replication_token.as_deref(),
+        ),
+    ] {
+        if let Some(refused) = fennec_http::short_token(flag, token, &[cfg.addr.as_str()]) {
+            fail(&refused);
+        }
     }
     let replicating = replication_token.as_deref().is_some_and(|t| !t.is_empty());
     if replica_of.is_some() && !replicating {
