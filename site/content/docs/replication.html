@@ -240,8 +240,8 @@ cut, none answered more than 316 ms before it — 250 ms plus the sync's own
 time — and kept every write its change feed had handed a reader, as a prefix
 of the writes. A <code>--dir</code> node under <code>--sync always</code> lost
 no acknowledged write at any cut. Its standby, read as each cut left it, held
-nothing the node came back without, and was 0 to 51 changes behind it, writes
-still unanswered at the cut, a 20 MiB spill among them. The second run counted
+nothing the node came back without and was 0 to 51 changes behind it, a 20 MiB
+spill still unanswered at the cut among them. The second run counted
 the writes the node had answered as durable that the standby lacked: none, at
 all ten tenant cuts, so a promotion at any of them would have lost nothing.
 That was measured, not promised: a write answered as durable is on the
