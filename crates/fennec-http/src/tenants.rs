@@ -1628,7 +1628,16 @@ impl Tenants {
         let following = match (&upstream, history.following) {
             (Some(_), true) => true,
             (Some(_), false) if demote || history.lineage.is_empty() => {
-                db.follow(history.lineage.clone()).map_err(failed)?;
+                // On disk before the follow is answered: the router counts
+                // the copy as the tenant's replica from then on. Left in the
+                // sink's buffer -- a copy waiting on its primary's image
+                // writes nothing meanwhile -- the record went with a kill,
+                // and the restart opened the old primary's file as a
+                // primary's, following nothing, with nothing in the log
+                // (`make chaos`'s catch-up fault, five runs on 2026-11-13).
+                db.follow(history.lineage.clone())
+                    .and_then(|_| db.sync())
+                    .map_err(failed)?;
                 true
             }
             (Some(_), false) => false,
@@ -3501,6 +3510,46 @@ mod tests {
             f.halt();
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A follow is answered once the file says it follows. A node killed
+    /// right after -- its copy waiting on the primary's image over a slow
+    /// link, nothing written since -- opens it again as a replica's file.
+    /// Left in the sink's buffer, the record making it one went with the
+    /// process: the restart opened the old primary's file as a primary's,
+    /// with no follower and nothing in the log, and the copy the router
+    /// counted on never caught up (`make chaos`'s catch-up fault, five runs
+    /// on 2026-11-13: docs/design/replication.md).
+    #[test]
+    fn a_follow_answered_has_its_file_say_it_follows() {
+        let dir = scratch("follow-kill");
+        let reg = replicating(&dir);
+        let t = reg.create("t").unwrap();
+        run(&t, "create collection n (i int)");
+        run(&t, "put n {i: 1}");
+        drop(t);
+        reg.follow("t", Some("http://127.0.0.1:9")).unwrap();
+        // What a kill leaves: the file as the system holds it -- what this
+        // process wrote, not what it kept to write -- and the record beside.
+        let killed = scratch("follow-killed");
+        std::fs::create_dir_all(&killed).unwrap();
+        for f in ["t.fennec", "t.follows"] {
+            std::fs::copy(dir.join(f), killed.join(f)).unwrap();
+        }
+        let restarted = replicating(&killed);
+        let following = restarted.get("t").unwrap().read().history().following;
+        for r in [&reg, &restarted] {
+            let t = r.get("t").unwrap();
+            if let Some(f) = t.repl.as_ref().and_then(|r| r.follower()) {
+                f.halt();
+            }
+        }
+        assert!(
+            following,
+            "the restart opened the old primary's file as a primary's"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(killed);
     }
 
     /// A delete is a departure only on a node that replicates its tenants,

@@ -70,7 +70,9 @@ node follows (the standby copy the router made). Every file on a replica
 node was made to follow once, so an idle close or a restart undid a
 promotion and the old primary's image wiped the writes since. A rejoining
 node's tenants follow when the router records the pair
-(`POST /_admin/tenants/<t>/follow`, each), a failover that moved every
+(`POST /_admin/tenants/<t>/follow`, each: the file says so on disk before
+the follow is answered, [replication.md](replication.md#replication)), a
+failover that moved every
 tenant ends the pair, and no tenant is placed on or moved to a standby. A
 tenant whose follower runs is never closed as idle: the follower holds the
 database rather than the tenant, and a close left it writing the file under

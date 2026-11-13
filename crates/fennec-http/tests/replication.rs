@@ -388,6 +388,34 @@ fn a_replica_behind_the_buffer_is_sent_an_image() {
     assert_eq!(rows(&r, near), rows(&p, near));
 }
 
+/// An image a copy took says on disk that the copy follows. The image's
+/// own history is its primary's, taking writes, and the record making it a
+/// follower's, appended after the rename, waited for a write behind that a
+/// copy with nothing to apply never makes: a kill then, and the restart
+/// opened the copy as a primary's file, following nothing.
+#[test]
+fn an_image_a_copy_took_says_on_disk_that_it_follows() {
+    let d = dir("image-follows");
+    let p = primary(&d.join("p.fennec"), 256);
+    assert_eq!(query(&p, SCHEMA).0, 200);
+    write_some(&p, 0, 40);
+    let r = replica(&d.join("r.fennec"), p.port);
+    caught_up(&r, &p);
+    assert_eq!(r.follower.as_ref().unwrap().images(), 1);
+    // What a kill leaves: the file as the system holds it, not what the
+    // process kept to write.
+    let killed = d.join("killed.fennec");
+    std::fs::write(&killed, std::fs::read(d.join("r.fennec")).unwrap()).unwrap();
+    let (db, _feed) =
+        replication::open(killed.to_str().unwrap(), replication::DEFAULT_BUFFER).unwrap();
+    assert!(
+        db.history().following,
+        "the image's own history, a primary's"
+    );
+    assert_eq!(db.history().lineage, r.db.read().unwrap().history().lineage);
+    assert_eq!(db.change_seq(), seq(&p));
+}
+
 #[test]
 fn a_replica_of_a_replica_is_fed_the_same_writes() {
     let d = dir("chain");

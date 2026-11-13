@@ -1950,9 +1950,16 @@ primary's writes since the first kill for the 60 s the settle waits, every
 link read back clear and every node running, and n2 logged nothing of
 replication once it started again. CI's run before the review (43464712047,
 a lease of 2 s) stopped the same way on seed 1003, its copy on n1, while
-its two other seeds passed. A copy whose follow was answered and then cut
-by a kill does not follow after the restart: not the drill's, and not
-explained yet.
+its two other seeds passed, and so did all three of the review's hosted
+run at a lease of 5 s (43482324234, seeds 2001 to 2003, each at its
+catch-up fault). It was fennecdb's, not the drill's: the record making the
+old primary's file a follower's was left in the sink's buffer as the
+follow was answered, and a copy waiting on its image writes nothing that
+would have written it behind. The kill took the record, and the restart
+opened the file as a primary's, following nothing
+([replication.md](replication.md#replication), *A restart reads a copy's
+role from its file*). A follow now syncs it before it is answered, and an
+image comes with it inside its rename.
 
 ## Install channels
 
