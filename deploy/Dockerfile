@@ -15,17 +15,22 @@
 # was given before it is copied out (the script says why: a branch's image
 # once carried main's fennec-shard).
 
+# Every FROM names a digest, and the rust image the release
+# rust-toolchain.toml names, as the repository's Dockerfile does
+# (tools/toolchain_check.py holds both).
+#
 # ----------------------------------------------------------------- build
-FROM rust:alpine AS build
+FROM rust:1.99.1-alpine@sha256:44819b27be4c97b0e4d7203bd2e02c4820f97700211b6a37fb4c246a2de59383 AS build
 
 RUN apk add --no-cache musl-dev rsync
 
 WORKDIR /src
+# rust-toolchain.toml governs the build; the wasm32 target it asks for, which
+# no binary here needs, is added in a layer of its own, as the repository's
+# Dockerfile adds it.
+COPY rust-toolchain.toml ./
+RUN rustup toolchain install --no-self-update
 COPY . .
-
-# rust-toolchain.toml also asks for the wasm32 target, which no binary
-# here needs; the channel is "stable" already, so no pin is lost.
-RUN rm -f rust-toolchain.toml
 
 # /built, a path no build before the script copied from: BuildKit keyed
 # those COPYs by binaries a stale target/ had made, and could hand a
@@ -35,7 +40,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     tools/image-cargo.sh /built --release -p fennec-server -p fennec-shard -p fennec-cli
 
 # ------------------------------------------------------------------- kit
-FROM alpine:3 AS kit
+FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS kit
 
 COPY --from=build /built/ /usr/local/bin/
 # The drill's containers run as root inside: their data are named volumes
@@ -49,7 +54,7 @@ CMD ["fennec-server", "--help"]
 # failed: a segment growing as it read it), node_exporter what reads the
 # sync's success (a file it could not read passed a check made as root),
 # acl the runbook's setfacl.
-FROM python:3.13-slim AS systemd
+FROM python:3.13.18-slim-trixie@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90 AS systemd
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends systemd systemd-sysv procps rclone \
