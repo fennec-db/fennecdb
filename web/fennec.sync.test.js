@@ -1456,9 +1456,11 @@ test("a replica's tokenProvider is handed why a token is wanted", { skip, concur
     // its `exp` or not -- and the one handed over refused too, asked for
     // again no sooner than a second later, `attempt` 2. A provider that
     // throws then hands over nothing: the status says it failed and what it
-    // was asked, and `setOnline(true)` asks it again.
+    // was asked -- already by the time `onError` is told, so a handler that
+    // throws leaves it said -- and `setOnline(true)` asks it again.
     const told = [];
     const at = [];
+    const toldError = [];
     const forged = () => jwt('another-secret-of-32-bytes-or-more!', { sub: 'alice', exp: now() + 600 });
     const refused = await sync({
       url: s.url,
@@ -1472,15 +1474,20 @@ test("a replica's tokenProvider is handed why a token is wanted", { skip, concur
         if (r.attempt > 1) throw new FennecError('the issuer is out of reach');
         return forged();
       },
-      onError: () => {},
+      onError: (e) => {
+        if (String(e?.message).includes('out of reach')) toldError.push(refused.status()[0].token?.stage);
+      },
     });
     opened.push(refused);
     await until(() => told.length === 2, 'the token asked for twice');
     const second = { errorCode: null, expired: false, hadToken: true, attempt: 2 };
     assert.deepEqual(told, [{ errorCode: null, expired: false, hadToken: true, attempt: 1 }, second]);
     assert.ok(at[1] - at[0] >= 1000, `asked again after ${at[1] - at[0]} ms`);
+    await until(() => toldError.length === 1, 'onError told of the failure');
+    assert.deepEqual(toldError, ['failed']);
     assert.equal(refused.status()[0].errorCode, null);
-    assert.deepEqual(said(refused.status()[0].tokenRefusal), second);
+    assert.equal(refused.status()[0].token.stage, 'failed');
+    assert.deepEqual(said(refused.status()[0].token.refusal), second);
     assert.equal(refused.status()[0].error, 'the token provider failed: the issuer is out of reach');
     refused.setOnline(true);
     await until(() => told.length === 3, 'the token asked for again');
@@ -1507,7 +1514,10 @@ test("a replica's tokenProvider is handed why a token is wanted", { skip, concur
     await until(() => once.length === 1, 'the provider asked');
     slow.setOnline(true);
     slow.setToken(await forged());
-    await until(() => slow.status()[0].tokenRefusal?.attempt === 2, 'the ask after the wait');
+    await until(() => {
+      const t = slow.status()[0].token;
+      return t?.stage === 'asked' && t.refusal.attempt === 2;
+    }, 'the ask after the wait');
     slow.setOnline(true);
     gate();
     await slow.ready();

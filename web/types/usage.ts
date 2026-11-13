@@ -35,6 +35,7 @@ import {
   type Statements,
   type Timestamp,
   type TokenRefusal,
+  type TokenWait,
   type TypedCall,
   type TypedFrom,
   type Vector,
@@ -435,12 +436,22 @@ export async function remote() {
   });
   const code: string | null = replica.status()[0].errorCode;
   expect<string | null>(code);
-  // What the provider was handed for the token the sync waits on, for an
-  // app that hands its tokens over with `setToken`.
-  const waiting: TokenRefusal | null = replica.status()[0].tokenRefusal;
-  if (waiting && waiting.attempt > 1) expect<boolean>(waiting.hadToken);
+  // The token the sync waits on: where its ask stands, and the refusal the
+  // provider was handed -- for an app that hands its tokens over with
+  // `setToken`, which it does at `asked`.
+  const waiting: TokenWait | null = replica.status()[0].token;
+  if (waiting?.stage === 'asked') replica.setToken(asked(waiting.refusal));
+  if (waiting && waiting.refusal.attempt > 1) expect<boolean>(waiting.refusal.hadToken);
+  const stage: 'delayed' | 'asked' | 'failed' | undefined = waiting?.stage;
+  expect<'delayed' | 'asked' | 'failed' | undefined>(stage);
+  // @ts-expect-error -- a stage the status never says
+  if (waiting?.stage === 'waiting') expect<never>(waiting);
   // @ts-expect-error -- read-only, as the provider's is
-  if (waiting) waiting.attempt = 1;
+  if (waiting) waiting.stage = 'asked';
+  // @ts-expect-error -- read-only, as the provider's is
+  if (waiting) waiting.refusal.attempt = 1;
+  // @ts-expect-error -- the refusal is the token's, no member of the status's own
+  void replica.status()[0].tokenRefusal;
   // @ts-expect-error -- the status's code is `errorCode`, as every SDK names the server's
   void replica.status()[0].code;
 

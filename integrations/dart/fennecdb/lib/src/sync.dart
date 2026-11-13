@@ -44,16 +44,9 @@ class SyncFailure {
 
   /// The code a 401 the sync waits on for a token named (the server's
   /// body's `code`, [TokenRefusal.errorCode]), null for none:
-  /// `token_expired` where the token's `exp` passed -- for an app that hands
-  /// its tokens over with `setToken` rather than a provider.
+  /// `token_expired` where the token's `exp` passed.
   final String? errorCode;
-
-  /// What the provider was handed for the token the sync waits on, null
-  /// while it waits on none, and while it waits before asking again: the
-  /// same [TokenRefusal], for an app that hands its tokens over with
-  /// `setToken`.
-  final TokenRefusal? tokenRefusal;
-  const SyncFailure(this.message, this.status, [this.quota, this.errorCode, this.tokenRefusal]);
+  const SyncFailure(this.message, this.status, [this.quota, this.errorCode]);
   @override
   String toString() =>
       'SyncFailure($status${quota == null ? '' : ', $quota'}${errorCode == null ? '' : ', $errorCode'}): $message';
@@ -108,6 +101,42 @@ class TokenRefusal {
   String toString() => 'TokenRefusal(errorCode: $errorCode, hadToken: $hadToken, attempt: $attempt)';
 }
 
+/// Where the ask for a token a replica waits on stands ([TokenWait.stage]).
+enum TokenStage {
+  /// The token handed over was refused too: the provider is asked after a
+  /// wait, 1 s doubling to 60 s.
+  delayed,
+
+  /// The provider is asked -- with none, the app is -- and no token has
+  /// come.
+  asked,
+
+  /// The provider threw or handed over none: `resume()` or
+  /// `setOnline(true)` asks it again.
+  failed,
+}
+
+/// A token a replica waits on, as its status says it ([SyncStatus.token]):
+/// for an app that hands its tokens over with `setToken` -- which acts at
+/// [TokenStage.asked] -- and for one that shows where its provider stands.
+class TokenWait {
+  final TokenStage stage;
+
+  /// What the provider was handed -- or, [TokenStage.delayed], will be.
+  final TokenRefusal refusal;
+
+  const TokenWait(this.stage, this.refusal);
+
+  @override
+  bool operator ==(Object other) => other is TokenWait && other.stage == stage && other.refusal == refusal;
+
+  @override
+  int get hashCode => Object.hash(stage, refusal);
+
+  @override
+  String toString() => 'TokenWait($stage, $refusal)';
+}
+
 class ShapeState {
   final String collection;
   final int cursor;
@@ -123,11 +152,16 @@ class SyncStatus {
   final int pending;
 
   /// The last error: a connection's until it is back, a refused write's
-  /// until the next.
+  /// until the next -- the token's while one is wanted, whatever else
+  /// failed since (a stream that ended, as streams end offline).
   final SyncFailure? error;
   final List<ShapeState> shapes;
 
-  const SyncStatus(this.state, this.pending, this.error, this.shapes);
+  /// The token the sync waits on, null while it waits on none: nothing is
+  /// sent meanwhile.
+  final TokenWait? token;
+
+  const SyncStatus(this.state, this.pending, this.error, this.shapes, [this.token]);
 
   /// Whether every shape has had its seed.
   bool get seeded => shapes.isNotEmpty && shapes.every((s) => s.seeded);
@@ -136,6 +170,13 @@ class SyncStatus {
 
   static SyncStatus _of(Map<String, Object?> v) {
     final e = v['error'] as Map<String, Object?>?;
+    final t = v['token'] as Map<String, Object?>?;
+    final stage = switch (t?['stage']) {
+      'delayed' => TokenStage.delayed,
+      'asked' => TokenStage.asked,
+      'failed' => TokenStage.failed,
+      _ => null,
+    };
     return SyncStatus(
       switch (v['state']) {
         'online' => SyncState.online,
@@ -146,19 +187,19 @@ class SyncStatus {
       e == null
           ? null
           : SyncFailure(
-              e['message'] as String? ?? '',
-              e['status'] as int? ?? 0,
-              e['quota'] as String?,
-              e['code'] as String?,
-              switch (e['attempt']) {
-                final int attempt => TokenRefusal(
-                    errorCode: e['code'] as String?, hadToken: e['had_token'] as bool? ?? true, attempt: attempt),
-                _ => null,
-              }),
+              e['message'] as String? ?? '', e['status'] as int? ?? 0, e['quota'] as String?, e['code'] as String?),
       [
         for (final s in (v['shapes'] as List? ?? const []).cast<Map<String, Object?>>())
           ShapeState(s['collection'] as String, s['cursor'] as int, s['seeded'] == true, s['connected'] == true),
       ],
+      t == null || stage == null
+          ? null
+          : TokenWait(
+              stage,
+              TokenRefusal(
+                  errorCode: t['code'] as String?,
+                  hadToken: t['had_token'] as bool? ?? true,
+                  attempt: t['attempt'] as int? ?? 1)),
     );
   }
 }
@@ -239,7 +280,9 @@ class Replica {
     await wait;
   }
 
-  /// A fresh token, for the requests and streams from here on.
+  /// A fresh token, for the requests and streams from here on: what a `401`
+  /// stopped goes on, whatever the status's `token` says -- a provider that
+  /// never returned among them, called no second time meanwhile.
   void setToken(String token) {
     _token = token;
     _signalJson({'token': token});

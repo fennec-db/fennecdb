@@ -144,9 +144,9 @@ void main() {
 
   // A 401 hands the provider why -- no token sent (`hadToken` false) -- and
   // the status says the same while the sync waits. A provider that failed,
-  // its issuer out of reach, is named by the status's error and asked again
-  // at `resume()`; the token it hands over then refused too, it is asked
-  // once more after a wait, as `attempt` 2.
+  // its issuer out of reach, is named by the status -- its `token` failed,
+  // its error why -- and asked again at `resume()`; the token it hands over
+  // then refused too, it is asked once more after a wait, as `attempt` 2.
   test('a token provider is handed why a token is wanted', () async {
     final s = await Server.start('token', token: 'right');
     servers.add(s);
@@ -170,11 +170,11 @@ void main() {
         () async =>
             (await db.replica!.refresh()).error?.message ==
             'the token provider failed: SocketException: the issuer is out of reach');
-    expect(db.replica!.status.error?.tokenRefusal, first);
+    expect(db.replica!.status.token, const TokenWait(TokenStage.failed, first));
     db.replica!.resume();
     await db.replica!.ready();
     expect(asked, [first, first, const TokenRefusal(hadToken: true, attempt: 2)]);
-    expect((await db.replica!.refresh()).error?.tokenRefusal, isNull);
+    expect((await db.replica!.refresh()).token, isNull);
     expect(asked.where((r) => r.expired || r.errorCode != null), isEmpty);
     expect(const TokenRefusal(errorCode: 'token_expired').expired, isTrue);
     expect(await titles(db), ['one', 'two']);
@@ -202,7 +202,10 @@ void main() {
     db.replica!.resume();
     db.replica!.setToken('wrong');
     await eventually(
-        'the ask after the wait', () async => (await db.replica!.refresh()).error?.tokenRefusal?.attempt == 2);
+        'the ask after the wait',
+        () async =>
+            (await db.replica!.refresh()).token ==
+            const TokenWait(TokenStage.asked, TokenRefusal(hadToken: true, attempt: 2)));
     db.replica!.resume();
     gate.complete();
     await db.replica!.ready();

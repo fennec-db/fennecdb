@@ -410,12 +410,18 @@ class Run {
       case 'online':
         this.db.setOnline(st.online);
         break;
-      // The provider's answer to the ask out, or the app's own handover.
+      // The answer of the provider's call out, or the app's own handover.
       case 'token':
         if (this.asking) {
           this.asking.res(st.token);
           this.asking = null;
         } else this.db.setToken(st.token);
+        break;
+      // The app's own token while the provider's call stays out -- one
+      // that never returns -- whose answer, given later, answers the ask
+      // out then.
+      case 'set_token':
+        this.db.setToken(st.token);
         break;
       // The provider asked threw, or handed over none.
       case 'token_failed':
@@ -457,18 +463,20 @@ class Run {
     if (this.askedTwice) throw new Error('a token asked for while the ask before was out');
     // A provider handed an `expired` its code does not say, whatever the step expects.
     if (this.token && 'expired' in this.token) throw new Error(`token: expired ${this.token.expired} for code ${this.token.code}`);
-    // A text the status's last error says, null for none.
+    // A text the status's error says, null for none.
     if ('status_error' in e) {
       const said = this.db.status()[0].error;
       const ok = e.status_error === null ? said === null : typeof said === 'string' && said.includes(e.status_error);
       if (!ok) throw new Error(`status_error: expected ${JSON.stringify(e.status_error)}, got ${JSON.stringify(said)}`);
     }
     if ('code' in e) matches(e.code, this.db.status()[0].errorCode, binds, 'code');
-    // What the status says the sync waits on a token for: the last ask's
-    // three, null where it waits on none or waits before asking.
-    if ('token_refusal' in e) {
-      const r = this.db.status()[0].tokenRefusal;
-      matches(e.token_refusal, r && { code: r.errorCode, had_token: r.hadToken, attempt: r.attempt }, binds, 'token_refusal');
+    // What the status says of the token the sync waits on: its stage and
+    // the ask's three, null where it waits on none.
+    if ('token_wait' in e) {
+      const t = this.db.status()[0].token;
+      const r = t?.refusal;
+      if (r && r.expired !== (r.errorCode === 'token_expired')) throw new Error(`token_wait: expired ${r.expired} for code ${r.errorCode}`);
+      matches(e.token_wait, t && { stage: t.stage, code: r.errorCode, had_token: r.hadToken, attempt: r.attempt }, binds, 'token_wait');
     }
     if (e.waits) {
       assert.equal(this.waits.length, e.waits.length, `waits: ${e.waits.length} expected, ${JSON.stringify(this.waits)} asked`);

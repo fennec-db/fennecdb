@@ -1650,12 +1650,14 @@ export class FennecSync {
   #untaken = null;
   /**
    * The `TokenRefusal` the sync waits on a token for, while it does, and
-   * where its ask stands: `waiting` (the wait before it runs), `out` (the
+   * where its ask stands: `delayed` (the wait before it runs), `asked` (the
    * provider asked, no answer yet) or `failed` (it threw, or handed over
-   * none), as the native core's `Stage`.
+   * none, `#tokenWhy` saying why), as the native core's `Stage` -- the
+   * status's `token`.
    */
   #want = null;
   #stage = null;
+  #tokenWhy = '';
   /** The provider is at work: one call is out at a time. */
   #providing = false;
   #fetch;
@@ -1768,24 +1770,32 @@ export class FennecSync {
     return this.#queue.length ? new Promise((r) => this.#pushed.push(r)) : Promise.resolve();
   }
 
-  /** Shape state: `{collection, cursor, seeded, connected, pending, error, leader}`. */
+  /** Shape state: `{collection, cursor, seeded, connected, pending, error, quota, errorCode, token, leader}`. */
   status() {
+    // While a token is wanted the error is the token's too, both said here
+    // from where its ask stands and never kept as a fault, as the native
+    // core's status says them: kept as one, a fault set after it -- a
+    // stream's end, as streams end offline, where providers fail -- was
+    // written over it, and an app handing its tokens over by the status
+    // missed the ask while nothing was sent.
+    const token = this.#paused && this.#want ? Object.freeze({ stage: this.#stage, refusal: this.#want }) : null;
+    const fault = token ? { message: this.#tokenMessage(), quota: null, code: this.#want.errorCode } : this.#fault;
     return [...this.#shapes.values()].map((s) => ({
       collection: s.collection,
       cursor: s.cursor,
       seeded: s.seeded,
       connected: s.connected,
       pending: this.#queue.length,
-      error: this.#fault?.message ?? (s.error ? String(s.error.message ?? s.error) : null),
+      error: fault?.message ?? (s.error ? String(s.error.message ?? s.error) : null),
       // The tenant's quota the error names: a stream over the `streams`
       // quota is not connected, as one the network dropped is not.
-      quota: this.#fault?.quota ?? null,
+      quota: fault?.quota ?? null,
       // The code a 401 the sync waits on for a token named: `token_expired`
       // once the token's `exp` passed, null for none.
-      errorCode: this.#fault?.code ?? null,
-      // The `TokenRefusal` the provider was handed for the token the sync
-      // waits on, null while it waits on none, or before it asks again.
-      tokenRefusal: this.#fault?.refusal ?? null,
+      errorCode: fault?.code ?? null,
+      // The token the sync waits on, null while it waits on none: where its
+      // ask stands and the `TokenRefusal` it says or, delayed, will say.
+      token,
       leader: this.#leader,
     }));
   }
@@ -1806,7 +1816,7 @@ export class FennecSync {
     // next ask runs -- an app handing back its cached one at the status's
     // errorCode -- is the token the wait is for: it stands, or every wait
     // is skipped.
-    if (this.#paused && !(again && this.#stage === 'waiting')) {
+    if (this.#paused && !(again && this.#stage === 'delayed')) {
       this.#paused = false;
       this.#fault = null;
       // Another token handed over before the wait for a second ask ran
@@ -2257,8 +2267,8 @@ export class FennecSync {
     this.#waits.add(w);
   }
 
-  #setFault(message, status, connection, quota = null, code = null, refusal = null) {
-    this.#fault = { message, status, connection, quota, code, refusal };
+  #setFault(message, status, connection, quota = null) {
+    this.#fault = { message, status, connection, quota };
   }
 
   #clearConnectionFault() {
@@ -2325,9 +2335,8 @@ export class FennecSync {
     if (expired) this.#expiredGen = carried;
     const attempt = this.#tokenAsks;
     this.#want = Object.freeze({ errorCode: code, expired: code === TOKEN_EXPIRED, hadToken: carried !== null, attempt });
-    this.#stage = 'waiting';
+    this.#stage = 'delayed';
     if (attempt === 1) return this.#ask();
-    this.#setFault('the token handed over was refused too (401): another is asked for after a wait', 401, true, null, code);
     // A floor, as a server's word is: kept when the network comes back.
     this.#wait('token', 0, Math.min(1000 * 2 ** Math.min(attempt - 2, 6), 60000), () => this.#ask());
   }
@@ -2337,23 +2346,21 @@ export class FennecSync {
    * named (`errorCode`, `token_expired` where the token's `exp` passed),
    * whether that is an expiry (`expired`), whether the refused request
    * carried a token (`hadToken`), and how many times in a row it is asked
-   * since the server last took the token held (`attempt`). `status()`
-   * says the same, for an app that hands its tokens over with `setToken`.
+   * since the server last took the token held (`attempt`). `status()`'s
+   * `token` says the same, asked, for an app that hands its tokens over
+   * with `setToken`.
    */
   #ask() {
     const refusal = this.#want;
     if (!refusal || this.#closed) return;
-    this.#stage = 'out';
-    const message = refusal.expired
-      ? 'the token expired (401): a fresh one is wanted'
-      : refusal.hadToken
-        ? 'the server refused the token (401): a fresh one is wanted'
-        : 'the server wants a token (401): none was sent';
-    this.#setFault(message, 401, true, null, refusal.errorCode, refusal);
+    this.#stage = 'asked';
     // One call out at a time: called again while at work -- the app's own
     // `setToken` went on and was refused meanwhile -- a provider would mint
     // twice for one refusal, and the second token, coming late, end the
     // wait the first one's refusal began. Its answer answers this ask too.
+    // Nothing bounds the call, which may wait on a sign-in: one that never
+    // returns is called no second time, and the app's own `setToken` gets
+    // the sync going.
     if (!this.#tokenProvider || this.#providing) return;
     this.#providing = true;
     Promise.resolve()
@@ -2367,23 +2374,33 @@ export class FennecSync {
         },
         (e) => {
           this.#providing = false;
-          this.#onError?.(e);
+          // The status first: an `onError` that throws leaves it said.
           if (!this.#closed) this.#tokenFailed(String(e?.message ?? e));
+          this.#onError?.(e);
         },
       );
   }
 
   /**
-   * The provider threw, or handed over none: the status's error says so,
-   * the refusal it was handed kept beside it, and `setOnline(true)` asks
-   * again, as the native core does at `{"token_failed":..}`. One answering
-   * an ask the sync no longer waits on says nothing of the token wanted now.
+   * The provider threw, or handed over none: the status's `token` says so,
+   * `failed` beside the refusal it was handed, its error why, and
+   * `setOnline(true)` asks again, as the native core does at
+   * `{"token_failed":..}`. One answering an ask the sync no longer waits on
+   * says nothing of the token wanted now.
    */
   #tokenFailed(why) {
-    if (!this.#paused || this.#stage !== 'out') return;
+    if (!this.#paused || this.#stage !== 'asked') return;
     this.#stage = 'failed';
+    this.#tokenWhy = why;
+  }
+
+  /** The status's error while a token is wanted, by where its ask stands (the core's `Want::message`). */
+  #tokenMessage() {
     const r = this.#want;
-    this.#setFault(why ? `the token provider failed: ${why}` : 'the token provider failed', 401, true, null, r.errorCode, r);
+    if (this.#stage === 'delayed') return 'the token handed over was refused too (401): another is asked for after a wait';
+    if (this.#stage === 'failed') return this.#tokenWhy ? `the token provider failed: ${this.#tokenWhy}` : 'the token provider failed';
+    if (r.expired) return 'the token expired (401): a fresh one is wanted';
+    return r.hadToken ? 'the server refused the token (401): a fresh one is wanted' : 'the server wants a token (401): none was sent';
   }
 
   /**

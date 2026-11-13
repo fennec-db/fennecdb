@@ -45,9 +45,15 @@ data class SyncStatus(
     val state: State,
     /** Writes the server has not answered. */
     val pending: Int,
-    /** The last error: a connection's until it is back, a refused write's until the next. */
+    /**
+     * The last error: a connection's until it is back, a refused write's until the next -- the
+     * token's while one is wanted, whatever else failed since (a stream that ended, as streams end
+     * offline).
+     */
     val error: Failure?,
     val shapes: List<ShapeState>,
+    /** The token the sync waits on, null while it waits on none: nothing is sent meanwhile. */
+    val token: TokenWait? = null,
 ) {
     enum class State {
         /** Every shape's stream is open and seeded. */
@@ -65,16 +71,13 @@ data class SyncStatus(
      * server named, null for none: a stream refused by the quota of `streams` leaves the replica OFFLINE
      * as the network does, and this tells the two apart. [errorCode] is the code a 401 the sync waits on
      * for a token named (the server's body's `code`, [TokenRefusal.errorCode]), null for none:
-     * "token_expired" where the token's `exp` passed. [tokenRefusal] is what the provider was handed for
-     * the token the sync waits on, null while it waits on none and while it waits before asking again --
-     * both for an app that hands its tokens over with `setToken` rather than a provider.
+     * "token_expired" where the token's `exp` passed.
      */
     data class Failure @JvmOverloads constructor(
         val message: String,
         val status: Int,
         val quota: String? = null,
         val errorCode: String? = null,
-        val tokenRefusal: TokenRefusal? = null,
     )
 
     data class ShapeState(val collection: String, val cursor: Long, val seeded: Boolean, val connected: Boolean)
@@ -93,14 +96,20 @@ data class SyncStatus(
             },
             v.int("pending") ?: 0,
             v.row("error")?.let {
-                Failure(
-                    it.string("message") ?: "", it.int("status") ?: 0, it.string("quota"), it.string("code"),
-                    it.int("attempt")?.let { attempt -> TokenRefusal(it.string("code"), it.bool("had_token") ?: true, attempt) },
-                )
+                Failure(it.string("message") ?: "", it.int("status") ?: 0, it.string("quota"), it.string("code"))
             },
             (v.list("shapes") ?: emptyList()).map {
                 val s = it as Row
                 ShapeState(s.string("collection") ?: "", s.long("cursor") ?: 0, s.bool("seeded") == true, s.bool("connected") == true)
+            },
+            v.row("token")?.let { t ->
+                val stage = when (t.string("stage")) {
+                    "delayed" -> TokenWait.Stage.DELAYED
+                    "asked" -> TokenWait.Stage.ASKED
+                    "failed" -> TokenWait.Stage.FAILED
+                    else -> return@let null
+                }
+                TokenWait(stage, TokenRefusal(t.string("code"), t.bool("had_token") ?: true, t.int("attempt") ?: 1))
             },
         )
     }
@@ -158,6 +167,35 @@ class TokenRefusal @JvmOverloads constructor(
 }
 
 /**
+ * A token a replica waits on, as its status says it ([SyncStatus.token]):
+ * for an app that hands its tokens over with `setToken` -- which acts at
+ * [Stage.ASKED] -- and for one that shows where its provider stands. A
+ * plain class, as [TokenRefusal] is.
+ */
+class TokenWait(
+    val stage: Stage,
+    /** What the provider was handed -- or, [Stage.DELAYED], will be. */
+    val refusal: TokenRefusal,
+) {
+    enum class Stage {
+        /** The token handed over was refused too: the provider is asked after a wait, 1 s doubling to 60 s. */
+        DELAYED,
+
+        /** The provider is asked -- with none, the app is -- and no token has come. */
+        ASKED,
+
+        /** The provider threw or handed over none: `resume()` or `setOnline(true)` asks it again. */
+        FAILED,
+    }
+
+    override fun equals(other: Any?) = other is TokenWait && other.stage == stage && other.refusal == refusal
+
+    override fun hashCode() = stage.hashCode() * 31 + refusal.hashCode()
+
+    override fun toString() = "TokenWait(stage=$stage, refusal=$refusal)"
+}
+
+/**
  * A write the server refused: it was put back on the replica. [quota] is the tenant's quota that
  * refused it -- "bytes" or "rows", a 507 -- null for any other refusal: room is made by deleting,
  * and the writes behind it went on. [reason] is what the write's `require n else '<reason>'` said,
@@ -196,9 +234,13 @@ data class Refusal @JvmOverloads constructor(
  * and throws where it gets none -- the issuer out of reach, or refusing,
  * where the app signs out; nothing is sent until a token is handed over.
  * A provider that threw, or handed over an empty token, is named by the
- * status's error ("the token provider failed: ...") and asked again at
- * `resume()` or `setOnline(true)`; it is called once at a time. [path] is
- * one account's: a replica is never opened for another. A lambda asking
+ * status (`token` FAILED, the error "the token provider failed: ...") and
+ * asked again at `resume()` or `setOnline(true)`; it is called once at a
+ * time. Nothing bounds its time, since it may wait on a sign-in, so it must
+ * return: time out its own requests to the issuer and throw. One that never
+ * returns holds the sync, `token` ASKED, until the app hands a token over
+ * itself (`setToken`). [path] is one account's: a replica is never opened
+ * for another. A lambda asking
  * nothing, `{ refresh() }`, still takes; a reference to a function of none,
  * `::refresh`, no longer does: `{ refresh() }` for it.
  */
@@ -285,7 +327,11 @@ class Replica internal constructor(
         }
     }
 
-    /** A fresh token, for the requests and streams from here on. */
+    /**
+     * A fresh token, for the requests and streams from here on: what a `401` stopped goes on, whatever
+     * the status's `token` says -- a provider that never returned among them, called no second time
+     * meanwhile.
+     */
     fun setToken(token: String) {
         this.token = token
         signal(mapOf("token" to token))

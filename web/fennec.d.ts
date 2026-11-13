@@ -1834,11 +1834,15 @@ export interface SyncOptions<S extends AnySchema<S> = Schema> {
    * (`attempt` past 1: a key the server has not fetched yet, an `nbf` its
    * clock has not reached, a misconfiguration) the sync asks again after
    * 1 s doubling to 60 s. A provider that throws (told to `onError`) or
-   * hands over no token leaves the sync waiting, `status()`'s `error`
-   * reading `the token provider failed: …`, and is asked again at
-   * `setOnline(true)` -- the page's `online` event. It is called once at a
-   * time: while it is at work nothing asks it again, and what it hands
-   * over answers every ask meanwhile.
+   * hands over no token leaves the sync waiting, `status()`'s `token`
+   * reading `failed` and its `error` `the token provider failed: …`, and
+   * is asked again at `setOnline(true)` -- the page's `online` event. It
+   * is called once at a time: while it is at work nothing asks it again,
+   * and what it hands over answers every ask meanwhile. Nothing bounds its
+   * time, since it may wait on a sign-in, so it must return: time out its
+   * own requests to the issuer and throw. One that never returns holds the
+   * sync, `token` reading `asked`, until the app hands a token over itself
+   * with `setToken`.
    */
   tokenProvider?: (refusal: TokenRefusal) => string | Promise<string>;
   fetch?: typeof globalThis.fetch;
@@ -1888,18 +1892,35 @@ export interface ShapeStatus {
   /**
    * The code a 401 the sync waits on for a token named (`TokenRefusal`'s
    * `errorCode`): `token_expired` where the token's `exp` passed, null for
-   * none and for every other error -- for an app that hands its tokens
-   * over with `setToken` rather than a provider.
+   * none and for every other error.
    */
   errorCode: NonNullable<FennecError['errorCode']> | null;
   /**
-   * What the provider was handed for the token the sync waits on -- the
-   * same `TokenRefusal` -- null while it waits on none, and while it waits
-   * before asking again: for an app that hands its tokens over with
-   * `setToken`.
+   * The token the sync waits on, null while it waits on none: nothing is
+   * sent meanwhile. While it is not null, `error` is the token's too,
+   * whatever else failed since -- a stream that ended, as streams end
+   * offline.
    */
-  tokenRefusal: TokenRefusal | null;
+  token: TokenWait | null;
   leader: boolean;
+}
+
+/**
+ * A token a replica waits on, as its `status()` says it: for an app that
+ * hands its tokens over with `setToken` -- which acts at `asked` -- and for
+ * one that shows where its provider stands.
+ */
+export interface TokenWait {
+  /**
+   * `delayed` while the wait before the provider is asked runs -- the
+   * token handed over was refused too, and the next is asked for after
+   * 1 s doubling to 60 s; `asked` once the provider is asked, or with none
+   * the app is, and no token has come; `failed` where the provider threw
+   * or handed over none, until `setOnline(true)` asks it again.
+   */
+  readonly stage: 'delayed' | 'asked' | 'failed';
+  /** What the provider was handed -- or, `delayed`, will be. */
+  readonly refusal: TokenRefusal;
 }
 
 /**
@@ -1952,8 +1973,10 @@ export declare class FennecSync<S extends AnySchema<S> = Schema, Rel extends Rel
   status(): ShapeStatus[];
   /**
    * A new token: requests carry it from here on, and what a 401 stopped
-   * goes on. An empty one is none. The token just refused, handed over
-   * again while the wait before the next ask runs, does not end the wait.
+   * goes on, whatever its `token`'s stage -- a `tokenProvider` that never
+   * returned among them, which is called no second time meanwhile. An
+   * empty one is none. The token just refused, handed over again while the
+   * wait before the next ask runs, does not end the wait.
    */
   setToken(token: string): void;
   /**

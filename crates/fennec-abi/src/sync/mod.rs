@@ -41,8 +41,11 @@
 //!   does not end; a refusal of a token since replaced is sent again with
 //!   the new one, never asked about. One ask is out at a time: a binding
 //!   answers it with `{"token":..}`, or with `{"token_failed":".."}` where
-//!   its provider threw or handed over none -- the status's error says so
-//!   -- and only then does `{"online":true}` ask again
+//!   its provider threw or handed over none -- the status's `token` says
+//!   so -- and only then does `{"online":true}` ask again. Nothing bounds a
+//!   provider's time, which may be a sign-in's: one that never returns is
+//!   called no second time, and a token the app hands over itself gets the
+//!   sync going
 //! - `{"do":"changed"}`: the replica changed, live queries look again
 //! - `{"do":"refused","status":S,"message":..,"query":..,"quota":..,"reason":..}`:
 //!   the server refused a write, which was put back; `quota` is there where
@@ -138,6 +141,14 @@ fn own(name: &str) -> bool {
     matches!(name, SYNC_SHAPES | SYNC_QUEUE | SYNC_TEMPS)
 }
 
+/// `t` as a JSON text, or `null`.
+fn text_or_null(out: &mut String, t: Option<&str>) {
+    match t {
+        Some(t) => json::escape_into(out, t),
+        None => out.push_str("null"),
+    }
+}
+
 struct Shape {
     spec: shape::Spec,
     /// The server, the filter and the projection: a replica opened with
@@ -216,19 +227,41 @@ struct Want {
     stage: Stage,
 }
 
-/// Where the ask for a token stands.
-#[derive(Clone, Copy, PartialEq)]
+/// Where the ask for a token stands: the status's `token.stage`.
+#[derive(Clone, PartialEq)]
 enum Stage {
     /// The wait before the binding is asked runs ([`TOKEN_BACKOFF_MS`]).
-    Waiting,
+    Delayed,
     /// The binding was asked and has not answered. One ask is out at a
     /// time: asked again meanwhile, a provider still at work would be
     /// called twice for one refusal, and the second token, coming late,
     /// would end the wait the first one's refusal began.
-    Out,
-    /// The binding said none came (`{"token_failed":..}`): its provider
-    /// threw or handed over none, and `{"online":true}` asks again.
-    Failed,
+    Asked,
+    /// The binding said none came (`{"token_failed":..}`), and why: its
+    /// provider threw or handed over none, and `{"online":true}` asks
+    /// again.
+    Failed(String),
+}
+
+impl Want {
+    /// The status's error while the token is wanted, said from where its
+    /// ask stands ([`Sync::status`]).
+    fn message(&self) -> String {
+        match &self.stage {
+            Stage::Delayed => {
+                "the token handed over was refused too (401): another is asked for after a wait"
+                    .into()
+            }
+            Stage::Asked => match (self.code.as_deref(), self.had_token) {
+                (Some(TOKEN_EXPIRED), _) => "the token expired (401): a fresh one is wanted",
+                (_, false) => "the server wants a token (401): none was sent",
+                _ => "the server refused the token (401): a fresh one is wanted",
+            }
+            .into(),
+            Stage::Failed(why) if why.is_empty() => "the token provider failed".into(),
+            Stage::Failed(why) => format!("the token provider failed: {why}"),
+        }
+    }
 }
 
 struct Fault {
@@ -240,14 +273,6 @@ struct Fault {
     /// app tells "the server holds this tenant to its share" from "the
     /// network is gone" in a status that reads `offline` for both.
     quota: Option<String>,
-    /// The code a 401 named while the sync waits for a token
-    /// ([`TOKEN_EXPIRED`], or a later server's), which the status tells an
-    /// app that hands its tokens over with a signal as the token action
-    /// tells a provider.
-    code: Option<String>,
-    /// The token action's `had_token` and `attempt` once the binding was
-    /// asked, so the status says all three the action did.
-    asked: Option<(bool, u32)>,
 }
 
 /// What an answer says beyond its words, read from the body fennec-server
@@ -1104,8 +1129,6 @@ impl Sync {
             status,
             connection,
             quota,
-            code: None,
-            asked: None,
         });
         self.once("{\"do\":\"status\"}");
     }
@@ -1177,28 +1200,16 @@ impl Sync {
             self.expired_gen = carried;
         }
         let attempt = self.token_asks;
-        let want = Want {
+        self.want = Some(Want {
             code,
             had_token: carried.is_some(),
             attempt,
-            stage: Stage::Waiting,
-        };
+            stage: Stage::Delayed,
+        });
         if attempt == 1 {
-            self.want = Some(want);
             return self.ask();
         }
-        self.fault = Some(Fault {
-            message:
-                "the token handed over was refused too (401): another is asked for after a wait"
-                    .into(),
-            status: 401,
-            connection: true,
-            quota: None,
-            code: want.code.clone(),
-            asked: None,
-        });
         self.once("{\"do\":\"status\"}");
-        self.want = Some(want);
         let ms = (TOKEN_BACKOFF_MS << (attempt - 2).min(6)).min(TOKEN_BACKOFF_MAX_MS);
         // A floor, as a server's word is: kept when the network comes back.
         self.wait(Timer::Token, 0, ms);
@@ -1206,9 +1217,9 @@ impl Sync {
 
     /// Asks the binding for the token wanted:
     /// `{"do":"token","code":..,"had_token":B,"attempt":N}`, the status's
-    /// error naming the same three. A sync stopped asks nothing, as the
-    /// page's closed does: a provider called after the app closed the
-    /// database would mint a token no one sends.
+    /// `token` saying the same three, asked. A sync stopped asks nothing,
+    /// as the page's closed does: a provider called after the app closed
+    /// the database would mint a token no one sends.
     fn ask(&mut self) {
         if self.stopped {
             return;
@@ -1216,30 +1227,13 @@ impl Sync {
         let Some(w) = self.want.as_mut() else {
             return;
         };
-        w.stage = Stage::Out;
-        let message = match (w.code.as_deref(), w.had_token) {
-            (Some(TOKEN_EXPIRED), _) => "the token expired (401): a fresh one is wanted",
-            (_, false) => "the server wants a token (401): none was sent",
-            _ => "the server refused the token (401): a fresh one is wanted",
-        };
+        w.stage = Stage::Asked;
         let mut a = String::from("{\"do\":\"token\",\"code\":");
-        match &w.code {
-            Some(c) => json::escape_into(&mut a, c),
-            None => a.push_str("null"),
-        }
+        text_or_null(&mut a, w.code.as_deref());
         a.push_str(&format!(
             ",\"had_token\":{},\"attempt\":{}}}",
             w.had_token, w.attempt
         ));
-        let fault = Fault {
-            message: message.into(),
-            status: 401,
-            connection: true,
-            quota: None,
-            code: w.code.clone(),
-            asked: Some((w.had_token, w.attempt)),
-        };
-        self.fault = Some(fault);
         self.once("{\"do\":\"status\"}");
         self.outbox.push(a);
     }
@@ -1263,41 +1257,61 @@ impl Sync {
         }
     }
 
-    /// `{"state":"online"|"offline"|"catching_up","pending":N,"error":..,"shapes":[..]}`,
-    /// the error `{"message","status","quota","code","had_token","attempt"}`,
-    /// `quota` null unless a tenant's quota was named, `code` null unless a
-    /// 401 the sync waits on for a token named one ([`TOKEN_EXPIRED`]), and
-    /// `had_token` and `attempt` null unless the binding was asked for that
-    /// token, as the token action said them -- not while the wait before a
-    /// second ask runs.
+    /// `{"state":"online"|"offline"|"catching_up","pending":N,"error":..,"token":..,"shapes":[..]}`,
+    /// the error null or `{"message","status","quota","code"}`, `quota`
+    /// null unless a tenant's quota was named and `code` unless a 401 the
+    /// sync waits on for a token named one ([`TOKEN_EXPIRED`]); the token
+    /// null unless one is wanted, or `{"stage","code","had_token","attempt"}`:
+    /// `delayed` while the wait before the binding is asked runs, `asked`
+    /// once it is and has not answered, `failed` once it said none came,
+    /// beside the token action's three -- the ones the next ask says, while
+    /// it is delayed.
+    ///
+    /// While a token is wanted the error is the token's too, both said here
+    /// from where its ask stands and never kept as a fault: kept as one, a
+    /// fault set after it -- a stream's end, as streams end offline, where
+    /// providers fail -- was written over it, the error naming the stream
+    /// with the code and the ask's members gone, and an app handing its
+    /// tokens over by the status missed the ask while nothing was sent.
     pub fn status(&self) -> String {
         let mut out = format!(
             "{{\"state\":\"{}\",\"pending\":{},\"error\":",
             self.state_name(),
             self.queue.len()
         );
-        match &self.fault {
-            None => out.push_str("null"),
-            Some(f) => {
+        let want = self.want.as_ref().filter(|_| self.paused);
+        match (want, &self.fault) {
+            (Some(w), _) => {
+                out.push_str("{\"message\":");
+                json::escape_into(&mut out, &w.message());
+                out.push_str(",\"status\":401,\"quota\":null,\"code\":");
+                text_or_null(&mut out, w.code.as_deref());
+                out.push('}');
+            }
+            (None, Some(f)) => {
                 out.push_str("{\"message\":");
                 json::escape_into(&mut out, &f.message);
                 out.push_str(&format!(",\"status\":{},\"quota\":", f.status));
-                match &f.quota {
-                    Some(q) => json::escape_into(&mut out, q),
-                    None => out.push_str("null"),
-                }
-                out.push_str(",\"code\":");
-                match &f.code {
-                    Some(c) => json::escape_into(&mut out, c),
-                    None => out.push_str("null"),
-                }
-                match f.asked {
-                    Some((had, attempt)) => {
-                        out.push_str(&format!(",\"had_token\":{had},\"attempt\":{attempt}"))
-                    }
-                    None => out.push_str(",\"had_token\":null,\"attempt\":null"),
-                }
-                out.push('}');
+                text_or_null(&mut out, f.quota.as_deref());
+                out.push_str(",\"code\":null}");
+            }
+            (None, None) => out.push_str("null"),
+        }
+        out.push_str(",\"token\":");
+        match want {
+            None => out.push_str("null"),
+            Some(w) => {
+                let stage = match w.stage {
+                    Stage::Delayed => "delayed",
+                    Stage::Asked => "asked",
+                    Stage::Failed(_) => "failed",
+                };
+                out.push_str(&format!("{{\"stage\":\"{stage}\",\"code\":"));
+                text_or_null(&mut out, w.code.as_deref());
+                out.push_str(&format!(
+                    ",\"had_token\":{},\"attempt\":{}}}",
+                    w.had_token, w.attempt
+                ));
             }
         }
         out.push_str(",\"shapes\":[");
@@ -2062,7 +2076,11 @@ impl Sync {
                 && self
                     .want
                     .as_ref()
-                    .is_some_and(|w| w.stage == Stage::Waiting);
+                    .is_some_and(|w| w.stage == Stage::Delayed);
+            // Any other ends the wait, at whatever stage: the ask's answer,
+            // or the app's own while its provider has not returned -- one
+            // waiting on a sign-in, or never returning, which no timer here
+            // ends.
             if self.paused && !waiting {
                 self.paused = false;
                 self.fault = None;
@@ -2081,21 +2099,9 @@ impl Sync {
             if let Some(w) = self
                 .want
                 .as_mut()
-                .filter(|w| self.paused && w.stage == Stage::Out)
+                .filter(|w| self.paused && w.stage == Stage::Asked)
             {
-                w.stage = Stage::Failed;
-                let message = match why.as_str() {
-                    "" => "the token provider failed".to_string(),
-                    why => format!("the token provider failed: {why}"),
-                };
-                self.fault = Some(Fault {
-                    message,
-                    status: 401,
-                    connection: true,
-                    quota: None,
-                    code: w.code.clone(),
-                    asked: Some((w.had_token, w.attempt)),
-                });
+                w.stage = Stage::Failed(why.clone());
             }
         }
         match shape::member(&v, "online") {
@@ -2128,10 +2134,17 @@ impl Sync {
                 // again: a provider that threw -- its issuer out of reach
                 // with the network -- hands over nothing, and the sync
                 // would wait for good. Not while the ask is out, which
-                // would call a provider still at work a second time; nor
+                // would call a provider still at work a second time -- one
+                // that never returns stays the call out, and a token the
+                // app hands over itself is what gets the sync going -- nor
                 // while the wait before a second ask runs: that is the
                 // server's refusal, which the network says nothing of.
-                if self.paused && self.want.as_ref().is_some_and(|w| w.stage == Stage::Failed) {
+                if self.paused
+                    && self
+                        .want
+                        .as_ref()
+                        .is_some_and(|w| matches!(w.stage, Stage::Failed(_)))
+                {
                     self.ask();
                 }
             }

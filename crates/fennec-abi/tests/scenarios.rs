@@ -296,14 +296,19 @@ struct Run {
     requests: Vec<Value>,
     opened: Vec<Value>,
     refused: Vec<Value>,
+    /// Whether the provider was called during the step, and what it was
+    /// handed: the token action's `code`, `had_token` and `attempt`.
     token_asked: bool,
-    /// What the token action said: its `code`, `had_token` and `attempt`.
     token: Value,
-    /// A token action not answered yet by a `token` or `token_failed`
-    /// step: one ask is out at a time, and a second while it is fails the
-    /// scenario (`asked_twice`).
+    /// A token action not answered yet by a `token`, `set_token` or
+    /// `token_failed` step: one ask is out at a time, and a second while it
+    /// is fails the scenario (`asked_twice`).
     asking: bool,
     asked_twice: bool,
+    /// The provider's call is out, as a binding keeps it (`providing`): an
+    /// ask made meanwhile calls it no second time, and its answer -- a
+    /// `token` or `token_failed` step -- answers that ask.
+    providing: bool,
     waits: Vec<Value>,
     error: Option<String>,
     /// The reason the error said, a `require <n> else '<reason>'`'s.
@@ -426,6 +431,10 @@ impl Run {
             "token" => {
                 self.asked_twice |= self.asking;
                 self.asking = true;
+                if self.providing {
+                    return;
+                }
+                self.providing = true;
                 self.token_asked = true;
                 let said = |k: &str| member(a, k).cloned().unwrap_or(Value::Null);
                 self.token = obj(vec![
@@ -460,6 +469,7 @@ impl Run {
         self.timers.clear();
         self.held.clear();
         self.asking = false;
+        self.providing = false;
         let config = self.config();
         match Sync::start(&mut self.db, &config) {
             Ok(s) => self.sync = Some(s),
@@ -624,10 +634,15 @@ impl Run {
                     .signal(&mut self.db, &format!("{{\"online\":{on}}}"))
                     .unwrap();
             }
-            // The provider's answer to the ask out, or the app's own
-            // handover: to the core, a token either way.
-            "token" => {
+            // The answer of the provider's call out, or the app's own
+            // handover: to the core, a token either way. `set_token` is the
+            // app's own while the call stays out, a provider that never
+            // returns: the call, answered later, answers the ask out then.
+            "token" | "set_token" => {
                 self.asking = false;
+                if text(member(step, "do")) == "token" {
+                    self.providing = false;
+                }
                 let t = text(member(step, "token"));
                 self.sync
                     .as_mut()
@@ -641,8 +656,9 @@ impl Run {
             // The provider asked threw, or handed over none: the binding
             // tells the core why.
             "token_failed" => {
-                assert!(self.asking, "a provider fails with no ask out");
+                assert!(self.providing, "a provider fails with no call out");
                 self.asking = false;
+                self.providing = false;
                 let why = text(member(step, "error"));
                 self.sync
                     .as_mut()
@@ -731,23 +747,14 @@ impl Run {
         if self.asked_twice {
             return Err("a token asked for while the ask before was out".into());
         }
-        // What the status says the sync waits on a token for: the last
-        // ask's three, null where it waits on none or waits before asking.
-        if let Some(e) = member(expect, "token_refusal") {
+        // What the status says of the token the sync waits on: its stage
+        // and the ask's three, null where it waits on none.
+        if let Some(e) = member(expect, "token_wait") {
             let st = json::parse_json(&self.sync.as_ref().ok_or("no sync")?.status()).unwrap();
-            let err = member(&st, "error").cloned().unwrap_or(Value::Null);
-            let said = |k: &str| member(&err, k).cloned().unwrap_or(Value::Null);
-            let r = match said("attempt") {
-                Value::Null => Value::Null,
-                attempt => obj(vec![
-                    ("code", said("code")),
-                    ("had_token", said("had_token")),
-                    ("attempt", attempt),
-                ]),
-            };
-            matches(e, &r, binds, "token_refusal")?;
+            let t = member(&st, "token").cloned().unwrap_or(Value::Null);
+            matches(e, &t, binds, "token_wait")?;
         }
-        // A text the status's last error says, null for none.
+        // A text the status's error says, null for none.
         if let Some(e) = member(expect, "status_error") {
             let st = json::parse_json(&self.sync.as_ref().ok_or("no sync")?.status()).unwrap();
             let said = member(&st, "error")
@@ -862,6 +869,7 @@ fn run(file: &Value, sc: &Value) -> Check {
         token: Value::Null,
         asking: false,
         asked_twice: false,
+        providing: false,
         waits: vec![],
         error: None,
         reason: None,

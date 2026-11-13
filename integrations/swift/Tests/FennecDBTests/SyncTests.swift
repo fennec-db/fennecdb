@@ -54,9 +54,10 @@
 
         /// A 401 hands the provider why -- no token sent (`hadToken` false)
         /// -- and the status says the same while the sync waits. A provider
-        /// that threw, its issuer out of reach, is named by the status's
-        /// error and asked again at `resume()`; the token it hands over then
-        /// refused too, it is asked once more after a wait, as `attempt` 2.
+        /// that threw, its issuer out of reach, is named by the status --
+        /// its `token` failed, its error why -- and asked again at
+        /// `resume()`; the token it hands over then refused too, it is
+        /// asked once more after a wait, as `attempt` 2.
         @Test func aTokenProviderIsHandedWhyATokenIsWanted() async throws {
             let s = try await Server("token", token: "right")
             defer { s.stop() }
@@ -80,13 +81,13 @@
             try await eventually("the status naming the provider's failure") {
                 await db.replica!.refresh().error?.message == "the token provider failed: the issuer is out of reach"
             }
-            #expect(db.replica!.status.error?.tokenRefusal == first)
+            #expect(db.replica!.status.token == TokenWait(stage: .failed, refusal: first))
             db.replica!.resume()
             await db.replica!.ready()
             #expect(asked.get() == [first, first, TokenRefusal(hadToken: true, attempt: 2)])
             #expect(asked.get().allSatisfy { !$0.expired })
             #expect(TokenRefusal(errorCode: "token_expired").expired)
-            #expect(await db.replica!.refresh().error?.tokenRefusal == nil)
+            #expect(await db.replica!.refresh().token == nil)
             #expect(try await titles(db) == ["one", "two"])
             try await db.close()
         }
@@ -110,7 +111,9 @@
             try await eventually("the first ask") { asked.get().count == 1 }
             db.replica!.resume()
             db.replica!.setToken("wrong")
-            try await eventually("the ask after the wait") { await db.replica!.refresh().error?.tokenRefusal?.attempt == 2 }
+            try await eventually("the ask after the wait") {
+                await db.replica!.refresh().token == TokenWait(stage: .asked, refusal: TokenRefusal(hadToken: true, attempt: 2))
+            }
             db.replica!.resume()
             released.set { _ in true }
             await db.replica!.ready()

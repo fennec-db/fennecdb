@@ -150,9 +150,12 @@ int32_t fennec_warm(uint64_t handle, const uint8_t *only, size_t only_len, char 
  * since replaced is sent again with the new one, no action. One ask is out
  * at a time: a binding answers it with {"token":..}, or with
  * {"token_failed":"why"} where its provider threw or handed over none --
- * the status's error says so -- and calls its provider once at a time, a
+ * the status's token says so -- and calls its provider once at a time, a
  * token action meanwhile answered by that call; then {"online":true} asks
- * again, never while an ask is out or during the wait.
+ * again, never while an ask is out or during the wait. Nothing bounds a
+ * provider's time, which may be a sign-in's: one that never returns is
+ * called no second time, and a {"token":..} the app signals itself gets
+ * the sync going.
  * A binding reading only "do" asks for a token at every one.
  * Once started, a write through fennec_query to a synced collection is
  * applied at once and queued for the server in the same block.
@@ -176,12 +179,17 @@ int32_t fennec_sync_feed(uint64_t handle, uint32_t kind, uint64_t id, int32_t st
                         char **out, size_t *out_len);
 
 /*
- * {"state":"online"|"offline"|"catching_up","pending":N,"error":..,"shapes":[..]},
- * the error null or {"message":..,"status":S,"quota":..|null,"code":..|null,
- * "had_token":B|null,"attempt":N|null}, its code the one the 401 a token is
- * wanted for named ("token_expired"), had_token and attempt the token
- * action's once one was asked for, null while the wait before it runs; its
- * message "the token provider failed: <why>" after {"token_failed":..}.
+ * {"state":"online"|"offline"|"catching_up","pending":N,"error":..,"token":..,
+ * "shapes":[..]}: the error null or {"message":..,"status":S,"quota":..|null,
+ * "code":..|null}, its code the one the 401 a token is wanted for named
+ * ("token_expired"); the token null unless one is wanted, or
+ * {"stage":"delayed"|"asked"|"failed","code":..|null,"had_token":B,"attempt":N}:
+ * delayed while the wait before the ask runs, asked once the token action
+ * came and no token was signalled, failed after {"token_failed":..} until
+ * {"online":true} asks again; code, had_token and attempt the action's, or
+ * the next one's while delayed. While a token is wanted the error is the
+ * token's -- "the token provider failed: <why>" once failed -- whatever else
+ * failed since, a stream that ended among them.
  */
 int32_t fennec_sync_status(uint64_t handle, char **out, size_t *out_len);
 

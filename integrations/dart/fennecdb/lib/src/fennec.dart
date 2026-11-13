@@ -449,9 +449,14 @@ class Fennec {
   /// completes with an error where it gets none -- the issuer out of reach,
   /// or refusing, where the app signs out; nothing is sent until a token is
   /// handed over. A provider that failed, or handed over an empty token, is
-  /// named by the status's error ("the token provider failed: ...") and
-  /// asked again at `resume()` or `setOnline(true)`; it is called once at a
-  /// time. [path] is one account's: a replica is never opened for another.
+  /// named by the status (`token` [TokenStage.failed], the error "the token
+  /// provider failed: ...") and asked again at `resume()` or
+  /// `setOnline(true)`; it is called once at a time. Nothing bounds its
+  /// time, since it may wait on a sign-in, so it must complete: time out its
+  /// own requests to the issuer and fail. One that never completes holds the
+  /// sync, `token` [TokenStage.asked], until the app hands a token over
+  /// itself (`setToken`). [path] is one account's: a replica is never opened
+  /// for another.
   /// A function of no argument is no longer taken (before 1.0 it was):
   /// `(_) => refresh()` for it.
   static Future<Fennec> openSynced({

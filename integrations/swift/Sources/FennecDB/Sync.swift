@@ -66,6 +66,32 @@ public struct TokenRefusal: Sendable, Equatable {
     }
 }
 
+/// A token a replica waits on, as its status says it (`SyncStatus.token`):
+/// for an app that hands its tokens over with `setToken` -- which acts at
+/// `.asked` -- and for one that shows where its provider stands.
+public struct TokenWait: Sendable, Equatable {
+    public enum Stage: String, Sendable {
+        /// The token handed over was refused too: the provider is asked
+        /// after a wait, 1 s doubling to 60 s.
+        case delayed
+        /// The provider is asked -- with none, the app is -- and no token
+        /// has come.
+        case asked
+        /// The provider threw or handed over none: `resume()` or
+        /// `setOnline(true)` asks it again.
+        case failed
+    }
+
+    public let stage: Stage
+    /// What the provider was handed -- or, `.delayed`, will be.
+    public let refusal: TokenRefusal
+
+    public init(stage: Stage, refusal: TokenRefusal) {
+        self.stage = stage
+        self.refusal = refusal
+    }
+}
+
 /// Where a replica stands with its server.
 public struct SyncStatus: Sendable, Equatable {
     public enum State: String, Sendable {
@@ -87,14 +113,8 @@ public struct SyncStatus: Sendable, Equatable {
         public let quota: String?
         /// The code a 401 the sync waits on for a token named (the
         /// server's body's `code`, `TokenRefusal.errorCode`), nil for none:
-        /// "token_expired" where the token's `exp` passed -- for an app that
-        /// hands its tokens over with `setToken` rather than a provider.
+        /// "token_expired" where the token's `exp` passed.
         public let errorCode: String?
-        /// What the provider was handed for the token the sync waits on,
-        /// nil while it waits on none, and while it waits before asking
-        /// again: the same `TokenRefusal`, for an app that hands its tokens
-        /// over with `setToken`.
-        public let tokenRefusal: TokenRefusal?
     }
 
     public struct ShapeState: Sendable, Equatable {
@@ -108,19 +128,24 @@ public struct SyncStatus: Sendable, Equatable {
     /// Writes the server has not answered.
     public let pending: Int
     /// The last error: a connection's until it is back, a refused write's
-    /// until the next.
+    /// until the next -- the token's while one is wanted, whatever else
+    /// failed since (a stream that ended, as streams end offline).
     public let error: Failure?
+    /// The token the sync waits on, nil while it waits on none: nothing is
+    /// sent meanwhile.
+    public let token: TokenWait?
     public let shapes: [ShapeState]
 
     /// Whether every shape has had its seed.
     public var seeded: Bool { shapes.allSatisfy(\.seeded) }
 
-    static let starting = SyncStatus(state: .catchingUp, pending: 0, error: nil, shapes: [])
+    static let starting = SyncStatus(state: .catchingUp, pending: 0, error: nil, token: nil, shapes: [])
 
-    init(state: State, pending: Int, error: Failure?, shapes: [ShapeState]) {
+    init(state: State, pending: Int, error: Failure?, token: TokenWait?, shapes: [ShapeState]) {
         self.state = state
         self.pending = pending
         self.error = error
+        self.token = token
         self.shapes = shapes
     }
 
@@ -130,10 +155,16 @@ public struct SyncStatus: Sendable, Equatable {
         error = v["error"]?.object.map { e in
             Failure(
                 message: e["message"]?.string ?? "", status: e["status"]?.int ?? 0, quota: e["quota"]?.string,
-                errorCode: e["code"]?.string,
-                tokenRefusal: e["attempt"]?.int.map {
-                    TokenRefusal(errorCode: e["code"]?.string, hadToken: e["had_token"]?.bool ?? true, attempt: $0)
-                })
+                errorCode: e["code"]?.string)
+        }
+        token = v["token"]?.object.flatMap { t in
+            TokenWait.Stage(rawValue: t["stage"]?.string ?? "").map {
+                TokenWait(
+                    stage: $0,
+                    refusal: TokenRefusal(
+                        errorCode: t["code"]?.string, hadToken: t["had_token"]?.bool ?? true,
+                        attempt: t["attempt"]?.int ?? 1))
+            }
         }
         shapes = (v["shapes"]?.array ?? []).map {
             ShapeState(
@@ -182,10 +213,14 @@ extension Fennec {
     /// for a fresh one at every 401, and throws where it gets none -- the
     /// issuer out of reach, or refusing, where the app signs out; nothing is
     /// sent until a token is handed over. A provider that threw, or handed
-    /// over an empty token, is named by the status's error ("the token
-    /// provider failed: ...") and asked again at `resume()` or
-    /// `setOnline(true)`; it is called once at a time. `path` is one
-    /// account's: a replica is never opened for another.
+    /// over an empty token, is named by the status (`token` `.failed`, the
+    /// error "the token provider failed: ...") and asked again at
+    /// `resume()` or `setOnline(true)`; it is called once at a time.
+    /// Nothing bounds its time, since it may wait on a sign-in, so it must
+    /// return: time out its own requests to the issuer and throw. One that
+    /// never returns holds the sync, `token` `.asked`, until the app hands
+    /// a token over itself (`setToken`). `path` is one account's: a replica
+    /// is never opened for another.
     public static func sync(
         url: String, token: String? = nil, shapes: [Shape], path: String, options: Options = [],
         tokenProvider: (@Sendable (TokenRefusal) async throws -> String)? = nil
@@ -330,7 +365,10 @@ public final class Replica: NSObject, URLSessionDataDelegate, @unchecked Sendabl
         }
     }
 
-    /// A fresh token, for the requests and streams from here on.
+    /// A fresh token, for the requests and streams from here on: what a
+    /// `401` stopped goes on, whatever the status's `token` says -- a
+    /// provider that never returned among them, called no second time
+    /// meanwhile.
     public func setToken(_ token: String) {
         lock.lock()
         self.token = token
