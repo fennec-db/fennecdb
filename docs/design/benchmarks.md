@@ -1,6 +1,6 @@
 # Benchmarks
 
-The long form of the invariants [crates/fennec-bench/CLAUDE.md](../../crates/fennec-bench/CLAUDE.md) lists under *Benchmarks*: what `make scale-bench` and `make ycsb` measure and how. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists. The last, [Instruction counts](#instruction-counts), holds no invariant of the code: it is how two builds' counts are read on macOS, which `tools/instr/` runs.
+The long form of the invariants [crates/fennec-bench/CLAUDE.md](../../crates/fennec-bench/CLAUDE.md) lists under *Benchmarks*: what `make scale-bench` and `make ycsb` measure and how, and [the gate](#the-gate) every pull request's instruction counts are held to. The first two sections are paragraphs moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists. [Instruction counts](#instruction-counts) holds no invariant of the code: it is how two builds' counts are read on macOS, which `tools/instr/` runs.
 
 ## scale-bench
 
@@ -210,3 +210,153 @@ code to the instruction. The tools are macOS's -- the counts, the signing
 and lldb -- and elsewhere say so and exit 0; `tools/instr/test_instr.py`,
 run in CI, holds a copy's UUID, the refusals keeping a build's output
 untouched, the figures and a trace's deltas.
+
+## The gate
+
+**A pull request is held to its base in instructions an op.** CI's `perf
+(instructions)` job, on every pull request and in the merge queue, builds
+`crates/fennec-http/examples/gate.rs` twice -- at the merge's first parent,
+which is a pull request's base branch or the commit a merge group queues
+onto, and in the change -- and counts each of its workloads under
+valgrind's callgrind, five runs a side. A side's figure is the median of
+its runs' instructions; a workload whose figure is 1% or more above the
+base's fails the job (`tools/perf_gate.py`), unless the pull request adds
+an entry to `PERF_ACCEPTED`, in the same file: the workload, the most it
+lets through (`"+1.8%"`) and why, in 40 characters at the least -- what the
+instructions buy, and what `make perf-gate` and `make instr-compare`
+measured. The job judges with the base's copy of the checker, reading the
+pull request's entries as data, never running them, as
+`tools/openapi_compat.py` reads `BREAKS` ([http.md](http.md#compatibility)):
+a pull request that lowers the bar, cuts the runs or rewrites the rule is
+judged by the rule it would replace. An entry lets its workload through
+only in the pull request that adds it -- one the base holds already lets
+nothing through, and an entry edited counts as added -- so the list is the
+history of what was let through, never cut. A workload the base's build
+cannot run, one over a statement the change brings, is held to nothing and
+says so; one this tree's build cannot run fails the job. Making the job a
+required check is a setting of the branch's protection, beside `test
+(ubuntu-latest)`, `test (macos-latest)` and `build (release + cli
+profile)`.
+
+*What is counted.* One program, this tree's source copied into the base's
+worktree, so both sides run the same work against their own crates; a
+program the base's crates do not build -- an interface the change altered
+-- falls back to the base's own copy, its workloads held to these by name.
+It is built for `x86_64-unknown-linux-musl` in the release profile, the
+code the release's binaries and the image are, its symbols kept
+(`CARGO_PROFILE_RELEASE_STRIP=false`): stripping moves no instruction, and
+a profile of a stripped binary names no function. Each workload sets its
+data up from a fixed seed, then runs its ops in a loop, and only the loop is
+counted: valgrind starts with `--instr-atstart=no --collect-atstart=no`,
+and the program asks callgrind to instrument and count as the loop starts
+and to stop as it ends -- client requests, the magic sequences of
+valgrind's `valgrind.h` written as inline assembly for x86_64 and aarch64,
+which a processor runs as no work. Setup so runs under valgrind's core
+alone, about five times slower than native, where instrumented it ran some
+eighty times slower. A run that counts nothing -- valgrind passed a
+sequence by -- is refused. Every workload is in process and on one thread,
+with no socket: the figures over the wire are `make requests-bench`'s,
+`make roundtrip-bench`'s, `make load-bench`'s, `make scale-bench`'s, `make
+ycsb`'s and `make beir`'s, whose clients, servers in Docker and systems
+beside them an instruction count cannot hold. `make perf-gate` runs the
+job's count and judgement on Linux with valgrind; `HEAD=<ref>` replays two
+commits, as the calibration below did. Each side's median run's profile is
+kept (`target/perf-gate/profiles/<workload>.<side>.callgrind`), for
+`callgrind_annotate` to say which function a difference is in.
+
+*Why on musl.* The release's Linux binaries and the image are static musl
+builds (`release.yml`, `Dockerfile`), and musl's allocator is much of a
+request -- [http.md](http.md#json-from-stored-rows): it gave a freed group
+of blocks back to the system and faulted it in again at the next request --
+so glibc's, which ships nowhere, would count another program's costs.
+Instructions rather than time: a shared runner's clock moves by more than
+most changes cost, and one binary's count, run after run, is the same to
+the instruction where nothing it does depends on a draw or on the clock.
+
+*Where a count moves.* Held to itself -- one build on both sides, ten runs
+a side, eight at a time on a loaded M1 in Docker (aarch64 musl) -- 17 of 24
+workloads counted the same to the instruction, or within 0.03%, run after
+run; `group`, `near` and the filtered `near` within 0.5%; `facet` 15-18%
+and the three scoped requests 2-6% apart. Two things moved those, each
+found by diffing two runs' profiles by function. The clock: `--request-rate`'s window is
+swept once a second of the wall's time (`rate::Held::take`), forgetting the
+callers that asked nothing in it, and a caller forgotten is taken in anew
+at its next request. A thousand subjects in turn -- `rows.rs`'s -- took two
+seconds a turn under callgrind, and a hundred on a loaded machine more than
+one at times: how many each sweep forgot was the clock's, and a scoped
+request's count moved by 2 to 6% from one run to the next. Four subjects
+each ask again within milliseconds, and the sweep forgets none. The draw:
+std's hash tables take their keys at random in each process
+(`RandomState`), and a facet through a `@hash` index walks its buckets in
+the order the keys lay its table out, `order_rows`' pick of the ten most
+comparing as many times as that order makes it: one database's facet cost
+some 15% apart from one process to the next. Each op of `core-facet` asks
+the next of 256 databases, each with keys of its own (a thread's tables
+take its keys with the first moved by one, a new key each), and a run
+counts the mean of 256 draws. Ten runs a side then spread 1.1% for `facet`,
+0.03% for the scoped read, 0.8% and 1.0% for the scoped insert and set --
+the set within 0.04% over eight runs made one at a time -- and 0.4% for the
+filtered `near`: a step a workload's lookups pay or not, which the median
+of five takes, the threshold standing well above it.
+
+*The threshold.* CALIBRATION PENDING: the replays of merged pull requests
+`make instr-compare` judged neutral, and of known regressions, and the base
+held to itself twenty times, in this change's CI.
+
+*Why fennec-http's examples.* The program reaches every crate a request
+does and no more. In `fennec-bench`, its bundled SQLite, the MongoDB
+driver, tokio, PostgreSQL's and Redis's clients would be built twice a
+pull request, which the job's fifteen minutes cannot hold. fennec-http's
+examples build its dev-dependency, fennec-tls -- rustls and ring, whose C
+the runner's `musl-gcc` compiles (`musl-tools`, as `release.yml` installs
+it) -- though no workload links it. valgrind is the runner's package too:
+the crates take no dependency.
+
+*The workloads and the claims they stand for.* Each is the path a page's
+figure measures; a hot path a page quotes gets one.
+
+| workload | its loop | the claim it stands for |
+|---|---|---|
+| `core-put` | a row written over by id, its `@hash` bucket moved, into a file | YCSB's updates ([benchmarks-ycsb.html](../../site/content/docs/benchmarks-ycsb.html#ycsb)) |
+| `core-insert` | a new row into a file | YCSB's load, and D's and E's inserts |
+| `core-get-id` | a row by id of 10 000 | YCSB C's reads by id, 438 k a second at one thread |
+| `core-filter-limit` | a `@hash` bucket of some 100 rows, the first ten | a filter with a limit of 10, 0.032 ms over HTTP ([benchmarks-requests.html](../../site/content/docs/benchmarks-requests.html#requests)) |
+| `core-order` | a range of a `@sorted` field, the first ten in order | YCSB E's short scans; [`@sorted`](indexes.md#sorted) |
+| `core-group` | 10 000 rows grouped by a field of 100 values, counted and summed | an aggregate of 50 000 groups ([benchmarks-requests.html](../../site/content/docs/benchmarks-requests.html#concurrency)) |
+| `core-lookup` | ten parents in id order, each with its children through a `@hash` | [`lookup`](lookup-and-aggregates.md#lookup), one bucket probe a parent (`make lookup-bench`) |
+| `core-match` | BM25 over two words, the ten best, of 10 000 documents of 30 words | `match … limit 10`, two words: 0.06 ms ([benchmarks-text.html](../../site/content/docs/benchmarks-text.html#text-search)) |
+| `core-fuzzy` | a word with a typo, its words within an edit | a word's neighbours, one edit: 14 µs ([benchmarks-text.html](../../site/content/docs/benchmarks-text.html#typos)) |
+| `core-facet` | the brands of every row through `@hash`, over 256 databases in turn | a facet over every row through `@hash`: 0.01 ms ([benchmarks-text.html](../../site/content/docs/benchmarks-text.html#text-search)) |
+| `core-near` | the ten nearest of 4 000 64-dim vectors by the graph, a beam of 100 | `near` at a beam of 100 ([benchmarks-vector.html](../../site/content/docs/benchmarks-vector.html#scale), `make sweep`) |
+| `core-near-filtered` | the same under a `@hash` filter keeping 1% | a filter keeping 1%: 0.67 ms at a million ([benchmarks-vector.html](../../site/content/docs/benchmarks-vector.html#scale)) |
+| `core-json-page` | 1 000 rows of four floats written as JSON off the stored documents | [a plain `get` written from the stored rows](http.md#json-from-stored-rows) (`json_numbers.rs`) |
+| `ql-parse` | 34 texts of every kind, SQL's spellings among them, each parsed | every statement's first request, before [the parse cache](http.md#parse-cache) holds it |
+| `http-get-row` | `GET /t?id=eq.<id>` through `fennec_http::handle` | a row by id: 0.022 ms over HTTP ([benchmarks-requests.html](../../site/content/docs/benchmarks-requests.html#requests)) |
+| `http-patch` | `PATCH /t?id=eq.<id>`, a row written by a filter | REST's writes; [row tags](http.md#row-tags) cost a write by a filter nothing |
+| `http-put` | `put` by id through `/query` (`replays.rs`'s `put`) | put a row: 0.022 ms over HTTP ([benchmarks-requests.html](../../site/content/docs/benchmarks-requests.html#requests)) |
+| `http-put-keyed` | the same, each with an `Idempotency-Key` of its own | [idempotency keys](http.md#idempotency-keys) (`make replay-bench`) |
+| `http-batch` | a `/batch` of 1 000 puts, one block | a `POST /batch` of single puts ([benchmarks-requests.html](../../site/content/docs/benchmarks-requests.html#loading)) |
+| `http-scoped-get` | `http-get-row` under a scoped token, `--request-rate` charged | what a scoped caller pays ([access.md](access.md); `rows.rs`'s `scoped`) |
+| `http-scoped-set` | a customer's `set` of its own row beside a bound collection | a scoped write waking nothing does main's work ([named-statements.md](named-statements.md); `make wake-bench`) |
+| `http-scoped-insert` | a customer's `insert` of a row of its own, the same | the same |
+| `file-open` | a file of 100 000 rows opened, no index built | an open ([benchmarks-vector.html](../../site/content/docs/benchmarks-vector.html#against-sqlite-and-pgvector)); [lazy indexes](indexes.md#lazy-indexes) |
+| `file-compact` | a file of 10 000 rows each written twice, compacted | [compaction](storage.md#compaction) (`make compact-bench`) |
+
+*What it does not hold yet.* Callgrind counts no system call: a change that
+doubles a durable write's fsyncs, or a compaction's bytes written, passes
+it. Those counts -- fsyncs and bytes written a durable write, a `/batch`, a
+spill and a compact, under `strace -f -c` -- are to be another `metric` of
+the same results file, over the same two builds and the same checker, the
+job's step after this one's.
+
+*Rejected.* A glibc build: it ships nowhere, and its allocator is not
+musl's. `--toggle-collect` on the loop's function, valgrind's other way to
+count a part: the setup runs instrumented. Every map's hasher fixed under a
+`cfg`: the counts would be exact, but the change touches some hundred maps
+of shipped code, and needs a measurement of its own that the `cfg` off
+costs nothing. The seeds fixed from outside -- `getrandom` refused under a
+seccomp filter, so std reads `/dev/urandom`, and a file of fixed bytes
+bound over it: no code changes, but a thread's tables take their keys in
+the order they are made, so a map added anywhere before a workload's moves
+every later one's keys, and a change's count would be one draw from the
+same spread, once a build, where five runs and their median read past it.

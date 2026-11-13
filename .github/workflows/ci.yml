@@ -67,6 +67,13 @@ jobs:
       - name: tools/instr's UUID copies, figures and trace deltas
         run: python3 tools/instr/test_instr.py
 
+      # docs/design/benchmarks.md#the-gate: the perf job's judgement -- a
+      # synthetic +1% fails, a PERF_ACCEPTED entry the pull request adds
+      # lets it through, one the base holds does not -- and the entries
+      # read as data.
+      - name: tools/perf_gate.py fails +1% and lets an entry through
+        run: python3 tools/test_perf_gate.py
+
       # docs/design/http.md#compatibility: the checker the test job runs on
       # the served documents finds each kind of break, lets each addition
       # through, and holds BREAKS and the committed baseline.
@@ -591,6 +598,59 @@ jobs:
         run: |
           sudo apt-get install -y --no-install-recommends brotli
           python3 crates/fennec-wasm/size_report.py HEAD^1 "$BASE"
+
+  # docs/design/benchmarks.md#the-gate: every workload of
+  # crates/fennec-http/examples/gate.rs counted under callgrind in the
+  # base's build and this one's -- the static musl build that ships, the
+  # same program on both sides -- five runs a side, the medians held to
+  # each other: +1% or more fails, unless the pull request adds a
+  # PERF_ACCEPTED entry naming the workload. Judged by the base's copy of
+  # the checker, the pull request's entries read as data. The base is the
+  # merge's first parent, a pull request's base branch or the commit a
+  # merge group queues onto. valgrind and musl-gcc (ring's C, through the
+  # examples' dev-dependency on fennec-tls) are the runner's packages, no
+  # crate.
+  perf:
+    name: perf (instructions)
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Install the pinned toolchain, the musl target, valgrind and musl-gcc
+        run: |
+          rustup show
+          rustup target add x86_64-unknown-linux-musl
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends valgrind musl-tools
+
+      - name: Count each workload's instructions in the base's build and this one's
+        run: |
+          python3 tools/perf_gate.py run --base HEAD^1 --target x86_64-unknown-linux-musl \
+            --work "$RUNNER_TEMP/perf" --out "$RUNNER_TEMP/perf/results.json" --no-check
+
+      - name: Hold them to the base's, by the base's checker
+        run: |
+          base=$(git rev-parse HEAD^1)
+          if git cat-file -e "$base:tools/perf_gate.py"; then
+            git show "$base:tools/perf_gate.py" > "$RUNNER_TEMP/perf/base_perf_gate.py"
+            python3 -I "$RUNNER_TEMP/perf/base_perf_gate.py" check "$RUNNER_TEMP/perf/results.json" \
+              --accepted-from tools/perf_gate.py --accepted-base "$RUNNER_TEMP/perf/base_perf_gate.py" \
+              --summary "$GITHUB_STEP_SUMMARY"
+          else
+            echo "the base has no tools/perf_gate.py yet: this tree's judges"
+            python3 -I tools/perf_gate.py check "$RUNNER_TEMP/perf/results.json" --summary "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # P50, the I/O counts -- fsyncs and bytes written a durable write and
+      # a compact, under strace -f -c -- goes here, over the same two
+      # builds and the same checker: a results file of its own `metric`.
 
   integrations:
     name: integrations (python, react)

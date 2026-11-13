@@ -15,7 +15,9 @@ server answers 503 to whichever test asked), and so are `fennec-http`'s
 refusal is the process's, so the other tests' servers ask with none
 (`audit::set_delay(0)` in their helpers). Measurement programs are each
 crate's `examples/` and `fennec-bench`'s binaries, wired to `make` targets,
-not to CI.
+not to CI -- but for the perf gate's workloads
+(`crates/fennec-http/examples/gate.rs`), which CI counts in instructions on
+every pull request ([benchmarks.md](benchmarks.md#the-gate)).
 
 ## Reruns
 
