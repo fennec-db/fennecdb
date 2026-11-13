@@ -775,7 +775,9 @@ alice reads                                [{"title":"alice note"}] [200]</pre>
     until the next fetch), a token whose <code>nbf</code> the server's clock
     has not reached, or an issuer, audience or client the server does not
     take: a token minted again at once is refused the same, and a replica's
-    sync waits before it asks again, 1 s doubling to 60 s. It hands its
+    sync waits before it asks again, 1 s doubling to 60 s -- as it does for
+    tokens that arrive expired, as every one does where the server's clock
+    runs ahead of the issuer's by a token's lifetime. It hands its
     <code>tokenProvider</code> what it needs to tell these apart
     (<a href="/docs/sync#token-refusals">Sync</a>,
     <a href="/docs/mobile#sync">mobile</a>). A replica belongs to one

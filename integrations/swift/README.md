@@ -109,8 +109,12 @@ one: a 401 alone is never a sign-out, since the server keeps no list of
 revoked tokens -- the app signs out where the issuer refuses to issue one.
 Where the token handed over is refused too (`attempt` past 1: a key the
 server has not fetched yet, an `nbf` its clock has not reached), the sync
-asks again after 1 s doubling to 60 s. A provider that throws is asked
-again at `resume()` or `setOnline(true)`. A file is one account's -- its
+asks again after 1 s doubling to 60 s; an expiry of the token the server
+took last, or of the first handed over since, starts the count at 1 again.
+A provider that throws, or hands over an empty token, leaves the sync
+waiting, `replica.status`'s error reading "the token provider failed: …",
+and is asked again at `resume()` or `setOnline(true)` -- never while it is
+still at work: it is called once at a time. A file is one account's -- its
 path names the account, and it is never opened for another -- and signing
 out keeps it, for that account's next sign-in to send its `pending` writes.
 `replica.status`'s error names the `errorCode` and the `tokenRefusal` too,
@@ -244,6 +248,9 @@ words held to `integrations/builder-golden.json`.
   it asks again where the token handed over was refused too, and
   `resume()` asks again for a token a provider that threw never handed
   over.
+- A provider that throws, or hands over an empty token, is told in
+  `replica.status`'s error ("the token provider failed: …"), where it was
+  swallowed; an empty token is no longer handed to the server as none.
 - `SyncStatus.Failure` has `errorCode` and `tokenRefusal`, and
   `FennecError` a refusal's `errorCode`.
 

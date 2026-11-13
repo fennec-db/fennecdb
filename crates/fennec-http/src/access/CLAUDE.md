@@ -113,12 +113,17 @@ provider the code, whether the refused request carried a token and the
 asks in a row since the server took the token held -- a 2xx or a stream
 opened, never a 408, 429 or 5xx (`TokenRefusal`, the token action's
 `code`, `had_token`, `attempt`) -- asks once while it waits, after 1 s
-doubling to 60 s where the token handed over was refused too (an expiry
-starting at 1, unless of the token already refused for one), again at
-`{"online":true}` where nothing came, and sends a request refused for a
-token since replaced again, unasked (`fennec_abi::sync`, `web/fennec.js`,
-held by the scenario file); a replica is one account's, its key or path
-naming it; every SDK names the code `errorCode`.
+doubling to 60 s where the token handed over was refused too, a wait the
+same token handed over again does not end (an expiry starting at 1 only
+for the token the server took last or the first handed over since, never
+for one already refused for its expiry), one ask out at a time -- a
+binding calls its provider once at a time and answers with the token or
+`{"token_failed":..}`, which the status's error tells in every SDK --
+again at `{"online":true}` only after that, nothing once stopped, and
+sends a request refused for a token since replaced again, unasked
+(`fennec_abi::sync`, `web/fennec.js`, held by the scenario file); a
+replica is one account's, its key or path naming it; every SDK names the
+code `errorCode`.
 
 **[An empty token is no token.](../../../../docs/design/access.md#empty-tokens)**
 A variable set empty is unset (`env_secret`, fennec-shard's `env`); a token

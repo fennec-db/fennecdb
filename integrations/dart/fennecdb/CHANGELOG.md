@@ -10,11 +10,15 @@ Changed before 1.0, which freezes the API:
 - A 401 never asks the app to sign out: the provider asks its issuer for a
   fresh token at every one, and signs out where the issuer refuses. Where
   the token handed over is refused too (`attempt` past 1), the sync asks
-  again after 1 s doubling to 60 s; an expiry starts the count at 1 again,
-  and only a 2xx to the token held, or a stream that opens, resets it.
-- `resume()` and `setOnline(true)` ask again for a token asked for and not
-  handed over: a provider that failed no longer leaves the sync waiting
-  for good.
+  again after 1 s doubling to 60 s; an expiry of the token the server took
+  last, or of the first handed over since, starts the count at 1 again, and
+  only a 2xx to the token held, or a stream that opens, resets it.
+- `resume()` and `setOnline(true)` ask again for a token a provider that
+  failed did not hand over -- never while it is still at work: a provider
+  is called once at a time. A provider that fails, or hands over an empty
+  token, is told in `replica.status`'s error ("the token provider failed:
+  …"), where it was swallowed; an empty token is no longer handed to the
+  server as none.
 - `SyncFailure.errorCode` and `SyncFailure.tokenRefusal` say what the sync
   waits on a token for, and `FennecException.errorCode` is a refusal's
   code.

@@ -86,8 +86,12 @@ one: a 401 alone is never a sign-out, since the server keeps no list of
 revoked tokens -- the app signs out where the issuer refuses to issue one.
 Where the token handed over is refused too (`attempt` past 1: a key the
 server has not fetched yet, an `nbf` its clock has not reached), the sync
-asks again after 1 s doubling to 60 s. A provider that fails is asked again
-at `resume()` or `setOnline(true)`. A file is one account's -- its path
+asks again after 1 s doubling to 60 s; an expiry of the token the server
+took last, or of the first handed over since, starts the count at 1 again.
+A provider that fails, or hands over an empty token, leaves the sync
+waiting, `replica.status`'s error reading "the token provider failed: …",
+and is asked again at `resume()` or `setOnline(true)` -- never while it is
+still at work: it is called once at a time. A file is one account's -- its path
 names the account, and it is never opened for another -- and signing out
 keeps it, for that account's next sign-in to send its `pending` writes.
 `replica.status`'s error names the `errorCode` and the `tokenRefusal` too,

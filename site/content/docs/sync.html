@@ -263,19 +263,30 @@ a key the server has not fetched yet, an <code>nbf</code> its clock has not
 reached or a misconfiguration: where the token just handed over is refused
 too (<code>attempt</code> past 1), the sync asks again after 1 s doubling to
 60 s, so a provider that hands over a token at every ask asks the issuer
-once a minute, not at the network's speed. An expiry starts the count at 1
-again -- a token handed over offline may run out before it is sent -- and
-so does the server taking the token held, a 2xx or a stream that opens;
-a 408, 429 or 5xx does not, as it may come before the token is read. A 401 to a
-request sent before a new token was handed over is not asked about: the
-request goes again with the new one.</p>
+once a minute, not at the network's speed; handing over the token just
+refused again -- a cached one, at <code>errorCode</code> -- does not end
+that wait. An expiry of the token the server took last, or of the first
+one handed over since, starts the count at 1 again -- a token handed over
+offline may run out before it is sent -- and so does the server taking the
+token held, a 2xx or a stream that opens; a 408, 429 or 5xx does not, as it
+may come before the token is read. Any other token refused for its expiry
+counts, and waits: it was minted expired, as every token is where the
+server's clock runs ahead of the issuer's, and asked for again at once it
+would cost an issuer's call a round trip. A 401 to a request sent before a
+new token was handed over is not asked about: the request goes again with
+the new one.</p>
 
-<p><b>A provider that throws</b> -- the issuer out of reach -- hands over
-nothing, and the sync waits: the page's <code>online</code> event, or
+<p><b>A provider that throws</b> -- the issuer out of reach -- or hands
+over no token leaves the sync waiting, and says so: <code>status()</code>'s
+<code>error</code> reads <code>the token provider failed: …</code> (what it
+threw goes to <code>onError</code> too), its <code>tokenRefusal</code> what
+the provider was handed. The page's <code>online</code> event, or
 <code>setOnline(true)</code>, asks it again with the same
 <code>TokenRefusal</code>, though not before a wait the server's refusal
-began. An app that hands its tokens over with <code>setToken</code> instead
-reads the same from <code>status()</code>: the <code>error</code>, its
+began. A provider is asked once at a time: while it is at work nothing
+asks it again, and what it hands over answers every ask meanwhile. An app
+that hands its tokens over with <code>setToken</code> instead reads the
+same from <code>status()</code>: the <code>error</code>, its
 <code>errorCode</code>, and <code>tokenRefusal</code>, what the sync waits
 on a token for.</p>
 
@@ -309,8 +320,8 @@ rather than make the row twice.</p>
 <p><b>Offline.</b> A write made while the server cannot be reached waits in
 the queue; the page's <code>online</code> event, or
 <code>setOnline(true)</code>, sends it at once, the backoff forgotten -- unless
-the server said when to come back (below) -- asks again for a token asked
-for and not handed over, and
+the server said when to come back (below) -- asks a provider that failed for
+a token again, and
 <code>offline</code> or <code>setOnline(false)</code> closes the streams.
 Writes left from before go before the streams open again, so what they
 bring holds them.</p>
@@ -323,7 +334,9 @@ with it.</p>
 
 <p><b>Backoff.</b> 250 ms, doubling to 15 s, with 30% jitter on top so a
 server back up is not met by every client at once; a stream that cannot
-reconnect waits the same way, and starts the count again once it opens.</p>
+reconnect waits the same way, and starts the count again once it opens. One
+that ends while a token is wanted waits for the token instead, and opens
+with it.</p>
 
 <p><b>A tenant's quota.</b> A tenant node holds each tenant to its quotas
 (<a href="sharding-reference.html#quota-bounds">Quotas</a>), and names the one that refused
