@@ -1825,6 +1825,19 @@ each after one that builds the image, each run's seeds its own (its number
 times 1000 on), every seed's result and a failed one's history and logs
 kept for 14 days. Never on a pull request: hours long.
 
+*What the first runs saw*, on a laptop whose load other work held at 50 to
+110, seeds 1 to 4 (1.5, 2.5, 2.5 and 2.5 minutes of faults): 32 faults,
+every kind in each seed of 2.5 minutes, 36 settles with every replica's
+digest its primary's, 51 132 register writes and 22 603 appends answered
+and 39 622 reads, 43 operations whose outcome was unknown, no violation.
+Leases missed under that load failed nodes over besides the faults: a
+tenant reached its fifth term in 4 minutes. Eleven files left on nodes were
+removed as the runbook's operator removes them. The first runs stopped on
+the drill's own faults, each fixed: a pad row of id 0 (an id is positive),
+a region that had no node left for a replica (the operator's repair above),
+and the oracle formatting a passing read's message with no write before
+it, which ended two seeds' checks -- their histories, checked again, held.
+
 ## Install channels
 
 **A release is installed from its own files, each checked before it is used.** Four ways to install `fennec` and `fennec-server` other than a registry or the image -- Homebrew's formula, `https://fennecdb.com/install.sh`, a `.deb` and an `.rpm`, and on Windows `https://fennecdb.com/install.ps1` -- all take the archives `release.yml` built (the musl tarballs for Linux, which are static, the two macOS ones, and the two Windows zips) and build nothing themselves. Each names what it installs by a SHA-256, which is what holds them to one source: the formula carries the four sums of `SHA256SUMS`, each installer checks the tarball or the zip against the sum of the release it came from, and the packages are made from those tarballs and listed in `SHA256SUMS` with the rest. Because all three name the release's files by checksum, a published release's assets are never replaced: re-running `release.yml` for a tag whose release is public (`publish`) uploads only the files the release has no asset of, with a warning that its `SHA256SUMS` does not list them, where a draft's are replaced as before. A rebuild is not byte for byte the first build (the Rust toolchain, the runner image), so a replaced tarball would have failed every `brew install` and every sum already taken from the old `SHA256SUMS`. The image jobs still push `:X.Y.Z` and `:latest` again on a re-run; the image is not named by a checksum anywhere here. One file of a published release is written again, and only by growing: `desktop.yml` appends the app's lines to `SHA256SUMS` -- the Mac's DMG, Windows' zips and Linux's tarballs -- every line before them kept byte for byte, and never replaces a download ([Studio desktop](#studio-desktop), The release).
