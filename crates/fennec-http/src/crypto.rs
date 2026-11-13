@@ -6,10 +6,12 @@
 //! No dependencies, like the rest of fennecdb. Each primitive is held to its
 //! RFC's vectors in the tests at the end of the module -- SHA-256 to FIPS
 //! 180-4's examples, HMAC to RFC 4231's seven cases, PBKDF2 to RFC 7914's,
-//! ChaCha20, Poly1305 and the AEAD to RFC 8439's appendix A whole
-//! (`rfc8439_vectors.txt`) -- ES256 to Wycheproof's (`tests/es256.rs`), and
-//! SCRAM's exchange, fennec-wire's, to RFC 7677's; hand-written crypto is
-//! only usable when it can be proven against known vectors.
+//! and both where a key meets the block to Python's standard library's
+//! (`hmac_pbkdf2_vectors.txt`), ChaCha20, Poly1305 and the AEAD to RFC
+//! 8439's appendix A whole (`rfc8439_vectors.txt`) -- ES256 to Wycheproof's
+//! (`tests/es256.rs`), and SCRAM's exchange, fennec-wire's, to RFC 7677's;
+//! hand-written crypto is only usable when it can be proven against known
+//! vectors.
 
 mod p256;
 pub use p256::P256Key;
@@ -778,7 +780,12 @@ mod os;
 mod tests {
     use super::*;
 
+    /// Hex as the RFCs print it, its spaces passed over; `-` is no bytes,
+    /// as the vector files write an empty field.
     fn unhex(s: &str) -> Vec<u8> {
+        if s == "-" {
+            return Vec::new();
+        }
         let s: String = s.split_whitespace().collect();
         (0..s.len())
             .step_by(2)
@@ -977,16 +984,13 @@ mod tests {
                 "9b09ffa71b942fcb27635fbcd5b0e944 bfdc63644f0713938a7f51535c3a35e2",
             ),
         ];
-        let mut ran = 0;
         for (n, (key, data, mac)) in cases.iter().enumerate() {
             let (key, data, want) = (unhex(key), unhex(data), unhex(mac));
             let got = hmac_sha256(&key, &data);
             assert_eq!(&got[..want.len()], &want[..], "test case {}", n + 1);
             let (a, b) = data.split_at(data.len() / 3);
             assert_eq!(HmacKey::new(&key).mac(&[a, b]), got, "test case {}", n + 1);
-            ran += 1;
         }
-        assert_eq!(ran, 7);
     }
 
     /// RFC 7914, section 11: PBKDF2-HMAC-SHA-256 at c = 1 and c = 80 000.
@@ -1011,12 +1015,49 @@ mod tests {
                  a1d425a1225833549adb841b51c9b317 6a272bdebba1d078478f62b397f33c8d",
             ),
         ];
-        let mut ran = 0;
         for (p, s, c, dk) in cases {
             assert_eq!(pbkdf2_sha256(p, s, c)[..], unhex(dk)[..32], "c = {c}");
-            ran += 1;
         }
-        assert_eq!(ran, 2);
+    }
+
+    /// Where a key meets the 64-byte block, which RFC 4231's and RFC 7914's
+    /// keys and passwords never do: HMAC keys and PBKDF2 passwords of 0, 63,
+    /// 64 and 65 bytes -- 64 is the padded block as it is, never hashed --
+    /// and PBKDF2 salts of 60 to 63 bytes, whose INT(1) ends the inner
+    /// hash's second block or crosses into its third. The vectors are
+    /// Python's standard library's (`hmac_pbkdf2_vectors.txt`, the command
+    /// in its header), read as lines, so each kind's count is asserted.
+    #[test]
+    fn hmac_and_pbkdf2_where_a_key_meets_the_block() {
+        let (mut hmacs, mut pbkdf2s) = (0, 0);
+        for line in include_str!("hmac_pbkdf2_vectors.txt").lines() {
+            let f: Vec<&str> = line.split(' ').collect();
+            match f[0] {
+                "hmac" => {
+                    let (key, msg) = (unhex(f[1]), unhex(f[2]));
+                    let n = key.len();
+                    assert_eq!(
+                        hmac_sha256(&key, &msg)[..],
+                        unhex(f[3])[..],
+                        "a key of {n} bytes"
+                    );
+                    hmacs += 1;
+                }
+                "pbkdf2" => {
+                    let (p, s, c) = (unhex(f[1]), unhex(f[2]), f[3].parse().unwrap());
+                    let dk = pbkdf2_sha256(&p, &s, c);
+                    let (np, ns) = (p.len(), s.len());
+                    assert_eq!(
+                        dk[..],
+                        unhex(f[4])[..],
+                        "a password of {np} bytes, a salt of {ns}"
+                    );
+                    pbkdf2s += 1;
+                }
+                _ => assert!(line.starts_with('#') || line.is_empty(), "{line}"),
+            }
+        }
+        assert_eq!((hmacs, pbkdf2s), (4, 8));
     }
 
     /// RFC 8439's appendix A, a section's vectors (`rfc8439_vectors.txt`):
@@ -1129,13 +1170,10 @@ mod tests {
             (b"", b"x"),
             (&[0x80; 64], &[0x80; 64]),
         ];
-        let mut ran = 0;
         for (a, b) in pairs {
             assert_eq!(ct_eq(a, b), a == b, "{a:?} {b:?}");
             assert_eq!(ct_eq(b, a), a == b);
-            ran += 1;
         }
-        assert_eq!(ran, 7);
     }
 
     #[test]
