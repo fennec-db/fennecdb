@@ -10,7 +10,8 @@
 # newer Flutter is a change of the version and its sum, made on purpose. The
 # archive the list names is held to the list's sum and to SHA256 before it
 # is unpacked: a list or a download that is not what was looked at is
-# refused. An SDK already in DIR (the workflow's cache) is taken as it is.
+# refused. An SDK already in DIR (the workflow's cache) is taken as it is,
+# and either is then held to VERSION as Flutter itself reports it.
 # ci.yml's mobile jobs and packages.yml's `pub` come through here, in place
 # of subosito/flutter-action, whose own steps run actions/cache by its tag
 # (docs/design/integrations.md#workflows).
@@ -23,8 +24,10 @@ releases=$2
 want=$3
 dir=$4
 
+command -v jq >/dev/null 2>&1 || { echo "jq reads Flutter's lists and its version, and there is none" >&2; exit 1; }
+
 if [ -x "$dir/flutter/bin/flutter" ]; then
-    echo "Flutter $version in $dir, from the cache"
+    echo "Flutter in $dir, from the cache"
 else
     case "$(uname -m)" in
         x86_64 | amd64) arch=x64 ;;
@@ -34,7 +37,6 @@ else
             exit 1
             ;;
     esac
-    command -v jq >/dev/null 2>&1 || { echo "jq reads $releases, and there is none" >&2; exit 1; }
     tmp=$(mktemp -d "${TMPDIR:-/tmp}/install-flutter.XXXXXX")
     trap 'rm -rf "$tmp"' EXIT
     curl -fsSL --retry 3 -o "$tmp/releases.json" "$releases"
@@ -72,4 +74,19 @@ else
     rmdir "$dir/.unpacking"
     echo "Flutter $version in $dir, from $url ($got)"
 fi
-"$dir/flutter/bin/flutter" --version
+
+# The SDK is VERSION's, whether this run unpacked it or the cache held it:
+# the cache's key is a name the workflow writes, and a key and a version
+# that part would run another Flutter, green. Flutter's own answer
+# (`--machine`, a JSON object, which a first run's notices may come before
+# on its output) and not a file of its tree.
+machine=$("$dir/flutter/bin/flutter" --version --machine) || {
+    echo "$dir/flutter/bin/flutter --version --machine failed: [$machine]" >&2
+    exit 1
+}
+found=$(printf '%s\n' "$machine" | sed -n '/^{/,/^}/p' | jq -r '.frameworkVersion // empty' 2>/dev/null) || found=
+if [ "$found" != "$version" ]; then
+    echo "$dir/flutter is Flutter [$found], not the $version asked for: $machine" >&2
+    exit 1
+fi
+echo "Flutter $found in $dir/flutter"

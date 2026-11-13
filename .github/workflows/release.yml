@@ -469,11 +469,13 @@ jobs:
   # Docker 29 keeps images in containerd's store, and an image it loads from
   # `docker save`'s file it pushes as it stored it, under an OCI manifest
   # with the layers uncompressed -- 8.18 MB an architecture where v0.2.0's
-  # Docker v2 manifest names 4.08 MB of gzip layers. So the push refuses a
-  # Docker on containerd's store, and each tag pushed is read back from
-  # ghcr.io and held to v0.2.0's media types: should 24.04's Docker move to
-  # that store too, the release stops here and says why, instead of
-  # shipping an image twice the size in another format.
+  # Docker v2 manifest names 4.08 MB of gzip layers. So the push takes a
+  # Docker whose store is the classic one, overlay2, and no other -- a
+  # store it has not been told of is refused, as containerd's (`overlayfs`)
+  # is -- and each tag pushed is read back from ghcr.io and held to
+  # v0.2.0's media types: should 24.04's Docker move to another store too,
+  # the release stops here and says why, instead of shipping an image
+  # twice the size in another format.
   image-push:
     name: image (push)
     needs: image
@@ -494,13 +496,11 @@ jobs:
         run: |
           set -eu
           version="${TAG#v}"
-          store=$(docker info --format '{{json .DriverStatus}}')
-          case $store in
-            *io.containerd.snapshotter*)
-              echo "::error::this runner's Docker $(docker version --format '{{.Server.Version}}') keeps images in containerd's store, and would push these as OCI manifests with uncompressed layers, not the Docker v2 manifests and gzip layers v0.2.0's are: run image-push where Docker keeps its classic store (release.yml)"
-              exit 1
-              ;;
-          esac
+          driver=$(docker info --format '{{.Driver}}')
+          if [ "$driver" != overlay2 ]; then
+            echo "::error::this runner's Docker $(docker version --format '{{.Server.Version}}') keeps images in [$driver], not its classic overlay2 store, and may push these as OCI manifests with uncompressed layers (containerd's store does), not the Docker v2 manifests and gzip layers v0.2.0's are: run image-push where Docker keeps the classic store (release.yml)"
+            exit 1
+          fi
           for arch in amd64 arm64; do
             docker load -i "images/image-$arch.tar"
             platform=$(docker image inspect -f '{{.Os}}/{{.Architecture}}' "$IMAGE:$version-$arch")
