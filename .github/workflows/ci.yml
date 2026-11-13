@@ -10,6 +10,15 @@ on:
   merge_group:
   workflow_dispatch:
 
+# A pull request's or main's newer commit ends the run of the one before it:
+# a run is about 170 job-minutes, the account runs 20 jobs at once, and on
+# 2026-11-13 32 runs stood queued behind superseded ones, each a fix pushed
+# over its own still-running predecessor. A merge group is never cancelled:
+# each has its own ref, and the queue waits on its result.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
+
 env:
   CARGO_TERM_COLOR: always
 
