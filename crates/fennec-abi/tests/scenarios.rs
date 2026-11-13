@@ -279,10 +279,15 @@ struct Run {
     up: bool,
     /// The token the replica starts with, `None` for none.
     start_token: Option<String>,
-    /// The status and body the next stream opened is answered with.
-    stream_status: Option<(u16, String)>,
-    /// The status and body the next `GET /collections` is answered with.
-    schema_status: Option<(u16, String)>,
+    /// The status and body the next stream opened is answered with, and
+    /// whether only at the next `release`.
+    stream_status: Option<(u16, String, bool)>,
+    /// The same for the next `GET /collections`.
+    schema_status: Option<(u16, String, bool)>,
+    /// Answers held for the next `release`, in the order held: a stream's
+    /// open (its path) or a `GET /collections` (none), its id, status and
+    /// body.
+    held: Vec<(Option<String>, u64, u16, String)>,
     /// Open streams: id -> collection.
     streams: Vec<(u64, String)>,
     posts: VecDeque<u64>,
@@ -366,7 +371,10 @@ impl Run {
                     let sync = self.sync.as_mut().unwrap();
                     match (self.up, self.schema_status.take()) {
                         (false, _) => sync.response(&mut self.db, id, 0, 0, "connection refused"),
-                        (true, Some((s, body))) => sync.response(&mut self.db, id, s, 0, &body),
+                        (true, Some((s, body, true))) => self.held.push((None, id, s, body)),
+                        (true, Some((s, body, false))) => {
+                            sync.response(&mut self.db, id, s, 0, &body)
+                        }
                         (true, None) => sync.response(&mut self.db, id, 200, 0, &self.collections),
                     }
                 } else {
@@ -385,20 +393,11 @@ impl Run {
                 if !self.up {
                     return sync.closed(&mut self.db, id, "connection refused");
                 }
-                if let Some((s, body)) = self.stream_status.take() {
-                    return sync.opened(&mut self.db, id, s, &body);
+                match self.stream_status.take() {
+                    Some((s, body, true)) => self.held.push((Some(path), id, s, body)),
+                    Some((s, body, false)) if s != 200 => sync.opened(&mut self.db, id, s, &body),
+                    _ => self.open(id, &path),
                 }
-                let c = path
-                    .trim_start_matches('/')
-                    .split('/')
-                    .next()
-                    .unwrap()
-                    .to_string();
-                self.streams.push((id, c));
-                self.sync
-                    .as_mut()
-                    .unwrap()
-                    .opened(&mut self.db, id, 200, "");
             }
             "cancel" => self.streams.retain(|s| s.0 != id),
             "wait" => {
@@ -427,10 +426,26 @@ impl Run {
         }
     }
 
+    /// Stream `id`, at `path`, answered 200: open for the events to come.
+    fn open(&mut self, id: u64, path: &str) {
+        let c = path
+            .trim_start_matches('/')
+            .split('/')
+            .next()
+            .unwrap()
+            .to_string();
+        self.streams.push((id, c));
+        self.sync
+            .as_mut()
+            .unwrap()
+            .opened(&mut self.db, id, 200, "");
+    }
+
     fn start(&mut self) {
         self.streams.clear();
         self.posts.clear();
         self.timers.clear();
+        self.held.clear();
         let config = self.config();
         match Sync::start(&mut self.db, &config) {
             Ok(s) => self.sync = Some(s),
@@ -568,10 +583,23 @@ impl Run {
                     Some(b) => json::to_string(b),
                     None => "{\"error\":\"refused\"}".into(),
                 };
-                let answer = Some((int(member(step, "status")) as u16, body));
+                let held = matches!(member(step, "held"), Some(Value::Bool(true)));
+                let answer = Some((int(member(step, "status")) as u16, body, held));
                 match text(member(step, "do")).as_str() {
                     "stream_status" => self.stream_status = answer,
                     _ => self.schema_status = answer,
+                }
+            }
+            // The answers held, given now: a request still out while a
+            // token was handed over is answered for the one it carried.
+            "release" => {
+                for (stream, id, s, body) in std::mem::take(&mut self.held) {
+                    let sync = self.sync.as_mut().unwrap();
+                    match stream {
+                        Some(path) if s == 200 => self.open(id, &path),
+                        Some(_) => sync.opened(&mut self.db, id, s, &body),
+                        None => sync.response(&mut self.db, id, s, 0, &body),
+                    }
                 }
             }
             "online" => {
@@ -661,6 +689,22 @@ impl Run {
         if let Some(e) = member(expect, "token") {
             matches(e, &self.token, binds, "token")?;
         }
+        // What the status says the sync waits on a token for: the last
+        // ask's three, null where it waits on none or waits before asking.
+        if let Some(e) = member(expect, "token_refusal") {
+            let st = json::parse_json(&self.sync.as_ref().ok_or("no sync")?.status()).unwrap();
+            let err = member(&st, "error").cloned().unwrap_or(Value::Null);
+            let said = |k: &str| member(&err, k).cloned().unwrap_or(Value::Null);
+            let r = match said("attempt") {
+                Value::Null => Value::Null,
+                attempt => obj(vec![
+                    ("code", said("code")),
+                    ("had_token", said("had_token")),
+                    ("attempt", attempt),
+                ]),
+            };
+            matches(e, &r, binds, "token_refusal")?;
+        }
         if let Some(e) = member(expect, "code") {
             let st = json::parse_json(&self.sync.as_ref().ok_or("no sync")?.status()).unwrap();
             let c = member(&st, "error")
@@ -746,6 +790,7 @@ fn run(file: &Value, sc: &Value) -> Check {
         start_token: Some("t0".into()),
         stream_status: None,
         schema_status: None,
+        held: vec![],
         streams: vec![],
         posts: VecDeque::new(),
         timers: vec![],

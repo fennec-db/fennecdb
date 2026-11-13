@@ -1620,9 +1620,11 @@ class SyncQuery extends Query {
  * the server answers; no answer, a 408, a 429 or a 5xx is tried again with
  * backoff -- or after the `retry_after` a quota's 429 or a move's 503 names,
  * where longer -- a 401 asks the `tokenProvider` for a token, handed a
- * `TokenRefusal` (`errorCode`, `expired`, `hadToken`, `attempt`), and a 507
- * naming a tenant's quota and any other 4xx are a refusal, put back. Moving
- * this layer onto that core instead was measured at +21 KB brotli.
+ * `TokenRefusal` (`errorCode`, `expired`, `hadToken`, `attempt`), after a
+ * wait of 1 s doubling to 60 s where the one handed over was refused too,
+ * and a 507 naming a tenant's quota and any other 4xx are a refusal, put
+ * back. Moving this layer onto that core instead was measured at +21 KB
+ * brotli.
  */
 export class FennecSync {
   #local;
@@ -1635,8 +1637,13 @@ export class FennecSync {
    * of the token held now.
    */
   #tokenGen = 0;
-  /** How many times in a row a token was asked for, the server taking no request with one between. */
+  /** How many times in a row a token was asked for since the server last took the one held. */
   #tokenAsks = 0;
+  /** The token last refused for its expiry (`#carried`): refused for its expiry again, it was handed back as it was. */
+  #expiredGen = null;
+  /** The `TokenRefusal` the sync waits on a token for, while it does, and whether the provider was asked yet. */
+  #want = null;
+  #asked = false;
   #fetch;
   #shapes = new Map();
   #lives;
@@ -1760,6 +1767,9 @@ export class FennecSync {
       // The code a 401 the sync waits on for a token named: `token_expired`
       // once the token's `exp` passed, null for none.
       errorCode: this.#fault?.code ?? null,
+      // The `TokenRefusal` the provider was handed for the token the sync
+      // waits on, null while it waits on none, or before it asks again.
+      tokenRefusal: this.#fault?.refusal ?? null,
       leader: this.#leader,
     }));
   }
@@ -1775,6 +1785,15 @@ export class FennecSync {
     if (this.#paused) {
       this.#paused = false;
       this.#fault = null;
+      // Handed over before the wait for a second ask ran out: it is what
+      // the ask would have brought.
+      this.#want = null;
+      this.#asked = false;
+      for (const w of this.#waits) {
+        if (w.what !== 'token') continue;
+        clearTimeout(w.t);
+        this.#waits.delete(w);
+      }
     }
     this.#kick();
   }
@@ -1783,7 +1802,9 @@ export class FennecSync {
    * The network is gone (`false`): the streams end and writes wait. Back
    * (`true`): what waited goes at once, the backoff forgotten -- but not a
    * server's `retry_after`, since the network says nothing of a tenant's
-   * quota. A page has it from `online` and `offline` on its own.
+   * quota, nor the wait before a token is asked for again -- and a token
+   * asked for and not handed over is asked for again. A page has it from
+   * `online` and `offline` on its own.
    */
   setOnline(on) {
     if (!on) {
@@ -1807,6 +1828,9 @@ export class FennecSync {
     this.#schemaWaiting = held('schema');
     // A write the server said to hold back lets the streams open, as its 429 did.
     this.#flushing = this.#queue.length > 0 && !this.#sendWaiting;
+    // A provider that threw -- its issuer out of reach with the network --
+    // handed over nothing, and the sync would wait for good.
+    if (this.#paused && this.#asked) this.#ask();
     this.#kick();
   }
 
@@ -2207,8 +2231,8 @@ export class FennecSync {
     this.#waits.add(w);
   }
 
-  #setFault(message, status, connection, quota = null, code = null) {
-    this.#fault = { message, status, connection, quota, code };
+  #setFault(message, status, connection, quota = null, code = null, refusal = null) {
+    this.#fault = { message, status, connection, quota, code, refusal };
   }
 
   #clearConnectionFault() {
@@ -2222,49 +2246,76 @@ export class FennecSync {
 
   /**
    * The server answered a request, or a stream's head, that carried
-   * `carried` with `status`: an answer but a 401 to the token held took
-   * it, and a later ask is a first one again.
+   * `carried` with `status`. A 2xx to the token held is the server taking
+   * it, and the next ask is a first one again; nothing else is -- a 408, a
+   * 429 or a 5xx may come before a token is read (the connection ceiling's
+   * 503, a router's while a tenant moves).
    */
   #answered(status, carried) {
-    if (status !== 0 && status !== 401 && carried === this.#carried()) this.#tokenAsks = 0;
+    if (status >= 200 && status < 300 && carried === this.#carried()) this.#tokenAsks = 0;
   }
 
   /**
    * A 401 to a request, or a stream, that carried `carried`. Sent before a
    * token handed over since -- or none -- it goes again with that one, the
    * provider asked nothing: the refusal is of a token no longer held, and
-   * asked, an app that signs out at a token refused right after it was
-   * minted would have taken this for that. Returns whether it asked.
+   * counted, it would make the next ask wait for a refusal that crossed
+   * the handover. Returns whether a token is wanted.
    */
   #tokenRefused(code, carried) {
     if (carried !== this.#carried()) return false;
-    this.#wantToken(code, carried !== null);
+    this.#wantToken(code, carried);
     return true;
   }
 
   /**
    * Nothing is sent until a token is handed over, and the `tokenProvider`
-   * is asked for one, handed a `TokenRefusal`: the code the 401 named
-   * (`errorCode`, `token_expired` where the token's `exp` passed), whether
-   * that is an expiry (`expired`), whether the refused request carried a
-   * token (`hadToken`), and how many times in a row it is asked, the
-   * server taking nothing between (`attempt`: 2 where the token it handed
-   * over was refused too). Asked already, a second 401 -- a stream's at
-   * the `exp` beside a write's -- asks nothing more.
+   * is asked for one (`#ask`) -- at once the first time in a row, after 1 s
+   * doubling to 60 s where the token handed over at the last ask was
+   * refused too: one minted again at once is refused for what minting does
+   * not change, and a provider that hands one over at every ask would loop
+   * at the network's speed. An expiry is no such refusal: a fresh token
+   * cures it however many were asked for before -- one handed over offline
+   * may run out before it is sent -- so it starts the count again, unless
+   * the token refused is the one already refused for its expiry, handed
+   * back as it was. Asked already, a second 401 -- a stream's at the `exp`
+   * beside a write's -- asks nothing more.
    */
-  #wantToken(code, hadToken) {
+  #wantToken(code, carried) {
     if (this.#paused) return;
     this.#paused = true;
-    const attempt = ++this.#tokenAsks;
-    const expired = code === TOKEN_EXPIRED;
-    const message = expired
+    if (code === TOKEN_EXPIRED && carried !== null && carried !== this.#expiredGen) {
+      this.#expiredGen = carried;
+      this.#tokenAsks = 1;
+    } else this.#tokenAsks++;
+    const attempt = this.#tokenAsks;
+    this.#want = Object.freeze({ errorCode: code, expired: code === TOKEN_EXPIRED, hadToken: carried !== null, attempt });
+    this.#asked = false;
+    if (attempt === 1) return this.#ask();
+    this.#setFault('the token handed over was refused too (401): another is asked for after a wait', 401, true, null, code);
+    // A floor, as a server's word is: kept when the network comes back.
+    this.#wait('token', 0, Math.min(1000 * 2 ** Math.min(attempt - 2, 6), 60000), () => this.#ask());
+  }
+
+  /**
+   * Hands the `tokenProvider` the `TokenRefusal` wanted: the code the 401
+   * named (`errorCode`, `token_expired` where the token's `exp` passed),
+   * whether that is an expiry (`expired`), whether the refused request
+   * carried a token (`hadToken`), and how many times in a row it is asked
+   * since the server last took the token held (`attempt`). `status()`
+   * says the same, for an app that hands its tokens over with `setToken`.
+   */
+  #ask() {
+    const refusal = this.#want;
+    if (!refusal || this.#closed) return;
+    this.#asked = true;
+    const message = refusal.expired
       ? 'the token expired (401): a fresh one is wanted'
-      : hadToken
+      : refusal.hadToken
         ? 'the server refused the token (401): a fresh one is wanted'
         : 'the server wants a token (401): none was sent';
-    this.#setFault(message, 401, true, null, code);
+    this.#setFault(message, 401, true, null, refusal.errorCode, refusal);
     if (this.#tokenProvider) {
-      const refusal = Object.freeze({ errorCode: code, expired, hadToken, attempt });
       Promise.resolve()
         .then(() => this.#tokenProvider(refusal))
         .then((t) => t && !this.#closed && this.setToken(t), (e) => this.#onError?.(e));
@@ -3105,7 +3156,9 @@ function normalizeShape(raw, url) {
  *              a compiled module, `./fennec.wasm` unless given.
  * - `token`    `Authorization: Bearer`; `tokenProvider` an async function
  *              asked for a new one when the server answers 401
- * - `persist`  IndexedDB key: the replica, its cursors and its unsent writes
+ * - `persist`  IndexedDB key: the replica, its cursors and its unsent writes,
+ *              one account's -- the key names it, and a replica is never
+ *              opened for another
  * - `cryptoKey` an AES-GCM `CryptoKey` the image and its chunks are sealed
  *              with (`persist`)
  * - `onRefused` told of each write the server refused, which was put back

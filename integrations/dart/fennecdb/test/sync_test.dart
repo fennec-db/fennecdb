@@ -142,9 +142,11 @@ void main() {
     servers.clear();
   });
 
-  // A 401 hands the provider why: no token sent (`hadToken` false), then
-  // the one it handed over refused too (`attempt` 2), where an app signs
-  // out -- here it hands over the server's token instead.
+  // A 401 hands the provider why -- no token sent (`hadToken` false) -- and
+  // the status says the same while the sync waits. A provider that failed,
+  // its issuer out of reach, is asked again at `resume()`; the token it
+  // hands over then refused too, it is asked once more after a wait, as
+  // `attempt` 2.
   test('a token provider is handed why a token is wanted', () async {
     final s = await Server.start('token', token: 'right');
     servers.add(s);
@@ -155,10 +157,19 @@ void main() {
         path: await scratch('sync-token'),
         tokenProvider: (refusal) async {
           asked.add(refusal);
-          return refusal.attempt > 1 ? 'right' : 'wrong';
+          return switch (asked.length) {
+            1 => throw const SocketException('the issuer is out of reach'),
+            2 => 'wrong',
+            _ => 'right',
+          };
         });
+    const first = TokenRefusal(hadToken: false);
+    await eventually('the first ask', () => asked.length == 1);
+    await eventually('the status naming it', () async => (await db.replica!.refresh()).error?.tokenRefusal == first);
+    db.replica!.resume();
     await db.replica!.ready();
-    expect(asked, [const TokenRefusal(hadToken: false), const TokenRefusal(hadToken: true, attempt: 2)]);
+    expect(asked, [first, first, const TokenRefusal(hadToken: true, attempt: 2)]);
+    expect((await db.replica!.refresh()).error?.tokenRefusal, isNull);
     expect(asked.where((r) => r.expired || r.errorCode != null), isEmpty);
     expect(const TokenRefusal(errorCode: 'token_expired').expired, isTrue);
     expect(await titles(db), ['one', 'two']);

@@ -119,6 +119,8 @@ class Run {
     this.startToken = 't0';
     this.streamStatus = null;
     this.schemaStatus = null;
+    // Answers held for the next `release`, in the order held.
+    this.held = [];
     this.open = [];
     this.posts = [];
     this.timers = new Set();
@@ -140,6 +142,19 @@ class Run {
     this.reason = null;
   }
 
+  /**
+   * An answer given only at the next `release`, the request out meanwhile:
+   * an abort before then rejects it, as a real fetch's does.
+   */
+  hold(answer, signal) {
+    return new Promise((res, rej) => {
+      const abort = () => rej(new DOMException('aborted', 'AbortError'));
+      if (signal?.aborted) return abort();
+      signal?.addEventListener('abort', abort, { once: true });
+      this.held.push(() => res(answer()));
+    });
+  }
+
   fetch = (url, init = {}) => {
     const path = String(url).slice(URL_.length);
     const h = init.headers ?? {};
@@ -147,24 +162,12 @@ class Run {
       this.streams.push({ path, auth: h.authorization ?? null });
       if (!this.up) return Promise.reject(new TypeError('connection refused'));
       if (this.streamStatus) {
-        const { status, body } = this.streamStatus;
+        const { status, body, held } = this.streamStatus;
         this.streamStatus = null;
-        return Promise.resolve(answered(body, status, init.signal));
+        const answer = () => (status === 200 ? this.opened(path, init.signal) : answered(body, status, init.signal));
+        return held ? this.hold(answer, init.signal) : Promise.resolve(answer());
       }
-      const c = path.slice(1).split('/')[0];
-      let ctl;
-      const body = new ReadableStream({ start: (c) => void (ctl = c) });
-      const s = { c, ctl };
-      this.open.push(s);
-      init.signal?.addEventListener('abort', () => {
-        this.open = this.open.filter((x) => x !== s);
-        try {
-          ctl.error(new DOMException('aborted', 'AbortError'));
-        } catch {
-          /* already ended */
-        }
-      });
-      return Promise.resolve(new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } }));
+      return Promise.resolve(this.opened(path, init.signal));
     }
     const r = { method: init.method ?? 'GET', path, auth: h.authorization ?? null, key: h['idempotency-key'] ?? null };
     if (init.body != null) {
@@ -174,12 +177,31 @@ class Run {
     this.requests.push(r);
     if (r.method === 'GET') {
       if (!this.up) return Promise.reject(new TypeError('connection refused'));
-      const { status, body } = this.schemaStatus ?? { status: 200, body: this.collections };
+      const { status, body, held } = this.schemaStatus ?? { status: 200, body: this.collections };
       this.schemaStatus = null;
-      return Promise.resolve(answered(body, status, init.signal));
+      const answer = () => answered(body, status, init.signal);
+      return held ? this.hold(answer, init.signal) : Promise.resolve(answer());
     }
     return new Promise((res, rej) => this.posts.push({ res, rej, signal: init.signal }));
   };
+
+  /** A stream at `path` answered 200: open for the events the script writes to it. */
+  opened(path, signal) {
+    const c = path.slice(1).split('/')[0];
+    let ctl;
+    const body = new ReadableStream({ start: (c) => void (ctl = c) });
+    const s = { c, ctl };
+    this.open.push(s);
+    signal?.addEventListener('abort', () => {
+      this.open = this.open.filter((x) => x !== s);
+      try {
+        ctl.error(new DOMException('aborted', 'AbortError'));
+      } catch {
+        /* already ended */
+      }
+    });
+    return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  }
 
   /** Timers the core would ask for: a backoff waits for `fire`, a frame's tick runs at once. */
   clock() {
@@ -209,6 +231,7 @@ class Run {
   async start() {
     this.open = [];
     this.posts = [];
+    this.held = [];
     this.timers.clear();
     globalThis.indexedDB = this.idb;
     globalThis.IDBKeyRange = KeyRange;
@@ -358,11 +381,16 @@ class Run {
         break;
       case 'stream_status':
       case 'schema_status': {
-        const answer = { status: st.status, body: st.body !== undefined ? JSON.stringify(st.body) : '{"error":"refused"}' };
+        const answer = { status: st.status, body: st.body !== undefined ? JSON.stringify(st.body) : '{"error":"refused"}', held: st.held === true };
         if (st.do === 'stream_status') this.streamStatus = answer;
         else this.schemaStatus = answer;
         break;
       }
+      // The answers held, given now: a request still out while a token was
+      // handed over is answered for the one it carried.
+      case 'release':
+        for (const give of this.held.splice(0)) give();
+        break;
       case 'online':
         this.db.setOnline(st.online);
         break;
@@ -399,6 +427,12 @@ class Run {
     // A provider handed an `expired` its code does not say, whatever the step expects.
     if (this.token && 'expired' in this.token) throw new Error(`token: expired ${this.token.expired} for code ${this.token.code}`);
     if ('code' in e) matches(e.code, this.db.status()[0].errorCode, binds, 'code');
+    // What the status says the sync waits on a token for: the last ask's
+    // three, null where it waits on none or waits before asking.
+    if ('token_refusal' in e) {
+      const r = this.db.status()[0].tokenRefusal;
+      matches(e.token_refusal, r && { code: r.errorCode, had_token: r.hadToken, attempt: r.attempt }, binds, 'token_refusal');
+    }
     if (e.waits) {
       assert.equal(this.waits.length, e.waits.length, `waits: ${e.waits.length} expected, ${JSON.stringify(this.waits)} asked`);
       e.waits.forEach(([lo, hi], i) => {

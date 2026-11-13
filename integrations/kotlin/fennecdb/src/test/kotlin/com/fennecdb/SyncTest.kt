@@ -141,22 +141,33 @@ class SyncTest {
     }
 
     /**
-     * A 401 hands the provider why: no token sent (`hadToken` false), then
-     * the one it handed over refused too (`attempt` 2), where an app signs
-     * out -- here it hands over the server's token instead. A lambda asking
-     * nothing, as before 1.0, still takes.
+     * A 401 hands the provider why -- no token sent (`hadToken` false) --
+     * and the status says the same while the sync waits. A provider that
+     * threw, its issuer out of reach, is asked again at `resume()`; the
+     * token it hands over then refused too, it is asked once more after a
+     * wait, as `attempt` 2. A lambda asking nothing, as before 1.0, still
+     * takes.
      */
     @Test
     fun aTokenProviderIsHandedWhyATokenIsWanted() = runBlocking {
         val s = Server("token", token = "right").also { servers.add(it) }
         val asked = Collections.synchronizedList(mutableListOf<TokenRefusal>())
         val db = Fennec.sync(url = s.url, shapes = listOf(open), path = path("token"), tokenProvider = { refusal ->
-            asked.add(refusal)
-            if (refusal.attempt > 1) "right" else "wrong"
+            val n = synchronized(asked) { asked.add(refusal); asked.size }
+            when (n) {
+                1 -> throw java.net.ConnectException("the issuer is out of reach")
+                2 -> "wrong"
+                else -> "right"
+            }
         })
+        val first = TokenRefusal(hadToken = false, attempt = 1)
+        eventually("the first ask") { asked.size == 1 }
+        eventually("the status naming it") { db.replica!!.refresh().error?.tokenRefusal == first }
+        db.replica!!.resume()
         db.replica!!.ready()
-        assertEquals(listOf(TokenRefusal(hadToken = false, attempt = 1), TokenRefusal(hadToken = true, attempt = 2)), asked.toList())
+        assertEquals(listOf(first, first, TokenRefusal(hadToken = true, attempt = 2)), asked.toList())
         assertTrue(asked.none { it.expired || it.errorCode != null })
+        assertEquals(null, db.replica!!.refresh().error?.tokenRefusal)
         assertTrue(TokenRefusal("token_expired").expired)
         assertEquals(listOf("one", "two"), titles(db))
         db.close()

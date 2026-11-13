@@ -31,13 +31,14 @@ public struct Shape: Sendable {
 /// Why a replica asks its `tokenProvider` for a token: the server answered
 /// 401, and nothing is sent until one is handed over.
 ///
-/// At `expired` refresh the token, and the sync goes on where it stopped.
-/// At a 401 naming no code ask the issuer for a fresh one too: a key
-/// rotation, a token not valid yet, an older server's expiry and none sent
-/// are each cured by one. Sign out only where the issuer refuses, or at an
-/// `attempt` past 1 -- the token handed over at the last ask refused too.
-/// A replica whose `pending` writes are not 0 keeps them through a sign-out,
-/// for the account's next sign-in to send; deleting its file loses them.
+/// Ask the issuer for a fresh token at every one, whatever the code --
+/// forcing a refresh at `expired`, where a cached token is the one refused
+/// -- and the sync goes on where it stopped. A 401 alone is never a
+/// sign-out: the server keeps no list of revoked tokens, so only the
+/// issuer knows a session ended; sign out where it refuses to issue one.
+/// A replica belongs to one account: its file's path names the account,
+/// and it is never opened for another. Signing out keeps it, for that
+/// account's next sign-in to send its `pending` writes.
 public struct TokenRefusal: Sendable, Equatable {
     /// The code the server named beside its words (its body's `code`), nil
     /// for none: "token_expired" where the token's `exp` passed. A later
@@ -46,9 +47,12 @@ public struct TokenRefusal: Sendable, Equatable {
     /// Whether the refused request carried a token: false for one sent
     /// before any was handed over.
     public let hadToken: Bool
-    /// How many times in a row the provider is asked, the server taking no
-    /// request between: 1, then 2 where the token handed over at the last
-    /// ask was refused too -- one more from the issuer will not do better.
+    /// How many times in a row the provider is asked since the server last
+    /// took the token held: 1, then 2 and on where the token handed over at
+    /// the last ask was refused too -- asked after 1 s doubling to 60 s,
+    /// since one minted again at once is refused for what minting does not
+    /// change (a key the server has not fetched yet, an `nbf` its clock has
+    /// not reached). An expiry starts it at 1 again. No reason to sign out.
     public let attempt: Int
 
     /// The token's `exp` passed (`errorCode` is "token_expired"): refresh
@@ -86,6 +90,11 @@ public struct SyncStatus: Sendable, Equatable {
         /// "token_expired" where the token's `exp` passed -- for an app that
         /// hands its tokens over with `setToken` rather than a provider.
         public let errorCode: String?
+        /// What the provider was handed for the token the sync waits on,
+        /// nil while it waits on none, and while it waits before asking
+        /// again: the same `TokenRefusal`, for an app that hands its tokens
+        /// over with `setToken`.
+        public let tokenRefusal: TokenRefusal?
     }
 
     public struct ShapeState: Sendable, Equatable {
@@ -118,10 +127,13 @@ public struct SyncStatus: Sendable, Equatable {
     init(_ v: Value) {
         state = State(rawValue: v["state"]?.string ?? "") ?? .catchingUp
         pending = v["pending"]?.int ?? 0
-        error = v["error"]?.object.map {
+        error = v["error"]?.object.map { e in
             Failure(
-                message: $0["message"]?.string ?? "", status: $0["status"]?.int ?? 0, quota: $0["quota"]?.string,
-                errorCode: $0["code"]?.string)
+                message: e["message"]?.string ?? "", status: e["status"]?.int ?? 0, quota: e["quota"]?.string,
+                errorCode: e["code"]?.string,
+                tokenRefusal: e["attempt"]?.int.map {
+                    TokenRefusal(errorCode: e["code"]?.string, hadToken: e["had_token"]?.bool ?? true, attempt: $0)
+                })
         }
         shapes = (v["shapes"]?.array ?? []).map {
             ShapeState(
@@ -166,10 +178,12 @@ extension Fennec {
     /// system's TLS: iOS's App Transport Security refuses plain `http://`
     /// to anything but a local address, and a server is reached through
     /// TLS in front of it. `tokenProvider` is asked for a token when the
-    /// server answers 401, handed why (`TokenRefusal`): it refreshes at
-    /// `expired` and at a 401 naming no code, and throws -- the app signed
-    /// out -- where the issuer refuses or at an `attempt` past 1; nothing
-    /// is sent until a token is handed over.
+    /// server answers 401, handed why (`TokenRefusal`): it asks the issuer
+    /// for a fresh one at every 401, and throws where it gets none -- the
+    /// issuer out of reach, or refusing, where the app signs out; nothing is
+    /// sent until a token is handed over, and a provider that threw is
+    /// asked again at `resume()` or `setOnline(true)`. `path` is one
+    /// account's: a replica is never opened for another.
     public static func sync(
         url: String, token: String? = nil, shapes: [Shape], path: String, options: Options = [],
         tokenProvider: (@Sendable (TokenRefusal) async throws -> String)? = nil
@@ -198,20 +212,6 @@ extension Fennec {
             try? await db.close()
             throw error
         }
-    }
-
-    /// A provider asking nothing, as before 1.0: it is handed no
-    /// `TokenRefusal`, so it refreshes at every 401 and cannot tell a token
-    /// just handed over refused again. Not optional and with no default,
-    /// so a call naming no provider, or `nil`, is the one above.
-    @available(*, deprecated, message: "tokenProvider is handed a TokenRefusal: write { refusal in ... }, or { _ in ... }")
-    public static func sync(
-        url: String, token: String? = nil, shapes: [Shape], path: String, options: Options = [],
-        tokenProvider: @escaping @Sendable () async throws -> String
-    ) async throws -> Fennec {
-        try await sync(
-            url: url, token: token, shapes: shapes, path: path, options: options,
-            tokenProvider: { (_: TokenRefusal) in try await tokenProvider() })
     }
 
     /// A replica's sync, when the database is one (`Fennec.sync`).
@@ -335,11 +335,15 @@ public final class Replica: NSObject, URLSessionDataDelegate, @unchecked Sendabl
 
     /// The network as the platform sees it (`NWPathMonitor`): offline closes
     /// the streams and sends nothing; online comes back at once, the
-    /// backoff forgotten.
+    /// backoff forgotten, and asks the provider again for a token it asked
+    /// for and did not get -- a provider that threw, its issuer out of
+    /// reach -- but not before the wait the server's refusal of the last
+    /// one began.
     public func setOnline(_ online: Bool) { signal(["online": .bool(online)]) }
 
     /// What an app calls as it comes back to the foreground: the streams a
-    /// suspension cut are opened again at once, from their cursors.
+    /// suspension cut are opened again at once, from their cursors, and a
+    /// token asked for and not handed over is asked for again.
     public func resume() { setOnline(true) }
 
     /// The server itself, for what the replica does not hold.

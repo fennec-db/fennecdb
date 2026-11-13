@@ -401,23 +401,20 @@ export async function remote() {
 
   const replica = await sync<Schema>({ url: 'http://127.0.0.1:8080', shapes: [{ collection: 'articles' }] });
   await replica.from('articles').where('year', 2024).rows();
-  // Handed why it is asked: refreshed at an expiry and at a 401 naming no
-  // code, signed out where a token just handed over is refused again; a
-  // provider asking nothing, as before, still takes.
-  const signOut = async () => {};
+  // Handed why it is asked: a fresh token from the issuer at every 401,
+  // forced at an expiry; a provider asking nothing, as before, still takes.
+  const refresh = async (force: boolean) => (force ? 'forced' : 'fresh');
   await sync<Schema>({
     url: 'http://127.0.0.1:8080',
     token: 'first',
     shapes: [{ collection: 'articles' }],
+    persist: 'articles:user-1',
     tokenProvider: async ({ expired, hadToken, attempt, errorCode }) => {
       expect<boolean>(expired);
       expect<boolean>(hadToken);
+      expect<number>(attempt);
       expect<string | null>(errorCode);
-      if (attempt > 1) {
-        await signOut();
-        throw new Error('signed out');
-      }
-      return 'fresh';
+      return refresh(expired);
     },
   });
   await sync<Schema>({ url: 'http://127.0.0.1:8080', shapes: [{ collection: 'articles' }], tokenProvider: () => 'fresh' });
@@ -438,6 +435,12 @@ export async function remote() {
   });
   const code: string | null = replica.status()[0].errorCode;
   expect<string | null>(code);
+  // What the provider was handed for the token the sync waits on, for an
+  // app that hands its tokens over with `setToken`.
+  const waiting: TokenRefusal | null = replica.status()[0].tokenRefusal;
+  if (waiting && waiting.attempt > 1) expect<boolean>(waiting.hadToken);
+  // @ts-expect-error -- read-only, as the provider's is
+  if (waiting) waiting.attempt = 1;
   // @ts-expect-error -- the status's code is `errorCode`, as every SDK names the server's
   void replica.status()[0].code;
 

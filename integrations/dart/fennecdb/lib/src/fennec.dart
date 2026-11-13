@@ -445,10 +445,12 @@ class Fennec {
   /// change stream are `dart:io`'s `HttpClient`'s, with the platform's TLS:
   /// iOS and Android refuse cleartext HTTP by default. [tokenProvider] is
   /// asked for a token when the server answers 401, handed why
-  /// ([TokenRefusal]): it refreshes at `expired` and at a 401 naming no
-  /// code, and completes with an error -- the app signed out -- where the
-  /// issuer refuses or at an `attempt` past 1; nothing is sent until a
-  /// token is handed over. A function of no argument is no longer taken
+  /// ([TokenRefusal]): it asks the issuer for a fresh one at every 401, and
+  /// completes with an error where it gets none -- the issuer out of reach,
+  /// or refusing, where the app signs out; nothing is sent until a token is
+  /// handed over, and a provider that failed is asked again at `resume()`
+  /// or `setOnline(true)`. [path] is one account's: a replica is never
+  /// opened for another. A function of no argument is no longer taken
   /// (before 1.0 it was): `(_) => refresh()` for it.
   static Future<Fennec> openSynced({
     required String url,

@@ -550,9 +550,10 @@ export declare class FennecError extends Error {
    * The code the server named beside its words, its body's `code`: what a
    * program tells the refusal by. `token_expired` on a 401 for a token
    * past its `exp` -- a request's, or the event ending a stream (`live`,
-   * `subscribe`) at it -- which a fresh token cures; a 401 naming none may
-   * be cured by one too (a key rotation, a token not valid yet), so it is
-   * no sign-out by itself. Every SDK names it so -- Python's `error_code`,
+   * `subscribe`) at it -- which a fresh token cures; a 401 naming none is
+   * no sign-out by itself either (a key since removed, a key not fetched
+   * yet, a token not valid yet): only the issuer knows a session ended.
+   * Every SDK names it so -- Python's `error_code`,
    * Go's and .NET's `ErrorCode` -- whose `code`, where there is one, is
    * the status's name or the library's own error kind.
    */
@@ -1824,15 +1825,17 @@ export interface SyncOptions<S extends AnySchema<S> = Schema> {
   /**
    * Asked for a token when the server answers 401: until one is handed
    * over nothing is sent, and the writes wait in the replica. Handed why
-   * (`TokenRefusal`). At `expired` refresh the token, and the sync goes on
-   * where it stopped. At a 401 naming no code ask the issuer for a fresh
-   * one too: a key rotation, a token not valid yet, an older server's
-   * expiry and none sent are each cured by one. Sign out only where the
-   * issuer refuses, or at an `attempt` past 1 -- the token handed over at
-   * the last ask refused too: throw (told to `onError`) and nothing more
-   * is sent. A replica whose `pending` writes are not 0 keeps them through
-   * a sign-out, for the account's next sign-in to send; deleting its
-   * `persist` key loses them.
+   * (`TokenRefusal`). Ask the issuer for a fresh token at every one,
+   * whatever the code -- force a refresh at `expired`, where a cached
+   * token is the one refused -- and the sync goes on where it stopped. A
+   * 401 alone is never a sign-out: the server keeps no list of revoked
+   * tokens, so only the issuer knows a session ended; sign out where it
+   * refuses to issue one. Where the token handed over was refused too
+   * (`attempt` past 1: a key the server has not fetched yet, an `nbf` its
+   * clock has not reached, a misconfiguration) the sync asks again after
+   * 1 s doubling to 60 s. A provider that throws (told to `onError`)
+   * hands over nothing, and is asked again at `setOnline(true)` -- the
+   * page's `online` event.
    */
   tokenProvider?: (refusal: TokenRefusal) => string | Promise<string>;
   fetch?: typeof globalThis.fetch;
@@ -1840,6 +1843,11 @@ export interface SyncOptions<S extends AnySchema<S> = Schema> {
    * IndexedDB key: the replica is stored there with its cursors and the
    * writes the server has not answered, which a page opened again sends.
    * A `local` kept in a file (`openFile`) keeps them in the file instead.
+   * A replica belongs to one account: the key names it (`tasks:${userId}`)
+   * and is never opened for another, or another account's sign-in on the
+   * same browser sends the writes left under its own token and shows their
+   * rows. Signing out keeps it, for that account's next sign-in to send
+   * its `pending` writes; deleting it loses them.
    */
   persist?: string;
   /** Seals the stored image and its chunks with AES-GCM (`persist`). */
@@ -1881,6 +1889,13 @@ export interface ShapeStatus {
    * over with `setToken` rather than a provider.
    */
   errorCode: NonNullable<FennecError['errorCode']> | null;
+  /**
+   * What the provider was handed for the token the sync waits on -- the
+   * same `TokenRefusal` -- null while it waits on none, and while it waits
+   * before asking again: for an app that hands its tokens over with
+   * `setToken`.
+   */
+  tokenRefusal: TokenRefusal | null;
   leader: boolean;
 }
 
@@ -1900,9 +1915,11 @@ export interface TokenRefusal {
   /** Whether the refused request carried a token: false for one sent before any was handed over. */
   readonly hadToken: boolean;
   /**
-   * How many times in a row the provider is asked, the server taking no
-   * request between: 1, then 2 where the token handed over at the last
-   * ask was refused too -- one more from the issuer will not do better.
+   * How many times in a row the provider is asked since the server last
+   * took the token held: 1, then 2 and on where the token handed over at
+   * the last ask was refused too -- asked after 1 s doubling to 60 s,
+   * since a token minted again at once is refused for what minting does
+   * not change. An expiry starts it at 1 again. No reason to sign out.
    */
   readonly attempt: number;
 }

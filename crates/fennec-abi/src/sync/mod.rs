@@ -30,13 +30,16 @@
 //!   401, and nothing is sent until a token is handed over. `code` is the
 //!   one the server named, null for none -- [`TOKEN_EXPIRED`] where the
 //!   token's `exp` passed; `had_token` whether the refused request carried
-//!   a token at all; `attempt` how many times in a row a token was asked
-//!   for, the server taking no request between: 2 where the one handed over
-//!   at the last ask was refused too. A fresh token from its issuer cures
-//!   an expiry and most 401s naming no code (a key rotation, a token not
-//!   valid yet, an older server's expiry), so a binding hands the provider
-//!   all three and lets the app decide; a refusal of a token since replaced
-//!   is sent again with the new one, never asked about
+//!   a token at all; `attempt` the asks in a row since the server last took
+//!   the token held, 2 and on where the one handed over at the last ask was
+//!   refused too, an expiry starting it at 1 again. A binding asks its
+//!   issuer for a token at every one, whatever the code: the server keeps
+//!   no list of revoked tokens, so only the issuer knows a session ended.
+//!   Past 1 the action comes after a wait, 1 s doubling to 60 s
+//!   ([`TOKEN_BACKOFF_MS`]); a refusal of a token since replaced is sent
+//!   again with the new one, never asked about; and `{"online":true}` asks
+//!   again where the binding was asked and none came -- a provider that
+//!   failed
 //! - `{"do":"changed"}`: the replica changed, live queries look again
 //! - `{"do":"refused","status":S,"message":..,"query":..,"quota":..,"reason":..}`:
 //!   the server refused a write, which was put back; `quota` is there where
@@ -74,16 +77,33 @@ pub const TEMP_BASE: i64 = 1 << 52;
 /// The code fennec-server tells a token past its `exp` by, on a request's
 /// 401 and on the `error` event that ends a stream at the `exp`
 /// (fennec-http's `access::EXPIRED_CODE`): an app refreshes the token
-/// silently at it. A 401 naming no code may be cured by a fresh token too
-/// -- a key rotation, a token not valid yet, an older server's expiry,
-/// none sent -- so the code tells an app what it can be sure of, never
-/// that it must sign out.
+/// silently at it. A 401 naming no code is no sign-out either -- a key
+/// since removed, an older server's expiry and none sent are cured by a
+/// fresh token, a key not fetched yet and an `nbf` not reached by waiting
+/// -- so the code tells an app what it can be sure of, never that it must
+/// sign out.
 pub const TOKEN_EXPIRED: &str = "token_expired";
 
 /// Backoff: from this, doubling, up to [`BACKOFF_MAX_MS`], with 30% jitter
 /// so a server back up is not met by every client at once.
 const BACKOFF_MS: u64 = 250;
 const BACKOFF_MAX_MS: u64 = 15_000;
+
+/// The wait before a token is asked for again where the one handed over at
+/// the last ask was refused too: from this, doubling, up to
+/// [`TOKEN_BACKOFF_MAX_MS`], 30% jitter on top. A token minted at once is
+/// refused for what minting does not change -- a key the server has not
+/// fetched yet (a refresh job runs every few minutes), an `nbf` its clock
+/// has not reached (seconds), an audience or issuer it does not take (for
+/// good) -- so a second is the soonest one is worth asking for, and each
+/// ask costs the issuer a token: past a minute between, a fleet of devices
+/// meets an issuer's rate limit before a fix lands. The network's 250 ms
+/// to 15 s would ask four times a minute for as long as it lasts, and
+/// without any wait a provider that hands over a token at every ask looped
+/// at the network's speed. The jitter is the network's: a rotation refuses
+/// every device at once.
+const TOKEN_BACKOFF_MS: u64 = 1_000;
+const TOKEN_BACKOFF_MAX_MS: u64 = 60_000;
 
 /// The longest a server's `retry_after` is waited: past it the sync comes
 /// back and is told again. A bound, since the browser's `setTimeout` fires
@@ -180,6 +200,18 @@ enum Timer {
     Stream(usize),
     Send,
     Schema,
+    /// The wait before a token is asked for again ([`TOKEN_BACKOFF_MS`]).
+    Token,
+}
+
+/// Why the sync waits on a token: the token action's members, and whether
+/// the binding was asked yet -- it is not while the wait before a second
+/// ask runs.
+struct Want {
+    code: Option<String>,
+    had_token: bool,
+    attempt: u32,
+    asked: bool,
 }
 
 struct Fault {
@@ -196,6 +228,9 @@ struct Fault {
     /// app that hands its tokens over with a signal as the token action
     /// tells a provider.
     code: Option<String>,
+    /// The token action's `had_token` and `attempt` once the binding was
+    /// asked, so the status says all three the action did.
+    asked: Option<(bool, u32)>,
 }
 
 /// What an answer says beyond its words, read from the body fennec-server
@@ -290,9 +325,14 @@ pub struct Sync {
     /// this number, so a 401 to one sent before is told from a refusal of
     /// the token the sync holds now ([`Sync::carried`]).
     token_gen: u64,
-    /// How many times in a row a token was asked for, the server taking no
-    /// request with one between: the token action's `attempt`.
+    /// How many times in a row a token was asked for since the server last
+    /// took the one held: the token action's `attempt`.
     token_asks: u32,
+    /// The token last refused for its expiry ([`Sync::token_gen`]): refused
+    /// for its expiry again, it was handed back as it was.
+    expired_gen: Option<u64>,
+    /// Why the sync waits on a token, while it does.
+    want: Option<Want>,
     shapes: Vec<Shape>,
     queue: Vec<Op>,
     temps: Vec<Temp>,
@@ -834,6 +874,8 @@ impl Sync {
             token,
             token_gen: 0,
             token_asks: 0,
+            expired_gen: None,
+            want: None,
             shapes,
             queue: Vec::new(),
             temps: Vec::new(),
@@ -1038,6 +1080,7 @@ impl Sync {
             connection,
             quota,
             code: None,
+            asked: None,
         });
         self.once("{\"do\":\"status\"}");
     }
@@ -1049,10 +1092,12 @@ impl Sync {
     }
 
     /// The server answered a request, or a stream's head, that carried
-    /// `carried` with `status`: an answer but a 401 to the token the sync
-    /// holds took it, and a later ask is a first one again.
+    /// `carried` with `status`. A 2xx to the token the sync holds is the
+    /// server taking it, and the next ask is a first one again; nothing
+    /// else is -- a 408, a 429 or a 5xx may come before a token is read
+    /// (the connection ceiling's 503, a router's while a tenant moves).
     fn answered(&mut self, status: u16, carried: Option<u64>) {
-        if status != 0 && status != 401 && carried == self.carried() {
+        if (200..300).contains(&status) && carried == self.carried() {
             self.token_asks = 0;
         }
     }
@@ -1060,51 +1105,101 @@ impl Sync {
     /// A 401 to a request, or a stream, that carried `carried`. Sent before
     /// a token handed over since -- or none -- it is sent again with that
     /// one at once, the binding asked nothing: the refusal is of a token no
-    /// longer held, and asked, an app that signs out at a token refused
-    /// right after it was minted would have taken this for that. Otherwise
-    /// the binding is asked for one ([`Sync::want_token`]). Returns whether
-    /// it was asked.
+    /// longer held, and counted, it would make the next ask wait for a
+    /// refusal that crossed the handover. Otherwise a token is wanted
+    /// ([`Sync::want_token`]). Returns whether it was.
     fn token_refused(&mut self, said: Said, carried: Option<u64>) -> bool {
         if carried != self.carried() {
             return false;
         }
-        self.want_token(said.code, carried.is_some());
+        self.want_token(said.code, carried);
         true
     }
 
     /// Nothing is sent until a token is handed over, and the binding is
-    /// asked for one: `{"do":"token","code":..,"had_token":B,"attempt":N}`,
-    /// the status's error naming the code too. Asked already, a second 401
-    /// -- a stream's at the `exp` beside a write's -- asks nothing more:
-    /// the provider is at work on the first, and asked twice an app would
-    /// count the second as a fresh token refused.
-    fn want_token(&mut self, code: Option<String>, had_token: bool) {
+    /// asked for one ([`Sync::ask`]) -- at once the first time in a row,
+    /// after a wait where the token handed over at the last ask was refused
+    /// too: one minted again at once is refused for what minting does not
+    /// change, and a provider that hands one over at every ask would loop
+    /// at the network's speed. An expiry is no such refusal: a fresh token
+    /// cures it however many were asked for before -- one handed over
+    /// offline may run out before it is sent -- so it starts the count
+    /// again, unless the token refused is the one already refused for its
+    /// expiry, handed back as it was. Asked already, a second 401 -- a
+    /// stream's at the `exp` beside a write's -- asks nothing more.
+    fn want_token(&mut self, code: Option<String>, carried: Option<u64>) {
         if self.paused {
             return;
         }
         self.paused = true;
-        self.token_asks += 1;
-        let message = match (code.as_deref(), had_token) {
+        if code.as_deref() == Some(TOKEN_EXPIRED)
+            && carried.is_some()
+            && carried != self.expired_gen
+        {
+            self.expired_gen = carried;
+            self.token_asks = 1;
+        } else {
+            self.token_asks += 1;
+        }
+        let attempt = self.token_asks;
+        let want = Want {
+            code,
+            had_token: carried.is_some(),
+            attempt,
+            asked: false,
+        };
+        if attempt == 1 {
+            self.want = Some(want);
+            return self.ask();
+        }
+        self.fault = Some(Fault {
+            message:
+                "the token handed over was refused too (401): another is asked for after a wait"
+                    .into(),
+            status: 401,
+            connection: true,
+            quota: None,
+            code: want.code.clone(),
+            asked: None,
+        });
+        self.once("{\"do\":\"status\"}");
+        self.want = Some(want);
+        let ms = (TOKEN_BACKOFF_MS << (attempt - 2).min(6)).min(TOKEN_BACKOFF_MAX_MS);
+        // A floor, as a server's word is: kept when the network comes back.
+        self.wait(Timer::Token, 0, ms);
+    }
+
+    /// Asks the binding for the token wanted:
+    /// `{"do":"token","code":..,"had_token":B,"attempt":N}`, the status's
+    /// error naming the same three.
+    fn ask(&mut self) {
+        let Some(w) = self.want.as_mut() else {
+            return;
+        };
+        w.asked = true;
+        let message = match (w.code.as_deref(), w.had_token) {
             (Some(TOKEN_EXPIRED), _) => "the token expired (401): a fresh one is wanted",
             (_, false) => "the server wants a token (401): none was sent",
             _ => "the server refused the token (401): a fresh one is wanted",
         };
         let mut a = String::from("{\"do\":\"token\",\"code\":");
-        match &code {
+        match &w.code {
             Some(c) => json::escape_into(&mut a, c),
             None => a.push_str("null"),
         }
         a.push_str(&format!(
-            ",\"had_token\":{had_token},\"attempt\":{}}}",
-            self.token_asks
+            ",\"had_token\":{},\"attempt\":{}}}",
+            w.had_token, w.attempt
         ));
-        self.fault = Some(Fault {
+        let fault = Fault {
             message: message.into(),
             status: 401,
             connection: true,
             quota: None,
-            code,
-        });
+            code: w.code.clone(),
+            asked: Some((w.had_token, w.attempt)),
+        };
+        self.fault = Some(fault);
         self.once("{\"do\":\"status\"}");
         self.outbox.push(a);
     }
@@ -1129,9 +1224,12 @@ impl Sync {
     }
 
     /// `{"state":"online"|"offline"|"catching_up","pending":N,"error":..,"shapes":[..]}`,
-    /// the error `{"message","status","quota","code"}`, `quota` null unless
-    /// a tenant's quota was named, `code` null unless a 401 the sync waits
-    /// on for a token named one ([`TOKEN_EXPIRED`]).
+    /// the error `{"message","status","quota","code","had_token","attempt"}`,
+    /// `quota` null unless a tenant's quota was named, `code` null unless a
+    /// 401 the sync waits on for a token named one ([`TOKEN_EXPIRED`]), and
+    /// `had_token` and `attempt` null unless the binding was asked for that
+    /// token, as the token action said them -- not while the wait before a
+    /// second ask runs.
     pub fn status(&self) -> String {
         let mut out = format!(
             "{{\"state\":\"{}\",\"pending\":{},\"error\":",
@@ -1152,6 +1250,12 @@ impl Sync {
                 match &f.code {
                     Some(c) => json::escape_into(&mut out, c),
                     None => out.push_str("null"),
+                }
+                match f.asked {
+                    Some((had, attempt)) => {
+                        out.push_str(&format!(",\"had_token\":{had},\"attempt\":{attempt}"))
+                    }
+                    None => out.push_str(",\"had_token\":null,\"attempt\":null"),
                 }
                 out.push('}');
             }
@@ -1887,6 +1991,7 @@ impl Sync {
             Timer::Stream(i) => self.shapes[i].waiting = false,
             Timer::Send => self.send_waiting = false,
             Timer::Schema => self.schema_waiting = false,
+            Timer::Token => self.ask(),
         }
         self.kick(db);
     }
@@ -1907,6 +2012,10 @@ impl Sync {
             if self.paused {
                 self.paused = false;
                 self.fault = None;
+                // Handed over before the wait for a second ask ran out:
+                // it is what the ask would have brought.
+                self.want = None;
+                self.timers.retain(|t| t.1 != Timer::Token);
             }
         }
         match shape::member(&v, "online") {
@@ -1935,6 +2044,15 @@ impl Sync {
                 // A write the server said to hold back lets the streams
                 // open, as its 429 did.
                 self.flushing = !self.queue.is_empty() && !self.send_waiting;
+                // A token asked for and not handed over is asked for
+                // again: a provider that threw -- its issuer out of reach
+                // with the network -- hands over nothing, and the sync
+                // would wait for good. Not while the wait before a second
+                // ask runs: that is the server's refusal, which the network
+                // says nothing of.
+                if self.paused && self.want.as_ref().is_some_and(|w| w.asked) {
+                    self.ask();
+                }
             }
             _ => {}
         }

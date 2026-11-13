@@ -1,8 +1,8 @@
 {
   "about": [
     "One script for both of a replica's syncs: the browser's FennecSync (web/fennec.js, run by web/fennec.sync.scenarios.test.js) and the native core every binding drives (crates/fennec-abi/src/sync, run by crates/fennec-abi/tests/scenarios.rs).",
-    "A scenario starts with no replica and plays its steps in order. `do` says what happens: start, restart (the app opened again over the replica it kept; either with `token`, the token it starts with, null for none, t0 unless given), seed / change (a stream event of the shape at index `shape`, 0 by default), error (the stream's error event, its `error`, `status` and `code`), drop (every stream ends), fire (every timer asked for runs out), answer (the oldest write request not yet answered gets `status`, `seq` as Fennec-Seq and `body`; status 0 is no answer at all), write (an app's write: insert / insert_new (the builders' insertNew, FennecQL's insert) / update / delete / upsert / batch, a value {\"$inc\": n} as inc(n) and {\"$expr\": text} as expr(text), and get, a read with its require, in a batch; `require` and `reason` as the builders' { require: n, reason }; text, a FennecQL text and its `params` as an app runs it on the replica itself -- a native binding's run, the browser's db.local.query -- never in a batch, and here only one the replica refuses whole), net (whether the server is reached: a stream or GET /collections made while it is not fails at once), stream_status (the next stream opened is answered with its `status` and `body`, {\"error\":\"refused\"} unless given), schema_status (the same for the next GET /collections), online (the platform's network signal), token (a new token handed over), schema (what GET /collections answers from now on).",
-    "After each step the runner checks `expect`: requests (the GETs and POSTs made during the step: method, path, auth, key = the Idempotency-Key, body = the lines sent, lines = how many), streams (each stream opened: its path and query, auth), rows (the replica's rows of a collection by id, each row's named fields), pending (writes not yet answered), refused (each write refused, as it was told: a status alone is one told with no quota, {status, quota} one a tenant's quota refused, {status, reason} one a require's reason refused), quota (the tenant's quota the status's last error names, null for none), code (the code the status's last error names, token_expired where the server said the token's exp passed, null for none: FennecSync's errorCode), token_asked, token (what the ask for a token said, null where none was asked during the step: its code, had_token -- whether the refused request carried a token -- and attempt, the asks in a row with no request taken between; the core's token action, FennecSync's TokenRefusal as errorCode, hadToken and attempt, whose expired is always its code's), waits (each timer asked for, [min, max] ms), ready (every shape seeded), error (a start or a write refused before anything is sent), reason (the reason that error gave, a require's).",
+    "A scenario starts with no replica and plays its steps in order. `do` says what happens: start, restart (the app opened again over the replica it kept; either with `token`, the token it starts with, null for none, t0 unless given), seed / change (a stream event of the shape at index `shape`, 0 by default), error (the stream's error event, its `error`, `status` and `code`), drop (every stream ends), fire (every timer asked for runs out), answer (the oldest write request not yet answered gets `status`, `seq` as Fennec-Seq and `body`; status 0 is no answer at all), write (an app's write: insert / insert_new (the builders' insertNew, FennecQL's insert) / update / delete / upsert / batch, a value {\"$inc\": n} as inc(n) and {\"$expr\": text} as expr(text), and get, a read with its require, in a batch; `require` and `reason` as the builders' { require: n, reason }; text, a FennecQL text and its `params` as an app runs it on the replica itself -- a native binding's run, the browser's db.local.query -- never in a batch, and here only one the replica refuses whole), net (whether the server is reached: a stream or GET /collections made while it is not fails at once), stream_status (the next stream opened is answered with its `status` and `body`, {\"error\":\"refused\"} unless given; `held`, only at the next release, the request still out meanwhile), schema_status (the same for the next GET /collections), release (every answer held is given, in the order held), online (the platform's network signal), token (a new token handed over, the same one again among them), schema (what GET /collections answers from now on).",
+    "After each step the runner checks `expect`: requests (the GETs and POSTs made during the step: method, path, auth, key = the Idempotency-Key, body = the lines sent, lines = how many), streams (each stream opened: its path and query, auth), rows (the replica's rows of a collection by id, each row's named fields), pending (writes not yet answered), refused (each write refused, as it was told: a status alone is one told with no quota, {status, quota} one a tenant's quota refused, {status, reason} one a require's reason refused), quota (the tenant's quota the status's last error names, null for none), code (the code the status's last error names, token_expired where the server said the token's exp passed, null for none: FennecSync's errorCode), token_asked, token (what the ask for a token said, null where none was asked during the step: its code, had_token -- whether the refused request carried a token -- and attempt, the asks in a row since the server last took the token held, an expiry of another token than the last one refused for its expiry starting it at 1 again; the core's token action, FennecSync's TokenRefusal as errorCode, hadToken and attempt, whose expired is always its code's), token_refusal (what the status says the sync waits on a token for, the same three as the last ask said them, null where it waits on none or waits before it asks: the core's status error's code, had_token and attempt, FennecSync's status().tokenRefusal), waits (each timer asked for, [min, max] ms), ready (every shape seeded), error (a start or a write refused before anything is sent), reason (the reason that error gave, a require's).",
     "An object expected is a subset of the one that came; a list is whole. A string `<name>` is any value, the same wherever the name comes again and another than every other name's: a key made for an insert, an Idempotency-Key. In a step's data a bound `<name>` stands for its value, so the server's copy of a row carries the key the app made. `@name` in rows or puts is a fixture.",
     "Writes are written with their fields in alphabetical order, as the builders render them in the order given: JavaScript keeps an object's order and the native runner's JSON sorts it. A temporary id is 2^52 = 4503599627370496 and up.",
     "Where the platforms differ on purpose a scenario says why in `differs`, and a step's expect_js / expect_native hold each side's own. Both runners write the names that passed to target/sync-scenarios/, and integrations/sync-scenarios-check.mjs fails unless both ran every one."
@@ -1046,22 +1046,80 @@
       ]
     },
     {
-      "name": "a token handed over and refused again is asked for as attempt 2, and the count starts again once the server takes one",
-      "covers": "sync.html#refusals-retries-and-offline: an attempt past 1 is a token just handed over refused too, where an app signs out",
+      "name": "a token handed over and refused too is asked for again after a wait, as attempt 2, and the count starts over only once the server takes one",
+      "covers": "sync.html#token-refusals: a token just minted refused too -- a key the server has not fetched yet, an nbf its clock has not reached -- is cured by no fresh one, and the next is asked for after 1 s doubling to 60 s; the count starts over at a 2xx to the token held, never at a 408, 429 or 5xx, some of which come before a token is read",
       "steps": [
         {"do": "start"},
         {"do": "seed", "seq": 3, "rows": "@open"},
         {"do": "write", "write": {"update": "tasks", "set": {"title": "ONE"}, "where": {"key": "a"}}, "expect": {"requests": [{"key": "<w1>", "auth": "Bearer t0"}]}},
         {"do": "answer", "status": 401, "body": {"error": "no key has the token's kid"}, "expect": {
-          "token": {"code": null, "had_token": true, "attempt": 1}, "pending": 1}},
-        {"do": "token", "token": "t1", "expect": {"requests": [{"path": "/query", "key": "<w1>", "auth": "Bearer t1"}]}},
+          "token": {"code": null, "had_token": true, "attempt": 1}, "token_refusal": {"code": null, "had_token": true, "attempt": 1}, "waits": [], "pending": 1}},
+        {"do": "token", "token": "t1", "expect": {"requests": [{"path": "/query", "key": "<w1>", "auth": "Bearer t1"}], "token_refusal": null}},
         {"do": "answer", "status": 401, "body": {"error": "no key has the token's kid"}, "expect": {
-          "token": {"code": null, "had_token": true, "attempt": 2}, "pending": 1}},
+          "token_asked": false, "token_refusal": null, "code": null, "waits": [[1000, 1300]], "requests": [], "pending": 1}},
+        {"do": "fire", "expect": {
+          "token": {"code": null, "had_token": true, "attempt": 2}, "token_refusal": {"code": null, "had_token": true, "attempt": 2}, "requests": [], "waits": []}},
         {"do": "token", "token": "t2", "expect": {"requests": [{"path": "/query", "key": "<w1>", "auth": "Bearer t2"}]}},
-        {"do": "answer", "status": 200, "seq": 4, "expect": {"pending": 0, "token_asked": false}},
-        {"do": "write", "write": {"update": "tasks", "set": {"title": "TWO"}, "where": {"key": "a"}}, "expect": {"requests": [{"key": "<w2>", "auth": "Bearer t2"}]}},
-        {"do": "answer", "status": 401, "body": {"code": "token_expired", "error": "the token has expired"}, "expect": {
-          "token": {"code": "token_expired", "had_token": true, "attempt": 1}}}
+        {"do": "answer", "status": 503, "body": {"error": "the tenant is being moved"}, "expect": {"token_asked": false, "waits": [[250, 325]], "pending": 1}},
+        {"do": "fire", "expect": {"requests": [{"path": "/query", "key": "<w1>", "auth": "Bearer t2"}]}},
+        {"do": "answer", "status": 401, "body": {"error": "no key has the token's kid"}, "expect": {"token_asked": false, "waits": [[2000, 2600]]}},
+        {"do": "fire", "expect": {"token": {"code": null, "had_token": true, "attempt": 3}}},
+        {"do": "token", "token": "t3", "expect": {"requests": [{"path": "/query", "key": "<w1>", "auth": "Bearer t3"}]}},
+        {"do": "answer", "status": 200, "seq": 4, "expect": {"pending": 0, "token_asked": false, "token_refusal": null}},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "TWO"}, "where": {"key": "a"}}, "expect": {"requests": [{"key": "<w2>", "auth": "Bearer t3"}]}},
+        {"do": "answer", "status": 401, "body": {"error": "no key has the token's kid"}, "expect": {
+          "token": {"code": null, "had_token": true, "attempt": 1}, "waits": []}}
+      ]
+    },
+    {
+      "name": "the wait before a token is asked for again doubles to 60 s, and stays there",
+      "covers": "sync.html#token-refusals: a provider that hands over a token at every ask, whatever the attempt, against a server that takes none of them asks once a minute, not at the network's speed",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "ONE"}, "where": {"key": "a"}}, "expect": {"requests": [{"key": "<w1>", "auth": "Bearer t0"}]}},
+        {"do": "answer", "status": 401, "body": {"error": "the token names no audience (aud) this server takes"}, "expect": {
+          "token": {"code": null, "had_token": true, "attempt": 1}, "waits": []}},
+        {"do": "token", "token": "t1", "expect": {"requests": [{"path": "/query", "key": "<w1>", "auth": "Bearer t1"}]}},
+        {"do": "answer", "status": 401, "body": {"error": "the token names no audience (aud) this server takes"}, "expect": {"token_asked": false, "waits": [[1000, 1300]]}},
+        {"do": "fire", "expect": {"token": {"code": null, "had_token": true, "attempt": 2}}},
+        {"do": "token", "token": "t2", "expect": {"requests": [{"path": "/query", "key": "<w1>", "auth": "Bearer t2"}]}},
+        {"do": "answer", "status": 401, "body": {"error": "the token names no audience (aud) this server takes"}, "expect": {"token_asked": false, "waits": [[2000, 2600]]}},
+        {"do": "fire", "expect": {"token": {"attempt": 3}}},
+        {"do": "token", "token": "t3"},
+        {"do": "answer", "status": 401, "body": {"error": "the token names no audience (aud) this server takes"}, "expect": {"token_asked": false, "waits": [[4000, 5200]]}},
+        {"do": "fire", "expect": {"token": {"attempt": 4}}},
+        {"do": "token", "token": "t4"},
+        {"do": "answer", "status": 401, "body": {"error": "the token names no audience (aud) this server takes"}, "expect": {"token_asked": false, "waits": [[8000, 10400]]}},
+        {"do": "fire", "expect": {"token": {"attempt": 5}}},
+        {"do": "token", "token": "t5"},
+        {"do": "answer", "status": 401, "body": {"error": "the token names no audience (aud) this server takes"}, "expect": {"token_asked": false, "waits": [[16000, 20800]]}},
+        {"do": "fire", "expect": {"token": {"attempt": 6}}},
+        {"do": "token", "token": "t6"},
+        {"do": "answer", "status": 401, "body": {"error": "the token names no audience (aud) this server takes"}, "expect": {"token_asked": false, "waits": [[32000, 41600]]}},
+        {"do": "fire", "expect": {"token": {"attempt": 7}}},
+        {"do": "token", "token": "t7"},
+        {"do": "answer", "status": 401, "body": {"error": "the token names no audience (aud) this server takes"}, "expect": {"token_asked": false, "waits": [[60000, 78000]]}},
+        {"do": "fire", "expect": {"token": {"attempt": 8}}},
+        {"do": "token", "token": "t8"},
+        {"do": "answer", "status": 401, "body": {"error": "the token names no audience (aud) this server takes"}, "expect": {"token_asked": false, "waits": [[60000, 78000]]}},
+        {"do": "fire", "expect": {"token": {"code": null, "had_token": true, "attempt": 9}, "requests": [], "pending": 1}}
+      ]
+    },
+    {
+      "name": "a token refused too at a stream's open is asked for again after a wait, and a stream that opens starts the count over",
+      "covers": "sync.html#token-refusals: a stream that opened with the token held is the server taking it, as a 2xx is",
+      "steps": [
+        {"do": "stream_status", "status": 401, "body": {"error": "the token is not valid yet"}},
+        {"do": "start", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open", "auth": "Bearer t0"}], "token": {"code": null, "had_token": true, "attempt": 1}, "waits": []}},
+        {"do": "stream_status", "status": 401, "body": {"error": "the token is not valid yet"}},
+        {"do": "token", "token": "t1", "expect": {
+          "streams": [{"path": "/tasks/changes?status=eq.open", "auth": "Bearer t1"}], "token_asked": false, "token_refusal": null, "waits": [[1000, 1300]]}},
+        {"do": "fire", "expect": {"token": {"code": null, "had_token": true, "attempt": 2}, "streams": []}},
+        {"do": "token", "token": "t2", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open", "auth": "Bearer t2"}], "waits": []}},
+        {"do": "seed", "seq": 3, "rows": "@open", "expect": {"ready": true}},
+        {"do": "error", "error": "the token has expired", "status": 401, "expect": {
+          "streams": [], "token": {"code": null, "had_token": true, "attempt": 1}, "waits": []}}
       ]
     },
     {
@@ -1112,6 +1170,101 @@
         {"do": "write", "write": {"update": "tasks", "set": {"title": "ONE"}, "where": {"key": "a"}}, "expect": {"requests": [{"key": "<w1>", "auth": "Bearer t0"}]}},
         {"do": "answer", "status": 401, "body": {"code": "a_later_code", "error": "refused"}, "expect": {
           "token": {"code": "a_later_code", "had_token": true, "attempt": 1}, "code": "a_later_code", "pending": 1}}
+      ]
+    },
+    {
+      "name": "a token that expired while the replica was offline is asked for at once, as attempt 1, whatever was asked before",
+      "covers": "sync.html#token-refusals: an expiry is cured by a fresh token and is no escalation -- a token handed over offline may run out before it is sent",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open", "expect": {"ready": true}},
+        {"do": "error", "error": "the token has expired", "status": 401, "code": "token_expired", "expect": {
+          "token": {"code": "token_expired", "had_token": true, "attempt": 1}, "waits": []}},
+        {"do": "online", "online": false},
+        {"do": "token", "token": "t1", "expect": {"streams": [], "requests": [], "token_asked": false}},
+        {"do": "stream_status", "status": 401, "body": {"code": "token_expired", "error": "the token has expired"}},
+        {"do": "online", "online": true, "expect": {
+          "streams": [{"path": "/tasks/changes?status=eq.open&since=3", "auth": "Bearer t1"}],
+          "token": {"code": "token_expired", "had_token": true, "attempt": 1}, "code": "token_expired", "waits": []}},
+        {"do": "token", "token": "t2", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open&since=3", "auth": "Bearer t2"}], "code": null}},
+        {"do": "change", "seq": 4, "puts": [], "dels": [], "expect": {"ready": true}}
+      ]
+    },
+    {
+      "name": "the token handed back at an expiry's ask, refused for its expiry again, is asked for again after a wait",
+      "covers": "sync.html#token-refusals: only a fresh token cures an expiry; the same one handed back -- a provider's cache, read by a clock behind the server's -- is refused again, and the next ask waits",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open", "expect": {"ready": true}},
+        {"do": "error", "error": "the token has expired", "status": 401, "code": "token_expired", "expect": {
+          "token": {"code": "token_expired", "had_token": true, "attempt": 1}, "waits": []}},
+        {"do": "stream_status", "status": 401, "body": {"code": "token_expired", "error": "the token has expired"}},
+        {"do": "token", "token": "t0", "expect": {
+          "streams": [{"path": "/tasks/changes?status=eq.open&since=3", "auth": "Bearer t0"}],
+          "token_asked": false, "code": "token_expired", "token_refusal": null, "waits": [[1000, 1300]]}},
+        {"do": "fire", "expect": {"token": {"code": "token_expired", "had_token": true, "attempt": 2}, "streams": []}},
+        {"do": "token", "token": "t1", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open&since=3", "auth": "Bearer t1"}]}},
+        {"do": "change", "seq": 4, "puts": [], "dels": [], "expect": {"ready": true, "code": null}}
+      ]
+    },
+    {
+      "name": "a stream's open answered 401 after its token was replaced opens again with the new one, asking nothing",
+      "covers": "sync.html#token-refusals: a refusal of a token no longer held is sent again with the one held, wherever it was sent",
+      "steps": [
+        {"do": "stream_status", "status": 401, "body": {"code": "token_expired", "error": "the token has expired"}, "held": true},
+        {"do": "start", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open", "auth": "Bearer t0"}], "token_asked": false}},
+        {"do": "token", "token": "t1", "expect": {"streams": [], "token_asked": false}},
+        {"do": "release", "expect": {
+          "streams": [{"path": "/tasks/changes?status=eq.open", "auth": "Bearer t1"}], "token_asked": false, "code": null, "waits": []}},
+        {"do": "seed", "seq": 3, "rows": "@open", "expect": {"ready": true}}
+      ]
+    },
+    {
+      "name": "GET /collections answered 401 after its token was replaced is asked again with the new one, asking nothing",
+      "steps": [
+        {"do": "schema_status", "status": 401, "body": {"code": "token_expired", "error": "the token has expired"}, "held": true},
+        {"do": "start", "expect": {"requests": [{"method": "GET", "path": "/collections", "auth": "Bearer t0"}], "streams": [], "token_asked": false}},
+        {"do": "token", "token": "t1", "expect": {"requests": [], "streams": [], "token_asked": false}},
+        {"do": "release", "expect": {
+          "requests": [{"method": "GET", "path": "/collections", "auth": "Bearer t1"}],
+          "streams": [{"path": "/tasks/changes?status=eq.open", "auth": "Bearer t1"}], "token_asked": false, "code": null, "waits": []}},
+        {"do": "seed", "seq": 3, "rows": "@open", "expect": {"ready": true}}
+      ]
+    },
+    {
+      "name": "a 401 to a write sent with the token handed over again since is a refusal of the token held, and asks",
+      "covers": "sync.html#token-refusals: only another token makes a refusal one of a token since replaced; the same one handed over again keeps its place, so its refusal is asked about rather than sent again unasked",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "ONE"}, "where": {"key": "a"}}, "expect": {"requests": [{"key": "<w1>", "auth": "Bearer t0"}]}},
+        {"do": "token", "token": "t0", "expect": {"requests": [], "streams": [], "token_asked": false}},
+        {"do": "answer", "status": 401, "body": {"error": "the token's signature does not match"}, "expect": {
+          "token": {"code": null, "had_token": true, "attempt": 1}, "requests": [], "waits": [], "pending": 1}},
+        {"do": "token", "token": "t1", "expect": {"requests": [{"path": "/query", "key": "<w1>", "auth": "Bearer t1"}]}},
+        {"do": "answer", "status": 200, "seq": 4, "expect": {"pending": 0}}
+      ]
+    },
+    {
+      "name": "a token asked for and not handed over is asked for again when the network comes back, and a wait before an ask is kept",
+      "covers": "sync.html#token-refusals: a provider that threw -- its issuer unreachable -- leaves the sync waiting until setOnline(true) or resume() asks it again; a wait before an ask is the server's refusal, which the network says nothing of",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open", "expect": {"ready": true}},
+        {"do": "error", "error": "the token has expired", "status": 401, "code": "token_expired", "expect": {
+          "token": {"code": "token_expired", "had_token": true, "attempt": 1}}},
+        {"do": "online", "online": true, "expect": {
+          "token": {"code": "token_expired", "had_token": true, "attempt": 1}, "streams": [], "requests": [], "waits": []}},
+        {"do": "online", "online": false, "expect": {"token_asked": false}},
+        {"do": "online", "online": true, "expect": {
+          "token": {"code": "token_expired", "had_token": true, "attempt": 1}, "token_refusal": {"code": "token_expired", "had_token": true, "attempt": 1}, "streams": []}},
+        {"do": "stream_status", "status": 401, "body": {"error": "no key has the token's kid"}},
+        {"do": "token", "token": "t1", "expect": {
+          "streams": [{"path": "/tasks/changes?status=eq.open&since=3", "auth": "Bearer t1"}], "token_asked": false, "waits": [[1000, 1300]]}},
+        {"do": "online", "online": true, "expect": {"token_asked": false, "streams": [], "waits": []}},
+        {"do": "fire", "expect": {"token": {"code": null, "had_token": true, "attempt": 2}}},
+        {"do": "token", "token": "t2", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open&since=3", "auth": "Bearer t2"}]}},
+        {"do": "change", "seq": 4, "puts": [], "dels": [], "expect": {"ready": true, "token_refusal": null}}
       ]
     },
     {

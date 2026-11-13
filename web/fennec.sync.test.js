@@ -1404,7 +1404,8 @@ test('a live query over HTTP follows the writes a scoped token may read, and no 
 // (`token_expired`) -- at the stream's end, and at a stream refused at its
 // open, whose body a fetch throws away once the stream is cancelled, so it
 // is read first -- or a token refused otherwise, one handed over refused
-// again (`attempt` 2), and none sent at all (`hadToken` false).
+// too asked for again after a wait (`attempt` 2), and none sent at all
+// (`hadToken` false).
 test("a replica's tokenProvider is handed why a token is wanted", { skip, concurrency: false }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'fennec-sync-expiry-'));
   const secret = 'web-tests-jwt-secret-of-32-bytes-or-more';
@@ -1452,9 +1453,12 @@ test("a replica's tokenProvider is handed why a token is wanted", { skip, concur
     await until(async () => (await db.from('notes').rows()).some((r) => r.title === 'reopened'), 'the write after the open');
 
     // A token no key of the server's signed: refused, never an expiry, past
-    // its `exp` or not -- and the one handed over refused too, `attempt` 2,
-    // where an app signs out.
+    // its `exp` or not -- and the one handed over refused too, asked for
+    // again no sooner than a second later, `attempt` 2. A provider that
+    // throws then hands over nothing: the status says what it was asked,
+    // and `setOnline(true)` asks it again.
     const told = [];
+    const at = [];
     const forged = () => jwt('another-secret-of-32-bytes-or-more!', { sub: 'alice', exp: now() + 600 });
     const refused = await sync({
       url: s.url,
@@ -1464,19 +1468,23 @@ test("a replica's tokenProvider is handed why a token is wanted", { skip, concur
       shapes: [{ collection: 'notes' }],
       tokenProvider: (r) => {
         told.push(said(r));
-        if (r.attempt > 1) throw new FennecError('signed out');
+        at.push(performance.now());
+        if (r.attempt > 1) throw new FennecError('the issuer is out of reach');
         return forged();
       },
       onError: () => {},
     });
     opened.push(refused);
     await until(() => told.length === 2, 'the token asked for twice');
-    assert.deepEqual(told, [
-      { errorCode: null, expired: false, hadToken: true, attempt: 1 },
-      { errorCode: null, expired: false, hadToken: true, attempt: 2 },
-    ]);
+    const second = { errorCode: null, expired: false, hadToken: true, attempt: 2 };
+    assert.deepEqual(told, [{ errorCode: null, expired: false, hadToken: true, attempt: 1 }, second]);
+    assert.ok(at[1] - at[0] >= 1000, `asked again after ${at[1] - at[0]} ms`);
     assert.equal(refused.status()[0].errorCode, null);
+    assert.deepEqual(said(refused.status()[0].tokenRefusal), second);
     assert.match(refused.status()[0].error, /refused the token/);
+    refused.setOnline(true);
+    await until(() => told.length === 3, 'the token asked for again');
+    assert.deepEqual(told[2], second);
 
     // Started with no token: asked for one, told none was sent.
     const bare = [];
