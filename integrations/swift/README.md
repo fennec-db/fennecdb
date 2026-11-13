@@ -112,13 +112,23 @@ server has not fetched yet, an `nbf` its clock has not reached), the sync
 asks again after 1 s doubling to 60 s; an expiry of the token the server
 took last, or of the first handed over since, starts the count at 1 again.
 A provider that throws, or hands over an empty token, leaves the sync
-waiting, `replica.status`'s error reading "the token provider failed: …",
-and is asked again at `resume()` or `setOnline(true)` -- never while it is
-still at work: it is called once at a time. A file is one account's -- its
-path names the account, and it is never opened for another -- and signing
-out keeps it, for that account's next sign-in to send its `pending` writes.
-`replica.status`'s error names the `errorCode` and the `tokenRefusal` too,
-and a `FennecRemote` refusal its body's code as `FennecError.errorCode`.
+waiting, `replica.status.token` reading `.failed` and its error "the token
+provider failed: …", and is asked again at `resume()` or
+`setOnline(true)` -- never while it is still at work: it is called once at
+a time. Nothing bounds its time, since it may wait on a sign-in, so it
+must return: time out its own requests to the issuer and throw. One that
+never returns holds the sync, `token` reading `.asked`, until the app hands
+a token over itself with `setToken`. A file is one account's -- its path
+names the account, and it is never opened for another -- and signing out
+keeps it, for that account's next sign-in to send its `pending` writes.
+
+While a token is wanted `replica.status.token` says so: its `stage`
+(`.delayed` while the wait before the next ask runs, `.asked`, `.failed`)
+and the `TokenRefusal` its `refusal`, the error the token's whatever else
+failed since -- a stream that ended, as streams end offline. An app that
+hands its tokens over with `setToken` rather than a provider does so at
+`.asked`. A `FennecRemote` refusal names its body's code as
+`FennecError.errorCode`.
 
 The same `Fennec`: reads and live queries are the file's, a write to a
 shape's collection shows at once and is sent -- queued in the file while
@@ -249,10 +259,12 @@ words held to `integrations/builder-golden.json`.
   `resume()` asks again for a token a provider that threw never handed
   over.
 - A provider that throws, or hands over an empty token, is told in
-  `replica.status`'s error ("the token provider failed: …"), where it was
-  swallowed; an empty token is no longer handed to the server as none.
-- `SyncStatus.Failure` has `errorCode` and `tokenRefusal`, and
-  `FennecError` a refusal's `errorCode`.
+  `replica.status` (`token` `.failed`, the error "the token provider
+  failed: …"), where it was swallowed; an empty token is no longer handed
+  to the server as none.
+- `SyncStatus` has `token`, a `TokenWait` -- its `stage` and the
+  `TokenRefusal` -- while a token is wanted, `SyncStatus.Failure`
+  `errorCode`, and `FennecError` a refusal's `errorCode`.
 
 ## Building and testing
 

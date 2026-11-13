@@ -117,8 +117,9 @@ doubling to 60 s where the token handed over was refused too, a wait the
 same token handed over again does not end (an expiry starting at 1 only
 for the token the server took last or the first handed over since, never
 for one already refused for its expiry), one ask out at a time -- a
-binding calls its provider once at a time and answers with the token or
-`{"token_failed":..}`, which the status's error tells in every SDK --
+binding calls its provider once at a time, bounding none, and answers with
+the token or `{"token_failed":..}`, which the status's `token` tells in
+every SDK (its stage, said from the ask: no fault set since hides it) --
 again at `{"online":true}` only after that, nothing once stopped, and
 sends a request refused for a token since replaced again, unasked
 (`fennec_abi::sync`, `web/fennec.js`, held by the scenario file); a

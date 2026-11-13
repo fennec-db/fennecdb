@@ -89,13 +89,24 @@ server has not fetched yet, an `nbf` its clock has not reached), the sync
 asks again after 1 s doubling to 60 s; an expiry of the token the server
 took last, or of the first handed over since, starts the count at 1 again.
 A provider that fails, or hands over an empty token, leaves the sync
-waiting, `replica.status`'s error reading "the token provider failed: …",
-and is asked again at `resume()` or `setOnline(true)` -- never while it is
-still at work: it is called once at a time. A file is one account's -- its path
-names the account, and it is never opened for another -- and signing out
-keeps it, for that account's next sign-in to send its `pending` writes.
-`replica.status`'s error names the `errorCode` and the `tokenRefusal` too,
-and a `FennecRemote` refusal its body's code as `FennecException.errorCode`.
+waiting, `replica.status.token` reading `TokenStage.failed` and its error
+"the token provider failed: …", and is asked again at `resume()` or
+`setOnline(true)` -- never while it is still at work: it is called once at
+a time. Nothing bounds its time, since it may wait on a sign-in, so it
+must complete: time out its own requests to the issuer and fail. One that
+never completes holds the sync, `token` reading `TokenStage.asked`, until
+the app hands a token over itself with `setToken`. A file is one account's
+-- its path names the account, and it is never opened for another -- and
+signing out keeps it, for that account's next sign-in to send its
+`pending` writes.
+
+While a token is wanted `replica.status.token` says so: its `stage`
+(`delayed` while the wait before the next ask runs, `asked`, `failed`) and
+the `TokenRefusal` its `refusal`, the error the token's whatever else
+failed since -- a stream that ended, as streams end offline. An app that
+hands its tokens over with `setToken` rather than a provider does so at
+`asked`. A `FennecRemote` refusal names its body's code as
+`FennecException.errorCode`.
 
 **Changed before 1.0** (CHANGELOG.md): `tokenProvider` takes the
 `TokenRefusal`, and a function of no argument is no longer taken -- Dart

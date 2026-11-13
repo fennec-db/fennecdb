@@ -16,12 +16,13 @@ Changed before 1.0, which freezes the API:
 - `resume()` and `setOnline(true)` ask again for a token a provider that
   failed did not hand over -- never while it is still at work: a provider
   is called once at a time. A provider that fails, or hands over an empty
-  token, is told in `replica.status`'s error ("the token provider failed:
-  …"), where it was swallowed; an empty token is no longer handed to the
-  server as none.
-- `SyncFailure.errorCode` and `SyncFailure.tokenRefusal` say what the sync
-  waits on a token for, and `FennecException.errorCode` is a refusal's
-  code.
+  token, is told in `replica.status` (`token` `TokenStage.failed`, the
+  error "the token provider failed: …"), where it was swallowed; an empty
+  token is no longer handed to the server as none.
+- `SyncStatus.token`, a `TokenWait` -- its `TokenStage` and the
+  `TokenRefusal` -- says what the sync waits on a token for while it does,
+  `SyncFailure.errorCode` the code a 401 named, and
+  `FennecException.errorCode` is a refusal's code.
 - A replica is one account's: its file's path names the account, and it is
   never opened for another.
 

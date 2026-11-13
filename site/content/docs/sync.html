@@ -278,17 +278,37 @@ the new one.</p>
 
 <p><b>A provider that throws</b> -- the issuer out of reach -- or hands
 over no token leaves the sync waiting, and says so: <code>status()</code>'s
-<code>error</code> reads <code>the token provider failed: …</code> (what it
-threw goes to <code>onError</code> too), its <code>tokenRefusal</code> what
-the provider was handed. The page's <code>online</code> event, or
+<code>token</code> reads <code>failed</code> and its <code>error</code>
+<code>the token provider failed: …</code> (what it threw goes to
+<code>onError</code> too). The page's <code>online</code> event, or
 <code>setOnline(true)</code>, asks it again with the same
 <code>TokenRefusal</code>, though not before a wait the server's refusal
 began. A provider is asked once at a time: while it is at work nothing
-asks it again, and what it hands over answers every ask meanwhile. An app
-that hands its tokens over with <code>setToken</code> instead reads the
-same from <code>status()</code>: the <code>error</code>, its
-<code>errorCode</code>, and <code>tokenRefusal</code>, what the sync waits
-on a token for.</p>
+asks it again, and what it hands over answers every ask meanwhile. Nothing
+bounds its time, since it may be waiting on a sign-in, so <b>a provider
+must return</b>: it times out its own requests to the issuer, and throws.
+One that never returns holds the sync, <code>token</code> reading
+<code>asked</code>, until the app hands a token over itself with
+<code>setToken</code>, which gets it going whatever the stage.</p>
+
+<p id="token-status"><b>The status while a token is wanted.</b>
+<code>status()</code>'s <code>token</code> is null while the sync waits on
+none. Otherwise it says where the ask stands, its <code>stage</code> --
+<code>delayed</code> while the wait before the next ask runs (the token
+handed over was refused too), <code>asked</code> once the provider is
+asked and no token has come, <code>failed</code> where it threw or handed
+over none -- beside its <code>refusal</code>, the <code>TokenRefusal</code>
+the provider was handed, or will be once the wait runs out. Nothing is
+sent meanwhile, and the <code>error</code> is the token's, its
+<code>errorCode</code> the code the 401 named, whatever else fails while it
+waits: streams end where the network goes, which is where providers fail.
+An app that hands its tokens over with <code>setToken</code> rather than a
+provider does so at <code>asked</code>.</p>
+
+<pre data-lang="ts">const t = db.status()[0].token;
+if (t?.stage === 'asked') db.setToken(await auth.refresh());      // the provider's job, by hand
+if (t?.stage === 'failed') toast('Signing in again once the network is back');
+</pre>
 
 <p id="one-account"><b>One replica, one account.</b> A replica holds one
 account's rows and the writes it made: its <code>persist</code> key -- or a

@@ -417,6 +417,7 @@ static and instance member of one name.</p>
 <tr><td>first seed, writes answered</td><td colspan="3"><code>ready()</code>, <code>pushed()</code></td></tr>
 <tr><td>refused writes</td><td><code>refusals()</code></td><td><code>refusals</code> (a <code>SharedFlow</code>)</td><td><code>refusals</code></td></tr>
 <tr><td>a new token</td><td colspan="3"><code>setToken(jwt)</code>, or a <code>tokenProvider</code> asked on a <code>401</code>, handed a <code>TokenRefusal</code></td></tr>
+<tr><td>a token wanted</td><td><code>status.token?.stage</code>: <code>.delayed</code>, <code>.asked</code>, <code>.failed</code></td><td><code>status.value.token?.stage</code>: <code>DELAYED</code>, <code>ASKED</code>, <code>FAILED</code></td><td><code>status.token?.stage</code>: <code>TokenStage.delayed</code>, <code>.asked</code>, <code>.failed</code></td></tr>
 <tr><td>the network</td><td colspan="3"><code>setOnline(bool)</code>, <code>resume()</code></td></tr>
 <tr><td>the server itself</td><td colspan="3"><code>replica.remote</code> (<a href="#connect">below</a>)</td></tr>
 </tbody>
@@ -451,11 +452,25 @@ of the first one handed over since, starts the count at 1 again, any other
 -- a token minted expired, as every one is where the server's clock runs
 ahead of the issuer's -- counts. A provider that throws -- the issuer out
 of reach -- or hands over an empty token leaves the sync waiting, the
-status's error reading <code>the token provider failed: …</code>, and is
-asked again at <code>resume()</code> or <code>setOnline(true)</code>;
-while it is at work nothing asks it again. The status's error names the
-<code>errorCode</code> and the <code>tokenRefusal</code> too, for an app
-that hands its tokens over with <code>setToken</code>.</p>
+status's <code>token</code> reading failed and its error <code>the token
+provider failed: …</code>, and is asked again at <code>resume()</code> or
+<code>setOnline(true)</code>; while it is at work nothing asks it again.
+Nothing bounds its time, since it may be waiting on a sign-in, so <b>a
+provider must return</b>: it times out its own requests to the issuer, and
+throws. One that never returns holds the sync until the app hands a token
+over itself with <code>setToken</code>, which gets it going whatever the
+stage.</p>
+
+<p>While a token is wanted the status's <code>token</code> says where the
+ask stands -- its <code>stage</code>: delayed while the wait before the
+next ask runs, asked once the provider is asked and no token has come,
+failed where it threw or handed over none -- beside its
+<code>refusal</code>, the <code>TokenRefusal</code>. Nothing is sent
+meanwhile, and the status's error is the token's, its
+<code>errorCode</code> the code the <code>401</code> named, whatever else
+fails while it waits: streams end where the network goes, which is where
+providers fail. An app that hands its tokens over with
+<code>setToken</code> rather than a provider does so at asked.</p>
 
 <p>A replica belongs to one account: its file's path names the account,
 and it is never opened for another, or the next account signing in on the
@@ -524,7 +539,7 @@ token and the asks in a row, after 1 s doubling to 60 s where the token
 handed over was refused too -- a <code>401</code> to a request sent with a
 token since replaced goes again with the new one, unasked, and one ask is
 out at a time, the binding answering it with a token or with why none came
-(<code>{"token_failed":..}</code>), which the status's error says; a <code>507</code> naming a tenant's
+(<code>{"token_failed":..}</code>), which the status's <code>token</code> says; a <code>507</code> naming a tenant's
 quota, and any other <code>4xx</code>, is a refusal, and the writes behind
 it go on
 (<a href="sync.html#refusals-retries-and-offline">why</a>). The status's

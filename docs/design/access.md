@@ -1045,11 +1045,9 @@ a token is read -- the 503 at the connection ceiling, a router's while a
 tenant moves -- and reset there, a fresh token refused, then a 503, then
 refused again was a first ask again, the wait (below) never reached. A
 code the core does not know is passed on as it came, so a later server's
-code reaches an app without a new core. The status's error says what the
-last ask said (`code`, `had_token`, `attempt`; every SDK's
-`tokenRefusal`), for an app that hands its tokens over with a signal
-rather than a provider: `had_token` and `attempt` are null while the wait
-before an ask runs, as the provider has not been asked.
+code reaches an app without a new core. The status says the same while a
+token is wanted (below), for an app that hands its tokens over with a
+signal rather than a provider.
 
 **A token refused again is asked for again after a wait.** Where the token
 handed over at the last ask is refused too, the next ask comes after 1 s
@@ -1096,7 +1094,7 @@ handed over before the wait for a second ask ran out ended it, as what the
 ask would have brought -- the same token too, so an app handing its cached
 token back at the status's `errorCode` skipped every wait and resent at the
 network's speed. The same token handed over while the wait runs
-(`Stage::Waiting`, the page's `#stage`) leaves it running; another token
+(`Stage::Delayed`, the page's `#stage`) leaves it running; another token
 ends it, as the same one does once the ask is out -- the provider's
 answer, which refused again counts.
 
@@ -1131,18 +1129,58 @@ send.
 that its provider threw (`onError`); Swift's `try?`, Kotlin's `runCatching`
 and Dart's `onError: (_) {}` swallowed it, the status saying the sync
 waited for a token, not that none would come. Every SDK says it now in the
-status's error, `the token provider failed: <why>`, its `tokenRefusal`
-the refusal the provider was handed -- written once by the core for the
-three native bindings from `{"token_failed":..}`, by `#tokenFailed` in the
-page, and one scenario holds both. The status, since every SDK has one
-(`status()`, Swift's and Kotlin's `SyncStatus`, Dart's `SyncFailure`) and
-only the page an error callback: a callback in each native SDK would have
-been three APIs more to freeze at 1.0, told once, where the status says it
-until the sync goes on. The page still hands what the provider threw to
-`onError`, as it hands every error in the background. An empty token is a
-failure too: the page took it for nothing handed over and said nothing,
-and a binding handed it to the core, which sent the requests with no
-token, to be refused again.
+status, its `token` failed and its error `the token provider failed:
+<why>` -- written once by the core for the three native bindings from
+`{"token_failed":..}`, by `#tokenFailed` in the page, and scenarios hold
+both. The status, since every SDK has one (`status()`, Swift's, Kotlin's
+and Dart's `SyncStatus`) and only the page an error callback: a callback
+in each native SDK would have been three APIs more to freeze at 1.0, told
+once, where the status says it until the sync goes on. The page still
+hands what the provider threw to `onError`, as it hands every error in the
+background -- once the status says the failure: the other way round, a
+handler that threw left the ask out for good, and `setOnline(true)` asked
+nothing. An empty token is a failure too: the page took it for nothing
+handed over and said nothing, and a binding handed it to the core, which
+sent the requests with no token, to be refused again.
+
+**While a token is wanted, the status is the token's.** The status has a
+member of its own for it, `token`: null while the sync waits on none,
+otherwise its `stage` -- `delayed` while the wait before the next ask runs,
+`asked` once the provider is asked and no token has come, `failed` where
+it threw or handed over none -- and the code, `had_token` and `attempt`
+the ask said or, delayed, will say (the core's
+`{"stage","code","had_token","attempt"}`; `TokenWait` in every SDK, its
+`refusal` the `TokenRefusal`). The first form of this said it in the
+status's error alone -- its message, `code`, `had_token` and `attempt`,
+the two null during the wait -- set as a fault when the ask was made and
+when the provider failed, and any fault set after was written over it: a
+stream ending, as streams end offline, where providers fail, left "the
+subscription to `tasks` ended: …", the code and the ask's members gone,
+while nothing was sent (the fourth review's probes in both runners: a
+write's 401 and then the stream dropped, and a 401, the provider's failure
+and then a drop). An app reading the error for a failure, or handing its
+tokens over at the ask by the status, as sync.html told it to, missed it
+and stalled. Nothing about the token is kept as a fault now: `status` says
+both from where the ask stands (`want`, `Stage`; the page's `#want`,
+`#stage`, `#tokenWhy`), the error the token's -- its message by the stage,
+its code the 401's -- whatever failed since, and a stage, since a message
+is no contract to freeze. A fault set meanwhile is cleared with the token,
+as it was. `delayed` carries the refusal too, where the first form said
+none: the stage says what the nulls did, that the provider has not been
+asked, and an app at `delayed` hands over nothing -- or another token,
+which ends the wait.
+
+**A provider must return.** Nothing bounds a provider's time: it may wait
+on a sign-in, an issuer's own retries or a person, and a bound the sync
+chose would cut those short or, longer than they take, still leave the app
+waiting on a call it cannot see. So a provider that never returns holds
+the sync -- `token` `asked`, the one call out, which `resume()`,
+`setOnline(true)` and a later refusal call no second time -- and the rule
+is the app's, said in sync.html, mobile.html, `fennec.d.ts`, `fennec.h`
+and each SDK's README: time out the requests to the issuer, and throw. The
+app's own token, handed over meanwhile, gets the sync going whatever the
+stage (`signal`, `setToken`); the call still out answers the next ask
+when it returns, as a call at work always has.
 
 **A 401 to a token since replaced is no refusal of the token held.** Each
 request and stream remembers the token it carried (`Sync::carried`, a
@@ -1205,7 +1243,7 @@ or not), `tests/access.rs`'s
 `an_expired_token_is_told_by_its_code_and_no_other_refusal_is` (a request,
 a stream's open, `/_whoami`) and `a_subscription_ends_when_its_token_expires`
 (the stream's end), the core's `a_refusal_code_is_read_from_the_body_alone`,
-twenty-four scenarios both runners play (a stream ended at the `exp` with
+twenty-seven scenarios both runners play (a stream ended at the `exp` with
 the code and without it, a write and a stream's open and `GET /collections`
 refused for an expiry, a replica started with no token, a token refused
 again asked for after a wait and the count starting over at a 2xx but not
@@ -1221,19 +1259,23 @@ token handed over again while a write is out, a second 401 while asked, a
 provider that failed named by the status and asked again when the network
 comes back but never while its ask is out, a token asked for once whatever
 the network says, a sync stopped asking nothing, a stream ended while a
-token is wanted waiting for it, a code no client knows; each runner fails
-a scenario whose sync asks again while an ask is out),
+token is asked for, during the wait before an ask and after the provider
+failed waiting for it and leaving the status the token's, a provider that
+never returns held until the app's own token, a code no client knows; each
+runner fails a scenario whose sync asks again while an ask is out, and
+calls a provider once at a time, as every binding does),
 `web/fennec.client.test.js` (`errorCode` on a refusal and a stream's end),
 `web/fennec.sync.test.js`'s replicas against a server (an expiry at the
 stream's end and at its open on Node's own fetch, a forged token refused
 twice, the second ask no sooner than a second later, the provider's failure
-in the status and asked again at `setOnline(true)`, a provider at work
-called once while the app's own token is refused, none sent), each
-binding's provider against a server (Swift, Kotlin, Dart: a provider that
-threw named by the status and asked again at `resume()`, the status's
-`tokenRefusal`, the wait before `attempt` 2, a provider at work called once
-while `resume()` and the app's own token, refused, ask again) and each
-SDK's refusal naming its code fail without it.
+in the status -- already when `onError` is told -- and asked again at
+`setOnline(true)`, a provider at work called once while the app's own token
+is refused, none sent), each binding's provider against a server (Swift,
+Kotlin, Dart: a provider that threw named by the status and asked again at
+`resume()`, the status's `token` failed, then asked after the wait before
+`attempt` 2, a provider at work called once while `resume()` and the app's
+own token, refused, ask again) and each SDK's refusal naming its code fail
+without it.
 
 ## Empty tokens
 
