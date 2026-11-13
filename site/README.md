@@ -128,12 +128,16 @@ in the backlex repo, including its two hard-won rules:
 `.github/workflows/site.yml` builds the wasm and deploys on a push to `main`
 that touches `site/`, `wrangler.jsonc` or the crates the module is built from.
 It needs two secrets: `CLOUDFLARE_API_TOKEN` (the *Edit Cloudflare Workers*
-template) and `CLOUDFLARE_ACCOUNT_ID`, kept in the `site` environment its
-deploy job names, which lets only `main` deploy, and not in the
-repository's, which any branch's workflow could read (RELEASING.md,
-*GitHub*). Neither is committed — no `account_id` lives in the config, so
-`wrangler` resolves it from the login session locally and from the
-environment in CI.
+template) and `CLOUDFLARE_ACCOUNT_ID`. They are the repository's today,
+which any branch's workflow could read, and are to move into a `site`
+environment that lets only `main` deploy. The owner creates that
+environment first (RELEASING.md, *GitHub*, has the commands); then a pull
+request has the deploy job name it again and drops the job from
+`REPOSITORY_SECRETS` in `tools/workflow_check.py`, and the secrets move.
+Naming it before it exists would make GitHub create it at the next deploy,
+with no rules. Neither secret is committed — no `account_id` lives in the
+config, so `wrangler` resolves it from the login session locally and from
+the environment in CI.
 
 Locally, `wrangler login` once, then `make site-deploy`.
 
@@ -369,7 +373,8 @@ it needs, all once:
    *Read*. For the deploy to embed sections changed since the cache was
    committed, either give the deploy token that permission or make a
    token with it alone and store it as `CLOUDFLARE_AI_TOKEN`, a secret of
-   the `site` environment.
+   the `site` environment once the owner has made it (until then the
+   repository's, as the deploy's two are: *Deployment* above).
 5. **Spend.** The Worker holds the day to `DAILY_NEURONS` (5 000, half
    the free allocation of 10 000 a day). Workers AI has no spend cap of
    its own; a usage notification for it under *Notifications*, where the

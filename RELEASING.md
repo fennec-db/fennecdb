@@ -656,22 +656,38 @@ installs nothing. CI's `windows (release zip)` job runs
 `site/test_install.ps1` on Windows against the zip it builds.
 
 **GitHub.** The environments `pypi`, `npm`, `nuget`, `maven`, `pub` and `homebrew` are made the first
-time the workflow runs, and `site` the first time `site.yml` deploys. A required reviewer on them makes a publish wait for a second
+time the workflow runs. A required reviewer on them makes a publish wait for a second
 yes. `homebrew`, which holds a secret of its own, and `pypi` and `nuget`,
 whose policies PyPI and nuget.org trust, are limited to `main` and `v*`
 tags (the Homebrew, PyPI and NuGet sections above), and `npm` too since its
 packages publish by trusted publishing; `maven` and `pub` hold their
-secrets and are limited the same way, and `site`, which holds the Cloudflare
-deploy's (`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, and
-`CLOUDFLARE_AI_TOKEN` where there is one: site/README.md), to `main`
-alone. A job reads only the secrets of the environment it names, and a
-repository secret of the same name too: each is moved by setting it in
-its environment (`gh secret set <NAME> --env <environment> -R
-fennec-db/fennecdb`) and then deleting the repository's (`gh secret delete
-<NAME> -R fennec-db/fennecdb`), its environment limited first, since a
-secret in an environment with no rules is read by a job of any branch that
-names it. `tools/workflow_check.py` refuses a job that reads a secret and
-names no environment.
+secrets and are limited the same way. A job reads only the secrets of the
+environment it names, and a repository secret of the same name too: each
+is moved by setting it in its environment (`gh secret set <NAME> --env
+<environment> -R fennec-db/fennecdb`) and then deleting the repository's
+(`gh secret delete <NAME> -R fennec-db/fennecdb`), its environment limited
+first, since a secret in an environment with no rules is read by a job of
+any branch that names it. `tools/workflow_check.py` refuses a job that
+reads a secret and names no environment, but for one it lets off by name
+with the reason.
+
+`site.yml`'s deploy is that one, until its environment exists: the
+Cloudflare secrets (`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, and
+`CLOUDFLARE_AI_TOKEN` where there is one: site/README.md) are the
+repository's, which any branch's workflow reads. A workflow naming an
+environment that does not exist makes GitHub create it at its next run,
+with no rules, so the owner creates `site` first, limited to `main` alone:
+
+    gh api -X PUT repos/fennec-db/fennecdb/environments/site \
+      -F 'deployment_branch_policy[protected_branches]=false' \
+      -F 'deployment_branch_policy[custom_branch_policies]=true'
+    gh api -X POST repos/fennec-db/fennecdb/environments/site/deployment-branch-policies -f name=main -f type=branch
+
+then a pull request puts the line back in `site.yml`'s `deploy`
+(`environment: { name: site, url: https://fennecdb.com }`) and drops the job
+from `REPOSITORY_SECRETS` in `tools/workflow_check.py`, which fails while
+the entry outlives its reason; once it has merged, the three secrets move
+into `site` as above.
 
 The repository's own settings hold what the workflows cannot. Every action
 a workflow runs is pinned to a commit (`docs/design/integrations.md#workflows`);

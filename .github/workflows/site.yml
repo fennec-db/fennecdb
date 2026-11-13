@@ -34,16 +34,17 @@ permissions:
   contents: read
 
 jobs:
-  # In the `site` environment, which keeps the Cloudflare secrets and lets
-  # only main's runs deploy (site/README.md): a repository secret is read
-  # by any branch's workflow, a dispatch from a branch deploying that
-  # branch's site with the token. A repository secret of the same name is
-  # read here until it is moved.
+  # The Cloudflare secrets are the repository's for now, which any branch's
+  # workflow reads: a dispatch from a branch deploys that branch's site with
+  # the token. They are to move into a `site` environment that lets only
+  # main's runs deploy (site/README.md, RELEASING.md's *GitHub*). The owner
+  # creates it first, then this job names it again
+  # (`environment: { name: site, url: https://fennecdb.com }`) and
+  # tools/workflow_check.py's REPOSITORY_SECRETS drops the job: naming an
+  # environment that does not exist makes GitHub create it at the next
+  # deploy, with no rules -- a settings change no pull request should make.
   deploy:
     runs-on: ubuntu-latest
-    environment:
-      name: site
-      url: https://fennecdb.com
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

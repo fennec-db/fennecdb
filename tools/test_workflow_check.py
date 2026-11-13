@@ -93,6 +93,42 @@ class Pins(unittest.TestCase):
     def test_a_comment_that_is_no_tag_is_refused(self):
         self.assertIn("names no tag", self.one(f"actions/checkout@{PIN} # the latest"))
 
+    def test_the_comment_names_the_most_specific_tag(self):
+        # Dependabot rewrites only a comment naming the commit's most
+        # specific tag: a `# v7` would stay `# v7` over a pin moved to v8.
+        for comment in ("v7", "v7.0", "7"):
+            with self.subTest(comment=comment):
+                got = self.one(f"actions/checkout@{PIN} # {comment}")
+                self.assertIn(f"names `{comment}`, not the commit's most specific tag", got)
+        for comment in ("v7.0.1", "7.0.1", "v1.0.0-rc.1", "v7.0.1 the tag CI ran"):
+            with self.subTest(comment=comment):
+                self.assertEqual(findings(workflow(f"""
+                    a:
+                      runs-on: ubuntu-latest
+                      steps:
+                        - uses: actions/checkout@PIN # {comment}
+                """)), [])
+
+    def test_an_action_publishing_no_full_tag_may_name_its_major(self):
+        text = workflow("""
+            a:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: some/action/sub@PIN # v2
+                - uses: other/action@PIN # v2
+                - uses: some/action@PIN # the latest
+        """)
+        saved = dict(wc.MAJOR_TAGS)
+        try:
+            wc.MAJOR_TAGS["some/action"] = "a test's: it publishes v2 and no v2.x.y"
+            got = findings(text)
+        finally:
+            wc.MAJOR_TAGS.clear()
+            wc.MAJOR_TAGS.update(saved)
+        self.assertEqual(len(got), 2, got)
+        self.assertIn("uses other/action@", got[0])
+        self.assertIn("names no tag", got[1])
+
     def test_an_action_in_a_subdirectory_is_held_the_same(self):
         self.assertIn("40-hex commit", self.one("gradle/actions/setup-gradle@v6"))
         self.assertEqual(findings(workflow("""
@@ -206,8 +242,8 @@ class WritesAndBuilds(unittest.TestCase):
         self.assertBuild(self.job(None, "npm run build", top="permissions: write-all\n"), "write-all")
 
     def test_id_token_is_a_write(self):
-        self.assertBuild(self.job("id-token: write", "npm ci"), "an npm, pnpm or yarn install or build")
-        self.assertBuild(self.job("id-token: write", "pnpm install --frozen-lockfile"), "install or build")
+        self.assertBuild(self.job("id-token: write", "npm ci"), "an npm, pnpm or yarn install, script or build")
+        self.assertBuild(self.job("id-token: write", "pnpm install --frozen-lockfile"), "install, script or build")
 
     def test_a_command_where_a_shell_starts_one(self):
         for run in ("set -eu\nfor t in a b; do cargo build --target \"$t\"; done",
@@ -226,8 +262,8 @@ class WritesAndBuilds(unittest.TestCase):
                          "gradle/actions/setup-gradle")
 
     def test_a_script_named_for_building(self):
-        self.assertBuild(self.job("contents: write", "integrations/kotlin/build-aar.sh dist"), "a build script")
-        self.assertBuild(self.job("contents: write", "python3 site/build.py"), "a build script")
+        self.assertBuild(self.job("contents: write", "integrations/kotlin/build-aar.sh dist"), "a build or package script")
+        self.assertBuild(self.job("contents: write", "python3 site/build.py"), "a build or package script")
 
     def test_a_job_that_reads_may_build(self):
         self.assertEqual(self.job("contents: read", "cargo build\nmake wasm\ndocker build ."), [])
@@ -254,6 +290,139 @@ class WritesAndBuilds(unittest.TestCase):
             make_it=1 echo "${#make_it}"
         """
         self.assertEqual(self.job("contents: write\npackages: write\nid-token: write", run), [])
+
+    def test_each_build_beside_a_write(self):
+        for run, what in (
+                ("swift build -c release", "swift build"),
+                ("swift test", "swift test"),
+                ("dotnet pack -c Release -o dist", "dotnet pack"),
+                ("dotnet build", "dotnet build"),
+                ("pip install .", "pip install"),
+                ("python3 -m pip install -e .", "pip install"),
+                ("python3 setup.py sdist", "setup.py"),
+                ("go build ./...", "go build"),
+                ("go run github.com/magefile/mage@v1.17.2 -v build:linux", "go run"),
+                ("npx wrangler deploy", "npx"),
+                ("xcodebuild -scheme NotesKit build -quiet", "xcodebuild"),
+                ("flutter build apk --debug", "flutter build"),
+                ("dart compile exe bin/x.dart", "dart compile"),
+                ("mvn -B package", "maven"),
+                ("npm run lint", "an npm, pnpm or yarn install, script or build"),
+                ("yarn", "an npm, pnpm or yarn install, script or build"),
+                ("pnpm lint", "an npm, pnpm or yarn install, script or build"),
+                ("docker compose up --build -d", "docker build"),
+                ("docker --context remote build .", "docker build"),
+                ("integrations/packages.sh dist-packages", "a build or package script"),
+                ("sh integrations/dotnet/package.sh dist-nuget", "a build or package script"),
+                ("tools/linux-packages.sh 1.0.0 tarballs dist amd64", "a build or package script"),
+                ("./pack.ps1", "a build or package script")):
+            with self.subTest(run=run):
+                self.assertBuild(self.job("contents: write", run), f"runs {what}")
+
+    def test_a_local_action_beside_a_write(self):
+        # Its steps are another file's, which this check does not read.
+        uses = "./.github/actions/setup"
+        self.assertBuild(self.job("contents: write", "echo hi", uses=uses),
+                         "runs the local action ./.github/actions/setup")
+        self.assertEqual(self.job("contents: read", "echo hi", uses=uses), [])
+
+    def test_text_a_command_is_handed_is_no_command(self):
+        run = """
+            echo "a; cargo build" && echo 'x && make y'
+            printf '%s\\n' "npm ci" | tee note
+            git commit -m "make it so" -m "then swift build"
+            echo "::notice::run npx wrangler, then go build"
+            cat > action.yml <<'EOF'
+            cargo build
+            $(make wasm)
+            EOF
+            case $state in
+              make) echo "a pattern, not a command" ;;
+              cargo | npx) exit 0 ;;
+            esac
+            command -v cargo >/dev/null || echo "no cargo"
+            for tool in cargo make npx; do echo "$tool"; done
+            npm publish "./pkg.tgz" && dotnet nuget push x.nupkg && flutter pub publish --force
+            yarn --version
+            x=$((1 + 2)) # make
+        """
+        self.assertEqual(self.job("contents: write", run), [])
+
+    def test_what_runs_inside_a_word_or_a_shell_is_read(self):
+        for run, what in (
+                ('echo "$(cargo build)"', "cargo"),
+                ('echo "`make`"', "make"),
+                ("bash -c 'cargo build --release'", "cargo"),
+                ('sh -ec "make wasm"', "make"),
+                ('eval "go build ./..."', "go build"),
+                ("diff <(cargo tree) expected", "cargo"),
+                ("sh <<'EOF'\ncargo build\nEOF", "cargo"),
+                ("cat > out <<EOF\n$(swift build)\nEOF", "swift build"),
+                ("xargs -I {} dotnet pack {}", "dotnet pack"),
+                ("sudo -u builder env CC=clang make", "make")):
+            with self.subTest(run=run):
+                self.assertBuild(self.job("contents: write", run), f"runs {what}")
+
+    def test_powershell_is_read_as_powershell(self):
+        def job(run, shell="  shell: pwsh\n", runs_on="ubuntu-latest"):
+            body = textwrap.indent(textwrap.dedent(run).strip("\n"), "        ")
+            return findings(workflow(
+                f"a:\n  runs-on: {runs_on}\n  permissions:\n    contents: write\n  steps:\n"
+                f"    - run: |\n{body}\n" + textwrap.indent(shell, "    ")))
+        self.assertEqual(job("""
+            Write-Host "cargo build"; Write-Host `"make`"
+            $s = @'
+            cargo build
+            '@
+            <# make
+               npx #> Write-Output $s
+        """), [])
+        self.assertEqual(len(job("Get-Item x | ForEach-Object { cargo build }")), 1)
+        # A Windows runner's own shell is PowerShell: its backquote escapes.
+        self.assertEqual(job('Write-Host "`"make`""', shell="", runs_on="windows-latest"), [])
+        self.assertEqual(len(job("cargo build", shell="", runs_on="windows-latest")), 1)
+
+    def test_a_job_let_off_by_name(self):
+        text = workflow("""
+            a:
+              runs-on: ubuntu-latest
+              permissions:
+                contents: write
+              steps:
+                - run: cargo build
+        """)
+        saved = dict(wc.WRITE_AND_BUILD)
+        try:
+            wc.WRITE_AND_BUILD[("t.yml", "a")] = "a test's"
+            self.assertEqual(findings(text), [])
+            wc.WRITE_AND_BUILD.clear()
+            wc.WRITE_AND_BUILD[("t.yml", "b")] = "another job's"
+            got = findings(text)
+            self.assertEqual(len(got), 2, got)
+            self.assertIn("job `a` holds contents write and runs cargo", got[0])
+            self.assertIn("WRITE_AND_BUILD lets off job `b`, which this workflow does not have", got[1])
+        finally:
+            wc.WRITE_AND_BUILD.clear()
+            wc.WRITE_AND_BUILD.update(saved)
+
+    def test_a_job_let_off_that_no_longer_builds_is_a_finding(self):
+        text = workflow("""
+            a:
+              runs-on: ubuntu-latest
+              permissions:
+                contents: write
+              steps:
+                - run: gh release upload v1 dist/*
+        """)
+        saved = dict(wc.WRITE_AND_BUILD)
+        try:
+            wc.WRITE_AND_BUILD[("t.yml", "a")] = "a test's"
+            got = findings(text)
+        finally:
+            wc.WRITE_AND_BUILD.clear()
+            wc.WRITE_AND_BUILD.update(saved)
+        self.assertEqual(len(got), 1, got)
+        self.assertIn("WRITE_AND_BUILD lets it off, and it runs no build beside a write: take it out", got[0])
 
 
 class Secrets(unittest.TestCase):
@@ -350,10 +519,36 @@ class Secrets(unittest.TestCase):
             self.assertEqual(findings(text), [])
             wc.REPOSITORY_SECRETS.clear()
             wc.REPOSITORY_SECRETS[("t.yml", "b")] = "another job's"
-            self.assertEqual(len(findings(text)), 1)
+            got = findings(text)
+            self.assertEqual(len(got), 2, got)
+            self.assertIn("job `a` reads secrets.DEPLOY_TOKEN and names no `environment:`", got[0])
+            self.assertIn("REPOSITORY_SECRETS lets off job `b`, which this workflow does not have", got[1])
         finally:
             wc.REPOSITORY_SECRETS.clear()
             wc.REPOSITORY_SECRETS.update(saved)
+
+    def test_a_job_let_off_that_names_its_environment_is_a_finding(self):
+        # site.yml's `deploy` once its environment exists: the line naming
+        # it returns, and the entry letting it off goes.
+        text = workflow("""
+            a:
+              runs-on: ubuntu-latest
+              environment: site
+              steps:
+                - run: deploy
+                  env:
+                    TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+        """)
+        saved = dict(wc.REPOSITORY_SECRETS)
+        try:
+            wc.REPOSITORY_SECRETS[("t.yml", "a")] = "a test's"
+            got = findings(text)
+        finally:
+            wc.REPOSITORY_SECRETS.clear()
+            wc.REPOSITORY_SECRETS.update(saved)
+        self.assertEqual(len(got), 1, got)
+        self.assertIn("REPOSITORY_SECRETS lets it off, and it reads no stored secret outside an"
+                      " environment: take it out", got[0])
 
 
 class Reader(unittest.TestCase):
@@ -428,6 +623,13 @@ class Reader(unittest.TestCase):
 
 
 class Repository(unittest.TestCase):
+    def test_every_job_or_action_let_off_says_why(self):
+        for listed in (wc.REPOSITORY_SECRETS, wc.WRITE_AND_BUILD, wc.MAJOR_TAGS):
+            for key, reason in listed.items():
+                with self.subTest(key=key):
+                    self.assertIsInstance(reason, str)
+                    self.assertGreater(len(reason.split()), 4, f"{key}: say why it is let off")
+
     def test_the_workflows_here_pass(self):
         root = pathlib.Path(HERE).parent / ".github" / "workflows"
         files = sorted(p for p in root.iterdir() if p.suffix in (".yml", ".yaml"))

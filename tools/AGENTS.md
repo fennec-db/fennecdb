@@ -1,6 +1,6 @@
 # AGENTS.md
 
-The install channels' and the workflows' invariants, for `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/windows-zip.sh`, `tools/windows-zip-check.ps1`, `tools/install-ps1-check.ps1`, `tools/image-check.sh`, `site/install.sh`, `site/install.ps1`, the release workflows, and every workflow in `.github/workflows/` with `tools/workflow_check.py` and `.github/dependabot.yml`. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
+The install channels' and the workflows' invariants, for `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/windows-zip.sh`, `tools/windows-zip-check.ps1`, `tools/install-ps1-check.ps1`, `tools/image-check.sh`, `site/install.sh`, `site/install.ps1`, the release workflows, and every workflow in `.github/workflows/` with `tools/workflow_check.py`, `tools/install-flutter.sh` and `.github/dependabot.yml`. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
 
 ## Invariants
 
@@ -37,25 +37,39 @@ before it is kept (`tools/linux-packages-check.sh`,
 every change), and the image on the runner that built it -- its
 `--version`, its server healthy by its own HEALTHCHECK
 (`tools/image-check.sh`, which CI's Grafana job runs on the image it
-builds) -- before `image-push` pushes it; a new channel names what it
-installs by its checksum. A release job that builds runs with
-`contents: read` and a checkout keeping no token (`binaries`, `windows`,
-`wasm`, `android`, `linux-packages`, `image`): the crates' build scripts
-run there, and only the jobs that publish write (`publish`, `image-push`,
-`manifest`).
+builds) -- before `image-push` pushes it, from a Docker on its classic
+image store (`ubuntu-24.04`), each tag and the `<version>` list then read
+back and held to v0.2.0's Docker v2 manifests and gzip layers; `latest`
+moves to the newest published release alone, never a draft, a pre-release
+or back, as the formula does (`packages.yml`'s `image-latest`); a new
+channel names what it installs by its checksum. A release job that builds
+runs with `contents: read` and a checkout keeping no token (`binaries`,
+`windows`, `wasm`, `android`, `linux-packages`, `image`): the crates'
+build scripts run there, and only the jobs that publish write (`publish`,
+`image-push`, `manifest`).
 
 **[A workflow runs actions pinned by commit, and a job that writes builds
 nothing.](../docs/design/integrations.md#workflows)** Every `uses:` names a
-40-hex commit with the tag it was taken from in a comment (`@<sha> #
-v7.0.1`, the commit's most specific tag: the only comment Dependabot
-rewrites as it moves the pin), never a tag or a branch; every workflow says
-`permissions:` at its top, and a job widens only what it uses; a job
-holding any write, `id-token: write` among them, runs no build -- no cargo,
-gradle, make, npm/pnpm/yarn install or build, docker build or build script
--- but takes what a job that reads alone built as an artifact
+40-hex commit with the tag it was taken from in a comment, the commit's
+most specific, X.Y.Z (`@<sha> # v7.0.1`, never `# v7`: the only comment
+Dependabot rewrites as it moves the pin; an action that publishes no X.Y.Z
+tag is in `MAJOR_TAGS` with the reason), never a tag or a branch, and no
+action runs another by a tag inside it (a composite one's `action.yml`,
+which `sha_pinning_required` refuses under a pinned commit too: Flutter
+comes from its archive, `tools/install-flutter.sh`, held to the sum the
+workflow names); every workflow says `permissions:` at its top, and a job
+widens only what it uses; a job holding any write, `id-token: write` among
+them, runs no build -- what its `run:` scripts run as commands, read as
+their shell reads them: cargo, gradle, maven, make, xcodebuild, npx, an
+npm, pnpm or yarn install or script, docker, swift, dotnet, go, flutter or
+dart building, pip installing, a build or package script -- and no local
+action, but takes what a job that reads alone built as an artifact
 (`release.yml`'s `image` to `image-push`, `swift-binary.yml`'s `build` to
 `pull-request`); and a job reading a stored secret names its
 `environment:`, where the secret is kept under rules saying which runs may
-read it. `tools/workflow_check.py` holds every workflow to all four in CI's
-fmt job, itself held by `tools/test_workflow_check.py`; a job let off the
-last is listed in its `REPOSITORY_SECRETS` with the reason.
+read it, but never one that does not exist yet, which GitHub would create
+with no rules. `tools/workflow_check.py` holds every workflow to all four
+in CI's fmt job, itself held by `tools/test_workflow_check.py`; a job let
+off the third or the last is listed in `WRITE_AND_BUILD` or
+`REPOSITORY_SECRETS` with the reason (site.yml's `deploy`, until the owner
+creates its environment), and an entry no job needs is a finding.
