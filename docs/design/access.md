@@ -634,9 +634,9 @@ for each lock they take, the MCP tools as `/query`. The list is held to
 page, grouped by its field for its distinct values (grouped every time, a
 `set` under such a rule took 4.5 -> 5.1 us); one that pages, groups or
 computes its column as far as the engine reads a statement's own inner
-`get` of that kind, `MAX_SUBQUERY_VALUES` rows, refused past them as the
-engine refuses one, and refused without reading on where the rows read
-already hold more values than the bound). Before #623 that second kind
+`get` of that kind, `MAX_SUBQUERY_VALUES` rows -- groups, where it groups
+-- refused past them as the engine refuses one, and refused without reading
+on where the rows read already hold more values than the bound). Before #623 that second kind
 was its first 1 002 rows: under `limit 5000`, `offset 1`, `group
 room, n` or `select lower(room) as r`, 1 003 memberships of one room and
 then one of another were a list of the first room, and the token was shown
@@ -648,7 +648,54 @@ $jwt.sub limit 5000))`, read as 1 003 bans of one room's alone held out
 that room, and the token read the messages of a second room it had banned
 (`a_deny_list_is_not_cut_open`, `[three, two]` where its rule admits
 `[three]`); `hold` binds an inner `get`'s rules for the `not`s it stands
-under, not the length of its list. The refusal names the rule,
+under, not the length of its list. A plain `get`'s re-read was grouped by
+its field whatever the field, and a group is the values its key finds
+equal: a `nocase` field's key is its case fold, so `R2` and `r2` were one
+group, which kept the first row's spelling, where `in` compares by the
+collation of the field on its left. Under `not (room in (get bans select
+room where user = $jwt.sub))`, `bans.room` `nocase` and `messages.room`
+not, 1 003 bans of `R2` beside one of `r2` held out the room `R2` alone,
+and the token read `r2`'s messages
+(`a_deny_list_over_a_folded_field_keeps_every_spelling`, `[lower, three]`
+where the rule admits `[three]`; a Turkish fold, `nocase collate tr`,
+joined `KIR` and `kır` alike). A json field's key takes a number as the
+number it is, `[1.0]` and `[1]` one group, where `in` reads a list of ints
+from 0 to 255 beside bytes as the bytes it writes and a list of floats as
+none: a deny list of both over a `bytes` field held out neither once read
+again (`a_deny_list_of_json_values_keeps_each_as_written`). Such a field
+-- `nocase`, json, or a path into one -- is now read again row by row, as
+a `get` that pages or computes its column is, its values told apart by
+their encodings (`grouped_whole`, asked of the schema on a re-read alone);
+every other field holds one kind, whose group is the values `=` finds
+equal, and is grouped as before -- `collate und` and `collate tr` alone
+fold nothing, their equality the bytes'. Read so, a `nocase` list over
+more than 100 000 rows is refused where grouped it was answered, and costs
+more: counted around `Scope::bound` (`proc_pid_rusage`, a scratch program,
+medians of nine), a `nocase` list of one room over 1 003 rows went 3.21 M
+-> 4.37 M instructions a statement, and over 100 000 rows 110.8 M -> 204.5
+M, the price of a list kept whole. A ranking answers its best rows,
+`MAX_MATCH_ROWS` or `MAX_NEAR_ROWS` where it names no `limit`, not every
+row its filter holds: under `not (room in (get bans select room where user
+= $jwt.sub match reason "spam"))`, 10 001 bans were their top 10 000, and
+the token read the room of the one ranked last. `match` with no `order` or
+aggregate, loose or not, `near`, `fuse` and `rerank` in a rule's inner
+`get` are refused where the policy is read (`inner_gets`, `ranking`),
+naming its line, so a server holding one stops at its start rather than
+serve a page as a set; `match` beside `order` is a filter, every row it
+scores above zero, with no ceiling (`matched_rows`), and stays
+(`a_ranking_in_a_rule_s_inner_get_is_refused_at_startup` reads 10 001
+bans so, whole). What a re-read costs a statement at the most, counted the
+same way: read row by row it stops at `MAX_SUBQUERY_VALUES` rows, 204.4 M
+instructions (11.2 ms here) over 100 000 rows of one room, against 4.38 M
+over 1 003; with `group` it stops at 100 000 groups, which bound the
+groups and not the rows folded into them -- 100 000 groups of one row
+each cost 1.10 G (70 ms), the filter's rows folded twice, by the first
+read and the re-read -- and a plain field's grouped re-read folds every row
+of its filter with no bound of rows at all, 110.6 M over 100 000 rows,
+some 1 100 a row. The bound is on values, not on the rows a filter holds:
+a token whose rule's filter holds many rows pays for them in every
+statement, and is served better by a narrower filter or the membership
+kept in the rows. The refusal names the rule,
 by its collection and its filter as the policy writes it -- which
 `/_whoami` shows the token too -- beside the inner `get` and the bound
 (`past_bound`), where it named the inner collection alone; `distinct`

@@ -55,9 +55,11 @@ statement.](../../../../docs/design/access.md#rules-reading-another-collection)*
 Its `in` lists are answered under each lock (`Scope::bound`), the scope
 `Check`, the mask and streams use; a list past `MAX_CLAIM_VALUES` is
 refused naming its rule, never cut, nor made of the rows read before the
-bound stopped its `get` (`listed`), and rules reading each other's
-collections, a `*` rule reading one, or `new.` or `expired()` in one are
-refused at startup (`ring`). A stream's filter reading another collection -- a rule's, or the
+bound stopped its `get`, nor of a group's one value where `in` tells its
+values apart -- a `nocase` or json field is read row by row (`listed`,
+`grouped_whole`) -- and rules reading each other's collections, a `*` rule
+reading one, `new.` or `expired()` in one, or a ranking in one, a page and
+not a set (`ranking`), are refused at startup (`ring`, `inner_gets`). A stream's filter reading another collection -- a rule's, or the
 shape's own inner `get`, any token's -- is answered again at each look
 after a write to what it reads, once a row of it reached its `@ttl`, or
 a second after the read answering it ended where it reads the time -- the

@@ -580,10 +580,20 @@ messages   read,insert  where room in (get members select room where user = $jwt
     it, and a statement whose list would hold more is refused (400) rather
     than answered with a list cut short, the refusal naming the bound and
     the rule by its collection and its filter as the policy writes it. An
-    inner <code>get</code> with a <code>limit</code>, an
-    <code>offset</code>, a <code>group</code> or a computed column is read
-    on past its first rows as far as a statement's own would be, 100 000
-    rows, and refused past them. The bound is not a statement's 100 000
+    inner <code>get</code> that selects one field and pages nothing is read
+    whole, however many rows its filter holds, but for a
+    <code>nocase</code> or <code>json</code> field, whose values a group
+    would join where <code>in</code> tells them apart
+    (<code>"R2"</code> and <code>"r2"</code>): that one, and one with a
+    <code>limit</code>, an <code>offset</code> or a computed column, is
+    read on past its first rows as far as a statement's own would be,
+    100 000 rows, and refused past them; one with a <code>group</code> as
+    far as 100 000 groups, which bound the groups and not the rows read
+    into them. A list read again to 100 000 rows costs its statement some
+    200 million instructions, about 11 ms, and one read whole or grouped
+    costs the rows its filter holds, however few its values: a rule's
+    inner <code>get</code> is best kept to the token's own few rows. The
+    bound is not a statement's 100 000
     because the list is made before every statement the token sends, and
     every row the statement reads is tested against it: a list of 1 000
     values costs each statement some 2.8 million instructions, against
@@ -596,8 +606,16 @@ messages   read,insert  where room in (get members select room where user = $jwt
     rules read <code>positions</code>, at any depth, whatever their roles
     — stop the server at startup, since none of them could be answered
     first; so do a rule on <code>*</code> that reads a collection, a claim
-    anywhere in the inner <code>get</code> but its <code>where</code>, and
-    what an inner <code>get</code> may not say anyway. A scoped
+    anywhere in the inner <code>get</code> but its <code>where</code>, an
+    inner <code>get</code> that ranks its rows — <code>match</code> with no
+    <code>order</code>, <code>fuzzy</code> or <code>prefix</code> or
+    neither, <code>near</code>, <code>fuse</code>, <code>rerank</code> —
+    and what an inner <code>get</code> may not say anyway. A ranking
+    answers a page of its best rows, at most 10 000, not every row its
+    filter holds, and under a <code>not</code> a list cut there would hold
+    out less than the rule names; <code>match</code> beside
+    <code>order</code> is a filter, every row it scores above zero, and may
+    stand there. A scoped
     subscription whose rules read another collection is bound again when
     that collection is written: the courier enters a customer's stream of
     <code>positions</code> as the order is claimed and leaves it, a
