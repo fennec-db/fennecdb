@@ -31,7 +31,7 @@ make docs-builder  # the SDKs' tests of the site's builder tabs (site/builder_ta
 make schema-golden  # integrations/schema-golden.json rewritten through the module (web/schema-golden.mjs)
 make openapi-golden  # integrations/openapi/ rewritten from the served documents; openapi-check: the API only grew
 make types-check  # web/fennec.d.ts held to web/fennec.js and a caller's code under tsc --strict, then docs-types
-make perf-gate  # this tree against BASE's in instructions an op under callgrind, CI's perf job (Linux; on macOS in Docker)
+make perf-gate  # this tree against BASE's in instructions and heap bytes an op under callgrind, CI's perf jobs (Linux; on macOS in Docker)
 make studio-highlight  # studio/highlight.js and the Grafana data source's copy rewritten from site/highlight.js
 make pgvector-up  # PostgreSQL 17 + pgvector in Docker on 127.0.0.1:55432 for comparisons and --follow (pgvector-down)
 make server TOKEN=secret HTTP=127.0.0.1:8080  # the server against ./data.fennec
@@ -488,12 +488,12 @@ Covers `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/wind
 
 ### `crates/fennec-bench/CLAUDE.md`
 
-Covers `crates/fennec-bench/`; its gate rule binds `tools/perf_gate.py`, `crates/fennec-http/examples/gate.rs` and CI's `perf (instructions)` job too.
+Covers `crates/fennec-bench/`; its gate rule binds `tools/perf_gate.py`, `crates/fennec-http/examples/gate.rs`, CI's `perf (count)` and `perf (instructions)` jobs and `.github/workflows/perf-holdout.yml` too.
 
 *Benchmarks*
 - `make scale-bench` holds fennec-server to pgvector, each over its own protocol.
 - `make ycsb` is fennecdb as a general database.
-- A pull request is held to its base in instructions an op.
+- A pull request is held to its base in instructions and heap bytes an op.
 
 ## Conventions
 

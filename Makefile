@@ -327,12 +327,12 @@ else
 	  $(if $(ONLY),--only '$(ONLY)') $(if $(OUT),--out '$(OUT)')
 endif
 
-## This tree against BASE's (origin/main) in instructions an op under
-## callgrind: what CI's `perf (instructions)` job holds every pull request
-## to. Each workload of crates/fennec-http/examples/gate.rs, the one
+## This tree against BASE's (origin/main) in instructions and heap bytes an
+## op under callgrind: what CI's `perf (instructions)` job holds every pull
+## request to. Each workload of crates/fennec-http/examples/gate.rs, the one
 ## program built on both sides, RUNS (5) times a build, JOBS at a time;
-## a median 1% or more above the base's fails unless the pull request adds
-## a PERF_ACCEPTED entry (tools/perf_gate.py). HEAD=<ref> replays two
+## a median 1% or more above the base's, in instructions or bytes, fails
+## unless the pull request adds a PERF_ACCEPTED entry (tools/perf_gate.py). HEAD=<ref> replays two
 ## commits; TARGET=x86_64-unknown-linux-musl builds as CI does. Linux with
 ## valgrind: on macOS, in Docker. Scratch in target/perf-gate, BASE's
 ## worktree kept with KEEP=1 (docs/design/benchmarks.md#the-gate)

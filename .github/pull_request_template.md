@@ -27,12 +27,14 @@ None of the invariants in CONTRIBUTING.md are affected.
 
 <!--
 `make test` is the baseline. Say what you added. CI's `perf (instructions)`
-job holds the change to main in instructions an op: a workload 1% or more
-slower fails unless the change adds a PERF_ACCEPTED entry
-(tools/perf_gate.py) naming it and saying why. If the change touches
+job holds the change to main in instructions and heap bytes an op: a
+workload 1% or more slower, or asking for 1% more bytes, fails unless the
+change adds a PERF_ACCEPTED entry (tools/perf_gate.py) naming it and saying
+why, which the owner approves, as any edit of the gate's own files. If the
+change touches
 performance, recall or memory, say what `make instr-compare` / `make bench` /
 `make sweep` / `make memory` reported before and after, and on what hardware.
 -->
 
 - [ ] `make test` passes
-- [ ] `perf (instructions)` passes, or a PERF_ACCEPTED entry says why not
+- [ ] `perf (instructions)` passes, or a PERF_ACCEPTED entry says why not, with the owner's OK
