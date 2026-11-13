@@ -1,6 +1,6 @@
 # The HTTP server
 
-The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md), [crates/fennec-http/src/mcp/CLAUDE.md](../../crates/fennec-http/src/mcp/CLAUDE.md) (MCP's, moved there to make room) and [studio/CLAUDE.md](../../studio/CLAUDE.md) list under *The HTTP server*: the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, connections no thread is made for and chunked bodies (both added after the move), the OpenAPI document and the compatibility it is held to, and compressed answers (added after it too) -- and the open server's rule its CLAUDE.md lists under *Access* (added after the move as well), beside MCP's guard it grew from. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md), [crates/fennec-http/src/mcp/CLAUDE.md](../../crates/fennec-http/src/mcp/CLAUDE.md) (MCP's, moved there to make room) and [studio/CLAUDE.md](../../studio/CLAUDE.md) list under *The HTTP server*: the studio, MCP, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, connections no thread is made for, a body's ceiling and chunked bodies (each added after the move), the OpenAPI document and the compatibility it is held to, and compressed answers (added after it too) -- and the open server's rule its CLAUDE.md lists under *Access* (added after the move as well), beside MCP's guard it grew from. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Studio
 
@@ -544,8 +544,8 @@ reading the answer -- `Authorization` looked for among the headers -- took
 but 401 to a request carrying `Authorization`, and most answers verify
 nothing: an unknown path's 404 on a node or the router, `/_studio/`, an
 open `/_metrics` or `/_shard/`, `POST /_whoami`'s 405, a body past
-`max_body` (read whole where an admin token raises the ceiling) refused
-413, a `--metrics` listener's 404, `/_admin/` off, a preflight the router
+`max_body` refused 413 (from its head: [a body's ceiling](#a-bodys-ceiling)),
+a `--metrics` listener's 404, `/_admin/` off, a preflight the router
 forwarded, and every answer of a server that asks for no token but holds a
 replication or an admin one (`Who::Full` there verifies nothing) -- a
 client guessing tokens sent `GET /nosuch` between its guesses and never
@@ -1649,6 +1649,64 @@ With the archive's round file ([replication.md](replication.md#replication),
 `fennec-shard`'s 1 024 (aarch64-apple-darwin): the slot's moves and
 drops, the held request's, the sweep and its line.
 
+## A body's ceiling
+
+**A body is held to the ceiling its head earns** (`body_ceiling`,
+`http::read_head`, `http::Head::body`, `admin::is_import`,
+`admin::carries`). A request is read in two steps: its head, the framing
+judged with it (`chunked_framing`, a `Content-Length` parsed), then its
+body, to a ceiling the head is judged to earn before a byte of the body is
+read. Every request's is `max_body`, 64 MiB, but one: a tenant node with
+`--admin-token` reads an image's import, `PUT /_admin/tenants/<t>/file`,
+to `max_import`, 1 GiB, where its `Authorization` carries the admin token
+-- compared in constant time as `admin::handle` compares it, the route read
+off the path as `handle` routes it, `//_admin/tenants/x/file` too, with
+nothing allocated. An import carrying another token, or none, is refused
+from its head with the 401 its route answers (`WWW-Authenticate: Bearer`),
+logged and waited out as every refusal of a token is (`audit::http`; by
+the router's client where the router forwarded it), and its connection
+ended as a refused one is (`accept::end_refused`): its body is never read.
+
+Before, a node with an admin token read every request's body to the larger
+ceiling, from any peer, before its path was looked at, and `route_tenant`
+refused a data request past `max_body` only once it had it whole: a body
+of a gibibyte a request, a hundred connections at once, from a peer with
+no token at all. Memory was taken only as bytes came -- a length's
+`vec![0; len]` is the system's zero pages, a chunked body grows a step of
+64 KiB at a time ([chunked bodies](#chunked-bodies)) -- so the peer paid
+for each byte in bandwidth; but SECURITY.md promises a body bounded by
+`max_body` before it is read, and two tests wrote the old reading down
+(`tests/audit.rs`'s "read whole, and refused before its token is looked
+at", `tests/tenants.rs`'s chunked statement "read whole and refused").
+Now a body past `max_body` is 413 from its head -- by its length before a
+byte of it is read, chunked at the size that would pass it -- `/_admin/`'s
+other routes with the token among them, which read to the import's
+ceiling before. `only_an_import_carrying_the_admin_token_is_read_past_the_data_ceiling`
+declares a gibibyte, by its length and in one chunk, sends 64 KiB of it
+with no token, a guess and the token without `Bearer`, and reads each
+401 (against the old reading it waited out its 20 s read); holds every
+other route past `max_body` by a byte to 413 from its head; and installs
+an image past `max_body` carrying the token, by its length and chunked, as
+a tenant that answers. `tests/audit.rs` holds the import's 401 to a
+refusal counted, the next one waiting twice as long, and the token read
+past `max_body`. `route_tenant`'s and `admin_query`'s checks after the
+read, which no body past `max_body` reaches now, are gone.
+
+Rejected: a ceiling by route alone, the import's for any `PUT
+.../file`, which leaves the gibibyte to whoever names the path; and the
+token looked at after the body, as before, which is the hole. A new route
+reading past `max_body` is judged in `body_ceiling`, from its head, never
+by a ceiling raised for every request and refused after.
+
+What it costs a request: `read_request` is `read_head` and `Head::body`
+now, the same work in another order -- the framing judged and the
+`Request` built before the body is read, the body moved into it after --
+and `body_ceiling` asks a node's request its method alone unless it is a
+`PUT`, whose path it walks with nothing allocated. `served.rs` (`make
+instr-compare EXAMPLE=served`) counts a request through a served
+connection, read off a socket and answered on it, where `replays.rs` and
+`rows.rs` count `handle` alone.
+
 ## Chunked bodies
 
 **A chunked body grows as it comes, held to the ceiling; a
@@ -1666,8 +1724,9 @@ statement's shape see the statement and never its framing.
 What bounds it, each before a byte is allocated: a size is 1 to 16 hex
 digits (`MAX_SIZE_DIGITS`, any `u64`) on a line of at most 1 KiB, its CRLF
 and extensions included (`MAX_CHUNK_LINE`), else 400; the size is held to
-what is left under the ceiling the connection reads to (`--max-body`, or a
-tenant node's import ceiling, the data's refused after as by a length)
+what is left under the ceiling the request's head earns (`max_body`, or an
+image's import carrying the admin token, [a body's
+ceiling](#a-bodys-ceiling))
 before the chunk is read, 413 the moment one would pass it -- a size of
 `ffffffffffffffff` with no byte behind it is refused, never reserved -- and
 a size within it is believed no further than its bytes come: `read_onto`

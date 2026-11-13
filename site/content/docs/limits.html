@@ -560,7 +560,10 @@ href="http-reference.html">HTTP reference</a>; this is what it leaves out.</p>
     the ceiling before it is read), and the header block at 64 KiB; above
     that, 413 or 431. A body two servers could frame two ways is 400, a
     transfer coding but <code>chunked</code> 501
-    (<a href="/docs/http-reference#bodies">Request bodies</a>).</li>
+    (<a href="/docs/http-reference#bodies">Request bodies</a>). The one body
+    read past 64 MiB is a tenant's image installed on a node, up to 1 GiB,
+    and only once the request's head carries the node's admin token
+    (<a href="/docs/sharding-reference">Sharding reference</a>).</li>
   <li>Pagination is <code>limit</code> and <code>offset</code> — no cursor, no
     <code>Range</code> header — each a number or, in FennecQL, a parameter
     (<code>limit $2 offset $3</code>), so every page is one statement. The response is built in one piece, so a very

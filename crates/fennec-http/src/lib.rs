@@ -812,6 +812,40 @@ fn open_refusal(cfg: &Config, backend: &Backend, req: &Request) -> Option<Respon
     .map(|why| Response::error(403, &why))
 }
 
+/// Why a request was not read whole: its head or its framing refused
+/// (`http::read_head`, `Head::body`), or the request refused from its
+/// head, its body unread ([`body_ceiling`]) -- boxed, a refusal's path
+/// alone, so a read's `Result` stays the size of a `BadRequest`.
+enum Unread {
+    Bad(http::BadRequest),
+    Refused(Box<(Request, Response)>),
+}
+
+/// The most of its body a request's head earns a read of, judged before a
+/// byte of the body is read: `max_body`, but on a tenant node an image's
+/// import, `PUT /_admin/tenants/<t>/file`, carrying the admin token, which
+/// reads to `max_import`. The import carrying another token or none is
+/// refused here, with the 401 its route answers, its body never read.
+/// Before, a node with an admin token read every request to `max_import`,
+/// 1 GiB, from any peer, and refused a data request past `max_body` only
+/// once it had it whole: a body bounded by the bandwidth an unauthenticated
+/// peer would spend, where SECURITY.md promises one bounded by `max_body`
+/// before it is read.
+#[inline]
+fn body_ceiling(
+    cfg: &Config,
+    imports: bool,
+    req: &Request,
+) -> std::result::Result<usize, Response> {
+    match cfg.admin_token.as_deref() {
+        Some(token) if imports && admin::is_import(req) => match admin::carries(req, token) {
+            true => Ok(cfg.max_body.max(cfg.max_import)),
+            false => Err(admin::refused()),
+        },
+        _ => Ok(cfg.max_body),
+    }
+}
+
 /// A single connection: reads consecutive requests on a keep-alive
 /// connection, holding its `slot` under `--max-connections` until it ends.
 fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cfg: &Config) {
@@ -839,15 +873,9 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
     // the database's clients.
     let _open = (!matches!(backend, Backend::Metrics { .. })).then(metrics::Connection::open);
 
-    // The body is read before the path is looked at, so in tenant mode the
-    // reading ceiling is the larger of the two and a data request over
-    // `max_body` is refused afterwards.
-    let tenant_mode = matches!(backend, Backend::Tenants(_));
-    let ceiling = if tenant_mode && cfg.admin_token.is_some() {
-        cfg.max_body.max(cfg.max_import)
-    } else {
-        cfg.max_body
-    };
+    // A body's ceiling is its head's ([`body_ceiling`]): only a tenant
+    // node takes an image's import past `max_body`.
+    let imports = matches!(backend, Backend::Tenants(_));
 
     loop {
         // With the `timing` feature the clock starts once the request's
@@ -858,19 +886,47 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
             let _ = reader.fill_buf();
             timing::begin();
         }
-        let mut req = match http::read_request(&mut reader, ceiling) {
+        // The head first, then the body to the ceiling the head earns:
+        // a refusal of either leaves what the client still sends unread.
+        let read = http::read_head(&mut reader)
+            .map_err(Unread::Bad)
+            .and_then(|head| {
+                let Some(head) = head else { return Ok(None) };
+                match body_ceiling(cfg, imports, head.request()) {
+                    Ok(ceiling) => head
+                        .body(&mut reader, ceiling)
+                        .map(Some)
+                        .map_err(Unread::Bad),
+                    Err(refused) => Err(Unread::Refused(Box::new((head.unread(), refused)))),
+                }
+            });
+        let mut req = match read {
             Ok(Some(req)) => req,
             Ok(None) => return,
-            Err(http::BadRequest(status, msg)) => {
-                // A request that could not be read has an id all the same:
-                // its answer is what a client reports.
-                request_id::begin(None);
+            Err(unread) => {
+                let resp = match unread {
+                    // A request that could not be read has an id all the
+                    // same: its answer is what a client reports.
+                    Unread::Bad(http::BadRequest(status, msg)) => {
+                        request_id::begin(None);
+                        Response::error(status, &msg)
+                    }
+                    // Refused for its token: logged and waited out as
+                    // every such refusal is, by its router's client where
+                    // the router forwarded it.
+                    Unread::Refused(refused) => {
+                        let (req, refused) = *refused;
+                        request_id::begin_request(&req);
+                        if cfg.router_mark.is_some() {
+                            audit::request(&req, cfg.router_mark.as_deref());
+                        }
+                        audit::http(&req, refused.status, peer);
+                        refused
+                    }
+                };
                 // Its body, if any, is unread: ended as a refused
                 // connection is, the answer read before the close.
-                if cors(Response::error(status, &msg), cfg)
-                    .write(&mut out, false, false)
-                    .is_ok()
-                {
+                if cors(resp, cfg).write(&mut out, false, false).is_ok() {
                     drop(reader);
                     conn.end_refused();
                 }
@@ -1807,16 +1863,8 @@ fn route_tenant(
     if segs.as_slice() == ["_whoami"] {
         return Err(whoami(cfg, req, "tenants", None, None));
     }
-    if req.body.len() > cfg.max_body {
-        return Err(Response::error(
-            413,
-            &format!(
-                "the body is {} bytes, the ceiling is {}",
-                req.body.len(),
-                cfg.max_body
-            ),
-        ));
-    }
+    // No body past `max_body` comes this far: an image's import, the one
+    // read past it, is `/_admin/`'s, answered above ([`body_ceiling`]).
     let name = match segs.as_slice() {
         ["t", name, ..] => name.to_string(),
         _ => {
@@ -3379,16 +3427,8 @@ pub(crate) fn with_id_note<S: std::borrow::Borrow<Schema>>(schemas: &[S]) -> Str
 }
 
 pub(crate) fn admin_query(t: &tenants::Tenant, cfg: &Config, req: &Request) -> Response {
-    if req.body.len() > cfg.max_body {
-        return Response::error(
-            413,
-            &format!(
-                "the body is {} bytes, the ceiling is {}",
-                req.body.len(),
-                cfg.max_body
-            ),
-        );
-    }
+    // Its body was held to `max_body` as it was read: no route but an
+    // image's import reads past it ([`body_ceiling`]).
     let started = std::time::Instant::now();
     let resp = {
         // Held against a freeze as any request of the tenant's is: a move

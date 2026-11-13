@@ -995,8 +995,8 @@ fn chunked_call(
 }
 
 /// `/_admin`'s bodies -- a tenant's image, read to the import's ceiling
-/// past the data's, and its quota -- and a tenant's statement come chunked
-/// as they come by their length.
+/// past the data's where its head carries the admin token, and its quota --
+/// and a tenant's statement come chunked as they come by their length.
 #[test]
 fn admin_and_tenant_bodies_come_chunked() {
     let n = start(
@@ -1021,7 +1021,9 @@ fn admin_and_tenant_bodies_come_chunked() {
         assert_eq!(r.status, 200, "{}", r.text());
     }
     // Past the data's ceiling and within the import's, a tenant's
-    // statement is read whole and refused, as by its length.
+    // statement is refused at the chunk that passes the data's, as by its
+    // length: no request but an import carrying the admin token is read
+    // to the import's.
     let big = format!(
         r#"{{"query":"get docs count where pad = '{}'"}}"#,
         "q".repeat(5000)
@@ -1062,6 +1064,138 @@ fn admin_and_tenant_bodies_come_chunked() {
     assert_eq!(r.status, 200, "{}", r.text());
     let r = query(n.port, "copy", "put docs {title: 'eleventh'}");
     assert_eq!(r.status, 507, "{}", r.text());
+}
+
+/// A request whose head declares `framing` -- `Content-Length: <n>` or
+/// `Transfer-Encoding: chunked` -- with `sent` bytes of its body after it
+/// and no more, answered before the rest comes: the answer, read to the
+/// server's end, within a bound only what must happen waits for.
+fn declared(
+    port: u16,
+    method: &str,
+    target: &str,
+    auth: Option<&str>,
+    framing: &str,
+    sent: &[u8],
+) -> Res {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    let auth = auth.map_or(String::new(), |a| format!("Authorization: {a}\r\n"));
+    let head = format!("{method} {target} HTTP/1.1\r\nHost: localhost\r\n{auth}{framing}\r\n\r\n");
+    s.write_all(head.as_bytes()).unwrap();
+    // The answer may come before the body is written: a refusal from the
+    // head ends the connection under the write.
+    let _ = s.write_all(sent);
+    let mut out = Vec::new();
+    let _ = s.read_to_end(&mut out);
+    let split = out
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("an answer before the body came");
+    let head = String::from_utf8_lossy(&out[..split]).into_owned();
+    Res {
+        status: head
+            .split_whitespace()
+            .nth(1)
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(0),
+        head,
+        body: out[split + 4..].to_vec(),
+    }
+}
+
+/// Only an image's import carrying the admin token is read past
+/// `max_body`, and only once its head said so: any other request's body is
+/// held to `max_body` before a byte of it is read, and an import carrying
+/// another token, or none, is refused from its head, 401, its body never
+/// read -- a gibibyte declared by an unauthenticated peer is answered with
+/// 64 KiB of it sent, where a node read it whole, to the import's ceiling.
+#[test]
+fn only_an_import_carrying_the_admin_token_is_read_past_the_data_ceiling() {
+    let max_body = 4 << 10;
+    let n = start(
+        "ceiling",
+        Config {
+            max_body,
+            ..admin_cfg()
+        },
+    );
+    create(n.port, "acme");
+    let gib = format!("Content-Length: {}", 1u64 << 30);
+    let some = vec![b'x'; 64 << 10];
+    for auth in [None, Some("Bearer guessed"), Some("adm")] {
+        let r = declared(n.port, "PUT", "/_admin/tenants/x/file", auth, &gib, &some);
+        assert_eq!(r.status, 401, "{auth:?}: {}", r.text());
+        assert!(r.head.contains("WWW-Authenticate: Bearer"), "{}", r.head);
+        assert!(r.head.contains("Connection: close"), "{}", r.head);
+        // Chunked, a gibibyte's chunk declared.
+        let r = declared(
+            n.port,
+            "PUT",
+            "//_admin/tenants/x/file",
+            auth,
+            "Transfer-Encoding: chunked",
+            b"40000000\r\nxxxx",
+        );
+        assert_eq!(r.status, 401, "{auth:?}: {}", r.text());
+    }
+    // Past `max_body` by a byte, every other route is refused from its
+    // head: a tenant's data, a tenant's own statement, `/_admin/`'s other
+    // routes with the admin token, and the image read with it.
+    let over = format!("Content-Length: {}", max_body + 1);
+    for (method, target, auth) in [
+        ("POST", "/t/acme/query", None),
+        ("PUT", "/t/acme/docs/1", None),
+        ("PUT", "/_admin/tenants/acme/quota", Some(ADMIN)),
+        ("POST", "/_admin/tenants/acme/query", Some(ADMIN)),
+        ("GET", "/_admin/tenants/acme/file", Some(ADMIN)),
+        ("PUT", "/_admin/tenants/acme/file/more", Some(ADMIN)),
+    ] {
+        let r = declared(n.port, method, target, auth, &over, b"");
+        assert_eq!(r.status, 413, "{method} {target}: {}", r.text());
+    }
+    let r = declared(
+        n.port,
+        "POST",
+        "/t/acme/query",
+        None,
+        "Transfer-Encoding: chunked",
+        format!("{:x}\r\n", max_body + 1).as_bytes(),
+    );
+    assert_eq!(r.status, 413, "{}", r.text());
+
+    // An image past `max_body`, carrying the token, by its length and
+    // chunked, installs a tenant that works.
+    let make = "create collection docs (title text, pad text)";
+    assert_eq!(query(n.port, "acme", make).status, 200);
+    for i in 0..4 {
+        let put = format!("put docs {{title: 't{i}', pad: '{}'}}", "p".repeat(3000));
+        assert_eq!(query(n.port, "acme", &put).status, 200);
+    }
+    let image = call(n.port, "GET", "/_admin/tenants/acme/file", b"", Some(ADMIN));
+    assert_eq!(image.status, 200);
+    assert!(image.body.len() > max_body, "{}", image.body.len());
+    let r = call(
+        n.port,
+        "PUT",
+        "/_admin/tenants/copy/file",
+        &image.body,
+        Some(ADMIN),
+    );
+    assert_eq!(r.status, 201, "{}", r.text());
+    let r = chunked_call(
+        n.port,
+        "PUT",
+        "/_admin/tenants/chunked/file",
+        &image.body,
+        ADMIN,
+        1000,
+    );
+    assert_eq!(r.status, 201, "{}", r.text());
+    for copy in ["copy", "chunked"] {
+        let r = query(n.port, copy, "get docs count");
+        assert!(r.text().contains(r#""count":4"#), "{copy}: {}", r.text());
+    }
 }
 
 /// A node whose registry no scheduler runs -- `--http-read-only` -- takes

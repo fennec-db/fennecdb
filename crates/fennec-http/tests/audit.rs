@@ -499,8 +499,10 @@ fn a_tenant_node_starts_a_count_again_on_a_token_it_verified_alone() {
             token: Some("data".into()),
             access: Some(Arc::clone(&access)),
             cors: Some("*".into()),
-            // A body past this and within the import's ceiling is read
-            // whole, and refused before its token is looked at.
+            // A body past this is refused (413) from its head, before its
+            // token is looked at: only an image's import carrying the
+            // admin token is read to the import's ceiling, and one
+            // carrying a guess is refused (401) from its head.
             max_body: 1024,
             max_import: 1 << 20,
             ..Config::default()
@@ -539,6 +541,12 @@ fn a_tenant_node_starts_a_count_again_on_a_token_it_verified_alone() {
         held,
     );
     verify_nothing(bare, &[("GET", "/_admin/stats", "", "", 404)], held);
+    // An import carrying a guess, its body past `max_body`, is a refusal
+    // of its token as every other: answered from its head, waited out, and
+    // counted -- the next refusal waits twice as long.
+    let (got, out) = ask(port, "PUT", "/_admin/tenants/copy/file", GUESSED, &big);
+    assert_eq!(got, 401, "{out}");
+    assert_eq!(would_wait(LOCAL), held * 2);
 
     let vera = access.mint(r#"{"sub":"vera","tenant":"acme"}"#).unwrap();
     let elsewhere = access.mint(r#"{"sub":"vera","tenant":"beta"}"#).unwrap();
@@ -557,6 +565,9 @@ fn a_tenant_node_starts_a_count_again_on_a_token_it_verified_alone() {
             ("GET", "/t/acme/notes", &elsewhere, "", 403),
             ("GET", "/_admin/stats", adm, "", 200),
             ("GET", "/_metrics", adm, "", 200),
+            // Carrying the admin token, an import is read past
+            // `max_body`, and refused as no image.
+            ("PUT", "/_admin/tenants/copy/file", adm, &big, 400),
         ],
     );
     let _ = std::fs::remove_dir_all(&dir);

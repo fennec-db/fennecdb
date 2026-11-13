@@ -171,6 +171,16 @@ tenant left it. A hint keeps at most 4 096 places, a shard of long texts'
 16 384 (`HINT_PLACES`, `HINT_BUDGET`); a page's documents' lists are read
 again alone (`fennec_ql::read_listed`).
 
+**[A body is held to the ceiling its head
+earns.](../../docs/design/http.md#a-bodys-ceiling)** `max_body`, judged
+from the head before a byte of the body is read (`body_ceiling`,
+`http::read_head`): a tenant node reads an image's import, `PUT
+/_admin/tenants/<t>/file`, to `max_import` where it carries the admin token
+alone (`admin::carries`), and refuses one carrying another or none with its
+route's 401, waited out as every refusal is, its body unread. A route
+reading past `max_body` is judged so there, from its head, never by a
+ceiling raised for every request and refused after the read.
+
 **[A chunked body grows as it comes, held to the
 ceiling](../../docs/design/http.md#chunked-bodies)** (`read_onto`); a framing
 read two ways is refused (`chunked_framing`, `end_refused`).
