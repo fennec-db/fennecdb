@@ -773,14 +773,16 @@ whole open.</p>
 <tbody>
 <tr><td>macOS, Apple silicon</td><td class="n">1.68 MB</td></tr>
 <tr><td>macOS, Intel</td><td class="n">1.77 MB</td></tr>
-<tr><td>Linux arm64, with the JNI functions</td><td class="n">1.71 MB</td></tr>
-<tr><td>Linux x86-64, with the JNI functions</td><td class="n">1.88 MB</td></tr>
+<tr><td>Linux arm64, with the JNI functions</td><td class="n">3.09 MB</td></tr>
+<tr><td>Linux x86-64, with the JNI functions</td><td class="n">3.50 MB</td></tr>
 </tbody>
 </table>
 </div>
 
-<p>The sync with a server is 165 to 198 KB of each. iOS's and Android's
-are measured by CI for every change, in the run's summary. An app ships the code it links: the XCFramework's static library
+<p>The sync with a server is 165 to 198 KB of each. Linux's are the
+release's <code>libfennec_ffi.so</code> (<a href="#c-on-linux">C on
+Linux</a>); iOS's and Android's are measured by CI for every change, in the
+run's summary. An app ships the code it links: the XCFramework's static library
 is the objects before the app's linker takes what it uses.</p>
 
 <div class="tbl">
