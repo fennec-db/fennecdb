@@ -358,13 +358,19 @@ class Counting(unittest.TestCase):
             0 500
             fn=(7) <alloc::raw_vec::RawVecInner>::finish_grow
             1 10
+            fn=(8) mmap
+            0 27
+            fn=(9) __syscall_ret
+            0 18
             totals: 5000
             """
         )
         with tempfile.NamedTemporaryFile("w", suffix=".callgrind", delete=False) as f:
             f.write(out)
         self.addCleanup(os.unlink, f.name)
-        self.assertEqual(gate.allocator(f.name), 30 + 300 + 120 + 64)
+        # memcpy, which realloc calls and the program does too, is the
+        # program's; the system calls musl makes its groups with are not.
+        self.assertEqual(gate.allocator(f.name), 30 + 300 + 120 + 64 + 27 + 18)
 
 
 def tallied(res, name, base_bytes, head_bytes, calls=(1_000, 1_000)):

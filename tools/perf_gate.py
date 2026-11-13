@@ -103,20 +103,26 @@ THRESHOLD = 0.01
 # Runs a build of each workload: the figure is their median.
 RUNS = 5
 # The allocator's own functions, as the static musl build's profile names
-# them: the entry points, musl's mallocng behind them, and its lock. Their
-# instructions -- each function's self cost, which callgrind charges by
-# where an instruction is, never by its tracking of calls -- are the
-# allocator's, priced at the base's cost a call, the calls gate.rs's own
-# tally. memcpy and memset, which realloc and calloc call and the program
-# does too, count as they ran. A name missing here counts as the program's
-# and moves with the heap, which the heap-shift control shows. The count
-# runs the base's copy of this list, so a name added here prices nothing
-# away in the pull request that adds it.
+# them: the entry points, musl's mallocng behind them, its lock, and the
+# system calls it makes and frees its groups with -- mmap, munmap, madvise,
+# mremap, brk and the wrappers they share. Their instructions -- each
+# function's self cost, which callgrind charges by where an instruction
+# is, never by its tracking of calls -- are the allocator's, priced at the
+# base's cost a call, the calls gate.rs's own tally. The program's own
+# system calls pass through the same wrappers, a few instructions each,
+# priced with them: the gate counts no system call's work anyway. memcpy
+# and memset, which realloc and calloc call and the program does too,
+# count as they ran. A name missing here counts as the program's and moves
+# with the heap, which the heap-shift control shows. The count runs the
+# base's copy of this list, so a name added here prices nothing away in
+# the pull request that adds it.
 ALLOCATOR = frozenset({
     "malloc", "free", "realloc", "calloc", "aligned_alloc", "posix_memalign", "memalign",
     "malloc_usable_size", "__libc_malloc", "__libc_malloc_impl", "__libc_free", "__libc_realloc",
     "__libc_calloc", "alloc_slot", "alloc_group", "try_avail", "nontrivial_free", "__malloc_alloc_meta",
     "__malloc_donate", "get_meta", "enframe", "size_to_class", "__lock", "__unlock",
+    "mmap", "__mmap", "munmap", "__munmap", "madvise", "__madvise", "mremap", "__mremap", "brk",
+    "__vm_wait", "__vm_lock", "__vm_unlock", "__syscall_ret", "__errno_location",
 })
 # A replica's sync (`sync-apply`), which only the native library builds
 # otherwise, asked for on the command line: a base whose fennec-http
