@@ -25,7 +25,7 @@ WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --fe
 .PHONY: all test test-js upgrade-check openapi-lint openapi-check openapi-golden sync-scenarios-check fennecql-corpus builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-desktop studio-desktop-dist studio-desktop-test studio-highlight statements-bench gzip-bench replay-bench hook-bench instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \ lists-bench
 	python-test go-test dotnet-test languages-test examples-test recipes-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench entry-bench \
 	compare beir import-test follow-bench \
-	pgvector-up pgvector-down pgvector-tls docker docker-run docker-compact docker-down grafana-check deploy-check drill memory clean \
+	pgvector-up pgvector-down pgvector-tls docker docker-run docker-compact docker-down grafana-check deploy-check drill chaos memory clean \
 	site site-serve site-deploy packaging-test
 
 all: test wasm
@@ -953,6 +953,27 @@ deploy-check:
 drill:
 	docker build -f deploy/Dockerfile --target kit -t fennec-kit .
 	python3 deploy/drill/drill.py
+
+## The drill's seeded faults (Docker): a region of three nodes, its router
+## and standby, every container held to --cpus and --memory, clients writing
+## and reading registers and appending rows while a schedule drawn from each
+## seed kills and pauses nodes, delays, drops and cuts links between a router
+## and a node and between two nodes (tc netem), kills a node again mid
+## catch-up, fails a move's source over and jumps a node's clock (a test
+## build's, `test-clock`). After each fault heals every replica's rows are
+## held to its primary's; at the end the history is held to the YCSB register
+## checker, every append answered found, and no tenant written by two
+## primaries at once (deploy/drill/oracle.py). The driver runs in a container
+## too, removed with everything else however the run ends.
+## SEEDS (3) seeds from SEED0 (1), CHAOS_MINUTES (3) of faults each;
+## CHAOS_OUT=<dir> keeps each seed's result, and a failure's history and logs
+SEEDS ?= 3
+SEED0 ?= 1
+CHAOS_MINUTES ?= 3
+chaos:
+	python3 deploy/drill/test_oracle.py
+	docker build -f deploy/Dockerfile --target chaos -t fennec-kit-chaos .
+	SEEDS=$(SEEDS) SEED0=$(SEED0) CHAOS_MINUTES=$(CHAOS_MINUTES) python3 deploy/drill/chaos.py
 
 ## A file under updates, compacted on its own or not: YCSB's 1 KB records,
 ## a field updated at a time while a thread reads whole records, the file's

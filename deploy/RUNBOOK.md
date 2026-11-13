@@ -17,6 +17,7 @@ this page is the procedures, and the files beside it are the kit:
 | `env/*.env` | the environment files the units read: addresses, flags and tokens |
 | `alerts/fennecdb.rules.yml`, `alerts/grafana.yml` | alert rules, for Prometheus and for Grafana |
 | `drill/drill.py` | `make drill`: the failovers below, in Docker, timed |
+| `drill/chaos.py`, `drill/oracle.py` | `make chaos`: a region broken by a schedule each seed draws, its history held to an oracle |
 | `test/units.py` | `make deploy-check`: these units under a real systemd |
 | `test/ingress.py` | `make deploy-check`: the tunnel's rules, asked of cloudflared's own matcher |
 
@@ -1247,6 +1248,21 @@ its archive to a moment marked earlier. Every acknowledged write is read
 back from each tenant's primary and its replica; the summary prints the
 times and `lost`, which must be 0. No port is fixed and everything it
 made is removed; `DRILL_KEEP=1` leaves it for a look.
+
+`make chaos` breaks a region at random instead: a router and its standby,
+three nodes, clients writing and reading registers and appending rows,
+while a schedule drawn from each seed kills and pauses nodes, delays,
+drops and cuts the links between a router and a node and between two
+nodes (tc netem), kills a node again while it catches up, fails a move's
+source over and jumps a node's clock -- one fault at a time, every
+replica's rows checked against its primary's after each. At the end every
+answered write must be found, every read must have found a value a write
+could have left, and no tenant may have been written by two primaries at
+once. `make chaos SEEDS=5 SEED0=40 CHAOS_MINUTES=10` runs seeds 40 to 44
+for ten minutes each; a failed seed names itself, and the same seed draws
+the same schedule again. Every container, the driver's too, is held to
+`--cpus` and `--memory`. Its nodes run a test build of fennec-server
+(`test-clock`), never one a release ships.
 
 ## Known gaps
 

@@ -2124,6 +2124,16 @@ impl Tenants {
             .collect()
     }
 
+    /// Sets every open tenant's clock to `at` (`Database::set_clock`), the
+    /// system's where `None`: a test build's ([`crate::test_clock`]). A
+    /// tenant opened after it runs on the system's clock until the next.
+    #[cfg(feature = "test-clock")]
+    pub(crate) fn set_clocks(&self, at: Option<i64>) {
+        for t in self.open_tenants() {
+            crate::held::write(&t.db).set_clock(at);
+        }
+    }
+
     /// Pushes every dirty open tenant to disk. The periodic syncer calls it,
     /// and does as the single database's does: the flush under the tenant's
     /// write lock, the fsync once it is let go. Held through the fsync, the

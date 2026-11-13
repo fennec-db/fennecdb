@@ -1662,6 +1662,169 @@ the drill fails it prints the last 300 lines of every router's and node's
 log (`DRILL_LOG_LINES`), since the cleanup takes the containers and CI
 leaves nothing else to read. CI's `deploy` job runs both checks.
 
+### The chaos drill
+
+**`make chaos` breaks a region by seed, one fault at a time, and holds its
+history to an oracle.** The drill above runs one sequence, the same every
+time; `make chaos SEEDS=N` (`deploy/drill/chaos.py`, the standard library
+and the Docker CLI) draws a schedule of faults from each seed and holds
+what the clients saw to `deploy/drill/oracle.py`. One region, as the kit
+runs it: the global router, the region's router (`--replicas`,
+`--auto-failover` at a lease of 2 s, `--upstream-timeout` twice that) and
+its standby, three nodes in three zones (`--dir --lease --sync always`),
+four tenants each with a replica in another zone, every token in the
+environment. Every container is held to `--cpus` and `--memory`, the
+driver too: it runs in a container of the chaos image on the same network,
+Docker's socket handed in, so its clients reach the routers by name and
+take no port of the machine running it -- loopback load once left 16 000
+sockets in `TIME_WAIT` and cut every other process off the network -- and
+a client refused or cut off dials again at most 20 times a second, less
+as it goes on. The run is removed by its label however it ends, the driver
+first when the process running `make` is stopped.
+
+*The workload.* Two clients a tenant, a connection each, through the
+region's router (its standby where the router cannot be reached). Each
+writes registers -- `put regs {id: k, v: <a value no other write in the
+run writes>, at: now()}`, four registers a tenant -- reads them back, and
+appends rows of values of its own (`put log`), and records every operation
+with when it was sent and answered, on the driver's monotonic clock, and
+how: answered (2xx, with `Fennec-Seq` and `Fennec-History`); refused,
+which cannot have run -- a 4xx, a 503 (every 503 says nothing landed,
+[quotas.md](quotas.md#retry-after-in-bodies)), a connection never made;
+or neither -- a 500 (`outcome: unknown` among them), a 502 or 504, a
+request sent and never answered -- which may have run, then or later.
+Each tenant starts with 200 rows of 1 KB, so a move's image and a copy's
+catch-up over a slowed link take seconds.
+
+*The faults*, drawn by weight from the seed, each held for half a lease to
+four, then healed:
+
+- `kill`: `docker kill` of a node -- the process lost, the kernel
+  delivering what its sockets held, the case the replication paragraph's
+  bound covers -- and started again;
+- `pause`: `docker pause` of a node, shorter or longer than a lease. The
+  freezer stops the process and not its clocks, so a node woken past its
+  lease holds none, and a write it was answering is `outcome: unknown`
+  (`answered_under_lease`), never a 200 its failover lost;
+- `router`: tc netem between the region's router (or its standby) and a
+  node, both ways: a delay of 50-400 ms with a quarter of it as jitter, a
+  loss of 5-30%, both, or a partition (all of it lost);
+- `replica`: the same between two nodes, each the primary of tenants whose
+  replicas the other holds;
+- `catch-up`: a node killed long enough to be failed over, started again
+  with its peers' links to it slowed to 256 kbit-1 Mbit, and killed and
+  started again while a copy the router named on it holds fewer appends
+  than its primary;
+- `move`: a tenant moved to the third node, its source's link to the
+  router slowed so that the image takes seconds, and the source killed,
+  paused or cut off from the router while the tenant is `moving`, for more
+  than a lease: a failover during a move;
+- `clock`: a node's clock moved an hour to 30 days ahead or back.
+
+netem is applied from inside each container (`--cap-add NET_ADMIN`, the
+image's `tc`) on a fourth band of a `prio` qdisc that no priority maps to,
+filled only by a `u32` filter per peer address, so a fault touches the one
+link it names; the run first applies one and reads it back, since a kernel
+without `sch_netem` would make every link fault nothing and the run a
+pass (CI's runner loads the module).
+
+*The clock.* Docker cannot move one container's wall clock -- a time
+namespace offsets `CLOCK_MONOTONIC` and `CLOCK_BOOTTIME` alone -- and the
+kit's binaries are static musl, so no faked `clock_gettime` can be
+preloaded. The nodes run fennec-server built with `test-clock`
+(`crates/fennec-http/src/test_clock.rs`): where `FENNEC_TEST_CLOCK` names
+a file, a thread sets every open tenant's clock (`Database::set_clock`, the
+seam the browser module hands its time through) to the system's time plus
+the milliseconds the file holds, every 50 ms while it holds one -- a
+pinned clock stands still -- and back to the system's when it holds none.
+A file, not a route: a route is one the OpenAPI document lists
+([http.md](http.md#openapi)) or one a test build answers that no release
+does, and the file is reachable only from the node's own machine, as its
+clock is. What it moves is what reads a database's clock: `now()` -- the
+registers' `at`, which a replica must hold as the primary wrote it, read
+in the digests -- and the rows a `@ttl` leaves out. Not the lease, which
+runs on the boot clock and is no wall clock's to move
+([tenants.md](tenants.md#scaling-out-by-tenant)), nor what reads the
+system's time itself (the sweep, a token's `exp`, the archive's stamps).
+It stays out of a release three ways: the feature is off by default and
+compiled out (`#[cfg]`), the one build naming it is `deploy/Dockerfile`'s
+`chaos` stage, and a binary built with it says `fennec-server
+<version>+test-clock` on `--version`, which `tools/linux-packages-check.sh`
+-- run on every release's tarballs -- holds to `fennec-server <version>`.
+fennec-server's `tests/test_clock.rs` holds both builds: the shift moves
+`now()` a hundred years and back in a test build, and moves nothing, and
+is never mentioned, in every other -- CI's, which builds none with it.
+
+*Settling.* After each fault every node and router runs unpaused, no netem
+is left, every clock is the system's, and every tenant is placed, active,
+with a replica, within 180 s. The router repairs on its own as a node
+answers again; past 20 s without, the drill does every 20 s what the
+runbook has an operator do (*Replicas*, *Files left on nodes*): a repair
+(`POST /_shard/replicas`), each file it lists as left removed on its node
+(`DELETE /_admin/tenants/<t>`) where the directory places neither the
+tenant nor its replica, and a repair again, every file removed recorded.
+It is needed: a node failed over leaves its replica copies behind as
+files noted with no identity -- a detached replica that stayed, which the
+router never takes back or follows over by design
+([tenants.md](tenants.md#replicas-tried-again)) -- so a region of three
+nodes, two of them failed over in turn, had no node left to put a
+tenant's replica on, and the first runs stopped there. Then the clients
+pause, and each tenant's replica must hold its primary's rows -- `regs`
+and `log`, read from each node directly, a SHA-256 of them by id --
+within 60 s, the placement read again at each try, since a lease missed
+under load moves the primary. A replica that never does is a violation,
+and ends the run. So every fault starts from a region whose copies are
+caught up.
+
+*The oracle.* At the end the clients stop, the region settles once more,
+and every register is read once more through the router. Then:
+
+- *registers*: fennec-bench's YCSB checker (`check` in
+  `crates/fennec-bench/src/bin/ycsb.rs`, [benchmarks.md](benchmarks.md#ycsb))
+  for one field a record, with a write whose outcome is unknown taken as
+  one that may land at any moment after it was sent -- an end at infinity,
+  overlapping every later read and never the last to end before one: a
+  read must find the value of a write that could have been the last before
+  it, one that ended before the read began and was followed by none that
+  also did, or one that overlapped it, or nothing where no write had ended
+  before it. A write answered and lost is found by the first read after it
+  that finds an older value, the final reads at the latest; a read is held
+  to the writes and not to the reads before it, as YCSB's is, so a read may
+  see a write before its fsync and a later read the value before it (a
+  plain read may, [named-statements.md](named-statements.md#where-a-run-happens-and-once));
+- *appends*: every append answered is in its tenant's `log`, and none
+  refused is -- a refusal that ran is a client told to send again what
+  landed;
+- *epochs*: no tenant written by two primaries at once, read off the
+  positions its answered writes were given. A promotion forks the history
+  into the next term, and a move keeps it, so within one history no change
+  number is given two writes, a history's id names one term, and no write
+  is answered in a term after one sent after a later term's write was
+  answered: an older term answering after a newer has is the primary
+  failed over still writing.
+
+`deploy/drill/test_oracle.py` holds each check to histories made by hand,
+each failing where it must. A violation is reported with its seed, the
+schedule (`result.json`), the history and every container's log; the
+schedule is the seed's (`make chaos SEEDS=1 SEED0=<seed>` draws it again),
+the moments are the machine's.
+
+*One fault at a time.* The replication paragraph's bound is what is
+tested, not past it: a durable write is answered once every stream has
+written it into its socket, a lagging one not waited for past `SENT_WAIT`,
+so a primary that dies while its replica lags, or a machine lost with a
+write in its socket, loses what it answered -- the window the design names
+([named-statements.md](named-statements.md#what-a-sender-is-told), the
+failover table's last row). Faults overlapping on two links or two nodes
+would find that window and nothing else; one at a time, each settled
+before the next, a violation is a bug.
+
+*In CI.* `.github/workflows/chaos.yml`, weekly and by hand: 50 seeds of 10
+minutes each, more than a hosted job's six hours, so three jobs of a share
+each after one that builds the image, each run's seeds its own (its number
+times 1000 on), every seed's result and a failed one's history and logs
+kept for 14 days. Never on a pull request: hours long.
+
 ## Install channels
 
 **A release is installed from its own files, each checked before it is used.** Four ways to install `fennec` and `fennec-server` other than a registry or the image -- Homebrew's formula, `https://fennecdb.com/install.sh`, a `.deb` and an `.rpm`, and on Windows `https://fennecdb.com/install.ps1` -- all take the archives `release.yml` built (the musl tarballs for Linux, which are static, the two macOS ones, and the two Windows zips) and build nothing themselves. Each names what it installs by a SHA-256, which is what holds them to one source: the formula carries the four sums of `SHA256SUMS`, each installer checks the tarball or the zip against the sum of the release it came from, and the packages are made from those tarballs and listed in `SHA256SUMS` with the rest. Because all three name the release's files by checksum, a published release's assets are never replaced: re-running `release.yml` for a tag whose release is public (`publish`) uploads only the files the release has no asset of, with a warning that its `SHA256SUMS` does not list them, where a draft's are replaced as before. A rebuild is not byte for byte the first build (the Rust toolchain, the runner image), so a replaced tarball would have failed every `brew install` and every sum already taken from the old `SHA256SUMS`. The image jobs still push `:X.Y.Z` and `:latest` again on a re-run; the image is not named by a checksum anywhere here. One file of a published release is written again, and only by growing: `desktop.yml` appends the app's lines to `SHA256SUMS` -- the Mac's DMG, Windows' zips and Linux's tarballs -- every line before them kept byte for byte, and never replaces a download ([Studio desktop](#studio-desktop), The release).

@@ -477,6 +477,7 @@ Covers `deploy/`.
 
 *Integrations and deploy*
 - `deploy/` is the regions' kit, held to the binaries by two checks.
+- `make chaos` breaks a region by seed, one fault at a time, and holds its history to an oracle.
 
 ### `tools/CLAUDE.md`
 
