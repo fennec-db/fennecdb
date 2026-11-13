@@ -384,7 +384,9 @@ jobs:
   # The server's image, ghcr.io/<owner>/fennec-server, in three jobs: this
   # one builds each architecture's on a runner of its own, `image-push`
   # pushes each under an arch-suffixed tag, and `manifest` stitches them
-  # together. A runner of each architecture is the reason there is no QEMU
+  # together as `<version>`; `latest` follows once the release is
+  # published (packages.yml's `image-latest`). A runner of each
+  # architecture is the reason there is no QEMU
   # step -- emulating a Rust build is many times slower than a second
   # runner. The build holds no write and its checkout keeps no token: the
   # crates' build scripts run in the image's cargo build. Each image is run
@@ -420,10 +422,13 @@ jobs:
           set -eu
           version="${TAG#v}"
           # image.source is what makes GHCR attach the package to this
-          # repository, and with it the repository's permissions.
+          # repository, and with it the repository's permissions. The
+          # revision is the commit checked out, the tag's: a dispatch's
+          # github.sha is the branch it ran from.
+          revision=$(git rev-parse HEAD)
           docker build \
             --label org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }} \
-            --label org.opencontainers.image.revision=${{ github.sha }} \
+            --label org.opencontainers.image.revision="$revision" \
             --label org.opencontainers.image.version="$version" \
             --label org.opencontainers.image.licenses=Apache-2.0 \
             -t "$IMAGE:$version-${{ matrix.arch }}" .
@@ -444,20 +449,34 @@ jobs:
       - name: Keep it
         run: docker save -o "image-${{ matrix.arch }}.tar" "$IMAGE:${TAG#v}-${{ matrix.arch }}"
 
+      # For `image-push`, later in this run, alone: a day is room for a
+      # re-run of a push that failed.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-${{ matrix.arch }}
           path: image-${{ matrix.arch }}.tar
+          retention-days: 1
           if-no-files-found: error
 
   # The one job holding packages: write for the arch-suffixed tags, and it
   # builds nothing and runs no image: it loads the two `image` saved, holds
   # each to the platform its tag names, and pushes them. Both or neither:
   # an architecture whose build or check failed holds back the other's tag.
+  #
+  # On ubuntu-24.04, the Docker that built and saved them (28, its classic
+  # image store), and not ubuntu-latest, which is Ubuntu 26.04 now: its
+  # Docker 29 keeps images in containerd's store, and an image it loads from
+  # `docker save`'s file it pushes as it stored it, under an OCI manifest
+  # with the layers uncompressed -- 8.18 MB an architecture where v0.2.0's
+  # Docker v2 manifest names 4.08 MB of gzip layers. So the push refuses a
+  # Docker on containerd's store, and each tag pushed is read back from
+  # ghcr.io and held to v0.2.0's media types: should 24.04's Docker move to
+  # that store too, the release stops here and says why, instead of
+  # shipping an image twice the size in another format.
   image-push:
     name: image (push)
     needs: image
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       packages: write
     env:
@@ -474,6 +493,13 @@ jobs:
         run: |
           set -eu
           version="${TAG#v}"
+          store=$(docker info --format '{{json .DriverStatus}}')
+          case $store in
+            *io.containerd.snapshotter*)
+              echo "::error::this runner's Docker $(docker version --format '{{.Server.Version}}') keeps images in containerd's store, and would push these as OCI manifests with uncompressed layers, not the Docker v2 manifests and gzip layers v0.2.0's are: run image-push where Docker keeps its classic store (release.yml)"
+              exit 1
+              ;;
+          esac
           for arch in amd64 arm64; do
             docker load -i "images/image-$arch.tar"
             platform=$(docker image inspect -f '{{.Os}}/{{.Architecture}}' "$IMAGE:$version-$arch")
@@ -495,15 +521,42 @@ jobs:
             docker push "$IMAGE:${TAG#v}-$arch"
           done
 
-  # The multi-arch tags, `<version>` and `latest`, made from the two pushed
-  # above: a manifest list written on ghcr.io, nothing built or run. Only
-  # once `publish` has drafted the release, which follows every job that
-  # builds its files, `binaries` among them: `latest` never names the image
-  # of a release whose binaries, zips or packages failed.
+      # Each tag as ghcr.io now holds it: one platform's image, a Docker v2
+      # manifest naming a Docker image config and gzip layers, as v0.2.0's
+      # -amd64 and -arm64 are.
+      - name: Each tag is one platform's Docker v2 manifest, its layers gzip
+        run: |
+          set -eu
+          for arch in amd64 arm64; do
+            ref="$IMAGE:${TAG#v}-$arch"
+            raw=$(docker buildx imagetools inspect --raw "$ref")
+            platform=$(docker buildx imagetools inspect --format '{{json .Image}}' "$ref" | jq -r '"\(.os)/\(.architecture)"')
+            if [ "$platform" != "linux/$arch" ] || ! printf '%s' "$raw" | jq -e '
+                .mediaType == "application/vnd.docker.distribution.manifest.v2+json"
+                and .config.mediaType == "application/vnd.docker.container.image.v1+json"
+                and (.layers | length) > 0
+                and all(.layers[]; .mediaType == "application/vnd.docker.image.rootfs.diff.tar.gzip")' >/dev/null; then
+              echo "::error::$ref is not one linux/$arch image of a Docker v2 manifest and gzip layers, as v0.2.0's tags are: it is $platform, $raw"
+              exit 1
+            fi
+            echo "$ref: linux/$arch, $(printf '%s' "$raw" | jq '[.layers[].size] | add') bytes of gzip layers"
+          done
+
+  # The multi-arch tag, `<version>`, made from the two pushed above: a
+  # manifest list written on ghcr.io, nothing built or run. Only once
+  # `publish` has drafted the release, which follows every job that builds
+  # its files, `binaries` among them. `latest` is not moved here: a draft is
+  # no release yet, and a run cannot know from its tag whether a newer
+  # release is out. packages.yml's `image-latest` moves it once the release
+  # is published, never to a pre-release and never back to an older one.
+  #
+  # On ubuntu-24.04, as `image-push`: `imagetools create` writes a Docker
+  # manifest list from two Docker v2 manifests, as v0.2.0's `0.2.0` is, and
+  # the list is held to that after.
   manifest:
     name: image (manifest)
     needs: [binaries, publish, image-push]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       packages: write
     env:
@@ -519,10 +572,30 @@ jobs:
         run: |
           set -eu
           version="${TAG#v}"
-          docker buildx imagetools create \
-            -t "$IMAGE:$version" -t "$IMAGE:latest" \
-            "$IMAGE:$version-amd64" "$IMAGE:$version-arm64"
+          docker buildx imagetools create -t "$IMAGE:$version" "$IMAGE:$version-amd64" "$IMAGE:$version-arm64"
           docker buildx imagetools inspect "$IMAGE:$version"
+
+      # The list as ghcr.io holds it: a Docker manifest list of two Docker
+      # v2 manifests, linux/amd64 and linux/arm64, each the one its arch tag
+      # names, as v0.2.0's is.
+      - name: The list is v0.2.0's kind, naming the two arch tags
+        run: |
+          set -eu
+          version="${TAG#v}"
+          digest() { docker buildx imagetools inspect --format '{{json .Manifest}}' "$1" | jq -r .digest; }
+          amd=$(digest "$IMAGE:$version-amd64")
+          arm=$(digest "$IMAGE:$version-arm64")
+          raw=$(docker buildx imagetools inspect --raw "$IMAGE:$version")
+          if ! printf '%s' "$raw" | jq -e --arg amd "$amd" --arg arm "$arm" '
+              .mediaType == "application/vnd.docker.distribution.manifest.list.v2+json"
+              and ([.manifests[] | {mediaType, platform: "\(.platform.os)/\(.platform.architecture)", digest}]
+                | sort_by(.platform)) == [
+                  {mediaType: "application/vnd.docker.distribution.manifest.v2+json", platform: "linux/amd64", digest: $amd},
+                  {mediaType: "application/vnd.docker.distribution.manifest.v2+json", platform: "linux/arm64", digest: $arm}]' >/dev/null; then
+            echo "::error::$IMAGE:$version is not the Docker manifest list of $amd (amd64) and $arm (arm64) v0.2.0's kind is: $raw"
+            exit 1
+          fi
+          echo "$IMAGE:$version: a Docker manifest list of linux/amd64 $amd and linux/arm64 $arm"
 
   # The one job writing to the repository: the release and its assets, and
   # the Go module's tag, pushed with the checkout's token. It builds nothing:
@@ -579,10 +652,12 @@ jobs:
           # Drafted, not published: the notes get a read before the release
           # goes out. `gh release edit --draft=false` publishes it.
           #
-          # Re-running a release has to work -- a tag gets moved, or a job is
-          # retried after a runner failure -- and `gh release create` refuses
-          # when one already exists, so an existing release is updated in
-          # place instead: a draft's assets are replaced.
+          # Re-running a release has to work -- a job retried after a runner
+          # failure, or the release dispatched again for its tag once a fix
+          # to this workflow is in; the tag itself is never moved
+          # (RELEASING.md, *GitHub*) -- and `gh release create` refuses when
+          # one already exists, so an existing release is updated in place
+          # instead: a draft's assets are replaced.
           #
           # A published release's are not. The tarballs, the Windows zip and
           # SHA256SUMS are what the Homebrew formula, install.sh, install.ps1

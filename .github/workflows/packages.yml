@@ -8,8 +8,10 @@ name: packages
 # `fennecdb_flutter` (with PUB_CREDENTIALS) go out when
 # a release is published -- not when its tag is pushed: release.yml leaves
 # the release a draft so its notes get a read, and publishing the draft is
-# the moment the packages follow it. So does Homebrew's formula
-# (fennec-db/homebrew-tap, with HOMEBREW_TAP_TOKEN, the `homebrew` job). A registry keeps what it is given, so
+# the moment the packages follow it. So do Homebrew's formula
+# (fennec-db/homebrew-tap, with HOMEBREW_TAP_TOKEN, the `homebrew` job) and
+# the image's `latest` tag on ghcr.io (`image-latest`). A registry keeps
+# what it is given, so
 # nothing goes to one before every package has been built, installed and
 # used (integrations/packages.sh). Each registry takes a token when its
 # secret is set -- NPM_TOKEN, PYPI_API_TOKEN -- and this workflow's OIDC
@@ -576,3 +578,80 @@ jobs:
             commit --quiet -m "fennecdb ${RELEASE_TAG#v}"
           git push --quiet origin "HEAD:$branch"
           echo "fennecdb ${RELEASE_TAG#v} is in $GITHUB_REPOSITORY_OWNER/homebrew-tap, branch $branch" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # `latest` on ghcr.io, the tag an image named without one pulls, moved to
+  # this release's `<version>` (the list of both architectures release.yml's
+  # `manifest` made) once the release is published, as the Homebrew tap
+  # follows it, and not when its tag is pushed: a draft is no release yet. A
+  # draft or a pre-release is not offered (a 1.0.0-rc.N would hand every
+  # untagged pull a release candidate), and neither is any version but the
+  # newest published release's (`sort -V` over the release list): a
+  # dispatch for an old tag, or two releases published close together and
+  # finished out of order, must not move it back. It copies a list ghcr.io
+  # holds already -- `imagetools create` from one list writes those bytes
+  # under the new tag -- and holds `latest` to that list's digest after.
+  # Nothing is built or run, and no secret is read: the job's own token,
+  # `packages: write`. On ubuntu-24.04, the Docker release.yml's image jobs
+  # push with. One run at a time.
+  image-latest:
+    name: image (latest)
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: image-latest
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/fennec-server
+      RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+    steps:
+      - name: Whether this is the newest published release
+        id: go
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          set -eu
+          version="${RELEASE_TAG#v}"
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::notice::$RELEASE_TAG is not a release version: latest names releases only"
+            echo "set=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          state=$(gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --json isDraft,isPrerelease -q '"\(.isDraft) \(.isPrerelease)"')
+          if [ "$EVENT_PRERELEASE" = true ] || [ "$state" != "false false" ]; then
+            echo "::notice::$RELEASE_TAG is a draft or a pre-release: latest names published releases only"
+            echo "set=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          newest=$(gh release list -R "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases -L 1000 \
+            --json tagName -q '.[].tagName' | sed -n 's/^v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' | sort -V | tail -n 1)
+          if [ "$newest" != "$version" ]; then
+            echo "::warning::$version is not the newest published release, $newest: latest is not moved back"
+            echo "latest is left on the newest published release, $newest, not moved to $version" >> "$GITHUB_STEP_SUMMARY"
+            echo "set=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "set=true" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to ghcr.io
+        if: steps.go.outputs.set == 'true'
+        env:
+          TOKEN: ${{ github.token }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Move latest to this release's image
+        if: steps.go.outputs.set == 'true'
+        run: |
+          set -eu
+          version="${RELEASE_TAG#v}"
+          digest() { docker buildx imagetools inspect --format '{{json .Manifest}}' "$1" | jq -r .digest; }
+          want=$(digest "$IMAGE:$version")
+          docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:$version"
+          got=$(digest "$IMAGE:latest")
+          if [ "$got" != "$want" ]; then
+            echo "::error::$IMAGE:latest is $got, not $version's list $want"
+            exit 1
+          fi
+          echo "$IMAGE:latest is $version, $got" | tee -a "$GITHUB_STEP_SUMMARY"

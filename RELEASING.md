@@ -36,10 +36,12 @@ nothing reaches a registry before the notes have had a read.
    was made in and run before it is kept, `tools/windows-zip-check.ps1`),
    the `fennec-web`
    bundle, the Android AAR (`fennecdb-android-X.Y.Z.aar`, the native library
-   for each ABI inside) and the multi-arch image on ghcr.io -- each
-   architecture's run on the runner that built it before it is pushed, its
-   `--version` and its server healthy by its own HEALTHCHECK
-   (`tools/image-check.sh`) -- takes the
+   for each ABI inside) and the multi-arch image on ghcr.io as
+   `X.Y.Z` -- each architecture's run on the runner that built it before
+   it is pushed, its `--version` and its server healthy by its own
+   HEALTHCHECK (`tools/image-check.sh`), pushed from Docker's classic image
+   store and read back, each tag and the list held to v0.2.0's Docker v2
+   manifests and gzip layers; `latest` waits for step 4 -- takes the
    XCFramework zips step 2's run kept -- the static one held to the checksum the tag's
    `Package.swift` names, and stopping the release where none matches --
    and drafts the release with all of them and their checksums. It also
@@ -52,8 +54,10 @@ nothing reaches a registry before the notes have had a read.
    the same commit: a Go module in a subdirectory is fetched by a tag that
    names it, so that tag is the Go SDK's release (`go get
    github.com/fennec-db/fennecdb/integrations/go@vX.Y.Z`), and there is no
-   registry to publish to. A release built again, by the tag or by a
-   dispatch, replaces the assets of a draft; a published release's are never
+   registry to publish to. A release built again -- a job of its run
+   retried, or a dispatch for its tag; the tag itself is never moved
+   (*GitHub*, below) -- replaces the assets of a draft; a published
+   release's are never
    replaced, and it only gets the files it has no asset of, with a warning
    that its `SHA256SUMS` does not list them. The Homebrew formula, `install.sh`,
    `install.ps1` and the packages name the release's files by checksum, and a
@@ -110,7 +114,10 @@ nothing reaches a registry before the notes have had a read.
    skips with a notice where the secret is not set, for a draft or a
    pre-release, and for a version older than the tap's formula (the tap is
    never moved back, whichever release is dispatched or published late), and
-   one run pushes at a time.
+   one run pushes at a time. The image's `latest` follows the same way
+   (`image-latest`): moved to `X.Y.Z`'s list once the release is published,
+   only where it is the newest published release, never for a draft, a
+   pre-release or an older version.
    The `.deb` and `.rpm` need no step of their own: step 3 built them, and
    publishing the draft is what makes them downloadable.
 5. Once the release is published and `packages.yml`'s run is done, attach the
