@@ -1296,7 +1296,8 @@ def main():
     if findings:
         sys.exit(f"workflow_check: {len(findings)} finding(s) in {len(paths)} workflow(s):"
                  " docs/design/integrations.md#workflows")
-    let_off = len(REPOSITORY_SECRETS) + len(WRITE_AND_BUILD) + len(MAJOR_TAGS)
+    names = {p.name for p in paths}
+    let_off = sum(1 for listed in (REPOSITORY_SECRETS, WRITE_AND_BUILD) for f, _ in listed if f in names)
     print(f"workflow_check: {len(paths)} workflows, every action pinned by its commit, every"
           " workflow's permissions said, no job that writes builds, every secret read under an environment"
           + (f" ({let_off} let off by name, each with its reason)" if let_off else ""))
