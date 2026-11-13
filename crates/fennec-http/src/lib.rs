@@ -913,14 +913,18 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
                     }
                     // Refused for its token: logged and waited out as
                     // every such refusal is, by its router's client where
-                    // the router forwarded it.
+                    // the router forwarded it, and a trace as one refused
+                    // once its body was read was -- its span holding the
+                    // wait, as `route_tenant`'s refusals' do.
                     Unread::Refused(refused) => {
                         let (req, refused) = *refused;
                         request_id::begin_request(&req);
                         if cfg.router_mark.is_some() {
                             audit::request(&req, cfg.router_mark.as_deref());
                         }
+                        trace::begin(&req);
                         audit::http(&req, refused.status, peer);
+                        trace::end(refused.status);
                         refused
                     }
                 };

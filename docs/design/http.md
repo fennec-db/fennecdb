@@ -1664,8 +1664,15 @@ off the path as `handle` routes it, `//_admin/tenants/x/file` too, with
 nothing allocated. An import carrying another token, or none, is refused
 from its head with the 401 its route answers (`WWW-Authenticate: Bearer`),
 logged and waited out as every refusal of a token is (`audit::http`; by
-the router's client where the router forwarded it), and its connection
-ended as a refused one is (`accept::end_refused`): its body is never read.
+the router's client where the router forwarded it), a trace as it was
+when its body was read first (`trace::begin` and `end` around the wait,
+as `route_tenant`'s refusals have theirs), and its connection ended as a
+refused one is (`accept::end_refused`): its body is never read. The node's
+OpenAPI document says so in its description: a body past 64 MiB is 413,
+by its length before a byte of it is read, chunked at the chunk passing
+it, and the import reads to 1 GiB only carrying the admin token -- the
+413 is the `default` refusal every operation lists, the import's 401 its
+own, and neither says when it comes.
 
 Before, a node with an admin token read every request's body to the larger
 ceiling, from any peer, before its path was looked at, and `route_tenant`
@@ -1687,10 +1694,21 @@ with no token, a guess and the token without `Bearer`, and reads each
 401 (against the old reading it waited out its 20 s read); holds every
 other route past `max_body` by a byte to 413 from its head; and installs
 an image past `max_body` carrying the token, by its length and chunked, as
-a tenant that answers. `tests/audit.rs` holds the import's 401 to a
-refusal counted, the next one waiting twice as long, and the token read
-past `max_body`. `route_tenant`'s and `admin_query`'s checks after the
-read, which no body past `max_body` reaches now, are gone.
+a tenant that answers. `tests/audit.rs` sends the import a guess, the
+node's data token and a tenant's JWT -- the last two good where they
+belong -- each declaring the import's ceiling with 2 KiB of it sent, and
+holds each to a 401 answered with its body unread and counted, the next
+refusal waiting twice as long; and the token read past `max_body`.
+fennec-server's `tests/tracing.rs` holds the refused import to its span:
+its route, the client's parent, 401, and the wait inside it.
+`route_tenant`'s and `admin_query`'s checks after the read, which no body
+past `max_body` reaches now, are gone.
+
+Left as it was: a move across regions sends the image to the receiving
+region's router (`PUT /_shard/tenants/<t>/file`, `region::move_across`),
+which reads every request to its `--max-body`, 64 MiB by default, so an
+image past it moves within a region but not across one without raising
+that router's ceiling for every route.
 
 Rejected: a ceiling by route alone, the import's for any `PUT
 .../file`, which leaves the gibibyte to whoever names the path; and the
