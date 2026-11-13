@@ -554,42 +554,70 @@ fn a_rule_s_list_is_not_cut_at_its_first_rows() {
 
 /// A rule's inner `get` that pages, groups or computes its column, read
 /// again, is read as far as a statement's own inner `get` of that kind --
-/// 100 000 rows -- and refused past them, naming the rule: a list of one
-/// room over 100 000 rows is read, over 100 001 refused, never cut there.
+/// 100 000 rows, or groups where it groups -- and refused past them, naming
+/// the rule: a list of one room over 100 000 rows is read, over 100 001
+/// refused, never cut there. A plain `nocase` field, whose groups would
+/// join spellings `in` tells apart, is read so too, where a plain field of
+/// one kind is grouped, every row of its filter folded: 100 001 rows of it
+/// are a list of one.
 #[test]
 fn a_rule_s_list_read_again_stops_where_a_statement_s_would() {
-    let a = Access::new(
-        SECRET,
-        "messages read where room in (get members select room where user = $jwt.sub limit 200000)\n\
-         members read where user = $jwt.sub\n",
-    )
-    .unwrap();
-    let scope = a.scope(&a.mint(r#"{"sub":"alice"}"#).unwrap(), 0).unwrap();
-    let mut db = Database::new();
-    for sql in [
-        "create collection members (room text, user text)",
-        "create collection messages (room text)",
+    for (inner, field, refused) in [
+        (
+            "get members select room where user = $jwt.sub limit 200000",
+            "text",
+            Some("reads more than 100000 rows, where"),
+        ),
+        (
+            "get members select room where user = $jwt.sub",
+            "text nocase",
+            Some("reads more than 100000 rows: its field is `nocase` or json"),
+        ),
+        (
+            "get members select room where user = $jwt.sub group room, n",
+            "text",
+            Some("makes more than 100000 groups"),
+        ),
+        (
+            "get members select room where user = $jwt.sub",
+            "text",
+            None,
+        ),
     ] {
-        db.execute(&fennec_ql::parse_one(sql).unwrap()).unwrap();
+        let a = Access::new(
+            SECRET,
+            &format!("messages read where room in ({inner})\nmembers read where user = $jwt.sub\n"),
+        )
+        .unwrap();
+        let scope = a.scope(&a.mint(r#"{"sub":"alice"}"#).unwrap(), 0).unwrap();
+        let mut db = Database::new();
+        for sql in [
+            format!("create collection members (room {field}, user text, n int)"),
+            "create collection messages (room text)".into(),
+        ] {
+            db.execute(&fennec_ql::parse_one(&sql).unwrap()).unwrap();
+        }
+        // Every row its own `n`: each a group of `group room, n`.
+        for k in 0..10 {
+            let docs: Vec<String> = (k * 10_000..(k + 1) * 10_000)
+                .map(|i| format!(r#"{{room: "r1", user: "alice", n: {i}}}"#))
+                .collect();
+            let put = fennec_ql::parse_one(&format!("put members [{}]", docs.join(", "))).unwrap();
+            db.execute(&put).unwrap();
+        }
+        let read = fennec_ql::parse_one("get messages count").unwrap();
+        assert!(scope.bound(&db, &[&read]).is_ok(), "{inner} ({field})");
+        let one = r#"put members {room: "r1", user: "alice", n: 100000}"#;
+        db.execute(&fennec_ql::parse_one(one).unwrap()).unwrap();
+        match (refused, scope.bound(&db, &[&read])) {
+            (None, Ok(_)) => {}
+            (Some(words), Err(Error::Query(why))) => assert!(
+                why.contains(words) && why.contains("the rule on `messages` where"),
+                "{inner} ({field}): {why}"
+            ),
+            (_, r) => panic!("{inner} ({field}) over 100 001 rows: {:?}", r.err()),
+        }
     }
-    let docs: Vec<&str> = (0..10_000)
-        .map(|_| r#"{room: "r1", user: "alice"}"#)
-        .collect();
-    let put = fennec_ql::parse_one(&format!("put members [{}]", docs.join(", "))).unwrap();
-    for _ in 0..10 {
-        db.execute(&put).unwrap();
-    }
-    let read = fennec_ql::parse_one("get messages count").unwrap();
-    assert!(scope.bound(&db, &[&read]).is_ok());
-    let one = r#"put members {room: "r1", user: "alice"}"#;
-    db.execute(&fennec_ql::parse_one(one).unwrap()).unwrap();
-    let Err(Error::Query(why)) = scope.bound(&db, &[&read]) else {
-        panic!("100 001 rows read again are refused");
-    };
-    assert!(
-        why.contains("more than 100000 rows") && why.contains("the rule on `messages` where"),
-        "{why}"
-    );
 }
 
 /// A deny list cut short holds out less than it names: under `not`, 1 003
@@ -622,6 +650,141 @@ fn a_deny_list_is_not_cut_open() {
         seed.contains("three") && !seed.contains("two") && !seed.contains("one"),
         "{seed}"
     );
+}
+
+/// A deny list over a `nocase` field keeps every spelling its rows hold:
+/// `in` compares by the left field's own collation, so a ban of `R2` holds
+/// out a case-sensitive room `R2`, and one of `r2` the room `r2`. Read
+/// again grouped once its rows filled the first read, the field's groups
+/// were its folds -- `R2` and `r2` one, the list keeping the first -- and
+/// after 1 003 more bans of `R2` alice read the room `r2` she had banned,
+/// `[lower, three]`: open. A Turkish fold (`nocase collate tr`) makes `KIR`
+/// and `kır` one the same way; a collation alone folds nothing, its
+/// equality the bytes'.
+#[test]
+fn a_deny_list_over_a_folded_field_keeps_every_spelling() {
+    for (field, upper, lower) in [
+        ("text nocase", "R2", "r2"),
+        ("text nocase collate tr", "KIR", "kır"),
+        ("text collate und", "R2", "r2"),
+        ("text collate tr", "KIR", "kır"),
+    ] {
+        let setup = [
+            format!("create collection bans (room {field}, user text @hash)"),
+            "create collection messages (room text @hash, text text)".into(),
+            format!(
+                r#"put messages [{{room: "{upper}", text: "upper"}}, {{room: "{lower}", text: "lower"}}, {{room: "r3", text: "three"}}]"#
+            ),
+            format!(
+                r#"put bans [{{room: "{upper}", user: "alice"}}, {{room: "{lower}", user: "alice"}}]"#
+            ),
+        ];
+        let setup: Vec<&str> = setup.iter().map(String::as_str).collect();
+        let n = start_with(
+            "messages read where not (room in (get bans select room where user = $jwt.sub))\n\
+             bans read where user = $jwt.sub\n",
+            &setup,
+        );
+        let alice = n.token(r#"{"sub":"alice"}"#);
+        let read = "get messages select text order text";
+        let three = (200, r#"[{"text":"three"}]"#.to_string());
+        assert_eq!(n.query(&alice, read), three, "{field}, two bans");
+        let more: Vec<String> = (0..1_003)
+            .map(|_| format!(r#"{{room: "{upper}", user: "alice"}}"#))
+            .collect();
+        let r = n.query(ROOT, &format!("put bans [{}]", more.join(", ")));
+        assert_eq!(r.0, 200, "{}", r.1);
+        assert_eq!(n.query(&alice, read), three, "{field}, 1 005 bans");
+        let (_, seed) = n.stream(&alice, "/messages/changes");
+        assert!(
+            seed.contains("three") && !seed.contains("upper") && !seed.contains("lower"),
+            "{field}: {seed}"
+        );
+    }
+}
+
+/// A json field's values are kept as they are written, and a group keys
+/// their numbers as the numbers they are: `[1.0]` and `[1]` one group, the
+/// list keeping the first. `in` tells them apart beside bytes, reading a
+/// list of ints from 0 to 255 as the bytes it writes and a list of floats
+/// as none, so a deny list of both, read again grouped, held out no row
+/// whose bytes are `[1]`: after 1 003 more bans of `[1.0]` alice read it.
+#[test]
+fn a_deny_list_of_json_values_keeps_each_as_written() {
+    let n = start_with(
+        "messages read where not (b in (get bans select j where user = $jwt.sub))\n\
+         bans read where user = $jwt.sub\n",
+        &[
+            "create collection bans (j json, user text @hash)",
+            "create collection messages (b bytes, text text)",
+            r#"put messages [{b: [1], text: "one"}, {b: [3], text: "three"}]"#,
+        ],
+    );
+    // Over HTTP, which hands a json field its lists as written.
+    let r = n.query(
+        ROOT,
+        r#"put bans [{j: [1.0], user: "alice"}, {j: [1], user: "alice"}]"#,
+    );
+    assert_eq!(r.0, 200, "{}", r.1);
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    let read = "get messages select text order text";
+    let three = (200, r#"[{"text":"three"}]"#.to_string());
+    assert_eq!(n.query(&alice, read), three, "two bans");
+    let more: Vec<&str> = (0..1_003).map(|_| r#"{j: [1.0], user: "alice"}"#).collect();
+    let r = n.query(ROOT, &format!("put bans [{}]", more.join(", ")));
+    assert_eq!(r.0, 200, "{}", r.1);
+    assert_eq!(n.query(&alice, read), three, "1 005 bans");
+}
+
+/// A ranking is a page of its best rows, at most 10 000, not a set: a
+/// rule's inner `get` that ranks -- `match` with no `order` or aggregate,
+/// loose or not, `near`, `fuse`, `rerank` -- is refused at startup, naming
+/// its line. Taken, the deny list of 10 001 bans ranked by `match` was its
+/// top 10 000, and alice read the room of the ban ranked last. `match`
+/// beside `order` is a filter, every row it scores above zero, and its
+/// list is read whole.
+#[test]
+fn a_ranking_in_a_rule_s_inner_get_is_refused_at_startup() {
+    for (clause, named) in [
+        (r#"match reason "spam""#, "`match`"),
+        (r#"match reason "spam" fuzzy"#, "`match`"),
+        (r#"match reason "spam" prefix"#, "`match`"),
+        ("near emb [1, 0]", "`near`"),
+        (r#"match reason "spam" near emb [1, 0] fuse"#, "`fuse`"),
+        (r#"match reason "spam" rerank emb [1, 0]"#, "`rerank`"),
+    ] {
+        let policy = format!(
+            "bans read where user = $jwt.sub\n\
+             messages read where not (room in (get bans select room where user = $jwt.sub \
+             {clause}))\n"
+        );
+        let e = Access::new(SECRET, &policy).err().unwrap_or_default();
+        assert!(
+            e.starts_with("policy line 2: ")
+                && e.contains(named)
+                && e.contains("a ranking is a page"),
+            "{clause}: {e}"
+        );
+    }
+    let n = start_with(
+        "messages read where not (room in (get bans select room where user = $jwt.sub \
+         match reason \"spam\" order id))\n\
+         bans read where user = $jwt.sub\n",
+        &[
+            "create collection bans (room text, reason text @text, user text @hash)",
+            "create collection messages (room text @hash, text text)",
+            r#"put messages [{room: "r1", text: "one"}, {room: "r2", text: "two"}, {room: "r3", text: "three"}]"#,
+        ],
+    );
+    let rows: Vec<&str> = (0..10_000)
+        .map(|_| r#"{room: "r1", reason: "spam", user: "alice"}"#)
+        .chain([r#"{room: "r2", reason: "spam and more spam", user: "alice"}"#])
+        .collect();
+    let r = n.query(ROOT, &format!("put bans [{}]", rows.join(", ")));
+    assert_eq!(r.0, 200, "{}", r.1);
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    let (status, body) = n.query(&alice, "get messages select text order text");
+    assert_eq!((status, body.as_str()), (200, r#"[{"text":"three"}]"#));
 }
 
 /// Rules that read each other's collections, at any depth, are refused at
