@@ -44,7 +44,7 @@ description: Download fennec studio, the app (beta) for Mac, Windows and Linux t
             <li><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3 3 7-7"/></svg>In SHA256SUMS</li>
             <li><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3 3 7-7"/></svg>Tokens in the Keychain</li>
           </ul>
-          <p class="dl-first"><strong>Not signed by Apple.</strong> The first time you open it, macOS stops it once: System Settings › Privacy &amp; Security › <strong>Open Anyway</strong>. After that it opens as any app does.</p>
+          <p class="dl-first"><strong>Not signed by Apple.</strong> The first time you open it, macOS says &ldquo;Not Opened&rdquo;: press <strong>Done</strong>, not Move to Trash, which deletes the app. Then in System Settings › Privacy &amp; Security click <strong>Open Anyway</strong> and confirm with your password. After that it opens as any app does.</p>
           <p class="dl-app-line">Or in one line, with nothing to click through:</p>
           <div class="dl-one"><pre data-lang="bash">curl -fsSL https://fennecdb.com/install.sh | sh -s -- --app</pre></div>
           <p class="dl-else">For Windows, <a href="https://github.com/fennec-db/fennecdb/releases/download/v{{version}}/fennec-studio-v{{version}}-windows-x64.zip">the .zip</a>, and Linux, <a href="https://github.com/fennec-db/fennecdb/releases/download/v{{version}}/fennec-studio-v{{version}}-linux-x64.tar.xz">the .tar.xz</a> (x64; arm64 on the <a href="https://github.com/fennec-db/fennecdb/releases/tag/v{{version}}">release</a>). On an Intel Mac the same studio comes in the server, <code>fennec-server --studio</code>, and runs in your browser on the <a href="playground.html">Playground</a>.</p>
@@ -482,8 +482,9 @@ shasum -a 256 -c --ignore-missing SHA256SUMS
         <h3 class="dl-later">The app</h3>
         <p>Its .dmg is in <code>SHA256SUMS</code> too, so the same two lines
           check it, and the one-line install checks it before it copies
-          anything. It is signed ad hoc, not by Apple: macOS asks once before
-          it first opens, and <code>xattr -cr "/Applications/fennec studio.app"</code>
+          anything. It is signed ad hoc, not by Apple: macOS stops it
+          once when it first opens (press Done, never Move to Trash, then
+          Open Anyway in Privacy &amp; Security), and <code>xattr -cr "/Applications/fennec studio.app"</code>
           does what Open Anyway does.</p>
       </div>
       <div>
