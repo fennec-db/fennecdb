@@ -86,12 +86,27 @@ that did, or one overlapping it), a scan consecutive keys as far as it
 could see, a write one record -- every write logged, since a read under
 concurrent writes is judged by every write's span, and nothing compared
 in an operation's time. A pass over all six systems found no mismatch
-(`ycsb/verify.tsv`). `ycsb/results.tsv` is the three runs the site
+(`ycsb/verify.tsv`). `results/ycsb.tsv` is the three runs the site
 quotes, appended to and never rewritten -- a run's cell measured again
 counts as its last line, and a run a later one replaced is named in
-`ycsb/superseded.tsv` and counts in no median (`ycsb report`, `site/build.py`)
+`results/superseded.tsv` and counts in no median (`ycsb report`, `site/build.py`)
 -- and `site/build.py` holds every YCSB figure on the site to its median
-there, the full grid row by row. Docker's VM syncs a
+there, the full grid row by row.
+
+Every family's results are one schema, `results/<family>.tsv`: run, commit,
+machine, date, family, cell, metric, value, a line a value (`ycsb` writes
+`<system>:<mode>:<workload>:<threads>` as the cell and each column as a
+metric). `site/build.py` takes the median of each `(family, cell, metric)`
+and holds every figure with a unit in README.md, the home page,
+benchmarks.html and the `vs-*` pages to one (a `CLAIMS` entry, or a
+`FIGURES` one for the families other than YCSB); the detail pages carry a
+dated "measured at" note. The YCSB runs migrated from the old wide file took
+their commit from the first commit that held the line, which is where the
+results were committed, not necessarily the build measured. A figure no
+recorded run backs is a `hand` run on the machine `hand-measured`, its
+commit the one that first wrote the figure into a page; the release
+candidates' nights replace those rows with measured runs.
+`tools/bench_record.py` appends a run's values in the schema. Docker's VM syncs a
 write in 0.08-0.10 ms where the Mac's `F_FULLFSYNC` takes 3.9
 (`ycsb/fsync.txt`), so the durable server comparison is `server-docker`
 against PostgreSQL and MongoDB, all in the VM, the native server beside

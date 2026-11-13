@@ -1,0 +1,40 @@
+family	run	cell	why
+ycsb	r1	fennec	before the file compacted on its own: runs c1-c3 replace it
+ycsb	r2	fennec	before the file compacted on its own: runs c1-c3 replace it
+ycsb	r3	fennec	before the file compacted on its own: runs c1-c3 replace it
+ycsb	r1	server	before the file compacted on its own: runs c1-c3 replace it
+ycsb	r2	server	before the file compacted on its own: runs c1-c3 replace it
+ycsb	r3	server	before the file compacted on its own: runs c1-c3 replace it
+ycsb	r1	server-docker	before the file compacted on its own: runs c1-c3 replace it
+ycsb	r2	server-docker	before the file compacted on its own: runs c1-c3 replace it
+ycsb	r3	server-docker	before the file compacted on its own: runs c1-c3 replace it
+ycsb	s1	server-docker	before the file compacted on its own: runs c1-c3 replace it
+ycsb	s2	server-docker	before the file compacted on its own: runs c1-c3 replace it
+ycsb	s3	server-docker	before the file compacted on its own: runs c1-c3 replace it
+ycsb	rd1	server	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+ycsb	rd2	server	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+ycsb	rd3	server	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+ycsb	rd1	server-docker	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+ycsb	rd2	server-docker	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+ycsb	rd3	server-docker	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+ycsb	rd1	pg	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+ycsb	rd2	pg	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+ycsb	rd3	pg	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+ycsb	rd1	mongo	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+ycsb	rd2	mongo	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+ycsb	rd3	mongo	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+ycsb	rd1	redis	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+ycsb	rd2	redis	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+ycsb	rd3	redis	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+ycsb	c1	server	measured on other days than the servers beside it: runs rx1-rx3 measure every server on one day
+ycsb	c2	server	measured on other days than the servers beside it: runs rx1-rx3 measure every server on one day
+ycsb	c3	server	measured on other days than the servers beside it: runs rx1-rx3 measure every server on one day
+ycsb	c1	server-docker	measured on other days than the servers beside it: runs rx1-rx3 measure every server on one day
+ycsb	c2	server-docker	measured on other days than the servers beside it: runs rx1-rx3 measure every server on one day
+ycsb	c3	server-docker	measured on other days than the servers beside it: runs rx1-rx3 measure every server on one day
+ycsb	r1	pg	measured on other days than the servers beside it: runs rx1-rx3 measure every server on one day
+ycsb	r2	pg	measured on other days than the servers beside it: runs rx1-rx3 measure every server on one day
+ycsb	r3	pg	measured on other days than the servers beside it: runs rx1-rx3 measure every server on one day
+ycsb	r1	mongo	measured on other days than the servers beside it: runs rx1-rx3 measure every server on one day
+ycsb	r2	mongo	measured on other days than the servers beside it: runs rx1-rx3 measure every server on one day
+ycsb	r3	mongo	measured on other days than the servers beside it: runs rx1-rx3 measure every server on one day

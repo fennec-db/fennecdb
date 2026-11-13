@@ -23,6 +23,7 @@ import sys
 import urllib.parse
 
 import builder_tabs
+import figures
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(ROOT)
@@ -565,8 +566,34 @@ def filled(raw, page=None):
     if page is not None and "{{moved" in raw:
         raw = (raw.replace("{{moved_script}}", MOVED_SCRIPT.replace("@@MAP@@", moved_map(page)))
                   .replace("{{moved}}", moved_map(page)))
+    if "{{measured:" in raw:
+        raw = re.sub(r"\{\{measured: *([\w, ]+?) *\}\}", lambda m: measured_note(m.group(1)), raw)
     return (raw.replace("{{version}}", workspace_version())
                .replace("{{docs_map}}", docs_map()))
+
+
+def measured_note(families):
+    """The dated note of a benchmarks page whose figures are not claims of
+    the build: the commits and days its families' rows were recorded at, and
+    the machines, from `results/<family>.tsv`. A `hand` row is a figure a
+    page carried before a run was recorded for it, and says so."""
+    rows = [r for r in result_rows() if r["family"] in {f.strip() for f in families.split(",")}]
+    if not rows:
+        return ""
+    stamps = sorted({(r["date"], r["commit"], r["machine"], r["run"] == "hand") for r in rows})
+    measured = [f"<code>{c}</code> ({d})" for d, c, m, hand in stamps if not hand]
+    hand = [f"<code>{c}</code> ({d})" for d, c, m, hand in stamps if hand]
+    machines = sorted({m for _, _, m, hand in stamps if not hand})
+    parts = []
+    if measured:
+        parts.append("Measured at " + ", ".join(measured) + (" on " + ", ".join(machines) if machines else ""))
+    if hand:
+        parts.append(("Figures first written into the pages at " if not measured else "and some first written into the pages at ")
+                     + ", ".join(hand) + ", not yet measured by a recorded run (hand-measured in the results)")
+    names = ", ".join(f"<code>{f.strip()}.tsv</code>" for f in families.split(","))
+    return (f'<p class="note"><small>{" ".join(parts)}. Results: {names} in '
+            "<code>crates/fennec-bench/results/</code>; a release candidate's night measures the "
+            "hand-measured ones again.</small></p>")
 
 
 def read_page(path):
@@ -680,6 +707,7 @@ APP = (
 BENCH = "site/content/docs/benchmarks.html"
 BENCH_YCSB = "site/content/docs/benchmarks-ycsb.html"
 BENCH_SIZE = "site/content/docs/benchmarks-size.html"
+BENCH_PAGE = BENCH
 CLAIMS = [
     # fennec studio's first load, which studio/test/statements.test.mjs holds
     # under 120 KB.
@@ -890,18 +918,69 @@ CLAIMS = [
 ]
 
 
-# A YCSB figure the site quotes is the median of the runs of its cell in the
-# bench's results, which are committed with the pages that quote them: a
-# number copied by hand from a terminal is how the sizes above drifted.
-# Its fact is `ycsb:<system>:<mode>:<workload>:<threads>`, written in
-# thousands of operations a second, held to the last digit it shows.
-YCSB_RESULTS = os.path.join(REPO, "crates", "fennec-bench", "ycsb", "results.tsv")
-# The runs a later one replaced, by run and system: their lines stay in the
-# results, which are only appended to, and count in no median.
-YCSB_SUPERSEDED = os.path.join(REPO, "crates", "fennec-bench", "ycsb", "superseded.tsv")
-# The system's name in the lines written before fenecdb became fennecdb:
-# the files keep their bytes, and those cells are fennec's.
-YCSB_RENAMED = {"fenec": "fennec"}
+# Every figure the site quotes as a measurement is the median of the runs of
+# its (family, cell, metric) in the bench's results, which are committed with
+# the pages that quote them: a number copied by hand from a terminal is how
+# the sizes above drifted. `crates/fennec-bench/results/<family>.tsv` has one
+# line a value -- run, commit, machine, date, family, cell, metric, value --
+# only appended to; `superseded.tsv` names the runs a later one replaced
+# (family, run, the cell's first field, why), whose lines stay and count in
+# no median. A figure with no recorded run behind it is a `hand` run on the
+# machine `hand-measured`, its commit the one that first wrote the figure
+# into a page: it is held like any other, and a night that measures it
+# replaces the row.
+RESULTS_DIR = os.path.join(REPO, "crates", "fennec-bench", "results")
+RESULTS_COLUMNS = ("run", "commit", "machine", "date", "family", "cell", "metric", "value")
+
+
+def result_rows():
+    """Every line of every family's file, in file order, as dicts."""
+    rows = []
+    if not os.path.isdir(RESULTS_DIR):
+        return rows
+    for name in sorted(os.listdir(RESULTS_DIR)):
+        if not name.endswith(".tsv") or name == "superseded.tsv":
+            continue
+        lines = open(os.path.join(RESULTS_DIR, name), encoding="utf-8").read().splitlines()
+        if not lines:
+            continue
+        assert tuple(lines[0].split("\t")) == RESULTS_COLUMNS, f"{name}: the header is not {RESULTS_COLUMNS}"
+        for line in lines[1:]:
+            rows.append(dict(zip(RESULTS_COLUMNS, line.split("\t"))))
+    return rows
+
+
+def results_medians():
+    """`(family, cell, metric)` to the median of its runs' values, the upper
+    of the two middle runs when there are an even number, as `ycsb report`
+    takes them. A run's cell measured again (a run cut short, completed
+    later under its own id) counts once, as its last line; a value that is
+    not a number is left out."""
+    superseded = set()
+    path = os.path.join(RESULTS_DIR, "superseded.tsv")
+    if os.path.exists(path):
+        for line in open(path, encoding="utf-8").read().splitlines()[1:]:
+            family, run, cell = line.split("\t")[:3]
+            superseded.add((family, run, cell))
+    latest = {}
+    for r in result_rows():
+        if (r["family"], r["run"], r["cell"].split(":")[0]) in superseded:
+            continue
+        latest[(r["family"], r["cell"], r["metric"], r["run"])] = r["value"]
+    runs = {}
+    for (family, cell, metric, _), v in latest.items():
+        try:
+            runs.setdefault((family, cell, metric), []).append(float(v))
+        except ValueError:
+            pass
+    return {k: sorted(v)[len(v) // 2] for k, v in runs.items()}
+
+
+def results_runs(family, cell, metric):
+    """What a median rests on: the (run, commit, machine, date) of each line
+    it takes, for the notes on a page and for the report of a miss."""
+    return sorted({(r["run"], r["commit"], r["machine"], r["date"]) for r in result_rows()
+                   if (r["family"], r["cell"], r["metric"]) == (family, cell, metric)})
 
 
 YCSB_WORKLOADS = ("A", "B", "C", "D", "E", "F")
@@ -913,44 +992,12 @@ def ycsb_cells():
     median of its runs, by `(system, mode, workload, threads)`: `ops_s`,
     `ops` (where a size or a memory line keeps its bytes) and each
     operation's `<OP>_p50` and `<OP>_p99`, each column's median on its own
-    as `ycsb report` takes them, the upper of the two middle runs when there
-    are an even number. A run's cell measured again (a run cut short,
-    completed later under its own id) counts once, as its last line."""
-    if not os.path.exists(YCSB_RESULTS):
-        return {}
-    lines = open(YCSB_RESULTS, encoding="utf-8").read().splitlines()
-    head = lines[0].split("\t")
-    col = {name: i for i, name in enumerate(head)}
-    superseded = set()
-    if os.path.exists(YCSB_SUPERSEDED):
-        for line in open(YCSB_SUPERSEDED, encoding="utf-8").read().splitlines()[1:]:
-            run, system = line.split("\t")[:2]
-            superseded.add((run, YCSB_RENAMED.get(system, system)))
-    latest = {}
-    for line in lines[1:]:
-        f = line.split("\t")
-        f[col["system"]] = YCSB_RENAMED.get(f[col["system"]], f[col["system"]])
-        if (f[col["run"]], f[col["system"]]) in superseded:
-            continue
-        key = tuple(f[col[c]] for c in ("system", "mode", "workload", "threads"))
-        latest[(key, f[col["run"]])] = f
-    runs = {}
-    for (key, _), f in latest.items():
-        runs.setdefault(key, []).append(f)
-    names = ["ops_s", "ops"] + [f"{op}_{q}" for op in YCSB_OPS for q in ("p50", "p99")]
+    as `ycsb report` takes them."""
+    names = {"ops_s", "ops"} | {f"{op}_{q}" for op in YCSB_OPS for q in ("p50", "p99")}
     out = {}
-    for key, fs in runs.items():
-        cell = {}
-        for name in names:
-            vals = []
-            for f in fs:
-                try:
-                    vals.append(float(f[col[name]]))
-                except (IndexError, ValueError):
-                    pass  # a size line stops at the probe's column
-            if vals:
-                cell[name] = sorted(vals)[len(vals) // 2]
-        out[key] = cell
+    for (family, cell, metric), v in results_medians().items():
+        if family == "ycsb" and metric in names:
+            out.setdefault(tuple(cell.split(":")), {})[metric] = v
     return out
 
 
@@ -1019,32 +1066,42 @@ def redis_facts():
     return out
 
 
-# A read by key in Docker taken apart (`make roundtrip-bench`) has no results
-# file: the table of benchmarks-requests.html is where its medians are
-# recorded, so a page quoting them is held to that table
-# (`rt:docker:read:<part>`, microseconds).
-ROUND_TRIP_PAGE = os.path.join(ROOT, "content", "docs", "benchmarks-requests.html")
+# A read by key in Docker taken apart (`make roundtrip-bench`): its medians
+# are in results/requests.tsv, and benchmarks-requests.html's table is held to
+# them like any page (`rt:docker:read:<part>`, microseconds).
 ROUND_TRIP_ROWS = (
-    ("rt:docker:read:round_trip",
-     r'<tr><td>round trip, p50</td><td class="n">[\d.]+ ms</td><td class="n"><b>([\d.]+) ms</b>'),
-    ("rt:docker:read:inside",
-     r'<tr><td>inside the server</td><td class="n">[\d.]+ ms</td><td class="n">([\d.]+) ms</td>'),
+    ("rt:docker:read:round_trip", "round_trip_us"),
+    ("rt:docker:read:inside", "inside_us"),
 )
 
 
 def round_trip_facts():
-    page = open(ROUND_TRIP_PAGE, encoding="utf-8").read()
+    medians = results_medians()
+    return {fact: medians[("requests", "fennec-server-docker:read", metric)]
+            for fact, metric in ROUND_TRIP_ROWS
+            if ("requests", "fennec-server-docker:read", metric) in medians}
+
+
+# Every other figure the pages quote (`figures.FIGURES`), by
+# `res:<family>|<cell>|<metric>|<scale>`: the median of its results, which
+# the claim reads in the page's unit by the scale.
+def res_fact(family, cell, metric, scale):
+    return f"res:{family}|{cell}|{metric}|{scale}"
+
+
+def res_facts():
+    medians = results_medians()
     out = {}
-    for fact, pattern in ROUND_TRIP_ROWS:
-        m = re.search(pattern, page)
-        if m:
-            out[fact] = float(m.group(1)) * 1000
+    for _, _, family, cell, metric, scale in figures.FIGURES:
+        v = medians.get((family, cell, metric))
+        if v is not None:
+            out[res_fact(family, cell, metric, scale)] = v
     return out
 
 
 # What the bench's figures give: every fact with the unit a drifted claim is
 # reported in, and the prefixes that say a fact is one of them.
-BENCH_FACTS = ("ycsb:", "ycsbms:", "redis:", "rt:")
+BENCH_FACTS = ("ycsb:", "ycsbms:", "redis:", "rt:", "res:")
 
 
 def bench_facts():
@@ -1052,9 +1109,10 @@ def bench_facts():
     latency = {**ycsb_latency_facts(), **round_trip_facts()}
     counts = redis_facts()
     # The counts are of cells; a page says `none` for how many Redis led in.
+    res = res_facts()
     unit = {**{k: " k ops/s" for k in ycsb}, **{k: " ms" for k in latency},
-            **{k: " cells" for k in counts}}
-    return {**ycsb, **latency, **counts}, unit
+            **{k: " cells" for k in counts}, **{k: " (results)" for k in res}}
+    return {**ycsb, **latency, **counts, **res}, unit
 
 
 # ---- Redis on benchmarks-ycsb.html#ycsb
@@ -1467,10 +1525,31 @@ def ycsb_grid_claims(truth):
     return out
 
 
+FIGURE_CLAIMS = [(rel, pattern, res_fact(family, cell, metric, scale), 0)
+                 for rel, pattern, family, cell, metric, scale in figures.FIGURES]
+YCSB_PAGE_CLAIMS = [(rel, pattern, fact, 0) for rel, pattern, fact in figures.YCSB]
+# What the pages load, on the pages that set it beside another engine's.
+SIZE_PAGE_CLAIMS = [
+    (BENCH_PAGE, r'<code>fennec.wasm</code></td><td class="n"><b>(\d+) KB</b></td>', "kb_br", 0),
+    (BENCH_PAGE, r'<code>fennec.wasm</code></td><td class="n"><b>\d+ KB</b></td><td class="n">(\d+) KB', "kb_gz", 0),
+    (BENCH_PAGE, r'and its modules</td><td class="n">(\d+) KB</td>', "kb_client_br", 0),
+    (BENCH_PAGE, r'and its modules</td><td class="n">\d+ KB</td><td class="n">(\d+) KB', "kb_client_gz", 0),
+    (BENCH_PAGE, r'<code>@fennecdb/web/client</code></td><td class="n">(\d+) KB</td>', "kb_app_client_br", 0),
+    ("README.md", r"(\d+) KB brotli in its bundle", "kb_app_client_br", 0),
+    ("site/content/docs/vs-sqlite.html", r'<td>(\d+) KB \(<a href="#size">below</a>\)</td>\s*<td>341', "kb_br", 0),
+    ("site/content/docs/vs-sqlite.html", r'<code>fennec.wasm</code> \{\{version\}\}</td><td class="n"><b>(\d+) KB</b>', "kb_br", 0),
+    ("site/content/docs/vs-sqlite.html", r'<code>fennec.wasm</code> \{\{version\}\}</td><td class="n"><b>\d+ KB</b></td><td class="n"><b>(\d+) KB</b>', "kb_gz", 0),
+    ("site/content/docs/vs-pglite.html", r'<td>(\d+) KB \(<a href="#size">below</a>\)</td>\s*<td>3 740', "kb_br", 0),
+    ("site/content/docs/vs-pglite.html", r'<code>fennec.wasm</code> \{\{version\}\}</td><td class="n"><b>(\d+) KB</b>', "kb_br", 0),
+    ("site/content/docs/vs-pglite.html", r'<code>fennec.wasm</code> \{\{version\}\}</td><td class="n"><b>\d+ KB</b></td><td class="n"><b>(\d+) KB</b>', "kb_gz", 0),
+]
+
+
 def claims_against(truth, unit, wanted):
     """The CLAIMS whose fact `wanted` takes, each held to `truth`."""
     problems = []
-    for rel, pattern, fact, tol in CLAIMS + ycsb_grid_claims(truth):
+    for rel, pattern, fact, tol in (CLAIMS + SIZE_PAGE_CLAIMS + YCSB_PAGE_CLAIMS + FIGURE_CLAIMS
+                                    + ycsb_grid_claims(truth)):
         if not wanted(fact):
             continue
         path = os.path.join(REPO, rel)
@@ -1490,10 +1569,12 @@ def claims_against(truth, unit, wanted):
                 else "a module `make wasm-lite` did not build" if fact not in truth
                 else "a brotli size and `brotli` is not installed"
             )
-            why = ("a YCSB cell crates/fennec-bench/ycsb/results.tsv does not hold"
+            why = ("a YCSB cell crates/fennec-bench/results/ycsb.tsv does not hold"
                    if fact.startswith(("ycsb:", "ycsbms:", "redis:")) else
-                   "a row of benchmarks-requests.html's round-trip table it no longer has"
-                   if fact.startswith("rt:") else why)
+                   "a figure crates/fennec-bench/results/requests.tsv does not hold"
+                   if fact.startswith("rt:") else
+                   f"a result ({fact[4:].rpartition('|')[0]}) crates/fennec-bench/results/ does not hold"
+                   if fact.startswith("res:") else why)
             problems.append(f"{rel}: /{pattern}/ claims {why}, so it went unchecked")
             continue
         for m in found:
@@ -1514,6 +1595,17 @@ def claims_against(truth, unit, wanted):
                 room = 0.5 * 10 ** -places + tol + 1e-9
                 drifted = abs(float(written) - want / 1000) > room
                 want = f"{want / 1000:.{places}f}"
+            elif fact.startswith("res:"):
+                # Whatever the pages quote beside YCSB: the page's unit is
+                # the metric's over the scale, read to the last digit
+                # written (a thousands separator is no digit).
+                scale = float(fact.rpartition("|")[2])
+                text = re.sub(r"[\s\u00a0\u202f,]", "", written)
+                places = len(text.partition(".")[2])
+                room = 0.5 * 10 ** -places + tol + 1e-9
+                drifted = abs(float(text) - want / scale) > room
+                want = f"{want / scale:.{places}f}"
+                written = text
             elif fact.startswith("redis:"):
                 # A count of cells; a page says `none` for zero.
                 said = 0 if written == "none" else int(written)

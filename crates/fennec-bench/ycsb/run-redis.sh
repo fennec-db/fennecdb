@@ -2,7 +2,7 @@
 # YCSB with Redis beside fennec-server -- on the Mac and in Docker --,
 # PostgreSQL and MongoDB, in turns, three runs: the lines
 # benchmarks-ycsb.html#ycsb-redis is written from once they are in
-# results.tsv. Hours long (about nine on the M1 Air: 33 cells a system a
+# results/ycsb.tsv. Hours long (about nine on the M1 Air: 33 cells a system a
 # run, Redis's 48 with its snapshot mode, each 45 s with its idle gap, the
 # loads, three idle minutes between systems), so it runs in the background
 # and appends as it goes:
@@ -20,15 +20,15 @@
 # modes, into verify.tsv as run `rv`; the measurement starts only if it
 # found no mismatch. Then the measurement, runs `rd1`-`rd3` (`RUN=rx`
 # names them `rx1`-`rx3`, for runs that replace those), into
-# results.tsv. Its cells of fennec-server, fennec-server in Docker,
+# results/ycsb.tsv. Its cells of fennec-server, fennec-server in Docker,
 # PostgreSQL and MongoDB join the medians of those cells' earlier runs:
 # commit them with the pages `CI=1 python3 site/build.py` then flags, or
-# name the earlier runs in superseded.tsv so every compared cell is of one
+# name the earlier runs in results/superseded.tsv so every compared cell is of one
 # day.
 set -eu
 cd "$(dirname "$0")/../../.."
 
-results=crates/fennec-bench/ycsb/results.tsv
+results=crates/fennec-bench/results/ycsb.tsv
 verify=crates/fennec-bench/ycsb/verify.tsv
 probe=${PROBE_BASE:+--probe-base $PROBE_BASE}
 run=${RUN:-rd}

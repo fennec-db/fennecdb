@@ -2677,6 +2677,39 @@ fn header() -> String {
     h
 }
 
+/// The columns of a results file, one value a line, as every family's file
+/// in `crates/fennec-bench/results/` has them (`site/build.py` holds the
+/// site's figures to their medians).
+const RESULT_COLUMNS: &str = "run\tcommit\tmachine\tdate\tfamily\tcell\tmetric\tvalue";
+
+/// What a line names beside its values: the commit the bench was built from
+/// (`-dirty` with uncommitted changes), the machine (`FENNEC_BENCH_MACHINE`,
+/// else the host's name) and the day. Asked once a process.
+fn provenance() -> &'static (String, String, String) {
+    static P: std::sync::OnceLock<(String, String, String)> = std::sync::OnceLock::new();
+    P.get_or_init(|| {
+        let run = |cmd: &str, args: &[&str]| {
+            std::process::Command::new(cmd)
+                .args(args)
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default()
+        };
+        let mut commit = run("git", &["rev-parse", "--short=8", "HEAD"]);
+        if !run("git", &["status", "--porcelain", "--untracked-files=no"]).is_empty() {
+            commit.push_str("-dirty");
+        }
+        let machine = std::env::var("FENNEC_BENCH_MACHINE")
+            .unwrap_or_else(|_| run("hostname", &["-s"]));
+        (commit, machine, run("date", &["+%F"]))
+    })
+}
+
+/// Appends a wide line (`header()`'s columns) to a results file as one line
+/// a value: the cell is `<system>:<mode>:<workload>:<threads>`, each column
+/// after the thread count a metric, an empty one left out.
 fn append(path: &Path, line: &str) {
     let new = !path.exists();
     let mut f = std::fs::OpenOptions::new()
@@ -2685,9 +2718,25 @@ fn append(path: &Path, line: &str) {
         .open(path)
         .unwrap();
     if new {
-        writeln!(f, "{}", header()).unwrap();
+        writeln!(f, "{RESULT_COLUMNS}").unwrap();
     }
-    writeln!(f, "{line}").unwrap();
+    let head = header();
+    let head: Vec<&str> = head.split('\t').collect();
+    let v: Vec<&str> = line.split('\t').collect();
+    let (commit, machine, date) = provenance();
+    let cell = v[1..5].join(":");
+    let mut text = String::new();
+    for (name, value) in head.iter().zip(&v).skip(5) {
+        if !value.is_empty() {
+            writeln!(
+                text,
+                "{}\t{commit}\t{machine}\t{date}\tycsb\t{cell}\t{name}\t{value}",
+                v[0]
+            )
+            .unwrap();
+        }
+    }
+    f.write_all(text.as_bytes()).unwrap();
 }
 
 fn make_system(name: &str, dir: &Path, cfg: &Config) -> Box<dyn System> {
@@ -3014,23 +3063,42 @@ fn write_cell(
 
 // ----------------------------------------------------------------- report
 
-/// The system's name in the lines written before fenecdb became fennecdb:
-/// the results keep their bytes, and those cells are fennec's.
-fn renamed(system: &str) -> &str {
-    if system == "fenec" {
-        "fennec"
-    } else {
-        system
-    }
-}
-
 /// The median of each cell's runs: ops/s and every op's p99, as the
 /// lines `ycsb` wrote them.
 fn report(path: &Path) {
     let text = std::fs::read_to_string(path).unwrap();
     let mut lines = text.lines();
-    let head: Vec<&str> = lines.next().unwrap().split('\t').collect();
-    let col = |name: &str| head.iter().position(|h| *h == name).unwrap();
+    assert_eq!(
+        lines.next().unwrap(),
+        RESULT_COLUMNS,
+        "a results file is one value a line: {RESULT_COLUMNS}"
+    );
+    // The wide lines the median reads: each run's cell as the columns
+    // `header()` names, a metric written again by a later line winning (a
+    // run cut short and completed under its own id), the file's order kept.
+    let head: Vec<String> = header().split('\t').map(str::to_string).collect();
+    let col = |name: &str| head.iter().position(|h| h == name).unwrap();
+    let mut order: Vec<(String, String)> = Vec::new();
+    let mut wide: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+    for l in lines {
+        let f: Vec<&str> = l.split('\t').collect();
+        if f[4] != "ycsb" {
+            continue;
+        }
+        let key = (f[0].to_string(), f[5].to_string());
+        let row = wide.entry(key.clone()).or_insert_with(|| {
+            order.push(key.clone());
+            let mut row = vec![String::new(); head.len()];
+            row[0] = key.0.clone();
+            for (i, part) in key.1.split(':').enumerate() {
+                row[1 + i] = part.to_string();
+            }
+            row
+        });
+        if let Some(i) = head.iter().position(|h| h == f[6]) {
+            row[i] = f[7].to_string();
+        }
+    }
     // The runs a later one replaced, by run and system (`superseded.tsv`
     // beside the results): they stay in the file, which is only appended
     // to, and count in no median.
@@ -3041,25 +3109,27 @@ fn report(path: &Path) {
             .skip(1)
             .filter_map(|l| {
                 let mut f = l.split('\t');
-                Some((f.next()?.to_string(), renamed(f.next()?).to_string()))
+                (f.next()? == "ycsb").then_some(())?;
+                Some((f.next()?.to_string(), f.next()?.to_string()))
             })
             .collect();
-    let lines = lines.filter(|l| {
-        let f: Vec<&str> = l.split('\t').collect();
-        !superseded.iter().any(|(run, sys)| {
-            f.get(col("run")) == Some(&run.as_str())
-                && f.get(col("system")).map(|s| renamed(s)) == Some(sys.as_str())
-        })
-    });
+    let lines = order
+        .into_iter()
+        .map(|k| wide.remove(&k).unwrap())
+        .filter(|f| {
+            !superseded
+                .iter()
+                .any(|(run, sys)| f[col("run")] == *run && f[col("system")] == *sys)
+        });
     // A run's cell measured again -- a run cut short and completed by a
     // later invocation with its `--run-id` loads and pings again -- counts
     // once, as its last line: the file is only ever appended to.
     let mut latest: BTreeMap<(String, String, String, String, usize), Vec<String>> =
         BTreeMap::new();
     for l in lines {
-        let f: Vec<String> = l.split('\t').map(str::to_string).collect();
+        let f = l;
         let key = (
-            renamed(&f[col("system")]).to_string(),
+            f[col("system")].clone(),
             f[col("mode")].clone(),
             f[col("workload")].clone(),
             f[col("run")].clone(),
