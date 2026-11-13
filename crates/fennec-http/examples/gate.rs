@@ -74,7 +74,7 @@ fn main() {
         }
         return;
     }
-    let Some(&(name, ops, setup)) = WORKLOADS.iter().find(|w| w.0 == arg) else {
+    let Some(&(name, ops, setup)) = WORKLOADS.iter().chain(LOOKS).find(|w| w.0 == arg) else {
         eprintln!("usage: gate --list | gate WORKLOAD");
         std::process::exit(2);
     };
@@ -415,6 +415,60 @@ fn core_fuzzy(_: &Path, ops: usize) -> Box<dyn FnMut(usize)> {
         })
         .collect();
     reads(db, "get d match body $1 fuzzy limit 10", queries)
+}
+
+/// TEMPORARY (the calibration's, removed with perf-calibration.yml): where
+/// `core-facet`'s count moves, unlisted -- each a facet's variant.
+const LOOKS: &[(&str, usize, Setup)] = &[
+    ("look-facet-top1", 512, |d, o| {
+        facet_look(d, o, FACETED, true, "top 1")
+    }),
+    ("look-facet-all", 512, |d, o| {
+        facet_look(d, o, FACETED, true, "")
+    }),
+    ("look-facet-one", 512, |d, o| {
+        facet_look(d, o, 1, true, "top 10")
+    }),
+    ("look-facet-one-top1", 512, |d, o| {
+        facet_look(d, o, 1, true, "top 1")
+    }),
+    ("look-facet-scan", 64, |d, o| {
+        facet_look(d, o, 1, false, "top 10")
+    }),
+    ("look-facet-4096", 4096, |d, o| {
+        facet_look(d, o, 4096, true, "top 10")
+    }),
+];
+
+fn facet_look(_: &Path, _: usize, n: usize, hashed: bool, top: &str) -> Box<dyn FnMut(usize)> {
+    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+    let create = match hashed {
+        true => "create collection f (brand text @hash)",
+        false => "create collection f (brand text)",
+    };
+    let dbs: Vec<Database> = (0..n)
+        .map(|_| {
+            let mut db = Database::new();
+            run(&mut db, create, &[]);
+            let mut brands: Vec<u64> = (0..40).flat_map(|b| (0..=b).map(move |_| b)).collect();
+            for i in (1..brands.len()).rev() {
+                brands.swap(i, rng.below(i as u64 + 1) as usize);
+            }
+            let put = stmt("put f {brand: $1}");
+            for b in brands {
+                db.execute_with(&put, &[Value::Text(format!("brand {b}"))])
+                    .unwrap();
+            }
+            db
+        })
+        .collect();
+    let facet = stmt(&format!("get f select id limit 0 facet brand {top}"));
+    for db in &dbs {
+        db.query(&facet, &[]).unwrap();
+    }
+    Box::new(move |i| {
+        black_box(dbs[i % n].query(&facet, &[]).unwrap());
+    })
 }
 
 /// The databases `core-facet` asks in turn.
