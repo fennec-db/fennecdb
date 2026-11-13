@@ -262,7 +262,11 @@ beside them an instruction count cannot hold. `make perf-gate` runs the
 job's count and judgement on Linux with valgrind; `HEAD=<ref>` replays two
 commits, as the calibration below did. Each side's median run's profile is
 kept (`target/perf-gate/profiles/<workload>.<side>.callgrind`), for
-`callgrind_annotate` to say which function a difference is in.
+`callgrind_annotate` to say which function a difference is in; a failed job
+uploads them (`perf-profiles`). A change no build reads -- the site, the
+docs, an integration, nothing under `crates/`, the lock, the toolchain's
+file, the checker or `ci.yml` -- is the base's program to the byte, and the
+job counts nothing for it and says so.
 
 *Why on musl.* The release's Linux binaries and the image are static musl
 builds (`release.yml`, `Dockerfile`), and musl's allocator is much of a

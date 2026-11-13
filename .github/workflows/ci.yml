@@ -623,7 +623,20 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
 
+      # A change no build reads -- the site, the docs, an integration -- is
+      # the base's program to the byte: the count would hold it to itself.
+      - name: Whether the change reaches what the gate builds
+        id: reach
+        run: |
+          if git diff --name-only HEAD^1 HEAD | grep -q -E '^(crates/|Cargo\.lock$|rust-toolchain\.toml$|tools/perf_gate\.py$|\.github/workflows/ci\.yml$)'; then
+            echo "built=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "built=false" >> "$GITHUB_OUTPUT"
+            echo "No crate, lock, toolchain or gate file changed: nothing to count." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Install the pinned toolchain, the musl target, valgrind and musl-gcc
+        if: steps.reach.outputs.built == 'true'
         run: |
           rustup show
           rustup target add x86_64-unknown-linux-musl
@@ -631,11 +644,13 @@ jobs:
           sudo apt-get install -y --no-install-recommends valgrind musl-tools
 
       - name: Count each workload's instructions in the base's build and this one's
+        if: steps.reach.outputs.built == 'true'
         run: |
           python3 tools/perf_gate.py run --base HEAD^1 --target x86_64-unknown-linux-musl \
             --work "$RUNNER_TEMP/perf" --out "$RUNNER_TEMP/perf/results.json" --no-check
 
       - name: Hold them to the base's, by the base's checker
+        if: steps.reach.outputs.built == 'true'
         run: |
           base=$(git rev-parse HEAD^1)
           if git cat-file -e "$base:tools/perf_gate.py"; then
@@ -647,6 +662,16 @@ jobs:
             echo "the base has no tools/perf_gate.py yet: this tree's judges"
             python3 -I tools/perf_gate.py check "$RUNNER_TEMP/perf/results.json" --summary "$GITHUB_STEP_SUMMARY"
           fi
+
+      # Each side's median run of each workload, by function: what
+      # `callgrind_annotate` diffs to name where a failed count grew.
+      - name: Keep the median runs' profiles of a failed count
+        if: failure() && steps.reach.outputs.built == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: perf-profiles
+          path: ${{ runner.temp }}/perf/profiles/
+          retention-days: 14
 
       # P50, the I/O counts -- fsyncs and bytes written a durable write and
       # a compact, under strace -f -c -- goes here, over the same two
