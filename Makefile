@@ -360,9 +360,10 @@ instr-compare:
 
 ## The browser module's size with every feature, with none, with each alone
 ## and with every one but each: raw, gzip -9 and brotli -q 11, in KB, and
-## what each adds and saves. ONLY="geo collate" for those alone.
+## what each adds and saves. ONLY="geo collate" for those alone; JSON=1
+## also writes crates/fennec-wasm/sizes.json, which site/build.py holds the docs to.
 wasm-sizes:
-	@ONLY="$(ONLY)" python3 crates/fennec-wasm/sizes.py
+	@ONLY="$(ONLY)" python3 crates/fennec-wasm/sizes.py $(if $(JSON),--json)
 
 ## How fast the browser module is, in Node: an HNSW build, `near`, a filter
 ## and an order, `match`, a page of vectors as JSON. A list of .wasm files
