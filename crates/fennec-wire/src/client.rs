@@ -13,7 +13,7 @@
 //! can and checks nothing, so only `verify-full` keeps a stand-in for the
 //! server out. TLS is fennec-tls's, behind the `tls` feature.
 
-use crate::crypto::{b64_decode, b64_encode, hmac_sha256, nonce, pbkdf2_sha256, sha256};
+use crate::crypto::{b64_decode, b64_encode, ct_eq, hmac_sha256, nonce, pbkdf2_sha256, sha256};
 use crate::proto::{put_cstr, read_message, Message, Writer, PROTOCOL_V3};
 use fennec_core::error::{Error, Result};
 use std::io::{self as stdio, BufReader, ErrorKind, Read, Write};
@@ -570,6 +570,138 @@ fn tls_client(url: &Url) -> Result<fennec_tls::Client> {
     })
 }
 
+// ------------------------------------------------------------------- SCRAM
+
+/// The most PBKDF2 iterations SCRAM runs for a server: 256 times
+/// PostgreSQL's 4 096, its `scram_iterations` default. The count is the
+/// server's to choose -- and, under any `sslmode` short of `verify-full`,
+/// whoever stands in for it -- and is run before the proof goes out:
+/// `i=4294967295` was 54 trillion instructions of PBKDF2, more than half
+/// an hour of an M1 core even at its widest (eight a cycle at 3.2 GHz),
+/// `fennec import`, or `--follow` connecting again, waiting on it. The
+/// bound is 7.1 thousand million. A count past it is refused naming the
+/// range, never run, nor cut to fit.
+pub const SCRAM_MAX_ITERATIONS: u32 = 1 << 20;
+
+/// The client half of one SCRAM-SHA-256 exchange (RFC 5802, RFC 7677), its
+/// messages made and checked apart from the connection, the nonce given:
+/// [`Client::scram`] gives the system's, and `scram_rfc7677_exchange` RFC
+/// 7677's, holding the messages to the RFC's byte for byte.
+struct Scram {
+    /// The client-first message less its GS2 header: `n=<user>,r=<nonce>`.
+    first_bare: String,
+    /// The client's nonce, which the server's must begin with.
+    nonce: String,
+}
+
+/// What the server-final message must be: `v=` and the server's
+/// signature, which only a holder of the password's verifier can make.
+struct ServerFinal(String);
+
+impl Scram {
+    /// `user` is written as given: the client sends none, and RFC 7677's
+    /// example `user`, neither with a `,` or `=` to escape.
+    fn new(user: &str, nonce: &str) -> Scram {
+        Scram {
+            first_bare: format!("n={user},r={nonce}"),
+            nonce: nonce.to_string(),
+        }
+    }
+
+    /// The client-first message: no channel binding (`n,,`).
+    fn first(&self) -> String {
+        format!("n,,{}", self.first_bare)
+    }
+
+    /// The client-final message answering `server_first` -- the proof that
+    /// `password` is known -- and the server-final message to expect.
+    fn last(&self, server_first: &str, password: &str) -> Result<(String, ServerFinal)> {
+        let (mut snonce, mut salt, mut iterations) = (None, None, None);
+        for kv in server_first.split(',') {
+            let Some((k, v)) = kv.split_once('=') else {
+                continue;
+            };
+            match k {
+                "r" => snonce = Some(v),
+                "s" => salt = Some(b64_decode(v).ok_or_else(scram_unparsed)?),
+                "i" => iterations = Some(scram_iterations(v)?),
+                _ => {}
+            }
+        }
+        // The server has to carry our nonce as a prefix; otherwise the
+        // response belongs to another session.
+        let (Some(snonce), Some(salt), Some(iterations)) = (snonce, salt, iterations) else {
+            return Err(scram_invalid());
+        };
+        if !snonce.starts_with(&self.nonce) || salt.is_empty() {
+            return Err(scram_invalid());
+        }
+
+        // `c=biws`, base64("n,,") -- no channel binding in use.
+        let without_proof = format!("c=biws,r={snonce}");
+        let auth = format!("{},{server_first},{without_proof}", self.first_bare);
+        let salted = pbkdf2_sha256(password.as_bytes(), &salt, iterations);
+        let client_key = hmac_sha256(&salted, b"Client Key");
+        let sig = hmac_sha256(&sha256(&client_key), auth.as_bytes());
+        let proof: Vec<u8> = client_key.iter().zip(sig).map(|(a, b)| a ^ b).collect();
+        let server_key = hmac_sha256(&salted, b"Server Key");
+        let server_final = format!(
+            "v={}",
+            b64_encode(&hmac_sha256(&server_key, auth.as_bytes()))
+        );
+        Ok((
+            format!("{without_proof},p={}", b64_encode(&proof)),
+            ServerFinal(server_final),
+        ))
+    }
+}
+
+impl ServerFinal {
+    /// Whether the server's last message is the one expected, compared as
+    /// every signature is (`ct_eq`): one made fresh each exchange gives a
+    /// guess nothing to grow, but the rule has no exceptions to tell apart.
+    fn verify(&self, got: &str) -> Result<()> {
+        if !ct_eq(got.as_bytes(), self.0.as_bytes()) {
+            return Err(Error::Query(
+                "postgres: the server signature could not be verified".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// A server-first message's iteration count, held to 1 to
+/// [`SCRAM_MAX_ITERATIONS`]: a count past it, however many digits it has,
+/// is refused naming the range before PBKDF2 runs.
+fn scram_iterations(v: &str) -> Result<u32> {
+    if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(scram_unparsed());
+    }
+    // A count no `u32` holds is past the bound too; one past twenty digits
+    // is shown by its length, the message being the server's, as long as a
+    // gigabyte.
+    let digits = v.trim_start_matches('0');
+    if let Ok(n @ 1..=SCRAM_MAX_ITERATIONS) = digits.parse::<u32>() {
+        return Ok(n);
+    }
+    let shown = if digits.len() > 20 {
+        format!("a count of {} digits", digits.len())
+    } else {
+        v.to_string()
+    };
+    Err(Error::Query(format!(
+        "postgres: the server's SCRAM iteration count is 1 to {SCRAM_MAX_ITERATIONS}, not {shown}"
+    )))
+}
+
+fn scram_unparsed() -> Error {
+    Error::Corrupt("postgres: the SCRAM response could not be parsed".into())
+}
+
+fn scram_invalid() -> Error {
+    Error::Query("postgres: invalid SCRAM server response".into())
+}
+
 /// A connection to a live PostgreSQL server.
 #[derive(Debug)]
 pub struct Client {
@@ -680,7 +812,8 @@ impl Client {
         }
     }
 
-    /// The SCRAM-SHA-256 client half (RFC 5802 + RFC 7677).
+    /// The SCRAM-SHA-256 client half (RFC 5802 + RFC 7677) over the
+    /// connection, its messages [`Scram`]'s.
     ///
     /// The password is never sent over the wire; only nonces and HMAC proofs
     /// travel. The server signature is verified too, which proves the other
@@ -690,8 +823,10 @@ impl Client {
         // come again, and a proof with it.
         let cnonce =
             nonce(24).ok_or_else(|| io("no randomness from the system for SCRAM's nonce"))?;
-        let client_first_bare = format!("n=,r={cnonce}");
-        let initial = format!("n,,{client_first_bare}");
+        // No user name: PostgreSQL reads the startup message's, and libpq
+        // sends `n=,` too.
+        let scram = Scram::new("", &cnonce);
+        let initial = scram.first();
         let mut w = Writer::new();
         w.msg(b'p', |b| {
             put_cstr(b, "SCRAM-SHA-256");
@@ -700,60 +835,24 @@ impl Client {
         });
         w.flush_to(self.stream.get_mut()).map_err(io)?;
 
-        let m = self.read()?;
-        if m.tag == b'E' {
-            return Err(server_error(&m));
-        }
-        let bad = || Error::Corrupt("postgres: the SCRAM response could not be parsed".into());
-        let server_first = String::from_utf8_lossy(m.body.get(4..).ok_or_else(bad)?).into_owned();
-        let (mut snonce, mut salt, mut iters) = (String::new(), Vec::new(), 0u32);
-        for kv in server_first.split(',') {
-            let Some((k, v)) = kv.split_once('=') else {
-                continue;
-            };
-            match k {
-                "r" => snonce = v.to_string(),
-                "s" => salt = b64_decode(v).ok_or_else(bad)?,
-                "i" => iters = v.parse().map_err(|_| bad())?,
-                _ => {}
-            }
-        }
-        // The server has to carry our nonce as a prefix; otherwise the
-        // response belongs to another session.
-        if !snonce.starts_with(&cnonce) || salt.is_empty() || iters == 0 {
-            return Err(Error::Query(
-                "postgres: invalid SCRAM server response".into(),
-            ));
-        }
-
-        // `c=biws`, base64("n,,") -- no channel binding in use.
-        let without_proof = format!("c=biws,r={snonce}");
-        let auth = format!("{client_first_bare},{server_first},{without_proof}");
-        let salted = pbkdf2_sha256(password.as_bytes(), &salt, iters);
-        let client_key = hmac_sha256(&salted, b"Client Key");
-        let sig = hmac_sha256(&sha256(&client_key), auth.as_bytes());
-        let proof: Vec<u8> = client_key.iter().zip(sig).map(|(a, b)| a ^ b).collect();
-        let final_msg = format!("{without_proof},p={}", b64_encode(&proof));
+        let server_first = self.sasl_answer()?;
+        let (last, server_final) = scram.last(&server_first, password)?;
         let mut w = Writer::new();
-        w.msg(b'p', |b| b.extend_from_slice(final_msg.as_bytes()));
+        w.msg(b'p', |b| b.extend_from_slice(last.as_bytes()));
         w.flush_to(self.stream.get_mut()).map_err(io)?;
 
+        server_final.verify(&self.sasl_answer()?)
+    }
+
+    /// The text of a SASL answer -- the server-first or the server-final
+    /// message -- or the server's error.
+    fn sasl_answer(&mut self) -> Result<String> {
         let m = self.read()?;
         if m.tag == b'E' {
             return Err(server_error(&m));
         }
-        let got = String::from_utf8_lossy(m.body.get(4..).ok_or_else(bad)?).into_owned();
-        let server_key = hmac_sha256(&salted, b"Server Key");
-        let want = format!(
-            "v={}",
-            b64_encode(&hmac_sha256(&server_key, auth.as_bytes()))
-        );
-        if got != want {
-            return Err(Error::Query(
-                "postgres: the server signature could not be verified".into(),
-            ));
-        }
-        Ok(())
+        let body = m.body.get(4..).ok_or_else(scram_unparsed)?;
+        Ok(String::from_utf8_lossy(body).into_owned())
     }
 
     fn read(&mut self) -> Result<Message> {
@@ -1219,5 +1318,104 @@ mod tests {
         let e = server_error(&Message { tag: b'E', body }).to_string();
         assert!(e.contains("42P01"), "{e}");
         assert!(e.contains("does not exist"), "{e}");
+    }
+
+    /// RFC 7677, section 3: its exchange, user `user` and password
+    /// `pencil`, with its nonce -- the client's messages, the proof among
+    /// them, byte for byte as the RFC prints them, and its server signature
+    /// verified. The RFC breaks the server-first and the client-final
+    /// messages across lines; the messages hold no space.
+    #[test]
+    fn scram_rfc7677_exchange() {
+        let scram = Scram::new("user", "rOprNGfwEbeRWgbNEkqO");
+        assert_eq!(scram.first(), "n,,n=user,r=rOprNGfwEbeRWgbNEkqO");
+        let server_first = "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,\
+                            s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096";
+        let (last, server_final) = scram.last(server_first, "pencil").unwrap();
+        assert_eq!(
+            last,
+            "c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,\
+             p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ="
+        );
+        server_final
+            .verify("v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=")
+            .unwrap();
+        // A server-final message that is not the RFC's: a character of its
+        // signature changed, its last cut off, one more, none, or an error.
+        let refused = [
+            "v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G5=",
+            "v=7rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=",
+            "v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4",
+            "v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4==",
+            "",
+            "e=invalid-proof",
+        ];
+        let mut ran = 0;
+        for got in refused {
+            let e = server_final.verify(got).unwrap_err().to_string();
+            assert!(e.contains("server signature"), "{got:?}: {e}");
+            ran += 1;
+        }
+        assert_eq!(ran, 6);
+        // Another password is another proof, and expects another signature.
+        let (other, other_final) = scram.last(server_first, "pencil!").unwrap();
+        assert_ne!(other, last);
+        assert!(other_final
+            .verify("v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=")
+            .is_err());
+        // A server nonce not beginning with the client's is another
+        // session's.
+        let e = scram
+            .last(&server_first.replacen("rOpr", "xOpr", 1), "pencil")
+            .err()
+            .unwrap();
+        assert!(e.to_string().contains("invalid SCRAM"), "{e}");
+    }
+
+    /// The iteration count a server asks for is 1 to SCRAM_MAX_ITERATIONS,
+    /// read as written: the bound itself is run, one past it or any count
+    /// no `u32` holds refused naming the range, before PBKDF2 runs.
+    #[test]
+    fn scram_iterations_are_held_to_their_range() {
+        let taken = [
+            ("1", 1),
+            ("4096", 4096),
+            ("01048576", 1 << 20),
+            ("1048576", SCRAM_MAX_ITERATIONS),
+        ];
+        let mut ran = 0;
+        for (v, n) in taken {
+            assert_eq!(scram_iterations(v).unwrap(), n, "{v}");
+            ran += 1;
+        }
+        let refused = [
+            ("0", "not 0"),
+            ("1048577", "not 1048577"),
+            ("4294967295", "not 4294967295"),
+            ("4294967296", "not 4294967296"),
+            ("18446744073709551616", "not 18446744073709551616"),
+            ("123456789012345678901", "not a count of 21 digits"),
+        ];
+        for (v, says) in refused {
+            let e = scram_iterations(v).unwrap_err().to_string();
+            assert!(
+                e.contains("is 1 to 1048576") && e.contains(says),
+                "{v}: {e}"
+            );
+            ran += 1;
+        }
+        for v in ["", "-1", "+5", "1e6", "4096 ", "0x10"] {
+            let e = scram_iterations(v).unwrap_err().to_string();
+            assert!(e.contains("could not be parsed"), "{v:?}: {e}");
+            ran += 1;
+        }
+        assert_eq!(ran, 16);
+        // Refused as the server-first message is read, before its proof is
+        // made: no PBKDF2 of four billion rounds runs here.
+        let e = Scram::new("", "abc")
+            .last("r=abcdef,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4294967295", "p")
+            .err()
+            .unwrap();
+        assert!(e.to_string().contains("not 4294967295"), "{e}");
     }
 }

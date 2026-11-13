@@ -3,13 +3,15 @@
 //! The client was held to fennecdb's own pg server, whose SCRAM half was
 //! written by hand too, so each checked the other. That server is gone; the
 //! stand-in here keeps its half of SCRAM (RFC 5802 and 7677, checked
-//! against RFC 7677's example below), a cleartext password, and the
+//! against RFC 7677's example below, as the client's half is in
+//! `src/client.rs`'s `scram_rfc7677_exchange`), a server asking SCRAM for
+//! more rounds than the client runs, a cleartext password, and the
 //! answers the client reads: rows, an error, a COPY stream whose `CopyData`
 //! frames do not align with its lines. A live PostgreSQL is
 //! `make import-test`'s.
 
 use fennec_http::crypto::*;
-use fennec_wire::client::{Client, SslMode, Url};
+use fennec_wire::client::{Client, SslMode, Url, SCRAM_MAX_ITERATIONS};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 
@@ -312,6 +314,69 @@ fn scram_handshake_succeeds_and_rejects() {
         .unwrap_err()
         .to_string();
     assert!(e.contains("28P01") || e.contains("password"), "{e}");
+}
+
+/// A server asking SCRAM for `iterations` rounds, as one hostile, or
+/// standing in for PostgreSQL, may: whether the client's proof came back,
+/// told once the client ended or sent it.
+fn asking_server(iterations: String) -> (u16, std::sync::mpsc::Receiver<bool>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (told, proof) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        let mut len = [0u8; 4];
+        s.read_exact(&mut len).unwrap();
+        let mut startup = vec![0u8; i32::from_be_bytes(len) as usize - 4];
+        s.read_exact(&mut startup).unwrap();
+        let mut b = 10i32.to_be_bytes().to_vec();
+        cstr(&mut b, "SCRAM-SHA-256");
+        b.push(0);
+        s.write_all(&framed(b'R', &b)).unwrap();
+        let Some((b'p', body)) = read_msg(&mut s) else {
+            return told.send(false).unwrap();
+        };
+        let at = body.iter().position(|&c| c == 0).unwrap() + 1 + 4;
+        let first = String::from_utf8_lossy(&body[at..]).into_owned();
+        let bare = first.splitn(3, ',').nth(2).unwrap();
+        let cnonce = attr(bare, 'r').unwrap();
+        let mut b = 11i32.to_be_bytes().to_vec();
+        b.extend_from_slice(
+            format!("r={cnonce}x,s=W22ZaJ0SNY7soEsUEjb6gQ==,i={iterations}").as_bytes(),
+        );
+        s.write_all(&framed(b'R', &b)).unwrap();
+        told.send(read_msg(&mut s).is_some_and(|(tag, _)| tag == b'p'))
+            .unwrap();
+    });
+    (port, proof)
+}
+
+/// A server's iteration count past SCRAM_MAX_ITERATIONS is refused naming
+/// the range, before PBKDF2 runs: no proof goes out, and four billion
+/// rounds -- an hour and more of a core -- never start.
+#[test]
+fn scram_refuses_iterations_past_the_bound() {
+    let past = (SCRAM_MAX_ITERATIONS as u64 + 1).to_string();
+    let cases = [
+        past.clone(),
+        u32::MAX.to_string(),
+        (u32::MAX as u64 + 1).to_string(),
+        "0".to_string(),
+    ];
+    let mut ran = 0;
+    for asked in cases {
+        let (port, proof) = asking_server(asked.clone());
+        let e = Client::connect(&url(port, Some("p")))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains(&format!("is 1 to {SCRAM_MAX_ITERATIONS}, not {asked}")),
+            "{asked}: {e}"
+        );
+        assert!(!proof.recv().unwrap(), "a proof went out for i={asked}");
+        ran += 1;
+    }
+    assert_eq!(ran, 4);
 }
 
 #[test]

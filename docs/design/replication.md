@@ -673,3 +673,32 @@ to wait out the socket's 30 s timeout. `make import-test` runs the live
 tests with TLS on in the server (`make pgvector-tls`, fennec-wire's test
 CA), so every one of them, `--follow`'s included, goes over TLS under
 `prefer`, and one under `verify-full`.
+
+SCRAM's iteration count is the server's to choose, and so, under any
+`sslmode` short of `verify-full`, whoever stands in for it, and PBKDF2
+runs it before the proof goes out: `i=4294967295` was 54 trillion
+instructions of PBKDF2 at `fennec-server`'s opt-level 3 and 84 trillion at
+the `fennec` binary's z -- more than half an hour of an M1 core even at
+its widest, eight a cycle at 3.2 GHz, and some three hours by the CPU
+time 2^20 rounds took on this machine shared with other work (2.9 s; 1.2
+s keyed, below) -- `fennec import`, or `--follow` connecting again,
+waiting on it. The client runs 1 to `SCRAM_MAX_ITERATIONS` (2^20, 256
+times PostgreSQL's `scram_iterations` default of 4 096; 7.1 thousand
+million instructions at the bound, 12.8 at opt-level z) and
+refuses any other count naming the range as the server-first message is
+read, however many digits it has -- `scram_refuses_iterations_past_the_bound`
+through a stand-in, no proof sent, and `scram_iterations_are_held_to_their_range`
+at its edges. A server set past it -- `scram_iterations`, from PostgreSQL
+16, takes 1 to 2^31 - 1 -- is refused by name, where libpq takes any count
+from 1 (`fe-auth-scram.c`). PBKDF2 hashes the password's HMAC
+blocks once (`HmacKey`), each round two compressions where an HMAC made
+afresh took four: 6 780 instructions a round where it was 12 641 at
+`fennec-server`'s opt-level 3, and 12 250 where it was 19 529 at the
+`fennec` binary's opt-level z (`profile.cli`'s for fennec-http) --
+instructions retired over 2^20 rounds, the module's code built alone, a
+count no load moves.
+The exchange's messages are `Scram`'s, the nonce given, so
+`scram_rfc7677_exchange` holds them to RFC 7677's example byte for byte,
+the proof and the server signature among them; the server signature is
+compared by `ct_eq`, as every signature is
+([conventions.md](conventions.md#secrets-compared)).

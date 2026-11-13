@@ -1,6 +1,6 @@
 # Conventions
 
-The long form of the test and docs conventions [CLAUDE.md](../../CLAUDE.md) lists under *Conventions*: where tests live and which run alone, a test that fails on one run, Chrome's launch, the clock, ports, and what a change a user meets owes the docs. They hold no invariant of the code, so [README.md](README.md#the-original-order) does not number them. Each section below is a bullet moved word for word from CLAUDE.md, which keeps its rule in a sentence or two.
+The long form of the test and docs conventions [CLAUDE.md](../../CLAUDE.md) lists under *Conventions*: where tests live and which run alone, a test that fails on one run, Chrome's launch, the clock, ports, what a change a user meets owes the docs, and how a secret is compared and a primitive held to its vectors. They hold no invariant of the code, so [README.md](README.md#the-original-order) does not number them. Each section below is a bullet moved word for word from CLAUDE.md, which keeps its rule in a sentence or two.
 
 ## Test binaries
 
@@ -110,3 +110,76 @@ alone until the site's search vector cache has its vector: after sections
 change, commit the next `site` deploy's `search-embeddings` artifact as
 `site/search-embeddings.json` (`gh run download <run> -n
 search-embeddings`) where it differs.
+
+## Secrets compared
+
+A token, a mark, a MAC, a signature or a password is compared by
+`fennec_http::crypto::ct_eq` alone, never by `==` or `!=`: those leave at
+the first byte that differs, so the time an answer takes says how much of
+a guess was right, and a guess can be grown a byte at a time. `ct_eq` ORs
+every byte's difference into one accumulator, its lengths compared first
+(a length is no secret here), and reads the accumulator through
+`core::hint::black_box`: what is asked of it hidden, the optimizer cannot
+end the loop at the first difference, as one it took for a comparison it
+may (`bcmp`). `black_box` is a best effort, as its documentation says.
+The loop compiles to what it was, vectorised, its one branch on the count
+(aarch64, opt-level 3), and the accumulator's store and load are what is
+added: five instructions a call out of line, two where `authenticate`
+inlines it -- one `handle` call under the server's token traced in main's
+build and this one (`make instr-compare EXAMPLE=rows MODES=token
+TRACE=fennec_http::handle`'s binaries, `trace.py diff`), the program's own
+code 15 399 instructions against 15 401, the allocator's and the system's
+share apart, which a binary's identity moves. There were
+three such loops, the same bytes for bytes -- `crypto::ct_eq`, fennec-http's
+`constant_eq` and a copy of it in fennec-shard -- and one is left, which
+every bearer token (the server's, the admin's, the replication token, the
+router's `--token` and `/_metrics`'), the router's mark on a forwarded
+request, the global entry's mark, a hook's signatures, an HS256 JWT's MAC,
+the AEAD's tag, RS256's encoded message and SCRAM's server signature go
+through. The router compared tokens with `==` in three places, none an
+attacker could time -- a node's admin token against `--entry-token` as the
+node is added, behind `--token`, and at the start one flag's token against
+another's -- and goes through `ct_eq` there too: a rule without exceptions
+is one a reviewer need not weigh. SCRAM's server signature is fresh each
+exchange, so no guess grows by it; it goes through `ct_eq` for the same
+reason.
+
+`tools/secret_eq_check.py`, in CI's fmt job, holds it: it reads every `.rs`
+file under `crates/*/src`, comments, strings and characters blanked and
+`#[cfg(test)]` items left out, and refuses each `==` or `!=` an operand of
+which names a value whose name holds `token`, `secret`, `mark`,
+`signature` or `password`. A name with a capital first (a type, a variant,
+a constant) names no value, and an operand ending in `.len()`,
+`.is_empty()`, `.is_some()` or `.is_none()` no secret's bytes; a comparison
+one side of which is a literal or a constant is held to a value the binary
+carries, never to a guess. What is left and is no secret -- a select
+list's marks, a schedule's time mark, the router pool's tenant marks (a
+keyed hash of a name), a maintenance's tail number, a snippet's count of
+tokens -- is in its `ALLOWED`, by file and the comparison as written, with
+why; an entry the code no longer has fails the check, so the list keeps no
+stale pass, and `--self-test` holds the reader to its own cases. It goes by
+names: a tripwire, never a proof, and a secret under another name (`got`,
+`want`) is its reviewer's to see.
+
+A primitive we write is held to its RFC's vectors, every one, each test
+asserting how many cases it ran so none is skipped unseen: SHA-256 to
+FIPS 180-4's examples; HMAC-SHA-256 to RFC 4231's seven cases
+(`hmac_rfc4231_all`; `HmacKey` with its message in parts too);
+PBKDF2-HMAC-SHA-256 to RFC 7914's c = 1 and c = 80 000
+(`pbkdf2_sha256_vectors`, the first 32 bytes of the 64 it asks: its first
+block, which no length asked after it changes); ChaCha20, Poly1305 and the
+AEAD to RFC 8439's appendix A whole -- A.1's five block functions, A.2's
+three encryptions, A.3's eleven Poly1305 tags with #5 to #11 the carries
+and reductions 26-bit limbs get wrong, A.4's three one-time keys and A.5's
+decryption (`chacha20_rfc8439_appendix_a`, `poly1305_rfc8439_appendix_a`,
+`aead_rfc8439_appendix_a`, read from `rfc8439_vectors.txt`, each hex dump
+of the RFC's text read as bytes and held to its own ASCII column as it was
+made); ES256 to Wycheproof's (`tests/es256.rs`); and SCRAM's client half,
+fennec-wire's, to RFC 7677's exchange byte for byte, its nonce a parameter
+of `Scram` so the RFC's can be given (`scram_rfc7677_exchange`). Each
+vector is read from its RFC's text, never written from memory, and every
+one passed as first run: no primitive was wrong. RFC 4231's case 6 had
+stood in the old test as "case 3". Wycheproof's ChaCha20-Poly1305, RSA
+PKCS#1 v1.5 SHA-256 (2048, 3072 and 4096 bits, its e = 3 forgeries among
+them) and HMAC-SHA-256 files are to follow, vendored with a NOTICE as
+`tests/es256/` has its own.

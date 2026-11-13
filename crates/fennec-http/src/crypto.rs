@@ -3,10 +3,13 @@
 //! (RFC 8439), which seals an archive's files (`seal.rs`), and the RS256
 //! and ES256 (`p256.rs`) verifications an identity provider's tokens need.
 //!
-//! No dependencies, like the rest of fennecdb. All three functions are checked
-//! against RFC test vectors (see the tests at the end of the module);
-//! hand-written crypto is only usable when it can be proven against known
-//! vectors.
+//! No dependencies, like the rest of fennecdb. Each primitive is held to its
+//! RFC's vectors in the tests at the end of the module -- SHA-256 to FIPS
+//! 180-4's examples, HMAC to RFC 4231's seven cases, PBKDF2 to RFC 7914's,
+//! ChaCha20, Poly1305 and the AEAD to RFC 8439's appendix A whole
+//! (`rfc8439_vectors.txt`) -- ES256 to Wycheproof's (`tests/es256.rs`), and
+//! SCRAM's exchange, fennec-wire's, to RFC 7677's; hand-written crypto is
+//! only usable when it can be proven against known vectors.
 
 mod p256;
 pub use p256::P256Key;
@@ -206,14 +209,14 @@ impl HmacKey {
 }
 
 /// PBKDF2-HMAC-SHA256, a single 32-byte block of output (what SCRAM needs).
+/// The password's padded blocks are hashed once (`HmacKey`), so a round is
+/// two compressions where an HMAC made afresh each round took four.
 pub fn pbkdf2_sha256(password: &[u8], salt: &[u8], iters: u32) -> [u8; SHA256_LEN] {
-    let mut first = Vec::with_capacity(salt.len() + 4);
-    first.extend_from_slice(salt);
-    first.extend_from_slice(&1u32.to_be_bytes());
-    let mut u = hmac_sha256(password, &first);
+    let key = HmacKey::new(password);
+    let mut u = key.mac(&[salt, &1u32.to_be_bytes()]);
     let mut out = u;
     for _ in 1..iters {
-        u = hmac_sha256(password, &u);
+        u = key.mac(&[&u]);
         for i in 0..SHA256_LEN {
             out[i] ^= u[i];
         }
@@ -221,17 +224,28 @@ pub fn pbkdf2_sha256(password: &[u8], salt: &[u8], iters: u32) -> [u8; SHA256_LE
     out
 }
 
-/// Constant-time comparison: verifying the password proof must not exit
-/// early.
+/// Whether `a` and `b` are the same bytes, in a time their length alone
+/// sets: how every crate compares a secret -- a token, a mark, a MAC, a
+/// signature -- and `tools/secret_eq_check.py` keeps `==` and `!=` off
+/// them. `==` leaves at the first byte that differs, so the time an answer
+/// takes says how much of a guess was right, and a guess can be grown a
+/// byte at a time. Here every byte's difference is ORed into one
+/// accumulator, read through `black_box`: what is asked of it is hidden
+/// from the optimizer, which so cannot end the loop at the first
+/// difference -- as a loop it took for a comparison it may (`bcmp`). A best
+/// effort, as `black_box`'s own documentation says: the loop compiles as it
+/// did, and the accumulator's store and load add two instructions to a
+/// request's `authenticate`, which inlines it (a traced `handle`). A length
+/// is no secret here.
 pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
     let mut d = 0u8;
-    for i in 0..a.len() {
-        d |= a[i] ^ b[i];
+    for (x, y) in a.iter().zip(b) {
+        d |= x ^ y;
     }
-    d == 0
+    core::hint::black_box(d) == 0
 }
 
 // -------------------------------------------------------------------- base64
@@ -775,7 +789,6 @@ mod tests {
     const SUNSCREEN: &[u8] = b"Ladies and Gentlemen of the class of '99: If I could offer you \
         only one tip for the future, sunscreen would be it.";
 
-    /// RFC 8439, 2.4.2: ChaCha20 encryption.
     /// Keys of 2048, 2056, 3072 (e = 3) and 4096 bits, and messages each
     /// signed by node:crypto (`sign('sha256', msg, key)`).
     #[test]
@@ -804,6 +817,7 @@ mod tests {
         assert!(RsaKey::new(&even, &[1, 0, 1]).is_none(), "an even modulus");
     }
 
+    /// RFC 8439, 2.4.2: ChaCha20 encryption.
     #[test]
     fn chacha20_rfc8439() {
         let key: [u8; 32] = (0u8..32).collect::<Vec<_>>().try_into().unwrap();
@@ -907,36 +921,221 @@ mod tests {
         }
     }
 
+    /// RFC 4231, section 4: HMAC-SHA-256 in all seven test cases, the
+    /// RFC's hex as it prints it -- keys shorter than the MAC (2) and
+    /// longer than a block (6 and 7, hashed first), data past a block (3,
+    /// 4, 7), and case 5's MAC cut to its first 128 bits. `HmacKey`, its
+    /// padded blocks hashed once, gives each too, its message in two parts.
     #[test]
-    fn hmac_vectors() {
-        // RFC 4231, Test Case 1 and 2
-        assert_eq!(
-            hex(&hmac_sha256(&[0x0b; 20], b"Hi There")),
-            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
-        );
-        assert_eq!(
-            hex(&hmac_sha256(b"Jefe", b"what do ya want for nothing?")),
-            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
-        );
-        // Test Case 3: a key longer than the block size
-        assert_eq!(
-            hex(&hmac_sha256(
-                &[0xaa; 131],
-                b"Test Using Larger Than Block-Size Key - Hash Key First"
-            )),
-            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
-        );
+    fn hmac_rfc4231_all() {
+        const AA131: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+             aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+             aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+             aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa aaaaaa";
+        // (key, data, HMAC-SHA-256)
+        let cases: [(&str, &str, &str); 7] = [
+            (
+                "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b 0b0b0b0b",
+                "4869205468657265",
+                "b0344c61d8db38535ca8afceaf0bf12b 881dc200c9833da726e9376c2e32cff7",
+            ),
+            (
+                "4a656665",
+                "7768617420646f2079612077616e7420 666f72206e6f7468696e673f",
+                "5bdcc146bf60754e6a042426089575c7 5a003f089d2739839dec58b964ec3843",
+            ),
+            (
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa aaaaaaaa",
+                "dddddddddddddddddddddddddddddddd dddddddddddddddddddddddddddddddd \
+                 dddddddddddddddddddddddddddddddd dddd",
+                "773ea91e36800e46854db8ebd09181a7 2959098b3ef8c122d9635514ced565fe",
+            ),
+            (
+                "0102030405060708090a0b0c0d0e0f10 111213141516171819",
+                "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd \
+                 cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd cdcd",
+                "82558a389a443c0ea4cc819899f2083a 85f0faa3e578f8077a2e3ff46729665b",
+            ),
+            (
+                "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c 0c0c0c0c",
+                "546573742057697468205472756e6361 74696f6e",
+                "a3b6167473100ee06e0c796c2955552b",
+            ),
+            (
+                AA131,
+                "54657374205573696e67204c61726765 72205468616e20426c6f636b2d53697a \
+                 65204b6579202d2048617368204b6579 204669727374",
+                "60e431591ee0b67f0d8a26aacbf5b77f 8e0bc6213728c5140546040f0ee37f54",
+            ),
+            (
+                AA131,
+                "54686973206973206120746573742075 73696e672061206c6172676572207468 \
+                 616e20626c6f636b2d73697a65206b65 7920616e642061206c61726765722074 \
+                 68616e20626c6f636b2d73697a652064 6174612e20546865206b6579206e6565 \
+                 647320746f2062652068617368656420 6265666f7265206265696e6720757365 \
+                 642062792074686520484d414320616c 676f726974686d2e",
+                "9b09ffa71b942fcb27635fbcd5b0e944 bfdc63644f0713938a7f51535c3a35e2",
+            ),
+        ];
+        let mut ran = 0;
+        for (n, (key, data, mac)) in cases.iter().enumerate() {
+            let (key, data, want) = (unhex(key), unhex(data), unhex(mac));
+            let got = hmac_sha256(&key, &data);
+            assert_eq!(&got[..want.len()], &want[..], "test case {}", n + 1);
+            let (a, b) = data.split_at(data.len() / 3);
+            assert_eq!(HmacKey::new(&key).mac(&[a, b]), got, "test case {}", n + 1);
+            ran += 1;
+        }
+        assert_eq!(ran, 7);
     }
 
+    /// RFC 7914, section 11: PBKDF2-HMAC-SHA-256 at c = 1 and c = 80 000.
+    /// The RFC asks 64 bytes of each; the first 32 are its first block,
+    /// which no length asked after it changes, and all `pbkdf2_sha256`
+    /// makes (SCRAM's `SaltedPassword`).
     #[test]
-    fn pbkdf2_vector() {
-        // RFC 7677 example value: password "pencil", salt "W22ZaJ0SNY7soEsUEjb6gQ==", i=4096
-        let salt = b64_decode("W22ZaJ0SNY7soEsUEjb6gQ==").unwrap();
-        let sp = pbkdf2_sha256(b"pencil", &salt, 4096);
-        assert_eq!(
-            b64_encode(&sp),
-            "xKSVEDI6tPlSysH6mUQZOeeOp01r6B3fcJbodRPcYV0="
-        );
+    fn pbkdf2_sha256_vectors() {
+        let cases: [(&[u8], &[u8], u32, &str); 2] = [
+            (
+                b"passwd",
+                b"salt",
+                1,
+                "55ac046e56e3089fec1691c22544b605 f94185216dde0465e68b9d57c20dacbc \
+                 49ca9cccf179b645991664b39d77ef31 7c71b845b1e30bd509112041d3a19783",
+            ),
+            (
+                b"Password",
+                b"NaCl",
+                80000,
+                "4ddcd8f60b98be21830cee5ef22701f9 641a4418d04c0414aeff08876b34ab56 \
+                 a1d425a1225833549adb841b51c9b317 6a272bdebba1d078478f62b397f33c8d",
+            ),
+        ];
+        let mut ran = 0;
+        for (p, s, c, dk) in cases {
+            assert_eq!(pbkdf2_sha256(p, s, c)[..], unhex(dk)[..32], "c = {c}");
+            ran += 1;
+        }
+        assert_eq!(ran, 2);
+    }
+
+    /// RFC 8439's appendix A, a section's vectors (`rfc8439_vectors.txt`):
+    /// each line's fields after its section and number.
+    fn appendix(section: &str) -> Vec<Vec<&'static str>> {
+        include_str!("rfc8439_vectors.txt")
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .map(|l| l.split(' ').collect::<Vec<_>>())
+            .filter(|f| f[0] == section)
+            .map(|f| f[2..].to_vec())
+            .collect()
+    }
+
+    fn key32(hex: &str) -> [u8; 32] {
+        unhex(hex).try_into().unwrap()
+    }
+
+    fn nonce12(hex: &str) -> [u8; 12] {
+        unhex(hex).try_into().unwrap()
+    }
+
+    /// RFC 8439, appendix A.1, A.2 and A.4: the block function's five
+    /// vectors as key streams -- the zero key at counters 0 and 1, a key's
+    /// last bit, its second byte at counter 2, a nonce's last byte --
+    /// encryption's three (counters 0, 1 and 42; 64 bytes, 375 and 127),
+    /// and Poly1305's three one-time keys, a block at counter 0.
+    #[test]
+    fn chacha20_rfc8439_appendix_a() {
+        let mut ran = 0;
+        for f in appendix("A.1") {
+            let (key, nonce, counter) = (key32(f[0]), nonce12(f[1]), f[2].parse().unwrap());
+            assert_eq!(chacha20_block(&key, counter, &nonce)[..], unhex(f[3])[..]);
+            let mut stream = [0u8; 64];
+            chacha20_xor(&key, counter, &nonce, &mut stream);
+            assert_eq!(stream[..], unhex(f[3])[..]);
+            ran += 1;
+        }
+        for f in appendix("A.2") {
+            let (key, nonce, counter) = (key32(f[0]), nonce12(f[1]), f[2].parse().unwrap());
+            let (plain, cipher) = (unhex(f[3]), unhex(f[4]));
+            let mut data = plain.clone();
+            chacha20_xor(&key, counter, &nonce, &mut data);
+            assert_eq!(data, cipher, "counter {counter}");
+            chacha20_xor(&key, counter, &nonce, &mut data);
+            assert_eq!(data, plain);
+            ran += 1;
+        }
+        for f in appendix("A.4") {
+            let block = chacha20_block(&key32(f[0]), 0, &nonce12(f[1]));
+            assert_eq!(block[..32], unhex(f[2])[..]);
+            ran += 1;
+        }
+        assert_eq!(ran, 5 + 3 + 3);
+    }
+
+    /// RFC 8439, appendix A.3: Poly1305's eleven vectors -- an r of zero
+    /// and an s of zero, then #5 to #11, the cases 26-bit limbs get wrong:
+    /// a partly reduced result not fully reduced, s overflowing 2^128, a
+    /// limb of ones carrying, a result of exactly 2^130-5 and of 2^130-6,
+    /// and a 5*H+L reduction of 131 bits midway and at the end.
+    #[test]
+    fn poly1305_rfc8439_appendix_a() {
+        let mut ran = 0;
+        for f in appendix("A.3") {
+            let tag = poly1305(&key32(f[0]), &unhex(f[1]));
+            assert_eq!(tag[..], unhex(f[2])[..], "vector {}", ran + 1);
+            ran += 1;
+        }
+        assert_eq!(ran, 11);
+    }
+
+    /// RFC 8439, appendix A.5: the AEAD opens its ciphertext into the
+    /// Internet-Draft boilerplate, its one-time key on the way; sealing that
+    /// text again gives the ciphertext and the tag; a tag one bit off opens
+    /// nothing, the data left as it was.
+    #[test]
+    fn aead_rfc8439_appendix_a() {
+        let mut ran = 0;
+        for f in appendix("A.5") {
+            let (key, nonce, aad) = (key32(f[0]), nonce12(f[1]), unhex(f[2]));
+            let (otk, cipher, tag, plain) = (unhex(f[3]), unhex(f[4]), unhex(f[5]), unhex(f[6]));
+            assert_eq!(chacha20_block(&key, 0, &nonce)[..32], otk[..]);
+            let mut data = cipher.clone();
+            assert!(open_in_place(&key, &nonce, &aad, &mut data, &tag));
+            assert_eq!(data, plain);
+            let mut sealed = plain.clone();
+            assert_eq!(seal_in_place(&key, &nonce, &aad, &mut sealed)[..], tag[..]);
+            assert_eq!(sealed, cipher);
+            let mut bad = tag.clone();
+            bad[15] ^= 0x80;
+            let mut data = cipher.clone();
+            assert!(!open_in_place(&key, &nonce, &aad, &mut data, &bad));
+            assert_eq!(data, cipher);
+            ran += 1;
+        }
+        assert_eq!(ran, 1);
+    }
+
+    /// `ct_eq` answers as `==` does, whatever the lengths and wherever the
+    /// bytes differ.
+    #[test]
+    fn ct_eq_matches_eq() {
+        let pairs: [(&[u8], &[u8]); 7] = [
+            (b"secret", b"secret"),
+            (b"secret", b"secre"),
+            (b"secret", b"secrez"),
+            (b"secret", b"zecret"),
+            (b"", b""),
+            (b"", b"x"),
+            (&[0x80; 64], &[0x80; 64]),
+        ];
+        let mut ran = 0;
+        for (a, b) in pairs {
+            assert_eq!(ct_eq(a, b), a == b, "{a:?} {b:?}");
+            assert_eq!(ct_eq(b, a), a == b);
+            ran += 1;
+        }
+        assert_eq!(ran, 7);
     }
 
     #[test]

@@ -9,4 +9,7 @@
 **[`--follow` confirms nothing that is not on disk.](../../docs/design/replication.md#follow)**
 Every write is a put or delete by id; the mirror is a `fennec-server` thread,
 its collections' only writer. A wire message's length is held to
-`proto::MAX_MESSAGE` before anything is allocated (`proto::zeroed`).
+`proto::MAX_MESSAGE` before anything is allocated (`proto::zeroed`), and
+the iteration count a server asks SCRAM for to `SCRAM_MAX_ITERATIONS`
+before PBKDF2 runs, refused naming the range: the server, or whoever
+stands in for it, chooses it.

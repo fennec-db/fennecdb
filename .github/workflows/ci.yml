@@ -60,6 +60,14 @@ jobs:
           python3 tools/test_toolchain_check.py
           python3 tools/toolchain_check.py
 
+      # docs/design/conventions.md#secrets-compared: a token, a secret, a
+      # mark, a signature or a password is compared by crypto::ct_eq, never
+      # with == or !=; the reader is held to its own cases first.
+      - name: No secret is compared with == or != in the crates' sources
+        run: |
+          python3 tools/secret_eq_check.py --self-test
+          python3 tools/secret_eq_check.py
+
       # docs/design/benchmarks.md#instruction-counts: the measuring is
       # macOS's and runs by hand (make instr-compare); a copy's UUID, the
       # refusals keeping a build's output untouched, the figures and a

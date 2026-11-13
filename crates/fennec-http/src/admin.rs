@@ -79,7 +79,7 @@
 use crate::http::{Method, Request, Response};
 use crate::instance;
 use crate::tenants::{Kept, Refused, Tenants};
-use crate::{constant_eq, Config};
+use crate::{crypto::ct_eq, Config};
 
 pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
     let Some(token) = &cfg.admin_token else {
@@ -89,7 +89,7 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
         .header("authorization")
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("");
-    if !constant_eq(given.as_bytes(), token.as_bytes()) {
+    if !ct_eq(given.as_bytes(), token.as_bytes()) {
         return Response::error(401, "invalid or missing admin token")
             .header("WWW-Authenticate", "Bearer");
     }
