@@ -682,15 +682,22 @@ the `fennec` binary's z -- more than half an hour of an M1 core even at
 its widest, eight a cycle at 3.2 GHz, and some three hours by the CPU
 time 2^20 rounds took on this machine shared with other work (2.9 s; 1.2
 s keyed, below) -- `fennec import`, or `--follow` connecting again,
-waiting on it. The client runs 1 to `SCRAM_MAX_ITERATIONS` (2^20, 256
-times PostgreSQL's `scram_iterations` default of 4 096; 7.1 thousand
-million instructions at the bound, 12.8 at opt-level z) and
-refuses any other count naming the range as the server-first message is
-read, however many digits it has -- `scram_refuses_iterations_past_the_bound`
-through a stand-in, no proof sent, and `scram_iterations_are_held_to_their_range`
-at its edges. A server set past it -- `scram_iterations`, from PostgreSQL
-16, takes 1 to 2^31 - 1 -- is refused by name, where libpq takes any count
-from 1 (`fe-auth-scram.c`). PBKDF2 hashes the password's HMAC
+waiting on it. The client runs 1 to `SCRAM_MAX_ITERATIONS` (2^22, 1 024
+times PostgreSQL's `scram_iterations` default of 4 096: 28.6 thousand
+million instructions at the bound, 51.5 at opt-level z, which took 6.3 s
+and 9.2 s of a core here under a load average past 40) and refuses any
+other count as the server-first message is read, however many digits it
+has, naming the range and what brings a server under it: the role's
+password set again, its verifier made under a lower `scram_iterations` --
+`scram_refuses_iterations_past_the_bound` through a stand-in, no proof
+sent, and `scram_iterations_are_held_to_their_range` at its edges. A
+server set past it -- `scram_iterations`, from PostgreSQL 16, takes 1 to
+2^31 - 1 -- is refused by name, where libpq takes any count from 1
+(`fe-auth-scram.c`). The bound was 2^20 at first (7.2 thousand million
+instructions, 12.9 at z): a hardened setting near a million -- OWASP asks
+600 000 rounds of PBKDF2-HMAC-SHA256 -- had barely room under it, and four
+times it is still seconds of a core where the most a hostile count can ask
+is hours. PBKDF2 hashes the password's HMAC
 blocks once (`HmacKey`), each round two compressions where an HMAC made
 afresh took four: 6 780 instructions a round where it was 12 641 at
 `fennec-server`'s opt-level 3, and 12 250 where it was 19 529 at the

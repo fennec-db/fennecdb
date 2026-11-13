@@ -572,16 +572,19 @@ fn tls_client(url: &Url) -> Result<fennec_tls::Client> {
 
 // ------------------------------------------------------------------- SCRAM
 
-/// The most PBKDF2 iterations SCRAM runs for a server: 256 times
-/// PostgreSQL's 4 096, its `scram_iterations` default. The count is the
-/// server's to choose -- and, under any `sslmode` short of `verify-full`,
-/// whoever stands in for it -- and is run before the proof goes out:
-/// `i=4294967295` was 54 trillion instructions of PBKDF2, more than half
-/// an hour of an M1 core even at its widest (eight a cycle at 3.2 GHz),
-/// `fennec import`, or `--follow` connecting again, waiting on it. The
-/// bound is 7.1 thousand million. A count past it is refused naming the
-/// range, never run, nor cut to fit.
-pub const SCRAM_MAX_ITERATIONS: u32 = 1 << 20;
+/// The most PBKDF2 iterations SCRAM runs for a server: 2^22, 1 024 times
+/// PostgreSQL's 4 096, its `scram_iterations` default, with room above a
+/// hardened setting near a million (OWASP asks 600 000 of
+/// PBKDF2-HMAC-SHA256), which the first bound, 2^20, barely had. The
+/// count is the server's to choose -- and, under any `sslmode` short of
+/// `verify-full`, whoever stands in for it -- and is run before the proof
+/// goes out: `i=4294967295` was 54 trillion instructions of PBKDF2, more
+/// than half an hour of an M1 core even at its widest (eight a cycle at
+/// 3.2 GHz), `fennec import`, or `--follow` connecting again, waiting on
+/// it. The bound is 28.6 thousand million, seconds of a core. A count past
+/// it is refused naming the range and how to come under it, never run, nor
+/// cut to fit.
+pub const SCRAM_MAX_ITERATIONS: u32 = 1 << 22;
 
 /// The client half of one SCRAM-SHA-256 exchange (RFC 5802, RFC 7677), its
 /// messages made and checked apart from the connection, the nonce given:
@@ -672,7 +675,9 @@ impl ServerFinal {
 
 /// A server-first message's iteration count, held to 1 to
 /// [`SCRAM_MAX_ITERATIONS`]: a count past it, however many digits it has,
-/// is refused naming the range before PBKDF2 runs.
+/// is refused naming the range before PBKDF2 runs, and what brings a
+/// server's under it: the role's password set again, its verifier made
+/// under a lower `scram_iterations`.
 fn scram_iterations(v: &str) -> Result<u32> {
     if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
         return Err(scram_unparsed());
@@ -690,7 +695,8 @@ fn scram_iterations(v: &str) -> Result<u32> {
         v.to_string()
     };
     Err(Error::Query(format!(
-        "postgres: the server's SCRAM iteration count is 1 to {SCRAM_MAX_ITERATIONS}, not {shown}"
+        "postgres: the server's SCRAM iteration count is 1 to {SCRAM_MAX_ITERATIONS}, not {shown}: \
+         set the role's password again under a lower scram_iterations"
     )))
 }
 
@@ -1342,7 +1348,7 @@ mod tests {
             .unwrap();
         // A server-final message that is not the RFC's: a character of its
         // signature changed, its last cut off, one more, none, or an error.
-        let refused = [
+        let refused: [&str; 6] = [
             "v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G5=",
             "v=7rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=",
             "v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4",
@@ -1350,13 +1356,10 @@ mod tests {
             "",
             "e=invalid-proof",
         ];
-        let mut ran = 0;
         for got in refused {
             let e = server_final.verify(got).unwrap_err().to_string();
             assert!(e.contains("server signature"), "{got:?}: {e}");
-            ran += 1;
         }
-        assert_eq!(ran, 6);
         // Another password is another proof, and expects another signature.
         let (other, other_final) = scram.last(server_first, "pencil!").unwrap();
         assert_ne!(other, last);
@@ -1373,24 +1376,25 @@ mod tests {
     }
 
     /// The iteration count a server asks for is 1 to SCRAM_MAX_ITERATIONS,
-    /// read as written: the bound itself is run, one past it or any count
-    /// no `u32` holds refused naming the range, before PBKDF2 runs.
+    /// read as written: the bound itself is run, and a hardened setting
+    /// past a million, past the first bound of 2^20; one past it or any
+    /// count no `u32` holds is refused naming the range and how to come
+    /// under it, before PBKDF2 runs.
     #[test]
     fn scram_iterations_are_held_to_their_range() {
-        let taken = [
+        let taken: [(&str, u32); 5] = [
             ("1", 1),
             ("4096", 4096),
-            ("01048576", 1 << 20),
-            ("1048576", SCRAM_MAX_ITERATIONS),
+            ("2000000", 2_000_000),
+            ("04194304", 1 << 22),
+            ("4194304", SCRAM_MAX_ITERATIONS),
         ];
-        let mut ran = 0;
         for (v, n) in taken {
             assert_eq!(scram_iterations(v).unwrap(), n, "{v}");
-            ran += 1;
         }
-        let refused = [
+        let refused: [(&str, &str); 6] = [
             ("0", "not 0"),
-            ("1048577", "not 1048577"),
+            ("4194305", "not 4194305"),
             ("4294967295", "not 4294967295"),
             ("4294967296", "not 4294967296"),
             ("18446744073709551616", "not 18446744073709551616"),
@@ -1399,17 +1403,16 @@ mod tests {
         for (v, says) in refused {
             let e = scram_iterations(v).unwrap_err().to_string();
             assert!(
-                e.contains("is 1 to 1048576") && e.contains(says),
+                e.contains("is 1 to 4194304")
+                    && e.contains(says)
+                    && e.contains("set the role's password again under a lower scram_iterations"),
                 "{v}: {e}"
             );
-            ran += 1;
         }
         for v in ["", "-1", "+5", "1e6", "4096 ", "0x10"] {
             let e = scram_iterations(v).unwrap_err().to_string();
             assert!(e.contains("could not be parsed"), "{v:?}: {e}");
-            ran += 1;
         }
-        assert_eq!(ran, 16);
         // Refused as the server-first message is read, before its proof is
         // made: no PBKDF2 of four billion rounds runs here.
         let e = Scram::new("", "abc")

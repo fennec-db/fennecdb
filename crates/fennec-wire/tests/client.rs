@@ -352,31 +352,32 @@ fn asking_server(iterations: String) -> (u16, std::sync::mpsc::Receiver<bool>) {
 }
 
 /// A server's iteration count past SCRAM_MAX_ITERATIONS is refused naming
-/// the range, before PBKDF2 runs: no proof goes out, and four billion
-/// rounds -- an hour and more of a core -- never start.
+/// the range and how to come under it, before PBKDF2 runs: no proof goes
+/// out, and four billion rounds -- an hour and more of a core -- never
+/// start.
 #[test]
 fn scram_refuses_iterations_past_the_bound() {
     let past = (SCRAM_MAX_ITERATIONS as u64 + 1).to_string();
-    let cases = [
+    let cases: [String; 4] = [
         past.clone(),
         u32::MAX.to_string(),
         (u32::MAX as u64 + 1).to_string(),
         "0".to_string(),
     ];
-    let mut ran = 0;
     for asked in cases {
         let (port, proof) = asking_server(asked.clone());
         let e = Client::connect(&url(port, Some("p")))
             .unwrap_err()
             .to_string();
         assert!(
-            e.contains(&format!("is 1 to {SCRAM_MAX_ITERATIONS}, not {asked}")),
+            e.contains(&format!(
+                "is 1 to {SCRAM_MAX_ITERATIONS}, not {asked}: \
+                 set the role's password again under a lower scram_iterations"
+            )),
             "{asked}: {e}"
         );
         assert!(!proof.recv().unwrap(), "a proof went out for i={asked}");
-        ran += 1;
     }
-    assert_eq!(ran, 4);
 }
 
 #[test]
