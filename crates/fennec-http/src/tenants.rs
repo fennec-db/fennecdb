@@ -2127,11 +2127,35 @@ impl Tenants {
     /// Sets every open tenant's clock to `at` (`Database::set_clock`), the
     /// system's where `None`: a test build's ([`crate::test_clock`]). A
     /// tenant opened after it runs on the system's clock until the next.
+    /// Whether it reached every slot: one busy as it looked -- opening,
+    /// closing, installing -- is passed over, as [`Self::open_tenants`]
+    /// passes it, and its tenant keeps the clock it had, so the caller sets
+    /// the system's again until none was.
     #[cfg(feature = "test-clock")]
-    pub(crate) fn set_clocks(&self, at: Option<i64>) {
-        for t in self.open_tenants() {
+    pub(crate) fn set_clocks(&self, at: Option<i64>) -> bool {
+        let mut open = Vec::new();
+        let mut every = true;
+        for s in self.all_slots() {
+            let held = match s.held.try_lock() {
+                Ok(h) => h,
+                // Taken as it stands, as every lock a panic poisoned is
+                // here: passed over, the slot would be busy for good.
+                Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    every = false;
+                    continue;
+                }
+            };
+            if let Held::Open(t) = &*held {
+                open.push(Arc::clone(t));
+            }
+        }
+        // Each database's lock taken with no slot's held, as the syncer
+        // takes them.
+        for t in open {
             crate::held::write(&t.db).set_clock(at);
         }
+        every
     }
 
     /// Pushes every dirty open tenant to disk. The periodic syncer calls it,
@@ -3047,6 +3071,54 @@ mod tests {
     fn run(t: &Tenant, sql: &str) {
         let stmt = fennec_ql::parse_one(sql).unwrap();
         t.db.write().unwrap().execute(&stmt).unwrap();
+    }
+
+    /// A test build's clock (`test-clock`, `crate::test_clock`): a shift's
+    /// end reaches a tenant whose slot was busy as it ended. Set once, as it
+    /// first was, the tenant's clock stood at the shifted time for good --
+    /// `open_tenants` passes a busy slot over -- and `make chaos` jumped
+    /// nodes' clocks while their tenants opened and closed. The slot held
+    /// here as an open or a close holds it, a reset seen to pass it over, then
+    /// let go: the system's clock comes back.
+    #[cfg(feature = "test-clock")]
+    #[test]
+    fn a_tenant_busy_as_its_clock_shift_ends_takes_the_systems_clock_back() {
+        use crate::test_clock::PASSED_OVER;
+        let dir = scratch("test-clock");
+        let reg = Arc::new(Tenants::new(&dir).unwrap());
+        let t = reg.create("acme").unwrap();
+        let file = dir.join("shift");
+        let day: i64 = 86_400_000;
+        std::fs::write(&file, day.to_string()).unwrap();
+        crate::test_clock::follow_file(&reg, file.clone()).unwrap();
+        let system = || fennec_core::time::now_ms().unwrap();
+        let clock = || crate::held::read(&t.db).now_ms().unwrap();
+        let until = |what: &str, ok: &dyn Fn() -> bool| {
+            let end = Instant::now() + Duration::from_secs(30);
+            while !ok() {
+                assert!(Instant::now() < end, "never {what}");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        until("shifted a day", &|| clock() > system() + day / 2);
+        let slot = Arc::clone(reg.registry().get("acme").unwrap());
+        let held = slot.held.lock().unwrap();
+        let before = PASSED_OVER.load(Ordering::SeqCst);
+        std::fs::write(&file, "").unwrap();
+        until("passed the busy slot over", &|| {
+            PASSED_OVER.load(Ordering::SeqCst) > before
+        });
+        assert!(
+            clock() > system() + day / 2,
+            "the clock moved under a slot held"
+        );
+        drop(held);
+        until("back to the system's clock", &|| {
+            (clock() - system()).abs() < day / 2
+        });
+        drop(t);
+        drop(reg);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The steps this thread took since it last asked.

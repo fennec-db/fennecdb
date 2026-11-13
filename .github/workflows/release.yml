@@ -81,6 +81,27 @@ jobs:
             cargo build --profile cli --target "$t" -p fennec-cli
             cargo build --release   --target "$t" -p fennec-server
 
+            # A release's fennec-server, never a test build's: its --version
+            # is the name and the version, nothing after -- a test build
+            # says `+test-clock` (only deploy/Dockerfile's chaos stage builds
+            # one, tools/release_features_check.py). Run where this runner
+            # runs the target -- each Linux job its own, the Mac its arm64 --
+            # and read in the bytes where it does not, the Mac's x86_64: the
+            # mark is in no release's binary. Before 0.1.13 there was no
+            # --version, nor any test build.
+            bin="target/$t/release/fennec-server"
+            if said=$("$bin" --version 2>/dev/null); then
+              if [ "$said" != "fennec-server $version" ]; then
+                echo "$t: fennec-server says [$said], not [fennec-server $version]" >&2
+                exit 1
+              fi
+            elif grep -q -a -F '+test-clock' "$bin"; then
+              echo "$t: fennec-server carries a test build's mark, +test-clock" >&2
+              exit 1
+            else
+              echo "$t: fennec-server not run here; no test build's mark in its bytes"
+            fi
+
             stage="fennec-v${version}-${t}"
             mkdir -p "$stage"
             cp "target/$t/cli/fennec" "target/$t/release/fennec-server" "$stage/"
@@ -401,6 +422,19 @@ jobs:
             --label org.opencontainers.image.version="$version" \
             --label org.opencontainers.image.licenses=Apache-2.0 \
             -t "$IMAGE:$version-${{ matrix.arch }}" .
+          # The image runs a release's fennec-server before it is pushed:
+          # its --version the name and the version alone, never a test
+          # build's mark (`+test-clock`, which only deploy/Dockerfile's
+          # chaos stage builds; the root Dockerfile takes FEATURES). Each
+          # runner runs its own architecture. Before 0.1.13 there was no
+          # --version, nor any test build.
+          if [ "$(printf '%s\n' 0.1.13 "${version%%-*}" | sort -V | head -n 1)" = 0.1.13 ]; then
+            said=$(docker run --rm "$IMAGE:$version-${{ matrix.arch }}" --version)
+            if [ "$said" != "fennec-server $version" ]; then
+              echo "the image's fennec-server says [$said], not [fennec-server $version]" >&2
+              exit 1
+            fi
+          fi
           docker push "$IMAGE:$version-${{ matrix.arch }}"
 
   manifest:

@@ -60,6 +60,17 @@ jobs:
           python3 tools/test_toolchain_check.py
           python3 tools/toolchain_check.py
 
+      # docs/design/integrations.md#the-chaos-drill: `test-clock` moves a
+      # tenant node's clock by a file, for `make chaos` alone. No crate's
+      # default features reach it, no other feature or dependency turns it
+      # on, and nothing builds with it but deploy/Dockerfile's chaos stage
+      # (release.yml then refuses a binary or an image whose --version says
+      # it).
+      - name: No build but the chaos image's names a test build's feature
+        run: |
+          python3 tools/test_release_features_check.py
+          python3 tools/release_features_check.py
+
       # docs/design/benchmarks.md#instruction-counts: the measuring is
       # macOS's and runs by hand (make instr-compare); a copy's UUID, the
       # refusals keeping a build's output untouched, the figures and a
@@ -136,6 +147,12 @@ jobs:
       # The native library with the JNI functions the Kotlin binding calls,
       # which the workspace's run builds without.
       - run: cargo clippy -p fennec-ffi --features jni --all-targets -- -D warnings
+
+      # A test build's clock (`test-clock`, crates/fennec-http/src/test_clock.rs),
+      # which only `make chaos`'s image builds: linted here, its unit test
+      # and the server's test of it among the targets, or nothing would
+      # compile it before the weekly drill did.
+      - run: cargo clippy -p fennec-http -p fennec-server --features test-clock --all-targets -- -D warnings
 
       # SQL's joins held to what SQLite answers for the same rows: in the
       # bench crate, where SQLite is, which `make test` leaves out. About
@@ -261,6 +278,19 @@ jobs:
             | jq -r 'select(.profile.test == true and .target.name == "fennec_http") | .executable')
           sudo unshare --time --boottime 86400 "$bin" --exact \
             lease::tests::the_boot_clock_is_the_systems_and_runs_as_instant_does \
+            | tee /dev/stderr | grep -q 'test result: ok. 1 passed'
+
+      # A test build's clock reaches a tenant whose slot was busy as its
+      # shift ended (crates/fennec-http/src/test_clock.rs): set once, such a
+      # tenant stood at the shifted time for good. Only `make chaos`'s image
+      # builds the feature, so its test runs here, fennec-http's unit tests
+      # built again with it, the test named whole and its one pass asked
+      # for: renamed, a filter matching nothing runs nothing and passes.
+      - name: A test build's clock reaches every open tenant
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo test -p fennec-http --features test-clock --lib -- --exact \
+            tenants::tests::a_tenant_busy_as_its_clock_shift_ends_takes_the_systems_clock_back \
             | tee /dev/stderr | grep -q 'test result: ok. 1 passed'
 
       # fennec studio (`--studio`) in the runner's Chrome against the debug
