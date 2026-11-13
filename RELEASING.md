@@ -39,7 +39,11 @@ nothing reaches a registry before the notes have had a read.
    for each ABI inside) and the multi-arch image on ghcr.io, takes the
    XCFramework zips step 2's run kept -- the static one held to the checksum the tag's
    `Package.swift` names, and stopping the release where none matches --
-   and drafts the release with all of them and their checksums. It also
+   and drafts the release with all of them and their checksums, its notes
+   opening with the compiler: each `binaries` job holds its `rustc -V` to
+   the release `rust-toolchain.toml` names and, on Linux, to the one the
+   image's build stage resolves, and a difference stops the release before
+   the draft ([A toolchain bump](#a-toolchain-bump)). It also
    makes a `.deb` and an `.rpm` for amd64 and arm64 from the musl tarballs
    (`tools/linux-packages.sh`, `packaging/nfpm.yaml`), each architecture on a
    runner of its own, installs them in a Debian and a Fedora container and
@@ -371,6 +375,43 @@ field of it is read another way.
 | `fennec-studio-vX.Y.Z-windows-x64.zip`, `-windows-arm64.zip`, `-linux-x64.tar.xz`, `-linux-arm64.tar.xz` on the release | `integrations/studio-desktop` (`scripts/dist.sh`), `.github/workflows/desktop.yml` | fennec studio for Windows and Linux (beta): the folder `fennec-studio`, the app unpacked, which runs where it is unpacked; attached by step 5 with their lines appended to `SHA256SUMS`; unsigned |
 | `fennec-vX.Y.Z-x86_64-pc-windows-msvc.zip`, `fennec-vX.Y.Z-aarch64-pc-windows-msvc.zip` on the release | `tools/windows-zip.sh` | `fennec.exe` and `fennec-server.exe`, the C runtime linked in; unsigned |
 | `https://fennecdb.com/install.ps1` | `site/install.ps1` | the Windows installer: the release's zip, checked against `SHA256SUMS`, into `%LOCALAPPDATA%\fennecdb\bin`; with `-App`, the app's zip, checked the same way, into `%LOCALAPPDATA%\dev.fennecdb.studio\stable\app` with a Start-menu shortcut; deployed with the site, not with a release |
+
+## A toolchain bump
+
+The compiler is part of what a release ships, and it moves only by a pull
+request of its own ([docs/design/crates.md](docs/design/crates.md#toolchain)).
+`rust-toolchain.toml` names an exact release, never `stable`, which moved
+under main's CI on 2026-11-12 with no change of ours: 1.100.0's Unicode
+tables failed fennec-core's case tests on every pull request. A bump is
+deliberate, not each stable release -- one taken for what it brings, a fix,
+a lint, a measured speed or size -- and its pull request changes nothing
+else but what the new compiler needs:
+
+1. `rust-toolchain.toml`'s `channel`, the `FROM rust:` of `Dockerfile` and
+   `deploy/Dockerfile` and the Kotlin harnesses' image
+   (`integrations/kotlin/run-tests.sh`, `examples/kotlin-android/run-smoke.sh`),
+   each tag with the index digest `docker buildx imagetools inspect
+   rust:X.Y.Z-alpine` (`-slim-bookworm`) names; `python3
+   tools/toolchain_check.py` passes.
+2. What the compiler breaks, fixed in the same pull request -- a lint, a
+   table held to the standard library's (fennec-core's case tables) --
+   never a test held back.
+3. In its body, against main:
+   - `make wasm-sizes`, before and after: what each feature adds to the
+     module and what leaving it out saves;
+   - the size report: CI's size job measures the module against the base,
+     each built by its own `rust-toolchain.toml` and named in the summary,
+     and `make size-report BIN=fennec-server` and `BIN=fennec`, run on main
+     and on the branch, the binaries' code by crate; a size the docs quote
+     that moved is written again, which `site/build.py` asks for under CI;
+   - `make instr-compare`: the instructions a request costs, read over
+     re-signed copies ([docs/design/benchmarks.md](docs/design/benchmarks.md#instruction-counts));
+   - `make float-test`, which `float-tests.yml` also runs on the pull
+     request: fennec-core's own float formatting and reading held to the
+     new standard library's over every `f32` and 10^8 random `f64`s.
+
+A tag's `release.yml` holds its binaries' `rustc -V` to the file's release
+and the image's to theirs, and the draft's notes name it.
 
 ## Once: the desktop app's signing Environment
 

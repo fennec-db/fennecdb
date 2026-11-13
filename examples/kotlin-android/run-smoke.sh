@@ -23,10 +23,12 @@ fi
 command -v docker >/dev/null 2>&1 || { echo "kotlin-android: needs Docker, or Linux with Gradle and Java" >&2; exit 1; }
 
 # A target directory of its own: the host's target/ holds this machine's builds.
+# The image is the release rust-toolchain.toml names, its own toolchain taken
+# by name, as integrations/kotlin/run-tests.sh says.
 docker run --rm -v "$ROOT":/src -w /src \
   -v fennec-cargo-registry:/usr/local/cargo/registry \
   -e CARGO_TARGET_DIR=/src/target/linux-docker \
-  rust:1-slim-bookworm \
+  rust:1.99.1-slim-bookworm@sha256:f2c004e3d2d8b547e8cf7ffbc29205385f4e71d23e53e4e383065db5e9f822cd \
   sh -c 'export RUSTUP_TOOLCHAIN=$(ls /usr/local/rustup/toolchains | head -1) &&
     cargo rustc -q -p fennec-ffi --lib --features jni --profile ffi --crate-type cdylib'
 

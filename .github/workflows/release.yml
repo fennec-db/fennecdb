@@ -27,6 +27,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
+    # The rustc every entry was built by, the same in each (the step says).
+    outputs:
+      rustc: ${{ steps.rustc.outputs.rustc }}
     strategy:
       fail-fast: false
       matrix:
@@ -58,6 +61,39 @@ jobs:
         run: |
           rustup show
           for t in ${{ matrix.targets }}; do rustup target add "$t"; done
+
+      # The compiler is part of the release (docs/design/crates.md#toolchain):
+      # these binaries are built by the release rust-toolchain.toml names, and
+      # the image job builds fennec-server by the same rustc -- the one that
+      # resolves in the Dockerfile's rust image over this tree, as its build
+      # stage resolves it. A difference stops the release here, before the
+      # draft, whose notes name the rustc. A tag from before the pin names no
+      # exact release and is built as it was.
+      - name: The rustc these binaries and the image are built by
+        id: rustc
+        run: |
+          set -eu
+          want=$(sed -n 's/^channel = "\([0-9]*\.[0-9]*\.[0-9]*\)"$/\1/p' rust-toolchain.toml)
+          here=$(rustc -V)
+          echo "rust-toolchain.toml: ${want:-no exact release}; these binaries: $here"
+          if [ -z "$want" ]; then
+            echo "::notice::this tag is from before the toolchain pin: its rustc is not held"
+            exit 0
+          fi
+          case "$here" in
+            "rustc $want "*) ;;
+            *) echo "::error::rust-toolchain.toml names $want; these binaries are built by $here"; exit 1 ;;
+          esac
+          if [ "$RUNNER_OS" = Linux ]; then
+            from=$(sed -n 's/^FROM \(rust:[^ ]*\) AS build$/\1/p' Dockerfile)
+            there=$(docker run --rm -v "$PWD:/src:ro" -w /src "$from" rustc -V)
+            echo "the image, built on $from: $there"
+            if [ "$there" != "$here" ]; then
+              echo "::error::these binaries are built by $here, the image by $there"
+              exit 1
+            fi
+          fi
+          echo "rustc=$here" >> "$GITHUB_OUTPUT"
 
       - name: Install musl tooling
         if: runner.os == 'Linux'
@@ -471,6 +507,7 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+          RUSTC: ${{ needs.binaries.outputs.rustc }}
         run: |
           set -eu
           tag="${{ github.event.inputs.tag || github.ref_name }}"
@@ -505,8 +542,11 @@ jobs:
               done
             fi
           else
-            gh release create "$tag" dist/* \
-              --draft \
-              --title "$tag" \
-              --generate-notes
+            # The notes open with the compiler (`binaries` held the image's to
+            # it); GitHub's generated notes follow.
+            set -- --draft --title "$tag" --generate-notes
+            if [ -n "$RUSTC" ]; then
+              set -- "$@" --notes "Built by \`$RUSTC\`, the release rust-toolchain.toml pins: the compiler CI tested, for the binaries and the image alike."
+            fi
+            gh release create "$tag" dist/* "$@"
           fi

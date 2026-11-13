@@ -24,9 +24,11 @@ WORKDIR /src
 # this image's own release, and the wasm32 target it asks for -- which no
 # binary here needs, 99 MB of the build stage alone -- is added in a layer
 # of its own, kept until the file changes, rather than by rustup at every
-# build's first cargo call.
+# build's first cargo call. The minimal profile, as the image's own
+# toolchain was installed: a release the image lacks would otherwise bring
+# its docs, clippy and rustfmt.
 COPY rust-toolchain.toml ./
-RUN rustup toolchain install --no-self-update
+RUN rustup toolchain install --no-self-update --profile minimal
 COPY . .
 
 # On Alpine the host target is already *-linux-musl: a plain `--release`

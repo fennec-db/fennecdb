@@ -1,6 +1,6 @@
 # The crates
 
-The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *The crates*: zero dependencies, limits that error rather than truncate, and the build profiles. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *The crates*: zero dependencies, limits that error rather than truncate, the build profiles and the toolchain. Each section below but the last is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Zero dependencies
 
@@ -273,3 +273,80 @@ built for size made the binary 129 KB larger (`make size-report BIN=fennec`).
 Both binaries hold 72 KB of the standard library's backtrace symbolizer
 (`gimli`, `addr2line`, `rustc_demangle`, `object`), which only a nightly
 `build-std` leaves out.
+
+## Toolchain
+
+**The compiler CI tests with is the one that ships.** `rust-toolchain.toml`
+names an exact release, X.Y.Z, and the wasm32 target. rustup reads it in
+every checkout -- a developer's, each CI job's, each release job's -- so CI,
+a release's binaries and its image are built by one compiler, and a new one
+comes in only by a pull request of its own.
+
+The file named `stable` until 1.100.0 came out on 2026-11-12, after main's
+last CI run had built with 1.99.1 (`rustc 1.99.1 (58cf8f9c3 2026-10-13)`).
+From the next pull request on, CI built with 1.100.0, whose Unicode tables
+are not the ones fennec-core's case fold is held to
+(`case::tests::the_tables_are_the_standard_library_s` and
+`the_unlike_runs_are_the_standard_library_s`), and the macOS test job
+failed on every pull request with no change of ours. A release tagged that day would have built its binaries with a
+compiler no CI run of its commit had used, and its image with whichever
+release `rust:alpine` named that day: the Dockerfiles removed
+`rust-toolchain.toml` from their build, since with `stable` no pin was lost
+and the wasm32 target made rustup download a toolchain of its own.
+
+The images build on the rust image of the file's release, by its index
+digest (`FROM rust:1.99.1-alpine@sha256:...`, amd64 and arm64 alike), and
+keep the file: the image's own toolchain is the one it names, so rustup
+takes it and adds only the wasm32 target, in a layer of its own --
+`rustup toolchain install --no-self-update --profile minimal` after
+`COPY rust-toolchain.toml` and before the sources. That is 99 MB of the
+build stage and none of the image, which is `scratch` and the binary; added
+at the build's first cargo call instead, it was downloaded again at every
+build whose sources changed, and without the minimal profile a release the
+image lacks would bring its docs, clippy and rustfmt. Every other FROM of
+the two images (`Dockerfile`, `deploy/Dockerfile`) names a digest too, the
+tag beside it saying which (`alpine:3.24.4`, `python:3.13.18-slim-trixie`),
+so a tag moved under it changes no build; what `apk` and `apt-get` install
+is still that day's. The Kotlin harnesses' containers
+(`integrations/kotlin/run-tests.sh`, `examples/kotlin-android/run-smoke.sh`)
+run the rust image of the same release, by digest, and take its own
+toolchain by name (`RUSTUP_TOOLCHAIN`): it is the file's release, and under
+the file rustup added the wasm32 target at every run.
+
+`tools/toolchain_check.py`, in CI's fmt job, holds all of it: the channel
+is X.Y.Z -- not `stable`, `beta`, a nightly, nor X.Y, which follows its
+newest patch; every rust image a Dockerfile or a script names (a shell
+script, a Makefile, a workflow, a Python script, outside comments) is
+`rust:X.Y.Z-...@sha256:...` of that release; no Dockerfile removes the file
+or sets `RUSTUP_TOOLCHAIN`; every FROM of the two images names a digest,
+but `scratch` and a stage of the file's own. `release.yml`'s `binaries` job
+holds each entry's `rustc -V` to the file's release and, on Linux, to the
+`rustc -V` that resolves in the Dockerfile's rust image over the tag's tree,
+as the image job's build stage resolves it: a difference stops the release
+before its draft, whose notes open with the compiler. The size job's summary
+names the compiler each side was built by (`size_report.py`, the base by its
+own toolchain file), and `site/build.py` names the one beside the sizes it
+holds.
+
+A bump is deliberate, not each stable release: a release taken for what it
+brings, in a pull request of its own that carries in its body `make
+wasm-sizes`, the size report, `make instr-compare` and `make float-test`
+([RELEASING.md](../../RELEASING.md#a-toolchain-bump) lists how). What a
+compiler can move here is what fennec-core does for itself: it writes and
+reads numbers with its own code (`num.rs`, `json.rs`), held to the standard
+library's `{}` by three `#[ignore]`d tests over every `f32`, 10^8 random
+`f64`s and every `f32` read back through an `f64` -- minutes of every core,
+too long for every pull request: `float-tests.yml` runs them weekly, by
+hand, and on a pull request changing `rust-toolchain.toml`, `num.rs` or
+`json.rs`, so a bump's own pull request runs them. Its case fold and
+Unicode tables are held to the standard library's by plain tests, which a
+bump meets in its own CI.
+
+Rejected: following `stable` and fixing what a release breaks once it has
+landed -- main went red on every pull request with no change, and a
+release could ship a compiler no CI run of its commit used; setting
+`RUSTUP_TOOLCHAIN` in a Dockerfile to the image's own toolchain, which
+leaves the file out of the image's build and two places naming the release
+with nothing holding them alike; `X.Y`, which rustup follows to its newest
+patch, moving as `stable` does if less often; a nightly, which only a
+scheduled or sanitizer job takes, pinned to a date.

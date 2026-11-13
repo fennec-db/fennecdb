@@ -15,13 +15,17 @@ release:
   until the pin, when the channel was `stable` and no pin was lost;
 - every FROM of the two images whose binaries ship or run the regions'
   checks (PINNED) names a digest -- but `scratch`, which is no image, and
-  a stage of the file's own -- so a tag moved under it changes no build.
+  a stage of the file's own -- so a tag moved under it changes no build;
+- every script that runs a rust image -- a shell script, a Makefile, a
+  workflow, a Python script -- names it so too, outside its comments: the
+  Kotlin harnesses' `docker run` built with the image's newest 1.x.
 
     python3 tools/toolchain_check.py            # exit 1, naming each difference
     python3 tools/toolchain_check.py --release  # the release, for scripts
 
 A bump changes rust-toolchain.toml and every rust image's tag and digest in
-one pull request (docker buildx imagetools inspect rust:X.Y.Z-alpine)."""
+one pull request (docker buildx imagetools inspect rust:X.Y.Z-alpine, and
+-slim-bookworm for the Kotlin harnesses): docs/design/crates.md#toolchain."""
 
 import pathlib
 import re
@@ -40,6 +44,15 @@ DIGEST = re.compile(r"@sha256:[0-9a-f]{64}")
 FROM = re.compile(r"^\s*FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+(\S+))?\s*(?:#.*)?$", re.I)
 # Docker Hub's official image under each name a FROM may give it.
 RUST = {"rust", "library/rust", "docker.io/library/rust", "index.docker.io/library/rust"}
+# A rust image a script names: not part of a longer word or path (`--rust:`
+# is a CSS variable, `trust:` a word), a tag right after the colon (`rust:
+# ok` is a line a program prints).
+RUST_REF = re.compile(r"(?<![\w./-])(?:(?:index\.)?(?:docker\.io/)?library/)?rust:([0-9A-Za-z][\w.-]*)"
+                      r"(@sha256:[0-9a-f]{64})?")
+# What runs an image, beside the Dockerfiles; the check and its tests name
+# images that are refused on purpose.
+SCRIPTS = (".sh", ".py", ".ps1", ".mk", ".yml", ".yaml")
+OWN = {"tools/toolchain_check.py", "tools/test_toolchain_check.py"}
 
 
 def release(text):
@@ -102,16 +115,42 @@ def problems(path, text, want, pinned):
     return out
 
 
-def dockerfiles():
-    """Every Dockerfile in the repository: git's list, or PINNED without one."""
+def script_problems(path, text, want):
+    """Each rust image script `path` names, outside its comments, that is
+    not release `want` by digest."""
+    out = []
+    for n, line in enumerate(text.splitlines(), 1):
+        if line.lstrip().startswith("#"):
+            continue
+        for m in RUST_REF.finditer(line):
+            if m.group(1).split("-", 1)[0] != want or not m.group(2):
+                out.append(f"{path}:{n}: {m.group(0)}: rust-toolchain.toml names {want}, so the "
+                           f"image is rust:{want}-...@sha256:<digest> (docker buildx imagetools "
+                           f"inspect rust:{want}-<variant>)")
+    return out
+
+
+def listed():
+    """The repository's files, by git; none without it."""
     try:
-        listed = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-z"], check=True,
-                                capture_output=True, text=True).stdout.split("\0")
+        out = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-z"], check=True,
+                             capture_output=True, text=True).stdout
     except (OSError, subprocess.CalledProcessError):
-        return list(PINNED)
-    names = [p for p in listed if p and re.fullmatch(
+        return []
+    return [p for p in out.split("\0") if p]
+
+
+def dockerfiles():
+    """Every Dockerfile in the repository: git's list, and PINNED without one."""
+    names = [p for p in listed() if re.fullmatch(
         r"(?:.*\.)?(?:Dockerfile|Containerfile)(?:\..*)?", p.rsplit("/", 1)[-1])]
     return sorted(set(names) | set(PINNED))
+
+
+def scripts():
+    """Every file in the repository that may run an image, but the check's own."""
+    return sorted(p for p in listed() if p not in OWN and (
+        p.endswith(SCRIPTS) or p.rsplit("/", 1)[-1] in ("Makefile", "GNUmakefile")))
 
 
 def main(argv):
@@ -129,9 +168,15 @@ def main(argv):
     for path in dockerfiles():
         text = (ROOT / path).read_text()
         found += problems(path, text, want, path in PINNED)
+    for path in scripts():
+        try:
+            text = (ROOT / path).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        found += script_problems(path, text, want)
     if found:
         sys.exit("\n".join(found))
-    print(f"ok  rust-toolchain.toml: {want}, and every image's rust {want}, by digest")
+    print(f"ok  rust-toolchain.toml: {want}, and every image's and script's rust {want}, by digest")
 
 
 if __name__ == "__main__":
