@@ -31,6 +31,12 @@ on:
       minutes:
         description: 'Minutes of faults a seed'
         default: '10'
+  # TEMPORARY, removed in the next commit: GitHub dispatches only a workflow
+  # on the default branch, so the review's run is this push's, 3 seeds of 3
+  # minutes.
+  push:
+    branches: [v1-t9-chaos]
+    paths: ['.github/workflows/chaos.yml']
 
 permissions:
   contents: read
@@ -73,8 +79,8 @@ jobs:
       matrix:
         share: [1, 2, 3]
     env:
-      SEEDS_ALL: ${{ inputs.seeds || '50' }}
-      CHAOS_MINUTES: ${{ inputs.minutes || '10' }}
+      SEEDS_ALL: ${{ inputs.seeds || (github.event_name == 'push' && '3') || '50' }}
+      CHAOS_MINUTES: ${{ inputs.minutes || (github.event_name == 'push' && '3') || '10' }}
       # The kit's own lease. Three nodes at a CPU each, three routers at a
       # half and the driver at one are 5.5 CPUs of quota on a runner of 4:
       # a lease of 2 s, missed under that load, failed a node over that no
