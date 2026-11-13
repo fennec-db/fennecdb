@@ -238,6 +238,114 @@ fn an_f16_field_holds_65504_at_most() {
     assert_eq!(count(&db, "t"), 2);
 }
 
+/// A vector past sixteen components, as an embedding is: a `put` copies
+/// one it is given into the document with its test in the copy -- sixteen
+/// components at a time on aarch64 -- a literal's, a parameter's handed
+/// over as `f32`s or read from JSON, a document's in a page of them, and
+/// `set` and an upsert test one as they test every value. Each refuses a
+/// component no field holds at a block's ends and past the last block,
+/// naming it, and takes one whose top byte reaches the bound's though it is
+/// held -- 2^127 and past under `f32`, 2^15 and past under `f16` -- reading
+/// it back as it went in.
+#[test]
+fn a_wide_vector_is_held_wherever_a_write_takes_it() {
+    let mut db = db();
+    // 70: a turn of four blocks and six past them; 40: two blocks and eight.
+    run(
+        &mut db,
+        "create collection w (v vector<70>, h vector<40, f16>)",
+    )
+    .unwrap();
+    // Numbers an `f16` holds too, so either field reads them back as given.
+    let base = |n: usize| -> Vec<f32> { (0..n).map(|i| (i % 7) as f32 * 0.25 - 0.75).collect() };
+    // In, each number with its exponent -- FennecQL reads no integer past an
+    // `i64`, which JSON writes 2^127 as -- the one at `at` as `x` says. Out,
+    // as JSON writes them.
+    let digits_of = |v: &[f32], at: usize, x: &str| {
+        let mut d: Vec<String> = v.iter().map(|x| format!("{x:e}")).collect();
+        d[at] = x.to_string();
+        format!("[{}]", d.join(","))
+    };
+    let text = |v: &[f32]| fennec_core::json::to_string(&Value::Vector(v.to_vec()));
+    let writes = |db: &mut Database, f: &str, v: &[f32], digits: &str| {
+        let doc = format!("{{\"{f}\": {digits}}}");
+        [
+            run(db, &format!("put w {{{f}: {digits}}}")),
+            run(db, &format!("insert w {{{f}: {digits}}}")),
+            with(
+                db,
+                &format!("put w {{{f}: $1}}"),
+                &[Value::Vector(v.to_vec())],
+            ),
+            with_json(db, &format!("put w {{{f}: $1}}"), &format!("[{digits}]")),
+            with_json(db, "put w $1", &format!("[[{doc}]]")),
+            with(
+                db,
+                &format!("set w {{{f}: $1}} where id = 1"),
+                &[Value::Vector(v.to_vec())],
+            ),
+            with_json(
+                db,
+                &format!("put w {{id: 1}} if absent else set {{{f}: $1}}"),
+                &format!("[{digits}]"),
+            ),
+        ]
+    };
+    run(&mut db, "put w {id: 1}").unwrap();
+    for (f, n, range, past) in [("v", 70, RANGE, "1e39"), ("h", 40, HALF, "65520")] {
+        for at in [0, 15, 16, 31, 32, 63, 64, n - 1]
+            .into_iter()
+            .filter(|at| *at < n)
+        {
+            // Past what the field holds, as digits and as bits.
+            let mut v = base(n);
+            let digits = digits_of(&v, at, &format!("-{past}"));
+            v[at] = f32::NAN;
+            let says = format!("field `{f}`, element {at}: {range}");
+            for (way, r) in writes(&mut db, f, &v, &digits).into_iter().enumerate() {
+                refused(r, &says, &format!("{f}, {at}, way {way}"));
+            }
+            v[at] = f32::NEG_INFINITY;
+            let r = with(
+                &mut db,
+                &format!("put w {{{f}: $1}}"),
+                &[Value::Vector(v.clone())],
+            );
+            refused(r, &says, &format!("{f}, {at}, -inf"));
+            // Held, though its top byte reaches the bound's.
+            let big = match f {
+                "v" => [f32::from_bits(0x7f00_0000), -3e38],
+                _ => [32_768.0, -65_504.0],
+            };
+            for x in big {
+                let mut v = base(n);
+                v[at] = x;
+                let ways = writes(&mut db, f, &v, &digits_of(&v, at, &format!("{x:e}")));
+                assert!(ways.iter().all(|r| r.is_ok()), "{f}, {x} at {at}: {ways:?}");
+                let got = json(&db, &format!("get w select {f} where id = 1"));
+                assert_eq!(got, text(&v), "{f}, {x} at {at}");
+                let got = json(&db, &format!("get w select {f} order id desc limit 1"));
+                assert_eq!(got, text(&v), "{f}, {x} at {at}: the page's row");
+            }
+        }
+        // One of another length, which the copy leaves to `coerce`, is told
+        // its dimension as ever.
+        let short = base(n - 1);
+        let says = format!("vector dimension must be {n}, got {}", n - 1);
+        refused(
+            with(
+                &mut db,
+                &format!("put w {{{f}: $1}}"),
+                &[Value::Vector(short)],
+            ),
+            &says,
+            "short",
+        );
+    }
+    // Each way that took one wrote a row, `set` and the upsert row 1.
+    assert_eq!(count(&db, "w"), 1 + 2 * 8 * 5 + 2 * 6 * 5);
+}
+
 /// `near`'s and `rerank`'s query vector too: every distance from an
 /// infinity is an infinity or a `NaN`, which ranked the rows as their bits
 /// fell. Literal, parameter, JSON, pgvector's text, bits; with a filter,

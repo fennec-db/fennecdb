@@ -10565,6 +10565,11 @@ impl Database {
     fn document_of(schema: &Schema, members: &[(String, Value)]) -> Result<Document> {
         let mut doc = Document::default();
         for (k, v) in members {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(held) = held_member(schema, k, v) {
+                doc.set(k, held);
+                continue;
+            }
             doc_field(schema, &mut doc, k, v.clone())?;
         }
         doc_done(schema, doc)
@@ -15770,7 +15775,31 @@ fn build_docs(
     for pairs in docs {
         let mut doc = Document::default();
         for (k, e) in pairs {
-            doc_field(schema, &mut doc, k, eval(e, &mut NoRow, ctx)?)?;
+            // A literal's or a parameter's value read where it is, as `eval`
+            // reads it, without its call: a vector a vector field takes is
+            // copied into the document with its test in the copy
+            // (`held_member`), where `eval` cloned it and `coerce` read it
+            // again. Natively: the browser module keeps the one way.
+            #[cfg(not(target_arch = "wasm32"))]
+            let given = match e {
+                Expr::Lit(v) => Some(v),
+                Expr::Param(i) => ctx.params.get(*i),
+                _ => None,
+            };
+            #[cfg(not(target_arch = "wasm32"))]
+            let v = match given {
+                Some(v) => match held_member(schema, k, v) {
+                    Some(held) => {
+                        doc.set(k, held);
+                        continue;
+                    }
+                    None => v.clone(),
+                },
+                None => eval(e, &mut NoRow, ctx)?,
+            };
+            #[cfg(target_arch = "wasm32")]
+            let v = eval(e, &mut NoRow, ctx)?;
+            doc_field(schema, &mut doc, k, v)?;
         }
         built.push(doc_done(schema, doc)?);
     }
@@ -15782,6 +15811,30 @@ fn build_docs(
         }
     }
     Ok(())
+}
+
+/// The value `set_field` makes of `v` for the field `k`, where `v` is a
+/// vector a vector field of its length takes and each of its components is
+/// one the field holds: copied, its components tested in the copy
+/// (`value::held_copy`). On aarch64 a 768-dim vector's copy and test so are
+/// 425 instructions, where the clone's `memmove` alone was 590
+/// (docs/design/crates.md#limits, *What it costs*). `None` for any other --
+/// another kind of value, a field of another type or length, `id` and a
+/// path (no field is named either), a component the field does not hold --
+/// which `set_field` makes, or refuses naming the element, as it makes
+/// every value.
+#[cfg(not(target_arch = "wasm32"))]
+#[inline]
+fn held_member(schema: &Schema, k: &str, v: &Value) -> Option<Value> {
+    let Value::Vector(src) = v else {
+        return None;
+    };
+    match schema.field(k)?.ty {
+        DataType::Vector(dim, prec) if dim == src.len() => {
+            crate::value::held_copy(src, prec).map(Value::Vector)
+        }
+        _ => None,
+    }
 }
 
 /// A document being put with every field it was not given `null`, or

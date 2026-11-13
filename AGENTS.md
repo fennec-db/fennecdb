@@ -123,8 +123,9 @@ to a 32-bit `usize`; a list's elements too, each read as written and
 refused naming the field and the element. A vector's component is a
 number its field holds -- no `NaN`, no infinity (`1e39`'s `f32`), none an
 `f16` rounds past 65 504 -- refused naming the field or the query and the
-element wherever a write or `near` takes one (`value::held`), never
-stored to go out as `null`; what a file holds is read as it is.
+element wherever a write or `near` takes one (`value::held`, a `put` in
+its copy into the document, `held_copy`), never stored to go out as
+`null`; what a file holds is read as it is.
 
 **[Profiles differ on purpose.](docs/design/crates.md#profiles)**
 `fennec-cli` takes `cli` (`panic = abort`), `fennec-server` `release`: a

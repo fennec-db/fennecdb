@@ -146,16 +146,196 @@ pub fn quick_vector(items: &[Value]) -> Option<Vec<f32>> {
 /// small for an `f32` is the nearest one, 0 at or under half the smallest
 /// subnormal, as pgvector's `strtof` reads it.
 ///
-/// One pass, no branch a component: the bits under the sign order as the
-/// magnitudes do, a `NaN`'s above an infinity's, so taken from the bound's
-/// bits less one they borrow into the top bit exactly where they reach it,
-/// and the pass ORs them. Natively LLVM makes the loop four lanes at a time:
-/// 801 instructions a 768-dim vector on aarch64, by lldb's count, 2.6% of a
-/// write of one handed over as `f32`s (docs/design/crates.md#limits). The
-/// browser module, built for size, vectorises nothing on its own, and there
-/// the lanes are written out, as `vector::simd` writes the distances.
+/// One pass, no branch a component, and on aarch64 a pass over the
+/// components' top bytes ([`tops`]), the exact one ([`each_held`]) over the
+/// few past the last sixteen, or over the whole where a top byte reaches
+/// the bound's: a 768-dim vector's test is some 250 instructions by lldb's
+/// count -- 249 in `check_dim`, 243 in `near` -- where the exact pass alone
+/// was 801 (docs/design/crates.md#limits, *What it costs*). A vector a
+/// `put` is given is tested in its copy into the document ([`held_copy`]).
 #[inline]
 pub fn held(v: &[f32], prec: VecPrec) -> bool {
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_endian = "little"
+    ))]
+    {
+        let (blocks, rest) = v.as_chunks::<16>();
+        // SAFETY: the build has NEON, which is all `tops::reach` requires.
+        if !unsafe { tops::reach(blocks, prec) } {
+            return each_held(rest, prec);
+        }
+    }
+    each_held(v, prec)
+}
+
+/// `src` copied where every component is one a vector stored as `prec`
+/// holds ([`held`]), `None` where one is not: how a `put` copies a vector
+/// it is given into the document (`engine::held_member`), where the copy
+/// was a clone and the test a pass of its own after it. On aarch64 the copy
+/// is the test's pass ([`tops::copy_reach`]): a 768-dim vector's copy and
+/// test are 425 instructions, where the clone's `memmove` alone was 590
+/// and the test 249 more. Elsewhere the test, then the copy.
+pub fn held_copy(src: &[f32], prec: VecPrec) -> Option<Vec<f32>> {
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_endian = "little"
+    ))]
+    {
+        let mut out = Vec::with_capacity(src.len());
+        let (blocks, rest) = src.as_chunks::<16>();
+        let (into, past) = out.spare_capacity_mut()[..src.len()].as_chunks_mut::<16>();
+        // SAFETY: the build has NEON, which is all `tops::copy_reach` requires.
+        let reach = unsafe { tops::copy_reach(blocks, into, prec) };
+        for (o, x) in past.iter_mut().zip(rest) {
+            o.write(*x);
+        }
+        // SAFETY: every place up to `src.len()` was written, sixteen at a
+        // time by `copy_reach` and the rest above, and an `f32` is any bits.
+        unsafe { out.set_len(src.len()) };
+        let held = match reach {
+            false => each_held(rest, prec),
+            true => each_held(&out, prec),
+        };
+        held.then_some(out)
+    }
+    #[cfg(not(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_endian = "little"
+    )))]
+    {
+        held(src, prec).then(|| src.to_vec())
+    }
+}
+
+/// The components' top bytes, on aarch64: whether one reaches the bound's,
+/// so that [`each_held`] must say whether its component is held -- one of
+/// an `f32` from 2^127 (1.7e38), every infinity and `NaN` among them, or
+/// under `f16` from 2^15. A top byte is the sign and the top seven bits of
+/// the exponent, sixteen components' to a register, and two maxima take
+/// them, where the exact pass, four components to a register, takes
+/// sixteen instructions for sixteen. A test holds both to the exact pass:
+/// `held_and_its_copy_answer_as_each_component_does`.
+#[cfg(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_endian = "little"
+))]
+mod tops {
+    use super::VecPrec;
+    use core::arch::aarch64::*;
+    use std::mem::MaybeUninit;
+
+    /// Whether a top byte of `blocks` reaches the bound's: a
+    /// de-interleaving load puts a block's top bytes in a register, four
+    /// blocks a turn -- 18 instructions, where a block a turn took 20 for
+    /// four, two of each five its count and branch.
+    #[target_feature(enable = "neon")]
+    pub(super) fn reach(blocks: &[[f32; 16]], prec: VecPrec) -> bool {
+        // SAFETY: sixteen `f32`s are the 64 bytes `vld4q_u8` reads, at any
+        // alignment; its fourth register holds byte 3 of each, the top.
+        let tops = |b: &[f32; 16]| unsafe { vld4q_u8(b.as_ptr().cast::<u8>()) }.3;
+        let (fours, rest) = blocks.as_chunks::<4>();
+        let mut most = Most::new();
+        for [a, b, c, d] in fours {
+            most.four(tops(a), tops(b), tops(c), tops(d));
+        }
+        for b in rest {
+            most.one(tops(b));
+        }
+        most.reach(prec)
+    }
+
+    /// [`reach`], `blocks` copied into `into` in the same pass: a block
+    /// loaded and stored as it is, and its top bytes gathered by one table
+    /// lookup over its four registers -- 31 instructions for four blocks.
+    /// Loaded de-interleaved and stored so, LLVM made the pair a plain copy
+    /// and gathered the top bytes in three shuffles a block: 40.
+    #[target_feature(enable = "neon")]
+    pub(super) fn copy_reach(
+        blocks: &[[f32; 16]],
+        into: &mut [[MaybeUninit<f32>; 16]],
+        prec: VecPrec,
+    ) -> bool {
+        // Byte 3 of each `f32`, the top, of the 64 bytes.
+        let at: [u8; 16] = std::array::from_fn(|i| 4 * i as u8 + 3);
+        // SAFETY: the array is the 16 bytes `vld1q_u8` reads.
+        let at = unsafe { vld1q_u8(at.as_ptr()) };
+        // SAFETY: sixteen `f32`s are the 64 bytes `vld1q_u8_x4` reads and
+        // `vst1q_u8_x4` writes, at any alignment, stored as they came into
+        // sixteen places of an `f32`.
+        let copy = |b: &[f32; 16], o: &mut [MaybeUninit<f32>; 16]| unsafe {
+            let x = vld1q_u8_x4(b.as_ptr().cast::<u8>());
+            vst1q_u8_x4(o.as_mut_ptr().cast::<u8>(), x);
+            vqtbl4q_u8(x, at)
+        };
+        let (fours, rest) = blocks.as_chunks::<4>();
+        let (into_fours, into_rest) = into.as_chunks_mut::<4>();
+        let mut most = Most::new();
+        for ([a, b, c, d], [p, q, r, s]) in fours.iter().zip(into_fours) {
+            most.four(copy(a, p), copy(b, q), copy(c, r), copy(d, s));
+        }
+        for (b, o) in rest.iter().zip(into_rest) {
+            most.one(copy(b, o));
+        }
+        most.reach(prec)
+    }
+
+    /// The largest top byte of a positive component and of a negative one:
+    /// a negative's is under 0 as an `i8`, and a positive's under `0x80`,
+    /// so each maximum sees one sign's.
+    struct Most(int8x16_t, uint8x16_t);
+
+    impl Most {
+        #[target_feature(enable = "neon")]
+        #[inline]
+        fn new() -> Most {
+            Most(vdupq_n_s8(0), vdupq_n_u8(0))
+        }
+
+        #[target_feature(enable = "neon")]
+        #[inline]
+        fn four(&mut self, a: uint8x16_t, b: uint8x16_t, c: uint8x16_t, d: uint8x16_t) {
+            let s = vreinterpretq_s8_u8;
+            let pos = vmaxq_s8(vmaxq_s8(s(a), s(b)), vmaxq_s8(s(c), s(d)));
+            self.0 = vmaxq_s8(self.0, pos);
+            self.1 = vmaxq_u8(self.1, vmaxq_u8(vmaxq_u8(a, b), vmaxq_u8(c, d)));
+        }
+
+        #[target_feature(enable = "neon")]
+        #[inline]
+        fn one(&mut self, t: uint8x16_t) {
+            self.0 = vmaxq_s8(self.0, vreinterpretq_s8_u8(t));
+            self.1 = vmaxq_u8(self.1, t);
+        }
+
+        /// Whether a top byte reached the bound's: `0x7f` (an exponent of
+        /// 254 or 255) under `f32`, `0x47` (142 or 143) under `f16`, whose
+        /// bound 65 520 is 2^15 and some.
+        #[target_feature(enable = "neon")]
+        #[inline]
+        fn reach(&self, prec: VecPrec) -> bool {
+            let top: u8 = match prec {
+                VecPrec::F32 => 0x7f,
+                VecPrec::F16 => 0x47,
+            };
+            vmaxvq_s8(self.0) >= top as i8 || vmaxvq_u8(self.1) >= top | 0x80
+        }
+    }
+}
+
+/// [`held`] by each component's bits: those under the sign order as the
+/// magnitudes do, a `NaN`'s above an infinity's, so taken from the bound's
+/// bits less one they borrow into the top bit exactly where they reach it,
+/// and the pass ORs them. LLVM makes the loop four lanes at a time, 801
+/// instructions a 768-dim vector on aarch64. The browser module, built for
+/// size, vectorises nothing on its own, and there the lanes are written
+/// out, as `vector::simd` writes the distances.
+#[inline]
+fn each_held(v: &[f32], prec: VecPrec) -> bool {
     let below = match prec {
         VecPrec::F32 => f32::INFINITY.to_bits() - 1,
         VecPrec::F16 => 65_520f32.to_bits() - 1,
@@ -194,7 +374,7 @@ pub fn held(v: &[f32], prec: VecPrec) -> bool {
 pub fn unheld(v: &[f32], prec: VecPrec) -> Error {
     let i = v
         .iter()
-        .position(|x| !held(std::slice::from_ref(x), prec))
+        .position(|x| !each_held(std::slice::from_ref(x), prec))
         .unwrap_or(0);
     at_element(i, Error::Type(component(prec).into()))
 }
@@ -1626,5 +1806,68 @@ mod tests {
             }
         }
         assert!(held(&[], VecPrec::F32) && held(&[], VecPrec::F16));
+    }
+
+    /// Past sixteen components aarch64 tests their top bytes first, sixteen
+    /// at a time, four blocks a turn, and the exact pass decides where one
+    /// reaches the bound's: `held` and `held_copy` answer as each component
+    /// does, alone -- a number each side of each bound, a held one whose top
+    /// byte reaches it (2^127 and 2^15 and past), a `NaN` and an infinity of
+    /// either sign -- at every place of every length past a turn and a
+    /// block, and of longer ones at each block's ends and past the last
+    /// block; and the copy is the vector to the bit.
+    #[test]
+    fn held_and_its_copy_answer_as_each_component_does() {
+        use crate::codec::{f16_from_f32, f32_from_f16};
+        let alone = |x: f32, prec| match prec {
+            VecPrec::F32 => x.is_finite(),
+            VecPrec::F16 => f32_from_f16(f16_from_f32(x)).is_finite(),
+        };
+        let under = |x: f32| f32::from_bits(x.to_bits() - 1);
+        let probes = [
+            f32::NAN,
+            f32::from_bits(0xffc0_0001),
+            f32::INFINITY,
+            f32::MAX,
+            f32::from_bits(0x7f00_0000), // 2^127: its top byte is 0x7f
+            under(f32::from_bits(0x7f00_0000)),
+            65_520.0,
+            under(65_520.0),
+            65_504.0,
+            32_768.0, // 2^15: its top byte is 0x47
+            under(32_768.0),
+            f32::from_bits(1),
+            -0.0,
+        ];
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        for n in (0..=70).chain([79, 127, 128, 129, 255, 256, 257, 335]) {
+            let places: Vec<usize> = match n <= 70 {
+                true => (0..n).collect(),
+                false => (0..n)
+                    .filter(|i| i % 16 == 0 || i % 16 == 15 || *i >= n / 16 * 16)
+                    .collect(),
+            };
+            let base: Vec<f32> = (0..n).map(|i| (i as f32 * 0.37).sin() * 3.0).collect();
+            for prec in [VecPrec::F32, VecPrec::F16] {
+                assert!(held(&base, prec), "{n}");
+                assert_eq!(held_copy(&base, prec).map(|v| bits(&v)), Some(bits(&base)));
+                for &at in &places {
+                    for probe in probes {
+                        for x in [probe, -probe] {
+                            let mut v = base.clone();
+                            v[at] = x;
+                            let want = alone(x, prec);
+                            assert_eq!(held(&v, prec), want, "{x:e} at {at} of {n}, {prec:?}");
+                            let copy = held_copy(&v, prec).map(|c| bits(&c));
+                            assert_eq!(copy, want.then(|| bits(&v)), "{x:e} at {at} of {n}");
+                            if !want {
+                                let said = unheld(&v, prec).to_string();
+                                assert!(said.contains(&format!("element {at}: ")), "{said}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
