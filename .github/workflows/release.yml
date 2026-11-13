@@ -250,6 +250,10 @@ jobs:
             echo "::error::run $run kept no FennecFFIDynamic.xcframework.zip"
             exit 1
           }
+          unzip -l dist/FennecFFIDynamic.xcframework.zip | grep -q '/libfennec_ffi\.dylib$' || {
+            echo "::error::run $run's FennecFFIDynamic.xcframework.zip holds no libfennec_ffi.dylib (the Flutter plugin's macOS library)"
+            exit 1
+          }
 
       - uses: actions/upload-artifact@v7
         with:

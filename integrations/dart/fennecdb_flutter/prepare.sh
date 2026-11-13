@@ -10,7 +10,9 @@
 # from what integrations/swift/build-xcframework.sh --dynamic made (the
 # XCFramework and the dylib beside it, a release's
 # FennecFFIDynamic.xcframework.zip) and integrations/kotlin/build-aar.sh.
-# Whichever of them is built is copied; a release builds both first.
+# The XCFramework and the dylib are both required (a release's zip holds
+# both): one missing is an error naming it, never a plugin without it. The
+# jniLibs are copied when built.
 #
 # pub keeps no symbolic link -- it packs what one points at -- and every
 # file here goes to pub.dev: a platform given another's slices, or a
@@ -23,7 +25,9 @@ ROOT=$(cd "$HERE/../../.." && pwd)
 DYN="$ROOT/integrations/swift/build/dynamic"
 JNI="$ROOT/integrations/kotlin/android/build/jniLibs"
 
-if [ -d "$DYN/FennecFFI.xcframework" ]; then
+[ -d "$DYN/FennecFFI.xcframework" ] || { echo "prepare.sh: $DYN/FennecFFI.xcframework is missing" >&2; exit 1; }
+[ -f "$DYN/libfennec_ffi.dylib" ] || { echo "prepare.sh: $DYN/libfennec_ffi.dylib is missing" >&2; exit 1; }
+if true; then
   src="$DYN/FennecFFI.xcframework"
   dst="$HERE/ios/Frameworks/FennecFFI.xcframework"
   rm -rf "$HERE/ios/Frameworks"
@@ -39,13 +43,16 @@ if [ -d "$DYN/FennecFFI.xcframework" ]; then
   ' "$src/Info.plist" > "$dst/Info.plist"
   ids=$(sed -n '/<key>LibraryIdentifier<\/key>/{n;s/.*<string>\(.*\)<\/string>.*/\1/p;}' "$dst/Info.plist")
   for id in $ids; do cp -R "$src/$id" "$dst/"; done
-  if [ -n "$ids" ]; then
-    echo "FennecFFI.xcframework -> ios/Frameworks: $(echo "$ids" | tr '\n' ' ')"
-  else
-    rm -rf "$HERE/ios/Frameworks"
+  if [ -z "$ids" ]; then
+    echo "prepare.sh: $src/Info.plist names no iOS slice" >&2
+    exit 1
   fi
+  for id in $ids; do
+    [ -d "$dst/$id" ] || { echo "prepare.sh: slice $src/$id is missing" >&2; exit 1; }
+  done
+  echo "FennecFFI.xcframework -> ios/Frameworks: $(echo "$ids" | tr '\n' ' ')"
 fi
-if [ -f "$DYN/libfennec_ffi.dylib" ]; then
+if true; then
   rm -rf "$HERE/macos/Libraries"
   mkdir -p "$HERE/macos/Libraries"
   cp "$DYN/libfennec_ffi.dylib" "$HERE/macos/Libraries/"

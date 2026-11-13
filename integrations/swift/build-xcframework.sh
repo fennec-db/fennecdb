@@ -59,6 +59,9 @@ VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)
 # aarch64-apple-darwin builds for; an app built for it asked for 11, where
 # the objects said 12.
 export IPHONEOS_DEPLOYMENT_TARGET=15.0 MACOSX_DEPLOYMENT_TARGET=11.0
+# A stale target/ keeps objects built for 12.0, which cargo does not rebuild
+# when only this variable changes: the library's own objects go first.
+"$CARGO" clean -p fennec-ffi
 
 macos_only=false
 zip=false
