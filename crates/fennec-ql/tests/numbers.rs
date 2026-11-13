@@ -310,3 +310,88 @@ fn a_field_made_out_of_range_before_is_named_at_any_alter() {
         run(&mut db, "alter collection b rename field n to m").unwrap();
     }
 }
+
+/// A float literal past a float's range is refused naming it, where it is
+/// and the range, wherever FennecQL holds one -- a filter, a document's
+/// field, a list or a vector read at once, `near`, pgvector's text of a
+/// vector -- where it read as an infinity (written back as `null`) or 0.
+/// The largest and smallest
+/// `f64`s read as themselves, and a file holding an infinity opens and
+/// answers as it did.
+#[test]
+fn a_float_past_its_range_is_refused_naming_it() {
+    let large = "is past a float's range: a float is at most 1.7976931348623157e308 either \
+                 side of 0";
+    let small = "is past a float's range: a float is 0 or at least 5e-324 either side of 0";
+    for (sql, says) in [
+        (
+            "get t where x < 1e400",
+            format!("position 16: number `1e400` {large}"),
+        ),
+        (
+            "get t where x > -1e-400",
+            format!("position 16: number `-1e-400` {small}"),
+        ),
+        (
+            "put t {x: 2.5E+999}",
+            format!("position 10: number `2.5E+999` {large}"),
+        ),
+        (
+            "put t {v: [0.5, 1e-999]}",
+            format!("position 16: number `1e-999` {small}"),
+        ),
+        (
+            "get t near v [1, -1.8e308] limit 1",
+            format!("position 17: number `-1.8e308` {large}"),
+        ),
+        (
+            "get t where x in [1, 1_0e400]",
+            format!("position 21: number `10e400` {large}"),
+        ),
+        // pgvector's text of a vector, read where the SQL is.
+        (
+            "SELECT id FROM t ORDER BY v <#> '[1, 1e400]' LIMIT 2",
+            format!("number `1e400` {large}"),
+        ),
+    ] {
+        let e = refused(sql);
+        assert!(e.contains(&says), "{sql}: {e}");
+        let e = fennec_ql::parse_exact(sql).expect_err(sql).to_string();
+        assert!(e.contains(&says), "{sql}: {e}");
+    }
+    let mut db = Database::new();
+    run(&mut db, "create collection t (x float)").unwrap();
+    run(
+        &mut db,
+        "put t [{id: 1, x: 1.7976931348623157e308}, {id: 2, x: -5e-324}, {id: 3, x: 0e-999}]",
+    )
+    .unwrap();
+    // An infinity a file holds -- one `1e400` was read as before, or one a
+    // Rust caller put -- opens and is found, read back as JSON's `null`.
+    db.execute_with(
+        &parse_one("put t {id: 4, x: $1}").unwrap(),
+        &[Value::Float(f64::INFINITY)],
+    )
+    .unwrap();
+    let db = {
+        let mut opened = Database::new();
+        opened.load(&db.snapshot()).expect("it opens");
+        opened
+    };
+    let mut out = String::new();
+    let get = parse_one("get t select id, x where x >= 1.7976931348623157e308 or id = 2").unwrap();
+    db.query_json(&get, &[], &mut out).unwrap();
+    // Every digit, as JSON writes a float: the largest's 309 and the
+    // smallest's 324 places.
+    assert!(
+        out.contains(r#"{"id":1,"x":179769313486231570000"#),
+        "{out}"
+    );
+    assert!(
+        out.contains(r#"{"id":2,"x":-0.00000000000000000000"#),
+        "{out}"
+    );
+    assert!(out.contains(r#"{"id":4,"x":null}"#), "{out}");
+    let back = fennec_core::json::parse(&out).unwrap();
+    assert!(format!("{back:?}").contains("Float(-5e-324)"), "{back:?}");
+}

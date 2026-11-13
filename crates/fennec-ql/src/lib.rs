@@ -56,8 +56,25 @@ fn one_definition(stmt: Statement) -> Result<fennec_core::named::Definition> {
 /// read it as the vector it was (`value::compared_vector`), and the digest stays
 /// the one every definition stored before holds. A text with no `[` reads
 /// alike both ways, and is read once.
+///
+/// A number past a float's range, which every other reading refuses, reads
+/// here as it read before it was refused -- `1e400` an infinity, `1e-400`
+/// 0 (`lexer::float_token`) -- so a definition stored then reads to the
+/// tree its digest was taken of, under the grammar epoch it was stored
+/// with, rather than being marked broken; a new one holding one is refused
+/// at its `create statement`.
 #[cfg(feature = "statements")]
 pub fn stored_definition(text: &str) -> Result<(u64, fennec_core::named::Definition)> {
+    /// Set back as the reading ends, a panic's unwinding too: the thread's
+    /// next text is read afresh.
+    struct Reading;
+    impl Drop for Reading {
+        fn drop(&mut self) {
+            STORED.with(|s| s.set(false));
+        }
+    }
+    STORED.with(|s| s.set(true));
+    let _reading = Reading;
     let quick = definition(text)?;
     let digest = quick.digest()?;
     if !text.contains('[') {
@@ -68,6 +85,14 @@ pub fn stored_definition(text: &str) -> Result<(u64, fennec_core::named::Definit
         1 => Ok((digest, one_definition(read.remove(0))?)),
         _ => Ok((digest, quick)),
     }
+}
+
+#[cfg(feature = "statements")]
+thread_local! {
+    /// Whether this thread is reading a stored definition's text
+    /// ([`stored_definition`]), which reads a number past a float's range as
+    /// it read before one was refused.
+    pub(crate) static STORED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Installs [`stored_definition`] as the process's reader of stored named

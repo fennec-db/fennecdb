@@ -705,27 +705,29 @@ fn parse_value_at(s: &str, i: &mut usize, depth: usize) -> Result<Value> {
         b'{' => Value::object(parse_members(s, i, "", &[], depth + 1, Places::default())?)
             .map_err(|e| Error::Query(e.to_string())),
         b'-' | b'0'..=b'9' => {
+            let at = *i;
             let (text, is_float) = number_at(s, i);
-            if is_float {
-                crate::num::parse_f64(text)
-                    .map(Value::Float)
-                    .ok_or_else(|| Error::Query(format!("invalid number `{text}`")))
-            } else {
-                // A whole number past an `i64` is the `f64` it says, as the
-                // writer writes a float that large without an exponent:
-                // refused, `1e300` written out did not read back.
-                match crate::num::parse_i64(text) {
-                    Some(n) => {
-                        #[cfg(target_arch = "wasm32")]
-                        if n.unsigned_abs() > 1 << 53 {
-                            wide::met();
-                        }
-                        Ok(Value::Int(n))
+            // A whole number past an `i64` is the `f64` it says, as the
+            // writer writes a float that large without an exponent:
+            // refused, `1e300` written out did not read back.
+            let whole = match is_float {
+                true => None,
+                false => crate::num::parse_i64(text),
+            };
+            match whole {
+                Some(n) => {
+                    #[cfg(target_arch = "wasm32")]
+                    if n.unsigned_abs() > 1 << 53 {
+                        wide::met();
                     }
-                    None => crate::num::parse_f64(text)
-                        .map(Value::Float)
-                        .ok_or_else(|| Error::Query(format!("invalid number `{text}`"))),
+                    Ok(Value::Int(n))
                 }
+                // Inline, its refusal apart: a closure reading both ways was
+                // a call of its own, 20 instructions a document's number.
+                None => match crate::num::read_f64(text) {
+                    Ok(x) => Ok(Value::Float(x)),
+                    Err(why) => Err(unread(text, at, why)),
+                },
             }
         }
         _ => {
@@ -736,6 +738,18 @@ fn parse_value_at(s: &str, i: &mut usize, depth: usize) -> Result<Value> {
             Err(Error::Query(format!("unexpected JSON character `{other}`")))
         }
     }
+}
+
+/// The refusal of the number `text` at byte `at`: one past a float's range
+/// named with it and where it was, as an int past its range is -- read as
+/// an infinity, 1e400 went back out as `null`, and 1e-400 as 0.
+#[cold]
+#[inline(never)]
+fn unread(text: &str, at: usize, why: crate::num::Unread) -> Error {
+    Error::Query(match why.range() {
+        Some(range) => format!("number `{}` at byte {at} {range}", crate::num::shown(text)),
+        None => format!("invalid number `{text}`"),
+    })
 }
 
 /// The number at `i`, which starts with `-` or a digit: its text, and
@@ -1568,8 +1582,10 @@ mod tests {
             vectors += bits(&one).is_some() as u32;
             refused += one.is_err() as u32;
         }
-        // Both kinds were tried, many times over.
-        assert!(vectors > 30_000 && refused > 100, "{vectors} {refused}");
+        // Both kinds were tried, many times over: a number past a float's
+        // range among them -- a third of the exponents are of three digits
+        // -- is a refusal both ways, where it was an infinity or 0.
+        assert!(vectors > 25_000 && refused > 10_000, "{vectors} {refused}");
     }
 
     #[test]
@@ -1621,6 +1637,50 @@ mod tests {
         assert!(err("nul").contains("expected `null`"));
         assert!(err("1.2.3").contains("invalid number `1.2.3`"));
         assert!(err("[1] x").contains("trailing characters"));
+    }
+
+    /// A number past a float's range is refused wherever JSON holds one --
+    /// a value, a vector's component, a list's element, a document's
+    /// member, a parameter, a json field's object -- naming it, the byte it
+    /// starts at and the range, where it read as an infinity (written back
+    /// as `null`) or 0. The largest and smallest `f64`s read.
+    #[test]
+    fn a_number_past_a_float_s_range_is_refused_naming_it() {
+        let large = "is past a float's range: a float is at most 1.7976931348623157e308";
+        let small = "is past a float's range: a float is 0 or at least 5e-324";
+        let refused = |read: Result<()>, says: String| {
+            let e = read.expect_err(&says).to_string();
+            assert!(e.contains(&says), "{e}");
+        };
+        for (text, says) in [
+            ("1e400", format!("number `1e400` at byte 0 {large}")),
+            (
+                "[0.5, -1e400]",
+                format!("number `-1e400` at byte 6 {large}"),
+            ),
+            ("[1, 1e-400]", format!("number `1e-400` at byte 4 {small}")),
+        ] {
+            refused(parse(text).map(drop), says);
+        }
+        let nested = parse_json(r#"{"a": {"b": [1, 2e999]}}"#).map(drop);
+        refused(nested, format!("number `2e999` at byte 16 {large}"));
+        let documents = parse_documents_json(r#"[{"x": 1}, {"x": 9e-999}]"#, &[]).map(drop);
+        refused(documents, format!("number `9e-999` at byte 17 {small}"));
+        let params = parse_params("[1, [2.5, 1e309]]").map(drop);
+        refused(params, format!("number `1e309` at byte 10 {large}"));
+        // A whole number past an `i64` is the float it says, past the range
+        // too; one that long is named by its first 40 characters.
+        let whole = format!("1{}", "0".repeat(400));
+        let head = format!("number `1{}... (401 characters)` at byte 0", "0".repeat(39));
+        refused(parse(&whole).map(drop), format!("{head} {large}"));
+        assert_eq!(
+            parse_params("[1.7976931348623157e308, -5e-324, -0e999]").unwrap(),
+            [
+                Value::Float(f64::MAX),
+                Value::Float(-5e-324),
+                Value::Float(-0.0)
+            ]
+        );
     }
 
     #[test]

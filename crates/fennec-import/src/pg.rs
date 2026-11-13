@@ -307,13 +307,26 @@ pub(crate) fn parse_cell(raw: &[u8], kind: &Kind, column: &str) -> Result<Value>
         },
         Kind::Int => Value::Int(text(raw).trim().parse().map_err(|_| bad("an integer"))?),
         Kind::Float => {
-            // PostgreSQL can produce `NaN`, `Infinity` and `-Infinity`.
+            // PostgreSQL can produce `NaN`, `Infinity` and `-Infinity`, and a
+            // `numeric` a decimal past a float's range, 1e400, which is
+            // refused naming it, where it read as an infinity or 0.
             let s = text(raw);
             let v = match s.trim() {
                 "NaN" => f64::NAN,
                 "Infinity" => f64::INFINITY,
                 "-Infinity" => f64::NEG_INFINITY,
-                other => other.parse().map_err(|_| bad("a decimal"))?,
+                other => match fennec_core::num::read_f64(other) {
+                    Ok(x) => x,
+                    Err(why) => match why.range() {
+                        Some(range) => {
+                            let shown = fennec_core::num::shown(other);
+                            return Err(Error::Type(format!(
+                                "`{column}`: number `{shown}` {range}"
+                            )));
+                        }
+                        None => return Err(bad("a decimal")),
+                    },
+                },
             };
             Value::Float(v)
         }
@@ -963,6 +976,33 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("`score`"), "{e}");
+    }
+
+    /// A `numeric` holds decimals past a float's range, which a `float`
+    /// field refuses naming the column and the number, where they read as
+    /// an infinity or 0; PostgreSQL's own infinities and `NaN` are kept.
+    #[test]
+    fn a_decimal_past_a_float_s_range_is_refused_naming_the_column() {
+        let float = |raw: &str| parse_cell(raw.as_bytes(), &Kind::Float, "price");
+        let e = float("1e400").unwrap_err().to_string();
+        assert!(
+            e.contains("`price`: number `1e400` is past a float's range"),
+            "{e}"
+        );
+        let e = float("-0.1e-400").unwrap_err().to_string();
+        assert!(e.contains("a float is 0 or at least 5e-324"), "{e}");
+        let wide = format!("1{}", "0".repeat(400));
+        let e = float(&wide).unwrap_err().to_string();
+        assert!(e.contains("(401 characters)` is past"), "{e}");
+        assert_eq!(float("Infinity").unwrap(), Value::Float(f64::INFINITY));
+        assert!(matches!(float("NaN").unwrap(), Value::Float(f) if f.is_nan()));
+        assert_eq!(
+            float("1.7976931348623157e+308").unwrap(),
+            Value::Float(f64::MAX)
+        );
+        assert_eq!(float("-0").unwrap(), Value::Float(-0.0));
+        let e = float("1.2.3").unwrap_err().to_string();
+        assert!(e.contains("`price` expected a decimal"), "{e}");
     }
 
     #[test]

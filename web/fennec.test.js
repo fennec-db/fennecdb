@@ -603,6 +603,26 @@ test('a number past an int\'s range is refused naming its field, in the module',
   db.close();
 });
 
+// A page's parameters are doubles, so the module meets a number past a
+// float's range in a statement's text: refused naming it, where it read as
+// an infinity (written back as null) or 0; the ends of the range read.
+test('a number past a float\'s range is refused naming it, in the module', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const { Fennec } = await import('./fennec.js');
+  const db = await Fennec.open(wasm);
+  db.run('create collection t (x float, xs [float])');
+  const large = 'is past a float\'s range: a float is at most 1.7976931348623157e308 either side of 0';
+  const small = 'is past a float\'s range: a float is 0 or at least 5e-324 either side of 0';
+  const refused = (text, says) => assert.throws(() => db.run(text), (e) => e.message.includes(says), text);
+  refused('put t {x: 1e400}', `position 10: number \`1e400\` ${large}`);
+  refused('put t {x: -1e-400}', `position 10: number \`-1e-400\` ${small}`);
+  refused('put t {xs: [0.5, 2e999]}', `position 17: number \`2e999\` ${large}`);
+  refused('get t where x > 1e309', `position 16: number \`1e309\` ${large}`);
+  assert.equal(db.rows('get t count')[0].count, 0);
+  db.run('put t [{x: 1.7976931348623157e308}, {x: -5e-324}, {x: 0e-999}]');
+  assert.deepEqual(db.rows('get t select x').map((r) => r.x), [1.7976931348623157e308, -5e-324, 0]);
+  db.close();
+});
+
 test('an [int] and a [float] keep their numbers as written, in the module', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
   const { Fennec } = await import('./fennec.js');
   const db = await Fennec.open(wasm);

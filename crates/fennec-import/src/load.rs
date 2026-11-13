@@ -268,10 +268,19 @@ fn adapt(v: Value, ty: &DataType) -> Result<Value> {
         },
         // `NaN` and the infinities are a float column's values, as
         // PostgreSQL holds them (and `parse` reads `nan` and `inf` in any
-        // case): a `float` keeps them, ordered as PostgreSQL orders them.
-        (DataType::Float, Value::Text(s)) => match s.trim().parse::<f64>() {
+        // case): a `float` keeps them, ordered as PostgreSQL orders them. A
+        // decimal past a float's range -- a `numeric`'s 1e400 -- is refused
+        // naming it, where it read as an infinity or 0 (`num::read_f64`).
+        (DataType::Float, Value::Text(s)) => match fennec_core::num::read_f64(s.trim()) {
             Ok(f) => Value::Float(f),
-            Err(_) => return Err(mismatch("float", &Value::Text(s))),
+            Err(why) => match (why.range(), s.trim().parse::<f64>()) {
+                (Some(range), _) => {
+                    let shown = fennec_core::num::shown(s.trim());
+                    return Err(Error::Type(format!("number `{shown}` {range}")));
+                }
+                (None, Ok(f)) if !f.is_finite() => Value::Float(f),
+                _ => return Err(mismatch("float", &Value::Text(s))),
+            },
         },
         // A numeric value landing in a text column: in SQLite the type
         // belongs to the value rather than the column, so this is ordinary.
@@ -360,6 +369,24 @@ mod tests {
     use crate::{Column, IdSource, Rows};
     use fennec_core::schema::VectorIndexSpec;
     use fennec_core::value::VecPrec;
+
+    /// A text bound for a `float` -- SQLite's, a PostgreSQL cell -- past a
+    /// float's range is refused naming it, where it read as an infinity or
+    /// 0; the infinities and `NaN` spelled as words are kept.
+    #[test]
+    fn a_text_past_a_float_s_range_is_refused() {
+        let float = |s: &str| adapt(Value::Text(s.into()), &DataType::Float);
+        let e = float(" 1e400 ").unwrap_err().to_string();
+        assert!(e.contains("number `1e400` is past a float's range"), "{e}");
+        let e = float("1e-400").unwrap_err().to_string();
+        assert!(e.contains("a float is 0 or at least 5e-324"), "{e}");
+        assert_eq!(float("-inf").unwrap(), Value::Float(f64::NEG_INFINITY));
+        assert_eq!(float("Infinity").unwrap(), Value::Float(f64::INFINITY));
+        assert!(matches!(float("nan").unwrap(), Value::Float(f) if f.is_nan()));
+        assert_eq!(float("2.5").unwrap(), Value::Float(2.5));
+        let e = float("2.5x").unwrap_err().to_string();
+        assert!(e.contains("expected float"), "{e}");
+    }
 
     /// Document count in a collection. `Collection` gives stats, not a counter.
     fn count(db: &Database, name: &str) -> usize {

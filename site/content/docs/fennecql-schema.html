@@ -14,7 +14,11 @@ what a field holds, how it compares and which indexes it takes:
 64 bits, -9223372036854775808 to 9223372036854775807, and takes a float
 where it is whole (<code>20.0</code>); a value its type refuses is a type
 error naming the field, and a number past an int's range is one too, never
-clamped to its end. An int and a float compare by their true values,
+clamped to its end. A <code>float</code> is a 64-bit double, a number read
+as the nearest one, and a number past its range — <code>1e400</code>, past
+±1.7976931348623157×10<sup>308</sup>, or <code>1e-400</code>, nearer 0
+than 5×10<sup>-324</sup> — is refused naming it, never read as an infinity
+or 0 (<a href="limits.html#fixed-limits">limits</a>). An int and a float compare by their true values,
 wherever two numbers are compared — <code>where</code>, every index,
 <code>lookup</code>, <code>order</code>, <code>min</code> and
 <code>max</code>: the float 1152921504606846976.0 (2<sup>60</sup>) equals

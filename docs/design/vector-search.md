@@ -74,12 +74,14 @@ rows 0.373 -> 0.226 ms (`make wasm-speed`), for 37 bytes brotli.
 
 ## Numbers in
 
-**A number is read three ways, each exact.** `num::parse_f64` takes
-Clinger's path where the digits fit in 53 bits, divides a whole number of
-up to 19 digits by `5^n` for `10^-1` to `10^-25` (`divided`; `div128`
-divides in two 32-bit digits, since a `u128` division took the compiler's
-own, 1.4 KB, into the browser module), and shifts decimal digits
-otherwise. JavaScript writes most floats, every `f32` it widens among
+**A number is read four ways, each exact, or refused past an `f64`'s
+range.** `num::read_f64` takes Clinger's path where the digits fit in 53
+bits, divides a whole number of up to 19 digits by `5^n` for `10^-1` to
+`10^-25` (`divided`; `div128` divides in two 32-bit digits, since a `u128`
+division took the compiler's own, 1.4 KB, into the browser module),
+multiplies any other number's first 19 digits by its power of five
+(`near`), and compares every digit with a midpoint where that cannot tell
+(`exact`), each below. JavaScript writes most floats, every `f32` it widens among
 them, with seventeen digits, past Clinger's 53 bits. A page of 200
 768-dim vectors took 74.6 ms to read in the browser module; divided, 51.9;
 with the JSON reader walking the text's bytes rather than collecting it
@@ -95,6 +97,128 @@ index go in at 220k rows/s over HTTP against 123k (`make load-bench`;
 213k as REST arrays, 146k as a `/batch` of single puts now). A page's
 vectors come into the browser module as `f32`s already, and the reader
 stays out of it: there it was 474 bytes brotli for nothing.
+
+*Multiplied, never shifted.* Every number the first two paths did not
+take -- an exponent past 10^±22 or 10^-25, an integer past 2^53, more than
+19 digits -- was a decimal string shifted 27 bits a pass until it sat in
+`[1/2, 1)`, each pass over every digit and two 800-byte copies: `1e255`
+took 137 000 instructions where `1e25` took 211, so a 64 MiB body of
+`1e255,` was minutes of a core (found by the fuzzer, #624). Now `near`
+multiplies the first 19 digits by the power of five its exponent says, to
+125 bits -- Ryu's multipliers, which `f64_into` writes with and the module
+holds already (`pow5`, `inv_pow5`, the inverse's table grown from 5^-312 to
+5^-364 for the smallest subnormal's 5^-342) -- keeping every bit of the
+product, so the number lies in a span of `w` in its last place, `w + t`
+where digits were cut: where both ends round to one `f64`, that is the
+number's. It is Eisel and Lemire's algorithm on another table: theirs is
+the 12 KB of 128-bit powers the module went without, and its proof that a
+19-digit number never needs the fallback (Mushtak and Lemire, 2023) is for
+that table's precision, not 125 bits; the span needs no proof, it says
+itself whether it crosses a midpoint. One within 2^-59 of a midpoint is
+left to `exact`, which makes its digits (800 at most, a midpoint having
+768) one integer and the midpoint `(2m + 1) × 2^(e - 1)` another, brings
+both to one power of ten and of two, and compares them, the digits past
+800 settling a tie: some thousands of instructions where the shifting took
+up to 183 000, in 32-bit words so the module multiplies them itself.
+Crafted inputs reach it -- any midpoint's first 25 digits -- and cost
+about what an ordinary number does a byte. Instructions a number, a loop
+of 20 000 reads in release (`proc_pid_rusage`), each build's own reader:
+
+| number | main | now |
+|---|---:|---:|
+| `0.1`, Clinger's | 147 | 142 |
+| `123.456` | 231 | 224 |
+| `-0.30000000000000004`, JavaScript's 17 digits (the quotient) | 569 | 568 |
+| `1.2345678901234567e-7` | 606 | 595 |
+| `1.2345678901234567e+21` | 9 142 | 704 |
+| `1e25` | 211 | 195 |
+| `1e255` | 137 391 | 461 |
+| `1e-255` | 76 283 | 465 |
+| 17 digits, `e200` | 96 664 | 794 |
+| `1.7976931348623157e308` | 182 943 | 810 |
+| `4.9406564584124654e-324` | 126 540 | 707 |
+| `9007199254740993` | 7 371 | 489 |
+| 40 digits, `0.1234...` | 5 667 | 1 068 |
+| 40 digits, `e200` | 129 446 | 1 040 |
+| 800 random digits | 54 414 | 11 728 |
+| the midpoint above 1, 54 digits (`exact`) | 6 918 | 3 170 |
+| 25 digits under 1e300's midpoint (`exact`) | 177 401 | 3 949 |
+| 25 digits under a subnormal midpoint (`exact`) | 135 684 | 4 398 |
+| `1e400` | 522 (an infinity) | 195 (refused) |
+| `1e-400` | 166 228 (0) | 197 (refused) |
+
+JSON bodies of 8 000 numbers read by `json::parse`, instructions a number:
+`1e255`s 138 340 before and 684 now, documents `{"x":1e255}` 140 482 and
+2 067; `1e25`s 419 and 400, and documents of `0.1`, `123.456` and
+`-0.30000000000000004` 1 735, 1 850 and 2 280 against 1 736, 1 848 and
+2 281 -- medians of 18 runs over six identities of each build
+(`tools/instr/setuuid.py`), whose spreads overlap. Every bit is main's:
+the reader before, kept beside the new one in a program of its own, read
+14 835 394 generated numbers alike -- up to 19 digits over every exponent
+and past, every double's shortest texts, `f32`s widened, subnormals,
+midpoints written whole with a hair either side and cut to 17 to 40
+digits, and 20 to 920 digits -- with the numbers of the repository's JSON
+(3 409), of its FennecQL corpus (9 506) and every number-shaped token of
+its sources (177 713); where it read an infinity or 0 of a number not 0
+the new one refuses (735 124 of them), and `str::parse` read every one
+alike too. The tests hold the reader to `str::parse` as they did, each
+midpoint's tie and a hair either side (`exact` reached in more than 600),
+the digits past 800 breaking a tie, and no number of 19 digits or fewer
+reaching `exact` over every exponent. Rejected: `str::parse` natively and
+this reader in the module (the module reads what a page fetches too, and
+the table is what this file is here to keep out); the 128-bit table
+(12 KB); the shifting kept for what `near` leaves (a body of crafted
+25-digit numbers was still 177 000 instructions each); 64-bit words in
+`Big` (each product a call of the module's 128-bit multiply); `near` and
+`exact` inlined into the reader, whose digit loops then spilled their
+registers (up to 20 instructions more a number Clinger's path takes); a
+closure reading a JSON number either way, a call of its own handing its
+`Result<Value>` back through memory (20 instructions a document's number,
+over six identities of each build), where the refusals are cold functions
+apart (`json::unread`, `lexer::unread`); and `read_f64` itself out of
+line, whose `Result<f64, Unread>` came back through memory where main's
+`Option<f64>` came in two registers (5 more a document's number): the
+reading hands back a pair (`num::read`), its two wrappers inlined.
+
+*Past the range, refused.* A number past an `f64`'s range read as one
+anyway: `1e400` an infinity, which JSON writes as `null`, so a document
+written with it was read back with `null` where a number was, and `1e-400`
+0 -- another number than the one written, which a limit refuses rather
+than cuts ([crates.md](crates.md#limits)). Every reader refuses one now,
+naming it, where it was and the range (`num::Unread`): JSON's "number
+`1e400` at byte 7 is past a float's range: a float is at most
+1.7976931348623157e308 either side of 0" (a body's, a parameter's, a
+document's, a json field's, a vector's), FennecQL's at its position, the
+query string's naming the field, a sparse vector's weight, pgvector's text
+of a vector, and an import's naming the row and field or the column -- a
+`numeric` holds 1e400, and a
+SQLite text may -- the infinities and `NaN` PostgreSQL and SQLite spell as
+words kept as before. A number written past 40 characters is named by its
+first 40 and its length. Rounding to the nearest decides the ends: past
+the largest `f64` but under the midpoint above it (`1.7976931348623158e308`)
+reads as the largest, and anything from just past half the smallest
+subnormal (`2.4703282292062328e-324`, `3e-324`) as it, while that half
+itself is a tie to the even 0 and refused; 0 written any way is 0, its
+sign kept. Refusing a nonzero number rather than reading 0 is
+PostgreSQL's `float8in` (both ways "out of range for type double
+precision"), where JavaScript's and Python's readers give an infinity or
+0. An exponent is
+read whole to 2^40, where it was cut at 100 000: `0.` and a million zeros
+then `1e1000001` -- 1 -- read as an infinity. A float a file holds is its
+`f64`: an infinity an earlier build read from `1e400`, or one an import or
+a Rust caller put, opens, reads and is found as it did, JSON writing it
+`null` (`a_float_past_its_range_is_refused_naming_it`). A named
+statement's stored text alone reads one as it did, an infinity or 0, to
+the digest main gave it ([named-statements.md](named-statements.md#what-is-built),
+*A float past its range*). A vector's component is still the `f32` of the
+number read, and a number within an `f64`'s range past an `f32`'s is that
+`f32`'s infinity or 0, as a `vector<N, f16>`'s past ±65 504 is its own
+(`site/content/docs/limits.html`). The module grew 2 030 bytes, 963 of
+them brotli's (`make size-report`): the reader 1 923 where the one that
+shifted was 2 982, `exact` 757, `near` 536 and `rounded` 308, the
+multipliers out of line 688 where `float_into` gave back 584, the readers'
+words some 830 (FennecQL's, pgvector's text, a sparse weight, JSON's) and
+360 of data.
 
 **A list of numbers is read as written.** An `[int]`, a `[float]` and a
 `[timestamp]` keep each element as written, or refuse the statement naming

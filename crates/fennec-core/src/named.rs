@@ -91,6 +91,11 @@ pub enum What {
 /// ("its text reads as another statement under grammar epoch 4, where it
 /// was defined under 3: define it again"); none in the repository's
 /// FennecQL holds one (`make fennecql-corpus`).
+///
+/// Still 4: a float past its range -- `1e400`, `1e-400` -- is refused in a
+/// text read afresh, where it was an infinity or 0, but a stored text
+/// reads it as it did (`fennec_ql::stored_definition`), so none reads as
+/// another tree.
 pub const GRAMMAR_EPOCH: u32 = 4;
 
 /// What reads a named statement's stored text back into the tree it runs

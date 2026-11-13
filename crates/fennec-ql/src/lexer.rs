@@ -291,6 +291,48 @@ fn unlexed(
     )))
 }
 
+/// A float literal's number, or its refusal at `at`: a number past a
+/// float's range names the range (`num::read_f64`), as an int past its own
+/// is refused, where it read as an infinity or 0. A named statement's
+/// stored text reads one as it read before -- the infinity, the 0 -- so a
+/// definition a file holds reads to the tree its digest was taken of,
+/// under the grammar epoch it was stored with
+/// (`crate::stored_definition`); a text read afresh, a `create statement`'s
+/// among them, is refused.
+#[inline]
+pub(crate) fn float_token(text: &str, at: usize) -> Result<f64> {
+    match fennec_core::num::read_f64(text) {
+        Ok(x) => Ok(x),
+        Err(why) => unread(text, at, why),
+    }
+}
+
+/// [`float_token`]'s number that is none, apart: a refusal is rare, and its
+/// words are not worth a number's registers.
+#[cold]
+#[inline(never)]
+fn unread(text: &str, at: usize, why: fennec_core::num::Unread) -> Result<f64> {
+    #[cfg(feature = "statements")]
+    if crate::STORED.with(std::cell::Cell::get) {
+        use fennec_core::num::Unread;
+        let neg = text.starts_with('-');
+        match why {
+            Unread::TooLarge if neg => return Ok(f64::NEG_INFINITY),
+            Unread::TooLarge => return Ok(f64::INFINITY),
+            Unread::TooSmall if neg => return Ok(-0.0),
+            Unread::TooSmall => return Ok(0.0),
+            Unread::Malformed => {}
+        }
+    }
+    Err(Error::Query(match why.range() {
+        Some(range) => {
+            let shown = fennec_core::num::shown(text);
+            format!("position {at}: number `{shown}` {range}")
+        }
+        None => format!("position {at}: invalid decimal number `{text}`"),
+    }))
+}
+
 fn subtracts(last: Option<&Token>) -> bool {
     match last.map(|t| &t.tok) {
         Some(
@@ -1148,9 +1190,7 @@ fn lex_with(
                     false => raw,
                 };
                 if is_float {
-                    Tok::Float(fennec_core::num::parse_f64(text).ok_or_else(|| {
-                        Error::Query(format!("position {start}: invalid decimal number `{text}`"))
-                    })?)
+                    Tok::Float(float_token(text, start)?)
                 } else {
                     Tok::Int(fennec_core::num::parse_i64(text).ok_or_else(|| {
                         Error::Query(format!("position {start}: invalid integer `{text}`"))
@@ -1649,9 +1689,7 @@ mod tests {
                     }
                     let text: String = b[s..i].iter().filter(|c| **c != '_').collect();
                     if is_float {
-                        Tok::Float(fennec_core::num::parse_f64(&text).ok_or_else(|| {
-                            Error::Query(format!("position {s}: invalid decimal number `{text}`"))
-                        })?)
+                        Tok::Float(float_token(&text, s)?)
                     } else {
                         Tok::Int(text.parse().map_err(|_| {
                             Error::Query(format!("position {s}: invalid integer `{text}`"))

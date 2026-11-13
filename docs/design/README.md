@@ -124,7 +124,7 @@ A proposal holds no invariant until it is built, and is listed apart:
 79. [The browser module holds one copy of a generic where it can](browser-module.md#one-copy-of-a-generic)
 80. [The core lost what it held twice or for one use](browser-module.md#size-cuts)
 81. [A vector goes out as its `f32`s](vector-search.md#vectors-out)
-82. [A number is read three ways, each exact](vector-search.md#numbers-in)
+82. [A number is read four ways, each exact, or refused past an `f64`'s range](vector-search.md#numbers-in)
 83. [A vector parameter goes into the module as `f32`s](vector-search.md#vector-parameters)
 84. [A quantized index holds codes, and `near` orders by the documents' vectors](vector-search.md#quantized-indexes)
 85. [A bit code is a residual's signs, from a centre the index learned](vector-search.md#bit-codes)

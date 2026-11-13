@@ -961,3 +961,40 @@ fn a_schema_text_declares_statements_after_their_collections() {
     let e = fennec_ql::schema_text(&format!("{schema}{mine};{mine}")).unwrap_err();
     assert!(e.to_string().contains("declared twice"), "{e}");
 }
+
+/// A number past a float's range is refused in a text read afresh -- a
+/// `create statement`'s too -- but a definition stored before reads as it
+/// did, `1e400` an infinity and `1e-400` 0, in a list too: to the digest
+/// main's parser gave it (pinned, as main printed it), under the grammar
+/// epoch it was stored with, never marked broken. A text read afresh after
+/// is refused again.
+#[test]
+fn a_stored_definition_reads_a_float_past_its_range_as_it_did() {
+    let big = "create statement big() as get t where x < 1e400 and y > -1e-400 select id";
+    let lists = "create statement lists() public as insert t {xs: [1e-400, 1], ys: [2.5e999], \
+                 z: -1e400}";
+    for text in [big, lists] {
+        let e = parse_one(text).expect_err(text).to_string();
+        assert!(e.contains("is past a float's range"), "{e}");
+    }
+    let (digest, d) = fennec_ql::stored_definition(big).unwrap();
+    assert_eq!(digest, 0x5aef_e2bf_1e46_f4cf, "{digest:#018x}");
+    assert_eq!(d.digest().unwrap(), digest);
+    let tree = format!("{:?}", d.body);
+    assert!(
+        tree.contains("Lit(Float(inf))") && tree.contains("Lit(Float(-0.0))"),
+        "{tree}"
+    );
+    let (digest, d) = fennec_ql::stored_definition(lists).unwrap();
+    assert_eq!(digest, 0x6706_8334_dc46_6c11, "{digest:#018x}");
+    let tree = format!("{:?}", d.body);
+    for part in [
+        r#"("xs", Lit(List([Float(0.0), Int(1)])))"#,
+        r#"("ys", Lit(List([Float(inf)])))"#,
+        r#"("z", Lit(Float(-inf)))"#,
+    ] {
+        assert!(tree.contains(part), "{part}: {tree}");
+    }
+    let e = parse_one(big).expect_err(big).to_string();
+    assert!(e.contains("position 42: number `1e400` is past"), "{e}");
+}

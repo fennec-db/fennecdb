@@ -447,7 +447,11 @@ the import at its row, naming it: no distance orders by one. A
 <code>NaN</code>s and infinities, as PostgreSQL holds them (<a
 href="fennecql-schema.html">Collections and types</a>); SQLite stores a
 <code>NaN</code> as <code>NULL</code>, and a text <code>NaN</code> read
-into a float column is one.</p>
+into a float column is one. A decimal past a float's range — a
+<code>numeric</code>'s <code>1e400</code>, a SQLite text's — stops the
+import at its row, naming the column and the number: read as a float it
+would be an infinity or 0, another number than the one held (<a
+href="limits.html#fixed-limits">limits</a>).</p>
 </details>
 
 <h2>Speed and testing</h2>
