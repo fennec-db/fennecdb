@@ -477,6 +477,22 @@ jobs:
       - name: The lease's clock, devices' names and a secret's DACL
         run: cargo test -p fennec-http --features tls --lib -- --nocapture lease::tests::the_boot_clock owner_only::tests device_s_name
 
+      # fennec-import's sqlite:: tests drive the sqlite3 shell and, before
+      # T51, skipped themselves silently on this image, which has none: they
+      # ran nowhere on Windows. Under CI a missing sqlite3 now fails them, so
+      # the official 3.54.1 tools zip is put on PATH, its SHA3-256 (as
+      # sqlite.org/download.html publishes it) checked before it is unpacked.
+      - name: A pinned sqlite3 on PATH
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/sqlite-dl" "$RUNNER_TEMP/sqlite-tools"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/sqlite-dl/tools.zip" https://sqlite.org/2026/sqlite-tools-win-x64-3540100.zip
+          python -c "import hashlib,sys; h=hashlib.sha3_256(open(sys.argv[1],'rb').read()).hexdigest(); sys.exit(0 if h==sys.argv[2] else 'sqlite3 zip SHA3-256 mismatch: '+h)" "$RUNNER_TEMP/sqlite-dl/tools.zip" e171f3993a992edf076746926dd52b5e2ebfabaee38818e74987e1d8112ab987
+          unzip -q -o "$RUNNER_TEMP/sqlite-dl/tools.zip" -d "$RUNNER_TEMP/sqlite-tools"
+          dir=$(dirname "$(find "$RUNNER_TEMP/sqlite-tools" -name sqlite3.exe | head -1)")
+          test -n "$dir"
+          cygpath -w "$dir" >> "$GITHUB_PATH"
+
       # Each suite runs whatever the step before found, so one run names
       # every failing test.
       - name: fennec-ql's and fennec-import's suites
