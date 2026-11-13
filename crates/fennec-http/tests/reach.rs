@@ -552,14 +552,16 @@ fn a_rule_s_list_is_not_cut_at_its_first_rows() {
     }
 }
 
-/// A rule's inner `get` that pages, groups or computes its column, read
-/// again, is read as far as a statement's own inner `get` of that kind --
-/// 100 000 rows, or groups where it groups -- and refused past them, naming
-/// the rule: a list of one room over 100 000 rows is read, over 100 001
-/// refused, never cut there. A plain `nocase` field, whose groups would
-/// join spellings `in` tells apart, is read so too, where a plain field of
-/// one kind is grouped, every row of its filter folded: 100 001 rows of it
-/// are a list of one.
+/// A rule's inner `get` that pages or computes its column, read again, and
+/// one that groups, read once, are read as far as a statement's own inner
+/// `get` of that kind -- 100 000 rows, or groups where it groups -- and
+/// refused past them, naming the rule: a list of one room over 100 000
+/// rows is read, over 100 001 refused, never cut there. A plain `nocase`
+/// field, whose groups would join spellings `in` tells apart, is read so
+/// too, where a plain field of one kind is grouped, every row of its filter
+/// folded: 100 001 rows of it are a list of one. Past both bounds a
+/// grouped list is refused for its values, which selecting its field
+/// alone, as the groups' refusal advises, would leave as many.
 #[test]
 fn a_rule_s_list_read_again_stops_where_a_statement_s_would() {
     for (inner, field, refused) in [
@@ -617,6 +619,24 @@ fn a_rule_s_list_read_again_stops_where_a_statement_s_would() {
             ),
             (_, r) => panic!("{inner} ({field}) over 100 001 rows: {:?}", r.err()),
         }
+        if !inner.ends_with("group room, n") {
+            continue;
+        }
+        // 1 000 rooms whose groups come before `r1`'s: the 100 001 groups
+        // read hold 1 001 values.
+        let docs: Vec<String> = (0..1_000)
+            .map(|i| format!(r#"{{room: "a{i:03}", user: "alice", n: {i}}}"#))
+            .collect();
+        let put = fennec_ql::parse_one(&format!("put members [{}]", docs.join(", "))).unwrap();
+        db.execute(&put).unwrap();
+        match scope.bound(&db, &[&read]) {
+            Err(Error::Query(why)) => assert!(
+                why.contains("lists more than 1000 values")
+                    && why.contains("the rule on `messages` where"),
+                "{why}"
+            ),
+            r => panic!("past both bounds: {:?}", r.err()),
+        }
     }
 }
 
@@ -624,32 +644,41 @@ fn a_rule_s_list_read_again_stops_where_a_statement_s_would() {
 /// bans of `r1` and then one of `r2`, read as their first 1 002 rows, were
 /// the list `["r1"]`, and alice read the message of `r2`, which her rule
 /// holds out -- the cut failed open. Read whole, the list holds out both,
-/// on a read and on a stream's seed alike.
+/// on a read and on a stream's seed alike, however the rule negates it:
+/// `= false` is a deny list as `not` is.
 #[test]
 fn a_deny_list_is_not_cut_open() {
-    let n = start_with(
-        "messages read where not (room in (get bans select room where user = $jwt.sub limit 5000))\n\
-         bans read where user = $jwt.sub\n",
-        &[
-            "create collection bans (room text @hash, user text @hash)",
-            "create collection messages (room text @hash, text text)",
-            r#"put messages [{room: "r1", text: "one"}, {room: "r2", text: "two"}, {room: "r3", text: "three"}]"#,
-        ],
-    );
-    let rows: Vec<&str> = (0..1_003)
-        .map(|_| r#"{room: "r1", user: "alice"}"#)
-        .chain([r#"{room: "r2", user: "alice"}"#])
-        .collect();
-    let r = n.query(ROOT, &format!("put bans [{}]", rows.join(", ")));
-    assert_eq!(r.0, 200, "{}", r.1);
-    let alice = n.token(r#"{"sub":"alice"}"#);
-    let (status, body) = n.query(&alice, "get messages select text order text");
-    assert_eq!((status, body.as_str()), (200, r#"[{"text":"three"}]"#));
-    let (_, seed) = n.stream(&alice, "/messages/changes");
-    assert!(
-        seed.contains("three") && !seed.contains("two") && !seed.contains("one"),
-        "{seed}"
-    );
+    for denied in [
+        "not (room in (get bans select room where user = $jwt.sub limit 5000))",
+        "(room in (get bans select room where user = $jwt.sub limit 5000)) = false",
+    ] {
+        let n = start_with(
+            &format!("messages read where {denied}\nbans read where user = $jwt.sub\n"),
+            &[
+                "create collection bans (room text @hash, user text @hash)",
+                "create collection messages (room text @hash, text text)",
+                r#"put messages [{room: "r1", text: "one"}, {room: "r2", text: "two"}, {room: "r3", text: "three"}]"#,
+            ],
+        );
+        let rows: Vec<&str> = (0..1_003)
+            .map(|_| r#"{room: "r1", user: "alice"}"#)
+            .chain([r#"{room: "r2", user: "alice"}"#])
+            .collect();
+        let r = n.query(ROOT, &format!("put bans [{}]", rows.join(", ")));
+        assert_eq!(r.0, 200, "{}", r.1);
+        let alice = n.token(r#"{"sub":"alice"}"#);
+        let (status, body) = n.query(&alice, "get messages select text order text");
+        assert_eq!(
+            (status, body.as_str()),
+            (200, r#"[{"text":"three"}]"#),
+            "{denied}"
+        );
+        let (_, seed) = n.stream(&alice, "/messages/changes");
+        assert!(
+            seed.contains("three") && !seed.contains("two") && !seed.contains("one"),
+            "{denied}: {seed}"
+        );
+    }
 }
 
 /// A deny list over a `nocase` field keeps every spelling its rows hold:
@@ -741,8 +770,8 @@ fn a_deny_list_of_json_values_keeps_each_as_written() {
 /// loose or not, `near`, `fuse`, `rerank` -- is refused at startup, naming
 /// its line. Taken, the deny list of 10 001 bans ranked by `match` was its
 /// top 10 000, and alice read the room of the ban ranked last. `match`
-/// beside `order` is a filter, every row it scores above zero, and its
-/// list is read whole.
+/// beside an `order` or an aggregate is a filter, every row it scores
+/// above zero, and its list beside `order` is read whole.
 #[test]
 fn a_ranking_in_a_rule_s_inner_get_is_refused_at_startup() {
     for (clause, named) in [

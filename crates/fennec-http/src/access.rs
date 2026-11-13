@@ -1778,8 +1778,8 @@ fn inner_gets(e: &Expr, out: &mut Vec<String>) -> std::result::Result<(), String
             return Err(format!(
                 "a rule's `in (get {} ...)` ranks its rows by {clause}: a ranking is a page of \
                  its best rows, not every row its filter holds, and a list cut there holds out \
-                 less than it names under `not` -- `match` beside `order` is a filter, every \
-                 row it scores above zero",
+                 less than it names where the rule negates it -- `match` beside an `order` or \
+                 an aggregate is a filter, every row it scores above zero",
                 sel.collection
             ));
         }
@@ -2299,17 +2299,19 @@ fn answer(db: &Database, e: &mut Expr, rule: &Bound) -> Result<()> {
 
 /// The values an inner `get` with no inner `get` left lists, at most
 /// [`MAX_CLAIM_VALUES`] of them, each counted once however many rows hold
-/// it. It is read up to the rows that could still be under the bound, and
-/// read again only where the bound, not its own `limit`, stopped that
-/// read: a plain one -- one field, no page -- grouped by its field where a
-/// group is one value as `in` tells values apart ([`grouped_whole`]), its
-/// rows then its distinct values (a customer's few orders are a bucket's
-/// read, where grouping every list took a `set` under such a rule 4.5 ->
-/// 5.1 us, `make policy-bench`), every row of its filter folded; any other
-/// -- one that pages, groups or computes its column, or a plain `nocase`
-/// or json field -- as far as the engine reads a statement's own inner
-/// `get` that pages, groups or computes its column, [`MAX_SUBQUERY_VALUES`]
-/// rows, groups where it groups, and refused past them. Its first rows
+/// it. One that groups is read once, as far as the engine reads a
+/// statement's own inner `get` that groups, [`MAX_SUBQUERY_VALUES`]
+/// groups, and refused past them. Any other is read up to the rows that
+/// could still be under the bound, and read again only where the bound,
+/// not its own `limit`, stopped that read: a plain one -- one field, no
+/// page -- grouped by its field where a group is one value as `in` tells
+/// values apart ([`grouped_whole`]), its rows then its distinct values (a
+/// customer's few orders are a bucket's read, where grouping every list
+/// took a `set` under such a rule 4.5 -> 5.1 us, `make policy-bench`),
+/// every row of its filter folded; any other -- one that pages or computes
+/// its column, or a plain `nocase` or json field -- as far as the engine
+/// reads a statement's own inner `get` that pages or computes its column,
+/// [`MAX_SUBQUERY_VALUES`] rows, and refused past them. Its first rows
 /// alone were its list: 1 003 memberships of one room, then one of another,
 /// were a list of the first under `limit 5000`, and a token was shown none
 /// of the rows the rule granted it in the second. A ranking, a page rather
@@ -2339,14 +2341,40 @@ fn listed(db: &Database, sel: Select, rule: &Bound) -> Result<Vec<Expr>> {
     // one row.
     let asked = sel.limit.map(|l| l.at(&[]));
     let paged = sel.aggregate.is_empty() || groups;
+    // A grouped read folds every row of its filter and works out every
+    // group before its page is cut (`aggregate`), so a first read to 1 002
+    // groups cost what one to 100 001 does: read again past it, 100 000
+    // groups of a row each took 1.14 G instructions, where read once they
+    // take 0.60 G. It is read once, to where a statement's own would stop.
+    let first = match groups {
+        true => MAX_SUBQUERY_VALUES + 1,
+        false => past,
+    };
     if paged {
-        sel.limit = Some(Count::N(asked.map_or(past, |l| l.min(past))));
+        sel.limit = Some(Count::N(asked.map_or(first, |l| l.min(first))));
     }
     let rows = rows_of(db, &stmt)?;
+    let read = rows.len();
     // The bound stopped the read, not the `get`: the rows after may hold
     // values these do not.
-    let stopped = paged && rows.len() >= past && asked.is_none_or(|l| l > past);
-    let items = if !stopped {
+    let stopped = !groups && paged && read >= past && asked.is_none_or(|l| l > past);
+    let items = if groups {
+        // Its values asked first: a list past both bounds is told it holds
+        // too many values, which selecting its field alone -- what the
+        // groups' refusal advises -- would leave as many.
+        match distinct(rows) {
+            Some(_) if read > MAX_SUBQUERY_VALUES => {
+                let why = format!(
+                    "makes more than {MAX_SUBQUERY_VALUES} groups, where a statement's own inner \
+                     `get` that groups stops too, and is refused rather than cut -- narrow it, \
+                     or select its field alone, whose values count once however many rows hold \
+                     them"
+                );
+                return Err(past_bound(rule, &stmt, &why));
+            }
+            items => items,
+        }
+    } else if !stopped {
         distinct(rows)
     } else {
         let Statement::Select(sel) = &mut stmt else {
@@ -2380,21 +2408,15 @@ fn listed(db: &Database, sel: Select, rule: &Bound) -> Result<Vec<Expr>> {
                     sel.limit = Some(Count::N(asked.map_or(bound, |l| l.min(bound))));
                     let rows = rows_of(db, &stmt)?;
                     if rows.len() > MAX_SUBQUERY_VALUES {
-                        let why = match (field, groups) {
-                            (true, _) => format!(
+                        let why = match field {
+                            true => format!(
                                 "reads more than {MAX_SUBQUERY_VALUES} rows: its field is \
                                  `nocase` or json, whose groups would join values `in` tells \
                                  apart, so its rows are read one by one, as far as a statement's \
                                  own inner `get` that pages or computes its column is, and it is \
                                  refused rather than cut -- narrow it"
                             ),
-                            (false, true) => format!(
-                                "makes more than {MAX_SUBQUERY_VALUES} groups, where a \
-                                 statement's own inner `get` that groups stops too, and is refused \
-                                 rather than cut -- narrow it, or select its field alone, whose \
-                                 values count once however many rows hold them"
-                            ),
-                            (false, false) => format!(
+                            false => format!(
                                 "reads more than {MAX_SUBQUERY_VALUES} rows, where a statement's \
                                  own inner `get` that pages or computes its column stops too, and \
                                  is refused rather than cut -- narrow it, or select its field \
