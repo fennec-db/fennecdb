@@ -47,6 +47,8 @@ without `sorted`.
 `make wasm-lite` makes, both ways, and CI runs clippy over none and each
 alone.
 
+**`crates/fennec-wasm/sizes.json` is held to the built modules.** It is committed from a release's `make wasm-sizes JSON=1`, and the docs' figures are held to it (`site/build.py`'s `size_claims`); `check_claims` also holds its full and none figures, raw and brotli, to `web/fennec.wasm` and `web/fennec-min.wasm` (CI's test job builds both, `make wasm wasm-lite wasm-min`) within 0.75%, in both directions, whenever the modules are there. `make wasm-min` is `--no-default-features` with no feature, the very build `sizes.py` weighs as none, so no build of its own is added. The tolerance is for panic paths, which embed the build directory: `sizes.py` builds in `target/wasm-sizes`, so its raw bytes differ slightly from `make`'s. A drift larger than that fails the check, and the fix is `make wasm-sizes JSON=1` with the docs' figures it names.
+
 ## Language features
 
 **The rest of the language is features too, and the smallest module is

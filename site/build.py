@@ -24,6 +24,9 @@ import urllib.parse
 
 import builder_tabs
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "integrations"))
+from ffi_sizes_check import ROW as FFI_ROW  # the one table-row pattern, shared
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(ROOT)
 OUT = os.path.join(ROOT, "dist")
@@ -1314,8 +1317,7 @@ def size_facts():
     release), which a page quotes to the digit it writes."""
     truth = {}
     if os.path.exists(FFI_SIZES):
-        for target, nbytes in re.findall(r"^\| `([^`]+)` \| [\d.]+ MB \((\d+) bytes\) \|$",
-                                         open(FFI_SIZES, encoding="utf-8").read(), re.M):
+        for target, nbytes in FFI_ROW.findall(open(FFI_SIZES, encoding="utf-8").read()):
             truth[f"ffi:{target}"] = int(nbytes) / 1e6
     if os.path.exists(WASM_SIZES):
         rec = json.load(open(WASM_SIZES, encoding="utf-8"))
@@ -1350,6 +1352,40 @@ def size_facts():
         truth["sz:std:fmt"] = group(std, r"^std: core::fmt, the rest$")
         truth["sz:std:rest"] = truth["sz:std"] - sum(truth[f"sz:std:{n}"] for n in ("vec", "sort", "hashmap", "fmt"))
     return truth, {k: " MB" if k.startswith("ffi:") else " KB" for k in truth}
+
+
+# sizes.json is committed from a release's measurement, so nothing else holds
+# it to a build: a module that grew a few KB would fail no claim. Here, where
+# the built modules exist (CI's test job runs `make wasm wasm-min`), its raw
+# and brotli figures must stay within this share of them, in both directions:
+# panic paths embed the build directory, so a build in another target
+# directory (sizes.py's own) moves raw bytes slightly.
+WASM_SIZES_TOLERANCE = 0.0075
+
+
+def wasm_sizes_drift(modules):
+    """The figures of sizes.json that drifted from a built module's: `modules`
+    maps "full" and "none" to the module's path, a missing file left out.
+    "none" is `make wasm-min`'s, built with `--no-default-features` and no
+    feature, which is what sizes.py measures as none."""
+    if not os.path.exists(WASM_SIZES):
+        return []
+    rec = json.load(open(WASM_SIZES, encoding="utf-8"))
+    out = []
+    for end, path in modules.items():
+        if not os.path.exists(path):
+            continue
+        raw = os.path.getsize(path)
+        _, br = compressed(path)
+        for k, got in (("raw", raw), ("brotli", br)):
+            want = rec[end][k]
+            if got is not None and abs(got - want) > WASM_SIZES_TOLERANCE * want:
+                out.append(
+                    f"crates/fennec-wasm/sizes.json: {end} {k} is {want} bytes, "
+                    f"{os.path.relpath(path, REPO)} is {got} ({(got - want) / want:+.1%}, "
+                    f"more than {WASM_SIZES_TOLERANCE:.2%}); `make wasm-sizes JSON=1` "
+                    f"regenerates it, with the docs' figures")
+    return out
 
 
 def check_claims():
@@ -1415,7 +1451,8 @@ def check_claims():
     # Every size fact is in KB; without a default the report of a drifted
     # size died on a KeyError instead of saying which file drifted.
     unit = {**{k: " KB" for k in truth}, **bench_unit, **sizes_unit, **unit}
-    return claims_against({**truth, **bench, **sizes}, unit, lambda f: True)
+    return (claims_against({**truth, **bench, **sizes}, unit, lambda f: True)
+            + wasm_sizes_drift({"full": wasm, "none": web("fennec-min.wasm")}))
 
 
 # The flags of fennec-shard, which docs/sharding-reference lists in a table of
