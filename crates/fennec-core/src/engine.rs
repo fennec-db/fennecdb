@@ -704,9 +704,42 @@ pub fn resum(file: &mut [u8], at: usize) -> bool {
     let Some((from, sum_at)) = found else {
         return false;
     };
-    let sum = crc32c(0, &file[from..sum_at]);
-    file[sum_at..sum_at + SUM].copy_from_slice(&sum.to_le_bytes());
-    true
+    put_sum(file, from, sum_at)
+}
+
+/// [`resum`] for every checked record of `file`: what the fuzzer does to a
+/// file whose bytes it changed (`crates/fennec-fuzz`), so that an open reads
+/// what a record holds rather than stopping at its sum. How many it summed.
+#[doc(hidden)]
+#[cfg(not(target_arch = "wasm32"))]
+pub fn resum_all(file: &mut [u8]) -> usize {
+    let mut sums = Vec::new();
+    let mut walk = Walk::stopping(file, MAGIC.len());
+    while let Ok(Some(r)) = walk.next() {
+        if r.claim_at.is_some() {
+            sums.push((r.at, r.sum_at));
+        }
+    }
+    sums.iter()
+        .filter(|&&(from, sum_at)| put_sum(file, from, sum_at))
+        .count()
+}
+
+/// The sum of the bytes from `from` to `sum_at` written at `sum_at`: `false`
+/// for a record too short to hold its claim and sum, whose `sum_at` is
+/// `usize::MAX` ([`Rec::sum_at`]) -- the fuzzer's first finding, which
+/// sliced past the file.
+fn put_sum(file: &mut [u8], from: usize, sum_at: usize) -> bool {
+    let Some(sum) = file.get(from..sum_at).map(|b| crc32c(0, b)) else {
+        return false;
+    };
+    match file.get_mut(sum_at..sum_at.saturating_add(SUM)) {
+        Some(at) => {
+            at.copy_from_slice(&sum.to_le_bytes());
+            true
+        }
+        None => false,
+    }
 }
 
 /// The body of the whole record at the front of `record` when it is of
@@ -984,8 +1017,10 @@ impl ChangeWalk<'_> {
             p += 1;
             let id = get_uvarint(body, &mut p)?;
             let plen = get_uvarint(body, &mut p)? as usize;
-            let payload = body.get(p..p + plen).ok_or_else(cut)?;
-            p += plen;
+            // Added checked, as the apply does: a length near 2^64 wrapped.
+            let end = p.checked_add(plen).ok_or_else(cut)?;
+            let payload = body.get(p..end).ok_or_else(cut)?;
+            p = end;
             let schema = self.known.get(&cid);
             let what = match (op, schema) {
                 (OP_PUT, Some(schema)) => ChangeKind::Put(id, Some(schema.read_doc(id, payload)?)),
@@ -8433,7 +8468,10 @@ impl Database {
                 None => None,
             };
             let new = match op {
-                OP_PUT => Some(c.schema.read_doc(id, payload)?),
+                OP_PUT => {
+                    crate::store::written_id(id)?;
+                    Some(c.schema.read_doc(id, payload)?)
+                }
                 OP_DEL => None,
                 other => {
                     return Err(Error::Corrupt(format!(

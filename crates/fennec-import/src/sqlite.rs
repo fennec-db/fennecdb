@@ -112,11 +112,19 @@ fn decode_text(b: &[u8], enc: Encoding) -> String {
 #[derive(Debug)]
 struct Pager {
     file: File,
+    /// The file's length: what every length the file declares is held to
+    /// before anything is allocated for it.
+    len: u64,
     page_size: usize,
     /// The usable part of a page once the reserved bytes are taken off.
     usable: usize,
     encoding: Encoding,
 }
+
+/// SQLite's floor for a page's usable part (fileformat2.html, *Reserved
+/// bytes per page*): what `local_len`'s arithmetic stands on, a file under
+/// it refused as SQLite refuses one.
+const MIN_USABLE: usize = 480;
 
 impl Pager {
     fn open(path: &Path) -> Result<Pager> {
@@ -139,9 +147,13 @@ impl Pager {
         if page_size < 512 || !page_size.is_power_of_two() {
             return Err(corrupt(format!("invalid page size {page_size}")));
         }
+        // A byte: at most 255 of a page of 512 at least.
         let reserved = head[20] as usize;
-        if reserved >= page_size {
-            return Err(corrupt("the reserved bytes exceed the page"));
+        if page_size - reserved < MIN_USABLE {
+            return Err(corrupt(format!(
+                "a page's usable part is {} bytes, under SQLite's {MIN_USABLE}",
+                page_size - reserved
+            )));
         }
         let encoding = match u32::from_be_bytes([head[56], head[57], head[58], head[59]]) {
             0 | 1 => Encoding::Utf8,
@@ -149,12 +161,22 @@ impl Pager {
             3 => Encoding::Utf16Be,
             n => return Err(corrupt(format!("unknown text encoding {n}"))),
         };
+        let len = file
+            .metadata()
+            .map_err(|e| Error::Io(format!("{}: {e}", path.display())))?
+            .len();
         Ok(Pager {
             file,
+            len,
             page_size,
             usable: page_size - reserved,
             encoding,
         })
+    }
+
+    /// How many whole pages the file holds: no page past them is read.
+    fn pages(&self) -> u64 {
+        self.len / self.page_size as u64
     }
 
     fn read(&mut self, n: u32) -> Result<Vec<u8>> {
@@ -189,8 +211,19 @@ impl Pager {
     }
 
     /// Collects the cell payload; the part that does not fit in the page
-    /// comes from the overflow chain.
+    /// comes from the overflow chain. Its length, a varint of the file's,
+    /// is held to the file's before a byte is allocated for it, as a wire
+    /// message's is (`fennec_wire::proto::zeroed`): every byte of a payload
+    /// is in the file, and `Vec::with_capacity` of a length declaring
+    /// 2^62 bytes ended the import -- capacity overflow, or the allocator's
+    /// abort.
     fn payload(&mut self, page: &[u8], at: usize, total: usize) -> Result<Vec<u8>> {
+        if total as u64 > self.len {
+            return Err(corrupt(format!(
+                "a cell's payload of {total} bytes is longer than the file, {} bytes",
+                self.len
+            )));
+        }
         let local = self.local_len(total);
         let head = page
             .get(at..at + local)
@@ -244,6 +277,11 @@ struct Walk {
     stack: Vec<u32>,
     /// What is left of the current leaf, in reverse order.
     pending: Vec<Cell>,
+    /// The pages visited, a bit each of the file's: a b-tree reaches a
+    /// page once, so one reached again is a cycle -- an interior page
+    /// naming itself or a page above it -- which walked on forever, its
+    /// stack growing by the page's cells each time round.
+    seen: Vec<u64>,
 }
 
 impl Walk {
@@ -251,7 +289,29 @@ impl Walk {
         Walk {
             stack: vec![root],
             pending: Vec::new(),
+            seen: Vec::new(),
         }
+    }
+
+    /// Marks `page_no` visited, refusing a page past the file's end -- read,
+    /// it would be refused as short -- or one visited before.
+    fn visit(&mut self, page_no: u32, pages: u64) -> Result<()> {
+        if page_no as u64 > pages {
+            return Err(corrupt(format!(
+                "page {page_no} is past the file's {pages} pages"
+            )));
+        }
+        if self.seen.is_empty() {
+            self.seen = vec![0; (pages as usize + 1).div_ceil(64)];
+        }
+        let (word, bit) = (page_no as usize / 64, 1u64 << (page_no % 64));
+        if self.seen[word] & bit != 0 {
+            return Err(corrupt(format!(
+                "page {page_no} is reached twice: the b-tree loops"
+            )));
+        }
+        self.seen[word] |= bit;
+        Ok(())
     }
 
     fn next(&mut self, pager: &mut Pager) -> Result<Option<Cell>> {
@@ -262,6 +322,7 @@ impl Walk {
             let Some(page_no) = self.stack.pop() else {
                 return Ok(None);
             };
+            self.visit(page_no, pager.pages())?;
             let page = pager.read(page_no)?;
             let h = header_at(page_no);
             let kind = *page.get(h).ok_or_else(|| corrupt("no page header"))?;
@@ -590,9 +651,11 @@ fn take_type(s: &str) -> (String, &str) {
     let mut depth = 0usize;
     let mut end = s.len();
     let mut i = 0usize;
-    let b = s.as_bytes();
-    while i < b.len() {
-        let c = b[i] as char;
+    // A character at a time, never a byte read as one: the lead byte of a
+    // space of two bytes (U+00A0) read as `Â` began a word, which ended
+    // where that space is -- at once -- and the loop went no further, an
+    // import of such a schema never ending.
+    while let Some(c) = s[i..].chars().next() {
         if c == '(' {
             depth += 1;
             i += 1;
@@ -616,7 +679,7 @@ fn take_type(s: &str) -> (String, &str) {
             i = word_end;
             continue;
         }
-        i += 1;
+        i += c.len_utf8();
     }
     (s[..end].to_string(), &s[end..])
 }
@@ -988,6 +1051,18 @@ mod tests {
         assert!(!d[0].rowid_alias);
     }
 
+    /// A space of more than one byte between a column's name and its type
+    /// is a space: read a byte at a time, its lead byte began a word that
+    /// ended at once, and the reading never moved on.
+    #[test]
+    fn a_space_of_several_bytes_ends_a_name_and_the_reading_goes_on() {
+        let d =
+            parse_create("CREATE TABLE t (a\u{a0}INTEGER, b\u{2003}TEXT\u{85}NOT NULL)").unwrap();
+        let got: Vec<(&str, &str)> = d.iter().map(|x| (x.name.as_str(), x.ty.as_str())).collect();
+        assert_eq!(got, [("a", "INTEGER"), ("b", "TEXT")]);
+        assert_eq!(take_type("\u{a0}"), (String::from("\u{a0}"), ""));
+    }
+
     #[test]
     fn quoted_identifiers_survive() {
         let d = parse_create(
@@ -1071,6 +1146,7 @@ mod tests {
         let p = Pager {
             // The null device: `NUL` on Windows, read as the device alone.
             file: File::open(if cfg!(windows) { "NUL" } else { "/dev/null" }).unwrap(),
+            len: 0,
             page_size: 4096,
             usable: 4096,
             encoding: Encoding::Utf8,

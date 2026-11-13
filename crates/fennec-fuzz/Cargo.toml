@@ -1,0 +1,24 @@
+[package]
+name = "fennec-fuzz"
+description = "The fuzzer of fennecdb's parsers of untrusted bytes: a mutator of its own, run under AddressSanitizer, no dependency"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+# A tool of the repository's, never published: `make fuzz`, `make fuzz-smoke`
+# (docs/design/conventions.md#fuzzing).
+publish = false
+autotests = false
+
+[dependencies]
+# The crates whose parsers it runs, each without the features that take
+# anything from outside the workspace (fennec-http's and fennec-import's TLS):
+# it names no crate but the workspace's, as tools/deps_check.py holds.
+fennec-core = { workspace = true, features = ["std-fs", "full", "statements"] }
+fennec-ql = { workspace = true, features = ["statements"] }
+fennec-http.workspace = true
+fennec-import.workspace = true
+
+[[test]]
+name = "all"
+path = "tests/all.rs"

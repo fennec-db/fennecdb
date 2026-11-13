@@ -48,6 +48,12 @@ In scope, and worth reporting:
 - Query text reaching an identifier or a value without validation, from any
   client surface.
 
+Most of the parsers named above are fuzzed — an HTTP request, JSON,
+FennecQL, the file format's codec, a `.fennec` file's open and a replica's
+apply, a SQLite file — under AddressSanitizer on every pull request and for
+longer each week: `make fuzz` lists the targets (`crates/fennec-fuzz`). An
+input that crashes one is a report worth making.
+
 ## What is documented behaviour, not a vulnerability
 
 These are deliberate, and README explains each one:

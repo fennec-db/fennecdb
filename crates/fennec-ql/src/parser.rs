@@ -2336,13 +2336,28 @@ impl Parser {
     }
 
     fn data_type(&mut self) -> Result<DataType> {
-        // [type] -> list
-        if matches!(self.peek(), Tok::LBracket) {
+        // [type] -> list: its brackets counted, as deep as a value read back
+        // may nest (`codec::MAX_DEPTH`), never recursed into -- a text of
+        // 100 000 `[` took the stack down, and with it a server.
+        let mut lists = 0;
+        while matches!(self.peek(), Tok::LBracket) {
+            const _: () = assert!(fennec_core::codec::MAX_DEPTH == 64);
+            if lists == fennec_core::codec::MAX_DEPTH {
+                return self.err("a list type nests at most 64 levels");
+            }
             self.skip();
-            let inner = self.data_type()?;
-            self.expect(Tok::RBracket)?;
-            return Ok(DataType::List(Box::new(inner)));
+            lists += 1;
         }
+        let mut ty = self.scalar_type()?;
+        for _ in 0..lists {
+            self.expect(Tok::RBracket)?;
+            ty = DataType::List(Box::new(ty));
+        }
+        Ok(ty)
+    }
+
+    /// [`Self::data_type`] past its lists' brackets.
+    fn scalar_type(&mut self) -> Result<DataType> {
         let name = self.ident()?.to_ascii_lowercase();
         Ok(match name.as_str() {
             "bool" => DataType::Bool,

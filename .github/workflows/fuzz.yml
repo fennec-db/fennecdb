@@ -1,0 +1,59 @@
+name: fuzz
+
+# Each target of the fuzzer for half an hour a week, built with
+# AddressSanitizer and LLVM's coverage counters, its corpus kept between
+# weeks: the long run beside ci.yml's `fuzz-smoke`, which gives each 30 s on
+# every pull request (docs/design/conventions.md#fuzzing). The matrix names
+# every target `fennec-fuzz names` lists, held to it by crates/fennec-fuzz's
+# tests.
+on:
+  schedule:
+    - cron: '23 3 * * 0'
+  workflow_dispatch:
+
+# Every job reads: none writes to the repository, its packages or a registry.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: fuzz (${{ matrix.target }}, 30 min under ASan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [http, json, fennecql, codec, image, sqlite]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The nightly is the Makefile's FUZZ_NIGHTLY, a date: AddressSanitizer
+      # is a nightly flag, and only this and ci.yml's fuzz-smoke take one.
+      - name: Install the fuzzer's nightly, pinned to a date
+        run: make fuzz-toolchain
+
+      # The inputs that reached new coverage, a week's run going on from the
+      # last one's.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+
+      - name: Fuzz ${{ matrix.target }} for 30 minutes
+        run: make fuzz ASAN=1 TARGET=${{ matrix.target }} FUZZ_SECONDS=1800
+
+      - name: Keep what it found
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-crashes-${{ matrix.target }}
+          path: target/fuzz/crashes
+          retention-days: 90

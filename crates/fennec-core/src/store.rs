@@ -636,6 +636,28 @@ pub struct Segment {
 /// rather than a copy of every one.
 pub type SegmentBytes = std::sync::Arc<Vec<u8>>;
 
+/// Whether a frame may put document `id`, refused where frames are read --
+/// an open's replay, a replica's apply -- as damage, or a primary's record
+/// no write made, where it is an id no write gives: 0, which `allocate_id`
+/// starts past and a put naming is given another, or `DocId::MAX`, past
+/// which `next_id` has nowhere to go. Taken, 0 went into the id index's
+/// sparse map, and the dense array growing over it indexed slot -1, a
+/// panic; `DocId::MAX` set `next_id` to 0 -- the id the next write was
+/// given -- wrapping (the fuzzer's `image` target found both).
+#[inline]
+pub(crate) fn written_id(id: DocId) -> Result<()> {
+    match id {
+        0 | DocId::MAX => Err(unwritten_id(id)),
+        _ => Ok(()),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn unwritten_id(id: DocId) -> Error {
+    Error::Corrupt(format!("a frame puts document {id}, an id no write gives"))
+}
+
 /// The segment's bytes to append to.
 #[inline]
 fn grow(b: &mut SegmentBytes) -> &mut Vec<u8> {
@@ -1336,8 +1358,11 @@ impl Store {
             pos += 1;
             let id = get_uvarint(bytes, &mut pos)?;
             let len = get_uvarint(bytes, &mut pos)? as usize;
-            if pos + len > bytes.len() {
-                // Half-written last record: truncate and stop (crash-safe tail).
+            // Half-written last record: truncate and stop (crash-safe tail).
+            // Held to what is left rather than added: a length near 2^64
+            // wrapped `pos + len` past the test, and the frame was sliced
+            // backwards (the fuzzer's `image` target found it).
+            if len > bytes.len() - pos {
                 break;
             }
             let frame = &bytes[start..pos + len];
@@ -1358,6 +1383,7 @@ impl Store {
             self.total_bytes += frame.len();
             match op {
                 OP_PUT => {
+                    written_id(id)?;
                     let loc = Loc {
                         seg,
                         off: off as u32,
@@ -1404,8 +1430,9 @@ impl Store {
             pos += 1;
             let id = get_uvarint(bytes, &mut pos)?;
             let plen = get_uvarint(bytes, &mut pos)? as usize;
-            if pos + plen > bytes.len() {
-                // Half-written last record, as in `replay`.
+            if plen > bytes.len() - pos {
+                // Half-written last record, as in `replay`, its length held
+                // to what is left as there.
                 pos = start;
                 break;
             }
@@ -1417,6 +1444,7 @@ impl Store {
             self.total_bytes += frame_len;
             match op {
                 OP_PUT => {
+                    written_id(id)?;
                     self.index
                         .insert(id, Loc::mapped(at + pos as u64, plen as u32));
                     if id >= self.next_id {

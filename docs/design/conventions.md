@@ -1,6 +1,6 @@
 # Conventions
 
-The long form of the test and docs conventions [CLAUDE.md](../../CLAUDE.md) lists under *Conventions*: where tests live and which run alone, a test that fails on one run, Chrome's launch, the clock, ports, and what a change a user meets owes the docs. They hold no invariant of the code, so [README.md](README.md#the-original-order) does not number them. Each section below is a bullet moved word for word from CLAUDE.md, which keeps its rule in a sentence or two.
+The long form of the test and docs conventions [CLAUDE.md](../../CLAUDE.md) lists under *Conventions*: where tests live and which run alone, a test that fails on one run, Chrome's launch, the clock, ports, what a change a user meets owes the docs, and the fuzzing of every parser of untrusted bytes. They hold no invariant of the code, so [README.md](README.md#the-original-order) does not number them. Each section below is a bullet moved word for word from CLAUDE.md, which keeps its rule in a sentence or two.
 
 ## Test binaries
 
@@ -110,3 +110,97 @@ alone until the site's search vector cache has its vector: after sections
 change, commit the next `site` deploy's `search-embeddings` artifact as
 `site/search-embeddings.json` (`gh run download <run> -n
 search-embeddings`) where it differs.
+
+## Fuzzing
+
+Every parser of bytes a process takes from outside is fuzzed:
+`crates/fennec-fuzz`, a target each -- `http` (`http::read_request`, a
+request's head and its body by length or chunked, pipelined, read whole or
+a few bytes at a time as a slow client sends them), `json`
+(`json::parse_json`, `parse`, a page's documents and a query's parameters,
+and what parses written back and read as itself), `fennecql` (`parse` and
+`parse_exact` over the repository's FennecQL corpus,
+`tools/fennecql_corpus.py --list`), `codec` (a value's and a type's
+encoding decoded, skipped, read by a path and as a document's fields, and
+a value read written back as its bytes), `image` (a `.fennec` file opened,
+read whole and its indexes built, and its records applied as a replica
+applies a primary's; the first byte of an input says whether its records
+are summed anew, so an open reads what a record holds rather than stopping
+at its sum) and `sqlite` (`fennec import`'s reader over a file). `make fuzz`
+lists them, `make fuzz TARGET=<name>` runs one; a new parser of untrusted
+bytes gets its target in the pull request that adds it, and
+`.github/workflows/fuzz.yml`'s matrix its name, which the crate's tests
+hold to the registry.
+
+*The fuzzer is the repository's own.* A mutator of its own
+(`src/mutate.rs`: a bit flipped, a byte or a word set to a value on an
+edge, bytes inserted, dropped, copied or repeated ten thousand times, a
+length written as fennecdb's varint or SQLite's at an edge, a run of digits
+made another number, a token of the target's or of its seeds put in, two
+inputs spliced), guided by the coverage LLVM's sanitizer coverage counts
+on every edge of the code it compiles (`-Cpasses=sancov-module
+-Cllvm-args=-sanitizer-coverage-inline-8bit-counters`): each instrumented
+module hands its counters to `__sanitizer_cov_8bit_counters_init`, the one
+function of libFuzzer's runtime the instrumentation calls, written in
+`src/cover.rs`, and an input reaching a counter's bucket of counts (AFL's:
+1, 2, 3, 4-7, ... 128-255) for the first time is kept. libFuzzer through
+`cargo fuzz` would have been a crate from outside the workspace in a
+crate of it, which the zero-dependency rule
+([crates.md](crates.md#zero-dependencies)) keeps out; what the fuzzer
+needs of it is these few hundred lines. It runs under AddressSanitizer,
+a nightly flag (`-Zsanitizer=address`), so the build that fuzzes takes the
+Makefile's `FUZZ_NIGHTLY`, a date, and only it and the jobs running it do;
+a plain build of the same targets runs in `cargo test` (`tests/all.rs`:
+each over its seeds and 300 of their mutations), unguided and unsanitized.
+The fuzz profile keeps every check a debug build makes, so an overflow that
+wraps in a release build is a panic, a finding.
+
+*Whatever ends a run keeps its input* (`src/guard.rs`). A panic is caught
+around the run, and one the code under it caught and went on from is noted
+by the panic hook: either ends the fuzzer, the input written to
+`target/fuzz/crashes/`. A stack overflow, a failed allocation and
+AddressSanitizer's report end in `abort` -- ASan told so by
+`__asan_default_options` -- whose handler writes the input from where the
+run left it with nothing but system calls. A run past `--timeout-ms`
+(30 s of wall time: at 10 s a machine at a load of 40 took a 2.5 s input
+for a hang) is written by a watchdog thread, an allocation past
+`--max-alloc-mb` (2 GiB) aborts before it is made: a length read off the
+input and allocated before it met the input. A run is on a thread of a
+server's connection's stack, 8 MiB (`RUN_STACK`), so what overflows here
+overflows there. `fennec-fuzz replay <target> <file>` runs one again.
+
+*A finding is a regression test in its own crate*, the input's bytes or
+the file made by hand, failing before the fix. The pull request that added
+the fuzzer fixed what was known of these parsers then -- a value nested
+100 000 levels deep ([crates.md](crates.md#how-deep-a-value-nests)), a
+SQLite file whose b-tree loops, whose cell declares 2^62 bytes, or whose
+column's type follows a space of two bytes
+([crates.md](crates.md#a-sqlite-files-lengths)) -- and what the `image`
+target found in its first half hour: a file's schema holding an index
+over several fields with no part, whose first part the plan of a `get`
+read (`tests/composite.rs`); a frame putting an id no write gives
+(`store::written_id`, `tests/damage.rs`) -- document 0, which the id
+index's dense array grew over and indexed at -1, and `u64::MAX`, past
+which the next id wrapped to 0; a frame's length near 2^64, added
+unchecked past the replay's test (`tests/damage.rs`); a graph record
+counting 2^32 nodes over a few bytes, whose arrays asked for 32 GiB
+before a node was read (`vector::tests`); and a sparse vector read back
+with the last `u32` as an index, whose pgvector form overflowed adding
+one (`sparse::tests`). Two are left for a decision. JSON's reader takes a
+number past a double's range, `1e400`, as infinity, which its writer
+writes as `null`: no crash, and the `json` target holds its round trip to
+finite values until that is decided. And a vector field's `m` and
+dimension are read from a file as written -- a field a build before their
+bounds made opens as it did (`engine::altered`) -- so a crafted file
+declaring `@hnsw` with m = 2^40 asks the index's build for 2m slots a
+node, which the `image` target will meet.
+
+*CI* runs each target for 30 s under ASan on every pull request (ci.yml's
+`fuzz-smoke`, `make fuzz-smoke`) and for 30 minutes each on Sundays
+(`fuzz.yml`), each week's corpus going on from the last's; a finding is
+kept as the job's artifact. Not yet fuzzed, after 1.0: a sealed archive's
+and a backup's frames (`seal.rs`), an archive's segments, PostgreSQL's
+messages and `pgoutput` (`fennec-wire`), a JWT and a JWKS (`access`), the
+sync's messages through the native library and the browser module, and
+IndexedDB's chunks; nor is each target held to a count of runs since its
+code last changed.

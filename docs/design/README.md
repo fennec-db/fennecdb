@@ -6,7 +6,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 
 ## Files
 
-- [crates.md](crates.md) -- zero dependencies, limits that error rather than truncate, and the build profiles
+- [crates.md](crates.md) -- zero dependencies, limits that error rather than truncate -- how deep a value read off the bytes nests, a SQLite file's lengths -- and the build profiles
 - [storage.md](storage.md) -- the mapped file, the handover of writes to it, a block's spills, compaction and the file format
 - [engine.md](engine.md) -- the single writer, a block's documents built beside the readers, long reads pinned, and a block as one record
 - [durability.md](durability.md) -- a storage error stopping writes, buffered writes written behind the lock, the sync log, the power cut that holds it on Linux, and the one shutdown
@@ -34,7 +34,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 
 The conventions hold no invariant of the code, and are listed apart:
 
-- [conventions.md](conventions.md) -- where tests live and which run alone, a test that fails on one run, Chrome's launch, the clock, ports, and the docs a change a user meets owes
+- [conventions.md](conventions.md) -- where tests live and which run alone, a test that fails on one run, Chrome's launch, the clock, ports, the docs a change a user meets owes, and the fuzzing of every parser of untrusted bytes
 
 A proposal holds no invariant until it is built, and is listed apart:
 
@@ -199,3 +199,5 @@ A proposal holds no invariant until it is built, and is listed apart:
 154. [A scoped caller is held to `--request-rate` before anything runs](quotas.md#a-callers-request-rate) (added after the move, under *Quotas and retries*)
 155. [An answer past `--http-gzip` goes as gzip where its client takes it, never one carrying a tag](http.md#compressed-answers) (added after the move, under *The HTTP server*)
 156. [A server that asks for no token answers only under this machine's name, and a page only of its own origin or `--http-cors`'s](http.md#open-servers) (added after the move, under *Access*)
+157. [A value read off the bytes nests no deeper than JSON's limit](crates.md#how-deep-a-value-nests) (added after the move, under *Storage*)
+158. [A SQLite file's lengths are held to the file before anything is allocated, and its walk reaches a page once](crates.md#a-sqlite-files-lengths) (added after the move, under *Imports*)

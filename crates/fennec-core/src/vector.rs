@@ -543,7 +543,9 @@ impl<'a> Read<'a> {
             };
             pos += 1;
             let levels = get_uvarint(bytes, &mut pos).ok()? as usize;
-            if levels == 0 {
+            // A byte a level at least, its list's length: past what is left,
+            // the lists below were allocated for levels no record holds.
+            if levels == 0 || levels > bytes.len() - pos {
                 return None;
             }
             r.docs.push(doc);
@@ -5165,7 +5167,7 @@ impl VectorIndex {
                 return None;
             }
             if k > 0 {
-                let len = k * dim * 4;
+                let len = k.checked_mul(dim)?.checked_mul(4)?;
                 let at = bytes.get(pos..pos.checked_add(len)?)?;
                 pos += len;
                 let at = at.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b));
@@ -5185,6 +5187,15 @@ impl VectorIndex {
         let entry = entry_raw.checked_sub(1).map(|e| e as u32);
         let stored = ix.data.stored_len(dim);
         let body = &bytes[pos..];
+        // The arrays are sized by the count before a node is read, so it is
+        // held to what the body can hold: four bytes a node at least in
+        // either layout -- a document, a flag, the levels and level 0's
+        // length. A count of 2^32 - 16 over a few bytes asked for 32 GiB of
+        // document ids up front, an abort, and one past 2^60 overflowed the
+        // capacity, a panic (the fuzzer's `image` target found it).
+        if count > body.len() / 4 {
+            return None;
+        }
         let read = match flat {
             true => Read::flat(body, count, ix.m0, stored, waits, aliased)?,
             false => Read::varint(body, count, ix.m0, stored, waits, kept)?,
@@ -5671,6 +5682,57 @@ mod tests {
             // it once: never the beam's 2^32.
             assert!(r.capacity() <= 2 * r.len(), "{how}: {}", r.capacity());
         }
+    }
+
+    /// A graph record whose count of nodes is past what its body can hold
+    /// is no record, refused -- and rebuilt from the documents -- before the
+    /// arrays the count sizes are allocated: 2^32 - 16 nodes over a few
+    /// bytes asked for 32 GiB of document ids, an abort, and 2^61 overflowed
+    /// the capacity, a panic (the fuzzer's `image` target found it). In the
+    /// varint layout a node's levels are held to the bytes left as well.
+    #[test]
+    fn a_count_of_nodes_past_the_record_is_refused_before_it_is_allocated() {
+        let mut ix = VectorIndex::new(2, spec());
+        let held: HashMap<u64, Vec<f32>> = (1..=5u64).map(|i| (i, vec![i as f32, 1.0])).collect();
+        for (&i, v) in &held {
+            ix.insert(i, v);
+        }
+        let lookup = |doc: u64, out: &mut Vec<f32>| {
+            out.clear();
+            out.extend_from_slice(held.get(&doc).map_or(&[][..], |v| &v[..]));
+            held.contains_key(&doc)
+        };
+        let restore = |b: &[u8]| VectorIndex::restore_graph(b, 2, VecPrec::F32, lookup);
+        let (flat, varint) = (ix.serialize(false), ix.serialize_varint(false));
+        for (bytes, quant_byte) in [(&flat, true), (&varint, varint[0] != GRAPH_VERSION)] {
+            assert!(restore(bytes).is_some());
+            let mut head = vec![bytes[0]];
+            ix.write_head(&mut head, quant_byte);
+            assert_eq!(bytes[head.len()], 5, "the count after the head");
+            for count in [(1u64 << 32) - 16, 1 << 61, u64::MAX] {
+                let mut b = head.clone();
+                put_uvarint(&mut b, count);
+                b.extend_from_slice(&bytes[head.len() + 1..]);
+                assert!(restore(&b).is_none(), "{count}");
+            }
+        }
+        // A node of the varint layout declaring 2^40 levels: its lists were
+        // allocated for them before one was read.
+        let mut b = varint[..].to_vec();
+        let mut head = vec![b[0]];
+        ix.write_head(&mut head, b[0] != GRAPH_VERSION);
+        let mut at = head.len();
+        for _ in 0..3 {
+            get_uvarint(&b, &mut at).unwrap(); // the count, entry and top level
+        }
+        get_uvarint(&b, &mut at).unwrap(); // the first node's document
+        at += 1; // its flag
+        let levels_at = at;
+        get_uvarint(&b, &mut at).unwrap();
+        let mut huge = Vec::new();
+        put_uvarint(&mut huge, 1 << 40);
+        b.splice(levels_at..at, huge);
+        assert!(restore(&b).is_none());
     }
 
     /// The int8 kernels -- NEON's own on aarch64 -- give the scalar strips'

@@ -259,6 +259,76 @@ alone (98 bytes and 0.7 KB of the module). Reading `@hnsw(..)`'s number
 once before its key was 33 bytes more, a function of its own for the
 range's test, and is not done.
 
+### How deep a value nests
+
+**A value read off the bytes nests no deeper than JSON's limit.** A
+document's field in a file, a primary's record a replica applies, a page's
+image in the browser module: each value of it nests at most
+`codec::MAX_DEPTH` lists and objects, `value::MAX_JSON_DEPTH`'s 64, the
+most any write makes. A json field's value is held to it as it is written
+(`json_value`), a typed list's by its type, which `Schema::new` holds to
+the same 64 (`DataType::depth`: a list a level, a point -- `[lon, lat]`
+once read -- one, a json value all 64, so a list of json is refused at any
+depth, `[[json]]` as `[json]` was) and every reader of a type counts as it
+reads, recursing into none: the parser (`Parser::data_type`, "a list type
+nests at most 64 levels"), a declared schema's text (`declared::type_named`)
+and a file's schema (`codec::decode_type`, refused past it as damage).
+Past it the bytes are damage or a file made to hurt: `decode_value`, the
+skip and a path's read refuse them, `Error::Corrupt` naming the limit --
+"a value nests more than 64 levels deep" -- where the decoder recursed a
+level at a time and a record of 100 000 nested lists, 200 KB, overflowed
+the stack, which aborts the process: a server on a read of its file, a
+replica on its primary's record, the browser module on a page's image
+(`tests/damage.rs`: the open, the read and the apply, each refused with
+the stack whole, and each aborting the test binary with the bound taken
+out). An open reads no document ([indexes.md](indexes.md#lazy-indexes)),
+so such a record is refused where something reads it or past it: a read,
+an index's build, a vector index linked at the open -- which reads each
+document's vector past the fields before it, and refuses the open.
+
+A length counting items of several bytes -- a vector's `f32`s, a
+half-precision vector's halves, a sparse vector's weights -- is multiplied
+saturating, and `take` refuses what passes `usize` as longer than the
+bytes ("length overflow"): `n * 4` wrapped in a release build, so a vector
+declaring 2^62 `f32`s took none of the bytes after it and read as empty,
+and a half-precision one declaring 2^63 asked for its whole `Vec` before a
+byte was looked for (capacity overflow, a panic). A function of its own
+returning the refusal, checked, was 102 bytes of the module and a branch
+at each of six sites, for what `take` already refuses. A
+bool the bytes end before is refused by the skip as by the decoder:
+stepped over unseen, it left the position past the end, and a compact's
+copy of the bytes it skipped (`Schema::without_dropped`) sliced past them.
+
+The bound costs the decode a register and, in a list's or an object's arm
+alone, a comparison: some 11 to 14 instructions a list or object. Traced
+by lldb (`tools/instr/trace.py`, the program's own code), an object
+holding a list of three floats, a text, an object of two and a vector
+decoded in 1 758 instructions before and 1 800 after, and skipped in 875
+and 908. The browser module grew by 1.2 KB, 0.5 KB compressed, with the
+other refusals the fuzzer brought ([conventions.md](conventions.md#fuzzing)).
+
+### A SQLite file's lengths
+
+**A SQLite file's lengths are held to the file before anything is
+allocated, and its walk reaches a page once.** `fennec import`'s reader
+(`crates/fennec-import/src/sqlite.rs`) reads a file it did not write: a
+cell's payload length is a varint of the file's, and `Vec::with_capacity`
+of one declaring 2^62 bytes ended the import -- capacity overflow, or the
+allocator's abort -- before the length met the file; it is held to the
+file's length now (`Pager::payload`), as a wire message's is held to
+`proto::MAX_MESSAGE` (`proto::zeroed`). The b-tree walk keeps a bit a page
+of the file (`Walk::visit`): an interior page naming itself or a page
+above it as a child walked on for ever, its stack growing by the page's
+cells each time round, and is refused at the page reached twice; a child
+past the file's pages is refused before it is read. A page's usable part
+is held to SQLite's own floor of 480 bytes (`MIN_USABLE`), which the
+overflow arithmetic (`local_len`) stands on. And a column's type is read a
+character at a time (`take_type`): a space of two bytes, U+00A0, read a
+byte at a time began a word that ended at once, and the reading never
+moved on. Each is a test of `tests/sqlite.rs` on a file made by hand, and
+the fuzzer's `sqlite` target runs the reader over every seed's mutations
+([conventions.md](conventions.md#fuzzing)).
+
 ## Profiles
 
 **Profiles differ on purpose.** `fennec-cli` uses the `cli` profile (`panic =

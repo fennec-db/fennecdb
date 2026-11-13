@@ -62,6 +62,11 @@ names its byte; the file only grows; a looking tool opens
 tag or graph version is a number older binaries refuse, never misread (a
 graph's: rebuilds).
 
+**[A value read off the bytes nests no deeper than JSON's
+limit.](../../docs/design/crates.md#how-deep-a-value-nests)**
+`codec::MAX_DEPTH`, 64: deeper is `Error::Corrupt`, and a field's type is
+held to it (`DataType::depth`), no reader of a type recursing.
+
 ### Durability
 
 **[Buffered writes are written behind the lock](../../docs/design/durability.md#writes-behind-the-lock)**

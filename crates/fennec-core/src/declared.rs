@@ -659,13 +659,31 @@ fn index(v: &Value, at: &str) -> Result<IndexKind> {
     })
 }
 
-/// A type as the description spells it: as `DataType::name` writes it.
+/// A type as the description spells it: as `DataType::name` writes it. Its
+/// lists' brackets are peeled a pair at a time, as many as a value read back
+/// may nest (`codec::MAX_DEPTH`): recursed into, a description's type of a
+/// million brackets, 2 MB of a request's 64 MiB, took a connection's 8 MiB
+/// stack down, and the server with it.
 pub fn type_named(s: &str) -> Option<DataType> {
-    let b = s.as_bytes();
-    if let [b'[', inner @ .., b']'] = b {
-        let inner = std::str::from_utf8(inner).ok()?;
-        return Some(DataType::List(Box::new(type_named(inner)?)));
+    let mut s = s;
+    let mut lists = 0;
+    while let Some(inner) = s.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+        if lists == crate::codec::MAX_DEPTH {
+            return None;
+        }
+        lists += 1;
+        s = inner;
     }
+    let mut ty = scalar_named(s)?;
+    for _ in 0..lists {
+        ty = DataType::List(Box::new(ty));
+    }
+    Some(ty)
+}
+
+/// [`type_named`] past its lists' brackets.
+fn scalar_named(s: &str) -> Option<DataType> {
+    let b = s.as_bytes();
     // Up to ten digits read whole (`dimension`), and held to `MAX_DIM`.
     let dim = |head: &[u8], tail: &[u8]| -> Option<usize> {
         let rest = b.strip_prefix(head)?.strip_suffix(tail)?;

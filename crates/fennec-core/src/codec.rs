@@ -422,7 +422,34 @@ fn encode<const KEY: bool>(out: &mut Vec<u8>, v: &Value) {
     }
 }
 
+/// How deep a value read off the bytes may nest: a list or an object in one
+/// as many levels down as a json value may be written
+/// ([`crate::value::MAX_JSON_DEPTH`]), the most any write makes -- a json
+/// field's value is held to it as it is written, a typed list's by its type
+/// (`Schema::new`, [`DataType::depth`]). Past it the bytes are damage or a
+/// file made to hurt, refused ([`Error::Corrupt`]) where they are read and
+/// never decoded: the decoder and the skip recurse a level at a time, and a
+/// record of 100 000 nested lists, 200 KB, took the stack down -- and the
+/// process with it -- on a read of an open file or a replica's apply of its
+/// primary's record. A type's lists are held to it too ([`decode_type`]).
+pub const MAX_DEPTH: usize = crate::value::MAX_JSON_DEPTH;
+
+/// The refusal past [`MAX_DEPTH`], naming it: a text of its own rather than
+/// a `format!`, which the browser module would carry for one number.
+#[cold]
+#[inline(never)]
+fn too_deep() -> Error {
+    const _: () = assert!(MAX_DEPTH == 64, "the refusal's text names the limit");
+    Error::Corrupt("a value nests more than 64 levels deep".into())
+}
+
+#[inline]
 pub fn decode_value(buf: &[u8], pos: &mut usize) -> Result<Value> {
+    decode_at(buf, pos, 0)
+}
+
+/// [`decode_value`] for a value `depth` lists and objects down.
+fn decode_at(buf: &[u8], pos: &mut usize, depth: usize) -> Result<Value> {
     let tag = *buf
         .get(*pos)
         .ok_or_else(|| Error::Corrupt("missing value tag".into()))?;
@@ -459,13 +486,19 @@ pub fn decode_value(buf: &[u8], pos: &mut usize) -> Result<Value> {
             let n = get_uvarint(buf, pos)? as usize;
             Ok(Value::Bytes(take(buf, pos, n)?.to_vec()))
         }
+        // A count of items is multiplied saturating, which `take` refuses as
+        // longer than any bytes can be: `n * 4` wrapped in a release build,
+        // so a vector declaring 2^62 `f32`s took none of the bytes after it
+        // and read as empty, and a half-precision one declaring 2^63 asked
+        // for its whole `Vec` -- capacity overflow, a panic -- before any
+        // byte was looked for.
         TAG_VECTOR => {
             let n = get_uvarint(buf, pos)? as usize;
-            Ok(Value::Vector(f32s(take(buf, pos, n * 4)?)))
+            Ok(Value::Vector(f32s(take(buf, pos, n.saturating_mul(4))?)))
         }
         TAG_VECTOR_F16 => {
             let n = get_uvarint(buf, pos)? as usize;
-            let raw = take(buf, pos, n * 2)?;
+            let raw = take(buf, pos, n.saturating_mul(2))?;
             let mut v = Vec::with_capacity(n);
             for chunk in raw.as_chunks::<2>().0 {
                 v.push(f32_from_f16(u16::from_le_bytes(*chunk)));
@@ -473,19 +506,25 @@ pub fn decode_value(buf: &[u8], pos: &mut usize) -> Result<Value> {
             Ok(Value::Vector(v))
         }
         TAG_LIST => {
+            if depth >= MAX_DEPTH {
+                return Err(too_deep());
+            }
             let n = get_uvarint(buf, pos)? as usize;
             let mut items = Vec::with_capacity(n.min(4096));
             for _ in 0..n {
-                items.push(decode_value(buf, pos)?);
+                items.push(decode_at(buf, pos, depth + 1)?);
             }
             Ok(Value::List(items))
         }
         TAG_OBJECT => {
+            if depth >= MAX_DEPTH {
+                return Err(too_deep());
+            }
             let n = get_uvarint(buf, pos)? as usize;
             let mut members = Vec::with_capacity(n.min(4096));
             for _ in 0..n {
                 let k = decode_str(buf, pos)?;
-                members.push((k, decode_value(buf, pos)?));
+                members.push((k, decode_at(buf, pos, depth + 1)?));
             }
             Ok(Value::Object(members))
         }
@@ -498,7 +537,7 @@ pub fn decode_value(buf: &[u8], pos: &mut usize) -> Result<Value> {
                 at = at.wrapping_add(get_uvarint(buf, pos)? as u32);
                 entries.push((at, 0.0));
             }
-            let raw = take(buf, pos, n * 4)?;
+            let raw = take(buf, pos, n.saturating_mul(4))?;
             for (e, w) in entries.iter_mut().zip(raw.as_chunks::<4>().0) {
                 e.1 = f32::from_le_bytes(*w);
             }
@@ -510,8 +549,16 @@ pub fn decode_value(buf: &[u8], pos: &mut usize) -> Result<Value> {
 
 /// Skips over a value without decoding it. Lets projection move past the
 /// fields it does not read without allocating.
+#[inline]
 pub fn skip_value(buf: &[u8], pos: &mut usize) -> Result<()> {
-    skip::<false>(buf, pos)
+    skip_at(buf, pos, 0)
+}
+
+/// [`skip_value`] for a value `depth` lists and objects down, held to
+/// [`MAX_DEPTH`] as [`decode_value`] is: the one copy of the skip a list's
+/// and an object's members recurse into.
+fn skip_at(buf: &[u8], pos: &mut usize, depth: usize) -> Result<()> {
+    skip::<false>(buf, pos, depth)
 }
 
 /// [`skip_value`] for a document's field, which skips nothing where the
@@ -528,13 +575,13 @@ pub fn skip_field(buf: &[u8], pos: &mut usize) -> Result<()> {
         if *pos == buf.len() {
             return Ok(());
         }
-        return skip::<false>(buf, pos);
+        return skip_at(buf, pos, 0);
     }
-    skip::<true>(buf, pos)
+    skip::<true>(buf, pos, 0)
 }
 
 #[inline]
-fn skip<const FIELD: bool>(buf: &[u8], pos: &mut usize) -> Result<()> {
+fn skip<const FIELD: bool>(buf: &[u8], pos: &mut usize, depth: usize) -> Result<()> {
     let tag = match buf.get(*pos) {
         Some(&t) => t,
         None if FIELD => return Ok(()),
@@ -543,8 +590,12 @@ fn skip<const FIELD: bool>(buf: &[u8], pos: &mut usize) -> Result<()> {
     *pos += 1;
     match tag {
         TAG_NULL => Ok(()),
+        // Its byte looked for, as the decoder does: stepped over unseen, a
+        // bool the payload ends before left `pos` past the end, and a
+        // compact's copy of the bytes it skipped (`Schema::without_dropped`)
+        // sliced past them.
         TAG_BOOL => {
-            *pos += 1;
+            take(buf, pos, 1)?;
             Ok(())
         }
         TAG_INT | TAG_TIMESTAMP => {
@@ -566,27 +617,33 @@ fn skip<const FIELD: bool>(buf: &[u8], pos: &mut usize) -> Result<()> {
         }
         TAG_VECTOR => {
             let n = get_uvarint(buf, pos)? as usize;
-            take(buf, pos, n * 4)?;
+            take(buf, pos, n.saturating_mul(4))?;
             Ok(())
         }
         TAG_VECTOR_F16 => {
             let n = get_uvarint(buf, pos)? as usize;
-            take(buf, pos, n * 2)?;
+            take(buf, pos, n.saturating_mul(2))?;
             Ok(())
         }
         TAG_LIST => {
+            if depth >= MAX_DEPTH {
+                return Err(too_deep());
+            }
             let n = get_uvarint(buf, pos)?;
             for _ in 0..n {
-                skip_value(buf, pos)?;
+                skip_at(buf, pos, depth + 1)?;
             }
             Ok(())
         }
         TAG_OBJECT => {
+            if depth >= MAX_DEPTH {
+                return Err(too_deep());
+            }
             let n = get_uvarint(buf, pos)?;
             for _ in 0..n {
                 let k = get_uvarint(buf, pos)? as usize;
                 take(buf, pos, k)?;
-                skip_value(buf, pos)?;
+                skip_at(buf, pos, depth + 1)?;
             }
             Ok(())
         }
@@ -596,7 +653,7 @@ fn skip<const FIELD: bool>(buf: &[u8], pos: &mut usize) -> Result<()> {
             for _ in 0..n {
                 get_uvarint(buf, pos)?;
             }
-            take(buf, pos, n * 4)?;
+            take(buf, pos, n.saturating_mul(4))?;
             Ok(())
         }
         other => Err(Error::Corrupt(format!("unknown value tag {other}"))),
@@ -611,11 +668,18 @@ fn skip<const FIELD: bool>(buf: &[u8], pos: &mut usize) -> Result<()> {
 /// reads it a row at a time, and decoding the object whole, its keys and
 /// texts allocated, was most of what such a scan cost.
 pub fn decode_path_into(buf: &[u8], mut at: usize, keys: &str, slot: &mut Value) -> Result<()> {
+    // Each object walked is a level down, held to `MAX_DEPTH` as the whole
+    // value's read is, so a path reads no value that one refuses.
+    let mut depth = 0;
     for k in keys.split('.') {
         if buf.get(at) != Some(&TAG_OBJECT) {
             *slot = Value::Null;
             return Ok(());
         }
+        if depth >= MAX_DEPTH {
+            return Err(too_deep());
+        }
+        depth += 1;
         at += 1;
         let n = get_uvarint(buf, &mut at)?;
         let mut found = false;
@@ -623,7 +687,7 @@ pub fn decode_path_into(buf: &[u8], mut at: usize, keys: &str, slot: &mut Value)
             let len = get_uvarint(buf, &mut at)? as usize;
             let key = take(buf, &mut at, len)?;
             match key.cmp(k.as_bytes()) {
-                std::cmp::Ordering::Less => skip_value(buf, &mut at)?,
+                std::cmp::Ordering::Less => skip_at(buf, &mut at, depth)?,
                 std::cmp::Ordering::Equal => {
                     found = true;
                     break;
@@ -642,7 +706,7 @@ pub fn decode_path_into(buf: &[u8], mut at: usize, keys: &str, slot: &mut Value)
             decode_text_into(buf, &mut at, s)
         }
         (_, slot) => {
-            *slot = decode_value(buf, &mut at)?;
+            *slot = decode_at(buf, &mut at, depth)?;
             Ok(())
         }
     }
@@ -709,6 +773,13 @@ pub fn geo_at(raw: &[u8]) -> (f64, f64) {
 }
 
 pub fn decode_type(buf: &[u8], pos: &mut usize) -> Result<DataType> {
+    type_at(buf, pos, 0)
+}
+
+/// [`decode_type`] inside `lists` lists, held to [`MAX_DEPTH`] of them:
+/// no field is declared deeper (`Schema::new`), and a schema of 100 000
+/// nested lists recursed as deep, then dropped its boxes as deep.
+fn type_at(buf: &[u8], pos: &mut usize, lists: usize) -> Result<DataType> {
     let tag = *buf
         .get(*pos)
         .ok_or_else(|| Error::Corrupt("missing type tag".into()))?;
@@ -722,7 +793,8 @@ pub fn decode_type(buf: &[u8], pos: &mut usize) -> Result<DataType> {
         TAG_TIMESTAMP => DataType::Timestamp,
         TAG_VECTOR => DataType::Vector(get_usize(buf, pos)?, VecPrec::F32),
         TAG_VECTOR_F16 => DataType::Vector(get_usize(buf, pos)?, VecPrec::F16),
-        TAG_LIST => DataType::List(Box::new(decode_type(buf, pos)?)),
+        TAG_LIST if lists >= MAX_DEPTH => return Err(too_deep()),
+        TAG_LIST => DataType::List(Box::new(type_at(buf, pos, lists + 1)?)),
         TAG_SPARSE => DataType::Sparse(get_usize(buf, pos)?),
         TAG_JSON => DataType::Json,
         TAG_GEO => DataType::Geo,
@@ -939,6 +1011,116 @@ mod tests {
             let mut p = 0;
             assert_eq!(get_uvarint(&b, &mut p).unwrap(), v);
         }
+    }
+
+    /// A list or an object nests as deep as a json value may be written,
+    /// read whole, skipped or reached by a path; one level more is damage,
+    /// refused naming the limit -- and 100 000 levels, which took the stack
+    /// down, refused the same.
+    #[test]
+    fn a_value_nests_no_deeper_than_json_may_be_written() {
+        let nested = |levels: usize, tag: u8| {
+            let mut b = Vec::new();
+            for _ in 0..levels {
+                b.push(tag);
+                put_uvarint(&mut b, 1);
+                if tag == TAG_OBJECT {
+                    encode_str(&mut b, "a");
+                }
+            }
+            b.push(TAG_NULL);
+            b
+        };
+        let deep = |e: Result<Value>| matches!(&e, Err(Error::Corrupt(m)) if m == "a value nests more than 64 levels deep");
+        for tag in [TAG_LIST, TAG_OBJECT] {
+            let at_limit = nested(MAX_DEPTH, tag);
+            let v = decode_value(&at_limit, &mut 0).unwrap();
+            let mut back = Vec::new();
+            encode_value(&mut back, &v);
+            assert_eq!(back, at_limit);
+            let mut p = 0;
+            skip_value(&at_limit, &mut p).unwrap();
+            assert_eq!(p, at_limit.len());
+            for levels in [MAX_DEPTH + 1, 100_000] {
+                let past = nested(levels, tag);
+                assert!(deep(decode_value(&past, &mut 0)), "{tag} {levels}");
+                assert!(deep(skip_value(&past, &mut 0).map(|_| Value::Null)));
+                assert!(deep(skip_field(&past, &mut 0).map(|_| Value::Null)));
+            }
+        }
+        // A path walks objects a level at a time and reads what it finds
+        // at its depth: the value one level past the limit is refused
+        // there too, never read because it was reached by a path.
+        let path = |n: usize| vec!["a"; n].join(".");
+        let at_limit = nested(MAX_DEPTH, TAG_OBJECT);
+        assert_eq!(
+            decode_path(&at_limit, 0, &path(MAX_DEPTH)).unwrap(),
+            Value::Null
+        );
+        assert!(matches!(
+            decode_path(&at_limit, 0, &path(1)).unwrap(),
+            Value::Object(_)
+        ));
+        let past = nested(MAX_DEPTH + 1, TAG_OBJECT);
+        for n in [1, MAX_DEPTH, MAX_DEPTH + 1] {
+            assert!(deep(decode_path(&past, 0, &path(n))), "{n}");
+        }
+        // A type's lists too.
+        let lists = |n: usize| {
+            let mut b = vec![TAG_LIST; n];
+            b.push(TAG_INT);
+            b
+        };
+        let mut ty = DataType::Int;
+        for _ in 0..MAX_DEPTH {
+            ty = DataType::List(Box::new(ty));
+        }
+        assert_eq!(decode_type(&lists(MAX_DEPTH), &mut 0).unwrap(), ty);
+        for n in [MAX_DEPTH + 1, 100_000] {
+            assert!(deep(decode_type(&lists(n), &mut 0).map(|_| Value::Null)));
+        }
+    }
+
+    /// A length counting items of several bytes is refused where it passes
+    /// `usize`: wrapped, a vector of 2^62 `f32`s read as empty, and a
+    /// half-precision one of 2^63 asked for its whole `Vec` before a byte.
+    #[test]
+    fn a_count_of_items_past_usize_is_refused() {
+        for (tag, n) in [
+            (TAG_VECTOR, 1u64 << 62),
+            (TAG_VECTOR, u64::MAX),
+            (TAG_VECTOR_F16, 1u64 << 63),
+            (TAG_VECTOR_F16, u64::MAX),
+        ] {
+            let mut b = vec![tag];
+            put_uvarint(&mut b, n);
+            b.extend_from_slice(&[0; 8]);
+            assert!(
+                matches!(decode_value(&b, &mut 0), Err(Error::Corrupt(_))),
+                "{tag} {n}"
+            );
+            assert!(skip_value(&b, &mut 0).is_err(), "{tag} {n}");
+        }
+        let mut b = vec![TAG_SPARSE];
+        put_uvarint(&mut b, 3);
+        put_uvarint(&mut b, 1u64 << 62);
+        assert!(decode_value(&b, &mut 0).is_err());
+        assert!(skip_value(&b, &mut 0).is_err());
+    }
+
+    /// A bool the bytes end before is damage to the skip as to the decoder,
+    /// and leaves the position within the bytes.
+    #[test]
+    fn a_bool_cut_short_is_refused_by_the_skip() {
+        for skip in [skip_value, skip_field] {
+            let mut p = 0;
+            assert!(skip(&[TAG_BOOL], &mut p).is_err());
+            assert!(p <= 1);
+        }
+        assert!(decode_value(&[TAG_BOOL], &mut 0).is_err());
+        let mut p = 0;
+        skip_value(&[TAG_BOOL, 1], &mut p).unwrap();
+        assert_eq!(p, 2);
     }
 
     /// A dimension a 64-bit build wrote is read whole where `usize` holds

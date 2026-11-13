@@ -93,7 +93,7 @@ a different database.</p>
 
 <p>Ceilings baked into the code. Exceeding any of the first seven makes the
 query <b>error</b>, because a silently cut result is a wrong answer believed
-right; so does going past the two <code>json</code> depths.</p>
+right; so does going past the nesting depths and the path length.</p>
 
 <div class="tbl">
 <table>
@@ -115,7 +115,8 @@ right; so does going past the two <code>json</code> depths.</p>
 <tr><td>a <a href="/docs/fennecql-writing#require-reason"><code>require</code>'s reason</a> (<code>else '…'</code>)</td><td class="n"><b>200 bytes</b></td><td>of UTF-8; a parse error naming the length found when exceeded, and for an empty reason, a backtick in one or a parameter; never a reason cut</td></tr>
 <tr><td>values of one <code>facet</code></td><td class="n"><b>10 000</b></td><td>a query error when a facet without <code>top</code> finds more, and for <code>top</code> past it, written or a parameter's; never a list cut where it stopped</td></tr>
 <tr><td>ranges of one <code>facet ... ranges</code></td><td class="n"><b>10 000</b></td><td>a query error past 10 001 bounds; every range answers</td></tr>
-<tr><td><code>json</code> value nesting</td><td class="n"><b>64 levels</b></td><td>objects and lists inside one another; a write or a JSON text deeper is refused, never cut</td></tr>
+<tr><td><code>json</code> value nesting</td><td class="n"><b>64 levels</b></td><td>objects and lists inside one another; a write or a JSON text deeper is refused, never cut. Every value read back is held to the same 64 — a file's, a primary's record a replica applies, a page's image — and one deeper is refused as damage (<code>a value nests more than 64 levels deep</code>) where it is read, never decoded until the stack runs out</td></tr>
+<tr><td>list type nesting</td><td class="n"><b>64 levels</b></td><td><code>[[int]]</code> is two; a <code>geo</code> point counts one, being <code>[lon, lat]</code>. A type deeper is refused where it is declared (<code>a list type nests at most 64 levels</code>), and so is a list of <code>json</code> at any depth — <code>[[json]]</code> as <code>[json]</code>: a <code>json</code> field holds a list</td></tr>
 <tr><td>path length</td><td class="n"><b>64 keys</b></td><td>past its field (<code>meta.a.b</code> is two); a query error, since no value nests deeper</td></tr>
 <tr><td>fields of an <a href="/docs/fennecql-indexes#composite">index over several fields</a></td><td class="n"><b>8</b></td><td>refused past it, and under 2: one field's index is its own <code>@sorted</code> or <code>@unique</code></td></tr>
 <tr><td>spans the <code>in</code> lists over an index's parts make</td><td class="n">256</td><td>the elements of each, multiplied; past it the list is tested row by row, never cut</td></tr>

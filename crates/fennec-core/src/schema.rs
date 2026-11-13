@@ -859,10 +859,20 @@ impl Schema {
                     f.name
                 )));
             }
-            if matches!(&f.ty, DataType::List(t) if **t == DataType::Json) {
+            // At any depth: `[[json]]` is as much a json field holding a
+            // list, and its values would nest past what a value read back
+            // may (`codec::MAX_DEPTH`) -- written, then refused as damage.
+            if matches!(f.ty, DataType::List(_)) && *f.ty.innermost() == DataType::Json {
                 return Err(Error::Type(format!(
                     "`{}`: a list of json is a json field holding a list",
                     f.name
+                )));
+            }
+            if f.ty.depth() > crate::codec::MAX_DEPTH {
+                return Err(Error::Type(format!(
+                    "`{}`: a type nests at most {} levels, a list one and a point one",
+                    f.name,
+                    crate::codec::MAX_DEPTH
                 )));
             }
             if seen.contains(&f.name) {
@@ -1253,7 +1263,17 @@ impl Schema {
                     let unique = *buf.get(*pos).ok_or_else(ended)? != 0;
                     *pos += 1;
                     let parts = get_uvarint(buf, pos)? as usize;
-                    let mut keys = Vec::with_capacity(parts.min(MAX_COMPOSITE_KEYS));
+                    // As many as `check_composite` lets a `create` make: one
+                    // of none was taken, and the plan of the first `get`
+                    // over its collection read its first part (the fuzzer's
+                    // `image` target found it).
+                    if !(2..=MAX_COMPOSITE_KEYS).contains(&parts) {
+                        return Err(Error::Corrupt(format!(
+                            "an index over several fields holds 2 to {MAX_COMPOSITE_KEYS} of them, \
+                             not {parts}"
+                        )));
+                    }
+                    let mut keys = Vec::with_capacity(parts);
                     for _ in 0..parts {
                         let k = decode_str(buf, pos)?;
                         let desc = *buf.get(*pos).ok_or_else(ended)? != 0;

@@ -1104,6 +1104,38 @@ jobs:
       - name: Build the server (release)
         run: cargo build --release -p fennec-server
 
+  # docs/design/conventions.md#fuzzing: every parser of untrusted bytes --
+  # an HTTP request, JSON, FennecQL, the codec, a .fennec file's open and a
+  # replica's apply, a SQLite file -- fuzzed for 30 s each, built with
+  # AddressSanitizer and LLVM's coverage counters on the Makefile's dated
+  # nightly (a nightly only here and in fuzz.yml). The test job runs the same
+  # targets over their seeds in a plain build; fuzz.yml gives each half an
+  # hour a week. What a run finds is kept as an artifact.
+  fuzz-smoke:
+    name: fuzz-smoke (each target 30 s under ASan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the fuzzer's nightly, pinned to a date
+        run: make fuzz-toolchain
+
+      - name: Each target for 30 s under AddressSanitizer
+        run: make fuzz-smoke FUZZ_SECONDS=30
+
+      - name: Keep what it found
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-crashes
+          path: target/fuzz/crashes
+          retention-days: 90
+
   # The native library an app links (crates/fennec-ffi) on Android and the
   # JVM, and its Kotlin, Dart and Flutter bindings: the Kotlin library's
   # JVM tests against the Linux build, the AAR with the library built by

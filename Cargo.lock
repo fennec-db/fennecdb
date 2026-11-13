@@ -491,6 +491,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fennec-fuzz"
+version = "0.2.0"
+dependencies = [
+ "fennec-core",
+ "fennec-http",
+ "fennec-import",
+ "fennec-ql",
+]
+
+[[package]]
 name = "fennec-http"
 version = "0.2.0"
 dependencies = [
