@@ -9,19 +9,24 @@ on:
         description: 'Tag to build and release'
         required: true
 
+# Every job reads alone but the three that publish, each naming the one
+# write it uses: `publish` contents (the release, the Go module's tag),
+# `image-push` and `manifest` packages (ghcr.io). A job that builds holds no
+# write and its checkout keeps no token: the crates' build scripts (ring,
+# cc, ...), Gradle's plugins and the image's build run there, and what they
+# make reaches a job that writes only as an artifact. tools/workflow_check.py
+# holds every workflow to that (docs/design/integrations.md#workflows).
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Reads the tag and builds: it writes no release and no package, so the
-  # workflow's write permissions are not its token's, and the checkout does
-  # not leave the token in .git/config for the dependencies' build scripts
-  # (ring, cc, ...) to find. The artifact upload needs no token of the
-  # repository's.
+  # Reads the tag and builds: it writes no release and no package, so its
+  # token reads alone, and the checkout does not leave the token in
+  # .git/config for the dependencies' build scripts (ring, cc, ...) to find.
+  # The artifact upload needs no token of the repository's.
   binaries:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -46,7 +51,7 @@ jobs:
             targets: aarch64-apple-darwin x86_64-apple-darwin
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
           persist-credentials: false
@@ -89,7 +94,7 @@ jobs:
             echo "${stage}.tar.gz  $(wc -c < "dist/${stage}.tar.gz") bytes"
           done
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist-${{ matrix.name }}
           path: dist/*.tar.gz
@@ -110,8 +115,7 @@ jobs:
   # says so.
   #
   # Read-only, its checkout keeping no token: the crates' build scripts (ring,
-  # cc, windows_aarch64_msvc) run here, and the workflow's contents: write
-  # and packages: write are for the jobs that publish.
+  # cc, windows_aarch64_msvc) run here, and only the jobs that publish write.
   windows:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -129,7 +133,7 @@ jobs:
     env:
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
           persist-credentials: false
@@ -158,20 +162,25 @@ jobs:
         shell: pwsh
         run: ./tools/windows-zip-check.ps1 -Version ($env:TAG -replace '^v', '') -Zip (Get-Item dist/*.zip).FullName
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: steps.has.outputs.zip == '1'
         with:
           name: dist-${{ matrix.name }}
           path: dist/*.zip
           if-no-files-found: error
 
+  # Read-only, its checkout keeping no token, as `binaries`: `make wasm`
+  # runs cargo.
   wasm:
     name: wasm bundle
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
+          persist-credentials: false
 
       - name: Install the pinned toolchain
         run: rustup show
@@ -196,7 +205,7 @@ jobs:
           cp -r web/collate "fennec-web-v${version}/"
           tar -czf "dist/fennec-web-v${version}.tar.gz" "fennec-web-v${version}"
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist-wasm
           path: dist/*.tar.gz
@@ -208,13 +217,22 @@ jobs:
   # run and held to the checksum, and the release attaches it. A release
   # whose manifest names no such zip stops here rather than ship a package
   # SwiftPM would refuse.
+  #
+  # It writes nothing: the run's list and its artifact are the Actions API's
+  # to read (`actions: read`, as linux-power-cut.yml's `gh run download`
+  # asks; a public repository's answer them to a token without it, which is
+  # what v0.2.0's run had), and the checkout keeps no token.
   apple:
     name: XCFramework (from swift-binary)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
+          persist-credentials: false
 
       - name: Find the zip Package.swift names
         env:
@@ -250,7 +268,7 @@ jobs:
             exit 1
           }
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist-apple
           path: |
@@ -261,25 +279,30 @@ jobs:
 
   # The Android AAR: the Kotlin library with the native library for
   # arm64-v8a, armeabi-v7a and x86_64, built with the runner's NDK.
+  # Read-only, its checkout keeping no token: Gradle's plugins and the
+  # crates' build scripts run here.
   android:
     name: Android AAR
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
+          persist-credentials: false
 
       - name: Install the pinned toolchain and the Android targets
         run: |
           rustup show
           rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
 
-      - uses: actions/setup-java@v6
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: '17'
 
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
         with:
           gradle-version: '8.10.2'
 
@@ -288,7 +311,7 @@ jobs:
           export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
           integrations/kotlin/build-aar.sh dist
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist-android
           path: dist/*.aar
@@ -325,11 +348,11 @@ jobs:
     env:
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ matrix.artifact }}
           path: tarballs
@@ -350,7 +373,7 @@ jobs:
       - name: Install, run and remove them
         run: tools/linux-packages-check.sh "${TAG#v}" dist ${{ matrix.arch }}
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist-packages-${{ matrix.arch }}
           path: |
@@ -358,9 +381,23 @@ jobs:
             dist/*.rpm
           if-no-files-found: error
 
+  # The server's image, ghcr.io/<owner>/fennec-server, in three jobs: this
+  # one builds each architecture's on a runner of its own, `image-push`
+  # pushes each under an arch-suffixed tag, and `manifest` stitches them
+  # together. A runner of each architecture is the reason there is no QEMU
+  # step -- emulating a Rust build is many times slower than a second
+  # runner. The build holds no write and its checkout keeps no token: the
+  # crates' build scripts run in the image's cargo build. Each image is run
+  # on the runner that built it before it is kept (tools/image-check.sh:
+  # its `--version`, and the server its own CMD starts turning healthy by
+  # its own HEALTHCHECK, `fennec-server --ping`), so an image that does not
+  # start never reaches ghcr.io, and it is handed to `image-push` as the
+  # file `docker save` writes.
   image:
     name: image (${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -371,27 +408,17 @@ jobs:
       # BuildKit is what the Dockerfile's --mount=type=cache needs.
       DOCKER_BUILDKIT: '1'
       IMAGE: ghcr.io/${{ github.repository_owner }}/fennec-server
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
+          persist-credentials: false
 
-      - name: Log in to ghcr.io
-        run: echo '${{ github.token }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
-
-      # Each architecture is built on its own native runner and pushed under an
-      # arch-suffixed tag; the manifest job below stitches them together. This
-      # is the reason there is no QEMU step -- emulating a Rust build is many
-      # times slower than a second runner.
-      - name: Build and push
+      - name: Build
         run: |
           set -eu
-          if [ "${{ github.event_name }}" = workflow_dispatch ]; then
-            tag="${{ github.event.inputs.tag }}"
-          else
-            tag="$GITHUB_REF_NAME"
-          fi
-          version="${tag#v}"
+          version="${TAG#v}"
           # image.source is what makes GHCR attach the package to this
           # repository, and with it the repository's permissions.
           docker build \
@@ -400,42 +427,118 @@ jobs:
             --label org.opencontainers.image.version="$version" \
             --label org.opencontainers.image.licenses=Apache-2.0 \
             -t "$IMAGE:$version-${{ matrix.arch }}" .
-          docker push "$IMAGE:$version-${{ matrix.arch }}"
 
-  manifest:
-    name: image (manifest)
+      # The check is this workflow's own commit's, as `linux-packages`'s
+      # files are: a dispatch for a tag from before it has none. Taken after
+      # the build, so the build's context is the tag's tree alone.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: workflow
+          persist-credentials: false
+          sparse-checkout: tools/image-check.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Run it, its version and its own health check
+        run: workflow/tools/image-check.sh "$IMAGE:${TAG#v}-${{ matrix.arch }}" "${TAG#v}"
+
+      - name: Keep it
+        run: docker save -o "image-${{ matrix.arch }}.tar" "$IMAGE:${TAG#v}-${{ matrix.arch }}"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-${{ matrix.arch }}
+          path: image-${{ matrix.arch }}.tar
+          if-no-files-found: error
+
+  # The one job holding packages: write for the arch-suffixed tags, and it
+  # builds nothing and runs no image: it loads the two `image` saved, holds
+  # each to the platform its tag names, and pushes them. Both or neither:
+  # an architecture whose build or check failed holds back the other's tag.
+  image-push:
+    name: image (push)
     needs: image
     runs-on: ubuntu-latest
+    permissions:
+      packages: write
     env:
       IMAGE: ghcr.io/${{ github.repository_owner }}/fennec-server
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: image-*
+          path: images
+          merge-multiple: true
+
+      - name: Load the images
+        run: |
+          set -eu
+          version="${TAG#v}"
+          for arch in amd64 arm64; do
+            docker load -i "images/image-$arch.tar"
+            platform=$(docker image inspect -f '{{.Os}}/{{.Architecture}}' "$IMAGE:$version-$arch")
+            if [ "$platform" != "linux/$arch" ]; then
+              echo "::error::$IMAGE:$version-$arch is an image for $platform, not linux/$arch"
+              exit 1
+            fi
+          done
+
+      - name: Log in to ghcr.io
+        env:
+          TOKEN: ${{ github.token }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Push
+        run: |
+          set -eu
+          for arch in amd64 arm64; do
+            docker push "$IMAGE:${TAG#v}-$arch"
+          done
+
+  # The multi-arch tags, `<version>` and `latest`, made from the two pushed
+  # above: a manifest list written on ghcr.io, nothing built or run. Only
+  # once `publish` has drafted the release, which follows every job that
+  # builds its files, `binaries` among them: `latest` never names the image
+  # of a release whose binaries, zips or packages failed.
+  manifest:
+    name: image (manifest)
+    needs: [binaries, publish, image-push]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/fennec-server
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
       - name: Log in to ghcr.io
-        run: echo '${{ github.token }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+        env:
+          TOKEN: ${{ github.token }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
 
       - name: Join the per-architecture images
         run: |
           set -eu
-          if [ "${{ github.event_name }}" = workflow_dispatch ]; then
-            tag="${{ github.event.inputs.tag }}"
-          else
-            tag="$GITHUB_REF_NAME"
-          fi
-          version="${tag#v}"
+          version="${TAG#v}"
           docker buildx imagetools create \
             -t "$IMAGE:$version" -t "$IMAGE:latest" \
             "$IMAGE:$version-amd64" "$IMAGE:$version-arm64"
           docker buildx imagetools inspect "$IMAGE:$version"
 
+  # The one job writing to the repository: the release and its assets, and
+  # the Go module's tag, pushed with the checkout's token. It builds nothing:
+  # what it attaches is the artifacts of the jobs above, which read alone.
   publish:
     name: publish the release
     needs: [binaries, windows, wasm, apple, android, linux-packages]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: dist
           pattern: dist-*

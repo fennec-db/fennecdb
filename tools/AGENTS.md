@@ -1,6 +1,6 @@
 # AGENTS.md
 
-The install channels' invariant, for `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/windows-zip.sh`, `tools/windows-zip-check.ps1`, `tools/install-ps1-check.ps1`, `site/install.sh`, `site/install.ps1` and the release workflows. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
+The install channels' and the workflows' invariants, for `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/windows-zip.sh`, `tools/windows-zip-check.ps1`, `tools/install-ps1-check.ps1`, `tools/image-check.sh`, `site/install.sh`, `site/install.ps1`, the release workflows, and every workflow in `.github/workflows/` with `tools/workflow_check.py` and `.github/dependabot.yml`. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
 
 ## Invariants
 
@@ -34,7 +34,28 @@ nothing (`site/test_install.sh`, `site/test_install.ps1`). A package is installe
 and the Windows zip through `install.ps1` on the runner that built it,
 before it is kept (`tools/linux-packages-check.sh`,
 `tools/windows-zip-check.ps1`, which CI's `windows (release zip)` runs on
-every change); a new channel names what it installs by its checksum. A
-release job that builds runs with `contents: read` and a checkout keeping no
-token (`binaries`, `windows`, `linux-packages`): the crates' build scripts
-run there, and only the jobs that publish write.
+every change), and the image on the runner that built it -- its
+`--version`, its server healthy by its own HEALTHCHECK
+(`tools/image-check.sh`, which CI's Grafana job runs on the image it
+builds) -- before `image-push` pushes it; a new channel names what it
+installs by its checksum. A release job that builds runs with
+`contents: read` and a checkout keeping no token (`binaries`, `windows`,
+`wasm`, `android`, `linux-packages`, `image`): the crates' build scripts
+run there, and only the jobs that publish write (`publish`, `image-push`,
+`manifest`).
+
+**[A workflow runs actions pinned by commit, and a job that writes builds
+nothing.](../docs/design/integrations.md#workflows)** Every `uses:` names a
+40-hex commit with the tag it was taken from in a comment (`@<sha> #
+v7.0.1`, the commit's most specific tag: the only comment Dependabot
+rewrites as it moves the pin), never a tag or a branch; every workflow says
+`permissions:` at its top, and a job widens only what it uses; a job
+holding any write, `id-token: write` among them, runs no build -- no cargo,
+gradle, make, npm/pnpm/yarn install or build, docker build or build script
+-- but takes what a job that reads alone built as an artifact
+(`release.yml`'s `image` to `image-push`, `swift-binary.yml`'s `build` to
+`pull-request`); and a job reading a stored secret names its
+`environment:`, where the secret is kept under rules saying which runs may
+read it. `tools/workflow_check.py` holds every workflow to all four in CI's
+fmt job, itself held by `tools/test_workflow_check.py`; a job let off the
+last is listed in its `REPOSITORY_SECRETS` with the reason.
