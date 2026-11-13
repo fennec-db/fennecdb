@@ -1293,6 +1293,20 @@ def studio_gz():
     return total / 1024
 
 
+def rustc_version():
+    """`rustc -V` of the release rust-toolchain.toml pins, taken as `make
+    wasm` takes it (rustup's own first, as the Makefile prefers its cargo):
+    under CI the compiler of the module the sizes are read from, said with
+    them, since a toolchain moves sizes with no change of ours
+    (docs/design/crates.md#toolchain)."""
+    home = os.path.expanduser("~/.cargo/bin/rustc")
+    try:
+        return subprocess.run([home if os.path.exists(home) else "rustc", "-V"], cwd=REPO,
+                              capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "no rustc found"
+
+
 def check_claims():
     """Compares every number in CLAIMS against the thing it describes."""
     web = lambda name: os.path.join(REPO, "web", name)
@@ -2276,6 +2290,7 @@ def build():
     open(os.path.join(OUT, "llms-full.txt"), "w", encoding="utf-8").write(full)
 
     print(f"built {len(pages)} pages -> {os.path.relpath(OUT, REPO)}")
+    print(f"  sizes held against web/fennec.wasm; the toolchain here: {rustc_version()}")
 
     labels = check_fold_labels()
     if labels:

@@ -126,6 +126,14 @@ refused naming the field and the element.
 `fennec-cli` takes `cli` (`panic = abort`), `fennec-server` `release`: a
 connection's panic unwinds alone.
 
+**[The compiler CI tests with is the one that ships.](docs/design/crates.md#toolchain)**
+`rust-toolchain.toml` names an exact release, never `stable`; every rust
+image a Dockerfile or script names is that release by digest, the file
+kept in the build (`tools/toolchain_check.py`, the fmt job), and
+`release.yml` stops where a binary's `rustc -V` differs from it or the
+image's. A bump is a pull request of its own carrying `make wasm-sizes`,
+the size report, `make instr-compare` and `make float-test`.
+
 ### The engine's lock and blocks
 
 **[Single writer, and readers beside it.](docs/design/engine.md#single-writer)**

@@ -312,6 +312,18 @@ def part_of(home):
 OTHERS = [("fennec-lite.wasm", ["language"]), ("no feature", [])]
 
 
+def rustc(root):
+    """The rustc a build in `root` takes: rustup's, by that tree's
+    rust-toolchain.toml -- the base's own in its worktree, so a toolchain
+    bump's report weighs the compiler as much as the code."""
+    tool = os.path.join(os.path.dirname(CARGO), "rustc") if os.path.dirname(CARGO) else "rustc"
+    try:
+        return subprocess.run([tool, "-V"], cwd=root, capture_output=True, text=True,
+                              check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "an unknown rustc"
+
+
 def build(root, target, features=None):
     """The module built with its names, as bytes: its debug information
     stripped, which the link's `--compress-relocations` refuses, and its
@@ -798,6 +810,7 @@ def main():
         return
     head = measure(ROOT, os.path.join(out, "head"), features)
     head_others = others(ROOT, os.path.join(out, "head"))
+    compilers = f"Built by `{rustc(ROOT)}`"
     base = base_others = None
     if base_ref:
         # Outside the repository: Cargo reads the `.cargo/config.toml` of
@@ -809,13 +822,14 @@ def main():
         try:
             base = measure(tree, os.path.join(out, "base"), features)
             base_others = others(tree, os.path.join(out, "base"))
+            compilers += f", `{called}` by `{rustc(tree)}`"
         finally:
             subprocess.run(["git", "worktree", "remove", "--force", tree], cwd=ROOT)
             shutil.rmtree(os.path.dirname(tree), ignore_errors=True)
     title = "## The browser module" + ("" if features is None else
                                        f" with {', '.join(f'`{f}`' for f in features) or 'no feature'}")
     title += f", against `{called}`" if base_ref else ""
-    text = title + "\n\n" + report(head, base) + "\n"
+    text = title + "\n\n" + compilers + ".\n\n" + report(head, base) + "\n"
     text += ("\n## Without the indexes (`make wasm-lite`), and without any feature"
              + (f", against `{called}`" if base_ref else "")
              + "\n\n" + others_report(head_others, base_others) + "\n")

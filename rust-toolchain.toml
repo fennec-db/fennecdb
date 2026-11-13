@@ -1,9 +1,11 @@
 # An exact release, never `stable`: the compiler CI tests with is the one that
-# ships. `stable` moved under main's CI with no change of ours -- 1.100.0's
-# Unicode tables failed fennec-core's case tests on every pull request the
-# day it came out. The Dockerfiles build on the rust image of this same
-# release, by digest, and tools/toolchain_check.py holds them alike; a bump
-# is a pull request of its own.
+# ships (docs/design/crates.md#toolchain). `stable` moved under main's CI
+# with no change of ours -- 1.100.0's Unicode tables failed fennec-core's
+# case tests on every pull request the day it came out. Every rust image a
+# Dockerfile or script names is this same release, by digest, and
+# tools/toolchain_check.py holds them alike. A bump is a pull request of its
+# own, carrying `make wasm-sizes`, the size report, `make instr-compare` and
+# `make float-test` (RELEASING.md, "A toolchain bump").
 [toolchain]
 channel = "1.99.1"
 targets = ["wasm32-unknown-unknown"]

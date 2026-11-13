@@ -15,11 +15,10 @@
 # was given before it is copied out (the script says why: a branch's image
 # once carried main's fennec-shard).
 
+# ----------------------------------------------------------------- build
 # Every FROM names a digest, and the rust image the release
 # rust-toolchain.toml names, as the repository's Dockerfile does
 # (tools/toolchain_check.py holds both).
-#
-# ----------------------------------------------------------------- build
 FROM rust:1.99.1-alpine@sha256:44819b27be4c97b0e4d7203bd2e02c4820f97700211b6a37fb4c246a2de59383 AS build
 
 RUN apk add --no-cache musl-dev rsync
@@ -29,7 +28,7 @@ WORKDIR /src
 # no binary here needs, is added in a layer of its own, as the repository's
 # Dockerfile adds it.
 COPY rust-toolchain.toml ./
-RUN rustup toolchain install --no-self-update
+RUN rustup toolchain install --no-self-update --profile minimal
 COPY . .
 
 # /built, a path no build before the script copied from: BuildKit keyed
