@@ -632,28 +632,31 @@ for each lock they take, the MCP tools as `/query`. The list is held to
 `get` read up to 1 002 rows, and read again only where that bound, not the
 `get`'s own `limit`, stopped the read -- a plain one, one field and no
 page, grouped by its field for its distinct values (grouped every time, a
-`set` under such a rule took 4.5 -> 5.1 us); one that pages, groups or
-computes its column as far as the engine reads a statement's own inner
-`get` of that kind, `MAX_SUBQUERY_VALUES` rows -- groups, where it groups
--- refused past them as the engine refuses one, and refused without reading
-on where the rows read already hold more values than the bound). Before #623 that second kind
-was its first 1 002 rows: under `limit 5000`, `offset 1`, `group
+`set` under such a rule took 4.5 -> 5.1 us); one that pages or computes
+its column as far as the engine reads a statement's own inner `get` of
+that kind, `MAX_SUBQUERY_VALUES` rows, refused past them as the engine
+refuses one, and refused without reading on where the rows read already
+hold more values than the bound; one that groups read once, to
+`MAX_SUBQUERY_VALUES` groups, both bounds asked of that one answer, its
+values first). Before #623 every form but the plain one was its first
+1 002 rows: under `limit 5000`, `offset 1`, `group
 room, n` or `select lower(room) as r`, 1 003 memberships of one room and
 then one of another were a list of the first room, and the token was shown
 nothing of the second -- closed, and wrong -- and 2 003 rows of 1 001 rooms
 a list of one rather than a refusal (`tests/reach.rs`,
-`a_rule_s_list_is_not_cut_at_its_first_rows`). Under a `not` the same cut
+`a_rule_s_list_is_not_cut_at_its_first_rows`). Negated, the same cut
 failed open: a deny list, `not (room in (get bans select room where user =
-$jwt.sub limit 5000))`, read as 1 003 bans of one room's alone held out
-that room, and the token read the messages of a second room it had banned
-(`a_deny_list_is_not_cut_open`, `[three, two]` where its rule admits
-`[three]`); `hold` binds an inner `get`'s rules for the `not`s it stands
-under, not the length of its list. A plain `get`'s re-read was grouped by
-its field whatever the field, and a group is the values its key finds
-equal: a `nocase` field's key is its case fold, so `R2` and `r2` were one
-group, which kept the first row's spelling, where `in` compares by the
-collation of the field on its left. Under `not (room in (get bans select
-room where user = $jwt.sub))`, `bans.room` `nocase` and `messages.room`
+$jwt.sub limit 5000))` or the same `in` `= false`, read as 1 003 bans of
+one room's alone held out that room, and the token read the messages of a
+second room it had banned (`a_deny_list_is_not_cut_open`, `[three, two]`
+where its rule admits `[three]`); `hold` binds an inner `get`'s rules for
+the `not`s it stands under, not the length of its list. A plain `get`'s
+re-read was grouped by its field whatever the field, and a group is the
+values its key finds equal: a `nocase` field's key is its case fold, so
+`R2` and `r2` were one group, which kept the first row's spelling, where
+`in` compares by the collation of the field on its left. Under `not (room
+in (get bans select room where user = $jwt.sub))`, `bans.room` `nocase`
+and `messages.room`
 not, 1 003 bans of `R2` beside one of `r2` held out the room `R2` alone,
 and the token read `r2`'s messages
 (`a_deny_list_over_a_folded_field_keeps_every_spelling`, `[lower, three]`
@@ -681,19 +684,36 @@ the token read the room of the one ranked last. `match` with no `order` or
 aggregate, loose or not, `near`, `fuse` and `rerank` in a rule's inner
 `get` are refused where the policy is read (`inner_gets`, `ranking`),
 naming its line, so a server holding one stops at its start rather than
-serve a page as a set; `match` beside `order` is a filter, every row it
-scores above zero, with no ceiling (`matched_rows`), and stays
+serve a page as a set; `match` beside an `order` or an aggregate is a
+filter, every row it scores above zero, with no ceiling (`matched_rows`),
+and stays
 (`a_ranking_in_a_rule_s_inner_get_is_refused_at_startup` reads 10 001
-bans so, whole). What a re-read costs a statement at the most, counted the
-same way: read row by row it stops at `MAX_SUBQUERY_VALUES` rows, 204.4 M
+bans so, whole). What a re-read costs a statement, counted the same way:
+read row by row it stops at `MAX_SUBQUERY_VALUES` rows, 204.4 M
 instructions (11.2 ms here) over 100 000 rows of one room, against 4.38 M
-over 1 003; with `group` it stops at 100 000 groups, which bound the
-groups and not the rows folded into them -- 100 000 groups of one row
-each cost 1.10 G (70 ms), the filter's rows folded twice, by the first
-read and the re-read -- and a plain field's grouped re-read folds every row
-of its filter with no bound of rows at all, 110.6 M over 100 000 rows,
-some 1 100 a row. The bound is on values, not on the rows a filter holds:
-a token whose rule's filter holds many rows pays for them in every
+over 1 003, and a plain field's grouped re-read folds every row of its
+filter with no bound of rows at all, 110.6 M over 100 000 rows, some 1 100
+a row. A `group` form stops at 100 000 groups, which bound the groups and
+not the rows folded into them, and is read once: a grouped read folds
+every row of its filter and works out every group before its page is cut
+(`aggregate`: `selected_ids`, `fold`, `rows`, then `page`), so the first
+read #623 made of it, to 1 002 groups, cost what its re-read to 100 001
+did. Read once, 100 000 groups of a row each cost 0.60 G instructions
+where read twice they cost 1.14 G, 1 004 groups 6.4 M where 14.8 M, and
+100 001 groups, refused, 0.60 G where 1.13 G (this branch built before
+and after the change, medians of nine, two runs each, the load at 24 to
+57; that pair read the 100 000 rows row by row in 224 M). One refusal
+costs more: a list whose first 1 002 groups already held more than 1 000
+values was refused after the first read, its other groups never sorted
+nor made rows, and over 100 000 groups of a room each it costs 0.61 G
+where it cost 0.54 G, a list refused on every statement of its token
+either way. None of these figures is the most a list can cost: a `group`
+form and a plain list read grouped are bounded in groups or values, not
+in the rows they read, so a filter of a million rows folds a million, and
+a re-read row by row with `order` sorts every row of its filter before it
+takes its 100 001, unless an ordered index on that field walks it to its
+page (`walk_order`). The bound is on values, not on the rows a filter
+holds: a token whose rule's filter holds many rows pays for them in every
 statement, and is served better by a narrower filter or the membership
 kept in the rows. The refusal names the rule,
 by its collection and its filter as the policy writes it -- which

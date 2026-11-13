@@ -607,15 +607,17 @@ messages   read,insert  where room in (get members select room where user = $jwt
     — stop the server at startup, since none of them could be answered
     first; so do a rule on <code>*</code> that reads a collection, a claim
     anywhere in the inner <code>get</code> but its <code>where</code>, an
-    inner <code>get</code> that ranks its rows — <code>match</code> with no
-    <code>order</code>, <code>fuzzy</code> or <code>prefix</code> or
-    neither, <code>near</code>, <code>fuse</code>, <code>rerank</code> —
-    and what an inner <code>get</code> may not say anyway. A ranking
-    answers a page of its best rows, at most 10 000, not every row its
-    filter holds, and under a <code>not</code> a list cut there would hold
-    out less than the rule names; <code>match</code> beside
-    <code>order</code> is a filter, every row it scores above zero, and may
-    stand there. A scoped
+    inner <code>get</code> that ranks its rows — a <code>match</code>
+    with neither an <code>order</code> nor an aggregate beside it, plain,
+    <code>fuzzy</code> or <code>prefix</code> alike, a <code>near</code>, a
+    <code>fuse</code> or a <code>rerank</code> — and what an inner
+    <code>get</code> may not say anyway. A ranking answers a page of its
+    best rows, at most 10 000, not every row its filter holds, and where
+    the rule negates the list — <code>not</code>, or <code>(… in (get
+    …)) = false</code> — a list cut there would hold out less than the
+    rule names; <code>match</code> beside an <code>order</code> or an
+    aggregate is a filter, every row it scores above zero, and may stand
+    there. A scoped
     subscription whose rules read another collection is bound again when
     that collection is written: the courier enters a customer's stream of
     <code>positions</code> as the order is claimed and leaves it, a
