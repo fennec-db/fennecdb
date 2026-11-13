@@ -938,11 +938,16 @@ fn frames_in(body: &[u8]) -> Result<u64> {
     while pos < body.len() {
         pos += 1;
         get_uvarint(body, &mut pos)?;
-        pos += get_uvarint(body, &mut pos)? as usize;
+        let len = get_uvarint(body, &mut pos)? as usize;
+        // Held to what is left rather than added, as the replay holds it:
+        // a length near 2^64 wrapped `pos` back into the record in a
+        // release build, its frames counted again, and a debug build's
+        // add overflowed.
+        if len > body.len() - pos {
+            return Err(Error::Corrupt("a frame runs past its record".into()));
+        }
+        pos += len;
         n += 1;
-    }
-    if pos > body.len() {
-        return Err(Error::Corrupt("a frame runs past its record".into()));
     }
     Ok(n)
 }
@@ -10322,7 +10327,7 @@ impl Database {
                 fields.push(f.clone());
                 // A `String`, as the parser hands it one: a `&str` was a
                 // second copy of `Schema::new`, 0.6 KB of the browser module.
-                schema.fields = altered(collection, &schema.fields, fields)?;
+                schema.fields = altered(collection, fields)?;
                 (FIELD_ADD, f.name.clone(), String::new())
             }
             Alter::DropField(name) => {
@@ -10348,7 +10353,7 @@ impl Database {
                 // A name taken or reserved, as `create collection` refuses.
                 let mut fields = schema.fields.clone();
                 fields[pos].name = to.clone();
-                schema.fields = altered(collection, &schema.fields, fields)?;
+                schema.fields = altered(collection, fields)?;
                 // The paths into it are under its new name, and so are the
                 // parts of an index over several fields that read it.
                 let prefix = format!("{from}.");
@@ -16622,46 +16627,16 @@ fn past_tombstones(
     Short::Exact
 }
 
-/// The fields an alter of `collection` leaves, `had` before it, checked as
-/// `Schema::new` checks a `create`'s: one copy for `add` and `rename`.
-///
-/// Where it refuses one of the fields `had`, not the one the alter changes,
-/// it says so: a field a build before the bounds made -- an `@hnsw` `m`
-/// past `MAX_M`, a `vector<N>` past `MAX_DIM` -- opens, reads and writes as
-/// it did, and every alter asks each field again, so `add field x int` was
-/// refused naming `e`. Refused all the same, as `create` would refuse the
-/// field, but saying so and the way out: a field's own index goes only with
-/// the field, which a drop asks nothing of the rest to take away. Not in
-/// the browser module, which asks no `m` (`IndexKind::check`): there it is
-/// a dimension past 10^9, of which no page holds a vector, and
-/// `Schema::new`'s refusal names the field and its range; this was 0.7 KB
-/// of the module.
+/// The fields an alter of `collection` leaves, checked as `Schema::new`
+/// checks a `create`'s: one copy for `add` and `rename`. Every field it
+/// held was read within the language's ranges (`Schema::decode`), so a
+/// refusal is of the field the alter changes.
 #[inline(never)]
 fn altered(
     collection: &str,
-    had: &[crate::schema::Field],
     fields: Vec<crate::schema::Field>,
 ) -> Result<Vec<crate::schema::Field>> {
-    match Schema::new(collection.to_string(), fields) {
-        Ok(s) => Ok(s.fields),
-        Err(e) if cfg!(target_arch = "wasm32") => Err(e),
-        Err(e) => Err(held_over(collection, had).unwrap_or(e)),
-    }
-}
-
-#[cold]
-#[inline(never)]
-fn held_over(collection: &str, had: &[crate::schema::Field]) -> Option<Error> {
-    had.iter()
-        .find_map(|f| match f.index.check(&f.name, &f.ty) {
-            Err(Error::Type(why)) => Some(Error::Query(format!(
-                "`{collection}` holds a field a version before this one made, which this one no \
-                 longer takes ({why}): drop it (`alter collection {collection} drop field {}`) \
-                 and add it again within the range, or copy the rows into a collection made so",
-                f.name
-            ))),
-            _ => None,
-        })
+    Schema::new(collection.to_string(), fields).map(|s| s.fields)
 }
 
 /// The beam [`past_tombstones`] widens to: `ef`, at least the page, and

@@ -122,11 +122,15 @@ and what parses written back and read as itself), `fennecql` (`parse` and
 `parse_exact` over the repository's FennecQL corpus,
 `tools/fennecql_corpus.py --list`), `codec` (a value's and a type's
 encoding decoded, skipped, read by a path and as a document's fields, and
-a value read written back as its bytes), `image` (a `.fennec` file opened,
-read whole and its indexes built, and its records applied as a replica
-applies a primary's; the first byte of an input says whether its records
-are summed anew, so an open reads what a record holds rather than stopping
-at its sum) and `sqlite` (`fennec import`'s reader over a file). `make fuzz`
+a value read written back as its bytes), `image` (a `.fennec` file opened
+read into memory and mapped as a server opens it -- an image's data record
+taken from the index it wrote of its frames, `Store::adopt_index`, in shares
+on threads past 16 384 documents, any other replayed in place,
+`replay_mapped` -- each read whole, its indexes built and its vectors
+linked, and its records applied as a replica applies a primary's; the
+first byte of an input says whether its records are summed anew, so an
+open reads what a record holds rather than stopping at its sum) and
+`sqlite` (`fennec import`'s reader over a file). `make fuzz`
 lists them, `make fuzz TARGET=<name>` runs one; a new parser of untrusted
 bytes gets its target in the pull request that adds it, and
 `.github/workflows/fuzz.yml`'s matrix its name, which the crate's tests
@@ -169,6 +173,30 @@ input and allocated before it met the input. A run is on a thread of a
 server's connection's stack, 8 MiB (`RUN_STACK`), so what overflows here
 overflows there. `fennec-fuzz replay <target> <file>` runs one again.
 
+*A run is its seed's, so a finding is made again from its recipe.* A run
+hands its target each input of its start -- the target's seeds and what a
+corpus directory holds, in order, once -- then a mutation of one the corpus
+holds, the corpus taking each input that reached new coverage (`Inputs`).
+Nothing else is read: no clock, and coverage only as which runs the corpus
+took, so a seed, the start and the runs kept make the same inputs again, on
+another machine and in a build that counts no coverage; the fuzzer's own
+edges are taken as seen by a mutator of their own, which draws nothing from
+the run's. Whatever ends a run -- a panic, an abort's handler, the
+watchdog -- says its recipe (`guard::say_recipe`, with system calls alone):
+the target, the run, the input's length and FNV hash, and the command that
+makes it again, `fennec-fuzz reproduce <target> --seed N --start HASH
+[--corpus DIR] --run N --fnv HASH --kept RUNS`, the start's fingerprint
+telling another checkout's seeds apart and the runs kept written as steps
+in base 36. `reproduce` checks both hashes, writes the input and runs it as
+`replay` does. `tests/all.rs` holds each part: a panic's recipe read back
+and made into its input, an abort's from its handler in a child process,
+a run's input following the runs kept before it, and every target's start
+the same bytes in two processes -- the `image` target's seeds are files
+the engine writes, which must hold no clock, path or hash map's order.
+Coverage itself is not reproducible -- a hash map's random keys, threads,
+the platform's own code -- which is why the corpus's growth is written
+down rather than taken again.
+
 *A finding is a regression test in its own crate*, the input's bytes or
 the file made by hand, failing before the fix. The pull request that added
 the fuzzer fixed what was known of these parsers then -- a value nested
@@ -186,19 +214,40 @@ unchecked past the replay's test (`tests/damage.rs`); a graph record
 counting 2^32 nodes over a few bytes, whose arrays asked for 32 GiB
 before a node was read (`vector::tests`); and a sparse vector read back
 with the last `u32` as an index, whose pgvector form overflowed adding
-one (`sparse::tests`). Two are left for a decision. JSON's reader takes a
-number past a double's range, `1e400`, as infinity, which its writer
-writes as `null`: no crash, and the `json` target holds its round trip to
-finite values until that is decided. And a vector field's `m` and
-dimension are read from a file as written -- a field a build before their
-bounds made opens as it did (`engine::altered`) -- so a crafted file
-declaring `@hnsw` with m = 2^40 asks the index's build for 2m slots a
-node, which the `image` target will meet.
+one, now refused by the decoder, an entry being below its dimension
+wherever a write puts one (`codec::tests`).
 
-*CI* runs each target for 30 s under ASan on every pull request (ci.yml's
-`fuzz-smoke`, `make fuzz-smoke`) and for 30 minutes each on Sundays
-(`fuzz.yml`), each week's corpus going on from the last's; a finding is
-kept as the job's artifact. Not yet fuzzed, after 1.0: a sealed archive's
+Its review found more, each fixed in that pull request with its test. A
+vector field's `m` and dimension were read from a file as written, so 77
+bytes declaring `@hnsw` with an `m` of 2^40 had the open killed asking for
+2^41 links a node: a schema read off the bytes is held to the language's
+ranges ([crates.md](crates.md#limits), *A file's schema is held to the
+same ranges*), a graph record's own `m` too. A frame running past its data
+record stopped the replay as at a torn tail, the record's frames after it
+dropped with no word: refused, as the apply refuses it
+([storage.md](storage.md#file-format)). And the `image` target did not
+run the open a server runs, mapped: it does now, where the index an image
+writes of its frames took `u64::MAX` as an id, its next id overflowing
+(`store::tests`). Ten minutes of `image` with the mapped open under ASan
+(95 089 runs) and three of `codec` (181 725) found nothing more. One is
+left for a decision: JSON's reader takes a number past a double's range,
+`1e400`, as infinity, which its writer writes as `null` -- no crash, and
+the `json` target holds its round trip to finite values until that is
+decided.
+
+*CI* runs each target for 30 s under ASan on every pull request and push
+(ci.yml's `fuzz-smoke`, `make fuzz-smoke`) and for 30 minutes each on
+Sundays (`fuzz.yml`). The repository is public, and so are a job's log and
+its artifacts for 90 days, while SECURITY.md asks a finding be reported
+privately: so a job keeps no input and no corpus, and says no message and
+no backtrace (`--private`; ASan's report goes into a file of the runner's,
+`ASAN_OPTIONS=log_path`), only the recipe and the commit, from which a
+maintainer makes the input again on a machine of their own. The first
+version kept a finding's input and backtrace as the job's artifact, and
+carried the weekly corpus from week to week in the Actions cache: inputs
+no maintainer holds, which no recipe could make again. Each week starts
+from the repository's seeds instead, its seed the run's number, so each
+week's mutations are its own. Not yet fuzzed, after 1.0: a sealed archive's
 and a backup's frames (`seal.rs`), an archive's segments, PostgreSQL's
 messages and `pgoutput` (`fennec-wire`), a JWT and a JWKS (`access`), the
 sync's messages through the native library and the browser module, and

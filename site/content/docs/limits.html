@@ -124,7 +124,7 @@ right; so does going past the nesting depths and the path length.</p>
 <tr><td>segment size</td><td class="n">8 MiB</td><td>sealed when full, a new one is opened</td></tr>
 <tr><td>document payload, segment offset</td><td class="n">4 GiB</td><td>the location record is a <code>u32</code></td></tr>
 <tr><td>vector index node count</td><td class="n">2<sup>32</sup></td><td>the node id is a <code>u32</code>; memory runs out first in practice</td></tr>
-<tr><td><code>@hnsw</code>'s <code>m</code></td><td class="n">2–32 767</td><td>level 0 keeps <code>2m</code> links, a <code>u16</code> counter; refused naming the range past either end, never clamped. A field an earlier version made past it, or past the dimension below, opens as it was, and every <code>alter</code> of its collection is refused naming it until the field is dropped and made again</td></tr>
+<tr><td><code>@hnsw</code>'s <code>m</code></td><td class="n">2–32 767</td><td>level 0 keeps <code>2m</code> links, a <code>u16</code> counter; refused naming the range past either end, never clamped. A file whose schema holds a field past it, or past the dimension below — a damaged or crafted file's, or one an earlier version made — is refused as damage where it is opened and where a replica applies it, naming the field and the range</td></tr>
 <tr><td>bulk insert batch</td><td class="n">64–512 vectors</td><td><code>graph/16</code>, clamped to this range</td></tr>
 <tr><td>parallel build threshold</td><td class="n">1024 vectors</td><td>below it, the serial path</td></tr>
 <tr><td>gap in an externally given <code>id</code></td><td class="n">4096</td><td>a larger jump falls into a sparse map rather than a dense array</td></tr>

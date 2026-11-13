@@ -54,7 +54,8 @@ Below the newest whole claim (`survey`) records are read unchecked
 record after it claims past it, else cut, said (`cut_on_open`), a segment
 by its own claims: `judge_after` frames on, scans only past an unframed
 head, bounded; a record past the end is cut unjudged (Windows:
-`cut_and_open`). A follower without `sums=1` gets none (`plain_records`).
+`cut_and_open`), a frame past its record refused. A follower without
+`sums=1` gets none (`plain_records`).
 Unchecked, zeros to the end are cut only from a head after a nonzero byte
 or the image's end (`zero_tail`); a torn image refused, an unknown kind
 names its byte; the file only grows; a looking tool opens

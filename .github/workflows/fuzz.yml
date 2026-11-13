@@ -1,11 +1,20 @@
 name: fuzz
 
 # Each target of the fuzzer for half an hour a week, built with
-# AddressSanitizer and LLVM's coverage counters, its corpus kept between
-# weeks: the long run beside ci.yml's `fuzz-smoke`, which gives each 30 s on
-# every pull request (docs/design/conventions.md#fuzzing). The matrix names
-# every target `fennec-fuzz names` lists, held to it by crates/fennec-fuzz's
-# tests.
+# AddressSanitizer and LLVM's coverage counters: the long run beside ci.yml's
+# `fuzz-smoke`, which gives each 30 s on every pull request
+# (docs/design/conventions.md#fuzzing). The matrix names every target
+# `fennec-fuzz names` lists, held to it by crates/fennec-fuzz's tests.
+#
+# The repository is public, and so are a run's log and its artifacts, for
+# 90 days: a finding keeps no input and says neither its message nor its
+# backtrace (`--private`; ASan's report goes into a file of the runner's,
+# which nothing uploads), only its recipe -- the target, the seed, the run
+# and its input's hash -- from which `fennec-fuzz reproduce` makes the
+# input again on a maintainer's machine, to be reported as SECURITY.md
+# asks. So each week starts from the repository's seeds, its own seed the
+# run's number: a corpus carried from the week before would be inputs no
+# maintainer holds, which the recipe could not make again.
 on:
   schedule:
     - cron: '23 3 * * 0'
@@ -39,21 +48,17 @@ jobs:
       - name: Install the fuzzer's nightly, pinned to a date
         run: make fuzz-toolchain
 
-      # The inputs that reached new coverage, a week's run going on from the
-      # last one's.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target/fuzz/corpus/${{ matrix.target }}
-          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
-          restore-keys: fuzz-corpus-${{ matrix.target }}-
-
       - name: Fuzz ${{ matrix.target }} for 30 minutes
-        run: make fuzz ASAN=1 TARGET=${{ matrix.target }} FUZZ_SECONDS=1800
+        env:
+          ASAN_OPTIONS: log_path=${{ runner.temp }}/asan
+        run: >-
+          make fuzz ASAN=1 TARGET=${{ matrix.target }} FUZZ_SECONDS=1800
+          FUZZ_FLAGS="--private --corpus none --seed ${{ github.run_number }}"
 
-      - name: Keep what it found
+      - name: Say how to make what it found again
         if: failure()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: fuzz-crashes-${{ matrix.target }}
-          path: target/fuzz/crashes
-          retention-days: 90
+        run: |
+          echo "fennec-fuzz found something in ${{ matrix.target }} at $GITHUB_SHA. Its input is kept nowhere:"
+          echo "check out $GITHUB_SHA, run 'make fuzz-seeds' and 'make fuzz ASAN=1', then the line"
+          echo "'fennec-fuzz reproduce ...' above with target/<host>/fuzz/fennec-fuzz, and report what"
+          echo "it finds privately, as SECURITY.md asks (docs/design/conventions.md#fuzzing)."

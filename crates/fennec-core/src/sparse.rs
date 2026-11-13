@@ -182,17 +182,15 @@ fn uint(s: &str) -> Option<u64> {
 
 /// pgvector's text form of a sparse vector, indices from 1. Weights print
 /// as the shortest decimal that reads back as the same `f32`, as pgvector
-/// prints them.
+/// prints them. Each index is below `dim`, as every write and the decoder
+/// hold it (`codec::decode_value`), so its `+ 1` fits.
 pub fn format_into(out: &mut String, dim: u32, entries: &[(u32, f32)]) {
     out.push('{');
     for (k, (i, v)) in entries.iter().enumerate() {
         if k > 0 {
             out.push(',');
         }
-        // Widened first: a value read off the bytes is no write's, its
-        // index any `u32` (the codec adds its steps wrapping), and the last
-        // one's `+ 1` overflowed (the fuzzer's `image` target found it).
-        out.push_str(&(u64::from(*i) + 1).to_string());
+        out.push_str(&(i + 1).to_string());
         out.push(':');
         crate::num::f32_into(out, *v);
     }
@@ -696,12 +694,6 @@ mod tests {
         format_into(&mut s, 3, &[(0, 0.1), (2, -2.5e-7)]);
         assert_eq!(s, "{1:0.1,3:-0.00000025}/3");
         assert_eq!(parse(&s).unwrap().1, vec![(0, 0.1), (2, -2.5e-7)]);
-        // A value read off the bytes, which no write made, may hold the
-        // last `u32` as an index: written as the number it is, past the
-        // dimension, never overflowing (the fuzzer's `image` target).
-        let mut s = String::new();
-        format_into(&mut s, 3, &[(u32::MAX, 1.0)]);
-        assert_eq!(s, "{4294967296:1}/3");
     }
 
     #[test]

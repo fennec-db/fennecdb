@@ -401,6 +401,9 @@ fennecql-corpus:
 # fuzz.yml). Moved forward in a pull request of its own.
 FUZZ_NIGHTLY ?= nightly-2026-11-01
 FUZZ_SECONDS ?=
+# Flags for each run, CI's: `--private --corpus none` (a finding says its
+# recipe alone), the weekly run's `--seed`.
+FUZZ_FLAGS ?=
 ASAN ?= 0
 FUZZ_HOST = $(shell $(CARGO) -vV | sed -n 's/^host: //p')
 # AddressSanitizer, and LLVM's coverage counters on every edge, which the
@@ -412,16 +415,17 @@ FUZZ_BIN = $(if $(filter 1,$(ASAN)),target/$(FUZZ_HOST)/fuzz/fennec-fuzz,target/
 ## targets listed; TARGET=<name> runs one -- FUZZ_SECONDS long, else until it
 ## finds something -- its corpus kept in target/fuzz/corpus/<name>, what it
 ## finds in target/fuzz/crashes (`fennec-fuzz replay <name> <file>` runs it
-## again). ASAN=1 builds it with AddressSanitizer and the coverage counters
-## that guide it, on FUZZ_NIGHTLY (`make fuzz-toolchain`); without, a plain
-## build mutates its seeds unguided
+## again, `fennec-fuzz reproduce <name> <recipe>` makes a CI finding's input
+## from the recipe it said). ASAN=1 builds it with AddressSanitizer and the
+## coverage counters that guide it, on FUZZ_NIGHTLY (`make fuzz-toolchain`);
+## without, a plain build mutates its seeds unguided
 fuzz: fuzz-seeds
 ifeq ($(ASAN),1)
 	RUSTFLAGS="$(FUZZ_RUSTFLAGS)" $(CARGO) +$(FUZZ_NIGHTLY) build -p fennec-fuzz --profile fuzz --target $(FUZZ_HOST)
 else
 	$(CARGO) build -p fennec-fuzz --profile fuzz
 endif
-	@if [ -z "$(TARGET)" ]; then $(FUZZ_BIN) list; else $(FUZZ_BIN) run $(TARGET) $(if $(FUZZ_SECONDS),--seconds $(FUZZ_SECONDS)); fi
+	@if [ -z "$(TARGET)" ]; then $(FUZZ_BIN) list; else $(FUZZ_BIN) run $(TARGET) $(if $(FUZZ_SECONDS),--seconds $(FUZZ_SECONDS)) $(FUZZ_FLAGS); fi
 
 ## Every target of the fuzzer for FUZZ_SECONDS (30) under AddressSanitizer,
 ## guided by coverage: CI's fuzz-smoke job. SMOKE_ASAN=0 runs a plain build
@@ -429,7 +433,7 @@ SMOKE_ASAN ?= 1
 fuzz-smoke:
 	@$(MAKE) --no-print-directory fuzz ASAN=$(SMOKE_ASAN)
 	@bin=$(if $(filter 1,$(SMOKE_ASAN)),target/$(FUZZ_HOST)/fuzz/fennec-fuzz,target/fuzz/fennec-fuzz); \
-	for t in $$($$bin names); do $$bin run $$t --seconds $(or $(FUZZ_SECONDS),30) || exit 1; done
+	for t in $$($$bin names); do $$bin run $$t --seconds $(or $(FUZZ_SECONDS),30) $(FUZZ_FLAGS) || exit 1; done
 
 ## FUZZ_NIGHTLY, the one nightly the fuzzer is built with
 fuzz-toolchain:

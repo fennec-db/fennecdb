@@ -49,10 +49,14 @@ In scope, and worth reporting:
   client surface.
 
 Most of the parsers named above are fuzzed — an HTTP request, JSON,
-FennecQL, the file format's codec, a `.fennec` file's open and a replica's
-apply, a SQLite file — under AddressSanitizer on every pull request and for
-longer each week: `make fuzz` lists the targets (`crates/fennec-fuzz`). An
-input that crashes one is a report worth making.
+FennecQL, the file format's codec, a `.fennec` file's open, mapped as a
+server opens it, and a replica's apply, a SQLite file — under
+AddressSanitizer on every pull request and for longer each week: `make
+fuzz` lists the targets (`crates/fennec-fuzz`). An input that crashes one is
+a report worth making, privately as above. CI's runs publish no crashing
+input and no backtrace: a finding prints only a recipe — the target, a
+seed, a run and the input's hash — from which `fennec-fuzz reproduce` makes
+the input again on a maintainer's machine.
 
 ## What is documented behaviour, not a vulnerability
 

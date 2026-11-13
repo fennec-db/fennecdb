@@ -1316,6 +1316,7 @@ impl Schema {
                 != 0;
             *pos += 1;
             let index = decode_index(buf, pos)?;
+            decoded_within(&fname, &ty, &index)?;
             if ty == DataType::Json {
                 let n = get_uvarint(buf, pos)? as usize;
                 for _ in 0..n {
@@ -1343,6 +1344,42 @@ impl Schema {
             composites,
         })
     }
+}
+
+/// A field of a schema read off the bytes -- a file's, a primary's record a
+/// replica applies -- held to the ranges the language reads the same
+/// numbers in (`Parser::int_in`): a vector's dimension 1 to [`MAX_DIM`],
+/// wherever its type holds one, and an `@hnsw`'s `m` 2 to [`MAX_M`]. Past
+/// them the record is damage or a file made to hurt: read as written, a
+/// 77-byte file declaring `m` = 2^40 had the open's index ask for 2m links
+/// a node, and the process was killed; a `vector<N>` past `MAX_DIM`
+/// reserved N floats for each vector the open read. In the browser module
+/// too, whose page replica applies its server's schema records. One
+/// message, as `int_in` writes one, its ranges written out: formatted, the
+/// bounds were two numbers more, and a literal's `i32` brought `i32`'s
+/// formatting into the module, 307 bytes.
+#[inline(never)]
+fn decoded_within(field: &str, ty: &DataType, index: &IndexKind) -> Result<()> {
+    const _: () = assert!(
+        MAX_DIM == 1_000_000_000 && MAX_M == 32_767,
+        "the refusals' texts name the ranges"
+    );
+    let dim = match ty.innermost() {
+        DataType::Vector(d, _) | DataType::Sparse(d) => *d,
+        _ => 1,
+    };
+    let m = match index {
+        IndexKind::Vector(spec) => spec.m,
+        _ => 2,
+    };
+    let (range, n) = if !(1..=MAX_DIM).contains(&dim) {
+        ("a vector's dimension is 1 to 1000000000", dim)
+    } else if !(2..=MAX_M).contains(&m) {
+        ("@hnsw's `m` is 2 to 32767", m)
+    } else {
+        return Ok(());
+    };
+    Err(Error::Corrupt(format!("`{field}`: {range}, not {n}")))
 }
 
 /// An index's kind as a schema writes it, behind its field.

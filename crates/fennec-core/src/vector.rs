@@ -5159,6 +5159,14 @@ impl VectorIndex {
             };
             pos += 1;
         }
+        // The record's own `m`, which sizes level 0's lists before its spec
+        // is held to the field's (`Database::restore_graph`): the field's is
+        // 2 to `MAX_M` (`Schema::decode`), so a record past it is no graph
+        // of the field's, and one saying 2^40 asked for 2^41 links a node
+        // before that comparison came.
+        if !(2..=crate::schema::MAX_M).contains(&spec.m) {
+            return None;
+        }
         let mut ix = VectorIndex::with_precision(dim, spec, prec);
         let mut centred = false;
         if spec.quant == Quant::Bit {
@@ -5686,10 +5694,16 @@ mod tests {
 
     /// A graph record whose count of nodes is past what its body can hold
     /// is no record, refused -- and rebuilt from the documents -- before the
-    /// arrays the count sizes are allocated: 2^32 - 16 nodes over a few
-    /// bytes asked for 32 GiB of document ids, an abort, and 2^61 overflowed
-    /// the capacity, a panic (the fuzzer's `image` target found it). In the
-    /// varint layout a node's levels are held to the bytes left as well.
+    /// arrays the count sizes are allocated (the fuzzer's `image` target
+    /// found it). Each count below was run without the test of the count:
+    /// 2^61 and `u64::MAX` panicked, "capacity overflow" -- the document
+    /// ids' `Vec::with_capacity` comes before `Read::new`'s `checked_mul`
+    /// of the links, which never catches them -- and 2^32 - 16 asked for
+    /// 34 GB of document ids and 275 GB of links up front, which aborts the
+    /// process where the allocation fails (Linux; the fuzzer's cap), while
+    /// macOS reserves it untouched and then reads the record short: there
+    /// the first two alone hold the test to the fix. In the varint layout a
+    /// node's levels are held to the bytes left as well.
     #[test]
     fn a_count_of_nodes_past_the_record_is_refused_before_it_is_allocated() {
         let mut ix = VectorIndex::new(2, spec());

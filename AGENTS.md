@@ -120,7 +120,8 @@ takes that shape. A number a statement or a declared schema writes -- a
 dimension, a beam, `fuse k`, a count -- is read as written or refused
 naming its range (`Parser::int_in`, within `u32`), never clamped nor cut
 to a 32-bit `usize`; a list's elements too, each read as written and
-refused naming the field and the element.
+refused naming the field and the element. A schema read off the bytes is
+held to the same ranges, `Error::Corrupt` past them (`Schema::decode`).
 
 **[Profiles differ on purpose.](docs/design/crates.md#profiles)**
 `fennec-cli` takes `cli` (`panic = abort`), `fennec-server` `release`: a

@@ -448,7 +448,13 @@ pub fn decode_value(buf: &[u8], pos: &mut usize) -> Result<Value> {
     decode_at(buf, pos, 0)
 }
 
-/// [`decode_value`] for a value `depth` lists and objects down.
+/// [`decode_value`] for a value `depth` lists and objects down. The depth
+/// is only handed on here: a list's and an object's reads are functions of
+/// their own, which alone test and add to it. Tested in these arms, the
+/// depth was live across the whole match, and every value paid for it --
+/// a row of eight scalars took 1 763 instructions to decode before the
+/// bound, 1 779 so and 1 763 this way (a probe of `decode_value` built
+/// release with LTO, its retired instructions over 5 million loops).
 fn decode_at(buf: &[u8], pos: &mut usize, depth: usize) -> Result<Value> {
     let tag = *buf
         .get(*pos)
@@ -505,29 +511,8 @@ fn decode_at(buf: &[u8], pos: &mut usize, depth: usize) -> Result<Value> {
             }
             Ok(Value::Vector(v))
         }
-        TAG_LIST => {
-            if depth >= MAX_DEPTH {
-                return Err(too_deep());
-            }
-            let n = get_uvarint(buf, pos)? as usize;
-            let mut items = Vec::with_capacity(n.min(4096));
-            for _ in 0..n {
-                items.push(decode_at(buf, pos, depth + 1)?);
-            }
-            Ok(Value::List(items))
-        }
-        TAG_OBJECT => {
-            if depth >= MAX_DEPTH {
-                return Err(too_deep());
-            }
-            let n = get_uvarint(buf, pos)? as usize;
-            let mut members = Vec::with_capacity(n.min(4096));
-            for _ in 0..n {
-                let k = decode_str(buf, pos)?;
-                members.push((k, decode_at(buf, pos, depth + 1)?));
-            }
-            Ok(Value::Object(members))
-        }
+        TAG_LIST => decode_list(buf, pos, depth),
+        TAG_OBJECT => decode_object(buf, pos, depth),
         TAG_SPARSE => {
             let dim = get_uvarint(buf, pos)? as u32;
             let n = get_uvarint(buf, pos)? as usize;
@@ -535,6 +520,15 @@ fn decode_at(buf: &[u8], pos: &mut usize, depth: usize) -> Result<Value> {
             let mut at = 0u32;
             for _ in 0..n {
                 at = at.wrapping_add(get_uvarint(buf, pos)? as u32);
+                // Within its dimension, where every write and
+                // `sparse::parse` put an entry: past it the bytes are
+                // damage, and pgvector's form of one at the last `u32`
+                // overflowed its `+ 1` (the fuzzer's `image` target).
+                if at >= dim {
+                    return Err(Error::Corrupt(
+                        "a sparse vector's index is past its dimension".into(),
+                    ));
+                }
                 entries.push((at, 0.0));
             }
             let raw = take(buf, pos, n.saturating_mul(4))?;
@@ -545,6 +539,36 @@ fn decode_at(buf: &[u8], pos: &mut usize, depth: usize) -> Result<Value> {
         }
         other => Err(Error::Corrupt(format!("unknown value tag {other}"))),
     }
+}
+
+/// A list's items, its tag read, `depth` lists and objects down: one level
+/// more, held to [`MAX_DEPTH`].
+#[inline(never)]
+fn decode_list(buf: &[u8], pos: &mut usize, depth: usize) -> Result<Value> {
+    if depth >= MAX_DEPTH {
+        return Err(too_deep());
+    }
+    let n = get_uvarint(buf, pos)? as usize;
+    let mut items = Vec::with_capacity(n.min(4096));
+    for _ in 0..n {
+        items.push(decode_at(buf, pos, depth + 1)?);
+    }
+    Ok(Value::List(items))
+}
+
+/// An object's members, its tag read, as [`decode_list`] reads a list's.
+#[inline(never)]
+fn decode_object(buf: &[u8], pos: &mut usize, depth: usize) -> Result<Value> {
+    if depth >= MAX_DEPTH {
+        return Err(too_deep());
+    }
+    let n = get_uvarint(buf, pos)? as usize;
+    let mut members = Vec::with_capacity(n.min(4096));
+    for _ in 0..n {
+        let k = decode_str(buf, pos)?;
+        members.push((k, decode_at(buf, pos, depth + 1)?));
+    }
+    Ok(Value::Object(members))
 }
 
 /// Skips over a value without decoding it. Lets projection move past the
@@ -1106,6 +1130,45 @@ mod tests {
         put_uvarint(&mut b, 1u64 << 62);
         assert!(decode_value(&b, &mut 0).is_err());
         assert!(skip_value(&b, &mut 0).is_err());
+    }
+
+    /// A sparse vector's entry sits below its dimension wherever a write
+    /// puts one, so bytes saying otherwise are damage: refused, and never a
+    /// value pgvector's form writes past its dimension -- at the last `u32`,
+    /// its `+ 1` overflowed (the fuzzer's `image` target found it).
+    #[test]
+    fn a_sparse_index_past_its_dimension_is_refused() {
+        let sparse = |dim: u64, steps: &[u64]| {
+            let mut b = vec![TAG_SPARSE];
+            put_uvarint(&mut b, dim);
+            put_uvarint(&mut b, steps.len() as u64);
+            for s in steps {
+                put_uvarint(&mut b, *s);
+            }
+            for _ in steps {
+                b.extend_from_slice(&1f32.to_le_bytes());
+            }
+            b
+        };
+        let past = |e: Result<Value>| matches!(&e, Err(Error::Corrupt(m)) if m == "a sparse vector's index is past its dimension");
+        // The last index of three, and one past it; the last `u32`, in a
+        // step and in two.
+        assert_eq!(
+            decode_value(&sparse(3, &[0, 2]), &mut 0).unwrap(),
+            Value::Sparse(3, vec![(0, 1.0), (2, 1.0)])
+        );
+        assert!(past(decode_value(&sparse(3, &[3]), &mut 0)));
+        assert!(past(decode_value(&sparse(3, &[0, 2, 1]), &mut 0)));
+        assert!(past(decode_value(&sparse(3, &[u32::MAX as u64]), &mut 0)));
+        let to_the_last = u32::MAX as u64 - 1;
+        assert!(past(decode_value(&sparse(3, &[1, to_the_last]), &mut 0)));
+        // A step wrapping round to an index below the dimension is an
+        // entry out of order, which a value built by hand may hold: read as
+        // it was written (`encode`).
+        assert_eq!(
+            decode_value(&sparse(3, &[2, u32::MAX as u64]), &mut 0).unwrap(),
+            Value::Sparse(3, vec![(2, 1.0), (1, 1.0)])
+        );
     }
 
     /// A bool the bytes end before is damage to the skip as to the decoder,

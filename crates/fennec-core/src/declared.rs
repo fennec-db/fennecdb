@@ -494,7 +494,15 @@ fn field(collection: &str, v: &Value) -> Result<(Field, Vec<Field>)> {
     let fname = name(o, "name", "a field")?;
     let at = cat(&[collection, ".", &fname]);
     let ty = match member(o, "type") {
-        Some(Value::Text(t)) => type_named(t).ok_or_else(|| bad(&at, "has a type there is not"))?,
+        Some(Value::Text(t)) => type_named(t).ok_or_else(|| {
+            // Past the lists a value read back may nest, named as the
+            // parser names it, rather than as a type there is not.
+            const _: () = assert!(crate::codec::MAX_DEPTH == 64);
+            match t.bytes().take_while(|&b| b == b'[').count() > crate::codec::MAX_DEPTH {
+                true => bad(&at, "has a list type nesting more than 64 levels deep"),
+                false => bad(&at, "has a type there is not"),
+            }
+        })?,
         _ => return Err(bad(&at, "has no `type`")),
     };
     let mut f = Field::new(fname.clone(), ty);
@@ -1810,6 +1818,38 @@ mod tests {
         ] {
             let e = parse(src).unwrap_err().to_string();
             assert!(e.contains(why), "{e} / {src}");
+        }
+    }
+
+    /// A type's lists are read a pair of brackets at a time, as many as a
+    /// value read back may nest (`codec::MAX_DEPTH`): one past them is
+    /// refused naming the limit, as the parser names it, and so are a
+    /// million, which recursed into took a connection's stack down.
+    #[test]
+    fn a_list_type_past_64_levels_is_refused_naming_the_limit() {
+        let declared = |levels: usize| {
+            let ty = "[".repeat(levels) + "int" + &"]".repeat(levels);
+            parse(&format!(
+                r#"{{"format":1,"collections":[{{"name":"t","fields":[{{"name":"e","type":"{ty}"}}]}}]}}"#
+            ))
+        };
+        let fields = declared(64).unwrap().collections[0].fields.clone();
+        assert_eq!(fields[0].ty.depth(), 64);
+        for levels in [65, 1_000_000] {
+            let e = declared(levels).unwrap_err().to_string();
+            assert!(
+                e.ends_with("t.e has a list type nesting more than 64 levels deep"),
+                "{levels}: {e}"
+            );
+        }
+        // A type there is not, inside its lists or out, is said so still.
+        for ty in ["[[intt]]", "intt", "[int"] {
+            let e = parse(&format!(
+                r#"{{"format":1,"collections":[{{"name":"t","fields":[{{"name":"e","type":"{ty}"}}]}}]}}"#
+            ))
+            .unwrap_err()
+            .to_string();
+            assert!(e.ends_with("t.e has a type there is not"), "{ty}: {e}");
         }
     }
 

@@ -251,11 +251,12 @@ fn pgvectors_floor_reads_back_as_it_was_made() {
 
 /// A collection a version before the bounds made out of them -- an `@hnsw`
 /// `m` past 32 767, which a node's 16-bit count of links already cut, or a
-/// `vector<N>` past 10^9 -- opens as it was, and every alter of it is
-/// refused saying so and the way out, rather than naming a field the alter
-/// does not touch; dropping the field asks nothing of the rest.
+/// `vector<N>` past 10^9 -- is refused at the open as damage, naming the
+/// field and its range: a schema is read off the bytes within the
+/// language's ranges (`Schema::decode`), the same ranges this file's
+/// parser reads, since a crafted file's `m` of 2^40 killed the open.
 #[test]
-fn a_field_made_out_of_range_before_is_named_at_any_alter() {
+fn a_field_made_out_of_range_before_is_refused_at_the_open() {
     for (field, says) in [
         (
             {
@@ -265,11 +266,11 @@ fn a_field_made_out_of_range_before_is_named_at_any_alter() {
                 };
                 Field::new("e", DataType::Vector(3, VecPrec::F32)).indexed(IndexKind::Vector(spec))
             },
-            "@hnsw's `m` is 2 to 32767",
+            "`e`: @hnsw's `m` is 2 to 32767, not 40000",
         ),
         (
             Field::new("e", DataType::Vector(1_000_000_001, VecPrec::F32)),
-            "a vector's dimension is 1 to 1000000000",
+            "`e`: a vector's dimension is 1 to 1000000000, not 1000000001",
         ),
     ] {
         // Made as a version before made it: `Schema::new` refuses it now,
@@ -282,31 +283,9 @@ fn a_field_made_out_of_range_before_is_named_at_any_alter() {
             if_not_exists: false,
         })
         .unwrap();
-        let mut db = {
-            let mut opened = Database::new();
-            opened.load(&db.snapshot()).expect("it opens");
-            opened
-        };
-        run(&mut db, "put b {n: 1}").unwrap();
-        for alter in [
-            "alter collection b add field x int",
-            "alter collection b rename field n to m",
-        ] {
-            let e = run(&mut db, alter).expect_err(alter).to_string();
-            let held = "`b` holds a field a version before this one made, which this one no \
-                        longer takes (`e`: ";
-            assert!(e.contains(held) && e.contains(says), "{alter}: {e}");
-            assert!(
-                e.contains("drop it (`alter collection b drop field e`) and add it again"),
-                "{e}"
-            );
+        match Database::new().load(&db.snapshot()) {
+            Err(Error::Corrupt(m)) => assert_eq!(m, says),
+            other => panic!("{says}: {other:?}"),
         }
-        run(&mut db, "alter collection b drop field e").unwrap();
-        run(
-            &mut db,
-            "alter collection b add field e vector<3> @hnsw(m=16)",
-        )
-        .unwrap();
-        run(&mut db, "alter collection b rename field n to m").unwrap();
     }
 }

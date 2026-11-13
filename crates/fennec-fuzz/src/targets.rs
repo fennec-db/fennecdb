@@ -45,7 +45,7 @@ pub static TARGETS: &[Target] = &[
     },
     Target {
         name: "image",
-        about: "a .fennec file opened (Database::load) and read whole, its indexes built, and its records applied as a replica applies a primary's",
+        about: "a .fennec file opened read into memory (Database::load) and mapped as a server opens it (load_mapped: an image's index of its frames adopted, in shares on threads, the rest replayed in place), each read whole, its indexes built and its vectors linked, and its records applied as a replica applies a primary's",
         max_len: 256 << 10,
         seeds: image_seeds,
         dictionary: IMAGE_TOKENS,
@@ -711,6 +711,17 @@ fn image_seeds() -> Vec<Vec<u8>> {
         files.push(std::fs::read(&path).expect("a seed's file"));
         let _ = std::fs::remove_file(&path);
     }
+    // An image whose index of its frames is read in two shares on threads
+    // by a mapped open (`store::adopt_shares`, past 16 384 documents), its
+    // documents as small as they come so it fits the target's inputs.
+    let mut db = Database::new();
+    db.execute(&fennec_ql::parse_one("create collection t (n int)").expect("a create"))
+        .expect("a create");
+    let docs: Vec<String> = (0..16_400).map(|i| format!("{{n: {}}}", i % 100)).collect();
+    let put = format!("put t [{}]", docs.join(", "));
+    db.execute(&fennec_ql::parse_one(&put).expect("a put"))
+        .expect("a put");
+    files.push(db.snapshot());
     for f in ["language.fennec", "statements.fennec"] {
         if let Ok(b) = std::fs::read(repo().join("crates/fennec-core/tests").join(f)) {
             files.push(b);
@@ -757,6 +768,19 @@ fn image(data: &[u8]) {
     let mut db = Database::new();
     if db.load(&file).is_ok() {
         read_all(&db);
+    }
+    // The open a server runs (`fs::open_serving`): mapped, the documents
+    // read where they lie in the file -- an image's data record taken from
+    // the index it wrote of its frames (`Store::adopt_index`), any other
+    // replayed in place (`replay_mapped`) -- and the vectors it left out
+    // of the graphs linked after, as a server links them beside its
+    // queries.
+    let mut served = Database::new();
+    served.defer_linking();
+    let base: fennec_core::store::Base = std::sync::Arc::new(file.clone());
+    if served.load_mapped(base).is_ok() {
+        served.link_pending(usize::MAX);
+        read_all(&served);
     }
     let magic = fennec_core::engine::MAGIC.len();
     if file.len() > magic && file[..magic] == fennec_core::engine::MAGIC[..] {

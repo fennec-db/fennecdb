@@ -6,6 +6,11 @@
 //! calls; a run past the timeout is written by the watchdog; an allocation
 //! past the cap aborts before it is made -- what a length read off the
 //! input and allocated before it was checked looks like.
+//!
+//! Each of those ends says the finding's recipe as well ([`say_recipe`]):
+//! the target, the seed, the run and its input's hash, and the runs whose
+//! inputs the corpus took -- all a maintainer needs to make the input
+//! again ([`crate::reproduce`]), where CI keeps none (`--private`).
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::{Path, PathBuf};
@@ -36,6 +41,114 @@ static PANIC: Mutex<Option<String>> = Mutex::new(None);
 static PANICKED: AtomicBool = AtomicBool::new(false);
 /// The most one allocation may ask for.
 static CAP: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// Whether a finding says its recipe alone: no message, no backtrace.
+static PRIVATE: AtomicBool = AtomicBool::new(false);
+/// The run in flight, counted from 0.
+static RUN: AtomicU64 = AtomicU64::new(0);
+/// The recipe's parts: the target's name; the command making the input
+/// again, up to the run; the runs kept, as [`push_kept`] writes them; and
+/// the last of them.
+static NAME: Shared = Shared::new();
+static FIXED: Shared = Shared::new();
+static KEPT: Shared = Shared::new();
+static LAST_KEPT: AtomicU64 = AtomicU64::new(0);
+
+/// Bytes the abort's handler reads with no lock: held behind one for
+/// whoever writes them, and published as a pointer and a length after
+/// each write. Written between runs alone, on the fuzzer's thread, so a
+/// handler -- on that thread or one a run made -- never meets a write.
+struct Shared {
+    held: Mutex<Vec<u8>>,
+    ptr: AtomicPtr<u8>,
+    len: AtomicUsize,
+}
+
+impl Shared {
+    const fn new() -> Shared {
+        Shared {
+            held: Mutex::new(Vec::new()),
+            ptr: AtomicPtr::new(std::ptr::null_mut()),
+            len: AtomicUsize::new(0),
+        }
+    }
+
+    /// The bytes changed by `edit`, then published.
+    fn edit(&self, edit: impl FnOnce(&mut Vec<u8>)) {
+        let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+        self.len.store(0, Ordering::Release);
+        edit(&mut held);
+        self.ptr.store(held.as_mut_ptr(), Ordering::Release);
+        self.len.store(held.len(), Ordering::Release);
+    }
+
+    /// The bytes as last published, read with no lock.
+    fn read(&self) -> &[u8] {
+        let (p, n) = (
+            self.ptr.load(Ordering::Acquire),
+            self.len.load(Ordering::Acquire),
+        );
+        if p.is_null() || n == 0 {
+            return &[];
+        }
+        // SAFETY: `n` bytes at `p`, published after the write that made
+        // them, and written again only between runs (above).
+        unsafe { std::slice::from_raw_parts(p, n) }
+    }
+}
+
+/// FNV-1a: an input's hash, which names its file and its recipe.
+pub fn fnv(b: &[u8]) -> u64 {
+    b.iter().fold(0xcbf2_9ce4_8422_2325, |h, &x| {
+        (h ^ x as u64).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// `n` in decimal, written into `buf` with no allocation.
+fn digits(mut n: u64, buf: &mut [u8; 20]) -> &[u8] {
+    let mut at = buf.len();
+    loop {
+        at -= 1;
+        buf[at] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    &buf[at..]
+}
+
+/// `n` as sixteen hexadecimal digits, with no allocation.
+fn hex(n: u64, buf: &mut [u8; 16]) -> &[u8] {
+    for (i, b) in buf.iter_mut().enumerate() {
+        *b = b"0123456789abcdef"[((n >> (60 - 4 * i)) & 0xf) as usize];
+    }
+    buf
+}
+
+/// `n` in base 36 onto `out`.
+fn radix36(mut n: u64, out: &mut Vec<u8>) {
+    let mut buf = [0u8; 13];
+    let mut at = buf.len();
+    loop {
+        at -= 1;
+        buf[at] = b"0123456789abcdefghijklmnopqrstuvwxyz"[(n % 36) as usize];
+        n /= 36;
+        if n == 0 {
+            break;
+        }
+    }
+    out.extend_from_slice(&buf[at..]);
+}
+
+/// A run kept, onto the runs a recipe names: its `step` from the one kept
+/// before -- from 0 for the first -- in base 36, after a dot where a run
+/// came before it.
+pub fn push_kept(text: &mut Vec<u8>, step: u64) {
+    if !text.is_empty() {
+        text.push(b'.');
+    }
+    radix36(step, text);
+}
 
 /// AddressSanitizer's options where the build carries it, read before
 /// `main`: its report ends in `abort`, whose handler keeps the input, and an
@@ -80,20 +193,14 @@ fn capped(size: usize) {
 #[cold]
 #[inline(never)]
 fn too_big(size: usize) -> ! {
-    // No allocation from here on: the number is written into the stack.
-    let mut digits = [0u8; 20];
-    let mut at = digits.len();
-    let mut n = size;
-    loop {
-        at -= 1;
-        digits[at] = b'0' + (n % 10) as u8;
-        n /= 10;
-        if n == 0 {
-            break;
-        }
+    if PRIVATE.load(Ordering::Relaxed) {
+        sys::say(b"fennec-fuzz: an allocation past the cap (--max-alloc-mb)\n");
+        std::process::abort();
     }
+    // No allocation from here on: the number is written into the stack.
+    let mut buf = [0u8; 20];
     sys::say(b"fennec-fuzz: an allocation of ");
-    sys::say(&digits[at..]);
+    sys::say(digits(size as u64, &mut buf));
     sys::say(b" bytes, past the cap (--max-alloc-mb)\n");
     // And the way to it, whose frames name what read the length: the input
     // kept is the run's, but what asked may not replay from it alone. Its
@@ -111,8 +218,9 @@ fn too_big(size: usize) -> ! {
 
 /// Sets up what keeps an input that ends the process: its files go in
 /// `dir`, named for `target` and this process; a run past `timeout` is a
-/// finding, as is an allocation past `cap` bytes.
-pub fn install(dir: &Path, target: &str, timeout: Duration, cap: usize) {
+/// finding, as is an allocation past `cap` bytes. `private`, a finding
+/// says its recipe alone ([`crate::Options::private`]).
+pub fn install(dir: &Path, target: &str, timeout: Duration, cap: usize, private: bool) {
     let _ = BASE.set(Instant::now());
     let pid = std::process::id();
     let mut path = dir
@@ -129,17 +237,20 @@ pub fn install(dir: &Path, target: &str, timeout: Duration, cap: usize) {
     *WATCHED.lock().unwrap_or_else(|e| e.into_inner()) =
         Some((timeout, dir.join(format!("timeout-{target}-{pid}"))));
     CAP.store(cap, Ordering::Relaxed);
+    PRIVATE.store(private, Ordering::Relaxed);
     STARTED.call_once(|| {
         sys::on_abort();
         std::panic::set_hook(Box::new(|info| {
             if !PANICKED.swap(true, Ordering::Relaxed) {
                 let message = info.to_string();
-                eprintln!("fennec-fuzz: {message}");
-                // Under RUST_BACKTRACE, as the default hook would: a replay's
-                // way to the line.
-                let trace = std::backtrace::Backtrace::capture();
-                if trace.status() == std::backtrace::BacktraceStatus::Captured {
-                    eprintln!("{trace}");
+                if !PRIVATE.load(Ordering::Relaxed) {
+                    eprintln!("fennec-fuzz: {message}");
+                    // Under RUST_BACKTRACE, as the default hook would: a
+                    // replay's way to the line.
+                    let trace = std::backtrace::Backtrace::capture();
+                    if trace.status() == std::backtrace::BacktraceStatus::Captured {
+                        eprintln!("{trace}");
+                    }
                 }
                 *PANIC.lock().unwrap_or_else(|e| e.into_inner()) = Some(message);
             }
@@ -151,8 +262,96 @@ pub fn install(dir: &Path, target: &str, timeout: Duration, cap: usize) {
     });
 }
 
-/// The input a run is about to be handed.
-pub fn arm(input: &[u8]) {
+/// The recipe a finding of this run will say: `target`'s, from `seed` and
+/// the start of fingerprint `start`, read from the corpus directory
+/// `corpus` as well where it gave the start more than the seeds. No run
+/// is kept yet.
+pub fn recipe(target: &str, seed: u64, start: u64, corpus: Option<&Path>) {
+    NAME.edit(|b| {
+        b.clear();
+        b.extend_from_slice(target.as_bytes());
+    });
+    FIXED.edit(|b| {
+        b.clear();
+        b.extend_from_slice(
+            format!("fennec-fuzz reproduce {target} --seed {seed} --start {start:016x}").as_bytes(),
+        );
+        if let Some(dir) = corpus {
+            b.extend_from_slice(format!(" --corpus {}", dir.display()).as_bytes());
+        }
+    });
+    KEPT.edit(|b| {
+        b.clear();
+        // Room for some thousands of runs kept before it grows.
+        b.reserve(64 << 10);
+    });
+    LAST_KEPT.store(0, Ordering::Relaxed);
+}
+
+/// The corpus took the input of `run`.
+pub fn kept(run: u64) {
+    let step = run - LAST_KEPT.swap(run, Ordering::Relaxed);
+    KEPT.edit(|b| push_kept(b, step));
+}
+
+/// The recipe of the finding that ended the run in flight, on standard
+/// error with system calls alone -- the abort's handler says it
+/// ([`recipe_into`]).
+pub fn say_recipe(kind: &[u8]) {
+    recipe_into(kind, &mut |b| sys::say(b));
+}
+
+/// The recipe of the finding that ended the run in flight, a line handed to
+/// `out` a part at a time with no allocation: what ended it (`kind`), the
+/// run, its input's length and hash, and the command that makes the input
+/// again ([`crate::Recipe::from_args`] reads its flags). Nothing where no
+/// recipe was set up (a replay).
+pub fn recipe_into(kind: &[u8], out: &mut dyn FnMut(&[u8])) {
+    let fixed = FIXED.read();
+    if fixed.is_empty() {
+        return;
+    }
+    let (p, n) = (PTR.load(Ordering::Relaxed), LEN.load(Ordering::Relaxed));
+    let input: &[u8] = match p.is_null() {
+        true => &[],
+        // SAFETY: the input `arm` left, which nothing moved since.
+        false => unsafe { std::slice::from_raw_parts(p, n) },
+    };
+    let (mut d, mut l, mut h) = ([0u8; 20], [0u8; 20], [0u8; 16]);
+    let hash = hex(fnv(input), &mut h);
+    let run = digits(RUN.load(Ordering::Relaxed), &mut d);
+    let kept = match KEPT.read() {
+        [] => &b"-"[..],
+        kept => kept,
+    };
+    for part in [
+        b"fennec-fuzz: ",
+        NAME.read(),
+        b": ",
+        kind,
+        b" at run ",
+        run,
+        b", its input ",
+        digits(input.len() as u64, &mut l),
+        b" bytes of fnv ",
+        hash,
+        b"; made again by\n    ",
+        fixed,
+        b" --run ",
+        run,
+        b" --fnv ",
+        hash,
+        b" --kept ",
+        kept,
+        b"\n",
+    ] {
+        out(part);
+    }
+}
+
+/// The input run `run` is about to be handed.
+pub fn arm(run: u64, input: &[u8]) {
+    RUN.store(run, Ordering::Relaxed);
     let mut cur = CURRENT.lock().unwrap_or_else(|e| e.into_inner());
     cur.clear();
     cur.extend_from_slice(input);
@@ -207,6 +406,7 @@ fn watch() {
             limit,
             file.display()
         );
+        say_recipe(b"a run past the timeout");
         sys::exit(3);
     }
 }
@@ -276,6 +476,7 @@ mod sys {
                 write_all(2, path, path_len - 1);
                 say(b"\n");
             }
+            super::say_recipe(b"an abort");
         }
         exit(2);
     }

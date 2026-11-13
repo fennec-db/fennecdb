@@ -167,41 +167,89 @@ fn a_primarys_record_nesting_past_the_limit_is_refused_by_its_replica() {
     assert_eq!(rows(&replica), 1);
 }
 
-/// A frame whose length is near 2^64 is a frame cut short, as one past its
-/// record's end is: an open's replay stops there, as at a torn tail, and a
-/// replica refuses the record. Added unchecked, the length wrapped past the
-/// test and the frame was sliced backwards, a panic (the fuzzer's `image`
-/// target found it).
+/// A frame running past the data record holding it is damage, refused
+/// where a file is opened, read into memory or mapped as a server maps it,
+/// and where a replica applies the record: a record reaches the replay
+/// whole by its length, and by its sum, so a crash's torn tail is the
+/// record the open's walk cuts, never a frame inside one. Stopped there as
+/// at a torn tail, the frames after it vanished with no word -- the open
+/// answered every row but them. A length near 2^64 is one such: added
+/// unchecked, it wrapped past the test and the frame was sliced backwards,
+/// a panic (the fuzzer's `image` target found it).
 #[test]
-fn a_frame_whose_length_passes_the_address_space_is_cut_short() {
+fn a_frame_running_past_its_record_is_refused_where_a_file_is_opened_and_applied() {
     let (create, cid) = made("create collection d (n int)", "put d {n: 1}");
-    let mut body = vec![fennec_core::store::OP_PUT];
-    put_uvarint(&mut body, 1);
-    put_uvarint(&mut body, u64::MAX - 1);
-    body.extend_from_slice(&[0; 8]);
-    let mut records = create.clone();
-    records.push(fennec_core::engine::record(REC_DATA, cid, &body));
-    let rows = |db: &Database| query(db, "get d").unwrap().rows().unwrap().rows.len();
-
-    let mut memory = Database::new();
-    memory.load(&file(&records)).unwrap();
-    assert_eq!(rows(&memory), 0);
+    let mut n = Vec::new();
+    fennec_core::codec::encode_value(&mut n, &Value::Int(1));
     let dir = std::env::temp_dir().join(format!("fennecdb-damage-len-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("len.fennec");
-    std::fs::write(&path, file(&records)).unwrap();
-    let mapped = fennec_core::fs::open(&path).unwrap();
-    assert_eq!(rows(&mapped), 0);
-    drop(mapped);
-    std::fs::remove_dir_all(&dir).unwrap();
+    let rows = |db: &Database| query(db, "get d").unwrap().rows().unwrap().rows.len();
+    for (i, len) in [u64::MAX - 1, n.len() as u64 + 1].into_iter().enumerate() {
+        // A whole put before it in the record, and one after: neither is
+        // taken.
+        let mut body = Vec::new();
+        for (id, len) in [(1, n.len() as u64), (2, len)] {
+            body.push(fennec_core::store::OP_PUT);
+            put_uvarint(&mut body, id);
+            put_uvarint(&mut body, len);
+            body.extend_from_slice(&n);
+        }
+        let mut records = create.clone();
+        records.push(fennec_core::engine::record(REC_DATA, cid, &body));
+        let refused = |r: Result<()>| match r {
+            Err(Error::Corrupt(m)) => assert_eq!(m, "a write record cut short", "{len}"),
+            other => panic!("{len}: {other:?}"),
+        };
+        refused(Database::new().load(&file(&records)).map(|_| ()));
+        let path = dir.join(format!("{i}.fennec"));
+        std::fs::write(&path, file(&records)).unwrap();
+        refused(fennec_core::fs::open(&path).map(|_| ()));
 
-    let mut replica = Database::new();
-    replica.apply(&create.concat()).unwrap();
-    assert!(matches!(
-        replica.apply(&records[create.len()]),
-        Err(Error::Corrupt(_))
-    ));
-    assert_eq!(rows(&replica), 0);
+        let mut replica = Database::new();
+        replica.apply(&create.concat()).unwrap();
+        refused(replica.apply(&records[create.len()]).map(|_| ()));
+        assert_eq!(rows(&replica), 0);
+
+        // The same record cut short by the file's end is a torn tail: the
+        // open cuts it, and answers the rows before it.
+        let mut torn = file(&records[..create.len()]);
+        torn.extend_from_slice(&put_record(cid, 3, &n));
+        let whole = torn.len();
+        let last = &records[create.len()];
+        torn.extend_from_slice(&last[..last.len() - 1]);
+        let mut memory = Database::new();
+        assert_eq!(memory.load(&torn).unwrap(), whole);
+        assert_eq!(rows(&memory), 1);
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// What counts a record's writes -- a replica's feed, an archive's
+/// (`engine::writes_in`) -- holds a frame's length to its record as the
+/// replay does: added, a length near 2^64 wrapped back into the record in
+/// a release build, its frames counted again, and overflowed in a debug
+/// one.
+#[test]
+fn a_frame_running_past_its_record_is_refused_where_writes_are_counted() {
+    let mut whole = vec![fennec_core::store::OP_PUT];
+    put_uvarint(&mut whole, 1);
+    put_uvarint(&mut whole, 1);
+    whole.push(TAG_NULL);
+    let count = |body: &[u8]| {
+        fennec_core::engine::writes_in(&fennec_core::engine::record(REC_DATA, 1, body))
+    };
+    assert_eq!(count(&whole).unwrap(), 1);
+    for len in [u64::MAX - 1, 1 << 63, 2] {
+        let mut body = whole.clone();
+        body.push(fennec_core::store::OP_PUT);
+        put_uvarint(&mut body, 2);
+        put_uvarint(&mut body, len);
+        body.push(TAG_NULL);
+        match count(&body) {
+            Err(Error::Corrupt(m)) => assert_eq!(m, "a frame runs past its record", "{len}"),
+            other => panic!("{len}: {other:?}"),
+        }
+    }
 }
 
 /// No write gives a document the id 0 (`allocate_id` starts at 1, and a
@@ -247,6 +295,89 @@ fn a_frame_putting_an_id_no_write_gives_is_refused_where_a_file_is_opened_and_ap
         assert_eq!(rows(&replica), 0);
         replica.apply(&records[create.len() + 1]).unwrap();
         assert_eq!(rows(&replica), 1);
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A schema read off the bytes holds its numbers to the ranges the
+/// language reads them in (`Parser::int_in`): an `@hnsw` whose `m` is past
+/// 32 767, or a dimension past 10^9 or of none, is damage, refused naming
+/// the field and its range where a file is opened -- read into memory and
+/// mapped -- and where a replica applies the record, before a document is
+/// read. Read as written, a file of a few dozen bytes declaring `m` = 2^40
+/// and holding one vector had the open's index ask for 2^41 links a node,
+/// and the process was killed. No `create` makes such a field, so one a
+/// version before the bounds made is refused alike: fennecdb is alpha.
+#[test]
+fn a_schema_past_the_languages_ranges_is_refused_where_a_file_is_opened_and_applied() {
+    let hnsw = |dim: usize, m: usize| {
+        let spec = VectorIndexSpec {
+            m,
+            ..VectorIndexSpec::default()
+        };
+        Field::new("v", DataType::Vector(dim, VecPrec::F32)).indexed(IndexKind::Vector(spec))
+    };
+    let dims = "`v`: a vector's dimension is 1 to 1000000000, not";
+    let ms = "`v`: @hnsw's `m` is 2 to 32767, not";
+    let dir = std::env::temp_dir().join(format!("fennecdb-damage-ranges-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (i, (field, says)) in [
+        (hnsw(2, 1 << 40), format!("{ms} 1099511627776")),
+        (hnsw(2, 32_768), format!("{ms} 32768")),
+        (hnsw(2, 1), format!("{ms} 1")),
+        (hnsw(1 << 40, 16), format!("{dims} 1099511627776")),
+        (
+            Field::new("v", DataType::Vector(1_000_000_001, VecPrec::F16)),
+            format!("{dims} 1000000001"),
+        ),
+        (
+            Field::new("v", DataType::Sparse(1 << 40)),
+            format!("{dims} 1099511627776"),
+        ),
+        (
+            Field::new(
+                "v",
+                DataType::List(Box::new(DataType::Vector(0, VecPrec::F32))),
+            ),
+            format!("{dims} 0"),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Made as no `create` makes it -- `Schema::new` refuses the field
+        // -- and as a crafted file holds it: a create takes the schema it
+        // is handed, and its record is the file's.
+        let sink = Records::default();
+        let mut db = Database::with_sink(Box::new(sink.clone()));
+        let mut schema = Schema::new("w", vec![Field::new("n", DataType::Int)]).unwrap();
+        schema.fields.push(field);
+        db.execute(&Statement::CreateCollection {
+            schema,
+            if_not_exists: false,
+        })
+        .unwrap();
+        let mut records = sink.0.lock().unwrap().clone();
+        // The create's record, kind 1 in a checked record's low five bits:
+        // `[kind][cid][len]`.
+        let create = records.iter().find(|r| r[0] & 0x1f == 1).expect("a create");
+        let cid = get_uvarint(create, &mut 1).unwrap() as u32;
+        // And a document holding a vector, put by hand: the in-memory
+        // database above would build the index it names.
+        let mut doc = Vec::new();
+        fennec_core::codec::encode_value(&mut doc, &Value::Int(1));
+        fennec_core::codec::encode_value(&mut doc, &Value::Vector(vec![1.0, 2.0]));
+        records.push(put_record(cid, 1, &doc));
+
+        let refused = |r: Result<()>| match r {
+            Err(Error::Corrupt(m)) => assert_eq!(m, says),
+            other => panic!("{says}: {other:?}"),
+        };
+        refused(Database::new().load(&file(&records)).map(|_| ()));
+        let path = dir.join(format!("{i}.fennec"));
+        std::fs::write(&path, file(&records)).unwrap();
+        refused(fennec_core::fs::open(&path).map(|_| ()));
+        refused(Database::new().apply(&records.concat()).map(|_| ()));
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }

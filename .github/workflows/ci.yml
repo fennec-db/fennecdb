@@ -1110,7 +1110,9 @@ jobs:
   # AddressSanitizer and LLVM's coverage counters on the Makefile's dated
   # nightly (a nightly only here and in fuzz.yml). The test job runs the same
   # targets over their seeds in a plain build; fuzz.yml gives each half an
-  # hour a week. What a run finds is kept as an artifact.
+  # hour a week. It runs on main's pushes too, whose logs and artifacts
+  # anyone reads: a finding keeps no input and says no backtrace, only the
+  # recipe `fennec-fuzz reproduce` makes its input again from (fuzz.yml).
   fuzz-smoke:
     name: fuzz-smoke (each target 30 s under ASan)
     runs-on: ubuntu-latest
@@ -1126,15 +1128,17 @@ jobs:
         run: make fuzz-toolchain
 
       - name: Each target for 30 s under AddressSanitizer
-        run: make fuzz-smoke FUZZ_SECONDS=30
+        env:
+          ASAN_OPTIONS: log_path=${{ runner.temp }}/asan
+        run: make fuzz-smoke FUZZ_SECONDS=30 FUZZ_FLAGS="--private --corpus none"
 
-      - name: Keep what it found
+      - name: Say how to make what it found again
         if: failure()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: fuzz-crashes
-          path: target/fuzz/crashes
-          retention-days: 90
+        run: |
+          echo "fennec-fuzz found something at $GITHUB_SHA. Its input is kept nowhere: check out"
+          echo "$GITHUB_SHA, run 'make fuzz-seeds' and 'make fuzz ASAN=1', then the line"
+          echo "'fennec-fuzz reproduce ...' above with target/<host>/fuzz/fennec-fuzz"
+          echo "(docs/design/conventions.md#fuzzing)."
 
   # The native library an app links (crates/fennec-ffi) on Android and the
   # JVM, and its Kotlin, Dart and Flutter bindings: the Kotlin library's
