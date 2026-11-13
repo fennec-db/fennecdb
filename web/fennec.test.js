@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { needs } from './ci-prereq.mjs';
 import { from, call, Call, or, not, raw, inc, expr, distance, param, Query, FennecError } from './fennec.js';
 
 const q = () => from('articles');
@@ -2260,7 +2261,6 @@ test('fuzzy and prefix on wasm', { skip: wasm ? false : 'no web/fennec.wasm (mak
 
 import { createServer } from 'node:http';
 import { connect, FennecHttp } from './fennec.js';
-import { needs } from './ci-prereq.mjs';
 
 /** A small server that records requests and returns a canned response. */
 async function stub(handler) {

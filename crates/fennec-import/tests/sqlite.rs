@@ -42,7 +42,7 @@ macro_rules! fixture {
                 // A runner that skipped these reported a green job that read
                 // no SQLite file; GitHub's images ship sqlite3.
                 assert!(
-                    std::env::var_os("CI").is_none(),
+                    std::env::var_os("CI").is_none_or(|v| v.is_empty()),
                     "sqlite3 not found under CI: `{}` would test nothing",
                     $name
                 );

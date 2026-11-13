@@ -33,7 +33,14 @@ reporter and each cargo run to `target/skips/`, and `tools/skips_check.py`
 fails a job whose `skipped` or `ignored` sum passes
 `tools/skips-allowlist.json`'s count for its runner (`Linux`, `macOS`;
 `RUNNER_OS`), each entry carrying its reason. A platform where a suite cannot
-run gets an entry, never a silent skip. The Windows jobs run `cargo test`
+run gets an entry, never a silent skip. A log that parsed nothing (no node
+`skipped N` line, no cargo `test result:` line) fails under CI as well, so a
+changed reporter cannot read as zero skips. `CI` means set and non-empty, in
+Rust, JS and Python alike. The program-dependent checks in
+`fennec-cli/src/types.rs` assert `python3` under CI (both images ship it);
+`swiftc`, `dart` and `gofmt` stay deliberately uncounted: the test job
+installs none of them (a Mac image has swiftc, an Ubuntu one not), and a developer's machine
+without one skips only that language's syntax check of a generated file. The Windows jobs run `cargo test`
 by hand, outside `make test`, and are not counted yet.
 
 ## Reruns

@@ -26,6 +26,7 @@ ALLOWLIST = Path(__file__).with_name("skips-allowlist.json")
 KINDS = ("js_skipped", "rust_ignored")
 # node --test --test-reporter=spec: `ℹ skipped 3`; cargo: `... 0 failed; 2 ignored; ...`
 JS = re.compile(r"^\s*(?:ℹ|#)\s+skipped\s+(\d+)\s*$", re.M)
+RUST_ANY = re.compile(r"^test result: ", re.M)
 RUST = re.compile(r"^test result: .*?; (\d+) ignored;", re.M)
 
 
@@ -36,13 +37,26 @@ def runner_name():
     )
 
 
+def in_ci():
+    """CI set and non-empty, as the Rust and JS sides read it."""
+    return bool(os.environ.get("CI"))
+
+
 def counts(logs):
+    """(sums, problems): a log that parsed nothing is a problem, a summary line gone missing."""
     found = {"js_skipped": 0, "rust_ignored": 0}
+    problems = []
     for log in logs:
-        text = Path(log).read_text(errors="replace")
-        found["js_skipped"] += sum(int(n) for n in JS.findall(text))
-        found["rust_ignored"] += sum(int(n) for n in RUST.findall(text))
-    return found
+        text = Path(log).read_text(encoding="utf-8", errors="replace")
+        js, rust = JS.findall(text), RUST.findall(text)
+        found["js_skipped"] += sum(int(n) for n in js)
+        found["rust_ignored"] += sum(int(n) for n in rust)
+        is_js = Path(log).name.startswith("js")
+        if is_js and not js:
+            problems.append(f"{log}: no node summary `skipped N` line")
+        elif not is_js and not RUST_ANY.search(text):
+            problems.append(f"{log}: no cargo `test result:` line")
+    return found, problems
 
 
 def check(runner, logs):
@@ -52,8 +66,11 @@ def check(runner, logs):
             if kind not in KINDS or not entry.get("reason"):
                 sys.exit(f"{ALLOWLIST.name}: {name}.{kind} needs a known kind and a reason")
     allowed = entries.get(runner, {})
-    found = counts(logs)
-    failed = False
+    found, problems = counts(logs)
+    problems = problems if in_ci() else []  # a local run teed nothing
+    failed = bool(problems)
+    for problem in problems:
+        print(f"  {problem}: the run printed no summary, so nothing was counted", file=sys.stderr)
     for kind in KINDS:
         n, ok = found[kind], allowed.get(kind, {}).get("count", 0)
         print(f"{runner}: {kind} {n} (allowed {ok})")
@@ -66,21 +83,35 @@ def check(runner, logs):
             )
         elif n < ok:
             print(f"  note: lower {runner}.{kind} to {n} in {ALLOWLIST.name}")
-    if failed and os.environ.get("CI"):
+    if failed and in_ci():
         sys.exit(1)
     if failed:
         print("(not under CI: reported only)")
 
 
 def tee(log, command):
+    """Run COMMAND; under CI copy its output to LOG too. A developer's run keeps
+    its terminal (cargo's and node's colours and progress), and LOG stays empty."""
     Path(log).parent.mkdir(parents=True, exist_ok=True)
-    with open(log, "w", errors="replace") as out:
-        p = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        for line in iter(p.stdout.readline, b""):
-            sys.stdout.buffer.write(line)
-            sys.stdout.buffer.flush()
-            out.write(line.decode(errors="replace"))
-        return p.wait()
+    if not in_ci():
+        Path(log).write_text("")
+        try:
+            return subprocess.call(command)
+        except KeyboardInterrupt:
+            return 130
+    p = None
+    try:
+        with open(log, "w", encoding="utf-8", errors="replace") as out:
+            p = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            for line in iter(p.stdout.readline, b""):
+                sys.stdout.buffer.write(line)
+                sys.stdout.buffer.flush()
+                out.write(line.decode("utf-8", errors="replace"))
+            return p.wait()
+    except KeyboardInterrupt:
+        if p:
+            p.wait()
+        return 130
 
 
 def main(argv):

@@ -1582,6 +1582,7 @@ test('a held claim over HTTP takes the job enqueued meanwhile, and a signal give
 // given by URL when asked: here the one without indexes, whose `near`
 // measures every vector as `exact` does.
 const liteWasm = await readFile(new URL('./fennec-lite.wasm', import.meta.url)).catch(() => null);
+needs(['web/fennec-lite.wasm', liteWasm, 'make wasm-lite']);
 
 test('sync opens the full module by default, and the module it is given', { ...opts, skip: skip || (liteWasm ? false : 'no web/fennec-lite.wasm (make wasm-lite)') }, async () => {
   const s = await server();
