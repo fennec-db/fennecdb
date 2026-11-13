@@ -592,6 +592,38 @@ fn a_rule_s_list_read_again_stops_where_a_statement_s_would() {
     );
 }
 
+/// A deny list cut short holds out less than it names: under `not`, 1 003
+/// bans of `r1` and then one of `r2`, read as their first 1 002 rows, were
+/// the list `["r1"]`, and alice read the message of `r2`, which her rule
+/// holds out -- the cut failed open. Read whole, the list holds out both,
+/// on a read and on a stream's seed alike.
+#[test]
+fn a_deny_list_is_not_cut_open() {
+    let n = start_with(
+        "messages read where not (room in (get bans select room where user = $jwt.sub limit 5000))\n\
+         bans read where user = $jwt.sub\n",
+        &[
+            "create collection bans (room text @hash, user text @hash)",
+            "create collection messages (room text @hash, text text)",
+            r#"put messages [{room: "r1", text: "one"}, {room: "r2", text: "two"}, {room: "r3", text: "three"}]"#,
+        ],
+    );
+    let rows: Vec<&str> = (0..1_003)
+        .map(|_| r#"{room: "r1", user: "alice"}"#)
+        .chain([r#"{room: "r2", user: "alice"}"#])
+        .collect();
+    let r = n.query(ROOT, &format!("put bans [{}]", rows.join(", ")));
+    assert_eq!(r.0, 200, "{}", r.1);
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    let (status, body) = n.query(&alice, "get messages select text order text");
+    assert_eq!((status, body.as_str()), (200, r#"[{"text":"three"}]"#));
+    let (_, seed) = n.stream(&alice, "/messages/changes");
+    assert!(
+        seed.contains("three") && !seed.contains("two") && !seed.contains("one"),
+        "{seed}"
+    );
+}
+
 /// Rules that read each other's collections, at any depth, are refused at
 /// startup, and so is what an inner `get` may not say; a chain is not a
 /// ring.

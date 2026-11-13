@@ -576,9 +576,22 @@ messages   read,insert  where room in (get members select room where user = $jwt
     <code>/batch</code> answers it again for each
     statement: a courier's claim, then a read of the customer's door the
     claim lets them read, is one round trip. The list is held to a list
-    claim's bound, 1 000 values, and a statement whose list would hold
-    more is refused (400) rather than answered with a list cut short; a
-    value held by many rows counts once. Rules that read each other's
+    claim's bound, 1 000 values, each counted once however many rows hold
+    it, and a statement whose list would hold more is refused (400) rather
+    than answered with a list cut short, the refusal naming the bound and
+    the rule by its collection and its filter as the policy writes it. An
+    inner <code>get</code> with a <code>limit</code>, an
+    <code>offset</code>, a <code>group</code> or a computed column is read
+    on past its first rows as far as a statement's own would be, 100 000
+    rows, and refused past them. The bound is not a statement's 100 000
+    because the list is made before every statement the token sends, and
+    every row the statement reads is tested against it: a list of 1 000
+    values costs each statement some 2.8 million instructions, against
+    32 000 for one of two, and one of 100 000 would cost every statement
+    what a statement's own list of that length costs once, 391 million.
+    Past 1 000 the membership belongs in the rows — a collection a room,
+    or a tenant — or in a statement's own <code>in (get …)</code>. Rules
+    that read each other's
     collections — <code>positions</code> reading <code>orders</code> whose
     rules read <code>positions</code>, at any depth, whatever their roles
     — stop the server at startup, since none of them could be answered

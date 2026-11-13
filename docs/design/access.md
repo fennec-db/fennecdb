@@ -184,6 +184,31 @@ over the server token's was +2.2-4.4 us a `set`, +2.5-4.4 a row and
 +2.5-4.7 a page on main, +2.2-4.6, +2.5-3.9 and +2.7-4.8 with it (six
 runs each in turns, the machine loaded: the spread is the load's).
 
+**A subject is a string** (`Access::scope`, `Scope::sub_not_text`). RFC
+7519 makes `sub` a StringOrURI, and a text that is not empty alone names a
+token's subject: the owner of its Idempotency-Keys (`idempotent::key`),
+whom `--request-rate` and `--call-rate` count (`rate::keyed`, beside its
+issuer), whose MCP calls `--mcp-calls-per-sec` counts, and `/_whoami`'s
+`sub`. A number is not made one by its digits: `42`, `42.0` and `4.2e1`
+are one number and three texts, and an issuer writing ids past 2^53 as JSON
+numbers -- JavaScript's -- hands two accounts one, so keys and counts kept
+by a number's text would part one user or join two. A token whose `sub` is
+a number, a bool, a list or an object is taken as before, and names no
+subject: its rules read the claim as it holds it (`owner = $jwt.sub` is
+`owner = 42`, matching no owner stored as the text `"42"`), it is counted
+with every token of its issuer naming none, and its Idempotency-Key is
+refused (400). That refusal said what a token with no `sub` at all is
+told, "needs a token with a subject (`sub`)", and sent vulpes, whose
+tokens carried its numeric account ids in `sub`, looking for a claim its
+tokens had; it now names the claim and says it must be a string, with a
+numeric id's spelling, `"42"` (`idempotent::SUB_NOT_TEXT`). The claims are
+asked on that refusal alone, so a request pays nothing for it. Refusing
+such a token (401) was not taken: its rules bind the number and serve it
+today wherever nothing needs a subject, and turning it away would refuse
+working apps for a claim's spelling. vulpes now mints the account as its
+decimal text in `sub` and the number in a claim of its own (`user`), which
+its rules compare with the number fields.
+
 **An ordered comparison against a claim holds the other side to the
 claim's kind** (`kind_held`, `claims_held`). Values of two kinds order by
 kind (`cmp_value`'s type rank), every bool below every number and every
@@ -604,9 +629,49 @@ there wakes it. A `/batch` answers them for each line (a claim, then the
 read the claim opened, one round trip), a read loop and a read batch again
 for each lock they take, the MCP tools as `/query`. The list is held to
 `MAX_CLAIM_VALUES` and refused past it, never cut (`listed`: the inner
-`get` read up to 1 002 rows, and grouped by its field for its distinct
-values only when it fills them -- grouped every time, a `set` under such
-a rule took 4.5 -> 5.1 us). A scoped stream of a collection whose rules reach out
+`get` read up to 1 002 rows, and read again only where that bound, not the
+`get`'s own `limit`, stopped the read -- a plain one, one field and no
+page, grouped by its field for its distinct values (grouped every time, a
+`set` under such a rule took 4.5 -> 5.1 us); one that pages, groups or
+computes its column as far as the engine reads a statement's own inner
+`get` of that kind, `MAX_SUBQUERY_VALUES` rows, refused past them as the
+engine refuses one, and refused without reading on where the rows read
+already hold more values than the bound). Until this change that second
+kind was its first 1 002 rows: under `limit 5000`, `offset 1`, `group
+room, n` or `select lower(room) as r`, 1 003 memberships of one room and
+then one of another were a list of the first room, and the token was shown
+nothing of the second -- closed, and wrong -- and 2 003 rows of 1 001 rooms
+a list of one rather than a refusal (`tests/reach.rs`,
+`a_rule_s_list_is_not_cut_at_its_first_rows`). Under a `not` the same cut
+failed open: a deny list, `not (room in (get bans select room where user =
+$jwt.sub limit 5000))`, read as 1 003 bans of one room's alone held out
+that room, and the token read the messages of a second room it had banned
+(`a_deny_list_is_not_cut_open`, `[three, two]` where its rule admits
+`[three]`); `hold` binds an inner `get`'s rules for the `not`s it stands
+under, not the length of its list. The refusal names the rule,
+by its collection and its filter as the policy writes it -- which
+`/_whoami` shows the token too -- beside the inner `get` and the bound
+(`past_bound`), where it named the inner collection alone; `distinct`
+stops at the first value past the bound, since kept in order each of 100
+000 values read again shifted the ones before. Under the policy bench's
+`reach` side it costs the call answering a rule's lists,
+`Scope::bound_over`, +37 of its own 11 681 instructions (one call traced in
+each build, `tools/instr/trace.py`; the allocator's 55 mallocs and 42 frees
+the same in both, its paths the binary's draw). The bound stays a list
+claim's 1 000, not a statement's 100 000: a statement's own `in (get ...)`
+is a cost its sender takes on for it, where a rule's list is made before
+every statement of its token -- each line of a `/batch`, each look of a
+stream after a write to what it reads -- and tested against every row the
+statement reads and every document it writes. Counted in instructions
+(`proc_pid_rusage` around `Scope::bound` in a scratch program, the load
+standing at 30 to 40, which a count does not see), a rule's list of 2
+values cost a statement 32 114, of 100 values 296 067 and of 1 000
+2 842 625 -- some 2 800 a value -- and the engine's own inner `get` of
+1 000, 10 000 and 100 000 values cost its statement 3.8 M, 38.0 M and
+391.3 M, which a rule held to that bound would add to every statement of
+its token. Past 1 000 the membership belongs in the rows -- a collection a
+room, a tenant -- or in a statement's own `in (get ...)`. A scoped stream
+of a collection whose rules reach out
 (`sse::Reach`) binds them again under a look's lock where a collection
 they read was written since its change, where a row of one reached its
 `@ttl` since they were answered -- the stream wakes for it, as for a row
