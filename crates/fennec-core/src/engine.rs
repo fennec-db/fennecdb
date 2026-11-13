@@ -12113,7 +12113,7 @@ impl Database {
                 ))
             })
         })?;
-        let qv = near_vector(eval(&near.vector, &mut NoRow, ctx)?)?;
+        let qv = near_vector(eval(&near.vector, &mut NoRow, ctx)?, &near.field)?;
         if qv.len() != ix.dim {
             return Err(Error::Type(format!(
                 "the query vector must have {} dimensions, got {}",
@@ -12186,7 +12186,7 @@ impl Database {
         ctx: &EvalCtx,
     ) -> Result<Vec<(DocId, f32)>> {
         use crate::schema::Quant;
-        let qv = near_vector(eval(&near.vector, &mut NoRow, ctx)?)?;
+        let qv = near_vector(eval(&near.vector, &mut NoRow, ctx)?, &near.field)?;
         if qv.len() != dim {
             return Err(Error::Type(format!(
                 "the query vector must have {dim} dimensions, got {}",
@@ -12699,7 +12699,7 @@ impl Database {
             IndexKind::Vector(spec) => spec.metric,
             _ => Metric::Cosine,
         };
-        let qv = near_vector(eval(&rr.vector, &mut NoRow, ctx)?)?;
+        let qv = near_vector(eval(&rr.vector, &mut NoRow, ctx)?, &rr.field)?;
         if qv.len() != dim {
             return Err(Error::Type(format!(
                 "the rerank vector must have {dim} dimensions, got {}",
@@ -18383,14 +18383,46 @@ fn order_rows(flat: &[Value], n: usize, count: usize, keys: &[OrderKey], k: usiz
     idx
 }
 
-/// The query vector of `near`. Three forms are accepted, none of them
+/// The query vector of `near` or `rerank` over `field`, each component a
+/// number an `f32` holds, as a vector field takes one
+/// ([`crate::value::held`]): `1e39`, read as an `f32`'s infinity, or a
+/// `NaN` handed over as bits, made every distance an infinity or a `NaN`,
+/// which ranked the rows as their bits fell. A vector a row holds is
+/// measured as it is (`near` ranks the rows of a file an earlier build
+/// wrote one into).
+fn near_vector(v: Value, field: &str) -> Result<Vec<f32>> {
+    let v = near_floats(v)?;
+    match crate::value::held(&v, VecPrec::F32) {
+        true => Ok(v),
+        false => Err(query_unheld(&v, field)),
+    }
+}
+
+/// [`crate::value::unheld`]'s refusal of a query vector, its field named:
+/// "the query vector for `embed`, element 3: a vector's component is ...".
+/// Out of line, on the refusal alone.
+#[cold]
+#[inline(never)]
+fn query_unheld(v: &[f32], field: &str) -> Error {
+    match crate::value::unheld(v, VecPrec::F32) {
+        Error::Type(m) => Error::Type(crate::declared::cat(&[
+            "the query vector for `",
+            field,
+            "`, ",
+            &m,
+        ])),
+        e => e,
+    }
+}
+
+/// The query vector's `f32`s. Three forms are accepted, none of them
 /// silently mangled.
 ///
 /// The text form (`near embed '[1,2,3]'`) is pgvector's notation, and a
 /// string is what most clients send. On the parameter path the same
 /// value was already parsed into a list; on the literal path it stayed
 /// `text` and raised a type error.
-fn near_vector(v: Value) -> Result<Vec<f32>> {
+fn near_floats(v: Value) -> Result<Vec<f32>> {
     let items = match v {
         Value::Vector(v) => return Ok(v),
         Value::List(items) => items,

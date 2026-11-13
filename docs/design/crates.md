@@ -235,6 +235,99 @@ browser module asks no `m`, and a dimension past 10^9, of which no page
 holds a vector, is refused there in `Schema::new`'s words, which name the
 field and its range -- the message was 0.7 KB of the module.
 
+*A vector's components.* A vector holds `f32`s, and a number within an
+`f64`'s range but past an `f32`'s -- `1e39`, `-1e39`, `3.5e38`: everything
+from 2^128 - 2^103 (3.4028235677973366e38) on, the tie between the largest
+`f32` and the next power of two going to the even one -- was read as the
+`f32`'s infinity, as a `NaN` or an infinity handed over as bits (the native
+library's and the browser module's vectors, `fennec_abi::with_vectors`) was
+kept. Stored, JSON wrote the component as `null`, and every distance from
+it was an infinity or a `NaN`. A vector field now refuses each where a
+write takes it, naming the field and the element counted from 0 -- "field
+`v`, element 3: a vector's component is a number at most 3.4028235e38
+either side of 0" -- in `Value::coerce`, which every write meets: a
+statement's literal, a parameter read from JSON or handed over as `f32`s, a
+document's object (`put t $1`), a `set`, an upsert, a named statement's
+argument, an import (which names the row and the component first,
+`fennec_import::load`); and `near` and `rerank` refuse their query vector
+so, naming its field, from a literal, a parameter or pgvector's text
+(`engine::near_vector`). A `vector<N, f16>` keeps each component as the
+nearest `f16`, and from 65 520 either side that is the `f16`'s infinity --
+65 504, the largest, is odd, so the tie halfway to the next goes up:
+refused there in its own words, where it was stored as the infinity and
+read back as `null`, as `limits.html` said. A sparse vector's weights were
+refused already (`sparse::normalise`), and are named by their index now. A
+number too small for an `f32` is the nearest one -- 0, its sign kept, at or
+under half the smallest subnormal (7×10^-46) -- as pgvector's `strtof`
+reads a vector's text, refusing an infinity ("out of range for type
+vector") and a `NaN` alone; in an `f16` field, 0 at or under about 3×10^-8,
+half its smallest subnormal.
+
+*Where the check is.* Once a vector, where the engine takes it:
+`value::held`, one pass and no branch a component. The bits under the sign
+order as the magnitudes do, a `NaN`'s above an infinity's, so taken from
+the bound's bits less one they borrow into the top bit exactly where they
+reach it, and the pass ORs them: LLVM makes the loop four lanes at a time,
+16 instructions for 16 components on aarch64. The browser module, built for
+size, vectorises nothing on its own, and the loop ran there scalar, 18 wasm
+instructions a component; written out in lanes it is 21 for four -- one
+`v128.load` each, where lanes built from the elements, as `vector::simd`
+builds them, took a load a lane. No pass the write path already made could
+take it: the readers make a vector's `f32`s before any field is known -- a
+list read the quick way is a vector until it binds, and a `[float]` or a
+json field keeps `1e39` as written -- and from there to the record nothing
+reads the components but the encoder, which cannot refuse. A key looked up
+by a vector is not checked (`Value::key_as`): `=` finds a row an earlier
+build stored with an infinity, as the scan does.
+
+*What it costs.* By lldb's count of one call (`tools/instr/trace.py`, main
+against the change, aarch64), a 768-dimension vector's check is 801
+instructions where a write takes it (`check_dim`, 21 then 822) and 800
+where `near` does (`near_vector`, 32 then 832); of a whole write's own code
+nothing else moved but `coerce_as`'s 5. Counted a request over four
+identities a build, five runs each, in a quiet minute
+(`tools/instr/compare.py`, `benchmarks.md#instruction-counts`): +966 a
+write of one handed over as `f32`s, the cheapest way a vector goes in (2.6%
+of 36 732, SE 118), +746 one read from JSON (0.21% of 347 644), +712 a
+`near` over 2 000 such vectors (0.04% of 1.64 million). In the module
+`held` is 217 bytes, out of line, the two refusals 280 (`unheld`,
+`query_unheld`) and their words 216 of data: 906 bytes raw, 0.3 to 0.5 KB
+under gzip and brotli, in each build (`make wasm`, `wasm-lite`,
+`wasm-min`).
+
+*What a file holds.* A vector an earlier build stored with an infinity or a
+`NaN` -- `1e39` read as an `f32`, a binding's bits, or a hook's, whose
+changes no check reads again -- opens and reads as it did: JSON writes the
+component as `null`, another field of its row is written as ever, `=` finds
+it by a key holding it, and its vector written again puts it right
+(`a_file_holding_a_component_no_f32_holds_opens_and_reads`). `near`
+measures it as it is, which no distance pays for: its distance is what IEEE
+arithmetic makes of the infinity or the `NaN`, ordered by `total_cmp`
+(`Cand`), so the walk, the scan and a filtered search answer, the finite
+rows come in the order they would without it, and the row comes after every
+number -- a distance of `+inf`, a positive `NaN` -- or before it -- `-inf`,
+a dot product's `+inf` negated, a negative `NaN` -- never among them
+(`near_ranks_a_file_s_vector_holding_no_number_as_ieee_orders_it`). The
+sign of a `NaN` the arithmetic makes is the platform's, negative on x86-64,
+positive on aarch64; one a vector holds keeps its own through a sum and a
+product. `_score` goes out as `null`, which finds the row to write again.
+Ranking such a row last everywhere would test every distance the walk
+measures, a compare and a select each, on every query, for a row no write
+makes now. A function over vectors (`dot`, `l2_distance`) computes over
+what it is handed, a row's vector as a literal's -- it cannot tell them
+apart, and a read of a file holding one must not fail -- so `dot([1e39],
+[0])` is a `NaN` still.
+
+*In the page.* `vectorsApart` hands a JavaScript `1e39` over as the
+`f32`'s infinity, as `Float32Array.set` makes it, and the module refuses
+it as a server reading the digits does; it is not exact, so a list of
+numbers asks for it as JSON and keeps it as written. A typed array goes
+over whatever it holds, a `NaN` and an infinity among them, as a native
+binding hands its `f32`s, and the module names the element: in the JSON a
+`NaN` was `null` and the array an object, which no vector field takes. An
+array's `NaN` or infinity stays in the JSON, `null` as a server is sent
+it.
+
 *Grammar epoch 3.* A named statement is stored as its text and read again
 at every open ([named-statements.md](named-statements.md#what-is-built),
 *Grammar epoch 3*):

@@ -84,6 +84,7 @@ mod two_indexes;
 mod unique;
 mod unwinding;
 mod upsert;
+mod vector_range;
 mod wakes;
 mod windows;
 mod within;

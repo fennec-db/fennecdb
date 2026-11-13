@@ -135,6 +135,80 @@ pub fn quick_vector(items: &[Value]) -> Option<Vec<f32>> {
     }
 }
 
+/// Whether every component of `v` is a number a vector stored as `prec`
+/// holds: no `NaN` and no infinity -- an `f32`'s, which every number from
+/// 2^128 - 2^103 (3.4028235677973366e38) up rounds to, `1e39` among them --
+/// nor, in an `f16` field, one rounding to an `f16`'s infinity: 65 504, the
+/// largest `f16`, is odd, so 65 520, halfway to the next, goes up to it.
+/// JSON writes an infinity and a `NaN` as `null`, and a distance over one is
+/// an infinity or a `NaN`, so a write and `near`'s query refuse them
+/// ([`unheld`]); what a file already holds is read as it is. A number too
+/// small for an `f32` is the nearest one, 0 at or under half the smallest
+/// subnormal, as pgvector's `strtof` reads it.
+///
+/// One pass, no branch a component: the bits under the sign order as the
+/// magnitudes do, a `NaN`'s above an infinity's, so taken from the bound's
+/// bits less one they borrow into the top bit exactly where they reach it,
+/// and the pass ORs them. Natively LLVM makes the loop four lanes at a time:
+/// 801 instructions a 768-dim vector on aarch64, by lldb's count, 2.6% of a
+/// write of one handed over as `f32`s (docs/design/crates.md#limits). The
+/// browser module, built for size, vectorises nothing on its own, and there
+/// the lanes are written out, as `vector::simd` writes the distances.
+#[inline]
+pub fn held(v: &[f32], prec: VecPrec) -> bool {
+    let below = match prec {
+        VecPrec::F32 => f32::INFINITY.to_bits() - 1,
+        VecPrec::F16 => 65_520f32.to_bits() - 1,
+    };
+    // The top bit set where `x`'s magnitude is past the bound.
+    let over = |x: &f32| below.wrapping_sub(x.to_bits() & !(1 << 31));
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        use core::arch::wasm32::*;
+        let (fours, rest) = v.as_chunks::<4>();
+        let (b, magnitude) = (u32x4_splat(below), u32x4_splat(!(1 << 31)));
+        let mut lanes = u32x4_splat(0);
+        for x in fours {
+            // SAFETY: four `f32`s are the 16 bytes a `v128` reads, at any
+            // alignment. Built from its elements, as `vector::simd` builds
+            // its lanes, the loop took four loads a lane each for one.
+            let x = unsafe { (x as *const [f32; 4] as *const v128).read_unaligned() };
+            lanes = v128_or(lanes, i32x4_sub(b, v128_and(x, magnitude)));
+        }
+        i32x4_bitmask(lanes) == 0 && rest.iter().fold(0, |m, x| m | over(x)) >> 31 == 0
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+    {
+        v.iter().fold(0, |m, x| m | over(x)) >> 31 == 0
+    }
+}
+
+/// The refusal of a vector [`held`] finds a component of that its field's
+/// `prec` does not hold, the first named, counted from 0, as a list's
+/// element is: "element 3: a vector's component is a number at most
+/// 3.4028235e38 either side of 0" -- the largest `f32`'s shortest digits --
+/// a document's write naming the field before it (`engine::in_field`),
+/// `near` its query vector. Out of line, on the refusal alone.
+#[cold]
+#[inline(never)]
+pub fn unheld(v: &[f32], prec: VecPrec) -> Error {
+    let i = v
+        .iter()
+        .position(|x| !held(std::slice::from_ref(x), prec))
+        .unwrap_or(0);
+    at_element(i, Error::Type(component(prec).into()))
+}
+
+/// What a vector stored as `prec` holds a component of, in a refusal's
+/// words: [`unheld`]'s, and an import's naming the row
+/// (`fennec_import::load`).
+pub fn component(prec: VecPrec) -> &'static str {
+    match prec {
+        VecPrec::F32 => "a vector's component is a number at most 3.4028235e38 either side of 0",
+        VecPrec::F16 => "an f16 vector's component is a number at most 65504 either side of 0",
+    }
+}
+
 impl fmt::Display for DataType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.name())
@@ -431,7 +505,9 @@ impl Value {
             (DataType::Text, Value::Timestamp(ms)) if fit != Fit::Key => {
                 Ok(Value::Text(crate::time::format_iso(ms)))
             }
-            (DataType::Vector(dim, _), Value::Vector(v)) => check_dim(v, *dim),
+            (DataType::Vector(dim, prec), Value::Vector(v)) => {
+                check_dim(v, *dim, (fit == Fit::Write).then_some(*prec))
+            }
             // pgvector's text form is how a sparse vector arrives from JSON, a
             // FennecQL literal or an import; either way it is put in index
             // order, and its zeros dropped, before anything holds it.
@@ -443,14 +519,14 @@ impl Value {
                 let (d, e) = crate::sparse::parse(&s)?;
                 check_sparse_dim(d, e, *dim)
             }
-            (DataType::Vector(dim, _), Value::List(items)) => {
+            (DataType::Vector(dim, prec), Value::List(items)) => {
                 let out = Value::floats(&items).map_err(|it| {
                     Error::Type(format!(
                         "vector element must be numeric, found {}",
                         it.type_name()
                     ))
                 })?;
-                check_dim(out, *dim)
+                check_dim(out, *dim, (fit == Fit::Write).then_some(*prec))
             }
             // A list of numbers alone is read into a vector's `f32`s where no
             // schema is at hand (`near $1`), and a list of numbers takes one
@@ -1002,13 +1078,23 @@ fn at_element(i: usize, e: Error) -> Error {
     }
 }
 
-fn check_dim(v: Vec<f32>, dim: usize) -> Result<Value> {
+/// `v` as a field of `dim` dimensions holds it, and where it is `written`
+/// into one stored as that precision, each component a number the field
+/// holds ([`held`]) -- never where a key is looked up by it, which `=`
+/// finds a row by as it is ([`Value::key_as`]): a file an earlier build
+/// wrote may hold an infinity.
+fn check_dim(v: Vec<f32>, dim: usize, written: Option<VecPrec>) -> Result<Value> {
     if v.len() != dim {
         return Err(Error::Type(format!(
             "vector dimension must be {}, got {}",
             dim,
             v.len()
         )));
+    }
+    if let Some(prec) = written {
+        if !held(&v, prec) {
+            return Err(unheld(&v, prec));
+        }
     }
     Ok(Value::Vector(v))
 }
@@ -1483,5 +1569,62 @@ mod tests {
         let rounded = Value::Int((1 << 53) + 1).coerce(&float).unwrap();
         assert_eq!(rounded, Value::Float(9_007_199_254_740_992.0));
         assert!(Value::Float(-I64_END).coerce(&int).is_err());
+    }
+
+    /// `held` takes exactly the numbers a field holds: every `f32` but an
+    /// infinity and a `NaN`, and in an `f16` field every one whose `f16` is
+    /// a number (`codec::f16_from_f32`, which stores it), across every sign
+    /// and exponent at each end of the significand; one component anywhere
+    /// in a vector fails the whole, and `unheld` names the first.
+    #[test]
+    fn held_takes_the_numbers_a_field_holds() {
+        use crate::codec::{f16_from_f32, f32_from_f16};
+        let ends = [
+            0, 1, 2, 0x3f_ffff, 0x40_0000, 0x7f_efff, 0x7f_f000, 0x7f_fffe, 0x7f_ffff,
+        ];
+        for top in 0..=0x1ffu32 {
+            for low in ends {
+                let x = f32::from_bits(top << 23 | low);
+                assert_eq!(held(&[x], VecPrec::F32), x.is_finite(), "{x:e}");
+                let half = f32_from_f16(f16_from_f32(x)).is_finite();
+                assert_eq!(held(&[x], VecPrec::F16), half, "{x:e} as an f16");
+            }
+        }
+        // The f32 just under 65 520 rounds to 65 504; 65 520 to the infinity.
+        let under = f32::from_bits(65_520f32.to_bits() - 1);
+        for (x, f32s, f16s) in [
+            (f32::MAX, true, false),
+            (f32::from_bits(1), true, true),
+            (65_504.0, true, true),
+            (under, true, true),
+            (65_520.0, true, false),
+            (f32::INFINITY, false, false),
+            (f32::NAN, false, false),
+        ] {
+            for x in [x, -x] {
+                assert_eq!(held(&[x], VecPrec::F32), f32s, "{x:e}");
+                assert_eq!(held(&[x], VecPrec::F16), f16s, "{x:e} as an f16");
+            }
+        }
+        assert_eq!(f32_from_f16(f16_from_f32(under)), 65_504.0);
+        for n in 1..=13 {
+            for at in 0..n {
+                for bad in [f32::INFINITY, f32::NAN, -f32::INFINITY] {
+                    let mut v = vec![0.5f32; n];
+                    v[at] = bad;
+                    // Another after it: the first is the one named.
+                    if at + 1 < n {
+                        v[n - 1] = f32::NAN;
+                    }
+                    assert!(!held(&v, VecPrec::F32), "{v:?}");
+                    let said = unheld(&v, VecPrec::F32).to_string();
+                    let at = format!("element {at}: a vector's component is a number at most");
+                    assert!(said.contains(&at), "{said}");
+                }
+                assert!(held(&vec![-f32::MAX; n], VecPrec::F32));
+                assert!(!held(&vec![-65_520.0; n], VecPrec::F16));
+            }
+        }
+        assert!(held(&[], VecPrec::F32) && held(&[], VecPrec::F16));
     }
 }

@@ -507,12 +507,47 @@ fn a_range_above_every_number_holds_the_nans() {
 /// `NaN`s of four bit patterns as `f32`s, a vector's components.
 const NANS32: [u32; 4] = [0x7FC0_0000, 0xFFC0_0000, 0x7FC0_0001, 0xFF80_0001];
 
+/// A vector holding a `NaN`, as an earlier build stored one: a write
+/// refuses it now (`tests/vector_range.rs`), so the vector `[1000 + i, 1]`
+/// a write hands `e` or `eh` becomes `[NaN, 1]` of `NANS32[i]`'s bits, a
+/// hook's changes read by no check.
+struct Planted;
+impl Hook for Planted {
+    fn name(&self) -> &str {
+        "planted"
+    }
+    fn before_write(&self, _: &Schema, _: WriteOp, doc: &mut Document) -> Result<()> {
+        for field in ["e", "eh"] {
+            let marked = match doc.get(field) {
+                Some(Value::Vector(v)) => (1000.0..1004.0).contains(&v[0]).then(|| v[0] as usize),
+                _ => None,
+            };
+            if let Some(i) = marked {
+                let nan = f32::from_bits(NANS32[i - 1000]);
+                doc.set(field, Value::Vector(vec![nan, 1.0]));
+            }
+        }
+        Ok(())
+    }
+}
+impl Plugin for Planted {
+    fn name(&self) -> &str {
+        "planted"
+    }
+    fn init(&self, reg: &mut Registry) -> Result<()> {
+        reg.register_hook(std::sync::Arc::new(Planted));
+        Ok(())
+    }
+}
+
 /// A list or a vector holds a `NaN` and a zero as a float field does:
 /// `[NaN, 1]` of any bits is one value, `[-0.0, 1]` is `[0.0, 1]`. A
 /// `[float]` field's `@hash` answers as the scan does -- it filed a list by
 /// its floats' bits, and took one of the `[NaN, 1]` rows where the scan
 /// took four -- and a group, a distinct count, a sketch and `@unique` take
-/// each as one value, as `=` does.
+/// each as one value, as `=` does. A vector holding one is a file's an
+/// earlier build wrote ([`Planted`]), which `=` still finds by a key holding
+/// one.
 #[test]
 fn a_list_or_a_vector_holds_one_nan_and_one_zero() {
     fennec_ql::install();
@@ -522,11 +557,12 @@ fn a_list_or_a_vector_holds_one_nan_and_one_zero() {
         "create collection l (xs [float], xh [float] @hash, e vector<2>, eh vector<2> @hash, j json);
          create collection lu (xs [float] @unique)",
     );
+    db.install_plugin(&Planted).unwrap();
     let list = |a: f64| Value::List(vec![Value::Float(a), Value::Float(1.0)]);
     let vector = |a: f32| Value::Vector(vec![a, 1.0]);
     let put = "put l {xs: $1, xh: $1, e: $2, eh: $2}";
-    for (i, bits) in NANS32.into_iter().enumerate() {
-        let e = vector(f32::from_bits(bits));
+    for i in 0..NANS32.len() {
+        let e = vector(1000.0 + i as f32);
         with(&mut db, put, &[list(nan(i)), e]).unwrap();
     }
     for x in [-0.0, 0.0, 2.0] {

@@ -130,7 +130,8 @@ right; so does going past the two <code>json</code> depths.</p>
 <tr><td><code>int</code></td><td class="n">i64</td><td>-9223372036854775808 to 9223372036854775807; a number past it — <code>1e300</code>, a JSON integer past 64 bits, a <code>set</code>'s float result — is a type error naming the field, never clamped to the nearest int. A float goes in where it is whole and short of 2<sup>63</sup> either side, so -9223372036854775808 is taken written as an integer, not as a float (JavaScript writes <code>-(2 ** 63)</code> as <code>-9223372036854776000</code>). An <code>[int]</code>'s elements are held to it the same way, each read as written and one past it refused naming the field and the element, counted from 0; a row an earlier build wrote keeps the <code>f32</code>s it stored, 16777216 for 16777217, until written again</td></tr>
 <tr><td><code>timestamp</code></td><td class="n">1 ms, i64</td><td>±2.9×10<sup>8</sup> years; microseconds truncated, always UTC</td></tr>
 <tr><td><a href="/docs/fennecql-reading#functions"><code>bucket</code> by a named zone</a></td><td class="n">from 2000</td><td>IANA's rules of the build's tzdata (2026c); a time before 2000 is a query error, never answered by rules the build does not hold; an offset written out (<code>'+03:00'</code>) answers any time</td></tr>
-<tr><td><code>vector&lt;N, f16&gt;</code></td><td class="n">±65 504</td><td>~3 decimal digits; outside it, values silently become <code>inf</code> or 0</td></tr>
+<tr><td><code>vector&lt;N&gt;</code> component</td><td class="n">±3.4×10<sup>38</sup></td><td>an <code>f32</code>, at most 3.4028235×10<sup>38</sup> either side of 0; a component past it — <code>1e39</code>, which an <code>f32</code> rounds to its infinity — and a <code>NaN</code> or an infinity sent as <code>f32</code>s are refused naming the field and the element, counted from 0, in every write and in <code>near</code>'s and <code>rerank</code>'s query vector, never stored to come back as <code>null</code>; one at or under half the smallest subnormal, 7×10<sup>-46</sup>, is 0, as pgvector reads it. A vector an earlier version stored with one is kept and read as before</td></tr>
+<tr><td><code>vector&lt;N, f16&gt;</code></td><td class="n">±65 504</td><td>~3 decimal digits; a component of 65 520 or more either side of 0, which rounds to the <code>f16</code>'s infinity, is refused naming the field and the element, never stored to come back as <code>null</code>; one at or under about 3×10<sup>-8</sup>, half its smallest subnormal, is 0</td></tr>
 <tr><td><code>geo</code> point</td><td class="n">±180°, ±90°</td><td>two <code>f64</code>s kept as written; past either range a write is refused, never wrapped</td></tr>
 <tr><td><code>vector&lt;N&gt;</code> and <code>sparse&lt;N&gt;</code> dimension</td><td class="n">10<sup>9</sup></td><td>pgvector's for <code>sparsevec</code>, and a <code>vector&lt;N&gt;</code>'s <code>f32</code>s still fit a document's 4 GiB; refused past it, never cut; a sparse vector's weights are <code>f32</code>, finite, and a zero is dropped</td></tr>
 
@@ -367,7 +368,9 @@ what you might expect.</p>
     <code>or</code> scan every row.</li>
   <li><b><code>order</code> reads every match</b> unless it is over one
     <code>@sorted</code> field with a <code>limit</code>.</li>
-  <li><b><code>put</code> does not check that a vector is finite.</b></li>
+  <li><b>A vector's components are numbers its field holds:</b> a
+    <code>NaN</code>, an infinity or <code>1e39</code> is refused naming the
+    field and the element.</li>
 </ul>
 
 <details class="deep"><summary>Edge cases of sparse near, filters, order and collation</summary>
@@ -463,11 +466,27 @@ what you might expect.</p>
     text form (<code>near embed '[1,0,0]'</code>), which is the natural one
     when typing by hand in the shell. None of the three fails silently — unparsable
     text and a non-numeric component both error.</li>
-  <li><b><code>put</code> does not check that a vector is finite.</b> A NaN or
-    infinite component enters the index and makes distances meaningless; the
-    check exists only on the <code>fennec import</code> path. In a
-    <code>vector&lt;N, f16&gt;</code> field an out-of-range value silently
-    becomes <code>inf</code> or drops to zero below about 6×10<sup>-8</sup>.</li>
+  <li><b>A vector's components are numbers its field holds.</b> A
+    component past an <code>f32</code>'s range — <code>1e39</code>, within a
+    float's, which an <code>f32</code> rounds to its infinity — and a
+    <code>NaN</code> or an infinity sent as <code>f32</code>s (a
+    <code>Float32Array</code>, the native libraries' vectors) are refused
+    naming the field and the element, counted from 0 — <code>field `embed`,
+    element 3: a vector's component is a number at most 3.4028235e38 either
+    side of 0</code> — wherever a write takes one: a statement, a parameter, a
+    JSON body, a <code>set</code>, an upsert, a named statement's argument,
+    <code>fennec import</code>. <code>near</code>'s and <code>rerank</code>'s
+    query vector too, naming its field. Stored, such a component came back
+    as <code>null</code>, and every distance from it was an infinity or a
+    <code>NaN</code>. In a <code>vector&lt;N, f16&gt;</code> field a
+    component of 65 520 or more either side, which rounds to the
+    <code>f16</code>'s infinity, is refused the same way, and one at or under
+    about 3×10<sup>-8</sup> is 0; in a <code>vector&lt;N&gt;</code> one at or
+    under 7×10<sup>-46</sup> is. A row an earlier version stored with a
+    <code>NaN</code> or an infinity opens and reads as before, the component
+    <code>null</code> in JSON; <code>near</code> measures it as it is, and a
+    function over vectors computes over it — write its vector again to put
+    it right.</li>
   <li>The browser module needs WebAssembly SIMD: Chrome 91, Firefox 89, Safari
     16.4 (March 2023) or later. On an engine without it,
     <code>Fennec.open</code> fails with a <code>FennecError</code> that says
@@ -603,8 +622,8 @@ SQLite or PostgreSQL, and can follow a PostgreSQL table as it changes.</p>
 <ul>
   <li><b>Checkpoint a SQLite file's WAL first;</b> one with an unprocessed
     WAL is not read.</li>
-  <li><b>A vector with a NaN or an infinity stops the import</b> at that
-    row.</li>
+  <li><b>A vector with a NaN, an infinity or a component past what its
+    field holds stops the import</b> at that row.</li>
   <li><b><code>--follow</code> needs <code>wal_level = logical</code></b> and
     an integer key.</li>
 </ul>
@@ -630,7 +649,10 @@ SQLite or PostgreSQL, and can follow a PostgreSQL table as it changes.</p>
     milliseconds.</li>
   <li><b>A non-finite component of a value bound for a vector field stops
     the import</b> — a pgvector column, a BLOB under <code>--vector</code>,
-    a <code>float[]</code> named with it — and it says which row. A NaN
+    a <code>float[]</code> named with it — and it says which row, as does a
+    component past what the field holds: a <code>float8[]</code>'s
+    <code>1e39</code>, whose <code>f32</code> is an infinity, or one of
+    65 520 or more bound for a <code>vector&lt;N, f16&gt;</code>. A NaN
     makes a distance incomparable; even if the index accepted it, the result
     would be meaningless. A <code>float</code> or <code>[float]</code> field
     keeps its <code>NaN</code>s and infinities, as PostgreSQL holds
