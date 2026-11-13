@@ -70,21 +70,35 @@ final db = await Fennec.openSynced(
   url: 'https://api.example.com', token: jwt,
   shapes: [Shape('todos', where: {'owner': me}, key: 'key')],
   path: '${dir.path}/todos.fennec',
-  // The token's exp passed: a fresh one, and the sync goes on. Refused
-  // otherwise: the session ended.
-  tokenProvider: (expired) async {
-    if (expired) return refreshToken();
-    await signOut();
-    throw StateError('signed out');
+  tokenProvider: (refusal) async {
+    // The one handed over refused too: sign out, the file kept.
+    if (refusal.attempt > 1) {
+      await signOut();
+      throw StateError('signed out');
+    }
+    // Expired or not, a fresh token: the issuer refusing throws.
+    return refreshToken();
   },
 );
 await db.replica!.ready();
 ```
 
-A `401` asks `tokenProvider` for a token, told whether the server said the
-token's `exp` passed (its code `token_expired`) or refused it otherwise --
-a session ended or revoked, where an app signs out rather than hand over
-the same token again; `replica.status`'s error names the `code` too.
+A `401` asks `tokenProvider` for a token, handed a `TokenRefusal`: the
+code the server named (`errorCode`, `token_expired` where the token's `exp`
+passed), `expired`, whether the refused request carried a token
+(`hadToken`) and the asks in a row (`attempt`). A fresh token from the
+issuer cures an expiry and most 401s naming no code -- a key rotation, a
+token not valid yet, an older server's expiry, none sent -- so the provider
+refreshes at both, and signs out only where the issuer refuses or at an
+`attempt` past 1. A sign-out keeps a file whose status says `pending`
+writes: deleting it loses them. `replica.status`'s error names the
+`errorCode` too, and a `FennecRemote` refusal its body's code as
+`FennecException.errorCode`.
+
+**Changed before 1.0:** `tokenProvider` takes the `TokenRefusal`, and a
+function of no argument is no longer taken -- Dart has no overloading to
+keep the old form beside it. Write `(_) => refreshToken()` where the
+provider reads none of it.
 
 The same `Fennec`: reads and live queries are the file's, a write to a
 shape's collection shows at once and is sent -- queued in the file while

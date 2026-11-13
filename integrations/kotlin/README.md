@@ -94,20 +94,29 @@ val db = Fennec.sync(
     url = "https://api.example.com", token = jwt,
     shapes = listOf(Shape("todos", where = mapOf("owner" to me), key = "key")),
     path = File(context.filesDir, "todos.fennec").path,
-    // The token's exp passed: a fresh one, and the sync goes on. Refused
-    // otherwise: the session ended.
-    tokenProvider = { expired ->
-        if (expired) refreshToken()
-        else { signOut(); throw CancellationException("signed out") }
+    tokenProvider = { refusal ->
+        // The one handed over refused too: sign out, the file kept.
+        if (refusal.attempt > 1) { signOut(); throw CancellationException("signed out") }
+        // Expired or not, a fresh token: the issuer refusing throws.
+        refreshToken()
     },
 )
 db.replica!!.ready()
 ```
 
-A `401` asks `tokenProvider` for a token, told whether the server said the
-token's `exp` passed (its code `token_expired`) or refused it otherwise --
-a session ended or revoked, where an app signs out rather than hand over
-the same token again; `replica.status`'s error names the `code` too.
+A `401` asks `tokenProvider` for a token, handed a `TokenRefusal`: the
+code the server named (`errorCode`, "token_expired" where the token's `exp`
+passed), `expired`, whether the refused request carried a token
+(`hadToken`) and the asks in a row (`attempt`). A fresh token from the
+issuer cures an expiry and most 401s naming no code -- a key rotation, a
+token not valid yet, an older server's expiry, none sent -- so the provider
+refreshes at both, and signs out only where the issuer refuses or at an
+`attempt` past 1. A sign-out keeps a file whose status says `pending`
+writes: deleting it loses them. `replica.status`'s error names the
+`errorCode` too, and a `FennecRemote` refusal its body's code as
+`FennecException.errorCode`. Before 1.0 the provider took no argument: a
+lambda asking nothing, `{ refreshToken() }`, still takes, but a reference
+to a function of none, `::refreshToken`, no longer does.
 
 The same `Fennec`: reads and live queries are the file's, a write to a
 shape's collection shows at once and is sent -- queued in the file while

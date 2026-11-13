@@ -129,10 +129,12 @@ describes: `_sync_shapes` (cursors), `_sync_queue` (unanswered writes, their
 keys and undo), `_sync_temps` (rows under temporary ids). Writes go one at
 a time in order; 0/408/429/5xx retry with backoff (250 ms doubling to 15 s,
 30% jitter) or the `retry_after` a quota names where longer, 401 asks for
-a token -- `{"do":"token","code":"token_expired"}` where the server said
-the token's `exp` passed, which a fresh token cures, and `{"do":"token"}`
-for a token refused otherwise, at which an app signs out, the status's
-error naming the same `code` ([access.md](access.md#expired-tokens)) -- a
+a token -- `{"do":"token","code":..,"had_token":B,"attempt":N}`, the code
+the server named (`token_expired` where the token's `exp` passed), whether
+the refused request carried a token and the asks in a row, the status's
+error naming the same `code`, and a 401 to a request sent with a token
+since replaced sent again with the new one, unasked
+([access.md](access.md#expired-tokens)) -- a
 507 naming a tenant's quota and any other 4xx are a refusal put
 back (below). A
 replica reopened sends its queue before opening its streams. An update of
@@ -193,7 +195,7 @@ fsync `sync()`.
 **The browser's sync and the native core are held to one scenario file.**
 Moving `FennecSync` onto `fennec_abi::sync` was measured at +21 KB brotli of
 the browser module, so the two are written apart, and
-`integrations/sync-scenarios.json` says what both do: 91 scenarios, each a
+`integrations/sync-scenarios.json` says what both do: 98 scenarios, each a
 script of shapes, app writes and server events -- a seed, a change, a
 stream dropped, the status each write's request is answered with, a seed
 past the horizon, the network's signal, a token -- with what the replica,
@@ -201,7 +203,10 @@ the queue, the requests sent (method, path, body, the idempotency key
 reused or new), the timers and the refusals are after every step.
 `crates/fennec-abi/tests/scenarios.rs` drives the sans-IO core through it,
 and `web/fennec.sync.scenarios.test.js` drives `FennecSync` through a fetch
-and a clock the script plays, its replica persisted over an in-memory
+and a clock the script plays -- every body it answers thrown away at an
+abort, as a real fetch throws it away: a stand-in that kept its bodies hid a
+stream refused at its open whose body was read after the stream was
+cancelled, told nothing on Node's own fetch -- its replica persisted over an in-memory
 IndexedDB so a restart is a page opened again; each writes the names that
 passed to `target/sync-scenarios/`, and `make sync-scenarios-check` (in
 `make test` where the module is built, and its own CI step) fails unless

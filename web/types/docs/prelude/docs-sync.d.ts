@@ -4,7 +4,7 @@
 declare const db: import('../../../fennec.js').FennecSync<import('../fennec-schema.js').FennecSchema>;
 /** The page's own drawing, handed the rows. */
 declare function draw(rows: { title: string | null }[]): void;
-/** The page's sign-in, which hands out a fresh token, and its sign-out. */
-declare const auth: { refresh(): Promise<string>; signOut(): Promise<void> };
+/** The page's sign-in: the token it holds, a fresh one from the issuer, and its sign-out. */
+declare const auth: { token(): Promise<string>; refresh(): Promise<string>; signOut(): Promise<void> };
 /** The page's own way of telling its user something. */
 declare function toast(text: string): void;

@@ -979,73 +979,125 @@ the start) fail without it.
 ## Expired tokens
 
 **A token past its `exp` is told so by a code, and no other refusal is.**
-A replica's sync was told a token that ran out and a session that ended
-alike: a request's 401 named the check in words, the stream ended at the
-`exp` with `{"error":"the token has expired","status":401}`, and
-`fennec_sync_feed` handed both to the binding as `{"do":"token"}`. An app
-must refresh its token and go on at the one, and sign out -- deleting the
-replica, which holds the signed-in account's rows -- at the other; told
-them alike it could do neither. vulpes, an offline app on the native
-library whose proxy mints five-minute HS256 tokens a device, dropped the
-stream's last frame in its proxy so that a device would not take every
-token's end for a sign-out. A request whose token's `exp` passed is now
-answered 401 `{"error":"the token has expired","code":"token_expired"}`
-(`access::refusal_code`, read where `authenticate` builds the refusal,
-`Response::coded`), and the stream's last event says the same
-(`sse::EXPIRED`, `{"error":..,"status":401,"code":"token_expired"}`). Every
-other 401 names no code: a signature no key makes, a `kid` no key has, an
-issuer, audience or client not taken, a token not valid yet (`nbf`), one
-with no `exp` or one further ahead than `--jwt-max-age`, a malformed one,
-none -- and the empty one, which is none ([below](#empty-tokens)). A
-fresh token cures none of those as it cures an expiry, and a client signs
-out at them. The `exp` is asked after the signature and whom the token is
-for (`Access::verify`), so the code is told only of a token this server
-took until then: a forged token past its `exp` is refused for its
-signature, and one for another audience for that, the code telling a
-sender of a token no key here made nothing it did not know.
+A replica's sync was told a token that ran out and every other 401 alike:
+a request's 401 named the check in words, the stream ended at the `exp`
+with `{"error":"the token has expired","status":401}`, and
+`fennec_sync_feed` handed both to the binding as `{"do":"token"}`. vulpes,
+an offline app on the native library whose proxy mints five-minute HS256
+tokens a device, dropped the stream's last frame in its proxy so that a
+device would not take every token's end for a sign-out. A request whose
+token's `exp` passed is now answered 401 `{"error":"the token has
+expired","code":"token_expired"}` (`access::refusal_code`, read where
+`authenticate` builds the refusal, `Response::coded`), and the stream's
+last event says the same (`sse::EXPIRED`,
+`{"error":..,"status":401,"code":"token_expired"}`). Every other 401 names
+no code: a signature no key makes, a `kid` no key has, an issuer, audience
+or client not taken, a token not valid yet (`nbf`), one with no `exp` or
+one further ahead than `--jwt-max-age`, a malformed one, none -- and the
+empty one, which is none ([below](#empty-tokens)). The `exp` is asked after
+the signature and whom the token is for (`Access::verify`), so the code is
+told only of a token this server took until then: a forged token past its
+`exp` is refused for its signature, and one for another audience for that,
+the code telling a sender of a token no key here made nothing it did not
+know.
+
+**A 401 naming no code is no sign-out.** The first form of this told an app
+to refresh at `token_expired` and sign out -- deleting the replica -- at
+any other 401. A fresh token from the issuer cures many of those: a token
+signed with a key the server has not fetched yet (`no key has the token's
+kid`, behind a rotation, [auth.html](../../site/content/docs/auth.html)), a
+replica offline past its old key's removal, an `nbf` a clock behind the
+server's has not reached, a request sent before any token was handed over,
+and every expiry from a v0.2.0 server, which names no code. The server keeps
+no list of revoked tokens, so a session ends at its issuer, and deleting the
+file lost the writes the server had not taken. The guidance is now the same
+everywhere it is given (auth.html, sync.html, mobile.html, `fennec.h`,
+`fennec.d.ts`, the bindings' READMEs): refresh at `token_expired`; at a 401
+naming none ask the issuer for a fresh token too; sign out only where the
+issuer refuses, or where a token just minted is refused again; and never
+delete a replica whose `pending` is not 0 on a 401 alone.
+
+**The provider is handed a value, not a flag.** Telling "a token just
+minted is refused again" from "an expiry" takes more than one bool, and a
+bool frozen at 1.0 could carry neither "no token was sent" nor a later
+code. So the core's action is `{"do":"token","code":..|null,"had_token":B,
+"attempt":N}` and every binding hands its provider a `TokenRefusal` of the
+same three -- `errorCode`, `hadToken`, `attempt` -- and `expired`, derived
+from the code: a Swift struct, a Kotlin class that is not a data class (a
+`copy` and `componentN`s would freeze its shape), a Dart class and, in the
+browser, a frozen object. `attempt` counts the asks in a row with no request
+the server took between (`token_asks`, `#tokenAsks`, reset by any answer
+but a 401 to the token held): 2 is a token handed over at the last ask and
+refused too, the "refused again" a provider signs out at, which it could
+otherwise tell only by a clock. A code the core does not know is passed on
+as it came, so a later server's code reaches an app without a new core. The
+status's error keeps `code`, the server's member, for an app that hands its
+tokens over with a signal rather than a provider.
+
+**A 401 to a token since replaced is no refusal of the token held.** Each
+request and stream remembers the token it carried (`Sync::carried`, a
+number bumped at each other token handed over; `#carried` in the page), and
+a 401 to one sent before the token now held is sent again with that one,
+the binding asked nothing (`token_refused`). Asked, an app counting a fresh
+token refused again would have signed out at a write's 401 that crossed the
+handover. And a 401 while a token is already asked for asks nothing more
+(`want_token` returns while `paused`, as `#wantToken` did): a stream's end
+at the `exp` beside a write's 401 is one question, and asked twice a
+provider would count the second as its fresh token refused.
 
 The code is a member of the body, beside the words: the words are a
 person's and may be put otherwise, and a page on another origin reads a
 header only where CORS exposes it, while a binding hands the sync core a
 body, not headers. `WWW-Authenticate: Bearer error="invalid_token"` (RFC
 6750) was the standard's way and was not taken: its `invalid_token` names
-an expired, a revoked and a malformed token alike, the very three this
-tells apart. The core reads the code alone (`sync::expired`, through
-`said`), as `web/fennec.js` does (`expiredIn`): a 401 without it is a
-token refused, whatever its words say, so an older server's stream end --
-the words without the code -- reads as a refusal there, and the code is
-what a server of this release says.
-
-The sync core asks a binding for a token at every 401 as before, the
-action naming the code where the server did, `{"do":"token","code":
-"token_expired"}`, and the status's error carrying it (`"code"`, null for
-none) until a token is handed over. A separate action was not taken: each
-binding switches on `do` and passes over what it does not know, so a
+an expired, a revoked and a malformed token alike. The core reads the code
+alone (`said`), as `web/fennec.js` does: an older server's stream end, the
+words without the code, has no code. A separate `do` was not taken either:
+each binding switches on `do` and passes over what it does not know, so a
 binding written against the earlier actions -- vulpes's, over `fennec.h` --
 would have skipped it and left its replica waiting for a token no one was
-asked for; reading `do` alone it asks for one at both, as it did. Each
-binding tells its `tokenProvider` which it is -- Swift's, Kotlin's and
-Dart's an `expired` flag, `FennecSync`'s too -- and its status's error the
-`code`; `FennecHttp` sets `FennecError.code` from a refusal's body and a
-stream's last event. The provider's signature changed in Swift and Dart
-(a closure of no argument no longer takes) before 1.0 froze it; Kotlin's
-lambdas and JavaScript's functions of none still take.
+asked for; reading `do` alone it asks for one at every 401, as it did.
+
+**Every SDK names the body's code `errorCode`.** `code` was taken: Go's
+`Error.Code` and .NET's `FennecException.Code` are the status's name
+(`unauthorized`), Swift's `FennecError.code`, Kotlin's and Dart's
+`FennecException.code` the library's own error kind. So the server's
+member is `errorCode` in JavaScript, Swift, Kotlin and Dart (`FennecError`,
+`FennecException`, the sync statuses, `TokenRefusal`), `error_code` in
+Python and `ErrorCode` in Go and .NET (a stream's error event's too: Go's
+through `errorOf`, .NET's `Event.ErrorCode`) -- the name the AWS and Azure
+SDKs give a service's code beside the HTTP status. None changes a field
+that was there; JavaScript's `FennecError.code`, added in the same pull
+request, became `errorCode` before it shipped.
+
+**A stream refused at its open is read before it is cancelled.** The page's
+sync first cancelled such a stream, then read its body: on a real fetch the
+abort throws the body away, so the provider was told no code
+(`#stream`). The body is read first now, the stream's turn checked again,
+then cancelled; and the scenario runner's fetch throws a body away at an
+abort as a real one does (`answered`), so this class fails there.
 
 Nothing is measured beside it: the stream asks the time where it did, at
 the head of each look, the event a constant 23 bytes longer written once a
 stream; a request pays nothing until it is refused, and a refusal compares
-its words with one constant. `access.rs`'s
-`only_an_expired_token_is_told_by_its_code` (a forged, early, malformed,
-empty and foreign-audience token past its `exp` or not), `tests/access.rs`'s
+its words with one constant; the sync notes a token's number at each send,
+a branch. `access.rs`'s `only_an_expired_token_is_told_by_its_code` (a
+forged, early, malformed, empty and foreign-audience token past its `exp`
+or not), `tests/access.rs`'s
 `an_expired_token_is_told_by_its_code_and_no_other_refusal_is` (a request,
 a stream's open, `/_whoami`) and `a_subscription_ends_when_its_token_expires`
-(the stream's end), the core's `an_expiry_is_told_by_its_code_alone`, four
-scenarios both runners play (a stream ended at the `exp` with the code and
-without it, a write refused for its token's expiry, a stream refused at its
-open for it), `web/fennec.client.test.js` (`FennecError.code` on a refusal
-and a stream's end) and `web/fennec.sync.test.js`'s replica against a
-server (its provider told `true` at the `exp` and `false` for a token no
-key signed) fail without it.
+(the stream's end), the core's `a_refusal_code_is_read_from_the_body_alone`,
+eleven scenarios both runners play (a stream ended at the `exp` with the
+code and without it, a write and a stream's open and `GET /collections`
+refused for an expiry, a replica started with no token, a fresh token
+refused again and the count starting over, a write's and a stream's 401 to
+a token since replaced sent again unasked, a second 401 while asked, a code
+no client knows), `web/fennec.client.test.js` (`errorCode` on a refusal and
+a stream's end), `web/fennec.sync.test.js`'s replicas against a server (an
+expiry at the stream's end and at its open on Node's own fetch, a forged
+token refused twice, none sent), each binding's provider against a server
+(Swift, Kotlin, Dart) and each SDK's refusal naming its code fail without
+it.
 
 ## Empty tokens
 
