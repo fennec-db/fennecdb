@@ -1,11 +1,11 @@
 # TEMPORARY -- removed before this pull request is marked ready. The perf
-# gate's calibration (docs/design/benchmarks.md#the-gate), second pass: the
-# two merged pull requests make instr-compare judged neutral that the gate
-# failed (#474 as merged, #524), replayed with every median run's profile
-# kept, the workloads that moved profiled by instruction, and the binaries
-# kept, for callgrind_annotate and a disassembler; and where core-facet's
-# count moves, over the facet's variants (gate.rs's LOOKS), counted ten
-# times each on one build of main.
+# gate's calibration (docs/design/benchmarks.md#the-gate), third pass: the
+# first pass's pairs and control again, judged with the allocator's calls
+# priced at the base's cost a call and core-facet picking its commonest
+# brand. The merged pull requests make instr-compare judged neutral must all
+# pass, the known regressions must all fail, and the base held to itself,
+# two builds of one commit at two paths as the gate builds them, twenty
+# times over, must stay under the threshold, every delta 0.1% or less.
 name: perf calibration
 
 on:
@@ -27,7 +27,7 @@ env:
 
 jobs:
   pair:
-    name: profiles (${{ matrix.name }})
+    name: calibration (${{ matrix.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 50
     permissions:
@@ -36,8 +36,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: "neutral #474 as merged", slug: "474", base: d45afa21, head: e3d58955 }
+          # Neutral: merged, instr-compare's figures inside the noise.
+          - { name: "neutral #531", slug: "531", base: 088bc30f, head: de59fdd1 }
           - { name: "neutral #524", slug: "524", base: a96bd554, head: c736b5c0 }
+          - { name: "neutral #506 (the #513 v1/bc7636b2 pair)", slug: "506", base: edb629d2, head: bc7636b2 }
+          - { name: "neutral #513", slug: "513", base: fb93539e, head: 61fe4261 }
+          - { name: "neutral #542 as merged", slug: "542", base: 4a157cdd, head: 1dee77aa }
+          - { name: "neutral #474 as merged", slug: "474", base: d45afa21, head: e3d58955 }
+          # Known regressions: each measured before it was fixed or undone.
+          - { name: "regression #511 undone (JSON numbers -8.7%)", slug: "r511", base: 82319b7f, head: 9da6411e }
+          - { name: "regression #542 first head (read +1.41%, write +1.65%)", slug: "r542", base: de23ce27, head: 0e05fe22 }
+          - { name: "regression #474 first head (scoped writes +1 128)", slug: "r474", base: e1d6a47c, head: 41f293a9 }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -52,57 +61,35 @@ jobs:
 
       - name: Replay the pair with this pull request's program
         run: |
-          W="$RUNNER_TEMP/perf"
+          start=$(date +%s)
           python3 tools/perf_gate.py run --base "${{ matrix.base }}" --head "${{ matrix.head }}" \
-            --target x86_64-unknown-linux-musl --work "$W" --out "$W/results.json" --no-check
-          python3 tools/perf_gate.py check "$W/results.json" --summary "$GITHUB_STEP_SUMMARY" \
+            --target x86_64-unknown-linux-musl --work "$RUNNER_TEMP/perf" \
+            --out "$RUNNER_TEMP/perf/results.json" --no-check
+          echo "replayed in $(( $(date +%s) - start )) s"
+          python3 tools/perf_gate.py check "$RUNNER_TEMP/perf/results.json" --summary "$GITHUB_STEP_SUMMARY" \
             && echo "CALIBRATION-VERDICT pass" || echo "CALIBRATION-VERDICT fail"
-          echo "CALIBRATION-RESULTS $(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))))' "$W/results.json")"
+          echo "CALIBRATION-RESULTS $(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))))' "$RUNNER_TEMP/perf/results.json")"
+          cp "$RUNNER_TEMP/perf/results.json" "$RUNNER_TEMP/perf/profiles/"
 
-      - name: The workloads that moved, by instruction, one run a side
-        run: |
-          W="$RUNNER_TEMP/perf"
-          K="$W/keep"
-          bin=x86_64-unknown-linux-musl/release/examples/gate
-          mkdir -p "$K/instr"
-          cp "$W/base-target/$bin" "$K/base-gate"
-          cp "$W/head-target/$bin" "$K/head-gate"
-          cp -r "$W/profiles" "$K/profiles"
-          cp "$W/results.json" "$K/results.json"
-          for w in core-put core-get-id core-filter-limit core-order core-match http-get-row http-patch http-put http-batch http-scoped-set; do
-            for side in base head; do
-              echo "$w $side"
-            done
-          done | xargs -P 4 -n 2 sh -c 'valgrind --tool=callgrind --instr-atstart=no --collect-atstart=no \
-            --dump-instr=yes --dump-line=no --callgrind-out-file="$0/instr/$1.$2.callgrind" "$0/$2-gate" "$1" \
-            > /dev/null 2>&1 || echo "$1 $2: did not run"' "$K"
-          ls -la "$K" "$K/instr"
-
-      - name: callgrind_annotate, each side's median run, by function
-        run: |
-          K="$RUNNER_TEMP/perf/keep"
-          for w in core-put core-get-id core-filter-limit core-order http-get-row http-patch http-put http-scoped-set; do
-            for side in base head; do
-              f="$K/profiles/$w.$side.callgrind"
-              [ -f "$f" ] || continue
-              echo "=== $w $side (self)"
-              callgrind_annotate --inclusive=no --threshold=99.5 "$f" | sed -n '1,60p'
-            done
-          done
-
+      # Each side's median run of each workload, by function, and the
+      # results: where a verdict comes from, for callgrind_annotate.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: perf-diag-${{ matrix.slug }}
-          path: ${{ runner.temp }}/perf/keep/
-          retention-days: 14
+          name: perf-calibration-${{ matrix.slug }}
+          path: ${{ runner.temp }}/perf/profiles/
+          retention-days: 7
 
-  facet:
-    name: facet's spread
+  control:
+    name: control (part ${{ matrix.part }})
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 60
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -115,48 +102,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends valgrind musl-tools
 
-      # The merge's tree: main's crates, this pull request's program.
-      - name: Build the gate program
+      # Two builds of the base at two paths, as the gate builds a base and
+      # a pull request changing no code; five rounds of the gate's count
+      # over them a part, four parts: twenty.
+      - name: The base against itself, five rounds
         run: |
-          CARGO_PROFILE_RELEASE_STRIP=false cargo build --locked --release -p fennec-http --example gate \
-            --target x86_64-unknown-linux-musl
-          mkdir -p "$RUNNER_TEMP/facet/profiles"
-          cp target/x86_64-unknown-linux-musl/release/examples/gate "$RUNNER_TEMP/facet/gate"
-
-      - name: Each variant counted ten times, core-facet's every profile kept
-        run: |
-          cat > "$RUNNER_TEMP/facet/spread.py" <<'EOF'
-          import concurrent.futures, os, shutil, statistics, sys, tempfile
-          sys.path.insert(0, "tools")
-          import perf_gate
-          gate, keep = sys.argv[1], sys.argv[2]
-          looks = [("core-facet", 512, 10), ("look-facet-top1", 512, 10), ("look-facet-all", 512, 10),
-                   ("look-facet-one", 512, 10), ("look-facet-one-top1", 512, 10),
-                   ("look-facet-scan", 64, 10), ("look-facet-4096", 4096, 5)]
-          scratch = tempfile.mkdtemp()
-          tasks = [(name, ops, r) for name, ops, runs in looks for r in range(runs)]
-          out = {}
-          with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count()) as pool:
-              futs = {pool.submit(perf_gate.one_run, gate, name, ops, scratch): (name, ops, r) for name, ops, r in tasks}
-              for fut in concurrent.futures.as_completed(futs):
-                  name, ops, r = futs[fut]
-                  n, path = fut.result()
-                  out.setdefault(name, []).append((n, ops))
-                  if name == "core-facet":
-                      shutil.move(path, os.path.join(keep, f"core-facet.{r}.callgrind"))
-                  else:
-                      os.unlink(path)
-          for name, _, _ in looks:
-              runs = sorted(n / ops for n, ops in out[name])
-              med = statistics.median_low(runs)
-              print(f"FACET-SPREAD {name}: median {med:.1f} an op, min {runs[0]:.1f}, max {runs[-1]:.1f}, "
-                    f"range {(runs[-1] - runs[0]) / med * 100:.3f}%, runs {[round(x, 1) for x in runs]}")
-          EOF
-          python3 "$RUNNER_TEMP/facet/spread.py" "$RUNNER_TEMP/facet/gate" "$RUNNER_TEMP/facet/profiles"
-
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
-        with:
-          name: perf-diag-facet
-          path: ${{ runner.temp }}/facet/
-          retention-days: 14
+          W="$RUNNER_TEMP/perf"
+          python3 tools/perf_gate.py run --base HEAD^1 --head HEAD^1 --target x86_64-unknown-linux-musl \
+            --work "$W" --out "$W/r0.json" --no-check
+          bin=x86_64-unknown-linux-musl/release/examples/gate
+          cmp "$W/base-target/$bin" "$W/head-target/$bin" && echo "CALIBRATION-IDENTICAL yes" || echo "CALIBRATION-IDENTICAL no"
+          for i in 1 2 3 4 5; do
+            python3 tools/perf_gate.py measure --base-bin "$W/base-target/$bin" --head-bin "$W/head-target/$bin" \
+              --out "$W/r$i.json"
+            python3 tools/perf_gate.py check "$W/r$i.json" --summary "$GITHUB_STEP_SUMMARY" \
+              && echo "CALIBRATION-VERDICT pass" || echo "CALIBRATION-VERDICT fail"
+            echo "CALIBRATION-RESULTS $(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))))' "$W/r$i.json")"
+          done
