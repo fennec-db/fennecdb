@@ -2069,9 +2069,13 @@ buffer, reads no clock and sets no timeout: no more than before. A larger
 request, or one of several reads, pays a clock read a read and about two
 `setsockopt`s. A bound past what `Instant` can name -- a timeout of
 centuries, which `+` panics at -- is none (`checked_add`), the idle
-timeout's alone. Release builds on macOS arm64: `fennec-server` grew one
-16 KB page (6 908 256 -> 6 924 784 bytes), `fennec-shard` nothing
-(6 013 824 both).
+timeout's alone. Release builds on macOS arm64, stripped, against main
+at its pinned toolchain: `fennec-server` 6 908 256 -> 6 924 800 bytes
+(+16 544, one 16 KB page), `fennec-shard` 6 013 824 -> 6 046 960
+(+33 136, two). The code under them is 4.2 KB more without TLS and 9.8 KB
+with it, `read_by` and the first record's clock among it (`__text` of
+`served.rs`'s and `routed.rs`'s builds); the rest is pages, which a
+segment grows by whole.
 
 *Over TLS.* rustls's `Stream::read` reads the socket again inside one call
 until a record is whole, so a timeout set for a read bounds each of those
