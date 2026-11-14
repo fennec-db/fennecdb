@@ -267,7 +267,59 @@ of `Scram` so the RFC's can be given (`scram_rfc7677_exchange`). Each
 vector is read from its RFC's text or computed by another implementation,
 never written from memory, and every one passed as first run: no primitive
 was wrong. RFC 4231's case 6 had
-stood in the old test as "case 3". Wycheproof's ChaCha20-Poly1305, RSA
-PKCS#1 v1.5 SHA-256 (2048, 3072 and 4096 bits, its e = 3 forgeries among
-them), HMAC-SHA-256 and PBKDF2-HMAC-SHA-256 files are to follow, vendored
-with a NOTICE as `tests/es256/` has its own.
+stood in the old test as "case 3".
+
+Every primitive Project Wycheproof has a file for is held to every case of
+it too. Six files of C2SP/wycheproof's `testvectors_v1/`, at one commit,
+are committed unchanged in `fennec-http/tests/wycheproof/` with their
+licence -- its README names the commit, each file's SHA-256 and how one is
+updated: on purpose, in a change of its own, never in passing -- and run by
+`tests/wycheproof.rs`; ES256's is `tests/es256/`'s. ChaCha20-Poly1305's 325
+(`aead_wycheproof`): a valid case sealed gives its ciphertext and tag and
+opened gives its message back, Poly1305's edge cases of a one-time key's
+limbs, carrying sums and the final addition among them; the 60 tags with
+bits changed are refused, the bytes left as they came, and the 9 nonces
+not of 12 bytes by the type the primitives take, `&[u8; 12]`.
+RSASSA-PKCS1-v1_5 with SHA-256's 776, at 2048, 3072 and 4096 bits
+(`rsa_pkcs1_sha256_wycheproof_2048` and on), each key read from its JWK as
+`--jwt-keys` reads one: the 24 valid verify, those of three e = 3 keys
+among them, and the 749 invalid are refused -- forged paddings, BER
+encodings, lengths up to 2^64 - 1, other hashes, PSS, and signatures of 0,
+1, 2, n - 1, n, n + 1 and no bytes. `RsaKey` makes the message's encoding
+and compares it whole, as RFC 8017 verifies (8.2.2), so none of a padding
+a lenient parser would read -- where an e = 3 key lets anyone forge
+(Bleichenbacher, 2006) -- is read at all. HMAC-SHA-256's 174
+(`hmac_sha256_wycheproof`): keys of 16, 32 and 65 bytes, tags of 256 bits
+and of 128 as the router's and the entry's marks are cut, each compared by
+`ct_eq`. PBKDF2-HMAC-SHA-256's 60 (`pbkdf2_sha256_wycheproof`), passwords
+of 0 to 257 bytes, UTF-8 or not: a case asking 16 or 32 bytes is held to
+them all, one asking 42, 64 or 65 to its first 32 -- block 1, all
+`pbkdf2_sha256` makes, the bytes past it made from an INT(2) or INT(3)
+nothing in fennecdb asks for. An `acceptable` case is held to an answer
+chosen for its kind, never let go either way, and a kind the files did not
+hold fails its test until one is chosen. They hold one, `MissingNull`, an
+RSA DigestInfo without the NULL parameters of its algorithm: refused, as
+RFC 8017's EMSA-PKCS1-v1_5 writes the NULL for SHA-256 (9.2's note 1, and
+appendix B.1's exception to SHA-2's parameters being left out) and its
+verification compares encodings; Wycheproof calls such signatures invalid,
+taken by some libraries for old signers' sake, and an RS256 token is an
+identity provider's of today. Each test names every case answered
+otherwise at once, never only the first, and holds its count of cases to
+the file's `numberOfTests` and each result's to what the file held.
+
+Every case agreed as first run: no primitive was wrong. Mutations show what
+the files hold: an RSA encoding judged by its first two bytes and its hash
+alone, as a parser finding the hash would judge it, is taken in 182 or 183
+cases of each file, each named; a tag compared on 15 of its 16 bytes in
+12; Poly1305's carry into h1 at a block's end dropped fails 255 of the 256
+valid. One step neither RFC 8439's appendix nor Wycheproof's file reaches
+is Poly1305's last carry, h0's into h1 once h4's overflow is folded back in
+as 5: dropped, every vector of both still passed. It is reached where the
+sum before s is added is j * 2^26 + i, i from 0 to 4, held as that plus p,
+so a key and a last block solved for each other give it at once; four
+such, their tags a big-integer Poly1305's and OpenSSL's alike, hold it
+(`poly1305_last_carry`). The six files are 1.16 MB, included in the test
+binary; their tests take 2.5 s of a core in `cargo test`'s build on an
+Apple M1, 1.6 s of the clock beside each other: PBKDF2's 58 cases of 4 096
+rounds and one of 80 000 are 1.6 s, the RSA files 0.8, the AEAD's and
+HMAC's 0.01.

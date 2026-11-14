@@ -538,8 +538,11 @@ Covers `crates/fennec-bench/`.
   `tools/secret_eq_check.py` (CI's fmt job) refuses one on an operand so
   named in `crates/*/src` outside tests, each operand read whole, a name
   that is no secret allowed with why and how many times. A primitive we
-  write is held to its RFC's vectors, every one, and where a key meets its
-  block to another implementation's, each test's count of cases held.
+  write is held to its RFC's vectors, every one, to every case of Project
+  Wycheproof's file for it where there is one (committed unchanged, an
+  `acceptable` case to the answer chosen for its kind), and where a key
+  meets its block to another implementation's, each test's count of cases
+  held.
 - [A change a user meets](docs/design/conventions.md#docs-a-change-owes)
   says so in the same pull request: its page under `site/content/docs/`,
   README's feature table and the links beside it, the home page and docs
