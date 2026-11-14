@@ -5,7 +5,7 @@
 // server's supervision and the quit handler with it -- until someone clicks.
 // Pure, so `node --test` can hold the wording to its cases (test/messages.test.ts).
 
-import type { Notice } from "../shared/rpc.ts";
+import type { Notice, StartFailure } from "../shared/rpc.ts";
 import type { Probe } from "./remote.ts";
 
 const tail = (text: string, lines = 8) => text.trim().split("\n").slice(-lines).join("\n");
@@ -141,15 +141,64 @@ export function remoteNotice(name: string, origin: string, probe: Exclude<Probe,
 	}
 }
 
-/** A served database's port is another program's. */
-export function portTakenNotice(name: string, port: number, serverSaid: string): Notice {
+/**
+ * A served database's port is another program's. `serverSaid` is null where no
+ * server was started (something answered on the port first): the notice then
+ * has no "What the server said", which would be the app's words under the
+ * server's name.
+ */
+export function portTakenNotice(name: string, port: number, serverSaid: string | null): Notice {
 	return {
 		title: `Port ${port} is taken`,
 		message: `Another program listens on port ${port}, so ${name} was not served.`,
 		hint: "Pick another port, or leave it empty for any free port.",
-		detail: tail(serverSaid, 4),
+		...(serverSaid ? { detail: tail(serverSaid, 4) } : {}),
 		actions: [{ id: "settings", label: "Change the port" }],
 	};
+}
+
+/** How a served database's server failed to start, as app.ts read it off the error. */
+export type StartWhy =
+	| { kind: "port"; port: number; said: string | null }
+	| { kind: "held"; said: string }
+	| { kind: "failed"; exit: number | null; said: string | null; message: string };
+
+/**
+ * What a served database's row in Servers keeps saying after a start failed
+ * (rpc.ts `StartFailure`): the notice's reason, shorter, with what to do; and
+ * the last lines the server wrote, its error the last of them. Only what the
+ * app knows: a port found taken before a server was started is said as
+ * something answering there, never as the server's words.
+ */
+export function startFailure(name: string, why: StartWhy): StartFailure {
+	const said = why.said ? tail(why.said) : null;
+	switch (why.kind) {
+		case "port":
+			return {
+				reason: `${
+					why.said ? `Port ${why.port} is in use by another program, so its server could not listen there.` : `Port ${why.port} is in use: something else answers on it, so no server was started.`
+				} Pick another port and give your apps the new address, or free ${why.port}.`,
+				said,
+				port: why.port,
+			};
+		case "held":
+			return { reason: `${name} is open in another program, which holds its lock. Close it there, then start it again.`, said, port: null };
+		case "failed":
+			// Exit 2 is a flag refused (outOfStepNotice); a server that wrote nothing
+			// and was not killed failed for a reason the app found itself, its message.
+			return {
+				reason:
+					why.exit === 2
+						? "The fennec-server inside this app refused how the app starts it: the two were built apart."
+						: why.exit !== null
+							? `fennec-server could not open ${name} (exit ${why.exit}).`
+							: why.said
+								? "fennec-server did not say where it listens in time, so it was stopped."
+								: why.message.replace(/\.?$/, "."),
+				said,
+				port: null,
+			};
+	}
 }
 
 /** A served database's server exited without being asked to. */
@@ -176,5 +225,6 @@ export function gone(what: string): Notice {
 }
 
 export function internalError(what: string, e: unknown): Notice {
-	return { title: "Something went wrong", message: what, detail: String((e as Error)?.message ?? e) };
+	// The app's own error, not a server's: its fold says so.
+	return { title: "Something went wrong", message: what, detail: String((e as Error)?.message ?? e), detailTitle: "The error, for a report" };
 }

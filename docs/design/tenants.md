@@ -964,6 +964,21 @@ drives a node from before: a create answering no identity, and a reclaim
 of its file, noted by hand in this tree's router's directory, answered 404
 and kept.
 
+The copy a failed attach made goes in the pass of the try that gives the
+tenant its replica elsewhere: once that replica is recorded, the try's
+look at the files left has the copy's node take it back, the tenant's
+claim held across the call, and a repair meeting the claim leaves the file
+to the next look. `a_copy_left_where_the_replica_went_elsewhere_is_taken_back`
+asked a repair of its own as soon as the replica read, and met it: `left`
+named the copy `not taken back: another operation holds the tenant` in 6
+runs of 200, two at a time beside six busy loops in `docker run
+--cpus=3`, and in every run that held the try's reclaim at its proxy. It
+waits for the take-back now (`fennec_router_files_left` at 0), the event
+that must come, and asks after it: none of 200 the same way. The router is
+as it was: the claim held was the try's own, taking that very file back,
+and a repair that waited on a held claim would wait out a move of any
+size.
+
 Nothing of it is on a request's path: the tries run on the repair's
 thread, and a create, a move and a delete write a row only where a call
 failed.
