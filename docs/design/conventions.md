@@ -32,6 +32,53 @@ own output, Gradle's `testLogging`, `dart test`'s GitHub reporter, `node
 `test-reports-android` or `test-results-apple` (the simulator's
 `.xcresult`).
 
+`make stress-test` is that reproduction as a target (`tools/stress-test.sh`):
+the Rust suites (`cargo test --workspace --exclude fennec-bench`, or one crate
+with `CRATE=`) and the JS tests (`node --test web/*.test.js`, on the node 22 CI
+runs, from nodejs.org's tarball checked against its pinned SHASUMS256, not
+Debian's 18) `ITER=` times (20), inside
+`docker run --cpus=3` beside three busy loops, in the rust image of
+`rust-toolchain.toml`'s release by digest (`IMAGE=`). Everything runs in the
+container, load included: many loopback clients on the host once exhausted
+its ports and cut every agent off the API. The script starts every busy loop
+and kills it by PID on every way out (exit, Ctrl-C, a failure), and kills
+its container by name if interrupted. The cargo home, the target directory
+and a copy of the sources (made by content, as `tools/image-cargo.sh` does,
+so an older checkout is not taken for built) live in a Docker volume
+named for the architecture and the image's digest
+(`fennec-stress-<arch>-<digest>`) and locked while a run uses it, so the
+iterations rebuild nothing and two runs do not race; `docker volume rm` of it
+clears it. An iteration runs every test binary (`--no-fail-fast`); the run
+stops after the first iteration that fails, keeps that
+iteration's log (the directory is printed) and names the iteration and the
+failing tests; a passing iteration's log is dropped. `TIMEOUT=` (seconds,
+14400) bounds the build and the whole run. It is a measurement run by hand or on a quiet
+night, not a CI job; a test it fails is fixed in the test or the code,
+never retried.
+
+`tools/ci_flakes.py -n 50` is the ledger: the failed jobs of the last 50
+completed `ci.yml` runs on main and in the merge queue, each with its failing
+step and whether a later commit fixed it (a pull request that passed again
+with changed files, a later push touching a source file the failing job's area
+owns or a pull request's branch updated; every conclusion but success, skipped
+and cancelled counts, a timeout too). A failure that
+passed again with the same files is a flake and counts, whatever its cause.
+The 1.0 plan's budget is none without a fixing commit.
+
+Which `ci.yml` jobs are required checks is a repository setting (classic
+branch protection on main, not the merge queue's ruleset). All of them are,
+but `size (browser module)`, which only runs on a pull request and so would
+never report in the merge queue. A job given a path filter or an `if:` that
+skips it on some events cannot be required for the same reason: a skipped
+required check blocks a merge it should not. A new job that is neither
+needs adding to the list.
+
+The mobile jobs upload build products nothing downloads
+(`fennecdb-android`, `fennecdb-xcframework`) with `continue-on-error`: an
+upload that fails on GitHub's side does not fail a job whose tests passed
+(#590 and #591 lost merge-queue runs to one). The test-report uploads run
+only when a step failed, and no step retries a test.
+
 ## Chrome
 
 A step that launches Chrome reads Chrome's own files first, or a cold

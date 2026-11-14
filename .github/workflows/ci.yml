@@ -1260,7 +1260,12 @@ jobs:
         timeout-minutes: 20
         run: examples/flutter/run-tests.sh apk
 
+      # Nothing in a workflow downloads this (packages.yml rebuilds the AAR
+      # from a release): it is for a person to fetch. An upload that fails
+      # on GitHub's side (#590/#591 lost a merge-queue run to one) must not
+      # fail a job whose tests all passed. A test is never retried.
       - uses: actions/upload-artifact@v7
+        continue-on-error: true
         with:
           name: fennecdb-android
           path: dist-mobile/*.aar
@@ -1371,7 +1376,10 @@ jobs:
           rm -rf test
           flutter build ios --simulator --debug --no-codesign
 
+      # Nothing downloads this either (see the Android upload): a failed
+      # upload on GitHub's side does not fail a job whose tests passed.
       - uses: actions/upload-artifact@v7
+        continue-on-error: true
         with:
           name: fennecdb-xcframework
           path: |
