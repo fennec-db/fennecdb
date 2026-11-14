@@ -18,7 +18,7 @@ use crate::proto::{put_cstr, read_message, Message, Writer, PROTOCOL_V3};
 use fennec_core::error::{Error, Result};
 use std::io::{self as stdio, BufReader, ErrorKind, Read, Write};
 use std::net::TcpStream;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The timeout used while connecting and while waiting for a message.
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -1054,6 +1054,58 @@ impl WalStream {
             b.push(0);
         });
         w.flush_to(self.client.stream.get_mut()).map_err(io)
+    }
+
+    /// Ends the stream as the protocol ends one: `CopyDone`, then the
+    /// server's messages read up to its `ReadyForQuery`, `wait` at most in
+    /// all. The walsender lets the slot go before it answers
+    /// (`ReplicationSlotRelease`, then `CommandComplete`), so once this
+    /// returns `Ok` the slot is free: to drop, or to stream again.
+    ///
+    /// Closing the connection instead left the slot held until the
+    /// walsender next read its socket, which it does not while it decodes
+    /// a transaction -- any table's, published or not -- so a slot dropped,
+    /// or streamed again, just after its follower stopped was refused,
+    /// `55006`, "active for PID". What the server still sends of the stream
+    /// is dropped unread: nothing of it was applied, so nothing of it is
+    /// confirmed, and it comes again from the slot.
+    pub fn end(mut self, wait: Duration) -> Result<()> {
+        let mut w = Writer::new();
+        w.msg(b'c', |_| {});
+        w.flush_to(self.client.stream.get_mut()).map_err(io)?;
+        let deadline = Instant::now() + wait;
+        let late = || {
+            io(format!(
+                "the server did not end the replication stream within {wait:?}"
+            ))
+        };
+        let mut failed = None;
+        loop {
+            // Looked at before every message, not only an idle socket's: a
+            // server still sending a large transaction keeps it busy.
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(late());
+            }
+            if self.client.stream.buffer().is_empty() {
+                match self.client.stream.get_mut().readable(left) {
+                    Ok(true) => {}
+                    Ok(false) => return Err(late()),
+                    Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
+                        return Err(io("the server closed the replication stream"))
+                    }
+                    Err(e) => return Err(io(e)),
+                }
+            }
+            let m = self.client.read()?;
+            match m.tag {
+                b'E' => failed = Some(server_error(&m)),
+                b'Z' => return failed.map_or(Ok(()), Err),
+                // CopyData still on its way, the server's CopyDone, its
+                // CommandComplete, a notice.
+                _ => {}
+            }
+        }
     }
 }
 

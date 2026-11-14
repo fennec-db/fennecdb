@@ -58,6 +58,15 @@ const IDLE_WAIT: Duration = Duration::from_millis(200);
 const FIRST_BACKOFF: Duration = Duration::from_millis(500);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
+/// How long a follower that stops waits for the server to end its stream
+/// and let the slot go (`WalStream::end`). A walsender answers at once
+/// unless it is decoding a transaction, any table's, which it finishes
+/// before it reads the socket again: a million rows of a table the slot
+/// does not publish held a stop 0.5 to 2 s on a loaded machine. Past the
+/// wait the connection is closed, and the server lets the slot go once it
+/// reads that.
+const END_WAIT: Duration = Duration::from_secs(10);
+
 /// The slot and publication a collection follows through.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Follow {
@@ -613,14 +622,34 @@ fn stream(
         .map_err(Failure::Stream)?;
     *backoff = FIRST_BACKOFF;
     report(Event::Streaming);
+    let ended = apply(source, db, opts, &mut wal, stop, report);
+    // Stopped, or stopped by what it read: the stream is ended as the
+    // protocol ends one, so the follower returns with its slot let go
+    // (`WalStream::end`). One that broke is its connection's to drop, and a
+    // server that does not answer in time lets the slot go once it reads
+    // the connection closed, as it did before.
+    if !matches!(ended, Err(Failure::Stream(_))) {
+        let _ = wal.end(END_WAIT);
+    }
+    ended
+}
 
+/// Applies an open stream until it breaks or `stop` is set.
+fn apply(
+    source: &Source,
+    db: &RwLock<Database>,
+    opts: &Options,
+    wal: &mut WalStream,
+    stop: &AtomicBool,
+    report: &mut dyn FnMut(Event),
+) -> std::result::Result<(), Failure> {
     let mut mirror = Mirror::new(source, opts);
     let mut p = Progress::default();
     let mut in_transaction = false;
     loop {
         if stop.load(Ordering::SeqCst) && !in_transaction {
             if p.unsynced.is_some() {
-                settle(db, &mut wal, &mut p, report)?;
+                settle(db, wal, &mut p, report)?;
             }
             return Ok(());
         }
@@ -634,7 +663,7 @@ fn stream(
         match wal.next(wait).map_err(Failure::Stream)? {
             None => {
                 if p.unsynced.is_some() && !in_transaction {
-                    settle(db, &mut wal, &mut p, report)?;
+                    settle(db, wal, &mut p, report)?;
                 }
             }
             Some(Wal::Keepalive { end, reply }) => {
@@ -666,7 +695,7 @@ fn stream(
         // Under a steady stream the socket is never idle: bound how long
         // applied changes wait for their fsync.
         if p.unsynced.is_some_and(|t| t.elapsed() >= SYNC_EVERY) && !in_transaction {
-            settle(db, &mut wal, &mut p, report)?;
+            settle(db, wal, &mut p, report)?;
         }
     }
 }

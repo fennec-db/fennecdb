@@ -207,6 +207,13 @@ fn converge(db: &RwLock<Database>, name: &str) {
     }
 }
 
+/// Drops the slot just after its follower stopped, which is what a user is
+/// told to do to stop following for good: stopping ends the stream and
+/// returns once the server has let the slot go
+/// (`a_stopped_follower_lets_its_slot_go`), so the drop is never refused
+/// as "active for PID". When the follower only closed its connection, the
+/// slot stayed taken until the walsender read the close, which under load
+/// came after this drop.
 fn drop_slot(name: &str) {
     sql(&format!(
         "select pg_drop_replication_slot('{name}') from pg_replication_slots where slot_name = '{name}'"
@@ -265,9 +272,13 @@ fn a_broken_stream_loses_nothing() {
                 1 + (round * 20 + i) % 100
             ));
         }
-        // The server ends the follower's connection.
-        sql("select pg_terminate_backend(pid) from pg_stat_replication \
-             where application_name = 'fennec-follow'");
+        // The server ends the follower's connection: this follower's alone,
+        // by its slot's holder. By `application_name` it ended every
+        // test's follower running beside it, at any step of theirs.
+        sql(&format!(
+            "select pg_terminate_backend(active_pid) from pg_replication_slots \
+             where slot_name = '{t}' and active"
+        ));
         sql(&format!(
             "insert into {t} values ({}, 'during', 0, null, null)",
             500 + round
@@ -300,6 +311,46 @@ fn a_stopped_follower_resumes_without_a_copy() {
     converge(&db, t);
     let second = f.stop();
     assert!(!second.iter().any(|e| e.contains("Copying")), "{second:?}");
+    drop_slot(t);
+}
+
+/// Whether the server still has the slot taken by a connection.
+fn slot_active(name: &str) -> bool {
+    let mut c = Client::connect(&url()).unwrap();
+    let r = c
+        .query(&format!(
+            "select active from pg_replication_slots where slot_name = '{name}'"
+        ))
+        .unwrap();
+    r.rows.first().and_then(|row| row[0].as_deref()) == Some("t")
+}
+
+/// A follower that stops has let its slot go when it returns, even while
+/// the server is busy decoding a transaction -- here a million rows of a
+/// table it does not follow, which the slot decodes all the same. Closing
+/// the connection left the slot taken until the walsender next read its
+/// socket, after that transaction: a slot dropped then was refused as
+/// "active for PID", and a follower started again met its own slot taken.
+#[test]
+#[ignore]
+fn a_stopped_follower_lets_its_slot_go() {
+    let t = "fennec_follow_release";
+    let bulk = format!("{t}_bulk");
+    table(t, 10);
+    sql(&format!("drop table if exists {bulk}"));
+    sql(&format!("create table {bulk} (id bigint, s text)"));
+    let db = Arc::new(RwLock::new(Database::new()));
+    let f = Follower::start(t, Arc::clone(&db));
+    converge(&db, t);
+    sql(&format!(
+        "insert into {bulk} select g, 'x' from generate_series(1, 1000000) g"
+    ));
+    f.stop();
+    assert!(
+        !slot_active(t),
+        "the stopped follower's slot is still taken"
+    );
+    sql(&format!("drop table {bulk}"));
     drop_slot(t);
 }
 

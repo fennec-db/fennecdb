@@ -7,13 +7,16 @@
 //! `src/client.rs`'s `scram_rfc7677_exchange`), a server asking SCRAM for
 //! more rounds than the client runs, a cleartext password, and the
 //! answers the client reads: rows, an error, a COPY stream whose `CopyData`
-//! frames do not align with its lines. A live PostgreSQL is
-//! `make import-test`'s.
+//! frames do not align with its lines, a replication stream's end. A live
+//! PostgreSQL is `make import-test`'s.
 
 use fennec_http::crypto::*;
-use fennec_wire::client::{Client, SslMode, Url, SCRAM_MAX_ITERATIONS};
+use fennec_wire::client::{Client, SslMode, Url, Wal, WalStream, SCRAM_MAX_ITERATIONS};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant};
 
 // ------------------------------------------------------------- framing
 
@@ -497,4 +500,133 @@ fn trailing_row_without_newline_is_kept() {
 fn empty_copy_stream_yields_nothing() {
     let port = copy_server(vec![]);
     assert!(lines(port).is_empty());
+}
+
+// ----------------------------------------------------------- replication
+
+/// What the stand-in walsender does once the client sent its `CopyDone`.
+#[derive(Clone, Copy, PartialEq)]
+enum Then {
+    /// Lets the slot go -- `released`, set before anything goes out, as
+    /// the walsender's `ReplicationSlotRelease` comes before its
+    /// `CommandComplete` -- and answers as PostgreSQL does: a change it
+    /// still had on its way, its own `CopyDone`, `CommandComplete`,
+    /// `ReadyForQuery`.
+    Answers,
+    /// Answers nothing, as a walsender decoding a transaction does not.
+    Decodes,
+    /// Goes on sending changes, as one sending a large transaction does.
+    Sends,
+}
+
+/// A stand-in walsender: it starts a stream and sends a keepalive, reads up
+/// to the client's `CopyDone`, then does as `then` says. It tells whether
+/// the client then ended the connection: `Terminate`, or, as it goes on
+/// sending, a write refused.
+fn walsender(then: Then) -> (u16, Arc<AtomicBool>, mpsc::Receiver<bool>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let released = Arc::new(AtomicBool::new(false));
+    let (told, terminated) = mpsc::channel();
+    let slot = Arc::clone(&released);
+    std::thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        let mut len = [0u8; 4];
+        s.read_exact(&mut len).unwrap();
+        let mut startup = vec![0u8; i32::from_be_bytes(len) as usize - 4];
+        s.read_exact(&mut startup).unwrap();
+        let mut out = framed(b'R', &0i32.to_be_bytes());
+        out.extend_from_slice(&framed(b'Z', b"I"));
+        s.write_all(&out).unwrap();
+
+        let Some((b'Q', q)) = read_msg(&mut s) else {
+            panic!("no START_REPLICATION");
+        };
+        assert!(String::from_utf8_lossy(&q).starts_with("START_REPLICATION SLOT"));
+        let mut out = framed(b'W', &[0, 0, 0]);
+        let mut k = vec![b'k'];
+        k.extend_from_slice(&7u64.to_be_bytes());
+        k.extend_from_slice(&0i64.to_be_bytes());
+        k.push(0);
+        out.extend_from_slice(&framed(b'd', &k));
+        s.write_all(&out).unwrap();
+
+        // Feedback, if any, then the CopyDone.
+        while let Some((tag, _)) = read_msg(&mut s) {
+            if tag == b'c' {
+                break;
+            }
+        }
+        let mut w = vec![b'w'];
+        w.extend_from_slice(&[0u8; 24]);
+        w.extend_from_slice(b"B");
+        let change = framed(b'd', &w);
+        match then {
+            Then::Answers => {
+                slot.store(true, Ordering::SeqCst);
+                let mut out = change;
+                out.extend_from_slice(&framed(b'c', b""));
+                out.extend_from_slice(&framed(b'C', b"COPY 0\0"));
+                out.extend_from_slice(&framed(b'Z', b"I"));
+                s.write_all(&out).unwrap();
+            }
+            Then::Decodes => {}
+            Then::Sends => {
+                while s.write_all(&change).is_ok() {}
+                return told.send(true).unwrap();
+            }
+        }
+        let ended = read_msg(&mut s);
+        told.send(ended.is_some_and(|(tag, _)| tag == b'X'))
+            .unwrap();
+    });
+    (port, released, terminated)
+}
+
+/// A stream started against [`walsender`], its keepalive read.
+fn streaming(then: Then) -> (WalStream, Arc<AtomicBool>, mpsc::Receiver<bool>) {
+    let (port, released, terminated) = walsender(then);
+    let c = Client::connect_replication(&url(port, None)).unwrap();
+    let mut wal = c.start_replication("fennec_docs", "fennec_docs").unwrap();
+    let first = wal.next(Duration::from_secs(30)).unwrap();
+    assert_eq!(
+        first,
+        Some(Wal::Keepalive {
+            end: 7,
+            reply: false
+        })
+    );
+    (wal, released, terminated)
+}
+
+/// Ending a stream waits for the server's answer, which it sends only
+/// once the slot is free: a follower that stops returns with its slot let
+/// go, never with the server still holding it for a connection it has not
+/// read the end of. What the server still sent of the stream is dropped.
+#[test]
+fn ending_a_stream_waits_for_the_server_to_let_the_slot_go() {
+    let (wal, released, terminated) = streaming(Then::Answers);
+    wal.end(Duration::from_secs(30)).unwrap();
+    assert!(
+        released.load(Ordering::SeqCst),
+        "the stream ended before the server let the slot go"
+    );
+    assert!(terminated.recv().unwrap(), "no Terminate after the end");
+}
+
+/// A server that does not answer -- a walsender decoding a transaction
+/// reads nothing until it is through -- or one that goes on sending is
+/// waited for no longer than asked, and the connection is closed as
+/// before.
+#[test]
+fn ending_a_stream_is_bounded() {
+    for then in [Then::Decodes, Then::Sends] {
+        let (wal, _, terminated) = streaming(then);
+        let wait = Duration::from_millis(200);
+        let began = Instant::now();
+        let e = wal.end(wait).unwrap_err().to_string();
+        assert!(began.elapsed() >= wait, "{:?}", began.elapsed());
+        assert!(e.contains("did not end the replication stream"), "{e}");
+        assert!(terminated.recv().unwrap(), "the connection was not ended");
+    }
 }

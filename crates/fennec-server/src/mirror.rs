@@ -34,8 +34,9 @@ thread_local! {
 }
 
 /// How long the shutdown waits for the follower to put its last changes on
-/// disk and confirm them: past it, a copy still being made is left for the
-/// next start to make again, as a copy cut short always is.
+/// disk and confirm them, then end its stream, the slot let go for the
+/// next start: past it, a copy still being made is left for the next start
+/// to make again, as a copy cut short always is.
 const STOP_WAIT: Duration = Duration::from_secs(5);
 
 /// What `--follow` was given.

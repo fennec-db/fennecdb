@@ -39,10 +39,29 @@ fn table(c: &mut Client, t: &str, rows: u64) {
     }
 }
 
+/// The slot, publication and table gone, once the server that followed
+/// them stopped by a signal or ended on its own: either way its follower
+/// ended its stream and let the slot go, so the drop is never refused as
+/// "active for PID". A server killed outright cannot; its walsender holds
+/// the slot until it reads the connection closed.
 fn forget(c: &mut Client, t: &str) {
-    let _ = c.query(&format!("select pg_drop_replication_slot('fennec_{t}')"));
-    let _ = c.query(&format!("drop publication if exists fennec_{t}"));
-    let _ = c.query(&format!("drop table if exists {t}"));
+    for q in [
+        format!("select pg_drop_replication_slot('fennec_{t}') from pg_replication_slots where slot_name = 'fennec_{t}'"),
+        format!("drop publication if exists fennec_{t}"),
+        format!("drop table if exists {t}"),
+    ] {
+        c.query(&q).unwrap_or_else(|e| panic!("{q}: {e}"));
+    }
+}
+
+/// Whether the server still has the slot taken by a connection.
+fn slot_active(c: &mut Client, t: &str) -> bool {
+    let r = c
+        .query(&format!(
+            "select active from pg_replication_slots where slot_name = 'fennec_{t}'"
+        ))
+        .unwrap();
+    r.rows.first().and_then(|row| row[0].as_deref()) == Some("t")
 }
 
 fn rows(s: &Server, t: &str) -> u64 {
@@ -142,7 +161,7 @@ fn a_followed_table_is_served_and_takes_no_other_write() {
     s.http().run("put notes {n: 1}");
     assert_eq!(rows(&s, t), 51);
 
-    drop(s);
+    let _ = s.terminate();
     forget(&mut c, t);
 }
 
@@ -229,11 +248,17 @@ fn a_server_stopped_or_killed_goes_on_without_losing_a_row() {
     table(&mut c, t, 20);
     let file = tmp("restart");
 
-    // Stopped by a signal: its last changes on disk and confirmed, and the
-    // ones committed while it was down taken in when it is back.
+    // Stopped by a signal: its last changes on disk and confirmed, its slot
+    // let go -- a server started again at once streams from it, never
+    // finding it taken -- and the changes committed while it was down taken
+    // in when it is back.
     let s = start(&file, t);
     holds(&s, t, 20);
     let _ = s.terminate();
+    assert!(
+        !slot_active(&mut c, t),
+        "the stopped server's slot is still taken"
+    );
     c.query(&format!(
         "insert into {t} select g, 'down ' || g from generate_series(21, 40) g"
     ))
@@ -265,6 +290,6 @@ fn a_server_stopped_or_killed_goes_on_without_losing_a_row() {
     let s = start(&file, t);
     holds(&s, t, written.load(Ordering::Relaxed));
 
-    drop(s);
+    let _ = s.terminate();
     forget(&mut c, t);
 }
