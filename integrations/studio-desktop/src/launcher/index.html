@@ -11,7 +11,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>fennec studio</title>
-<link rel="stylesheet" href="../ui/app.css">
+<!-- Absolute: a page is views://<page>/, <page> is the URL's host, and ../ cannot climb
+     above a host, so ../ui/app.css went to views://<page>/ui/app.css, a file that does
+     not exist. holdTo governs navigation only; CSP style-src admits views:. -->
+<link rel="stylesheet" href="views://ui/app.css">
 </head>
 <body class="main-window">
 <div class="app">
@@ -51,12 +54,30 @@
           <button type="button" id="new" class="primary">New database</button>
         </div>
       </header>
-      <div class="find">
+      <!-- No database yet: the list, its search and its details give way to what
+           a first run can do. Each action is a button (the tiles too): a link
+           here would be a navigation, which holdTo refuses. -->
+      <section class="empty-state" id="db-empty" aria-labelledby="db-empty-title" hidden>
+        <span class="empty-mark" aria-hidden="true">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><ellipse cx="12" cy="5.5" rx="7.5" ry="3"></ellipse><path d="M4.5 5.5v13c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3v-13"></path><path d="M4.5 12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3"></path></svg>
+        </span>
+        <h2 id="db-empty-title">No database yet</h2>
+        <p class="muted">A database is one <code>.fennec</code> file. Make one here, or open one you have; a <code>.fennec</code> double-clicked in <span class="file-manager">Finder</span> opens here too.</p>
+        <div class="actions center">
+          <button type="button" id="empty-new" class="primary big">New database</button>
+          <button type="button" id="empty-open" class="big">Open a .fennec file…</button>
+        </div>
+        <div class="tiles">
+          <button type="button" id="empty-connect" class="tile"><span class="strong">Connect to a server</span><span class="muted">A fennec-server elsewhere, by its address and token.</span></button>
+          <button type="button" id="empty-backup" class="tile"><span class="strong">Start from a backup</span><span class="muted">A folder of backups becomes a database again.</span></button>
+        </div>
+      </section>
+      <div class="find" id="db-find">
         <label for="find" class="vh">Find a database</label>
         <input id="find" type="search" placeholder="Find a database" spellcheck="false">
         <span id="db-count" class="muted"></span>
       </div>
-      <div class="table-box">
+      <div class="table-box" id="db-table">
         <table>
           <thead>
             <tr>
@@ -71,7 +92,6 @@
           </thead>
           <tbody id="db-rows"></tbody>
         </table>
-        <p class="empty" id="db-empty" hidden>No database yet. Make one with New database, or open a .fennec file.</p>
       </div>
 
       <div class="cards-row" id="db-detail" hidden>
@@ -133,6 +153,21 @@
                 <button type="button" id="srv-stop" class="danger">Stop</button>
                 <button type="button" id="srv-remove" class="quiet">Remove</button>
               </span>
+            </div>
+            <!-- Its last start failed. A status, not an alert: the notice window was
+                 the alert when it failed; this is what the list keeps saying after,
+                 read out when it is shown, not again at each refresh (index.ts sets
+                 its text only when it changes). Start again takes Start's place. -->
+            <div class="callout" id="srv-failed" role="status" hidden>
+              <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5M12 16.5h.01"></path></svg>
+              <div class="callout-text">
+                <span class="strong">It did not start.</span>
+                <span class="muted" id="srv-failed-reason"></span>
+              </div>
+              <div class="actions">
+                <button type="button" id="srv-failed-port" class="primary">Change the port</button>
+                <button type="button" id="srv-failed-start">Start again</button>
+              </div>
             </div>
             <dl class="figures">
               <div><dt>Statements / s</dt><dd id="srv-rate">—</dd></div>
@@ -226,7 +261,10 @@
             </thead>
             <tbody id="bk-rows"></tbody>
           </table>
-          <p class="empty" id="bk-empty" hidden>No database yet.</p>
+          <div class="empty" id="bk-empty" hidden>
+            <p>No database yet, so nothing to back up. A folder of backups, the app's, <code>fennec backup</code>'s or <code>fennec archive</code>'s, becomes a database again with New database, started from A backup.</p>
+            <button type="button" id="bk-empty-new">New database…</button>
+          </div>
         </div>
       </section>
 

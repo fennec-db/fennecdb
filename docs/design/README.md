@@ -9,7 +9,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [crates.md](crates.md) -- zero dependencies, limits that error rather than truncate, and the build profiles
 - [storage.md](storage.md) -- the mapped file, the handover of writes to it, a block's spills, compaction and the file format
 - [engine.md](engine.md) -- the single writer, a block's documents built beside the readers, long reads pinned, and a block as one record
-- [durability.md](durability.md) -- a storage error stopping writes, buffered writes written behind the lock, the sync log, the power cut that holds it on Linux, and the one shutdown
+- [durability.md](durability.md) -- a storage error stopping writes, buffered writes written behind the lock, the sync log, the power cuts that hold it on Linux -- `--sync always`, `--sync 250`'s window and a node with its standby -- and the one shutdown
 - [replication.md](replication.md) -- replication, a node's tenants archived over one stream, `/_changes`, `Fennec-After`, sealed archives and `--follow`
 - [tenants.md](tenants.md) -- scaling out by tenant, the router's directory, moves, failovers and leases, and replicas tried again
 - [regions.md](regions.md) -- regions and zones, a region's own directory, and the global entry
@@ -34,7 +34,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 
 The conventions hold no invariant of the code, and are listed apart:
 
-- [conventions.md](conventions.md) -- where tests live and which run alone, a test that fails on one run, Chrome's launch, the clock, ports, and the docs a change a user meets owes
+- [conventions.md](conventions.md) -- where tests live and which run alone, a test that fails on one run, Chrome's launch, the clock, ports, the docs a change a user meets owes, and how a secret is compared and a primitive held to its vectors
 
 A proposal holds no invariant until it is built, and is listed apart:
 
