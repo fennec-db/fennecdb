@@ -27,7 +27,11 @@ whole; a write in flight at the cut there whole or not at all; a batch, and
 a spill, all there or none of it; every acknowledged `Idempotency-Key`
 answered again as it was, `Idempotent-Replayed`, never made twice; and a new
 write taken. A cut that came with no write in flight landed between writes
-and held none of that to a write cut short: it fails as the rig's (`RIG`).
+and held none of that to a write cut short: it fails as the rig's (`RIG`),
+unless the server runs under `--sync <ms>` and an acknowledged write was
+still unsynced at the cut: that cut held it to the window (below), and a
+write is in flight there for well under a millisecond, so a kill may find
+every writer between two writes by chance.
 `--commit` makes what it found the state the next cut is held to. The token
 is read from --token-file, never printed.
 
@@ -653,10 +657,35 @@ class Check:
                 else:
                     print(f"AFTER {names[e['op']]} q={q}, tried {e['t'] - self.killed:.3f} s after the cut")
             if not flight:
-                self.rig(
-                    f"cut {self.args.cut} landed between writes: none was in flight when QEMU was killed, "
-                    "so it held nothing to a write cut short"
-                )
+                # Under `--sync <ms>` a write is in flight for well under a
+                # millisecond, so a kill may find every writer between two
+                # writes by chance (run 43594792647's first cut); the cut
+                # still held the server to the acknowledged writes no sync
+                # had covered, which `window` checks. Only a cut holding
+                # neither is vacuous.
+                unsynced = self.unsynced() if self.sync else 0
+                if unsynced:
+                    print(
+                        f"LOAD between writes, held to the window all the same: "
+                        f"{unsynced} acknowledged writes no /_changes page had covered"
+                    )
+                else:
+                    self.rig(
+                        f"cut {self.args.cut} landed between writes: none was in flight when QEMU was killed"
+                        + (", nor an acknowledged write left for a sync to cover" if self.sync else "")
+                        + ", so it held nothing to a write cut short"
+                    )
+
+    def unsynced(self):
+        """The acknowledged writes no `/_changes` page had covered when the
+        cut came: what a cut under `--sync <ms>` holds the server to without
+        any write in flight (`window` checks them against its bound)."""
+        nexts = [p["next"] for p in self.pages]
+        return sum(
+            1
+            for q, e in self.acked.items()
+            if e.get("seq") is not None and self.sent[q]["op"] != "k" and bisect.bisect_left(nexts, e["seq"]) == len(nexts)
+        )
 
     def in_flight(self):
         """The writes in flight at the cut: sent no later than the host's

@@ -7,7 +7,8 @@
 # the same file -- the sync log beside it applied, the path a durable write
 # takes on Linux and no other system -- and what it promised is checked
 # there, no batch half there; a cut with no write in flight fails as the
-# rig's. Two of the cuts also lose the disk's volatile cache: the disk
+# rig's (under `--sync 250` only if no acknowledged write was left for a
+# sync to cover either). Two of the cuts also lose the disk's volatile cache: the disk
 # rebuilt as of the last flush the guest asked for (QEMU's blklogwrites,
 # replay.py), checked the same way. Four guests, a matrix entry each:
 #
