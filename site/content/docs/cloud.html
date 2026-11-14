@@ -664,15 +664,17 @@ npm install -D wrangler</pre>
     href="/docs/serverless#worker">A database a Durable Object</a>, and a
     <code>fetch</code> that lets in only the callers holding its token before
     it sends a tenant's statements to that tenant's object. The class there
-    is typed, so the file is <code>worker.ts</code>.
+    is typed, so the file is <code>worker.ts</code>: that page's code, with
+    this in place of its <code>export default</code>.
     <a href="https://github.com/fennec-db/fennecdb/blob/main/integrations/cloudflare/example/worker.js"><code>integrations/cloudflare/example/worker.js</code></a>
-    is the whole Worker in JavaScript, importing from the repository where
+    is the same Worker in JavaScript, importing from the repository where
     yours imports the packages, run by its test under <code>wrangler
-    dev</code>; the check below goes at the top of its <code>fetch</code>.</p>
-<pre data-lang="ts" data-label="worker.ts">const enc = new TextEncoder();
+    dev</code>.</p>
+<pre data-lang="ts" data-label="worker.ts">// In Env, beside TENANT:   FENNEC_TOKEN: string;
+const enc = new TextEncoder();
 
 /** Whether the request carries the Worker's token, compared in constant time. */
-async function allowed(req, env) {
+async function allowed(req: Request, env: Env): Promise&lt;boolean&gt; {
   const [got, want] = await Promise.all(
     [req.headers.get('authorization') ?? '', `Bearer ${env.FENNEC_TOKEN}`]
       .map((s) =&gt; crypto.subtle.digest('SHA-256', enc.encode(s))),
@@ -685,9 +687,14 @@ export default {
     if (!env.FENNEC_TOKEN || !(await allowed(req, env))) {
       return new Response('unauthorized', { status: 401 });
     }
-    // then the example's: POST /t/&lt;tenant&gt;/query to that tenant's object
+    // POST /t/&lt;tenant&gt;/query, to that tenant's object
+    const m = new URL(req.url).pathname.match(/^\/t\/([a-z0-9_-]+)\/query$/);
+    if (!m || req.method !== 'POST') return new Response('not found', { status: 404 });
+    const tenant = env.TENANT.get(env.TENANT.idFromName(m[1]));
+    const { sql, params = [] } = await req.json&lt;{ sql: string; params?: unknown[] }&gt;();
+    return Response.json(await tenant.query(sql, params));
   },
-};</pre>
+} satisfies ExportedHandler&lt;Env&gt;;</pre>
   </li>
   <li>
     <p>The deploy, then the token: until it has one the Worker answers 401 to
@@ -977,6 +984,15 @@ export async function GET(req) {
   const q = new URL(req.url).searchParams.get('q') ?? '';
   return Response.json(db.run('get products select name, price match name $1', [q]));
 }</pre>
+
+<p>The image can also be your server's own data: a file <code>fennec
+backup</code> wrote (<a href="#backups">Backups</a>) loads as it is. A backup
+copied to the bundle or the bucket at each deploy, or each night, gives every
+instance the server's database as of that backup, read without a request to
+the server. Use the <code>@fennecdb/web</code> of the server's release or a
+later one.</p>
+
+<pre data-lang="bash">fennec backup https://db.example.com catalog.fennec --token "$REPL"</pre>
 
 <p>Lambda, Cloud Run and Vercel give a function gigabytes of memory, so an
 image of tens of megabytes loads; a cold start pays its load, tens of
