@@ -934,30 +934,84 @@ async function unseal(ck, key, gen, n, rec) {
 const isSealed = (rec) => rec != null && rec.data != null && rec.iv != null;
 const chunkRange = (key) => IDBKeyRange.bound(`${key}#`, `${key}#\uffff`);
 
-// Each caller closes its connection once its transaction is done: left
-// open till collected, they held off a delete or an upgrade of the
-// database (web/browser/).
+/**
+ * The connection every call shares, opened by the first and kept: a call
+ * opening its own and closing it took 8 to 10 ms once the page had sat
+ * idle 3 s, in Chrome and Firefox alike, and Firefox 0.6 to 2.4 ms more
+ * back to back (web/browser/). It lets go when a delete or an upgrade of
+ * the database asks -- left open, connections held both up -- or the
+ * browser closes it, and the next call opens another.
+ */
+let shared = null;
 function idb() {
-  return new Promise((res, rej) => {
-    const req = indexedDB.open(DB_NAME, 1);
-    req.onupgradeneeded = () => req.result.createObjectStore(STORE);
-    req.onsuccess = () => res(req.result);
-    req.onerror = () => rej(req.error);
-  });
+  const factory = indexedDB;
+  if (shared?.factory !== factory) {
+    const entry = { factory, db: null };
+    const drop = () => {
+      if (shared === entry) shared = null;
+    };
+    entry.opening = new Promise((res, rej) => {
+      const req = factory.open(DB_NAME, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+      req.onsuccess = () => {
+        const db = (entry.db = req.result);
+        db.onversionchange = () => {
+          db.close();
+          drop();
+        };
+        db.onclose = drop;
+        res(db);
+      };
+      req.onerror = () => {
+        drop();
+        rej(req.error);
+      };
+    });
+    shared = entry;
+  }
+  return shared.opening;
 }
 
 /**
- * `tx` done, then `value()`, or its error. Past the quota Chrome aborts at
- * the commit (`abort` alone), and Firefox fails the request before the
- * transaction holds its error (web/browser/).
+ * `ask`'s requests of the store in a transaction of `mode`, done: then what
+ * the function `ask` returned gives, or the transaction's error. Past the
+ * quota Chrome aborts at the commit (`abort` alone), and Firefox fails the
+ * request before the transaction holds its error -- and then refused the
+ * connection's next transactions and requests (InvalidStateError), no
+ * `close` said: the connection a transaction failed on is let go, and a
+ * call a closed one refuses is asked again of another (web/browser/).
  */
-function finished(tx, value) {
-  return new Promise((res, rej) => {
-    const fail = (e) => rej(e ?? new FennecError('IndexedDB aborted the transaction'));
-    tx.oncomplete = () => res(value?.());
-    tx.onerror = (e) => fail(e?.target?.error ?? tx.error);
-    tx.onabort = () => fail(tx.error);
-  });
+async function inStore(mode, ask) {
+  for (let again = false; ; again = true) {
+    const db = await idb();
+    const forget = () => {
+      if (shared?.db === db) shared = null;
+      db.close();
+    };
+    let tx = null;
+    let value;
+    try {
+      tx = db.transaction(STORE, mode);
+      value = ask(tx.objectStore(STORE));
+    } catch (e) {
+      // Nothing of it lands: some of its requests may have been made.
+      try {
+        tx?.abort();
+      } catch {}
+      forget();
+      if (again || e?.name !== 'InvalidStateError') throw e;
+      continue;
+    }
+    return new Promise((res, rej) => {
+      const fail = (e) => {
+        forget();
+        rej(e ?? new FennecError('IndexedDB aborted the transaction'));
+      };
+      tx.oncomplete = () => res(value?.());
+      tx.onerror = (e) => fail(e?.target?.error ?? tx.error);
+      tx.onabort = () => fail(tx.error);
+    });
+  }
 }
 
 /**
@@ -984,25 +1038,20 @@ export async function persist(fennec, key = 'default', opts = {}) {
     else chunk = bytes;
   }
   const gen = image && ck ? [...crypto.getRandomValues(new Uint8Array(8))].map((b) => b.toString(16).padStart(2, '0')).join('') : s.gen;
-  let db = null;
   try {
     const rec = !ck ? (image ?? chunk) : image ? await seal(ck, key, gen, 0, image) : await seal(ck, key, gen, s.next, chunk);
-    db = await idb();
-    const tx = db.transaction(STORE, 'readwrite');
-    const os = tx.objectStore(STORE);
-    if (image) {
-      os.put(rec, key);
-      os.delete(chunkRange(key));
-    } else {
-      os.put(rec, chunkKey(key, s.next));
-    }
-    await finished(tx);
+    await inStore('readwrite', (os) => {
+      if (image) {
+        os.put(rec, key);
+        os.delete(chunkRange(key));
+      } else {
+        os.put(rec, chunkKey(key, s.next));
+      }
+    });
   } catch (e) {
     // The drained writes are nowhere now; the next call stores an image.
     stored.delete(fennec);
     throw e;
-  } finally {
-    db?.close();
   }
   if (image) Object.assign(s, { gen, next: 1, image: image.length, chunks: 0 });
   else Object.assign(s, { next: s.next + 1, chunks: s.chunks + chunk.length });
@@ -1011,26 +1060,17 @@ export async function persist(fennec, key = 'default', opts = {}) {
 
 /** Free-form state (cursors): next to the image, under a separate key. */
 export async function putState(key, value) {
-  const db = await idb();
-  try {
-    const tx = db.transaction(STORE, 'readwrite');
-    tx.objectStore(STORE).put(value, key);
-    await finished(tx);
-  } finally {
-    db.close();
-  }
+  await inStore('readwrite', (os) => {
+    os.put(value, key);
+  });
 }
 
 /** Reads back what `putState` wrote; `undefined` when absent. */
 export async function getState(key) {
-  const db = await idb();
-  try {
-    const tx = db.transaction(STORE, 'readonly');
-    const req = tx.objectStore(STORE).get(key);
-    return await finished(tx, () => req.result);
-  } finally {
-    db.close();
-  }
+  return inStore('readonly', (os) => {
+    const req = os.get(key);
+    return () => req.result;
+  });
 }
 
 /**
@@ -1041,18 +1081,11 @@ export async function getState(key) {
  */
 export async function restore(fennec, key = 'default', opts = {}) {
   const ck = opts.cryptoKey ?? null;
-  const db = await idb();
-  let image;
-  let chunks;
-  try {
-    const tx = db.transaction(STORE, 'readonly');
-    const os = tx.objectStore(STORE);
+  let [image, chunks] = await inStore('readonly', (os) => {
     const img = os.get(key);
     const ch = os.getAll(chunkRange(key));
-    [image, chunks] = await finished(tx, () => [img.result, ch.result]);
-  } finally {
-    db.close();
-  }
+    return () => [img.result, ch.result];
+  });
   if (!image) return false;
   if (isSealed(image) !== !!ck) {
     throw new FennecError(ck ? `${key} is stored in the clear, not sealed with a key` : `${key} is sealed: restore needs its cryptoKey`);

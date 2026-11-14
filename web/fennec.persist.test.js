@@ -27,15 +27,17 @@ class KeyRange {
 
 /**
  * One store's records, every transaction that wrote to them, and the
- * connections left open. A transaction's writes land as it commits; with
+ * connections opened. A transaction's writes land as it commits; with
  * `refuse` set to an error's name, the next one that writes is aborted
  * there instead, its writes gone, as a real one past its quota is: by
- * `abort` alone.
+ * `abort` alone. A delete asks every open connection to let go
+ * (`versionchange`), and is `blocked` while one holds on.
  */
 function fakeIndexedDB() {
   const records = new Map();
   const log = [];
-  let connections = 0;
+  const open = new Set();
+  let opened = 0;
   const request = (fn) => {
     const req = {};
     queueMicrotask(() => {
@@ -66,38 +68,61 @@ function fakeIndexedDB() {
     records,
     log,
     refuse: null,
-    /** Connections opened and not closed. */
+    /** Connections opened, and those not closed. */
+    get opened() {
+      return opened;
+    },
     get connections() {
-      return connections;
+      return open.size;
     },
     open() {
       const req = {};
       queueMicrotask(() => {
-        connections++;
+        const db = {
+          transaction() {
+            if (!open.has(db)) throw Object.assign(new Error('the connection is closed'), { name: 'InvalidStateError' });
+            const writes = [];
+            const tx = { objectStore: () => store(writes) };
+            setTimeout(() => {
+              if (writes.length && idb.refuse) {
+                tx.error = Object.assign(new Error(`refused: ${idb.refuse}`), { name: idb.refuse });
+                idb.refuse = null;
+                return tx.onabort?.();
+              }
+              for (const w of writes) w.pop()();
+              if (writes.length) log.push(writes);
+              tx.oncomplete?.();
+            });
+            return tx;
+          },
+          close() {
+            open.delete(db);
+          },
+        };
+        opened++;
+        open.add(db);
         req.result = db;
         req.onsuccess?.();
       });
       return req;
     },
-  };
-  const db = {
-    transaction() {
-      const writes = [];
-      const tx = { objectStore: () => store(writes) };
+    deleteDatabase() {
+      const req = {};
       setTimeout(() => {
-        if (writes.length && idb.refuse) {
-          tx.error = Object.assign(new Error(`refused: ${idb.refuse}`), { name: idb.refuse });
-          idb.refuse = null;
-          return tx.onabort?.();
-        }
-        for (const w of writes) w.pop()();
-        if (writes.length) log.push(writes);
-        tx.oncomplete?.();
+        for (const db of [...open]) db.onversionchange?.({});
+        if (open.size) return req.onblocked?.();
+        records.clear();
+        req.onsuccess?.();
       });
-      return tx;
+      return req;
     },
-    close() {
-      connections--;
+    /** Every connection closed as Firefox closes one after a write past its quota: `close` told later. */
+    invalidate() {
+      const gone = [...open];
+      open.clear();
+      return () => {
+        for (const db of gone) db.onclose?.({});
+      };
     },
   };
   return idb;
@@ -165,10 +190,12 @@ test('persist stores the image once, then only what was written since', { skip: 
   assert.deepEqual(rows(fourth), rows(third));
 });
 
-// Left open, each call's connection stayed until the collector came for it,
-// and a delete of the database -- or another page's upgrade of it -- waited
-// on every one (web/browser/ found it in Chrome).
-test('persist, restore and the state calls close the connections they open', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+// Each call opened a connection of its own, left open until the collector
+// came for it, and a delete of the database -- or another page's upgrade of
+// it -- waited on every one (web/browser/ found it in Chrome). Closed after
+// each call instead, Chrome's store closed with the last, and a call after
+// the page sat idle 2 s took 6 to 8 ms reopening it.
+test('persist, restore and the state calls share one connection, which lets a delete of the database go ahead', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
   const idb = fakeIndexedDB();
   globalThis.indexedDB = idb;
   globalThis.IDBKeyRange = KeyRange;
@@ -183,7 +210,20 @@ test('persist, restore and the state calls close the connections they open', { s
   assert.equal(await restore(await Fennec.open(wasm), 'none'), false);
   await putState('c-state', { at: 1 });
   assert.deepEqual(await getState('c-state'), { at: 1 });
+  assert.equal(idb.opened, 1, 'one connection for every call');
+
+  const deleted = await new Promise((res) => {
+    const req = idb.deleteDatabase('fennecdb');
+    req.onsuccess = () => res('deleted');
+    req.onblocked = () => res('blocked');
+  });
+  assert.equal(deleted, 'deleted');
   assert.equal(idb.connections, 0);
+  // The next call opens another, and finds the store empty.
+  assert.equal(await getState('c-state'), undefined);
+  await putState('c-state', { at: 2 });
+  assert.deepEqual(await getState('c-state'), { at: 2 });
+  assert.equal(idb.opened, 2);
 });
 
 // A transaction past its quota is refused at its commit, by `abort` alone:
@@ -208,14 +248,17 @@ test('a write refused at its commit is refused to its caller, what was stored st
   const back = await Fennec.open(wasm);
   await restore(back, 'q');
   assert.deepEqual(ns(back), [1], 'what was stored stands');
-  // The refused chunk's writes are nowhere else: the next persist stores
-  // the image whole.
+  // Firefox closes the connection after such a write, and says so only
+  // later: a call in between goes to another. The refused chunk's writes
+  // are nowhere else: the next persist stores the image whole.
+  const told = idb.invalidate();
   await persist(db, 'q');
   assert.deepEqual(idb.log.at(-1).map((w) => w[0]), ['put', 'delete']);
+  told();
   const again = await Fennec.open(wasm);
   await restore(again, 'q');
   assert.deepEqual(ns(again), [1, 2]);
-  assert.equal(idb.connections, 0);
+  assert.equal(idb.connections, 1, 'those a refusal left closed, the one in use open');
 });
 
 test('drain hands over frames, or an image after a rewrite', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {

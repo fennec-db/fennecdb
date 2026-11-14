@@ -209,18 +209,31 @@ What it found, fixed with it:
   handles open till then, and `openFile` was refused as open elsewhere for
   1.98 to 2.01 s (Chrome 157). It now asks again for 3 s (`HELD_MS`) before
   it refuses, a file this worker itself holds refused at once (`holding`).
-  Firefox ends the worker at once: the file opens 50 to 85 ms after the
-  reload.
+  Firefox and Safari end the worker at once: the file opens 50 to 85 ms
+  after the reload in Firefox, about 60 ms in Safari 27.
+- Safari names a held file `InvalidStateError`, where the standard, Chrome
+  and Firefox say `NoModificationAllowedError`: a second opener was
+  handed the DOMException ("The object is in an invalid state.") and never
+  waited. `openFile` takes either as the file held elsewhere.
 - Every `persist`, `restore`, `putState` and `getState` opened a connection
   and left it open until the collector came, and a delete of the database
   -- or another page's upgrade of it -- waited on all of them
-  (`indexedDB.deleteDatabase` was blocked in Chrome). Each closes its own
-  once its transaction is done.
+  (`indexedDB.deleteDatabase` was blocked in Chrome). They share one now
+  (`idb`), which closes when a delete or an upgrade asks
+  (`versionchange`). Closing each call's own instead cost more than it
+  fixed: a call after the page sat idle 3 s took 8.1 ms in Chrome and
+  10.2 ms in Firefox, where main's took 1.5 and 2.8 and the shared
+  connection's 1.2 and 1.9, and back to back Firefox's took 0.70 ms to
+  the shared one's 0.08 (a `putState` 2.5 to 0.06).
 - Past the quota, Chrome aborts the transaction at its commit, by `abort`
   alone: `putState`, waiting on `error` and `complete`, never answered.
   Firefox refuses the request, whose `error` reaches the transaction
   before the transaction holds it: `persist`'s refusal was `null`. All four
-  read the request's error and the abort's (`finished`).
+  read the request's error and the abort's (`inStore`). Firefox then
+  refused that connection's next transactions and requests
+  (InvalidStateError) without saying it closed: the connection a
+  transaction failed on is let go, and a call a closed one refuses is
+  asked again of another.
 - A file past the quota: Chrome's file system throws QuotaExceededError,
   Firefox's writes nothing and says so by its count, which the file now
   names as the origin out of room. Either way the write is refused, every

@@ -455,6 +455,7 @@ Covers `web/`; its retry rule binds Python's clients (`integrations/python/`), G
 - A Durable Object keeps a database as a file would.
 - An object's alarm keeps its database.
 - A live query learns what changed from the change ring.
+- A page's IndexedDB calls share one connection, and let it go when asked.
 - A number from 2^53 on goes out as every digit.
 - A client sends a request again only where it cannot have run or may run twice, and bounds every request in time.
 
