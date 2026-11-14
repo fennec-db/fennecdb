@@ -261,12 +261,12 @@ label. Built in an amd64 Ubuntu 24.04 container laid out as a runner is
 `fennec-server` 12 288, an ELF file's segments being laid out by 4 KB
 pages, so a figure moves a page at a time or not at all.
 
-Rejected: a budget of the measurement itself, which stopped every pull
-request that added a byte, and made two in the merge queue that each wrote
-one conflict; a ceiling 5% above it, the 1.0 plan's for after 1.0, which
-left the docs' figures free to drift 5% before anything failed; measuring
-the image in `release.yml` (`docker image inspect`), once a release and
-after the docs have shipped its figure.
+Rejected: a budget of the measurement itself, which would stop every pull
+request that adds a byte and make any two in the merge queue that each
+write one conflict; a ceiling 5% above it, the 1.0 plan's for after 1.0,
+which would leave the docs' figures free to drift 5% before anything
+failed; measuring the image in `release.yml` (`docker image inspect`),
+once a release and after the docs have shipped its figure.
 
 What the job costs. It built `make small` and `fennec-server` for the
 host (glibc), one after the other: a median of 2.3 minutes over 40 green

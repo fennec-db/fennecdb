@@ -35,9 +35,9 @@ ROOM = 0.01
 # a thousand bytes: a change of a few bytes passes, the room above it is
 # about the room below, and a pull request adding more than half a percent
 # measures it and says what it bought. A budget of the measurement itself
-# stopped every pull request that added a byte, and two in the merge queue
-# that each wrote one conflicted; one of 5% above it, the 1.0 plan's
-# ceiling, left the docs' figures free to drift 5% unheld.
+# would stop every pull request that adds a byte, and any two in the merge
+# queue that each write one would conflict; one 5% above it, the 1.0
+# plan's ceiling, would leave the docs' figures free to drift 5% unheld.
 HEADROOM = 0.005
 
 
