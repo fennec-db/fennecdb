@@ -97,6 +97,14 @@ jobs:
       - name: tools/openapi_compat.py finds every break and passes every addition
         run: python3 tools/test_openapi_compat.py
 
+      # docs/design/durability.md#a-power-cut: the power cuts run by hand,
+      # weekly and on a push to main, never on a pull request; what their
+      # shared check must fail -- a sync come late, a write lost past
+      # `--sync 250`'s window, a cut with no write in flight, a standby far
+      # behind -- is held here on every one.
+      - name: The power cut's check fails a late sync, a loss past the window, a cut between writes and a standby far behind
+        run: python3 -B .github/power-cut/test_client.py
+
   clippy:
     name: clippy
     runs-on: ubuntu-latest
