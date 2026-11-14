@@ -76,7 +76,8 @@ key and file, is the README's and the studio page's (`associate.ts`,
 credential store alone with its address (`token.ts`), never sent elsewhere
 or along a redirect: on Windows kept on the machine (`win32.ts`), on Linux
 refused in words where no Secret Service with a default collection answers
-within a bound (`secretservice.ts`, `checks/keyring.mjs`) -- never a file,
+within a bound, a "/" asked again on its connection, which gnome-keyring may
+not know yet (`secretservice.ts`, `checks/keyring.mjs`) -- never a file,
 never taken for "no token"; a failure is a notice window, never a native
 alert. Each window has its own data store, a removed connection's
 cleared after its window closes by `STORE_KINDS`, never
