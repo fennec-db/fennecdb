@@ -1628,7 +1628,16 @@ impl Tenants {
         let following = match (&upstream, history.following) {
             (Some(_), true) => true,
             (Some(_), false) if demote || history.lineage.is_empty() => {
-                db.follow(history.lineage.clone()).map_err(failed)?;
+                // On disk before the follow is answered: the router counts
+                // the copy as the tenant's replica from then on. Left in the
+                // sink's buffer -- a copy waiting on its primary's image
+                // writes nothing meanwhile -- the record went with a kill,
+                // and the restart opened the old primary's file as a
+                // primary's, following nothing, with nothing in the log
+                // (`make chaos`'s catch-up fault, five runs on 2026-11-13).
+                db.follow(history.lineage.clone())
+                    .and_then(|_| db.sync())
+                    .map_err(failed)?;
                 true
             }
             (Some(_), false) => false,
@@ -2122,6 +2131,40 @@ impl Tenants {
                 Held::Closed => None,
             })
             .collect()
+    }
+
+    /// Sets every open tenant's clock to `at` (`Database::set_clock`), the
+    /// system's where `None`: a test build's ([`crate::test_clock`]). A
+    /// tenant opened after it runs on the system's clock until the next.
+    /// Whether it reached every slot: one busy as it looked -- opening,
+    /// closing, installing -- is passed over, as [`Self::open_tenants`]
+    /// passes it, and its tenant keeps the clock it had, so the caller sets
+    /// the system's again until none was.
+    #[cfg(feature = "test-clock")]
+    pub(crate) fn set_clocks(&self, at: Option<i64>) -> bool {
+        let mut open = Vec::new();
+        let mut every = true;
+        for s in self.all_slots() {
+            let held = match s.held.try_lock() {
+                Ok(h) => h,
+                // Taken as it stands, as every lock a panic poisoned is
+                // here: passed over, the slot would be busy for good.
+                Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    every = false;
+                    continue;
+                }
+            };
+            if let Held::Open(t) = &*held {
+                open.push(Arc::clone(t));
+            }
+        }
+        // Each database's lock taken with no slot's held, as the syncer
+        // takes them.
+        for t in open {
+            crate::held::write(&t.db).set_clock(at);
+        }
+        every
     }
 
     /// Pushes every dirty open tenant to disk. The periodic syncer calls it,
@@ -3039,6 +3082,54 @@ mod tests {
         t.db.write().unwrap().execute(&stmt).unwrap();
     }
 
+    /// A test build's clock (`test-clock`, `crate::test_clock`): a shift's
+    /// end reaches a tenant whose slot was busy as it ended. Set once, as it
+    /// first was, the tenant's clock stood at the shifted time for good --
+    /// `open_tenants` passes a busy slot over -- and `make chaos` jumped
+    /// nodes' clocks while their tenants opened and closed. The slot held
+    /// here as an open or a close holds it, a reset seen to pass it over, then
+    /// let go: the system's clock comes back.
+    #[cfg(feature = "test-clock")]
+    #[test]
+    fn a_tenant_busy_as_its_clock_shift_ends_takes_the_systems_clock_back() {
+        use crate::test_clock::PASSED_OVER;
+        let dir = scratch("test-clock");
+        let reg = Arc::new(Tenants::new(&dir).unwrap());
+        let t = reg.create("acme").unwrap();
+        let file = dir.join("shift");
+        let day: i64 = 86_400_000;
+        std::fs::write(&file, day.to_string()).unwrap();
+        crate::test_clock::follow_file(&reg, file.clone()).unwrap();
+        let system = || fennec_core::time::now_ms().unwrap();
+        let clock = || crate::held::read(&t.db).now_ms().unwrap();
+        let until = |what: &str, ok: &dyn Fn() -> bool| {
+            let end = Instant::now() + Duration::from_secs(30);
+            while !ok() {
+                assert!(Instant::now() < end, "never {what}");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        until("shifted a day", &|| clock() > system() + day / 2);
+        let slot = Arc::clone(reg.registry().get("acme").unwrap());
+        let held = slot.held.lock().unwrap();
+        let before = PASSED_OVER.load(Ordering::SeqCst);
+        std::fs::write(&file, "").unwrap();
+        until("passed the busy slot over", &|| {
+            PASSED_OVER.load(Ordering::SeqCst) > before
+        });
+        assert!(
+            clock() > system() + day / 2,
+            "the clock moved under a slot held"
+        );
+        drop(held);
+        until("back to the system's clock", &|| {
+            (clock() - system()).abs() < day / 2
+        });
+        drop(t);
+        drop(reg);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The steps this thread took since it last asked.
     fn steps_taken() -> Vec<&'static str> {
         STEPS.with(|s| std::mem::take(&mut *s.borrow_mut()))
@@ -3419,6 +3510,46 @@ mod tests {
             f.halt();
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A follow is answered once the file says it follows. A node killed
+    /// right after -- its copy waiting on the primary's image over a slow
+    /// link, nothing written since -- opens it again as a replica's file.
+    /// Left in the sink's buffer, the record making it one went with the
+    /// process: the restart opened the old primary's file as a primary's,
+    /// with no follower and nothing in the log, and the copy the router
+    /// counted on never caught up (`make chaos`'s catch-up fault, five runs
+    /// on 2026-11-13: docs/design/replication.md).
+    #[test]
+    fn a_follow_answered_has_its_file_say_it_follows() {
+        let dir = scratch("follow-kill");
+        let reg = replicating(&dir);
+        let t = reg.create("t").unwrap();
+        run(&t, "create collection n (i int)");
+        run(&t, "put n {i: 1}");
+        drop(t);
+        reg.follow("t", Some("http://127.0.0.1:9")).unwrap();
+        // What a kill leaves: the file as the system holds it -- what this
+        // process wrote, not what it kept to write -- and the record beside.
+        let killed = scratch("follow-killed");
+        std::fs::create_dir_all(&killed).unwrap();
+        for f in ["t.fennec", "t.follows"] {
+            std::fs::copy(dir.join(f), killed.join(f)).unwrap();
+        }
+        let restarted = replicating(&killed);
+        let following = restarted.get("t").unwrap().read().history().following;
+        for r in [&reg, &restarted] {
+            let t = r.get("t").unwrap();
+            if let Some(f) = t.repl.as_ref().and_then(|r| r.follower()) {
+                f.halt();
+            }
+        }
+        assert!(
+            following,
+            "the restart opened the old primary's file as a primary's"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(killed);
     }
 
     /// A delete is a departure only on a node that replicates its tenants,

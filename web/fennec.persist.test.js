@@ -7,8 +7,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { needs } from './ci-prereq.mjs';
 
 const wasm = await readFile(new URL('./fennec.wasm', import.meta.url)).catch(() => null);
+needs(['web/fennec.wasm', wasm, 'make wasm']);
 
 class KeyRange {
   constructor(lo, hi) {

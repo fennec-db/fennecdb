@@ -84,6 +84,17 @@ jobs:
           python3 tools/secret_eq_check.py --self-test
           python3 tools/secret_eq_check.py
 
+      # docs/design/integrations.md#the-chaos-drill: `test-clock` moves a
+      # tenant node's clock by a file, for `make chaos` alone. No crate's
+      # default features reach it, no other feature or dependency turns it
+      # on, and nothing builds with it but deploy/Dockerfile's chaos stage
+      # (release.yml then refuses a binary or an image whose --version says
+      # it).
+      - name: No build but the chaos image's names a test build's feature
+        run: |
+          python3 tools/test_release_features_check.py
+          python3 tools/release_features_check.py
+
       # docs/design/benchmarks.md#instruction-counts: the measuring is
       # macOS's and runs by hand (make instr-compare); a copy's UUID, the
       # refusals keeping a build's output untouched, the figures and a
@@ -177,6 +188,12 @@ jobs:
       # which the workspace's run builds without.
       - run: cargo clippy -p fennec-ffi --features jni --all-targets -- -D warnings
 
+      # A test build's clock (`test-clock`, crates/fennec-http/src/test_clock.rs),
+      # which only `make chaos`'s image builds: linted here, its unit test
+      # and the server's test of it among the targets, or nothing would
+      # compile it before the weekly drill did.
+      - run: cargo clippy -p fennec-http -p fennec-server --features test-clock --all-targets -- -D warnings
+
       # SQL's joins held to what SQLite answers for the same rows: in the
       # bench crate, where SQLite is, which `make test` leaves out. About
       # 32 s to build and 0.3 s to run, with this job's target cached.
@@ -190,7 +207,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # ubuntu-24.04-arm: the aarch64-linux binaries and image ship, and
+        # their NEON, CRC and atomics paths run only on an arm host.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     steps:
       - uses: actions/checkout@v7
 
@@ -222,9 +241,10 @@ jobs:
           key: ${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: ${{ matrix.os }}-cargo-
 
-      # The browser bundle comes first: web/fennec.sync.test.js and the
-      # end-to-end half of web/fennec.test.js skip themselves when
-      # web/fennec.wasm is missing, so without this the JS side is a no-op.
+      # The browser bundle comes first: the JS suites skip themselves on a
+      # machine with no web/fennec.wasm and throw under CI (web/ci-prereq.mjs),
+      # and `make test` fails on a skipped or ignored test past
+      # tools/skips-allowlist.json's count (tools/skips_check.py).
       # The module without the indexes is what web/fennec.test.js hands the
       # full one's files to, and back, and holds its `near` to the full
       # one's `near ... exact`.
@@ -304,6 +324,19 @@ jobs:
             lease::tests::the_boot_clock_is_the_systems_and_runs_as_instant_does \
             | tee /dev/stderr | grep -q 'test result: ok. 1 passed'
 
+      # A test build's clock reaches a tenant whose slot was busy as its
+      # shift ended (crates/fennec-http/src/test_clock.rs): set once, such a
+      # tenant stood at the shifted time for good. Only `make chaos`'s image
+      # builds the feature, so its test runs here, fennec-http's unit tests
+      # built again with it, the test named whole and its one pass asked
+      # for: renamed, a filter matching nothing runs nothing and passes.
+      - name: A test build's clock reaches every open tenant
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo test -p fennec-http --features test-clock --lib -- --exact \
+            tenants::tests::a_tenant_busy_as_its_clock_shift_ends_takes_the_systems_clock_back \
+            | tee /dev/stderr | grep -q 'test result: ok. 1 passed'
+
       # fennec studio (`--studio`) in the runner's Chrome against the debug
       # fennec-server `make test` built: signed in with the server's token
       # and as one user of a policy, a scroll through 100 000 rows held to
@@ -357,14 +390,61 @@ jobs:
       - name: A second process over a served file is refused
         run: cargo test -p fennec-cli --test lock
 
+  # macOS x86_64 ships (release.yml cross-builds fennec and fennec-server
+  # for it), and only an x86_64 process runs fennec-core's SSE/AVX and CRC
+  # paths there. macos-latest is arm64, so the x86_64 test binaries run under
+  # Rosetta 2. The crates the tarball is made of, the shell's and the
+  # server's own binaries built for the target too.
+  # Only on the merge queue and main: the macOS slots (5 at once) are CI's
+  # bottleneck, and a pull request's x86_64 run would wait for one. A job
+  # skipped by `if:` reports success, so it can still be a required check.
+  macos-x86_64:
+    name: test (macos x86_64, Rosetta)
+    if: github.event_name != 'pull_request'
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rosetta 2 and the pinned toolchain
+        run: |
+          softwareupdate --install-rosetta --agree-to-license
+          rustup show
+          rustup target add x86_64-apple-darwin
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: macos-x86_64-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: macos-x86_64-cargo-
+
+      # crc.rs falls back to the table silently where detection fails; this
+      # makes the test `hardware_path_is_chosen` assert Rosetta runs SSE4.2.
+      - name: Test the shipped crates for x86_64-apple-darwin
+        env:
+          FENNEC_EXPECT_SSE42: '1'
+        run: |
+          cargo test --target x86_64-apple-darwin \
+            -p fennec-core -p fennec-ql -p fennec-abi -p fennec-http \
+            -p fennec-cli -p fennec-server
+
   # fennec-core whole on Windows (docs/design/windows.md, decision 5):
   # the file mapped in views laid end to end in a placeholder (slice 2),
   # every test of the mapped path, and slice 1's experiment on the
   # runner's NTFS and on a ReFS and a FAT32 VHD. Cached apart from the
   # single writer's job, whose target holds the programs.
   windows-core:
-    name: windows (core)
-    runs-on: windows-latest
+    name: windows (core)${{ matrix.os == 'windows-11-arm' && ' arm' || '' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # windows-11-arm: aarch64-windows ships (release.yml).
+        os: [windows-latest, windows-11-arm]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -379,8 +459,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: windows-latest-core-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: windows-latest-core-
+          key: ${{ matrix.os }}-core-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ matrix.os }}-core-
 
       # The library's and the integration tests; not the examples, which
       # `cargo test` builds otherwise: measurement programs `make` runs on
@@ -445,8 +525,13 @@ jobs:
   # killed by TerminateProcess, beside fennec-abi's, fennec's and the native
   # library's suites, over files mapped as slice 2 maps them.
   windows-server:
-    name: windows (server)
-    runs-on: windows-latest
+    name: windows (server)${{ matrix.os == 'windows-11-arm' && ' arm' || '' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # windows-11-arm: aarch64-windows ships (release.yml).
+        os: [windows-latest, windows-11-arm]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -461,8 +546,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: windows-latest-server-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: windows-latest-server-
+          key: ${{ matrix.os }}-server-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ matrix.os }}-server-
 
       - name: Build the suites
         run: cargo test -p fennec-server -p fennec-abi -p fennec-cli -p fennec-ffi --no-run
@@ -520,6 +605,22 @@ jobs:
       # directory, and whom a file the temporary directory gives is open to.
       - name: The lease's clock, devices' names and a secret's DACL
         run: cargo test -p fennec-http --features tls --lib -- --nocapture lease::tests::the_boot_clock owner_only::tests device_s_name
+
+      # fennec-import's sqlite:: tests drive the sqlite3 shell and, before
+      # T51, skipped themselves silently on this image, which has none: they
+      # ran nowhere on Windows. Under CI a missing sqlite3 now fails them, so
+      # the official 3.54.1 tools zip is put on PATH, its SHA3-256 (as
+      # sqlite.org/download.html publishes it) checked before it is unpacked.
+      - name: A pinned sqlite3 on PATH
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/sqlite-dl" "$RUNNER_TEMP/sqlite-tools"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/sqlite-dl/tools.zip" https://sqlite.org/2026/sqlite-tools-win-x64-3540100.zip
+          python -c "import hashlib,sys; h=hashlib.sha3_256(open(sys.argv[1],'rb').read()).hexdigest(); sys.exit(0 if h==sys.argv[2] else 'sqlite3 zip SHA3-256 mismatch: '+h)" "$RUNNER_TEMP/sqlite-dl/tools.zip" e171f3993a992edf076746926dd52b5e2ebfabaee38818e74987e1d8112ab987
+          unzip -q -o "$RUNNER_TEMP/sqlite-dl/tools.zip" -d "$RUNNER_TEMP/sqlite-tools"
+          dir=$(dirname "$(find "$RUNNER_TEMP/sqlite-tools" -name sqlite3.exe | head -1)")
+          test -n "$dir"
+          cygpath -w "$dir" >> "$GITHUB_PATH"
 
       # Each suite runs whatever the step before found, so one run names
       # every failing test.

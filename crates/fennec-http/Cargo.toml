@@ -35,6 +35,13 @@ timing = []
 # The shell, which reaches this crate for `fennec backup`, carries none.
 studio = []
 tls = ["dep:fennec-tls"]
+# `test-clock`: a test build's clock (`src/test_clock.rs`): every tenant open
+# on a node answers `now()` and its `@ttl` reads at the system's time shifted
+# by what the file `FENNEC_TEST_CLOCK` names holds, which `make chaos` jumps
+# a node's wall clock with. Never a release's: only deploy/Dockerfile's
+# `chaos` stage names it, and fennec-server built with it says so in its
+# version. Off, none of it is compiled.
+test-clock = []
 
 [[test]]
 name = "all"

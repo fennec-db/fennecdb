@@ -30,7 +30,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [lookup-and-aggregates.md](lookup-and-aggregates.md) -- `lookup`, `required`, keys of several fields, folded levels, select-list expressions, HyperLogLog and time zones
 - [native-and-sync.md](native-and-sync.md) -- `fennec-ffi`, the sans-IO sync core and the scenario file both sync runners are held to
 - [router.md](router.md) -- the router's CORS, its pooled connections, the cuts a failover makes, the leading router's and its followers', and queries across tenants
-- [integrations.md](integrations.md) -- `integrations/`, the Grafana data source, the desktop app, the `deploy/` kit and the install channels (Homebrew, `install.sh`, `.deb` and `.rpm`)
+- [integrations.md](integrations.md) -- `integrations/`, the Grafana data source, the desktop app, the `deploy/` kit and its chaos drill, and the install channels (Homebrew, `install.sh`, `.deb` and `.rpm`)
 
 The conventions hold no invariant of the code, and are listed apart:
 
@@ -39,6 +39,7 @@ The conventions hold no invariant of the code, and are listed apart:
 A proposal holds no invariant until it is built, and is listed apart:
 
 - [named-statements.md](named-statements.md) -- FennecQL defined once in a database and called by name with typed arguments and an authority of its own: its storage, its authority model against `SECURITY DEFINER`'s, its surfaces -- HTTP, the SDKs, MCP's tools, the studio and the shell -- and the slices that built it; and write-bound statements (F2), run in the block of the write that woke them, built in six slices; and scheduled statements (F3), run by the primary that may write the file, once a slot, the run and its slot's mark one block, built in six slices; and webhook consumers (F4), a statement taking another service's signed events at `/_hooks/<name>`, verified before anything is read and taken once by the event's key, its writes and the key one block, built in six slices
+- [tenants.md](tenants.md#a-detached-copy-taken-back-by-its-identity) -- a replica's identity kept in the directory, so a copy detached as its node was failed over is taken back or followed over by it, and a region of three nodes failed over twice gives every tenant its copy back with no operator (proposed for 1.0)
 - [windows.md](windows.md) -- what Windows still lacks after its single writer (#453), designed in seven decisions and five slices, the first two built: the file mapped in views laid end to end in a placeholder, fennec-core's suite on Windows CI (slice 2), a file a view still maps replaced by std's rename, which no view refuses as the experiment on CI found (slice 1), a rename made durable on NTFS and one another handle refuses tried again (slice 1), every console event the one shutdown, the server's tests on Windows CI, and a release installed by `install.ps1` from a checksummed zip
 
 ## The original order
@@ -199,4 +200,5 @@ A proposal holds no invariant until it is built, and is listed apart:
 154. [A scoped caller is held to `--request-rate` before anything runs](quotas.md#a-callers-request-rate) (added after the move, under *Quotas and retries*)
 155. [An answer past `--http-gzip` goes as gzip where its client takes it, never one carrying a tag](http.md#compressed-answers) (added after the move, under *The HTTP server*)
 156. [A server that asks for no token answers only under this machine's name, and a page only of its own origin or `--http-cors`'s](http.md#open-servers) (added after the move, under *Access*)
-157. [A pull request is held to its base in instructions and heap bytes an op](benchmarks.md#the-gate) (added after the move, under *Benchmarks*)
+157. [`make chaos` breaks a region by seed, one fault at a time, and holds its history to an oracle](integrations.md#the-chaos-drill) (added after the move, under *Integrations and deploy*)
+158. [A pull request is held to its base in instructions and heap bytes an op](benchmarks.md#the-gate) (added after the move, under *Benchmarks*)
