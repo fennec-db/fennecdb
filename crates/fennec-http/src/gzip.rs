@@ -942,6 +942,10 @@ mod tests {
         {
             Ok(c) => c,
             Err(e) => {
+                assert!(
+                    std::env::var_os("CI").is_none_or(|v| v.is_empty()),
+                    "no python3 to inflate with under CI ({e}): the test would check nothing"
+                );
                 eprintln!("no python3 to inflate with ({e}): skipped");
                 return None;
             }

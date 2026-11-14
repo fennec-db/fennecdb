@@ -478,10 +478,11 @@ Covers `deploy/`.
 
 *Integrations and deploy*
 - `deploy/` is the regions' kit, held to the binaries by two checks.
+- `make chaos` breaks a region by seed, one fault at a time, and holds its history to an oracle.
 
 ### `tools/CLAUDE.md`
 
-Covers `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/windows-zip.sh`, `tools/windows-zip-check.ps1`, `tools/install-ps1-check.ps1`, `site/install.sh`, `site/install.ps1` and `.github/workflows/`'s `release.yml` and `packages.yml`.
+Covers `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/windows-zip.sh`, `tools/windows-zip-check.ps1`, `tools/install-ps1-check.ps1`, `tools/linux-ffi.sh`, `tools/linux-ffi-check.sh`, `site/install.sh`, `site/install.ps1` and `.github/workflows/`'s `release.yml` and `packages.yml`.
 
 *Integrations and deploy*
 - A release is installed from its own files, each checked before it is used.
@@ -533,6 +534,14 @@ Covers `crates/fennec-bench/`.
   `listening on: http://<address>` stderr line, a router told its nodes by
   the addresses they said; only a site needing its address before it binds
   takes a system-picked port, held by a stand-in listener till then.
+- [A secret is compared by `crypto::ct_eq` alone](docs/design/conventions.md#secrets-compared)
+  -- a token, a mark, a MAC, a signature, a proof, a password -- never by
+  `==` or `!=`, which leave at the first byte that differs:
+  `tools/secret_eq_check.py` (CI's fmt job) refuses one on an operand so
+  named in `crates/*/src` outside tests, each operand read whole, a name
+  that is no secret allowed with why and how many times. A primitive we
+  write is held to its RFC's vectors, every one, and where a key meets its
+  block to another implementation's, each test's count of cases held.
 - [A change a user meets](docs/design/conventions.md#docs-a-change-owes)
   says so in the same pull request: its page under `site/content/docs/`,
   README's feature table and the links beside it, the home page and docs

@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import { spawn, execFile } from 'node:child_process';
 import { access } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import { needs } from './ci-prereq.mjs';
 
 async function binary(name) {
   for (const p of [`../target/debug/${name}`, `../target/release/${name}`]) {
@@ -26,6 +27,7 @@ async function binary(name) {
   return null;
 }
 const bin = await binary('fennec-server');
+needs(['fennec-server', bin, 'cargo build']);
 const certs = fileURLToPath(new URL('../crates/fennec-http/tests/certs/', import.meta.url));
 const client = fileURLToPath(new URL('./client.js', import.meta.url));
 
