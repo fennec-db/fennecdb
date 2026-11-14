@@ -1162,20 +1162,7 @@ window and the app's words are each system's, and the app has its icon there.
   icon's images), `Resources\app.ico` 48 892; Linux's `Setup.tar.gz`
   41 806 525 -> 41 875 912 (+69 387, +0.17%; the second +69 315), the update
   archive +69 236 and +69 187 (Hutch's two copies of the PNG are one in
-  zstd's window). The build also writes the icon's images into the app's own
-  `bun.exe`, read from the x64 download: RT_ICON 1 to 7 are the .ico's seven
-  images and RT_GROUP_ICON 1 names them, as in `launcher.exe`, but Bun's own
-  group, the named `IDI_MYICON`, stays, and still names RT_ICON 1 as its one
-  256-pixel image of 270 600 bytes, which is now the app's 16-pixel one; a
-  named group comes before a numbered one, so it is the icon Windows draws for
-  that file, the 16-pixel image (its hash, `environment`'s, is neither the
-  toolchain Bun's nor the launcher's, on both runners). The write leaves the
-  security directory naming Bun's signature at 88 815 616, 10 328 bytes, in a
-  file of 88 594 432: Windows reads it as NotSigned (the toolchain's is Valid),
-  and Bun refuses that copy as the base of a program (InvalidSecurityDirectory:
-  `environment`'s stand-in is built by the toolchain's). Whether a window's
-  taskbar button or Task Manager shows that icon, Electrobun setting none of
-  its own, is not measured. macOS's is the iconset it had. Without them the launcher, its shortcut, its menu entry and
+  zstd's window). In the Windows download (read from the x64 and arm64 zips of main's run 43210313114) neither exe carried it: `launcher.exe` had no resource section, and `bun.exe`, the process that owns every window, held Bun's own dumpling, the named group `IDI_MYICON` naming one 256-pixel image of 270 600 bytes (named groups come before numbered ones), so the taskbar and Alt-Tab drew Bun's icon. `scripts/dist.sh` therefore writes `icon/icon.ico` into both with `scripts/set-exe-icon.mjs` (plain Node: the resource section rewritten in place in `bun.exe`, Bun's group dropped and its version and manifest kept, a new section for the launcher; the certificate table, no longer a signature, cut off), and `scripts/checks/icons.mjs` holds the downloaded exes to 16, 32, 48 and 256 pixel images, each the size its entry declares and the app's own. No dependency: a resource editor would be a Windows-only step or a package for a table of a few hundred bytes. macOS's is the iconset it had. Without them the launcher, its shortcut, its menu entry and
   each window show a default program's icon, and a `.fennec` file none.
 
 Toolchain. `electrobun init` installed Hutch (the build tool) in `~/.hutch` and

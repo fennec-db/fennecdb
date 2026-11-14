@@ -41,6 +41,7 @@ pub mod upstream;
 use directory::{Directory, Node, State};
 use fennec_core::prelude::*;
 use fennec_http::conn::Conn;
+use fennec_http::crypto::ct_eq;
 use fennec_http::http::{self, Method, Request, Response};
 use fennec_http::replication::{self, Replication};
 use metrics::Route;
@@ -3344,7 +3345,7 @@ impl Router {
             .header("authorization")
             .and_then(|v| v.strip_prefix("Bearer "))
             .unwrap_or("");
-        if constant_eq(given.as_bytes(), token.as_bytes()) {
+        if ct_eq(given.as_bytes(), token.as_bytes()) {
             fennec_http::audit::verified();
             return None;
         }
@@ -3701,7 +3702,8 @@ impl Router {
         };
         // The entry's token is in a Worker's secrets: as a node's admin
         // token it would reach `/_admin/` there, every tenant's file.
-        if self.cfg.entry_token.as_deref() == Some(token) {
+        let entry = self.cfg.entry_token.as_deref();
+        if entry.is_some_and(|e| ct_eq(e.as_bytes(), token.as_bytes())) {
             return Err(Fail(
                 400,
                 "the node's admin token is this router's --entry-token, which the global \
@@ -6761,17 +6763,6 @@ fn read(d: &RwLock<Directory>) -> std::sync::RwLockReadGuard<'_, Directory> {
 
 fn write(d: &RwLock<Directory>) -> std::sync::RwLockWriteGuard<'_, Directory> {
     d.write().unwrap_or_else(|e| e.into_inner())
-}
-
-fn constant_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 #[cfg(test)]
