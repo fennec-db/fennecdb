@@ -29,10 +29,20 @@
 // window is open (with none, closing it quits the app: lastwindow.mjs).
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { CONTROL, EXE, REPORT, WIN, assertClean, cmd, data, evalIn, lines, log, quit, startApp, step, until, waitFor, waitStudio, webviewWindows } from './lib.mjs';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { CONTROL, EXE, REPORT, USER_DATA, WIN, assertClean, cmd, data, evalIn, lines, log, quit, startApp, step, until, waitFor, waitStudio, webviewWindows } from './lib.mjs';
 
 assertClean('before');
 const FILE = data('menu', 5);
+// Windows types into the main window's search box, which is shown only once a database is
+// listed: with none, Databases is its empty state, with no list to search. So the app starts with
+// this file among its recent ones (state.json, as an open leaves it), opened by nothing, and the
+// window is still as it opened. Linux presses the main window's buttons, and starts with none.
+if (WIN) {
+  mkdirSync(USER_DATA, { recursive: true });
+  writeFileSync(join(USER_DATA, 'state.json'), JSON.stringify({ recents: [{ path: FILE, openedAt: Date.now() }], connections: [], databases: [] }));
+}
 
 const app = startApp('menu', { FENNEC_DESKTOP_LAUNCHER: '1' });
 await waitFor((l) => l.what === 'page-text' && l.key === 'launcher' && /Open file/.test(l.text), 60000, 'the main window drawn');

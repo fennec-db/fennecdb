@@ -23,6 +23,12 @@ on:
       - '.github/workflows/site-lighthouse.yml'
   workflow_dispatch:
 
+# A newer commit on the same pull request ends the audit of the one before
+# it, as ci.yml's runs do: the account's 20 job slots are CI's bottleneck.
+concurrency:
+  group: lighthouse-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 

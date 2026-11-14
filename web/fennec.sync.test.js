@@ -18,6 +18,7 @@ import { Fennec, sync, connect, inc, FennecError } from './fennec.js';
 import { fennecTable, text, integer, index, rename } from './schema.js';
 import { installIndexedDB } from './idb.fake.js';
 import * as client from './client.js';
+import { needs } from './ci-prereq.mjs';
 
 const wasm = await readFile(new URL('./fennec.wasm', import.meta.url)).catch(() => null);
 async function binary(name) {
@@ -34,6 +35,7 @@ async function binary(name) {
 }
 const bin = await binary('fennec-server');
 const shardBin = await binary('fennec-shard');
+needs(['web/fennec.wasm', wasm, 'make wasm'], ['fennec-server', bin, 'cargo build'], ['fennec-shard', shardBin, 'cargo build']);
 
 const skip = !wasm
   ? 'no web/fennec.wasm (make wasm)'
@@ -1580,6 +1582,7 @@ test('a held claim over HTTP takes the job enqueued meanwhile, and a signal give
 // given by URL when asked: here the one without indexes, whose `near`
 // measures every vector as `exact` does.
 const liteWasm = await readFile(new URL('./fennec-lite.wasm', import.meta.url)).catch(() => null);
+needs(['web/fennec-lite.wasm', liteWasm, 'make wasm-lite']);
 
 test('sync opens the full module by default, and the module it is given', { ...opts, skip: skip || (liteWasm ? false : 'no web/fennec-lite.wasm (make wasm-lite)') }, async () => {
   const s = await server();

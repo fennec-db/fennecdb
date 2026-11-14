@@ -140,6 +140,7 @@ NAV = [
     ]),
     ("Operate", [
         ("docs/server", "Server"),
+        ("docs/cloud", "Cloud platforms"),
         ("docs/studio", "Studio"),
         ("docs/replication", "Replication"),
         ("docs/monitoring", "Monitoring"),

@@ -44,6 +44,13 @@ const CHECKS = [
       linux: "Windows alone: WebKit takes a view's user script at once (its user content controller), where WebView2 completes AddScriptToExecuteOnDocumentCreated later",
     },
   },
+  {
+    name: 'firstload',
+    skip: {
+      darwin: "Linux alone: the one system a first load WebKit dropped was seen on, the guard reading Electrobun's Linux did-navigate, which comes for a failed load too",
+      win32: 'Linux alone: the one system a first load WebKit dropped was seen on; Electrobun drops a WebView2 navigation that failed, raising no event',
+    },
+  },
   { name: 'pages' },
   { name: 'storage' },
   { name: 'environment' },

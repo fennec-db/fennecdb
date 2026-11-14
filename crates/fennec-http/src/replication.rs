@@ -1906,12 +1906,26 @@ impl Follower {
             }
         }
         if image {
-            let Message::Image(bytes) = stream.receive()? else {
+            let Message::Image(mut bytes) = stream.receive()? else {
                 return Err(io::Error::other("the primary promised an image"));
             };
             // Every record held to its sum, which an open does not ask of an
             // image's: one damaged on the way would be this file's whole.
             fennec_core::engine::check_records(&bytes).map_err(io::Error::other)?;
+            // A follower's file in the bytes that replace it: the image's
+            // own history is its primary's, taking writes, and the record
+            // `follow` appends after the rename went with a kill before a
+            // write behind -- the restart opened the copy as a primary's
+            // file, following nothing (`Tenants::open_as`). `follow` below
+            // then appends nothing. Room for the record alone: grown as a
+            // `Vec` grows, a 40 MB image took 80.
+            let follows = fennec_core::history::History {
+                lineage: lineage.clone(),
+                following: true,
+            }
+            .record();
+            bytes.reserve_exact(follows.len());
+            bytes.extend_from_slice(&follows);
             // Loaded before the lock is taken: reads go on meanwhile.
             let mut fresh = Database::new();
             fresh.load(&bytes).map_err(io::Error::other)?;
@@ -1946,6 +1960,18 @@ impl Follower {
         }
 
         loop {
+            // A halt is looked at between messages, as an archiver looks at
+            // its stop, never left to the socket's cut alone: on Windows the
+            // cut -- a `shutdown` through a duplicate of the socket -- ends a
+            // read already waiting, but a read begun after it reads on, the
+            // primary's keep-alive every `ALIVE` keeping it short of its
+            // `SILENCE`. A follower between two reads at the halt -- landing
+            // a write, its fsync -- followed on for good, and the halt
+            // waited for it for good: five runs of Windows CI hung so. One
+            // that looked just before the cut ends after its next message.
+            if self.stop.load(Ordering::SeqCst) {
+                return Ok(());
+            }
             match stream.receive()? {
                 Message::Writes { first, records, .. } => {
                     let mut g = crate::held::write(&self.db);
@@ -2041,7 +2067,9 @@ impl Follower {
     }
 
     /// Stops following and stays a replica: started again, it follows on
-    /// from where it stopped.
+    /// from where it stopped. The cut ends a read waiting on the primary;
+    /// the session sees the flag at its next message whatever the socket
+    /// does with a read begun after the cut (`Follower::session`).
     pub fn halt(&self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(s) = lock(&self.conn).take() {

@@ -83,6 +83,8 @@ pub mod studio;
 pub mod sweep;
 pub mod tenant_hooks;
 pub mod tenants;
+#[cfg(feature = "test-clock")]
+pub mod test_clock;
 pub mod timing;
 pub mod trace;
 pub mod waits;

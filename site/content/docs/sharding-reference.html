@@ -535,10 +535,12 @@ is a kit for running everything on these pages on machines of your own: systemd
 units, their environment files, alert rules, and the operator's
 <a href="https://github.com/fennec-db/fennecdb/blob/main/deploy/RUNBOOK.md">runbook</a>.
 <code>make drill</code> breaks a deployment of two regions on purpose, in
-Docker, and holds it to losing no acknowledged write.</p>
+Docker, and holds it to losing no acknowledged write; <code>make chaos</code>
+breaks a region at random, a schedule of faults drawn from each seed.</p>
 
 <pre data-lang="bash">make deploy-check   # the units under a real systemd, the alert rules under promtool
 make drill          # two regions: a node killed and back, a router killed, the global router cut off, a restore
+make chaos SEEDS=5  # one region: kills, pauses, netem on its links, failovers mid catch-up and mid move, clock jumps
 </pre>
 
 <ul>
@@ -569,7 +571,7 @@ make drill          # two regions: a node killed and back, a router killed, the 
     the moment it was restored to.</li>
 </ul>
 
-<details class="deep"><summary>What make deploy-check and make drill run</summary>
+<details class="deep"><summary>What make deploy-check, make drill and make chaos run</summary>
 <p><code>make deploy-check</code> boots systemd in two privileged
 containers, installs every unit and environment file as the runbook
 installs them, and runs them: <code>systemd-analyze verify</code> on each,
@@ -613,4 +615,24 @@ most, the rest 16, 18 and 17; a reviewer's runs on another machine saw
 runbook says what each alert means, the order to bring a deployment up in,
 how to rotate each token and upgrade with no downtime, and what is not
 measured yet.</p>
+
+<p><code>make chaos</code> runs one region -- its router and standby, three
+nodes under leases and <code>--replicas</code> -- with every container, its
+driver's too, held to <code>--cpus</code> and <code>--memory</code>. Clients
+write registers, read them back and append rows while a schedule drawn
+from each seed applies one fault at a time: a node killed or paused,
+shorter or longer than a lease; delay, loss or a partition between a router
+and a node or between two nodes (tc netem); a node killed again while its
+copies catch up; a move's source killed, paused or cut off mid-move; a
+node's clock jumped hours or days. After each fault heals, every replica
+must hold its primary's rows. At the end every read must have found a
+value a write could have left (YCSB's register checker), every answered
+write and append must be there -- each register write lands its value in a
+ledger in the same block, so a write written over before anyone read it is
+found too -- and no tenant may have been written by two primaries at once.
+The one loss allowed is the one a failover is documented to make: a write
+answered while its replica was behind, which the run counts and names. A
+fault that did not land is drawn again, and every kind lands once a seed.
+Fifty seeds of ten minutes run every week at the kit's lease of 5 s; a
+failure names its seed, which draws the same schedule again.</p>
 </details>
