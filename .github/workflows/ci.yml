@@ -1,8 +1,28 @@
 name: ci
 
+# main moves only through the merge queue, and a merge group's head is the
+# very commit main then holds: a run on every push to main tested again what
+# the group had (14 landings in 14 hours on 2026-11-14, each three runs of
+# about 28 jobs, the merge groups dropped at the queue's 60-minute timeout
+# behind that backlog). So a push starts this workflow only when what the
+# caches are keyed by moved, or the workflow itself: a run on main is the only
+# one whose caches other branches may restore (a pull request's and a merge
+# group's are scoped to their own refs), and every cargo cache below is keyed
+# by hashFiles('**/Cargo.lock', 'rust-toolchain.toml'), saved once per key.
+# The schedule is main's whole run in between, for what comes with time
+# (runner and base images, the badge, the flake ledger's view of main), twice
+# a day, not every six hours: each run is about 170 job-minutes of the 20
+# slots, and a drift found within 12 hours is as good as within 6. Minute 17,
+# as a scheduled run at the top of an hour is the one GitHub delays or drops.
 on:
   push:
     branches: [main]
+    paths:
+      - '**/Cargo.lock'
+      - rust-toolchain.toml
+      - .github/workflows/ci.yml
+  schedule:
+    - cron: '17 4,16 * * *'
   pull_request:
   # The merge queue tests each pull request as it would land on main, with
   # the ones queued before it: two that pass apart can fail together (#292
