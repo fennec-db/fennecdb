@@ -119,7 +119,9 @@ a token: a router or a node refuses an address past loopback without one.
 
 ## Tokens
 
-Every token is made with `openssl rand -hex 32` and lives in an
+Every token is made with `openssl rand -hex 32` -- a node and a router
+listening past loopback refuse at the start a token shorter than 32 bytes,
+the env files' `change-me` examples among them -- and lives in an
 environment file, `/etc/fennecdb/*.env`, mode 0600, owned by root. systemd
 reads it as root before the process starts, so no service's user can read
 the file, and no token is on a command line (`ps` shows every process's
@@ -1179,7 +1181,8 @@ it short and says what it costs.
 - `FennecRouterRefusals`, `FennecNodeRefusals`: more than one refused token a
   second -- a client with a stale token, or someone guessing. The audit log
   (`/var/log/fennecdb/<role>/audit.log`) names the address; each refusal
-  waits, longer for each one more from the same address.
+  waits, longer for each one more from the same address (an IPv6 one's
+  /64).
 
 ## The entry token
 

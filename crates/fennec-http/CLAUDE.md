@@ -96,6 +96,10 @@ A replay is a write's answer on every path, a call made to read's too
 waits.](../../docs/design/http.md#audit)** Only `audit::verified`, where a token
 checks out, clears the wait; a new check must call it, and nothing infers
 it from an answer. A node believes `Fennec-Router` from the router alone.
+A refusal is counted by its address, an IPv6 one's /64
+(`audit::counted_ip`, the hooks' count's key too), in a table that, full,
+lets the count refused longest ago go (`audit::ADDRESSES`): never every
+count at once.
 
 **[Every request has an id, in its answer and every line it
 wrote.](../../docs/design/http.md#request-ids)** `tests/datadog.rs` and

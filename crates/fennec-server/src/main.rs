@@ -35,7 +35,8 @@ usage: fennec-server [options]
                             under /t/<tenant>/
       --admin-token <value> token for /_admin/ (--dir only): create, delete,
                             freeze and move tenants. Without it, off. Also
-                            read from FENNEC_ADMIN_TOKEN: argv shows up in `ps`
+                            read from FENNEC_ADMIN_TOKEN: argv shows up in `ps`.
+                            Past loopback 32 bytes at least
       --idle-close <s>      close a tenant untouched for this long  default: 300
                             (0 = never). The next request reopens it
       --lease               write a tenant only while the router's lease names
@@ -133,7 +134,8 @@ usage: fennec-server [options]
                             roots, which it trusts without it
 
       --http-token <value>  require `Authorization: Bearer <value>`. Also read
-                            from FENNEC_HTTP_TOKEN: argv shows up in `ps`
+                            from FENNEC_HTTP_TOKEN: argv shows up in `ps`.
+                            Past loopback 32 bytes at least
       --jwt-secret <value>  also take HS256 JSON Web Tokens signed with this,
                             each held to --policy: which collections, which
                             rows (`where owner = $jwt.sub`). Also read from
@@ -315,7 +317,8 @@ usage: fennec-server [options]
                             status, and promotes a replica. With --dir every
                             tenant has one of its own under
                             /t/<tenant>/_replication. Refuses --sync off.
-                            Also read from FENNEC_REPLICATION_TOKEN
+                            Also read from FENNEC_REPLICATION_TOKEN. Past
+                            loopback 32 bytes at least
       --replica-of <url>    follow the primary at http://host:port, or
                             https://host:port over TLS (--tls-ca), and take
                             no write of its own (403). With --dir it
@@ -362,7 +365,13 @@ usage: fennec-server [options]
                             bound
 
 A token or key set empty in the environment is unset; one given empty as a
-flag is refused at the start.
+flag is refused at the start. A token taken where --http or --metrics is
+past loopback is 32 bytes at least, refused at the start otherwise, since
+guesses there may come from any number of addresses: `openssl rand -hex 32`
+makes one. On loopback any length is taken; behind a proxy or a router,
+which reach it from past this machine, give it 32 bytes too: a shorter one
+is warned of at the first request one sends. A --hooks secret shorter than
+32 bytes is taken, and warned of.
 
 With --tls-cert and --tls-key fennec-server serves HTTPS itself, no proxy
 in front needed; without them it speaks plain HTTP, for loopback or a TLS
@@ -1201,8 +1210,67 @@ fn main() {
     http_cfg.sync_on_write = sync == SyncPolicy::Always;
 
     // An endpoint on an open network without a token is a question of the
-    // flags alone, refused with them (2) before anything is opened.
-    if let Some(refused) = fennec_http::exposed(&http_cfg, false) {
+    // flags alone, refused with them (2) before anything is opened; so is a
+    // token taken there shorter than `fennec_http::TOKEN_MIN`, from the flag
+    // or its variable (`fennec_http::short_token`). The data and admin tokens
+    // are taken on --metrics' listener too, the replication token on the
+    // HTTP one alone. Each listener's name is looked up once, here: judged
+    // of the addresses the lookup answered and bound on them below, never
+    // on a second lookup, and a name not looked up is judged past loopback.
+    let http_listen = fennec_http::Listen::look_up(&http_cfg.addr);
+    let metrics_listen = metrics.as_deref().map(fennec_http::Listen::look_up);
+    let listeners: Vec<&fennec_http::Listen> = std::iter::once(&http_listen)
+        .chain(metrics_listen.as_ref())
+        .collect();
+    let tokens = [
+        (
+            "--http-token (FENNEC_HTTP_TOKEN)",
+            http_cfg.token.as_deref(),
+            &listeners[..],
+        ),
+        (
+            "--admin-token (FENNEC_ADMIN_TOKEN)",
+            http_cfg.admin_token.as_deref(),
+            &listeners[..],
+        ),
+        (
+            "--replication-token (FENNEC_REPLICATION_TOKEN)",
+            replication_token.as_deref(),
+            &listeners[..1],
+        ),
+    ];
+    for (flag, token, on) in tokens {
+        if let Some(refused) = fennec_http::short_token(flag, token, on) {
+            fail(&refused);
+        }
+    }
+    // Every one shorter is on loopback alone, which a proxy or a router in
+    // front takes past this machine: the first request through one warns
+    // of them (`fennec_http::kept_short`), as of a hook's secret on such a
+    // listener. Past loopback a hook's short secret is warned of now:
+    // refused, a sender's secret would stop a server its operator cannot
+    // change without the sender (`docs/design/access.md`, *Short tokens*).
+    let mut short: Vec<String> = (tokens.iter())
+        .filter(|(_, token, _)| token.is_some_and(|t| fennec_http::too_short(t.len())))
+        .map(|(flag, ..)| flag.to_string())
+        .collect();
+    let short_hooks = (http_cfg.hooks.iter())
+        .flat_map(|hooks| hooks.iter().filter(|h| h.short))
+        .map(|h| format!("hook `{}`'s secret", h.name));
+    if http_listen.past_loopback() {
+        for hook in short_hooks {
+            fennec_http::log!(
+                "warning: {hook} is shorter than {} bytes, and --http is past loopback: a \
+                 shorter one can be guessed, from one event signed with it too. Where its \
+                 sender lets you choose it, make one with `openssl rand -hex 32`",
+                fennec_http::TOKEN_MIN
+            );
+        }
+    } else {
+        short.extend(short_hooks);
+    }
+    fennec_http::kept_short(&short);
+    if let Some(refused) = fennec_http::exposed(&http_cfg, false, &http_listen) {
         fail(&format!("could not open the HTTP endpoint: {refused}"));
     }
     let metrics_cfg = metrics.map(|addr| fennec_http::Config {
@@ -1216,9 +1284,8 @@ fn main() {
         tls: http_cfg.tls.clone(),
         ..fennec_http::Config::default()
     });
-    if let Some(refused) = metrics_cfg
-        .as_ref()
-        .and_then(|c| fennec_http::exposed(c, true))
+    if let Some(refused) = (metrics_cfg.as_ref().zip(metrics_listen.as_ref()))
+        .and_then(|(c, on)| fennec_http::exposed(c, true, on))
     {
         fail(&format!("could not open the metrics endpoint: {refused}"));
     }
@@ -1250,6 +1317,7 @@ fn main() {
         serve_dir(
             &dir,
             http_cfg,
+            &http_listen,
             sync,
             checkpoint,
             idle_close,
@@ -1334,11 +1402,13 @@ fn main() {
     // settled, a failed `--promote` had forked and synced its file. Not
     // before the open: a connection would wait in the backlog through it,
     // where it is refused at once.
-    let metrics_listener = metrics_cfg.as_ref().map(|c| {
-        std::net::TcpListener::bind(&c.addr)
+    // Each on the addresses its name was looked up to and judged by, before
+    // the open.
+    let metrics_listener = metrics_listen.as_ref().map(|on| {
+        on.bind()
             .unwrap_or_else(|e| fail(&format!("could not open the metrics endpoint: {e}")))
     });
-    let listener = match std::net::TcpListener::bind(&http_cfg.addr) {
+    let listener = match http_listen.bind() {
         Ok(l) => l,
         Err(e) => {
             fennec_http::log!("could not open the HTTP endpoint: {e}");
@@ -1524,6 +1594,7 @@ fn main() {
 fn serve_dir(
     dir: &str,
     http_cfg: fennec_http::Config,
+    http_listen: &fennec_http::Listen,
     sync: SyncPolicy,
     checkpoint: bool,
     idle_close: Duration,
@@ -1579,8 +1650,9 @@ fn serve_dir(
     // The listener before any tenant opens: a port that cannot be had stops
     // the start here, with nothing to sync. Taken after, a standby's failed
     // starts opened its tenants and rewrote each one's file of vectors at
-    // every restart its unit made.
-    let listener = std::net::TcpListener::bind(&http_cfg.addr)
+    // every restart its unit made. On the addresses judged at the start.
+    let listener = http_listen
+        .bind()
         .unwrap_or_else(|e| fail(&format!("could not open the HTTP endpoint: {e}")));
     // The tenants' scheduled statements run from one thread, a tenant at a
     // time (`fennec_http::schedule::Node`), set on the registry before any

@@ -1,6 +1,6 @@
 # Access
 
-The long form of the invariants [crates/fennec-http/src/access/CLAUDE.md](../../crates/fennec-http/src/access/CLAUDE.md) lists under *Access* (moved there from `crates/fennec-http/CLAUDE.md` to make room, beside `access.rs` and `access/`): scoped tokens, field lists, rules reading another collection, the server's own collections, a token bound to its tenant, whom a token is for, and empty tokens. Each section below but *The server's own collections* and *Whom a token is for*, added after the move, is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-http/src/access/CLAUDE.md](../../crates/fennec-http/src/access/CLAUDE.md) lists under *Access* (moved there from `crates/fennec-http/CLAUDE.md` to make room, beside `access.rs` and `access/`): scoped tokens, field lists, rules reading another collection, the server's own collections, a token bound to its tenant, whom a token is for, empty tokens and short ones. Each section below but *The server's own collections*, *Whom a token is for* and *Short tokens*, added after the move, is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Scoped tokens
 
@@ -999,3 +999,140 @@ fennec-server, fennec-shard and fennec-cli and fennec-http's
 from `FENNEC_ADMIN_TOKEN` and a router `--replication-token` from
 `FENNEC_SHARD_REPLICATION_TOKEN`, the two that had no variable, so no token
 need be on a command line `ps` shows.
+
+## Short tokens
+
+**A token taken past loopback is 32 bytes at least.** The wait after a
+refusal ([http.md](http.md#audit)) is the one brake on guessing a token
+online, and it is an address's: 100 ms doubled to 5 s for one address, the
+first 100 ms again for the next. Past loopback the guesses come from as many
+addresses as a client holds -- an IPv6 /64 is one count now, but a cloud
+account or a botnet holds thousands of addresses apart -- and every token flag took any
+length: `--http-token secret`, six bytes of a word, falls to a dictionary at
+any of those rates, where the JWT secret beside it was held to 32 bytes from
+the start (`access::SHORT`). So `fennec-server` and `fennec-shard` refuse at
+the start (2), before the file or the directory is opened, a token shorter
+than `fennec_http::TOKEN_MIN` (32 bytes) where a listener taking it binds an
+address past loopback (`fennec_http::short_token`, of the addresses the
+listener is bound on, below): the data and admin tokens on `--http` and `--metrics`,
+whose scrape takes both (`metrics::allowed`), the replication token on
+`--http` alone, and the router's `--token`, `--entry-token` -- the key of
+the entry's mark, which a guess of it forges for any address -- and
+`--replication-token` on `--listen`. The refusal names the flag beside
+the variable it is also read from (`--http-token (FENNEC_HTTP_TOKEN) is
+shorter than 32 bytes, ...`): an environment file's value is as short as a
+command line's. `openssl rand -hex 32`, which the refusal and the kit's env
+files suggest, makes 64 characters; 32 bytes of anything a person would
+type are past a guess at 5 s an address.
+
+Loopback is judged of the addresses the listener is bound on. Each
+listener's name is looked up once, as the flags are read
+(`fennec_http::Listen::look_up`): the token lengths and `exposed` are judged
+of the addresses that lookup answered, and the listener is bound on those
+same addresses (`Listen::bind`, `TcpListener::bind(&addrs[..])`;
+`Router::bind_on` in fennec-shard). Judged of the flag's text
+(`is_remote`) and bound by it again, a name was looked up twice, the second
+answer the one bound, and a lookup that failed was taken for loopback: a
+short token passed for a name the resolver did not answer at the judgment
+and answered with a public address at the bind. A name that cannot be
+looked up is judged past loopback now (`Listen::past_loopback`), so a
+short token on it is refused, the refusal saying first that the name was
+not looked up -- what went wrong, which a refusal naming the length alone
+hid; it binds nothing (`binds_past_loopback`), the lookup's error the
+bind's. Made as the flags are read, the lookup moved in file mode, whose
+listeners are bound after the open (a connection would wait in the backlog
+through it): a name the resolver did not answer as the server started -- a
+boot before DNS is up -- was looked up again at the bind and could be bound
+there, and now fails the start whatever the token, a unit's
+`Restart=on-failure` starting it again. The kit's units give `--http` and
+`--listen` an address, and start after `network-online.target`. A node
+binds before any tenant opens and the router after its directory's open,
+so theirs moved by little.
+
+On loopback any length is taken, for a listener this machine alone
+reaches: `make server TOKEN=secret`, the README's first server, runs as it
+is, as does every test's `secret` on 127.0.0.1. Behind a proxy or a router
+it is reached from past this machine, and 32 bytes are owed there too: a
+TLS proxy in front of a server on 127.0.0.1
+(`site/content/docs/server.html#behind-a-proxy`), or a public router
+relaying to nodes on 127.0.0.1, hands the listener the length was judged by every
+guess the Internet sends -- and behind a plain proxy each refusal is counted
+by the proxy's 127.0.0.1, the connection's peer, which only a router's and
+the entry's marks name otherwise ([http.md](http.md#audit)), so any client's
+good token clears the one count every guess shares. The flags cannot tell
+such a deployment from a laptop's, so the server says so: the lengths are
+judged once, at the start, and where one was taken short on loopback
+(`fennec_http::kept_short`) the first request carrying `Forwarded`,
+`X-Forwarded-For` or `X-Forwarded-Host` -- what Caddy and Traefik send of
+their own, nginx where told, and the router on every forward
+(`cors::FORWARDED_HOST`) -- logs one warning naming the flags
+(`fennec_http::proxied`). A server whose tokens are long pays a relaxed load
+and a branch a request for it, the look at the headers out of line
+(`#[cold]`), and the flag is let go by the warning, so a short one's
+server pays the same after it. Warned, never refused: a client may send
+the headers itself, and nginx's plain `proxy_pass` sends none, so a header
+is a hint about the deployment, never a judgment of the request.
+`--insecure` waives nothing: it lets a server listen past loopback with no
+token, which its name says, where a short token looks like protection and
+is not. The library leaves its embedder's tokens alone -- `Server::bind`
+and `Router::bind` refuse no token past loopback, as before, and a short
+one is the embedder's to choose, as `insecure` is.
+
+A webhook's secret has no minimum, and is warned of the same way: a hook
+whose secret is shorter than 32 bytes as its file or its `PUT` gave it
+(`Hook::short`) is said at the start where `--http` is past loopback,
+naming the hook, joins the tokens' warning on loopback, and, set for a
+tenant through `PUT /_admin/tenants/<t>/hooks/<h>` or its whole set
+through `hook-secrets`, is said in the node's log as it is set
+(`tenant_hooks::said_short`) -- never the secret. Not refused: Stripe's and
+Svix's secrets are their senders' to make, and a refusal would leave a hook
+with none until the sender's settings changed; GitHub's is a person's
+choice, which can be a word, and a word is guessed offline from one event
+it signed, whatever waits online. Counted as the sender shows it, `whsec_`
+and all: a Standard Webhooks key of 24 bytes, Svix's, is 38 bytes shown,
+and counted decoded every Svix secret would be warned of.
+
+The failure table that waits a guess out costs a tail of its own: a
+refusal looks at three places of its queue on the whole (`Table::kept`),
+but the one that finds the queue past half as many again as the counts
+sweeps all of it -- 15 002 places of a full table, a lookup in the counts
+each -- under the table's one mutex, which every verified token takes
+while a count is held, once every 5 000 refusals at most. Measured on a
+copy of its structures, the rounds ending in that refusal against the same
+rounds stopped one short: 4.4 million instructions a sweep (`/usr/bin/time
+-l`, two pairs within 0.3%), some 290 a place, the SipHash of the key
+most of it: under a millisecond at two instructions a cycle and 3 GHz,
+an estimate rather than a timing, the machine it was counted on too
+loaded to time it.
+
+Rejected: *16 bytes*, the plan's other option -- 16 random bytes hold, but
+16 bytes of a word do not, and the minimum is met by people choosing a
+token, not by a generator; 32 is the JWT secret's already. *A token's
+entropy* read from its characters: a guess about a guess. *Loopback held
+too*: every local test, `make server TOKEN=secret` and the docs' first runs
+would need 32 bytes for no attacker. *The router refusing a node's short
+admin token* as `PUT /_shard/nodes` records it: a node past loopback
+refuses its own as it starts, so the router never holds one that is short
+there.
+
+It changed the CLI contract before 1.0 froze it (the 1.0 plan's G51): a
+deployment that listened past loopback with a shorter token stops at the
+start, its log naming the flag. The kit's own already made theirs long
+(`secrets.token_hex(16)` in the drill and `deploy/test/units.py`,
+`token_urlsafe(32)` in the power-cut rigs, 32 random bytes in the desktop
+app); the language and Python integration runs, `make grafana-check` and the
+compose files' examples were given 32 bytes or more. `tests/tokens.rs` in
+fennec-server (each flag and its variable past loopback, exiting 2, the
+data and admin tokens refused on `--metrics` alone past it, a name not
+looked up judged past loopback, 32 bytes passing on an address no machine
+holds, short ones on loopback, the warning through a proxy once, each
+header first to a server of its own, and never for long tokens) and in
+fennec-shard (its three likewise, and the router's warning at each header),
+`a_short_secret_is_warned_of_and_taken` and
+`a_tenants_short_secret_is_said_as_it_is_set` in fennec-server's
+`tests/hooks.rs`, and `a_token_past_loopback_is_32_bytes_at_least`,
+`a_name_not_looked_up_is_judged_past_loopback` and
+`the_address_bound_is_the_one_judged` in fennec-http's `lib.rs`, fail
+without it. Each server test strips the `FENNEC_*_TOKEN` variables it
+inherited (`support::without_tokens`): one a developer's shell exports
+stood in for a flag a test left out.

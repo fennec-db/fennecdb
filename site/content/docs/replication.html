@@ -14,7 +14,10 @@ moment.</p>
 <code>fennec-server</code> on its own file pointed at the primary. The replica
 serves reads; when the primary is gone, promote it to take writes.</p>
 
-<pre data-lang="bash"># the primary: replicas are fed over its HTTP listener
+<pre data-lang="bash"># $HTTP and $REPL: the same two tokens on both machines, each 32 bytes or
+# more (openssl rand -hex 32), as a server listening past loopback takes them
+
+# the primary: replicas are fed over its HTTP listener
 fennec-server --file primary.fennec --http 0.0.0.0:8080 --http-token "$HTTP" \
          --replication-token "$REPL" --sync always
 
@@ -732,7 +735,7 @@ feeding and how far each has been sent.</p>
 <div class="tbl">
 <table>
 <tbody>
-<tr><td><code>--replication-token &lt;value&gt;</code></td><td>turns replication on; needs <code>--file</code>, and <code>--http</code> to feed replicas. Also read from <code>FENNEC_REPLICATION_TOKEN</code></td></tr>
+<tr><td><code>--replication-token &lt;value&gt;</code></td><td>turns replication on; needs <code>--file</code>, and <code>--http</code> to feed replicas. Also read from <code>FENNEC_REPLICATION_TOKEN</code>. 32 bytes at least where <code>--http</code> is past loopback (<a href="/docs/server#token-length">Security</a>)</td></tr>
 <tr><td><code>--replica-of http://host:port</code></td><td>follows that primary into <code>--file</code>; needs the token. <code>https://host:port</code> follows it over TLS</td></tr>
 <tr><td><code>--tls-ca &lt;pem&gt;</code></td><td>the CAs an <code>https://</code> primary is held to, in place of Mozilla's roots; also a flag of <code>fennec backup</code> and <code>fennec archive</code></td></tr>
 <tr><td><code>--promote</code></td><td>opens a replica's file to take writes, forking its history</td></tr>

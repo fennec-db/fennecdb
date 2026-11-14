@@ -59,6 +59,31 @@ These are deliberate, and README explains each one:
   (nginx, Caddy, stunnel).
 - **`--insecure` does what it says.** Binding to a non-loopback address without
   authentication is refused unless that flag is passed deliberately.
+- **A short token is taken on loopback alone.** Past loopback `fennec-server`
+  and `fennec-shard` refuse at the start a token shorter than 32 bytes --
+  `--http-token`, `--admin-token`, `--replication-token`, the router's
+  `--token`, `--entry-token` and `--replication-token`, or the variable each
+  is read from -- naming the flag; `--insecure` does not waive it. On
+  loopback any length is taken, so a short token there is the operator's
+  call -- but behind a proxy or a router, 32 bytes too: a TLS proxy in front
+  of a server on 127.0.0.1, or a router on the same machine relaying to
+  nodes there, reaches that listener for the whole network, and behind a
+  plain proxy every refusal waits by the proxy's address, which any
+  client's good token clears. Such a server logs a warning once, at the
+  first request carrying `Forwarded`, `X-Forwarded-For` or
+  `X-Forwarded-Host`, while it holds a shorter token; it refuses nothing.
+  Loopback is judged of the addresses the listener is bound on, and a name
+  that cannot be looked up counts as past it. A refused token waits, 100 ms
+  doubled to 5 s, by its address -- an IPv6 address by its /64 -- in a table
+  of 10 000 counts that lets the one refused longest ago go when full:
+  against a client holding more addresses than that, the token's length is
+  what holds.
+- **A webhook's secret has no minimum.** One shorter than 32 bytes is taken
+  and warned of -- at the start where `--http` is past loopback, through a
+  proxy as a short token is, and in a node's log as a tenant's is set --
+  since a sender's secret is the sender's to make. A GitHub secret is the
+  operator's to choose: a short one is guessed offline from one event it
+  signed.
 - **A token on the command line shows up in `ps`.** `FENNEC_HTTP_TOKEN`,
   `FENNEC_JWT_SECRET`, `--jwt-secret-file` and `FENNEC_REPLICATION_TOKEN` exist
   for that reason.

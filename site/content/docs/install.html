@@ -182,11 +182,13 @@ page lists every file.</p>
 libc, 7 MB. Its data lives in <code>/data</code>, which the command
 below keeps in a volume.</p>
 
-<pre data-lang="bash">docker run -d --name fennecdb -v fennecdata:/data \
-  -p 127.0.0.1:8080:8080 -e FENNEC_HTTP_TOKEN=a-token \
+<pre data-lang="bash">export FENNEC_HTTP_TOKEN=$(openssl rand -hex 32)
+docker run -d --name fennecdb -v fennecdata:/data \
+  -p 127.0.0.1:8080:8080 -e FENNEC_HTTP_TOKEN \
   ghcr.io/fennec-db/fennec-server:{{version}}</pre>
 
-<p>A container listens beyond localhost, so the server asks for a token, or
+<p>A container listens beyond localhost, so the server asks for a token of
+32 bytes or more (<a href="server.html#token-length">Security</a>), or
 for <code>--insecure</code> where you publish the port to your own machine
 only, as the <a href="quickstart.html">Quickstart</a> does. Its command is
 <code>--http 0.0.0.0:8080 --file /data/data.fennec --sync 250</code>: write every

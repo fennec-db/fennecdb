@@ -104,3 +104,18 @@ A variable set empty is unset (`env_secret`, fennec-shard's `env`); a token
 flag, a JWT secret's file or a key file given empty is refused at the
 start; a library constructor takes an empty token as none
 (`Config::settled`).
+
+**[A token taken past loopback is 32 bytes at least.](../../../../docs/design/access.md#short-tokens)**
+`fennec-server` and `fennec-shard` refuse at the start, before anything is
+opened, a token shorter than `TOKEN_MIN` where a listener taking it binds
+past loopback (`fennec_http::short_token`), naming the flag, its variable
+and the minimum: `--http-token` and `--admin-token` on `--http` and
+`--metrics`, `--replication-token` on `--http`, the router's `--token`,
+`--entry-token` and `--replication-token` on `--listen`. A new token flag
+joins those lists. Loopback is judged of the addresses the listener is
+bound on, its name looked up once (`fennec_http::Listen`), never bound by
+its text again, and a name not looked up is past loopback. On loopback any
+length is taken (`make server TOKEN=secret`), one shorter warned of once,
+at the first request a proxy or a router sent (`kept_short`, `proxied`: a
+load and a branch a request, nothing refused), as is a hook's secret
+shorter (`Hook::short`); `--insecure` waives nothing.

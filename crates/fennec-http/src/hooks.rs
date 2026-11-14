@@ -195,6 +195,13 @@ pub struct Hook {
     /// How many secrets its line names: one or two. With one, the second
     /// slot's match is masked out ([`Hooks::verify`]).
     pub secrets: usize,
+    /// Whether a secret of it is shorter than [`crate::TOKEN_MIN`] bytes as
+    /// its file or its `PUT` gave it -- a `standard` one counted as its
+    /// sender shows it, `whsec_` and all -- which the server warns of and
+    /// takes: a sender's own (Stripe's, Svix's) are longer, and one a
+    /// person chose (GitHub's) can be a word, guessed from one event it
+    /// signed.
+    pub short: bool,
     pub tolerance_ms: i64,
     /// How long an event's key is kept past its taking.
     pub keep_ms: i64,
@@ -448,9 +455,12 @@ pub(crate) fn hook_of(
         return Err("a hook names one secret file, or two while a secret rolls");
     }
     let mut keys = [stand_in.clone(), stand_in.clone()];
+    let mut short = false;
     for (slot, f) in keys.iter_mut().zip(&rest[..files]) {
         let raw = secret(f).map_err(|_| "could not read a secret file it names")?;
-        *slot = HmacKey::new(&secret_of(scheme, &raw)?);
+        let written = written(&raw);
+        short |= crate::too_short(written.len());
+        *slot = HmacKey::new(&secret_of(scheme, written)?);
     }
     let mut opts = rest[files..].iter();
     let (mut keep, mut tolerance, mut key, mut ceiling) = (None, None, None, None);
@@ -503,6 +513,7 @@ pub(crate) fn hook_of(
         scheme,
         keys,
         secrets: files,
+        short,
         tolerance_ms,
         keep_ms,
         key: key.unwrap_or(KeyBy::Body),
@@ -510,14 +521,19 @@ pub(crate) fn hook_of(
     })
 }
 
-/// A secret file's bytes as its scheme reads them: Stripe's `whsec_` text
-/// and GitHub's chosen secret as written, a `standard` one's base64 after
-/// `whsec_` decoded. Its file's last line end is no part of it.
-fn secret_of(scheme: Scheme, raw: &[u8]) -> std::result::Result<Vec<u8>, Why> {
+/// A secret file's bytes as written: its last line end is no part of it.
+fn written(raw: &[u8]) -> &[u8] {
     let mut s = raw;
     while let [rest @ .., b'\n' | b'\r'] = s {
         s = rest;
     }
+    s
+}
+
+/// A secret as written ([`written`]) as its scheme reads it: Stripe's
+/// `whsec_` text and GitHub's chosen secret as they are, a `standard` one's
+/// base64 after `whsec_` decoded.
+fn secret_of(scheme: Scheme, s: &[u8]) -> std::result::Result<Vec<u8>, Why> {
     if s.is_empty() {
         return Err("a secret is empty: an empty secret verifies any signature");
     }
@@ -1415,8 +1431,9 @@ fn fails() -> &'static Mutex<Fails> {
     F.get_or_init(Default::default)
 }
 
-/// A count's key: the address, canonical as `audit`'s are, and the name's
-/// digest -- odd, so no name's is the count of the paths naming none, 0.
+/// A count's key: the address as `audit`'s are counted -- canonical, an IPv6
+/// one's /64 (`audit::counted_ip`) -- and the name's digest -- odd, so no
+/// name's is the count of the paths naming none, 0.
 fn keyed(ip: IpAddr, name: Option<Named>) -> (IpAddr, u64) {
     let digested = |n: Named| {
         let mut d = digest(n.tenant.unwrap_or("").as_bytes());
@@ -1427,7 +1444,7 @@ fn keyed(ip: IpAddr, name: Option<Named>) -> (IpAddr, u64) {
         }
         d | 1
     };
-    (ip.to_canonical(), name.map_or(0, digested))
+    (crate::audit::counted_ip(ip), name.map_or(0, digested))
 }
 
 /// Entries with a refusal counted: a verified event asks the table only
