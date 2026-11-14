@@ -191,15 +191,16 @@ and flush `openFile` asks of the file system and stops at the one it is
 armed for -- a write once half its bytes are in -- busy until the reload
 ends it, as a worker the page left in the middle of a flush is. Stopped on
 `Atomics.wait` instead, its file was still held 3 s after the reload in
-Safari 27, which ends a running worker at once. A reload in the middle of a chunk's or a new image's
-transaction loses no acknowledged write, and the image keeps its chunks or
-the new one stands alone; a reload at each of a rewrite's eight steps, and
-in the middle of an append, keeps every answered write and empties the
-copy. Chrome is held to a quota over the DevTools protocol
-(`Storage.overrideQuotaForOrigin`) and Firefox by a preference (a group of
-origins gets a fifth of `dom.quotaManager.temporaryStorage.fixedLimit`, never
-under 10 MiB); Safari has neither, and its two quota tests are skipped by
-name. The page is told the quota, not left to read it: Chrome's
+Safari 27, which ends a running worker at once. A reload in the middle of
+a chunk's or a new image's transaction loses no acknowledged write, and
+the image keeps its chunks or the new one stands alone; a reload at each
+of a rewrite's eight steps, and in the middle of an append, keeps every
+answered write and empties the copy. Chrome is held to a quota over the
+DevTools protocol (`Storage.overrideQuotaForOrigin`) and Firefox by a
+preference (a group of origins gets a fifth of
+`dom.quotaManager.temporaryStorage.fixedLimit`, never under 10 MiB);
+Safari has neither, and its two quota tests are skipped by name. The page
+is told the quota, not left to read it: Chrome's
 `navigator.storage.estimate()` names 10 GiB whatever it enforces.
 
 What it found, fixed with it:
@@ -221,10 +222,13 @@ What it found, fixed with it:
   (`indexedDB.deleteDatabase` was blocked in Chrome). They share one now
   (`idb`), which closes when a delete or an upgrade asks
   (`versionchange`). Closing each call's own instead cost more than it
-  fixed: a call after the page sat idle 3 s took 8.1 ms in Chrome and
-  10.2 ms in Firefox, where main's took 1.5 and 2.8 and the shared
-  connection's 1.2 and 1.9, and back to back Firefox's took 0.70 ms to
-  the shared one's 0.08 (a `putState` 2.5 to 0.06).
+  fixed: a `persist` of one row after the page sat idle 3 s took 8.1 ms
+  in Chrome and 10.2 ms in Firefox, and back to back Firefox's took 0.70
+  ms (a `putState` 2.5). The shared one took it from main's 1.8 ms to 1.4
+  in Chrome and 4.7 to 1.3 in Firefox after the idle, and from 0.14 to
+  0.11 and 0.30 to 0.10 back to back (medians, Chrome 157 and Firefox 160
+  on an Apple M1; `make file-bench`'s row after an image, 0.23 to
+  0.14).
 - Past the quota, Chrome aborts the transaction at its commit, by `abort`
   alone: `putState`, waiting on `error` and `complete`, never answered.
   Firefox refuses the request, whose `error` reaches the transaction
