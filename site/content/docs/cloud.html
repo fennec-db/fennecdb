@@ -17,7 +17,9 @@ Serverless needs none of that: on Cloudflare the engine runs inside a Worker,
 a database in each Durable Object (<a href="#durable-objects">Serverless</a>),
 and a function on any platform is a client, of a server or of that Worker (<a
 href="#functions">Functions</a>). Servers in several regions take one URL
-through a Worker in front of them (<a href="#global-entry">Distributed</a>).</p>
+through a Worker in front of them (<a href="#global-entry">Distributed</a>),
+and <a href="#elsewhere">Cloudflare's pieces on other platforms</a> says what
+each part is called elsewhere.</p>
 
 <div class="tbl">
 <table>
@@ -735,6 +737,90 @@ href="/docs/sharding-reference#deploying">Deploying it</a>.</p>
     excludes.</li>
 </ul>
 
+<h2 id="elsewhere">Cloudflare's pieces on other platforms</h2>
+
+<p>Each part of the Cloudflare setup above has a counterpart, or none, on the
+other platforms. Only Cloudflare's are built and tested here; where a table
+says <i>an adapter</i>, it is one no one has written yet, shaped as
+<code>@fennecdb/cloudflare</code> is. The shortest way off Cloudflare is often
+to keep only its front: the entry Worker, Tunnel and Access stand in front of
+servers on <a href="#vm">VMs of any cloud</a>.</p>
+
+<h3 id="elsewhere-home">A database's home with no server</h3>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Platform</th><th>Its counterpart of a Durable Object</th><th>fennecdb there</th></tr></thead>
+<tbody>
+<tr><td>Fly.io</td><td>a Machine and a volume for each tenant, its requests sent to it with the <code>fly-replay</code> header (<code>instance=</code>); a body over 1 MB is not replayed</td><td>works today: <code>fennec-server</code> itself in each Machine (<a href="#fly">Fly.io</a>); the map from a tenant to its Machine is your front app's</td></tr>
+<tr><td>Rivet Actors</td><td>a keyed actor with an SQLite database of its own, on Rivet's cloud or yours</td><td>the closest: <code>@fennecdb/cloudflare</code> keeps a database in an object's SQL storage, a table a generation and a row a write, and an adapter would keep it in the actor's</td></tr>
+<tr><td>Azure</td><td>Durable Entities: an entity of Durable Functions handles one operation at a time</td><td>an adapter: the image and the writes in the entity's state</td></tr>
+<tr><td>Restate, Dapr, Orleans</td><td>a virtual object, an actor, a grain: one writer for each key, over a state store</td><td>an adapter, as above</td></tr>
+<tr><td>Deno Deploy</td><td>Deno KV: atomic writes checked against a version, but no single writer, and a value of 64 KiB at most</td><td>the weakest fit: an adapter would need a lease of its own and the image in chunks</td></tr>
+<tr><td>AWS, Google Cloud, Vercel, Netlify, Fastly, Supabase</td><td>no keyed single writer with storage</td><td>a server elsewhere, the functions its clients (<a href="#functions">Functions</a>)</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3 id="elsewhere-entry">An entry in front of regions</h3>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Platform</th><th>Its counterpart of the entry Worker</th><th>fennecdb there</th></tr></thead>
+<tbody>
+<tr><td>Fastly Compute</td><td>code at the edge with the client's location, a cache, backends and their headers; a request runs 2 minutes at most</td><td>the closest: the entry's logic would port, its long subscriptions reconnecting at the bound</td></tr>
+<tr><td>Vercel</td><td>Routing Middleware or an Edge Function, the client's country in <code>x-vercel-ip-country</code>; an answer begun within 25 s and streamed for up to 300 s; its runtime cache is a region's</td><td>a front that learns homes a region at a time</td></tr>
+<tr><td>Netlify</td><td>Edge Functions, the client's location in <code>context.geo</code></td><td>a front, as Vercel's</td></tr>
+<tr><td>Fly.io</td><td><code>fly-replay</code> with <code>region=</code>: a server sends a request on to another region</td><td>a region's front can hand a tenant's request to its home region</td></tr>
+<tr><td>AWS, Google Cloud, Azure</td><td>CloudFront with Lambda@Edge, the global load balancer, Front Door: each routes by host, path or the client's geography</td><td>a tenant's region written in its hostname, rather than learned</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3 id="elsewhere-origin">No open port, one caller let in</h3>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Platform</th><th>Its counterpart of Tunnel and Access</th></tr></thead>
+<tbody>
+<tr><td>AWS</td><td>CloudFront VPC origins: an ALB, an NLB or an EC2 instance in a private subnet, reached by CloudFront alone</td></tr>
+<tr><td>Azure</td><td>Front Door Premium with Private Link to the origin, approved on the origin's side</td></tr>
+<tr><td>Google Cloud</td><td>Identity-Aware Proxy in front of the load balancer, which admits named users and service accounts</td></tr>
+<tr><td>Fly.io</td><td>the private network: a Machine with no public address, reached over <code>.internal</code> or Flycast by the organization's apps</td></tr>
+<tr><td>any cloud</td><td><code>cloudflared</code> runs on any machine: the <code>deploy/</code> kit's tunnel works in front of a VM anywhere</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3 id="elsewhere-storage">Object storage for archives and files</h3>
+
+<p>An archive goes to a bucket by rclone, which speaks all of them:
+<code>s3</code> for S3, R2, Tigris (Fly.io's), Backblaze B2's S3 API and
+Supabase Storage's S3 endpoint, <code>gcs</code> for Google Cloud Storage,
+<code>azureblob</code> for Azure Blob Storage. The <a href="/docs/files">files
+recipe</a> is the S3 API's calls: S3, R2, Tigris, and Cloud Storage through its
+S3 interoperability; Azure Blob, Vercel Blob and Netlify Blobs speak their own
+APIs, which the recipe does not.</p>
+
+<h3 id="elsewhere-identity">An identity in a header</h3>
+
+<p>The server reads <code>Authorization: Bearer</code> alone and takes HS256,
+RS256 and ES256 tokens, its keys from a file a job of yours fetches
+(<a href="/docs/http-access#jwt-keys">Keys</a>); a proxy in front moves a
+platform's header there, as for Access.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Platform</th><th>Header and token</th><th>The server</th></tr></thead>
+<tbody>
+<tr><td>Google Cloud IAP</td><td><code>x-goog-iap-jwt-assertion</code>, ES256, keys at <code>https://www.gstatic.com/iap/verify/public_key-jwk</code>, <code>aud</code> <code>/projects/&lt;number&gt;/global/backendServices/&lt;id&gt;</code></td><td>takes it, as it takes Access's</td></tr>
+<tr><td>Azure App Service</td><td>with its token store on, Entra's ID token in <code>X-MS-TOKEN-AAD-ID-TOKEN</code> (RS256); <code>X-MS-CLIENT-PRINCIPAL</code> is base64 JSON, not a token</td><td>takes the ID token with Entra's keys, the app passing it on</td></tr>
+<tr><td>AWS ALB</td><td><code>x-amzn-oidc-data</code>, ES256, its parts base64 with padding and its key fetched one by one</td><td>refuses it, as a strict JWT reader does: verify it in the app, or send the identity provider's own token (<a href="/docs/auth">Auth</a>, Cognito)</td></tr>
+<tr><td>Vercel, Netlify, Fly.io, Fastly</td><td>none of their own</td><td>an identity provider's tokens: Clerk, Auth0, Supabase Auth, Cognito, Firebase (<a href="/docs/auth">Auth</a>)</td></tr>
+</tbody>
+</table>
+</div>
+
 <h2 id="functions">Functions: clients from anywhere</h2>
 
 <p>Vercel, Netlify, AWS Lambda, Cloud Run, Cloud Functions, Azure Functions
@@ -780,6 +866,40 @@ export async function POST(req) {
     Direct VPC egress, Azure's VNet integration); one without it is given an
     HTTPS address and the token. A Worker needs neither.</li>
 </ul>
+
+<h3 id="read-only">A read-only copy inside the function</h3>
+
+<p>A function can also hold a database in its own memory, read-only: a
+catalog, a search index, data that changes with a deploy. The image is built
+once, shipped in the bundle or a bucket, and loaded at a cold start; the
+module runs in Node, Bun and Deno as in a page, as the site's own search runs
+in the page from an image. Its writes stay in that instance and are lost with
+it: data that changes goes to a server.</p>
+
+<pre data-lang="js" data-label="build.mjs, at deploy">import { readFile, writeFile } from 'node:fs/promises';
+import { Fennec } from '@fennecdb/web';
+
+const db = await Fennec.open(await readFile('node_modules/@fennecdb/web/fennec.wasm'));
+db.run('create collection products (name text @text, price int @sorted)');
+db.run("put products {name: 'red fox mug', price: 12}");
+await writeFile('catalog.fennec', db.snapshot());</pre>
+
+<pre data-lang="js" data-label="api/search.js">import { readFile } from 'node:fs/promises';
+import { Fennec } from '@fennecdb/web';
+
+// Once an instance: the module and the image read at a cold start.
+const db = await Fennec.open(await readFile('node_modules/@fennecdb/web/fennec.wasm'));
+db.load(await readFile('catalog.fennec'));
+
+export async function GET(req) {
+  const q = new URL(req.url).searchParams.get('q') ?? '';
+  return Response.json(db.run('get products select name, price match name $1', [q]));
+}</pre>
+
+<p>Lambda, Cloud Run and Vercel give a function gigabytes of memory, so an
+image of tens of megabytes loads; a cold start pays its load, tens of
+milliseconds for 10 000 rows (<a href="/docs/serverless#cold-start">A cold
+start</a>).</p>
 
 <h2 id="not-a-home">Platforms that are not a home</h2>
 
