@@ -188,6 +188,46 @@ from a case can be held to it.
   rendered in all seven languages and run through each SDK. Each sent its
   case's text and parameters.
 
+## Audit of the published packages' dependencies
+
+The `audit` workflow (`.github/workflows/audit.yml`) reads what `packages.yml`
+publishes for known advisories. It is not a job of `ci.yml` and not a
+merge-queue check: an advisory with no fix yet would block every unrelated
+change, so it runs on a pull request that touches a manifest, a lockfile, the
+workflow or `tools/osv_check.py`, weekly (Monday, where a new advisory is
+found and read) and by hand.
+
+- `npm audit --omit=dev` for `@fennecdb/web`, `react`, `cloudflare` and
+  `langchain` (web has no lockfile and no dependency; its audit is of the one
+  npm resolves in a copy). Its JSON is read by `osv_check.py --npm-audit`,
+  failing on high and critical advisories not in the ignore list.
+- `govulncheck` (v1.9.0, `-format json`, on the newest Go: `go 1.22` in
+  `go.mod` is the oldest a user may build with, and a standard-library fix is
+  theirs to take). The Go module has no `require`, so what it audits is the
+  standard library; a called vulnerability fails.
+- `dotnet list package --vulnerable --include-transitive` for `FennecDb`. It
+  exits 0 whatever it finds, so `--nuget` reads its text: it fails on a
+  vulnerable package, on NU1900 (the advisory data could not be fetched) and on
+  a project that did not print "has no vulnerable packages".
+- `tools/osv_check.py` for Kotlin and Dart: api.osv.dev about the Maven
+  coordinates the Gradle files pin and the newest version a Dart constraint
+  admits (as no lockfile of a library is kept, `pubspec.lock` is ignored, the
+  newest version the constraint admits is what is audited; a caret on 0.x
+  follows pub, `^0.3` is `>=0.3.0 <0.4.0`). A Gradle dependency line not read
+  into a coordinate, or a version that is a variable, fails rather than goes
+  unaudited; HTTP calls are retried three times. A binary scanner with a
+  pinned checksum would add a download for two dependencies.
+- PyPI's package has no runtime dependencies, so nothing is audited there.
+- Test-only dependencies are not shipped and not audited; Dependabot reads
+  them.
+
+`tools/audit-ignore.json` is the one ignore list: each entry has an advisory
+id (GHSA, OSV, GO or CVE), the package, a reason and an expiry date, and
+every tool above reads it (npm, govulncheck, NuGet and OSV alike). An entry
+past its expiry, or missing a field, fails the run, so an ignore is a dated
+decision to revisit. It starts empty. `tools/test_osv_check.py` holds the
+parsing and the list's rules.
+
 ## Grafana
 
 **Grafana's data source binds a dashboard's values; it never splices them**
