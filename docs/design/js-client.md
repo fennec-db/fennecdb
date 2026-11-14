@@ -175,6 +175,56 @@ the chunk's number, so one moved, dropped from the middle or kept from an
 image before is refused; a row persists in 0.16 ms either way, the 32 MB
 image in 129 ms against 76. The OPFS file stays plain: it is `fennec-server`'s.
 
+### In real browsers
+
+`web/fennec.persist.test.js` and `web/fennec.file.test.js` hold these calls
+to in-memory stand-ins, Node having no IndexedDB and no origin private file
+system. `web/browser/` (`make browser-test`, the `browsers` jobs in CI) runs
+them against each engine's own -- Chrome and Firefox headless through
+puppeteer-core, Safari through safaridriver -- in a page that runs its suite
+itself (`persist.js`) and loads itself again where a test reloads it, its
+state kept between loads by the server that opened it (`run.mjs`). It holds
+what it races rather than timing a reload: a persist's transaction is held
+open by a read after a read until the page is gone (`holdNextWrite`), and
+the worker keeping a file (`file-worker.js`) counts every write, truncate
+and flush `openFile` asks of the file system and stops at the one it is
+armed for -- a write once half its bytes are in -- on a
+`SharedArrayBuffer`'s wait nothing ends but the reload, so the page is
+cross-origin isolated. A reload in the middle of a chunk's or a new image's
+transaction loses no acknowledged write, and the image keeps its chunks or
+the new one stands alone; a reload at each of a rewrite's eight steps, and
+in the middle of an append, keeps every answered write and empties the
+copy. Chrome is held to a quota over the DevTools protocol
+(`Storage.overrideQuotaForOrigin`) and Firefox by a preference (a group of
+origins gets a fifth of `dom.quotaManager.temporaryStorage.fixedLimit`, never
+under 10 MiB); Safari has neither, and its two quota tests are skipped by
+name. The page is told the quota, not left to read it: Chrome's
+`navigator.storage.estimate()` names 10 GiB whatever it enforces.
+
+What it found, fixed with it:
+
+- A page reloaded while its worker was busy found its file held: Chrome
+  stops a busy worker only 2 s after its page is gone, its sync access
+  handles open till then, and `openFile` was refused as open elsewhere for
+  1.98 to 2.01 s (Chrome 157). It now asks again for 3 s (`HELD_MS`) before
+  it refuses, a file this worker itself holds refused at once (`holding`).
+  Firefox ends the worker at once: the file opens 50 to 85 ms after the
+  reload.
+- Every `persist`, `restore`, `putState` and `getState` opened a connection
+  and left it open until the collector came, and a delete of the database
+  -- or another page's upgrade of it -- waited on all of them
+  (`indexedDB.deleteDatabase` was blocked in Chrome). Each closes its own
+  once its transaction is done.
+- Past the quota, Chrome aborts the transaction at its commit, by `abort`
+  alone: `putState`, waiting on `error` and `complete`, never answered.
+  Firefox refuses the request, whose `error` reaches the transaction
+  before the transaction holds it: `persist`'s refusal was `null`. All four
+  read the request's error and the abort's (`finished`).
+- A file past the quota: Chrome's file system throws QuotaExceededError,
+  Firefox's writes nothing and says so by its count, which the file now
+  names as the origin out of room. Either way the write is refused, every
+  later one too, and the file opened again holds every answered write.
+
 ## Durable Objects
 
 **A Durable Object keeps a database as a file would** (`integrations/cloudflare`,

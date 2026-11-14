@@ -98,7 +98,12 @@ const calls = {
   async open(name) {
     steps ??= new Steps(await navigator.storage.getDirectory());
     db = await Fennec.open(await MODULE);
-    file = await openFile(db, name, { dir: steps });
+    try {
+      file = await openFile(db, name, { dir: steps });
+    } catch (e) {
+      db.close();
+      throw e;
+    }
     return file.size;
   },
 
@@ -149,16 +154,12 @@ const calls = {
     }
   },
 
-  async estimate() {
-    return navigator.storage.estimate();
-  },
-
   /**
-   * Rows of `size` random characters until a write is refused: the rows
-   * answered, and the refusal.
+   * Rows of `size` random characters until a write is refused, `most` at
+   * most: the rows answered, and the refusal (`null` when none came).
    */
-  fill(size) {
-    for (let n = 0; ; n++) {
+  fill(size, most) {
+    for (let n = 0; n < most; n++) {
       try {
         db.run('put big {n: $1, body: $2}', [n, noise(size)]);
       } catch (e) {
@@ -166,6 +167,7 @@ const calls = {
         return { answered: n, error: { name: e.name, message: e.message, cause, where: steps.refused } };
       }
     }
+    return { answered: most, error: null };
   },
 };
 

@@ -51,7 +51,7 @@ the page does.</p>
 </div>
 
 <p>Beside a module the page loads <code>fennec.js</code> and the two modules it
-imports, 59 KB brotli as they are served with no build step; a bundler keeps
+imports, 60 KB brotli as they are served with no build step; a bundler keeps
 what the app uses of them. An app whose queries run on a server can import
 the client entry instead:</p>
 
@@ -388,9 +388,15 @@ const bytes = file.bytes();                        // what fennec and fennec-ser
   <li><b>The file is portable:</b> download it and <code>fennec
     notes.fennec</code> opens it, and a server's file loads in a page.</li>
   <li><b>One owner at a time:</b> a second worker or tab that opens the file
-    is refused.</li>
+    is refused, after waiting 3 s for it to be let go of — the time a page
+    reloaded while its worker was busy needs, since Chrome lets that worker
+    run on for 2 s.</li>
   <li><b>A crash leaves a whole file:</b> the next <code>openFile</code> holds
     every write <code>run</code> answered.</li>
+  <li><b>Tested in the browsers it runs in:</b> <code>persist</code>,
+    <code>restore</code> and <code>openFile</code> are held in Chrome, Firefox
+    and Safari to what they keep, the page reloaded in the middle of their
+    writes and past its quota.</li>
 </ul>
 
 <details class="deep"><summary>How openFile works, with timings</summary>
@@ -401,7 +407,13 @@ handed to a page loads there. <code>run</code> appends each statement's
 writes to it and flushes the file before it answers. It needs a dedicated
 worker, the one place a page gets synchronous access to a file, and it takes
 the file for itself: a second worker or tab that opens the file is refused,
-where a second process over a server's file would corrupt it.</p>
+where a second process over a server's file would corrupt it. A file held
+elsewhere is waited for 3 s first. A page loaded again finds its file in the
+hands of the worker of the page before until that worker has ended — at
+once when it was idle, but Chrome stops a busy worker only 2 s after its
+page is gone, and a page reloaded in the middle of a statement was refused
+for those 2 s. A second <code>openFile</code> of a file the same worker
+holds is refused at once.</p>
 
 <p>A <code>compact</code>, and writes appended past half the image (and past
 64 KB), put a new image in the file. It is written into a copy beside the
@@ -414,13 +426,20 @@ the file and from <code>persist</code>'s images alike; the page's memory
 keeps those versions until it opens the file again or runs
 <code>compact</code>, since a page has no thread to compact beside its
 queries the way a server and an app do. Once the file refuses a write, every later write is
-refused too; the database has to be opened from the file again.</p>
+refused too; the database has to be opened from the file again. A write past
+the origin's quota is refused so: Chrome's file system throws
+<code>QuotaExceededError</code>, Firefox's writes nothing, and either way the
+file opened again holds every write <code>run</code> answered.</p>
 
 <p><code>persist</code> and <code>restore</code> keep the same bytes in
 IndexedDB, wherever a page runs: the image once, then only the writes since
 the last call, as chunks. <code>persist</code> stores what was written when
 it is called, and IndexedDB decides when that reaches the disk; the file is
-flushed before every answer. Over 32.4 MB (61 000 rows with a
+flushed before every answer. Each call closes its connection once its
+transaction is done, so nothing of fennecdb's holds up a delete of the
+database (<code>indexedDB.deleteDatabase('fennecdb')</code>), and a
+<code>persist</code> or <code>putState</code> past the quota is refused with
+<code>QuotaExceededError</code>, what was stored before standing. Over 32.4 MB (61 000 rows with a
 <code>vector&lt;128&gt;</code>), in a worker (<code>make file-bench</code>):</p>
 
 <div class="tbl">

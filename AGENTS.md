@@ -32,6 +32,7 @@ make schema-golden  # integrations/schema-golden.json rewritten through the modu
 make openapi-golden  # integrations/openapi/ rewritten from the served documents; openapi-check: the API only grew
 make types-check  # web/fennec.d.ts held to web/fennec.js and a caller's code under tsc --strict, then docs-types
 make studio-highlight  # studio/highlight.js and the Grafana data source's copy rewritten from site/highlight.js
+make browser-test  # persist, restore and openFile in real browsers, reloaded mid-write (BROWSERS="chrome firefox safari")
 make pgvector-up  # PostgreSQL 17 + pgvector in Docker on 127.0.0.1:55432 for comparisons and --follow (pgvector-down)
 make server TOKEN=secret HTTP=127.0.0.1:8080  # the server against ./data.fennec
 make node ADMIN=secret  # a tenant node: fennec-server --dir tenants
@@ -98,6 +99,8 @@ and `web/client.d.ts` hold the types, `fennec types <file>` a schema's.
 (`fennec_journal`, `fennec_drain`; off until asked for), sealed by a
 `cryptoKey`; `openFile` keeps `fennec-server`'s own file in OPFS, never
 sealed, flushing a new image into `<name>~` before writing over the file.
+`web/browser/` holds both in real Chrome, Firefox and Safari, the page
+reloaded in the middle of their writes.
 
 ## Invariants
 
@@ -514,10 +517,12 @@ Covers `crates/fennec-bench/`.
   never retry it away or lengthen a sleep. A test waits for an event, not a
   time: it holds what it races (`Replica.setOnline(false)` before a write it
   reads back) and bounds only the wait for what must happen. A step
-  launching Chrome reads Chrome's files first (`warm`, `warm-chrome.mjs`),
-  never waiting longer for its port. A CI log names each failing test and
-  its assertion (spec reporters, Gradle's `testLogging`); a failing mobile
-  job uploads `test-reports-android` or `test-results-apple`.
+  launching a browser reads its files first (`warm`, `warm-chrome.mjs`),
+  never waiting longer for its port; a page reloaded in a test keeps its
+  state with the server that opened it (`web/browser/`). A CI log names
+  each failing test and its assertion (spec reporters, Gradle's
+  `testLogging`); a failing mobile job uploads `test-reports-android` or
+  `test-results-apple`.
 - [A test reads the clock from below](docs/design/conventions.md#the-clock)
   (`took >= wait`), bounding it from above only where the time is the
   property, by what it stands against with seconds to spare; elsewhere it
@@ -531,8 +536,9 @@ Covers `crates/fennec-bench/`.
 - [A server a test or a harness starts](docs/design/conventions.md#ports)
   listens on port 0, never a fixed or found-free port, found by its
   `listening on: http://<address>` stderr line, a router told its nodes by
-  the addresses they said; only a site needing its address before it binds
-  takes a system-picked port, held by a stand-in listener till then.
+  the addresses they said; only a site needing its address before it binds,
+  or a program naming no port it chose (safaridriver), takes a
+  system-picked port, held by a stand-in listener till then.
 - [A secret is compared by `crypto::ct_eq` alone](docs/design/conventions.md#secrets-compared)
   -- a token, a mark, a MAC, a signature, a proof, a password -- never by
   `==` or `!=`, which leave at the first byte that differs:
