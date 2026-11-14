@@ -147,7 +147,10 @@ reads it, then wipes the log's header; an entry carries a hash and the log
 names the file it was written for (its inode, and a hash of the bytes
 before the log's start), so an entry cut short ends it and a log beside
 another file -- one a restore or an import renamed into the place -- is
-ignored. A clean close syncs the file and removes the log. A tool that only
+ignored. A clean close syncs the file and removes the log, and so does a
+server's stop (<code>SIGTERM</code>, <code>docker stop</code>) and the
+shell's <code>-c</code>: a crash, or a storage error, leaves it beside the
+file for the next open. A tool that only
 reads the file (<code>fennec types</code>, <code>fennec verify
 data.fennec</code>) reads it with what the log holds put back and writes
 neither; a raw copy of the file taken after a power loss lacks those writes

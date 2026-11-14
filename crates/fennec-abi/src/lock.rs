@@ -138,6 +138,9 @@ impl Sink for Holding {
     fn flush(&mut self) -> CoreResult<Option<Durability>> {
         self.sink.flush()
     }
+    fn close_log(&mut self) {
+        self.sink.close_log()
+    }
 }
 
 /// Why [`hold`] did not take the lock.
