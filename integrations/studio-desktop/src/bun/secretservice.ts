@@ -9,10 +9,11 @@
 // token had ever been saved (#578's runs). So the app asks the service itself,
 // one D-Bus call, `org.freedesktop.Secret.Service.ReadAlias("default")`,
 // bounded at a few seconds: an answer that is a collection means the store is
-// there; "/" means there is none to keep anything in; no answer, or an error,
-// means no store. The call opens no prompt (a locked keyring is unlocked by
-// libsecret when an item is read, with the user, unbounded) and is spoken here
-// over the bus's socket, so no program outside the app is needed.
+// there; "/", asked again where gnome-keyring can say it of a connection too
+// new to it (askOne), means there is none to keep anything in; no answer, or
+// an error, means no store. The call opens no prompt (a locked keyring is
+// unlocked by libsecret when an item is read, with the user, unbounded) and is
+// spoken here over the bus's socket, so no program outside the app is needed.
 //
 // What D-Bus asks of a client is small for one call: a NUL byte and the SASL
 // EXTERNAL handshake (the uid, which the bus checks against the socket's
@@ -26,6 +27,8 @@ import { connect, type Socket } from "node:net";
 export const SECRET_SERVICE = "org.freedesktop.secrets";
 /** How long the store has to answer before the app says it is not there. */
 export const STORE_ANSWER_MS = 3000;
+/** How many times one connection asks ReadAlias("default") while the answer is "/" (askOne). */
+export const READ_ALIAS_TRIES = 3;
 
 export type StoreAnswer =
 	| { ok: true; collection: string }
@@ -256,7 +259,18 @@ function askOne(path: string, deadline: number, ms: number, uid: number): Promis
 			finish({ ok: false, why: authed ? "no-answer" : "no-bus", detail: `${authed ? `${SECRET_SERVICE} did not answer` : "the session bus did not answer"} within ${(ms / 1000).toFixed(1)} s` });
 		};
 		let timer = setTimeout(late, Math.max(0, deadline - Date.now()));
-		const CALL = 2;
+		// gnome-keyring knows a connection as a client only once an idle its D-Bus filter
+		// queues for each message has run (gkd-secret-service.c's service_message_filter),
+		// and a connection's first call can be handled before it: ReadAlias then finds no
+		// client, so no session and no collection, and answers "/" (its journal says
+		// "gkd_secret_service_get_pkcs11_session: assertion 'client' failed"; the arm64
+		// runner, right after a token was kept or cleared). Its answer is the event that
+		// the idle was queued before that call was handled, so a "/" is asked again on the
+		// same connection, READ_ALIAS_TRIES calls in all; a store with no default
+		// collection answers "/" to each.
+		let call = 2;
+		let asked = 1;
+		const readAlias = () => methodCall(call, SECRET_SERVICE, "/org/freedesktop/secrets", "org.freedesktop.Secret.Service", "ReadAlias", ["default"]);
 		try {
 			socket = connect({ path });
 		} catch (e) {
@@ -281,14 +295,22 @@ function askOne(path: string, deadline: number, ms: number, uid: number): Promis
 					Buffer.concat([
 						Buffer.from("BEGIN\r\n", "ascii"),
 						methodCall(1, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "Hello"),
-						methodCall(CALL, SECRET_SERVICE, "/org/freedesktop/secrets", "org.freedesktop.Secret.Service", "ReadAlias", ["default"]),
+						readAlias(),
 					]),
 				);
 			}
 			const { messages, used } = readMessages(pending);
 			pending = pending.subarray(used);
 			for (const m of messages) {
-				if ((m.type === METHOD_RETURN || m.type === ERROR) && m.replySerial === CALL) return finish(answerOf(m));
+				if ((m.type !== METHOD_RETURN && m.type !== ERROR) || m.replySerial !== call) continue;
+				const a = answerOf(m);
+				if (!a.ok && a.why === "no-default" && asked < READ_ALIAS_TRIES) {
+					asked++;
+					call++;
+					s.write(readAlias());
+					continue;
+				}
+				return finish(a);
 			}
 		});
 	});

@@ -472,7 +472,10 @@ them (201 MB), every saved server's a check ever made, each emptied by its
 removal and left in place.
 
 A failed check keeps what the app cannot say (`keepEvidence`, before `run.mjs`
-kills what is left): the unified log of the app and of WebKit's processes since
+kills what is left): every fact the app reported (`<check>.report.jsonl`, each
+window's load step by step, on every system: the next check's start empties the
+file, and a failure prints only its last 12 lines), the unified log of the app
+and of WebKit's processes since
 the check started, a `sample` of the app's `bun` while it runs, and any crash
 report written meanwhile, all in the logs CI uploads. A window whose page never
 loads is otherwise silent: Electrobun 2.0.4's navigation delegate implements
@@ -664,7 +667,33 @@ applies to.
   Bun.secrets against a timer (a `set` that lost the race may land after the
   app said it kept nothing, and an unlock prompt would be cut off); `gdbus`,
   `busctl` or `dbus-send` (none is on every desktop); and a file of the app's
-  own where there is no store, never.
+  own where there is no store, never. On the arm64 runner gnome-keyring
+  answered `ReadAlias("default")` with "/" now and then, right after a token
+  was kept or cleared, and the app refused in words a store that was there:
+  `serve`'s `serve-token` (132035918973, 132103481650), `remote`'s first save
+  (1 of 12 looped runs in 43601158459) and its form's Forget token (1 of 15
+  in 43603246274). The command threw in the test hooks unreported, and the
+  check waited its 30 s out saying nothing; a command that throws is now
+  reported with its words (`cmd-failed`, testhooks.ts), which fails the
+  check's wait at once, and a failed check keeps gnome-keyring's journal.
+  That journal said why, at the failure's millisecond:
+  `gkd_secret_service_get_pkcs11_session: assertion 'client' failed`, then
+  `gkd_secret_objects_lookup_collection: assertion 'session' failed`.
+  gnome-keyring knows a connection as a client once an idle its D-Bus filter
+  queues for each message has run (gkd-secret-service.c's
+  `service_message_filter`, at G_PRIORITY_HIGH "to make sure this ... is
+  scheduled before the actual method call"), and the app asks on a
+  connection of its own made for the one call, so its first call met that
+  race whenever gnome-keyring's loop was busy (it had just written the
+  keyring); libsecret's one shared connection meets it once. A "/" is asked
+  again on the same connection, three calls in all, each on the answer
+  before it: that answer is the event that the idle was queued before the
+  call was handled. A store with no default collection answers "/" to each,
+  a few milliseconds more. Rejected: a time between the calls, and a call of
+  another kind first (DBus.Peer.Ping is answered by GDBus in its own thread,
+  before the idle). It did not come back in the container (200 asks each at
+  once after an item was kept, 150 of `serve`'s token kept and read at once),
+  where the daemon's loop was never as late.
 - **WebView2's stores.** Electrobun's Windows `sessionClearStorageData` clears
   the first WebView2 view it finds, whatever partition it is asked for
   (win/nativeWrapper.cpp:14580, upstream #608): another window's store, while
@@ -687,7 +716,13 @@ applies to.
   asked after each try, not when the call returned: on the arm64 runner the app
   once said a removed connection's folder was gone and the check found it
   there. `storage` now runs on Windows and holds each folder gone, a closed
-  file window's too, on both runners.
+  file window's too, on both runners. `remote` waits for each removal as long
+  as the app gives one (3 s for its window to close, 20 s for its folder),
+  failing at once where the app says it gave a store up: its 10 s for all nine
+  was less, and on the x64 runner the first, the one with a window, was not
+  done 10 s after its window closed, another window's WebView2 starting beside
+  it (131970689776). Unloaded, the nine took 0.9 to 3.4 s (56 looped runs on
+  both runners, the four runs named below).
 - **New windows.** Electrobun 2.0.4 handles no WebView2 NewWindowRequested (it
   raises `new-window-open` only for a Ctrl+click it sees starting a
   navigation), so WebView2 opens a window of its own for a page's
@@ -853,6 +888,57 @@ has.
   window silent; the load again came 47 to 82 ms after the first on x64 and
   59 to 113 ms on arm64 (one each in 43104202430, 43107758866 and
   43109301246).
+- **A first load WebKitGTK cancelled.** A studio window's first load on
+  Linux sometimes ended 5 to 22 ms after its `will-navigate`, before anything
+  committed, and the window stayed blank: 7 of the 146 Linux runs of the
+  checks from 12 to 14 November failed so (`files`, `storage`, `remote`,
+  `serve`, `backups`), each with the same reports, a `did-navigate` and no
+  `did-commit-navigation` before it. Electrobun 2.0.4 hands the app WebKitGTK's
+  `load-failed` as an event no main-process handler takes, and the
+  `did-navigate` its load-changed FINISHED sends after it
+  (linux/nativeWrapper.cpp's onLoadChanged) as a load that finished. A shim
+  loaded into the app on the runners (`LD_PRELOAD`, a handler of its own on
+  each view's `load-failed`, printing the error) caught one on x64 in
+  43598872776: "Load request
+  cancelled" (WebKitNetworkError 302) as the load started, a saved server's
+  window opened again in its store 150 ms after it closed; WebKit draws no
+  error page for a cancel. It came in 1 of the 14 looped runs of the six
+  checks with studio windows there, and once in about 1 300 windows in an
+  `ubuntu:24.04` container with the same WebKitGTK (2.52.6) beside busy
+  loops; what cancels it is WebKit's. The app waits for that event, never a
+  time: a first load that ended with nothing committed is loaded again, at
+  most three times a window and only until a document of it commits
+  (`loadAgainIfDropped`, firstload.ts). Linux alone: the drop was seen
+  nowhere else, and on Windows Electrobun drops a NavigationCompleted that did
+  not succeed, so a failed load raises no event. `firstload` holds it with a
+  first load made to end the same way: the window's server is reached through
+  a proxy whose first answer to the page is 204 No Content, which WebKit stops
+  as it starts ("Frame load interrupted", WebKitPolicyError 102, no error
+  page); the page was loaded again at once and the studio there 372 ms later
+  in the container. Rejected: a time after `will-navigate` (a slow page would
+  be loaded again under itself, and a dropped one waited for), and a longer
+  wait in the checks (the window never loads).
+- **A window's first load on Windows.** Five Windows runs of the checks from
+  12 to 14 November stopped at a studio window's `will-navigate` with no
+  commit for the rest of their 30 s (`environment`, `storage`, `finder`,
+  `serve` twice; the two `serve`s, on arm64, with no report readable at the
+  failure at all). Each studio window there is a WebView2 browser of its own
+  (Electrobun makes a user data folder for each partition, and the app a
+  partition for each window), and its document waits for that browser before
+  its request leaves: in 56 looped runs of the six checks with studio windows
+  on the two runners (43594226957, 43598872776, 43601158459, 43601398293),
+  1 119 windows, `will-navigate` to the commit took 1.0 to 1.7 s at the
+  median, the page's own Navigation Timing putting that time before its
+  connection, and up to 20.1 s on x64 (`storage`'s windows opened while
+  another window's browser was ending and its folder being removed); every
+  window loaded. Not WPAD: the runners have "Automatically detect settings"
+  on and a `wpad` lookup that fails after 3 to 5 s, but with it off
+  (43601398293) the wait was the same. Whether the five were that tail or a
+  navigation WebView2 ended unseen (Electrobun drops a NavigationCompleted
+  that did not succeed, and a cancel draws no error page) is not known, and
+  none came back in those runs; a failed check keeps the window's every step
+  now, and a page that loaded says where its load's time went (`nav`, its
+  first state report).
 
 Desktop integration (phase 3 of #578). A `.fennec` opens from Explorer and a
 file manager, the app registers itself for that, the menus' keys, the last
