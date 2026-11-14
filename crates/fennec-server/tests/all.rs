@@ -19,6 +19,7 @@ mod start;
 mod stdin;
 mod studio;
 mod support;
+mod test_clock;
 mod tokens;
 mod tracing;
 mod version;

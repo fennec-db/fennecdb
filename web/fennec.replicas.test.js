@@ -21,6 +21,7 @@ import { createServer, connect as dial } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { connect, FennecError } from './client.js';
+import { needs } from './ci-prereq.mjs';
 
 async function binary(name) {
   for (const p of [`../target/debug/${name}`, `../target/release/${name}`]) {
@@ -36,6 +37,7 @@ async function binary(name) {
 }
 const bin = await binary('fennec-server');
 const shardBin = await binary('fennec-shard');
+needs(['fennec-server', bin, 'cargo build'], ['fennec-shard', shardBin, 'cargo build']);
 const skip = !bin
   ? 'no fennec-server binary (cargo build)'
   : !shardBin
