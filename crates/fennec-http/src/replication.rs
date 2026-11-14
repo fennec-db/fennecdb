@@ -54,7 +54,7 @@
 //! `&image=1` asks for an image whatever the positions say: a replica sends
 //! it after a record it could not apply.
 
-use crate::constant_eq;
+use crate::crypto::ct_eq;
 use crate::http::{Request, Response};
 use fennec_core::prelude::*;
 use std::cell::Cell;
@@ -1130,7 +1130,7 @@ impl Replication {
         let ok = self
             .token
             .as_ref()
-            .is_some_and(|t| constant_eq(given.as_bytes(), t.as_bytes()));
+            .is_some_and(|t| ct_eq(given.as_bytes(), t.as_bytes()));
         if ok {
             crate::audit::verified();
         }
@@ -1946,6 +1946,18 @@ impl Follower {
         }
 
         loop {
+            // A halt is looked at between messages, as an archiver looks at
+            // its stop, never left to the socket's cut alone: on Windows the
+            // cut -- a `shutdown` through a duplicate of the socket -- ends a
+            // read already waiting, but a read begun after it reads on, the
+            // primary's keep-alive every `ALIVE` keeping it short of its
+            // `SILENCE`. A follower between two reads at the halt -- landing
+            // a write, its fsync -- followed on for good, and the halt
+            // waited for it for good: five runs of Windows CI hung so. One
+            // that looked just before the cut ends after its next message.
+            if self.stop.load(Ordering::SeqCst) {
+                return Ok(());
+            }
             match stream.receive()? {
                 Message::Writes { first, records, .. } => {
                     let mut g = crate::held::write(&self.db);
@@ -2041,7 +2053,9 @@ impl Follower {
     }
 
     /// Stops following and stays a replica: started again, it follows on
-    /// from where it stopped.
+    /// from where it stopped. The cut ends a read waiting on the primary;
+    /// the session sees the flag at its next message whatever the socket
+    /// does with a read begun after the cut (`Follower::session`).
     pub fn halt(&self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(s) = lock(&self.conn).take() {

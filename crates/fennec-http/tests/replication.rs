@@ -153,6 +153,20 @@ fn caught_up(replica: &Node, primary: &Node) {
     }
 }
 
+/// `f` halted, as `Follower::halt` halts it, the wait for its thread
+/// bounded: a follower that read on past its halt's cut held the halt, and
+/// Windows CI's job with it, for hours, where it now fails here.
+fn halt(f: &Arc<Follower>) {
+    let (halted, done) = std::sync::mpsc::channel();
+    let f = Arc::clone(f);
+    std::thread::spawn(move || {
+        f.halt();
+        let _ = halted.send(());
+    });
+    done.recv_timeout(Duration::from_secs(20))
+        .expect("the halt waited 20 s for the follower's thread, which never ended");
+}
+
 fn write_some(node: &Node, from: usize, n: usize) {
     for i in from..from + n {
         let (status, body) = query(
@@ -295,7 +309,7 @@ fn a_replica_follows_and_a_restarted_one_goes_on_from_where_it_was() {
     // missed rather than for an image. The file is looked at before the
     // follower starts: read after, the follower had often fetched the
     // writes it missed already.
-    r.follower.as_ref().unwrap().halt();
+    halt(r.follower.as_ref().unwrap());
     let at = seq(&r);
     write_some(&p, 50, 10);
     drop(r);
@@ -351,7 +365,7 @@ fn a_primary_compacts_beside_the_database_while_a_replica_follows() {
     }
 
     let (seq_was, rows_were) = (seq(&p), rows(&p, "get items"));
-    r.follower.as_ref().unwrap().halt();
+    halt(r.follower.as_ref().unwrap());
     drop(p);
     let back = fennec_core::fs::open(&file).unwrap();
     assert_eq!(back.change_seq(), seq_was);
@@ -463,7 +477,7 @@ fn a_replica_on_the_forked_side_of_nothing_goes_on_without_an_image() {
 
     // The primary goes; `a` is promoted and `b` pointed at it. `b` holds
     // nothing `a` does not, so it goes on from where it was.
-    b.follower.as_ref().unwrap().halt();
+    halt(b.follower.as_ref().unwrap());
     drop(b);
     drop(p);
     let (status, _) = http(a.port, "POST", "/_replication/promote", Some(TOKEN), "");
@@ -540,7 +554,7 @@ fn a_read_sent_after_a_write_waits_for_it_on_a_replica() {
     // A replica held back: without the header a read is answered from
     // where it stands, and with it waits until the write is there.
     let f = r.follower.as_ref().unwrap();
-    f.halt();
+    halt(f);
     let put = "{\"query\":\"put items {name: \\\"held back\\\", n: 999, e: [1.0, 0.5, 2.0]}\"}";
     let (_, head, _) = raw(p.port, "POST", "/query", "", put);
     let written: u64 = head
@@ -603,10 +617,13 @@ fn a_read_sent_after_a_write_waits_for_it_on_a_replica() {
 }
 
 /// A subscription's first event, read on a connection of its own -- or,
-/// refused, its whole answer: the status and that text.
+/// refused, its whole answer: the status and that text. Bounded as a whole,
+/// not a read at a time: a stream sending its keep-alives and no event never
+/// lets a read run out, and was read for as long as it stayed open.
 fn first_event(port: u16, path: &str, headers: &str) -> (u16, String) {
+    const WITHIN: Duration = Duration::from_secs(30);
+    let deadline = Instant::now() + WITHIN;
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
     // Closed after an answer that is not a stream, which a stream is anyway.
     write!(
         s,
@@ -624,13 +641,22 @@ fn first_event(port: u16, path: &str, headers: &str) -> (u16, String) {
                 return (head[9..12].parse().unwrap(), event.to_string());
             }
         }
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !left.is_zero(),
+            "{path}: no event and no end within {WITHIN:?}, only {out:?}"
+        );
+        s.set_read_timeout(Some(left)).unwrap();
         match s.read(&mut chunk) {
             Ok(0) | Err(_) => break,
             Ok(n) => out.push_str(&String::from_utf8_lossy(&chunk[..n])),
         }
     }
     let (head, body) = out.split_once("\r\n\r\n").unwrap_or((&out, ""));
-    (head[9..12].parse().unwrap(), body.to_string())
+    let status = head.get(9..12).and_then(|s| s.parse().ok());
+    let status =
+        status.unwrap_or_else(|| panic!("{path}: no answer within {WITHIN:?}, only {out:?}"));
+    (status, body.to_string())
 }
 
 /// A put of a row named `name` on `node`: the change it left it at.
@@ -689,7 +715,7 @@ fn a_stream_and_changes_sent_after_a_write_wait_for_it_on_a_replica() {
         ),
     ];
     for (i, (what, target, kind)) in cases.into_iter().enumerate() {
-        f.halt();
+        halt(f);
         let name = format!("held back {i}");
         let written = put_named(&p, &name);
         assert!(
@@ -1058,7 +1084,7 @@ fn a_primary_and_its_replica_compact_on_their_own_while_writes_go_on() {
 
     // Opened again over the file it compacted, it goes on from where it was.
     let images = r.follower.as_ref().unwrap().images();
-    r.follower.as_ref().unwrap().halt();
+    halt(r.follower.as_ref().unwrap());
     let at = seq(&r);
     drop(r);
     write_some(&p, 500, 5);
@@ -1315,6 +1341,91 @@ fn a_promotion_does_not_wait_for_a_primary_that_never_answers() {
     assert!(!db.read().unwrap().history().following);
 }
 
+/// A halt ends a follower that is between two reads as it comes, whatever
+/// its socket does with a read begun after the cut. On Windows the cut -- a
+/// `shutdown` through a duplicate of the socket -- ends a read already
+/// waiting, not one begun after it, which read on: the primary's keep-alive
+/// every 2 s kept it short of its 10 s of silence, the session never looked
+/// at the halt again, and the halt waited for it for good. Five runs of
+/// Windows CI hung so, each in a test halting a follower that had just
+/// landed a write. Here the follower is held in its hello's callback, past
+/// its read, until the cut has reached the primary's side of a relay
+/// between them; let go, it reads no more.
+#[test]
+fn a_halt_ends_a_follower_held_between_two_reads() {
+    use std::sync::mpsc;
+    use std::sync::{Condvar, Mutex};
+    let d = dir("halt-between-reads");
+    let p = primary(&d.join("p.fennec"), replication::DEFAULT_BUFFER);
+    // The follower's bytes to the primary and back, and word once the
+    // follower's side has ended: the cut's FIN.
+    let relay = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let via = relay.local_addr().unwrap();
+    let (ended, cut) = mpsc::channel();
+    let to = p.port;
+    std::thread::spawn(move || {
+        for conn in relay.incoming() {
+            let Ok(follower) = conn else { continue };
+            let primary = TcpStream::connect(("127.0.0.1", to)).unwrap();
+            let mut up = (follower.try_clone().unwrap(), primary.try_clone().unwrap());
+            let ended = ended.clone();
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut up.0, &mut up.1);
+                let _ = ended.send(());
+            });
+            let mut down = (primary, follower);
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut down.0, &mut down.1);
+            });
+        }
+    });
+    let file = d.join("r.fennec");
+    let (mut db, feed) =
+        replication::open(file.to_str().unwrap(), replication::DEFAULT_BUFFER).unwrap();
+    let lineage = db.history().lineage.clone();
+    db.follow(lineage).unwrap();
+    let db = Arc::new(RwLock::new(db));
+    let follower = Follower::new(
+        &format!("http://{via}"),
+        TOKEN.into(),
+        Arc::clone(&db),
+        Some(feed),
+        true,
+    )
+    .unwrap();
+    // Held after the hello is read and taken, before the next read, until
+    // the gate opens.
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let (said, hello) = mpsc::channel();
+    let held = Arc::clone(&gate);
+    follower.on_hello(Box::new(move |_| {
+        let _ = said.send(());
+        let (open, opened) = &*held;
+        let mut open = open.lock().unwrap();
+        while !*open {
+            open = opened.wait(open).unwrap();
+        }
+    }));
+    follower.start("halt-between-reads".into()).unwrap();
+    hello
+        .recv_timeout(Duration::from_secs(20))
+        .expect("the primary never said hello to the follower");
+    let (halted, done) = mpsc::channel();
+    let f = Arc::clone(&follower);
+    std::thread::spawn(move || {
+        f.halt();
+        let _ = halted.send(());
+    });
+    cut.recv_timeout(Duration::from_secs(20))
+        .expect("the halt never cut the follower's connection");
+    *gate.0.lock().unwrap() = true;
+    gate.1.notify_all();
+    done.recv_timeout(Duration::from_secs(20))
+        .expect("the follower read on past its halt's cut, and the halt never ended");
+    assert!(!follower.running());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// A copy's own sink, panicking as it is handed a write: a panic as the
 /// copy applies its primary's records, past the point the engine puts them
 /// back.
@@ -1463,6 +1574,6 @@ fn a_copy_that_could_not_apply_a_write_takes_an_image_and_goes_on() {
             .collect();
         assert_eq!(got, rows(&p, sql), "{sql}");
     }
-    follower.halt();
+    halt(&follower);
     let _ = std::fs::remove_dir_all(&d);
 }
