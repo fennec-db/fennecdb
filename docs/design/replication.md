@@ -781,3 +781,31 @@ The exchange's messages are `Scram`'s, the nonce given, so
 the proof and the server signature among them; the server signature is
 compared by `ct_eq`, as every signature is
 ([conventions.md](conventions.md#secrets-compared)).
+
+**Run on CI.** Those tests -- fennec-import's `tests/pg.rs` (9) and
+`tests/follow.rs` (4), fennec-server's `tests/follow.rs` (4), each
+`#[ignore]`d for the server it needs -- ran only where a developer had
+Docker, so no CI run held this section's invariant until ci.yml's
+`postgres (import and --follow)` job, which runs `make import-test`'s two
+cargo lines on every pull request, merge-queue run and push to main. Its
+server is a service container given what `make pgvector-up` gives its
+own: the Makefile's `PG_IMAGE`, PostgreSQL 17.12 with pgvector 0.8.7 by the
+digest of the tag's index (amd64 and arm64), its options and its port,
+`-c wal_level=logical` through the service's `command` (the runner's since
+2.333.0); `make pgvector-tls` turns TLS on in it once the checkout holds
+the certificates. The job fails unless cargo's two summaries count every
+test the three files mark `#[ignore]` passed and none ignored: a filter
+that matches nothing once a module is renamed, or a test a feature
+compiles out (`verify_full_speaks_tls_to_a_live_server` is `tls`'s),
+passes cargo. Either server is ready once `pg_isready` answers over TCP
+inside its container -- the service's health check, `pgvector-up`'s loop,
+each 120 tries a second apart at most: the image's entrypoint first runs a
+server on the socket alone for its setup and stops it, a second of a 9 s
+start, and a check over the socket could take that one for the real server
+and hand the next statement one shutting down. `make pgvector-tls` ends
+once a session over TCP is encrypted, `pg_reload_conf()` being a signal
+the server takes in its own time. Nineteen runs of both lines on an Apple
+silicon Mac beside other builds (load average 22 to 76) all passed: the 13
+in 15 to 103 s, the 4 in 5 to 22 s, every `converge` within 4.3 s of its
+20 (six runs timed); the long one is `follow::a_broken_stream_loses_nothing`,
+66 connections each under TLS and SCRAM in a debug build.

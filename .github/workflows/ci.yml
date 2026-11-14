@@ -343,6 +343,81 @@ jobs:
       - name: Both sync runners ran every scenario
         run: node integrations/sync-scenarios-check.mjs
 
+  # docs/design/replication.md#follow: the import's PostgreSQL arm and
+  # `--follow` -- COPY, pgoutput, the mirror fennec-server serves, SCRAM
+  # and TLS against the real server -- are tests marked `#[ignore]`, which
+  # need PostgreSQL 17 with pgvector and wal_level=logical: the server
+  # `make pgvector-up` starts on a developer's machine, here a service
+  # container given the same image, options and port (a service's `command`
+  # is the runner's since 2.333.0). It is ready once `pg_isready` answers
+  # over TCP, polled a second apart and failed after 120 tries: the image
+  # first runs a server of its own on the socket alone, for its setup. TLS
+  # is turned on once the checkout holds fennec-wire's test certificates,
+  # by `make pgvector-tls`. No cache: a checkout's new file times make
+  # cargo build the workspace's crates again whatever target/ holds, what it
+  # would keep is fennec-tls's few crates from outside, and the
+  # repository's caches are at GitHub's 10 GB already.
+  postgres:
+    name: postgres (import and --follow)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    services:
+      postgres:
+        # The Makefile's PG_IMAGE: a new one changes both.
+        image: pgvector/pgvector:0.8.7-pg17@sha256:b513c48566e4777cd3370451400000c78eda6a08131d68f4c31d4a76f27bd8fd
+        env:
+          POSTGRES_PASSWORD: fennec
+          POSTGRES_DB: fennecbench
+        ports:
+          - 55432:5432
+        command: >-
+          postgres -c shared_buffers=1GB -c maintenance_work_mem=1GB
+          -c max_parallel_workers_per_gather=0 -c wal_level=logical
+        options: >-
+          --shm-size=2g
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres -d fennecbench"
+          --health-interval 1s --health-timeout 5s --health-retries 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: TLS on in it, fennec-wire's test CA's certificate
+        env:
+          PG: ${{ job.services.postgres.id }}
+        run: make pgvector-tls PG="$PG"
+
+      - name: Install the pinned toolchain
+        run: rustup show
+
+      # Built first, so the next step's time is the tests' and the server's.
+      - name: Build the tests
+        run: |
+          cargo test -p fennec-import --test all --no-run
+          cargo test -p fennec-server --test all --no-run
+
+      # `make import-test`'s two runs, less its server's start and stop.
+      - name: The import's and --follow's tests against PostgreSQL 17
+        run: |
+          set -o pipefail
+          { cargo test -p fennec-import --test all -- --ignored pg:: follow:: &&
+            cargo test -p fennec-server --test all -- --ignored follow::; } 2>&1 | tee "$RUNNER_TEMP/import-test.log"
+
+      # A filter that matches nothing, or a test a feature compiles out,
+      # passes cargo: the two runs' summaries must count every test the
+      # three files mark `#[ignore]` passed, and none ignored.
+      - name: Every one of them ran and passed, none ignored
+        run: |
+          want=$(cat crates/fennec-import/tests/pg.rs crates/fennec-import/tests/follow.rs \
+            crates/fennec-server/tests/follow.rs | grep -c '^[[:space:]]*#\[ignore')
+          runs=0 passed=0 ignored=0
+          while read -r line; do
+            [[ $line =~ ([0-9]+)\ passed\;\ ([0-9]+)\ failed\;\ ([0-9]+)\ ignored\; ]] || continue
+            runs=$((runs + 1)) passed=$((passed + BASH_REMATCH[1])) ignored=$((ignored + BASH_REMATCH[3]))
+          done < <(sed 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/import-test.log" | grep '^test result: ')
+          echo "$runs runs: $passed passed and $ignored ignored, of the $want tests marked #[ignore]"
+          if [ "$runs" -ne 2 ] || [ "$passed" -ne "$want" ] || [ "$ignored" -ne 0 ]; then exit 1; fi
+
   # Windows, which no release is built for yet: the programs and the native
   # library build, and `<file>.lock` (`LockFileEx` there) refuses a second
   # holder -- in this process, in another, a second `fennec-server --file`
