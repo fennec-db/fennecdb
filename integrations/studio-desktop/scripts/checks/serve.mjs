@@ -31,9 +31,13 @@ async function ask(c, what, ms = 30000) {
 const status = async (url, token) => (await fetch(url, { headers: token ? { authorization: `Bearer ${token}` } : {} })).status;
 /** The fennec-server processes on `path` (`fennec-server.exe` on Windows): the app's (under its bundle) and any other. */
 const serversOn = (path) => procs().filter((p) => /fennec-server(\.exe)? /.test(p.command) && p.command.includes(`--file ${path} `));
+// Only for "a port asked for", which the app must be told before its server binds. Picked on the
+// wildcard address: Windows lets a socket bind 127.0.0.1 on a port another program holds on
+// 0.0.0.0 (unless it asked for SO_EXCLUSIVEADDRUSE), and the app, finding that one answering on
+// 127.0.0.1, rightly calls the port taken; two binds on 0.0.0.0 conflict on every system.
 const freePort = () =>
   new Promise((resolve) => {
-    const s = createServer().listen(0, '127.0.0.1', () => {
+    const s = createServer().listen(0, '0.0.0.0', () => {
       const { port } = s.address();
       s.close(() => resolve(port));
     });
@@ -196,15 +200,17 @@ const takenAgain = await waitNotice(`Port ${TAKEN} is taken`, 15000, n);
 await pressNotice(takenAgain, 'ok');
 await pressNotice(taken, 'ok');
 
-step('Change the port: the serve sheet on it, at the port that was taken; another port starts it, and the callout goes');
+step('Change the port: the serve sheet on it, at the port that was taken; emptied, any free port starts it, and the callout goes');
 await evalIn('launcher', `document.getElementById('srv-failed-port').click(); return 1`);
 const sheetOn = await until(async () => (await evalIn('launcher', `return document.getElementById('sheet').open && JSON.stringify([document.getElementById('sheet-title').textContent, document.getElementById('port').value])`)).value, 10000, 'the serve sheet');
 assert.deepEqual(JSON.parse(sheetOn), [`Serve ${basename(OTHER)}`, String(TAKEN)]);
-const MOVED = await freePort();
+// The field emptied, the system picks the port (the sheet's "any free port"). A port the check
+// found free and let go of was taken by the time the app asked on a Windows runner ("Port 50478
+// is taken"): a port is never found free and handed on, as the repo's rule for ports says.
 n = lines().length;
-await evalIn('launcher', `const p = document.getElementById('port'); p.value = ${JSON.stringify(String(MOVED))}; p.dispatchEvent(new Event('input', { bubbles: true })); document.getElementById('sheet-start').click(); return 1`);
-const moved = await waitFor((l, i) => i >= n && l.what === 'served' && l.path === OTHER, 30000, 'served on the port it was changed to');
-assert.equal(moved.port, MOVED);
+await evalIn('launcher', `const p = document.getElementById('port'); p.value = ''; p.dispatchEvent(new Event('input', { bubbles: true })); document.getElementById('sheet-start').click(); return 1`);
+const moved = await waitFor((l, i) => i >= n && l.what === 'served' && l.path === OTHER, 30000, 'served on the port the system picked');
+assert.ok(moved.port > 0 && moved.port !== TAKEN, `served on ${moved.port}, not the taken ${TAKEN}`);
 await until(async () => (await evalIn('launcher', `return document.getElementById('srv-failed').hidden && document.getElementById('srv-chip').textContent`)).value === 'Running', 10000, 'the callout gone once it runs');
 assert.equal((await ask({ cmd: 'stop-served', path: OTHER }, 'stop-served-result')).ok, true);
 blocker.close();
