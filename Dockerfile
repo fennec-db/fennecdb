@@ -54,12 +54,30 @@ RUN mkdir -p /data
 FROM scratch
 
 COPY --from=build /built/fennec-server /usr/local/bin/fennec-server
-# A named volume inherits this directory's ownership, so the non-root process
-# can write to it. With a bind mount the ownership comes from the host:
-#   docker run -v $PWD/data:/data --user $(id -u):$(id -g) ...
+# 65534's already: a named volume Docker fills from it, and a pod that mounts
+# nothing at /data, need no hand-over (below).
 COPY --from=build --chown=65534:65534 /data /data
 
-USER 65534:65534
+# No USER: the image starts as root, and fennec-server becomes 65534:65534
+# itself before it opens a file or starts a thread -- dropping its
+# supplementary groups, then its group, then root, and checking root cannot
+# be had back. Root is kept that long for one thing: a volume a platform
+# mounts (Fly's, Render's, Railway's, a bind mount, Docker's with
+# volume-nocopy) is a file system whose root is root's, where a process
+# started as 65534 cannot make its file, and this image has no shell to
+# chown it with. So the server first hands /data over -- the directory and
+# the database's files in it, nothing else, and only where /data is a
+# volume of its own holding nothing but the database and a lost+found
+# (docs/design/integrations.md#the-images-user) -- as the postgres and redis
+# images' entrypoints do in theirs.
+#
+# An environment variable, not a flag, so it holds when CMD is overridden.
+# `--ping` and anything else run in the container (`docker exec`) drop root
+# the same way. Started as another user -- `docker run --user 1000:1000`,
+# Kubernetes' runAsUser -- the server passes the variable over and runs as
+# that user, with the volume that user's already. FENNEC_USER= (empty) keeps
+# root, which nothing here needs.
+ENV FENNEC_USER=65534:65534
 
 VOLUME /data
 EXPOSE 8080

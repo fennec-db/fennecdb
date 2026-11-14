@@ -22,5 +22,6 @@ mod support;
 mod test_clock;
 mod tokens;
 mod tracing;
+mod user;
 mod version;
 mod windows;

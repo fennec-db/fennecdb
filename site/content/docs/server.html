@@ -95,6 +95,7 @@ href="/docs/sharding">Tenants and sharding</a>.</p>
 <tr><td><code>--call-max-rows &lt;n&gt;</code></td><td>The most rows one call of a <a href="/docs/fennecql#named-statements">named statement</a> examines; past it the call is put back and refused (400), never answered from the rows it reached. Default <code>100000</code>.</td></tr>
 <tr><td><code>--call-rate &lt;n&gt;</code></td><td>Calls a second from one scoped token's subject and issuer in each tenant, and runs of the statements bound to its writes (<a href="/docs/http-access#wakes">Waking a bound statement</a>), 429 with <code>Retry-After</code> past it; <code>0</code> for no bound. The server's token is not held. Default <code>100</code> (<a href="/docs/http-access#calls">Calling a named statement</a>).</td></tr>
 <tr><td><code>--request-rate &lt;n&gt;</code></td><td>Requests a second from one scoped token's subject and issuer to each database or tenant, every route counted, 429 with <code>Retry-After</code> and <code>retry_after_ms</code> past it, before anything of the request runs; <code>0</code> for no bound. The server's token is not held. A call is a request too, held to both. Default <code>1000</code> (<a href="/docs/http-access#request-rate">Requests a second</a>).</td></tr>
+<tr><td><code>--user &lt;uid&gt;:&lt;gid&gt;</code></td><td>Started as root, runs as this user and group, in numbers: the directory the server writes in (<code>--file</code>'s, or <code>--dir</code>) is handed to them first, where it is a volume of its own holding nothing but the database, then root is dropped for good, before any file is opened. Also read from <code>FENNEC_USER</code>, which the Docker image sets to <code>65534:65534</code>; started as any other user, the server passes the variable over and refuses a <code>--user</code> it is not. Unix only (<a href="cloud.html#volume-owner">Who owns the volume</a>).</td></tr>
 <tr><td><code>--insecure</code></td><td>Allows a non-loopback address without a token.</td></tr>
 <tr><td><code>--ping</code></td><td>Asks the server whether it is up and exits, over TLS too where the server speaks it (<a href="#limits">health checks</a>).</td></tr>
 <tr><td><code>-V, --version</code></td><td>Prints <code>fennec-server &lt;version&gt;</code> on stdout and exits 0, before the file is opened or a port bound. Releases up to 0.1.12 have no such flag: the first line of <code>--help</code>, on stderr, names theirs.</td></tr>
@@ -112,7 +113,7 @@ href="/docs/sharding">Tenants and sharding</a>.</p>
 <tbody>
 <tr><td><code>0</code></td><td>It stopped as asked: a signal, or the end of stdin under <code>--exit-on-stdin-close</code>, after the final sync. A signal that comes before the server has opened its file ends it by the system's default action instead, with no code of its own. <code>--ping</code>: a server answers. <code>--version</code> and <code>--help</code>: printed.</td></tr>
 <tr><td><code>1</code></td><td>A server over a file or in memory could not start: its file could not be opened (another process holds it, or it cannot be read), <code>--follow</code>'s guard could not be put on it, a replica's file was started without <code>--replica-of</code> or <code>--promote</code>, its history could not be settled (a promotion's fork, or its sync, failed), or its HTTP port could not be had. Or <code>--follow</code>'s mirror stopped, before the server served or after, or once serving its listener failed — after the final sync and with no checkpoint. <code>--ping</code>: none answers.</td></tr>
-<tr><td><code>2</code></td><td>A flag or its value was refused, before anything was opened: an open address with no token among them, <code>--tls-cert</code> without <code>--tls-key</code> or the reverse, a certificate or key that cannot be read or parsed, a key that is not the certificate's. Also a node's directory that could not be used, a node's HTTP port or <code>--metrics</code>' that could not be had, and a thread the start could not make (after the final sync, with no checkpoint).</td></tr>
+<tr><td><code>2</code></td><td>A flag or its value was refused, before anything was opened: an open address with no token among them, <code>--tls-cert</code> without <code>--tls-key</code> or the reverse, a certificate or key that cannot be read or parsed, a key that is not the certificate's. Also a server started as root that could not become its <code>--user</code> (a container without the <code>SETUID</code> and <code>SETGID</code> capabilities), a node's directory that could not be used, a node's HTTP port or <code>--metrics</code>' that could not be had, and a thread the start could not make (after the final sync, with no checkpoint).</td></tr>
 </tbody>
 </table>
 </div>
@@ -122,7 +123,8 @@ open, before anything writes the file or runs beside it, so a failed start
 has written only <code>&lt;file&gt;.lock</code> and what an open writes — the
 file, or a node's directory, made empty where there was none, a torn tail cut,
 and on Linux the writes a crashed server had made durable written back from
-its sync log — and a supervisor restarting
+its sync log — and, started as root, the owner of a volume it handed to
+<code>--user</code> before it read the rest of its flags; a supervisor restarting
 it again and again changes nothing more. A server that stops on a failure
 writes no checkpoint either: the next open links what the graphs kept in the
 file left. Between the ports being taken and the server answering — the open
@@ -704,8 +706,10 @@ other monitoring systems</a>.</p>
     localhost.</li>
   <li><b>Run one instance per file.</b> Two writers corrupt it: on Kubernetes,
     a <code>StatefulSet</code> with one replica.</li>
-  <li><b>A volume a platform makes is often root's,</b> and the image runs as
-    65534: <a href="cloud.html#volume-owner">Who owns the volume</a>.</li>
+  <li><b>It serves as 65534, on any volume.</b> The image starts as root, and
+    the server hands a volume a platform made root's to <code>65534:65534</code>
+    before it becomes that user: <a href="cloud.html#volume-owner">Who owns the
+    volume</a>.</li>
   <li><b>Write every flag out</b> when you override the command, or the data
     file is dropped.</li>
 </ul>
