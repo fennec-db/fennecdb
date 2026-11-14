@@ -1677,6 +1677,11 @@ export declare class Fennec<S extends AnySchema<S> = Schema, Rel extends Relatio
     length: number,
     parts: () => Iterable<Uint8Array | ArrayBuffer> | AsyncIterable<Uint8Array | ArrayBuffer>,
   ): Promise<number>;
+  /**
+   * Lets the database go. A `persist` of it not yet run is refused, as is
+   * a `restore` or `openFile` not yet done with it, and every later one; a
+   * `persist` already storing what it took finishes.
+   */
   close(): void;
 
   /**
@@ -1722,10 +1727,17 @@ export interface PersistOptions {
  * Writes the database into IndexedDB under `key`: the image the first time,
  * then only the writes since the last call. Returns the bytes written.
  * Calls on one database -- with `restore` and `openFile` -- run one after
- * another in call order, each storing what was written by its turn.
+ * another in call order, each storing what was written by its turn. One
+ * not yet run when the database is closed is refused, naming the close; one
+ * called while a `restore` is out is refused when that restore fails,
+ * naming it, unless a later `restore` called before it loads its record.
  */
 export function persist(fennec: Fennec<any, any>, key?: string, opts?: PersistOptions): Promise<number>;
-/** Restores from IndexedDB, image and chunks; `false` when there is no record. */
+/**
+ * Restores from IndexedDB, image and chunks; `false` when there is no
+ * record. In turn with `persist` and `openFile`; refused when the database
+ * is closed before it runs, or before it loads what it read.
+ */
 export function restore(fennec: Fennec<any, any>, key?: string, opts?: PersistOptions): Promise<boolean>;
 /** Free-form state (cursors) -- next to the image, under a separate key. */
 export function putState(key: string, value: unknown): Promise<void>;
@@ -1756,7 +1768,10 @@ export interface FennecFile {
  * on `run` appends every statement's writes to it and flushes before it
  * answers. Only in a dedicated worker, one at a time a file: one another
  * worker holds is waited for 3 s, then refused -- the worker of a page
- * reloaded while it was busy lets go of it only once it has ended.
+ * reloaded while it was busy lets go of it only once it has ended. In turn
+ * with `persist` and `restore`: refused, its file let go of, once the
+ * database is closed before it has opened the file, and, called while a
+ * `restore` is out, when that restore fails.
  */
 export function openFile(
   fennec: Fennec<any, any>,

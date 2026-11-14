@@ -416,6 +416,141 @@ test('a persist called while restore is out runs after it, where it left the dat
   assert.deepEqual(ns(back), [1, 2, 3]);
 });
 
+// A closed database gives an empty image. A persist that waited its turn,
+// or retried once its connection had ended, ran after the page closed the
+// database, stored that empty image over the record, deleted its chunks,
+// and answered as if it had stored the database: restore then refused the
+// record as corrupt.
+test('a persist or restore that has not run by the close is refused, the record standing', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async (t) => {
+  const idb = fakeIndexedDB();
+  globalThis.indexedDB = idb;
+  globalThis.IDBKeyRange = KeyRange;
+  const { Fennec, persist, restore } = await import('./fennec.js');
+  const ns = (d) => d.rows('get t select n order n').map((r) => r.n);
+  const restored = async (key) => {
+    const back = await Fennec.open(wasm);
+    assert.equal(await restore(back, key), true, `${key} restores`);
+    return ns(back);
+  };
+  const stored = async (key) => {
+    const db = await Fennec.open(wasm);
+    db.run('create collection t (n int)');
+    db.run('put t {n: 1}');
+    await persist(db, key);
+    db.run('put t {n: 2}');
+    await persist(db, key);
+    return db;
+  };
+  const closed = /the database was closed/;
+
+  await t.test('one waiting behind a refused one, which owed an image', async () => {
+    const db = await stored('q');
+    db.run('put t {n: 3}');
+    idb.refuse = 'QuotaExceededError';
+    const refused = persist(db, 'q');
+    const waiting = persist(db, 'q');
+    db.close();
+    await assert.rejects(refused, { name: 'QuotaExceededError' });
+    await assert.rejects(waiting, closed);
+    assert.deepEqual(await restored('q'), [1, 2]);
+  });
+
+  await t.test("one waiting behind another key's, which took its image at the call", async () => {
+    const db = await stored('k2');
+    const other = persist(db, 'k1');
+    const back = persist(db, 'k2');
+    db.close();
+    assert.ok((await other) > 0, 'the one running at the close stores what it took');
+    await assert.rejects(back, closed);
+    assert.deepEqual(await restored('k2'), [1, 2]);
+    assert.deepEqual(await restored('k1'), [1, 2]);
+  });
+
+  await t.test('the retry after an ended connection, no event said yet', async () => {
+    const db = await stored('e');
+    db.run('put t {n: 3}');
+    const told = idb.invalidate();
+    const ending = persist(db, 'e');
+    db.close();
+    await assert.rejects(ending, closed);
+    told();
+    assert.deepEqual(await restored('e'), [1, 2]);
+  });
+
+  // Each would have loaded into the closed database.
+  await t.test('a restore reading at the close, one waiting its turn, and calls after', async () => {
+    const db = await stored('r');
+    const running = restore(db, 'r');
+    const queued = restore(db, 'r');
+    db.close();
+    await assert.rejects(running, closed);
+    await assert.rejects(queued, closed);
+    await assert.rejects(persist(db, 'r'), closed);
+    await assert.rejects(restore(db, 'r'), closed);
+    assert.deepEqual(await restored('r'), [1, 2]);
+  });
+
+  await t.test('an empty image, however it came, is never stored', async () => {
+    await stored('z');
+    const db = await Fennec.open(wasm);
+    db.snapshot = () => new Uint8Array(0);
+    await assert.rejects(persist(db, 'z'), /empty image/);
+    assert.deepEqual(await restored('z'), [1, 2]);
+  });
+});
+
+// A restore that failed -- here the collation data its image needs could
+// not be fetched -- may have emptied the database first (one holding only
+// what its schema made is emptied for the image), and a persist waiting
+// behind it stored that empty database over the record the restore was to
+// load.
+test('a persist waiting for a restore that fails is refused with it; one called after runs', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  globalThis.indexedDB = fakeIndexedDB();
+  globalThis.IDBKeyRange = KeyRange;
+  const { Fennec, persist, restore } = await import('./fennec.js');
+  const collation = (name) => readFile(new URL(`./collate/${name}.bin`, import.meta.url));
+  const schema = 'create collection words (w text collate und @sorted)';
+  const words = (d) => d.rows('get words select w').map((r) => r.w);
+  const writer = await Fennec.open(wasm, { schema, collation });
+  await writer.from('words').insert([{ w: 'Ελλάδα' }]);
+  assert.ok((await persist(writer, 'u')) > 0);
+
+  const offline = () => {
+    throw new Error('offline');
+  };
+  const page = await Fennec.open(wasm, { schema, collation: offline });
+  const failing = restore(page, 'u');
+  const waiting = persist(page, 'u');
+  await assert.rejects(failing, /offline/);
+  await assert.rejects(waiting, /the restore it waited for failed \(offline\)/);
+  const back = await Fennec.open(wasm, { collation });
+  assert.equal(await restore(back, 'u'), true);
+  assert.deepEqual(words(back), ['Ελλάδα'], 'the record stands');
+  // Called once the failure was answered, a persist runs as it always did.
+  assert.ok((await persist(page, 'after')) > 0);
+
+  // A restore that loaded its record, called after the failed one, is the
+  // one a persist behind both waited for; one that found no record lets
+  // the failed one before it count.
+  const again = await Fennec.open(wasm, { schema, collation: offline });
+  const first = restore(again, 'u');
+  const none = restore(again, 'none');
+  const behindNone = persist(again, 'u');
+  await assert.rejects(first, /offline/);
+  assert.equal(await none, false);
+  await assert.rejects(behindNone, /the restore it waited for failed/);
+  const fine = await Fennec.open(wasm, { schema, collation });
+  const failed = restore(fine, 'u', { cryptoKey: await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']) });
+  const loaded = restore(fine, 'u');
+  const behindLoaded = persist(fine, 'copy');
+  await assert.rejects(failed, /stored in the clear/);
+  assert.equal(await loaded, true);
+  assert.ok((await behindLoaded) > 0, 'stored after the restore that loaded');
+  const copy = await Fennec.open(wasm, { collation });
+  assert.equal(await restore(copy, 'copy'), true);
+  assert.deepEqual(words(copy), ['Ελλάδα']);
+});
+
 // A transaction past its quota is refused at its commit, by `abort` alone:
 // `putState`, waiting on `error` and `complete`, never answered (Chrome,
 // web/browser/).

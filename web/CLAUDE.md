@@ -47,11 +47,17 @@ after another in call order (`inTurn`), each once the one before has
 settled, refused or not: two at once read one chunk number, and the
 second chunk was stored over the first; a retry inside one runs in its
 turn (`persistNow`), never through `persist`, which would wait for itself.
-`web/fennec.persist.test.js`, `web/fennec.file.test.js` and
-`web/browser/` hold all four. A change to these calls or to `idb` runs
-`web/browser/` in Chrome, Firefox and Safari before it lands -- Safari's job by `gh workflow run
-ci.yml --ref <branch>`, a pull request running none -- and `make
-file-bench` in Chrome and Firefox against main's.
+A database `close`d is refused by each of them not yet run, by the retry
+and by one that awaited before it touches the database (`alive`): its
+image is empty, and stored it replaced the record and its chunks; nor is
+an empty image ever stored (`filled`). A `persist` or `openFile` made
+while a `restore` was out is refused when that restore was (`restoring`),
+unless a later one before it loaded its record: the restore may have
+emptied the database. `web/fennec.persist.test.js`,
+`web/fennec.file.test.js` and `web/browser/` hold all four. A change to
+these calls or to `idb` runs `web/browser/` in Chrome, Firefox and Safari
+before it lands -- every pull request's run has `browsers (safari)` --
+and `make file-bench` in Chrome and Firefox against main's.
 
 **[A number from 2^53 on goes out as every
 digit.](../docs/design/indexes.md#sorted)** Whatever sends values to a

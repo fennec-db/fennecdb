@@ -35,6 +35,8 @@ const TESTS = {
   closed: 'persist, restore and the state calls leave no connection open to block a delete of the database',
   gone: 'a database deleted under the page has its image stored again by the next persist',
   turns: 'persists called before the one before answered store their chunks in call order, plain and sealed',
+  shut: 'a persist or restore that has not run by the close is refused, the record standing',
+  unread: 'a persist waiting for a restore that fails is refused with it, the record standing',
 };
 
 /** The files the suite makes in the origin private file system, each with its copy. */
@@ -706,6 +708,52 @@ const PHASES = {
         ok(await restore(back, key, opts), `${key} restored`);
         same(ns(back), [1, 2, 3, 4], `${key}: every write`);
       }
+      await wipe();
+    });
+
+    // A persist that ran after the close stored the closed database's
+    // image -- empty -- over the record and deleted its chunks.
+    await test(TESTS.shut, async () => {
+      const db = await open();
+      db.run('create collection t (n int)');
+      db.run('put t {n: 1}');
+      await persist(db, 'shut');
+      db.run('put t {n: 2}');
+      await persist(db, 'shut');
+      // Another key's runs at once and takes its image; the one behind it
+      // owes an image of its own.
+      const running = persist(db, 'elsewhere');
+      const waiting = persist(db, 'shut');
+      const restoring = restore(db, 'shut');
+      db.close();
+      ok((await within(running)) > 0, 'the one running at the close stores what it took');
+      await refuses(within(waiting), /persist refused: the database was closed/, 'the persist waiting its turn');
+      await refuses(within(restoring), /restore refused: the database was closed/, 'the restore waiting its turn');
+      same([...(await records('shut')).keys()], ['shut', 'shut#000000001'], 'the image and its chunk stand');
+      const back = await open();
+      ok(await restore(back, 'shut'), 'restored');
+      same(ns(back), [1, 2], 'every write stored before the close');
+      await wipe();
+    });
+
+    // A persist waiting for a restore that failed stored whatever the
+    // database held over the record the restore could not read.
+    await test(TESTS.unread, async () => {
+      const cryptoKey = await derived('a passphrase');
+      const db = await open();
+      db.run('create collection t (n int)');
+      db.run('put t {n: 1}');
+      await persist(db, 'unread', { cryptoKey });
+      const page = await open();
+      const other = { cryptoKey: await derived('another passphrase') };
+      const failing = restore(page, 'unread', other);
+      const waiting = persist(page, 'unread', other);
+      await refuses(within(failing), /does not open/, 'the restore under another key');
+      await refuses(within(waiting), /persist refused: the restore it waited for failed/, 'the persist waiting for it');
+      const back = await open();
+      ok(await restore(back, 'unread', { cryptoKey }), 'the record restores with its key');
+      same(ns(back), [1], 'as it was stored');
+      ok((await within(persist(page, 'afterwards'))) > 0, 'a persist called once the failure was answered runs');
       await wipe();
     });
   },

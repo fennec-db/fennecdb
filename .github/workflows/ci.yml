@@ -850,17 +850,15 @@ jobs:
         run: node web/browser/run.mjs chrome firefox
 
   # Safari on macOS through safaridriver, which the runner allows once
-  # `--enable`d. Only where ci.yml runs outside a pull request -- the merge
-  # queue, main, `gh workflow run ci.yml --ref <branch>` (for a branch that
-  # changes how the page keeps its database: web/CLAUDE.md) -- as the
-  # Rosetta job: the macOS slots (5 at once) are CI's bottleneck, and every
-  # merge waits for one. A job skipped by `if:` reports success. Bounded by
-  # the rule above from its one run on #650: 30 s, 18 s of it the suite --
-  # twice that 1 minute, plus 2 minutes 2.5 -- and 20 suite runs in a row on
-  # macos-latest took 9 to 25 s each (2026-11-14).
+  # `--enable`d. On every run, a pull request's too: no browsers job is a
+  # required check, so a Safari failure seen only in the merge queue would
+  # not stop the merge, and a pull request's own run is where it is read.
+  # It costs one of the 5 macOS slots (CI's bottleneck) for 30 s a run (run
+  # 43631233253 on #650, 18 s of it the suite). Bounded by the rule above
+  # from that run -- twice 30 s is 1 minute, plus 2 minutes 2.5 -- and 20
+  # suite runs in a row on macos-latest took 9 to 25 s each (2026-11-14).
   browsers-safari:
     name: browsers (safari)
-    if: github.event_name != 'pull_request'
     needs: browsers-module
     runs-on: macos-latest
     timeout-minutes: 5

@@ -385,6 +385,37 @@ test('a call made while openFile is out waits for it, and is refused by what it 
   assert.deepEqual(titles(again), ['a']);
 });
 
+// A database closed while `openFile` asked for its file was kept in it all
+// the same: an empty file took the closed database's empty image, and its
+// handles stayed held, so the next `openFile` of that file in this worker
+// was refused at once as open elsewhere.
+test('an openFile that has not run by the close is refused, its file let go of', { skip }, async () => {
+  const dir = fakeDir();
+  const db = await open();
+  db.run('create collection docs (title text)');
+  const asking = openFile(db, 'c.fennec', { dir });
+  const waiting = openFile(db, 'w.fennec', { dir });
+  db.close();
+  await assert.rejects(asking, /openFile refused: the database was closed/);
+  await assert.rejects(waiting, /openFile refused: the database was closed/);
+  assert.equal(dir.files.get('c.fennec').open, false, 'its handle let go of');
+  assert.equal(dir.bytes('c.fennec').length, 0, 'nothing written');
+  assert.equal(dir.files.has('w.fennec'), false, 'the one waiting never asked');
+  const other = await open();
+  const file = await openFile(other, 'c.fennec', { dir });
+  other.run('create collection docs (title text)');
+  other.run('put docs {title: "a"}');
+  file.close();
+  const { db: again } = await reopen(dir, 'c.fennec');
+  assert.deepEqual(titles(again), ['a']);
+
+  // Nor is an empty image written into a file, however it came.
+  const empty = await open();
+  empty.snapshot = () => new Uint8Array(0);
+  await assert.rejects(openFile(empty, 'e.fennec', { dir }), /empty image/);
+  assert.equal(dir.files.get('e.fennec').open, false);
+});
+
 // A page loaded again finds its file held by the worker of the page before
 // until that worker has ended -- in Chrome 2 s after the page went, when
 // it was busy (web/browser/) -- and opens it once it is let go of.

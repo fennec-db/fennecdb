@@ -60,6 +60,9 @@ const dec = new TextDecoder();
 const untouched = new WeakMap();
 const replaceable = (f) => untouched.get(f) === f.changeSeq;
 
+/** The databases `close` let go of, which `persist`, `restore` and `openFile` refuse (`alive`). */
+const closed = new WeakSet();
+
 /** A `compact`, which `batch` cannot put back: a batch holding one runs each statement on its own. */
 const COMPACT = /^(?:\s|--[^\n]*|#[^\n]*)*compact\b/i;
 
@@ -719,6 +722,7 @@ export class Fennec {
   }
 
   close() {
+    closed.add(this);
     this.#lives?.clear();
     this.#wasm.fennec_close(this.#handle);
   }
@@ -1029,9 +1033,27 @@ async function inStore(mode, ask, on = null) {
  */
 const turns = new WeakMap();
 
-/** `run()` once every call before it on `fennec` has settled, refused or not: at once when none is out. */
-function inTurn(fennec, run) {
-  const out = turns.get(fennec)?.then(run) ?? run();
+/** Per database, the last `restore` called while it is out: `{prev, loaded, failed}`, `prev` the one out at its call. */
+const restoring = new WeakMap();
+
+/**
+ * `run()` once every call before it on `fennec` has settled, refused or
+ * not: at once when none is out. A `persist` or `openFile` (`call`) made
+ * while a `restore` was out is refused when that restore was: the database
+ * is not the one it waited for -- emptied, maybe, for an image that never
+ * loaded -- and stored, it replaced the record the restore could not read.
+ * A later restore that loaded its record answers for those before it; one
+ * that found none leaves the database as they left it.
+ */
+function inTurn(fennec, run, call) {
+  const behind = call && restoring.get(fennec);
+  const go = () => {
+    for (let r = behind; r && !r.loaded; r = r.prev) {
+      if (r.failed) throw new FennecError(`${call} refused: the restore it waited for failed (${r.failed.message})`, { cause: r.failed });
+    }
+    return run();
+  };
+  const out = turns.get(fennec)?.then(go) ?? go();
   const done = out.then(free, free);
   function free() {
     if (turns.get(fennec) === done) turns.delete(fennec);
@@ -1047,10 +1069,26 @@ function inTurn(fennec, run) {
  * Called while another is out, it stores what was written by its turn.
  */
 export async function persist(fennec, key = 'default', opts = {}) {
-  return inTurn(fennec, () => persistNow(fennec, key, opts));
+  return inTurn(fennec, () => persistNow(fennec, key, opts), 'persist');
+}
+
+/**
+ * Refuses a database `close` let go of, whose image is empty: stored, it
+ * replaced the record and its chunks. A call that had not run by the
+ * close meets it, a retry, and one that awaited before it touches the database.
+ */
+function alive(fennec, call) {
+  if (closed.has(fennec)) throw new FennecError(`${call} refused: the database was closed`);
+}
+
+/** `image`, never an empty one -- a closed database's -- which stored would replace a record with nothing. */
+function filled(image) {
+  if (image?.length === 0) throw new FennecError('an empty image is never stored');
+  return image;
 }
 
 async function persistNow(fennec, key, opts) {
+  alive(fennec, 'persist');
   if (kept.has(fennec)) throw new FennecError('the database is kept in a file (openFile): persist would take the writes it appends');
   const ck = opts.cryptoKey ?? null;
   let s = stored.get(fennec);
@@ -1077,6 +1115,7 @@ async function persistNow(fennec, key, opts) {
   const gen = image && ck ? [...crypto.getRandomValues(new Uint8Array(8))].map((b) => b.toString(16).padStart(2, '0')).join('') : s.gen;
   let on = null;
   try {
+    filled(image);
     const rec = !ck ? (image ?? chunk) : image ? await seal(ck, key, gen, 0, image) : await seal(ck, key, gen, s.next, chunk);
     // The connection may end while the record is sealed or the call waits
     // its turn: a chunk is stored over the image's alone.
@@ -1095,6 +1134,7 @@ async function persistNow(fennec, key, opts) {
     // this one, where the image's connection had ended.
     stored.delete(fennec);
     // In this call's turn still: `persist` would wait for this very call.
+    // It stores an image, which a database closed meanwhile has not.
     if (e === ENDED) return persistNow(fennec, key, opts);
     throw e;
   }
@@ -1125,10 +1165,22 @@ export async function getState(key) {
  * refuses a record stored in the clear.
  */
 export async function restore(fennec, key = 'default', opts = {}) {
-  return inTurn(fennec, () => restoreNow(fennec, key, opts));
+  const r = { prev: restoring.get(fennec) };
+  restoring.set(fennec, r);
+  // Noted inside the turn: before the next call's begins.
+  return inTurn(fennec, async () => {
+    try {
+      return (r.loaded = await restoreNow(fennec, key, opts));
+    } catch (e) {
+      throw (r.failed = e);
+    } finally {
+      if (restoring.get(fennec) === r) restoring.delete(fennec);
+    }
+  });
 }
 
 async function restoreNow(fennec, key, opts) {
+  alive(fennec, 'restore');
   const ck = opts.cryptoKey ?? null;
   let on = null;
   let [image, chunks] = await inStore('readonly', (os, db) => {
@@ -1161,6 +1213,8 @@ async function restoreNow(fennec, key, opts) {
       at += c.length;
     }
   }
+  // Closed while the record was read: `emptied` would open it again.
+  alive(fennec, 'restore');
   if (replaceable(fennec)) emptied(fennec);
   await fennec.loadAsync(bytes);
   fennec.journal();
@@ -1397,10 +1451,11 @@ function loads(fennec, bytes) {
  * @returns {Promise<FennecFile>}
  */
 export async function openFile(fennec, name = 'default.fennec', opts = {}) {
-  return inTurn(fennec, () => openFileNow(fennec, name, opts));
+  return inTurn(fennec, () => openFileNow(fennec, name, opts), 'openFile');
 }
 
 async function openFileNow(fennec, name, opts) {
+  alive(fennec, 'openFile');
   if (kept.has(fennec)) throw new FennecError('the database is already kept in a file');
   if (stored.has(fennec)) throw new FennecError('persist keeps this database in IndexedDB: a file would take the writes it stores');
   const dir = opts.dir ?? (await globalThis.navigator?.storage?.getDirectory?.());
@@ -1411,6 +1466,8 @@ async function openFileNow(fennec, name, opts) {
   let aside = null;
   try {
     aside = await syncAccess(dir, `${name}~`, ours);
+    // Closed while the file was asked for: its handles are let go of below.
+    alive(fennec, 'openFile');
     const beside = aside.getSize();
     if (beside > 0) {
       // A rewrite stopped: its copy was flushed before the file was
@@ -1426,7 +1483,7 @@ async function openFileNow(fennec, name, opts) {
     let image;
     if (size === 0) {
       fennec.journal();
-      const snap = fennec.snapshot();
+      const snap = filled(fennec.snapshot());
       overwrite(main, snap);
       size = snap.length;
       image = imageEnd(snap);
@@ -1448,11 +1505,14 @@ async function openFileNow(fennec, name, opts) {
     }
     const file = new FennecFile(fennec, name, main, aside, size, Math.max(image, 0), where);
     kept.set(fennec, file);
-    // Refused, the file is let go of, as it was found.
-    await checked(fennec, opts.schema ? opts : declared.get(fennec), 'apply').catch((e) => {
+    // Refused, or the database closed meanwhile, the file is let go of.
+    try {
+      await checked(fennec, opts.schema ? opts : declared.get(fennec), 'apply');
+      alive(fennec, 'openFile');
+    } catch (e) {
       file.close();
       throw e;
-    });
+    }
     return file;
   } catch (e) {
     main.close();

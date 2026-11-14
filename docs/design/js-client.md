@@ -177,7 +177,13 @@ image in 129 ms against 76. The OPFS file stays plain: it is `fennec-server`'s.
 A database's `persist`, `restore` and `openFile` calls run one after another
 in call order (`inTurn`), each once the one before has settled, refused or
 not: a `persist` called while another is out stores what was written by its
-turn, and one called with none out runs at once, as it always did.
+turn, and one called with none out runs at once, as it always did. One
+not yet run when the database is `close`d is refused, naming the close, as
+is a `restore` or `openFile` that was awaiting IndexedDB or the file when
+it came; a `persist` already storing what it took finishes. A `persist` or
+`openFile` made while a `restore` was out is refused, naming it, when that
+restore fails -- unless a later restore called before it loaded its
+record -- and one called once the failure was answered runs.
 
 ### In real browsers
 
@@ -206,12 +212,12 @@ preference (a group of origins gets a fifth of
 Safari has neither, and its two quota tests are skipped by name. The page
 is told the quota, not left to read it: Chrome's
 `navigator.storage.estimate()` names 10 GiB whatever it enforces.
-The Chrome and Firefox job runs on every pull request, Safari's where
-`ci.yml` runs outside one -- the merge queue, main, and a branch it is run
-for (`gh workflow run ci.yml --ref <branch>`), as a change to how the page
-keeps its database is (`web/CLAUDE.md`): the account runs 5 macOS jobs at
-once and every merge waits for one, and a pull request's Safari job held
-one for 30 s of work.
+The Chrome and Firefox job and the Safari job run on every pull request,
+in the merge queue and on main. Safari's ran outside pull requests alone
+for a while, to spare the account's 5 macOS slots, which every merge waits
+for; but no browsers job is a required check, so a Safari failure seen
+only in the merge queue would not have stopped a merge, and the job holds
+a slot for 30 s of work (run 43631233253), 18 s of it the suite.
 
 What it found, fixed with it:
 
@@ -308,6 +314,57 @@ What it found, fixed with it:
   `web/fennec.persist.test.js` and `web/fennec.file.test.js` hold each
   case, and the browser suite's sixteenth test two persists made before
   the first answered, plain and sealed.
+- (Found in review of the call order.) A `persist` that ran after
+  `db.close()` stored the closed database's image -- empty: the module
+  gives no chunks for a handle no database holds -- over the record,
+  deleted its chunks, and answered as if it had stored the database;
+  `restore` then refused the record as corrupt. The image was taken only
+  at the call before the calls took turns; in a turn it could be taken
+  later: by one waiting behind a refused `persist`, which owed an image,
+  by one of another key waiting behind the first, and by the retry after
+  an ended connection. `close` now marks the database (`closed`), and
+  `persist`, `restore` and `openFile` refuse it as each begins, the retry
+  too, `restore` and `openFile` again after their awaits, before they
+  touch the database (`alive`), naming the close: a `restore` reading when
+  the close came went on to `emptied`, which opened the closed database
+  again, a handle in the module never let go, and an `openFile` asking for
+  its file kept the closed database in it, an empty file written its
+  empty image and its handles held, so that the next `openFile` of the
+  file in that worker was refused at once. A `persist` already storing
+  what it took finishes: those bytes are the database before the close.
+  An empty image is never stored, whatever the path (`filled`). What else
+  a turn reads after an await holds: the chunk number and the image's
+  connection are moved within the turn, which no other call shares, the
+  sealing key is the call's own, the journal is drained and the image
+  taken in one synchronous stretch, and an open file drains nothing from
+  a closed database, so its fold never takes an empty image. A database
+  closed while kept in a file holds the file until its `close`, as before.
+- (Found in the same review; older than the turns, which left it where a
+  restore fails.) A `persist` or `openFile` waiting behind a `restore`
+  that failed stored what the database held. `restore` empties a
+  database holding only what its schema made before it loads
+  (`emptied`), so one refused after -- its collation data not fetched,
+  say -- left it empty, and that image
+  replaced the record the restore was to read; a sealed record restored
+  under another key went the same way, the database untouched but not
+  the one stored. Each `restore` now notes how it ended, inside its turn
+  (`restoring`: `{prev, loaded, failed}`), and a `persist` or `openFile`
+  made while one was out is refused when it failed, naming it. A later
+  `restore` before it that loaded its record lets it run, the database
+  being that record now; one that found none leaves the database as the
+  failed one left it, which still counts. A call made once the failure
+  was answered runs as any other: its caller has seen it. Refusing every
+  call until a `restore` lands was rejected: the sync layer answers a
+  refused cache by seeding again and persisting the seed. `web/fennec.js`
+  grows 2 404 bytes, 707 gzip and 585 brotli as served (655 and 237 gzip
+  minified), which takes the client's quoted sizes from 232, 61 and 72 KB
+  to 234, 62 and 73 (72.81 KiB gzip measured). `close` adds a `WeakSet`
+  insert, and each call a `WeakSet` and a `WeakMap` lookup and a closure,
+  no request; not timed, the machine standing at a load of 10 to 12 on 8
+  cores under another session's work. `web/fennec.persist.test.js` and `web/fennec.file.test.js`
+  hold each case, failing before; the browser suite's seventeenth and
+  eighteenth tests hold a `persist` and a `restore` waiting at the close,
+  and a `persist` waiting for a `restore` under another key.
 - A file past the quota: Chrome's file system throws QuotaExceededError,
   Firefox's writes nothing and says so by its count, which the file now
   names as the origin out of room. Either way the write is refused, every
