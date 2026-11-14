@@ -250,7 +250,11 @@ bytes for x86_64 musl against 6 891 744 for aarch64-apple-darwin. The musl
 build is what a Linux tarball, the `.deb`, the `.rpm` and the image ship,
 and a runner builds it to the same bytes each time: the compiler is
 pinned, and the paths it writes into panics' locations are the runner's.
-Built in an amd64 Ubuntu 24.04 container laid out as a runner is
+The job runs on `ubuntu-24.04`, the runner `release.yml` builds the
+tarball on, not `ubuntu-latest`, which became 26.04 in 2026-11: another
+release's musl, gcc (ring's C) and linker would measure another binary
+than the one that ships, and move every figure the day GitHub moves the
+label. Built in an amd64 Ubuntu 24.04 container laid out as a runner is
 (`/home/runner/work/fennecdb/fennecdb`, `CARGO_HOME` under
 `/home/runner`), main at `38f6a0bc` gave 4 856 592, 8 186 416 and
 2 951 680 bytes; 0.2.0's tarball to it moved `fennec` 4 096 bytes and

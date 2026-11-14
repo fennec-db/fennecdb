@@ -1302,10 +1302,12 @@ jobs:
   # clippy jobs. Their bytes are held to tools/size-budgets.json
   # (docs/design/benchmarks.md#binary-sizes): one past its budget fails,
   # and so does one more than 1% under it or from the figure the docs
-  # quote, which site/build.py holds the docs within 1% of.
+  # quote, which site/build.py holds the docs within 1% of. On the runner
+  # release.yml builds the tarball on, not ubuntu-latest: that is 26.04
+  # since 2026-11, whose musl, gcc and linker are not the release's.
   build:
     name: build (release + cli profile)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -1329,8 +1331,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ubuntu-latest-build-musl-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: ubuntu-latest-build-musl-
+          key: ubuntu-24.04-build-musl-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ubuntu-24.04-build-musl-
 
       # The three at once. Each build is a chain of compiles of one unit
       # (`codegen-units = 1`) ending in one fat LTO, a core's work most of
