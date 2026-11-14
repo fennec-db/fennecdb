@@ -41,7 +41,8 @@ href="#volume-owner">the volume's owner</a>, which hold on every platform.</p>
     exists for them; this page does not recommend them.</li>
   <li><b>One instance.</b> Replicas 1, no autoscaling, and a deploy stops the
     old instance before it starts the new: a second process over the file is
-    refused (exit 1), and what does hold two at once must not.</li>
+    refused (exit 1), so a platform that starts the new beside the old must be
+    told not to.</li>
   <li><b>A token from the secret store.</b> <code>FENNEC_HTTP_TOKEN</code>, in
     the environment, never <code>--http-token</code>: <code>argv</code> shows in
     <code>ps</code>. Without a token the server refuses to listen beyond
@@ -139,14 +140,14 @@ sudo mount -a</pre>
 <pre data-lang="bash">sudo useradd --system --no-create-home --shell /usr/sbin/nologin fennec
 sudo chown fennec:fennec /var/lib/fennecdb
 sudo install -d -m 0750 -o root -g fennec /etc/fennecdb
-echo "FENNEC_HTTP_TOKEN=$(openssl rand -hex 32)" | sudo tee /etc/fennecdb/server.env
-sudo chmod 0640 /etc/fennecdb/server.env; sudo chgrp fennec /etc/fennecdb/server.env</pre>
+sudo install -m 0640 -o root -g fennec /dev/null /etc/fennecdb/server.env
+echo "FENNEC_HTTP_TOKEN=$(openssl rand -hex 32)" | sudo tee /etc/fennecdb/server.env &gt;/dev/null</pre>
   </li>
   <li>
     <p>The unit. It is the repository's <code>deploy/systemd/fennec-node.service</code>
     cut down to one file: the same hardening, the token from an environment file, a
     user of its own, and a stop that waits.</p>
-<pre data-lang="toml" data-label="/etc/systemd/system/fennec-server.service">[Unit]
+<pre data-lang="text" data-label="/etc/systemd/system/fennec-server.service">[Unit]
 Description=fennec-server
 After=network-online.target local-fs.target
 Wants=network-online.target
@@ -390,7 +391,8 @@ kill_timeout = 60
 [http_service]
   internal_port = 8080
   force_https = true
-  # A stopped Machine is a stop with no clean shutdown; keep it running.
+  # Fly's proxy stops a Machine it sees no traffic for, and apps reaching it
+  # over .internal pass around the proxy: keep it running.
   auto_stop_machines = "off"
   auto_start_machines = false
 
@@ -510,9 +512,9 @@ way out: <code>RAILWAY_RUN_UID=0</code> runs the service as root.</p>
     environment made before 16 October 2025 resolves that name to IPv6 only; then
     the server has to listen on <code>[::]</code>, as <a href="#fly">Fly's</a>
     <code>Dockerfile</code> does.</li>
-  <li><b>The volume</b> is 0.5 GB on the free and trial plans, 5 on Hobby and
-    50 on Pro, grown live and never shrunk; Railway makes manual and automatic
-    backups of it.</li>
+  <li><b>The volume</b>'s size depends on the plan; it grows live and never
+    shrinks, and Railway makes manual and automatic backups of it: take
+    <a href="#backups">a backup of your own</a> too.</li>
 </ul>
 
 <h2 id="cloudflare">Cloudflare</h2>
@@ -556,7 +558,8 @@ would be R2 mounted as files, which this page's rule excludes.</p>
 platform's environment and secret store, as <code>FENNEC_URL</code> and
 <code>FENNEC_TOKEN</code> say:</p>
 
-<pre data-lang="python">from fennecdb import Client
+<pre data-lang="python">import os
+from fennecdb import Client
 db = Client(os.environ["FENNEC_URL"], token=os.environ["FENNEC_TOKEN"])</pre>
 
 <pre data-lang="js">import { connect } from "@fennecdb/web";
@@ -616,7 +619,7 @@ fennec archive https://db.example.com /backups/archive --token "$REPL" --image-e
 
 # to the cloud's bucket, beside the archiver
 aws s3 sync /backups/archive s3://my-bucket/fennec --delete      # AWS
-gsutil -m rsync -r /backups/archive gs://my-bucket/fennec        # Google Cloud
+gcloud storage rsync --recursive /backups/archive gs://my-bucket/fennec   # Google Cloud
 azcopy sync /backups/archive "https://acct.blob.core.windows.net/fennec"   # Azure
 rclone sync /backups/archive r2:fennec                           # R2, Spaces, B2, ...</pre>
 
