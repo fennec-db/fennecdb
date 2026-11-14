@@ -1,17 +1,22 @@
 <!--
 title: Cloud platforms — fennecdb
-description: Deploy fennec-server on Fly.io, Render, Railway, AWS, Google Cloud, Azure, DigitalOcean, Hetzner and any VM or Kubernetes cluster, which platforms cannot be its home, and how an app on each reaches it.
+description: Deploy fennec-server on Fly.io, Render, Railway, AWS, Google Cloud, Azure, DigitalOcean, Hetzner and any VM or Kubernetes cluster, or run no server at all with a database in each Cloudflare Durable Object; which platforms cannot hold the file, and how apps and serverless functions on each reach it.
 -->
 
 <h1>Cloud platforms</h1>
-<p class="kicker">Where to run <code>fennec-server</code> on each cloud, the
-config for it, and how your apps there reach it.</p>
+<p class="kicker">Where to run <code>fennec-server</code> on each cloud, or no
+server at all on Cloudflare, the config for it, and how your apps and
+functions reach it.</p>
 
 <p>A server is one process over one file on a disk, reached over HTTP. That
 asks three things of a platform: a block disk that outlives the process, one
 instance at a time, and a stop that waits for the final sync. Pick yours from
 the table, then read <a href="#rules">the rules</a> and <a
-href="#volume-owner">the volume's owner</a>, which hold on every platform.</p>
+href="#volume-owner">the volume's owner</a>, which hold on every platform.
+Serverless needs none of that: on Cloudflare the engine runs inside a Worker,
+a database in each Durable Object (<a href="#cloudflare">Cloudflare
+Workers</a>), and a function on any platform is a client, of a server or of
+that Worker (<a href="#functions">Functions</a>).</p>
 
 <div class="tbl">
 <table>
@@ -22,8 +27,9 @@ href="#volume-owner">the volume's owner</a>, which hold on every platform.</p>
 <tr><td>Railway</td><td>a service from the image</td><td>Railway volume</td><td><a href="#railway">Railway</a></td></tr>
 <tr><td>AWS, Google Cloud, Azure, DigitalOcean, Hetzner, OVHcloud, Scaleway, Akamai/Linode, Vultr, Oracle Cloud, any VM</td><td>a VM</td><td>the cloud's block volume (EBS, Persistent Disk or Hyperdisk, managed disk, Volume)</td><td><a href="#vm">A VM</a></td></tr>
 <tr><td>EKS, GKE, AKS, DOKS and any Kubernetes</td><td>a StatefulSet of one</td><td>a <code>ReadWriteOnce</code> claim</td><td><a href="#kubernetes">Kubernetes</a></td></tr>
-<tr><td>Cloudflare</td><td>the engine in a Durable Object</td><td>the object's storage</td><td><a href="#cloudflare">Cloudflare</a></td></tr>
-<tr><td>Cloud Run, Lambda, ECS on Fargate, App Runner, Container Apps, App Service, App Platform, Heroku, Vercel, Netlify</td><td>your app, as a client</td><td>none that fits</td><td><a href="#not-a-home">Not a home</a></td></tr>
+<tr><td>Cloudflare Workers</td><td>no server: the engine in a Durable Object, a database each</td><td>the object's storage</td><td><a href="#cloudflare">Cloudflare Workers</a></td></tr>
+<tr><td>Vercel, Netlify, Lambda, Cloud Run, Cloud Functions, Azure Functions, Deno Deploy</td><td>functions, as clients of a server or of a Worker</td><td>none needed</td><td><a href="#functions">Functions</a></td></tr>
+<tr><td>ECS on Fargate, App Runner, Container Apps, App Service, App Platform, Heroku</td><td>your app, as a client</td><td>none that fits</td><td><a href="#not-a-home">Not a home</a></td></tr>
 </tbody>
 </table>
 </div>
@@ -517,24 +523,160 @@ way out: <code>RAILWAY_RUN_UID=0</code> runs the service as root.</p>
     <a href="#backups">a backup of your own</a> too.</li>
 </ul>
 
-<h2 id="cloudflare">Cloudflare</h2>
+<h2 id="cloudflare">Cloudflare Workers: no server</h2>
 
-<p>Cloudflare is the one platform where the engine runs inside your code rather
-than as a server: one database for each Durable Object, in a Worker, with the
-object's storage as its disk. It fits a database for each user, team or
-document; one large database with many writers is a server elsewhere, and a
-Worker is then its client. <a href="/docs/serverless">Serverless and
-Cloudflare</a> has both, and <a href="/docs/sharding-entry#global-entry">The
-global entry</a> puts one Worker in front of a sharded fleet.</p>
+<p>On Cloudflare the engine runs inside your Worker. The browser module,
+<code>@fennecdb/web</code>, opens a database in a Durable Object, and
+<code>@fennecdb/cloudflare</code> keeps it in the object's storage as a file
+would hold it: an image, then the writes since, each stored before its answer
+goes, and the object's alarm deleting expired rows and writing a new image
+when one is worth it. There is no process to run, no volume and no instance
+count: an object is one writer, as a file is, and Cloudflare starts it where
+it is first asked for.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th>a database in a Durable Object</th></tr></thead>
+<tbody>
+<tr><td>fits</td><td>a database for each user, team, tenant or document; a tenant's own RAG corpus</td></tr>
+<tr><td>size</td><td>about 60 000 rows of 128 dimensions, or 12 000 of 768, an object (<a href="/docs/serverless#limits">Limits</a>)</td></tr>
+<tr><td>a cold start</td><td>tens of milliseconds for 10 000 rows, under 200 for 50 000 (<a href="/docs/serverless#cold-start">A cold start</a>)</td></tr>
+<tr><td>does not fit</td><td>one large database with many writers: a server on a platform above, the Worker its client (<a href="/docs/functions#worker">a Worker that is an endpoint</a>)</td></tr>
+</tbody>
+</table>
+</div>
+
+<ol class="steps-doc">
+  <li>
+    <p>Install the two packages and wrangler.</p>
+<pre data-lang="bash">npm install @fennecdb/web @fennecdb/cloudflare
+npm install -D wrangler</pre>
+  </li>
+  <li>
+    <p>Bind the object's class. A class a new account makes is SQLite-backed,
+    and <code>persist</code> keeps the database in its SQL storage.</p>
+<pre data-lang="json" data-label="wrangler.jsonc">{
+  "name": "my-fennec",
+  "main": "worker.js",
+  "compatibility_date": "2026-09-01",
+  "durable_objects": {
+    "bindings": [{ "name": "TENANT", "class_name": "Tenant" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Tenant"] }]
+}</pre>
+  </li>
+  <li>
+    <p>The Worker: the <code>Tenant</code> class of <a
+    href="/docs/serverless#worker">A database a Durable Object</a>, and a
+    <code>fetch</code> that lets in only the callers holding its token before
+    it sends a tenant's statements to that tenant's object.
+    <a href="https://github.com/fennec-db/fennecdb/blob/main/integrations/cloudflare/example/worker.js"><code>integrations/cloudflare/example/worker.js</code></a>
+    is the whole Worker, run by its test under <code>wrangler dev</code>; the
+    check below goes at the top of its <code>fetch</code>.</p>
+<pre data-lang="js" data-label="worker.js">const enc = new TextEncoder();
+
+/** Whether the request carries the Worker's token, compared in constant time. */
+async function allowed(req, env) {
+  const [got, want] = await Promise.all(
+    [req.headers.get('authorization') ?? '', `Bearer ${env.FENNEC_TOKEN}`]
+      .map((s) =&gt; crypto.subtle.digest('SHA-256', enc.encode(s))),
+  );
+  return crypto.subtle.timingSafeEqual(got, want);
+}
+
+export default {
+  async fetch(req, env) {
+    if (!env.FENNEC_TOKEN || !(await allowed(req, env))) {
+      return new Response('unauthorized', { status: 401 });
+    }
+    // then the example's: POST /t/&lt;tenant&gt;/query to that tenant's object
+  },
+};</pre>
+  </li>
+  <li>
+    <p>The token, then the deploy.</p>
+<pre data-lang="bash">openssl rand -hex 32 | npx wrangler secret put FENNEC_TOKEN
+npx wrangler deploy
+curl -X POST https://my-fennec.&lt;account&gt;.workers.dev/t/acme/query \
+  -H "Authorization: Bearer $TOKEN" -d '{"sql": "collections"}'</pre>
+  </li>
+</ol>
+
+<ul>
+  <li><b>The Worker is the access layer.</b> The server's scoped tokens and
+    rules (<a href="/docs/http-access">HTTP security</a>) are a server's; in a
+    Worker, what a caller may run is its own code. One that runs whatever
+    FennecQL it is sent gives every holder of its token the whole database,
+    so a page or an app's users get endpoints for what they may do instead,
+    each its statement, as <a href="/docs/functions#worker">Functions and
+    webhooks</a> writes them.</li>
+  <li><b>Collation data</b> for scripts the module does not carry is fetched
+    from a URL unless the Worker hands it from its bundle
+    (<a href="/docs/serverless#limits">Limits</a>).</li>
+  <li><b>Apps anywhere</b> reach the Worker as they would a server: its URL
+    and its token (<a href="#functions">Functions</a>). Data in Durable
+    Objects and functions on Vercel or Lambda make a stack with no server in
+    it.</li>
+  <li><b>Servers in several regions</b> take one URL through a Worker in front
+    of them, which sends each tenant's requests to its region:
+    <a href="/docs/sharding-entry#global-entry">the global entry</a>.</li>
+</ul>
 
 <p>Cloudflare Containers is not a home for the server: its disk is ephemeral,
 and an instance that sleeps starts again from the image. Persistence there
 would be R2 mounted as files, which this page's rule excludes.</p>
 
+<h2 id="functions">Functions: clients from anywhere</h2>
+
+<p>Vercel, Netlify, AWS Lambda, Cloud Run, Cloud Functions, Azure Functions
+and Deno Deploy keep no disk a database can live on (<a
+href="#not-a-home">below</a>), so a function there is a client: of a
+<code>fennec-server</code> on a platform above, or of a Worker holding the
+databases in Durable Objects (<a href="#cloudflare">above</a>). Every client is
+HTTP, so a function has no connection pool to run out of, and the JavaScript
+one, <code>@fennecdb/web/client</code>, needs <code>fetch</code> alone, so it
+runs in Node, Bun, Deno and the edge runtimes as it is.</p>
+
+<pre data-lang="js" data-label="api/notes.js">import { connect } from '@fennecdb/web/client';   // the builder and the HTTP client, no WebAssembly
+
+// Once an instance, outside the handler: the calls after the first reuse it.
+const db = connect(process.env.FENNEC_URL, {
+  token: process.env.FENNEC_TOKEN,
+  timeout: 5000,   // ms to an answer's head, under the function's own limit
+});
+
+export async function POST(req) {
+  const { id, title } = await req.json();
+  // A retried invocation sends the write again: the key makes it once.
+  await db.withIdempotencyKey(`note-${id}`).from('notes').insert({ title });
+  return Response.json({ ok: true });
+}</pre>
+
+<ul>
+  <li><b>Made once an instance.</b> Python's <code>Client</code>, Go's
+    <code>fennecdb.New</code> and .NET's <code>FennecClient</code> too: at
+    module scope, in Lambda's init phase, not in the handler.</li>
+  <li><b>Bounded under the function's limit.</b> A client bounds every request
+    in time (<code>timeout</code>, 30 s unless given) and sends one again only
+    where it cannot have run or may run twice: a read, or a write carrying an
+    idempotency key (<a href="/docs/http#idempotency">Retrying a write</a>).
+    Set the timeout under the platform's, so the function answers rather than
+    being cut off mid-wait.</li>
+  <li><b>A platform's retry is a second write.</b> Lambda tries an
+    asynchronous invocation again, and a queue delivers a message again; key
+    such writes by the event, its id or the message's, and a server answers
+    the second as it answered the first.</li>
+  <li><b>Private addresses.</b> A function reaching a server's private address
+    needs the platform's VPC attachment (a Lambda in the VPC, Cloud Run's
+    Direct VPC egress, Azure's VNet integration); one without it is given an
+    HTTPS address and the token. A Worker needs neither.</li>
+</ul>
+
 <h2 id="not-a-home">Platforms that are not a home</h2>
 
-<p>These run your apps, which are clients of a server elsewhere
-(<a href="#using">below</a>). None gives a process a block disk it keeps.</p>
+<p>These run your apps and functions, which are clients of a server elsewhere
+or of a Worker (<a href="#functions">Functions</a>, <a href="#using">below</a>).
+None gives a process a block disk it keeps.</p>
 
 <div class="tbl">
 <table>
@@ -547,7 +689,7 @@ would be R2 mounted as files, which this page's rule excludes.</p>
 <tr><td>Azure Container Apps, Container Instances, App Service</td><td>The persistent volume is Azure Files, SMB or NFS. The rest is ephemeral.</td></tr>
 <tr><td>DigitalOcean App Platform</td><td>No volumes; the local file system is lost at a deploy.</td></tr>
 <tr><td>Heroku</td><td>Each dyno's file system is discarded when it stops or restarts.</td></tr>
-<tr><td>Vercel, Netlify</td><td>Functions and static hosting: no disk of their own.</td></tr>
+<tr><td>Vercel, Netlify, Deno Deploy, Azure Functions</td><td>Functions and static hosting: no disk of their own, and a function's memory goes with its instance.</td></tr>
 </tbody>
 </table>
 </div>
@@ -562,7 +704,7 @@ platform's environment and secret store, as <code>FENNEC_URL</code> and
 from fennecdb import Client
 db = Client(os.environ["FENNEC_URL"], token=os.environ["FENNEC_TOKEN"])</pre>
 
-<pre data-lang="js">import { connect } from "@fennecdb/web";
+<pre data-lang="js">import { connect } from "@fennecdb/web/client";
 const db = connect(process.env.FENNEC_URL, { token: process.env.FENNEC_TOKEN });</pre>
 
 <p>Go is <code>fennecdb.New(url, fennecdb.WithToken(token))</code>, .NET
@@ -585,12 +727,9 @@ href="/docs/mobile#connect">Mobile and native apps</a> the apps'.</p>
 </div>
 
 <ul>
-  <li><b>Functions are clients.</b> Vercel, Netlify, Lambda, Cloud Run, Cloud
-    Functions, Azure Functions and Workers send HTTP requests and keep no
-    connection open, so there is no pool to exhaust. A function that has to
-    reach a private address needs the platform's VPC attachment (a Lambda in
-    the VPC, Cloud Run's Direct VPC egress, Azure's VNet integration); one
-    that does not is given an HTTPS address and the token.</li>
+  <li><b>Functions are clients</b>, made once an instance, bounded under the
+    platform's limit and keyed against its retries: <a
+    href="#functions">Functions</a>.</li>
   <li><b>A browser never gets the server's token.</b> Give it a scoped JWT
     that names what its user may read and write, and let the server accept
     the page's origin with <code>--http-cors</code> (<a
