@@ -60,6 +60,24 @@ class RestorePoint(unittest.TestCase):
         self.assertIsNotNone(judge_restore("t", (396, 2, 397), 396, [lost()]))
         self.assertIsNotNone(judge_restore("t", (396, 1, 397), 396, [lost()]))
 
+    def test_no_row_acknowledged_passes_one_row_where_a_try_may_have_run(self):
+        self.assertIsNone(judge_restore("t", (1, 1, 1), 0, [lost()]))
+
+    def test_no_row_acknowledged_fails_one_row_without_such_a_try(self):
+        why = judge_restore("t", (1, 1, 1), 0, [])
+        self.assertIn("not 1..0;", why)
+        self.assertIn("row 1 was not sent before the moment", why)
+
+    def test_several_tries_pass_the_row_after_them_where_one_may_have_run(self):
+        tries = [[-3.0, -2.9, "fail", "503 lease"], lost(-2.5, 0.9), [-2.0, -1.9, "fail", "503 lease"]]
+        self.assertIsNone(judge_restore("t", (397, 1, 397), 396, tries))
+
+    def test_several_tries_fail_the_row_after_them_where_none_may_have_run(self):
+        tries = [[-3.0, -2.9, "fail", "503 lease"], [-2.5, -2.4, "fail", "503 lease"],
+                 [-2.0, -2.0, "fail", "no connection: ConnectionRefusedError"]]
+        why = judge_restore("t", (397, 1, 397), 396, tries)
+        self.assertIn("not 1..396;", why)
+
     def test_nothing_restored_passes_only_where_nothing_was_acknowledged(self):
         self.assertIsNone(judge_restore("t", (0, None, None), 0, []))
         self.assertIn("holds no row", judge_restore("t", (0, None, None), 3, []))

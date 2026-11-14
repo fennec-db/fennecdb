@@ -1736,37 +1736,46 @@ log (`DRILL_LOG_LINES`), since the cleanup takes the containers and CI
 leaves nothing else to read. CI's `deploy` job runs both checks.
 
 The restore point is the writers paused, a moment noted a second and a
-half after and a second and a half before they resume, and the tenant
-restored to it holds rows 1..c: every row acknowledged by then, and the
-row after them only where that row was sent before the moment and one of
-its tries may have run -- not answered (the writer's 5 s timeout, a reset)
-or answered a 5xx but a 503 -- since it landed then and the writer gave up
-on it (`judge_restore`, `drill/test_drill.py`, which `make drill` runs
-first, with the writer's judging of a try: as chaos.py's clients judge
-one, a 4xx, a 503 or no connection made did not run). Equality, as the
-check first stood, held the archive to the writer's count where the
-writer's own rule is that a row sent again after an answer that never
-came writes the same row, and CI's run 43627518610 failed it: 397 rows
-against 396 acknowledged. Its writers had stalled with no fault yet
-injected -- the pause took 3.6 s where it takes 0.1 s, the `until`'s
-step, in each of the job's 78 other runs among CI's last 150, and 718
-writes were answered in the 2 s before it against a median of 1 191 --
-and eu-t1's row 397 landed while its writer waited for an answer it gave
-up on. A restore keeping a write from after its moment is ruled out by
-the code -- a record's time is its node's clock as the record enters the
-feed under the write lock (`replication::Feed::push`), the archive keeps
-it (`archive::take`) and `--to` stops at the first record after the
-moment (`archive::assemble_into`), the node's clock being the runner's --
-and an answer held past the writer's timeout just before the moment
-reproduced the mismatch every time, with no stall: 201 rows against 200.
-Ten runs here (Docker's 8 CPUs, nothing else running) saw no stall:
-pauses of 8-14 ms, gaps before them of 17-36 ms, no row unanswered, each
-restore equal to its count. The restore point now says how long the
-pause took and which writer was last, the longest gap between
-acknowledged writes before it, and each row not acknowledged by then with
-its tries (sent and ended, from the moment, and what came), and a failed
-restore says them and whether eu-a's archive was of the tenant's primary
-or its replica, so the next failure says which it was. A replica's node
+half after and a second and a half before they resume. The tenant
+restored to it holds rows 1..c, where K is the last row the writer had
+acknowledged by the moment and K <= c <= K+1 (`judge_restore`,
+`drill/test_drill.py`, which `make drill` runs first). Every row
+acknowledged by then must be there, and a row sent after the moment must
+not, so nothing past K+1 can be: the writer sends row K+2 only once K+1
+is answered. Row K+1 is allowed only where it was sent before the moment
+and one of its tries may have run, that is, has the outcome `unknown`:
+not answered (the writer's 5 s timeout, a reset) or answered a 5xx but a
+503. Such a row may have landed then while the writer gave up on it, and
+the writer's own rule is that a row sent again after an answer that never
+came writes the same row. A 4xx, a 503 or no connection made did not run,
+as chaos.py's clients judge a try, so those tries allow no K+1. More than
+that is a row written after the moment (a restore keeping what came after
+its time) or a refusal of a write that ran; fewer is an acknowledged write
+the archive lacks or timed after the moment.
+
+The check first stood as equality with the writer's count, and CI's run
+43627518610 failed it: 397 rows against 396 acknowledged. Its writers had
+stalled with no fault yet injected: the pause took 3.6 s where it takes
+0.1 s (the poll interval of `until` in `deploy/drill/drill.py`, the
+granularity of its wait for every writer to pause) in each of the job's
+78 other runs among CI's last 150, and 718 writes were answered in the 2 s
+before it against a median of 1 191. eu-t1's row 397 landed while its
+writer waited for an answer it gave up on. A restore keeping a write from
+after its moment is ruled out by the code: a record's time is its node's
+clock as the record enters the feed under the write lock
+(`replication::Feed::push`), the archive keeps it (`archive::take`) and
+`--to` stops at the first record after the moment
+(`archive::assemble_into`), the node's clock being the runner's. An
+answer held past the writer's timeout just before the moment reproduced
+the mismatch every time, with no stall: 201 rows against 200. Ten runs
+here (Docker's 8 CPUs, nothing else running) saw no stall: pauses of
+8-14 ms, gaps before them of 17-36 ms, no row unanswered, each restore
+equal to its count. The restore point now says how long the pause took
+and which writer was last, the longest gap between acknowledged writes
+before it, and each row not acknowledged by then with its tries (sent and
+ended, from the moment, and what came), and a failed restore says them
+and whether eu-a's archive was of the tenant's primary or its replica, so
+the next failure says which it was. A replica's node
 times each write as it applies it, a little after its primary appended
 it (its follower passes over the times the primary sent, and its own feed
 stamps the record), so a restore from a replica's archive can hold fewer
