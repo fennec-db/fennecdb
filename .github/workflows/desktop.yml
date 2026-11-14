@@ -367,6 +367,64 @@ jobs:
       - name: Build the test variant
         run: FENNEC_DESKTOP_TEST_BUILD=1 npm run build
 
+      # The windows-11-arm runner's own provisioner, provjobd.exe in its user's
+      # temporary folder, started before the job, asks WSL every 30 s for as long
+      # as the runner lives (`wsl -u root -e ls`), and WSL is not installed there.
+      # The system's wsl.exe, run with no console, answers by opening
+      # `wsl.exe --update --confirm --prompt-before-exit` in a console of its own:
+      # a window that asks for a key to install WSL and gives up 60 s on, one at a
+      # time, so a new one every 90 s, on an idle runner as during the checks
+      # (runs 43594225601 and 43594228435, every process start audited). Each
+      # comes in front: `menu`'s click into its main window's page landed on one
+      # that opened 3 s before (jobs 132400115646, 132425554981). Not only once
+      # Windows Terminal hosts consoles: a console a background process opened
+      # while another program's window was in front came over that window 7
+      # times of 7 hosted by conhost, as 10 of 10 by Windows Terminal, and each
+      # of the runner's own prompts took the foreground (run 43605593298), so
+      # pinning conhost as the console host would not keep one behind. WSL cannot be
+      # installed in a job (`wsl --update` says it is not installed; the feature
+      # wants a restart), and a prompt closed is opened again by the next poll,
+      # so the poll is paused for the rest of the job (NtSuspendProcess, as
+      # Process Explorer's Suspend; resumed in the job's last step), a poll it had
+      # started let end, then the prompt still open closed as a person closes it
+      # (WM_CLOSE to its console's or Windows Terminal's window: a cancel). No key
+      # is sent to it: a key would install WSL.
+      - name: The runner's WSL poll paused, and its install prompt closed
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Add-Type -TypeDefinition @'
+          using System; using System.Collections.Generic; using System.Runtime.InteropServices; using System.Text;
+          public static class FennecRunner {
+            delegate bool EnumProc(IntPtr h, IntPtr l);
+            [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc f, IntPtr l);
+            [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+            [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
+            [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
+            [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint m, IntPtr w, IntPtr l);
+            [DllImport("ntdll.dll")] public static extern int NtSuspendProcess(IntPtr h);
+            // The prompt's window: its own console's, or Windows Terminal's that hosts it, titled with wsl.exe's path.
+            public static List<IntPtr> Prompts() { var r = new List<IntPtr>(); EnumWindows((h, l) => { var t = new StringBuilder(512); GetWindowTextW(h, t, 512); var c = new StringBuilder(256); GetClassNameW(h, c, 256); var k = c.ToString(); if (IsWindowVisible(h) && (k == "ConsoleWindowClass" || k == "CASCADIA_HOSTING_WINDOW_CLASS") && t.ToString().EndsWith("\\wsl.exe", StringComparison.OrdinalIgnoreCase)) r.Add(h); return true; }, IntPtr.Zero); return r; }
+          }
+          '@
+          $polls = { @(Get-CimInstance Win32_Process -Filter "Name = 'wsl.exe'" | Where-Object { $pollers -contains $_.ParentProcessId }) }
+          $prompts = { @(Get-CimInstance Win32_Process -Filter "Name = 'wsl.exe'" | Where-Object { $_.CommandLine -match '--prompt-before-exit' }) }
+          $pollers = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'provjobd.exe%'" | ForEach-Object { [int]$_.ProcessId })
+          if (-not $pollers) { 'no provjobd running: nothing paused' }
+          foreach ($p in Get-CimInstance Win32_Process -Filter "Name LIKE 'provjobd.exe%'") {
+            '{0} {1}, started {2}, paused: NTSTATUS {3}' -f $p.ProcessId, $p.ExecutablePath, $p.CreationDate.ToUniversalTime().ToString('o'), [FennecRunner]::NtSuspendProcess([Diagnostics.Process]::GetProcessById([int]$p.ProcessId).Handle)
+          }
+          $until = (Get-Date).AddSeconds(20)
+          while ((& $polls).Count -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 200 }
+          if ((& $polls).Count) { "a poll still running 20 s on: $((& $polls).CommandLine -join '; ')" }
+          $open = & $prompts
+          "prompts open: $(if ($open) { ($open | ForEach-Object { '{0}, started {1}' -f $_.ProcessId, $_.CreationDate.ToUniversalTime().ToString('o') }) -join '; ' } else { 'none' })"
+          foreach ($h in [FennecRunner]::Prompts()) { 'its window {0} asked to close: {1}' -f $h, [FennecRunner]::PostMessageW($h, 0x10, [IntPtr]::Zero, [IntPtr]::Zero) }
+          $until = (Get-Date).AddSeconds(15)
+          while ((& $prompts).Count -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 200 }
+          $left = & $prompts
+          if ($left) { "still open 15 s on: $($left.ProcessId -join ', ')" } else { 'no prompt open' }
+
       # The windows-11-arm image comes up with the Start menu open, its search in
       # front, and a "Microsoft account" sign-in window (WWAHost.exe), each started
       # before the job and in front of every window the checks open: `menu` found
@@ -473,6 +531,16 @@ jobs:
           path: ${{ runner.temp }}/fennec-desktop-checks/logs
           retention-days: 14
           if-no-files-found: ignore
+
+      # What "The runner's WSL poll paused" paused, given back to the runner as it was.
+      - name: The runner's WSL poll resumed
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Add-Type -Namespace FennecRunner -Name Nt -MemberDefinition '[DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr h);'
+          foreach ($p in Get-CimInstance Win32_Process -Filter "Name LIKE 'provjobd.exe%'") {
+            '{0} resumed: NTSTATUS {1}' -f $p.ProcessId, [FennecRunner.Nt]::NtResumeProcess([Diagnostics.Process]::GetProcessById([int]$p.ProcessId).Handle)
+          }
 
   sign:
     name: sign and notarize

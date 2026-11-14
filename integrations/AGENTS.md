@@ -86,7 +86,12 @@ state, its `state.json`, credential store items and web stores (`freshState`),
 and on Windows with no picker of the shell's dimming the screen, one a check
 left failing it (`clearDimming`), so one that fails half-way fails alone; a failed one keeps the system log of the
 app and of WebKit's processes (`keepEvidence`), the main record of a page that
-never loads. The toolchain is fetched into `.hutch-home/`,
+never loads. On the arm64 runner its provisioner's WSL poll, whose install
+prompt comes over the window in front every 90 s whichever host its console
+has, is paused for the job and the prompt closed, never a key sent to it, the
+poll resumed by the job's last step (`desktop.yml`); the unit tests ask
+Windows a command line and a file's DACL by the app's own calls under its
+Bun, never through PowerShell, which crashed there (`test/platform.ts`). The toolchain is fetched into `.hutch-home/`,
 never `~/.hutch` or a shell file, and held to `hutch-pin.json`, a pin of
 every system it builds on, Hutch and what Hutch fetches, a system without
 one refused (`scripts/electrobun.mjs`); signing runs by hand from `main` alone, in an
