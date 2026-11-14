@@ -396,7 +396,9 @@ through an upgrade: a follower that does not say it reads record checksums
 (<code>sums=1</code> on <code>/_replication</code>, or on a node's
 <code>POST /_replication/tenants</code>) is sent each record and image as a
 binary from before them wrote it
-(<a href="file-format.html">File format</a>). An archiver writes each
+(<a href="file-format.html">File format</a>); the order to upgrade a
+cluster in, and what 1.x promises, are on
+<a href="compatibility.html">Compatibility and upgrades</a>. An archiver writes each
 record it takes with a checksum of its own and how far it had synced the
 segment, a plain one from a primary from before too, so a power cut on
 the archiver's machine leaves an archive a restore reads to its last
