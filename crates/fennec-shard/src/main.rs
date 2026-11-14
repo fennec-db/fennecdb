@@ -9,6 +9,7 @@
 //! curl localhost:8090/t/acme/
 //! ```
 
+use fennec_http::crypto::ct_eq;
 use fennec_http::replication::{self, Follower, Replication};
 use fennec_shard::directory::Directory;
 use fennec_shard::{Config, Router};
@@ -205,12 +206,24 @@ fn hold_file(path: &str, what: &str) -> fennec_abi::lock::FileLock {
 /// as it is added (`PUT /_shard/nodes/<n>`).
 fn refuse_node_token(dir: &Directory, entry_token: Option<&str>, path: &str) {
     let Some(t) = entry_token else { return };
-    if let Some((name, _)) = dir.nodes().iter().find(|(_, n)| n.token == t) {
+    if let Some((name, _)) = dir
+        .nodes()
+        .iter()
+        .find(|(_, n)| same_token(Some(&n.token), t))
+    {
         fail(&format!(
             "--entry-token is node `{name}`'s admin token in {path}: the entry's Worker holds \
              its token, and that one reaches /_admin/ on the node; give the entry one of its own"
         ));
     }
+}
+
+/// Whether `held` is the token `t`, compared as every token is: no request
+/// reaches these, which hold one flag's token to another's at the start,
+/// but a token compared any other way would be one more to tell apart
+/// (`tools/secret_eq_check.py`).
+fn same_token(held: Option<&str>, t: &str) -> bool {
+    held.is_some_and(|h| ct_eq(h.as_bytes(), t.as_bytes()))
 }
 
 fn main() {
@@ -439,11 +452,11 @@ fn main() {
     }
     match cfg.entry_token.as_deref() {
         Some("") => fail("--entry-token is empty: the entry's mark would be anyone's to make"),
-        Some(t) if cfg.token.as_deref() == Some(t) => fail(
+        Some(t) if same_token(cfg.token.as_deref(), t) => fail(
             "--entry-token is --token: the entry's Worker holds its token, and --token moves \
              and deletes every tenant; give the entry one of its own",
         ),
-        Some(t) if replication_token.as_deref() == Some(t) => fail(
+        Some(t) if same_token(replication_token.as_deref(), t) => fail(
             "--entry-token is --replication-token: the entry's Worker holds its token, and \
              the directory's replication stream carries every node's admin token; give the \
              entry one of its own",

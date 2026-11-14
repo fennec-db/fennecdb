@@ -13,6 +13,8 @@ WASM_OUT = target/wasm32-unknown-unknown/wasm/fennec_wasm.wasm
 # code opens with comes with any set, unless SCHEMA=0: 7.5 KB brotli for a
 # page whose code declares none.
 FEATURES ?=
+# `make test`'s logs, counted for the tests that skipped themselves (tools/skips_check.py)
+SKIPS = python3 tools/skips_check.py
 SCHEMA ?= 1
 # `make studio-desktop STUDIO_SERVER=0.1.12`: the server the desktop app bundles
 # is that release's, not built from this checkout. A release's version, and
@@ -22,10 +24,10 @@ SCHEMA ?= 1
 STUDIO_SERVER ?=
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js upgrade-check openapi-lint openapi-check openapi-golden sync-scenarios-check fennecql-corpus builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-desktop studio-desktop-dist studio-desktop-test studio-highlight statements-bench gzip-bench replay-bench hook-bench instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \ lists-bench
+.PHONY: all test test-js upgrade-check openapi-lint openapi-check openapi-golden sync-scenarios-check fennecql-corpus builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-desktop studio-desktop-dist studio-desktop-test studio-highlight statements-bench gzip-bench replay-bench hook-bench instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench lists-bench stress-test
 	python-test go-test dotnet-test languages-test examples-test recipes-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench entry-bench \
 	compare beir import-test follow-bench \
-	pgvector-up pgvector-down pgvector-tls docker docker-run docker-compact docker-down grafana-check deploy-check drill memory clean \
+	pgvector-up pgvector-down pgvector-tls docker docker-run docker-compact docker-down grafana-check deploy-check drill chaos memory clean \
 	site site-serve site-deploy packaging-test
 
 all: test wasm
@@ -41,20 +43,21 @@ all: test wasm
 ## The sync scenarios' reports go first, so a runner that did not run this
 ## time leaves none for sync-scenarios-check to find.
 test:
-	@rm -rf target/sync-scenarios
-	$(CARGO) test --workspace --exclude fennec-bench --lib --bins --tests
-	$(CARGO) test --workspace --exclude fennec-bench --doc
-	$(CARGO) test -p fennec-core --no-default-features --features std-fs,language --lib --test features
-	$(CARGO) test -p fennec-core --no-default-features --features std-fs --lib --test features
+	@rm -rf target/sync-scenarios target/skips
+	$(SKIPS) tee target/skips/rust-1.log -- $(CARGO) test --workspace --exclude fennec-bench --lib --bins --tests
+	$(SKIPS) tee target/skips/rust-2.log -- $(CARGO) test --workspace --exclude fennec-bench --doc
+	$(SKIPS) tee target/skips/rust-3.log -- $(CARGO) test -p fennec-core --no-default-features --features std-fs,language --lib --test features
+	$(SKIPS) tee target/skips/rust-4.log -- $(CARGO) test -p fennec-core --no-default-features --features std-fs --lib --test features
 	@$(MAKE) --no-print-directory test-js
 	@if [ -f web/fennec.wasm ] && command -v node >/dev/null 2>&1; then $(MAKE) --no-print-directory sync-scenarios-check; fi
+	@python3 tools/skips_check.py check target/skips/*.log
 
 ## JS tests. node's own runner; no dependencies. The spec reporter ends a
 ## failing run with each failing test's name and assertion: Node 22's
 ## default away from a terminal is TAP, a failure among a thousand lines.
 ##   fennec.test.js      query builder (end-to-end too when wasm is present)
 ##   fennec.sync.test.js sync layer -- against a real `fennec-server --http` server;
-##                     skipped when `web/fennec.wasm` or the binary is missing
+##                     skipped when `web/fennec.wasm` or the binary is missing (a failure under CI)
 ##   fennec.sync.scenarios.test.js  integrations/sync-scenarios.json against
 ##                     FennecSync, over a scripted transport
 ##   fennec.persist.test.js  incremental persistence, over an in-memory IndexedDB
@@ -81,7 +84,7 @@ test:
 ##                     `web/fennec.wasm` or the binary is missing
 test-js:
 	@if command -v node >/dev/null 2>&1; then \
-		node --test --test-reporter=spec web/fennec.test.js web/fennec.sync.test.js web/fennec.sync.scenarios.test.js web/fennec.persist.test.js web/fennec.file.test.js web/fennec.schema.test.js web/fennec.client.test.js web/fennec.replicas.test.js web/fennec.https.test.js studio/test/statements.test.mjs studio/test/transport.test.mjs; \
+		$(SKIPS) tee target/skips/js.log -- node --test --test-reporter=spec web/fennec.test.js web/fennec.sync.test.js web/fennec.sync.scenarios.test.js web/fennec.persist.test.js web/fennec.file.test.js web/fennec.schema.test.js web/fennec.client.test.js web/fennec.replicas.test.js web/fennec.https.test.js studio/test/statements.test.mjs studio/test/transport.test.mjs; \
 	else \
 		echo "node not found -- JS tests skipped"; \
 	fi
@@ -956,6 +959,30 @@ drill:
 	docker build -f deploy/Dockerfile --target kit -t fennec-kit .
 	python3 deploy/drill/drill.py
 
+## The drill's seeded faults (Docker): a region of three nodes, its router
+## and standby, every container held to --cpus and --memory, clients writing
+## and reading registers and appending rows while a schedule drawn from each
+## seed kills and pauses nodes, delays, drops and cuts links between a router
+## and a node and between two nodes (tc netem), kills a node again mid
+## catch-up, fails a move's source over and jumps a node's clock (a test
+## build's, `test-clock`), each fault drawn again until it lands. After each
+## fault heals every replica's rows are held to its primary's; at the end the
+## history is held to the YCSB register checker, every write and append
+## answered found -- but one a failover lost while its replica was behind,
+## the window the design names, counted -- and no tenant written by two
+## primaries at once (deploy/drill/oracle.py). The driver runs in a container
+## too, removed with everything else however the run ends.
+## SEEDS (3) seeds from SEED0 (1), CHAOS_MINUTES (3) of faults each, at a
+## lease of CHAOS_LEASE (5) s; CHAOS_OUT=<dir> keeps each seed's result, and a
+## failure's history and logs; CHAOS_KEEP=1 leaves a failed seed's containers
+SEEDS ?= 3
+SEED0 ?= 1
+CHAOS_MINUTES ?= 3
+chaos:
+	python3 deploy/drill/test_oracle.py
+	docker build -f deploy/Dockerfile --target chaos -t fennec-kit-chaos .
+	SEEDS=$(SEEDS) SEED0=$(SEED0) CHAOS_MINUTES=$(CHAOS_MINUTES) python3 deploy/drill/chaos.py
+
 ## A file under updates, compacted on its own or not: YCSB's 1 KB records,
 ## a field updated at a time while a thread reads whole records, the file's
 ## size, the reads' latency during and after each compact, the major faults,
@@ -1229,3 +1256,11 @@ clean:
 	$(CARGO) clean
 	rm -f web/fennec.wasm web/fennec-lite.wasm web/fennec-min.wasm
 	rm -rf web/collate site/dist
+
+## The Rust and JS suites ITER (20) times in `docker run --cpus=3` beside BUSY
+## (3) busy loops, GitHub's three-core runner, the way a flake reproduces
+## (docs/design/conventions.md#reruns). CRATE=fennec-ql: that crate's tests
+## alone; TIMEOUT seconds (14400), CPUS, IMAGE (the pinned rust image) and
+## LOGDIR (under /tmp) as tools/stress-test.sh says. Needs Docker.
+stress-test:
+	ITER="$(ITER)" CRATE="$(CRATE)" TIMEOUT="$(TIMEOUT)" BUSY="$(BUSY)" CPUS="$(CPUS)" IMAGE="$(IMAGE)" LOGDIR="$(LOGDIR)" ./tools/stress-test.sh

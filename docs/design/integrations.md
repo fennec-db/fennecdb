@@ -472,7 +472,10 @@ them (201 MB), every saved server's a check ever made, each emptied by its
 removal and left in place.
 
 A failed check keeps what the app cannot say (`keepEvidence`, before `run.mjs`
-kills what is left): the unified log of the app and of WebKit's processes since
+kills what is left): every fact the app reported (`<check>.report.jsonl`, each
+window's load step by step, on every system: the next check's start empties the
+file, and a failure prints only its last 12 lines), the unified log of the app
+and of WebKit's processes since
 the check started, a `sample` of the app's `bun` while it runs, and any crash
 report written meanwhile, all in the logs CI uploads. A window whose page never
 loads is otherwise silent: Electrobun 2.0.4's navigation delegate implements
@@ -664,7 +667,33 @@ applies to.
   Bun.secrets against a timer (a `set` that lost the race may land after the
   app said it kept nothing, and an unlock prompt would be cut off); `gdbus`,
   `busctl` or `dbus-send` (none is on every desktop); and a file of the app's
-  own where there is no store, never.
+  own where there is no store, never. On the arm64 runner gnome-keyring
+  answered `ReadAlias("default")` with "/" now and then, right after a token
+  was kept or cleared, and the app refused in words a store that was there:
+  `serve`'s `serve-token` (132035918973, 132103481650), `remote`'s first save
+  (1 of 12 looped runs in 43601158459) and its form's Forget token (1 of 15
+  in 43603246274). The command threw in the test hooks unreported, and the
+  check waited its 30 s out saying nothing; a command that throws is now
+  reported with its words (`cmd-failed`, testhooks.ts), which fails the
+  check's wait at once, and a failed check keeps gnome-keyring's journal.
+  That journal said why, at the failure's millisecond:
+  `gkd_secret_service_get_pkcs11_session: assertion 'client' failed`, then
+  `gkd_secret_objects_lookup_collection: assertion 'session' failed`.
+  gnome-keyring knows a connection as a client once an idle its D-Bus filter
+  queues for each message has run (gkd-secret-service.c's
+  `service_message_filter`, at G_PRIORITY_HIGH "to make sure this ... is
+  scheduled before the actual method call"), and the app asks on a
+  connection of its own made for the one call, so its first call met that
+  race whenever gnome-keyring's loop was busy (it had just written the
+  keyring); libsecret's one shared connection meets it once. A "/" is asked
+  again on the same connection, three calls in all, each on the answer
+  before it: that answer is the event that the idle was queued before the
+  call was handled. A store with no default collection answers "/" to each,
+  a few milliseconds more. Rejected: a time between the calls, and a call of
+  another kind first (DBus.Peer.Ping is answered by GDBus in its own thread,
+  before the idle). It did not come back in the container (200 asks each at
+  once after an item was kept, 150 of `serve`'s token kept and read at once),
+  where the daemon's loop was never as late.
 - **WebView2's stores.** Electrobun's Windows `sessionClearStorageData` clears
   the first WebView2 view it finds, whatever partition it is asked for
   (win/nativeWrapper.cpp:14580, upstream #608): another window's store, while
@@ -687,7 +716,13 @@ applies to.
   asked after each try, not when the call returned: on the arm64 runner the app
   once said a removed connection's folder was gone and the check found it
   there. `storage` now runs on Windows and holds each folder gone, a closed
-  file window's too, on both runners.
+  file window's too, on both runners. `remote` waits for each removal as long
+  as the app gives one (3 s for its window to close, 20 s for its folder),
+  failing at once where the app says it gave a store up: its 10 s for all nine
+  was less, and on the x64 runner the first, the one with a window, was not
+  done 10 s after its window closed, another window's WebView2 starting beside
+  it (131970689776). Unloaded, the nine took 0.9 to 3.4 s (56 looped runs on
+  both runners, the four runs named below).
 - **New windows.** Electrobun 2.0.4 handles no WebView2 NewWindowRequested (it
   raises `new-window-open` only for a Ctrl+click it sees starting a
   navigation), so WebView2 opens a window of its own for a page's
@@ -853,6 +888,57 @@ has.
   window silent; the load again came 47 to 82 ms after the first on x64 and
   59 to 113 ms on arm64 (one each in 43104202430, 43107758866 and
   43109301246).
+- **A first load WebKitGTK cancelled.** A studio window's first load on
+  Linux sometimes ended 5 to 22 ms after its `will-navigate`, before anything
+  committed, and the window stayed blank: 7 of the 146 Linux runs of the
+  checks from 12 to 14 November failed so (`files`, `storage`, `remote`,
+  `serve`, `backups`), each with the same reports, a `did-navigate` and no
+  `did-commit-navigation` before it. Electrobun 2.0.4 hands the app WebKitGTK's
+  `load-failed` as an event no main-process handler takes, and the
+  `did-navigate` its load-changed FINISHED sends after it
+  (linux/nativeWrapper.cpp's onLoadChanged) as a load that finished. A shim
+  loaded into the app on the runners (`LD_PRELOAD`, a handler of its own on
+  each view's `load-failed`, printing the error) caught one on x64 in
+  43598872776: "Load request
+  cancelled" (WebKitNetworkError 302) as the load started, a saved server's
+  window opened again in its store 150 ms after it closed; WebKit draws no
+  error page for a cancel. It came in 1 of the 14 looped runs of the six
+  checks with studio windows there, and once in about 1 300 windows in an
+  `ubuntu:24.04` container with the same WebKitGTK (2.52.6) beside busy
+  loops; what cancels it is WebKit's. The app waits for that event, never a
+  time: a first load that ended with nothing committed is loaded again, at
+  most three times a window and only until a document of it commits
+  (`loadAgainIfDropped`, firstload.ts). Linux alone: the drop was seen
+  nowhere else, and on Windows Electrobun drops a NavigationCompleted that did
+  not succeed, so a failed load raises no event. `firstload` holds it with a
+  first load made to end the same way: the window's server is reached through
+  a proxy whose first answer to the page is 204 No Content, which WebKit stops
+  as it starts ("Frame load interrupted", WebKitPolicyError 102, no error
+  page); the page was loaded again at once and the studio there 372 ms later
+  in the container. Rejected: a time after `will-navigate` (a slow page would
+  be loaded again under itself, and a dropped one waited for), and a longer
+  wait in the checks (the window never loads).
+- **A window's first load on Windows.** Five Windows runs of the checks from
+  12 to 14 November stopped at a studio window's `will-navigate` with no
+  commit for the rest of their 30 s (`environment`, `storage`, `finder`,
+  `serve` twice; the two `serve`s, on arm64, with no report readable at the
+  failure at all). Each studio window there is a WebView2 browser of its own
+  (Electrobun makes a user data folder for each partition, and the app a
+  partition for each window), and its document waits for that browser before
+  its request leaves: in 56 looped runs of the six checks with studio windows
+  on the two runners (43594226957, 43598872776, 43601158459, 43601398293),
+  1 119 windows, `will-navigate` to the commit took 1.0 to 1.7 s at the
+  median, the page's own Navigation Timing putting that time before its
+  connection, and up to 20.1 s on x64 (`storage`'s windows opened while
+  another window's browser was ending and its folder being removed); every
+  window loaded. Not WPAD: the runners have "Automatically detect settings"
+  on and a `wpad` lookup that fails after 3 to 5 s, but with it off
+  (43601398293) the wait was the same. Whether the five were that tail or a
+  navigation WebView2 ended unseen (Electrobun drops a NavigationCompleted
+  that did not succeed, and a cancel draws no error page) is not known, and
+  none came back in those runs; a failed check keeps the window's every step
+  now, and a page that loaded says where its load's time went (`nav`, its
+  first state report).
 
 Desktop integration (phase 3 of #578). A `.fennec` opens from Explorer and a
 file manager, the app registers itself for that, the menus' keys, the last
@@ -1162,20 +1248,7 @@ window and the app's words are each system's, and the app has its icon there.
   icon's images), `Resources\app.ico` 48 892; Linux's `Setup.tar.gz`
   41 806 525 -> 41 875 912 (+69 387, +0.17%; the second +69 315), the update
   archive +69 236 and +69 187 (Hutch's two copies of the PNG are one in
-  zstd's window). The build also writes the icon's images into the app's own
-  `bun.exe`, read from the x64 download: RT_ICON 1 to 7 are the .ico's seven
-  images and RT_GROUP_ICON 1 names them, as in `launcher.exe`, but Bun's own
-  group, the named `IDI_MYICON`, stays, and still names RT_ICON 1 as its one
-  256-pixel image of 270 600 bytes, which is now the app's 16-pixel one; a
-  named group comes before a numbered one, so it is the icon Windows draws for
-  that file, the 16-pixel image (its hash, `environment`'s, is neither the
-  toolchain Bun's nor the launcher's, on both runners). The write leaves the
-  security directory naming Bun's signature at 88 815 616, 10 328 bytes, in a
-  file of 88 594 432: Windows reads it as NotSigned (the toolchain's is Valid),
-  and Bun refuses that copy as the base of a program (InvalidSecurityDirectory:
-  `environment`'s stand-in is built by the toolchain's). Whether a window's
-  taskbar button or Task Manager shows that icon, Electrobun setting none of
-  its own, is not measured. macOS's is the iconset it had. Without them the launcher, its shortcut, its menu entry and
+  zstd's window). In the Windows download (read from the x64 and arm64 zips of main's run 43210313114) neither exe carried it: `launcher.exe` had no resource section, and `bun.exe`, the process that owns every window, held Bun's own dumpling, the named group `IDI_MYICON` naming one 256-pixel image of 270 600 bytes (named groups come before numbered ones), so the taskbar and Alt-Tab drew Bun's icon. `scripts/dist.sh` therefore writes `icon/icon.ico` into both with `scripts/set-exe-icon.mjs` (plain Node: the resource section rewritten in place in `bun.exe`, Bun's group dropped and its version and manifest kept, a new section for the launcher; the certificate table, no longer a signature, cut off), and `scripts/checks/icons.mjs` holds the downloaded exes to 16, 32, 48 and 256 pixel images, each the size its entry declares and the app's own. No dependency: a resource editor would be a Windows-only step or a package for a table of a few hundred bytes. macOS's is the iconset it had. Without them the launcher, its shortcut, its menu entry and
   each window show a default program's icon, and a `.fennec` file none.
 
 Toolchain. `electrobun init` installed Hutch (the build tool) in `~/.hutch` and
@@ -1662,6 +1735,309 @@ the drill fails it prints the last 300 lines of every router's and node's
 log (`DRILL_LOG_LINES`), since the cleanup takes the containers and CI
 leaves nothing else to read. CI's `deploy` job runs both checks.
 
+### The chaos drill
+
+**`make chaos` breaks a region by seed, one fault at a time, and holds its
+history to an oracle.** The drill above runs one sequence, the same every
+time; `make chaos SEEDS=N` (`deploy/drill/chaos.py`, the standard library
+and the Docker CLI) draws a schedule of faults from each seed and holds
+what the clients saw to `deploy/drill/oracle.py`. One region, as the kit
+runs it: the global router, the region's router (`--replicas`,
+`--auto-failover` at the kit's lease of 5 s, `--upstream-timeout` twice
+that) and its standby, three nodes in three zones (`--dir --lease --sync
+always`),
+four tenants each with a replica in another zone, every token in the
+environment. Every container is held to `--cpus` and `--memory`, the
+driver too: it runs in a container of the chaos image on the same network,
+Docker's socket handed in, so its clients reach the routers by name and
+take no port of the machine running it -- loopback load once left 16 000
+sockets in `TIME_WAIT` and cut every other process off the network -- and
+a client refused or cut off dials again at most 20 times a second, less
+as it goes on. The run is removed by its label however it ends, the driver
+first when the process running `make` is stopped.
+
+*The workload.* Two clients a tenant, a connection each, through the
+region's router (its standby where the router cannot be reached). Each
+writes registers -- `put regs {id: k, v: <a value no other write in the
+run writes>, at: now()}`, four registers a tenant, and in the same block,
+one `/batch`, `put wl {id: <that value>, k: k}`, the ledger -- reads them
+back, and appends rows of values of its own (`put log`), and records every
+operation
+with when it was sent and answered, on the driver's monotonic clock, and
+how: answered (2xx, with `Fennec-Seq` and `Fennec-History`); refused,
+which cannot have run -- a 4xx, a 503 (every 503 says nothing landed,
+[quotas.md](quotas.md#retry-after-in-bodies)), a connection never made;
+or neither -- a 500 (`outcome: unknown` among them), a 502 or 504, a
+request sent and never answered -- which may have run, then or later.
+Each tenant starts with 200 rows of 1 KB, so a move's image and a copy's
+catch-up over a slowed link take seconds.
+
+*The faults*, drawn by weight from the seed, each held for half a lease to
+four, then healed:
+
+- `kill`: `docker kill` of a node -- the process lost, the kernel
+  delivering what its sockets held, the case the replication paragraph's
+  bound covers -- and started again;
+- `pause`: `docker pause` of a node, shorter or longer than a lease. The
+  freezer stops the process and not its clocks, so a node woken past its
+  lease holds none, and a write it was answering is `outcome: unknown`
+  (`answered_under_lease`), never a 200 its failover lost;
+- `router`: tc netem between the region's router and a node, both ways: a
+  delay of 50-400 ms with a quarter of it as jitter, a loss of 5-30%,
+  both, or a partition (all of it lost). Never its standby's, which
+  leases nothing and carries no client: drawn a third of the time as the
+  drill first stood, it was a fault nothing met;
+- `replica`: the same between two nodes a tenant's stream runs between,
+  its primary's and its replica's as the router places them -- as first
+  drawn, any two nodes, a pair that may share no tenant;
+- `catch-up`: a node holding a primary killed long enough to be failed
+  over, started again with its peers' links to it slowed to 256 kbit-1
+  Mbit, and killed and started again while a copy the router named on it
+  holds fewer appends than its primary -- the copy of a tenant it lost,
+  which follows the new primary from an image, its history forked past;
+  a node holding replicas alone has them taken off as it is failed over;
+- `move`: a tenant moved to the third node, its source's link to the
+  router slowed so that the image takes seconds, and the source killed,
+  paused or cut off from the router once the tenant is seen `moving`, for
+  more than a lease: a failover during a move;
+- `clock`: the clock of a node holding a primary moved an hour to 30 days
+  ahead or back, every copy on the node read back -- `get probe select
+  now()`, the node's own reading -- the shift away from the system's clock
+  before it holds, and the system's again, every one, after.
+
+*Each fault lands, or is drawn again.* Each says whether it did: a kill
+or a pause the container's state shows, a link's netem tc shows on both
+ends, a catch-up a copy seen behind, a move a tenant seen moving, a clock
+every copy on the node read shifted. As the drill first stood, a
+catch-up whose copies caught up before it looked, a move that ended
+before its source was hit or found no tenant, and a link fault on a pair
+sharing no tenant or on the standby router went on as faults, and a seed
+could pass with a kind never made. One that did not land is drawn again,
+the same kind; three in a row fail the seed, naming why, and the run goes
+on past its minutes until every kind has landed once. The summary counts
+each kind landed and drawn again.
+
+netem is applied from inside each container (`--cap-add NET_ADMIN`, the
+image's `tc`) on a fourth band of a `prio` qdisc that no priority maps to,
+filled only by a `u32` filter per peer address, so a fault touches the one
+link it names; the run first applies one and reads it back, since a kernel
+without `sch_netem` would make every link fault nothing and the run a
+pass (CI's runner loads the module).
+
+*The clock.* Docker cannot move one container's wall clock -- a time
+namespace offsets `CLOCK_MONOTONIC` and `CLOCK_BOOTTIME` alone -- and the
+kit's binaries are static musl, so no faked `clock_gettime` can be
+preloaded. The nodes run fennec-server built with `test-clock`
+(`crates/fennec-http/src/test_clock.rs`): where `FENNEC_TEST_CLOCK` names
+a file, a thread sets every open tenant's clock (`Database::set_clock`, the
+seam the browser module hands its time through) to the system's time plus
+the milliseconds the file holds, every 50 ms while it holds one -- a
+pinned clock stands still -- and back to the system's when it holds none.
+The registry passes over a slot busy as it looks (an open, a close, an
+install: `open_tenants`' `try_lock`), so the system's clock is set again
+every 50 ms until no slot was passed over, for 10 s at most, the node
+saying so past it: set once, as first built, a tenant whose slot was busy
+at that moment stood at the shifted time for good
+(`a_tenant_busy_as_its_clock_shift_ends_takes_the_systems_clock_back`, run
+in CI's test job with the feature).
+A file, not a route: a route is one the OpenAPI document lists
+([http.md](http.md#openapi)) or one a test build answers that no release
+does, and the file is reachable only from the node's own machine, as its
+clock is. What it moves is what reads a database's clock: `now()` -- the
+registers' `at`, which a replica must hold as the primary wrote it, read
+in the digests -- and the rows a `@ttl` leaves out. Not the lease, which
+runs on the boot clock and is no wall clock's to move
+([tenants.md](tenants.md#scaling-out-by-tenant)), nor what reads the
+system's time itself (the sweep, a token's `exp`, the archive's stamps).
+It stays out of a release by what is checked, not by care. Off, the
+feature compiles nothing (`#[cfg]`). `tools/release_features_check.py`, in
+CI's fmt job, holds that only fennec-http and fennec-server define it, as
+`[]` and `["fennec-http/test-clock"]`, that no other feature -- `default`
+above all -- nor any dependency turns it on, and that nothing builds with
+it -- `--features ...test-clock`, `FEATURES=...test-clock` or
+`--all-features` outside a `cargo clippy`, `test`, `check`, `doc` or
+`metadata` -- but `deploy/Dockerfile`'s `chaos-build` stage, which only its
+`chaos` stage copies from and no stage is built on. A binary built with it
+says `fennec-server <version>+test-clock` on `--version`, and `release.yml`
+refuses one: every tarball's fennec-server is run where its runner runs
+it, its line held to `fennec-server <version>`, and read for the mark
+where it does not (the Mac's x86_64), and the image's is run before it is
+pushed; the `.deb` and the `.rpm`, made from the Linux tarballs, are held
+to the same line once installed (`tools/linux-packages-check.sh`). As
+first written, this paragraph said that last check ran on every release's
+tarballs: it ran on the Linux packages alone, and nothing looked at the
+Mac's tarballs or the image. CI's clippy job lints the gated code with the
+feature, and fennec-server's `tests/test_clock.rs` holds both builds: the
+shift moves `now()` a hundred years and back in a test build, and moves
+nothing, and is never mentioned, in every other.
+
+*Settling.* After each fault every node and router runs unpaused, no netem
+is left -- read back with tc, five clears at most, before any copy is
+compared: a clear's failure was passed over, and a link left delayed would
+have held a copy behind through the next comparison -- every clock is the
+system's, and every tenant is placed, active, with a replica, within 180 s.
+The router repairs on its own as a node answers again; past 20 s
+without, the drill does every 20 s what the runbook has an operator do
+(*Replicas*, *Files left on nodes*): a repair (`POST /_shard/replicas`),
+each file it lists as left removed on its node
+(`DELETE /_admin/tenants/<t>`) where the directory places neither the
+tenant nor its replica, and a repair again, every file removed recorded.
+It is needed: a node failed over leaves its replica copies behind as
+files noted with no identity -- a detached replica that stayed, which the
+router never takes back or follows over by design
+([tenants.md](tenants.md#replicas-tried-again)) -- so a region of three
+nodes, two of them failed over in turn, had no node left to put a
+tenant's replica on, and the first runs stopped there -- a gap an operator
+meets too (RUNBOOK.md, *Known gaps*), whose fix is proposed in
+[tenants.md](tenants.md#a-detached-copy-taken-back-by-its-identity). Then
+the clients pause, and each tenant's replica must hold its primary's rows
+-- `regs`, `log` and `wl`, read from each node directly, a SHA-256 of them
+by id -- within 60 s, the placement read again at each try, since a lease
+missed under load moves the primary. A replica that never does is a
+violation, and ends the run. So every fault starts from a region whose
+copies are caught up. Last, each tenant's primary is written once on
+`probe`, directly, and its `Fennec-History` is the term it answers in as
+the next fault starts.
+
+*The oracle.* At the end the clients stop, the region settles once more,
+and every register is read once more through the router. Then:
+
+- *registers*: fennec-bench's YCSB checker (`check` in
+  `crates/fennec-bench/src/bin/ycsb.rs`, [benchmarks.md](benchmarks.md#ycsb))
+  for one field a record, with a write whose outcome is unknown taken as
+  one that may land at any moment after it was sent -- an end at infinity,
+  overlapping every later read and never the last to end before one: a
+  read must find the value of a write that could have been the last before
+  it, one that ended before the read began and was followed by none that
+  also did, or one that overlapped it, or nothing where no write had ended
+  before it. A write answered and lost is found by the first read after it
+  that finds an older value, the final reads at the latest; a read is held
+  to the writes and not to the reads before it, as YCSB's is, so a read may
+  see a write before its fsync and a later read the value before it (a
+  plain read may, [named-statements.md](named-statements.md#where-a-run-happens-and-once));
+- *the ledger and the appends*: every register write answered is in its
+  tenant's `wl` and every append answered in its `log`, and none refused
+  is in either -- a refusal that ran is a client told to send again what
+  landed. The registers alone could not see every loss: a write lost and
+  written over before any read of its register, or lost behind an earlier
+  write whose outcome is unknown (w10 answered, w11 unknown, w12 answered
+  and lost, a read finding 11, which may have landed after 12), passed;
+  the ledger's row is in the write's own block and never written over;
+- *epochs*: no tenant written by two primaries at once, read off the
+  positions its answered writes were given. A promotion forks the history
+  into the next term under a fresh id, and a move keeps it, so within one
+  history no change number is given two writes, a history's id names one
+  term and a term one id, and no write is answered in a term after one
+  sent after a later term's write was answered: an older term answering
+  after a newer has is the primary failed over still writing. The review
+  found the check of a term's one id missing: two copies promoted from term
+  2 both answer in term 3, each under an id of its own, and interleaved
+  writes under the two passed every other check.
+
+*What a failover may lose, and nothing more.* A write answered and lost is
+a violation unless it is in the window the design names (*A node lost* in
+RUNBOOK.md, the replication paragraph above): a write answered while its
+replica is behind -- its stream past `SENT_WAIT` and not waited for until
+it catches up, or no stream at all, the copy down or made anew -- is lost
+with its primary. The oracle holds each lost write to that by what the
+drill did (`documented`): each fault's span runs from the settle before it
+to its own, and records each tenant's primary, replica and term as that
+settle found them and what the fault held behind -- the nodes whose copies
+it killed, paused or made catch up, the links it impaired. A loss is in
+the window when its term is not the one its tenant ends in (a promotion
+ended it) and either it was answered in the term its span began in, by
+the primary whose replica the fault held behind, once the fault had begun
+-- a replica fault's lag, say, and a lease missed under load failing the
+primary over meanwhile -- or in a later term, one a failover of that span
+began, whose new copy
+starts behind, before the settle saw it caught up. Such a loss is counted
+(`acknowledged_lost` in `result.json`) and named with its reason, and its
+register write is taken as one whose outcome is unknown by the register
+check; every other loss fails the seed. The window is the drill's
+knowledge of what it held behind, never wider: a lag no fault made -- a
+replica starved of CPU past `SENT_WAIT` -- with a failover beside it fails
+the seed, and its logs say which it was.
+
+`deploy/drill/test_oracle.py` holds each check to histories made by hand,
+each failing where it must. A violation is reported with its seed, the
+schedule (`result.json`), the history and every container's log; the
+schedule is the seed's (`make chaos SEEDS=1 SEED0=<seed>` draws it again),
+the moments are the machine's.
+
+*One fault at a time.* The replication paragraph's bound is what is
+tested, not past it: a durable write is answered once every stream has
+written it into its socket, a lagging one not waited for past `SENT_WAIT`,
+so a primary that dies while its replica lags, or a machine lost with a
+write in its socket, loses what it answered -- the window the design names
+([named-statements.md](named-statements.md#what-a-sender-is-told), the
+failover table's last row). Faults overlapping on two links or two nodes
+would find that window and nothing else; one at a time, each settled
+before the next, a loss outside it is a bug. Load overlaps them anyway: a
+lease missed on a loaded machine fails a node over beside whatever fault
+runs, so a replica fault's lag can meet a failover no fault made. At a
+lease of 2 s, on a runner of 4 CPUs under 5.5 CPUs of quota, that failed
+seeds with no bug, which the window above now names and counts, and the
+kit's lease of 5 s makes rare.
+
+*In CI.* `.github/workflows/chaos.yml`, weekly and by hand: 50 seeds of 10
+minutes each at a lease of 5 s, more than a hosted job's six hours, so
+three jobs of a share each after one that builds the image, each run's
+seeds its own (its number times 1000 on), every seed's result and a failed
+one's history and logs kept for 14 days. Never on a pull request: hours
+long. A dispatch's `seeds` is digits or the job stops before any
+arithmetic -- bash evaluates a variable's text as an expression, so
+`a[$(...)]` would run a command in `$(( n / 3 ))` -- and `minutes` a
+number. `CHAOS_KEEP=1` leaves a failed seed's containers, volumes and
+network for a look and runs no seed after it; the sweep after each seed
+removed them as first written.
+
+*What the first runs saw*, on a laptop whose load other work held at 50 to
+110, seeds 1 to 4 (1.5, 2.5, 2.5 and 2.5 minutes of faults): 32 faults,
+every kind in each seed of 2.5 minutes, 36 settles with every replica's
+digest its primary's, 51 132 register writes and 22 603 appends answered
+and 39 622 reads, 43 operations whose outcome was unknown, no violation.
+Leases missed under that load failed nodes over besides the faults: a
+tenant reached its fifth term in 4 minutes. Eleven files left on nodes were
+removed as the runbook's operator removes them. The first runs stopped on
+the drill's own faults, each fixed: a pad row of id 0 (an id is positive),
+a region that had no node left for a replica (the operator's repair above),
+and the oracle formatting a passing read's message with no write before
+it, which ended two seeds' checks -- their histories, checked again, held.
+
+*What the review's runs saw*, at a lease of 5 s on the same laptop, Docker
+otherwise idle and other agents' test suites holding its load at 60 to
+137, seeds 901 to 903 of 2 minutes each and 902 a second time: 27 faults,
+every kind in each seed, each landing at its first draw; the clock read
+the shift away on every copy of its node -- 3 599 982 to 3 599 985 ms of an
+hour ahead, 2 591 999 953 to 2 591 999 978 of 30 days, -86 400 031 and
+-86 400 077 of a day back -- and the system's clock again after. 901, 903
+and 902's second run passed: 24 settles with every replica's digest its
+primary's, 59 194 register writes, 26 260 appends and 46 321 reads
+answered, 38 operations whose outcome was unknown, no acknowledged write
+lost in the window the design names or out of it, 8 files left on nodes
+removed as the runbook's operator removes them. 902's first run stopped
+after its catch-up: t1's copy on n2 -- the old primary's file, which the
+router's repair had follow the new primary on n1 as n2 answered again,
+n2 then killed by the fault while that copy was behind -- held none of the
+primary's writes since the first kill for the 60 s the settle waits, every
+link read back clear and every node running, and n2 logged nothing of
+replication once it started again. CI's run before the review (43464712047,
+a lease of 2 s) stopped the same way on seed 1003, its copy on n1, while
+its two other seeds passed, and so did all three of the review's hosted
+run at a lease of 5 s (43482324234, seeds 2001 to 2003, each at its
+catch-up fault). It was fennecdb's, not the drill's: the record making the
+old primary's file a follower's was left in the sink's buffer as the
+follow was answered, and a copy waiting on its image writes nothing that
+would have written it behind. The kill took the record, and the restart
+opened the file as a primary's, following nothing
+([replication.md](replication.md#replication), *A restart reads a copy's
+role from its file*). A follow now syncs it before it is answered, and an
+image comes with it inside its rename. CI's run after the fix (43493883363)
+drew seeds 2001 to 2006 at 3 minutes each, the three that had failed among
+them, and every seed passed: 69 faults, every kind in each seed and every
+catch-up restarting its node with copies behind, 75 settles with every
+replica's digest its primary's, and no acknowledged write lost.
+
 ## Install channels
 
 **A release is installed from its own files, each checked before it is used.** Four ways to install `fennec` and `fennec-server` other than a registry or the image -- Homebrew's formula, `https://fennecdb.com/install.sh`, a `.deb` and an `.rpm`, and on Windows `https://fennecdb.com/install.ps1` -- all take the archives `release.yml` built (the musl tarballs for Linux, which are static, the two macOS ones, and the two Windows zips) and build nothing themselves. Each names what it installs by a SHA-256, which is what holds them to one source: the formula carries the four sums of `SHA256SUMS`, each installer checks the tarball or the zip against the sum of the release it came from, and the packages are made from those tarballs and listed in `SHA256SUMS` with the rest. Because all three name the release's files by checksum, a published release's assets are never replaced: re-running `release.yml` for a tag whose release is public (`publish`) uploads only the files the release has no asset of, with a warning that its `SHA256SUMS` does not list them, where a draft's are replaced as before. A rebuild is not byte for byte the first build (the Rust toolchain, the runner image), so a replaced tarball would have failed every `brew install` and every sum already taken from the old `SHA256SUMS`. The image jobs still push `:X.Y.Z` and `:latest` again on a re-run; the image is not named by a checksum anywhere here. One file of a published release is written again, and only by growing: `desktop.yml` appends the app's lines to `SHA256SUMS` -- the Mac's DMG, Windows' zips and Linux's tarballs -- every line before them kept byte for byte, and never replaces a download ([Studio desktop](#studio-desktop), The release).
@@ -1679,5 +2055,7 @@ The Windows zip and `site/install.ps1` are [windows.md](windows.md#6-a-windows-r
 `install.ps1` is `install.sh`'s counterpart, run as `irm https://fennecdb.com/install.ps1 | iex`, and served the same way (`_headers`, `text/plain`, five minutes). `iex` runs a text in the caller's session, so the script is `function` definitions, each named for fennec, and `Install-Fennec @args` as its last statement, and ASCII, which Windows PowerShell 5.1 reads a file without a byte order mark as. `tools/install-ps1-check.ps1` holds the first with PowerShell's own parser (`Parser.ParseFile`), not a reading of lines -- one that let a quote inside a string end the check's idea of a string, and a `}; command` after a function's closing brace, through: it fails unless the file parses, its top level is those and nothing else (no other statement on any line, no param, begin/process/end block, trap or `using`), and no command anywhere in it, a nested block or a string's `$( )` included, is `Invoke-Expression`, `iex`, `Invoke-Command`, `Add-Type`, `Start-Job`, `Start-Process` or an alias-making command, under any module prefix or quoting, no command's name is computed but `& (Join-Path ...)`, and no member is `Create`, `NewScriptBlock`, `InvokeScript`, `ExpandString`, `InvokeCommand` or `Invoke`, nor `Run`, `Exec` or `ShellExecute` (the shell's COM objects' ways to start a program: `-App` makes its shortcut with WScript.Shell, which has the first two), or computed, nor a `[scriptblock]` type named (its strings and comments aside: the usage names `irm | iex`). CI's Windows job runs it under both PowerShells and fails copies made to run a command (`test_install.ps1`); `build.py` runs it with the `pwsh` on its PATH -- the site's deploy and CI's ubuntu job have one, a build without it says so, and under CI it is a failure -- and itself holds the ASCII and `text/plain`. A copy cut short parses to nothing or defines functions and runs none. Run in the caller's session, it assigns no variable there, but its fennec-named functions stay defined until the session ends; its settings (`Set-StrictMode`, `$ErrorActionPreference`, `$ProgressPreference`) set inside its functions, and the one process-wide setting it needs, Windows PowerShell 5.1's TLS versions (`ServicePointManager.SecurityProtocol`, held to TLS 1.2), is put back as it was. A failure is one line, `fennecdb install: ...`: run from a file it exits 1, through `iex` it throws, which fails the line it was run from -- `powershell -Command "irm ... | iex"` exits 1 -- and not the session. It finds the machine's processor in the system's environment (`HKLM\...\Session Manager\Environment`), since an x64 PowerShell on an arm64 Windows says AMD64 in its own, and takes that processor's zip and no other -- a release without the zip for an arm64 machine is refused, naming the release, since an x86_64 program runs on Windows 11's emulation and not on a Windows 10 for arm64, and a release has both Windows zips or neither; the latest release by the zip names in `releases/latest/download/SHA256SUMS`, or `FENNEC_VERSION`, held to `[0-9A-Za-z.+-]`; `FENNEC_BASE_URL` held to https or `http://localhost` and `http://127.0.0.1` as `install.sh` holds it; and `FENNEC_FROM`, a folder holding a release's zip and `SHA256SUMS`, from which it installs with nothing downloaded -- the release job's check, and a machine off the network. Downloads are `Invoke-WebRequest`'s, held to TLS 1.2 or 1.3 under PowerShell 7 (`-SslProtocol`), and a redirect from https that ends anywhere else is refused and its bytes removed, Windows PowerShell 5.1 following one that PowerShell 7 refuses. The sum is checked before `Expand-Archive`, then the zip's mark of the web, where it has one, is taken off (`Unblock-File`), so nothing it installs carries the mark into SmartScreen's warning. It installs into `%LOCALAPPDATA%\fennecdb\bin` or `$env:FENNEC_INSTALL\bin` (made absolute against the session's folder), both programs copied beside their places and then each renamed into its place, the first put back if the second cannot be (the failure names it, or the one it could not put back); Windows refuses to write over or delete a running program's file but lets it be renamed, so a program there already is renamed aside first, removed once nothing runs it -- at once, or by the next install, which sweeps what the last left -- and an upgrade under a running server installs, the server keeping its old file until it stops. It touches no profile and no `PATH`, user's or machine's: it prints the line that puts the folder on the session's `PATH`, and names the account's environment dialog for the user's `Path`, never a command writing the registry (.NET's `SetEnvironmentVariable` writes the user's `Path` back as `REG_SZ` with its `%...%` names expanded, and `setx` cuts it at 1 024 characters). It runs nothing it downloaded but the installed `fennec-server.exe --version`. `site/test_install.ps1`, in CI's `windows (release zip)` job, holds it under both PowerShells against the zip that job built, the release laid out on disk and served by Python on port 0: an install from the URL and from a folder, again over the first, over a running server and once it stopped; on the `PATH` and not; a pinned version with and without its `v`, one with no release, one not a version; a latest release with no Windows build (every one before slice 5), a tampered zip from either source, both sources named at once, a folder with no `SHA256SUMS`; every refused base URL `test_install.sh` refuses; a relative `FENNEC_INSTALL`, one that cannot be made, an unknown argument and `--help`; through `iex`, the session's settings unchanged and a failure failing the line; the script cut at every line's end, across its bytes and through its last line short of the call's name, each cut run through `iex` with nothing run; a zip marked as a browser marks one installing programs that carry no mark; and no profile and no value of the user's environment touched across all of it. It prints what Windows does with the mark of the web -- whether `Invoke-WebRequest` marks a download, from the internet and from the machine, and whether `Expand-Archive` carries a zip's mark onto what it unpacks.
 
 `install.ps1 -App` (or `--app`) installs the app instead of the two programs. `irm | iex` hands a script no argument, so the line the docs give makes the downloaded text a script block and calls it with `-App`, `& ([scriptblock]::Create((irm https://fennecdb.com/install.ps1))) -App`: the same text, its functions defined in that block's scope and gone after it. The release is found as for the programs, by the zip of the machine's processor (or `FENNEC_VERSION`), and `fennec-studio-v<version>-windows-<x64|arm64>.zip`'s sum checked before anything reads it, from the URL or from `FENNEC_FROM` alike (`Get-FennecAsset`, which the programs' path takes too), its mark taken off. It refuses while a program runs from the app's place (`Get-Process`'s paths: Windows refuses to move a folder a running program's file is in), unpacks the zip into a staging folder beside that place, `%LOCALAPPDATA%\dev.fennecdb.studio\stable\app` (Electrobun's installer's, so one copy either way; the folder above it is the app's own and never touched), renames the old app aside and the new one into place, putting the old one back if that fails and saying where it is if it cannot, and sweeps what an earlier install could not remove. A Start-menu shortcut, `fennec studio.lnk` in `$env:APPDATA\...\Start Menu\Programs` (Electrobun's name too), is written through WScript.Shell's `CreateShortcut`, the one writer of the binary `.lnk` every Windows has; one that cannot be written is said, the app installed. No administrator, no `PATH`, no registry, and nothing it unpacked runs; there is no uninstall entry (Electrobun's installer writes one, with its own uninstaller), so it prints the two paths that remove the app. `site/test_install.ps1` holds it under both PowerShells with a stand-in (the folder `fennec-studio`, a copy of `ping.exe` as its launcher, which runs from anywhere and can be kept running): from a URL into a `LOCALAPPDATA` and an `APPDATA` of the test's own, the shortcut's target the launcher, nothing beside the app, the programs not installed; again over it, the app's `state.json` kept and no staging left; spelled `--app`; refused while the stand-in runs from its place, for a tampered zip, for a release with no app and for a latest release with no Windows build, each installing nothing; from a folder whose zip a browser marked, the launcher carrying no mark; and through the script block the docs give, the session's settings unchanged and no function of the script left defined. `checks/dist-archive.mjs` runs it on the real zip under Windows PowerShell 5.1 on each Windows runner and starts what it installed by the shortcut's target ([Studio desktop](#studio-desktop)).
+
+The C library for Linux is the native library's channel for a program that is not Swift, Kotlin or Dart -- vulpes' GTK apps first among them -- where a release had carried only Apple's XCFramework and Android's AAR and the JVM's jar said to bring the library. `release.yml`'s `linux-ffi` job builds `crates/fennec-ffi` in the `ffi` profile on each architecture's runner (`ubuntu-24.04`, `ubuntu-24.04-arm`, `contents: read`, no stored credentials) with `tools/linux-ffi.sh`, and tars it as `fennec-ffi-v<version>-<target>.tar.gz` for `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`: the binaries' tarballs' pattern, the part named as the crate is, the target the Rust triple whose `gnu` says glibc where theirs say musl. The folder is a prefix -- `include/fennec.h`, `lib/libfennec_ffi.so`, `lib/libfennec_ffi.a`, `lib/pkgconfig/` -- so it is unpacked anywhere or into `/usr/local`, and its two `.pc` files name the folder from where they are (`${pcfiledir}`): `fennec-ffi` links the shared library, `fennec-ffi-static` the archive by its path and the system libraries rustc names for a static library (`--print native-static-libs`, read from an empty crate's build, since cargo prints nothing for a library it did not build again and fennec-ffi takes no dependency of its own), because pkg-config has no way to ask for the archive beside a shared library of the same name. Each library is built alone, as `make ffi` builds one. The shared library's SONAME is its name, so a program records `libfennec_ffi.so` whether it was linked with `-l` or by the file's path, as CMake links an imported library; it carries the `jni` feature's functions, so the JVM on Linux loads the same file. The archive takes none -- only a JVM loads them, from a shared library -- and is stripped of its debug sections, the standard library's, which the profile's `strip` does not reach in a file it does not link. The libraries are built against the runner's glibc and run on an older one: what fixes the baseline is the newest symbol version they ask for, which is `GLIBC_2.34` -- the threads' symbols moved into libc in 2.34 and took that version, so any build on a newer glibc asks for it -- and `tools/linux-ffi-check.sh` fails a library asking for a newer one rather than let the runner's image move the baseline. The check is the release's gate, as `linux-packages-check.sh` is the packages': the tarball's files and nothing else, its header the repository's, the shared library's machine and SONAME, its `NEEDED` held to glibc's libraries and `libgcc_s`, its exports the header's functions and `FennecNative.kt`'s JNI functions and nothing else, the archive defining the header's functions, each `.pc` file's version; then the header compiled as C++, and `tools/linux-ffi-check.c` compiled as C99 with every warning an error and linked to each library by the pkg-config lines the docs give, run on the runner and in `almalinux:9`, whose glibc is 2.34 (the container's glibc is held to it, so an image moving on fails the check rather than weaken it): the library's version, a file opened, a row written with parameters and read back, a second open refused (`FENNEC_LOCKED`), a statement that does not parse refused with its JSON, the row there after a close and an open, and a sync started on a database in memory and driven with no network, as `fennec-ffi`'s own tests drive it. CI's `linux (C library)` job runs both scripts on every change, so a tag meets no step of it CI has not run, and keeps the tarballs as the run's artifacts. Its two tarballs are in `SHA256SUMS` with the rest (`publish` globs `*.tar.gz`), and the names the installers read are held apart from theirs: `install.sh` and `install.ps1` look for `fennec-v<version>-`, which `fennec-ffi-v` is not.
 
 The packages are nfpm's (`packaging/nfpm.yaml`): one description makes both formats on a runner of either architecture with no dpkg or rpmbuild, where `rpmbuild` would have wanted a spec, a build root per architecture and its strip and requires scripts turned off for a prebuilt static binary. nfpm itself is the release binary `tools/install-nfpm.sh` pins by checksum (copied from the release's `checksums.txt`), shared by `release.yml` and CI. The deb's version carries nfpm's `release: 1` as its Debian revision (`0.1.11-1`, in the file's name too), `version_schema: semver` turns a pre-release's `-rc1` into `~rc1` in the package's version (`0.2.0~rc1-1`, an rpm's `0.2.0~rc1`; the file's name keeps the `-`), which sorts before `0.2.0` as a pre-release must, and `tools/linux-packages-check.sh` holds both packages to that form and to the ordering (`dpkg --compare-versions`, `rpm.vercmp`). `SOURCE_DATE_EPOCH` fixes the files' times: the same tarballs gave the same `.deb`, byte for byte, from nfpm on a Mac and on Linux, but the `.rpm` records the build host's name, so two machines' rpms differ by that and by nothing else. The files are `/usr/bin/fennec`, `/usr/bin/fennec-server` and the licence where each distribution looks. Each architecture is packed on a runner of its own (with `contents: read` and no stored credentials), and `tools/linux-packages-check.sh` installs the packages in `debian:12-slim` and `fedora:42` of that architecture, asserts their metadata and that they depend on nothing -- every assertion printing what it found and what it wanted -- runs both binaries, removes the package and checks the files are gone, before the artifact is kept: a package that does not install stops the release. CI's `packaging` job does the same with the latest release's tarball and again with it named as a pre-release. The job's checkout is the workflow's own commit and not a dispatched tag, which may be from before the packaging files. There is no apt or yum repository, only files on the release.

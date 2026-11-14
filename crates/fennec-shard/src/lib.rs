@@ -41,6 +41,7 @@ pub mod upstream;
 use directory::{Directory, Node, State};
 use fennec_core::prelude::*;
 use fennec_http::conn::Conn;
+use fennec_http::crypto::ct_eq;
 use fennec_http::http::{self, Method, Request, Response};
 use fennec_http::replication::{self, Replication};
 use metrics::Route;
@@ -3351,7 +3352,7 @@ impl Router {
             .header("authorization")
             .and_then(|v| v.strip_prefix("Bearer "))
             .unwrap_or("");
-        if constant_eq(given.as_bytes(), token.as_bytes()) {
+        if ct_eq(given.as_bytes(), token.as_bytes()) {
             fennec_http::audit::verified();
             return None;
         }
@@ -3708,7 +3709,8 @@ impl Router {
         };
         // The entry's token is in a Worker's secrets: as a node's admin
         // token it would reach `/_admin/` there, every tenant's file.
-        if self.cfg.entry_token.as_deref() == Some(token) {
+        let entry = self.cfg.entry_token.as_deref();
+        if entry.is_some_and(|e| ct_eq(e.as_bytes(), token.as_bytes())) {
             return Err(Fail(
                 400,
                 "the node's admin token is this router's --entry-token, which the global \
@@ -6770,17 +6772,6 @@ fn write(d: &RwLock<Directory>) -> std::sync::RwLockWriteGuard<'_, Directory> {
     d.write().unwrap_or_else(|e| e.into_inner())
 }
 
-fn constant_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7310,6 +7301,12 @@ mod tests {
         let (read, came) = std::sync::mpsc::channel::<()>();
         std::thread::spawn(move || {
             let mut tries = 0;
+            // Each try's connection is held open and unread past what it
+            // read. A reader draining it took the body whole whenever it beat
+            // the cut, and the router, the write gone out, rightly judged
+            // that try as one that may have run: a 502 at the first try, and
+            // no second for the cutter to wait for.
+            let mut held = Vec::new();
             for conn in l.incoming() {
                 let Ok(conn) = conn else { return };
                 let mut conn = std::io::BufReader::new(conn);
@@ -7334,7 +7331,7 @@ mod tests {
                     std::io::Read::read_exact(&mut conn, &mut body).unwrap();
                 }
                 let _ = read.send(());
-                std::thread::spawn(move || std::io::copy(&mut conn, &mut std::io::sink()));
+                held.push(conn);
             }
         });
         let cutter = Arc::clone(&r);

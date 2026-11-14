@@ -1,6 +1,6 @@
 <!--
 title: Install — fennecdb
-description: Every way to install fennecdb: the install script, Homebrew, a .deb or .rpm, a release tarball, the PowerShell script and zip for Windows, the Docker image, the package for your language, or a build from source.
+description: Every way to install fennecdb: the install script, Homebrew, a .deb or .rpm, a release tarball, the PowerShell script and zip for Windows, the Docker image, the package for your language, the C library for Linux, or a build from source.
 -->
 
 <h1>Install</h1>
@@ -194,7 +194,8 @@ only, as the <a href="quickstart.html">Quickstart</a> does. Its command is
 <code>--http 0.0.0.0:8080 --file /data/data.fennec --sync 250</code>: write every
 flag out when you override it, or the file is dropped. <a
 href="server.html#containers">Run it in a container</a> has the rest: one
-instance a file, memory limits, Kubernetes.</p>
+instance a file, memory limits. <a href="cloud.html">Cloud platforms</a> has
+the config for Fly.io, Render, Railway, a VM on any cloud and Kubernetes.</p>
 
 <h2 id="packages">A package for your language</h2>
 
@@ -213,6 +214,7 @@ alone, and the ones that keep the database in your app or your page.</p>
 <tr><td>Swift</td><td>SwiftPM: <code>github.com/fennec-db/fennecdb</code>, product <code>FennecDB</code></td><td><a href="mobile.html">Mobile and native apps</a></td></tr>
 <tr><td>Kotlin, Java</td><td><code>com.fennecdb:fennecdb-android</code> (the AAR) or <code>com.fennecdb:fennecdb</code> (the JVM), on Maven Central</td><td><a href="mobile.html">Mobile and native apps</a></td></tr>
 <tr><td>Dart, Flutter</td><td><code>flutter pub add fennecdb_flutter</code>, or <code>fennecdb</code> in Dart alone (pub.dev)</td><td><a href="mobile.html">Mobile and native apps</a></td></tr>
+<tr><td>C, C++ on Linux</td><td>the release's <code>fennec-ffi-v{{version}}-&lt;arch&gt;-unknown-linux-gnu.tar.gz</code> (releases after 0.2.0): the library, shared and static, <code>fennec.h</code> and pkg-config's <code>fennec-ffi</code>, x86_64 and arm64, glibc 2.34 or later</td><td><a href="mobile.html#c-on-linux">C on Linux</a></td></tr>
 <tr><td>Rust</td><td><code>fennec-core</code> and <code>fennec-ql</code> from the repository: the engine as a library, with no dependencies</td><td><a href="embedding.html">Embedded Rust</a></td></tr>
 <tr><td>Java, PHP, Ruby</td><td>nothing: the language's own HTTP client</td><td><a href="languages.html">Your language</a></td></tr>
 </tbody>
@@ -245,8 +247,9 @@ Linux the install script installs it instead of the two programs:</p>
 Developer ID, not notarized). What <code>curl</code> downloads is not
 quarantined, so the app opens at once; the same DMG downloaded from the <a
 href="https://github.com/fennec-db/fennecdb/releases/tag/v{{version}}">release</a>
-by a browser is, and its first open asks once, in System Settings, Privacy
-&amp; Security, <b>Open Anyway</b>. To remove it, delete
+by a browser is, and its first open is stopped once: press <b>Done</b> in
+macOS's prompt (Move to Trash deletes the app), then in System Settings,
+Privacy &amp; Security, click <b>Open Anyway</b>. To remove it, delete
 <code>~/Applications/fennec studio.app</code>.</p>
 
 <p>On Linux, x64 or arm64, it first asks whether the system has what the app

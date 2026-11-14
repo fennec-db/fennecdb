@@ -406,7 +406,7 @@ scheme says so; <code>http://</code> works as it did.</p>
 <table>
 <thead><tr><th><code>--sync</code></th><th>What it means</th></tr></thead>
 <tbody>
-<tr><td><code>250</code> (default)</td><td>Flushed every 250 ms. A crash loses at most that much.</td></tr>
+<tr><td><code>250</code> (default)</td><td>Flushed every 250 ms. A crash loses at most the writes answered in the last 250 ms plus the sync's own time. Measured over ten power cuts of a Linux guest (ext4), in two runs: each cut lost 54 to 794 acknowledged writes, none answered more than 316 ms before it, and what was kept was always a prefix of the writes.</td></tr>
 <tr><td><code>always</code></td><td>Each write is answered once it is on disk; a write refused by what another left (a 409 for an id taken, a 412 for a <code>require</code>) once that is on disk.</td></tr>
 <tr><td><code>off</code></td><td>Flushed only on shutdown.</td></tr>
 </tbody>
@@ -743,6 +743,8 @@ docker run -d --name fennecdb -v fennecdata:/data \
     <code>0.0.0.0</code> is.</li>
   <li><b>Run one instance per file.</b> Two writers corrupt it: on Kubernetes,
     a <code>StatefulSet</code> with one replica.</li>
+  <li><b>A volume a platform makes is often root's,</b> and the image runs as
+    65534: <a href="cloud.html#volume-owner">Who owns the volume</a>.</li>
   <li><b>Write every flag out</b> when you override the command, or the data
     file is dropped.</li>
 </ul>
@@ -788,6 +790,10 @@ comes up with an in-memory database. There is no shell in the image, so
 <code>docker exec ... sh</code> does not work; what is left is
 <code>docker logs</code> and <code>docker run --rm
 ghcr.io/fennec-db/fennec-server --help</code>.</p>
+
+<p>Fly.io, Render, Railway, a VM on any cloud and Kubernetes each have a config
+file of their own on <a href="cloud.html">Cloud platforms</a>, with a
+StatefulSet that holds the rules above.</p>
 
 <p>On machines of your own, the repository's <code>deploy/</code> has a
 systemd unit for a server of every role — a tenant node, a region's router,

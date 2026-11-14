@@ -236,6 +236,23 @@ wrote past the fork.</p>
 lost in ten failovers. With the default <code>--sync 250</code>, a failover
 loses up to the last 250 ms of writes.</p>
 
+<p>A power cut was measured on the primary, with no failover after it: no
+replica was promoted. Cut ten times on a Linux guest (ext4), in two runs, a
+primary under <code>--sync 250</code> lost 54 to 794 acknowledged writes a
+cut, none answered more than 316 ms before it — 250 ms plus the sync's own
+time — and kept every write its change feed had handed a reader, as a prefix
+of the writes. A <code>--dir</code> node under <code>--sync always</code> lost
+no acknowledged write at any cut. Its standby, read as each cut left it, held
+nothing the node came back without and was 0 to 51 changes behind it, a 20 MiB
+spill still unanswered at the cut among them. The second run counted
+the writes the node had answered as durable that the standby lacked: none, at
+all ten tenant cuts, so a promotion at any of them would have lost nothing.
+That was measured, not promised: a write answered as durable is on the
+primary's disk and in its socket to each replica, and a power cut can take the
+socket before it sends, where a killed process's kernel still delivers it.
+Once the node was back, the standby held the same rows again within 3.4 s of
+being asked.</p>
+
 <div class="tbl">
 <table>
 <thead><tr><th>primary's <code>--sync</code></th><th class="n">acknowledged writes/s</th><th class="n">lost per failover</th></tr></thead>

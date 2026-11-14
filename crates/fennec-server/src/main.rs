@@ -13,6 +13,16 @@ use std::io::{IsTerminal, Read, Write};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+/// What `--version` says after the version: a test build's mark, which
+/// keeps one out of a release -- every release's package check holds the
+/// line to `fennec-server <version>` (`tools/linux-packages-check.sh`).
+/// `test-clock` lets a file move a tenant node's clock (`make chaos`).
+const BUILD: &str = if cfg!(feature = "test-clock") {
+    "+test-clock"
+} else {
+    ""
+};
+
 const USAGE: &str = "\
 usage: fennec-server [options]
 
@@ -964,7 +974,7 @@ fn main() {
             // script read it: the file is opened and the port bound only
             // once every argument has been read.
             "--version" | "-V" => {
-                println!("fennec-server {}", env!("CARGO_PKG_VERSION"));
+                println!("fennec-server {}{BUILD}", env!("CARGO_PKG_VERSION"));
                 return;
             }
             other => fail(&format!("unknown option: {other}\n\n{USAGE}")),
@@ -1685,6 +1695,10 @@ fn serve_dir(
         if let Some(s) = &scheduler {
             s.start(durability::stop_with)?;
         }
+        // A test build's clock, moved by a file (`make chaos`), its thread
+        // started with the node's as the scheduler's is.
+        #[cfg(feature = "test-clock")]
+        fennec_http::test_clock::follow(&tenants)?;
         // Before the thread that says it listens, as a file server reads it.
         let asked = durability::shutdown_requested();
         std::thread::Builder::new()

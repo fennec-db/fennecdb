@@ -81,6 +81,27 @@ jobs:
             cargo build --profile cli --target "$t" -p fennec-cli
             cargo build --release   --target "$t" -p fennec-server
 
+            # A release's fennec-server, never a test build's: its --version
+            # is the name and the version, nothing after -- a test build
+            # says `+test-clock` (only deploy/Dockerfile's chaos stage builds
+            # one, tools/release_features_check.py). Run where this runner
+            # runs the target -- each Linux job its own, the Mac its arm64 --
+            # and read in the bytes where it does not, the Mac's x86_64: the
+            # mark is in no release's binary. Before 0.1.13 there was no
+            # --version, nor any test build.
+            bin="target/$t/release/fennec-server"
+            if said=$("$bin" --version 2>/dev/null); then
+              if [ "$said" != "fennec-server $version" ]; then
+                echo "$t: fennec-server says [$said], not [fennec-server $version]" >&2
+                exit 1
+              fi
+            elif grep -q -a -F '+test-clock' "$bin"; then
+              echo "$t: fennec-server carries a test build's mark, +test-clock" >&2
+              exit 1
+            else
+              echo "$t: fennec-server not run here; no test build's mark in its bytes"
+            fi
+
             stage="fennec-v${version}-${t}"
             mkdir -p "$stage"
             cp "target/$t/cli/fennec" "target/$t/release/fennec-server" "$stage/"
@@ -164,6 +185,70 @@ jobs:
         with:
           name: dist-${{ matrix.name }}
           path: dist/*.zip
+          if-no-files-found: error
+
+  # The C library for Linux (crates/fennec-ffi, docs/design/integrations.md,
+  # Install channels): fennec-ffi-vX.Y.Z-<target>.tar.gz, the shared and the
+  # static library, fennec.h and their pkg-config files, built against the
+  # runner's glibc by tools/linux-ffi.sh, each architecture on a runner of
+  # its own. Before it is kept, tools/linux-ffi-check.sh holds what the
+  # libraries export and ask the system for -- no glibc symbol newer than
+  # the 2.34 the docs name -- and links a C program to each through its
+  # pkg-config file, which opens a file, writes and reads a row and drives
+  # a sync, run on the runner and in AlmaLinux 9's glibc 2.34. CI's `linux
+  # (C library)` job runs the same two scripts on every change. In
+  # SHA256SUMS with the rest (`publish` globs *.tar.gz). A tag from before
+  # the scripts -- a dispatch for an older one -- builds none, and says so.
+  #
+  # Read-only, its checkout keeping no token, as the other builds are.
+  linux-ffi:
+    name: C library (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          persist-credentials: false
+
+      - name: Whether the tag builds the C library
+        id: has
+        run: |
+          if [ -f tools/linux-ffi.sh ]; then
+            echo "lib=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::$TAG is from before the C library for Linux: no fennec-ffi tarball"
+          fi
+
+      - name: Install the pinned toolchain
+        if: steps.has.outputs.lib == '1'
+        run: |
+          rustup show
+          rustup target add ${{ matrix.target }}
+          command -v pkg-config >/dev/null || { sudo apt-get update && sudo apt-get install -y pkg-config; }
+
+      - name: Build the tarball
+        if: steps.has.outputs.lib == '1'
+        run: tools/linux-ffi.sh "${TAG#v}" ${{ matrix.target }} dist
+
+      - name: Link a C program to each library and run it, here and on glibc 2.34
+        if: steps.has.outputs.lib == '1'
+        run: tools/linux-ffi-check.sh "${TAG#v}" ${{ matrix.target }} dist
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.has.outputs.lib == '1'
+        with:
+          name: dist-ffi-${{ matrix.target }}
+          path: dist/*.tar.gz
           if-no-files-found: error
 
   wasm:
@@ -401,6 +486,19 @@ jobs:
             --label org.opencontainers.image.version="$version" \
             --label org.opencontainers.image.licenses=Apache-2.0 \
             -t "$IMAGE:$version-${{ matrix.arch }}" .
+          # The image runs a release's fennec-server before it is pushed:
+          # its --version the name and the version alone, never a test
+          # build's mark (`+test-clock`, which only deploy/Dockerfile's
+          # chaos stage builds; the root Dockerfile takes FEATURES). Each
+          # runner runs its own architecture. Before 0.1.13 there was no
+          # --version, nor any test build.
+          if [ "$(printf '%s\n' 0.1.13 "${version%%-*}" | sort -V | head -n 1)" = 0.1.13 ]; then
+            said=$(docker run --rm "$IMAGE:$version-${{ matrix.arch }}" --version)
+            if [ "$said" != "fennec-server $version" ]; then
+              echo "the image's fennec-server says [$said], not [fennec-server $version]" >&2
+              exit 1
+            fi
+          fi
           docker push "$IMAGE:$version-${{ matrix.arch }}"
 
   manifest:
@@ -429,7 +527,7 @@ jobs:
 
   publish:
     name: publish the release
-    needs: [binaries, windows, wasm, apple, android, linux-packages]
+    needs: [binaries, windows, linux-ffi, wasm, apple, android, linux-packages]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

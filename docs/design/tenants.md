@@ -70,7 +70,9 @@ node follows (the standby copy the router made). Every file on a replica
 node was made to follow once, so an idle close or a restart undid a
 promotion and the old primary's image wiped the writes since. A rejoining
 node's tenants follow when the router records the pair
-(`POST /_admin/tenants/<t>/follow`, each), a failover that moved every
+(`POST /_admin/tenants/<t>/follow`, each: the file says so on disk before
+the follow is answered, [replication.md](replication.md#replication)), a
+failover that moved every
 tenant ends the pair, and no tenant is placed on or moved to a standby. A
 tenant whose follower runs is never closed as idle: the follower holds the
 database rather than the tenant, and a close left it writing the file under
@@ -962,6 +964,21 @@ drives a node from before: a create answering no identity, and a reclaim
 of its file, noted by hand in this tree's router's directory, answered 404
 and kept.
 
+The copy a failed attach made goes in the pass of the try that gives the
+tenant its replica elsewhere: once that replica is recorded, the try's
+look at the files left has the copy's node take it back, the tenant's
+claim held across the call, and a repair meeting the claim leaves the file
+to the next look. `a_copy_left_where_the_replica_went_elsewhere_is_taken_back`
+asked a repair of its own as soon as the replica read, and met it: `left`
+named the copy `not taken back: another operation holds the tenant` in 6
+runs of 200, two at a time beside six busy loops in `docker run
+--cpus=3`, and in every run that held the try's reclaim at its proxy. It
+waits for the take-back now (`fennec_router_files_left` at 0), the event
+that must come, and asks after it: none of 200 the same way. The router is
+as it was: the claim held was the try's own, taking that very file back,
+and a repair that waited on a held claim would wait out a move of any
+size.
+
 Nothing of it is on a request's path: the tries run on the repair's
 thread, and a create, a move and a delete write a row only where a call
 failed.
@@ -1000,3 +1017,44 @@ rest; `fennec-shard` 15.3 (2 936.3 -> 2 951.6): `reclaim_noted` with the
 reclaim in it 4.4, `place_replica`'s nodes kept 1.7, `left_on` with its
 identities 1.6, the repair's look 1.5, the directory's `leftovers` and
 `forget_leftover` 2.2, the move's and the attach's notes the rest.
+
+### A detached copy taken back by its identity
+
+*Proposed for 1.0, not built.* A replica taken off its record leaves its
+copy on its node noted with no identity: a move's `detach`, an old
+primary's file whose node did not answer (`note_old_primary`), and a
+failover's own -- the tenants whose replica the failed node held lose the
+record (`failover_replicas`' `lost`), and the copy, once a repair has
+placed the tenant's replica elsewhere, is a file the repair's look notes
+as one the router did not (`place_replica`). A file noted with none is
+never followed over nor taken back, by design (*The identity* above: only
+an identity tells the file the router left from a later one): `reclaim_noted`
+keeps it, an attach or a move onto its node is refused (`clear_target`),
+and `replica_node` passes the node over (`kept`). So a node failed over
+comes back holding copies no repair can use, and in a region of three
+nodes, two failed over in turn, a tenant has no node left for its copy
+until an operator removes those files (RUNBOOK.md, *Files left on nodes*)
+and asks for a repair -- what `make chaos`'s first runs stopped on, and
+what its settle does as the runbook's operator
+([integrations.md](integrations.md#the-chaos-drill)). The RUNBOOK's
+*Known gaps* names it until this is built.
+
+The fix: keep each replica's identity in the directory. The follow answers
+its copy's `instance` already, and the attach knows it; recorded beside the
+replica's row (a field added as `lineage` was), it is the identity a
+detach, a failover's `lost` and the repair's look note the copy under, so
+the next look has its node take it back -- the node judging under the
+tenant's slot, 200 gone, 409 naming another file (`reclaim_noted`) -- or,
+where the repair wants a replica on that node, the attach follows over it
+naming the identity (`follow_as`'s `named`), as an old primary's file is
+followed today (`a_tenant_failed_over_twice_has_its_copy_back_each_time`).
+A copy whose identity changed since -- a later follow, a promotion, an
+install minting another -- carries another and stays noted for an
+operator, as now: the identity names one file, never a place, so nothing a
+newer router placed is written over. It costs a field written where the
+replica is recorded, nothing on a request's path. To hold it: a region of
+three nodes, two failed over in turn and back, gives every tenant its copy
+with no file left noted (`fennec_router_files_left` 0), the operator's
+step gone from the drill's settle; a detached copy whose node minted
+another identity meanwhile is kept and noted; and a router from before the
+field, whose rows carry none, notes as it does now.

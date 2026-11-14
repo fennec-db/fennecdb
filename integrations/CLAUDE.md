@@ -57,7 +57,10 @@ reads are held there too, and `sandbox` holds a studio window's to its own
 origin by its CSP on every system; no `WEBVIEW2_*` variable the app was
 started with reaches it, each taken out of the process's environment block
 (`webview2.ts`, `win32.ts`), never by `process.env` alone, whose delete did
-not reach WebView2. No path or link the app hands the system goes through a
+not reach WebView2. On Linux a studio window's first load that WebKitGTK
+ended with nothing committed (a cancel, which Electrobun reports as a load
+finished) is loaded again on that event, never a timer, at most three times
+(`loadAgainIfDropped`, `checks/firstload.mjs`). No path or link the app hands the system goes through a
 shell: on Linux `xdg-open` with an argument vector, never Electrobun's `openExternal` or `showItemInFolder`
 (`opener.ts`, `checks/opener.mjs`). One instance a user listens where only
 that user can (`instance.ts`). A `.fennec` double-clicked on Windows or Linux
@@ -73,7 +76,8 @@ key and file, is the README's and the studio page's (`associate.ts`,
 credential store alone with its address (`token.ts`), never sent elsewhere
 or along a redirect: on Windows kept on the machine (`win32.ts`), on Linux
 refused in words where no Secret Service with a default collection answers
-within a bound (`secretservice.ts`, `checks/keyring.mjs`) -- never a file,
+within a bound, a "/" asked again on its connection, which gnome-keyring may
+not know yet (`secretservice.ts`, `checks/keyring.mjs`) -- never a file,
 never taken for "no token"; a failure is a notice window, never a native
 alert. Each window has its own data store, a removed connection's
 cleared after its window closes by `STORE_KINDS`, never
@@ -84,9 +88,11 @@ no test hook, such as an environment read outside `__TESTABLE__`
 (`checks/release.mjs`). Each check starts with none of the test variant's
 state, its `state.json`, credential store items and web stores (`freshState`),
 and on Windows with no picker of the shell's dimming the screen, one a check
-left failing it (`clearDimming`), so one that fails half-way fails alone; a failed one keeps the system log of the
-app and of WebKit's processes (`keepEvidence`), the main record of a page that
-never loads. The toolchain is fetched into `.hutch-home/`,
+left failing it (`clearDimming`), so one that fails half-way fails alone; a failed one keeps every fact the app
+reported, each window's load step by step, and the system log of the app and
+of WebKit's processes (`keepEvidence`), the main record of a page that never
+loads; a command the app could not carry out fails its check at once with the
+app's words (`cmd-failed`). The toolchain is fetched into `.hutch-home/`,
 never `~/.hutch` or a shell file, and held to `hutch-pin.json`, a pin of
 every system it builds on, Hutch and what Hutch fetches, a system without
 one refused (`scripts/electrobun.mjs`); signing runs by hand from `main` alone, in an

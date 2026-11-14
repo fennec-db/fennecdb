@@ -35,7 +35,47 @@ in V5's drill on CI; `tests/replication.rs` holds a promotion beside a
 lookup that never ends (30 s on main, the 5 s of the dial's bound with the
 dial not walked away from) and beside a primary that takes the connection
 and never answers (the follower's 10 s of silence where the stream reached
-`halt` only with the head). A durable
+`halt` only with the head). The session looks at the halt before each
+message it reads (`Follower::session`), as an archiver's looks at its
+stop (`archive.rs`, `node_archive.rs`), and never at the socket's cut
+alone: the cut is a `shutdown` through a duplicate of the socket
+(`try_clone`), which on Unix shares the socket, every read after it
+reading its end, and on Windows (`WSADuplicateSocket`) ends a read already
+waiting but not one begun after it -- that read reads on, the primary's
+keep-alive every 2 s (`ALIVE`) keeping it short of its 10 s of silence. A
+follower between two reads at the halt -- landing a write, its fsync under
+`--sync always`, or not yet back at its read -- so followed on for good,
+and the halt waited for it for good: five runs of `windows (http)` between
+2026-11-08 and 11-13 hung until cancelled, 1 to 6 hours each, every one in
+a test halting a follower just after a write landed on it
+(`a_stream_and_changes_sent_after_a_write_wait_for_it_on_a_replica`, which
+halts three times; a restarted replica; a compaction beside a replica; a
+copy taking an image) or promoting one
+(`node_archive::a_promoted_tenant_is_archived_on_its_new_history_without_an_image`).
+On Unix it never showed: of 4 500 runs of the first under load, on macOS
+and in Docker on Linux, none hung. Now a halt between reads ends the
+session at once, and one whose look came just before the cut ends it after
+the next message: a keep-alive at most 2 s on from a live primary, or
+the session's 10 s of silence (`SILENCE`) from a stalled one. `tests/replication.rs`'
+`a_halt_ends_a_follower_held_between_two_reads` holds a follower in its
+hello's callback, past its read, until the cut has reached the primary's
+side of a relay between them, then lets it go; with a cut that leaves later
+reads alone, as Windows' does (on macOS, `Shutdown::Write` in its place),
+the loop as it was read on and the test failed at its 20 s, the hung test
+failing at its first halt, and fennec-http's whole suite hung where
+Windows' had, in `node_archive`'s promotion (and in `dials`' replica over
+HTTPS, halted as it follows). With the loop looking at the flag every one
+passes under that stand-in but the promotion beside a primary that never
+answers, which asks the cut to end a read already waiting: Windows' does,
+the test passing there, and `Shutdown::Write` does not. The tests' halts
+are bounded (`halt`, 20 s) and a stream's first event is read within 30 s
+as a whole (`first_event`), so a hang fails in seconds naming what did not
+end. Rejected: cancelling the read on Windows
+at each turn of the halt's wait (`CancelIoEx`, as `conn::end_all` ends a
+TLS connection's) -- Windows' own call, behind `tls` today, for a read the
+flag ends within one message; and a read timeout under `ALIVE` -- a wake
+for every follower, every second, to look at a flag the primary's next
+message brings it to anyway. A durable
 write is answered once every stream has written it into its socket
 (`Feed::wait_sent` in the `Tee`'s durability, `SENT_WAIT` a second at
 most, a stream that missed it `lagging` and not waited for until it
@@ -130,6 +170,38 @@ the round's own name -- and finds the image taken and every one gone once
 let go of (in the `windows (http)` job, the held one said in the log
 once). Its code is in `fennec-server`'s 832 bytes more of `__text`
 ([http.md](http.md#connections-without-a-thread)).
+
+**A restart reads a copy's role from its file.** An open makes a file
+follow only where the follow asks it to (`demote`) or where it has no
+history yet; otherwise a file whose history says it takes writes stays a
+primary's, `.follows` or not -- a promotion whose removal of `.follows`
+a crash lost must stay one ([tenants.md](tenants.md)). So the record
+saying a file follows is on disk before anything counts on it. A follow
+syncs it before it is answered (`Tenants::open_as`), and an image comes
+with it: `Follower::session` appends the record to the image's bytes
+before `adopt` writes them, fsyncs them and renames them into place, and
+`follow` then appends nothing. Both records were once left in the sink's
+buffer, for a write behind, which a copy writes only as it applies its
+primary's writes. A copy made to follow and then waiting for its image
+writes nothing, so a kill then lost the record. The restart opened the old
+primary's file as a primary's, with no follower and nothing in the log,
+while the router counted it the tenant's replica. `make chaos`'s catch-up
+fault found this in five runs on 2026-11-13 -- CI's seeds 1003 and 2001
+to 2003, a laptop's 902 -- each a node killed
+within seconds of the router's repair having its old primary's files
+follow, over a link throttled to 256 or 512 kbit/s
+([integrations.md](integrations.md#the-chaos-drill)). An image's
+record was a window only until the copy's first write applied after it.
+`tenants::tests`' `a_follow_answered_has_its_file_say_it_follows` and
+`tests/replication.rs`' `an_image_a_copy_took_says_on_disk_that_it_follows`
+each copy the file as a kill leaves it, the page cache without the
+process's buffer, and open it again; each fails without its half of the
+fix. The cost is one fsync more for each follow that changes what a file
+is, some 30 bytes more in an image's own rename, and 768 bytes of
+`fennec-server`'s `__text` (4 818 432 to 4 819 200, 16 bytes on the file;
+macOS arm64, release). The image's buffer is
+grown by the record alone: a `Vec` grown its own way took twice a large
+image's size.
 
 ## A node's archive
 
@@ -673,3 +745,39 @@ to wait out the socket's 30 s timeout. `make import-test` runs the live
 tests with TLS on in the server (`make pgvector-tls`, fennec-wire's test
 CA), so every one of them, `--follow`'s included, goes over TLS under
 `prefer`, and one under `verify-full`.
+
+SCRAM's iteration count is the server's to choose, and so, under any
+`sslmode` short of `verify-full`, whoever stands in for it, and PBKDF2
+runs it before the proof goes out: `i=4294967295` was 54 trillion
+instructions of PBKDF2 at `fennec-server`'s opt-level 3 and 84 trillion at
+the `fennec` binary's z -- more than half an hour of an M1 core even at
+its widest, eight a cycle at 3.2 GHz, and some three hours by the CPU
+time 2^20 rounds took on this machine shared with other work (2.9 s; 1.2
+s keyed, below) -- `fennec import`, or `--follow` connecting again,
+waiting on it. The client runs 1 to `SCRAM_MAX_ITERATIONS` (2^22, 1 024
+times PostgreSQL's `scram_iterations` default of 4 096: 28.6 thousand
+million instructions at the bound, 51.5 at opt-level z, which took 6.3 s
+and 9.2 s of a core here under a load average past 40) and refuses any
+other count as the server-first message is read, however many digits it
+has, naming the range and what brings a server under it: the role's
+password set again, its verifier made under a lower `scram_iterations` --
+`scram_refuses_iterations_past_the_bound` through a stand-in, no proof
+sent, and `scram_iterations_are_held_to_their_range` at its edges. A
+server set past it -- `scram_iterations`, from PostgreSQL 16, takes 1 to
+2^31 - 1 -- is refused by name, where libpq takes any count from 1
+(`fe-auth-scram.c`). The bound was 2^20 at first (7.2 thousand million
+instructions, 12.9 at z): a hardened setting near a million -- OWASP asks
+600 000 rounds of PBKDF2-HMAC-SHA256 -- had barely room under it, and four
+times it is still seconds of a core where the most a hostile count can ask
+is hours. PBKDF2 hashes the password's HMAC
+blocks once (`HmacKey`), each round two compressions where an HMAC made
+afresh took four: 6 780 instructions a round where it was 12 641 at
+`fennec-server`'s opt-level 3, and 12 250 where it was 19 529 at the
+`fennec` binary's opt-level z (`profile.cli`'s for fennec-http) --
+instructions retired over 2^20 rounds, the module's code built alone, a
+count no load moves.
+The exchange's messages are `Scram`'s, the nonce given, so
+`scram_rfc7677_exchange` holds them to RFC 7677's example byte for byte,
+the proof and the server signature among them; the server signature is
+compared by `ct_eq`, as every signature is
+([conventions.md](conventions.md#secrets-compared)).
