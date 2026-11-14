@@ -12,6 +12,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { BrowserView, BrowserWindow, PATHS, Session } from "electrobun/main";
 import type { Notice } from "../shared/rpc.ts";
+import { loadAgainIfDropped } from "./firstload.ts";
 import { LINK_OUT, linkOut, newWindowPreload, openLink } from "./opener.ts";
 import { sessionPreload, type StudioSession } from "./session.ts";
 import { goesWithWindow, inUse, removeStoreFolder, storeClosed, storeOpened, sweepStores, webview2Root } from "./stores.ts";
@@ -229,6 +230,8 @@ export async function openStudioWindow(opts: { key: string; title: string; sessi
 	focusesPage(win, view);
 	// Stay on the server's origin; everything else goes to the browser.
 	holdTo(view, `${origin}/*`);
+	// Linux: a first load WebKitGTK dropped before anything committed is loaded again (firstload.ts).
+	loadAgainIfDropped(view as any, `${origin}/_studio/`, __TESTABLE__ ? (tries) => hooks?.report("load-again", { key: opts.key, tries }) : undefined);
 	const last = { at: 0 };
 	(view as any).on("new-window-open", (e: any) => {
 		const d = detailOf(e);
