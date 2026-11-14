@@ -270,7 +270,9 @@ export async function showNotice(n: Notice, onAction: (id: string) => void = () 
 		url: "views://notice/index.html",
 		preload: noticePreload(n) + newWindowPreload(),
 		sandbox: true,
-		frame: frame(540, 330),
+		// Room for the title and message, the hint, what the server said unfolded
+		// (its 8 lines scroll within it) and 40 px buttons, as the notice's design has it.
+		frame: frame(560, 460),
 	});
 	counted(win);
 	focusesPage(win, win.webview);

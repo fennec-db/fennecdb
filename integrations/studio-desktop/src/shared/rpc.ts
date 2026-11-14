@@ -29,6 +29,17 @@ export type Figures = {
 	median?: number | null;
 };
 
+/**
+ * Why a served database's server did not start, kept with its last run
+ * (store.ts) so the Servers list says it until the next start: the reason in
+ * words, and what the server itself wrote, its error the last line. `said` is
+ * null where no server wrote anything: a port something already answers on is
+ * found before one is started (process.ts), and the app does not put its own
+ * finding in the server's mouth. `port`: the port was the reason, so changing
+ * it is the way on.
+ */
+export type StartFailure = { reason: string; said: string | null; port: number | null };
+
 /** A database the app has served, running or stopped with the settings it last ran with. */
 export type ServedRow = {
 	state: "running" | "starting" | "stopping" | "stopped";
@@ -40,6 +51,8 @@ export type ServedRow = {
 	metricsUrl: string | null;
 	startedAt: number | null;
 	lastRan: { at: number; port: number | null; why: string } | null;
+	/** Stopped because its last start failed: the Servers list's "Did not start" and its callout. */
+	failed: StartFailure | null;
 	facts: string;
 	/** What the app runs, its secrets as dots. */
 	command: string;
@@ -78,6 +91,8 @@ export type Overview = {
 	machine: string;
 	/** The file manager's button: "Reveal in Finder", "Show in Explorer", "Open its folder". */
 	reveal: string;
+	/** Where a `.fennec` is double-clicked: "Finder", "Explorer", "your file manager". */
+	fileManager: string;
 	/** `fennec-server 0.1.12`, the server the app carries. */
 	bundled: string;
 	/** The home folder, which a path under it is shown with as ~. */
@@ -187,6 +202,8 @@ export type Notice = {
 	hint?: string;
 	/** What the server or the network said, for whoever reports it. */
 	detail?: string;
+	/** What the detail's fold is called, where it is not what the server said (an error of the app's own). */
+	detailTitle?: string;
 	/** Buttons besides OK, which always closes. */
 	actions?: { id: string; label: string }[];
 };
