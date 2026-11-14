@@ -32,6 +32,15 @@ refusing `restore`.
 ring.](../docs/design/js-client.md#live-queries)** `Query.reads` names each
 collection read (`Lives`), `fennec_changes` those written.
 
+**[A page's IndexedDB calls share one connection, and let it go when
+asked.](../docs/design/js-client.md#in-real-browsers)** `persist`,
+`restore`, `putState` and `getState` reach the store through `inStore`, on
+the connection `idb` keeps, never one of their own: left open, theirs
+blocked a delete of the database, and closed after each call, the next
+took 8 to 10 ms once the page sat idle. It closes on `versionchange`, and
+the one a transaction failed on is let go (Firefox refuses its next
+requests); `web/fennec.persist.test.js` and `web/browser/` hold both.
+
 **[A number from 2^53 on goes out as every
 digit.](../docs/design/indexes.md#sorted)** Whatever sends values to a
 server as JSON -- `FennecHttp`'s bodies, the sync layer's lines -- writes

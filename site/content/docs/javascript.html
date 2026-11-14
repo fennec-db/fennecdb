@@ -396,7 +396,7 @@ const bytes = file.bytes();                        // what fennec and fennec-ser
   <li><b>Tested in the browsers it runs in:</b> <code>persist</code>,
     <code>restore</code> and <code>openFile</code> are held in Chrome, Firefox
     and Safari to what they keep, the page reloaded in the middle of their
-    writes and past its quota.</li>
+    writes, and in Chrome and Firefox past its quota.</li>
 </ul>
 
 <details class="deep"><summary>How openFile works, with timings</summary>
@@ -435,10 +435,11 @@ file opened again holds every write <code>run</code> answered.</p>
 IndexedDB, wherever a page runs: the image once, then only the writes since
 the last call, as chunks. <code>persist</code> stores what was written when
 it is called, and IndexedDB decides when that reaches the disk; the file is
-flushed before every answer. Each call closes its connection once its
-transaction is done, so nothing of fennecdb's holds up a delete of the
-database (<code>indexedDB.deleteDatabase('fennecdb')</code>), and a
-<code>persist</code> or <code>putState</code> past the quota is refused with
+flushed before every answer. The calls share one connection, which closes
+as soon as a delete of the database
+(<code>indexedDB.deleteDatabase('fennecdb')</code>) or an upgrade asks, so
+nothing of fennecdb's holds either up, and a <code>persist</code> or
+<code>putState</code> past the quota is refused with
 <code>QuotaExceededError</code>, what was stored before standing. Over 32.4 MB (61 000 rows with a
 <code>vector&lt;128&gt;</code>), in a worker (<code>make file-bench</code>):</p>
 
