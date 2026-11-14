@@ -39,7 +39,10 @@ assert.match(launcherText.text, /Servers/);
 async function save(name, url, token, tenant = '') {
   const n = lines().length;
   cmd({ cmd: 'addconn', name, url, token, tenant });
-  return (await waitFor((l, i) => i >= n && l.what === 'conn-added' && l.name === name, 10000, `${name} saved`)).id;
+  // A refusal is the answer too, and fails at once with the app's words (the credential store's, on Linux).
+  const answer = await waitFor((l, i) => i >= n && ((l.what === 'conn-added' && l.name === name) || l.what === 'conn-refused'), 10000, `${name} saved`);
+  if (answer.what === 'conn-refused') throw new Error(`${name} not saved: ${answer.message}`);
+  return answer.id;
 }
 /** Opens a saved server and returns what the app answered. */
 async function open(id) {

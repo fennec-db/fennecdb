@@ -633,14 +633,25 @@ export function freshState() {
  * no web process that ended. run.mjs calls it before it kills what is left.
  *
  * Linux and Windows keep less: WebKitGTK writes its warnings to the app's own
- * output (the check's app log), and neither system has a log this reads yet;
- * what is kept is what was running at the failure, the app's processes and
- * the web engine's (WebKitGTK's helpers, WebView2's msedgewebview2).
+ * output (the check's app log); what is kept is what was running at the
+ * failure, the app's processes and the web engine's (WebKitGTK's helpers,
+ * WebView2's msedgewebview2), and on Linux gnome-keyring's own lines in the
+ * journal (`<name>.keyring.log`).
  */
 export function keepEvidence(name, since) {
   // Every fact the app reported, which a failure prints the last 12 of: the next check's start
   // empties the file, and a window's load is told by its steps from the open on.
   if (existsSync(REPORT)) copyFileSync(REPORT, `${D}/logs/${name}.report.jsonl`);
+  if (LINUX) {
+    // What gnome-keyring said meanwhile (it logs to syslog once it is a daemon): on the arm64
+    // runner it answered ReadAlias("default") with "/" right after a token was kept or cleared,
+    // and the app's refusal in words is all that showed of it.
+    const from = `@${Math.floor(since / 1000) - 1}`;
+    const args = ['--no-pager', '-o', 'short-precise', '--since', from, '-t', 'gnome-keyring-daemon', '-t', 'gnome-keyring-d'];
+    let j = spawnSync('journalctl', args, { encoding: 'utf8', timeout: 30000 });
+    if (j.status !== 0 || !j.stdout.trim()) j = spawnSync('sudo', ['-n', 'journalctl', ...args], { encoding: 'utf8', timeout: 30000 });
+    writeFileSync(`${D}/logs/${name}.keyring.log`, j.stdout || `journalctl: ${j.error?.message ?? j.stderr}`);
+  }
   if (!MAC) {
     const engine = procs().filter((p) => /WebKit(Web|Network)Process|msedgewebview2/i.test(p.command));
     writeFileSync(`${D}/logs/${name}.processes.txt`, `the app's, ${new Date().toISOString()} (the check began ${new Date(since).toISOString()}):\n${describe(mine())}\n\nthe web engine's:\n${describe(engine)}\n`);
