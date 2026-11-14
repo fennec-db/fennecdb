@@ -193,8 +193,9 @@ test('persist stores the image once, then only what was written since', { skip: 
 // Each call opened a connection of its own, left open until the collector
 // came for it, and a delete of the database -- or another page's upgrade of
 // it -- waited on every one (web/browser/ found it in Chrome). Closed after
-// each call instead, Chrome's store closed with the last, and a call after
-// the page sat idle 2 s took 6 to 8 ms reopening it.
+// each call instead, a call after the page sat idle 3 s took 8 to 10 ms
+// reopening it (a `persist` of one row: 8.1 ms in Chrome, 10.2 in Firefox,
+// medians; docs/design/js-client.md#in-real-browsers).
 test('persist, restore and the state calls share one connection, which lets a delete of the database go ahead', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
   const idb = fakeIndexedDB();
   globalThis.indexedDB = idb;
@@ -224,6 +225,80 @@ test('persist, restore and the state calls share one connection, which lets a de
   await putState('c-state', { at: 2 });
   assert.deepEqual(await getState('c-state'), { at: 2 });
   assert.equal(idb.opened, 2);
+});
+
+// The store deleted under a page that had persisted -- a script's
+// `indexedDB.deleteDatabase('fennecdb')`, the browser clearing the site's
+// data -- took the image, and `persist`, still believing it stored, went
+// on storing chunks: `restore` found no image, and everything the page
+// persisted after the delete was lost.
+test('a store deleted under the page has its image stored again by the next persist', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const idb = fakeIndexedDB();
+  globalThis.indexedDB = idb;
+  globalThis.IDBKeyRange = KeyRange;
+  const { Fennec, persist, restore } = await import('./fennec.js');
+  const ns = (d) => d.rows('get t select n order n').map((r) => r.n);
+  const restored = async (key, opts) => {
+    const back = await Fennec.open(wasm);
+    assert.equal(await restore(back, key, opts), true, `${key} restores`);
+    return ns(back);
+  };
+  const lastWrite = () => idb.log.at(-1).map((w) => [w[0], w[1]]);
+  const deleteDatabase = () =>
+    new Promise((res) => {
+      const req = idb.deleteDatabase('fennecdb');
+      req.onsuccess = () => res('deleted');
+      req.onblocked = () => res('blocked');
+    });
+  const db = await Fennec.open(wasm);
+  db.run('create collection t (n int)');
+  db.run('put t {n: 1}');
+  await persist(db, 'g');
+  db.run('put t {n: 2}');
+  await persist(db, 'g');
+  assert.deepEqual([...idb.records.keys()].sort(), ['g', 'g#000000001']);
+
+  // A delete asks the connection to let go (`versionchange`), then the
+  // store is gone.
+  assert.equal(await deleteDatabase(), 'deleted');
+  db.run('put t {n: 3}');
+  await persist(db, 'g');
+  assert.deepEqual(lastWrite(), [['put', 'g'], ['delete', 'g#..']], 'the image, not a chunk');
+  assert.deepEqual(await restored('g'), [1, 2, 3]);
+  // Nothing written since the delete, the image is stored again all the same.
+  assert.equal(await deleteDatabase(), 'deleted');
+  assert.ok((await persist(db, 'g')) > 0);
+  assert.deepEqual(await restored('g'), [1, 2, 3]);
+
+  // The browser clearing the site's data closes the connection (a forced
+  // close: its requests refused at once, `close` told after). A persist in
+  // between is refused by it and goes to another: there, an image.
+  db.run('put t {n: 4}');
+  await persist(db, 'g');
+  assert.deepEqual(lastWrite(), [['put', 'g#000000001']]);
+  let told = idb.invalidate();
+  idb.records.clear();
+  db.run('put t {n: 5}');
+  await persist(db, 'g');
+  told();
+  assert.deepEqual(lastWrite(), [['put', 'g'], ['delete', 'g#..']]);
+  assert.deepEqual(await restored('g'), [1, 2, 3, 4, 5]);
+
+  // The connection gone while a chunk is being sealed: the chunk is
+  // stored over no other, the image is.
+  const cryptoKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  await persist(db, 's', { cryptoKey });
+  db.run('put t {n: 6}');
+  await persist(db, 's', { cryptoKey });
+  assert.deepEqual(lastWrite(), [['put', 's#000000001']]);
+  db.run('put t {n: 7}');
+  const sealing = persist(db, 's', { cryptoKey });
+  told = idb.invalidate();
+  idb.records.clear();
+  await sealing;
+  told();
+  assert.deepEqual(lastWrite(), [['put', 's'], ['delete', 's#..']]);
+  assert.deepEqual(await restored('s', { cryptoKey }), [1, 2, 3, 4, 5, 6, 7]);
 });
 
 // A transaction past its quota is refused at its commit, by `abort` alone:

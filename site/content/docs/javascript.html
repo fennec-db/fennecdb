@@ -438,7 +438,10 @@ it is called, and IndexedDB decides when that reaches the disk; the file is
 flushed before every answer. The calls share one connection, which closes
 as soon as a delete of the database
 (<code>indexedDB.deleteDatabase('fennecdb')</code>) or an upgrade asks, so
-nothing of fennecdb's holds either up, and a <code>persist</code> or
+nothing of fennecdb's holds either up. Deleted under the page, or with the
+site's data cleared, the database is stored whole by the next
+<code>persist</code>, which a <code>restore</code> then finds. A
+<code>persist</code> or
 <code>putState</code> past the quota is refused with
 <code>QuotaExceededError</code>, what was stored before standing. Over 32.4 MB (61 000 rows with a
 <code>vector&lt;128&gt;</code>), in a worker (<code>make file-bench</code>):</p>

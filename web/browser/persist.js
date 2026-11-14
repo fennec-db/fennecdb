@@ -33,6 +33,7 @@ const TESTS = {
   quota: 'persist and putState past the quota are refused, what was stored standing',
   fileQuota: 'a file past the quota refuses the write and keeps every write it answered',
   closed: 'persist, restore and the state calls leave no connection open to block a delete of the database',
+  gone: 'a database deleted under the page has its image stored again by the next persist',
 };
 
 /** The files the suite makes in the origin private file system, each with its copy. */
@@ -657,6 +658,26 @@ const PHASES = {
     // Every persist, restore and state call of this page has closed its
     // connection, or the delete is blocked.
     await test(TESTS.closed, wipe);
+
+    // The image persist believed stored went with the database: its
+    // chunks after the delete would restore nothing.
+    await test(TESTS.gone, async () => {
+      const db = await open();
+      db.run('create collection t (n int)');
+      db.run('put t {n: 1}');
+      await persist(db, 'gone');
+      db.run('put t {n: 2}');
+      await persist(db, 'gone');
+      same([...(await records('gone')).keys()], ['gone', 'gone#000000001'], 'the image and a chunk');
+      await wipe();
+      db.run('put t {n: 3}');
+      await persist(db, 'gone');
+      same([...(await records('gone')).keys()], ['gone'], 'the persist after the delete stores the image');
+      const back = await open();
+      ok(await restore(back, 'gone'), 'restored after the delete');
+      same(ns(back), [1, 2, 3], 'every write, those before the delete too');
+      await wipe();
+    });
   },
 };
 

@@ -39,7 +39,14 @@ the connection `idb` keeps, never one of their own: left open, theirs
 blocked a delete of the database, and closed after each call, the next
 took 8 to 10 ms once the page sat idle. It closes on `versionchange`, and
 the one a transaction failed on is let go (Firefox refuses its next
-requests); `web/fennec.persist.test.js` and `web/browser/` hold both.
+requests). A chunk follows its image only over the connection that stored
+or read the image, open since (`stored`'s `db`, `inStore`'s `on`): past a
+delete of the database or the site's data cleared, the next `persist`
+stores an image. `web/fennec.persist.test.js` and `web/browser/` hold all
+three. A change to these calls or to `idb` runs `web/browser/` in Chrome,
+Firefox and Safari before it lands -- Safari's job by `gh workflow run
+ci.yml --ref <branch>`, a pull request running none -- and `make
+file-bench` in Chrome and Firefox against main's.
 
 **[A number from 2^53 on goes out as every
 digit.](../docs/design/indexes.md#sorted)** Whatever sends values to a

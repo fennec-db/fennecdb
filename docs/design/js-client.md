@@ -202,6 +202,12 @@ preference (a group of origins gets a fifth of
 Safari has neither, and its two quota tests are skipped by name. The page
 is told the quota, not left to read it: Chrome's
 `navigator.storage.estimate()` names 10 GiB whatever it enforces.
+The Chrome and Firefox job runs on every pull request, Safari's where
+`ci.yml` runs outside one -- the merge queue, main, and a branch it is run
+for (`gh workflow run ci.yml --ref <branch>`), as a change to how the page
+keeps its database is (`web/CLAUDE.md`): the account runs 5 macOS jobs at
+once and every merge waits for one, and a pull request's Safari job held
+one for 30 s of work.
 
 What it found, fixed with it:
 
@@ -238,6 +244,27 @@ What it found, fixed with it:
   (InvalidStateError) without saying it closed: the connection a
   transaction failed on is let go, and a call a closed one refuses is
   asked again of another.
+- (Found in review.) Deleted under the page -- by a script's
+  `indexedDB.deleteDatabase('fennecdb')`, or the browser clearing the
+  site's data -- the database took the image `persist` believed stored
+  (`stored`), and the next `persist` stored a chunk alone: `restore` found
+  no image, and every write persisted since was lost. A chunk now follows
+  its image only over the connection that stored the image (or that
+  `restore` read it over), open since. A delete asks every connection to
+  let go before it goes ahead (`versionchange`), and clearing the site's
+  data closes them (a forced close: requests refused at once, `close` told
+  after); either way the next `persist` finds another connection and
+  stores an image, written to since or not. A chunk sealed while its
+  connection ended is stored over no other (`inStore`'s `on`): the image
+  is. Dropping the belief on `versionchange` and `close` alone would not
+  do: a call between a forced close and its `close` went to a new
+  connection and stored its chunk there, as the Node test shows. No
+  request is added; after a connection a failed transaction let go -- the
+  quota's case -- each database's next `persist` stores an image.
+  `putState` and `getState` keep nothing between calls, and an open
+  file's size and image end describe a file its sync access handle holds
+  alone: nothing else in the origin writes, truncates or removes it
+  meanwhile.
 - A file past the quota: Chrome's file system throws QuotaExceededError,
   Firefox's writes nothing and says so by its count, which the file now
   names as the origin out of room. Either way the write is refused, every

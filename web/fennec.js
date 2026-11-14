@@ -972,18 +972,24 @@ function idb() {
   return shared.opening;
 }
 
+/** Thrown by `inStore` asked to write over a connection that has ended. */
+const ENDED = new FennecError('the connection the image was stored over has ended');
+
 /**
  * `ask`'s requests of the store in a transaction of `mode`, done: then what
- * the function `ask` returned gives, or the transaction's error. Past the
- * quota Chrome aborts at the commit (`abort` alone), and Firefox fails the
- * request before the transaction holds its error -- and then refused the
- * connection's next transactions and requests (InvalidStateError), no
- * `close` said: the connection a transaction failed on is let go, and a
- * call a closed one refuses is asked again of another (web/browser/).
+ * the function `ask` returned gives, or the transaction's error. `ask` is
+ * handed the store and the connection. Past the quota Chrome aborts at the
+ * commit (`abort` alone), and Firefox fails the request before the
+ * transaction holds its error -- and then refused the connection's next
+ * transactions and requests (InvalidStateError), no `close` said: the
+ * connection a transaction failed on is let go, and a call a closed one
+ * refuses is asked again of another (web/browser/). With `on`, over that
+ * connection alone: once it has ended, nothing is asked and `ENDED` thrown.
  */
-async function inStore(mode, ask) {
+async function inStore(mode, ask, on = null) {
   for (let again = false; ; again = true) {
     const db = await idb();
+    if (on && db !== on) throw ENDED;
     const forget = () => {
       if (shared?.db === db) shared = null;
       db.close();
@@ -992,7 +998,7 @@ async function inStore(mode, ask) {
     let value;
     try {
       tx = db.transaction(STORE, mode);
-      value = ask(tx.objectStore(STORE));
+      value = ask(tx.objectStore(STORE), db);
     } catch (e) {
       // Nothing of it lands: some of its requests may have been made.
       try {
@@ -1025,10 +1031,16 @@ export async function persist(fennec, key = 'default', opts = {}) {
   let s = stored.get(fennec);
   let image = null;
   let chunk = null;
-  if (s?.key !== key || s.ck !== ck) {
+  // A chunk follows its image only over the connection that stored the
+  // image (`s.db`), open since: one that ended may have ended with the
+  // store -- a delete of the database asks it to let go first
+  // (`versionchange`), the browser clearing the site's data closes it
+  // (`close`, or its requests refused) -- and chunks stored after would
+  // restore nothing. Then an image, even with nothing written since.
+  if (s?.key !== key || s.ck !== ck || s.db !== shared?.db) {
     fennec.journal();
     image = fennec.snapshot();
-    s = { key, ck, gen: null, next: 1, image: 0, chunks: 0 };
+    s = { key, ck, db: null, gen: null, next: 1, image: 0, chunks: 0 };
     stored.set(fennec, s);
   } else {
     const { replace, bytes } = fennec.drain();
@@ -1038,22 +1050,29 @@ export async function persist(fennec, key = 'default', opts = {}) {
     else chunk = bytes;
   }
   const gen = image && ck ? [...crypto.getRandomValues(new Uint8Array(8))].map((b) => b.toString(16).padStart(2, '0')).join('') : s.gen;
+  let on = null;
   try {
     const rec = !ck ? (image ?? chunk) : image ? await seal(ck, key, gen, 0, image) : await seal(ck, key, gen, s.next, chunk);
-    await inStore('readwrite', (os) => {
+    // The connection may end while the record is sealed or the call waits
+    // its turn: a chunk is stored over the image's alone.
+    const ask = (os, db) => {
+      on = db;
       if (image) {
         os.put(rec, key);
         os.delete(chunkRange(key));
       } else {
         os.put(rec, chunkKey(key, s.next));
       }
-    });
+    };
+    await inStore('readwrite', ask, image ? null : s.db);
   } catch (e) {
-    // The drained writes are nowhere now; the next call stores an image.
+    // The drained writes are nowhere now; the next call stores an image --
+    // this one, where the image's connection had ended.
     stored.delete(fennec);
+    if (e === ENDED) return persist(fennec, key, opts);
     throw e;
   }
-  if (image) Object.assign(s, { gen, next: 1, image: image.length, chunks: 0 });
+  if (image) Object.assign(s, { db: on, gen, next: 1, image: image.length, chunks: 0 });
   else Object.assign(s, { next: s.next + 1, chunks: s.chunks + chunk.length });
   return (image ?? chunk).length;
 }
@@ -1081,7 +1100,9 @@ export async function getState(key) {
  */
 export async function restore(fennec, key = 'default', opts = {}) {
   const ck = opts.cryptoKey ?? null;
-  let [image, chunks] = await inStore('readonly', (os) => {
+  let on = null;
+  let [image, chunks] = await inStore('readonly', (os, db) => {
+    on = db;
     const img = os.get(key);
     const ch = os.getAll(chunkRange(key));
     return () => [img.result, ch.result];
@@ -1113,7 +1134,8 @@ export async function restore(fennec, key = 'default', opts = {}) {
   if (replaceable(fennec)) emptied(fennec);
   await fennec.loadAsync(bytes);
   fennec.journal();
-  stored.set(fennec, { key, ck, gen, next: chunks.length + 1, image: image.length, chunks: bytes.length - image.length });
+  // Its chunks follow over the connection it was read over, as `persist`'s.
+  stored.set(fennec, { key, ck, db: on, gen, next: chunks.length + 1, image: image.length, chunks: bytes.length - image.length });
   // The database the code declared its schema for is this one now: checked
   // again, what it adds journaled with the rest.
   await checked(fennec, declared.get(fennec), 'apply');
