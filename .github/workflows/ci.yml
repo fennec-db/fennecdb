@@ -1336,7 +1336,10 @@ jobs:
 
       # The three at once. Each build is a chain of compiles of one unit
       # (`codegen-units = 1`) ending in one fat LTO, a core's work most of
-      # its time, and the runner has four. `fennec` and `fennec-server` in a
+      # its time, and the runner has four: with nothing cached they took
+      # 98 s at once, their own times adding to 4 min 5 s (#648's first
+      # run), and the job 2.2 minutes against 2.3 for the two host builds
+      # it made one after another before. `fennec` and `fennec-server` in a
       # cargo run each, as release.yml builds them: one run unifies its
       # packages' features, which would change the bytes. `make small` in a
       # target directory of its own: a second run on the cli profile's

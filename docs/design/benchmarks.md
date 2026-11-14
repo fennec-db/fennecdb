@@ -257,9 +257,10 @@ than the one that ships, and move every figure the day GitHub moves the
 label. Built in an amd64 Ubuntu 24.04 container laid out as a runner is
 (`/home/runner/work/fennecdb/fennecdb`, `CARGO_HOME` under
 `/home/runner`), main at `38f6a0bc` gave 4 856 592, 8 186 416 and
-2 951 680 bytes; 0.2.0's tarball to it moved `fennec` 4 096 bytes and
-`fennec-server` 12 288, an ELF file's segments being laid out by 4 KB
-pages, so a figure moves a page at a time or not at all.
+2 951 680 bytes, and the job's first run on `ubuntu-24.04` (#648) the
+same three to the byte; 0.2.0's tarball to them moved `fennec` 4 096
+bytes and `fennec-server` 12 288, an ELF file's segments being laid out by
+4 KB pages, so a figure moves a page at a time or not at all.
 
 Rejected: a budget of the measurement itself, which would stop every pull
 request that adds a byte and make any two in the merge queue that each
@@ -277,7 +278,12 @@ in one fat LTO -- 68 s of `fennec-server`'s 85 -- a core's work most of
 its time, and the runner has four: the three builds run at once, `make
 small` in a target directory of its own, since a second cargo run on the
 `cli` profile's waits for the first's lock, and the cache holds the musl
-builds' crates from outside the workspace under a key of its own.
+builds' crates from outside the workspace under a key of its own. Its
+first run, with nothing in that cache, took 2.2 minutes: the builds 98 s
+at once -- `fennec-server` 1 min 38 s, `fennec` 1 min 19 s, `make small`
+1 min 8 s, ring's C and rustls compiled for each profile, the three
+adding to 4 min 5 s -- and the musl target and musl-tools about 13 s of
+the install's 23.
 
 Not built here: `fennec-shard`, which no release ships yet -- its row left
 the size table, and it joins this job and the file when `release.yml`
