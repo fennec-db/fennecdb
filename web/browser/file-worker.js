@@ -37,11 +37,13 @@ class Steps {
 
   #stop(what) {
     // Told first: the page reloads once it hears, and the message is on
-    // its way before the wait begins.
+    // its way before the worker goes on.
     postMessage({ stopped: what });
-    // Never woken: a SharedArrayBuffer of this worker's own, which needs
-    // the page cross-origin isolated (run.mjs's headers).
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+    // Busy till the reload ends it, as a worker the page left in the middle
+    // of a flush is. Stopped on Atomics.wait instead, its file was still
+    // held 3 s after the reload in Safari 27, which ended a running worker
+    // at once.
+    for (;;);
   }
 
   async getFileHandle(name, opts) {
