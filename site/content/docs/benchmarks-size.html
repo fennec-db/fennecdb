@@ -41,7 +41,7 @@ container memory is a sensible <code>--max-memory</code>: it covers both this
 <h2 id="binary-size">Binary size</h2>
 
 <p>How large each build is. For the module and the client together, what
-the browser pays is <b>344 KB brotli</b>; for an app whose queries run on a
+the browser pays is <b>347.6 KB brotli</b>; for an app whose queries run on a
 server, the client alone in its bundle.</p>
 
 <div class="tbl">
@@ -57,7 +57,7 @@ server, the client alone in its bundle.</p>
 <tr><td>wasm32, browser</td><td class="n"><b>833 KB</b></td><td class="n"><b>285 KB</b></td><td class="n">345 KB</td></tr>
 <tr><td>wasm32, no index or schema check, <code>make wasm FEATURES=language SCHEMA=0</code></td><td class="n">606 KB</td><td class="n">211 KB</td><td class="n">253 KB</td></tr>
 <tr><td>wasm32, no feature at all, <code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">546 KB</td><td class="n">188 KB</td><td class="n">225 KB</td></tr>
-<tr><td><code>web/fennec.js</code> and its modules, the client</td><td class="n">226 KB</td><td class="n">59 KB</td><td class="n">70 KB</td></tr>
+<tr><td><code>web/fennec.js</code> and its modules, the client</td><td class="n">238.0 KB</td><td class="n">62.5 KB</td><td class="n">73.8 KB</td></tr>
 <tr><td><code>@fennecdb/web/client</code> in an app's bundle, <code>connect</code> and a query's rows, esbuild, minified</td><td class="n">35 KB</td><td class="n">12 KB</td><td class="n">13 KB</td></tr>
 <tr><td>container image, scratch + musl, amd64</td><td class="n">7.18 MB</td><td class="n">—</td><td class="n">—</td></tr>
 </tbody>
@@ -67,7 +67,7 @@ server, the client alone in its bundle.</p>
 <details class="deep"><summary>Method, and where the module's bytes go</summary>
 <p>The compressed columns are filled in only where they mean something: the
 wasm module and the client are fetched over HTTP, so what the browser pays is
-<b>344 KB brotli</b> for both together. A binary you execute and an image
+<b>347.6 KB brotli</b> for both together. A binary you execute and an image
 whose layers are already compressed are not served that way, hence the
 dashes.</p>
 
