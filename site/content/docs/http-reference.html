@@ -1051,6 +1051,11 @@ all, one JSON object a line, from any write the server still keeps.</p>
   <li><code>op</code> is <code>put</code>, <code>del</code>,
   <code>create</code>, <code>alter</code> or <code>drop</code>; a put
   carries the document as it was written, as JSON writes a row.</li>
+  <li><code>at</code> is when the write was appended, in milliseconds since
+  the epoch. On a replica, and a replica of one, it is when the primary
+  appended it, by the primary's clock; a promoted replica times its own
+  writes by its own clock, which may be behind. Order by
+  <code>seq</code>.</li>
   <li>It needs <code>--http-token</code> or no token at all: a scoped
   token's filter could not hold back the deletion of a row it never saw,
   and is refused (403).</li>

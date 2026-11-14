@@ -442,6 +442,10 @@ pub(crate) struct Writer {
     /// A record with a sum came on this stream: one without after it is
     /// damage ([`fennec_core::engine::claimed_into`]).
     checked: bool,
+    /// The latest time a write is archived at, which no write after it is
+    /// archived before ([`Archive::take`]): read from the last segment as
+    /// the archive is opened to be written.
+    latest: u64,
 }
 
 /// What a stream's hello did to an archive.
@@ -711,10 +715,11 @@ impl Archive {
         self.put(&self.image_path(seq, now_ms()), image)
     }
 
-    /// The last change the archive holds, the history it is on, and the
+    /// The last change the archive holds, the history it is on, the
     /// segment that ends there, opened to go on -- its torn tail, if a crash
-    /// left one, cut off.
-    fn position(&self) -> io::Result<(u64, History, Option<Segment>)> {
+    /// left one, cut off -- and the latest time the last segment holding a
+    /// write archived one at.
+    fn position(&self) -> io::Result<(u64, History, Option<Segment>, u64)> {
         let history = match self.read_whole(&self.dir.join("history")) {
             Ok(b) => History::decode(&b).map_err(|e| corrupt(e.to_string()))?,
             Err(e) if e.kind() == io::ErrorKind::NotFound => History::default(),
@@ -723,6 +728,7 @@ impl Archive {
         let mut at = self.images()?.last().map_or(0, |i| i.0);
         let mut open = None;
         let mut removed = false;
+        let mut latest = 0;
         for &first in self.segments()?.iter().rev() {
             let path = self.segment_path(first);
             let read = self.read_segment(&path)?;
@@ -742,6 +748,9 @@ impl Archive {
                 continue;
             }
             let last = first + list.iter().map(|e| e.3).sum::<u64>() - 1;
+            // The latest of them, not the last: an archive written before
+            // its times ran in order may hold an earlier one after it.
+            latest = list.iter().map(|e| e.0).max().unwrap_or(0);
             if last >= at {
                 at = last;
                 // Plain, a record cut short is cut off; sealed, a frame is,
@@ -795,7 +804,7 @@ impl Archive {
             // no write with segments after it, which `verify` refuses.
             self.sync_dir()?;
         }
-        Ok((at, history, open))
+        Ok((at, history, open, latest))
     }
 
     /// Follows `upstream` into the archive until `stop` is set, connecting
@@ -912,7 +921,7 @@ impl Archive {
         if let Ok(mut said) = self.scratch.try_lock() {
             self.sweep(&mut said);
         }
-        let (at, history, segment) = self.position()?;
+        let (at, history, segment, latest) = self.position()?;
         Ok(Writer {
             at,
             history,
@@ -920,6 +929,7 @@ impl Archive {
             segment,
             taken: 0,
             checked: false,
+            latest,
         })
     }
 
@@ -1080,6 +1090,16 @@ impl Archive {
         let mut pos = 0;
         let mut entry = Vec::new();
         for &time in times {
+            // Never before the write before it. The times are the clock of
+            // whatever appended each write: a copy's writes carry its
+            // primary's, and once it is promoted its own, which may be
+            // behind them, as a clock set back is. A restore to a moment
+            // stops at the first write timed after it either way, but
+            // `prune` and a restore to a moment before every write kept
+            // read the images' times -- each its last write's -- as in
+            // order, and with a write timed back an image let go of was
+            // one a restore inside `--keep` started from.
+            let time = time.max(w.latest);
             let len = record_len(&records[pos..])
                 .ok_or_else(|| io::Error::other("a write record cut short"))?;
             let record = &records[pos..pos + len];
@@ -1161,6 +1181,7 @@ impl Archive {
             pos += len;
             w.at = seq + n - 1;
             w.taken += n;
+            w.latest = time;
         }
         self.fresh.store(true, Ordering::SeqCst);
         if let Some(s) = &mut w.segment {
@@ -2313,5 +2334,72 @@ mod tests {
                 assert_eq!((list.len(), end), (1, big - 8), "{what}, unsynced");
             }
         }
+    }
+
+    /// The times of every write the archive holds, in order.
+    fn times(a: &Archive) -> Vec<u64> {
+        let mut out = Vec::new();
+        for first in a.segments().unwrap() {
+            let bytes = a.read_segment(&a.segment_path(first)).unwrap().plain;
+            let (list, _) = entries(&bytes, Damage::Judge).unwrap();
+            out.extend(list.iter().map(|e| e.0));
+        }
+        out
+    }
+
+    /// An archive's times run in order. A copy's writes carry its
+    /// primary's times and, once it is promoted, its own clock's: a copy
+    /// whose clock is behind its old primary's sent writes timed before
+    /// the ones before them, as a clock set back does. Each is archived at
+    /// the latest time before it -- an archiver started again reads that
+    /// from its last segment -- so a restore to a moment cuts where it cut
+    /// with the times as they came, at the first write appended after it,
+    /// and `prune`, reading the images' times as in order, keeps what a
+    /// restore within its window needs. With the times as they came, it let
+    /// go of the image a restore inside its window starts from, and that
+    /// restore answered another change after the prune than before it.
+    #[test]
+    fn an_archives_times_run_in_order_across_a_clock_behind() {
+        let dir = std::env::temp_dir().join(format!("fennec-archive-behind-{}", fresh_id()));
+        fs::create_dir_all(&dir).unwrap();
+        let a = Archive::new(dir.join("archive")).unwrap();
+        let mut p = Source::new();
+        p.run("create collection notes (n int)");
+        a.add_image(p.db.change_seq(), &p.image(false)).unwrap();
+        let t = now_ms() + 60_000;
+        let mut w = a.writer().unwrap();
+        let mut put = |w: &mut Writer, n: u64, time: u64| {
+            let record = p.run(&format!("put notes {{n: {n}}}"));
+            a.take(w, w.at + 1, &[time], &record).unwrap();
+        };
+        // The old primary's writes, then the promoted copy's, its clock
+        // 150 ms behind.
+        for (n, time) in [(1, t + 100), (2, t + 200), (3, t + 300)] {
+            put(&mut w, n, time);
+        }
+        assert_eq!(a.consolidate().unwrap(), Some(4));
+        for (n, time) in [(4, t + 150), (5, t + 160), (6, t + 170)] {
+            put(&mut w, n, time);
+        }
+        assert_eq!(a.consolidate().unwrap(), Some(7));
+        // Started again, the archiver goes on from the latest time.
+        w.park().unwrap();
+        let mut w = a.writer().unwrap();
+        put(&mut w, 7, t + 175);
+        assert_eq!(
+            times(&a),
+            [100, 200, 300, 300, 300, 300, 300].map(|d| t + d)
+        );
+        let images: Vec<u64> = a.images().unwrap().iter().map(|i| i.1).collect();
+        assert_eq!(images[1..], [t + 300, t + 300]);
+
+        // Before the moment the old primary's last write was appended at:
+        // the two before it.
+        let to = Target::Time(t + 250);
+        assert_eq!(restored_rows(&a, &dir, to), (3, 2));
+        a.prune(1_000, t + 1_180).unwrap();
+        assert_eq!(restored_rows(&a, &dir, to), (3, 2));
+        assert_eq!(restored_rows(&a, &dir, Target::End), (8, 7));
+        let _ = fs::remove_dir_all(&dir);
     }
 }
