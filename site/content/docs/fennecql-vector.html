@@ -59,6 +59,9 @@ get articles near embed $1 exact limit 10
   <li><b><code>exact</code> checks every vector</b>, which is how you measure
     recall.</li>
   <li><b>Each row gets a <code>_score</code></b> column.</li>
+  <li><b>A vector holds <code>f32</code>s:</b> a component past one's range
+    (<code>1e39</code>) or a <code>NaN</code> is refused naming the element, in
+    a write and in the query vector (<a href="limits.html#fixed-limits">limits</a>).</li>
 </ul>
 
 <details class="deep"><summary>How ef, exact and a filter are planned</summary>

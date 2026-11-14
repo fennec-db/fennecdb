@@ -845,30 +845,41 @@ const LITTLE = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
 
 /**
  * The parameters that are vectors, apart from the rest, as `f32`s: a
- * typed array or an array of finite numbers, which the module reads as a
- * vector either way. Each goes over as its place among the parameters and
- * its length, then its values, and the JSON holds `null` where it goes.
- * Written out as text and read back, a page of 200 768-dim vectors spent
- * most of its time on the digits, both sides of the call. A `-0` goes over
- * as `0`, as JSON writes it, so either way stores the same vector. Those
- * at `asJson` stay in the JSON: a json field keeps a list's numbers as
- * written, which the module asks for by their places. One each of whose
- * numbers an `f32` holds exactly -- a `Float32Array`, an int short of 2^24,
- * `0.5`, not `0.1` -- goes marked exact, its place's top bit set, and an
- * `[int]` or a `[float]` takes it as it came (`fennec_abi::EXACT`).
+ * typed array, whatever numbers it holds, or an array of finite numbers,
+ * which the module reads as a vector either way. Each goes over as its
+ * place among the parameters and its length, then its values, and the JSON
+ * holds `null` where it goes. Written out as text and read back, a page of
+ * 200 768-dim vectors spent most of its time on the digits, both sides of
+ * the call. A `-0` goes over as `0`, as JSON writes it, so either way
+ * stores the same vector. Those at `asJson` stay in the JSON: a json field
+ * keeps a list's numbers as written, which the module asks for by their
+ * places. One each of whose numbers is a finite one an `f32` holds exactly
+ * -- a `Float32Array`'s, an int short of 2^24, `0.5`, not `0.1` -- goes
+ * marked exact, its place's top bit set, and an `[int]` or a `[float]`
+ * takes it as it came (`fennec_abi::EXACT`).
  */
 function vectorsApart(params, asJson = null) {
   const found = [];
   let size = 0;
   params.forEach((p, i) => {
     if (asJson?.includes(i)) return;
-    const list = Array.isArray(p) || (ArrayBuffer.isView(p) && !(p instanceof DataView)) ? p : null;
+    const typed = !Array.isArray(p);
+    const list = !typed || (ArrayBuffer.isView(p) && !(p instanceof DataView)) ? p : null;
     if (!LITTLE || !list || list.length === 0) return;
-    // A `Float32Array`'s numbers pass as they are.
+    // A typed array's numbers pass as they are, a NaN or an infinity among
+    // them, as a native binding hands its `f32`s: the module refuses a
+    // vector holding one where a vector field or `near` takes it, naming the
+    // element -- in the JSON a NaN was `null` and the array an object, which
+    // no vector field takes. An array's NaN or infinity keeps it in the
+    // JSON, `null` there as a server is sent it. A number past an `f32`'s
+    // range, `1e39`, goes over as the `f32`'s infinity, which the module
+    // refuses so too, as a server reading its digits does; none of these
+    // is exact, so a list of numbers asks for it as JSON, as written.
     let exact = true;
     for (let k = 0; k < list.length; k++) {
-      if (typeof list[k] !== 'number' || !Number.isFinite(list[k])) return;
-      if (exact && Math.fround(list[k]) !== list[k]) exact = false;
+      const x = list[k];
+      if (typeof x !== 'number' || (!typed && !Number.isFinite(x))) return;
+      if (exact && !(Math.fround(x) === x && Number.isFinite(x))) exact = false;
     }
     found.push(exact ? -1 - i : i);
     size += 8 + 4 * list.length;

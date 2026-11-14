@@ -442,7 +442,11 @@ untouched vector taken from the collection rather than resent (<a
 href="#following">Following changes</a>). A <code>NaN</code> or an
 infinity in a value bound for a vector field — one of pgvector's, a BLOB
 under <code>--vector</code>, a <code>float[]</code> named with it — stops
-the import at its row, naming it: no distance orders by one. A
+the import at its row, naming it: no distance orders by one. So does a
+component past what the field holds, a <code>float8[]</code>'s
+<code>1e39</code>, whose <code>f32</code> is an infinity, or one of
+65 520 or more bound for a <code>vector&lt;N, f16&gt;</code>, which an
+<code>f16</code> rounds to its infinity, named in the engine's words (<a href="limits.html#fixed-limits">limits</a>). A
 <code>float</code> or <code>[float]</code> field keeps its
 <code>NaN</code>s and infinities, as PostgreSQL holds them (<a
 href="fennecql-schema.html">Collections and types</a>); SQLite stores a

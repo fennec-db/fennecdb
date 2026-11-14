@@ -10565,6 +10565,11 @@ impl Database {
     fn document_of(schema: &Schema, members: &[(String, Value)]) -> Result<Document> {
         let mut doc = Document::default();
         for (k, v) in members {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(held) = held_member(schema, k, v) {
+                doc.set(k, held);
+                continue;
+            }
             doc_field(schema, &mut doc, k, v.clone())?;
         }
         doc_done(schema, doc)
@@ -12113,7 +12118,7 @@ impl Database {
                 ))
             })
         })?;
-        let qv = near_vector(eval(&near.vector, &mut NoRow, ctx)?)?;
+        let qv = near_vector(eval(&near.vector, &mut NoRow, ctx)?, &near.field)?;
         if qv.len() != ix.dim {
             return Err(Error::Type(format!(
                 "the query vector must have {} dimensions, got {}",
@@ -12186,7 +12191,7 @@ impl Database {
         ctx: &EvalCtx,
     ) -> Result<Vec<(DocId, f32)>> {
         use crate::schema::Quant;
-        let qv = near_vector(eval(&near.vector, &mut NoRow, ctx)?)?;
+        let qv = near_vector(eval(&near.vector, &mut NoRow, ctx)?, &near.field)?;
         if qv.len() != dim {
             return Err(Error::Type(format!(
                 "the query vector must have {dim} dimensions, got {}",
@@ -12699,7 +12704,7 @@ impl Database {
             IndexKind::Vector(spec) => spec.metric,
             _ => Metric::Cosine,
         };
-        let qv = near_vector(eval(&rr.vector, &mut NoRow, ctx)?)?;
+        let qv = near_vector(eval(&rr.vector, &mut NoRow, ctx)?, &rr.field)?;
         if qv.len() != dim {
             return Err(Error::Type(format!(
                 "the rerank vector must have {dim} dimensions, got {}",
@@ -15770,7 +15775,31 @@ fn build_docs(
     for pairs in docs {
         let mut doc = Document::default();
         for (k, e) in pairs {
-            doc_field(schema, &mut doc, k, eval(e, &mut NoRow, ctx)?)?;
+            // A literal's or a parameter's value read where it is, as `eval`
+            // reads it, without its call: a vector a vector field takes is
+            // copied into the document with its test in the copy
+            // (`held_member`), where `eval` cloned it and `coerce` read it
+            // again. Natively: the browser module keeps the one way.
+            #[cfg(not(target_arch = "wasm32"))]
+            let given = match e {
+                Expr::Lit(v) => Some(v),
+                Expr::Param(i) => ctx.params.get(*i),
+                _ => None,
+            };
+            #[cfg(not(target_arch = "wasm32"))]
+            let v = match given {
+                Some(v) => match held_member(schema, k, v) {
+                    Some(held) => {
+                        doc.set(k, held);
+                        continue;
+                    }
+                    None => v.clone(),
+                },
+                None => eval(e, &mut NoRow, ctx)?,
+            };
+            #[cfg(target_arch = "wasm32")]
+            let v = eval(e, &mut NoRow, ctx)?;
+            doc_field(schema, &mut doc, k, v)?;
         }
         built.push(doc_done(schema, doc)?);
     }
@@ -15782,6 +15811,31 @@ fn build_docs(
         }
     }
     Ok(())
+}
+
+/// The value `set_field` makes of `v` for the field `k`, where `v` is a
+/// vector a vector field of its length takes and each of its components is
+/// one the field holds: copied, its components tested in the copy
+/// (`value::held_copy`). A 768-dim vector's copy and test so are 425
+/// instructions on aarch64, where the clone's `memmove` alone was 590, and
+/// 978 on x86-64, where the test alone was 6 150
+/// (docs/design/crates.md#limits, *What it costs*). `None` for any other --
+/// another kind of value, a field of another type or length, `id` and a
+/// path (no field is named either), a component the field does not hold --
+/// which `set_field` makes, or refuses naming the element, as it makes
+/// every value.
+#[cfg(not(target_arch = "wasm32"))]
+#[inline]
+fn held_member(schema: &Schema, k: &str, v: &Value) -> Option<Value> {
+    let Value::Vector(src) = v else {
+        return None;
+    };
+    match schema.field(k)?.ty {
+        DataType::Vector(dim, prec) if dim == src.len() => {
+            crate::value::held_copy(src, prec).map(Value::Vector)
+        }
+        _ => None,
+    }
 }
 
 /// A document being put with every field it was not given `null`, or
@@ -18383,14 +18437,46 @@ fn order_rows(flat: &[Value], n: usize, count: usize, keys: &[OrderKey], k: usiz
     idx
 }
 
-/// The query vector of `near`. Three forms are accepted, none of them
+/// The query vector of `near` or `rerank` over `field`, each component a
+/// number an `f32` holds, as a vector field takes one
+/// ([`crate::value::held`]): `1e39`, read as an `f32`'s infinity, or a
+/// `NaN` handed over as bits, made every distance an infinity or a `NaN`,
+/// which ranked the rows as their bits fell. A vector a row holds is
+/// measured as it is (`near` ranks the rows of a file an earlier build
+/// wrote one into).
+fn near_vector(v: Value, field: &str) -> Result<Vec<f32>> {
+    let v = near_floats(v)?;
+    match crate::value::held(&v, VecPrec::F32) {
+        true => Ok(v),
+        false => Err(query_unheld(&v, field)),
+    }
+}
+
+/// [`crate::value::unheld`]'s refusal of a query vector, its field named:
+/// "the query vector for `embed`, element 3: a vector's component is ...".
+/// Out of line, on the refusal alone.
+#[cold]
+#[inline(never)]
+fn query_unheld(v: &[f32], field: &str) -> Error {
+    match crate::value::unheld(v, VecPrec::F32) {
+        Error::Type(m) => Error::Type(crate::declared::cat(&[
+            "the query vector for `",
+            field,
+            "`, ",
+            &m,
+        ])),
+        e => e,
+    }
+}
+
+/// The query vector's `f32`s. Three forms are accepted, none of them
 /// silently mangled.
 ///
 /// The text form (`near embed '[1,2,3]'`) is pgvector's notation, and a
 /// string is what most clients send. On the parameter path the same
 /// value was already parsed into a list; on the literal path it stayed
 /// `text` and raised a type error.
-fn near_vector(v: Value) -> Result<Vec<f32>> {
+fn near_floats(v: Value) -> Result<Vec<f32>> {
     let items = match v {
         Value::Vector(v) => return Ok(v),
         Value::List(items) => items,
