@@ -38,8 +38,10 @@ In scope, and worth reporting:
   and the WASM boundary.
 - Anything that authenticates when it should not, or that lets a client skip
   authentication: the bearer token, a JWT and the policy it is held to.
-- A non-constant-time comparison on a secret. The HTTP bearer token is compared
-  in constant time on purpose; a regression there is a bug worth reporting.
+- A non-constant-time comparison on a secret. Every token, mark, MAC and
+  signature is compared in constant time on purpose, by `crypto::ct_eq` alone,
+  and CI refuses `==` on one by its name (`tools/secret_eq_check.py`); a
+  regression there is a bug worth reporting.
 - Allocation driven by an unauthenticated peer. A request's head is capped and
   its body bounded by `max_body` before it is read -- a tenant node reads past
   it an image's import alone, and only once its head carries the admin token;

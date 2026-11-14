@@ -9,7 +9,9 @@
 //   - it is one folder, fennec-studio, the app unpacked: its launcher and its
 //     main process, no payload left, and a launcher that is not Electrobun's
 //     extractor (the build folder's own is, and must be found to be: the
-//     control); it holds none of the test hooks (release.mjs);
+//     control); it holds none of the test hooks (release.mjs); on Windows
+//     bun.exe and launcher.exe carry the app's icon at 16, 32, 48 and 256
+//     pixels, each image the size its entry says (icons.mjs);
 //   - unpacked anywhere, as a browser's download is, it starts from there:
 //     its processes up and a window of theirs on screen; it is then stopped,
 //     leaves nothing running, and not a file of it changed;
@@ -313,6 +315,10 @@ const digest = treeDigest(app);
 log(`${ARCHIVE}: ${sizeMB} MB, ${digest.files} files; the launcher is the app's (the build's extractor holds ${holds(extractor).join(', ')})`);
 const hooks = spawnSync(process.execPath, [join(HERE, 'scripts', 'checks', 'release.mjs'), app], { stdio: 'inherit' });
 assert.equal(hooks.status, 0, 'the app in the archive holds none of the test hooks');
+if (WIN) {
+  const icons = spawnSync(process.execPath, [join(HERE, 'scripts', 'checks', 'icons.mjs'), app], { stdio: 'inherit' });
+  assert.equal(icons.status, 0, "the app's exes carry its icon at every size (checks/icons.mjs)");
+}
 
 step('started where it was unpacked, as a browser download is');
 {

@@ -627,8 +627,10 @@ SQLite or PostgreSQL, and can follow a PostgreSQL table as it changes.</p>
     shows stale data and stopping beats silently returning it. Run
     <code>sqlite3 &lt;db&gt; "PRAGMA wal_checkpoint(TRUNCATE)"</code> first.
     <code>WITHOUT ROWID</code> tables are not read either.</li>
-  <li>No TLS to the PostgreSQL server read from, and no md5 authentication:
-    scram-sha-256 or cleartext.</li>
+  <li>No md5 authentication: scram-sha-256 or cleartext. A server asking
+    SCRAM for more than 4 194 304 iterations is refused, the range named:
+    set the role's password again under a lower
+    <code>scram_iterations</code>.</li>
   <li>PostgreSQL <code>timestamp(tz)</code> values are truncated to
     milliseconds.</li>
   <li><b>A non-finite component of a value bound for a vector field stops

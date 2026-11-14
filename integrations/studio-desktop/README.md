@@ -97,7 +97,15 @@ folder, a launcher that is not the extractor, no test hook, started where it
 is unpacked, then installed through `install.ps1 -App` or `install.sh --app`
 from a release laid out on the machine and started by the shortcut's or the
 menu entry's own target, unchanged by either run but for the launcher's own
-log, `bin\app.log`, which Electrobun writes beside itself on Windows.
+log, `bin\app.log`, which Electrobun writes beside itself on Windows. On
+Windows it also holds `bin\bun.exe` (which owns every window, so the taskbar
+button and Alt-Tab) and `bin\launcher.exe` (the shortcuts' target) to the app's
+icon: `scripts/checks/icons.mjs` reads their PE icon groups and fails without
+16, 32, 48 and 256 pixel images, an entry whose image is not the size it
+declares, or an image that is not `icon/icon.ico`'s. Electrobun's `build.win.icon`
+reached neither (Bun's own dumpling, one 256-pixel image, in `bun.exe`; none in
+the launcher), so `scripts/dist.sh` writes the .ico into both with
+`scripts/set-exe-icon.mjs` before it zips them (`test/exe-icon.test.ts`).
 
 **What the DMG holds.** Electrobun's stable build is a self-extractor: a
 launcher and the app as a `.tar.zst` in its Resources, which the first launch

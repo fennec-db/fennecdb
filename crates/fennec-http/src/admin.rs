@@ -79,7 +79,7 @@
 use crate::http::{Method, Request, Response};
 use crate::instance;
 use crate::tenants::{Kept, Refused, Tenants};
-use crate::{constant_eq, Config};
+use crate::{crypto::ct_eq, Config};
 
 /// Whether `req` carries the admin `token`, compared in constant time.
 pub(crate) fn carries(req: &Request, token: &str) -> bool {
@@ -87,7 +87,7 @@ pub(crate) fn carries(req: &Request, token: &str) -> bool {
         .header("authorization")
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("");
-    constant_eq(given.as_bytes(), token.as_bytes())
+    ct_eq(given.as_bytes(), token.as_bytes())
 }
 
 /// The answer to a request under `/_admin/` without the admin token.
