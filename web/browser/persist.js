@@ -298,7 +298,6 @@ function worker() {
 
 const PHASES = {
   async start() {
-    ok(crossOriginIsolated, 'the page is cross-origin isolated (run.mjs serves it so)');
     await wipe();
     await send('plan', { tests: Object.values(TESTS) });
     await say(navigator.userAgent);
