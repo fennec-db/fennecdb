@@ -112,10 +112,25 @@ opened: /data/data.fennec</pre>
     that user and hands nothing over: the volume has to be that user's.
     <code>FENNEC_USER</code>, or the <code>--user</code> flag over it, names
     whom root becomes, <code>&lt;uid&gt;:&lt;gid&gt;</code> in numbers.</li>
+  <li><b>Every capability dropped.</b> Root without <code>SETUID</code>,
+    <code>SETGID</code> and <code>CHOWN</code> (<code>docker run --cap-drop
+    ALL</code>, a pod's <code>drop: ["ALL"]</code>) cannot become anyone: the
+    server says so and exits 2 rather than serve as root. Start it as 65534
+    there, <code>--user 65534:65534</code> or <code>runAsUser</code>, on a
+    volume that is 65534's.</li>
   <li><b><code>docker exec</code> and the health check.</b>
     <code>--ping</code>, and anything else run in the container, starts as root
     and drops it the same way: nothing it makes is root's.</li>
 </ul>
+
+<p><b>Releases after 0.2.0.</b> The image of 0.2.0 starts as 65534 and hands
+nothing over: on a volume its platform made root's it stops with <code>its
+lock file: Permission denied</code>. With that image, run it as root there —
+a derived image of two lines, <code>FROM
+ghcr.io/fennec-db/fennec-server:0.2.0</code> and <code>USER 0:0</code>, or
+Railway's <code>RAILWAY_RUN_UID=0</code> — or make the volume 65534's
+(<code>fsGroup: 65534</code> on Kubernetes, which the manifest below
+sets).</p>
 
 <details class="deep"><summary>Why the image starts as root</summary>
 <p>The image holds the static binary and nothing else: no shell, no
@@ -128,8 +143,7 @@ around it (a derived image running as root, Railway's
 <code>RAILWAY_RUN_UID=0</code>). Root is kept for the hand-over alone: the
 supplementary groups, the group and then the user are dropped, and the server
 checks that root cannot be had back before it goes on; a step that fails ends
-the start. The image of 0.2.0 started as 65534: on a root-owned volume it needs
-the volume made 65534's, or the container run as root.</p>
+the start.</p>
 </details>
 
 <h2 id="vm">A VM and its block volume</h2>

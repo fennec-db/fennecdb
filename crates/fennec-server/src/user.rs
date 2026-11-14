@@ -324,11 +324,19 @@ pub fn system_device() -> std::io::Result<u64> {
 /// but the owner and the group.
 #[cfg(unix)]
 pub fn hand_over(entries: &[Entry], user: User) -> Result<(), String> {
-    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     for e in entries {
         let shown = e.path.display();
         // Read-only, so the open writes nothing; a directory opens so too.
-        let f = std::fs::File::open(&e.path).map_err(|err| format!("{shown}: {err}"))?;
+        // A link put in the entry's place since the look is not opened at
+        // all (`sys::AS_FOUND`): root opening what it points at -- a FIFO
+        // to wait on, a device -- is refused here rather than undone by the
+        // inode's check below, which still holds the rest.
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(sys::AS_FOUND)
+            .open(&e.path)
+            .map_err(|err| format!("{shown}: {err}"))?;
         let m = f.metadata().map_err(|err| format!("{shown}: {err}"))?;
         let same = (m.dev(), m.ino()) == (e.dev, e.ino)
             && match e.dir {
@@ -368,6 +376,34 @@ mod sys {
     extern "C" {
         pub fn setgroups(size: i32, list: *const u32) -> i32;
     }
+
+    /// `open`'s `O_NOFOLLOW | O_NONBLOCK` for a hand-over: the path's last
+    /// name is opened only if it is no link, and a FIFO there is not
+    /// waited on. The numbers are each target's own, read from its libc
+    /// (Python's `os.O_NOFOLLOW` on each: Linux's differs by processor),
+    /// and none where they were not read: there the inode's check stands
+    /// alone, as it did before these.
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        target_arch = "x86_64"
+    ))]
+    pub const AS_FOUND: i32 = 0o400000 | 0o4000;
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        target_arch = "aarch64"
+    ))]
+    pub const AS_FOUND: i32 = 0o100000 | 0o4000;
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    pub const AS_FOUND: i32 = 0x100 | 0x4;
+    #[cfg(not(any(
+        all(
+            any(target_os = "linux", target_os = "android"),
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos",
+        target_os = "ios"
+    )))]
+    pub const AS_FOUND: i32 = 0;
 }
 
 /// The process's effective uid and its user and group, for [`wanted`].
@@ -399,7 +435,9 @@ pub fn become_user(user: User) -> Result<(), String> {
         let e = std::io::Error::last_os_error();
         format!(
             "could not become {user} ({what}: {e}): a server started as root needs the \
-             SETUID and SETGID capabilities to drop root, and CHOWN to hand its volume over"
+             SETUID and SETGID capabilities to drop root, and CHOWN to hand its volume over. \
+             Where they are dropped, start it as {user} instead (docker run --user {user}, \
+             a pod's runAsUser)"
         )
     };
     // SAFETY: an empty list, which the call reads nothing of; the ids are
@@ -797,5 +835,31 @@ mod tests {
         let e = hand_over(&got, me).unwrap_err();
         assert!(e.contains("changed while it was handed over"), "{e}");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A link put where a file was, between the look and the change, is
+    /// refused where it is opened: what it points at is never opened, and
+    /// keeps its owner. Held on the targets whose `open` flags are known
+    /// (`sys::AS_FOUND`); on the others the inode's check refuses it, after
+    /// the open.
+    #[test]
+    fn a_link_in_a_files_place_is_not_followed() {
+        let d = dir("link");
+        touch(&d, "data.fennec");
+        let outside = dir("link-outside");
+        touch(&outside, "target");
+        let w = Writes::file(&d.join("data.fennec"), None).unwrap();
+        let got = plan(&w, other(), devices(&d).1).unwrap();
+        std::fs::remove_file(d.join("data.fennec")).unwrap();
+        std::os::unix::fs::symlink(outside.join("target"), d.join("data.fennec")).unwrap();
+        let (_, me) = current();
+        let e = hand_over(&got, me).unwrap_err();
+        if sys::AS_FOUND != 0 {
+            // The open's own refusal (ELOOP), not the check after it.
+            assert!(!e.contains("changed while it was handed over"), "{e}");
+            assert!(e.contains("os error"), "{e}");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 }
