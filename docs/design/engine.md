@@ -557,7 +557,9 @@ id (`tests/blocks.rs`, `a_hook_changing_a_documents_id_is_refused`). Then
 the row written over leaves the indexes whose field changes (`unindex_doc`), the
 frame is appended, the document goes into the scalar indexes
 (`index_scalar`), and after the statement's documents their vectors go into
-the graph in a batch or are left waiting (`index_written`). A `set` -- an
+the graph in a batch or are left waiting (`index_written`), the batch
+linked first where a document writes over a row it holds or lets one go
+past its time ([writes.md](writes.md#insert-and-put)). A `set` -- an
 upsert's too -- reads its row, asks the hooks and `@unique`, remembers,
 then the same: the row out, the frame, the document in, its vector first
 (`index_doc`). A `del` -- a sweep's, a `put`'s over an expired row --
@@ -844,3 +846,84 @@ guard and with it), each 8 copies under random UUIDs of 7 runs
 guard against 13 217.7 without (SE 27.6 for the difference) and
 12 371.4 against 12 370.1 a thousand an `apply` (SE 20.3), main's
 13 727.8 and 12 798.7.
+
+## The model
+
+**A write form or an index kind the engine gains is drawn in
+`tests/model.rs`.** It is held to the model and an index to the scan over
+its twin, in both builds, and a divergence the model finds is fixed with a
+test of its own beside the code's others -- or is the model's, fixed there
+-- never by drawing less. Its first runs found two bugs and its first
+vector beside `@ttl` and `@unique` a third.
+
+`tests/model.rs` holds blocks, and every other write, to a model of the
+rows, a `BTreeMap` a collection: seeded runs of `put`, `insert`, upserts,
+`set` and `del` picking rows with `order` and `limit`, `require` and
+`returning`; blocks that land, blocks refused part way and blocks rolled
+back; alters, indexes made and dropped, compacts, checkpoints, `@ttl` moved
+by `set_clock` and its sweep; reopens, and the file cut at a step's end --
+there, zeros after it, the record after it torn or zeroed from inside. Each
+answer, every row after each step, each record a step appends, what an open
+takes of a cut file and the change counter -- a row a write, a schema
+change one, taken back with the file and never reused -- are held to the
+model's, and every index's answer to the scan's over a twin field holding
+the same values (as `tests/nan.rs` holds them), in the build with every
+index and in the one without them (`tests/features.rs`). A divergence
+names its seed, its step and what differed, the command that runs it again
+as the weekly run builds it -- a release with debug assertions and overflow
+checks -- and the steps it shrinks to (`shrink`, halves then single steps,
+a statement of a block at a time). `make test` runs 200 seeds of 1 000
+steps in each build; `.github/workflows/model.yml` 1 000 seeds of 100 000
+in each, a week, seeds no run took before, each named as it starts and as
+it ends (`FENNEC_MODEL_PROGRESS=1`), so a job that hangs names its seed.
+
+Vectors are drawn in every kind of graph: `b`'s four twins, over `f32`s,
+int8 codes, bit codes and halves (`vector<3, f16>`), and `t`'s, beside its
+`@ttl` and `@unique`. `near` is read through the graph and exactly, to a
+limit and over a filter's rows, each answer held to the rows it may answer
+-- each scored by its own vector's cosine, the scores the best those rows
+have -- and the graph's to the exact one's, to the bit; a limit leaves
+ties to either, so there the scores are compared, not the ids. After every
+step each graph holds a document for every row holding its vector, as
+`Database::stats` counts them, and none other. Now and then a graph run
+fills a collection of its own, `z`, in one block: `FENNEC_MODEL_GRAPH`
+vectors in a `put` (48 in `make test`, 2 200 in the weekly run, past the
+1 024 nodes from which `insert_batch` links in parallel and the 2 048 a bit
+index learns its centres from), a second `put` writing some rows again --
+one twice -- and some new into the graph the first made, rows deleted,
+each graph searched to a limit over most rows, few or all, through the
+graph and exactly, and `z` emptied. Over thousands of vectors the graph
+may miss a neighbour, so there it is held to the rows and their own
+scores, and the exact search to the best scores. A run of 2 200 costs some
+1.2 G instructions, so a larger run is drawn as much less often: one in
+1 000 steps at 48, one in some 22 000 at 2 200, four or five a weekly
+seed, where one in 1 000 took 8 weekly seeds of 10 000 steps from 56.5 G
+instructions to 154.1 G.
+
+What it costs (`/usr/bin/time -l`, instructions retired): `make test`'s
+200 seeds of 1 000 steps, in the debug build, 423.1 G with every index and
+336.5 G without, 88 and 71 s of CPU here, where before the vectors in
+every kind of graph, the reads over them, the graph runs, the documents
+of a `put` meeting each other and the graphs' counts they took 321.9 G
+and 298.6 G, 65 and 63 s -- on CI's four vCPUs some 25 to 45 s each,
+within the minute. In the weekly run's build one seed of 100 000 steps
+takes 78.1 G and 7.8 s of CPU here, where it took 63.1 G and 6.7 s: a
+job's 125 seeds, some 31 a thread, are four minutes of this machine's
+CPU a thread, ten to twenty on a runner's slower vCPUs with the build, of
+the 180 a job may take.
+
+Its first runs found two bugs, each fixed with a test of its own: a `set`
+refused a `@unique` value a row past its time held, which a `put` took
+([writes.md](writes.md#arithmetic-in-set)), and a `put` writing one row
+twice linked its first document's vector over the row
+([writes.md](writes.md#insert-and-put)). A review found a third, a `put`
+letting go of a row past its time it had written itself, its vector
+waiting for the batch (also [writes.md](writes.md#insert-and-put)), which
+the model then could not draw: `t` held no vector. Given one, and a
+generator whose later documents of a `put` now and then take an earlier
+one's id or `@unique` value and whose writes name ids rows lately left,
+200 seeds of 1 000 steps still saw nothing: the vector showed only once
+the row's id held a row again, without a vector, before a compact or an
+open rebuilt the graph, and a `near` over `t` came by. Holding each
+graph's count to the rows after every step found it in the seventh seed,
+shrunk to the statement alone.

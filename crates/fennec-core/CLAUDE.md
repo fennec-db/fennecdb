@@ -180,6 +180,11 @@ an aggregate or `expired()` in one.
 builder, held to the golden file, and the sync refuses one a replica
 cannot answer (`PICKED`), as a scenario holds.
 
+**[A write form or an index kind the engine gains is drawn in
+`tests/model.rs`.](../../docs/design/engine.md#the-model)** Held to the
+model, an index to the scan's twin; a divergence is fixed with a test of
+its own, never by drawing less.
+
 ### Indexes
 
 **[`@unique` is a `@hash` that asks its bucket before a

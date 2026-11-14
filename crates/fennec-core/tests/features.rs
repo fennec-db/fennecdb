@@ -25,6 +25,14 @@
 
 use fennec_core::prelude::*;
 
+/// The engine held to its model (`tests/model.rs`) in this build too: the
+/// scan answering what the indexes would, and `create index` of one the
+/// build lacks refused. In the build with the rest of the language, the
+/// one `make test` runs the model in.
+#[cfg(feature = "language")]
+#[path = "model.rs"]
+mod model;
+
 /// The statements of `sql`, each parsed once the ones before it ran: a
 /// refusal a statement's own check makes comes at its parse.
 fn run(db: &mut Database, sql: &str) -> Result<Response> {

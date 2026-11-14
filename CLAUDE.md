@@ -233,6 +233,7 @@ Covers `crates/fennec-core/`; the browser module's rules bind `crates/fennec-was
 - A `set` or a `del` picks its rows with `order` and `limit`, and `returning` answers them.
 - A key of `order` may be an expression
 - A `put` answers the rows it wrote with `returning`.
+- A write form or an index kind the engine gains is drawn in `tests/model.rs`.
 
 *Indexes*
 - `@unique` is a `@hash` that asks its bucket before a write.

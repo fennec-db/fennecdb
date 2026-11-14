@@ -851,6 +851,21 @@ impl Store {
         self.index.get(id)
     }
 
+    /// Whether `id`'s record lies at or past `first`'s, which the running
+    /// statement appended: appended since, as the segments are appended
+    /// to in order. A statement's records are all in memory -- a block
+    /// spills, and a store hands over to the file, only between
+    /// statements -- so one in the mapped file is older.
+    pub fn wrote_after(&self, first: DocId, id: DocId) -> bool {
+        match (self.index.get(first), self.index.get(id)) {
+            (Some(f), Some(l)) => {
+                debug_assert!(f.seg & MAPPED == 0, "a statement's record is in memory");
+                l.seg & MAPPED == 0 && (l.seg, l.off) >= (f.seg, f.off)
+            }
+            _ => false,
+        }
+    }
+
     /// Points `id` at `loc`, or at nothing: where it was before a write
     /// that is put back.
     pub fn point(&mut self, id: DocId, loc: Option<Loc>) {
