@@ -652,7 +652,9 @@ not. Read the end of its `why`:
   (Upgrading with no downtime): a file made after that is taken back, while
   one already there carries no identity, so remove it by hand as below.
 - `not taken back: another operation holds the tenant` -- a create, a move
-  or an attach of the tenant was running; the next repair tries again.
+  or an attach of the tenant was running, or another repair was taking
+  that file back (the router runs one of its own 2 s after a replica's
+  attach fails); the next repair tries again, or finds the file gone.
 - `did not answer this repair's look` -- the node was silent; below.
 
 A move whose target already holds a file of the tenant (the install
