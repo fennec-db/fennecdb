@@ -200,7 +200,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # ubuntu-24.04-arm: the aarch64-linux binaries and image ship, and
+        # their NEON, CRC and atomics paths run only on an arm host.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     steps:
       - uses: actions/checkout@v7
 
@@ -381,14 +383,61 @@ jobs:
       - name: A second process over a served file is refused
         run: cargo test -p fennec-cli --test lock
 
+  # macOS x86_64 ships (release.yml cross-builds fennec and fennec-server
+  # for it), and only an x86_64 process runs fennec-core's SSE/AVX and CRC
+  # paths there. macos-latest is arm64, so the x86_64 test binaries run under
+  # Rosetta 2. The crates the tarball is made of, the shell's and the
+  # server's own binaries built for the target too.
+  # Only on the merge queue and main: the macOS slots (5 at once) are CI's
+  # bottleneck, and a pull request's x86_64 run would wait for one. A job
+  # skipped by `if:` reports success, so it can still be a required check.
+  macos-x86_64:
+    name: test (macos x86_64, Rosetta)
+    if: github.event_name != 'pull_request'
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rosetta 2 and the pinned toolchain
+        run: |
+          softwareupdate --install-rosetta --agree-to-license
+          rustup show
+          rustup target add x86_64-apple-darwin
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: macos-x86_64-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: macos-x86_64-cargo-
+
+      # crc.rs falls back to the table silently where detection fails; this
+      # makes the test `hardware_path_is_chosen` assert Rosetta runs SSE4.2.
+      - name: Test the shipped crates for x86_64-apple-darwin
+        env:
+          FENNEC_EXPECT_SSE42: '1'
+        run: |
+          cargo test --target x86_64-apple-darwin \
+            -p fennec-core -p fennec-ql -p fennec-abi -p fennec-http \
+            -p fennec-cli -p fennec-server
+
   # fennec-core whole on Windows (docs/design/windows.md, decision 5):
   # the file mapped in views laid end to end in a placeholder (slice 2),
   # every test of the mapped path, and slice 1's experiment on the
   # runner's NTFS and on a ReFS and a FAT32 VHD. Cached apart from the
   # single writer's job, whose target holds the programs.
   windows-core:
-    name: windows (core)
-    runs-on: windows-latest
+    name: windows (core)${{ matrix.os == 'windows-11-arm' && ' arm' || '' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # windows-11-arm: aarch64-windows ships (release.yml).
+        os: [windows-latest, windows-11-arm]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -403,8 +452,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: windows-latest-core-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: windows-latest-core-
+          key: ${{ matrix.os }}-core-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ matrix.os }}-core-
 
       # The library's and the integration tests; not the examples, which
       # `cargo test` builds otherwise: measurement programs `make` runs on
@@ -469,8 +518,13 @@ jobs:
   # killed by TerminateProcess, beside fennec-abi's, fennec's and the native
   # library's suites, over files mapped as slice 2 maps them.
   windows-server:
-    name: windows (server)
-    runs-on: windows-latest
+    name: windows (server)${{ matrix.os == 'windows-11-arm' && ' arm' || '' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # windows-11-arm: aarch64-windows ships (release.yml).
+        os: [windows-latest, windows-11-arm]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -485,8 +539,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: windows-latest-server-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: windows-latest-server-
+          key: ${{ matrix.os }}-server-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ matrix.os }}-server-
 
       - name: Build the suites
         run: cargo test -p fennec-server -p fennec-abi -p fennec-cli -p fennec-ffi --no-run
