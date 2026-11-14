@@ -141,6 +141,7 @@ sign.</p>
 <tr><td></td><td><code>exp</code>, which a token must have (401 otherwise; <code>--jwt-require-exp off</code> takes tokens without); <code>--jwt-max-age &lt;s&gt;</code> also refuses an <code>exp</code> further ahead than that. <code>nbf</code> too.</td></tr>
 <tr><td><b>Checked when told</b></td><td><code>iss</code> against <code>--jwt-issuer</code>, <code>aud</code> against <code>--jwt-audience</code>, and <code>azp</code> (or, where a token has none, <code>client_id</code>) against <code>--jwt-client</code>. Each flag is repeatable, any one of its values is taken, and each is asked of every token on every route, before a rule is read. A token refused is 401 naming the check, never the value it holds (<a href="#application">Holding a token to your application</a>). Given none of them the server takes any token its keys sign, which is right only where the keys are yours alone, and with <code>--jwt-keys</code> it says so on stderr as it starts.</td></tr>
 <tr><td><b>Not checked</b></td><td><code>token_use</code>: not read. Cognito's ID tokens and access tokens are told apart by the flags that name the client and the audience (<a href="#cognito">below</a>), or by a rule: <code>$jwt.token_use = 'access'</code>.</td></tr>
+<tr><td></td><td>The kind of <code>sub</code>. RFC 7519 makes it a string, and only a string that is not empty names the token's subject. A token whose <code>sub</code> is a number, a bool, a list or an object is taken, and names none: an <code>Idempotency-Key</code> sent with it is refused (400, <code>the token's `sub` claim must be a string (RFC 7519)</code>), <code>--request-rate</code> and <code>--call-rate</code> count it with every token of its issuer that names no subject, and <code>/_whoami</code> answers <code>"sub": null</code>. Mint a numeric id as its decimal text: <code>"sub": "42"</code>.</td></tr>
 <tr><td></td><td>Revocation. A token is good until its <code>exp</code> (<a href="#expiry">Expiry</a>).</td></tr>
 <tr><td><b>Not supported</b></td><td>A keys URL. <code>--jwt-keys</code> takes a path, read again when the file changes (<a href="#keys">Keys</a>).</td></tr>
 <tr><td></td><td>EdDSA, PS256, ES384, ES512, RS384 and RS512. Such a token is 401, <code>only HS256, RS256 and ES256 tokens are accepted</code>. Keys of any other kind in a JWKS (<code>OKP</code>, an <code>EC</code> key on P-384 or P-521) are skipped, and a file with no <code>RSA</code>, P-256 <code>EC</code> or <code>oct</code> key is refused at the start.</td></tr>
@@ -159,7 +160,14 @@ no other header. A rule's <code>for &lt;role&gt;</code> reads the claim
 missing claim narrows what a token may do, never widens it. A claim held as
 <code>null</code>, as <code>""</code>, as an object, or as a list where the rule
 reads one value is a missing one: <code>"sub": null</code> is no subject, and
-<code>owner = $jwt.sub</code> does not become <code>owner = null</code>. A claim
+<code>owner = $jwt.sub</code> does not become <code>owner = null</code>. A
+<code>sub</code> that is a number is no subject either, though a rule reads
+the claim as the token holds it: under <code>"sub": 42</code>,
+<code>owner = $jwt.sub</code> matches an owner stored as the number 42, and
+under <code>"sub": "42"</code> only one stored as the text. An app moving a
+numeric id into <code>sub</code> as text keeps the number in a claim of its
+own (<code>$jwt.user</code>) for the rules comparing it with a number field,
+or stores the field as text. A claim
 a rule compares by order admits only values of its own kind. A token that has
 been checked is kept by its text, up to 4 096 of them, and the kept ones are
 dropped whenever the keys change; <code>exp</code> and <code>nbf</code> are

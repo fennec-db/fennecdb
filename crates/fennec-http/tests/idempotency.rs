@@ -178,11 +178,22 @@ fn a_key_is_for_one_request_one_user_and_a_write_that_landed() {
     assert_eq!(n.count("notes"), "[{\"count\":2}]");
     // A scoped token with no subject has no one to keep a key for.
     let nobody = n.access.mint("{\"role\":\"x\"}").unwrap();
-    assert_eq!(
-        n.query(&nobody, Some("k"), "put notes {owner: \"x\", t: \"y\"}")
-            .status,
-        400
-    );
+    let r = n.query(&nobody, Some("k"), "put notes {owner: \"x\", t: \"y\"}");
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert!(!r.body.contains("must be a string"), "{}", r.body);
+    // Nor one whose `sub` is a number, which RFC 7519 makes a string: the
+    // refusal names the claim, and says so.
+    for sub in ["42", "[\"alice\"]"] {
+        let numbered = n.access.mint(&format!("{{\"sub\":{sub}}}")).unwrap();
+        let r = n.query(&numbered, Some("k"), "put notes {owner: \"x\", t: \"y\"}");
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert!(
+            r.body.contains("`sub` claim must be a string"),
+            "{sub}: {}",
+            r.body
+        );
+    }
+    assert_eq!(n.count("notes"), "[{\"count\":2}]");
     // Keys are the server's own: a scoped user reads none of them, and is
     // not told they are there.
     let peek = n.query(&alice, None, "get _idempotency").status;
