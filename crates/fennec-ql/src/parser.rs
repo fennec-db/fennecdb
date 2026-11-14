@@ -994,15 +994,33 @@ fn keys_alone(sel: &mut Select) {
     }
 }
 
-/// pgvector's text of a vector, `[1, 2.5, 3]`.
+/// pgvector's text of a vector, `[1, 2.5, 3]`, or why it is none: a number
+/// past a float's range named as every reader names one -- but in a stored
+/// definition's text, which reads it as it did (`crate::stored_float`): the
+/// SQL holding it is read at the open, and a definition stored with `<#>
+/// '[1, 1e400]'` was marked broken.
 #[inline(never)]
-fn pgvector_text(t: &str) -> Option<Vec<f32>> {
-    let inner = t.trim_ascii().strip_prefix('[')?.strip_suffix(']')?;
+fn pgvector_text(t: &str) -> std::result::Result<Vec<f32>, String> {
+    let bad = || "a vector written as text is pgvector's `'[1, 2, 3]'`".to_string();
+    let inner = t
+        .trim_ascii()
+        .strip_prefix('[')
+        .and_then(|t| t.strip_suffix(']'));
     let mut out = Vec::new();
-    for n in inner.split(',') {
-        out.push(fennec_core::num::parse_f64(n.trim_ascii())? as f32);
+    for n in inner.ok_or_else(bad)?.split(',') {
+        let n = n.trim_ascii();
+        match fennec_core::num::read_f64(n) {
+            Ok(x) => out.push(x as f32),
+            Err(why) => match (crate::stored_float(n, why), why.range()) {
+                (Some(x), _) => out.push(x as f32),
+                (None, Some(range)) => {
+                    return Err(format!("number `{}` {range}", fennec_core::num::shown(n)))
+                }
+                (None, None) => return Err(bad()),
+            },
+        }
     }
-    Some(out)
+    Ok(out)
 }
 
 fn one(mut s: Vec<Statement>) -> Result<Statement> {
@@ -3413,9 +3431,7 @@ impl Parser {
         // A sparse vector's text, `'{1:0.5}/30522'`, is read as it is.
         if let Expr::Lit(Value::Text(t)) = &vector {
             if !t.trim_ascii_start().starts_with('{') {
-                vector = Expr::Lit(Value::Vector(pgvector_text(t).ok_or_else(|| {
-                    self.error(&"a vector written as text is pgvector's `'[1, 2, 3]'`")
-                })?));
+                vector = Expr::Lit(Value::Vector(pgvector_text(t).map_err(|e| self.error(&e))?));
             }
         }
         sel.near = Some(Near {
