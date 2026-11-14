@@ -634,7 +634,8 @@ const PHASES = {
       const w = worker();
       await w.call('open', 'quota.fennec');
       await w.call('run', 'create collection big (n int, body text)');
-      const { answered, error } = await w.call('fill', ROW);
+      const { answered, error } = await w.call('fill', ROW, Math.ceil((3 * QUOTA) / ROW));
+      ok(error, `${answered} rows, three times the quota, and no write refused`);
       // Chrome's file system throws QuotaExceededError; Firefox's writes
       // nothing, and says so by the count it wrote.
       const full = error.cause?.name === 'QuotaExceededError' || /took none of a write/.test(error.message);

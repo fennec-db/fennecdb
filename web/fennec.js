@@ -934,13 +934,9 @@ async function unseal(ck, key, gen, n, rec) {
 const isSealed = (rec) => rec != null && rec.data != null && rec.iv != null;
 const chunkRange = (key) => IDBKeyRange.bound(`${key}#`, `${key}#\uffff`);
 
-/**
- * A connection to the store, which its caller closes once its transaction
- * is done (`close` waits for it). Left open, each call's connection stayed
- * until the collector came for it, and a delete of the database -- or a
- * page's upgrade of it -- waited on every one: `indexedDB.deleteDatabase`
- * after a page's persists was blocked in Chrome (web/browser/).
- */
+// Each caller closes its connection once its transaction is done: left
+// open till collected, they held off a delete or an upgrade of the
+// database (web/browser/).
 function idb() {
   return new Promise((res, rej) => {
     const req = indexedDB.open(DB_NAME, 1);
@@ -951,12 +947,9 @@ function idb() {
 }
 
 /**
- * `tx` done -- `value()` then -- or the error it ended with. Chrome refuses
- * a transaction past its quota at its commit, by `abort` alone: waiting on
- * `error` and `complete`, `putState` past the quota never answered. Firefox
- * refuses the request instead, and its `error` reaches the transaction
- * before the transaction holds it: read from the transaction, `persist`'s
- * refusal was `null`.
+ * `tx` done, then `value()`, or its error. Past the quota Chrome aborts at
+ * the commit (`abort` alone), and Firefox fails the request before the
+ * transaction holds its error (web/browser/).
  */
 function finished(tx, value) {
   return new Promise((res, rej) => {
@@ -975,46 +968,45 @@ function finished(tx, value) {
 export async function persist(fennec, key = 'default', opts = {}) {
   if (kept.has(fennec)) throw new FennecError('the database is kept in a file (openFile): persist would take the writes it appends');
   const ck = opts.cryptoKey ?? null;
-  const db = await idb();
-  try {
-    let s = stored.get(fennec);
-    let image = null;
-    let chunk = null;
-    if (s?.key !== key || s.ck !== ck) {
-      fennec.journal();
-      image = fennec.snapshot();
-      s = { key, ck, gen: null, next: 1, image: 0, chunks: 0 };
-      stored.set(fennec, s);
-    } else {
-      const { replace, bytes } = fennec.drain();
-      if (replace) image = bytes;
-      else if (bytes.length === 0) return 0;
-      else if (s.chunks + bytes.length > s.image * FOLD) image = fennec.snapshot();
-      else chunk = bytes;
-    }
-    const gen = image && ck ? [...crypto.getRandomValues(new Uint8Array(8))].map((b) => b.toString(16).padStart(2, '0')).join('') : s.gen;
-    try {
-      const rec = !ck ? (image ?? chunk) : image ? await seal(ck, key, gen, 0, image) : await seal(ck, key, gen, s.next, chunk);
-      const tx = db.transaction(STORE, 'readwrite');
-      const os = tx.objectStore(STORE);
-      if (image) {
-        os.put(rec, key);
-        os.delete(chunkRange(key));
-      } else {
-        os.put(rec, chunkKey(key, s.next));
-      }
-      await finished(tx);
-    } catch (e) {
-      // The drained writes are nowhere now; the next call stores an image.
-      stored.delete(fennec);
-      throw e;
-    }
-    if (image) Object.assign(s, { gen, next: 1, image: image.length, chunks: 0 });
-    else Object.assign(s, { next: s.next + 1, chunks: s.chunks + chunk.length });
-    return (image ?? chunk).length;
-  } finally {
-    db.close();
+  let s = stored.get(fennec);
+  let image = null;
+  let chunk = null;
+  if (s?.key !== key || s.ck !== ck) {
+    fennec.journal();
+    image = fennec.snapshot();
+    s = { key, ck, gen: null, next: 1, image: 0, chunks: 0 };
+    stored.set(fennec, s);
+  } else {
+    const { replace, bytes } = fennec.drain();
+    if (replace) image = bytes;
+    else if (bytes.length === 0) return 0;
+    else if (s.chunks + bytes.length > s.image * FOLD) image = fennec.snapshot();
+    else chunk = bytes;
   }
+  const gen = image && ck ? [...crypto.getRandomValues(new Uint8Array(8))].map((b) => b.toString(16).padStart(2, '0')).join('') : s.gen;
+  let db = null;
+  try {
+    const rec = !ck ? (image ?? chunk) : image ? await seal(ck, key, gen, 0, image) : await seal(ck, key, gen, s.next, chunk);
+    db = await idb();
+    const tx = db.transaction(STORE, 'readwrite');
+    const os = tx.objectStore(STORE);
+    if (image) {
+      os.put(rec, key);
+      os.delete(chunkRange(key));
+    } else {
+      os.put(rec, chunkKey(key, s.next));
+    }
+    await finished(tx);
+  } catch (e) {
+    // The drained writes are nowhere now; the next call stores an image.
+    stored.delete(fennec);
+    throw e;
+  } finally {
+    db?.close();
+  }
+  if (image) Object.assign(s, { gen, next: 1, image: image.length, chunks: 0 });
+  else Object.assign(s, { next: s.next + 1, chunks: s.chunks + chunk.length });
+  return (image ?? chunk).length;
 }
 
 /** Free-form state (cursors): next to the image, under a separate key. */
@@ -1132,8 +1124,7 @@ function imageEnd(head) {
 function writeAt(h, bytes, at) {
   for (let done = 0; done < bytes.length; ) {
     const n = h.write(bytes.subarray(done), { at: at + done });
-    // Firefox's answer past the origin's quota, where Chrome throws
-    // QuotaExceededError (web/browser/).
+    // Firefox's answer past the quota, where Chrome throws (web/browser/).
     if (!(n > 0)) throw new FennecError('the file took none of a write: the origin is out of room, or its file system failed');
     done += n;
   }
@@ -1161,20 +1152,12 @@ function refused(name, e) {
 }
 
 /**
- * How long `openFile` waits for a file another worker holds before it
- * refuses it as open elsewhere. A page loaded again finds its file in the
- * hands of the page before's worker until that worker has ended: at once
- * when it was idle, but Chrome stops a busy worker only 2 s after its page
- * is gone, its handles open till then, and a page reloaded in the middle of
- * a flush was refused for that long (1.98 to 2.01 s, Chrome 157,
- * web/browser/).
+ * How long `openFile` waits for a file held elsewhere: a page loaded again
+ * finds its file held until the page before's worker has ended, which
+ * Chrome puts off 2 s for a busy one (web/browser/).
  */
 const HELD_MS = 3000;
-/**
- * The files this worker keeps open, by directory (`null`, the origin's
- * own) and name: one asked for again is refused at once, since a wait
- * would wait on this worker itself.
- */
+/** The files this worker keeps, by directory (`null`: the origin's): asked for again, refused at once. */
 const holding = new Map();
 
 /** A database kept in a file of the origin private file system (`openFile`). */
@@ -1264,9 +1247,9 @@ class FennecFile {
 }
 
 /**
- * Synchronous access to `name` in `dir`, which is created if absent. Held
- * elsewhere, it is asked for again for `HELD_MS`; held by this worker
- * (`ours`), it is refused at once.
+ * Synchronous access to `name` in `dir`, created if absent; held
+ * elsewhere, asked for again for `HELD_MS` -- held by this worker
+ * (`ours`), refused at once.
  */
 async function syncAccess(dir, name, ours) {
   const fh = await dir.getFileHandle(name, { create: true });
@@ -1278,11 +1261,13 @@ async function syncAccess(dir, name, ours) {
     try {
       return await fh.createSyncAccessHandle();
     } catch (e) {
-      if (e?.name !== 'NoModificationAllowedError') throw e;
+      // Safari names a held file InvalidStateError, where the standard
+      // (and Chrome and Firefox) say NoModificationAllowedError.
+      if (e?.name !== 'NoModificationAllowedError' && e?.name !== 'InvalidStateError') throw e;
       if (ours || Date.now() >= until) {
         throw new FennecError(`${name} is open elsewhere (another worker or tab): one database at a time writes a file`, { cause: e });
       }
-      // The file system says nothing when a handle is let go: asked again.
+      // Nothing tells when a handle is let go: asked again.
       await new Promise((r) => setTimeout(r, 50));
     }
   }
@@ -1318,9 +1303,7 @@ function loads(fennec, bytes) {
  * Only in a dedicated worker, the one place the file system hands out the
  * synchronous access this needs; and one worker at a time, since a second
  * opener is refused -- as a second process over a server's file would
- * corrupt it. A file another worker holds is waited for 3 s first: the
- * worker of a page reloaded while it was busy lets go of it only once it
- * has ended.
+ * corrupt it. A file held elsewhere is waited for 3 s first.
  *
  * @param {Fennec} fennec
  * @param {string} name  the file's name in `opts.dir`

@@ -180,7 +180,7 @@ function firefoxPath() {
 
 /**
  * A browser's own files read once before it first starts, as the studio's
- * harness reads Chrome's (`warm`, docs/design/conventions.md#chrome):
+ * harness reads Chrome's (`warm`, docs/design/conventions.md#browsers):
  * started cold, a browser faults its binary in a page and a readahead at a
  * time, and on a fresh runner's disk its first launch has spent 5 to 20 s
  * of the 30 puppeteer waits for it. A directory that is not the browser's
