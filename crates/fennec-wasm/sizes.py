@@ -13,12 +13,19 @@ counted in each one's first and in neither one's second.
 
     make wasm-sizes                  # every feature, both ways
     make wasm-sizes ONLY="geo collate"  # those features alone, both ways
+    make wasm-sizes JSON=1           # also crates/fennec-wasm/sizes.json, in bytes
+
+sizes.json is what site/build.py holds every size the docs quote of a
+feature or of the two ends to, with no drift: a page's figure is this file's
+rounded, and the file is regenerated at each release (RELEASING.md), since
+CI measures the module only against a pull request's base.
 
 What each feature is, and what a build without it does with a file or a
 statement that needs it, is written beside it in fennec-core's Cargo.toml.
 """
 
 import gzip
+import json
 import os
 import shutil
 import subprocess
@@ -28,6 +35,7 @@ ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
 HOME_CARGO = os.path.expanduser("~/.cargo/bin/cargo")
 CARGO = os.environ.get("CARGO") or (HOME_CARGO if os.path.exists(HOME_CARGO) else "cargo")
 TARGET = os.path.join(ROOT, "target", "wasm-sizes")
+JSON_OUT = os.path.join(ROOT, "crates", "fennec-wasm", "sizes.json")
 OUT = os.path.join(TARGET, "wasm32-unknown-unknown", "wasm", "fennec_wasm.wasm")
 # Every feature of fennec-wasm a module may go without, in the order the
 # report lists them: the indexes, the rest of the language, the schema check.
@@ -72,13 +80,19 @@ def minus(a, b):
     return tuple(None if x is None or y is None else x - y for x, y in zip(a, b))
 
 
+def sizes(t):
+    return {"raw": t[0], "gzip": t[1], "brotli": t[2]}
+
+
 def main():
+    want_json = "--json" in sys.argv[1:]
     only = [f for f in os.environ.get("ONLY", "").split() if f] or FEATURES
     unknown = [f for f in only if f not in FEATURES]
     if unknown:
         sys.exit("unknown features: %s (of %s)" % (" ".join(unknown), " ".join(FEATURES)))
     full = build(FEATURES)
     least = build([])
+    record = {"full": sizes(full), "none": sizes(least), "features": {}}
     print("| module | raw KB | gzip KB | brotli KB |")
     print("| --- | ---: | ---: | ---: |")
     print("| every feature (`make wasm`) | %s |" % " | ".join(kb(n) for n in full))
@@ -97,6 +111,20 @@ def main():
         added, saved = minus(alone, base), minus(full, without)
         print("| %s | %s | %s | %s | %s |" % (name, signed_kb(added[0]), signed_kb(added[2]),
                                             kb(saved[0]), kb(saved[2])), flush=True)
+        record["features"][f] = {"added": sizes(added), "saved": sizes(saved)}
+    if want_json:
+        # Only a run of every feature may replace the committed file.
+        if only != FEATURES:
+            sys.exit("--json wants every feature, not ONLY")
+        # The code by where it is written, which the docs' table of the
+        # module's bytes quotes: the report's own measure, names kept.
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import size_report
+        m = size_report.measure(ROOT, os.path.join(TARGET, "names"))
+        record["code"] = {"code": m["code"], "data": m["data"], "parts": dict(sorted(m["parts"].items()))}
+        with open(JSON_OUT, "w") as out:
+            json.dump(record, out, indent=1)
+            out.write("\n")
 
 
 if __name__ == "__main__":

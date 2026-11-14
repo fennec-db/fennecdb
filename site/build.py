@@ -24,6 +24,9 @@ import urllib.parse
 
 import builder_tabs
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "integrations"))
+from ffi_sizes_check import ROW as FFI_ROW  # the one table-row pattern, shared
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(ROOT)
 OUT = os.path.join(ROOT, "dist")
@@ -891,6 +894,14 @@ CLAIMS = [
     ("README.md", r"and its B, durable, [\d.]+ k against ([\d.]+) k \(one node", "ycsb:redis:durable:B:16", 0),
     ("README.md", r"Redis does more operations a second in (none) of the \d+ cells", "redis:lost", 0),
     ("README.md", r"Redis does more operations a second in none of the (\d+) cells", "redis:both", 0),
+    # The native library's size: what CI's mobile jobs measure
+    # (integrations/ffi-sizes.sh), kept in integrations/ffi-sizes.md, which
+    # those jobs hold to a fresh run within 1%.
+    ("site/content/docs/mobile.html", r'macOS, Apple silicon</td><td class="n">([\d.]+) MB', "ffi:aarch64-apple-darwin", 0),
+    ("site/content/docs/mobile.html", r'macOS, Intel</td><td class="n">([\d.]+) MB', "ffi:x86_64-apple-darwin", 0),
+    ("site/content/docs/mobile.html", r'Linux x86-64, with the JNI functions</td><td class="n">([\d.]+) MB', "ffi:x86_64-unknown-linux-gnu", 0),
+    ("docs/design/native-and-sync.md", r"([\d.]+) MB stripped on aarch64-apple-darwin", "ffi:aarch64-apple-darwin", 0),
+    ("docs/design/native-and-sync.md", r"aarch64-apple-darwin, ([\d.]+) on\s+x86_64 Linux with JNI", "ffi:x86_64-unknown-linux-gnu", 0),
 ]
 
 
@@ -1049,6 +1060,7 @@ def round_trip_facts():
 # What the bench's figures give: every fact with the unit a drifted claim is
 # reported in, and the prefixes that say a fact is one of them.
 BENCH_FACTS = ("ycsb:", "ycsbms:", "redis:", "rt:")
+SIZE_FACTS = ("ffi:", "sz:")
 
 
 def bench_facts():
@@ -1297,6 +1309,89 @@ def studio_gz():
     return total / 1024
 
 
+FFI_SIZES = os.path.join(REPO, "integrations", "ffi-sizes.md")
+WASM_SIZES = os.path.join(REPO, "crates", "fennec-wasm", "sizes.json")
+
+
+def size_facts():
+    """`(facts, units)` of the sizes kept in files committed from a
+    measurement: the native library's in MB (`ffi:<target>`, CI's own table,
+    held to a fresh run by integrations/ffi_sizes_check.py) and the browser
+    module's in KB (`sz:...`, `make wasm-sizes JSON=1`, regenerated at each
+    release), which a page quotes to the digit it writes."""
+    truth = {}
+    if os.path.exists(FFI_SIZES):
+        for target, nbytes in FFI_ROW.findall(open(FFI_SIZES, encoding="utf-8").read()):
+            truth[f"ffi:{target}"] = int(nbytes) / 1e6
+    if os.path.exists(WASM_SIZES):
+        rec = json.load(open(WASM_SIZES, encoding="utf-8"))
+        for end in ("full", "none"):
+            for k, v in rec[end].items():
+                truth[f"sz:{end}:{k}"] = v / 1024
+        for f, row in rec["features"].items():
+            for way in ("added", "saved"):
+                for k, v in row[way].items():
+                    truth[f"sz:{f}:{way}:{k}"] = v / 1024
+        code = rec["code"]
+        truth["sz:code"] = code["code"] / 1024
+        truth["sz:data"] = code["data"] / 1024
+        for k, v in code["parts"].items():
+            truth[f"sz:part:{k}"] = v / 1024
+        # The page's groups: the sum of the parts that match, so a part the
+        # report splits differently moves no figure by itself.
+        parts = code["parts"]
+        mine = {k: v for k, v in parts.items() if k.startswith("fennec")}
+        std = {k: v for k, v in parts.items() if not k.startswith("fennec")}
+        group = lambda d, pat: sum(v for k, v in d.items() if re.search(pat, k)) / 1024
+        truth["sz:own"] = sum(mine.values()) / 1024
+        truth["sz:std"] = sum(std.values()) / 1024
+        truth["sz:own:engine"] = group(mine, r"^fennec_core::engine")
+        truth["sz:own:ql"] = group(mine, r"^fennec_ql::(parser|lexer)$")
+        truth["sz:own:vector"] = group(mine, r"^fennec_core::vector")
+        truth["sz:own:sorted"] = group(mine, r"^fennec_core::sorted")
+        truth["sz:own:rest"] = truth["sz:own"] - sum(truth[f"sz:own:{n}"] for n in ("engine", "ql", "vector", "sorted"))
+        truth["sz:std:vec"] = group(std, r"^std: Vec, String, Box$")
+        truth["sz:std:sort"] = group(std, r"^std: sort$")
+        truth["sz:std:hashmap"] = group(std, r"^std: HashMap$")
+        truth["sz:std:fmt"] = group(std, r"^std: core::fmt, the rest$")
+        truth["sz:std:rest"] = truth["sz:std"] - sum(truth[f"sz:std:{n}"] for n in ("vec", "sort", "hashmap", "fmt"))
+    return truth, {k: " MB" if k.startswith("ffi:") else " KB" for k in truth}
+
+
+# sizes.json is committed from a release's measurement, so nothing else holds
+# it to a build: a module that grew a few KB would fail no claim. Here, where
+# the built modules exist (CI's test job runs `make wasm wasm-min`), its raw
+# and brotli figures must stay within this share of them, in both directions:
+# panic paths embed the build directory, so a build in another target
+# directory (sizes.py's own) moves raw bytes slightly.
+WASM_SIZES_TOLERANCE = 0.0075
+
+
+def wasm_sizes_drift(modules):
+    """The figures of sizes.json that drifted from a built module's: `modules`
+    maps "full" and "none" to the module's path, a missing file left out.
+    "none" is `make wasm-min`'s, built with `--no-default-features` and no
+    feature, which is what sizes.py measures as none."""
+    if not os.path.exists(WASM_SIZES):
+        return []
+    rec = json.load(open(WASM_SIZES, encoding="utf-8"))
+    out = []
+    for end, path in modules.items():
+        if not os.path.exists(path):
+            continue
+        raw = os.path.getsize(path)
+        _, br = compressed(path)
+        for k, got in (("raw", raw), ("brotli", br)):
+            want = rec[end][k]
+            if got is not None and abs(got - want) > WASM_SIZES_TOLERANCE * want:
+                out.append(
+                    f"crates/fennec-wasm/sizes.json: {end} {k} is {want} bytes, "
+                    f"{os.path.relpath(path, REPO)} is {got} ({(got - want) / want:+.1%}, "
+                    f"more than {WASM_SIZES_TOLERANCE:.2%}); `make wasm-sizes JSON=1` "
+                    f"regenerates it, with the docs' figures")
+    return out
+
+
 def check_claims():
     """Compares every number in CLAIMS against the thing it describes."""
     web = lambda name: os.path.join(REPO, "web", name)
@@ -1305,9 +1400,10 @@ def check_claims():
         # The copy step above already said so. The bench's figures and the
         # studio's need no module, so they are still held to their truth.
         bench, bench_unit = bench_facts()
-        unit = {**bench_unit, "kb_studio_gz": " KB"}
-        return claims_against({**bench, "kb_studio_gz": studio_gz()}, unit,
-                              lambda f: f.startswith(BENCH_FACTS) or f == "kb_studio_gz")
+        sizes, sizes_unit = size_facts()
+        unit = {**bench_unit, **sizes_unit, "kb_studio_gz": " KB"}
+        return claims_against({**bench, **sizes, "kb_studio_gz": studio_gz()}, unit,
+                              lambda f: f.startswith(BENCH_FACTS + SIZE_FACTS) or f == "kb_studio_gz")
     size = os.path.getsize(wasm)
     wasm_gz, wasm_br = compressed(wasm)
     # The client is fennec.js and the two modules it imports, as a page loads
@@ -1354,11 +1450,13 @@ def check_claims():
         "kb_studio_gz": studio_gz(),
     }
     bench, bench_unit = bench_facts()
+    sizes, sizes_unit = size_facts()
     unit = {"glue": " lines", "version": "", "bytes": " bytes"}
     # Every size fact is in KB; without a default the report of a drifted
     # size died on a KeyError instead of saying which file drifted.
-    unit = {**{k: " KB" for k in truth}, **bench_unit, **unit}
-    return claims_against({**truth, **bench}, unit, lambda f: True)
+    unit = {**{k: " KB" for k in truth}, **bench_unit, **sizes_unit, **unit}
+    return (claims_against({**truth, **bench, **sizes}, unit, lambda f: True)
+            + wasm_sizes_drift({"full": wasm, "none": web("fennec-min.wasm")}))
 
 
 # The flags of fennec-shard, which docs/sharding-reference lists in a table of
@@ -1471,10 +1569,80 @@ def ycsb_grid_claims(truth):
     return out
 
 
+# The rows of benchmarks-size.html's table of the features, each by a snippet
+# of its first cell; `make wasm-sizes JSON=1` writes the figures.
+FEATURE_ROWS = {
+    "vector": "<code>vector</code>, the HNSW graph",
+    "text": "<code>text</code>, <code>match</code> with <code>fuzzy</code> and <code>prefix</code>",
+    "sparse": "<code>sparse</code>, <code>@inverted</code>",
+    "sorted": "<code>sorted</code>, <code>@sorted</code>, and <code>composite</code> with it",
+    "composite": "<code>composite</code>, an index over several fields, beside <code>sorted</code>",
+    "geo": "<code>geo</code>, points, and <code>@geo</code> where <code>sorted</code> is",
+    "nocase": "<code>nocase</code>",
+    "collate": "<code>collate</code>, ICU's order",
+    "facets": "<code>facets</code>",
+    "highlight": "<code>highlight</code>, beside <code>text</code>",
+    "analytics": "<code>analytics</code>",
+    "schema": "the schema check, <code>SCHEMA=0</code> without",
+}
+PARTS_ROWS = [
+    ("<b>fennecdb's own</b>", "sz:own"), ("the engine, <code>fennec_core::engine</code>", "sz:own:engine"),
+    ("FennecQL's parser and lexer", "sz:own:ql"), ("the vector index", "sz:own:vector"),
+    ("<code>@sorted</code>", "sz:own:sorted"), ("<b>the standard library's</b>", "sz:std"),
+    ("<code>Vec</code>, <code>String</code>, <code>Box</code>", "sz:std:vec"), ("the sort", "sz:std:sort"),
+    ("<code>HashMap</code>", "sz:std:hashmap"), ("<code>core::fmt</code>", "sz:std:fmt"),
+]
+DESIGN = "docs/design/browser-module.md"
+
+
+def size_claims(truth):
+    """Claims on the browser module's sizes, held to crates/fennec-wasm/sizes.json
+    with no drift: its feature table, the table of its code by crate, and the
+    prose that quotes either end or a feature."""
+    if "sz:full:raw" not in truth:
+        return []
+    out = [
+        (BENCH_SIZE, r"With every feature the module is ([\d.]+) KB brotli", "sz:full:brotli", 0),
+        (BENCH_SIZE, r"with none,\s+([\d.]+) KB, \d+% less", "sz:none:brotli", 0),
+        (BENCH_SIZE, r"every feature \(([\d.]+) KB on disk\)", "sz:full:raw", 0),
+        (BENCH_SIZE, r"with none \(([\d.]+) KB\)", "sz:none:raw", 0),
+        (BENCH_SIZE, r"<th>Code, [\d.]+ KB of the ([\d.]+)</th>", "sz:full:raw", 0),
+        (BENCH_SIZE, r"<th>Code, ([\d.]+) KB of the", "sz:code", 0),
+        (BENCH_SIZE, r"The data section is another ([\d.]+) KB", "sz:data", 0),
+        (DESIGN, r"module with none \(([\d.]+) KB, [\d.]+ brotli, against", "sz:none:raw", 0),
+        (DESIGN, r"module with none \([\d.]+ KB, ([\d.]+) brotli, against", "sz:none:brotli", 0),
+        (DESIGN, r"brotli, against ([\d.]+) and [\d.]+ with\s+every one", "sz:full:raw", 0),
+        (DESIGN, r"brotli, against [\d.]+ and ([\d.]+) with\s+every one", "sz:full:brotli", 0),
+        (DESIGN, r"smallest module is\s+(\d+) KB brotli", "sz:none:brotli", 0),
+        (DESIGN, r"the schema check ([\d.]+) and [\d.]+\.", "sz:schema:added:brotli", 0),
+        (DESIGN, r"the schema check [\d.]+ and ([\d.]+)\.", "sz:schema:saved:brotli", 0),
+        ("docs/design/js-client.md", r"the schema\s+check, ([\d.]+) KB brotli\)", "sz:full:brotli", 0),
+        ("web/README.md", r"`FEATURES=none SCHEMA=0` for none \(([\d.]+) KB\s+brotli against", "sz:none:brotli", 0),
+        ("web/README.md", r"`FEATURES=none SCHEMA=0` for none \([\d.]+ KB\s+brotli against ([\d.]+)\)", "sz:full:brotli", 0),
+        ("web/README.md", r"`SCHEMA=0` alone leaves the schema check out \(([\d.]+) KB\s+brotli\)", "sz:schema:saved:brotli", 0),
+    ]
+    for f, row in FEATURE_ROWS.items():
+        cell = r'</td><td class="n">'
+        head = re.escape(f"<tr><td>{row}") + cell
+        out += [
+            (BENCH_SIZE, head + r"([\d.]+)</td>", f"sz:{f}:added:brotli", 0),
+            (BENCH_SIZE, head + r"[\d.]+" + cell + r"([\d.]+)</td>", f"sz:{f}:saved:brotli", 0),
+            (BENCH_SIZE, head + r"[\d.]+" + cell + r"[\d.]+" + cell + r"([\d.]+)</td>", f"sz:{f}:saved:raw", 0),
+        ]
+        if f != "schema":
+            out += [
+                (DESIGN, rf"`{f}`\s+([\d.]+)\s+and\s+[\d.]+", f"sz:{f}:added:brotli", 0),
+                (DESIGN, rf"`{f}`\s+[\d.]+\s+and\s+([\d.]+)", f"sz:{f}:saved:brotli", 0),
+            ]
+    for label, fact in PARTS_ROWS:
+        out.append((BENCH_SIZE, re.escape(f"<tr><td>{label}</td>") + r'<td class="n">(?:<b>)?([\d.]+)', fact, 0))
+    return out
+
+
 def claims_against(truth, unit, wanted):
     """The CLAIMS whose fact `wanted` takes, each held to `truth`."""
     problems = []
-    for rel, pattern, fact, tol in CLAIMS + ycsb_grid_claims(truth):
+    for rel, pattern, fact, tol in CLAIMS + ycsb_grid_claims(truth) + size_claims(truth):
         if not wanted(fact):
             continue
         path = os.path.join(REPO, rel)
@@ -1494,6 +1662,8 @@ def claims_against(truth, unit, wanted):
                 else "a module `make wasm-lite` did not build" if fact not in truth
                 else "a brotli size and `brotli` is not installed"
             )
+            why = ("a size integrations/ffi-sizes.md or crates/fennec-wasm/sizes.json does not hold"
+                   if fact.startswith(SIZE_FACTS) else why)
             why = ("a YCSB cell crates/fennec-bench/ycsb/results.tsv does not hold"
                    if fact.startswith(("ycsb:", "ycsbms:", "redis:")) else
                    "a row of benchmarks-requests.html's round-trip table it no longer has"
@@ -1523,6 +1693,15 @@ def claims_against(truth, unit, wanted):
                 said = 0 if written == "none" else int(written)
                 drifted = said != int(want)
                 want = "none" if int(want) == 0 else str(int(want))
+            elif fact.startswith("sz:"):
+                # No drift: the page's figure is the committed measurement
+                # rounded to the digits it writes.
+                places = len(written.partition(".")[2])
+                want = f"{want:.{places}f}"
+                drifted = written != want
+            elif fact.startswith("ffi:"):
+                drifted = size_drifted(written, want, tol)
+                want = f"{want:.2f}"
             elif fact.startswith("kb"):
                 drifted = size_drifted(written, want, tol)
                 want = f"{want:.1f}"
