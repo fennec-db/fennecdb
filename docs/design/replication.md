@@ -171,6 +171,38 @@ let go of (in the `windows (http)` job, the held one said in the log
 once). Its code is in `fennec-server`'s 832 bytes more of `__text`
 ([http.md](http.md#connections-without-a-thread)).
 
+**A restart reads a copy's role from its file.** An open makes a file
+follow only where the follow asks it to (`demote`) or where it has no
+history yet; otherwise a file whose history says it takes writes stays a
+primary's, `.follows` or not -- a promotion whose removal of `.follows`
+a crash lost must stay one ([tenants.md](tenants.md)). So the record
+saying a file follows is on disk before anything counts on it. A follow
+syncs it before it is answered (`Tenants::open_as`), and an image comes
+with it: `Follower::session` appends the record to the image's bytes
+before `adopt` writes them, fsyncs them and renames them into place, and
+`follow` then appends nothing. Both records were once left in the sink's
+buffer, for a write behind, which a copy writes only as it applies its
+primary's writes. A copy made to follow and then waiting for its image
+writes nothing, so a kill then lost the record. The restart opened the old
+primary's file as a primary's, with no follower and nothing in the log,
+while the router counted it the tenant's replica. `make chaos`'s catch-up
+fault found this in five runs on 2026-11-13 -- CI's seeds 1003 and 2001
+to 2003, a laptop's 902 -- each a node killed
+within seconds of the router's repair having its old primary's files
+follow, over a link throttled to 256 or 512 kbit/s
+([integrations.md](integrations.md#the-chaos-drill)). An image's
+record was a window only until the copy's first write applied after it.
+`tenants::tests`' `a_follow_answered_has_its_file_say_it_follows` and
+`tests/replication.rs`' `an_image_a_copy_took_says_on_disk_that_it_follows`
+each copy the file as a kill leaves it, the page cache without the
+process's buffer, and open it again; each fails without its half of the
+fix. The cost is one fsync more for each follow that changes what a file
+is, some 30 bytes more in an image's own rename, and 768 bytes of
+`fennec-server`'s `__text` (4 818 432 to 4 819 200, 16 bytes on the file;
+macOS arm64, release). The image's buffer is
+grown by the record alone: a `Vec` grown its own way took twice a large
+image's size.
+
 ## A node's archive
 
 **A node's tenants are archived over one stream** (`fennec archive
