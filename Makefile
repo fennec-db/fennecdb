@@ -657,9 +657,11 @@ load-bench:
 	$(CARGO) run --release -p fennec-bench --bin load
 
 ## When size comes first: no import, abort instead of panic unwinding.
+## TARGET=x86_64-unknown-linux-musl builds it as CI's build job does, which
+## holds its size to tools/size-budgets.json.
 small:
-	@$(CARGO) build --profile cli -p fennec-cli --no-default-features
-	@echo "target/cli/fennec  $$(wc -c < target/cli/fennec) bytes"
+	@$(CARGO) build --profile cli -p fennec-cli --no-default-features $(if $(TARGET),--target $(TARGET))
+	@f="$${CARGO_TARGET_DIR:-target}/$(if $(TARGET),$(TARGET)/)cli/fennec"; echo "$$f  $$(wc -c < "$$f") bytes"
 
 ## Scale measurement (clustered embedding distribution). --uniform gives
 ## the pathological case.

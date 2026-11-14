@@ -40,26 +40,25 @@ container memory is a sensible <code>--max-memory</code>: it covers both this
 
 <h2 id="binary-size">Binary size</h2>
 
-<p>How large each build is. For the module and the client together, what
-the browser pays is <b>344 KB brotli</b>; for an app whose queries run on a
-server, the client alone in its bundle.</p>
+<p>How large each build is. The binaries are what a release ships for
+x86-64 Linux, static with musl, as CI measures them on every change. For the
+module and the client together, what the browser pays is <b>344 KB
+brotli</b>; for an app whose queries run on a server, the client alone in
+its bundle.</p>
 
 <div class="tbl">
 <table>
 <thead><tr><th>Build</th><th class="n">On disk</th><th class="n">Brotli</th><th class="n">gzip</th></tr></thead>
 <tbody>
-<tr><td><code>cargo build --release -p fennec-cli</code>, default</td><td class="n">4355 KB</td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td><code>--profile cli</code>, default, as a release builds it</td><td class="n">3357 KB</td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td><code>--no-default-features</code>, no import, backup or MCP</td><td class="n">2479 KB</td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>2091 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td><code>cargo build --release -p fennec-server</code>, default</td><td class="n">5922 KB</td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td><code>cargo build --release -p fennec-shard</code>, default, the router</td><td class="n">5113 KB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>fennec</code>, as a release ships it: <code>--profile cli</code>, default features</td><td class="n">4743 KB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>fennec</code> with no default feature, no import, backup or MCP: <code>make small</code></td><td class="n"><b>2883 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>fennec-server</code>, as a release ships it: <code>--release</code>, default features</td><td class="n">7995 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td>wasm32, browser</td><td class="n"><b>833 KB</b></td><td class="n"><b>285 KB</b></td><td class="n">345 KB</td></tr>
 <tr><td>wasm32, no index or schema check, <code>make wasm FEATURES=language SCHEMA=0</code></td><td class="n">606 KB</td><td class="n">211 KB</td><td class="n">253 KB</td></tr>
 <tr><td>wasm32, no feature at all, <code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">546 KB</td><td class="n">188 KB</td><td class="n">225 KB</td></tr>
 <tr><td><code>web/fennec.js</code> and its modules, the client</td><td class="n">226 KB</td><td class="n">59 KB</td><td class="n">70 KB</td></tr>
 <tr><td><code>@fennecdb/web/client</code> in an app's bundle, <code>connect</code> and a query's rows, esbuild, minified</td><td class="n">35 KB</td><td class="n">12 KB</td><td class="n">13 KB</td></tr>
-<tr><td>container image, scratch + musl, amd64</td><td class="n">7.18 MB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td>container image, scratch + musl, amd64: its one file, <code>fennec-server</code></td><td class="n">8.19 MB</td><td class="n">—</td><td class="n">—</td></tr>
 </tbody>
 </table>
 </div>
@@ -96,11 +95,21 @@ href="import.html#tls">TLS</a>) and to serve HTTPS (<a
 href="server.html#tls">HTTPS</a>), are 1164 KB of <code>fennec-server</code>,
 857 KB of <code>fennec-shard</code> and 730 KB of <code>fennec</code> as a
 release builds it, where the
-<code>cli</code> profile builds them for size. The <code>tls</code> feature
+<code>cli</code> profile builds them for size, each measured on macOS arm64
+when HTTPS came in (2026-11-02). The <code>tls</code> feature
 is a default one: <code>--no-default-features</code> leaves it out with
 the rest, and the binaries then take no crate from outside the workspace
-(<a href="concepts.html#zero-dependencies">Zero dependencies</a>). The
-binaries are measured on macOS arm64, a KB 1024 bytes.</p>
+(<a href="concepts.html#zero-dependencies">Zero dependencies</a>).</p>
+
+<p><b>The table's binaries are CI's measurements.</b> The build job every
+change passes builds <code>fennec</code> and <code>fennec-server</code> as a
+release builds its x86-64 Linux tarball, static with musl, and <code>make
+small</code> the same way, and holds each to a budget: a change that grows
+one past it raises the budget and says what the bytes bought. A KB is 1024
+bytes. The image holds one file, that <code>fennec-server</code>, so its
+figure is the file's, in MB of 1 000 000 bytes: what <code>docker
+images</code> reports is another thing. The same programs come out smaller
+as arm64 code, on Linux and on macOS.</p>
 
 <p id="module-parts"><b>Where the module's bytes go.</b>
 <code>make size-report</code> builds the module with its function names

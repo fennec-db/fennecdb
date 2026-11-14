@@ -180,7 +180,7 @@ nothing.</p>
 
 <div class="lang" data-name="Docker" data-keep="false">
 <div class="dl-panel">
-<p class="dl-say">Anywhere Docker runs · amd64 and arm64 · fennec-server alone, 7 MB</p>
+<p class="dl-say">Anywhere Docker runs · amd64 and arm64 · fennec-server alone, 8 MB on amd64</p>
 <div class="dl-main"><pre data-lang="bash">docker run -d --name fennecdb -v fennecdata:/data \
   -p 127.0.0.1:8080:8080 -e FENNEC_HTTP_TOKEN=a-token \
   ghcr.io/fennec-db/fennec-server:{{version}}</pre></div>
@@ -352,7 +352,7 @@ href="docs/server.html#containers">Run it in a container</a> has the rest.</p>
       </div>
       <div class="dl-card">
         <p class="dl-k">ghcr.io/fennec-db/fennec-server</p>
-        <p class="dl-fig"><b>7 MB</b> the image, amd64 and arm64</p>
+        <p class="dl-fig"><b>8 MB</b> the amd64 image; arm64 too</p>
         <p><code>fennec-server</code> alone: no shell, no libc, its data in
           <code>/data</code>.</p>
       </div>
@@ -386,7 +386,7 @@ href="docs/server.html#containers">Run it in a container</a> has the rest.</p>
 <tr><td><a href="docs/install.html#homebrew">Homebrew</a></td><td>the same two, kept up to date by <code>brew</code></td><td>macOS and Linux, arm64 and x86_64</td></tr>
 <tr><td><a href="docs/install.html#debian-and-fedora">.deb and .rpm</a></td><td>the same two, in <code>/usr/bin</code></td><td>Debian, Ubuntu, Fedora, RHEL; amd64 and arm64</td></tr>
 <tr><td><a href="docs/install.html#tarball">A tarball</a></td><td>the same two, in a folder</td><td>macOS and Linux, arm64 and x86_64</td></tr>
-<tr><td><a href="docs/install.html#docker">The Docker image</a></td><td><code>fennec-server</code> alone, 7 MB</td><td>anywhere Docker runs, amd64 and arm64</td></tr>
+<tr><td><a href="docs/install.html#docker">The Docker image</a></td><td><code>fennec-server</code> alone, 8 MB on amd64</td><td>anywhere Docker runs, amd64 and arm64</td></tr>
 <tr><td><a href="docs/install.html#packages">A package for your language</a></td><td>a client for the server, or the database in your app</td><td>by language, below</td></tr>
 <tr><td><a href="docs/install.html#source">From source</a></td><td>whatever <code>main</code> is today, the app too</td><td>where Rust builds; the app on a Mac</td></tr>
 </tbody>
