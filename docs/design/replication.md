@@ -613,8 +613,8 @@ database holds already 247.8-252.7.
 encryption, so with a key every archive file and a backup file is
 ChaCha20-Poly1305 (`crypto.rs`, RFC 8439's vectors and 2 000 random cases
 against node:crypto): ChaCha20 over AES-GCM because it has no secret-indexed
-tables in software, Poly1305 in 26-bit limbs. Frames carry a random nonce
-and their place and last-ness in the AAD; an image and the history are
+tables in software, Poly1305 in 26-bit limbs. Frames carry a random nonce,
+and their file's id, place and last-ness in the AAD (below); an image and the history are
 sealed whole (`open_whole` refuses a file cut short), a segment a frame for
 each batch of writes, whole records in each, so a crash cuts off a frame as
 it cut a record (`open_appended`, the segment's `sealed` state). A file of
@@ -623,6 +623,57 @@ one core. The live file stays plain -- mapped and read in place -- for the
 disk to encrypt. A checksum a record was measured and not taken: hardware
 CRC32C was 45 ns of an 840 ns put at 530 bytes, 357 at 3 KB, under the write
 lock, and the browser has no hardware CRC.
+
+**A frame is bound to its file** (`FENECSL\x02`, `seal::FileId`). A file
+sealed now begins with the magic and its id, 16 bytes of the system's
+randomness -- refused without it, as a nonce is -- and every frame's AAD
+is `[id 16][index u64][last u8]`, 25 bytes. Until 1.0's security review
+(plan item G8) the AAD was the place and last-ness alone, version 1
+(`FENECSL\x01`, every release from 0.1.7 to 0.2.0): two files sealed under
+one key -- two images of an archive, two segments, last week's backup and
+today's -- each held frames at places the other's frames of those places
+would open in, so a frame of one put in the other at its place opened, and
+the file read as whole with another's megabyte or batch of writes in it,
+every tag good. Every segment's frames sit at small indexes and every
+image's from 0, so anyone able to write to the bucket, holding no key,
+could splice them. With the id a frame opens only in the file it was sealed
+into, and an id changed, cut short or dropped -- the magic set back to
+version 1's to match -- opens nothing: Poly1305 takes the AAD's length in,
+so a 25-byte AAD's tag never stands for a 9-byte one (`seal::tests`,
+`a_frame_from_another_file_does_not_open`). What it does not cover: a whole
+file put in another's place -- an older image under a newer one's name, one
+backup for another -- opens, a whole file as it was sealed; an archive's
+names, the change numbers its records carry and its history hold it to its
+order, and a backup is the database it holds.
+
+*Rejected*: a key a file derived from the id (HKDF), which binds no better
+for a second primitive to hold to its vectors; the file's name or path in
+the AAD, which a sync tool's copy, a renamed backup or a node archive's
+directory moved would break where a sealed file opens wherever it is
+copied; a tag over the whole file, which an appended segment cannot keep
+without writing it again; an id counted by the archive, which two
+archivers or two backups under one key would share.
+
+*Older files.* A version 1 file opens as it did (`tests/sealed-v1/`, an
+archive and a backup 0.2.0 sealed, held by
+`a_v1_sealed_archive_still_opens`), and a segment an older archiver began
+goes on in version 1 frames, `FileId::V1` read back from it: frames of two
+versions in one file would open as neither. Nothing new is begun as
+version 1: images and segments taken after the upgrade are version 2
+beside the older files, which leave as `prune` lets them go; an older
+backup is bound by restoring it and backing it up again. A version past 2
+is refused by its number (`sealed as version 3, which this binary does not
+open`), never read as a plain file: `is_sealed` reads the magic's first
+seven bytes. A binary from before G8 took the magic's whole eight bytes,
+so a version 2 file is no sealed file to it, and it refuses one: `fennec
+restore today.sealed out.fennec --key-file k` says `today.sealed: not a
+sealed file`, `fennec verify` or `restore` of an archive `<image>: not
+sealed, where the archive is`, and without a key an image does not open as
+a database (`corrupt: invalid fennecdb signature`), nothing written. The
+binaries reading an archive are upgraded before the one writing it.
+
+*Cost*: one Poly1305 block more a frame -- the AAD padded to 32 bytes
+where it was 16 -- and 16 bytes a file. SEAL_COST
 
 **A frame's nonce is the system's randomness, never a fallback**
 (`crypto::system_random`), and so is every key and nonce fennecdb makes:
