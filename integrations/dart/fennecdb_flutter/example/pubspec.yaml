@@ -16,6 +16,14 @@ dependencies:
   material_ui: ^1.11.0
   path_provider: ^2.1.0
 
+# integration_test/: the plugin's library opened in the app itself, which
+# CI runs on macOS.
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  integration_test:
+    sdk: flutter
+
 dependency_overrides:
   fennecdb:
     path: ../../fennecdb

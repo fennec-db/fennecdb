@@ -464,12 +464,13 @@ Covers `studio/`; fennec-http serves it.
 
 ### `integrations/CLAUDE.md`
 
-Covers `integrations/`.
+Covers `integrations/`; the Flutter plugin's rule binds `tools/flutter_archive_check.py` and CI's `flutter-plugin` job too.
 
 *Integrations and deploy*
 - `integrations/` may use outside packages; the crates may not.
 - The desktop app is a window on a studio a `fennec-server` serves, one server per file.
 - Grafana's data source binds a dashboard's values; it never splices them.
+- The Flutter plugin ships each platform's library once, and no symbolic link.
 
 ### `deploy/CLAUDE.md`
 

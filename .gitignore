@@ -36,8 +36,9 @@ integrations/dart/**/.dart_tool/
 integrations/dart/**/pubspec.lock
 integrations/dart/**/.flutter-plugins*
 integrations/dart/fennecdb_flutter/ios/Frameworks/
-integrations/dart/fennecdb_flutter/macos/Frameworks/
+integrations/dart/fennecdb_flutter/macos/Libraries/
 integrations/dart/fennecdb_flutter/android/src/main/jniLibs/
 integrations/dart/fennecdb_flutter/example/*
 !integrations/dart/fennecdb_flutter/example/lib/
+!integrations/dart/fennecdb_flutter/example/integration_test/
 !integrations/dart/fennecdb_flutter/example/pubspec.yaml

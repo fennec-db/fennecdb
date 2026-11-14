@@ -1,6 +1,6 @@
 # Integrations and deploy
 
-The long form of the invariants [integrations/CLAUDE.md](../../integrations/CLAUDE.md), [deploy/CLAUDE.md](../../deploy/CLAUDE.md) and [tools/CLAUDE.md](../../tools/CLAUDE.md) list under *Integrations and deploy*: `integrations/`, the Grafana data source, the desktop app, the `deploy/` kit and the install channels. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [integrations/CLAUDE.md](../../integrations/CLAUDE.md), [deploy/CLAUDE.md](../../deploy/CLAUDE.md) and [tools/CLAUDE.md](../../tools/CLAUDE.md) list under *Integrations and deploy*: `integrations/`, the Grafana data source, the desktop app, the `deploy/` kit, the install channels and the Flutter plugin's archive. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Integrations
 
@@ -2059,3 +2059,70 @@ The Windows zip and `site/install.ps1` are [windows.md](windows.md#6-a-windows-r
 The C library for Linux is the native library's channel for a program that is not Swift, Kotlin or Dart -- vulpes' GTK apps first among them -- where a release had carried only Apple's XCFramework and Android's AAR and the JVM's jar said to bring the library. `release.yml`'s `linux-ffi` job builds `crates/fennec-ffi` in the `ffi` profile on each architecture's runner (`ubuntu-24.04`, `ubuntu-24.04-arm`, `contents: read`, no stored credentials) with `tools/linux-ffi.sh`, and tars it as `fennec-ffi-v<version>-<target>.tar.gz` for `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`: the binaries' tarballs' pattern, the part named as the crate is, the target the Rust triple whose `gnu` says glibc where theirs say musl. The folder is a prefix -- `include/fennec.h`, `lib/libfennec_ffi.so`, `lib/libfennec_ffi.a`, `lib/pkgconfig/` -- so it is unpacked anywhere or into `/usr/local`, and its two `.pc` files name the folder from where they are (`${pcfiledir}`): `fennec-ffi` links the shared library, `fennec-ffi-static` the archive by its path and the system libraries rustc names for a static library (`--print native-static-libs`, read from an empty crate's build, since cargo prints nothing for a library it did not build again and fennec-ffi takes no dependency of its own), because pkg-config has no way to ask for the archive beside a shared library of the same name. Each library is built alone, as `make ffi` builds one. The shared library's SONAME is its name, so a program records `libfennec_ffi.so` whether it was linked with `-l` or by the file's path, as CMake links an imported library; it carries the `jni` feature's functions, so the JVM on Linux loads the same file. The archive takes none -- only a JVM loads them, from a shared library -- and is stripped of its debug sections, the standard library's, which the profile's `strip` does not reach in a file it does not link. The libraries are built against the runner's glibc and run on an older one: what fixes the baseline is the newest symbol version they ask for, which is `GLIBC_2.34` -- the threads' symbols moved into libc in 2.34 and took that version, so any build on a newer glibc asks for it -- and `tools/linux-ffi-check.sh` fails a library asking for a newer one rather than let the runner's image move the baseline. The check is the release's gate, as `linux-packages-check.sh` is the packages': the tarball's files and nothing else, its header the repository's, the shared library's machine and SONAME, its `NEEDED` held to glibc's libraries and `libgcc_s`, its exports the header's functions and `FennecNative.kt`'s JNI functions and nothing else, the archive defining the header's functions, each `.pc` file's version; then the header compiled as C++, and `tools/linux-ffi-check.c` compiled as C99 with every warning an error and linked to each library by the pkg-config lines the docs give, run on the runner and in `almalinux:9`, whose glibc is 2.34 (the container's glibc is held to it, so an image moving on fails the check rather than weaken it): the library's version, a file opened, a row written with parameters and read back, a second open refused (`FENNEC_LOCKED`), a statement that does not parse refused with its JSON, the row there after a close and an open, and a sync started on a database in memory and driven with no network, as `fennec-ffi`'s own tests drive it. CI's `linux (C library)` job runs both scripts on every change, so a tag meets no step of it CI has not run, and keeps the tarballs as the run's artifacts. Its two tarballs are in `SHA256SUMS` with the rest (`publish` globs `*.tar.gz`), and the names the installers read are held apart from theirs: `install.sh` and `install.ps1` look for `fennec-v<version>-`, which `fennec-ffi-v` is not.
 
 The packages are nfpm's (`packaging/nfpm.yaml`): one description makes both formats on a runner of either architecture with no dpkg or rpmbuild, where `rpmbuild` would have wanted a spec, a build root per architecture and its strip and requires scripts turned off for a prebuilt static binary. nfpm itself is the release binary `tools/install-nfpm.sh` pins by checksum (copied from the release's `checksums.txt`), shared by `release.yml` and CI. The deb's version carries nfpm's `release: 1` as its Debian revision (`0.1.11-1`, in the file's name too), `version_schema: semver` turns a pre-release's `-rc1` into `~rc1` in the package's version (`0.2.0~rc1-1`, an rpm's `0.2.0~rc1`; the file's name keeps the `-`), which sorts before `0.2.0` as a pre-release must, and `tools/linux-packages-check.sh` holds both packages to that form and to the ordering (`dpkg --compare-versions`, `rpm.vercmp`). `SOURCE_DATE_EPOCH` fixes the files' times: the same tarballs gave the same `.deb`, byte for byte, from nfpm on a Mac and on Linux, but the `.rpm` records the build host's name, so two machines' rpms differ by that and by nothing else. The files are `/usr/bin/fennec`, `/usr/bin/fennec-server` and the licence where each distribution looks. Each architecture is packed on a runner of its own (with `contents: read` and no stored credentials), and `tools/linux-packages-check.sh` installs the packages in `debian:12-slim` and `fedora:42` of that architecture, asserts their metadata and that they depend on nothing -- every assertion printing what it found and what it wanted -- runs both binaries, removes the package and checks the files are gone, before the artifact is kept: a package that does not install stops the release. CI's `packaging` job does the same with the latest release's tarball and again with it named as a pre-release. The job's checkout is the workflow's own commit and not a dispatched tag, which may be from before the packaging files. There is no apt or yum repository, only files on the release.
+
+## Flutter plugin
+
+**The Flutter plugin ships each platform's library once, and no symbolic
+link.** pub keeps no link: it packs the file a link points at, so whatever
+reaches a binary through one goes out as another copy of it. Through 0.2.0,
+`prepare.sh` copied the whole dynamic XCFramework -- the iOS device's and
+the simulator's frameworks, and macOS's -- under `ios/` and again under
+`macos/`, and a macOS framework is versioned, its binary in `Versions/A`
+reached through `Versions/Current` and the top level. The archive pub.dev
+served held that 6.36 MB binary six times and each iOS one twice: 34 514 079
+bytes packed, 65 705 431 unpacked (main's, packed the same way on
+2026-11-13: 34 580 807 and 65 718 131). An app was no larger, since
+CocoaPods embeds one platform's slice, but nothing built a macOS app from
+what pub had made of the links.
+
+Now each platform's directory holds its own library alone: `ios/` the
+XCFramework's two iOS slices, its Info.plist written again to list only
+them (by awk, since `packages.yml` runs `prepare.sh` on Linux), `macos/` a
+plain `libfennec_ffi.dylib`, arm64 and x86_64, `android/` the `.so` of each
+ABI: 13 111 191 bytes packed and 24 596 463 unpacked, each Mach-O once
+(main's libraries, this layout, 2026-11-13). The ceilings
+`tools/flutter_archive_check.py` holds the archive to, 14 MB packed and 26
+MB unpacked, are the 1.0 plan's: the libraries once, with room for them to
+grow by about the 5% the plan gives a native library.
+
+macOS takes a dylib, the owner's choice over a framework: a framework
+without versions is iOS's layout, which code signing on macOS refuses.
+`build-xcframework.sh --dynamic` makes it from the macOS framework's
+binary, its install name rewritten to `@rpath/libfennec_ffi.dylib` and
+signed again ad hoc, rather than linking the library twice, and the
+release's `FennecFFIDynamic.xcframework.zip` holds it beside the
+XCFramework: 11 234 051 bytes where it was 7 991 814. The XCFramework
+keeps all three frameworks, macOS's included: vulpes embeds that one in
+its apps itself. Nor could the dylib go inside it: `xcodebuild
+-create-xcframework` stops at "an xcframework cannot contain both
+frameworks and libraries" (Xcode 26.3). The pod vendors the dylib
+(`vendored_libraries`): CocoaPods embeds a vendored dynamic library in the
+app's `Frameworks` with the script that embeds a framework, and signs it.
+Dart opens it by name, `DynamicLibrary.open('libfennec_ffi.dylib')`, which
+dyld looks up through the executable's `LC_RPATH`, Flutter's Runner's
+being `@executable_path/../Frameworks`: a bundle of that shape found the
+dylib, and a database opened, written and read through it, whether its
+executable linked the dylib or not, and without the rpath found nothing
+(macOS 26.1).
+
+The macOS slices are built for macOS 11, the lowest aarch64-apple-darwin
+builds for, where they said 12 (vulpes, an app on the library alone, asked
+for 11), and the iOS ones for iOS 15; the pods and `Package.swift` declare
+the same, and the check refuses a slice built for a newer system than its
+pod's `s.platform`, which is what CocoaPods holds an app to.
+
+CI's `flutter-plugin` job runs after the Android and Apple jobs, whose
+artifacts are a release's libraries: the AAR's `.so`s are built by the NDK
+on Linux, the XCFramework and the dylib on macOS. It takes them as
+`packages.yml` takes them from a release, runs `prepare.sh`, copies the
+plugin out of the repository -- pub lists a package inside a repository by
+the version control's own listing, and the libraries `prepare.sh` copies
+are ignored there, so a copy under `target/` packed to nothing -- and packs
+it with pub itself: `flutter pub publish --to-archive` writes the archive a
+publish would upload, and `--skip-validation` leaves the version of
+`fennecdb` it names unresolved, which before a release is on no registry.
+The example in that archive is then built on the plugin beside it, for
+macOS -- the release build both architectures, then its integration test,
+which opens a file through the dylib the app embeds -- and for the iOS
+simulator. Before this job the iOS app was built from `prepare.sh`'s output
+in the repository, as the Android one still is, and no macOS app at all.
