@@ -934,13 +934,84 @@ async function unseal(ck, key, gen, n, rec) {
 const isSealed = (rec) => rec != null && rec.data != null && rec.iv != null;
 const chunkRange = (key) => IDBKeyRange.bound(`${key}#`, `${key}#\uffff`);
 
+/**
+ * The connection every call shares, opened by the first and kept: a call
+ * opening its own and closing it took 8 to 10 ms once the page had sat
+ * idle 3 s, in Chrome and Firefox alike, and Firefox 0.6 to 2.4 ms more
+ * back to back (web/browser/). It lets go when a delete or an upgrade of
+ * the database asks -- left open, connections held both up -- or the
+ * browser closes it, and the next call opens another.
+ */
+let shared = null;
 function idb() {
-  return new Promise((res, rej) => {
-    const req = indexedDB.open(DB_NAME, 1);
-    req.onupgradeneeded = () => req.result.createObjectStore(STORE);
-    req.onsuccess = () => res(req.result);
-    req.onerror = () => rej(req.error);
-  });
+  const factory = indexedDB;
+  if (shared?.factory !== factory) {
+    const entry = { factory, db: null };
+    const drop = () => {
+      if (shared === entry) shared = null;
+    };
+    entry.opening = new Promise((res, rej) => {
+      const req = factory.open(DB_NAME, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+      req.onsuccess = () => {
+        const db = (entry.db = req.result);
+        db.onversionchange = () => {
+          db.close();
+          drop();
+        };
+        db.onclose = drop;
+        res(db);
+      };
+      req.onerror = () => {
+        drop();
+        rej(req.error);
+      };
+    });
+    shared = entry;
+  }
+  return shared.opening;
+}
+
+/**
+ * `ask`'s requests of the store in a transaction of `mode`, done: then what
+ * the function `ask` returned gives, or the transaction's error. Past the
+ * quota Chrome aborts at the commit (`abort` alone), and Firefox fails the
+ * request before the transaction holds its error -- and then refused the
+ * connection's next transactions and requests (InvalidStateError), no
+ * `close` said: the connection a transaction failed on is let go, and a
+ * call a closed one refuses is asked again of another (web/browser/).
+ */
+async function inStore(mode, ask) {
+  for (let again = false; ; again = true) {
+    const db = await idb();
+    const forget = () => {
+      if (shared?.db === db) shared = null;
+      db.close();
+    };
+    let tx = null;
+    let value;
+    try {
+      tx = db.transaction(STORE, mode);
+      value = ask(tx.objectStore(STORE));
+    } catch (e) {
+      // Nothing of it lands: some of its requests may have been made.
+      try {
+        tx?.abort();
+      } catch {}
+      forget();
+      if (again || e?.name !== 'InvalidStateError') throw e;
+      continue;
+    }
+    return new Promise((res, rej) => {
+      const fail = (e) => {
+        forget();
+        rej(e ?? new FennecError('IndexedDB aborted the transaction'));
+      };
+      tx.oncomplete = () => res(value?.());
+      tx.onerror = (e) => fail(e?.target?.error ?? tx.error);
+      tx.onabort = () => fail(tx.error);
+    });
+  }
 }
 
 /**
@@ -951,7 +1022,6 @@ function idb() {
 export async function persist(fennec, key = 'default', opts = {}) {
   if (kept.has(fennec)) throw new FennecError('the database is kept in a file (openFile): persist would take the writes it appends');
   const ck = opts.cryptoKey ?? null;
-  const db = await idb();
   let s = stored.get(fennec);
   let image = null;
   let chunk = null;
@@ -970,18 +1040,13 @@ export async function persist(fennec, key = 'default', opts = {}) {
   const gen = image && ck ? [...crypto.getRandomValues(new Uint8Array(8))].map((b) => b.toString(16).padStart(2, '0')).join('') : s.gen;
   try {
     const rec = !ck ? (image ?? chunk) : image ? await seal(ck, key, gen, 0, image) : await seal(ck, key, gen, s.next, chunk);
-    await new Promise((res, rej) => {
-      const tx = db.transaction(STORE, 'readwrite');
-      const os = tx.objectStore(STORE);
+    await inStore('readwrite', (os) => {
       if (image) {
         os.put(rec, key);
         os.delete(chunkRange(key));
       } else {
         os.put(rec, chunkKey(key, s.next));
       }
-      tx.oncomplete = res;
-      tx.onerror = () => rej(tx.error);
-      tx.onabort = () => rej(tx.error);
     });
   } catch (e) {
     // The drained writes are nowhere now; the next call stores an image.
@@ -995,23 +1060,16 @@ export async function persist(fennec, key = 'default', opts = {}) {
 
 /** Free-form state (cursors): next to the image, under a separate key. */
 export async function putState(key, value) {
-  const db = await idb();
-  await new Promise((res, rej) => {
-    const tx = db.transaction(STORE, 'readwrite');
-    tx.objectStore(STORE).put(value, key);
-    tx.oncomplete = res;
-    tx.onerror = () => rej(tx.error);
+  await inStore('readwrite', (os) => {
+    os.put(value, key);
   });
 }
 
 /** Reads back what `putState` wrote; `undefined` when absent. */
 export async function getState(key) {
-  const db = await idb();
-  return new Promise((res, rej) => {
-    const tx = db.transaction(STORE, 'readonly');
-    const req = tx.objectStore(STORE).get(key);
-    req.onsuccess = () => res(req.result);
-    req.onerror = () => rej(req.error);
+  return inStore('readonly', (os) => {
+    const req = os.get(key);
+    return () => req.result;
   });
 }
 
@@ -1023,14 +1081,10 @@ export async function getState(key) {
  */
 export async function restore(fennec, key = 'default', opts = {}) {
   const ck = opts.cryptoKey ?? null;
-  const db = await idb();
-  let [image, chunks] = await new Promise((res, rej) => {
-    const tx = db.transaction(STORE, 'readonly');
-    const os = tx.objectStore(STORE);
+  let [image, chunks] = await inStore('readonly', (os) => {
     const img = os.get(key);
     const ch = os.getAll(chunkRange(key));
-    tx.oncomplete = () => res([img.result, ch.result]);
-    tx.onerror = () => rej(tx.error);
+    return () => [img.result, ch.result];
   });
   if (!image) return false;
   if (isSealed(image) !== !!ck) {
@@ -1103,7 +1157,8 @@ function imageEnd(head) {
 function writeAt(h, bytes, at) {
   for (let done = 0; done < bytes.length; ) {
     const n = h.write(bytes.subarray(done), { at: at + done });
-    if (!(n > 0)) throw new FennecError('the file took none of a write');
+    // Firefox's answer past the quota, where Chrome throws (web/browser/).
+    if (!(n > 0)) throw new FennecError('the file took none of a write: the origin is out of room, or its file system failed');
     done += n;
   }
 }
@@ -1129,18 +1184,30 @@ function refused(name, e) {
   return new FennecError(`${name} refused a write (${e?.message ?? e}); it holds what was written before, and the database has to be opened from it again`, { cause: e });
 }
 
+/**
+ * How long `openFile` waits for a file held elsewhere: a page loaded again
+ * finds its file held until the page before's worker has ended, which
+ * Chrome puts off 2 s for a busy one (web/browser/).
+ */
+const HELD_MS = 3000;
+/** The files this worker keeps, by directory (`null`: the origin's): asked for again, refused at once. */
+const holding = new Map();
+
 /** A database kept in a file of the origin private file system (`openFile`). */
 class FennecFile {
-  #fennec; #main; #aside; #name; #size; #image;
+  #fennec; #main; #aside; #name; #size; #image; #where;
   #failed = null;
 
-  constructor(fennec, name, main, aside, size, image) {
+  constructor(fennec, name, main, aside, size, image, where) {
     this.#fennec = fennec;
     this.#name = name;
     this.#main = main;
     this.#aside = aside;
     this.#size = size;
     this.#image = image;
+    this.#where = where;
+    if (!holding.has(where)) holding.set(where, new Set());
+    holding.get(where).add(name);
   }
 
   /** The file's name in its directory. */
@@ -1194,6 +1261,9 @@ class FennecFile {
       this.#fennec.journal(false);
       this.#main.close();
       this.#aside.close();
+      const names = holding.get(this.#where);
+      names?.delete(this.#name);
+      if (names?.size === 0) holding.delete(this.#where);
     }
   }
 
@@ -1209,17 +1279,30 @@ class FennecFile {
   }
 }
 
-/** Synchronous access to `name` in `dir`, which is created if absent. */
-async function syncAccess(dir, name) {
+/**
+ * Synchronous access to `name` in `dir`, created if absent; held
+ * elsewhere, asked for again for `HELD_MS` -- held by this worker
+ * (`ours`), refused at once.
+ */
+async function syncAccess(dir, name, ours) {
   const fh = await dir.getFileHandle(name, { create: true });
   if (typeof fh.createSyncAccessHandle !== 'function') {
     throw new FennecError('openFile needs a dedicated worker: the file system hands out synchronous access nowhere else');
   }
-  try {
-    return await fh.createSyncAccessHandle();
-  } catch (e) {
-    if (e?.name !== 'NoModificationAllowedError') throw e;
-    throw new FennecError(`${name} is open elsewhere (another worker or tab): one database at a time writes a file`, { cause: e });
+  const until = Date.now() + HELD_MS;
+  for (;;) {
+    try {
+      return await fh.createSyncAccessHandle();
+    } catch (e) {
+      // Safari names a held file InvalidStateError, where the standard
+      // (and Chrome and Firefox) say NoModificationAllowedError.
+      if (e?.name !== 'NoModificationAllowedError' && e?.name !== 'InvalidStateError') throw e;
+      if (ours || Date.now() >= until) {
+        throw new FennecError(`${name} is open elsewhere (another worker or tab): one database at a time writes a file`, { cause: e });
+      }
+      // Nothing tells when a handle is let go: asked again.
+      await new Promise((r) => setTimeout(r, 50));
+    }
   }
 }
 
@@ -1253,7 +1336,7 @@ function loads(fennec, bytes) {
  * Only in a dedicated worker, the one place the file system hands out the
  * synchronous access this needs; and one worker at a time, since a second
  * opener is refused -- as a second process over a server's file would
- * corrupt it.
+ * corrupt it. A file held elsewhere is waited for 3 s first.
  *
  * @param {Fennec} fennec
  * @param {string} name  the file's name in `opts.dir`
@@ -1266,10 +1349,12 @@ export async function openFile(fennec, name = 'default.fennec', opts = {}) {
   if (stored.has(fennec)) throw new FennecError('persist keeps this database in IndexedDB: a file would take the writes it stores');
   const dir = opts.dir ?? (await globalThis.navigator?.storage?.getDirectory?.());
   if (!dir) throw new FennecError('openFile needs the origin private file system (navigator.storage.getDirectory)');
-  const main = await syncAccess(dir, name);
+  const where = opts.dir ?? null;
+  const ours = holding.get(where)?.has(name) ?? false;
+  const main = await syncAccess(dir, name, ours);
   let aside = null;
   try {
-    aside = await syncAccess(dir, `${name}~`);
+    aside = await syncAccess(dir, `${name}~`, ours);
     const beside = aside.getSize();
     if (beside > 0) {
       // A rewrite stopped: its copy was flushed before the file was
@@ -1305,7 +1390,7 @@ export async function openFile(fennec, name = 'default.fennec', opts = {}) {
       image = imageEnd(bytes);
       fennec.journal();
     }
-    const file = new FennecFile(fennec, name, main, aside, size, Math.max(image, 0));
+    const file = new FennecFile(fennec, name, main, aside, size, Math.max(image, 0), where);
     kept.set(fennec, file);
     // Refused, the file is let go of, as it was found.
     await checked(fennec, opts.schema ? opts : declared.get(fennec), 'apply').catch((e) => {

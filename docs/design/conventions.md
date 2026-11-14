@@ -1,6 +1,6 @@
 # Conventions
 
-The long form of the test and docs conventions [CLAUDE.md](../../CLAUDE.md) lists under *Conventions*: where tests live and which run alone, a test that fails on one run, Chrome's launch, the clock, ports, what a change a user meets owes the docs, and how a secret is compared and a primitive held to its vectors. They hold no invariant of the code, so [README.md](README.md#the-original-order) does not number them. Each section below is a bullet moved word for word from CLAUDE.md, which keeps its rule in a sentence or two.
+The long form of the test and docs conventions [CLAUDE.md](../../CLAUDE.md) lists under *Conventions*: where tests live and which run alone, a test that fails on one run, a browser's launch and a page's reload, the clock, ports, what a change a user meets owes the docs, and how a secret is compared and a primitive held to its vectors. They hold no invariant of the code, so [README.md](README.md#the-original-order) does not number them. Each section below is a bullet moved word for word from CLAUDE.md, which keeps its rule in a sentence or two.
 
 ## Test binaries
 
@@ -105,13 +105,26 @@ upload that fails on GitHub's side does not fail a job whose tests passed
 (#590 and #591 lost merge-queue runs to one). The test-report uploads run
 only when a step failed, and no step retries a test.
 
-## Chrome
+## Browsers
 
-A step that launches Chrome reads Chrome's own files first, or a cold
+A step that launches a browser reads its own files first, or a cold
 runner's disk spends 5 to 20 s of the launcher's wait (`waiting for
-dynamic debugging port`): the studio's harness (`warm`) and
-`examples/{shop,analytics}/scripts/warm-chrome.mjs` do; a longer wait only
-moves the bound.
+dynamic debugging port`): the studio's harness (`warm`),
+`examples/{shop,analytics}/scripts/warm-chrome.mjs` and
+`web/browser/run.mjs` (Chrome's and Firefox's, `warm`) do; a longer wait
+only moves the bound.
+
+A test of what a page keeps across a reload (`web/browser/`) has the page
+run its suite itself, its state kept between loads by the server that
+opened it: a reload is the page's own `location.reload()`, and the one
+suite runs under puppeteer and under safaridriver alike. It holds what it
+reloads in the middle of until the page is gone -- a persist's transaction
+by a read after a read, a worker's flush by keeping the worker busy, which
+every engine ends with its page (one waiting on `Atomics.wait` Safari did
+not) -- never catching it with a timer. A test a
+browser cannot run is skipped by name in `run.mjs`'s `SKIPS`, with why --
+Safari's quota tests, no driver setting its quota -- and any other skip
+fails the run, as does a listed one that ran.
 
 A `waitForFunction` predicate returns `null` for what is not on the page
 yet and never throws. Puppeteer starts the page's poller with `void
@@ -153,9 +166,11 @@ its own (`CREATE_NEW_PROCESS_GROUP`), on the console it shares with them
 -- and kills one with `SIGKILL`, on Windows `TerminateProcess`
 (fennec-server's `support::Server::signal`). Only a site
 whose address is needed before it binds -- a Next.js build renders it, the
-database's CORS names it -- takes a port the system picks, held by a
+database's CORS names it -- or a program that takes its port on its
+command line and names none it chose -- safaridriver, whose `-p 0` is a
+default port of its own -- takes a port the system picks, held by a
 stand-in listener until the moment it starts (`examples/shop`,
-`examples/dispatch`'s `ci.sh`).
+`examples/dispatch`'s `ci.sh`, `web/browser/run.mjs`).
 
 An address a test means nothing to listen on is `127.0.0.1:1`, which no
 system hands out, never a port picked and let go of: Linux hands a free

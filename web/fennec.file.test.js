@@ -26,6 +26,7 @@ const open = () => Fennec.open(wasm);
  * Files by name. `crashAfter(n)` lets n more writes, truncates and flushes
  * through and stops the next -- a write halfway -- and every one after it,
  * until `restart()`, which also lets go of the handles a dead page held.
+ * `onRefused` is told each file a handle was refused for, held elsewhere.
  */
 function fakeDir() {
   const files = new Map();
@@ -34,8 +35,9 @@ function fakeDir() {
     if (budget <= 0) throw new Error('crash');
     budget--;
   };
-  return {
+  const dir = {
     files,
+    onRefused: null,
     crashAfter(n) {
       budget = n;
     },
@@ -62,7 +64,10 @@ function fakeDir() {
       };
       return {
         async createSyncAccessHandle() {
-          if (f.open) throw Object.assign(new Error('locked'), { name: 'NoModificationAllowedError' });
+          if (f.open) {
+            dir.onRefused?.(name);
+            throw Object.assign(new Error('locked'), { name: 'NoModificationAllowedError' });
+          }
           f.open = true;
           return {
             getSize: () => f.bytes.length,
@@ -98,6 +103,7 @@ function fakeDir() {
       };
     },
   };
+  return dir;
 }
 
 /** A database opened from `name` in `dir`, as a page opens it again. */
@@ -356,6 +362,30 @@ test('one keeper a file and a database: the rest are refused', { skip }, async (
   const full = await open();
   full.run('create collection other (n int)');
   await assert.rejects(openFile(full, 'i.fennec', { dir }), /holds a database/);
+});
+
+// A page loaded again finds its file held by the worker of the page before
+// until that worker has ended -- in Chrome 2 s after the page went, when
+// it was busy (web/browser/) -- and opens it once it is let go of.
+test('a file held by another worker is opened once it is let go of', { skip }, async () => {
+  const dir = fakeDir();
+  const before = await open();
+  const file = await openFile(before, 'w.fennec', { dir });
+  before.run('create collection docs (title text)');
+  before.run('put docs {title: "kept"}');
+  file.close();
+  // Held as the worker of the page before holds it: a handle of no file
+  // this one keeps.
+  const held = await (await dir.getFileHandle('w.fennec')).createSyncAccessHandle();
+  let refusals = 0;
+  dir.onRefused = (name) => {
+    assert.equal(name, 'w.fennec');
+    if (++refusals === 2) held.close();
+  };
+  const db = await open();
+  await openFile(db, 'w.fennec', { dir });
+  assert.equal(refusals, 2, 'asked again until it was let go of');
+  assert.deepEqual(titles(db), ['kept']);
 });
 
 test('close lets the file go and stops keeping the writes', { skip }, async () => {

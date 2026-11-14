@@ -39,6 +39,7 @@ export function fakeIndexedDB() {
       setImmediate(() => tx.oncomplete?.());
       return tx;
     },
+    close() {},
   };
   return {
     records,

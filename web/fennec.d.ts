@@ -1752,7 +1752,9 @@ export interface FennecFile {
  * fennec-server keeps on disk: a file holding some is loaded into the database
  * (which must hold nothing yet), an empty one takes its image, and from then
  * on `run` appends every statement's writes to it and flushes before it
- * answers. Only in a dedicated worker, one at a time a file.
+ * answers. Only in a dedicated worker, one at a time a file: one another
+ * worker holds is waited for 3 s, then refused -- the worker of a page
+ * reloaded while it was busy lets go of it only once it has ended.
  */
 export function openFile(
   fennec: Fennec<any, any>,
