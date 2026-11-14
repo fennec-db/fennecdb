@@ -100,8 +100,11 @@ for (const page of found) {
   const prelude = join(here, 'docs/prelude', `${page.name}.d.ts`);
   if (existsSync(prelude)) files.push(up(dir, prelude));
 
-  // A Worker's examples see the Workers runtime's globals, not the DOM's.
-  const workers = page.name === 'docs-serverless';
+  // A Worker's examples see the Workers runtime's globals, not the DOM's:
+  // serverless.html's, and cloud.html's one TypeScript example, the Worker
+  // in front of the objects (`crypto.subtle.timingSafeEqual` is the
+  // runtime's, which the DOM's `SubtleCrypto` has none of).
+  const workers = page.name === 'docs-serverless' || page.name === 'docs-cloud';
   const modules = join(here, 'node_modules');
   const tsconfig = {
     compilerOptions: {
