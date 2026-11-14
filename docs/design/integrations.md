@@ -544,7 +544,25 @@ outlive the app by a moment, and `run.mjs` waits for what it killed to be gone
 before the next check removes that folder. A check that cannot pass on a system
 until a later phase is skipped there by name, its reason and phase in
 `run.mjs`'s list and the run's SKIP lines; a unit test likewise, its reason
-beside it in `node --test`'s output (`test/platform.ts`).
+beside it in `node --test`'s output (`test/platform.ts`). On Windows the unit
+tests ask the system through the app's own calls (win32.ts), run by the Bun
+the app runs on, the one `hutch-pin.json` pins (`test/win32-read.ts`): a
+process's command line (`argvOf`, which holds a server's argv to no token)
+by `processCommandLine` (NtQueryInformationProcess, as Task Manager reads
+one), and a file's owner and DACL (`ownerAlone`, which holds a key file to
+its user alone) by `pipeSddl`, as `pages.mjs` reads the pipe's: a protected
+DACL of one entry, every right (FA) to this user. They asked PowerShell 7
+before, WMI and `Get-Acl`, and `pwsh` itself crashed on the arm64 runner
+about once in 600 to 1000 starts, "Fatal error. Internal CLR error.
+(0x80131506)" and exit 0xC0000005, or a SynchronizationLockException in
+Monitor.Exit, the process it was asked about alive (job 132046665510). Not
+from the startup profile every `pwsh` rewrites as `node --test` runs test
+files side by side: with `DOTNET_MultiCoreJitNoProfileGather=1`, which keeps
+any from writing it, 3 and 6 of 3000 starts crashed, 7 and 3 without (jobs
+132452559288, 132452559492). The app's reader under its Bun read a command
+line 9000 times there in three jobs, four at once, with no failure, 41 s a
+3000 where `pwsh` took 470 s (job 132462525107). Nothing the unit tests run
+starts a .NET runtime.
 
 The process and security layer (phase 2 of #578, nothing shipped). What
 macOS gave the app for nothing is made on Windows and Linux, and every phase 2
@@ -1146,7 +1164,44 @@ window and the app's words are each system's, and the app has its icon there.
   asks each WWAHost window to close then, ends a WWAHost still running 15 s
   on, and closes the Start menu, in front, by Escape; the check looks along
   the whole visible title bar for a point that is the window's; `run.mjs`
-  says when another program's window is in front.) Nothing
+  says when another program's window is in front. The same runner's
+  provisioner, `provjobd.exe` in its user's temporary folder, started
+  before the job, runs `wsl -u root -e ls` every 30 s for as long as the
+  runner lives, and WSL is not installed there: the system's `wsl.exe`,
+  with no console, opens `wsl.exe --update --confirm --prompt-before-exit`
+  in a console of its own, a window asking for a key to install WSL that
+  gives up 60 s on, one at a time, so a new one every 90 s, on an idle
+  runner as during the checks (runs 43594225601 and 43594228435, every
+  process start audited with its command line). Each comes over the
+  window in front and takes the keyboard, whichever host its console has:
+  Windows began hosting consoles in Windows Terminal a few minutes into
+  the checks (on the idle runner it never did), and pinning conhost for
+  the job (`HKCU\Console\%%Startup`) was tried and does not keep one
+  behind. With a window of another process put in front by a click on its
+  title bar, as `menu` puts the app's, a console a background process
+  opened came over it 7 times of 7 hosted by conhost and 10 of 10 by
+  Windows Terminal, and each of the runner's own prompts took the
+  foreground (run 43605593298); three runs with conhost pinned passed only
+  because no prompt opened while the app was in front (runs 43599997221,
+  43600003350, 43600009843). `run.mjs` found one in front after
+  `finder` or `menu` in 37 of 72 arm64 runs from 2026-11-12 on, on the
+  runner images 20261101.203.1 (27 of 55) and 20261112.217.1 (10 of 17)
+  alike, so no image update brought it; and three times `menu`'s click
+  into its main window's page, or the chord after it, found one opened
+  seconds before over the page (jobs 131999721552, 132400115646,
+  132425554981). It cannot be put right in a job (`wsl --update` says WSL
+  is not installed, and the feature wants a restart), and a prompt closed
+  is opened again by the next poll, so closing it before each check, as
+  `clearDimming` closes a picker, would leave one to open during `menu`.
+  `desktop.yml` pauses the poll for the rest of the job (NtSuspendProcess,
+  as Process Explorer's Suspend; resumed by the job's last step), lets a
+  poll it had started end, and closes the prompt still open as a person
+  closes it (WM_CLOSE to its console's or Windows Terminal's window, a
+  cancel). No key is sent to it: a key installs WSL. Paused so, three arm64
+  runs passed every check, `menu` among them, no prompt starting from the
+  pause to the job's end where one would every 90 s, and gave the poll back
+  (runs 43607163544, 43607170305, 43607177163, every process start
+  audited).) Nothing
   else of the check's own brings a window forward or moves its focus: no Alt (the first version pressed and let
   go of one before a SetForegroundWindow, which can put the menu bar of a
   window in front by then in menu mode, where keys go), no activation, and no keys
