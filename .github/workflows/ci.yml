@@ -102,6 +102,14 @@ jobs:
       - name: tools/instr's UUID copies, figures and trace deltas
         run: python3 tools/instr/test_instr.py
 
+      # docs/design/benchmarks.md#binary-sizes: the build job holds what a
+      # release ships to tools/size-budgets.json. What its check refuses --
+      # a binary past its budget, more than 1% under it or from the figure
+      # the docs quote, an entry no run measures -- and the file's own
+      # entries, each inside its budget, are held here.
+      - name: tools/size_budgets.py refuses a binary past its budget or 1% off it, and the file's entries pass
+        run: python3 tools/test_size_budgets.py
+
       # docs/design/http.md#compatibility: the checker the test job runs on
       # the served documents finds each kind of break, lets each addition
       # through, and holds BREAKS and the committed baseline.
@@ -1145,7 +1153,8 @@ jobs:
   # dashboards asked of Grafana (through Infinity and through the plugin)
   # and held to fennec-server's own answer, the plugin's alert rule
   # evaluated, and what the data sources must refuse. Last, the backend's
-  # Go tests, against the fennec-server of the image just built.
+  # Go tests, against the fennec-server of the image just built, and that
+  # binary's size against the image's figure the docs quote.
   grafana:
     name: monitoring (Grafana)
     runs-on: ubuntu-latest
@@ -1189,6 +1198,14 @@ jobs:
           docker create --name fennec-server fennecdb
           docker cp fennec-server:/usr/local/bin/fennec-server "$RUNNER_TEMP/fennec-server"
           FENNEC_SERVER="$RUNNER_TEMP/fennec-server" go test -count=1 ./pkg/...
+
+      # The image the root Dockerfile builds, as release.yml's image job
+      # does, holds that one file, and the docs quote its size for the
+      # image: the build job's musl fennec-server's (tools/size-budgets.json).
+      # This is the one job that builds the image; its binary, built on
+      # Alpine with the same toolchain, within 1% of that figure.
+      - name: The image's fennec-server is the size the docs quote
+        run: python3 tools/size_budgets.py --summary "$GITHUB_STEP_SUMMARY" --near fennec-server="$RUNNER_TEMP/fennec-server"
 
   # deploy/: the alert rules under promtool, every systemd unit booted in
   # two privileged containers running systemd, and the failover drill --
@@ -1277,6 +1294,15 @@ jobs:
           tools/linux-packages.sh "$pre" "$RUNNER_TEMP/pre-tarballs" "$RUNNER_TEMP/pre-packages" amd64
           FENNEC_BINARY_VERSION="$version" tools/linux-packages-check.sh "$pre" "$RUNNER_TEMP/pre-packages" amd64
 
+  # What a release ships, built as release.yml builds its x86_64 Linux
+  # tarball -- `fennec` on the cli profile and `fennec-server` on release,
+  # static with musl -- and `make small`, the smallest shell binary and the
+  # only build of the CLI without its default features, import and backup.
+  # fennec-core without std-fs is the browser build's, in the test and
+  # clippy jobs. Their bytes are held to tools/size-budgets.json
+  # (docs/design/benchmarks.md#binary-sizes): one past its budget fails,
+  # and so does one more than 1% under it or from the figure the docs
+  # quote, which site/build.py holds the docs within 1% of.
   build:
     name: build (release + cli profile)
     runs-on: ubuntu-latest
@@ -1284,9 +1310,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install the pinned toolchain
-        run: rustup show
+      # musl-tools is the C compiler ring's C and assembly are built with
+      # for musl, as release.yml's Linux builds take it.
+      - name: Install the pinned toolchain, its musl target and musl-tools
+        run: |
+          rustup show
+          rustup target add x86_64-unknown-linux-musl
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends musl-tools
 
+      # The crates from outside the workspace, built once for each profile:
+      # the workspace's are compiled every run, their sources newer than
+      # any cache.
       - uses: actions/cache@v6
         with:
           path: |
@@ -1294,17 +1329,43 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ubuntu-latest-build-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: ubuntu-latest-build-
+          key: ubuntu-latest-build-musl-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ubuntu-latest-build-musl-
 
-      # `make small` is the smallest shell binary and the only build of the
-      # CLI without its default features, import and backup. fennec-core
-      # without std-fs is the browser build's, in the test and clippy jobs.
-      - name: Build the CLI (cli profile, no default features)
-        run: make small
+      # The three at once. Each build is a chain of compiles of one unit
+      # (`codegen-units = 1`) ending in one fat LTO, a core's work most of
+      # its time, and the runner has four. `fennec` and `fennec-server` in a
+      # cargo run each, as release.yml builds them: one run unifies its
+      # packages' features, which would change the bytes. `make small` in a
+      # target directory of its own: a second run on the cli profile's
+      # waits for the first's lock. It takes no crate from outside the
+      # workspace, so nothing of it is worth a cache.
+      - name: Build fennec and fennec-server as a release does, and make small
+        run: |
+          t=x86_64-unknown-linux-musl
+          cargo build --profile cli --target $t -p fennec-cli > "$RUNNER_TEMP/fennec.log" 2>&1 &
+          fennec=$!
+          cargo build --release --target $t -p fennec-server > "$RUNNER_TEMP/fennec-server.log" 2>&1 &
+          server=$!
+          CARGO_TARGET_DIR="$RUNNER_TEMP/small" make small TARGET=$t > "$RUNNER_TEMP/small.log" 2>&1 &
+          small=$!
+          failed=
+          for build in fennec:$fennec fennec-server:$server small:$small; do
+            name=${build%%:*}
+            if wait "${build##*:}"; then
+              echo "::group::$name"; cat "$RUNNER_TEMP/$name.log"; echo "::endgroup::"
+            else
+              cat "$RUNNER_TEMP/$name.log"; failed="$failed $name"
+            fi
+          done
+          if [ -n "$failed" ]; then echo "::error::did not build:$failed"; exit 1; fi
 
-      - name: Build the server (release)
-        run: cargo build --release -p fennec-server
+      - name: Their sizes against tools/size-budgets.json
+        run: >-
+          python3 tools/size_budgets.py --summary "$GITHUB_STEP_SUMMARY"
+          fennec=target/x86_64-unknown-linux-musl/cli/fennec
+          fennec-server=target/x86_64-unknown-linux-musl/release/fennec-server
+          small="$RUNNER_TEMP/small/x86_64-unknown-linux-musl/cli/fennec"
 
   # The native library an app links (crates/fennec-ffi) on Android and the
   # JVM, and its Kotlin, Dart and Flutter bindings: the Kotlin library's

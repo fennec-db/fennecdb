@@ -1,6 +1,6 @@
 # Benchmarks
 
-The long form of the invariants [crates/fennec-bench/CLAUDE.md](../../crates/fennec-bench/CLAUDE.md) lists under *Benchmarks*: what `make scale-bench` and `make ycsb` measure and how. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists. The last, [Instruction counts](#instruction-counts), holds no invariant of the code: it is how two builds' counts are read on macOS, which `tools/instr/` runs.
+The long form of the invariants [crates/fennec-bench/CLAUDE.md](../../crates/fennec-bench/CLAUDE.md) lists under *Benchmarks*: what `make scale-bench` and `make ycsb` measure and how. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists. The last two hold no invariant of the code: [Instruction counts](#instruction-counts) is how two builds' counts are read on macOS, which `tools/instr/` runs, and [Binary sizes](#binary-sizes) how the binaries a release ships are measured and held to their budgets, which CI's build job does.
 
 ## scale-bench
 
@@ -210,3 +210,74 @@ code to the instruction. The tools are macOS's -- the counts, the signing
 and lldb -- and elsewhere say so and exit 0; `tools/instr/test_instr.py`,
 run in CI, holds a copy's UUID, the refusals keeping a build's output
 untouched, the figures and a trace's deltas.
+
+## Binary sizes
+
+**What a release ships is measured as it is built, and held to a budget.**
+CI's build job (`build (release + cli profile)`, a required check) builds
+what `release.yml` puts in the x86_64 Linux tarball -- `fennec` on the
+`cli` profile and `fennec-server` on `release`, for
+`x86_64-unknown-linux-musl`, static, each in a cargo run of its own, ring's
+C built by musl-tools' compiler -- and `make small`, the shell without its
+default features, the same way, and holds each file's bytes to
+`tools/size-budgets.json` (`tools/size_budgets.py`). An entry carries what
+the job measured when it was last written (`measured`) and a budget half a
+percent above it, rounded up to a thousand bytes. A binary past its budget
+fails the job: the pull request that grew it writes the two figures the
+failure prints and says in its body what the bytes buy. One more than 1%
+under its budget, or more than 1% from its measurement, fails too, so that
+the figures the docs quote stay what ships. The docs quote `measured`, a KB
+1024 bytes, and `site/build.py` holds every figure they write within 1% of
+it (`binary_facts`): the size table, README's range, the image wherever a
+page names it. `tools/test_size_budgets.py`, in the fmt job, holds the
+check's refusals and the file's own entries.
+
+The image's figure is `fennec-server`'s, in MB of 10^6 bytes: the root
+`Dockerfile` builds the same binary with the same toolchain, on Alpine,
+and copies it alone into `scratch`. 0.2.0's amd64 image held 8 178 208
+bytes where its tarball's `fennec-server` was 8 174 128, 0.05% apart, and
+the monitoring (Grafana) job, the one job that builds the image, holds its
+binary within 1% of the figure (`--near`). What `docker images` reports is
+not it: 23.2 MB for that image under Docker Desktop.
+
+Why these figures. The docs quoted macOS arm64's, to be re-measured by
+hand at each release, and they drifted with nothing to stop them: 3357 KB
+for `fennec` and 5922 for `fennec-server` (measured 2026-11-02) when 0.2.0
+shipped 3616 and 6730 on macOS, and 7.18 MB for an image whose binary was
+8.18. A check in CI, which is Linux, cannot hold a Mac's figure, and the
+Mac's was never the Linux release's: 0.2.0's `fennec-server` is 8 174 128
+bytes for x86_64 musl against 6 891 744 for aarch64-apple-darwin. The musl
+build is what a Linux tarball, the `.deb`, the `.rpm` and the image ship,
+and a runner builds it to the same bytes each time: the compiler is
+pinned, and the paths it writes into panics' locations are the runner's.
+Built in an amd64 Ubuntu 24.04 container laid out as a runner is
+(`/home/runner/work/fennecdb/fennecdb`, `CARGO_HOME` under
+`/home/runner`), main at `38f6a0bc` gave 4 856 592, 8 186 416 and
+2 951 680 bytes; 0.2.0's tarball to it moved `fennec` 4 096 bytes and
+`fennec-server` 12 288, an ELF file's segments being laid out by 4 KB
+pages, so a figure moves a page at a time or not at all.
+
+Rejected: a budget of the measurement itself, which stopped every pull
+request that added a byte, and made two in the merge queue that each wrote
+one conflict; a ceiling 5% above it, the 1.0 plan's for after 1.0, which
+left the docs' figures free to drift 5% before anything failed; measuring
+the image in `release.yml` (`docker image inspect`), once a release and
+after the docs have shipped its figure.
+
+What the job costs. It built `make small` and `fennec-server` for the
+host (glibc), one after the other: a median of 2.3 minutes over 40 green
+runs (2026-11-13 and 14, the slowest 2.7), the two builds about 40 and
+80 s of it, the crates from outside the workspace restored from the cache.
+Each build is a chain of compiles of one unit (`codegen-units = 1`) ending
+in one fat LTO -- 68 s of `fennec-server`'s 85 -- a core's work most of
+its time, and the runner has four: the three builds run at once, `make
+small` in a target directory of its own, since a second cargo run on the
+`cli` profile's waits for the first's lock, and the cache holds the musl
+builds' crates from outside the workspace under a key of its own.
+
+Not built here: `fennec-shard`, which no release ships yet -- its row left
+the size table, and it joins this job and the file when `release.yml`
+builds it -- nor the release profile's `fennec` with and without its
+default features, which ship nowhere and whose rows the table had. The
+browser module's figures are `site/build.py`'s own, against the module the
+test job builds.

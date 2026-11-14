@@ -690,7 +690,7 @@ other monitoring systems</a>.</p>
 
 <h2 id="containers">Run it in a container</h2>
 
-<p>The image is 7 MB: the binary and nothing else.</p>
+<p>The image is 8 MB: the binary and nothing else.</p>
 
 <pre data-lang="bash">docker run -d --name fennecdb -v fennecdata:/data \
   -p 127.0.0.1:8080:8080 -e FENNEC_HTTP_TOKEN=a-token \
@@ -714,9 +714,10 @@ other monitoring systems</a>.</p>
 <p>The <code>Dockerfile</code> is two-stage: a static musl build copied into
 <code>scratch</code>. TLS's crates and roots are compiled in, and the binary runs its own
 health check (<code>--ping</code>), so the runtime image holds nothing but the
-binary — no shell, no package manager, no libc. The image is <b>7.18 MB</b> on
-amd64 and 6.11 MB on arm64 — since no target is written in, both come out of
-the same file. <code>make docker</code> builds it, and
+binary — no shell, no package manager, no libc. The image is <b>8.19 MB</b> on
+amd64, that binary's bytes as CI measures them on every change, and smaller on
+arm64 — since no target is written in, both come out of the same file.
+<code>make docker</code> builds it, and
 <code>docker compose up -d</code> starts the compose file's.</p>
 
 <p><b>The memory limit comes from the data.</b> With no buffer pool of its own

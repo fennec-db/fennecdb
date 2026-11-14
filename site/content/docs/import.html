@@ -475,6 +475,9 @@ for 275 KB of it, and its TLS, the <code>tls</code> feature, for 1035 KB more
 import without it, <code>prefer</code> then plain text).
 <code>--no-default-features</code> removes both, and <code>fennec
 backup</code>, <code>archive</code>, <code>restore</code> and <code>fennec
-mcp</code> with them (1876 KB); with the <code>cli</code> profile as well,
-the binary drops from 4355 KB to 2091 KB (<code>make small</code>).</p>
+mcp</code> with them (1876 KB). Those three figures are the
+<code>release</code> profile's on macOS arm64. As a release builds it, on
+the <code>cli</code> profile, <code>fennec</code> is 4743 KB on x86-64 Linux,
+and 2883 KB without its default features (<code>make small</code>), as CI
+measures them.</p>
 </details>

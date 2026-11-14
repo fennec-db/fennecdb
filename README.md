@@ -296,9 +296,10 @@ answered write to a ledger.
 [Read replicas](https://fennecdb.com/docs/sharding-read-replicas#read-replicas) ·
 [Deploying it](deploy/RUNBOOK.md).
 
-**Container.** 7.18 MB, and the `Dockerfile` is two-stage: static musl build
-into `scratch`, so the runtime image holds the binary and nothing else — no
-shell, no package manager, no libc.
+**Container.** 8.19 MB on amd64, and the `Dockerfile` is two-stage: static
+musl build into `scratch`, so the runtime image holds the binary and nothing
+else — no shell, no package manager, no libc. The figure is that binary's, as
+CI measures it on every change.
 
 ```bash
 docker pull ghcr.io/fennec-db/fennec-server:0.2.0     # published, multi-arch
@@ -376,7 +377,7 @@ let db = try await Fennec.sync(url: "https://api.example.com", token: jwt,
 | **Runs on** | Linux and macOS, arm64 and x86_64 · Windows 10 and 11 and Windows Server 2016 and later, x86_64 and arm64, the file mapped and made durable as on a Unix, from the release after 0.1.12 (`install.ps1`) · the image wherever Docker runs · the browser (WASM) · iOS and Android, in the app ([Install](https://fennecdb.com/docs/install)) |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, `--slow-ms`, and OpenTelemetry traces over OTLP (`--otlp-endpoint`) |
 | **Studio** | `fennec-server --studio`: collections, rows, edits, a query editor, the schema, live rows and the server's numbers in a browser at `/_studio/`, with the token you paste and no authority of its own · an app (beta) for macOS on Apple silicon, Windows and Linux (`install.sh --app`, `install.ps1 -App`, or the release's DMG, zip or tarball, unsigned: [`integrations/studio-desktop`](integrations/studio-desktop/README.md)) that makes, opens, serves and backs up `.fennec` files: a served database's port, reach and token (kept in the Keychain) picked in a sheet, its server stopped with the app; saved servers and their tokens in the Keychain |
-| **Runtime size** | 345 KB gzip wasm + 70 KB gzip client, or the client alone (`@fennecdb/web/client`) · 2091–4355 KB binary · 7.18 MB container image |
+| **Runtime size** | 345 KB gzip wasm + 70 KB gzip client, or the client alone (`@fennecdb/web/client`) · 2883–4743 KB binary, x86-64 Linux as CI measures it · 8.19 MB container image |
 
 Full reference: [FennecQL](https://fennecdb.com/docs/fennecql).
 
