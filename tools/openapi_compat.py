@@ -76,7 +76,14 @@ METHODS = ("get", "put", "post", "delete", "options", "head", "patch", "trace")
 #   {"version": "2", "kind": "file", "operation": "DELETE /{collection}/all",
 #    "change": "operation removed",
 #    "reason": "deprecated in 1 (sunset 2027-05-08): DELETE /{collection}?all"}
-BREAKS = []
+BREAKS = [
+    {"version": "2", "kind": "node", "operation": "PUT /_admin/tenants/{tenant}/hooks/{hook}",
+     "change": "request field key narrowed",
+     "reason": "a github hook keyed by X-GitHub-Delivery took a captured event again under a new one: GitHub signs the body alone. A caller writes key body or leaves key out; a payload sent twice carries an id of its own (docs/webhooks)"},
+    {"version": "2", "kind": "node", "operation": "PUT /_admin/tenants/{tenant}/hook-secrets",
+     "change": "request field hooks.*.key narrowed",
+     "reason": "a github hook keyed by X-GitHub-Delivery took a captured event again under a new one: GitHub signs the body alone. A caller writes key body or leaves key out; a payload sent twice carries an id of its own (docs/webhooks)"},
+]
 
 
 # ------------------------------------------------------------------ reading

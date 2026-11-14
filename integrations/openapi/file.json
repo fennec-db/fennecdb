@@ -2,7 +2,7 @@
  "openapi": "3.1.0",
  "info": {
   "title": "fennecdb: fennec-server",
-  "version": "1",
+  "version": "2",
   "description": "fennec-server's REST API over one database file. A request takes `Authorization: Bearer` with the server's token (--http-token) or a scoped JSON Web Token (--jwt-secret, --jwt-keys), held to the --policy rules; a server started with neither takes requests with no token. Every answer carries X-Request-Id; a refusal is {\"error\": \"...\"} under a status that says what to do about it, and a 429 or a 503 says when to come back in Retry-After and its body's retry_after: a scoped token's caller past --request-rate is answered 429 on every route, before anything of the request runs. A route marked x-fennec-flag is served under those flags. A GET answering HEAD lists a head operation beside it, and every path answers a CORS preflight under --http-cors.",
   "license": {
    "name": "Apache-2.0",
@@ -3038,7 +3038,7 @@
    "GitHubDelivery": {
     "name": "X-GitHub-Delivery",
     "in": "header",
-    "description": "A GitHub event's key, where its hook says key delivery.",
+    "description": "Logged beside a GitHub event's key, never its key: GitHub does not sign it.",
     "schema": {
      "type": "string"
     }
@@ -3328,10 +3328,9 @@
       ],
       "enum": [
        "body",
-       "delivery",
        null
       ],
-      "description": "A github hook's: its events keyed by their body or by X-GitHub-Delivery."
+      "description": "A github hook's: its events keyed by their body, which its signature covers (delivery, which it does not, is refused)."
      },
      "max_body": {
       "type": [
@@ -3402,7 +3401,6 @@
          ],
          "enum": [
           "body",
-          "delivery",
           null
          ]
         },

@@ -33,8 +33,8 @@
 //!
 //! **Taken once.** Verified, the event's content type is asked (415), its
 //! body parsed exactly as an object (400), its key read -- Stripe's `id`,
-//! Standard Webhooks' `webhook-id`, GitHub's body digest or its
-//! `X-GitHub-Delivery`, as the hook says -- and under a short read lock
+//! Standard Webhooks' `webhook-id`, GitHub's body digest: a value each
+//! signature covers -- and under a short read lock
 //! its key looked up and its statements judged; under the write lock the
 //! key looked up again and the event taken. A duplicate is answered as the
 //! first taking was, once that block is as durable and sent as the first's
@@ -120,16 +120,6 @@ impl Scheme {
     }
 }
 
-/// What a `github` hook keys its events by (`key body | delivery`): the
-/// body's SHA-256, which its signature covers and a redelivery repeats, or
-/// `X-GitHub-Delivery`, GitHub's own guidance, which its signature does
-/// not cover.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum KeyBy {
-    Body,
-    Delivery,
-}
-
 /// The check an event failed before its signature verified: named in the
 /// log line, the audit's `refused` line and
 /// `fennec_hook_unverified_total{check}` alone, never in the answer.
@@ -198,7 +188,6 @@ pub struct Hook {
     pub tolerance_ms: i64,
     /// How long an event's key is kept past its taking.
     pub keep_ms: i64,
-    pub key: KeyBy,
     /// The body's ceiling, `max-body`: a body past it fails `size`.
     pub ceiling: usize,
 }
@@ -228,8 +217,8 @@ pub struct Verified<'h> {
 }
 
 /// A hooks file's lines: `<name> <scheme> <secret file> [<secret file>]
-/// [keep <duration>] [tolerance <duration>] [key body|delivery] [max-body
-/// <size>]`, a `#` starting a comment.
+/// [keep <duration>] [tolerance <duration>] [key body] [max-body <size>]`,
+/// a `#` starting a comment.
 const OPTIONS: [&str; 4] = ["keep", "tolerance", "key", "max-body"];
 
 /// What a refused line says, past its number: the server's own words,
@@ -248,7 +237,8 @@ impl Hooks {
     /// unread or holding a `standard` secret that is not `whsec_` and
     /// base64, a tolerance of none or past an hour, a `keep` shorter than
     /// a day or not past twice the tolerance and [`SKEW_MS`], a `key` on a
-    /// hook not `github`'s, a `max-body` past `max_body`. Never a word of
+    /// hook not `github`'s or other than `body`, a `max-body` past
+    /// `max_body`. Never a word of
     /// the line, so never a secret's value. Refused too where the system's
     /// randomness cannot be read: a stand-in key is never the clock's.
     pub fn read(
@@ -459,14 +449,22 @@ pub(crate) fn hook_of(
         let given = match *opt {
             "keep" => keep.replace(duration(value)?).is_some(),
             "tolerance" => tolerance.replace(duration(value)?).is_some(),
-            "key" => {
-                let by = match value {
-                    "body" => KeyBy::Body,
-                    "delivery" => KeyBy::Delivery,
-                    _ => return Err("a `github` hook keys its events by `body` or `delivery`"),
-                };
-                key.replace(by).is_some()
-            }
+            // `delivery`, 0.2.0's other key, is refused rather than taken
+            // as `body`: GitHub signs the body alone, so nothing tells a
+            // payload sent twice from a captured one sent again under a new
+            // `X-GitHub-Delivery`, and a hook that chose it to take the
+            // first would drop it unsaid (docs/design/named-statements.md,
+            // "An event's key").
+            "key" => match value {
+                "body" => key.replace(()).is_some(),
+                "delivery" => {
+                    return Err("`key delivery` is refused: GitHub does not sign \
+                                X-GitHub-Delivery, so a copy of an event sent again under a new \
+                                one would be taken again; a `github` hook keys its events by \
+                                `body`, and a payload sent twice carries an id of its own")
+                }
+                _ => return Err("a `github` hook keys its events by `body`"),
+            },
             "max-body" => {
                 let size = (crate::quota::size(value).filter(|s| *s > 0))
                     .ok_or("`max-body` is a size: 64k, 4m")?;
@@ -505,7 +503,6 @@ pub(crate) fn hook_of(
         secrets: files,
         tolerance_ms,
         keep_ms,
-        key: key.unwrap_or(KeyBy::Body),
         ceiling: ceiling as usize,
     })
 }
@@ -1017,21 +1014,10 @@ fn take(
             }
         },
         Scheme::Standard => standard_id(req).to_string(),
-        Scheme::Github => match hook.key {
-            KeyBy::Body => hex(&sha256(&req.body)),
-            KeyBy::Delivery => match req.header("x-github-delivery") {
-                Some(d) => d.trim().to_string(),
-                None => {
-                    return refused(
-                        Response::error(
-                            400,
-                            "this hook keys its events by X-GitHub-Delivery, and none was sent",
-                        ),
-                        "no X-GitHub-Delivery",
-                    )
-                }
-            },
-        },
+        // The body's digest, which its signature covers: never
+        // `X-GitHub-Delivery`, which it does not, so a captured event sent
+        // again under a new one is answered from its key.
+        Scheme::Github => hex(&sha256(&req.body)),
     };
     let e = Event {
         hook: &hook.name,
@@ -2208,8 +2194,13 @@ mod tests {
             ("a stripe file:x tolerance 2h\n", "a tolerance is 1s to 1h"),
             ("a stripe file:x keep 23h\n", "1d at least"),
             ("a stripe file:x tolerance 1h keep 2h\n", "1d at least"),
-            ("a stripe file:x key delivery\n", "`github` hook's"),
-            ("a github file:x key both\n", "`body` or `delivery`"),
+            ("a stripe file:x key body\n", "`github` hook's"),
+            ("a github file:x key both\n", "keys its events by `body`"),
+            (
+                "a github file:x key delivery\n",
+                "does not sign X-GitHub-Delivery",
+            ),
+            ("a github file:x key body key body\n", "given twice"),
             ("a standard file:secret\n", "Standard Webhooks secret"),
             ("a standard /run/1\n", "Standard Webhooks secret"),
             ("a stripe /run/0\n", "is empty"),
@@ -2236,11 +2227,10 @@ mod tests {
         assert!(refused_at("\n\na stripe\n").starts_with("hooks file line 3: "));
         // `keep` against the tolerance: twice it and a minute is short by
         // nothing, which the floor of a day covers for every tolerance.
-        let h = hooks("a stripe file:x\nb github file:y key delivery keep 1d\n# a comment\n\n");
+        let h = hooks("a stripe file:x\nb github file:y key body keep 1d\n# a comment\n\n");
         assert_eq!(h.get("a").unwrap().keep_ms, 30 * DAY);
         assert_eq!(h.get("a").unwrap().tolerance_ms, TOLERANCE_MS);
         assert_eq!(h.get("b").unwrap().keep_ms, DAY);
-        assert_eq!(h.get("b").unwrap().key, KeyBy::Delivery);
         assert_eq!(h.get("b").unwrap().ceiling, CEILING);
         assert_eq!((h.get("a").unwrap().secrets, h.widest), (1, CEILING));
         // A server's lower `--max-body` is a hook's ceiling unless given.

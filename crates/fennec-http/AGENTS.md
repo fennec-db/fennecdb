@@ -150,9 +150,10 @@ node's 401 with no `WWW-Authenticate` too (`audit::hook_forwarded`) -- and
 a verified event never calls `audit::verified`. A secret is a hooks file's
 or a tenant's `<t>.hooks` (fennec-shard's rule), never the database's, an
 archive's, a log's, a trace's or an answer's but `hook-secrets`'. An
-event's key is a value its signature covers, or `X-GitHub-Delivery` where
-its hook says `key delivery`, kept more than twice the tolerance and
-`SKEW_MS`. A sender is told 2xx only once its event
+event's key is a value its signature covers -- GitHub's its body's digest,
+never `X-GitHub-Delivery`, which nothing signs (`key delivery` refused at
+the start) -- kept more than twice the tolerance and `SKEW_MS`. A sender is
+told 2xx only once its event
 is durable whatever `--sync` says (`hooks::taken` flushes as `--sync
 always` does), and a standby holds it (`Feed::standby_sent`, an archiver's
 or a read replica's stream none, each saying so on its request; else 503),

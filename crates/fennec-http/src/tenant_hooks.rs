@@ -49,7 +49,7 @@
 //! set, put away.
 
 use crate::crypto::HmacKey;
-use crate::hooks::{self, Check, Hook, KeyBy, Scheme, CEILING};
+use crate::hooks::{self, Check, Hook, Scheme, CEILING};
 use crate::http::Request;
 use crate::instance::{self, Binding};
 use crate::tenants::Refused;
@@ -778,9 +778,8 @@ impl Store {
                     h.secrets,
                     h.keep_ms,
                     h.tolerance_ms,
-                    match (h.scheme, h.key) {
-                        (Scheme::Github, KeyBy::Body) => "\"body\"",
-                        (Scheme::Github, KeyBy::Delivery) => "\"delivery\"",
+                    match h.scheme {
+                        Scheme::Github => "\"body\"",
                         _ => "null",
                     },
                     h.ceiling,

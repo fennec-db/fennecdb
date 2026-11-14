@@ -348,8 +348,12 @@ fn a_tenants_secrets_are_set_listed_and_exported_by_its_admin_alone() {
             "tolerance",
         ),
         (
-            r#"{"scheme":"stripe","secrets":["whsec_x"],"key":"delivery"}"#,
+            r#"{"scheme":"stripe","secrets":["whsec_x"],"key":"body"}"#,
             "github",
+        ),
+        (
+            r#"{"scheme":"github","secrets":["x"],"key":"delivery"}"#,
+            "does not sign X-GitHub-Delivery",
         ),
         (r#"{"scheme":"nosuch","secrets":["whsec_x"]}"#, "scheme"),
         (
@@ -376,7 +380,7 @@ fn a_tenants_secrets_are_set_listed_and_exported_by_its_admin_alone() {
         n.port,
         "PUT",
         "/_admin/tenants/acme/hooks/pushes",
-        &format!(r#"{{"scheme":"github","secrets":["{SECRET}"],"key":"delivery"}}"#),
+        &format!(r#"{{"scheme":"github","secrets":["{SECRET}"],"key":"body"}}"#),
     );
     assert_eq!(made.status, 200, "{}", made.body);
     assert_eq!(set_secret(n.port, "acme", "whsec_acme").status, 200);
@@ -384,7 +388,7 @@ fn a_tenants_secrets_are_set_listed_and_exported_by_its_admin_alone() {
     assert_eq!(listing.status, 200);
     for part in [
         r#""name":"pushes""#,
-        r#""key":"delivery""#,
+        r#""key":"body""#,
         r#""name":"stripe""#,
     ] {
         assert!(listing.body.contains(part), "{part}: {}", listing.body);
