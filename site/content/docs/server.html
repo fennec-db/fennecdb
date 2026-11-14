@@ -704,6 +704,8 @@ other monitoring systems</a>.</p>
     localhost.</li>
   <li><b>Run one instance per file.</b> Two writers corrupt it: on Kubernetes,
     a <code>StatefulSet</code> with one replica.</li>
+  <li><b>A volume a platform makes is often root's,</b> and the image runs as
+    65534: <a href="cloud.html#volume-owner">Who owns the volume</a>.</li>
   <li><b>Write every flag out</b> when you override the command, or the data
     file is dropped.</li>
 </ul>
@@ -749,6 +751,10 @@ comes up with an in-memory database. There is no shell in the image, so
 <code>docker exec ... sh</code> does not work; what is left is
 <code>docker logs</code> and <code>docker run --rm
 ghcr.io/fennec-db/fennec-server --help</code>.</p>
+
+<p>Fly.io, Render, Railway, a VM on any cloud and Kubernetes each have a config
+file of their own on <a href="cloud.html">Cloud platforms</a>, with a
+StatefulSet that holds the rules above.</p>
 
 <p>On machines of your own, the repository's <code>deploy/</code> has a
 systemd unit for a server of every role — a tenant node, a region's router,

@@ -1,0 +1,636 @@
+<!--
+title: Cloud platforms — fennecdb
+description: Deploy fennec-server on Fly.io, Render, Railway, AWS, Google Cloud, Azure, DigitalOcean, Hetzner and any VM or Kubernetes cluster, which platforms cannot be its home, and how an app on each reaches it.
+-->
+
+<h1>Cloud platforms</h1>
+<p class="kicker">Where to run <code>fennec-server</code> on each cloud, the
+config for it, and how your apps there reach it.</p>
+
+<p>A server is one process over one file on a disk, reached over HTTP. That
+asks three things of a platform: a block disk that outlives the process, one
+instance at a time, and a stop that waits for the final sync. Pick yours from
+the table, then read <a href="#rules">the rules</a> and <a
+href="#volume-owner">the volume's owner</a>, which hold on every platform.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Platform</th><th>Run it as</th><th>Disk</th><th>Section</th></tr></thead>
+<tbody>
+<tr><td>Fly.io</td><td>a Machine</td><td>Fly volume</td><td><a href="#fly">Fly.io</a></td></tr>
+<tr><td>Render</td><td>a private or web service</td><td>persistent disk</td><td><a href="#render">Render</a></td></tr>
+<tr><td>Railway</td><td>a service from the image</td><td>Railway volume</td><td><a href="#railway">Railway</a></td></tr>
+<tr><td>AWS, Google Cloud, Azure, DigitalOcean, Hetzner, OVHcloud, Scaleway, Akamai/Linode, Vultr, Oracle Cloud, any VM</td><td>a VM</td><td>the cloud's block volume (EBS, Persistent Disk or Hyperdisk, managed disk, Volume)</td><td><a href="#vm">A VM</a></td></tr>
+<tr><td>EKS, GKE, AKS, DOKS and any Kubernetes</td><td>a StatefulSet of one</td><td>a <code>ReadWriteOnce</code> claim</td><td><a href="#kubernetes">Kubernetes</a></td></tr>
+<tr><td>Cloudflare</td><td>the engine in a Durable Object</td><td>the object's storage</td><td><a href="#cloudflare">Cloudflare</a></td></tr>
+<tr><td>Cloud Run, Lambda, ECS on Fargate, App Runner, Container Apps, App Service, App Platform, Heroku, Vercel, Netlify</td><td>your app, as a client</td><td>none that fits</td><td><a href="#not-a-home">Not a home</a></td></tr>
+</tbody>
+</table>
+</div>
+
+<h2 id="rules">The rules on every platform</h2>
+
+<ul>
+  <li><b>A block volume, never a network share.</b> EBS, Persistent Disk and
+    Hyperdisk, an Azure managed disk, a DigitalOcean, Hetzner or Linode
+    volume, a Fly volume, a Render disk, a Railway volume. Not EFS, Azure
+    Files or Filestore (NFS and SMB), and not a bucket shown as files (Cloud
+    Storage FUSE, Mountpoint for S3, s3fs): the server holds <code>&lt;file&gt;.lock</code>
+    to keep a second process out, and a network file system may not keep that
+    lock (<a href="/docs/server#flags"><code>--file</code></a>). <code>--no-mmap</code>
+    exists for them; this page does not recommend them.</li>
+  <li><b>One instance.</b> Replicas 1, no autoscaling, and a deploy stops the
+    old instance before it starts the new: a second process over the file is
+    refused (exit 1), and what does hold two at once must not.</li>
+  <li><b>A token from the secret store.</b> <code>FENNEC_HTTP_TOKEN</code>, in
+    the environment, never <code>--http-token</code>: <code>argv</code> shows in
+    <code>ps</code>. Without a token the server refuses to listen beyond
+    loopback and exits 2.</li>
+  <li><b>Health is <code>GET /_health</code>.</b> It needs no token and takes no
+    lock. The port binds only after the file is opened, so a large file takes a
+    while: give a startup check a grace period of minutes (the image's own check,
+    <code>--ping</code>, waits 120 s). Orchestrators other than Docker ignore the
+    image's <code>HEALTHCHECK</code>.</li>
+  <li><b>Wait for the stop.</b> SIGINT, SIGTERM and SIGHUP all run the clean
+    shutdown: a final sync, then a checkpoint of the vector graphs. Killed before
+    it ends (SIGKILL, an out-of-memory kill, a grace period that ran out), up to
+    one <code>--sync</code> interval of writes is lost and the graphs are linked
+    again at the next start. Set the platform's stop timeout to 30 to 60 s.</li>
+  <li><b>Memory.</b> There is no buffer pool: the file is mapped and the page
+    cache holds it; the process holds the indexes. Give <code>--max-memory</code>
+    (in MiB) a third of the memory limit, and a write past it gets 507 rather than
+    an out-of-memory kill.</li>
+  <li><b>Every flag, when you override the command.</b> The image's is
+    <code>--http 0.0.0.0:8080 --file /data/data.fennec --sync 250</code>; write
+    out whatever you change, or the file is dropped and the database is in
+    memory.</li>
+</ul>
+
+<h2 id="volume-owner">Who owns the volume</h2>
+
+<p>The image is <code>FROM scratch</code> and runs as <code>65534:65534</code>.
+A platform's volume is often an empty file system whose root belongs to
+<code>root</code>, and then the server cannot make its file:</p>
+
+<pre data-lang="bash">$ docker run --rm --mount type=volume,dst=/data,volume-nocopy=true \
+    -e FENNEC_HTTP_TOKEN=t ghcr.io/fennec-db/fennec-server:{{version}}
+could not open /data/data.fennec: its lock file: Permission denied (os error 13)</pre>
+
+<p>A plain Docker named volume works, since Docker copies the image's
+<code>/data</code> ownership into a new one; most platforms do not. Each section
+below says what that platform needs. The ways out are the same everywhere:</p>
+
+<ul>
+  <li><b>Make the volume 65534's.</b> <code>chown 65534:65534</code> on a VM, or
+    <code>securityContext.fsGroup: 65534</code> on Kubernetes.</li>
+  <li><b>Run as root there.</b> A platform with no knob for either takes a
+    derived image, two lines:
+<pre data-lang="dockerfile" data-label="Dockerfile">FROM ghcr.io/fennec-db/fennec-server:{{version}}
+USER 0:0</pre>
+    The file it makes is root's; a later move to a non-root user needs a
+    <code>chown</code> of the data first.</li>
+</ul>
+
+<details class="deep"><summary>Why a scratch image runs as 65534</summary>
+<p>The image holds the static binary and nothing else: no shell, no
+<code>chown</code>, no way to repair a mount at start. So the owner has to be
+right before the process runs, and the image names the unprivileged
+<code>nobody</code> of Linux (65534) to run as, with a root-owned
+<code>/data</code> handed over to it at build time. Where the platform makes the
+volume itself, none of that reaches it. Reproduced here with Docker's
+<code>volume-nocopy</code> option, which creates the volume as a platform does,
+empty: the default user fails as above, and the derived image above starts,
+answers <code>/_health</code> and leaves <code>data.fennec</code> owned by root.</p>
+</details>
+
+<h2 id="vm">A VM and its block volume</h2>
+
+<p>The same recipe serves AWS (EC2, Lightsail), Google Compute Engine, Azure,
+DigitalOcean, Hetzner, OVHcloud, Scaleway, Akamai/Linode, Vultr, Oracle Cloud
+and a machine of your own: a Linux VM, a block volume attached to it in its
+zone, <code>fennec-server</code> as a systemd service.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Cloud</th><th>Create the disk</th><th>Gotcha</th></tr></thead>
+<tbody>
+<tr><td>AWS EC2</td><td>an EBS volume, <code>gp3</code>, in the instance's Availability Zone</td><td>On Nitro instances it shows as <code>/dev/nvme1n1</code>, and the number can change at a reboot: mount by UUID.</td></tr>
+<tr><td>AWS Lightsail</td><td>a block storage disk, attached to the instance</td><td>You format and mount it yourself; same zone as the instance.</td></tr>
+<tr><td>Google Cloud</td><td>a Persistent Disk or Hyperdisk, attached to the instance</td><td>Zonal: it follows the VM's zone.</td></tr>
+<tr><td>Azure</td><td>a managed data disk</td><td>Mount a data disk by UUID, not the OS disk's <code>/dev/sdX</code>.</td></tr>
+<tr><td>DigitalOcean, Hetzner, Linode, others</td><td>the provider's volume, in the Droplet's or server's region</td><td>One attachment at a time, in one location.</td></tr>
+</tbody>
+</table>
+</div>
+
+<ol class="steps-doc">
+  <li>
+    <p>Format and mount the volume once. The device name is on <code>lsblk</code>.</p>
+<pre data-lang="bash">sudo mkfs.ext4 /dev/nvme1n1
+sudo mkdir -p /var/lib/fennecdb
+echo "UUID=$(sudo blkid -s UUID -o value /dev/nvme1n1) /var/lib/fennecdb ext4 defaults,nofail 0 2" | sudo tee -a /etc/fstab
+sudo mount -a</pre>
+  </li>
+  <li>
+    <p>Install the programs (<a href="/docs/install#debian-and-fedora">a
+    <code>.deb</code> or <code>.rpm</code></a> put them in
+    <code>/usr/bin</code>; the packages ship no systemd unit), a user to run
+    them, and the token file.</p>
+<pre data-lang="bash">sudo useradd --system --no-create-home --shell /usr/sbin/nologin fennec
+sudo chown fennec:fennec /var/lib/fennecdb
+sudo install -d -m 0750 -o root -g fennec /etc/fennecdb
+echo "FENNEC_HTTP_TOKEN=$(openssl rand -hex 32)" | sudo tee /etc/fennecdb/server.env
+sudo chmod 0640 /etc/fennecdb/server.env; sudo chgrp fennec /etc/fennecdb/server.env</pre>
+  </li>
+  <li>
+    <p>The unit. It is the repository's <code>deploy/systemd/fennec-node.service</code>
+    cut down to one file: the same hardening, the token from an environment file, a
+    user of its own, and a stop that waits.</p>
+<pre data-lang="toml" data-label="/etc/systemd/system/fennec-server.service">[Unit]
+Description=fennec-server
+After=network-online.target local-fs.target
+Wants=network-online.target
+RequiresMountsFor=/var/lib/fennecdb
+
+[Service]
+User=fennec
+Group=fennec
+EnvironmentFile=/etc/fennecdb/server.env
+ExecStart=/usr/bin/fennec-server \
+    --file /var/lib/fennecdb/data.fennec \
+    --http 0.0.0.0:8080 \
+    --sync 250 \
+    --max-memory 1024
+Restart=on-failure
+RestartSec=2s
+
+# SIGTERM runs the final sync and the checkpoint of the vector graphs.
+KillSignal=SIGTERM
+TimeoutStopSec=60s
+LimitCORE=0
+UMask=0077
+
+ReadWritePaths=/var/lib/fennecdb
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target</pre>
+<pre data-lang="bash">sudo systemctl daemon-reload && sudo systemctl enable --now fennec-server
+curl -s localhost:8080/_health</pre>
+  </li>
+</ol>
+
+<ul>
+  <li><b>The volume's owner</b> is the <code>chown</code> above: the service
+    user, not 65534, since there is no image here.</li>
+  <li><b>Memory.</b> <code>--max-memory 1024</code> is for a machine of about
+    3 GiB; keep it at a third of what the instance has.</li>
+  <li><b>The network.</b> Open 8080 to your app's security group, firewall or
+    network security group only, not to the world. For HTTPS, give the server
+    <code>--tls-cert</code> and <code>--tls-key</code> (a renewed certificate
+    takes a restart; <a href="/docs/server#tls">HTTPS</a>) or put Caddy in
+    front.</li>
+  <li><b>Upgrades.</b> Replace the binary and <code>systemctl restart
+    fennec-server</code>: the stop waits, the start opens the file again.</li>
+</ul>
+
+<h2 id="kubernetes">Kubernetes</h2>
+
+<p>One <code>StatefulSet</code> with one replica, a <code>ReadWriteOnce</code>
+claim, and a <code>Service</code>. A <code>Deployment</code> would need
+<code>strategy: Recreate</code>, since a rolling update keeps two pods up
+together for a moment. The pod runs as 65534 and its volume is made 65534's by
+<code>fsGroup</code>; the root file system is read-only and every capability
+dropped.</p>
+
+<pre data-lang="yaml" data-label="fennec.yaml">apiVersion: v1
+kind: Secret
+metadata:
+  name: fennec
+type: Opaque
+stringData:
+  # Replace it, or leave this out and run:
+  #   kubectl create secret generic fennec --from-literal=FENNEC_HTTP_TOKEN="$(openssl rand -hex 32)"
+  FENNEC_HTTP_TOKEN: change-me
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fennec
+spec:
+  selector:
+    app: fennec
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: fennec
+spec:
+  serviceName: fennec
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fennec
+  template:
+    metadata:
+      labels:
+        app: fennec
+    spec:
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: fennec
+          image: ghcr.io/fennec-db/fennec-server:{{version}}
+          # args replace the image's CMD, so every flag is written out.
+          args:
+            - --http
+            - 0.0.0.0:8080
+            - --file
+            - /data/data.fennec
+            - --sync
+            - "250"
+            - --max-memory
+            - "340"
+          envFrom:
+            - secretRef:
+                name: fennec
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # No token needed, no lock taken. The port binds once the file is
+          # open: up to 5 minutes for a start over a large file.
+          startupProbe:
+            httpGet: {path: /_health, port: http}
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /_health, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /_health, port: http}
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # storageClassName: see the table below; omit for the cluster's default
+        resources:
+          requests:
+            storage: 20Gi</pre>
+
+<p>Apply it, then reach it from inside the cluster at
+<code>http://fennec.&lt;namespace&gt;.svc.cluster.local:8080</code>:</p>
+
+<pre data-lang="bash">kubectl apply -f fennec.yaml
+kubectl rollout status statefulset/fennec
+kubectl port-forward svc/fennec 8080:8080   # then curl localhost:8080/_health</pre>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Cluster</th><th><code>storageClassName</code></th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td>EKS</td><td>one you create: provisioner <code>ebs.csi.aws.com</code>, <code>parameters: {type: gp3}</code>, <code>volumeBindingMode: WaitForFirstConsumer</code></td><td>Install the EBS CSI driver add-on and give it its IAM role first. An EBS volume is in one Availability Zone.</td></tr>
+<tr><td>EKS Auto Mode</td><td>one you create (the docs call it <code>auto-ebs-sc</code>): provisioner <code>ebs.csi.eks.amazonaws.com</code>, <code>type: gp3</code></td><td>Auto Mode creates no class and needs no driver install.</td></tr>
+<tr><td>GKE</td><td><code>standard-rwo</code> (balanced Persistent Disk) or <code>premium-rwo</code> (SSD)</td><td>Provisioner <code>pd.csi.storage.gke.io</code>. Not <code>regional-rwx</code>, which is a shared file system.</td></tr>
+<tr><td>AKS</td><td><code>managed-csi</code> (Standard SSD) or <code>managed-csi-premium</code></td><td>Azure managed disks. Not <code>azurefile-csi</code> (Azure Files).</td></tr>
+<tr><td>DOKS</td><td><code>do-block-storage</code></td><td><code>do-block-storage-retain</code> keeps the volume when the claim is deleted.</td></tr>
+<tr><td>Linode (LKE)</td><td><code>linode-block-storage</code>, or <code>linode-block-storage-retain</code></td><td>10 GiB is the smallest volume.</td></tr>
+<tr><td>Others</td><td>the provider's block-volume CSI class</td><td>Whatever is <code>ReadWriteOnce</code> on a block device; <code>kubectl get storageclass</code>.</td></tr>
+</tbody>
+</table>
+</div>
+
+<details class="deep"><summary>Why a StatefulSet, and what the probes allow</summary>
+<p>A StatefulSet of one replica starts the replacement pod only after the old
+one has stopped, and ties it to the same claim; a Deployment's default rolling
+update would start the new pod beside the old one, with two processes over a
+volume that a block device lets only one node mount, or a network share that
+lets both and keeps no lock. <code>OnRootMismatch</code> makes Kubernetes
+change a volume's ownership when its root is not <code>fsGroup</code>'s, once,
+rather than walking every file at each start. The memory limit is 1 GiB and
+<code>--max-memory</code> 340 MiB, a third of it, as in the repository's
+<code>docker-compose.yml</code>. <code>terminationGracePeriodSeconds: 60</code>
+holds the final sync and the checkpoint; the default, 30 s, is short for a large
+graph.</p>
+</details>
+
+<h2 id="fly">Fly.io</h2>
+
+<p>A Machine with a volume, in one region. Fly's private network is IPv6, so
+the server listens on <code>[::]</code> (which takes IPv4 too on Linux) and the
+command is written out in a one-line <code>Dockerfile</code>:</p>
+
+<pre data-lang="dockerfile" data-label="Dockerfile">FROM ghcr.io/fennec-db/fennec-server:{{version}}
+CMD ["--http", "[::]:8080", "--file", "/data/data.fennec", "--sync", "250"]</pre>
+
+<pre data-lang="toml" data-label="fly.toml">app = "my-fennec"
+primary_region = "ams"
+
+# The default is 5 s; 300 s is the most it takes.
+kill_timeout = 60
+
+[build]
+  dockerfile = "Dockerfile"
+
+[[mounts]]
+  source = "fennec_data"
+  destination = "/data"
+  initial_size = "10GB"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # A stopped Machine is a stop with no clean shutdown; keep it running.
+  auto_stop_machines = "off"
+  auto_start_machines = false
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/_health"
+    grace_period = "120s"
+    interval = "15s"
+    timeout = "5s"
+
+[[vm]]
+  memory = "1gb"
+  cpu_kind = "shared"
+  cpus = 1</pre>
+
+<pre data-lang="bash">fly apps create my-fennec
+fly volumes create fennec_data --region ams --size 10
+fly secrets set FENNEC_HTTP_TOKEN="$(openssl rand -hex 32)"
+fly deploy --ha=false
+fly status</pre>
+
+<ul>
+  <li><b>One Machine, one volume.</b> A volume attaches to one Machine, so
+    <code>fly deploy --ha=false</code> and never <code>fly scale count 2</code>.
+    A deploy of one Machine with one volume is down for its length; the
+    <code>canary</code> and <code>bluegreen</code> strategies cannot be used
+    with a volume.</li>
+  <li><b>The volume's owner.</b> Fly staff say on the community forum that the
+    mount is chowned to the image's user, which is 65534 here. If the log shows
+    <code>Permission denied</code> on the lock file, add <code>USER 0:0</code> to
+    the <code>Dockerfile</code>.</li>
+  <li><b>Inside Fly.</b> Other apps in your organization reach it at
+    <code>http://my-fennec.internal:8080</code>, over the private network and
+    around Fly's proxy, with the token.</li>
+  <li><b>Backups.</b> Fly takes a daily snapshot of a volume and keeps it 5 days
+    by default (<code>snapshot_retention</code>, up to 60), and says a snapshot
+    may lack the latest writes: take <a href="#backups">a backup of your own</a>
+    too.</li>
+</ul>
+
+<h2 id="render">Render</h2>
+
+<p>A private service (or a web service, to be public) with a persistent disk.
+Render builds it from a repository holding the two-line <code>Dockerfile</code>
+that runs as root, since the platform's documentation does not say who owns a
+disk:</p>
+
+<pre data-lang="dockerfile" data-label="Dockerfile">FROM ghcr.io/fennec-db/fennec-server:{{version}}
+USER 0:0</pre>
+
+<pre data-lang="yaml" data-label="render.yaml">services:
+  - type: pserv           # web, for a public URL
+    name: fennec
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    numInstances: 1
+    healthCheckPath: /_health
+    maxShutdownDelaySeconds: 60
+    envVars:
+      - key: FENNEC_HTTP_TOKEN
+        sync: false          # asked for once, when the Blueprint is created
+    disk:
+      name: fennec-data
+      mountPath: /data
+      sizeGB: 10</pre>
+
+<ul>
+  <li><b>Port.</b> A web service is routed to <code>PORT</code>, 10000 unless
+    you set it: set <code>PORT=8080</code> beside the token, which is where the
+    image listens. A private service needs no routing.</li>
+  <li><b>One instance, and a gap at every deploy.</b> A disk cannot be shared
+    or scaled, and attaching one switches off zero-downtime deploys: Render
+    stops the old instance, then starts the new, a few seconds with a large
+    file's open on top. <code>maxShutdownDelaySeconds</code> takes 1 to 300 and
+    defaults to 30.</li>
+  <li><b>The disk</b> is mounted at runtime only, not in a build, a pre-deploy
+    command or a one-off job. It can grow but not shrink. Render snapshots it
+    every 24 hours and keeps each for seven days, restoring whole disks: take
+    <a href="#backups">a backup of your own</a> too.</li>
+  <li><b>Inside Render.</b> Other services in the workspace reach a private
+    service by its internal hostname and the port it listens on,
+    <code>http://&lt;internal-hostname&gt;:8080</code>, copied from the service's
+    Connect menu, Internal tab.</li>
+</ul>
+
+<h2 id="railway">Railway</h2>
+
+<p>A service from the image, a volume at <code>/data</code>, and one
+replica. A Railway volume is also not 65534's, and Railway documents the
+way out: <code>RAILWAY_RUN_UID=0</code> runs the service as root.</p>
+
+<ol class="steps-doc">
+  <li>
+    <p>New service, from the Docker image
+    <code>ghcr.io/fennec-db/fennec-server:{{version}}</code>.</p>
+  </li>
+  <li>
+    <p>Variables: <code>FENNEC_HTTP_TOKEN</code> (a random string, marked as a secret) and <code>RAILWAY_RUN_UID=0</code>.</p>
+  </li>
+  <li>
+    <p>Add a volume to the service, mount path <code>/data</code>. A service has
+    one volume.</p>
+  </li>
+  <li>
+    <p>Settings: a health check path of <code>/_health</code>, and a generous
+    timeout for it. Leave the replicas at 1.</p>
+  </li>
+</ol>
+
+<ul>
+  <li><b>A deploy is a brief outage.</b> Railway never runs two deployments
+    mounted to one volume, so a redeploy stops the old one first, with a health
+    check or not. Replicas cannot be used with volumes.</li>
+  <li><b>Inside Railway.</b> Services of the same environment reach it at
+    <code>http://fennec.railway.internal:8080</code> (the service's name). An
+    environment made before 16 October 2025 resolves that name to IPv6 only; then
+    the server has to listen on <code>[::]</code>, as <a href="#fly">Fly's</a>
+    <code>Dockerfile</code> does.</li>
+  <li><b>The volume</b> is 0.5 GB on the free and trial plans, 5 on Hobby and
+    50 on Pro, grown live and never shrunk; Railway makes manual and automatic
+    backups of it.</li>
+</ul>
+
+<h2 id="cloudflare">Cloudflare</h2>
+
+<p>Cloudflare is the one platform where the engine runs inside your code rather
+than as a server: one database for each Durable Object, in a Worker, with the
+object's storage as its disk. It fits a database for each user, team or
+document; one large database with many writers is a server elsewhere, and a
+Worker is then its client. <a href="/docs/serverless">Serverless and
+Cloudflare</a> has both, and <a href="/docs/sharding-entry#global-entry">The
+global entry</a> puts one Worker in front of a sharded fleet.</p>
+
+<p>Cloudflare Containers is not a home for the server: its disk is ephemeral,
+and an instance that sleeps starts again from the image. Persistence there
+would be R2 mounted as files, which this page's rule excludes.</p>
+
+<h2 id="not-a-home">Platforms that are not a home</h2>
+
+<p>These run your apps, which are clients of a server elsewhere
+(<a href="#using">below</a>). None gives a process a block disk it keeps.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Platform</th><th>Why not</th></tr></thead>
+<tbody>
+<tr><td>ECS on Fargate</td><td>An EBS volume belongs to one task: a service's volumes are deleted when the task ends, so a replacement starts empty (or from a snapshot, a copy). EFS is NFS. ECS on EC2 can bind-mount an instance's disk, with the task pinned to that instance; at that point it is <a href="#vm">a VM</a> with extra steps.</td></tr>
+<tr><td>AWS App Runner</td><td>No volumes. It is also closed to new customers.</td></tr>
+<tr><td>AWS Lambda</td><td>No persistent disk; EFS is NFS.</td></tr>
+<tr><td>Cloud Run, Cloud Functions</td><td>Volumes are a Cloud Storage bucket through FUSE, Filestore over NFS (with locking off) or memory.</td></tr>
+<tr><td>Azure Container Apps, Container Instances, App Service</td><td>The persistent volume is Azure Files, SMB or NFS. The rest is ephemeral.</td></tr>
+<tr><td>DigitalOcean App Platform</td><td>No volumes; the local file system is lost at a deploy.</td></tr>
+<tr><td>Heroku</td><td>Each dyno's file system is discarded when it stops or restarts.</td></tr>
+<tr><td>Vercel, Netlify</td><td>Functions and static hosting: no disk of their own.</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2 id="using">Using it from your apps</h2>
+
+<p>Every app needs two values, the server's URL and its token, from its
+platform's environment and secret store, as <code>FENNEC_URL</code> and
+<code>FENNEC_TOKEN</code> say:</p>
+
+<pre data-lang="python">from fennecdb import Client
+db = Client(os.environ["FENNEC_URL"], token=os.environ["FENNEC_TOKEN"])</pre>
+
+<pre data-lang="js">import { connect } from "@fennecdb/web";
+const db = connect(process.env.FENNEC_URL, { token: process.env.FENNEC_TOKEN });</pre>
+
+<p>Go is <code>fennecdb.New(url, fennecdb.WithToken(token))</code>, .NET
+<code>new FennecClient(url, new() { Token = token })</code>, and Swift, Kotlin
+and Dart <code>Fennec.connect(url, token: ...)</code>; <a
+href="/docs/languages">Your language</a> has each in full, and <a
+href="/docs/mobile#connect">Mobile and native apps</a> the apps'.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Your app runs on</th><th>Reach the server at</th></tr></thead>
+<tbody>
+<tr><td>Fly.io</td><td><code>http://my-fennec.internal:8080</code>, or Flycast where you want Fly's proxy on the private network</td></tr>
+<tr><td>Render</td><td><code>http://&lt;internal-hostname&gt;:8080</code>, from the service's Connect menu</td></tr>
+<tr><td>Railway</td><td><code>http://fennec.railway.internal:8080</code></td></tr>
+<tr><td>Kubernetes</td><td><code>http://fennec.&lt;namespace&gt;.svc.cluster.local:8080</code>, a <code>Service</code>; a <code>NetworkPolicy</code> naming the apps that may</td></tr>
+<tr><td>A cloud's VMs and VPC</td><td>the VM's private address, port 8080 open to the app's security group, firewall or network security group only</td></tr>
+</tbody>
+</table>
+</div>
+
+<ul>
+  <li><b>Functions are clients.</b> Vercel, Netlify, Lambda, Cloud Run, Cloud
+    Functions, Azure Functions and Workers send HTTP requests and keep no
+    connection open, so there is no pool to exhaust. A function that has to
+    reach a private address needs the platform's VPC attachment (a Lambda in
+    the VPC, Cloud Run's Direct VPC egress, Azure's VNet integration); one
+    that does not is given an HTTPS address and the token.</li>
+  <li><b>A browser never gets the server's token.</b> Give it a scoped JWT
+    that names what its user may read and write, and let the server accept
+    the page's origin with <code>--http-cors</code> (<a
+    href="/docs/http-access">HTTP security and scoped access</a>,
+    <code>--jwt-*</code>).</li>
+  <li><b>Studio and the shell.</b> <code>--studio</code> serves the admin pages
+    at <code>/_studio/</code>, behind the token (<a href="/docs/studio">Studio</a>).
+    The shell opens a file, not a URL: <code>fennec backup</code> the database
+    and open the copy, or send statements with <code>curl</code>
+    (<a href="/docs/shell">The shell</a>).
+    Reach a private address by the platform's tunnel (<code>fly proxy</code>,
+    <code>kubectl port-forward</code>, a bastion or SSH) rather than by opening
+    the port.</li>
+</ul>
+
+<h2 id="backups">Backups, then more than one server</h2>
+
+<p>A disk snapshot is a crash-consistent copy: a fine extra, not the backup.
+<code>fennec backup</code> takes the running database whole through the
+replication stream, and <code>fennec archive</code> keeps the stream for a
+restore to a moment; give the server <code>--replication-token</code> and run
+them from anywhere that reaches it.</p>
+
+<pre data-lang="bash">fennec backup https://db.example.com nightly.fennec --token "$REPL"
+fennec archive https://db.example.com /backups/archive --token "$REPL" --image-every 1h --keep 7d
+
+# to the cloud's bucket, beside the archiver
+aws s3 sync /backups/archive s3://my-bucket/fennec --delete      # AWS
+gsutil -m rsync -r /backups/archive gs://my-bucket/fennec        # Google Cloud
+azcopy sync /backups/archive "https://acct.blob.core.windows.net/fennec"   # Azure
+rclone sync /backups/archive r2:fennec                           # R2, Spaces, B2, ...</pre>
+
+<p>Restoring to a moment, and the bucket's side, are on <a
+href="/docs/replication#backups-and-restoring-to-a-moment">Replication</a> and
+<a href="/docs/replication#object-storage">In object storage</a>.</p>
+
+<p>A server grows two ways. <b>Reads:</b> <code>--replica-of</code> starts a
+read replica on a second machine, on its own disk, fed from the primary's
+(<a href="/docs/replication">Replication</a>; <code>POST
+/_replication/promote</code> makes it the primary when the first is gone).
+<b>Writes, many tenants or regions:</b> a database for each tenant behind a
+router, each a file on a node (<a href="/docs/sharding">Tenants and
+sharding</a>; <a href="/docs/sharding-reference#deploying">Deploying it</a>
+has the systemd kit and runbook, and <a
+href="/docs/sharding-entry#global-entry">the global entry</a> one URL across
+regions). Neither is a second process over the same file.</p>
