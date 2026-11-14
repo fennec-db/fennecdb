@@ -10,10 +10,10 @@
 // one D-Bus call, `org.freedesktop.Secret.Service.ReadAlias("default")`,
 // bounded at a few seconds: an answer that is a collection means the store is
 // there; "/", asked again where gnome-keyring can say it of a connection too
-// new to it (askOne), means there is none to keep anything in; no answer, or an error,
-// means no store. The call opens no prompt (a locked keyring is unlocked by
-// libsecret when an item is read, with the user, unbounded) and is spoken here
-// over the bus's socket, so no program outside the app is needed.
+// new to it (askOne), means there is none to keep anything in; no answer, or
+// an error, means no store. The call opens no prompt (a locked keyring is
+// unlocked by libsecret when an item is read, with the user, unbounded) and is
+// spoken here over the bus's socket, so no program outside the app is needed.
 //
 // What D-Bus asks of a client is small for one call: a NUL byte and the SASL
 // EXTERNAL handshake (the uid, which the bus checks against the socket's

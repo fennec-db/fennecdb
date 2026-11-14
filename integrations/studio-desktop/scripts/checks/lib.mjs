@@ -285,16 +285,18 @@ function context() {
 
 /**
  * The first report line `pred` accepts, waiting for it as long as `ms`: an event is waited for, never slept to.
- * A command the app could not carry out (`cmd-failed`, testhooks.ts) fails the wait at once with
- * what the app said: the answer waited for cannot come after it.
+ * A command the app could not carry out while it waits (`cmd-failed`, testhooks.ts) fails the
+ * wait at once with what the app said: the answer waited for cannot come after it. One that
+ * failed before is an earlier step's, which that step answered for.
  */
 export async function waitFor(pred, ms = 30000, label = 'a report') {
   const t0 = now();
+  const from = lines().length;
   for (;;) {
     const all = lines();
     const hit = all.find(pred);
     if (hit) return hit;
-    const refused = all.find((l) => l.what === 'cmd-failed');
+    const refused = all.slice(from).find((l) => l.what === 'cmd-failed');
     if (refused) throw new Error(`waiting for ${label}: the app could not carry out ${refused.cmd}: ${refused.message}${context()}`);
     if (now() - t0 > ms) throw new Error(`timeout waiting for ${label}${context()}`);
     await sleep(40);
