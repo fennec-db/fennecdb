@@ -146,49 +146,74 @@ pub fn quick_vector(items: &[Value]) -> Option<Vec<f32>> {
 /// small for an `f32` is the nearest one, 0 at or under half the smallest
 /// subnormal, as pgvector's `strtof` reads it.
 ///
-/// One pass, no branch a component, and on aarch64 a pass over the
-/// components' top bytes ([`tops`]), the exact one ([`each_held`]) over the
-/// few past the last sixteen, or over the whole where a top byte reaches
-/// the bound's: a 768-dim vector's test is some 250 instructions by lldb's
-/// count -- 249 in `check_dim`, 243 in `near` -- where the exact pass alone
-/// was 801 (docs/design/crates.md#limits, *What it costs*). A vector a
-/// `put` is given is tested in its copy into the document ([`held_copy`]).
+/// One pass, no branch a component, and first, on aarch64 and x86-64, a
+/// pass over each component's top bits ([`tops`], [`halves`]): the exact
+/// one ([`each_held`]) reads the few past the last sixteen, or the whole
+/// where a component's top bits reach the bound's. A 768-dim vector's test
+/// is some 250 instructions on aarch64 by lldb's count -- 249 in
+/// `check_dim`, 243 in `near` -- where the exact pass alone was 801, and
+/// some 750 on x86-64 by the release build's assembly, where LLVM left the
+/// exact pass scalar, 8 instructions a component: 6 150
+/// (docs/design/crates.md#limits, *What it costs*). A vector a `put` is
+/// given is tested in its copy into the document ([`held_copy`]).
 #[inline]
 pub fn held(v: &[f32], prec: VecPrec) -> bool {
-    #[cfg(all(
-        target_arch = "aarch64",
-        target_feature = "neon",
-        target_endian = "little"
+    #[cfg(any(
+        all(
+            target_arch = "aarch64",
+            target_feature = "neon",
+            target_endian = "little"
+        ),
+        target_arch = "x86_64"
     ))]
     {
         let (blocks, rest) = v.as_chunks::<16>();
-        // SAFETY: the build has NEON, which is all `tops::reach` requires.
-        if !unsafe { tops::reach(blocks, prec) } {
+        // SAFETY: the build has NEON on aarch64 and SSE2 on x86-64, which
+        // is all `lanes::reach` requires.
+        if !unsafe { lanes::reach(blocks, prec) } {
             return each_held(rest, prec);
         }
     }
     each_held(v, prec)
 }
 
+// The pass over the components' top bits, where the build has one: x86-64's
+// top halves, aarch64's top bytes.
+#[cfg(target_arch = "x86_64")]
+use halves as lanes;
+#[cfg(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_endian = "little"
+))]
+use tops as lanes;
+
 /// `src` copied where every component is one a vector stored as `prec`
 /// holds ([`held`]), `None` where one is not: how a `put` copies a vector
 /// it is given into the document (`engine::held_member`), where the copy
-/// was a clone and the test a pass of its own after it. On aarch64 the copy
-/// is the test's pass ([`tops::copy_reach`]): a 768-dim vector's copy and
-/// test are 425 instructions, where the clone's `memmove` alone was 590
-/// and the test 249 more. Elsewhere the test, then the copy.
+/// was a clone and the test a pass of its own after it. On aarch64 and
+/// x86-64 the copy is the test's pass ([`tops::copy_reach`],
+/// [`halves::copy_reach`]): a 768-dim vector's copy and test are 425
+/// instructions on aarch64, where the clone's `memmove` alone was 590 and
+/// the test 249 more, and 978 on x86-64, where the test alone was 6 150 and
+/// the clone's `memcpy` 384 turns of musl's `rep movsq`. Elsewhere the
+/// test, then the copy.
 pub fn held_copy(src: &[f32], prec: VecPrec) -> Option<Vec<f32>> {
-    #[cfg(all(
-        target_arch = "aarch64",
-        target_feature = "neon",
-        target_endian = "little"
+    #[cfg(any(
+        all(
+            target_arch = "aarch64",
+            target_feature = "neon",
+            target_endian = "little"
+        ),
+        target_arch = "x86_64"
     ))]
     {
         let mut out = Vec::with_capacity(src.len());
         let (blocks, rest) = src.as_chunks::<16>();
         let (into, past) = out.spare_capacity_mut()[..src.len()].as_chunks_mut::<16>();
-        // SAFETY: the build has NEON, which is all `tops::copy_reach` requires.
-        let reach = unsafe { tops::copy_reach(blocks, into, prec) };
+        // SAFETY: the build has NEON on aarch64 and SSE2 on x86-64, which
+        // is all `lanes::copy_reach` requires.
+        let reach = unsafe { lanes::copy_reach(blocks, into, prec) };
         for (o, x) in past.iter_mut().zip(rest) {
             o.write(*x);
         }
@@ -201,10 +226,13 @@ pub fn held_copy(src: &[f32], prec: VecPrec) -> Option<Vec<f32>> {
         };
         held.then_some(out)
     }
-    #[cfg(not(all(
-        target_arch = "aarch64",
-        target_feature = "neon",
-        target_endian = "little"
+    #[cfg(not(any(
+        all(
+            target_arch = "aarch64",
+            target_feature = "neon",
+            target_endian = "little"
+        ),
+        target_arch = "x86_64"
     )))]
     {
         held(src, prec).then(|| src.to_vec())
@@ -327,13 +355,112 @@ mod tops {
     }
 }
 
+/// The components' top halves, on x86-64: whether one reaches the bound's,
+/// so that [`each_held`] must say whether its component is held -- under
+/// `f32` exactly where it is an infinity or a `NaN`, under `f16` from
+/// 65 280. A top half is the sign, the exponent and seven bits of the
+/// significand; one AND clears the sign and zeroes the lower half, so the
+/// largest of a register's eight 16-bit lanes is its four components'
+/// largest top half: 15 instructions for sixteen components, loads and
+/// all, where LLVM left the exact pass scalar, 128. SSE2 is every
+/// x86-64's, and the release builds ask for no more (no `target-cpu`). A
+/// test holds it to the exact pass:
+/// `held_and_its_copy_answer_as_each_component_does`.
+#[cfg(target_arch = "x86_64")]
+mod halves {
+    use super::VecPrec;
+    use core::arch::x86_64::*;
+    use std::mem::MaybeUninit;
+
+    /// Whether a top half of `blocks` reaches the bound's.
+    #[target_feature(enable = "sse2")]
+    pub(super) fn reach(blocks: &[[f32; 16]], prec: VecPrec) -> bool {
+        let mut most = _mm_setzero_si128();
+        for b in blocks {
+            most = _mm_max_epi16(most, block(load(b)));
+        }
+        reaches(most, prec)
+    }
+
+    /// [`reach`], `blocks` copied into `into` in the same pass, each
+    /// register stored as it was loaded: 19 instructions for sixteen
+    /// components, where the exact pass took 128 and the clone's `memcpy`
+    /// 8 turns of musl's `rep movsq`, 8 bytes a turn.
+    #[target_feature(enable = "sse2")]
+    pub(super) fn copy_reach(
+        blocks: &[[f32; 16]],
+        into: &mut [[MaybeUninit<f32>; 16]],
+        prec: VecPrec,
+    ) -> bool {
+        let mut most = _mm_setzero_si128();
+        for (b, o) in blocks.iter().zip(into) {
+            let [w, x, y, z] = load(b);
+            let p = o.as_mut_ptr().cast::<__m128i>();
+            // SAFETY: sixteen places of an `f32` are the 64 bytes four
+            // 16-byte stores write, at any alignment.
+            unsafe {
+                _mm_storeu_si128(p, w);
+                _mm_storeu_si128(p.add(1), x);
+                _mm_storeu_si128(p.add(2), y);
+                _mm_storeu_si128(p.add(3), z);
+            }
+            most = _mm_max_epi16(most, block([w, x, y, z]));
+        }
+        reaches(most, prec)
+    }
+
+    /// A block's sixteen components, four to a register.
+    #[target_feature(enable = "sse2")]
+    #[inline]
+    fn load(b: &[f32; 16]) -> [__m128i; 4] {
+        let p = b.as_ptr().cast::<__m128i>();
+        // SAFETY: sixteen `f32`s are the 64 bytes four 16-byte loads read,
+        // at any alignment.
+        unsafe {
+            [
+                _mm_loadu_si128(p),
+                _mm_loadu_si128(p.add(1)),
+                _mm_loadu_si128(p.add(2)),
+                _mm_loadu_si128(p.add(3)),
+            ]
+        }
+    }
+
+    /// The largest top half of a block's components, in one of the eight
+    /// lanes: the AND leaves each component's upper lane its top half, the
+    /// sign cleared, and its lower lane 0, so a signed maximum is the
+    /// unsigned one SSE2 lacks.
+    #[target_feature(enable = "sse2")]
+    #[inline]
+    fn block([w, x, y, z]: [__m128i; 4]) -> __m128i {
+        let top = _mm_set1_epi32(0x7fff_0000);
+        let (w, x) = (_mm_and_si128(w, top), _mm_and_si128(x, top));
+        let (y, z) = (_mm_and_si128(y, top), _mm_and_si128(z, top));
+        _mm_max_epi16(_mm_max_epi16(w, x), _mm_max_epi16(y, z))
+    }
+
+    /// Whether a lane of `most` reached the bound's top half: `0x7f80`, the
+    /// exponent of an infinity and a `NaN`, under `f32`; `0x477f` under
+    /// `f16`, whose bound 65 520 is `0x477ff000`.
+    #[target_feature(enable = "sse2")]
+    #[inline]
+    fn reaches(most: __m128i, prec: VecPrec) -> bool {
+        let top: i16 = match prec {
+            VecPrec::F32 => 0x7f80,
+            VecPrec::F16 => 0x477f,
+        };
+        _mm_movemask_epi8(_mm_cmpgt_epi16(most, _mm_set1_epi16(top - 1))) != 0
+    }
+}
+
 /// [`held`] by each component's bits: those under the sign order as the
 /// magnitudes do, a `NaN`'s above an infinity's, so taken from the bound's
 /// bits less one they borrow into the top bit exactly where they reach it,
-/// and the pass ORs them. LLVM makes the loop four lanes at a time, 801
-/// instructions a 768-dim vector on aarch64. The browser module, built for
-/// size, vectorises nothing on its own, and there the lanes are written
-/// out, as `vector::simd` writes the distances.
+/// and the pass ORs them. LLVM makes the loop four lanes at a time on
+/// aarch64, 801 instructions a 768-dim vector, and left it scalar on
+/// x86-64, 8 a component. The browser module, built for size, vectorises
+/// nothing on its own, and there the lanes are written out, as
+/// `vector::simd` writes the distances.
 #[inline]
 fn each_held(v: &[f32], prec: VecPrec) -> bool {
     let below = match prec {
@@ -1834,6 +1961,8 @@ mod tests {
             65_520.0,
             under(65_520.0),
             65_504.0,
+            65_280.0, // its top half is 0x477f
+            under(65_280.0),
             32_768.0, // 2^15: its top byte is 0x47
             under(32_768.0),
             f32::from_bits(1),

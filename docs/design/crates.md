@@ -268,9 +268,11 @@ half its smallest subnormal.
 (`each_held`) reads each component's bits: those under the sign order as
 the magnitudes do, a `NaN`'s above an infinity's, so taken from the bound's
 bits less one they borrow into the top bit exactly where they reach it,
-and the pass ORs them. LLVM makes the loop four lanes at a time, 16
-instructions for 16 components on aarch64. The browser module, built for
-size, vectorises nothing on its own, and the loop ran there scalar, 18 wasm
+and the pass ORs them. LLVM makes the loop four lanes at a time on
+aarch64, 16 instructions for 16 components; on x86-64, inlined where a
+write and `near` call it, it left it scalar, 8 instructions a component
+(the release build's assembly). The browser module, built for size,
+vectorises nothing on its own, and the loop ran there scalar, 18 wasm
 instructions a component; written out in lanes it is 21 for four -- one
 `v128.load` each, where lanes built from the elements, as `vector::simd`
 builds them, took a load a lane. On aarch64 a pass over the components'
@@ -278,32 +280,40 @@ top bytes comes first (`value::tops`): a top byte is the sign and the top
 seven bits of the exponent, a de-interleaving load (`ld4`) puts sixteen
 components' in a register, and a signed and an unsigned maximum keep the
 largest of a positive's and of a negative's -- 18 instructions for 64
-components, four blocks a turn, where a block a turn took 20. Only where
-one reaches the bound's -- an `f32` from 2^127 (1.7×10^38), every infinity
-and `NaN` among them, an `f16` from 2^15 -- does the exact pass read the
-whole vector; otherwise it reads the few components past the last sixteen.
-`held_and_its_copy_answer_as_each_component_does` holds both passes to
-each component's own answer, at every place of every length to 70 and at
-each block's ends past it.
+components, four blocks a turn, where a block a turn took 20. On x86-64
+the pass is over each component's top half (`value::halves`), in SSE2,
+which every x86-64 has and the release builds ask no more than: one AND
+clears the sign and the lower 16 bits, and a signed maximum of 16-bit
+lanes keeps the largest -- 15 instructions for 16 components, loads and
+all. Only where one reaches the bound's -- on aarch64 an `f32` from 2^127
+(1.7×10^38), every infinity and `NaN` among them, an `f16` from 2^15; on
+x86-64 an infinity or a `NaN`, exactly, and an `f16` from 65 280 -- does
+the exact pass read the whole vector; otherwise it reads the few
+components past the last sixteen.
+`held_and_its_copy_answer_as_each_component_does` holds each pass to each
+component's own answer, at every place of every length to 70 and at each
+block's ends past it.
 
 A `put` tests a vector it is given in its copy into the document
 (`engine::held_member`, `value::held_copy`): a literal's or a parameter's
 value that a vector field of its length takes (`build_docs`), and a member
 of a page of documents (`document_of`). `eval` cloned it there, a
-`memmove`, and `coerce` read it again. On aarch64 the copy is the test's
-pass -- each block loaded and stored as it came, and its top bytes gathered
-by one table lookup over its four registers (`tbl`), 31 instructions for
-64 components; loaded de-interleaved and stored so, LLVM made the pair a
-plain copy and gathered the top bytes in three shuffles a block, 40 --
-and elsewhere the test runs, then the copy. A vector the copy does not
-pass goes the way every value goes, which refuses it naming the element,
-and a literal or a parameter a `put`'s document names is read where it is,
-`eval`'s call spared. The browser module keeps the one way, `eval` and
-`coerce`: its bytes are what it is held to. A `set`, an upsert's `else
-set`, a named statement's argument, an expression's vector, an import and
-`near`'s and `rerank`'s query vector (`engine::near_vector`) take the test
-alone: `near`'s is 243 instructions of a request of 4.36 million, and its
-copy taking it would spare some 400 more.
+`memmove`, and `coerce` read it again. On aarch64 and x86-64 the copy is
+the test's pass. On aarch64 each block is loaded and stored as it came, and
+its top bytes gathered by one table lookup over its four registers (`tbl`),
+31 instructions for 64 components; loaded de-interleaved and stored so,
+LLVM made the pair a plain copy and gathered the top bytes in three
+shuffles a block, 40. On x86-64 each register is stored as it was loaded,
+19 instructions for 16 components. Elsewhere the test runs, then the copy.
+A vector the copy does not pass goes the way every value goes, which
+refuses it naming the element, and a literal or a parameter a `put`'s
+document names is read where it is, `eval`'s call spared. The browser
+module keeps the one way, `eval` and `coerce`: its bytes are what it is
+held to. A `set`, an upsert's `else set`, a named statement's argument, an
+expression's vector, an import and `near`'s and `rerank`'s query vector
+(`engine::near_vector`) take the test alone: `near`'s is 243 instructions
+on aarch64, of a request of 4.36 million, and its copy taking it would
+spare some 400 more.
 
 No pass the readers make could take it: they make a vector's `f32`s before
 any field is known -- a list read the quick way is a vector until it binds,
@@ -317,40 +327,54 @@ vector is not checked (`Value::key_as`): `=` finds a row an earlier build
 stored with an infinity, as the scan does.
 
 *What it costs.* By lldb's count of one call (`tools/instr/trace.py`,
-aarch64, a 768-dimension vector), the exact pass alone was 801
-instructions where a write took it (`check_dim`, 21 on main, 822 with it)
-and 800 where `near` did (`near_vector`, 32, then 832); with the top bytes
-first it is 249 and 243 (`check_dim` 270, `near_vector` 275). A `put` of
-the vector handed over as `f32`s copies and tests it in 422 instructions
-(`held_copy`) and no longer calls `eval`, `set_field`, `coerce_as` or
-`check_dim` for it, nor `memmove`s it: the request's own code and the
-system's are 37 700 instructions, where main's are 38 122 and the exact
-pass's were 38 977 -- the allocator's share apart, which follows the
-binary's identity (`benchmarks.md#instruction-counts`). A document of
-scalars is read where it is too, `eval`'s calls spared: of a `put` of
-three parameters, the own code is 114 instructions fewer. Counted a request
-over four identities a build, five runs each, every run started and ended
-under a 1-minute load of 2.6, the scalar `put`'s of 4.8
-(`tools/instr/compare.py`, a program running
-each as the native library does -- `fennec_abi::prepare`, `exact`,
-`execute` or `query`, `answer` -- over a database in memory): a `put` of
-one handed over as `f32`s is 55 715 instructions, 529 fewer than main's
-56 244 (-0.94%, SE 89), where the exact pass made it 807 more (+1.44%);
-one read from JSON 231 057, 409 fewer than 231 465 (-0.18%, SE 52), where
-it made it 944 more (+0.41%); a `put` of three scalars 27 368, 134 fewer
-than 27 503 (-0.49%, SE 50); a `near` over 2 000 vectors under
-`@hnsw(cosine)`, ten rows answered with their vectors, 4 363 748, 440 more
-than 4 363 309 (+0.01%, SE 83), where it made it 886 more (+0.02%): the
-test's 243 is all the program's own code moved by (lldb's count of a
-`near` over 200 of them, the ids alone: `near_vector` +243, `run_near`
-+1), and the rest is the allocator's, which four identities a build
-average but do not cancel. In the module `held` is 217 bytes, out of
-line, the two refusals 280 (`unheld`, `query_unheld`) and their words 216
-of data: 906 bytes raw, 0.3 to 0.5 KB under gzip and brotli, in each build
-(`make wasm`, `wasm-lite`, `wasm-min`). The top bytes and the copy are
-aarch64's and a native build's: the module kept the exact pass, 8 bytes
-smaller in each build since, its gzip and brotli moved by the layout alone
-(-1 to +168 bytes, under the 0.3 KB `size_report.py` reads as that).
+aarch64, a 768-dimension vector), the exact pass alone was 801 instructions
+where a write took it (`check_dim`, 21 on main, 822 with it) and 800 where
+`near` did (`near_vector`, 32, then 832); with the top bytes first it is
+249 and 243 (`check_dim` 270, `near_vector` 275). A `put` of the vector
+handed over as `f32`s copies and tests it in 422 instructions (`held_copy`)
+and no longer calls `eval`, `set_field`, `coerce_as` or `check_dim` for it,
+nor `memmove`s it: the request's own code and the system's are 37 700
+instructions, where main's are 38 122 and the exact pass's were 38 977 --
+the allocator's share apart, which follows the binary's identity
+(`benchmarks.md#instruction-counts`). A document of scalars is read where
+it is too, `eval`'s calls spared: of a `put` of three parameters, the own
+code is 114 instructions fewer. Counted a request over four identities a
+build, five runs each, every run started and ended under a 1-minute load
+between 1.9 and 2.6 (`tools/instr/compare.py`, a program running each as
+the native library does -- `fennec_abi::prepare`, `exact`, `execute` or
+`query`, `answer` -- over a database in memory): a `put` of one handed over
+as `f32`s is 55 764 instructions, 321 fewer than main's 56 084 (-0.57%,
+SE 50), where the exact pass made it 869 more (+1.55%); one read from JSON
+231 162, 170 fewer than 231 332 (-0.07%, SE 65), where it made it 938 more
+(+0.41%); a `put` of three scalars 27 388, 54 fewer than 27 442 (-0.20%,
+SE 69); a `near` over 2 000 vectors under `@hnsw(cosine)`, ten rows
+answered with their vectors, 4 363 599, 147 more than 4 363 452 (SE 96),
+where it made it 860 more (+0.02%). Of a `near` the program's own code
+moved by the test's 243 alone (lldb's count of one over 200 vectors, the
+ids alone: `near_vector` +243, `run_near` +1); the allocator's share, which
+four identities a build average but do not cancel, moves the rest either
+way. In the module `held` is 217 bytes, out of line, the two refusals 280
+(`unheld`, `query_unheld`) and their words 216 of data: 906 bytes raw, 0.3
+to 0.5 KB under gzip and brotli, in each build (`make wasm`, `wasm-lite`,
+`wasm-min`). The top bytes, the top halves and the copy are a native
+build's: the module kept the exact pass, 8 bytes smaller in each build
+since, its gzip and brotli moved by the layout alone (-132 to +120 bytes,
+under the 0.3 KB `size_report.py` reads as that).
+
+On x86-64 the release build's assembly counts it
+(`x86_64-unknown-linux-musl`, `--emit asm`, each loop's instructions times
+its turns, a 768-dimension vector). LLVM left the exact pass scalar where a
+write and `near` inline it, 8 instructions a component: `check_dim` went
+from 20 instructions on main to 6 178, and `near`'s test was 6 151. With
+the top halves first `check_dim` is 773 and `near`'s test 735; a `put`'s
+copy and test (`held_copy`) is 978, where main's clone copied the vector in
+384 turns of musl's `rep movsq` and the exact pass then took 6 158 to test
+it. The perf gate #619 proposes counts that build under callgrind: its
+`core-near` and `core-near-filtered` meet `near`'s test over 64 dimensions
+-- 4 turns of 15 instructions, where the exact pass took 512 -- and none of
+its workloads writes a vector. AVX2 would take 32 bytes a register, half
+the turns, behind a check of the CPU at the call; the release builds ask
+for SSE2 alone.
 
 *What a file holds.* A vector an earlier build stored with an infinity or a
 `NaN` -- `1e39` read as an `f32`, a binding's bits, or a hook's, whose

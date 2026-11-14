@@ -15816,8 +15816,9 @@ fn build_docs(
 /// The value `set_field` makes of `v` for the field `k`, where `v` is a
 /// vector a vector field of its length takes and each of its components is
 /// one the field holds: copied, its components tested in the copy
-/// (`value::held_copy`). On aarch64 a 768-dim vector's copy and test so are
-/// 425 instructions, where the clone's `memmove` alone was 590
+/// (`value::held_copy`). A 768-dim vector's copy and test so are 425
+/// instructions on aarch64, where the clone's `memmove` alone was 590, and
+/// 978 on x86-64, where the test alone was 6 150
 /// (docs/design/crates.md#limits, *What it costs*). `None` for any other --
 /// another kind of value, a field of another type or length, `id` and a
 /// path (no field is named either), a component the field does not hold --
