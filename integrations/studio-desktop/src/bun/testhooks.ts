@@ -117,7 +117,10 @@ export function pagePreload(origin: string): string {
 /** Every navigation a window is asked to make, and what was decided: the rules a window is held to are checked by these. */
 function watchNavigation(view: BrowserView, key: string) {
 	// The commit too: a page that never loads is told apart from one that loaded and never drew.
-	for (const name of ["will-navigate", "did-commit-navigation", "did-navigate", "new-window-open"]) {
+	// And every step of a load the native side says (WebKitGTK's load-changed, as Electrobun 2.0.4
+	// names it on Linux), and the document's own `load` (the preload's dom-ready, every system):
+	// where a load stopped, which did-navigate alone did not say.
+	for (const name of ["will-navigate", "load-started", "load-committed", "did-commit-navigation", "did-navigate", "load-finished", "dom-ready", "new-window-open"]) {
 		(view as any).on(name, (e: any) => report(name, { key, data: JSON.stringify(e?.data ?? e).slice(0, 200) }));
 	}
 }

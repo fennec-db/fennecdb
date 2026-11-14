@@ -615,7 +615,9 @@ export function freshState() {
 }
 
 /**
- * What a failed check leaves beside its output, in logs/<name>.*: the unified
+ * What a failed check leaves beside its output, in logs/<name>.*: every fact
+ * the app reported (`<name>.report.jsonl`, each window's load step by step,
+ * on every system), the unified
  * log of the app and of WebKit's processes since `since` (WebKit logs each
  * load's steps in the app's own `bun`: the page made, the web process
  * launched, the policy decided, the commit), a sample of the app while it
@@ -629,6 +631,9 @@ export function freshState() {
  * the web engine's (WebKitGTK's helpers, WebView2's msedgewebview2).
  */
 export function keepEvidence(name, since) {
+  // Every fact the app reported, which a failure prints the last 12 of: the next check's start
+  // empties the file, and a window's load is told by its steps from the open on.
+  if (existsSync(REPORT)) copyFileSync(REPORT, `${D}/logs/${name}.report.jsonl`);
   if (!MAC) {
     const engine = procs().filter((p) => /WebKit(Web|Network)Process|msedgewebview2/i.test(p.command));
     writeFileSync(`${D}/logs/${name}.processes.txt`, `the app's, ${new Date().toISOString()} (the check began ${new Date(since).toISOString()}):\n${describe(mine())}\n\nthe web engine's:\n${describe(engine)}\n`);
