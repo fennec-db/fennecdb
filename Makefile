@@ -24,7 +24,7 @@ SCHEMA ?= 1
 STUDIO_SERVER ?=
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js upgrade-check openapi-lint openapi-check openapi-golden sync-scenarios-check fennecql-corpus builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-desktop studio-desktop-dist studio-desktop-test studio-highlight statements-bench gzip-bench replay-bench hook-bench instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench lists-bench stress-test
+.PHONY: all test test-js upgrade-check openapi-lint openapi-check openapi-golden sync-scenarios-check fennecql-corpus builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test browser-test studio-desktop studio-desktop-dist studio-desktop-test studio-highlight statements-bench gzip-bench replay-bench hook-bench instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench lists-bench stress-test
 	python-test go-test dotnet-test languages-test examples-test recipes-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench entry-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down pgvector-tls docker docker-run docker-compact docker-down grafana-check deploy-check drill chaos memory clean \
@@ -411,6 +411,17 @@ packages: wasm
 ## One version wherever a release reads it: make version V=0.1.5
 version:
 	@python3 tools/version.py $(or $(V),$(error V=<version> is required))
+
+## A page's database kept in real browsers (web/browser/run.mjs): persist,
+## restore and openFile against the engine's own IndexedDB, WebCrypto and
+## origin private file system, the page reloaded in the middle of a
+## persist's transaction and at each step of a file's flush, a quota
+## passed. BROWSERS="chrome firefox safari" (Chrome alone by default):
+## Chrome and Firefox through puppeteer-core (CHROME_PATH, FIREFOX_PATH),
+## Safari through safaridriver once `sudo safaridriver --enable` allowed it
+browser-test: wasm
+	@if [ "$(BROWSERS)" != safari ]; then cd web/browser && npm ci --no-audit --no-fund --loglevel=error; fi
+	node web/browser/run.mjs $(or $(BROWSERS),chrome)
 
 ## What keeping a database costs a page: IndexedDB (persist) against an
 ## OPFS file (openFile), 32 MB, in a worker of headless Chrome --

@@ -25,10 +25,17 @@ class KeyRange {
   }
 }
 
-/** One store's records, and every transaction that wrote to them. */
+/**
+ * One store's records, every transaction that wrote to them, and the
+ * connections left open. A transaction's writes land as it commits; with
+ * `refuse` set to an error's name, the next one that writes is aborted
+ * there instead, its writes gone, as a real one past its quota is: by
+ * `abort` alone.
+ */
 function fakeIndexedDB() {
   const records = new Map();
   const log = [];
+  let connections = 0;
   const request = (fn) => {
     const req = {};
     queueMicrotask(() => {
@@ -39,12 +46,12 @@ function fakeIndexedDB() {
   };
   const store = (writes) => ({
     put(value, key) {
-      writes.push(['put', key, value.length ?? 0]);
-      records.set(key, value);
+      writes.push(['put', key, value.length ?? 0, () => records.set(key, value)]);
     },
     delete(range) {
-      writes.push(['delete', `${range.lo}..`]);
-      for (const k of [...records.keys()]) if (range.has(k)) records.delete(k);
+      writes.push(['delete', `${range.lo}..`, 0, () => {
+        for (const k of [...records.keys()]) if (range.has(k)) records.delete(k);
+      }]);
     },
     get: (key) => request(() => records.get(key)),
     getAll: (range) =>
@@ -55,29 +62,45 @@ function fakeIndexedDB() {
           .map((k) => records.get(k)),
       ),
   });
-  const db = {
-    transaction() {
-      const writes = [];
-      const tx = { objectStore: () => store(writes) };
-      setTimeout(() => {
-        if (writes.length) log.push(writes);
-        tx.oncomplete?.();
-      });
-      return tx;
-    },
-  };
-  return {
+  const idb = {
     records,
     log,
+    refuse: null,
+    /** Connections opened and not closed. */
+    get connections() {
+      return connections;
+    },
     open() {
       const req = {};
       queueMicrotask(() => {
+        connections++;
         req.result = db;
         req.onsuccess?.();
       });
       return req;
     },
   };
+  const db = {
+    transaction() {
+      const writes = [];
+      const tx = { objectStore: () => store(writes) };
+      setTimeout(() => {
+        if (writes.length && idb.refuse) {
+          tx.error = Object.assign(new Error(`refused: ${idb.refuse}`), { name: idb.refuse });
+          idb.refuse = null;
+          return tx.onabort?.();
+        }
+        for (const w of writes) w.pop()();
+        if (writes.length) log.push(writes);
+        tx.oncomplete?.();
+      });
+      return tx;
+    },
+    close() {
+      connections--;
+    },
+  };
+  return idb;
 }
 
 test('persist stores the image once, then only what was written since', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
@@ -140,6 +163,59 @@ test('persist stores the image once, then only what was written since', { skip: 
   const fourth = await Fennec.open(wasm);
   await restore(fourth, 'k');
   assert.deepEqual(rows(fourth), rows(third));
+});
+
+// Left open, each call's connection stayed until the collector came for it,
+// and a delete of the database -- or another page's upgrade of it -- waited
+// on every one (web/browser/ found it in Chrome).
+test('persist, restore and the state calls close the connections they open', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const idb = fakeIndexedDB();
+  globalThis.indexedDB = idb;
+  globalThis.IDBKeyRange = KeyRange;
+  const { Fennec, persist, restore, putState, getState } = await import('./fennec.js');
+  const db = await Fennec.open(wasm);
+  db.run('create collection t (n int)');
+  await persist(db, 'c');
+  db.run('put t {n: 1}');
+  await persist(db, 'c');
+  assert.equal(await persist(db, 'c'), 0, 'nothing written, nothing stored');
+  assert.equal(await restore(await Fennec.open(wasm), 'c'), true);
+  assert.equal(await restore(await Fennec.open(wasm), 'none'), false);
+  await putState('c-state', { at: 1 });
+  assert.deepEqual(await getState('c-state'), { at: 1 });
+  assert.equal(idb.connections, 0);
+});
+
+// A transaction past its quota is refused at its commit, by `abort` alone:
+// `putState`, waiting on `error` and `complete`, never answered (Chrome,
+// web/browser/).
+test('a write refused at its commit is refused to its caller, what was stored standing', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)', timeout: 10_000 }, async () => {
+  const idb = fakeIndexedDB();
+  globalThis.indexedDB = idb;
+  globalThis.IDBKeyRange = KeyRange;
+  const { Fennec, persist, restore, putState, getState } = await import('./fennec.js');
+  const db = await Fennec.open(wasm);
+  db.run('create collection t (n int)');
+  db.run('put t {n: 1}');
+  await persist(db, 'q');
+  idb.refuse = 'QuotaExceededError';
+  await assert.rejects(putState('q-state', 'x'), { name: 'QuotaExceededError' });
+  assert.equal(await getState('q-state'), undefined);
+  db.run('put t {n: 2}');
+  idb.refuse = 'QuotaExceededError';
+  await assert.rejects(persist(db, 'q'), { name: 'QuotaExceededError' });
+  const ns = (d) => d.rows('get t select n order n').map((r) => r.n);
+  const back = await Fennec.open(wasm);
+  await restore(back, 'q');
+  assert.deepEqual(ns(back), [1], 'what was stored stands');
+  // The refused chunk's writes are nowhere else: the next persist stores
+  // the image whole.
+  await persist(db, 'q');
+  assert.deepEqual(idb.log.at(-1).map((w) => w[0]), ['put', 'delete']);
+  const again = await Fennec.open(wasm);
+  await restore(again, 'q');
+  assert.deepEqual(ns(again), [1, 2]);
+  assert.equal(idb.connections, 0);
 });
 
 test('drain hands over frames, or an image after a rewrite', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
