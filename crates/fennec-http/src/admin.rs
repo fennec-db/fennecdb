@@ -81,17 +81,40 @@ use crate::instance;
 use crate::tenants::{Kept, Refused, Tenants};
 use crate::{crypto::ct_eq, Config};
 
-pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
-    let Some(token) = &cfg.admin_token else {
-        return Response::error(404, "the admin endpoints are off (--admin-token)");
-    };
+/// Whether `req` carries the admin `token`, compared in constant time.
+pub(crate) fn carries(req: &Request, token: &str) -> bool {
     let given = req
         .header("authorization")
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("");
-    if !ct_eq(given.as_bytes(), token.as_bytes()) {
-        return Response::error(401, "invalid or missing admin token")
-            .header("WWW-Authenticate", "Bearer");
+    ct_eq(given.as_bytes(), token.as_bytes())
+}
+
+/// The answer to a request under `/_admin/` without the admin token.
+pub(crate) fn refused() -> Response {
+    Response::error(401, "invalid or missing admin token").header("WWW-Authenticate", "Bearer")
+}
+
+/// Whether `req` is an image's import, `PUT /_admin/tenants/<t>/file`, as
+/// [`handle`] routes it, read off its path with nothing allocated: the one
+/// request a node reads past `max_body`, asked of its head before its body
+/// is read (`body_ceiling`).
+pub(crate) fn is_import(req: &Request) -> bool {
+    let mut segs = req.path.split('/').filter(|s| !s.is_empty());
+    req.method == Method::Put
+        && segs.next() == Some("_admin")
+        && segs.next() == Some("tenants")
+        && segs.next().is_some()
+        && segs.next() == Some("file")
+        && segs.next().is_none()
+}
+
+pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
+    let Some(token) = &cfg.admin_token else {
+        return Response::error(404, "the admin endpoints are off (--admin-token)");
+    };
+    if !carries(req, token) {
+        return refused();
     }
     crate::audit::verified();
 

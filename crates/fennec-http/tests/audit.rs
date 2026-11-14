@@ -70,6 +70,29 @@ fn ask(port: u16, method: &str, target: &str, headers: &str, body: &str) -> (u16
     (out[9..12].parse().unwrap(), out)
 }
 
+/// An image's import with `headers`, its head declaring `declared` bytes
+/// of body of which only `sent` goes out: its status and the whole
+/// answer, read with the rest of the body never sent -- a node reading it
+/// would wait for the rest, and no answer would come.
+fn unread_import(port: u16, headers: &str, declared: usize, sent: &str) -> (u16, String) {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    write!(
+        s,
+        "PUT /_admin/tenants/copy/file HTTP/1.1\r\nHost: localhost\r\n{headers}\
+         Content-Length: {declared}\r\n\r\n"
+    )
+    .unwrap();
+    // A refusal from the head may end the connection under this write.
+    let _ = s.write_all(sent.as_bytes());
+    let mut out = String::new();
+    let _ = s.read_to_string(&mut out);
+    match out.get(9..12).and_then(|c| c.parse().ok()) {
+        Some(status) => (status, out),
+        None => panic!("no answer while the body was unsent: {out:?}"),
+    }
+}
+
 /// A case: a request's method, target, headers and body, and its status.
 type Case<'a> = (&'a str, &'a str, &'a str, &'a str, u16);
 
@@ -499,8 +522,10 @@ fn a_tenant_node_starts_a_count_again_on_a_token_it_verified_alone() {
             token: Some("data".into()),
             access: Some(Arc::clone(&access)),
             cors: Some("*".into()),
-            // A body past this and within the import's ceiling is read
-            // whole, and refused before its token is looked at.
+            // A body past this is refused (413) from its head, before its
+            // token is looked at: only an image's import carrying the
+            // admin token is read to the import's ceiling, and one
+            // carrying a guess is refused (401) from its head.
             max_body: 1024,
             max_import: 1 << 20,
             ..Config::default()
@@ -539,13 +564,26 @@ fn a_tenant_node_starts_a_count_again_on_a_token_it_verified_alone() {
         held,
     );
     verify_nothing(bare, &[("GET", "/_admin/stats", "", "", 404)], held);
-
     let vera = access.mint(r#"{"sub":"vera","tenant":"acme"}"#).unwrap();
     let elsewhere = access.mint(r#"{"sub":"vera","tenant":"beta"}"#).unwrap();
     let (vera, elsewhere) = (
         format!("Authorization: Bearer {vera}\r\n"),
         format!("Authorization: Bearer {elsewhere}\r\n"),
     );
+    // An import carrying anything but the admin token -- a guess, the
+    // node's data token, a tenant's JWT, the last two good where they
+    // belong -- is a refusal of its token as every other: answered from
+    // its head, its body unread, waited out, and counted, each next
+    // refusal waiting twice as long. Its head declares the import's
+    // ceiling and `big` of it is sent: a node reading the body would wait
+    // for the rest, and no answer would come.
+    let mut wait = held;
+    for auth in [GUESSED, data, vera.as_str()] {
+        let (got, out) = unread_import(port, auth, 1 << 20, &big);
+        assert_eq!(got, 401, "{auth}{out}");
+        wait *= 2;
+        assert_eq!(would_wait(LOCAL), wait, "{auth}");
+    }
     let adm = "Authorization: Bearer adm\r\n";
     verify(
         port,
@@ -557,6 +595,9 @@ fn a_tenant_node_starts_a_count_again_on_a_token_it_verified_alone() {
             ("GET", "/t/acme/notes", &elsewhere, "", 403),
             ("GET", "/_admin/stats", adm, "", 200),
             ("GET", "/_metrics", adm, "", 200),
+            // Carrying the admin token, an import is read past
+            // `max_body`, and refused as no image.
+            ("PUT", "/_admin/tenants/copy/file", adm, &big, 400),
         ],
     );
     let _ = std::fs::remove_dir_all(&dir);

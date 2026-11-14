@@ -43,8 +43,9 @@ In scope, and worth reporting:
   and CI refuses `==` on one by its name (`tools/secret_eq_check.py`); a
   regression there is a bug worth reporting.
 - Allocation driven by an unauthenticated peer. A request's head is capped and
-  its body bounded by `max_body` before it is read; a path around either is a
-  vulnerability.
+  its body bounded by `max_body` before it is read -- a tenant node reads past
+  it an image's import alone, and only once its head carries the admin token;
+  a path around either is a vulnerability.
 - A crafted `.fennec` file that does more than fail to open — the reader is
   expected to reject a damaged or hostile file, not to be exploited by it.
 - Query text reaching an identifier or a value without validation, from any

@@ -90,7 +90,8 @@ impl Request {
 /// A parse error: maps directly onto an HTTP status.
 pub struct BadRequest(pub u16, pub String);
 
-/// Reads a request. `Ok(None)` means the connection closed cleanly.
+/// Reads a request, its body held to `max_body`. `Ok(None)` means the
+/// connection closed cleanly.
 ///
 /// Generic over the reader for the tests' sake (a reader handing out a byte
 /// a read); the server and the router read a `BufReader<TcpStream>`, the
@@ -99,6 +100,68 @@ pub fn read_request<R: BufRead>(
     reader: &mut R,
     max_body: usize,
 ) -> Result<Option<Request>, BadRequest> {
+    match read_head(reader)? {
+        Some(head) => head.body(reader, max_body).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// A request read as far as its head ([`read_head`]): its body, if any,
+/// still in the reader, for [`Head::body`] to read to the ceiling the head
+/// is judged to earn -- on a tenant node an image's import carrying the
+/// admin token alone reads past `max_body` (`fennec_http`'s
+/// `body_ceiling`), so a peer without it has no more of a body read than
+/// that.
+pub struct Head {
+    req: Request,
+    /// The body's length its `Content-Length` says, 0 for none; `None`
+    /// for a chunked one, whose length its chunks tell.
+    length: Option<usize>,
+}
+
+impl Head {
+    /// The request as its head says it, its body not read: empty.
+    #[inline]
+    pub fn request(&self) -> &Request {
+        &self.req
+    }
+
+    /// The request whole, its body read to `max_body` at most: a length
+    /// past it is 413 before a byte of it is read, and a chunked body 413
+    /// at the size of the chunk that would pass it ([`read_chunked`]).
+    #[inline]
+    pub fn body<R: BufRead>(self, reader: &mut R, max_body: usize) -> Result<Request, BadRequest> {
+        let mut req = self.req;
+        match self.length {
+            None => read_chunked(reader, max_body, &mut req.body)?,
+            Some(len) if len > max_body => {
+                return Err(BadRequest(
+                    413,
+                    format!("the body is {len} bytes, the ceiling is {max_body}"),
+                ))
+            }
+            Some(0) => {}
+            Some(len) => {
+                req.body = vec![0u8; len];
+                reader.read_exact(&mut req.body).map_err(|e| unread(&e))?;
+            }
+        }
+        Ok(req)
+    }
+
+    /// The request, its body left unread: for an answer refusing it from
+    /// its head, after which the connection ends as a refused one does
+    /// (`accept::end_refused`), or its body would be read as the next
+    /// request.
+    pub fn unread(self) -> Request {
+        self.req
+    }
+}
+
+/// Reads a request's head: its line and headers, its framing judged
+/// ([`chunked_framing`], a `Content-Length` parsed), its body left in the
+/// reader ([`Head`]). `Ok(None)` means the connection closed cleanly.
+pub fn read_head<R: BufRead>(reader: &mut R) -> Result<Option<Head>, BadRequest> {
     let mut head = Vec::new();
     loop {
         let mut line = Vec::new();
@@ -213,30 +276,19 @@ pub fn read_request<R: BufRead>(
         headers.push((k.to_string(), v.to_string()));
     }
 
-    let body = if coded {
+    // The framing judged with the head, before the body's ceiling is: a
+    // refusal of either is the head's.
+    let length = if coded {
         chunked_framing(&headers, length.is_some(), version)?;
-        let mut body = Vec::new();
-        read_chunked(reader, max_body, &mut body)?;
-        body
+        None
     } else {
-        let len: usize = match length {
+        Some(match length {
             Some(at) => headers[at]
                 .1
                 .parse()
                 .map_err(|_| BadRequest(400, "invalid Content-Length".into()))?,
             None => 0,
-        };
-        if len > max_body {
-            return Err(BadRequest(
-                413,
-                format!("the body is {len} bytes, the ceiling is {max_body}"),
-            ));
-        }
-        let mut body = vec![0u8; len];
-        if len > 0 {
-            reader.read_exact(&mut body).map_err(|e| unread(&e))?;
-        }
-        body
+        })
     };
 
     // HTTP/1.1 defaults to a persistent connection; 1.0 is the other way round.
@@ -247,14 +299,17 @@ pub fn read_request<R: BufRead>(
     };
 
     let (raw_path, raw_query) = target.split_once('?').unwrap_or((target, ""));
-    Ok(Some(Request {
-        method,
-        target: target.to_string(),
-        path: percent_decode(raw_path),
-        query: parse_query(raw_query),
-        headers,
-        body,
-        keep_alive,
+    Ok(Some(Head {
+        req: Request {
+            method,
+            target: target.to_string(),
+            path: percent_decode(raw_path),
+            query: parse_query(raw_query),
+            headers,
+            body: Vec::new(),
+            keep_alive,
+        },
+        length,
     }))
 }
 

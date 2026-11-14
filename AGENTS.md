@@ -352,6 +352,7 @@ Covers `crates/fennec-http/`, access aside (below); an open server's rule binds 
 - A webhook is verified by its signature before anything of it is read, and every refusal before is one 401.
 - A statement is parsed once, and an answer goes out in one write.
 - A text's lists are read as written at once from its second request.
+- A body is held to the ceiling its head earns.
 - A chunked body grows as it comes, held to the ceiling
 - A plain `get` is written as JSON from the stored documents.
 - A row's tag is its JSON as its reader is shown it, and a write's preconditions are judged under the lock that writes it.

@@ -344,7 +344,10 @@ endif
 ## MODES=get,row,patch,patch-row,if-match: a row by id read and written
 ## over REST, by a filter and by its path, and under `If-Match`;
 ## MODES=scoped,token,get: that read under a scoped token, one of 1 000
-## subjects in turn, under the server's token and under none);
+## subjects in turn, under the server's token and under none;
+## EXAMPLE=served MODES=file,node,put,pipelined: a request through a served
+## connection, read off a socket and answered on it, of a file's server and
+## a tenant node, a row written by its path, 16 requests written at once);
 ## TRACE=fennec_http::handle also counts one call (HIT, the 30th) by
 ## function under lldb, the program's own code apart from the allocator's.
 ## UUIDS=0 for plain pairs. Each run once the 1-minute load is under QUIET

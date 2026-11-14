@@ -532,3 +532,71 @@ fn a_scheduled_run_is_a_trace_of_its_own() {
     assert_ne!(tick.trace, gatekeep.trace);
     assert_ne!(gatekeep.trace, clash.trace);
 }
+
+/// An image's import refused from its head -- carrying no admin token, its
+/// body never read -- is a request's trace as one refused once its body
+/// was read was: its server span named by its route, continuing the
+/// client's trace, its 401 the client's and no error of the server's, and
+/// the wait a refused token waits inside it.
+#[test]
+fn an_import_refused_from_its_head_is_a_trace() {
+    use std::io::{Read, Write};
+    let recv = Receiver::start();
+    let url = recv.url();
+    let dir = tmp("trace", "node");
+    std::fs::create_dir_all(&dir).unwrap();
+    let server = start_env(
+        &[
+            "--dir",
+            dir.to_str().unwrap(),
+            "--admin-token",
+            "adm",
+            "--auth-delay",
+            "100",
+            "--otlp-endpoint",
+            &url,
+        ],
+        &[],
+    );
+    let trace = "cccccccccccccccccccccccccccccccc";
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    // A gibibyte declared and none of it sent: answered from its head, or
+    // never.
+    write!(
+        s,
+        "PUT /_admin/tenants/copy/file HTTP/1.1\r\nHost: localhost\r\n\
+         Authorization: Bearer guessed\r\ntraceparent: {}\r\nX-Request-Id: req-import\r\n\
+         Content-Length: {}\r\n\r\n",
+        traceparent(trace, "01"),
+        1u64 << 30
+    )
+    .unwrap();
+    let mut out = String::new();
+    let _ = s.read_to_string(&mut out);
+    assert!(out.starts_with("HTTP/1.1 401"), "{out:?}");
+    let spans = recv.until("the refused import's span", |s| {
+        s.iter().any(|g| g.trace == trace && g.kind == 2)
+    });
+    let root = spans
+        .iter()
+        .find(|g| g.trace == trace && g.kind == 2)
+        .unwrap();
+    assert_eq!(root.name, "PUT /_admin/tenants/{name}/file");
+    assert_eq!(root.parent.as_deref(), Some(PARENT), "the client's span");
+    for (k, v) in [
+        ("http.request.method", "PUT"),
+        ("http.route", "/_admin/tenants/{name}/file"),
+        ("http.response.status_code", "401"),
+        ("fennec.request_id", "req-import"),
+    ] {
+        assert_eq!(root.attr(k), Some(v), "{k} in {root:#?}");
+    }
+    assert!(!root.error, "a refusal is the client's: {root:#?}");
+    assert!(
+        root.end - root.start >= 100_000_000,
+        "the refusal's wait is outside its span: {root:#?}"
+    );
+    drop(server);
+    let _ = std::fs::remove_dir_all(&dir);
+}
