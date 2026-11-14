@@ -36,7 +36,12 @@ nothing reaches a registry before the notes have had a read.
    on a runner of its architecture, `tools/windows-zip.sh`: the
    C runtime linked in, installed through `install.ps1` from the folder it
    was made in and run before it is kept, `tools/windows-zip-check.ps1`),
-   the `fennec-web`
+   the C library for Linux (`fennec-ffi-vX.Y.Z-<target>.tar.gz` for
+   `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`, each on a
+   runner of its architecture, `tools/linux-ffi.sh`: the shared and static
+   library, `fennec.h` and their pkg-config files, a C program linked to
+   each and run on the runner and in AlmaLinux 9's glibc 2.34 before it is
+   kept, `tools/linux-ffi-check.sh`), the `fennec-web`
    bundle, the Android AAR (`fennecdb-android-X.Y.Z.aar`, the native library
    for each ABI inside) and the multi-arch image on ghcr.io, takes the
    XCFramework zips step 2's run kept -- the static one held to the checksum the tag's
@@ -372,6 +377,7 @@ field of it is read another way.
 | `fennec-studio-vX.Y.Z-macos-arm64.dmg` on the release | `integrations/studio-desktop` (`scripts/dist.sh`), `.github/workflows/desktop.yml` | fennec studio's Mac app (beta, Apple silicon), unpacked and signed ad hoc, attached by step 5 with its line appended to `SHA256SUMS`; unsigned until the signing Environment holds its secrets |
 | `fennec-studio-vX.Y.Z-windows-x64.zip`, `-windows-arm64.zip`, `-linux-x64.tar.xz`, `-linux-arm64.tar.xz` on the release | `integrations/studio-desktop` (`scripts/dist.sh`), `.github/workflows/desktop.yml` | fennec studio for Windows and Linux (beta): the folder `fennec-studio`, the app unpacked, which runs where it is unpacked; attached by step 5 with their lines appended to `SHA256SUMS`; unsigned |
 | `fennec-vX.Y.Z-x86_64-pc-windows-msvc.zip`, `fennec-vX.Y.Z-aarch64-pc-windows-msvc.zip` on the release | `tools/windows-zip.sh` | `fennec.exe` and `fennec-server.exe`, the C runtime linked in; unsigned |
+| `fennec-ffi-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`, `fennec-ffi-vX.Y.Z-aarch64-unknown-linux-gnu.tar.gz` on the release | `crates/fennec-ffi`, `tools/linux-ffi.sh` | the C library for Linux with glibc 2.34 or later, in the folder of the tarball's name: `include/fennec.h`, `lib/libfennec_ffi.so` (its SONAME its name, the JNI functions in it for the JVM), `lib/libfennec_ffi.a`, `lib/pkgconfig/fennec-ffi.pc` and `fennec-ffi-static.pc`, `LICENSE`, `README.md`; in `SHA256SUMS` |
 | `https://fennecdb.com/install.ps1` | `site/install.ps1` | the Windows installer: the release's zip, checked against `SHA256SUMS`, into `%LOCALAPPDATA%\fennecdb\bin`; with `-App`, the app's zip, checked the same way, into `%LOCALAPPDATA%\dev.fennecdb.studio\stable\app` with a Start-menu shortcut; deployed with the site, not with a release |
 
 ## Once: the desktop app's signing Environment

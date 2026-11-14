@@ -1,6 +1,6 @@
 <!--
 title: Mobile and native apps — fennecdb
-description: Keep a fennecdb database in a file on the device from Swift, Kotlin or Dart and Flutter, with the query builder and live queries driving the UI.
+description: Keep a fennecdb database in a file on the device from Swift, Kotlin or Dart and Flutter, with the query builder and live queries driving the UI, or from C on Linux through the release's library.
 -->
 
 <h1>Mobile and native apps</h1>
@@ -11,7 +11,9 @@ network, the same engine and file format as the server and the browser.</p>
 and asks it questions in FennecQL or through the query builder, with
 <code>near</code>, <code>match</code> and <code>lookup</code> as anywhere
 else. A live query hands the UI its rows again after every write to what it
-reads.</p>
+reads. A Linux program -- a GTK app, a C or C++ program, any language with
+a C FFI -- links the same engine from the release's library
+(<a href="#c-on-linux">C on Linux</a>).</p>
 
 <div class="tbl">
 <table>
@@ -780,8 +782,10 @@ whole open.</p>
 </table>
 </div>
 
-<p>The sync with a server is 165 to 198 KB of each. iOS's and Android's
-are measured by CI for every change, in the run's summary. An app ships the code it links: the XCFramework's static library
+<p>The sync with a server is 165 to 198 KB of each. Linux's are the
+release's <code>libfennec_ffi.so</code> (<a href="#c-on-linux">C on
+Linux</a>); iOS's and Android's are measured by CI for every change, in the
+run's summary. An app ships the code it links: the XCFramework's static library
 is the objects before the app's linker takes what it uses.</p>
 
 <div class="tbl">
@@ -809,7 +813,9 @@ takes 23.3 µs, the server's time, most of it the vector's digits.</p>
 
 <p>Any language with a C FFI can call the library: the header is
 <code>crates/fennec-ffi/include/fennec.h</code>, and <code>make ffi</code>
-builds the library for this machine, or <code>TARGET=...</code> for another.
+builds the library for this machine, or <code>TARGET=...</code> for another;
+for Linux each release carries it built (<a href="#c-on-linux">C on
+Linux</a>).
 Every call returns a code -- 0, an error's kind, or the boundary's own:
 <code>FENNEC_MISUSE</code>, <code>FENNEC_LOCKED</code>,
 <code>FENNEC_PANIC</code> -- and writes its answer or its error as
@@ -832,4 +838,79 @@ Kotlin binding reaches the same calls through JNI functions the library
 carries itself (its <code>jni</code> feature): each call answers one
 <code>byte[]</code>, its code then its JSON, and text goes in as UTF-8
 bytes, since JNI's own strings write an emoji as two halves.</p>
+</details>
+
+<h2 id="c-on-linux">C on Linux</h2>
+
+<p>Releases after 0.2.0 carry the library built for Linux with glibc, for
+x86_64 and arm64, each a tarball listed in the release's
+<code>SHA256SUMS</code>: <code>fennec-ffi-v{{version}}-x86_64-unknown-linux-gnu.tar.gz</code>
+and <code>fennec-ffi-v{{version}}-aarch64-unknown-linux-gnu.tar.gz</code>.
+Each holds the shared library <code>lib/libfennec_ffi.so</code>, the static
+<code>lib/libfennec_ffi.a</code>, <code>include/fennec.h</code> and a
+pkg-config file for each library, <code>fennec-ffi</code> and
+<code>fennec-ffi-static</code>, which find the folder wherever it is
+unpacked. A GTK app, a C or C++ program, or any language with a C FFI
+links it. It runs on glibc 2.34 or later -- Ubuntu 22.04, Debian 12,
+RHEL 9 and the releases after them -- and asks the system for nothing else
+but <code>libgcc_s</code>.</p>
+
+<pre data-lang="bash">TARGET=x86_64-unknown-linux-gnu   # or aarch64-unknown-linux-gnu
+curl -fLO https://github.com/fennec-db/fennecdb/releases/download/v{{version}}/fennec-ffi-v{{version}}-$TARGET.tar.gz
+curl -fLO https://github.com/fennec-db/fennecdb/releases/download/v{{version}}/SHA256SUMS
+sha256sum --ignore-missing -c SHA256SUMS
+tar -xzf fennec-ffi-v{{version}}-$TARGET.tar.gz
+export PKG_CONFIG_PATH=$PWD/fennec-ffi-v{{version}}-$TARGET/lib/pkgconfig
+cc notes.c $(pkg-config --cflags --libs fennec-ffi) -o notes          # the shared library
+cc notes.c $(pkg-config --cflags --libs fennec-ffi-static) -o notes   # or the static one, linked in</pre>
+
+<pre data-lang="c" data-label="notes.c">#include &lt;fennec.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+
+int main(void) {
+    const char *path = "notes.fennec";
+    uint64_t db;
+    char *out = NULL;
+    if (fennec_open((const uint8_t *)path, strlen(path), 0, &amp;db, &amp;out, NULL) != FENNEC_OK) {
+        fprintf(stderr, "%s\n", out);
+        return 1;
+    }
+    const char *text = "create collection if not exists notes (title text); "
+                       "put notes {title: $1}; get notes select title";
+    const char *params = "[\"from C\"]";
+    int32_t code = fennec_query(db, (const uint8_t *)text, strlen(text),
+                                (const uint8_t *)params, strlen(params), NULL, 0, &amp;out, NULL);
+    printf("%d %s\n", code, out);
+    fennec_free_string(out);
+    fennec_close(db, NULL, NULL);
+    return code;
+}</pre>
+
+<pre data-lang="text">0 {"kind":"rows","result":{"columns":["title"],"rows":[{"title":"from C"}]}}</pre>
+
+<p>A program linked to the shared library finds
+<code>libfennec_ffi.so</code> where the loader looks: copy it into
+<code>/usr/local/lib</code> and run <code>ldconfig</code>, start the program
+with <code>LD_LIBRARY_PATH</code> naming the folder's <code>lib</code>, or
+link it with <code>-Wl,-rpath,&lt;folder&gt;/lib</code>. The static one is
+linked into the program, which then needs nothing beside it. The shared
+library carries the JNI functions too, so Kotlin's
+<code>com.fennecdb:fennecdb</code> on the JVM loads this file, named by
+<code>-Dfennec.library=&lt;folder&gt;/lib/libfennec_ffi.so</code> or
+<code>FENNEC_LIBRARY</code>.</p>
+
+<details class="deep"><summary>How each release checks it</summary>
+<p>Each architecture's tarball is built on a runner of its own and held
+before the release keeps it (<code>tools/linux-ffi-check.sh</code>): its
+files, its header the repository's, the shared library's name, its
+exports -- the header's functions and the JNI functions alone -- and what
+it asks the system for, glibc and <code>libgcc_s</code> and no glibc symbol
+newer than 2.34. Then a C program compiled against the header with every
+warning an error is linked to each library through its pkg-config file, as
+above, and run on the runner and in AlmaLinux 9, whose glibc is 2.34: it
+opens a file, writes a row with parameters and reads it back, is refused a
+second open of the file, finds the row after a close, and starts a sync and
+drives it as a binding does. CI does the same on every change and keeps
+the tarballs as the run's artifacts.</p>
 </details>

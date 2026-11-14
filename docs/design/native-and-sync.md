@@ -103,6 +103,11 @@ macOS 12 for `URLSession`'s async `data(for:)`, which the SDK back-deploys
 to 10.15 (an `@_alwaysEmitIntoClient` overload in Foundation's interface,
 the macOS 26.2 SDK's among them): its sources and tests typecheck at macOS
 11 as they are.
+Linux's is a release's tarball for x86_64 and aarch64 with
+glibc, the shared library with the JNI functions, the static one without,
+`fennec.h` and two pkg-config files, held to glibc 2.34 and run there before
+it is kept ([integrations.md](integrations.md#install-channels)); the JVM's
+jar loads that file on Linux.
 
 ## Sync core
 
