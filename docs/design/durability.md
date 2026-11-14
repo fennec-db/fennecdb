@@ -260,8 +260,26 @@ log, the renamed file flushed and then its directory,
 missed until the #495 review, as a tenant's create missed fsyncing the
 file its open made (`tenants.md`); a clean close syncs
 the file and removes it, so a node keeps none beside a closed tenant, and
-`Tenants::stats` counts it; a log that cannot be made is not tried again
-until the next open, each try being 260 KB of writes. `open_read_only`
+`Tenants::stats` counts it. The close is the sink's drop, which a process
+exiting with the database held never runs: a server's shutdown keeps the
+write lock to `process::exit` ([the one shutdown](#the-one-shutdown)) and
+a node's leaks its tenants' locks. So 0.2.0, stopped cleanly on Linux --
+`docker stop`, under `--sync 250`, `always` and a `--dir` node's open
+tenants alike -- left the 260 KB log beside each file it had written, and
+`fennec -c`, ending in `process::exit` too, beside each file it wrote.
+Nothing was lost -- the next open applied a log the file already held --
+but a stopped server left more than its file and `.lock`. The shutdown
+now asks for the close after its last sync and checkpoint
+(`Database::close_log`, which `Holding` and `Tee` pass on): the file
+fsynced, the log removed, and none begun again (`Tail::close` clears
+`keeps`). A `--sync always` write's durability, handed out before the
+shutdown took the lock and run after it, fsyncs the file rather than begin
+a log: one with a write still pending at the close began one again, as did
+the first sync of a file that had none yet. `-c` drops its database before
+the exit. A storage error leaves the log, which may hold what the file
+lacks, and `fennec-shard`'s router catches no signal, so its stop is a
+crash and leaves its directory's log. A log that cannot be made is not
+tried again until the next open, each try being 260 KB of writes. `open_read_only`
 applies none: after a power loss, `fennec types` or a raw copy taken
 before the next open may lack the last durable writes. On macOS
 `F_FULLFSYNC` flushes the drive either way, 3.9 ms appended or not, so
@@ -270,8 +288,14 @@ one). In Docker a durable update went 624 -> 325 us p50 (`make
 roundtrip-bench`), against PostgreSQL's 378; `tests/synclog.rs` crashes
 the machine (the process forgotten, the file cut back to the log's
 start) through a full log, a sync past an entry, a torn header, a file
-renamed in, a second open and two files of one stem, and fennec-core's
-and fennec-http's tests pass on Linux, where every file keeps one.
+renamed in, a second open and two files of one stem, and holds a database
+kept to the exit to `close_log` and a durability run after it
+(`a_database_held_to_the_exit_lets_its_log_go`); fennec-server's
+`a_clean_stop_leaves_no_sync_log` (`--sync always` and `250`) and
+`a_nodes_clean_stop_leaves_no_sync_log`, and fennec-cli's
+`the_shell_leaves_no_sync_log`, failed on Linux before the close was
+asked, each finding the log after the stop; fennec-core's and
+fennec-http's tests pass on Linux, where every file keeps one.
 
 ## A power cut
 
@@ -314,7 +338,10 @@ sees it within `LOOK`, 200 ms (`wait_tick`): the held writes answered
 `--follow`'s follower stopped with every change it applied on disk, the
 traces sent), then the final sync and the checkpoint, the write lock held
 to `process::exit`, so no write is answered between the sync and the exit.
-The syncers slept a whole `--sync` interval before they looked, so
+Held so, a database is never dropped, so the shutdown asks for what its
+drop did to the file, the sync log let go after the sync and checkpoint
+(`Database::close_log`, [the sync log](#the-sync-log)); a new step after
+the sync comes before it. The syncers slept a whole `--sync` interval before they looked, so
 `--sync 5000` exited 5.04 s after the end of its stdin, its lock held
 against the app's next open of the file, and `--sync 60000` would have let
 docker's SIGKILL, 10 s after its SIGTERM, come before the final sync; the

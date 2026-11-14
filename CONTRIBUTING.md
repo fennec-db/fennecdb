@@ -46,7 +46,10 @@ node --test web/fennec.test.js
 ```
 
 `cargo test -p fennec-import --test all pg:: -- --ignored` needs a live PostgreSQL;
-`make import-test` starts one in Docker and tears it down afterwards.
+`make import-test` starts one in Docker and tears it down afterwards. CI's
+`postgres (import and --follow)` job runs the same tests against the same
+server on every pull request, and fails unless every one of them ran and
+passed.
 
 ## The rules a change must not break
 

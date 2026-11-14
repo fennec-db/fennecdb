@@ -916,6 +916,12 @@ impl Sink for Tee {
             }
         }
     }
+    /// Passed on, the feed told nothing: it comes after the last sync, which
+    /// told it, and a durability still running tells it as before.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn close_log(&mut self) {
+        self.file.close_log()
+    }
 }
 
 /// The history a history record holds, `[8][0][length][history]`; `None`
