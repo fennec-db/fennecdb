@@ -27,11 +27,15 @@ archive's times run in order.](../../docs/design/replication.md#a-writes-time)**
 A follower hands the times a `W` message carries to its feed for the
 records it landed (`Feed::sent_times`), under the write lock and before
 its flush, so nothing is sent with the copy's own clock -- not to a copy of
-it, its `/_changes` nor an archive cut from it; a promoted copy times its
-own writes. Never in `Feed::push`, nor a new caller of `writes_in`: a
-primary's write path stays the code it was (LTO inlines `writes_in` there
-only so). `Archive::take` archives no write before the latest it holds
-(`Writer::latest`): `prune` reads image times as in order.
+it, its `/_changes` nor an archive cut from it -- but the landed prefix of
+an apply refused part way under `--replication-buffer 0` or `1`, until the
+next image; a promoted copy times its own writes. Never in `Feed::push`: a
+primary's write path stays the code it was, and a change near it owes a
+look that the release `fennec-server` still inlines `writes_in` there
+(`objdump` of `Feed::push`, built `-C strip=none`), which a third caller
+stopped. `Archive::take` archives no write before the latest it holds
+(`Writer::latest`), nor `hello` an image before it: `prune` reads image
+times as in order.
 
 **[A node's tenants are archived over one stream](../../docs/design/replication.md#a-nodes-archive)**
 (`fennec_http::node_stream`), a sender on each open tenant's feed:

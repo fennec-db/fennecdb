@@ -2,11 +2,13 @@
 //!
 //! An archive is the replication stream written to a directory instead of
 //! applied: base images, and after them every write with the time the
-//! primary appended it. A restore takes the latest image at or before the
-//! point asked for and appends the writes after it up to that point -- a
-//! fennecdb file is an image and the writes after it, so that is the whole
-//! restore -- then forks the result's history, since it leaves the primary's
-//! history at that point (see [`fennec_core::history`]).
+//! primary appended it -- or, where that clock stepped back, the latest time
+//! stored before it, which `verify` and a restore then report. A restore
+//! takes the latest image at or before the point asked for and appends the
+//! writes after it up to that point -- a fennecdb file is an image and the
+//! writes after it, so that is the whole restore -- then forks the result's
+//! history, since it leaves the primary's history at that point (see
+//! [`fennec_core::history`]).
 //!
 //! The archive is fed like a replica, so it holds only writes that were on
 //! the primary's disk, and a `compact` on the primary loses it nothing: the
@@ -960,7 +962,13 @@ impl Archive {
         let had = w.images;
         match image {
             Some(bytes) => {
-                self.add_image(seq, bytes)?;
+                // Timed by the archiver's clock, but never before the latest
+                // write the archive holds ([`Self::take`]): a clock behind
+                // the one that timed the writes dated the image before writes
+                // it follows, and `prune`, reading image times as in order,
+                // took it for the base of a window those writes are in,
+                // letting go of the image a restore inside it starts from.
+                self.put(&self.image_path(seq, now_ms().max(w.latest)), bytes)?;
                 if let Some(s) = &mut w.segment {
                     s.sync()?;
                 }
@@ -2400,6 +2408,47 @@ mod tests {
         a.prune(1_000, t + 1_180).unwrap();
         assert_eq!(restored_rows(&a, &dir, to), (3, 2));
         assert_eq!(restored_rows(&a, &dir, Target::End), (8, 7));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The image a hello brings is timed no earlier than the latest write
+    /// the archive holds. Timed by the archiver's clock alone, behind the
+    /// writes' as an archive of a primary whose clock runs ahead is, it was
+    /// dated before writes it follows: `prune` took it for the base of a
+    /// window whose writes it is after, let go of the image a restore inside
+    /// the window starts from, and that restore found no image to start
+    /// from.
+    #[test]
+    fn a_hellos_image_is_not_dated_before_the_writes_the_archive_holds() {
+        let dir = std::env::temp_dir().join(format!("fennec-archive-hello-{}", fresh_id()));
+        fs::create_dir_all(&dir).unwrap();
+        let a = Archive::new(dir.join("archive")).unwrap();
+        let mut p = Source::new();
+        p.run("create collection notes (n int)");
+        a.add_image(p.db.change_seq(), &p.image(false)).unwrap();
+        // The primary's clock a minute ahead of the archiver's.
+        let t = now_ms() + 60_000;
+        let mut w = a.writer().unwrap();
+        for (n, d) in [(1, 100), (2, 200), (3, 300)] {
+            let record = p.run(&format!("put notes {{n: {n}}}"));
+            let next = w.at + 1;
+            a.take(&mut w, next, &[t + d], &record).unwrap();
+        }
+        // The archiver connects again, the primary written on past what it
+        // keeps: an image.
+        p.run("put notes {n: 4}");
+        let seq = p.db.change_seq();
+        let lineage = p.db.history().lineage.clone();
+        let took = a.hello(&mut w, Some(&p.image(false)), seq, lineage);
+        assert_eq!(took.unwrap(), Took::Went);
+        let image = a.images().unwrap().last().copied().unwrap();
+        assert_eq!(image, (seq, t + 300));
+
+        let to = Target::Time(t + 250);
+        assert_eq!(restored_rows(&a, &dir, to), (3, 2));
+        a.prune(1_000, t + 1_250).unwrap();
+        assert_eq!(restored_rows(&a, &dir, to), (3, 2));
+        assert_eq!(restored_rows(&a, &dir, Target::End), (seq, 4));
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -231,11 +231,13 @@ spilled and landed (`land`) is sent as the one record it would have been
 (`landed_block`) and applied as one. Where the apply says how many landed
 (its `Ok(n)`: every record of the message) they are paired from the last
 back, which leaves them right where a ring smaller than one message let go
-of the first of them as later ones came in (only `--replication-buffer 1`
-can be). An apply refused part way lands a prefix, the records after the
+of the first of them as later ones came in (only `--replication-buffer 0`
+or `1` can be). An apply refused part way lands a prefix, the records after the
 refused one put back and never handed to the sink, and says nothing: its
 records are paired from the first on, where the ring still holds the first,
-and otherwise keep the copy's time until the image the follower connects
+and otherwise -- under `--replication-buffer 0` or `1` alone, the one
+place the rule's "nothing is sent with the copy's own clock" does not
+reach -- keep the copy's time until the image the follower connects
 again for starts the feed over (`Feed::start`), as any image (`force_image`)
 does; the writes after an image take their times as any. A copy of a copy
 sends its feed's times, its primary's, so a chain carries the first
@@ -254,7 +256,11 @@ where `main` inlines it in 519 -- a call more on every write a primary
 makes. As built, `Feed::push` and each of the `Tee`'s sink methods are the
 same instructions as on `main`, addresses aside, every `Feed` and `Tee`
 function but the new one (`fennec-server` built with `-C strip=none`,
-`objdump` of each symbol, macOS arm64).
+`objdump` of each symbol, macOS arm64). Nothing in the source says LTO
+inlines `writes_in` into `push`, so a change near it -- another caller of
+`writes_in` above all -- owes the same look: `objdump -d --demangle` of
+`fennec-server` built `--release` with `RUSTFLAGS="-C strip=none"`, no
+call to `writes_in` inside `Feed::push`.
 
 *An archive's times run in order.* With a copy's writes carrying its
 primary's times, an archive that follows a copy through its promotion is
@@ -276,9 +282,19 @@ being the same, and every time an archive holds runs in order. Rejected:
 keeping the feed's times in order instead (the latest in `push`), on a
 primary's write path, and lost with the process: a copy promoted after a
 restart had no time of its primary's to hold to, where an archive keeps its
-latest on disk. Left as it was: the image a hello brings is timed by the
-archiver's clock as it takes it (`add_image`), which a clock behind the
-primary's can put before writes the image holds. A copy's `/_changes`
+latest on disk. The image a hello brings is timed by the archiver's clock
+as it takes it, and no earlier than the latest write the archive holds
+(`Archive::hello`, `Writer::latest`): by that clock alone, behind the
+writes', it was dated before writes it follows, and a `prune` whose cutoff
+fell between the two took it for the base and let go of the image a
+restore inside `--keep` started from, which then found none to start from
+(`a_hellos_image_is_not_dated_before_the_writes_the_archive_holds`).
+A stored time is so the time the write was appended or, where the clock
+stepped back, the latest one stored before it, which `verify` and a
+restore report. The cost: a clock that ran ahead by some time holds
+pruning back that long, since every later write and image is stored at
+that time until real time passes it, and `prune` keeps the images timed
+after its cutoff. A copy's `/_changes`
 hands over each write's `at` as its feed holds it -- its primary's, then,
 promoted, its own, which may be behind -- a reading of a clock, as on a
 primary; a consumer orders by `seq`.
