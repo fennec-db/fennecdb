@@ -102,6 +102,13 @@ jobs:
       - name: tools/instr's UUID copies, figures and trace deltas
         run: python3 tools/instr/test_instr.py
 
+      # docs/design/benchmarks.md#the-gate: the perf job's judgement -- a
+      # synthetic +1% fails, a PERF_ACCEPTED entry the pull request adds
+      # lets it through, one the base holds does not -- and the entries
+      # read as data.
+      - name: tools/perf_gate.py fails +1% and lets an entry through
+        run: python3 tools/test_perf_gate.py
+
       # docs/design/http.md#compatibility: the checker the test job runs on
       # the served documents finds each kind of break, lets each addition
       # through, and holds BREAKS and the committed baseline.
@@ -784,6 +791,171 @@ jobs:
         run: |
           sudo apt-get install -y --no-install-recommends brotli
           python3 crates/fennec-wasm/size_report.py HEAD^1 "$BASE"
+
+  # docs/design/benchmarks.md#the-gate: every workload of
+  # crates/fennec-http/examples/gate.rs counted under callgrind in the
+  # base's build and this one's -- the static musl build that ships, the
+  # same program on both sides -- five runs a side, each with its tally of
+  # what it asked of the allocator. Counted by the base's copy of the
+  # checker, so a pull request's edit of it -- a function priced away, the
+  # runs cut -- counts nothing until it has landed; judged apart, by
+  # `perf`. The base is the merge's first parent, a pull request's base
+  # branch or the commit a merge group queues onto, built with its own
+  # toolchain. valgrind and musl-gcc (ring's C, through the examples'
+  # dev-dependency on fennec-tls) are the runner's packages, no crate.
+  perf-count:
+    name: perf (count)
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      # Under tools/, so it reads this checkout as its tree; this tree's
+      # only where the base has none yet.
+      - name: The base's checker
+        run: |
+          if git show HEAD^1:tools/perf_gate.py > tools/perf_gate_base.py; then
+            echo "counted by the base's checker"
+          else
+            cp tools/perf_gate.py tools/perf_gate_base.py
+            echo "the base has no tools/perf_gate.py yet: this tree's counts"
+          fi
+
+      # Counted unless every path is the site's, the docs', an
+      # integration's, the browser client's, the studio's, deploy/'s or
+      # Markdown: the root manifest's profiles, .cargo/ or a tool reach
+      # the build as a crate does.
+      - name: Whether the change reaches what the gate builds
+        id: reach
+        run: python3 -I tools/perf_gate_base.py reaches --base HEAD^1 --output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+
+      # The base's channel beside this tree's: a pull request moving
+      # rust-toolchain.toml builds its base with the base's compiler.
+      - name: Install both sides' toolchains, the musl target, valgrind and musl-gcc
+        if: steps.reach.outputs.built == 'true'
+        run: |
+          rustup show
+          rustup target add x86_64-unknown-linux-musl
+          base=$(git show HEAD^1:rust-toolchain.toml 2>/dev/null | sed -n 's/^channel *= *"\([^"]*\)".*/\1/p')
+          if [ -n "$base" ]; then
+            rustup toolchain install "$base" --profile minimal --target x86_64-unknown-linux-musl
+          fi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends valgrind musl-tools
+
+      - name: Count each workload's instructions and heap in the base's build and this one's
+        if: steps.reach.outputs.built == 'true'
+        run: |
+          python3 -I tools/perf_gate_base.py run --base HEAD^1 --target x86_64-unknown-linux-musl \
+            --work "$RUNNER_TEMP/perf" --out "$RUNNER_TEMP/perf/results.json" --no-check
+
+      - name: Keep the results for the judgement
+        if: steps.reach.outputs.built == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: perf-results
+          path: ${{ runner.temp }}/perf/results.json
+          retention-days: 14
+
+      # Each side's median run of each workload, by function: what
+      # `callgrind_annotate` diffs to name where a count grew.
+      - name: Keep the median runs' profiles
+        if: steps.reach.outputs.built == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: perf-profiles
+          path: ${{ runner.temp }}/perf/profiles/
+          retention-days: 14
+
+      # P50, the I/O counts -- fsyncs and bytes written a durable write and
+      # a compact, under strace -f -c -- goes here, over the same two
+      # builds and the same checker: a results file of its own `metric`.
+
+  # docs/design/benchmarks.md#the-gate: perf (count)'s results held to the
+  # base's by the base's copy of the checker, the pull request's
+  # PERF_ACCEPTED read as data and the workloads held to the base's own
+  # program's: +1% or more in instructions or in heap bytes an op fails
+  # unless the pull request adds an entry naming the workload, and so does
+  # a workload the base's program runs that this tree dropped or the base
+  # did not run. A job of its own: the count runs the change's build
+  # scripts and programs, which could put anything on a later step's PATH
+  # ($GITHUB_PATH); here nothing of the change runs, and git and python3
+  # are the runner's. It names every edit of the gate's own files and
+  # every entry added, which the owner approves before the change merges.
+  # This job is the check a merge may require.
+  perf:
+    name: perf (instructions)
+    needs: perf-count
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: The base's checker and program
+        id: base
+        run: |
+          mkdir -p "$RUNNER_TEMP/judge"
+          if git show HEAD^1:tools/perf_gate.py > tools/perf_gate_base.py; then
+            echo "had=true" >> "$GITHUB_OUTPUT"
+            echo "judged by the base's checker"
+          else
+            cp tools/perf_gate.py tools/perf_gate_base.py
+            echo "the base has no tools/perf_gate.py yet: this tree's judges"
+          fi
+          git show HEAD^1:crates/fennec-http/examples/gate.rs > "$RUNNER_TEMP/judge/base_gate.rs" \
+            || : > "$RUNNER_TEMP/judge/base_gate.rs"
+
+      - name: The gate's own files this change edits, for the owner
+        run: python3 -I tools/perf_gate_base.py edits --base HEAD^1 --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Whether the change reaches what the gate builds
+        id: reach
+        run: python3 -I tools/perf_gate_base.py reaches --base HEAD^1 --output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+
+      # A count that failed, or never ran, is no pass.
+      - name: The count ran
+        if: steps.reach.outputs.built == 'true'
+        env:
+          COUNT: ${{ needs.perf-count.result }}
+        run: |
+          if [ "$COUNT" != success ]; then
+            echo "::error title=perf gate::perf (count) ended $COUNT: nothing to judge, its log says why"
+            echo "perf (count) ended $COUNT: nothing to judge." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: The count's results
+        if: steps.reach.outputs.built == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: perf-results
+          path: ${{ runner.temp }}/judge
+
+      - name: Hold them to the base's, by the base's checker
+        if: steps.reach.outputs.built == 'true'
+        env:
+          BASE_HAD: ${{ steps.base.outputs.had }}
+        run: |
+          # The entries the base holds already let nothing through.
+          held=()
+          if [ "$BASE_HAD" = true ]; then
+            held=(--accepted-base tools/perf_gate_base.py)
+          fi
+          python3 -I tools/perf_gate_base.py check "$RUNNER_TEMP/judge/results.json" \
+            --accepted-from tools/perf_gate.py "${held[@]}" \
+            --base-program "$RUNNER_TEMP/judge/base_gate.rs" --summary "$GITHUB_STEP_SUMMARY"
 
   integrations:
     name: integrations (python, react)

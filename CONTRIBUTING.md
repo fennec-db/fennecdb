@@ -102,7 +102,9 @@ empty.
   tests go in `crates/*/tests/`, one binary a crate: add a new file's `mod`
   line to that crate's `tests/all.rs`, or it is never built. Measurement
   programs are
-  `crates/fennec-core/examples/` and are wired to `make`, not to CI.
+  `crates/fennec-core/examples/` and are wired to `make`, not to CI — but
+  for the perf gate's workloads (`crates/fennec-http/examples/gate.rs`),
+  which CI counts on every pull request.
 - Run `cargo fmt --all` before you push; CI checks it. rustfmt settles
   formatting so that review can be about the change itself.
 - CI also runs clippy with warnings denied, natively and for the browser
@@ -110,10 +112,45 @@ empty.
   `cargo clippy -p fennec-wasm -p fennec-core -p fennec-ql --target
   wasm32-unknown-unknown -- -D warnings`.
 
-## Performance claims
+## Performance
 
-`make bench`, `make sweep`, `make memory` and `make compare` are the harnesses
-behind the numbers on the benchmarks pages (`site/content/docs/benchmarks*.html`). If a change moves any
+A change must not make fennecdb slower. CI's perf gate holds part of that:
+`perf (count)` counts each workload of
+`crates/fennec-http/examples/gate.rs` — writes, reads by id and by index,
+`match`, `fuzzy`, `facet`, `near`, a JSON page, the parser, requests through
+the HTTP handler, a file's open and its compaction, a replica's sync — under
+callgrind, in main's build and the pull request's, and `perf (instructions)`
+fails a workload 1% or more slower, or asking the allocator for 1% more bytes
+(`docs/design/benchmarks.md#the-gate`). Each call into the allocator is
+counted at what main's build paid for one: what a call costs inside musl's
+allocator moves with the heap's layout, by hundreds of instructions on paths
+a change never touched, while an allocation more, or a bigger one, is the
+change's. The job's table shows the plain count, the calls and the bytes an
+op beside the figure, and the count uploads each side's profile by function
+(`perf-profiles`) for `callgrind_annotate`. `make perf-gate` runs it on Linux
+with valgrind; on macOS, in Docker. It counts instructions, on one thread, of
+x86_64 musl's code: what it does not see — cycles, threads, system calls such
+as fsyncs, other targets, writes of vectors, a replica applying its primary's
+records — is measured by hand.
+
+A change that costs instructions or bytes on purpose — a feature on a hot
+path — adds an entry to `PERF_ACCEPTED` in `tools/perf_gate.py`: the
+workload, `"metric": "bytes"` where it lets bytes through, the most it lets
+through and why, with what `make instr-compare` measured. The entry lets that
+workload through in that pull request alone, and stays as the record of it.
+The owner approves every entry, and every edit of the gate's own files
+(`gate.rs`, `tools/perf_gate.py`, the perf jobs of `ci.yml`), which the job
+names in its summary: such a pull request waits for the owner's OK before it
+merges. Main's copy of the checker counts and judges, so an edit to it
+counts once it has landed.
+
+A change on a request path is measured before it is opened: `make
+instr-compare` holds two builds' instructions an op to each other on macOS,
+read over several identities of each since the allocator there moves a
+request by hundreds (`docs/design/benchmarks.md#instruction-counts`), and
+`make hook-bench` does so for webhook events. `make bench`, `make sweep`,
+`make memory` and `make compare` are the harnesses behind the numbers on the
+benchmarks pages (`site/content/docs/benchmarks*.html`). If a change moves any
 of them, say by how much in the PR description and on what hardware — the docs
 quote measurements, not estimates.
 
