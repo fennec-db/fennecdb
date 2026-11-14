@@ -17,7 +17,10 @@ before each message it reads, as an archiver's does, never at the
 socket's cut alone: on Windows a cut ends only a read already waiting. A
 panic applying the primary's records is a write the follower could not
 apply, caught with the lock held (`Follower::session`): never a thread
-gone, which a halt waits for.
+gone, which a halt waits for. A restart reads a copy's role from its file:
+one made to follow says so on disk before the follow is answered
+(`Tenants::open_as` syncs it), and an image is taken with the record saying
+it inside its rename.
 
 **[A node's tenants are archived over one stream](../../docs/design/replication.md#a-nodes-archive)**
 (`fennec_http::node_stream`), a sender on each open tenant's feed:
