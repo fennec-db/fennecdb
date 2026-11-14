@@ -18,6 +18,15 @@ nothing reaches a registry before the notes have had a read.
    more: the outputs they show come from the release they install (the
    Quickstart's curl steps and its eight programs are held to their answers by
    `make languages-test`; the rest are compared by hand).
+   The sizes the docs quote of the browser module's features and of its code
+   by crate are regenerated in the same pull request: `make wasm-sizes
+   JSON=1` rewrites `crates/fennec-wasm/sizes.json`, and `site/build.py`
+   fails every page figure that is not its rounded value, so the feature
+   rows of `benchmarks-size.html`, `docs/design/browser-module.md` and
+   `web/README.md` are edited to match. The native library's are CI's: copy
+   the table the mobile jobs print (`integrations/ffi-sizes.sh`, in their
+   summaries) into `integrations/ffi-sizes.md`; those jobs fail a run more
+   than 1% from it.
 2. Build the Swift package's binary: `gh workflow run swift-binary.yml -f
    version=X.Y.Z`. SwiftPM fetches the package by its tag, and the
    `Package.swift` at that tag must already name the XCFramework's zip by

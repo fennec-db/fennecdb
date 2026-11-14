@@ -79,8 +79,10 @@ isolate a database), sends a vector as its `f32` bytes and a json field's
 has live queries as `Lives` has them, the looks of a burst gathered a frame
 (16 ms) and taken once no write is under way. The libraries are built alone
 (`cargo rustc --crate-type cdylib`): beside the staticlib and rlib, LTO left
-the shared one 4% larger. 1.68 MB stripped on aarch64-apple-darwin, 1.88 on
-x86_64 Linux with JNI, the sync (below) 165 and 198 KB of them; a buffered put of a 128-dim vector 4.6 us against
+the shared one 4% larger. 3.03 MB stripped on aarch64-apple-darwin, 3.50 on
+x86_64 Linux with JNI (CI's figures, `integrations/ffi-sizes.md`, held by
+`site/build.py`), the sync (below) 165 and 198 KB of them, measured by hand
+when the libraries were 1.68 and 1.88 MB; a buffered put of a 128-dim vector 4.6 us against
 the server handler's 23.2, a fsynced one 4.0 ms on an M1, `near` 97.8 us
 against 151.4 (`make ffi-bench`). The XCFramework is assembled by hand
 (`build-xcframework.sh`), so the Command Line Tools build every slice; a
@@ -175,8 +177,8 @@ and the browser module nothing: it has no sync. A one-row change
 costs 18.4 us against 7.1 for the same put alone, rows in changes of 100
 3.8 us either way, a 128-dim row under HNSW 482 against 465, a seed of 10
 000 rows 72 ms against 44 (`make sync-bench`). It adds about 165 KB to the
-native library -- 1.51 -> 1.68 MB on aarch64-apple-darwin, 1.68 -> 1.88 on
-x86_64 Linux, about 77 KB of it the sync's own code -- and the browser module is built without it:
+native library (when it was 1.51 -> 1.68 MB on aarch64-apple-darwin, 1.68 -> 1.88 on
+x86_64 Linux), about 77 KB of it the sync's own code -- and the browser module is built without it:
 `fennec-abi`'s `sync` feature, which only `fennec-ffi` turns on. It turns
 on fennec-ql's `statements`, to read the named statements it refuses: the
 native library names them anyway, so the refusal is its only cost, 128
