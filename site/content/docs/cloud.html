@@ -896,6 +896,15 @@ export async function GET(req) {
   return Response.json(db.run('get products select name, price match name $1', [q]));
 }</pre>
 
+<p>The image can also be your server's own data: a file <code>fennec
+backup</code> wrote (<a href="#backups">Backups</a>) loads as it is. A backup
+copied to the bundle or the bucket at each deploy, or each night, gives every
+instance the server's database as of that backup, read without a request to
+the server. Use the <code>@fennecdb/web</code> of the server's release or a
+later one.</p>
+
+<pre data-lang="bash">fennec backup https://db.example.com catalog.fennec --token "$REPL"</pre>
+
 <p>Lambda, Cloud Run and Vercel give a function gigabytes of memory, so an
 image of tens of megabytes loads; a cold start pays its load, tens of
 milliseconds for 10 000 rows (<a href="/docs/serverless#cold-start">A cold
