@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { needs } from './ci-prereq.mjs';
 import { from, call, Call, or, not, raw, inc, expr, distance, param, Query, FennecError } from './fennec.js';
 
 const q = () => from('articles');
@@ -531,6 +532,7 @@ test('the conditional filter pattern', () => {
 import { readFile } from 'node:fs/promises';
 
 const wasm = await readFile(new URL('./fennec.wasm', import.meta.url)).catch(() => null);
+needs(['web/fennec.wasm', wasm, 'make wasm']);
 
 // A Cloudflare Worker imports a `.wasm` file compiled, and cannot compile
 // bytes at run time: `open` takes the module that way too, and the database
@@ -1377,6 +1379,7 @@ test('end to end on wasm', { skip: wasm ? false : 'no web/fennec.wasm (make wasm
 // what the full one wrote, and the full one what it wrote: a build without
 // an index opens a file that declares one, and hands it back.
 const lite = await readFile(new URL('./fennec-lite.wasm', import.meta.url)).catch(() => null);
+needs(['web/fennec-lite.wasm', lite, 'make wasm-lite']);
 
 test('the module made without indexes and the full one open each other\'s files', {
   skip: wasm && lite ? false : 'no web/fennec.wasm and web/fennec-lite.wasm (make wasm wasm-lite)',
@@ -1564,6 +1567,7 @@ test('near without the graph is the full module\'s near ... exact', {
 // answers, points read, and what needs a missing feature is refused, the
 // feature named, through the module's own errors as a page meets them.
 const min = await readFile(new URL('./fennec-min.wasm', import.meta.url)).catch(() => null);
+needs(['web/fennec-min.wasm', min, 'make wasm-min']);
 
 test('the module made with no feature opens a file declaring every one', {
   skip: wasm && min ? false : 'no web/fennec.wasm and web/fennec-min.wasm (make wasm wasm-min)',

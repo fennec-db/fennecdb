@@ -13,6 +13,8 @@ WASM_OUT = target/wasm32-unknown-unknown/wasm/fennec_wasm.wasm
 # code opens with comes with any set, unless SCHEMA=0: 7.5 KB brotli for a
 # page whose code declares none.
 FEATURES ?=
+# `make test`'s logs, counted for the tests that skipped themselves (tools/skips_check.py)
+SKIPS = python3 tools/skips_check.py
 SCHEMA ?= 1
 # `make studio-desktop STUDIO_SERVER=0.1.12`: the server the desktop app bundles
 # is that release's, not built from this checkout. A release's version, and
@@ -41,20 +43,21 @@ all: test wasm
 ## The sync scenarios' reports go first, so a runner that did not run this
 ## time leaves none for sync-scenarios-check to find.
 test:
-	@rm -rf target/sync-scenarios
-	$(CARGO) test --workspace --exclude fennec-bench --lib --bins --tests
-	$(CARGO) test --workspace --exclude fennec-bench --doc
-	$(CARGO) test -p fennec-core --no-default-features --features std-fs,language --lib --test features
-	$(CARGO) test -p fennec-core --no-default-features --features std-fs --lib --test features
+	@rm -rf target/sync-scenarios target/skips
+	$(SKIPS) tee target/skips/rust-1.log -- $(CARGO) test --workspace --exclude fennec-bench --lib --bins --tests
+	$(SKIPS) tee target/skips/rust-2.log -- $(CARGO) test --workspace --exclude fennec-bench --doc
+	$(SKIPS) tee target/skips/rust-3.log -- $(CARGO) test -p fennec-core --no-default-features --features std-fs,language --lib --test features
+	$(SKIPS) tee target/skips/rust-4.log -- $(CARGO) test -p fennec-core --no-default-features --features std-fs --lib --test features
 	@$(MAKE) --no-print-directory test-js
 	@if [ -f web/fennec.wasm ] && command -v node >/dev/null 2>&1; then $(MAKE) --no-print-directory sync-scenarios-check; fi
+	@python3 tools/skips_check.py check target/skips/*.log
 
 ## JS tests. node's own runner; no dependencies. The spec reporter ends a
 ## failing run with each failing test's name and assertion: Node 22's
 ## default away from a terminal is TAP, a failure among a thousand lines.
 ##   fennec.test.js      query builder (end-to-end too when wasm is present)
 ##   fennec.sync.test.js sync layer -- against a real `fennec-server --http` server;
-##                     skipped when `web/fennec.wasm` or the binary is missing
+##                     skipped when `web/fennec.wasm` or the binary is missing (a failure under CI)
 ##   fennec.sync.scenarios.test.js  integrations/sync-scenarios.json against
 ##                     FennecSync, over a scripted transport
 ##   fennec.persist.test.js  incremental persistence, over an in-memory IndexedDB
@@ -81,7 +84,7 @@ test:
 ##                     `web/fennec.wasm` or the binary is missing
 test-js:
 	@if command -v node >/dev/null 2>&1; then \
-		node --test --test-reporter=spec web/fennec.test.js web/fennec.sync.test.js web/fennec.sync.scenarios.test.js web/fennec.persist.test.js web/fennec.file.test.js web/fennec.schema.test.js web/fennec.client.test.js web/fennec.replicas.test.js web/fennec.https.test.js studio/test/statements.test.mjs studio/test/transport.test.mjs; \
+		$(SKIPS) tee target/skips/js.log -- node --test --test-reporter=spec web/fennec.test.js web/fennec.sync.test.js web/fennec.sync.scenarios.test.js web/fennec.persist.test.js web/fennec.file.test.js web/fennec.schema.test.js web/fennec.client.test.js web/fennec.replicas.test.js web/fennec.https.test.js studio/test/statements.test.mjs studio/test/transport.test.mjs; \
 	else \
 		echo "node not found -- JS tests skipped"; \
 	fi
