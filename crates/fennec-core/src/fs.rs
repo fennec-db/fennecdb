@@ -237,8 +237,15 @@ impl Tail {
     /// node keeps no 260 KB beside each tenant that has closed. A crash
     /// leaves it, and the next open applies it. Whether the file was
     /// synced.
+    ///
+    /// None is begun after it: a server lets the log go before it exits
+    /// ([`Sink::close_log`]), and a durability handed out before that and
+    /// run after it -- a `--sync always` write's, its first sync not yet
+    /// run -- fsyncs the file; begun again, the log was left beside the
+    /// file the exit came after.
     fn close(&mut self, file: &File) -> bool {
         let kept = self.log.take().is_some() || (self.keeps && self.log_path.is_file());
+        self.keeps = false;
         let synced = kept && file.sync_data().is_ok();
         if synced {
             let _ = std::fs::remove_file(&self.log_path);
@@ -832,6 +839,11 @@ impl Sink for FileSink {
             lock(&disk).sync(&pending, upto, true)
         })))
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    fn close_log(&mut self) {
+        #[cfg(unix)]
+        self.let_log_go(&mut lock(&self.disk));
+    }
 }
 
 /// The image written straight into the side file a rewrite renames over the
@@ -870,13 +882,8 @@ impl Drop for FileSink {
         let mut disk = lock(&self.disk);
         let written = disk.write_pending(&self.pending);
         #[cfg(unix)]
-        if written.is_ok() && disk.failed.is_none() {
-            let Disk {
-                tail, file, end, ..
-            } = &mut *disk;
-            if tail.close(file) {
-                self.durable.store(*end, Ordering::Release);
-            }
+        if written.is_ok() {
+            self.let_log_go(&mut disk);
         }
         // Everything written is durable, and more than the open found: a
         // mark says so, and the next open checks nothing behind it -- a
@@ -890,6 +897,35 @@ impl Drop for FileSink {
             && self.marks_past.is_some_and(|past| durable > past)
         {
             let _ = disk.file.write_all(&crate::engine::synced_mark());
+        }
+    }
+}
+
+impl FileSink {
+    /// The file synced and its sync log removed, as a close does, and none
+    /// begun after ([`Tail::close`]): the drop's, and a server's before it
+    /// exits ([`Sink::close_log`]). Nothing after a storage error, whose
+    /// log may hold what the file lacks.
+    #[cfg(unix)]
+    fn let_log_go(&self, disk: &mut Disk) {
+        if disk.failed.is_some() {
+            return;
+        }
+        let Disk {
+            tail,
+            file,
+            end,
+            written,
+            synced,
+            inherited,
+            ..
+        } = disk;
+        if tail.close(file) {
+            // That fsync covered every byte written: a durability handed
+            // out before the close and run after it finds its bytes synced.
+            *synced = *written;
+            *inherited = false;
+            self.durable.store(*end, Ordering::Release);
         }
     }
 }

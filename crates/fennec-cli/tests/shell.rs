@@ -582,6 +582,23 @@ fn minus_c_reads_its_text_whole() {
     assert_eq!(count(&f, ""), 4);
 }
 
+/// The shell leaves no sync log beside a file it wrote (Linux and Android,
+/// `fennec-core`'s `synclog.rs`): `-c` ends in `process::exit`, which drops
+/// nothing, and the database's drop is what removes the log its sync began
+/// -- every `-c` that wrote left 260 KB beside the file. A script piped to
+/// its end returns from `main`, its database dropped.
+#[test]
+fn the_shell_leaves_no_sync_log() {
+    let d = Dir::new("synclog");
+    let f = d.notes();
+    let log = PathBuf::from(format!("{}.sync", f.display()));
+    assert!(!log.exists(), "`-c` left {}", log.display());
+    let out = piped(&f, "put notes {body: \"f\", topic: 1, posted: 6}\n");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(!log.exists(), "a script left {}", log.display());
+    assert_eq!(count(&f, ""), 6);
+}
+
 /// Typed at a terminal: a read on one line answers at Enter; a write waits
 /// for the next line, which goes on with it -- a `.` command between them
 /// leaves it waiting -- and an empty line runs it; a line that begins no

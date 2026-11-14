@@ -2676,6 +2676,9 @@ impl Tenants {
                 // Its last rewrite this process's, as a close's is.
                 instance::closing(&self.dir, &t.name, t.bound(), &self.path(&t.name));
                 self.hooks.rebind(&t.name, t.opened);
+                // The file synced and its sync log removed, as the close the
+                // lock kept below never runs would (`Database::close_log`).
+                g.close_log();
                 // Leaked on purpose: the process is about to exit, and a lock
                 // released here would let a session write after the final sync.
                 std::mem::forget(g);

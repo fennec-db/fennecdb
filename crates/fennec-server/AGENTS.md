@@ -14,8 +14,10 @@ holding until the exit --, `--exit-on-stdin-close`'s end of stdin
 (`request_shutdown`) and a failure of what runs beside the database
 (`stop_with`, its exit code) set one flag, `SHUTDOWN`; the syncer, a file's
 or a node's, looks every `LOOK` whatever `--sync` is, syncs, checkpoints
-(only once `serving`, and exiting 0, `checkpoints`) and exits holding the
-write lock. A new way down sets that flag and never exits on its own. What
-fails before anything writes the file or runs beside it -- a flag, the open,
-a port, both listeners bound straight after the open -- exits where it
-fails, having written only `<file>.lock` and what the open does.
+(only once `serving`, and exiting 0, `checkpoints`), lets the sync log go
+(`Database::close_log`: held, the database is never dropped) and exits
+holding the write lock. A new way down sets that flag and never exits on
+its own. What fails before anything writes the file or runs beside it -- a
+flag, the open, a port, both listeners bound straight after the open --
+exits where it fails, having written only `<file>.lock` and what the open
+does.
