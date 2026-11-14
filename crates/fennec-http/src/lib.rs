@@ -572,7 +572,7 @@ fn authenticate(
         Response::error(401, why).header("WWW-Authenticate", "Bearer")
     };
     if let (Some(token), Some(given)) = (&cfg.token, given) {
-        if constant_eq(given.as_bytes(), token.as_bytes()) {
+        if crypto::ct_eq(given.as_bytes(), token.as_bytes()) {
             audit::verified();
             return Ok(Who::Full);
         }
@@ -1856,7 +1856,7 @@ fn route_tenant(
             .unwrap_or("");
         let ok = tenants
             .replication_token()
-            .is_some_and(|t| constant_eq(given.as_bytes(), t.as_bytes()));
+            .is_some_and(|t| crypto::ct_eq(given.as_bytes(), t.as_bytes()));
         if !ok {
             return Err(Response::error(401, "invalid or missing replication token")
                 .header("WWW-Authenticate", "Bearer"));
@@ -5272,19 +5272,6 @@ fn cors(resp: Response, cfg: &Config) -> Response {
     cors::apply(resp, cfg.cors.as_deref())
 }
 
-/// The token comparison is constant time: an early-exit comparison leaks the
-/// length of the correct prefix.
-pub(crate) fn constant_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
-
 // A secret's file its owner's alone on Windows, a DACL where a Unix gives
 // the file mode 0600 (owner_only.rs). Below the code a Unix build compiles,
 // so its lines -- a panic's location among them -- stay where they were
@@ -5296,14 +5283,6 @@ pub mod owner_only;
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
-
-    #[test]
-    fn constant_eq_matches_eq() {
-        assert!(constant_eq(b"secret", b"secret"));
-        assert!(!constant_eq(b"secret", b"secre"));
-        assert!(!constant_eq(b"secret", b"secrez"));
-        assert!(constant_eq(b"", b""));
-    }
 
     #[test]
     fn loopback_addresses_are_local() {

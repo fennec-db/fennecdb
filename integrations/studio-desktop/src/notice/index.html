@@ -8,7 +8,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>fennec studio</title>
-<link rel="stylesheet" href="../ui/app.css">
+<!-- Absolute: a page is views://<page>/, <page> is the URL's host, and ../ cannot climb
+     above a host, so ../ui/app.css went to views://<page>/ui/app.css, a file that does
+     not exist. holdTo governs navigation only; CSP style-src admits views:. -->
+<link rel="stylesheet" href="views://ui/app.css">
 </head>
 <body>
 <main class="dialog" role="alertdialog" aria-labelledby="title" aria-describedby="message">

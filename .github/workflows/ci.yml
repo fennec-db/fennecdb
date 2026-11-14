@@ -51,6 +51,23 @@ jobs:
       - name: Only fennec-tls and fennec-bench take dependencies from outside the workspace
         run: python3 tools/deps_check.py
 
+      # The compiler CI tests with is the one that ships: rust-toolchain.toml
+      # names an exact release, and every Dockerfile's rust image is that
+      # release, by digest, the toolchain file kept in the build; the images
+      # that ship or run the regions' checks name a digest in every FROM.
+      - name: rust-toolchain.toml names an exact release, and every image builds with it
+        run: |
+          python3 tools/test_toolchain_check.py
+          python3 tools/toolchain_check.py
+
+      # docs/design/conventions.md#secrets-compared: a token, a secret, a
+      # mark, a signature or a password is compared by crypto::ct_eq, never
+      # with == or !=; the reader is held to its own cases first.
+      - name: No secret is compared with == or != in the crates' sources
+        run: |
+          python3 tools/secret_eq_check.py --self-test
+          python3 tools/secret_eq_check.py
+
       # docs/design/benchmarks.md#instruction-counts: the measuring is
       # macOS's and runs by hand (make instr-compare); a copy's UUID, the
       # refusals keeping a build's output untouched, the figures and a
@@ -70,8 +87,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # rust-toolchain.toml follows stable, so a new release can bring a new
-      # lint; this job is where that shows, rather than in someone's editor.
+      # rust-toolchain.toml names an exact release: a new one, and the lints
+      # it brings, comes in a pull request of its own, and shows here first.
       - name: Install the pinned toolchain
         run: |
           rustup show
@@ -152,8 +169,9 @@ jobs:
         if: matrix.os == 'macos-latest'
         run: sh site/test_install.sh
 
-      # rust-toolchain.toml pins stable and asks for wasm32-unknown-unknown;
-      # `rustup show` is what installs both before the first cargo call.
+      # rust-toolchain.toml pins an exact release and asks for
+      # wasm32-unknown-unknown; `rustup show` is what installs both before
+      # the first cargo call.
       - name: Install the pinned toolchain
         run: rustup show
 
@@ -554,6 +572,56 @@ jobs:
         run: |
           $zip = Get-Item dist/*.zip
           ./site/test_install.ps1 -Zip $zip.FullName -Version ($zip.Name -replace '^fennec-v(.+)-${{ matrix.target }}\.zip$', '$1')
+
+  # The C library for Linux as release.yml makes it (tools/linux-ffi.sh) and
+  # holds it before it keeps it (tools/linux-ffi-check.sh: its exports, the
+  # glibc it asks for, a C program linked to each library through its
+  # pkg-config file and run here and in AlmaLinux 9's glibc 2.34), on each
+  # architecture's runner and every change, so a tag meets no step of it CI
+  # has not run. The tarball is kept as the run's artifact.
+  linux-ffi:
+    name: linux (C library, ${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, os: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+          - { arch: aarch64, os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned toolchain
+        run: |
+          rustup show
+          rustup target add ${{ matrix.target }}
+          command -v pkg-config >/dev/null || { sudo apt-get update && sudo apt-get install -y pkg-config; }
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ matrix.os }}-linux-ffi-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ matrix.os }}-linux-ffi-
+
+      - name: The tarball, as release.yml makes it
+        run: tools/linux-ffi.sh "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)" ${{ matrix.target }} dist
+
+      - name: Linked into a C program and run, here and on glibc 2.34, as release.yml checks it before keeping it
+        run: tools/linux-ffi-check.sh "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)" ${{ matrix.target }} dist
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fennec-ffi-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
 
   # What a pull request does to the browser module against the branch it goes
   # into, on the run's summary page: raw, gzip and brotli, the code by crate,
@@ -1010,7 +1078,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: shellcheck
-        run: shellcheck --shell=sh site/install.sh site/test_install.sh tools/install-nfpm.sh tools/linux-packages.sh tools/linux-packages-check.sh tools/windows-zip.sh
+        run: shellcheck --shell=sh site/install.sh site/test_install.sh tools/install-nfpm.sh tools/linux-packages.sh tools/linux-packages-check.sh tools/windows-zip.sh tools/linux-ffi.sh tools/linux-ffi-check.sh
 
       - name: The installer, its checksum and its refusals
         run: sh site/test_install.sh
@@ -1192,7 +1260,12 @@ jobs:
         timeout-minutes: 20
         run: examples/flutter/run-tests.sh apk
 
+      # Nothing in a workflow downloads this (packages.yml rebuilds the AAR
+      # from a release): it is for a person to fetch. An upload that fails
+      # on GitHub's side (#590/#591 lost a merge-queue run to one) must not
+      # fail a job whose tests all passed. A test is never retried.
       - uses: actions/upload-artifact@v7
+        continue-on-error: true
         with:
           name: fennecdb-android
           path: dist-mobile/*.aar
@@ -1303,7 +1376,10 @@ jobs:
           rm -rf test
           flutter build ios --simulator --debug --no-codesign
 
+      # Nothing downloads this either (see the Android upload): a failed
+      # upload on GitHub's side does not fail a job whose tests passed.
       - uses: actions/upload-artifact@v7
+        continue-on-error: true
         with:
           name: fennecdb-xcframework
           path: |

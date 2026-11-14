@@ -23,7 +23,7 @@
 use crate::http::{Request, Response};
 use crate::replication::Replication;
 use crate::tenants::Stats;
-use crate::{constant_eq, Config};
+use crate::{crypto::ct_eq, Config};
 use fennec_core::engine::{HookRuns, Runs};
 use fennec_core::prelude::*;
 use std::cell::Cell;
@@ -504,7 +504,7 @@ pub(crate) fn allowed(cfg: &Config, req: &Request, admin: bool) -> bool {
         tokens
             .iter()
             .flatten()
-            .any(|t| constant_eq(g.as_bytes(), t.as_bytes()))
+            .any(|t| ct_eq(g.as_bytes(), t.as_bytes()))
     });
     // Open, a scrape verifies nothing, whatever it carries.
     if taken {

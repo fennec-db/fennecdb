@@ -242,6 +242,9 @@ KEYWORDS = {
     "dart": """import final const var return if else for in while try on catch
         async await class extends super this null true false void required
         late static""".split(),
+    # The C ABI's page: a program against fennec.h.
+    "c": """include if else for while return const static struct void char int
+        size_t uint8_t uint64_t int32_t NULL""".split(),
     # The home page's sessions in the languages the docs show as text.
     "csharp": """using var new await async return if else for foreach in while try
         catch throw class static public private void null true false""".split(),
@@ -274,6 +277,7 @@ COMMENT = {
     "swift": r"//[^\n]*|/\*[\s\S]*?\*/",
     "kotlin": r"//[^\n]*|/\*[\s\S]*?\*/",
     "dart": r"//[^\n]*|/\*[\s\S]*?\*/",
+    "c": r"//[^\n]*|/\*[\s\S]*?\*/",
     "csharp": r"//[^\n]*|/\*[\s\S]*?\*/",
     "java": r"//[^\n]*|/\*[\s\S]*?\*/",
     "php": r"//[^\n]*|/\*[\s\S]*?\*/",
