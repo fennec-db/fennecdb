@@ -301,6 +301,121 @@ test('a store deleted under the page has its image stored again by the next pers
   assert.deepEqual(await restored('s', { cryptoKey }), [1, 2, 3, 4, 5, 6, 7]);
 });
 
+// A second persist called before the first had answered read the chunk
+// number the first had not moved past yet, and stored its chunk over the
+// first's: the writes the first drained were nowhere, and sealed, the chunk
+// after them refused to open.
+test("persists of one database run one after another, in call order, each where the one before left", { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const idb = fakeIndexedDB();
+  globalThis.indexedDB = idb;
+  globalThis.IDBKeyRange = KeyRange;
+  const { Fennec, persist, restore } = await import('./fennec.js');
+  const ns = (d) => d.rows('get t select n order n').map((r) => r.n);
+  const restored = async (key, opts) => {
+    const back = await Fennec.open(wasm);
+    assert.equal(await restore(back, key, opts), true, `${key} restores`);
+    return ns(back);
+  };
+  const cryptoKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  for (const [key, opts] of [['plain', {}], ['sealed', { cryptoKey }]]) {
+    const db = await Fennec.open(wasm);
+    // An image large enough that no chunk here folds into a new one.
+    db.run('create collection pad (body text)');
+    db.run('put pad {body: $1}', ['x'.repeat(4096)]);
+    db.run('create collection t (n int)');
+    db.run('put t {n: 1}');
+    await persist(db, key, opts);
+    const from = idb.log.length;
+    const written = () => idb.log.slice(from).map((tx) => tx.map((w) => w[1]));
+
+    // The second called while the first is out, a write between.
+    db.run('put t {n: 2}');
+    const a = persist(db, key, opts);
+    db.run('put t {n: 3}');
+    const b = persist(db, key, opts);
+    const [first, second] = await Promise.all([a, b]);
+    assert.ok(first > 0 && second > 0, `${key}: each stores a chunk (${first}, ${second} bytes)`);
+    assert.deepEqual(written(), [[`${key}#000000001`], [`${key}#000000002`]], `${key}: the chunks in call order`);
+    assert.deepEqual(await restored(key, opts), [1, 2, 3]);
+
+    // A third called while two are out. The second runs once the first
+    // has answered, and stores both writes made by then; the third finds
+    // nothing left.
+    const calls = [];
+    for (const n of [4, 5, 6]) {
+      db.run('put t {n: $1}', [n]);
+      calls.push(persist(db, key, opts));
+    }
+    const [c, d, e] = await Promise.all(calls);
+    assert.ok(c > 0 && d > 0, `${key}: the first two store a chunk each (${c}, ${d} bytes)`);
+    assert.equal(e, 0, `${key}: the one before stored the write made before it`);
+    assert.deepEqual(written().slice(2), [[`${key}#000000003`], [`${key}#000000004`]], `${key}: two more, in call order`);
+    assert.deepEqual(await restored(key, opts), [1, 2, 3, 4, 5, 6]);
+  }
+});
+
+// A refused persist leaves no number taken and no turn held: the one called
+// after it runs, stores what the refused one could not -- an image -- and
+// answers for itself. Before, it stored a chunk over the image the refused
+// writes were missing from.
+test('a persist refused while another waits for it lets that one run, which stores the image', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const idb = fakeIndexedDB();
+  globalThis.indexedDB = idb;
+  globalThis.IDBKeyRange = KeyRange;
+  const { Fennec, persist, restore } = await import('./fennec.js');
+  const ns = (d) => d.rows('get t select n order n').map((r) => r.n);
+  const db = await Fennec.open(wasm);
+  db.run('create collection t (n int)');
+  db.run('put t {n: 1}');
+  await persist(db, 'w');
+  db.run('put t {n: 2}');
+  idb.refuse = 'QuotaExceededError';
+  const a = persist(db, 'w');
+  db.run('put t {n: 3}');
+  const b = persist(db, 'w');
+  await assert.rejects(a, { name: 'QuotaExceededError' });
+  assert.ok((await b) > 0, 'the second answers for itself');
+  assert.deepEqual(idb.log.at(-1).map((w) => [w[0], w[1]]), [['put', 'w'], ['delete', 'w#..']], 'an image, holding what the refused one drained');
+  const back = await Fennec.open(wasm);
+  assert.equal(await restore(back, 'w'), true);
+  assert.deepEqual(ns(back), [1, 2, 3]);
+});
+
+// A persist called while `restore` was still reading found no chunks to
+// follow, and stored the empty database's image over the one being
+// restored: the restore went on to load the old rows, and later chunks
+// were stored after an image that no longer held them.
+test('a persist called while restore is out runs after it, where it left the database', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const idb = fakeIndexedDB();
+  globalThis.indexedDB = idb;
+  globalThis.IDBKeyRange = KeyRange;
+  const { Fennec, persist, restore } = await import('./fennec.js');
+  const ns = (d) => d.rows('get t select n order n').map((r) => r.n);
+  const first = await Fennec.open(wasm);
+  first.run('create collection t (n int)');
+  first.run('put t {n: 1}');
+  await persist(first, 'r');
+  first.run('put t {n: 2}');
+  await persist(first, 'r');
+
+  const db = await Fennec.open(wasm);
+  // A refused one holds up nothing after it.
+  const cryptoKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  const refused = restore(db, 'r', { cryptoKey });
+  const r = restore(db, 'r');
+  const p = persist(db, 'r');
+  await assert.rejects(refused, /stored in the clear/);
+  assert.equal(await r, true);
+  assert.equal(await p, 0, 'nothing written since the restore, nothing stored');
+  assert.deepEqual(ns(db), [1, 2]);
+  db.run('put t {n: 3}');
+  await persist(db, 'r');
+  assert.deepEqual(idb.log.at(-1).map((w) => w[1]), ['r#000000002'], 'a chunk after those restored');
+  const back = await Fennec.open(wasm);
+  assert.equal(await restore(back, 'r'), true);
+  assert.deepEqual(ns(back), [1, 2, 3]);
+});
+
 // A transaction past its quota is refused at its commit, by `abort` alone:
 // `putState`, waiting on `error` and `complete`, never answered (Chrome,
 // web/browser/).

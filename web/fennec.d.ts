@@ -1721,6 +1721,8 @@ export interface PersistOptions {
 /**
  * Writes the database into IndexedDB under `key`: the image the first time,
  * then only the writes since the last call. Returns the bytes written.
+ * Calls on one database -- with `restore` and `openFile` -- run one after
+ * another in call order, each storing what was written by its turn.
  */
 export function persist(fennec: Fennec<any, any>, key?: string, opts?: PersistOptions): Promise<number>;
 /** Restores from IndexedDB, image and chunks; `false` when there is no record. */

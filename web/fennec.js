@@ -1021,11 +1021,36 @@ async function inStore(mode, ask, on = null) {
 }
 
 /**
+ * Per database, the last of its `persist`, `restore` and `openFile` calls.
+ * Each reads where the one before left the database -- the next chunk's
+ * number, the image's connection, the file it is kept in -- and moves it on
+ * only once its own write has landed: two at once read the same number, and
+ * the second chunk was stored over the first, its writes lost.
+ */
+const turns = new WeakMap();
+
+/** `run()` once every call before it on `fennec` has settled, refused or not: at once when none is out. */
+function inTurn(fennec, run) {
+  const out = turns.get(fennec)?.then(run) ?? run();
+  const done = out.then(free, free);
+  function free() {
+    if (turns.get(fennec) === done) turns.delete(fennec);
+  }
+  turns.set(fennec, done);
+  return out;
+}
+
+/**
  * Writes the database into IndexedDB under `key`: the image the first time,
  * then only the writes since the last call, as a chunk. Returns the bytes
  * written. With `{cryptoKey}` (AES-GCM) each is sealed before it is stored.
+ * Called while another is out, it stores what was written by its turn.
  */
 export async function persist(fennec, key = 'default', opts = {}) {
+  return inTurn(fennec, () => persistNow(fennec, key, opts));
+}
+
+async function persistNow(fennec, key, opts) {
   if (kept.has(fennec)) throw new FennecError('the database is kept in a file (openFile): persist would take the writes it appends');
   const ck = opts.cryptoKey ?? null;
   let s = stored.get(fennec);
@@ -1069,7 +1094,8 @@ export async function persist(fennec, key = 'default', opts = {}) {
     // The drained writes are nowhere now; the next call stores an image --
     // this one, where the image's connection had ended.
     stored.delete(fennec);
-    if (e === ENDED) return persist(fennec, key, opts);
+    // In this call's turn still: `persist` would wait for this very call.
+    if (e === ENDED) return persistNow(fennec, key, opts);
     throw e;
   }
   if (image) Object.assign(s, { db: on, gen, next: 1, image: image.length, chunks: 0 });
@@ -1099,6 +1125,10 @@ export async function getState(key) {
  * refuses a record stored in the clear.
  */
 export async function restore(fennec, key = 'default', opts = {}) {
+  return inTurn(fennec, () => restoreNow(fennec, key, opts));
+}
+
+async function restoreNow(fennec, key, opts) {
   const ck = opts.cryptoKey ?? null;
   let on = null;
   let [image, chunks] = await inStore('readonly', (os, db) => {
@@ -1367,6 +1397,10 @@ function loads(fennec, bytes) {
  * @returns {Promise<FennecFile>}
  */
 export async function openFile(fennec, name = 'default.fennec', opts = {}) {
+  return inTurn(fennec, () => openFileNow(fennec, name, opts));
+}
+
+async function openFileNow(fennec, name, opts) {
   if (kept.has(fennec)) throw new FennecError('the database is already kept in a file');
   if (stored.has(fennec)) throw new FennecError('persist keeps this database in IndexedDB: a file would take the writes it stores');
   const dir = opts.dir ?? (await globalThis.navigator?.storage?.getDirectory?.());

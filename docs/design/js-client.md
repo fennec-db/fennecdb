@@ -174,6 +174,10 @@ AES-GCM (WebCrypto), a tag over the key, the image's random generation and
 the chunk's number, so one moved, dropped from the middle or kept from an
 image before is refused; a row persists in 0.16 ms either way, the 32 MB
 image in 129 ms against 76. The OPFS file stays plain: it is `fennec-server`'s.
+A database's `persist`, `restore` and `openFile` calls run one after another
+in call order (`inTurn`), each once the one before has settled, refused or
+not: a `persist` called while another is out stores what was written by its
+turn, and one called with none out runs at once, as it always did.
 
 ### In real browsers
 
@@ -265,6 +269,45 @@ What it found, fixed with it:
   file's size and image end describe a file its sync access handle holds
   alone: nothing else in the origin writes, truncates or removes it
   meanwhile.
+- (Found in review; there since chunks came in, v0.1.5.) Two `persist`
+  calls on one database, the second made before the first answered, read
+  the same `stored` entry: the next chunk's number moved on only once a
+  chunk's transaction had landed, so the second chunk was stored under the
+  first's number, over it. In the clear, the first's writes were gone from
+  what `restore` read (`[1, 3]` restored of `[1, 2, 3]`); sealed, that, or,
+  where the first had landed while the second was being sealed, the second
+  stored under the next number but sealed with the first's, a record
+  `restore` refused -- either until a later `persist` folded the chunks
+  into an image. A refused `persist` let one waiting behind it
+  store a chunk after the image its writes were missing from, and a
+  `persist` made while `restore` was reading stored the empty database's
+  image over the one being restored. Each call now runs once the one
+  before it on that database has settled (`turns`, `inTurn`): `persist`,
+  `restore` and `openFile` alike, since each reads what the one before
+  leaves -- the chunk number, the image's connection, the file the
+  database is kept in -- and a second `openFile` made meanwhile took the
+  database to another file, the first's handles held and never written
+  again. A refused call holds up none after it, and `persist`'s retry on
+  an ended connection runs inside its own turn (`persistNow`), or it would
+  wait for itself. Taking the number when a chunk is drained instead, the
+  transactions running side by side, was not enough: a refused chunk
+  leaves a gap a later one is stored past, and a sealed record's
+  transaction is made when WebCrypto has sealed it, not in call order, so
+  an image's delete of its chunks could land after a chunk made after it.
+  Nothing is added for a call with none out -- it runs at once, as before
+  -- nor any IndexedDB request; a call made while another is out waits for
+  that one's commit, where before it raced it. `putState` and `getState`
+  keep nothing between calls, and IndexedDB runs one store's transactions
+  in the order they were made, which is call order for both: each makes
+  its transaction as soon as the shared connection's promise settles. An
+  open file's own state (`FennecFile`'s size and image end) is read and
+  moved on within one synchronous `flush`. `web/fennec.js` grows 1 250
+  bytes, 357 gzip and 311 brotli as served (87 gzip minified, the rest its
+  comments), which took the client past the room `site/build.py` leaves
+  its quoted sizes: 229, 60 and 71 KB are 232, 61 and 72 now.
+  `web/fennec.persist.test.js` and `web/fennec.file.test.js` hold each
+  case, and the browser suite's sixteenth test two persists made before
+  the first answered, plain and sealed.
 - A file past the quota: Chrome's file system throws QuotaExceededError,
   Firefox's writes nothing and says so by its count, which the file now
   names as the origin out of room. Either way the write is refused, every

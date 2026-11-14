@@ -51,7 +51,7 @@ the page does.</p>
 </div>
 
 <p>Beside a module the page loads <code>fennec.js</code> and the two modules it
-imports, 60 KB brotli as they are served with no build step; a bundler keeps
+imports, 61 KB brotli as they are served with no build step; a bundler keeps
 what the app uses of them. An app whose queries run on a server can import
 the client entry instead:</p>
 
@@ -435,7 +435,11 @@ file opened again holds every write <code>run</code> answered.</p>
 IndexedDB, wherever a page runs: the image once, then only the writes since
 the last call, as chunks. <code>persist</code> stores what was written when
 it is called, and IndexedDB decides when that reaches the disk; the file is
-flushed before every answer. The calls share one connection, which closes
+flushed before every answer. A database's <code>persist</code>,
+<code>restore</code> and <code>openFile</code> calls run one after another
+in the order they were made: a <code>persist</code> called before the one
+before it answered waits for it and stores what was written by then, and one
+refused holds up none after it. The calls share one connection, which closes
 as soon as a delete of the database
 (<code>indexedDB.deleteDatabase('fennecdb')</code>) or an upgrade asks, so
 nothing of fennecdb's holds either up. Deleted under the page, or with the

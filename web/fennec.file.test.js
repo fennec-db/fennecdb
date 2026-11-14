@@ -364,6 +364,27 @@ test('one keeper a file and a database: the rest are refused', { skip }, async (
   await assert.rejects(openFile(full, 'i.fennec', { dir }), /holds a database/);
 });
 
+// `openFile` names the database kept only once its file is open: a second
+// call, or a `persist`, made meanwhile found it kept nowhere, and the second
+// file took the database while the first went on holding its handles,
+// never written again.
+test('a call made while openFile is out waits for it, and is refused by what it kept', { skip }, async () => {
+  const dir = fakeDir();
+  const db = await open();
+  const first = openFile(db, 'p.fennec', { dir });
+  const second = openFile(db, 'q.fennec', { dir });
+  const stored = persist(db, 'p');
+  const file = await first;
+  await assert.rejects(second, /already kept/);
+  await assert.rejects(stored, /kept in a file/);
+  assert.equal(dir.files.has('q.fennec'), false, 'the second file never opened');
+  db.run('create collection docs (title text)');
+  db.run('put docs {title: "a"}');
+  file.close();
+  const { db: again } = await reopen(dir, 'p.fennec');
+  assert.deepEqual(titles(again), ['a']);
+});
+
 // A page loaded again finds its file held by the worker of the page before
 // until that worker has ended -- in Chrome 2 s after the page went, when
 // it was busy (web/browser/) -- and opens it once it is let go of.

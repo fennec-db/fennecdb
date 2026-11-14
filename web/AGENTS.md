@@ -42,9 +42,14 @@ the one a transaction failed on is let go (Firefox refuses its next
 requests). A chunk follows its image only over the connection that stored
 or read the image, open since (`stored`'s `db`, `inStore`'s `on`): past a
 delete of the database or the site's data cleared, the next `persist`
-stores an image. `web/fennec.persist.test.js` and `web/browser/` hold all
-three. A change to these calls or to `idb` runs `web/browser/` in Chrome,
-Firefox and Safari before it lands -- Safari's job by `gh workflow run
+stores an image. A database's `persist`, `restore` and `openFile` run one
+after another in call order (`inTurn`), each once the one before has
+settled, refused or not: two at once read one chunk number, and the
+second chunk was stored over the first; a retry inside one runs in its
+turn (`persistNow`), never through `persist`, which would wait for itself.
+`web/fennec.persist.test.js`, `web/fennec.file.test.js` and
+`web/browser/` hold all four. A change to these calls or to `idb` runs
+`web/browser/` in Chrome, Firefox and Safari before it lands -- Safari's job by `gh workflow run
 ci.yml --ref <branch>`, a pull request running none -- and `make
 file-bench` in Chrome and Firefox against main's.
 

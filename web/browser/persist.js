@@ -34,6 +34,7 @@ const TESTS = {
   fileQuota: 'a file past the quota refuses the write and keeps every write it answered',
   closed: 'persist, restore and the state calls leave no connection open to block a delete of the database',
   gone: 'a database deleted under the page has its image stored again by the next persist',
+  turns: 'persists called before the one before answered store their chunks in call order, plain and sealed',
 };
 
 /** The files the suite makes in the origin private file system, each with its copy. */
@@ -676,6 +677,35 @@ const PHASES = {
       const back = await open();
       ok(await restore(back, 'gone'), 'restored after the delete');
       same(ns(back), [1, 2, 3], 'every write, those before the delete too');
+      await wipe();
+    });
+
+    // Persists called without waiting for the one before read the same
+    // chunk number, and the second chunk was stored over the first.
+    await test(TESTS.turns, async () => {
+      const cryptoKey = await derived('a passphrase');
+      for (const [key, opts] of [['turns', {}], ['sealedTurns', { cryptoKey }]]) {
+        const db = await open();
+        // An image large enough that no chunk here folds into a new one.
+        db.run('create collection pad (body text)');
+        db.run('put pad {body: $1}', ['x'.repeat(4096)]);
+        db.run('create collection t (n int)');
+        db.run('put t {n: 1}');
+        await persist(db, key, opts);
+        const calls = [];
+        for (const n of [2, 3, 4]) {
+          db.run('put t {n: $1}', [n]);
+          calls.push(persist(db, key, opts));
+        }
+        // The second runs once the first has answered, with both writes
+        // made by then; the third finds nothing left.
+        const [a, b, c] = await within(Promise.all(calls));
+        ok(a > 0 && b > 0 && c === 0, `${key}: a chunk each from the first two, nothing from the third: ${a}, ${b}, ${c} bytes`);
+        same([...(await records(key)).keys()], [key, `${key}#000000001`, `${key}#000000002`], `${key}: the chunks numbered in call order`);
+        const back = await open();
+        ok(await restore(back, key, opts), `${key} restored`);
+        same(ns(back), [1, 2, 3, 4], `${key}: every write`);
+      }
       await wipe();
     });
   },
