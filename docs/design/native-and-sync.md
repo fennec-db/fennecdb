@@ -91,7 +91,11 @@ Flutter plugin vendors a dynamic `FennecFFI.xcframework` (`--dynamic`,
 and Dart opens `FennecFFI.framework/FennecFFI`: a static one kept whole with
 `-force_load` had the Runner link a file CocoaPods' "Copy XCFrameworks"
 phase makes with no order declared against it, and `flutter build ios`
-failed on it.
+failed on it. Linux's is a release's tarball for x86_64 and aarch64 with
+glibc, the shared library with the JNI functions, the static one without,
+`fennec.h` and two pkg-config files, held to glibc 2.34 and run there before
+it is kept ([integrations.md](integrations.md#install-channels)); the JVM's
+jar loads that file on Linux.
 
 ## Sync core
 

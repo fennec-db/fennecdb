@@ -36,14 +36,20 @@ import { serverEnvironment } from "./env.ts";
 import { parseListening, parseMetrics } from "./listening.ts";
 import { serverArgs, type Plan } from "./serving.ts";
 
-/** The file is open in another process: the server refused its `<file>.lock`. */
+/** The file is open in another process: the server refused its `<file>.lock`. Its message is what the server wrote. */
 export class AlreadyOpen extends Error {}
-/** The port asked for is taken by another program. */
+/**
+ * The port asked for is taken by another program. `said`: what the server
+ * wrote, when one was started and could not listen; null when something
+ * answered on the port before any was started, and the message is the app's.
+ */
 export class PortTaken extends Error {
 	port: number;
-	constructor(message: string, port: number) {
+	said: string | null;
+	constructor(message: string, port: number, said: string | null = null) {
 		super(message);
 		this.port = port;
+		this.said = said;
 	}
 }
 /**
@@ -51,13 +57,17 @@ export class PortTaken extends Error {
  * site/content/docs/server.html lists: 1, it could not start (its file could
  * not be opened, which a held lock is the usual reason for, and is
  * AlreadyOpen); 2, a flag was refused -- here, a server that does not know
- * what the app asks of it. `null`: killed, or never ended in time.
+ * what the app asks of it. `null`: killed, or never ended in time. `said`:
+ * what the server wrote, null where it wrote nothing or the message is the
+ * app's own finding (an address it was not asked to listen on).
  */
 export class StartFailed extends Error {
 	exit: number | null;
-	constructor(message: string, exit: number | null) {
+	said: string | null;
+	constructor(message: string, exit: number | null, said: string | null = null) {
 		super(message);
 		this.exit = exit;
+		this.said = said;
 	}
 }
 
@@ -242,8 +252,8 @@ export async function startServer(
 		await reading;
 		const text = tail.join("\n");
 		if (text.includes("it is open already")) throw new AlreadyOpen(text);
-		if (/address already in use/i.test(text)) throw new PortTaken(text, plan.port);
-		throw new StartFailed(text || `fennec-server ${first === "timeout" ? "did not start in time" : "exited"}`, first === "timeout" ? null : code);
+		if (/address already in use/i.test(text)) throw new PortTaken(text, plan.port, text);
+		throw new StartFailed(text || `fennec-server ${first === "timeout" ? "did not start in time" : "exited"}`, first === "timeout" ? null : code, text || null);
 	}
 
 	let stopping: Promise<number | null> | null = null;

@@ -198,6 +198,11 @@ export function revealLabel(platform: string = process.platform): string {
 	return platform === "darwin" ? "Reveal in Finder" : platform === "win32" ? "Show in Explorer" : "Open its folder";
 }
 
+/** Where a `.fennec` is double-clicked, as the main window's empty Databases names it: Linux's desktops each have their own. */
+export function fileManager(platform: string = process.platform): string {
+	return platform === "darwin" ? "Finder" : platform === "win32" ? "Explorer" : "your file manager";
+}
+
 /** Shows `path` (a database file, or a folder) in the file manager. */
 export async function reveal(path: string): Promise<unknown> {
 	if (process.platform === "linux") return runFirst(linuxOpeners(fileUri(folderOf(path))));

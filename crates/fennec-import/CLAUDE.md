@@ -9,8 +9,12 @@
 **[`--follow` confirms nothing that is not on disk.](../../docs/design/replication.md#follow)**
 Every write is a put or delete by id; the mirror is a `fennec-server` thread,
 its collections' only writer. A wire message's length is held to
-`proto::MAX_MESSAGE` before anything is allocated (`proto::zeroed`). The
-tests need a live PostgreSQL and are `#[ignore]`d; CI's `postgres` job runs
+`proto::MAX_MESSAGE` before anything is allocated (`proto::zeroed`), and
+the iteration count a server asks SCRAM for to `SCRAM_MAX_ITERATIONS`
+(2^22) before PBKDF2 runs, refused naming the range and what brings a
+server under it, the role's password set again under a lower
+`scram_iterations`: the server, or whoever stands in for it, chooses it.
+The tests need a live PostgreSQL and are `#[ignore]`d; CI's `postgres` job runs
 them as `make import-test` does and fails unless every test `tests/pg.rs`
 and both `tests/follow.rs` mark so passed: a new one goes in one of those
 files.

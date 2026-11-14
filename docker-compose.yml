@@ -16,8 +16,9 @@ services:
     image: fennecdb
     container_name: fennecdb
 
-    # Published only on the host's loopback. fennec-server speaks no TLS; put
-    # a TLS terminator (nginx, Caddy) in front of it for an open network.
+    # Published only on the host's loopback. For an open network give the
+    # server --tls-cert and --tls-key (docs/server#tls), or put a TLS
+    # terminator (nginx, Caddy) in front of it.
     ports:
       - "127.0.0.1:8080:8080"
 

@@ -8,14 +8,29 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>fennec studio</title>
-<link rel="stylesheet" href="../ui/app.css">
+<!-- Absolute: a page is views://<page>/, <page> is the URL's host, and ../ cannot climb
+     above a host, so ../ui/app.css went to views://<page>/ui/app.css, a file that does
+     not exist. holdTo governs navigation only; CSP style-src admits views:. -->
+<link rel="stylesheet" href="views://ui/app.css">
 </head>
 <body>
-<main class="dialog" role="alertdialog" aria-labelledby="title" aria-describedby="message">
-  <h1 id="title"></h1>
-  <p id="message"></p>
-  <p class="hint" id="hint" hidden></p>
-  <pre id="detail" hidden></pre>
+<main class="dialog notice" role="alertdialog" aria-labelledby="title" aria-describedby="message">
+  <div class="notice-head">
+    <span class="notice-mark" aria-hidden="true">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3.5 21 19.5H3z"></path><path d="M12 10v4.5M12 17h.01"></path></svg>
+    </span>
+    <div>
+      <h1 id="title"></h1>
+      <p id="message"></p>
+    </div>
+  </div>
+  <p class="notice-hint" id="hint" hidden></p>
+  <!-- Open as it comes, as the detail always showed; folded by its summary, a
+       native disclosure, which needs no script and no style of the page's own. -->
+  <details class="notice-detail" id="detail-box" open hidden>
+    <summary id="detail-title">What the server said</summary>
+    <pre id="detail"></pre>
+  </details>
   <div class="buttons" id="buttons"></div>
 </main>
 <script type="module" src="index.js"></script>

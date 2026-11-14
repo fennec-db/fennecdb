@@ -10,13 +10,29 @@ on:
   merge_group:
   workflow_dispatch:
 
+# A pull request's or main's newer commit ends the run of the one before it:
+# a run is about 170 job-minutes, the account runs 20 jobs at once, and on
+# 2026-11-13 32 runs stood queued behind superseded ones, each a fix pushed
+# over its own still-running predecessor. A merge group is never cancelled:
+# each has its own ref, and the queue waits on its result.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
+
 env:
   CARGO_TERM_COLOR: always
 
+# Every job is bounded (`timeout-minutes`): the next 5 minutes at or above
+# both twice its median and its slowest plus 2 minutes, over 100 green runs
+# (2026-11-13). Unbounded, a hang held its runner the 6 hours GitHub allows
+# -- windows (http) hung five times in a week, a follower's halt waiting for
+# a thread that read on (docs/design/replication.md#replication). A job
+# that grows past its bound moves the bound in the same change.
 jobs:
   fmt:
     name: fmt
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
 
@@ -60,6 +76,25 @@ jobs:
           python3 tools/test_toolchain_check.py
           python3 tools/toolchain_check.py
 
+      # docs/design/conventions.md#secrets-compared: a token, a secret, a
+      # mark, a signature or a password is compared by crypto::ct_eq, never
+      # with == or !=; the reader is held to its own cases first.
+      - name: No secret is compared with == or != in the crates' sources
+        run: |
+          python3 tools/secret_eq_check.py --self-test
+          python3 tools/secret_eq_check.py
+
+      # docs/design/integrations.md#the-chaos-drill: `test-clock` moves a
+      # tenant node's clock by a file, for `make chaos` alone. No crate's
+      # default features reach it, no other feature or dependency turns it
+      # on, and nothing builds with it but deploy/Dockerfile's chaos stage
+      # (release.yml then refuses a binary or an image whose --version says
+      # it).
+      - name: No build but the chaos image's names a test build's feature
+        run: |
+          python3 tools/test_release_features_check.py
+          python3 tools/release_features_check.py
+
       # docs/design/benchmarks.md#instruction-counts: the measuring is
       # macOS's and runs by hand (make instr-compare); a copy's UUID, the
       # refusals keeping a build's output untouched, the figures and a
@@ -73,9 +108,18 @@ jobs:
       - name: tools/openapi_compat.py finds every break and passes every addition
         run: python3 tools/test_openapi_compat.py
 
+      # docs/design/durability.md#a-power-cut: the power cuts run by hand,
+      # weekly and on a push to main, never on a pull request; what their
+      # shared check must fail -- a sync come late, a write lost past
+      # `--sync 250`'s window, a cut with no write in flight, a standby far
+      # behind -- is held here on every one.
+      - name: The power cut's check fails a late sync, a loss past the window, a cut between writes and a standby far behind
+        run: python3 -B .github/power-cut/test_client.py
+
   clippy:
     name: clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -137,6 +181,12 @@ jobs:
       # which the workspace's run builds without.
       - run: cargo clippy -p fennec-ffi --features jni --all-targets -- -D warnings
 
+      # A test build's clock (`test-clock`, crates/fennec-http/src/test_clock.rs),
+      # which only `make chaos`'s image builds: linted here, its unit test
+      # and the server's test of it among the targets, or nothing would
+      # compile it before the weekly drill did.
+      - run: cargo clippy -p fennec-http -p fennec-server --features test-clock --all-targets -- -D warnings
+
       # SQL's joins held to what SQLite answers for the same rows: in the
       # bench crate, where SQLite is, which `make test` leaves out. About
       # 32 s to build and 0.3 s to run, with this job's target cached.
@@ -146,6 +196,7 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -181,9 +232,10 @@ jobs:
           key: ${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: ${{ matrix.os }}-cargo-
 
-      # The browser bundle comes first: web/fennec.sync.test.js and the
-      # end-to-end half of web/fennec.test.js skip themselves when
-      # web/fennec.wasm is missing, so without this the JS side is a no-op.
+      # The browser bundle comes first: the JS suites skip themselves on a
+      # machine with no web/fennec.wasm and throw under CI (web/ci-prereq.mjs),
+      # and `make test` fails on a skipped or ignored test past
+      # tools/skips-allowlist.json's count (tools/skips_check.py).
       # The module without the indexes is what web/fennec.test.js hands the
       # full one's files to, and back, and holds its `near` to the full
       # one's `near ... exact`.
@@ -261,6 +313,19 @@ jobs:
             | jq -r 'select(.profile.test == true and .target.name == "fennec_http") | .executable')
           sudo unshare --time --boottime 86400 "$bin" --exact \
             lease::tests::the_boot_clock_is_the_systems_and_runs_as_instant_does \
+            | tee /dev/stderr | grep -q 'test result: ok. 1 passed'
+
+      # A test build's clock reaches a tenant whose slot was busy as its
+      # shift ended (crates/fennec-http/src/test_clock.rs): set once, such a
+      # tenant stood at the shifted time for good. Only `make chaos`'s image
+      # builds the feature, so its test runs here, fennec-http's unit tests
+      # built again with it, the test named whole and its one pass asked
+      # for: renamed, a filter matching nothing runs nothing and passes.
+      - name: A test build's clock reaches every open tenant
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo test -p fennec-http --features test-clock --lib -- --exact \
+            tenants::tests::a_tenant_busy_as_its_clock_shift_ends_takes_the_systems_clock_back \
             | tee /dev/stderr | grep -q 'test result: ok. 1 passed'
 
       # fennec studio (`--studio`) in the runner's Chrome against the debug
@@ -364,6 +429,7 @@ jobs:
   windows:
     name: windows (single writer)
     runs-on: windows-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -398,6 +464,7 @@ jobs:
   windows-core:
     name: windows (core)
     runs-on: windows-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
@@ -479,6 +546,7 @@ jobs:
   windows-server:
     name: windows (server)
     runs-on: windows-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -526,6 +594,7 @@ jobs:
   windows-http:
     name: windows (http)
     runs-on: windows-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -551,6 +620,22 @@ jobs:
       - name: The lease's clock, devices' names and a secret's DACL
         run: cargo test -p fennec-http --features tls --lib -- --nocapture lease::tests::the_boot_clock owner_only::tests device_s_name
 
+      # fennec-import's sqlite:: tests drive the sqlite3 shell and, before
+      # T51, skipped themselves silently on this image, which has none: they
+      # ran nowhere on Windows. Under CI a missing sqlite3 now fails them, so
+      # the official 3.54.1 tools zip is put on PATH, its SHA3-256 (as
+      # sqlite.org/download.html publishes it) checked before it is unpacked.
+      - name: A pinned sqlite3 on PATH
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/sqlite-dl" "$RUNNER_TEMP/sqlite-tools"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/sqlite-dl/tools.zip" https://sqlite.org/2026/sqlite-tools-win-x64-3540100.zip
+          python -c "import hashlib,sys; h=hashlib.sha3_256(open(sys.argv[1],'rb').read()).hexdigest(); sys.exit(0 if h==sys.argv[2] else 'sqlite3 zip SHA3-256 mismatch: '+h)" "$RUNNER_TEMP/sqlite-dl/tools.zip" e171f3993a992edf076746926dd52b5e2ebfabaee38818e74987e1d8112ab987
+          unzip -q -o "$RUNNER_TEMP/sqlite-dl/tools.zip" -d "$RUNNER_TEMP/sqlite-tools"
+          dir=$(dirname "$(find "$RUNNER_TEMP/sqlite-tools" -name sqlite3.exe | head -1)")
+          test -n "$dir"
+          cygpath -w "$dir" >> "$GITHUB_PATH"
+
       # Each suite runs whatever the step before found, so one run names
       # every failing test.
       - name: fennec-ql's and fennec-import's suites
@@ -573,12 +658,15 @@ jobs:
   windows-release:
     name: windows (release zip, ${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.minutes }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { arch: x86_64, os: windows-latest, target: x86_64-pc-windows-msvc }
-          - { arch: aarch64, os: windows-11-arm, target: aarch64-pc-windows-msvc }
+          # Each leg bounded by its own time: the arm runner's installer
+          # step takes 25 minutes where x86_64's takes 2.
+          - { arch: x86_64, os: windows-latest, target: x86_64-pc-windows-msvc, minutes: 15 }
+          - { arch: aarch64, os: windows-11-arm, target: aarch64-pc-windows-msvc, minutes: 55 }
     defaults:
       run:
         shell: bash
@@ -640,6 +728,56 @@ jobs:
           $zip = Get-Item dist/*.zip
           ./site/test_install.ps1 -Zip $zip.FullName -Version ($zip.Name -replace '^fennec-v(.+)-${{ matrix.target }}\.zip$', '$1')
 
+  # The C library for Linux as release.yml makes it (tools/linux-ffi.sh) and
+  # holds it before it keeps it (tools/linux-ffi-check.sh: its exports, the
+  # glibc it asks for, a C program linked to each library through its
+  # pkg-config file and run here and in AlmaLinux 9's glibc 2.34), on each
+  # architecture's runner and every change, so a tag meets no step of it CI
+  # has not run. The tarball is kept as the run's artifact.
+  linux-ffi:
+    name: linux (C library, ${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, os: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+          - { arch: aarch64, os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned toolchain
+        run: |
+          rustup show
+          rustup target add ${{ matrix.target }}
+          command -v pkg-config >/dev/null || { sudo apt-get update && sudo apt-get install -y pkg-config; }
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ matrix.os }}-linux-ffi-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ matrix.os }}-linux-ffi-
+
+      - name: The tarball, as release.yml makes it
+        run: tools/linux-ffi.sh "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)" ${{ matrix.target }} dist
+
+      - name: Linked into a C program and run, here and on glibc 2.34, as release.yml checks it before keeping it
+        run: tools/linux-ffi-check.sh "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)" ${{ matrix.target }} dist
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fennec-ffi-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
   # What a pull request does to the browser module against the branch it goes
   # into, on the run's summary page: raw, gzip and brotli, the code by crate,
   # module and part of the standard library, the ten functions that moved
@@ -652,6 +790,7 @@ jobs:
     name: size (browser module)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
         with:
@@ -670,6 +809,7 @@ jobs:
   integrations:
     name: integrations (python, react)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
@@ -774,6 +914,7 @@ jobs:
   examples:
     name: examples (Node, Python, Go, .NET, Rust)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -807,6 +948,7 @@ jobs:
   shop:
     name: examples (shop)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
@@ -842,6 +984,7 @@ jobs:
   ledger:
     name: examples (ledger)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -877,6 +1020,7 @@ jobs:
   saas:
     name: examples (saas)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -949,6 +1093,7 @@ jobs:
   dispatch:
     name: examples (dispatch)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -985,6 +1130,7 @@ jobs:
   analytics:
     name: examples (analytics)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -1091,11 +1237,12 @@ jobs:
   packaging:
     name: packaging (installer, Homebrew formula, .deb and .rpm)
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
 
       - name: shellcheck
-        run: shellcheck --shell=sh site/install.sh site/test_install.sh tools/install-nfpm.sh tools/linux-packages.sh tools/linux-packages-check.sh tools/windows-zip.sh
+        run: shellcheck --shell=sh site/install.sh site/test_install.sh tools/install-nfpm.sh tools/linux-packages.sh tools/linux-packages-check.sh tools/windows-zip.sh tools/linux-ffi.sh tools/linux-ffi-check.sh
 
       - name: The installer, its checksum and its refusals
         run: sh site/test_install.sh
@@ -1154,6 +1301,7 @@ jobs:
   build:
     name: build (release + cli profile)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -1277,7 +1425,12 @@ jobs:
         timeout-minutes: 20
         run: examples/flutter/run-tests.sh apk
 
+      # Nothing in a workflow downloads this (packages.yml rebuilds the AAR
+      # from a release): it is for a person to fetch. An upload that fails
+      # on GitHub's side (#590/#591 lost a merge-queue run to one) must not
+      # fail a job whose tests all passed. A test is never retried.
       - uses: actions/upload-artifact@v7
+        continue-on-error: true
         with:
           name: fennecdb-android
           path: dist-mobile/*.aar
@@ -1388,7 +1541,10 @@ jobs:
           rm -rf test
           flutter build ios --simulator --debug --no-codesign
 
+      # Nothing downloads this either (see the Android upload): a failed
+      # upload on GitHub's side does not fail a job whose tests passed.
       - uses: actions/upload-artifact@v7
+        continue-on-error: true
         with:
           name: fennecdb-xcframework
           path: |

@@ -1,0 +1,14 @@
+{
+  "Linux": {
+    "rust_ignored": {
+      "count": 26,
+      "reason": "17 tests need a live PostgreSQL (fennec-import's pg.rs and follow.rs, fennec-server's follow.rs): `make test` ignores them and CI's `postgres (import and --follow)` job runs them (`make import-test`), failing unless all 17 passed; and 3 are exhaustive f32/f64 sweeps too slow for a push (json.rs, num.rs, run by hand); `make test` runs fennec-core's lib three times, so the 3 sweeps count 3 times: 17 + 3 + 3 + 3"
+    }
+  },
+  "macOS": {
+    "rust_ignored": {
+      "count": 26,
+      "reason": "the same 26 as Linux: 17 tests need a live PostgreSQL (run by the Linux `postgres` job), 3 sweeps (counted in three of make test's four cargo runs) are run by hand"
+    }
+  }
+}
