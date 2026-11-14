@@ -4,10 +4,10 @@
     tools/ci_flakes.py [-n 50] [--repo fennec-db/fennecdb] [--json]
 
 Lists the failed jobs of the last N completed ci.yml runs (push to main,
-schedule on main and merge_group, in the order they ran), names each one's failing step, and says
-whether a later commit fixed it, so that the 1.0 plan's exit criterion --
-"0 failures without a fixing commit in the last 50" -- is a number. Standard
-library and `gh` (authenticated) only.
+schedule on main and merge_group, in the order they ran), names each one's
+failing step, and says whether a later commit fixed it, so that the 1.0
+plan's exit criterion -- "0 failures without a fixing commit in the last 50"
+-- is a number. Standard library and `gh` (authenticated) only.
 
 "Fixed by a commit" is decided from files, never from a rerun. A file counts
 only if it is source: not documentation (*.md, docs/, site/content/), not a

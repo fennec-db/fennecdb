@@ -97,18 +97,27 @@ merge queue, and a merge group's head is the commit main then holds, so a run
 on every push tested it a second time (14 landings in 14 hours on 2026-11-14,
 three runs of about 28 jobs each, merge groups dropped at the queue's
 60-minute timeout behind the backlog; the account runs 20 jobs, 5 on macOS).
-A push to main starts the workflow only when `**/Cargo.lock`,
-`rust-toolchain.toml` or `ci.yml` changed: a run on main is the only one whose
-caches other branches' runs restore (GitHub's caches are read from the run's
-own ref or the default branch's; a pull request's is its merge ref's, a merge
-group's its queue branch's), and every cargo cache is keyed by
-`hashFiles('**/Cargo.lock', 'rust-toolchain.toml')`, saved once per key. The
-merge group's run is a commit's whole run; its jobs go on after it merges
-unless cancelled. The `schedule` (04:17 and 16:17 UTC) is main's periodic
-whole run: the badge, runner and base images that drift, and the ledger's
-view of main. Jobs gated on the event: `test (macos x86_64, Rosetta)` runs
-on everything but a pull request, so on the schedule, and `size (browser
-module)` only on a pull request.
+A push to main starts the workflow only when an input of a cache changed, or
+`ci.yml`: a run on main is the only one whose caches other branches' runs
+restore (GitHub's caches are read from the run's own ref or the default
+branch's; a pull request's is its merge ref's, a merge group's its queue
+branch's). The caches and their inputs, each in `paths`: the 21 cargo `actions/cache`
+steps by `hashFiles('**/Cargo.lock', 'rust-toolchain.toml')` (the Unicode
+table's by its pinned version in the file); `setup-node`'s npm cache by the
+Grafana plugin's `package-lock.json`; `setup-go`'s by its `go.sum`, and
+`go.mod` for the Go version; the Flutter caches by the version pinned in
+`ci.yml`; `setup-gradle`'s key is the job and the commit, not a file's hash,
+and only main writes it, so the Gradle build files (`**/*.gradle`,
+`**/*.gradle.kts`, `**/gradle.properties`) are listed for what it holds, not
+for its key (no `gradle-wrapper.properties` or `libs.versions.toml` exists
+today: add either to `paths` when one does). The merge group's run is a
+commit's whole run; its jobs finish after it merges as long as nothing cancels
+them (observed on #651 and #652: they finished minutes after the merge). The `schedule` (04:17 and 16:17 UTC)
+is main's periodic whole run: the badge, runner and base images that drift,
+the ledger's view of main, and the backstop for an evicted cache (unused for 7
+days, the 10 GB limit). Jobs gated on the event: `test (macos x86_64,
+Rosetta)` runs on everything but a pull request, so on the schedule, and `size
+(browser module)` only on a pull request.
 
 Which `ci.yml` jobs are required checks is a repository setting (classic
 branch protection on main, not the merge queue's ruleset). All of them are,

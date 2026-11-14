@@ -4,16 +4,30 @@ name: ci
 # very commit main then holds: a run on every push to main tested again what
 # the group had (14 landings in 14 hours on 2026-11-14, each three runs of
 # about 28 jobs, the merge groups dropped at the queue's 60-minute timeout
-# behind that backlog). So a push starts this workflow only when what the
-# caches are keyed by moved, or the workflow itself: a run on main is the only
-# one whose caches other branches may restore (a pull request's and a merge
-# group's are scoped to their own refs), and every cargo cache below is keyed
-# by hashFiles('**/Cargo.lock', 'rust-toolchain.toml'), saved once per key.
+# behind that backlog). So a push starts this workflow only when an input of
+# a cache moved, or the workflow itself: a run on main is the only one whose
+# caches other branches may restore (a pull request's and a merge group's are
+# scoped to their own refs). The caches and their inputs:
+#   - the 21 cargo actions/cache steps: Cargo.lock and rust-toolchain.toml
+#     (the one Unicode table step is keyed by its version, pinned here);
+#   - setup-node `cache: npm`, the Grafana job: its package-lock.json;
+#   - setup-go, the same job: go.sum, and go.mod for the Go version;
+#   - the Flutter caches: the version pinned in this file;
+#   - setup-gradle: its key is the job and the commit, not a file's hash, and
+#     only main writes it (`cache-read-only` off the default branch), so what
+#     it holds is as old as main's last run; the Gradle build files, the
+#     Groovy and Kotlin ones and gradle.properties, decide what is worth
+#     holding, so a change to one starts a run. There is no
+#     gradle-wrapper.properties and no libs.versions.toml in the repository
+#     today (the Gradle version is pinned here): add either to `paths` the
+#     day one appears.
 # The schedule is main's whole run in between, for what comes with time
-# (runner and base images, the badge, the flake ledger's view of main), twice
-# a day, not every six hours: each run is about 170 job-minutes of the 20
-# slots, and a drift found within 12 hours is as good as within 6. Minute 17,
-# as a scheduled run at the top of an hour is the one GitHub delays or drops.
+# (runner and base images, the badge, the flake ledger's view of main) and as
+# the backstop for a cache GitHub evicted (unused for 7 days, or past the
+# 10 GB limit), twice a day, not every six hours: each run is about 170
+# job-minutes of the 20 slots, and a drift found within 12 hours is as good as
+# within 6. Minute 17, as a scheduled run at the top of an hour is the one
+# GitHub delays or drops.
 on:
   push:
     branches: [main]
@@ -21,6 +35,12 @@ on:
       - '**/Cargo.lock'
       - rust-toolchain.toml
       - .github/workflows/ci.yml
+      - integrations/grafana/package-lock.json
+      - integrations/grafana/go.mod
+      - integrations/grafana/go.sum
+      - '**/*.gradle'
+      - '**/*.gradle.kts'
+      - '**/gradle.properties'
   schedule:
     - cron: '17 4,16 * * *'
   pull_request:
