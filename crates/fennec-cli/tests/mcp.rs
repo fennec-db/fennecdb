@@ -5,6 +5,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_fennec");
 
@@ -114,6 +115,70 @@ fn a_session_over_a_file_holds_its_lock_and_leaves_its_writes_on_disk() {
     let a = again.ask(r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"recall","arguments":{}}}"#);
     assert!(a.contains("the build uses cargo"), "{a}");
     assert_eq!(again.end().0, 0);
+}
+
+/// A session lets `<file>.lock` go only once its database is closed: the
+/// close still writes the file -- the fsync that lets the sync log go
+/// (Linux and Android, fennec-core's `synclog.rs`), the synced mark -- and
+/// let go before it, the lock let a server or another `fennec` open the
+/// file under those writes. Taken here the moment the session lets it go,
+/// the lock finds the log gone and the file at the length it ends at.
+#[test]
+fn a_session_lets_its_lock_go_once_its_database_is_closed() {
+    let path = scratch("closed.fennec");
+    let p = path.to_str().unwrap();
+    let log = fennec_core::fs::beside(&path, "sync");
+    let mut s = Session::start(&["--file", p, "--memory", "memories"], &[]);
+    s.ask(INIT);
+    let a = s.ask(r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"remember","arguments":{"text":"closed before let go"}}}"#);
+    assert!(a.contains("\"remembered\":1"), "{a}");
+    if cfg!(any(target_os = "linux", target_os = "android")) {
+        assert!(log.exists(), "no sync log was begun to be let go of");
+    }
+    let Session {
+        child,
+        stdin,
+        stdout,
+    } = s;
+    drop(stdin);
+    // Asked again with no sleep between, so the lock is taken as soon after
+    // the session lets it go as it can be; bounded only for the letting go,
+    // which must come.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let held = loop {
+        match fennec_abi::lock::hold(&path) {
+            Ok(l) => break l,
+            Err(fennec_abi::lock::Refused::Held) => {
+                assert!(Instant::now() < deadline, "the session kept its lock")
+            }
+            Err(e) => panic!("{e}"),
+        }
+    };
+    let logged = log.exists();
+    let len = std::fs::metadata(&path).unwrap().len();
+    let out = child.wait_with_output().unwrap();
+    drop(stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !logged,
+        "the lock was let go with the sync log still beside the file"
+    );
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len(),
+        len,
+        "the file was written after its lock was let go"
+    );
+    drop(held);
+    let mut again = Session::start(&["--file", p, "--memory", "memories"], &[]);
+    let a = again.ask(r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"recall","arguments":{}}}"#);
+    assert!(a.contains("closed before let go"), "{a}");
+    assert_eq!(again.end().0, 0);
+    assert!(!log.exists(), "{} left beside the file", log.display());
 }
 
 #[test]
