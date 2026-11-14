@@ -34,7 +34,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 
 The conventions hold no invariant of the code, and are listed apart:
 
-- [conventions.md](conventions.md) -- where tests live and which run alone, a test that fails on one run, Chrome's launch, the clock, ports, and the docs a change a user meets owes
+- [conventions.md](conventions.md) -- where tests live and which run alone, a test that fails on one run, Chrome's launch, the clock, ports, the docs a change a user meets owes, and how a secret is compared and a primitive held to its vectors
 
 A proposal holds no invariant until it is built, and is listed apart:
 

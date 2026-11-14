@@ -460,7 +460,7 @@ pub fn handle(out: &mut &crate::conn::Conn, tenants: &Tenants, req: &Request) ->
         .unwrap_or("");
     let ok = tenants
         .replication_token()
-        .is_some_and(|t| crate::constant_eq(given.as_bytes(), t.as_bytes()));
+        .is_some_and(|t| crate::crypto::ct_eq(given.as_bytes(), t.as_bytes()));
     if !ok {
         return Some(
             Response::error(401, "invalid or missing replication token")

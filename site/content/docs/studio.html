@@ -514,9 +514,17 @@ unsigned: it has no Developer ID and is not notarized, so a copy a browser
 downloaded is held back once. The DMG is on the <a
 href="https://github.com/fennec-db/fennecdb/releases/latest">release page</a>
 too, as <code>fennec-studio-v{{version}}-macos-arm64.dmg</code>: open it and
-drag the app onto Applications. Its first open is refused ("Apple could not
-verify..."); click Done, then in System Settings, Privacy &amp; Security, click
-<b>Open Anyway</b> beside fennec studio, once. The one-liner needs neither,
+drag the app onto Applications. Its first open is refused, once:</p>
+<ol>
+<li>Open the app. macOS shows &ldquo;Not Opened&rdquo; ("Apple could not
+verify..."); press <b>Done</b>. <b>Move to Trash</b> deletes the app.</li>
+<li>Open System Settings, Privacy &amp; Security, scroll to Security and click
+<b>Open Anyway</b> beside fennec studio. Apple shows it for about an hour after
+the blocked open.</li>
+<li>Confirm with your password; if macOS asks once more, choose <b>Open
+Anyway</b>.</li>
+</ol>
+<p>The one-liner needs neither,
 since a file <code>curl</code> downloads is not quarantined; and
 <code>xattr -cr "/Applications/fennec studio.app"</code> takes the quarantine
 off a browser's copy.</p>
@@ -677,7 +685,7 @@ open "integrations/studio-desktop/build/stable-macos-arm64/fennec studio.app"
     Linux tabs above say how to remove it.</li>
   <li><b>Not signed, on any system.</b> An app you build opens as it is; one
     the install line takes opens at once; one a browser downloaded is asked
-    about once (macOS's Open Anyway, Windows' SmartScreen), or on a Mac needs
+    about once (macOS's Open Anyway, after Done, never Move to Trash; Windows' SmartScreen), or on a Mac needs
     <code>xattr -cr "fennec studio.app"</code> first.</li>
 </ul>
 

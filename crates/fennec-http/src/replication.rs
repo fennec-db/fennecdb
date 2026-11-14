@@ -54,7 +54,7 @@
 //! `&image=1` asks for an image whatever the positions say: a replica sends
 //! it after a record it could not apply.
 
-use crate::constant_eq;
+use crate::crypto::ct_eq;
 use crate::http::{Request, Response};
 use fennec_core::prelude::*;
 use std::cell::Cell;
@@ -1130,7 +1130,7 @@ impl Replication {
         let ok = self
             .token
             .as_ref()
-            .is_some_and(|t| constant_eq(given.as_bytes(), t.as_bytes()));
+            .is_some_and(|t| ct_eq(given.as_bytes(), t.as_bytes()));
         if ok {
             crate::audit::verified();
         }
