@@ -14,6 +14,7 @@ members = [
     "crates/fennec-cli",
     "crates/fennec-tls",
     "crates/fennec-bench",
+    "crates/fennec-fuzz",
 ]
 
 [workspace.package]
@@ -107,6 +108,21 @@ panic = "unwind"
 inherits = "release"
 opt-level = "z"
 panic = "abort"
+
+# The fuzzer's (`make fuzz`, crates/fennec-fuzz): release speed with every
+# check a debug build makes -- an overflow that wraps in a release build
+# panics here, a finding -- panics that unwind, so a target's is caught and
+# its input kept, and line tables for a crash's backtrace. No LTO and many
+# codegen units: CI builds it once a pull request, under ASan.
+[profile.fuzz]
+inherits = "release"
+lto = false
+codegen-units = 16
+debug = "line-tables-only"
+strip = false
+debug-assertions = true
+overflow-checks = true
+panic = "unwind"
 
 # For profiling: release speed plus symbols
 [profile.profiling]

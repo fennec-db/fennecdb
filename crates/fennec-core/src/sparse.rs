@@ -182,7 +182,8 @@ fn uint(s: &str) -> Option<u64> {
 
 /// pgvector's text form of a sparse vector, indices from 1. Weights print
 /// as the shortest decimal that reads back as the same `f32`, as pgvector
-/// prints them.
+/// prints them. Each index is below `dim`, as every write and the decoder
+/// hold it (`codec::decode_value`), so its `+ 1` fits.
 pub fn format_into(out: &mut String, dim: u32, entries: &[(u32, f32)]) {
     out.push('{');
     for (k, (i, v)) in entries.iter().enumerate() {

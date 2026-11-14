@@ -268,6 +268,143 @@ fn missing_table_lists_what_exists() {
     assert!(e.contains("alpha, beta"), "{e}");
 }
 
+// ------------------------------------------------------- hostile files
+
+/// SQLite's varint (big-endian, 7 bits a byte, the ninth byte all 8).
+fn sqlite_varint(v: u64) -> Vec<u8> {
+    if v >> 56 != 0 {
+        let mut out: Vec<u8> = (0..8).map(|i| 0x80 | (v >> (57 - 7 * i)) as u8).collect();
+        out.push(v as u8);
+        return out;
+    }
+    let mut groups = vec![(v & 0x7f) as u8];
+    let mut rest = v >> 7;
+    while rest > 0 {
+        groups.push(0x80 | (rest & 0x7f) as u8);
+        rest >>= 7;
+    }
+    groups.reverse();
+    groups
+}
+
+/// A file of 512-byte pages made by hand: page 1 `sqlite_master`, its one
+/// row table `t` (`sql`) rooted at page 2, then `pages` from page 2 on.
+/// `reserved` is the header's reserved bytes a page.
+fn hand_made(sql: &str, reserved: u8, pages: &[Vec<u8>]) -> Vec<u8> {
+    let mut f = vec![0u8; 512];
+    f[..16].copy_from_slice(b"SQLite format 3\0");
+    f[16..18].copy_from_slice(&512u16.to_be_bytes());
+    f[18] = 1;
+    f[19] = 1;
+    f[20] = reserved;
+    f[21..24].copy_from_slice(&[64, 32, 32]);
+    f[28..32].copy_from_slice(&(1 + pages.len() as u32).to_be_bytes());
+    f[56..60].copy_from_slice(&1u32.to_be_bytes());
+    // The row (type, name, tbl_name, rootpage, sql): its header -- its own
+    // length, then a serial type a column: text of 5, 1 and 1 bytes, an
+    // 8-bit int, the text -- then the values.
+    let mut record = vec![0, 23, 15, 15, 1];
+    record.extend_from_slice(&sqlite_varint(13 + 2 * sql.len() as u64));
+    record[0] = record.len() as u8;
+    record.extend_from_slice(b"tablett");
+    record.push(2);
+    record.extend_from_slice(sql.as_bytes());
+    let mut cell = sqlite_varint(record.len() as u64);
+    cell.push(1);
+    cell.extend_from_slice(&record);
+    let at = 512 - cell.len();
+    f[at..].copy_from_slice(&cell);
+    f[100] = 0x0d;
+    f[103..105].copy_from_slice(&1u16.to_be_bytes());
+    f[105..107].copy_from_slice(&(at as u16).to_be_bytes());
+    f[108..110].copy_from_slice(&(at as u16).to_be_bytes());
+    for p in pages {
+        assert_eq!(p.len(), 512);
+        f.extend_from_slice(p);
+    }
+    f
+}
+
+/// An interior table page with no cells, its right-most child `child`.
+fn interior(child: u32) -> Vec<u8> {
+    let mut p = vec![0u8; 512];
+    p[0] = 0x05;
+    p[5..7].copy_from_slice(&512u16.to_be_bytes());
+    p[8..12].copy_from_slice(&child.to_be_bytes());
+    p
+}
+
+fn written(name: &str, bytes: &[u8]) -> PathBuf {
+    let path = dir().join(format!("{name}.sqlite"));
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+fn refused(path: &Path, why: &str) {
+    let mut r = Reader::open(path, "t").unwrap();
+    let e = r.next_row().unwrap_err().to_string();
+    assert!(e.contains(why), "{e}");
+    let e = fennec_import::sqlite::count_rows(path, "t")
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains(why), "{e}");
+}
+
+/// An interior page naming itself, or a page above it, as a child is a
+/// b-tree that loops: refused at the page reached twice, where the walk
+/// went round for ever, its stack growing a page's cells each time.
+#[test]
+fn a_page_reached_twice_is_refused_not_walked_for_ever() {
+    let sql = "CREATE TABLE t (a INTEGER)";
+    let itself = written("loop-self", &hand_made(sql, 0, &[interior(2)]));
+    refused(&itself, "page 2 is reached twice");
+    let above = written(
+        "loop-above",
+        &hand_made(sql, 0, &[interior(3), interior(2)]),
+    );
+    refused(&above, "page 2 is reached twice");
+    let past = written("past-end", &hand_made(sql, 0, &[interior(9)]));
+    refused(&past, "page 9 is past the file's 2 pages");
+}
+
+/// A cell's payload length is a varint of the file's: one past the file's
+/// length is refused before a byte is allocated for it, where
+/// `Vec::with_capacity` of 2^62 bytes ended the import.
+#[test]
+fn a_payload_longer_than_the_file_is_refused_before_it_is_allocated() {
+    for declared in [1u64 << 62, u64::MAX >> 1, 1 << 40, 4096] {
+        let mut leaf = vec![0u8; 512];
+        leaf[0] = 0x0d;
+        leaf[3..5].copy_from_slice(&1u16.to_be_bytes());
+        let mut cell = sqlite_varint(declared);
+        cell.push(1);
+        let at = 512 - cell.len() - 8;
+        leaf[5..7].copy_from_slice(&(at as u16).to_be_bytes());
+        leaf[8..10].copy_from_slice(&(at as u16).to_be_bytes());
+        leaf[at..at + cell.len()].copy_from_slice(&cell);
+        let path = written(
+            "huge-payload",
+            &hand_made("CREATE TABLE t (a INTEGER)", 0, &[leaf]),
+        );
+        refused(&path, "is longer than the file, 1024 bytes");
+    }
+}
+
+/// SQLite refuses a page whose usable part is under 480 bytes, and so does
+/// the reader: the overflow arithmetic stands on it.
+#[test]
+fn a_page_under_sqlites_usable_floor_is_refused() {
+    let path = written(
+        "reserved",
+        &hand_made("CREATE TABLE t (a INTEGER)", 33, &[interior(2)]),
+    );
+    let e = Reader::open(&path, "t").unwrap_err().to_string();
+    assert!(
+        e.contains("usable part is 479 bytes, under SQLite's 480"),
+        "{e}"
+    );
+}
+
 #[test]
 fn not_a_sqlite_file_is_reported() {
     let path = dir().join("junk.sqlite");

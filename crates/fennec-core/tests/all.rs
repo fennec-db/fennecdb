@@ -22,6 +22,7 @@ mod composite;
 mod composite_lookup;
 mod counts;
 mod crash;
+mod damage;
 mod derived;
 mod exact_lists;
 mod exact_places;

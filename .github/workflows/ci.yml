@@ -1306,6 +1306,42 @@ jobs:
       - name: Build the server (release)
         run: cargo build --release -p fennec-server
 
+  # docs/design/conventions.md#fuzzing: every parser of untrusted bytes --
+  # an HTTP request, JSON, FennecQL, the codec, a .fennec file's open and a
+  # replica's apply, a SQLite file -- fuzzed for 30 s each, built with
+  # AddressSanitizer and LLVM's coverage counters on the Makefile's dated
+  # nightly (a nightly only here and in fuzz.yml). The test job runs the same
+  # targets over their seeds in a plain build; fuzz.yml gives each half an
+  # hour a week. It runs on main's pushes too, whose logs and artifacts
+  # anyone reads: a finding keeps no input and says no backtrace, only the
+  # recipe `fennec-fuzz reproduce` makes its input again from (fuzz.yml).
+  fuzz-smoke:
+    name: fuzz-smoke (each target 30 s under ASan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the fuzzer's nightly, pinned to a date
+        run: make fuzz-toolchain
+
+      - name: Each target for 30 s under AddressSanitizer
+        env:
+          ASAN_OPTIONS: log_path=${{ runner.temp }}/asan
+        run: make fuzz-smoke FUZZ_SECONDS=30 FUZZ_FLAGS="--private --corpus none"
+
+      - name: Say how to make what it found again
+        if: failure()
+        run: |
+          echo "fennec-fuzz found something at $GITHUB_SHA. Its input is kept nowhere: check out"
+          echo "$GITHUB_SHA, run 'make fuzz-seeds' and 'make fuzz ASAN=1', then the line"
+          echo "'fennec-fuzz reproduce ...' above with target/<host>/fuzz/fennec-fuzz"
+          echo "(docs/design/conventions.md#fuzzing)."
+
   # The native library an app links (crates/fennec-ffi) on Android and the
   # JVM, and its Kotlin, Dart and Flutter bindings: the Kotlin library's
   # JVM tests against the Linux build, the AAR with the library built by

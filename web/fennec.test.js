@@ -745,6 +745,9 @@ test('a number past 32 bits is refused in the module, never cut to its low bits'
     ['create collection v (e vector<1000000001>)', "a vector's dimension is 1 to 1000000000, not 1000000001"],
     ['create collection v (s sparse<4294967297>)', "a vector's dimension is 1 to 1000000000, not 4294967297"],
     ['create table v (e vector(4294967297))', "`e`: a vector's dimension is 1 to 1000000000"],
+    // A list of them too, as the module reads a file's schema back: taken, its
+    // image was refused as damage at the next restore.
+    ['create table v (e vector(1000000001)[])', "`e`: a vector's dimension is 1 to 1000000000, not 1000000001"],
     ['create collection v (e vector<2> @hnsw(m=4294967298))', '`m` is 2 to 32767, not 4294967298'],
     ['create collection v (e vector<2> @hnsw(ef_construction=4294967300))', '`ef_construction` is 4 to 4294967295, not 4294967300'],
     [`${fuse} candidates 4294967297`, '`candidates` is 1 to 10000, not 4294967297'],

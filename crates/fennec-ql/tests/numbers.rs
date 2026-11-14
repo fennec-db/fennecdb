@@ -37,6 +37,20 @@ fn a_number_past_its_range_is_refused_naming_it() {
             "create collection v (s sparse<4294967297>)".into(),
             "a vector's dimension is 1 to 1000000000, not 4294967297",
         ),
+        // A list's, at any depth: each dimension is read where it is
+        // written, in `create` and `alter` alike.
+        (
+            "create collection v (e [vector<0>])".into(),
+            "a vector's dimension is 1 to 1000000000, not 0",
+        ),
+        (
+            "create collection v (e [[sparse<1000000001>]])".into(),
+            "a vector's dimension is 1 to 1000000000, not 1000000001",
+        ),
+        (
+            "alter collection v add field e [vector<4294967297, f16>]".into(),
+            "a vector's dimension is 1 to 1000000000, not 4294967297",
+        ),
         // Clamped, `m=1` built an index of 2; past `MAX_M` a node's count
         // of links was cut to 16 bits.
         (format!("{v} @hnsw(m=1))"), "`m` is 2 to 32767, not 1"),
@@ -126,28 +140,46 @@ fn a_number_in_its_range_is_read_as_written() {
 
 /// SQL's `vector(n)` and a schema built in code reach no parser's bound:
 /// the schema's own check holds them (`IndexKind::check`), where SQL's
-/// `vector(4294967297)` was `vector(1)` on a 32-bit build.
+/// `vector(4294967297)` was `vector(1)` on a 32-bit build. A list of them
+/// too, at any depth, by the test a file's schema is read with
+/// (`schema::out_of_range`): the check held a field's own vector alone, so
+/// `vector(1000000001)[]` was taken, written, and its file refused as
+/// damage at its next open, by every replica and every page replicating it.
 #[test]
 fn a_schema_is_held_to_the_same_bounds_where_no_parser_read_it() {
     let mut db = Database::new();
     for (sql, says) in [
         (
             "create table t (e vector(4294967297))",
-            "`e`: a vector's dimension is 1 to 1000000000",
+            "`e`: a vector's dimension is 1 to 1000000000, not 4294967297",
         ),
         (
             "create table t (e halfvec(1000000001))",
-            "`e`: a vector's dimension is 1 to 1000000000",
+            "`e`: a vector's dimension is 1 to 1000000000, not 1000000001",
         ),
         (
             "create table t (s sparsevec(1000000001))",
-            "`s`: a vector's dimension is 1 to 1000000000",
+            "`s`: a vector's dimension is 1 to 1000000000, not 1000000001",
+        ),
+        // SQL's arrays of them: `[]`, `[3]` and `array`.
+        (
+            "create table t (e vector(1000000001)[])",
+            "`e`: a vector's dimension is 1 to 1000000000, not 1000000001",
+        ),
+        (
+            "create table t (e halfvec(4294967297)[3])",
+            "`e`: a vector's dimension is 1 to 1000000000, not 4294967297",
+        ),
+        (
+            "create table t (s sparsevec(2000000000) array)",
+            "`s`: a vector's dimension is 1 to 1000000000, not 2000000000",
         ),
     ] {
         let e = run(&mut db, sql).expect_err(sql).to_string();
         assert!(e.contains(says), "{sql}: {e}");
     }
     run(&mut db, "create table t (e vector(1000000000))").unwrap();
+    run(&mut db, "create table u (e vector(1000000000)[])").unwrap();
 
     let field = |m| {
         let spec = VectorIndexSpec {
@@ -161,9 +193,65 @@ fn a_schema_is_held_to_the_same_bounds_where_no_parser_read_it() {
             .err()
             .map(|e| e.to_string())
             .unwrap_or_default();
-        assert!(e.contains("`e`: @hnsw's `m` is 2 to 32767"), "{m}: {e}");
+        let says = format!("`e`: @hnsw's `m` is 2 to 32767, not {m}");
+        assert!(e.contains(&says), "{m}: {e}");
     }
     assert!(Schema::new("c", vec![field(32767)]).is_ok());
+
+    // A list's vectors in code, at any depth a type may nest.
+    let listed = |mut ty: DataType, lists: usize| {
+        for _ in 0..lists {
+            ty = DataType::List(Box::new(ty));
+        }
+        Schema::new("c", vec![Field::new("e", ty)])
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    };
+    for (inner, n) in [
+        (DataType::Vector(0, VecPrec::F32), 0usize),
+        (DataType::Vector(1_000_000_001, VecPrec::F16), 1_000_000_001),
+        (DataType::Sparse(0), 0),
+        (DataType::Sparse(1 << 40), 1 << 40),
+    ] {
+        for lists in [1, 2, 64] {
+            let e = listed(inner.clone(), lists).expect_err("refused");
+            let says = format!("`e`: a vector's dimension is 1 to 1000000000, not {n}");
+            assert!(e.contains(&says), "{lists}: {e}");
+        }
+    }
+    assert!(listed(DataType::Vector(1_000_000_000, VecPrec::F32), 64).is_ok());
+    assert!(listed(DataType::Sparse(1), 1).is_ok());
+
+    // A beam built in code, past what a 32-bit reader of a file's schema
+    // holds whole (`codec::get_usize`): taken natively, a page replicating
+    // the file refused its schema. Every parser holds it there already.
+    for (spec, says) in [
+        (
+            VectorIndexSpec {
+                ef_construction: 1 << 32,
+                ..VectorIndexSpec::default()
+            },
+            "`e`: @hnsw's `ef_construction` is at most 4294967295, not 4294967296",
+        ),
+        (
+            VectorIndexSpec {
+                ef_search: 1 << 32,
+                ..VectorIndexSpec::default()
+            },
+            "`e`: @hnsw's `ef_search` is at most 4294967295, not 4294967296",
+        ),
+    ] {
+        let f = Field::new("e", DataType::Vector(3, VecPrec::F32)).indexed(IndexKind::Vector(spec));
+        let e = Schema::new("c", vec![f]).expect_err(says).to_string();
+        assert!(e.contains(says), "{e}");
+    }
+    let widest = VectorIndexSpec {
+        ef_construction: u32::MAX as usize,
+        ef_search: u32::MAX as usize,
+        ..VectorIndexSpec::default()
+    };
+    let f = Field::new("e", DataType::Vector(3, VecPrec::F32)).indexed(IndexKind::Vector(widest));
+    assert!(Schema::new("c", vec![f]).is_ok());
     let dim = |d| {
         Schema::new(
             "c",
@@ -250,13 +338,23 @@ fn pgvectors_floor_reads_back_as_it_was_made() {
 }
 
 /// A collection a version before the bounds made out of them -- an `@hnsw`
-/// `m` past 32 767, which a node's 16-bit count of links already cut, or a
-/// `vector<N>` past 10^9 -- opens as it was, and every alter of it is
-/// refused saying so and the way out, rather than naming a field the alter
-/// does not touch; dropping the field asks nothing of the rest.
+/// `m` past 32 767, which a node's 16-bit count of links already cut, a
+/// `vector<N>` past 10^9, or a list of them, which SQL's
+/// `vector(1000000001)[]` made until the check held a list's vectors -- is
+/// refused at the open as damage, naming the field and its range: a schema
+/// is read off the bytes within the language's ranges (`Schema::decode`),
+/// the same ranges this file's parser reads, since a crafted file's `m` of
+/// 2^40 killed the open.
 #[test]
-fn a_field_made_out_of_range_before_is_named_at_any_alter() {
+fn a_field_made_out_of_range_before_is_refused_at_the_open() {
     for (field, says) in [
+        (
+            Field::new(
+                "e",
+                DataType::List(Box::new(DataType::Vector(1_000_000_001, VecPrec::F32))),
+            ),
+            "`e`: a vector's dimension is 1 to 1000000000, not 1000000001",
+        ),
         (
             {
                 let spec = VectorIndexSpec {
@@ -265,11 +363,11 @@ fn a_field_made_out_of_range_before_is_named_at_any_alter() {
                 };
                 Field::new("e", DataType::Vector(3, VecPrec::F32)).indexed(IndexKind::Vector(spec))
             },
-            "@hnsw's `m` is 2 to 32767",
+            "`e`: @hnsw's `m` is 2 to 32767, not 40000",
         ),
         (
             Field::new("e", DataType::Vector(1_000_000_001, VecPrec::F32)),
-            "a vector's dimension is 1 to 1000000000",
+            "`e`: a vector's dimension is 1 to 1000000000, not 1000000001",
         ),
     ] {
         // Made as a version before made it: `Schema::new` refuses it now,
@@ -282,31 +380,173 @@ fn a_field_made_out_of_range_before_is_named_at_any_alter() {
             if_not_exists: false,
         })
         .unwrap();
-        let mut db = {
-            let mut opened = Database::new();
-            opened.load(&db.snapshot()).expect("it opens");
-            opened
-        };
-        run(&mut db, "put b {n: 1}").unwrap();
-        for alter in [
-            "alter collection b add field x int",
-            "alter collection b rename field n to m",
-        ] {
-            let e = run(&mut db, alter).expect_err(alter).to_string();
-            let held = "`b` holds a field a version before this one made, which this one no \
-                        longer takes (`e`: ";
-            assert!(e.contains(held) && e.contains(says), "{alter}: {e}");
-            assert!(
-                e.contains("drop it (`alter collection b drop field e`) and add it again"),
-                "{e}"
-            );
+        match Database::new().load(&db.snapshot()) {
+            Err(Error::Corrupt(m)) => assert_eq!(m, says),
+            other => panic!("{says}: {other:?}"),
         }
-        run(&mut db, "alter collection b drop field e").unwrap();
-        run(
-            &mut db,
-            "alter collection b add field e vector<3> @hnsw(m=16)",
-        )
+    }
+}
+
+/// Whatever a write takes, an open reads back as it was made: every way a
+/// schema is made -- `Schema::new` in code, FennecQL's `create collection`
+/// and `alter collection`, SQL's `create table` and its arrays, a declared
+/// schema -- at the edges of a dimension's range and an `@hnsw`'s `m`, a
+/// field's own vector and a list's at every depth a type nests. A taken one
+/// is read back from the database's image as it was made, a refused one
+/// refused naming the range, and the field where no parser read the
+/// number. In code the write and the read take exactly the same fields,
+/// both asking `schema::out_of_range`: with a test each, the check held a
+/// field's own vector alone, and `[vector<0>]` was taken and written, and
+/// its file refused as damage at the next open.
+#[test]
+fn whatever_a_write_takes_an_open_reads_back() {
+    // `c`'s fields as an open makes them of `db`'s image.
+    let reopened = |db: &Database, c: &str| -> Result<Vec<Field>> {
+        let mut opened = Database::new();
+        opened.load(&db.snapshot())?;
+        Ok(opened.collection(c)?.schema.fields.clone())
+    };
+    let made = |db: &Database, c: &str| db.collection(c).unwrap().schema.fields.clone();
+    let dims = [
+        0,
+        1,
+        3,
+        1_000_000_000,
+        1_000_000_001,
+        4_294_967_297,
+        1 << 40,
+    ];
+    let within = |d: usize| (1..=1_000_000_000).contains(&d);
+
+    // In code: each field taken by the write exactly where the read takes
+    // it. One the write refuses is made as a crafted file or a version
+    // before holds it, for a create takes the schema it is handed.
+    let n = || Field::new("n", DataType::Int);
+    let mut fields = Vec::new();
+    for d in dims {
+        for inner in [
+            DataType::Vector(d, VecPrec::F32),
+            DataType::Vector(d, VecPrec::F16),
+            DataType::Sparse(d),
+        ] {
+            let mut ty = inner;
+            for lists in 0..=65 {
+                if [0, 1, 2, 64, 65].contains(&lists) {
+                    fields.push(Field::new("e", ty.clone()));
+                }
+                ty = DataType::List(Box::new(ty));
+            }
+        }
+        fields.push(Field::new("e", DataType::Sparse(d)).indexed(IndexKind::Inverted));
+        for m in [0, 1, 2, 16, 32_767, 32_768, 1 << 40] {
+            let spec = VectorIndexSpec {
+                m,
+                ..VectorIndexSpec::default()
+            };
+            let ty = DataType::Vector(d, VecPrec::F32);
+            fields.push(Field::new("e", ty).indexed(IndexKind::Vector(spec)));
+        }
+    }
+    for field in fields {
+        let written = Schema::new("c", vec![n(), field.clone()]);
+        let schema = match &written {
+            Ok(s) => s.clone(),
+            Err(_) => {
+                let mut s = Schema::new("c", vec![n()]).unwrap();
+                s.fields.push(field.clone());
+                s
+            }
+        };
+        let mut db = Database::new();
+        db.execute(&Statement::CreateCollection {
+            schema,
+            if_not_exists: false,
+        })
         .unwrap();
-        run(&mut db, "alter collection b rename field n to m").unwrap();
+        match (written, reopened(&db, "c")) {
+            (Ok(w), Ok(read)) => assert_eq!(read, w.fields),
+            (Err(Error::Type(_)), Err(Error::Corrupt(_))) => {}
+            (w, r) => panic!(
+                "{} {:?}: written {:?}, read {:?}",
+                field.ty.name(),
+                field.index,
+                w.err(),
+                r.err()
+            ),
+        }
+    }
+
+    // Through each statement that makes a schema, the last of each run the
+    // one that matters, and through a declared schema.
+    for d in dims {
+        let range = format!("a vector's dimension is 1 to 1000000000, not {d}");
+        for (texts, sql) in [
+            (vec![format!("create table t (e vector({d})[])")], true),
+            (vec![format!("create table t (e halfvec({d})[3])")], true),
+            (
+                vec![format!("create table t (e sparsevec({d}) array)")],
+                true,
+            ),
+            (
+                vec![format!("create table t (e vector({d}) array[2])")],
+                true,
+            ),
+            (
+                vec![format!("create collection t (e [[vector<{d}, f16>]])")],
+                false,
+            ),
+            (
+                vec![
+                    "create collection t (n int)".into(),
+                    format!("alter collection t add field e [sparse<{d}>]"),
+                ],
+                false,
+            ),
+        ] {
+            let mut db = Database::new();
+            let (last, before) = texts.split_last().unwrap();
+            for text in before {
+                run(&mut db, text).unwrap();
+            }
+            match run(&mut db, last) {
+                Ok(_) => {
+                    assert!(within(d), "{last}");
+                    assert_eq!(reopened(&db, "t").unwrap(), made(&db, "t"), "{last}");
+                }
+                // SQL's `vector(0)` has no dimension at all.
+                Err(e) if sql && d == 0 => assert!(e.to_string().contains("has its dimension")),
+                Err(e) => {
+                    let e = e.to_string();
+                    assert!(!within(d), "{last}: {e}");
+                    let says = match sql {
+                        true => format!("`e`: {range}"),
+                        false => range.clone(),
+                    };
+                    assert!(e.contains(&says), "{last}: {e}");
+                }
+            }
+        }
+        let json = format!(
+            r#"{{"format":1,"collections":[{{"name":"t","fields":[{{"name":"e","type":"[[vector<{d}>]]"}}]}}]}}"#
+        );
+        match fennec_core::declared::parse(&json) {
+            Ok(declared) => {
+                assert!(within(d), "{json}");
+                let schema = declared.collections[0].clone();
+                let mut db = Database::new();
+                db.execute(&Statement::CreateCollection {
+                    schema,
+                    if_not_exists: false,
+                })
+                .unwrap();
+                assert_eq!(reopened(&db, "t").unwrap(), made(&db, "t"));
+            }
+            Err(e) => {
+                let e = e.to_string();
+                assert!(!within(d), "{json}: {e}");
+                let says = "t.e has a vector's dimension that is not 1 to 1000000000";
+                assert!(e.ends_with(says), "{json}: {e}");
+            }
+        }
     }
 }

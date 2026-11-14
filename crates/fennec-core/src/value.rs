@@ -94,6 +94,36 @@ impl DataType {
     fn is_number(&self) -> bool {
         matches!(self, DataType::Int | DataType::Float | DataType::Timestamp)
     }
+
+    /// The type a list's elements are at its innermost, past every list:
+    /// `int` for `[[int]]`, the type itself for one that is no list.
+    pub fn innermost(&self) -> &DataType {
+        let mut t = self;
+        while let DataType::List(inner) = t {
+            t = inner;
+        }
+        t
+    }
+
+    /// How many levels a value of the type nests: a list one and what its
+    /// elements nest, a point one -- `[lon, lat]` once read -- and a json
+    /// value as deep as it may be written, [`MAX_JSON_DEPTH`]. What every
+    /// field's type is held to (`Schema::new`), so that no write makes a
+    /// value the codec refuses to read back (`codec::MAX_DEPTH`).
+    pub fn depth(&self) -> usize {
+        let mut lists = 0;
+        let mut t = self;
+        while let DataType::List(inner) = t {
+            lists += 1;
+            t = inner;
+        }
+        lists
+            + match t {
+                DataType::Geo => 1,
+                DataType::Json => MAX_JSON_DEPTH,
+                _ => 0,
+            }
+    }
 }
 
 /// Whether every `f32` of `v` is whole and short of 2^24 either side, where

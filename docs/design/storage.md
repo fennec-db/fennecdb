@@ -322,7 +322,18 @@ skipped, it swallowed the next append, an acknowledged write lost on the open
 after. Only past the checkpoint image, though: an image is renamed into place
 whole, so a record cut short inside it -- or an image longer than the file --
 is refused as corrupt; cut there as a torn tail is, one flipped bit deleted
-every record after it. A tool that only looks (`fennec types`) opens with
+every record after it. Nor is a tear ever inside a record: a data record's
+frames (`[op][id][length][payload]` each) reach the replay whole by the
+record's length, and past the durable point by its sum, so a frame running
+past its record's end is damage, refused as a replica's apply refuses it
+("a write record cut short", `Store::replay_noting` and `replay_mapped`),
+and where a feed counts a record's writes (`writes_in`), whose add of a
+length near 2^64 wrapped back into the record in a release build.
+The replay stopped there as at a torn tail, as it did before records had
+lengths, and the frames after it vanished while the open went on with the
+records after them (found in the review of the fuzzer's pull request,
+`a_frame_running_past_its_record_is_refused_where_a_file_is_opened_and_applied`).
+A tool that only looks (`fennec types`) opens with
 `fs::open_read_only`, which cuts, creates and writes nothing: a server's
 append in flight looks torn from outside. Zeros to the end of the
 file are a torn tail too when they start at a record's head (`zero_tail`),

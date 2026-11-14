@@ -120,7 +120,10 @@ takes that shape. A number a statement or a declared schema writes -- a
 dimension, a beam, `fuse k`, a count -- is read as written or refused
 naming its range (`Parser::int_in`, within `u32`), never clamped nor cut
 to a 32-bit `usize`; a list's elements too, each read as written and
-refused naming the field and the element.
+refused naming the field and the element. A schema read off the bytes is
+held to the same ranges, `Error::Corrupt` past them (`Schema::decode`), by
+the one test every schema a write makes meets (`schema::out_of_range`), a
+list's dimension too: no read refuses what a write took.
 
 **[Profiles differ on purpose.](docs/design/crates.md#profiles)**
 `fennec-cli` takes `cli` (`panic = abort`), `fennec-server` `release`: a
@@ -205,6 +208,7 @@ Covers `crates/fennec-core/`; the browser module's rules bind `crates/fennec-was
 - A file compacts itself once half of it is dead
 - A file is compacted before it outgrows the page cache
 - File format
+- A value read off the bytes nests no deeper than JSON's limit.
 
 *Durability*
 - Buffered writes are written behind the lock
@@ -401,6 +405,9 @@ Covers `crates/fennec-import/` and `crates/fennec-wire/`; the mirror is `crates/
 *Replication and archives*
 - `--follow` confirms nothing that is not on disk.
 
+*Imports*
+- A SQLite file's lengths are held to the file before anything is allocated, and its walk reaches a page once.
+
 ### `crates/fennec-shard/CLAUDE.md`
 
 Covers `crates/fennec-shard/`; its rules bind fennec-http's tenant registry, leases, replication and tenants' hook secrets (`tenants.rs`, `lease.rs`, `replication.rs`, `tenant_hooks.rs`) and the entry Worker (`integrations/cloudflare/entry/`) too.
@@ -533,6 +540,11 @@ Covers `crates/fennec-bench/`.
   `listening on: http://<address>` stderr line, a router told its nodes by
   the addresses they said; only a site needing its address before it binds
   takes a system-picked port, held by a stand-in listener till then.
+- [Every parser of untrusted bytes is fuzzed](docs/design/conventions.md#fuzzing)
+  by `crates/fennec-fuzz`, the repository's own mutator under ASan (`make
+  fuzz` lists the targets; CI's `fuzz-smoke` runs each 30 s, `fuzz.yml`
+  weekly): a new parser owes its target and `fuzz.yml`'s matrix line, a
+  finding a regression test in its own crate.
 - [A secret is compared by `crypto::ct_eq` alone](docs/design/conventions.md#secrets-compared)
   -- a token, a mark, a MAC, a signature, a proof, a password -- never by
   `==` or `!=`, which leave at the first byte that differs:
