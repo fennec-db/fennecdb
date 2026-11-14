@@ -7294,6 +7294,12 @@ mod tests {
         let (read, came) = std::sync::mpsc::channel::<()>();
         std::thread::spawn(move || {
             let mut tries = 0;
+            // Each try's connection is held open and unread past what it
+            // read. A reader draining it took the body whole whenever it beat
+            // the cut, and the router, the write gone out, rightly judged
+            // that try as one that may have run: a 502 at the first try, and
+            // no second for the cutter to wait for.
+            let mut held = Vec::new();
             for conn in l.incoming() {
                 let Ok(conn) = conn else { return };
                 let mut conn = std::io::BufReader::new(conn);
@@ -7318,7 +7324,7 @@ mod tests {
                     std::io::Read::read_exact(&mut conn, &mut body).unwrap();
                 }
                 let _ = read.send(());
-                std::thread::spawn(move || std::io::copy(&mut conn, &mut std::io::sink()));
+                held.push(conn);
             }
         });
         let cutter = Arc::clone(&r);

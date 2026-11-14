@@ -9,8 +9,11 @@
 //! tenant's quota asked as a run lands, and no rate charged.
 //!
 //! The registry runs in process, its scheduler driven by the time each
-//! test names (`schedule::Node::pass`), no thread beside it. Times are
-//! read off the clock: a tenant's open asks its slots of the clock it
+//! test names (`schedule::Node::pass`), no thread of its own beside it.
+//! The process's are: its compacter, `@ttl` sweeper and graph keeper look
+//! at every database it serves, and a tenant one holds is not closed till
+//! it lets go -- a test closing one waits for its close ([`close`]). Times
+//! are read off the clock: a tenant's open asks its slots of the clock it
 //! reads, and a test's look comes after.
 
 use fennec_core::prelude::*;
@@ -86,7 +89,7 @@ fn node(tag: &str) -> Nd {
 /// pending marks kept by the hint, or dropped as a crash drops them.
 fn restart(nd: Nd, clean: bool) -> Nd {
     if clean {
-        nd.tenants.close_idle(Duration::ZERO);
+        close(&nd, None);
         nd.node.write_hint().unwrap();
     }
     let dir = nd.dir.clone();
@@ -108,6 +111,12 @@ fn exec(t: &Tenant, q: &str) -> Response {
 /// A tenant made through the registry, `texts` defined by a clock reading
 /// `at` -- the schedules' `since` -- and closed again.
 fn tenant(nd: &Nd, name: &str, at: i64, texts: &[&str]) {
+    drop(defined(nd, name, at, texts));
+    close(nd, Some(name));
+}
+
+/// [`tenant`], left open.
+fn defined(nd: &Nd, name: &str, at: i64, texts: &[&str]) -> Arc<Tenant> {
     let t = nd.tenants.create(name).unwrap();
     {
         let mut g = t.db.write().unwrap();
@@ -119,8 +128,24 @@ fn tenant(nd: &Nd, name: &str, at: i64, texts: &[&str]) {
         }
         g.set_clock(None);
     }
-    drop(t);
-    nd.tenants.close_idle(Duration::ZERO);
+    t
+}
+
+/// Closes the idle tenants as a node's idle close does, until `name` is
+/// closed -- every tenant where `None`. One whose database something holds
+/// beside its slot stays open (`Tenant::db_in_use`): the compacter and the
+/// `@ttl` sweeper take each database the process serves in turn, waiting
+/// on a lock a write holds, and one still holding it as the write let go
+/// kept it open past a single `close_idle` -- its slot never told the
+/// node, the hint named it to look at at once, and a test reading the slot
+/// there found none (Windows CI).
+fn close(nd: &Nd, name: Option<&str>) {
+    let what = name.map_or("every tenant closed".into(), |n| format!("`{n}` closed"));
+    until(&what, || {
+        nd.tenants.close_idle(Duration::ZERO);
+        let open = open(nd);
+        name.map_or(open.is_empty(), |n| !open.iter().any(|o| o == n))
+    });
 }
 
 fn count(nd: &Nd, name: &str, collection: &str) -> i64 {
@@ -156,6 +181,9 @@ const TICKS: &str = "create collection ticks (slot timestamp, at timestamp)";
 const TICK: &str = "create statement tick every 1h as insert ticks {slot: slot(), at: now()}";
 /// Finds nothing: its runs land no block.
 const TIDY: &str = "create statement tidy every 1h scans as del ticks where slot = 0";
+/// `tick`, its next slot the new year's.
+const YEARLY: &str =
+    "create statement tick at '0 0 1 1 *' as insert ticks {slot: slot(), at: now()}";
 
 /// A closed tenant is opened as its slot comes, runs it, and is closed
 /// again: the run is no use of it. A tenant holding no schedule is never
@@ -299,7 +327,7 @@ fn a_tenant_enters_the_hint_before_its_first_schedule_lands() {
         nd.node.named().iter().any(|n| n.0 == "beta"),
         "until it closes"
     );
-    nd.tenants.close_idle(Duration::ZERO);
+    close(&nd, Some("beta"));
     nd.node.write_hint().unwrap();
     assert!(!hinted(&nd.dir).contains_key("beta"));
 }
@@ -368,7 +396,7 @@ fn a_tenant_installed_or_restored_in_is_learned() {
     assert!(!nd.node.named().iter().any(|n| n.0 == "rest"));
     drop(nd.tenants.get("rest").unwrap());
     assert!(nd.node.named().iter().any(|n| n.0 == "rest"));
-    nd.tenants.close_idle(Duration::ZERO);
+    close(&nd, Some("rest"));
 
     let mut runs = names(&nd.node.pass(h + HOUR + MINUTE))
         .into_iter()
@@ -454,7 +482,7 @@ fn a_closed_tenant_s_pending_mark_is_kept_until_its_file_changes() {
 
     // Closed again, then its file written behind the node: the mark counts
     // for nothing, and the slot is due again.
-    nd.tenants.close_idle(Duration::ZERO);
+    close(&nd, Some("acme"));
     {
         let mut db = fennec_core::fs::open(nd.dir.join("acme.fennec")).unwrap();
         db.execute(&fennec_ql::parse_one("put ticks {slot: 5}").unwrap())
@@ -471,7 +499,7 @@ fn a_closed_tenant_s_pending_mark_is_kept_until_its_file_changes() {
         "run again over what is there"
     );
     drop(t);
-    nd.tenants.close_idle(Duration::ZERO);
+    close(&nd, Some("acme"));
     assert_eq!(names(&nd.node.pass(h + HOUR + 3 * MINUTE)), ["acme"]);
 
     // Handed back, it lands with the next write.
@@ -698,8 +726,7 @@ fn an_installed_tenant_runs_nothing_until_it_arrived_and_one_taken_back_none() {
 fn a_replaced_schedule_is_looked_at_at_once_after_a_crash() {
     let nd = node("replaced");
     let now = now_ms();
-    let yearly = "create statement tick at '0 0 1 1 *' as insert ticks {slot: slot(), at: now()}";
-    tenant(&nd, "acme", now - 2 * HOUR, &[TICKS, yearly]);
+    tenant(&nd, "acme", now - 2 * HOUR, &[TICKS, YEARLY]);
     nd.node.write_hint().unwrap();
     let held = hinted(&nd.dir)["acme"].next.expect("its next slot");
     assert!(held > now + 24 * HOUR, "the new year's");
@@ -716,6 +743,29 @@ fn a_replaced_schedule_is_looked_at_at_once_after_a_crash() {
     let nd = restart(nd, false);
     assert_eq!(nd.node.named(), [("acme".to_string(), None)], "at once");
     assert_eq!(names(&nd.node.pass(now_ms())), ["acme"]);
+}
+
+/// A tenant whose database is held beside its slot -- as the compacter
+/// holds one whose lock it waited on, as the definition's write lets go --
+/// stays open through an idle close, and the hint names it to look at at
+/// once: no look has read its slot. Read there after one `close_idle`,
+/// the slot the test above wants was none (Windows CI). Let go, the
+/// tenant closes, and the hint holds its slot.
+#[test]
+fn a_tenant_held_beside_is_named_at_once_until_it_closes() {
+    let nd = node("beside");
+    let now = now_ms();
+    let t = defined(&nd, "acme", now - 2 * HOUR, &[TICKS, YEARLY]);
+    let beside = Arc::clone(&t.db);
+    drop(t);
+    assert_eq!(nd.tenants.close_idle(Duration::ZERO), 0, "held beside");
+    nd.node.write_hint().unwrap();
+    assert_eq!(hinted(&nd.dir)["acme"].next, None, "open: at once");
+    drop(beside);
+    close(&nd, Some("acme"));
+    nd.node.write_hint().unwrap();
+    let held = hinted(&nd.dir)["acme"].next.expect("its next slot");
+    assert!(held > now + 24 * HOUR, "the new year's");
 }
 
 /// A closed tenant its node's lease does not let it write is not opened
@@ -766,7 +816,7 @@ fn a_closed_tenant_s_held_slot_waits_its_backoff_out() {
     );
     let set = fennec_http::quota::Set::parse(r#"{"rows": 2}"#).unwrap();
     nd.tenants.set_quota("acme", set).unwrap();
-    nd.tenants.close_idle(Duration::ZERO);
+    close(&nd, Some("acme"));
     let outcomes = |runs: &[(String, Run)]| runs.iter().map(|r| r.1.outcome).collect::<Vec<_>>();
     let t0 = h + HOUR + MINUTE;
     assert_eq!(outcomes(&nd.node.pass(t0)), [Outcome::Held(507)]);
@@ -805,7 +855,7 @@ fn a_held_slot_is_listed_once_a_request_opens_its_tenant_again() {
     );
     let set = fennec_http::quota::Set::parse(r#"{"rows": 2}"#).unwrap();
     nd.tenants.set_quota("acme", set).unwrap();
-    nd.tenants.close_idle(Duration::ZERO);
+    close(&nd, Some("acme"));
     let at = now_ms();
     let runs = nd.node.pass(at);
     let outcomes: Vec<_> = runs.iter().map(|r| r.1.outcome).collect();

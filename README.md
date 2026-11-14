@@ -287,7 +287,9 @@ otherwise (Frankfurt to Singapore is 158 ms), never from before that
 client's own write. `deploy/` is the kit to run it on machines of your own
 -- systemd units, alert rules and the operator's runbook -- and `make drill`
 kills a node and a router of a two-region deployment in Docker and checks
-that no acknowledged write was lost.
+that no acknowledged write was lost; `make chaos` breaks a region at random,
+seed by seed, and holds every read and write to a register checker and every
+answered write to a ledger.
 [Tenants and sharding](https://fennecdb.com/docs/sharding) ·
 [Regions](https://fennecdb.com/docs/sharding-regions#regions) ·
 [One URL for every region](https://fennecdb.com/docs/sharding-entry#global-entry) ·
@@ -408,6 +410,7 @@ query; it is not a join and is not trying to be one.
 | [Mobile and native apps](https://fennecdb.com/docs/mobile) | Swift, Kotlin and Dart/Flutter: a file on the device, the builder, live queries driving the UI, syncing with a server, TLS and the background, where the file lives, durability |
 | [HTTP endpoint](https://fennecdb.com/docs/http) | Start a server and send it FennecQL from curl or any language's standard library: REST/JSON derived from the schema, raw FennecQL, batches, writes safe to retry, writes held to the row they read (`If-Match`); then the [reference](https://fennecdb.com/docs/http-reference) (every route, filter, header and status, SSE, vector search over POST, a read marked for a replica) and [security and scoped access](https://fennecdb.com/docs/http-access) |
 | [Server](https://fennecdb.com/docs/server) | Running `fennec-server`: flags, HTTPS, durability, tokens and policies, the audit log, limits, containers |
+| [Cloud platforms](https://fennecdb.com/docs/cloud) | Deploying `fennec-server` on Fly.io, Render, Railway, a VM on AWS, Google Cloud, Azure, DigitalOcean, Hetzner and others, and Kubernetes (EKS, GKE, AKS), or no server at all with a database in each Cloudflare Durable Object; the platforms that cannot hold the file, and using it from apps and serverless functions (Vercel, Netlify, Lambda, Cloud Run) |
 | [Replication](https://fennecdb.com/docs/replication) | Read replicas fed the writes on the primary's disk, promotion by hand, what a failover loses, backups and restoring to a moment, every tenant of a node archived over one connection |
 | [Integrations](https://fennecdb.com/docs/integrations) | `useLiveQuery` for React, the Go and .NET SDKs, and LangChain and LlamaIndex vector stores over HTTP |
 | [Agents and MCP](https://fennecdb.com/docs/mcp) | An agent's search and memory over the Model Context Protocol: `fennec-server --mcp` and `fennec mcp` for Claude Code, Cursor and Claude Desktop, each tool held to the token's rules, answers past a bound refused rather than cut |
@@ -424,7 +427,7 @@ query; it is not a join and is not trying to be one.
 | [Points and distances](https://fennecdb.com/docs/geo) | A `geo` field: distances in metres, rows within a radius or a box, the nearest first, positions that expire |
 | [Analytics and market data](https://fennecdb.com/docs/analytics) | Rollups by the minute, distinct users, funnels and retention over events; bars, VWAP and the latest price over ticks |
 | [Tenants and sharding](https://fennecdb.com/docs/sharding) | A tutorial that runs a router and two nodes and fails one over, then a guide to [tenants](https://fennecdb.com/docs/sharding-tenants) (schema, quotas, moves, archives, queries across them), [replicas and failover](https://fennecdb.com/docs/sharding-failover), [regions](https://fennecdb.com/docs/sharding-regions), [the global entry](https://fennecdb.com/docs/sharding-entry) and [read replicas](https://fennecdb.com/docs/sharding-read-replicas), the [reference](https://fennecdb.com/docs/sharding-reference) and the [design](https://fennecdb.com/docs/sharding-design) |
-| [Deploying across regions](deploy/RUNBOOK.md) | `deploy/`: systemd units for nodes, routers, archivers and the tunnel, alert rules, the operator's runbook, and `make drill`, which kills a node and a router of a two-region deployment in Docker and checks no acknowledged write was lost |
+| [Deploying across regions](deploy/RUNBOOK.md) | `deploy/`: systemd units for nodes, routers, archivers and the tunnel, alert rules, the operator's runbook, `make drill`, which kills a node and a router of a two-region deployment in Docker and checks no acknowledged write was lost, and `make chaos`, seeded random faults -- kills, pauses, netem delays, losses and partitions, failovers during moves -- held to a register checker and a ledger of every answered write |
 | [Import](https://fennecdb.com/docs/import) | Build a collection from SQLite or a live PostgreSQL server in one command, and keep it following the table's changes |
 | [Embedded Rust](https://fennecdb.com/docs/embedding) | `fennec-core` as a library: opening a file, executing parsed statements |
 | [File format](https://fennecdb.com/docs/file-format) | One file, replayed in a single pass; record kinds, and the crate layout |

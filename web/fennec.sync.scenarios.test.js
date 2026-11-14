@@ -19,12 +19,14 @@ import assert from 'node:assert/strict';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import { Fennec, sync, inc, expr } from './fennec.js';
 import { fakeIndexedDB, KeyRange } from './idb.fake.js';
+import { needs } from './ci-prereq.mjs';
 
 const wasm = await readFile(new URL('./fennec.wasm', import.meta.url)).catch(() => null);
+needs(['web/fennec.wasm', wasm, 'make wasm']);
 const file = JSON.parse(await readFile(new URL('../integrations/sync-scenarios.json', import.meta.url), 'utf8'));
 const URL_ = 'http://server';
 
-const skip = wasm ? false : process.env.CI ? false : 'no web/fennec.wasm (make wasm)';
+const skip = wasm ? false : 'no web/fennec.wasm (make wasm)';
 
 // --------------------------------------------------------------- matching
 
