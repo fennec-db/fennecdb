@@ -188,9 +188,10 @@ what it races rather than timing a reload: a persist's transaction is held
 open by a read after a read until the page is gone (`holdNextWrite`), and
 the worker keeping a file (`file-worker.js`) counts every write, truncate
 and flush `openFile` asks of the file system and stops at the one it is
-armed for -- a write once half its bytes are in -- on a
-`SharedArrayBuffer`'s wait nothing ends but the reload, so the page is
-cross-origin isolated. A reload in the middle of a chunk's or a new image's
+armed for -- a write once half its bytes are in -- busy until the reload
+ends it, as a worker the page left in the middle of a flush is. Stopped on
+`Atomics.wait` instead, its file was still held 3 s after the reload in
+Safari 27, which ends a running worker at once. A reload in the middle of a chunk's or a new image's
 transaction loses no acknowledged write, and the image keeps its chunks or
 the new one stands alone; a reload at each of a rewrite's eight steps, and
 in the middle of an append, keeps every answered write and empties the

@@ -742,7 +742,7 @@ jobs:
   browsers-module:
     name: browsers (module)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     permissions:
       contents: read
     steps:
@@ -765,12 +765,13 @@ jobs:
   # macOS through safaridriver, which the runner allows once `--enable`d. Each
   # browser's files are read before its first launch (run.mjs's `warm`).
   # Chrome stops a busy worker 2 s after its page goes, so its run waits
-  # that long at each of the nine reloads in the middle of a flush.
+  # that long at each of the nine reloads in the middle of a flush: about a
+  # minute a job, the module's half that (2026-11-14).
   browsers:
     name: browsers (${{ matrix.engines }})
     needs: browsers-module
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 5
     permissions:
       contents: read
     strategy:

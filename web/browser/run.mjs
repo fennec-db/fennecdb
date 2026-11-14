@@ -86,15 +86,9 @@ async function serve() {
   };
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, 'http://x');
-    const head = {
-      // A reload must fetch the page and its modules again, never keep
-      // the first run's.
-      'cache-control': 'no-store',
-      // Cross-origin isolated: the worker stops a file's flush on a
-      // SharedArrayBuffer's wait (file-worker.js), which needs it.
-      'cross-origin-opener-policy': 'same-origin',
-      'cross-origin-embedder-policy': 'require-corp',
-    };
+    // A reload must fetch the page and its modules again, never keep the
+    // first run's.
+    const head = { 'cache-control': 'no-store' };
     let body = '';
     for await (const chunk of req) body += chunk;
     const id = url.searchParams.get('run');

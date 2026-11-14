@@ -119,8 +119,9 @@ run its suite itself, its state kept between loads by the server that
 opened it: a reload is the page's own `location.reload()`, and the one
 suite runs under puppeteer and under safaridriver alike. It holds what it
 reloads in the middle of until the page is gone -- a persist's transaction
-by a read after a read, a worker's flush by a `SharedArrayBuffer`'s wait
-nothing ends but the reload -- never catching it with a timer. A test a
+by a read after a read, a worker's flush by keeping the worker busy, which
+every engine ends with its page (one waiting on `Atomics.wait` Safari did
+not) -- never catching it with a timer. A test a
 browser cannot run is skipped by name in `run.mjs`'s `SKIPS`, with why --
 Safari's quota tests, no driver setting its quota -- and any other skip
 fails the run, as does a listed one that ran.
