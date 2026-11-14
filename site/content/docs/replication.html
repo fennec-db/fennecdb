@@ -623,7 +623,7 @@ or a stream each as in the table.</p>
 <p>To keep an archive in S3, R2 or GCS, run a sync tool beside the archiver;
 fennecdb has no object-storage client of its own.</p>
 
-<pre data-lang="bash">rclone sync /backups/archive r2:backups/archive      # every few minutes
+<pre data-lang="bash">rclone sync --local-no-check-updated /backups/archive r2:backups/archive   # every few minutes
 aws s3 sync /backups/archive s3://backups/archive --delete
 
 # to restore: bring it back, check it, restore it
@@ -650,7 +650,12 @@ An archiver stopped there goes on from the segment before. A test copies an
 archive a file at a time while writes and images go on, and every copy
 verifies and restores to a prefix of what the primary wrote.
 <code>--delete</code>, or <code>rclone sync</code>'s own, carries a prune
-over to the copy; without it the copy keeps everything.</p>
+over to the copy; without it the copy keeps everything. rclone needs
+<code>--local-no-check-updated</code>: by default it refuses a file that
+changed while it read it (<code>can't copy - source file is being
+updated</code>), which the segment being written does for as long as its
+database is busy, so that segment never reaches the bucket; the
+<code>deploy/</code> kit's sync runs with it for the same reason.</p>
 
 <p>An image the archive takes of its own is put together in
 <code>consolidating-&lt;change&gt;.fennec</code>, a file of that round's

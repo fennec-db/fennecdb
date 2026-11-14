@@ -56,7 +56,8 @@ each part is called elsewhere.</p>
   <li><b>A token from the secret store.</b> <code>FENNEC_HTTP_TOKEN</code>, in
     the environment, never <code>--http-token</code>: <code>argv</code> shows in
     <code>ps</code>. Without a token the server refuses to listen beyond
-    loopback and exits 2.</li>
+    loopback and exits 2. Make it yourself and keep a copy for your apps: most
+    secret stores never show a secret again.</li>
   <li><b>Health is <code>GET /_health</code>.</b> It needs no token and takes no
     lock. The port binds only after the file is opened, so a large file takes a
     while: give a startup check a grace period of minutes (the image's own check,
@@ -239,16 +240,6 @@ together for a moment. The pod runs as 65534 and its volume is made 65534's by
 dropped.</p>
 
 <pre data-lang="yaml" data-label="fennec.yaml">apiVersion: v1
-kind: Secret
-metadata:
-  name: fennec
-type: Opaque
-stringData:
-  # Replace it, or leave this out and run:
-  #   kubectl create secret generic fennec --from-literal=FENNEC_HTTP_TOKEN="$(openssl rand -hex 32)"
-  FENNEC_HTTP_TOKEN: change-me
----
-apiVersion: v1
 kind: Service
 metadata:
   name: fennec
@@ -339,12 +330,19 @@ spec:
           requests:
             storage: 20Gi</pre>
 
-<p>Apply it, then reach it from inside the cluster at
+<p>The manifest holds no token, so none is committed with it: make the
+<code>Secret</code> it names first, apply it, then reach the server from
+inside the cluster at
 <code>http://fennec.&lt;namespace&gt;.svc.cluster.local:8080</code>:</p>
 
-<pre data-lang="bash">kubectl apply -f fennec.yaml
+<pre data-lang="bash">kubectl create secret generic fennec \
+  --from-literal=FENNEC_HTTP_TOKEN="$(openssl rand -hex 32)"
+kubectl apply -f fennec.yaml
 kubectl rollout status statefulset/fennec
-kubectl port-forward svc/fennec 8080:8080   # then curl localhost:8080/_health</pre>
+kubectl port-forward svc/fennec 8080:8080   # then curl localhost:8080/_health
+
+# the token, for your apps' own secrets
+kubectl get secret fennec -o jsonpath='{.data.FENNEC_HTTP_TOKEN}' | base64 -d</pre>
 
 <div class="tbl">
 <table>
@@ -382,7 +380,7 @@ the server listens on <code>[::]</code> (which takes IPv4 too on Linux) and the
 command is written out in a one-line <code>Dockerfile</code>:</p>
 
 <pre data-lang="dockerfile" data-label="Dockerfile">FROM ghcr.io/fennec-db/fennec-server:{{version}}
-CMD ["--http", "[::]:8080", "--file", "/data/data.fennec", "--sync", "250"]</pre>
+CMD ["--http", "[::]:8080", "--file", "/data/data.fennec", "--sync", "250", "--max-memory", "340"]</pre>
 
 <pre data-lang="toml" data-label="fly.toml">app = "my-fennec"
 primary_region = "ams"
@@ -420,7 +418,8 @@ kill_timeout = 60
 
 <pre data-lang="bash">fly apps create my-fennec
 fly volumes create fennec_data --region ams --size 10
-fly secrets set FENNEC_HTTP_TOKEN="$(openssl rand -hex 32)"
+TOKEN=$(openssl rand -hex 32)     # keep it: Fly never shows a secret again
+fly secrets set FENNEC_HTTP_TOKEN="$TOKEN"
 fly deploy --ha=false
 fly status</pre>
 
@@ -430,6 +429,15 @@ fly status</pre>
     A deploy of one Machine with one volume is down for its length; the
     <code>canary</code> and <code>bluegreen</code> strategies cannot be used
     with a volume.</li>
+  <li><b>Public, unless you say otherwise.</b> The first deploy gives the app
+    public addresses, and <code>[http_service]</code> then answers at
+    <code>https://my-fennec.fly.dev</code>, behind Fly's certificate, to anyone
+    holding the token. For a server only your apps reach, deploy with
+    <code>fly deploy --ha=false --no-public-ips</code>, or give back addresses
+    it already has (<code>fly ips list</code>, <code>fly ips release</code>):
+    <code>.internal</code> below needs none of them.</li>
+  <li><b>Memory.</b> <code>--max-memory 340</code> is a third of the
+    Machine's 1 GB; change the two together.</li>
   <li><b>The volume's owner.</b> Fly staff say on the community forum that the
     mount is chowned to the image's user, which is 65534 here. If the log shows
     <code>Permission denied</code> on the lock file, add <code>USER 0:0</code> to
@@ -460,7 +468,7 @@ USER 0:0</pre>
     dockerfilePath: ./Dockerfile
     plan: starter
     numInstances: 1
-    healthCheckPath: /_health
+    healthCheckPath: /_health   # asked of a web service; a private one is checked by its port
     maxShutdownDelaySeconds: 60
     envVars:
       - key: FENNEC_HTTP_TOKEN
@@ -474,6 +482,13 @@ USER 0:0</pre>
   <li><b>Port.</b> A web service is routed to <code>PORT</code>, 10000 unless
     you set it: set <code>PORT=8080</code> beside the token, which is where the
     image listens. A private service needs no routing.</li>
+  <li><b>Health.</b> Render asks <code>healthCheckPath</code> of a web service
+    alone; a private service passes once its port accepts a connection, which
+    is once the file is open.</li>
+  <li><b>Memory.</b> The <code>starter</code> plan has 512 MB. Give the
+    <code>Dockerfile</code> a third line with a third of it, every flag
+    written out: <code>CMD ["--http", "0.0.0.0:8080", "--file",
+    "/data/data.fennec", "--sync", "250", "--max-memory", "170"]</code>.</li>
   <li><b>One instance, and a gap at every deploy.</b> A disk cannot be shared
     or scaled, and attaching one switches off zero-downtime deploys: Render
     stops the old instance, then starts the new, a few seconds with a large
@@ -501,19 +516,34 @@ way out: <code>RAILWAY_RUN_UID=0</code> runs the service as root.</p>
     <code>ghcr.io/fennec-db/fennec-server:{{version}}</code>.</p>
   </li>
   <li>
-    <p>Variables: <code>FENNEC_HTTP_TOKEN</code> (a random string, marked as a secret) and <code>RAILWAY_RUN_UID=0</code>.</p>
+    <p>Variables, four:</p>
+<pre data-lang="text">FENNEC_HTTP_TOKEN=&lt;a random string, sealed; keep a copy for your apps&gt;
+RAILWAY_RUN_UID=0
+PORT=8080
+RAILWAY_DEPLOYMENT_DRAINING_SECONDS=60</pre>
+    <p><code>PORT</code> is where Railway's health check asks, and the server
+    listens on 8080 whatever it says. The draining seconds are the time
+    between Railway's SIGTERM and its SIGKILL, <b>0 unless set</b>: without
+    them every redeploy kills the server before its final sync.</p>
   </li>
   <li>
     <p>Add a volume to the service, mount path <code>/data</code>. A service has
     one volume.</p>
   </li>
   <li>
-    <p>Settings: a health check path of <code>/_health</code>, and a generous
-    timeout for it. Leave the replicas at 1.</p>
+    <p>Settings: a health check path of <code>/_health</code>. Railway asks it
+    while a deployment starts, for 300 s unless told otherwise
+    (<code>RAILWAY_HEALTHCHECK_TIMEOUT_SEC</code>), and not again once it is
+    live. Leave the replicas at 1.</p>
   </li>
 </ol>
 
 <ul>
+  <li><b>More flags.</b> A start command replaces the image's entry point, so
+    it is the whole command, the program first:
+    <code>/usr/local/bin/fennec-server --http 0.0.0.0:8080 --file
+    /data/data.fennec --sync 250 --max-memory 340</code>, with
+    <code>--max-memory</code> a third of the service's memory limit.</li>
   <li><b>A deploy is a brief outage.</b> Railway never runs two deployments
     mounted to one volume, so a redeploy stops the old one first, with a health
     check or not. Replicas cannot be used with volumes.</li>
@@ -573,7 +603,7 @@ npm install -D wrangler</pre>
     and <code>persist</code> keeps the database in its SQL storage.</p>
 <pre data-lang="json" data-label="wrangler.jsonc">{
   "name": "my-fennec",
-  "main": "worker.js",
+  "main": "worker.ts",
   "compatibility_date": "2026-09-01",
   "durable_objects": {
     "bindings": [{ "name": "TENANT", "class_name": "Tenant" }]
@@ -585,11 +615,13 @@ npm install -D wrangler</pre>
     <p>The Worker: the <code>Tenant</code> class of <a
     href="/docs/serverless#worker">A database a Durable Object</a>, and a
     <code>fetch</code> that lets in only the callers holding its token before
-    it sends a tenant's statements to that tenant's object.
+    it sends a tenant's statements to that tenant's object. The class there
+    is typed, so the file is <code>worker.ts</code>.
     <a href="https://github.com/fennec-db/fennecdb/blob/main/integrations/cloudflare/example/worker.js"><code>integrations/cloudflare/example/worker.js</code></a>
-    is the whole Worker, run by its test under <code>wrangler dev</code>; the
-    check below goes at the top of its <code>fetch</code>.</p>
-<pre data-lang="js" data-label="worker.js">const enc = new TextEncoder();
+    is the whole Worker in JavaScript, importing from the repository where
+    yours imports the packages, run by its test under <code>wrangler
+    dev</code>; the check below goes at the top of its <code>fetch</code>.</p>
+<pre data-lang="ts" data-label="worker.ts">const enc = new TextEncoder();
 
 /** Whether the request carries the Worker's token, compared in constant time. */
 async function allowed(req, env) {
@@ -610,9 +642,11 @@ export default {
 };</pre>
   </li>
   <li>
-    <p>The token, then the deploy.</p>
-<pre data-lang="bash">openssl rand -hex 32 | npx wrangler secret put FENNEC_TOKEN
-npx wrangler deploy
+    <p>The deploy, then the token: until it has one the Worker answers 401 to
+    everyone.</p>
+<pre data-lang="bash">npx wrangler deploy
+TOKEN=$(openssl rand -hex 32)     # keep it: wrangler never shows a secret again
+echo "$TOKEN" | npx wrangler secret put FENNEC_TOKEN
 curl -X POST https://my-fennec.&lt;account&gt;.workers.dev/t/acme/query \
   -H "Authorization: Bearer $TOKEN" -d '{"sql": "collections"}'</pre>
   </li>
@@ -979,8 +1013,11 @@ href="/docs/mobile#connect">Mobile and native apps</a> the apps'.</p>
 <p>A disk snapshot is a crash-consistent copy: a fine extra, not the backup.
 <code>fennec backup</code> takes the running database whole through the
 replication stream, and <code>fennec archive</code> keeps the stream for a
-restore to a moment; give the server <code>--replication-token</code> and run
-them from anywhere that reaches it.</p>
+restore to a moment. Give the server a replication token, as
+<code>FENNEC_REPLICATION_TOKEN</code> in its environment beside the HTTP
+token (the flag, <code>--replication-token</code>, shows in <code>ps</code>),
+and run them from anywhere that reaches it; both read their token from that
+variable too, where <code>--token</code> is not given.</p>
 
 <pre data-lang="bash">fennec backup https://db.example.com nightly.fennec --token "$REPL"
 fennec archive https://db.example.com /backups/archive --token "$REPL" --image-every 1h --keep 7d
@@ -989,9 +1026,13 @@ fennec archive https://db.example.com /backups/archive --token "$REPL" --image-e
 aws s3 sync /backups/archive s3://my-bucket/fennec --delete      # AWS
 gcloud storage rsync --recursive /backups/archive gs://my-bucket/fennec   # Google Cloud
 azcopy sync /backups/archive "https://acct.blob.core.windows.net/fennec"   # Azure
-rclone sync /backups/archive r2:fennec                           # R2, Spaces, B2, ...</pre>
+rclone sync --local-no-check-updated /backups/archive r2:fennec  # R2, Spaces, B2, ...</pre>
 
-<p>Restoring to a moment, and the bucket's side, are on <a
+<p><code>--local-no-check-updated</code>, since the newest segment grows
+while its database is written: rclone otherwise refuses a file that changed
+as it read it (<code>source file is being updated</code>), and a busy
+database's newest segment never reaches the bucket. Restoring to a moment,
+and the bucket's side, are on <a
 href="/docs/replication#backups-and-restoring-to-a-moment">Replication</a> and
 <a href="/docs/replication#object-storage">In object storage</a>.</p>
 
