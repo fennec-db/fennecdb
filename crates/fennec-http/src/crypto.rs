@@ -8,10 +8,11 @@
 //! 180-4's examples, HMAC to RFC 4231's seven cases, PBKDF2 to RFC 7914's,
 //! and both where a key meets the block to Python's standard library's
 //! (`hmac_pbkdf2_vectors.txt`), ChaCha20, Poly1305 and the AEAD to RFC
-//! 8439's appendix A whole (`rfc8439_vectors.txt`) -- ES256 to Wycheproof's
-//! (`tests/es256.rs`), and SCRAM's exchange, fennec-wire's, to RFC 7677's;
-//! hand-written crypto is only usable when it can be proven against known
-//! vectors.
+//! 8439's appendix A whole (`rfc8439_vectors.txt`) -- the AEAD, RS256,
+//! HMAC, PBKDF2 and ES256 to every case of Project Wycheproof's files
+//! (`tests/wycheproof.rs`, `tests/es256.rs`), and SCRAM's exchange,
+//! fennec-wire's, to RFC 7677's; hand-written crypto is only usable when it
+//! can be proven against known vectors.
 
 mod p256;
 pub use p256::P256Key;
@@ -749,7 +750,10 @@ impl RsaKey {
         let mut one = vec![0u64; k];
         one[0] = 1;
         self.mont(&x, &one, &mut t, &mut y);
-        // EMSA-PKCS1-v1_5: 00 01 ff.. 00, SHA-256's DigestInfo, the hash.
+        // EMSA-PKCS1-v1_5: 00 01 ff.. 00, SHA-256's DigestInfo, the hash --
+        // made from the message and compared whole, as RFC 8017 verifies
+        // (8.2.2), never parsed: a lenient parse of the padding is where an
+        // e = 3 forgery gets in (Wycheproof's cases, tests/wycheproof.rs).
         const INFO: [u8; 19] = [
             0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
             0x01, 0x05, 0x00, 0x04, 0x20,
@@ -1128,6 +1132,52 @@ mod tests {
             ran += 1;
         }
         assert_eq!(ran, 11);
+    }
+
+    /// The finalization's last carry, h0's into h1 once h4's overflow is
+    /// folded back in as 5, which no vector of RFC 8439's appendix or of
+    /// Wycheproof's file reaches: with it dropped, every one of them still
+    /// passed. It is reached where the sum before s is added is
+    /// j * 2^26 + i, i from 0 to 4, the limbs holding that plus p; such a
+    /// sum comes of a key and a last block solved for each other (the
+    /// block's value is v * r^-1 less the sum before it, mod p, kept where
+    /// that is a block's value). Each tag, the key's s plus that sum, is a
+    /// big-integer Poly1305's (RFC 8439, 2.5.1) and OpenSSL's (`openssl mac
+    /// -macopt hexkey:<key> POLY1305`) alike.
+    #[test]
+    fn poly1305_last_carry() {
+        // (key, message, tag)
+        let cases: [(&str, &str, &str); 4] = [
+            // The sum 2^26, of a block alone.
+            (
+                "5737404ef0eebea90651ee0f239c7d1f2adbc29e4a89f1c21d3da2e26bdc3a36",
+                "317c2237c69888de9be932636982bfb1",
+                "2adbc2a24a89f1c21d3da2e26bdc3a36",
+            ),
+            // 2 * 2^26 + 4, i at its most.
+            (
+                "b446d2290d5cd4902c495456a55e3d11ddd52e6c770d0cc8de09a6ced58802a4",
+                "d789c6ed35532da4ac7c36dabf07fdc9",
+                "e1d52e74770d0cc8de09a6ced58802a4",
+            ),
+            // 7 * 2^26 + 2, after two blocks.
+            (
+                "53469b3b7f02f507c953c944c97625dda87a111d909d137b345380e53ca837e5",
+                "e5e405200823a033e8eacc268a7663eff78036a0a9306254bd4479863f21cbc9
+                 76a14094efc7b88352ac1ba8465c1aff",
+                "aa7a1139909d137b345380e53ca837e5",
+            ),
+            // 3 * 2^26 + 1, its last block 15 bytes.
+            (
+                "a9521ef07ce542c6208f4709376008a3d5f7749e1b097a44bef3f88df130acf1",
+                "3e26ab07f7ce2d8f7f911ed88eb448dde85cc066af531d804ac9b2b4ff54b9",
+                "d6f774aa1b097a44bef3f88df130acf1",
+            ),
+        ];
+        for (key, msg, tag) in cases {
+            let got = poly1305(&key32(key), &unhex(msg));
+            assert_eq!(got[..], unhex(tag)[..], "{msg}");
+        }
     }
 
     /// RFC 8439, appendix A.5: the AEAD opens its ciphertext into the
