@@ -409,9 +409,13 @@ takes — waits for nothing.</p>
 <p><code>SIGINT</code>, <code>SIGTERM</code> and <code>SIGHUP</code> are caught
 and a final sync runs before exit. The exclusive lock is <b>held</b> until
 exit, so no write can be accepted between the sync and the exit and no write is
-left that looked successful to the client but never reached the disk. Under
-<code>kill -9</code> you get exactly what the chosen policy promised, and no
-more.</p>
+left that looked successful to the client but never reached the disk. On
+Linux the file is then synced and its sync log (<code>&lt;file&gt;.sync</code>,
+<a href="/docs/file-format">File format</a>) removed, each open tenant's on
+a node too, so a stopped server leaves its file and
+<code>&lt;file&gt;.lock</code> and no log. Under <code>kill -9</code> you get
+exactly what the chosen policy promised, and no more; the log stays beside
+the file, and the next open puts back what it holds.</p>
 
 <p>Windows sends no signals. There Ctrl+C and Ctrl+Break, closing the
 server's console window, logging off from the session it runs in and the

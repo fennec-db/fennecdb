@@ -145,6 +145,90 @@ fn checkpoint_on_exit_writes_the_graph() {
     );
 }
 
+/// Where a server keeps a sync log beside each file it writes
+/// (`fennec-core`'s `synclog.rs`): elsewhere the tests below find none
+/// before the stop, and hold the stop to leaving none all the same.
+const KEEPS_SYNC_LOG: bool = cfg!(any(target_os = "linux", target_os = "android"));
+
+/// Waits for the first sync to begin the sync log beside `file`, where one
+/// is kept: answered under `--sync always`, the syncer's first pass under
+/// an interval.
+fn log_begun(file: &std::path::Path, what: &str) -> std::path::PathBuf {
+    let log = fennec_core::fs::beside(file, "sync");
+    if KEEPS_SYNC_LOG {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !log.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            log.exists(),
+            "{what}: no sync log was begun to be let go of"
+        );
+    }
+    log
+}
+
+/// A clean stop leaves no sync log beside the file: the server exits
+/// holding its database, never dropping it, and the drop was what let the
+/// log go -- 0.2.0 left its 260 KB beside every file it served, under every
+/// `--sync`. The shutdown lets it go itself (`Database::close_log`), and
+/// the file holds every row without it.
+#[test]
+fn a_clean_stop_leaves_no_sync_log() {
+    for sync in ["always", "250"] {
+        let path = tmp("shutdown", &format!("log-{sync}.fennec"));
+        let server = start(&["--file", path.to_str().unwrap(), "--sync", sync]);
+        let mut c = server.http();
+        c.run("create collection t (name text)");
+        c.run(r#"put t {name: "one"}"#);
+        c.run(r#"put t {name: "two"}"#);
+        let log = log_begun(&path, &format!("--sync {sync}"));
+
+        let (code, out) = server.terminate();
+        assert_eq!(code, 0, "--sync {sync}: expected a clean exit\n{out}");
+        assert!(
+            !log.exists(),
+            "--sync {sync}: the clean stop left {}\n{out}",
+            log.display()
+        );
+        assert_eq!(documents(&path, "t"), 2, "--sync {sync}: a write was lost");
+    }
+}
+
+/// A node's clean stop leaves no sync log beside a tenant it had open: its
+/// tenants are synced and kept locked to the exit, never closed.
+#[test]
+fn a_nodes_clean_stop_leaves_no_sync_log() {
+    let dir = tmp("shutdown", "log-node");
+    std::fs::create_dir_all(&dir).unwrap();
+    let server = start(&["--admin-token", "adm", "--dir", dir.to_str().unwrap()]);
+    let made = server
+        .http()
+        .with_token("adm")
+        .ask("PUT", "/_admin/tenants/acme", "");
+    assert_eq!(made.status, 201, "{}", made.body);
+    let mut c = server.http();
+    for q in [
+        "create collection t (name text)",
+        r#"put t {name: "one"}"#,
+        r#"put t {name: "two"}"#,
+    ] {
+        c.query_at("/t/acme", q)
+            .unwrap_or_else(|e| panic!("{q}: {e:?}"));
+    }
+    let file = dir.join("acme.fennec");
+    let log = log_begun(&file, "a node's tenant");
+
+    let (code, out) = server.terminate();
+    assert_eq!(code, 0, "expected a clean exit\n{out}");
+    assert!(
+        !log.exists(),
+        "the node's clean stop left {}\n{out}",
+        log.display()
+    );
+    assert_eq!(documents(&file, "t"), 2, "a write was lost");
+}
+
 /// `--ping` asks `GET /_health` at the `--http` address: 0 while a server
 /// answers there, 1 once none does -- whatever the environment it inherits
 /// from the server's container would configure, which a probe never names

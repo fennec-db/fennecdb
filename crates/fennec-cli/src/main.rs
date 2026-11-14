@@ -290,6 +290,10 @@ fn main() {
             eprintln!("could not push the writes to disk: {e}");
             code = 1;
         }
+        // Closed before the exit, which drops nothing: the close removes
+        // the sync log the sync began (Linux, `synclog.rs`), which every
+        // `-c` that wrote left beside the file, 260 KB.
+        drop(db);
         std::process::exit(code);
     }
 
