@@ -51,7 +51,7 @@ the page does.</p>
 </div>
 
 <p>Beside a module the page loads <code>fennec.js</code> and the two modules it
-imports, 59 KB brotli as they are served with no build step; a bundler keeps
+imports, 63 KB brotli as they are served with no build step; a bundler keeps
 what the app uses of them. An app whose queries run on a server can import
 the client entry instead:</p>
 
@@ -98,7 +98,10 @@ to rows the token may read, and of no other (<a href="/docs/http-reference#subsc
 A token refused, or lapsed under an open stream -- the server ends a stream
 at its token's <code>exp</code> -- is a <code>FennecError</code> of status
 401 to <code>onError</code>, and the live query stops there, for the app to
-open it again with a fresh token.</p>
+open it again with a fresh token: its <code>errorCode</code> is
+<code>'token_expired'</code> where the token's <code>exp</code> passed, and
+missing where the server named no code -- which a fresh token from the
+issuer may cure as well (<a href="/docs/auth#expiry">Expiry</a>).</p>
 </details>
 
 <p>Each way in the table has a full example in the repository, the same Notes app:

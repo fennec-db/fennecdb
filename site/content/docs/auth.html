@@ -89,7 +89,7 @@ bob changes his email                      {"error":"this token may not change `
 bob changes his phone                      {"affected":1} [200]
 alice adds an audit line                   {"affected":1} [200]
 alice deletes it                           {"error":"`audit` is append-only: a scoped token inserts into it, and neither updates nor deletes its rows"} [403]
-a token that has lapsed                    {"error":"the token has expired"} [401]
+a token that has lapsed                    {"error":"the token has expired","code":"token_expired"} [401]
 no token                                   {"error":"invalid or missing token"} [401]</pre>
 
 <ul>
@@ -752,9 +752,39 @@ alice reads                                [{"title":"alice note"}] [200]</pre>
     (<code>connect</code> opens no connection), and one that keeps a client
     makes a new one when its provider refreshes.</li>
   <li><b>A stream ends at its token's <code>exp</code></b>, with <code>event:
-    error</code> and <code>{"error":"the token has expired","status":401}</code>:
+    error</code> and <code>{"error":"the token has expired","status":401,"code":"token_expired"}</code>:
     the client fetches a fresh token and opens the stream again. A member
     taken off a team stops hearing the team no later than that.</li>
+  <li><b>An expiry is told by its code.</b> A request whose token's
+    <code>exp</code> has passed is answered 401 with
+    <code>"code":"token_expired"</code>, as the stream's end is; every other
+    401 -- a signature no key makes, a <code>kid</code> no key has, an
+    issuer, audience or client the server does not take, a token not valid
+    yet, none at all -- names no code. The code is told only of a token
+    whose signature and audience checked out, so a forged token past its
+    <code>exp</code> is refused for its signature.</li>
+  <li><b>A 401 is no sign-out by itself.</b> The server keeps no list of
+    revoked tokens: only the issuer knows that a session ended. So an app
+    asks its issuer for a fresh token at every 401, whatever the code, and
+    signs out where the issuer refuses to issue one. A fresh token cures an
+    expiry, a token signed with a key the server has since dropped (a
+    replica offline past a rotation), a request sent before any token was
+    handed over, and every expiry from a server older than this release,
+    which names no code. It does not cure a key the server has not fetched
+    yet (<code>no key has the token's kid</code>, behind a rotation above,
+    until the next fetch), a token whose <code>nbf</code> the server's clock
+    has not reached, or an issuer, audience or client the server does not
+    take: a token minted again at once is refused the same, and a replica's
+    sync waits before it asks again, 1 s doubling to 60 s -- as it does for
+    tokens that arrive expired, as every one does where the server's clock
+    runs ahead of the issuer's by a token's lifetime. It hands its
+    <code>tokenProvider</code> what it needs to tell these apart
+    (<a href="/docs/sync#token-refusals">Sync</a>,
+    <a href="/docs/mobile#sync">mobile</a>). A replica belongs to one
+    account -- its file or <code>persist</code> key names the account, and it
+    is never opened for another -- and signing out keeps it, for that
+    account's next sign-in to send the writes the server has not taken;
+    deleting it loses them.</li>
   <li><b><code>--jwt-max-age &lt;s&gt;</code></b> refuses a token whose
     <code>exp</code> lies further ahead than that: set to 3600, a provider
     configured for day-long tokens is refused, and the fix is at the provider,

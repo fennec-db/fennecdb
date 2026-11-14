@@ -14,19 +14,23 @@ class Server {
   /// A tenant node's quota of rows a tenant, its tasks in tenant `acme`;
   /// null for a server over a file.
   final int? tenantRows;
+
+  /// The token a server over a file asks for (`--http-token`), null for
+  /// none.
+  final String? token;
   Process? _process;
   int port = 0;
 
-  Server._(this.file, this.tenantRows);
+  Server._(this.file, this.tenantRows, this.token);
 
   String get url => 'http://127.0.0.1:$port${tenantRows == null ? '' : '/t/acme'}';
 
   /// A server over a file of its own, holding `tasks` -- or, given
   /// [tenantRows], a tenant node (`--dir`) holding each tenant to that many
   /// rows, `tasks` in its tenant `acme`, which [url] names.
-  static Future<Server> start(String name, {int? tenantRows}) async {
+  static Future<Server> start(String name, {int? tenantRows, String? token}) async {
     final dir = await Directory.systemTemp.createTemp('fennecdb-dart-$name');
-    final s = Server._('${dir.path}/server.fennec', tenantRows);
+    final s = Server._('${dir.path}/server.fennec', tenantRows, token);
     await s._start(0);
     if (tenantRows != null) {
       final http = HttpClient();
@@ -57,6 +61,7 @@ class Server {
       '--sync',
       'always',
       ...rows == null ? ['--file', file] : ['--dir', file, '--admin-token', 'adm', '--tenant-max-rows', '$rows'],
+      ...token == null ? <String>[] : ['--http-token', token!],
     ]);
     _process = p;
     p.stdout.drain<void>();
@@ -85,7 +90,7 @@ class Server {
   Future<void> restart() => _start(port);
 
   Future<Answer> run(String text) async {
-    final r = Fennec.connect(url);
+    final r = Fennec.connect(url, token: token);
     try {
       return await r.run(text);
     } finally {
@@ -135,6 +140,78 @@ void main() {
       await s.kill();
     }
     servers.clear();
+  });
+
+  // A 401 hands the provider why -- no token sent (`hadToken` false) -- and
+  // the status says the same while the sync waits. A provider that failed,
+  // its issuer out of reach, is named by the status -- its `token` failed,
+  // its error why -- and asked again at `resume()`; the token it hands over
+  // then refused too, it is asked once more after a wait, as `attempt` 2.
+  test('a token provider is handed why a token is wanted', () async {
+    final s = await Server.start('token', token: 'right');
+    servers.add(s);
+    final asked = <TokenRefusal>[];
+    final db = await Fennec.openSynced(
+        url: s.url,
+        shapes: [open],
+        path: await scratch('sync-token'),
+        tokenProvider: (refusal) async {
+          asked.add(refusal);
+          return switch (asked.length) {
+            1 => throw const SocketException('the issuer is out of reach'),
+            2 => 'wrong',
+            _ => 'right',
+          };
+        });
+    const first = TokenRefusal(hadToken: false);
+    await eventually('the first ask', () => asked.length == 1);
+    await eventually(
+        "the status naming the provider's failure",
+        () async =>
+            (await db.replica!.refresh()).error?.message ==
+            'the token provider failed: SocketException: the issuer is out of reach');
+    expect(db.replica!.status.token, const TokenWait(TokenStage.failed, first));
+    db.replica!.resume();
+    await db.replica!.ready();
+    expect(asked, [first, first, const TokenRefusal(hadToken: true, attempt: 2)]);
+    expect((await db.replica!.refresh()).token, isNull);
+    expect(asked.where((r) => r.expired || r.errorCode != null), isEmpty);
+    expect(const TokenRefusal(errorCode: 'token_expired').expired, isTrue);
+    expect(await titles(db), ['one', 'two']);
+    await db.close();
+  });
+
+  // A provider at work is called once: `resume()` while it is asks nothing,
+  // nor does the ask after the app's own token, refused, waited for -- the
+  // provider's answer answers it, and the replica goes on.
+  test('a token provider at work is called once', () async {
+    final s = await Server.start('token-once', token: 'right');
+    servers.add(s);
+    final asked = <TokenRefusal>[];
+    final gate = Completer<void>();
+    final db = await Fennec.openSynced(
+        url: s.url,
+        shapes: [open],
+        path: await scratch('sync-token-once'),
+        tokenProvider: (refusal) async {
+          asked.add(refusal);
+          await gate.future;
+          return 'right';
+        });
+    await eventually('the first ask', () => asked.length == 1);
+    db.replica!.resume();
+    db.replica!.setToken('wrong');
+    await eventually(
+        'the ask after the wait',
+        () async =>
+            (await db.replica!.refresh()).token ==
+            const TokenWait(TokenStage.asked, TokenRefusal(hadToken: true, attempt: 2)));
+    db.replica!.resume();
+    gate.complete();
+    await db.replica!.ready();
+    expect(asked, [const TokenRefusal(hadToken: false)]);
+    expect(await titles(db), ['one', 'two']);
+    await db.close();
   });
 
   test('the seed fills the replica with the shape', () async {

@@ -47,6 +47,12 @@ public struct FennecError: Error, CustomStringConvertible, Sendable, Equatable {
     /// its body refused. From the library and the server's token alike, a
     /// scoped token told the `reason` and no name; nil otherwise.
     public let binding: String?
+    /// The code a server named beside its words, its body's `code`
+    /// (`FennecRemote`): "token_expired" on a 401 for a token past its
+    /// `exp`, which a fresh token from its issuer cures. A later server may
+    /// name others; nil for none, and for the library's own. Not `code`,
+    /// the library's error kind: every SDK names the server's this way.
+    public let errorCode: String?
     /// The parameters the library asked for again as JSON (`exact`).
     let exact: [Int]?
 
@@ -65,12 +71,13 @@ public struct FennecError: Error, CustomStringConvertible, Sendable, Equatable {
         self.retryAfter = nil
         self.reason = reason
         self.binding = binding
+        self.errorCode = nil
     }
 
     init(
         code: Code, message: String, status: Int, at: Int?, completed: Int?,
         quota: String? = nil, retryAfter: Double? = nil, reason: String? = nil,
-        binding: String? = nil
+        binding: String? = nil, errorCode: String? = nil
     ) {
         self.code = code
         self.message = message
@@ -82,6 +89,7 @@ public struct FennecError: Error, CustomStringConvertible, Sendable, Equatable {
         self.retryAfter = retryAfter
         self.reason = reason
         self.binding = binding
+        self.errorCode = errorCode
     }
 
     public var description: String { message }

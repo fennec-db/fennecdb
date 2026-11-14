@@ -546,6 +546,18 @@ export declare class FennecError extends Error {
    * token's rules.
    */
   status?: number;
+  /**
+   * The code the server named beside its words, its body's `code`: what a
+   * program tells the refusal by. `token_expired` on a 401 for a token
+   * past its `exp` -- a request's, or the event ending a stream (`live`,
+   * `subscribe`) at it -- which a fresh token cures; a 401 naming none is
+   * no sign-out by itself either (a key since removed, a key not fetched
+   * yet, a token not valid yet): only the issuer knows a session ended.
+   * Every SDK names it so -- Python's `error_code`,
+   * Go's and .NET's `ErrorCode` -- whose `code`, where there is one, is
+   * the status's name or the library's own error kind.
+   */
+  errorCode?: 'token_expired' | (string & {});
   /** A write the server refused: the text of its first statement. */
   query?: string;
   /**
@@ -1808,14 +1820,41 @@ export interface SyncOptions<S extends AnySchema<S> = Schema> {
   wasm?: string | BufferSource | WebAssembly.Module;
   /** Where the local module's collation data comes from (`Fennec.open`). */
   collation?: CollationSource;
+  /** Sent from the first request on; none, and the first 401 asks `tokenProvider` with `hadToken` false. */
   token?: string;
-  /** Asked for a new token when the server answers 401; until then nothing is sent. */
-  tokenProvider?: () => string | Promise<string>;
+  /**
+   * Asked for a token when the server answers 401: until one is handed
+   * over nothing is sent, and the writes wait in the replica. Handed why
+   * (`TokenRefusal`). Ask the issuer for a fresh token at every one,
+   * whatever the code -- force a refresh at `expired`, where a cached
+   * token is the one refused -- and the sync goes on where it stopped. A
+   * 401 alone is never a sign-out: the server keeps no list of revoked
+   * tokens, so only the issuer knows a session ended; sign out where it
+   * refuses to issue one. Where the token handed over was refused too
+   * (`attempt` past 1: a key the server has not fetched yet, an `nbf` its
+   * clock has not reached, a misconfiguration) the sync asks again after
+   * 1 s doubling to 60 s. A provider that throws (told to `onError`) or
+   * hands over no token leaves the sync waiting, `status()`'s `token`
+   * reading `failed` and its `error` `the token provider failed: …`, and
+   * is asked again at `setOnline(true)` -- the page's `online` event. It
+   * is called once at a time: while it is at work nothing asks it again,
+   * and what it hands over answers every ask meanwhile. Nothing bounds its
+   * time, since it may wait on a sign-in, so it must return: time out its
+   * own requests to the issuer and throw. One that never returns holds the
+   * sync, `token` reading `asked`, until the app hands a token over itself
+   * with `setToken`.
+   */
+  tokenProvider?: (refusal: TokenRefusal) => string | Promise<string>;
   fetch?: typeof globalThis.fetch;
   /**
    * IndexedDB key: the replica is stored there with its cursors and the
    * writes the server has not answered, which a page opened again sends.
    * A `local` kept in a file (`openFile`) keeps them in the file instead.
+   * A replica belongs to one account: the key names it (`tasks:${userId}`)
+   * and is never opened for another, or another account's sign-in on the
+   * same browser sends the writes left under its own token and shows their
+   * rows. Signing out keeps it, for that account's next sign-in to send
+   * its `pending` writes; deleting it loses them.
    */
   persist?: string;
   /** Seals the stored image and its chunks with AES-GCM (`persist`). */
@@ -1850,7 +1889,65 @@ export interface ShapeStatus {
    * `streams` is not `connected`, as one the network dropped is not.
    */
   quota: NonNullable<FennecError['quota']> | null;
+  /**
+   * The code a 401 the sync waits on for a token named (`TokenRefusal`'s
+   * `errorCode`): `token_expired` where the token's `exp` passed, null for
+   * none and for every other error.
+   */
+  errorCode: NonNullable<FennecError['errorCode']> | null;
+  /**
+   * The token the sync waits on, null while it waits on none: nothing is
+   * sent meanwhile. While it is not null, `error` is the token's too,
+   * whatever else failed since -- a stream that ended, as streams end
+   * offline.
+   */
+  token: TokenWait | null;
   leader: boolean;
+}
+
+/**
+ * A token a replica waits on, as its `status()` says it: for an app that
+ * hands its tokens over with `setToken` -- which acts at `asked` -- and for
+ * one that shows where its provider stands.
+ */
+export interface TokenWait {
+  /**
+   * `delayed` while the wait before the provider is asked runs -- the
+   * token handed over was refused too, and the next is asked for after
+   * 1 s doubling to 60 s; `asked` once the provider is asked, or with none
+   * the app is, and no token has come; `failed` where the provider threw
+   * or handed over none, until `setOnline(true)` asks it again.
+   */
+  readonly stage: 'delayed' | 'asked' | 'failed';
+  /** What the provider was handed -- or, `delayed`, will be. */
+  readonly refusal: TokenRefusal;
+}
+
+/**
+ * Why a replica's `tokenProvider` is asked for a token: the server answered
+ * 401, and nothing is sent until one is handed over.
+ */
+export interface TokenRefusal {
+  /**
+   * The code the server named beside its words (its body's `code`), null
+   * for none: `token_expired` where the token's `exp` passed. A later
+   * server may name others; a 401 naming none is no sign-out by itself.
+   */
+  readonly errorCode: 'token_expired' | (string & {}) | null;
+  /** The token's `exp` passed (`errorCode` is `token_expired`): refresh it, and the sync goes on. */
+  readonly expired: boolean;
+  /** Whether the refused request carried a token: false for one sent before any was handed over. */
+  readonly hadToken: boolean;
+  /**
+   * How many times in a row the provider is asked since the server last
+   * took the token held: 1, then 2 and on where the token handed over at
+   * the last ask was refused too -- asked after 1 s doubling to 60 s,
+   * since a token minted again at once is refused for what minting does
+   * not change. An expiry of the token the server took last, or of the
+   * first handed over since, starts it at 1 again; any other was minted
+   * expired, and counts. No reason to sign out.
+   */
+  readonly attempt: number;
 }
 
 /** Batch context: the same surface as `db`, but writes are accumulated. */
@@ -1874,11 +1971,18 @@ export declare class FennecSync<S extends AnySchema<S> = Schema, Rel extends Rel
   /** Resolves once the server has answered every write made so far. */
   pushed(): Promise<void>;
   status(): ShapeStatus[];
-  /** A new token: requests carry it from here on, and what a 401 stopped goes on. */
+  /**
+   * A new token: requests carry it from here on, and what a 401 stopped
+   * goes on, whatever its `token`'s stage -- a `tokenProvider` that never
+   * returned among them, which is called no second time meanwhile. An
+   * empty one is none. The token just refused, handed over again while the
+   * wait before the next ask runs, does not end the wait.
+   */
   setToken(token: string): void;
   /**
    * The network gone (`false`: the streams end, writes wait) or back
-   * (`true`: what waited goes at once). A page has it from `online` and
+   * (`true`: what waited goes at once, and a `tokenProvider` that threw or
+   * handed over none is asked again). A page has it from `online` and
    * `offline` on its own.
    */
   setOnline(online: boolean): void;

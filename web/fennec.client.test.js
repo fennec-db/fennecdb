@@ -158,10 +158,11 @@ test('a stream that ends is opened again, and its seed runs the query', async ()
   stop();
 });
 
-// The server ends a stream at its token's `exp` with a 401: the live query
-// says so as an auth error and stops -- opened again with the same token
-// it was refused at every attempt, each refusal waiting longer -- for the
-// app to open it again with a fresh one.
+// The server ends a stream at its token's `exp` with a 401 and its code,
+// `token_expired`: the live query says so as an auth error and stops --
+// opened again with the same token it was refused at every attempt, each
+// refusal waiting longer -- for the app to open it again with a fresh one,
+// told an expiry by the code alone (`errorCode`).
 test("a stream ended at its token's exp is an auth error, and is not opened again", async () => {
   const server = scripted(() => [{ id: 1 }]);
   const db = client.connect('http://db.test', { token: 'old', fetch: server.fetch });
@@ -169,10 +170,11 @@ test("a stream ended at its token's exp is an auth error, and is not opened agai
   db.live('get docs', () => {}, { collections: ['docs'], onError: (e) => errors.push(e) });
   await until(() => server.streams.length === 1);
   server.streams[0].emit('seed', { seq: 1, rows: [] });
-  server.streams[0].emit('error', { error: 'the token has expired', status: 401 });
+  server.streams[0].emit('error', { error: 'the token has expired', status: 401, code: 'token_expired' });
   await until(() => errors.length === 1);
   assert.ok(errors[0] instanceof client.FennecError);
   assert.equal(errors[0].status, 401);
+  assert.equal(errors[0].errorCode, 'token_expired');
   assert.match(errors[0].message, /expired/);
   await new Promise((r) => setTimeout(r, 400));
   assert.equal(server.streams.length, 1, 'opened again with the token refused');
@@ -209,9 +211,11 @@ test('subscribe hands a shape its seed and changes, opens it again, and stops at
   await until(() => events.length === 3);
   assert.deepEqual(states, ['open', 'retry', 'open']);
   // Ended at its token's exp: an auth error, and not opened again.
-  server.streams[1].emit('error', { error: 'the token has expired', status: 401 });
+  server.streams[1].emit('error', { error: 'the token has expired', status: 401, code: 'token_expired' });
   await until(() => errors.length === 2);
   assert.equal(errors[1].status, 401);
+  assert.equal(errors[1].errorCode, 'token_expired');
+  assert.equal(errors[0].errorCode, undefined, 'a stream ended for the tenant names no code');
   await new Promise((r) => setTimeout(r, 400));
   assert.equal(server.streams.length, 2);
   stop();
@@ -419,6 +423,25 @@ test('a refusal naming no wait is never sent again', async () => {
     assert.ok(err instanceof client.FennecError, `${refusal.status}`);
     assert.equal(err.status, refusal.status);
     assert.equal(server.calls.length, 1, `${refusal.status} sent again`);
+  }
+});
+
+// A 401 for a token past its `exp` names its code, `errorCode` as every
+// SDK names it; any other 401 names none, and a code the client does not
+// know -- a later server's -- is passed on as it came.
+test('a 401 for a token past its exp names its code, token_expired; any other none', async () => {
+  for (const [body, code] of [
+    [{ error: 'the token has expired', code: 'token_expired' }, 'token_expired'],
+    [{ error: "the token's signature does not match" }, undefined],
+    [{ error: 'refused', code: 'a_later_code' }, 'a_later_code'],
+    [{ error: 'refused', code: 7 }, undefined],
+  ]) {
+    const server = planned(answer(401, body, { 'www-authenticate': 'Bearer' }), answer(200, []));
+    const err = await client.connect('http://db.test', { token: 't', fetch: server.fetch }).from('docs').rows().catch((e) => e);
+    assert.ok(err instanceof client.FennecError);
+    assert.equal(err.status, 401);
+    assert.equal(err.errorCode, code);
+    assert.equal(server.calls.length, 1, 'a refused token is sent again');
   }
 });
 

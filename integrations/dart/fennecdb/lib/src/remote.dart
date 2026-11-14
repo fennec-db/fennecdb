@@ -596,7 +596,9 @@ class FennecRemote {
         quota: quota,
         retryAfter: wait,
         reason: m?['reason'] as String?,
-        binding: m?['binding'] as String?);
+        binding: m?['binding'] as String?,
+        // The code the server named, a text not empty alone.
+        errorCode: switch (m?['code']) { String c when c.isNotEmpty => c, _ => null });
   }
 
   /// An HTTP status as the error kind the engine would have said; the

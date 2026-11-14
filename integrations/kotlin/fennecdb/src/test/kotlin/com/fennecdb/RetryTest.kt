@@ -197,6 +197,29 @@ class RetryTest {
         }
         assertFailsWith<IllegalArgumentException> { FennecRemote.Retry(attempts = 0) }
     }
+
+    /**
+     * The code the server named is the error's `errorCode` -- never `code`,
+     * the library's kind -- and a refusal naming none has none; neither is
+     * sent again.
+     */
+    @Test
+    fun aRefusalNamesTheServersCode() = runBlocking<Unit> {
+        Stub(
+            Stub.Act.Answer(401, """{"error":"the token has expired","code":"token_expired"}"""),
+            Stub.Act.Answer(401, """{"error":"invalid or missing token"}"""),
+        ).use { s ->
+            val db = Fennec.connect(s.url, "t")
+            val e = assertFailsWith<FennecException> { db.from("docs").rows() }
+            assertEquals(401, e.status)
+            assertEquals(FennecException.Code.DENIED, e.code)
+            assertEquals("token_expired", e.errorCode)
+            val none = assertFailsWith<FennecException> { db.from("docs").rows() }
+            assertEquals(401, none.status)
+            assertEquals(null, none.errorCode)
+            assertEquals(2, s.seen.size)
+        }
+    }
 }
 
 /**

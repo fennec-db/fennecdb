@@ -133,7 +133,21 @@ describes: `_sync_shapes` (cursors), `_sync_queue` (unanswered writes, their
 keys and undo), `_sync_temps` (rows under temporary ids). Writes go one at
 a time in order; 0/408/429/5xx retry with backoff (250 ms doubling to 15 s,
 30% jitter) or the `retry_after` a quota names where longer, 401 asks for
-a token, a 507 naming a tenant's quota and any other 4xx are a refusal put
+a token -- `{"do":"token","code":..,"had_token":B,"attempt":N}`, the code
+the server named (`token_expired` where the token's `exp` passed), whether
+the refused request carried a token and the asks in a row since the server
+last took the token held, after 1 s doubling to 60 s where the token handed
+over was refused too, the status's `token` naming the same three and where
+the ask stands -- `delayed`, `asked`, `failed`, said from the ask itself so
+that no fault set since, a stream's end offline, hides it -- a 401 to a
+request sent with a token since replaced sent again with the new one,
+unasked, one ask out at a time -- the binding answering it with a token or
+with `{"token_failed":".."}`, its provider called once at a time, and with
+no bound on its time, a token the app hands over itself getting the sync
+going where it never returns -- and `{"online":true}` asking again only
+after the second
+([access.md](access.md#expired-tokens)) -- a
+507 naming a tenant's quota and any other 4xx are a refusal put
 back (below). A
 replica reopened sends its queue before opening its streams. An update of
 an unanswered insert reaches the server's copy by its key as well
@@ -193,15 +207,27 @@ fsync `sync()`.
 **The browser's sync and the native core are held to one scenario file.**
 Moving `FennecSync` onto `fennec_abi::sync` was measured at +21 KB brotli of
 the browser module, so the two are written apart, and
-`integrations/sync-scenarios.json` says what both do: 84 scenarios, each a
+`integrations/sync-scenarios.json` says what both do: 115 scenarios, each a
 script of shapes, app writes and server events -- a seed, a change, a
 stream dropped, the status each write's request is answered with, a seed
-past the horizon, the network's signal, a token -- with what the replica,
+past the horizon, the network's signal, a token, a provider that failed or
+never returns and the app's own token meanwhile, a stop, an answer held
+back until the script releases it (a stream's open or
+`GET /collections` answered after a token was handed over; given to no one
+once its stream was cancelled, as a fetch aborted rejects -- a stand-in that
+opened it kept a stream no shape held, which the next event went to) --
+with what the replica,
 the queue, the requests sent (method, path, body, the idempotency key
-reused or new), the timers and the refusals are after every step.
+reused or new), the timers, the refusals, the status's error and its token
+are after every step, each runner failing a scenario whose sync asks for a
+token while an ask is out, and calling a provider once at a time, as every
+binding calls it.
 `crates/fennec-abi/tests/scenarios.rs` drives the sans-IO core through it,
 and `web/fennec.sync.scenarios.test.js` drives `FennecSync` through a fetch
-and a clock the script plays, its replica persisted over an in-memory
+and a clock the script plays -- every body it answers thrown away at an
+abort, as a real fetch throws it away: a stand-in that kept its bodies hid a
+stream refused at its open whose body was read after the stream was
+cancelled, told nothing on Node's own fetch -- its replica persisted over an in-memory
 IndexedDB so a restart is a page opened again; each writes the names that
 passed to `target/sync-scenarios/`, and `make sync-scenarios-check` (in
 `make test` where the module is built, and its own CI step) fails unless

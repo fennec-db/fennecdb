@@ -41,9 +41,100 @@ class SyncFailure {
   /// by the quota of `streams` leaves the replica offline as the network
   /// does, and this tells the two apart.
   final String? quota;
-  const SyncFailure(this.message, this.status, [this.quota]);
+
+  /// The code a 401 the sync waits on for a token named (the server's
+  /// body's `code`, [TokenRefusal.errorCode]), null for none:
+  /// `token_expired` where the token's `exp` passed.
+  final String? errorCode;
+  const SyncFailure(this.message, this.status, [this.quota, this.errorCode]);
   @override
-  String toString() => 'SyncFailure($status${quota == null ? '' : ', $quota'}): $message';
+  String toString() =>
+      'SyncFailure($status${quota == null ? '' : ', $quota'}${errorCode == null ? '' : ', $errorCode'}): $message';
+}
+
+/// Why a replica asks its `tokenProvider` for a token: the server answered
+/// 401, and nothing is sent until one is handed over.
+///
+/// Ask the issuer for a fresh token at every one, whatever the code --
+/// forcing a refresh at [expired], where a cached token is the one refused
+/// -- and the sync goes on where it stopped. A 401 alone is never a
+/// sign-out: the server keeps no list of revoked tokens, so only the issuer
+/// knows a session ended; sign out where it refuses to issue one. A replica
+/// belongs to one account: its file's path names the account, and it is
+/// never opened for another. Signing out keeps it, for that account's next
+/// sign-in to send its `pending` writes.
+class TokenRefusal {
+  /// The code the server named beside its words (its body's `code`), null
+  /// for none: `token_expired` where the token's `exp` passed. A later
+  /// server may name others; a 401 naming none is no sign-out by itself.
+  final String? errorCode;
+
+  /// Whether the refused request carried a token: false for one sent before
+  /// any was handed over.
+  final bool hadToken;
+
+  /// How many times in a row the provider is asked since the server last
+  /// took the token held: 1, then 2 and on where the token handed over at
+  /// the last ask was refused too -- asked after 1 s doubling to 60 s, since
+  /// one minted again at once is refused for what minting does not change
+  /// (a key the server has not fetched yet, an `nbf` its clock has not
+  /// reached). An expiry starts it at 1 again. No reason to sign out.
+  final int attempt;
+
+  const TokenRefusal({this.errorCode, this.hadToken = true, this.attempt = 1});
+
+  /// The code fennec-server tells a token past its `exp` by.
+  static const tokenExpired = 'token_expired';
+
+  /// The token's `exp` passed ([errorCode] is `token_expired`): refresh it,
+  /// and the sync goes on.
+  bool get expired => errorCode == tokenExpired;
+
+  @override
+  bool operator ==(Object other) =>
+      other is TokenRefusal && other.errorCode == errorCode && other.hadToken == hadToken && other.attempt == attempt;
+
+  @override
+  int get hashCode => Object.hash(errorCode, hadToken, attempt);
+
+  @override
+  String toString() => 'TokenRefusal(errorCode: $errorCode, hadToken: $hadToken, attempt: $attempt)';
+}
+
+/// Where the ask for a token a replica waits on stands ([TokenWait.stage]).
+enum TokenStage {
+  /// The token handed over was refused too: the provider is asked after a
+  /// wait, 1 s doubling to 60 s.
+  delayed,
+
+  /// The provider is asked -- with none, the app is -- and no token has
+  /// come.
+  asked,
+
+  /// The provider threw or handed over none: `resume()` or
+  /// `setOnline(true)` asks it again.
+  failed,
+}
+
+/// A token a replica waits on, as its status says it ([SyncStatus.token]):
+/// for an app that hands its tokens over with `setToken` -- which acts at
+/// [TokenStage.asked] -- and for one that shows where its provider stands.
+class TokenWait {
+  final TokenStage stage;
+
+  /// What the provider was handed -- or, [TokenStage.delayed], will be.
+  final TokenRefusal refusal;
+
+  const TokenWait(this.stage, this.refusal);
+
+  @override
+  bool operator ==(Object other) => other is TokenWait && other.stage == stage && other.refusal == refusal;
+
+  @override
+  int get hashCode => Object.hash(stage, refusal);
+
+  @override
+  String toString() => 'TokenWait($stage, $refusal)';
 }
 
 class ShapeState {
@@ -61,11 +152,16 @@ class SyncStatus {
   final int pending;
 
   /// The last error: a connection's until it is back, a refused write's
-  /// until the next.
+  /// until the next -- the token's while one is wanted, whatever else
+  /// failed since (a stream that ended, as streams end offline).
   final SyncFailure? error;
   final List<ShapeState> shapes;
 
-  const SyncStatus(this.state, this.pending, this.error, this.shapes);
+  /// The token the sync waits on, null while it waits on none: nothing is
+  /// sent meanwhile.
+  final TokenWait? token;
+
+  const SyncStatus(this.state, this.pending, this.error, this.shapes, [this.token]);
 
   /// Whether every shape has had its seed.
   bool get seeded => shapes.isNotEmpty && shapes.every((s) => s.seeded);
@@ -74,6 +170,13 @@ class SyncStatus {
 
   static SyncStatus _of(Map<String, Object?> v) {
     final e = v['error'] as Map<String, Object?>?;
+    final t = v['token'] as Map<String, Object?>?;
+    final stage = switch (t?['stage']) {
+      'delayed' => TokenStage.delayed,
+      'asked' => TokenStage.asked,
+      'failed' => TokenStage.failed,
+      _ => null,
+    };
     return SyncStatus(
       switch (v['state']) {
         'online' => SyncState.online,
@@ -81,11 +184,22 @@ class SyncStatus {
         _ => SyncState.catchingUp,
       },
       v['pending'] as int? ?? 0,
-      e == null ? null : SyncFailure(e['message'] as String? ?? '', e['status'] as int? ?? 0, e['quota'] as String?),
+      e == null
+          ? null
+          : SyncFailure(
+              e['message'] as String? ?? '', e['status'] as int? ?? 0, e['quota'] as String?, e['code'] as String?),
       [
         for (final s in (v['shapes'] as List? ?? const []).cast<Map<String, Object?>>())
           ShapeState(s['collection'] as String, s['cursor'] as int, s['seeded'] == true, s['connected'] == true),
       ],
+      t == null || stage == null
+          ? null
+          : TokenWait(
+              stage,
+              TokenRefusal(
+                  errorCode: t['code'] as String?,
+                  hadToken: t['had_token'] as bool? ?? true,
+                  attempt: t['attempt'] as int? ?? 1)),
     );
   }
 }
@@ -120,7 +234,7 @@ class Replica {
   final Fennec _db;
   final String _url;
   String? _token;
-  final Future<String> Function()? _provider;
+  final Future<String> Function(TokenRefusal refusal)? _provider;
   final HttpClient _client = HttpClient()..connectionTimeout = const Duration(seconds: 10);
   final _requests = <int, HttpClientRequest>{};
   final _streams = <int, StreamSubscription<List<int>>>{};
@@ -129,6 +243,10 @@ class Replica {
   var _status = SyncStatus._starting;
   Future<void> _chain = Future.value();
   var _stopped = false;
+
+  /// The provider is at work, in the chain's order: one call is out at a
+  /// time.
+  var _providing = false;
 
   Replica._(this._db, String url, this._token, this._provider)
       : _url = url.endsWith('/') ? url.substring(0, url.length - 1) : url;
@@ -162,7 +280,9 @@ class Replica {
     await wait;
   }
 
-  /// A fresh token, for the requests and streams from here on.
+  /// A fresh token, for the requests and streams from here on: what a `401`
+  /// stopped goes on, whatever the status's `token` says -- a provider that
+  /// never returned among them, called no second time meanwhile.
   void setToken(String token) {
     _token = token;
     _signalJson({'token': token});
@@ -170,11 +290,15 @@ class Replica {
 
   /// The network as the platform sees it (connectivity_plus, say): offline
   /// closes the streams and sends nothing; online comes back at once, the
-  /// backoff forgotten.
+  /// backoff forgotten, and asks the provider again for a token it did not
+  /// hand over -- it threw, its issuer out of reach -- but not while it is
+  /// still at work, nor before the wait the server's refusal of the last one
+  /// began.
   void setOnline(bool online) => _signalJson({'online': online});
 
   /// What an app calls as it is resumed (`AppLifecycleState.resumed`): the
-  /// streams a pause cut are opened again at once, from their cursors.
+  /// streams a pause cut are opened again at once, from their cursors, and a
+  /// provider that failed is asked for a token again.
   void resume() => setOnline(true);
 
   /// The server itself, for what the replica does not hold.
@@ -243,9 +367,24 @@ class Replica {
             if (!_stopped) _serial(() => _feed(_kTimer, id));
           });
         case 'token':
+          // Why the core asks: the code the 401 named, whether the refused
+          // request carried a token, and the asks in a row. One call out at
+          // a time: asked again while at work -- the app's own `setToken`
+          // went on and was refused meanwhile -- a provider would mint twice
+          // for one refusal, and the second token, coming late, end the wait
+          // the first one's refusal began. Its answer answers this ask too.
           final p = _provider;
-          if (p != null) {
-            p().then(setToken, onError: (_) {});
+          if (p != null && !_providing) {
+            _providing = true;
+            final refusal = TokenRefusal(
+                errorCode: a['code'] as String?,
+                hadToken: a['had_token'] as bool? ?? true,
+                attempt: a['attempt'] as int? ?? 1);
+            // A provider that fails, even before it returns a future, hands
+            // over nothing: the core is told why, and `resume()` or
+            // `setOnline(true)` asks it again.
+            Future.sync(() => p(refusal)).then((t) => _provided(t.isEmpty ? null : t, 'it handed over no token'),
+                onError: (Object e) => _provided(null, '$e'));
           }
         case 'changed':
           _db.lives.touch();
@@ -258,6 +397,20 @@ class Replica {
           await _reload();
       }
     }
+  }
+
+  /// The provider's answer: its token handed over, or the engine told none
+  /// came and why (`{"token_failed":..}`), which the status's error says --
+  /// `resume()` asks again. In the chain with the call's end, so an ask the
+  /// engine makes before the answer reaches it is this call's.
+  void _provided(String? token, String why) {
+    if (token != null) _token = token;
+    final bytes = utf8.encode(jsonEncode(token != null ? {'token': token} : {'token_failed': why}));
+    if (_stopped) return;
+    _serial(() {
+      _providing = false;
+      return _feed(_kSignal, 0, bytes: bytes);
+    });
   }
 
   Future<void> _reload() async {
@@ -346,7 +499,7 @@ Future<Fennec> _openSynced({
   required List<Shape> shapes,
   required String path,
   int flags = 0,
-  Future<String> Function()? tokenProvider,
+  Future<String> Function(TokenRefusal refusal)? tokenProvider,
 }) async {
   final db = await Fennec.open(path, flags: flags);
   try {

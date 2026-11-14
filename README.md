@@ -235,7 +235,7 @@ import { Fennec } from './fennec.js';
 const db = await Fennec.open('./fennec.wasm');
 ```
 
-345 KB of gzipped WebAssembly and a 70 KB gzipped client — no wasm-bindgen, no
+345 KB of gzipped WebAssembly and a 74 KB gzipped client — no wasm-bindgen, no
 build step. An app whose queries run on a server can import
 `@fennecdb/web/client`, 12 KB brotli in its bundle, which cannot pull in the
 engine, sync or storage ([which package](https://fennecdb.com/docs/javascript#packages)). With live
@@ -344,7 +344,7 @@ let db = try await Fennec.sync(url: "https://api.example.com", token: jwt,
 |---|---|
 | **Documents** | `insert` (refuses a taken id), `put` (upsert), `set` and `del` by filter, a batch landing whole |
 | **Atomic batches** | `POST /batch` and the browser's `run` of several statements land whole or not at all; an `Idempotency-Key` makes a write once · the JavaScript, Python, Go, .NET, Swift, Kotlin and Dart clients send a request again only where it ran nothing (a 503 or 429 naming its wait, after it) or may run twice (a read the builder made or sent near, a write under a key), and give a request up at a timeout to its answer's head or between its pieces ([Retrying a write](https://fennecdb.com/docs/http#idempotency)) · optimistic concurrency by HTTP's own headers: `GET /<name>/<id>` answers the row's `ETag`, and a write under `If-Match` is made only over the row tagged, else 412 ([Optimistic concurrency](https://fennecdb.com/docs/http#optimistic)) |
-| **Live state and sync** | a query a screen follows: a write runs again every live query reading what it wrote (`db.live`, `useLiveQuery`, SwiftUI observables, Flows, Streams) · a replica in the page or the app that reads with no network, queues its writes in its file and sends each once under an `Idempotency-Key`, the server owning the data ([Sync](https://fennecdb.com/docs/sync)) |
+| **Live state and sync** | a query a screen follows: a write runs again every live query reading what it wrote (`db.live`, `useLiveQuery`, SwiftUI observables, Flows, Streams) · a replica in the page or the app that reads with no network, queues its writes in its file and sends each once under an `Idempotency-Key`, the server owning the data ([Sync](https://fennecdb.com/docs/sync)) · a 401 hands the replica's token provider why -- an expiry the server names (`token_expired`), no token sent, the asks in a row -- so it asks its issuer for a fresh token and goes on, a token refused again asked for after 1 s doubling to 60 s, and signs out only where the issuer refuses, the account's replica and its unsent writes kept ([Expiry](https://fennecdb.com/docs/auth#expiry)) |
 | **Schema** | `alter collection` adds, drops and renames a field without rewriting a document |
 | **Schema in code** | tables declared in TypeScript Drizzle's way, or a `schema.fennecql` in any SDK, checked at every open: what only adds is applied, a drop, a rename or a type change refused until a migration says, run once and recorded; `fennec types` writes TypeScript, Python, Go or C# from a database or a schema file |
 | **Types** | `bool` `int` `float` `text` `bytes` `timestamp` `[type]` `json` (objects, lists and scalars; a path such as `meta.source.rank` reads into it in `where`, `select`, `order` and `set`; imported from PostgreSQL's `jsonb`) `geo` (a point, `[lon, lat]`; imported from PostGIS) `vector<N[, f16]>` `sparse<N>` |
@@ -376,7 +376,7 @@ let db = try await Fennec.sync(url: "https://api.example.com", token: jwt,
 | **Runs on** | Linux and macOS, arm64 and x86_64 · Windows 10 and 11 and Windows Server 2016 and later, x86_64 and arm64, the file mapped and made durable as on a Unix, from the release after 0.1.12 (`install.ps1`) · the image wherever Docker runs · the browser (WASM) · iOS and Android, in the app ([Install](https://fennecdb.com/docs/install)) |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, `--slow-ms`, and OpenTelemetry traces over OTLP (`--otlp-endpoint`) |
 | **Studio** | `fennec-server --studio`: collections, rows, edits, a query editor, the schema, live rows and the server's numbers in a browser at `/_studio/`, with the token you paste and no authority of its own · an app (beta) for macOS on Apple silicon, Windows and Linux (`install.sh --app`, `install.ps1 -App`, or the release's DMG, zip or tarball, unsigned: [`integrations/studio-desktop`](integrations/studio-desktop/README.md)) that makes, opens, serves and backs up `.fennec` files: a served database's port, reach and token (kept in the Keychain) picked in a sheet, its server stopped with the app; saved servers and their tokens in the Keychain |
-| **Runtime size** | 345 KB gzip wasm + 70 KB gzip client, or the client alone (`@fennecdb/web/client`) · 2091–4355 KB binary · 7.18 MB container image |
+| **Runtime size** | 345 KB gzip wasm + 74 KB gzip client, or the client alone (`@fennecdb/web/client`) · 2091–4355 KB binary · 7.18 MB container image |
 
 Full reference: [FennecQL](https://fennecdb.com/docs/fennecql).
 

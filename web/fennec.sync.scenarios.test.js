@@ -81,6 +81,33 @@ function sorted(o, at) {
   assert.deepEqual(keys, [...keys].sort(), `${at}: fields in alphabetical order, or the platforms render them apart`);
 }
 
+/**
+ * An answer as a real fetch gives it: its body thrown away once `signal`
+ * aborts, a read begun after that rejecting. A stand-in whose body outlived
+ * the abort hid a stream refused at its open whose body was read only after
+ * the stream was cancelled -- told nothing, on Node's own fetch.
+ */
+function answered(text, status, signal, headers = {}) {
+  const body = new ReadableStream({
+    start(ctl) {
+      const abort = () => {
+        try {
+          ctl.error(new DOMException('aborted', 'AbortError'));
+        } catch {
+          /* already ended */
+        }
+      };
+      if (signal?.aborted) return abort();
+      signal?.addEventListener('abort', abort, { once: true });
+      // Queued and closed: an abort before the queue is read errors the
+      // stream all the same, its chunks dropped, as a fetch drops a body.
+      ctl.enqueue(new TextEncoder().encode(text));
+      ctl.close();
+    },
+  });
+  return new Response(body, { status, headers });
+}
+
 // ------------------------------------------------------------------- run
 
 /** The app, its replica, and the network as the script plays it. */
@@ -89,10 +116,21 @@ class Run {
     this.shapes = sc.shapes ?? file.shapes;
     this.collections = JSON.stringify(sc.collections ?? file.collections);
     this.up = true;
+    // The token the replica starts with: "t0" unless a start names one,
+    // null for none.
+    this.startToken = 't0';
     this.streamStatus = null;
+    this.schemaStatus = null;
+    // Answers held for the next `release`, in the order held.
+    this.held = [];
     this.open = [];
     this.posts = [];
     this.timers = new Set();
+    // The provider's call out, `{res, rej}`: one is out at a time, and a
+    // second while it is fails the scenario (`askedTwice`).
+    this.asking = null;
+    this.askedTwice = false;
+    this.closed = false;
     this.db = null;
     this.idb = fakeIndexedDB();
     this.clear();
@@ -104,8 +142,30 @@ class Run {
     this.refused = [];
     this.waits = [];
     this.tokenAsked = false;
+    // What the provider was handed: `{code, had_token, attempt}`, as the
+    // native core's token action says them.
+    this.token = null;
     this.error = null;
     this.reason = null;
+  }
+
+  /**
+   * An answer given only at the next `release`, the request out meanwhile:
+   * an abort before then rejects it, as a real fetch's does, and it is
+   * given to no one -- opened at the `release`, it was a stream no shape
+   * held, which the next event went to.
+   */
+  hold(answer, signal) {
+    return new Promise((res, rej) => {
+      const give = () => res(answer());
+      const abort = () => {
+        this.held = this.held.filter((g) => g !== give);
+        rej(new DOMException('aborted', 'AbortError'));
+      };
+      if (signal?.aborted) return abort();
+      signal?.addEventListener('abort', abort, { once: true });
+      this.held.push(give);
+    });
   }
 
   fetch = (url, init = {}) => {
@@ -115,24 +175,12 @@ class Run {
       this.streams.push({ path, auth: h.authorization ?? null });
       if (!this.up) return Promise.reject(new TypeError('connection refused'));
       if (this.streamStatus) {
-        const { status, body } = this.streamStatus;
+        const { status, body, held } = this.streamStatus;
         this.streamStatus = null;
-        return Promise.resolve(new Response(body, { status }));
+        const answer = () => (status === 200 ? this.opened(path, init.signal) : answered(body, status, init.signal));
+        return held ? this.hold(answer, init.signal) : Promise.resolve(answer());
       }
-      const c = path.slice(1).split('/')[0];
-      let ctl;
-      const body = new ReadableStream({ start: (c) => void (ctl = c) });
-      const s = { c, ctl };
-      this.open.push(s);
-      init.signal?.addEventListener('abort', () => {
-        this.open = this.open.filter((x) => x !== s);
-        try {
-          ctl.error(new DOMException('aborted', 'AbortError'));
-        } catch {
-          /* already ended */
-        }
-      });
-      return Promise.resolve(new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } }));
+      return Promise.resolve(this.opened(path, init.signal));
     }
     const r = { method: init.method ?? 'GET', path, auth: h.authorization ?? null, key: h['idempotency-key'] ?? null };
     if (init.body != null) {
@@ -142,10 +190,31 @@ class Run {
     this.requests.push(r);
     if (r.method === 'GET') {
       if (!this.up) return Promise.reject(new TypeError('connection refused'));
-      return Promise.resolve(new Response(this.collections, { status: 200 }));
+      const { status, body, held } = this.schemaStatus ?? { status: 200, body: this.collections };
+      this.schemaStatus = null;
+      const answer = () => answered(body, status, init.signal);
+      return held ? this.hold(answer, init.signal) : Promise.resolve(answer());
     }
-    return new Promise((res, rej) => this.posts.push({ res, rej }));
+    return new Promise((res, rej) => this.posts.push({ res, rej, signal: init.signal }));
   };
+
+  /** A stream at `path` answered 200: open for the events the script writes to it. */
+  opened(path, signal) {
+    const c = path.slice(1).split('/')[0];
+    let ctl;
+    const body = new ReadableStream({ start: (c) => void (ctl = c) });
+    const s = { c, ctl };
+    this.open.push(s);
+    signal?.addEventListener('abort', () => {
+      this.open = this.open.filter((x) => x !== s);
+      try {
+        ctl.error(new DOMException('aborted', 'AbortError'));
+      } catch {
+        /* already ended */
+      }
+    });
+    return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  }
 
   /** Timers the core would ask for: a backoff waits for `fire`, a frame's tick runs at once. */
   clock() {
@@ -175,21 +244,29 @@ class Run {
   async start() {
     this.open = [];
     this.posts = [];
+    this.held = [];
     this.timers.clear();
+    this.asking = null;
     globalThis.indexedDB = this.idb;
     globalThis.IDBKeyRange = KeyRange;
     try {
       this.db = await sync({
         url: URL_,
-        token: 't0',
+        token: this.startToken ?? undefined,
         local: await Fennec.open(wasm),
         leader: false,
         persist: 'scenario',
         shapes: structuredClone(this.shapes),
         fetch: this.fetch,
-        tokenProvider: () => {
+        // Handed a `TokenRefusal`: its `expired` is its code's, always. Its
+        // answer is the script's: a `token` step's, or a `token_failed`
+        // step's error.
+        tokenProvider: (r) => {
+          this.askedTwice ||= this.asking !== null;
           this.tokenAsked = true;
-          return new Promise(() => {});
+          this.token = { code: r.errorCode, had_token: r.hadToken, attempt: r.attempt };
+          if (r.expired !== (r.errorCode === 'token_expired')) this.token.expired = r.expired;
+          return new Promise((res, rej) => (this.asking = { res, rej }));
         },
         onRefused: (e) => this.refused.push({ status: e.status, quota: e.quota ?? null, reason: e.reason ?? null }),
       });
@@ -267,12 +344,15 @@ class Run {
     switch (st.do) {
       case 'start':
         if (st.shapes) this.shapes = st.shapes;
+        this.startToken = 'token' in st ? st.token : 't0';
         await this.start();
         break;
       case 'restart':
         await this.settle();
-        this.db.close();
+        if (!this.closed) this.db.close();
+        this.closed = false;
         if (st.shapes) this.shapes = st.shapes;
+        this.startToken = 'token' in st ? st.token : 't0';
         await this.start();
         break;
       case 'seed':
@@ -285,6 +365,7 @@ class Run {
       case 'error': {
         const data = { error: st.error };
         if ('status' in st) data.status = st.status;
+        if ('code' in st) data.code = st.code;
         this.event(st.shape ?? 0, 'error', data);
         break;
       }
@@ -303,7 +384,7 @@ class Run {
         if (!st.status) p.rej(new TypeError('connection reset'));
         else {
           const body = st.body !== undefined ? JSON.stringify(st.body) : '{}';
-          p.res(new Response(body, { status: st.status, headers: st.seq ? { 'fennec-seq': String(st.seq) } : {} }));
+          p.res(answered(body, st.status, p.signal, st.seq ? { 'fennec-seq': String(st.seq) } : {}));
         }
         break;
       }
@@ -317,13 +398,42 @@ class Run {
         this.up = st.up;
         break;
       case 'stream_status':
-        this.streamStatus = { status: st.status, body: st.body !== undefined ? JSON.stringify(st.body) : '{"error":"refused"}' };
+      case 'schema_status': {
+        const answer = { status: st.status, body: st.body !== undefined ? JSON.stringify(st.body) : '{"error":"refused"}', held: st.held === true };
+        if (st.do === 'stream_status') this.streamStatus = answer;
+        else this.schemaStatus = answer;
+        break;
+      }
+      // The answers held, given now: a request still out while a token was
+      // handed over is answered for the one it carried.
+      case 'release':
+        for (const give of this.held.splice(0)) give();
         break;
       case 'online':
         this.db.setOnline(st.online);
         break;
+      // The answer of the provider's call out, or the app's own handover.
       case 'token':
+        if (this.asking) {
+          this.asking.res(st.token);
+          this.asking = null;
+        } else this.db.setToken(st.token);
+        break;
+      // The app's own token while the provider's call stays out -- one
+      // that never returns -- whose answer, given later, answers the ask
+      // out then.
+      case 'set_token':
         this.db.setToken(st.token);
+        break;
+      // The provider asked threw, or handed over none.
+      case 'token_failed':
+        if (!this.asking) throw new Error('a provider fails with no ask out');
+        this.asking.rej(new Error(st.error));
+        this.asking = null;
+        break;
+      case 'stop':
+        this.db.close();
+        this.closed = true;
         break;
       case 'schema':
         this.collections = JSON.stringify(st.collections);
@@ -351,6 +461,25 @@ class Run {
     if (e.refused) matches(e.refused.map((r) => (typeof r === 'number' ? { status: r, quota: null } : r)), this.refused, binds, 'refused');
     if ('quota' in e) matches(e.quota, this.db.status()[0].quota, binds, 'quota');
     if ('token_asked' in e) matches(e.token_asked, this.tokenAsked, binds, 'token_asked');
+    if ('token' in e) matches(e.token, this.token, binds, 'token');
+    if (this.askedTwice) throw new Error('a token asked for while the ask before was out');
+    // A provider handed an `expired` its code does not say, whatever the step expects.
+    if (this.token && 'expired' in this.token) throw new Error(`token: expired ${this.token.expired} for code ${this.token.code}`);
+    // A text the status's error says, null for none.
+    if ('status_error' in e) {
+      const said = this.db.status()[0].error;
+      const ok = e.status_error === null ? said === null : typeof said === 'string' && said.includes(e.status_error);
+      if (!ok) throw new Error(`status_error: expected ${JSON.stringify(e.status_error)}, got ${JSON.stringify(said)}`);
+    }
+    if ('code' in e) matches(e.code, this.db.status()[0].errorCode, binds, 'code');
+    // What the status says of the token the sync waits on: its stage and
+    // the ask's three, null where it waits on none.
+    if ('token_wait' in e) {
+      const t = this.db.status()[0].token;
+      const r = t?.refusal;
+      if (r && r.expired !== (r.errorCode === 'token_expired')) throw new Error(`token_wait: expired ${r.expired} for code ${r.errorCode}`);
+      matches(e.token_wait, t && { stage: t.stage, code: r.errorCode, had_token: r.hadToken, attempt: r.attempt }, binds, 'token_wait');
+    }
     if (e.waits) {
       assert.equal(this.waits.length, e.waits.length, `waits: ${e.waits.length} expected, ${JSON.stringify(this.waits)} asked`);
       e.waits.forEach(([lo, hi], i) => {
@@ -388,7 +517,7 @@ for (const sc of file.scenarios) {
       }
       passed.push(sc.name);
     } finally {
-      run.db?.close();
+      if (!run.closed) run.db?.close();
       restore();
     }
   });

@@ -733,7 +733,11 @@ go on, since they are the way out. The rule and why it is there are under
 <h2 id="statuses">Refusals and their statuses</h2>
 
 <p>A refusal is a status and <code>{"error": "..."}</code>. The status says
-what to do about it; a <code>/batch</code> that stopped adds where
+what to do about it; a token past its <code>exp</code> adds the code a
+program tells it by, <code>"code": "token_expired"</code>, beside the words,
+which are a person's (<a href="/docs/auth#expiry">Expiry</a>; a later server
+may name other codes, and every SDK's error carries it as its
+<a href="/docs/languages#error-code"><code>errorCode</code></a>); a <code>/batch</code> that stopped adds where
 (<code>at</code>) and what stayed applied (<code>completed</code>), a
 <code>require</code> that said why gives the words (<code>reason</code>, the
 statement's own, on a lone statement and a <code>/batch</code> alike), a
@@ -760,7 +764,7 @@ SDK's error carries the rest; the outcome and its position are the Go,
 <thead><tr><th>Status</th><th>Means</th><th>What to do</th></tr></thead>
 <tbody>
 <tr><td class="n">400</td><td>a statement that does not parse or run, a bad parameter; a body framed two ways (<a href="#bodies">Request bodies</a>); <code>If-Match</code> or <code>If-None-Match</code> off a row's route (<a href="#conditional">Writing over the row you read</a>)</td><td>fix the request</td></tr>
-<tr><td class="n">401</td><td>no token, or a wrong one</td><td>send the right token</td></tr>
+<tr><td class="n">401</td><td>no token, or a wrong one; <code>"code": "token_expired"</code> where its <code>exp</code> passed</td><td>a fresh token from its issuer, at a 401 naming no code too; one minted again and refused the same waits for what minting does not change -- a key the server has not fetched yet, an <code>nbf</code> its clock has not reached (<a href="/docs/auth#expiry">Expiry</a>)</td></tr>
 <tr><td class="n">403</td><td>outside the token's rules — a row, a field, a change no transition names, a <code>returning</code> row it may not read, the write put back whole, a <code>PUT /&lt;name&gt;/&lt;id&gt;</code> — a write to a replica or a read-only server, or one marked <code>Fennec-Read</code></td><td>write where it is taken</td></tr>
 <tr><td class="n">404</td><td>a collection, field or tenant that is not there</td><td></td></tr>
 <tr><td class="n">409</td><td>an id or a <code>@unique</code> value taken, a collection that exists; a <code>/batch</code> holding a <code>compact</code> that <code>--call-rate</code> stopped after statements of it landed — never a 429 or 503 then, which say nothing ran</td><td>a lost race for a value; for the batch, send the statements from <code>at</code> on, alone</td></tr>
@@ -789,6 +793,11 @@ HTTP/1.1 503 Service Unavailable
 Retry-After: 1
 
 {"error":"the tenant is being moved; retry shortly","retry_after":1}
+
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer
+
+{"error":"the token has expired","code":"token_expired"}
 
 HTTP/1.1 412 Precondition Failed
 

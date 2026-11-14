@@ -418,7 +418,8 @@ static and instance member of one name.</p>
 <tr><td>status</td><td><code>replica.status</code>, <code>statuses()</code> (an <code>AsyncStream</code>)</td><td><code>replica.status</code> (a <code>StateFlow</code>)</td><td><code>replica.status</code>, <code>statuses</code> (a <code>Stream</code>)</td></tr>
 <tr><td>first seed, writes answered</td><td colspan="3"><code>ready()</code>, <code>pushed()</code></td></tr>
 <tr><td>refused writes</td><td><code>refusals()</code></td><td><code>refusals</code> (a <code>SharedFlow</code>)</td><td><code>refusals</code></td></tr>
-<tr><td>a new token</td><td colspan="3"><code>setToken(jwt)</code>, or a <code>tokenProvider</code> asked on a <code>401</code></td></tr>
+<tr><td>a new token</td><td colspan="3"><code>setToken(jwt)</code>, or a <code>tokenProvider</code> asked on a <code>401</code>, handed a <code>TokenRefusal</code></td></tr>
+<tr><td>a token wanted</td><td><code>status.token?.stage</code>: <code>.delayed</code>, <code>.asked</code>, <code>.failed</code></td><td><code>status.value.token?.stage</code>: <code>DELAYED</code>, <code>ASKED</code>, <code>FAILED</code></td><td><code>status.token?.stage</code>: <code>TokenStage.delayed</code>, <code>.asked</code>, <code>.failed</code></td></tr>
 <tr><td>the network</td><td colspan="3"><code>setOnline(bool)</code>, <code>resume()</code></td></tr>
 <tr><td>the server itself</td><td colspan="3"><code>replica.remote</code> (<a href="#connect">below</a>)</td></tr>
 </tbody>
@@ -429,6 +430,92 @@ static and instance member of one name.</p>
 <code>catchingUp</code> (connecting, seeding, or sending the writes left
 from before), how many writes the server has not answered, and the last
 error.</p>
+
+<p>A <code>401</code> stops the sending until a token is handed over, and
+asks <code>tokenProvider</code> for one, handed a <code>TokenRefusal</code>:
+<code>errorCode</code>, the code the server named --
+<code>token_expired</code> where the token's <code>exp</code> passed, none
+otherwise (<a href="/docs/auth#expiry">Expiry</a>) -- <code>expired</code>,
+that code's, <code>hadToken</code>, whether the refused request carried a
+token, and <code>attempt</code>, how many times in a row it is asked since
+the server last took the token held. The provider asks the issuer for a
+fresh token at every <code>401</code>, whatever the code -- forcing a
+refresh at <code>expired</code> -- and the replica goes on where it
+stopped, its waiting writes sent under the keys they kept. A
+<code>401</code> alone is never a sign-out: the server keeps no list of
+revoked tokens, so only the issuer knows that a session ended, and the app
+signs out where it refuses to issue a token. Where the token handed over
+is refused too (<code>attempt</code> past 1: a key the server has not
+fetched yet, an <code>nbf</code> its clock has not reached, a
+misconfiguration -- none of which a fresh token cures), the sync asks
+again after 1 s doubling to 60 s, a wait the token just refused, handed
+over again, does not end; an expiry of the token the server took last, or
+of the first one handed over since, starts the count at 1 again, any other
+-- a token minted expired, as every one is where the server's clock runs
+ahead of the issuer's -- counts. A provider that throws -- the issuer out
+of reach -- or hands over an empty token leaves the sync waiting, the
+status's <code>token</code> reading failed and its error <code>the token
+provider failed: …</code>, and is asked again at <code>resume()</code> or
+<code>setOnline(true)</code>; while it is at work nothing asks it again.
+Nothing bounds its time, since it may be waiting on a sign-in, so <b>a
+provider must return</b>: it times out its own requests to the issuer, and
+throws. One that never returns holds the sync until the app hands a token
+over itself with <code>setToken</code>, which gets it going whatever the
+stage.</p>
+
+<p>While a token is wanted the status's <code>token</code> says where the
+ask stands -- its <code>stage</code>: delayed while the wait before the
+next ask runs, asked once the provider is asked and no token has come,
+failed where it threw or handed over none -- beside its
+<code>refusal</code>, the <code>TokenRefusal</code>. Nothing is sent
+meanwhile, and the status's error is the token's, its
+<code>errorCode</code> the code the <code>401</code> named, whatever else
+fails while it waits: streams end where the network goes, which is where
+providers fail. An app that hands its tokens over with
+<code>setToken</code> rather than a provider does so at asked.</p>
+
+<p>A replica belongs to one account: its file's path names the account,
+and it is never opened for another, or the next account signing in on the
+device sends the writes left in it under its own token and is shown its
+rows. Signing out, an app closes the replica and keeps the file while its
+status says <code>pending</code> writes, for that account's next sign-in to
+send; deleting it loses them.</p>
+
+<div class="langs" data-langs>
+
+<div class="lang" data-name="Swift">
+<pre data-lang="swift">let db = try await Fennec.sync(url: url, token: jwt, shapes: shapes,
+                              path: dir.appendingPathComponent("\(account.id).fennec").path,
+                              tokenProvider: { refusal in
+                                  // A fresh token at every 401; throws where the issuer refuses.
+                                  try await auth.refresh(force: refusal.expired)
+                              })</pre>
+</div>
+
+<div class="lang" data-name="Kotlin">
+<pre data-lang="kotlin">val db = Fennec.sync(url = url, token = jwt, shapes = shapes,
+                    path = File(context.filesDir, "${account.id}.fennec").path,
+                    tokenProvider = { refusal ->
+                        // A fresh token at every 401; throws where the issuer refuses.
+                        auth.refresh(force = refusal.expired)
+                    })</pre>
+</div>
+
+<div class="lang" data-name="Dart">
+<pre data-lang="dart">final db = await Fennec.openSynced(url: url, token: jwt, shapes: shapes,
+    path: '${dir.path}/${account.id}.fennec',
+    // A fresh token at every 401; throws where the issuer refuses.
+    tokenProvider: (refusal) => auth.refresh(force: refusal.expired));</pre>
+</div>
+
+</div>
+
+<p>Before 1.0 a provider took no argument. Swift's no longer compiles
+(<code>{ _ in try await refresh() }</code> for it); a Kotlin lambda asking
+nothing still takes, but a reference to a function of none,
+<code>::refresh</code>, no longer does (<code>{ refresh() }</code> for it);
+Dart's provider takes the <code>TokenRefusal</code>,
+<code>(_) =&gt; refresh()</code> where it reads none of it.</p>
 
 <details class="deep"><summary>How the sync core and the bindings divide the work</summary>
 <p>What to ask, what an answer means and what is written are one state
@@ -448,7 +535,13 @@ not made again. A server's answer of <code>0</code> (no answer),
 backoff, 250 ms doubling to 15 s, or after the wait a tenant's quota (to
 the millisecond, <code>retry_after_ms</code>), a move or a failover
 (<code>retry_after</code>) names where that is longer; a
-<code>401</code> asks for a token; a <code>507</code> naming a tenant's
+<code>401</code> asks for a token, the action naming the code the server
+did (<code>token_expired</code>), whether the refused request carried a
+token and the asks in a row, after 1 s doubling to 60 s where the token
+handed over was refused too -- a <code>401</code> to a request sent with a
+token since replaced goes again with the new one, unasked, and one ask is
+out at a time, the binding answering it with a token or with why none came
+(<code>{"token_failed":..}</code>), which the status's <code>token</code> says; a <code>507</code> naming a tenant's
 quota, and any other <code>4xx</code>, is a refusal, and the writes behind
 it go on
 (<a href="sync.html#refusals-retries-and-offline">why</a>). The status's
@@ -472,7 +565,7 @@ rows 72 ms (<code>make sync-bench</code>).</p>
 <p>The browser's <code>sync</code> (<a href="sync.html">Sync</a>) is
 written apart -- this core in the browser module was 21 KB brotli more --
 and the two are held to one script: <code>integrations/sync-scenarios.json</code>,
-84 scenarios of shapes, writes, answers and server events, each step's
+112 scenarios of shapes, writes, answers and server events, each step's
 replica, queue and requests stated once and run against both. What is left
 between them is the platforms':</p>
 <ul>

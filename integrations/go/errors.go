@@ -30,6 +30,16 @@ const (
 	CodeOutcomeUnknown = "outcome_unknown"
 )
 
+// The ErrorCode values the server names in a refusal's body. The field is
+// any string, never a closed set: later releases may add codes, so match the
+// ones you act on and treat the rest as none.
+const (
+	// ErrorCodeTokenExpired: a 401 for a token past its exp, which a fresh
+	// token from its issuer cures; the stream that ends at the exp carries it
+	// too.
+	ErrorCodeTokenExpired = "token_expired"
+)
+
 // The quotas a tenant node holds a tenant to, as an *Error's Quota names
 // the one that refused it: QuotaBytes and QuotaRows answer 507, and room is
 // made by deleting; the rest answer 429 with a RetryAfter.
@@ -51,6 +61,13 @@ type Error struct {
 	Status  int    // the HTTP status
 	Code    string // the status's name, one of the Code constants or http_<status>
 	Message string // the server's {"error": ...}
+	// ErrorCode is the body's own "code", beside the status: ErrorCodeTokenExpired
+	// on a 401 for a token past its exp, which a fresh token from its issuer
+	// cures. No other refusal names one today, and a 401 naming none may be
+	// cured by a fresh token too (a key rotation), so it is not by itself a
+	// sign-out. A string later releases may add to; "" where the body names
+	// none, or a non-string or empty one. Code stays the status's name.
+	ErrorCode string
 	// Completed is how many statements of a failed Batch were applied: 0,
 	// since a batch lands whole or not at all, but for one holding a
 	// compact, which runs each statement on its own and keeps what ran.
@@ -133,10 +150,16 @@ func errorOf(status int, raw []byte) *Error {
 		Outcome      string `json:"outcome"`
 		Seq          uint64 `json:"seq"`
 		History      string `json:"history"`
+		// Raw, so that a code that is not a string is none, not a refused body.
+		ErrorCode json.RawMessage `json:"code"`
 	}
 	if json.Unmarshal(raw, &body) == nil && body.Error != "" {
 		e.Message, e.Completed, e.Quota, e.Reason = body.Error, body.Completed, body.Quota, body.Reason
 		e.Binding = body.Binding
+		var code string
+		if json.Unmarshal(body.ErrorCode, &code) == nil {
+			e.ErrorCode = code
+		}
 		// The wait in the body, what reads it here having no headers: to
 		// the millisecond where the server says it -- a bucket of 600 rows
 		// a second refills a row in 1.7 ms -- else Retry-After's seconds.

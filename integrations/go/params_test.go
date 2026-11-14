@@ -2,6 +2,7 @@ package fennecdb
 
 import (
 	"bytes"
+	"errors"
 	"math"
 	"reflect"
 	"strconv"
@@ -102,5 +103,31 @@ func TestAWholeFloatFrom2To53GoesAsEveryDigit(t *testing.T) {
 	plain := map[string]any{"a": 1.5, "b": []any{2.5}}
 	if reflect.ValueOf(exactly(plain)).Pointer() != reflect.ValueOf(plain).Pointer() {
 		t.Fatal("a map holding no such number was copied")
+	}
+}
+
+// The body's code is an *Error's ErrorCode beside the status's name, which
+// Code keeps; only a non-empty string counts, and a stream's error event
+// goes through the same reading.
+func TestARefusalsBodyCodeIsItsErrorCode(t *testing.T) {
+	e := errorOf(401, []byte(`{"error":"the token has expired","code":"token_expired"}`))
+	if e.ErrorCode != ErrorCodeTokenExpired || e.Code != CodeUnauthorized || e.Status != 401 {
+		t.Fatalf("%+v", e)
+	}
+	for _, body := range []string{
+		`{"error":"bad token"}`,
+		`{"error":"bad token","code":7}`,
+		`{"error":"bad token","code":""}`,
+		`{"error":"bad token","code":null}`,
+	} {
+		e = errorOf(401, []byte(body))
+		if e.ErrorCode != "" || e.Code != CodeUnauthorized || e.Message != "bad token" {
+			t.Fatalf("%s: %+v", body, e)
+		}
+	}
+	ev := eventOf("error", []byte(`{"error":"the token has expired","status":401,"code":"token_expired"}`))
+	var se *Error
+	if !errors.As(ev.Err, &se) || se.ErrorCode != ErrorCodeTokenExpired || se.Status != 401 {
+		t.Fatalf("%+v", ev)
 	}
 }

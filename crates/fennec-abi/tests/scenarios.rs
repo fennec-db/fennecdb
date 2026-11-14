@@ -277,8 +277,17 @@ struct Run {
     shapes: Value,
     collections: String,
     up: bool,
-    /// The status and body the next stream opened is answered with.
-    stream_status: Option<(u16, String)>,
+    /// The token the replica starts with, `None` for none.
+    start_token: Option<String>,
+    /// The status and body the next stream opened is answered with, and
+    /// whether only at the next `release`.
+    stream_status: Option<(u16, String, bool)>,
+    /// The same for the next `GET /collections`.
+    schema_status: Option<(u16, String, bool)>,
+    /// Answers held for the next `release`, in the order held: a stream's
+    /// open (its path) or a `GET /collections` (none), its id, status and
+    /// body.
+    held: Vec<(Option<String>, u64, u16, String)>,
     /// Open streams: id -> collection.
     streams: Vec<(u64, String)>,
     posts: VecDeque<u64>,
@@ -287,7 +296,19 @@ struct Run {
     requests: Vec<Value>,
     opened: Vec<Value>,
     refused: Vec<Value>,
+    /// Whether the provider was called during the step, and what it was
+    /// handed: the token action's `code`, `had_token` and `attempt`.
     token_asked: bool,
+    token: Value,
+    /// A token action not answered yet by a `token`, `set_token` or
+    /// `token_failed` step: one ask is out at a time, and a second while it
+    /// is fails the scenario (`asked_twice`).
+    asking: bool,
+    asked_twice: bool,
+    /// The provider's call is out, as a binding keeps it (`providing`): an
+    /// ask made meanwhile calls it no second time, and its answer -- a
+    /// `token` or `token_failed` step -- answers that ask.
+    providing: bool,
     waits: Vec<Value>,
     error: Option<String>,
     /// The reason the error said, a `require <n> else '<reason>'`'s.
@@ -296,8 +317,12 @@ struct Run {
 
 impl Run {
     fn config(&self) -> String {
+        let token = match &self.start_token {
+            Some(t) => json::to_string(&Value::Text(t.clone())),
+            None => "null".into(),
+        };
         format!(
-            r#"{{"url":"{URL}","token":"t0","seed":"0123456789abcdef0123456789abcdef","shapes":{}}}"#,
+            r#"{{"url":"{URL}","token":{token},"seed":"0123456789abcdef0123456789abcdef","shapes":{}}}"#,
             json::to_string(&self.shapes)
         )
     }
@@ -354,9 +379,13 @@ impl Run {
                 self.requests.push(obj(r));
                 if method == "GET" {
                     let sync = self.sync.as_mut().unwrap();
-                    match self.up {
-                        true => sync.response(&mut self.db, id, 200, 0, &self.collections),
-                        false => sync.response(&mut self.db, id, 0, 0, "connection refused"),
+                    match (self.up, self.schema_status.take()) {
+                        (false, _) => sync.response(&mut self.db, id, 0, 0, "connection refused"),
+                        (true, Some((s, body, true))) => self.held.push((None, id, s, body)),
+                        (true, Some((s, body, false))) => {
+                            sync.response(&mut self.db, id, s, 0, &body)
+                        }
+                        (true, None) => sync.response(&mut self.db, id, 200, 0, &self.collections),
                     }
                 } else {
                     self.posts.push_back(id);
@@ -374,22 +403,19 @@ impl Run {
                 if !self.up {
                     return sync.closed(&mut self.db, id, "connection refused");
                 }
-                if let Some((s, body)) = self.stream_status.take() {
-                    return sync.opened(&mut self.db, id, s, &body);
+                match self.stream_status.take() {
+                    Some((s, body, true)) => self.held.push((Some(path), id, s, body)),
+                    Some((s, body, false)) if s != 200 => sync.opened(&mut self.db, id, s, &body),
+                    _ => self.open(id, &path),
                 }
-                let c = path
-                    .trim_start_matches('/')
-                    .split('/')
-                    .next()
-                    .unwrap()
-                    .to_string();
-                self.streams.push((id, c));
-                self.sync
-                    .as_mut()
-                    .unwrap()
-                    .opened(&mut self.db, id, 200, "");
             }
-            "cancel" => self.streams.retain(|s| s.0 != id),
+            // An answer held for a stream ended meanwhile is given to no
+            // one, as a fetch aborted rejects: opened at the `release`, it
+            // was a stream no shape held, which the next event went to.
+            "cancel" => {
+                self.streams.retain(|s| s.0 != id);
+                self.held.retain(|h| h.1 != id);
+            }
             "wait" => {
                 self.timers.push(id);
                 self.waits.push(Value::Int(int(member(a, "ms"))));
@@ -402,16 +428,48 @@ impl Run {
                     member(a, "reason").cloned().unwrap_or(Value::Null),
                 ),
             ])),
-            "token" => self.token_asked = true,
+            "token" => {
+                self.asked_twice |= self.asking;
+                self.asking = true;
+                if self.providing {
+                    return;
+                }
+                self.providing = true;
+                self.token_asked = true;
+                let said = |k: &str| member(a, k).cloned().unwrap_or(Value::Null);
+                self.token = obj(vec![
+                    ("code", said("code")),
+                    ("had_token", said("had_token")),
+                    ("attempt", said("attempt")),
+                ]);
+            }
             "changed" | "status" => {}
             other => panic!("an action of no kind: {other}"),
         }
+    }
+
+    /// Stream `id`, at `path`, answered 200: open for the events to come.
+    fn open(&mut self, id: u64, path: &str) {
+        let c = path
+            .trim_start_matches('/')
+            .split('/')
+            .next()
+            .unwrap()
+            .to_string();
+        self.streams.push((id, c));
+        self.sync
+            .as_mut()
+            .unwrap()
+            .opened(&mut self.db, id, 200, "");
     }
 
     fn start(&mut self) {
         self.streams.clear();
         self.posts.clear();
         self.timers.clear();
+        self.held.clear();
+        self.asking = false;
+        self.providing = false;
         let config = self.config();
         match Sync::start(&mut self.db, &config) {
             Ok(s) => self.sync = Some(s),
@@ -443,6 +501,7 @@ impl Run {
         self.refused.clear();
         self.waits.clear();
         self.token_asked = false;
+        self.token = Value::Null;
         self.error = None;
         self.reason = None;
         let shape_collection = |run: &Run| -> String {
@@ -452,11 +511,19 @@ impl Run {
             let n = int(member(step, "shape")) as usize;
             text(member(&shapes[n], "collection"))
         };
+        // `"token"` on a start: the token the replica starts with, null for
+        // none; "t0" where it names none.
+        let start_token = |step: &Value| match member(step, "token") {
+            Some(Value::Text(t)) => Some(t.clone()),
+            Some(_) => None,
+            None => Some("t0".to_string()),
+        };
         match text(member(step, "do")).as_str() {
             "start" => {
                 if let Some(s) = member(step, "shapes") {
                     self.shapes = s.clone();
                 }
+                self.start_token = start_token(step);
                 self.start();
             }
             "restart" => {
@@ -464,6 +531,7 @@ impl Run {
                 if let Some(s) = member(step, "shapes") {
                     self.shapes = s.clone();
                 }
+                self.start_token = start_token(step);
                 self.start();
             }
             "seed" | "change" => {
@@ -480,7 +548,7 @@ impl Run {
             "error" => {
                 let c = shape_collection(self);
                 let mut data = Vec::new();
-                for k in ["error", "status"] {
+                for k in ["error", "status", "code"] {
                     if let Some(v) = member(step, k) {
                         data.push((k, v.clone()));
                     }
@@ -534,12 +602,29 @@ impl Run {
                 }
             }
             "net" => self.up = matches!(member(step, "up"), Some(Value::Bool(true))),
-            "stream_status" => {
+            "stream_status" | "schema_status" => {
                 let body = match member(step, "body") {
                     Some(b) => json::to_string(b),
                     None => "{\"error\":\"refused\"}".into(),
                 };
-                self.stream_status = Some((int(member(step, "status")) as u16, body));
+                let held = matches!(member(step, "held"), Some(Value::Bool(true)));
+                let answer = Some((int(member(step, "status")) as u16, body, held));
+                match text(member(step, "do")).as_str() {
+                    "stream_status" => self.stream_status = answer,
+                    _ => self.schema_status = answer,
+                }
+            }
+            // The answers held, given now: a request still out while a
+            // token was handed over is answered for the one it carried.
+            "release" => {
+                for (stream, id, s, body) in std::mem::take(&mut self.held) {
+                    let sync = self.sync.as_mut().unwrap();
+                    match stream {
+                        Some(path) if s == 200 => self.open(id, &path),
+                        Some(_) => sync.opened(&mut self.db, id, s, &body),
+                        None => sync.response(&mut self.db, id, s, 0, &body),
+                    }
+                }
             }
             "online" => {
                 let on = matches!(member(step, "online"), Some(Value::Bool(true)));
@@ -549,7 +634,15 @@ impl Run {
                     .signal(&mut self.db, &format!("{{\"online\":{on}}}"))
                     .unwrap();
             }
-            "token" => {
+            // The answer of the provider's call out, or the app's own
+            // handover: to the core, a token either way. `set_token` is the
+            // app's own while the call stays out, a provider that never
+            // returns: the call, answered later, answers the ask out then.
+            "token" | "set_token" => {
+                self.asking = false;
+                if text(member(step, "do")) == "token" {
+                    self.providing = false;
+                }
                 let t = text(member(step, "token"));
                 self.sync
                     .as_mut()
@@ -558,6 +651,29 @@ impl Run {
                         &mut self.db,
                         &json::to_string(&obj(vec![("token", Value::Text(t))])),
                     )
+                    .unwrap();
+            }
+            // The provider asked threw, or handed over none: the binding
+            // tells the core why.
+            "token_failed" => {
+                assert!(self.providing, "a provider fails with no call out");
+                self.asking = false;
+                self.providing = false;
+                let why = text(member(step, "error"));
+                self.sync
+                    .as_mut()
+                    .unwrap()
+                    .signal(
+                        &mut self.db,
+                        &json::to_string(&obj(vec![("token_failed", Value::Text(why))])),
+                    )
+                    .unwrap();
+            }
+            "stop" => {
+                self.sync
+                    .as_mut()
+                    .unwrap()
+                    .signal(&mut self.db, r#"{"stop":true}"#)
                     .unwrap();
             }
             "schema" => {
@@ -624,6 +740,46 @@ impl Run {
         }
         if let Some(e) = member(expect, "token_asked") {
             matches(e, &Value::Bool(self.token_asked), binds, "token_asked")?;
+        }
+        if let Some(e) = member(expect, "token") {
+            matches(e, &self.token, binds, "token")?;
+        }
+        if self.asked_twice {
+            return Err("a token asked for while the ask before was out".into());
+        }
+        // What the status says of the token the sync waits on: its stage
+        // and the ask's three, null where it waits on none.
+        if let Some(e) = member(expect, "token_wait") {
+            let st = json::parse_json(&self.sync.as_ref().ok_or("no sync")?.status()).unwrap();
+            let t = member(&st, "token").cloned().unwrap_or(Value::Null);
+            matches(e, &t, binds, "token_wait")?;
+        }
+        // A text the status's error says, null for none.
+        if let Some(e) = member(expect, "status_error") {
+            let st = json::parse_json(&self.sync.as_ref().ok_or("no sync")?.status()).unwrap();
+            let said = member(&st, "error")
+                .and_then(|e| member(e, "message"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            match (e, &said) {
+                (Value::Null, Value::Null) => {}
+                (Value::Text(want), Value::Text(got)) if got.contains(want.as_str()) => {}
+                _ => {
+                    return Err(format!(
+                        "status_error: expected {}, got {}",
+                        json::to_string(e),
+                        json::to_string(&said)
+                    ))
+                }
+            }
+        }
+        if let Some(e) = member(expect, "code") {
+            let st = json::parse_json(&self.sync.as_ref().ok_or("no sync")?.status()).unwrap();
+            let c = member(&st, "error")
+                .and_then(|e| member(e, "code"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            matches(e, &c, binds, "code")?;
         }
         if let Some(Value::List(e)) = member(expect, "waits") {
             if e.len() != self.waits.len() {
@@ -699,7 +855,10 @@ fn run(file: &Value, sc: &Value) -> Check {
                 .unwrap(),
         ),
         up: true,
+        start_token: Some("t0".into()),
         stream_status: None,
+        schema_status: None,
+        held: vec![],
         streams: vec![],
         posts: VecDeque::new(),
         timers: vec![],
@@ -707,6 +866,10 @@ fn run(file: &Value, sc: &Value) -> Check {
         opened: vec![],
         refused: vec![],
         token_asked: false,
+        token: Value::Null,
+        asking: false,
+        asked_twice: false,
+        providing: false,
         waits: vec![],
         error: None,
         reason: None,

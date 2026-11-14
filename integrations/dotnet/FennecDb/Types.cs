@@ -121,6 +121,11 @@ public sealed record Event(
     /// token's <c>exp</c>, for the caller to subscribe again with a fresh token.</summary>
     public int? Status { get; init; }
 
+    /// <summary>An <c>error</c> event's <c>code</c>, where the server gave one: <c>token_expired</c> when it ended
+    /// the stream at its token's <c>exp</c>, which a fresh token from its issuer cures. <c>null</c> otherwise, or
+    /// for a non-string or empty one; the same field as <see cref="FennecException.ErrorCode"/>.</summary>
+    public string? ErrorCode { get; init; }
+
     internal static Event Failed(string error) => new("error", 0, [], [], [], false, error);
 
     internal static Event Of(string name, string data)
@@ -133,6 +138,8 @@ public sealed record Event(
                 return Failed(d.TryGetProperty("error", out var e) ? e.GetString() ?? data : data) with
                 {
                     Status = d.TryGetProperty("status", out var st) && st.TryGetInt32(out var n) ? n : null,
+                    ErrorCode = d.TryGetProperty("code", out var cd) && cd.ValueKind == JsonValueKind.String
+                        && cd.GetString() is { Length: > 0 } cs ? cs : null,
                 };
             return new Event(
                 name,
@@ -216,11 +223,19 @@ public class FennecException : Exception
     /// the 503 of a tenant being moved or failed over or of a server at its ceiling in whole seconds.</summary>
     public TimeSpan? RetryAfter { get; }
 
+    /// <summary>The body's own <c>code</c>, beside the status: <c>token_expired</c> on a 401 for a token past its
+    /// <c>exp</c>, which a fresh token from its issuer cures. No other refusal names one today, and a 401 naming
+    /// none may be cured by a fresh token too (a key rotation), so it is not by itself a sign-out. A string later
+    /// releases may add to, never an enum; <c>null</c> where the body names none, or a non-string or empty one.
+    /// <see cref="Code"/> stays the status's name.</summary>
+    public string? ErrorCode { get; }
+
     /// <summary>A refusal with its status, message and, for a batch, how many statements were applied and
     /// which one stopped it; for a tenant's quota, which quota and how long to wait; for a require that said
     /// why, its reason; for a statement bound to the write that refused it, its name.</summary>
     public FennecException(int status, string message, int completed = 0, int? at = null,
-        string? quota = null, TimeSpan? retryAfter = null, string? reason = null, string? binding = null)
+        string? quota = null, TimeSpan? retryAfter = null, string? reason = null, string? binding = null,
+        string? errorCode = null)
         : base(message)
     {
         Status = status;
@@ -231,11 +246,13 @@ public class FennecException : Exception
         RetryAfter = retryAfter;
         Reason = reason;
         Binding = binding;
+        ErrorCode = errorCode;
     }
 
     /// <summary>A write whose outcome is unknown: <c>outcome_unknown</c>, and where it left the database.</summary>
-    FennecException(int status, string message, int completed, int? at, long? seq, string? history)
-        : this(status, message, completed, at)
+    FennecException(int status, string message, int completed, int? at, long? seq, string? history,
+        string? errorCode = null)
+        : this(status, message, completed, at, errorCode: errorCode)
     {
         Code = "outcome_unknown";
         Seq = seq;
@@ -272,13 +289,17 @@ public class FennecException : Exception
                 TimeSpan? wait = r.TryGetProperty("retry_after", out var w) ? TimeSpan.FromSeconds(w.GetInt64()) : null;
                 if (r.TryGetProperty("retry_after_ms", out var ms) && ms.GetInt64() > 0)
                     wait = TimeSpan.FromMilliseconds(ms.GetInt64());
+                // Only a non-empty string is a code; anything else is none.
+                var errorCode = r.TryGetProperty("code", out var cd) && cd.ValueKind == JsonValueKind.String
+                    && cd.GetString() is { Length: > 0 } cs ? cs : null;
                 if (r.TryGetProperty("outcome", out var o) && o.ValueKind == JsonValueKind.String
                     && o.GetString() == "unknown")
                     return new FennecException(status, e.GetString() ?? body,
                         r.TryGetProperty("completed", out var done) ? done.GetInt32() : 0,
                         r.TryGetProperty("at", out var stop) ? stop.GetInt32() : null,
                         r.TryGetProperty("seq", out var s) && s.TryGetInt64(out var n) ? n : null,
-                        r.TryGetProperty("history", out var h) ? h.GetString() : null);
+                        r.TryGetProperty("history", out var h) ? h.GetString() : null,
+                        errorCode);
                 return new FennecException(status, e.GetString() ?? body,
                     r.TryGetProperty("completed", out var c) ? c.GetInt32() : 0,
                     r.TryGetProperty("at", out var at) ? at.GetInt32() : null,
@@ -289,7 +310,8 @@ public class FennecException : Exception
                         ? why.GetString() : null,
                     // The statement bound to the write that refused it, by name.
                     r.TryGetProperty("binding", out var bound) && bound.ValueKind == JsonValueKind.String
-                        ? bound.GetString() : null);
+                        ? bound.GetString() : null,
+                    errorCode);
             }
         }
         catch (JsonException) { }

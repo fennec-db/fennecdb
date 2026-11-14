@@ -400,3 +400,22 @@ def test_a_host_s_joined_refusals_are_a_refusal_and_nothing_else_is():
     assert not _refused(OSError("Multiple exceptions: "))
     assert not _refused(ConnectionResetError(errno.ECONNRESET, "reset"))
     assert not _refused(TimeoutError())
+
+
+def test_a_bodys_code_is_the_errors_error_code():
+    from fennecdb import _answer
+
+    def refused(body):
+        with pytest.raises(FennecError) as e:
+            _answer(401, json.dumps(body).encode())
+        return e.value
+
+    e = refused({"error": "the token has expired", "code": "token_expired"})
+    assert (e.status, e.error_code) == (401, "token_expired")
+    # None where the body names no string, or an empty one.
+    assert refused({"error": "bad token"}).error_code is None
+    assert refused({"error": "bad token", "code": 7}).error_code is None
+    assert refused({"error": "bad token", "code": ""}).error_code is None
+    with pytest.raises(FennecError) as e:
+        _answer(401, b"not json")
+    assert e.value.error_code is None
