@@ -298,7 +298,10 @@ answered write to a ledger.
 
 **Container.** 7.18 MB, and the `Dockerfile` is two-stage: static musl build
 into `scratch`, so the runtime image holds the binary and nothing else — no
-shell, no package manager, no libc.
+shell, no package manager, no libc. It serves as `65534:65534` on whatever
+volume a platform mounts: started as root, the server hands a root-owned
+volume over and drops root itself
+([Who owns the volume](https://fennecdb.com/docs/cloud#volume-owner)).
 
 ```bash
 docker pull ghcr.io/fennec-db/fennec-server:0.2.0     # published, multi-arch

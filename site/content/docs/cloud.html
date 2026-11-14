@@ -80,39 +80,56 @@ each part is called elsewhere.</p>
 
 <h2 id="volume-owner">Who owns the volume</h2>
 
-<p>The image is <code>FROM scratch</code> and runs as <code>65534:65534</code>.
-A platform's volume is often an empty file system whose root belongs to
-<code>root</code>, and then the server cannot make its file:</p>
+<p>Nothing to set on any platform. The image starts as root, and
+<code>fennec-server</code> becomes <code>65534:65534</code>, the
+<code>nobody</code> of Linux, before it opens a file or starts a thread: it
+never serves as root. A platform's volume is often an empty file system whose
+root belongs to <code>root</code>, where 65534 could not make its file, so the
+server hands it over first:</p>
 
 <pre data-lang="bash">$ docker run --rm --mount type=volume,dst=/data,volume-nocopy=true \
-    -e FENNEC_HTTP_TOKEN=t ghcr.io/fennec-db/fennec-server:{{version}}
-could not open /data/data.fennec: its lock file: Permission denied (os error 13)</pre>
-
-<p>A plain Docker named volume works, since Docker copies the image's
-<code>/data</code> ownership into a new one; most platforms do not. Each section
-below says what that platform needs. The ways out are the same everywhere:</p>
+    -e FENNEC_HTTP_TOKEN="$(openssl rand -hex 32)" ghcr.io/fennec-db/fennec-server:{{version}}
+handed /data to 65534:65534
+running as 65534:65534, started as root (FENNEC_USER)
+opened: /data/data.fennec</pre>
 
 <ul>
-  <li><b>Make the volume 65534's.</b> <code>chown 65534:65534</code> on a VM, or
-    <code>securityContext.fsGroup: 65534</code> on Kubernetes.</li>
-  <li><b>Run as root there.</b> A platform with no knob for either takes a
-    derived image, two lines:
-<pre data-lang="dockerfile" data-label="Dockerfile">FROM ghcr.io/fennec-db/fennec-server:{{version}}
-USER 0:0</pre>
-    The file it makes is root's; a later move to a non-root user needs a
-    <code>chown</code> of the data first.</li>
+  <li><b>What is handed over.</b> The directory the server writes in
+    (<code>--file</code>'s, or <code>--dir</code>) and the database's files in
+    it — <code>data.fennec</code> and the files beside it named after it, a
+    node's tenants' files — where they are not 65534's already. A start after
+    the first hands over nothing, and neither does a Docker named volume, which
+    Docker fills from the image's <code>/data</code>, 65534's in the image.</li>
+  <li><b>What is not.</b> Only a volume of its own holding nothing but the
+    database and a <code>lost+found</code>: never <code>/</code>, a path through
+    a symbolic link, a directory on the image's or the host's own file system,
+    one anyone may write in, nor one holding any other file, a link or a
+    directory. The server says why in its log and goes on as 65534; if it then
+    cannot write there, make the directory 65534's yourself, or start the
+    server as its owner.</li>
+  <li><b>Another user.</b> Started as anyone but root — <code>docker run --user
+    1000:1000</code>, Kubernetes' <code>runAsUser</code> — the server runs as
+    that user and hands nothing over: the volume has to be that user's.
+    <code>FENNEC_USER</code>, or the <code>--user</code> flag over it, names
+    whom root becomes, <code>&lt;uid&gt;:&lt;gid&gt;</code> in numbers.</li>
+  <li><b><code>docker exec</code> and the health check.</b>
+    <code>--ping</code>, and anything else run in the container, starts as root
+    and drops it the same way: nothing it makes is root's.</li>
 </ul>
 
-<details class="deep"><summary>Why a scratch image runs as 65534</summary>
+<details class="deep"><summary>Why the image starts as root</summary>
 <p>The image holds the static binary and nothing else: no shell, no
-<code>chown</code>, no way to repair a mount at start. So the owner has to be
-right before the process runs, and the image names the unprivileged
-<code>nobody</code> of Linux (65534) to run as, with a root-owned
-<code>/data</code> handed over to it at build time. Where the platform makes the
-volume itself, none of that reaches it. Reproduced here with Docker's
-<code>volume-nocopy</code> option, which creates the volume as a platform does,
-empty: the default user fails as above, and the derived image above starts,
-answers <code>/_health</code> and leaves <code>data.fennec</code> owned by root.</p>
+<code>chown</code>, no <code>gosu</code>. Images with a shell, postgres's and
+redis's, fix a volume's owner in an entrypoint script that runs as root and then
+drops to the database's user; here the binary does it, between reading its
+arguments and opening anything. An image that started as 65534 could not: where
+the platform makes the volume itself it is root's, and each platform needed a way
+around it (a derived image running as root, Railway's
+<code>RAILWAY_RUN_UID=0</code>). Root is kept for the hand-over alone: the
+supplementary groups, the group and then the user are dropped, and the server
+checks that root cannot be had back before it goes on; a step that fails ends
+the start. The image of 0.2.0 started as 65534: on a root-owned volume it needs
+the volume made 65534's, or the container run as root.</p>
 </details>
 
 <h2 id="vm">A VM and its block volume</h2>
@@ -237,7 +254,10 @@ claim, and a <code>Service</code>. A <code>Deployment</code> would need
 <code>strategy: Recreate</code>, since a rolling update keeps two pods up
 together for a moment. The pod runs as 65534 and its volume is made 65534's by
 <code>fsGroup</code>; the root file system is read-only and every capability
-dropped.</p>
+dropped. The image's own user is root, which hands a volume over and becomes
+65534 itself (<a href="#volume-owner">Who owns the volume</a>), so
+<code>runAsNonRoot: true</code> needs <code>runAsUser</code> beside it: without
+one the kubelet refuses to start the pod.</p>
 
 <pre data-lang="yaml" data-label="fennec.yaml">apiVersion: v1
 kind: Service
@@ -366,7 +386,13 @@ update would start the new pod beside the old one, with two processes over a
 volume that a block device lets only one node mount, or a network share that
 lets both and keeps no lock. <code>OnRootMismatch</code> makes Kubernetes
 change a volume's ownership when its root is not <code>fsGroup</code>'s, once,
-rather than walking every file at each start. The memory limit is 1 GiB and
+rather than walking every file at each start. A pod that leaves
+<code>runAsNonRoot</code>, <code>runAsUser</code> and <code>fsGroup</code> out
+starts the server as root, which hands the volume to 65534 and becomes it; that
+needs the <code>CHOWN</code>, <code>SETUID</code> and <code>SETGID</code>
+capabilities, which <code>drop: ["ALL"]</code> takes away: there it cannot
+drop root, says so and exits 2. With every capability dropped, run it as 65534
+from the start, as above. The memory limit is 1 GiB and
 <code>--max-memory</code> 340 MiB, a third of it, as in the repository's
 <code>docker-compose.yml</code>. <code>terminationGracePeriodSeconds: 60</code>
 holds the final sync and the checkpoint; the default, 30 s, is short for a large
@@ -438,10 +464,10 @@ fly status</pre>
     <code>.internal</code> below needs none of them.</li>
   <li><b>Memory.</b> <code>--max-memory 340</code> is a third of the
     Machine's 1 GB; change the two together.</li>
-  <li><b>The volume's owner.</b> Fly staff say on the community forum that the
-    mount is chowned to the image's user, which is 65534 here. If the log shows
-    <code>Permission denied</code> on the lock file, add <code>USER 0:0</code> to
-    the <code>Dockerfile</code>.</li>
+  <li><b>The volume's owner.</b> Nothing to do: the <code>CMD</code> above
+    keeps the image's <code>FENNEC_USER</code>, and the server hands a new
+    volume to 65534 at its first start, its log saying so (<a
+    href="#volume-owner">Who owns the volume</a>).</li>
   <li><b>Inside Fly.</b> Other apps in your organization reach it at
     <code>http://my-fennec.internal:8080</code>, over the private network and
     around Fly's proxy, with the token.</li>
@@ -454,12 +480,11 @@ fly status</pre>
 <h2 id="render">Render</h2>
 
 <p>A private service (or a web service, to be public) with a persistent disk.
-Render builds it from a repository holding the two-line <code>Dockerfile</code>
-that runs as root, since the platform's documentation does not say who owns a
-disk:</p>
+Render builds it from a repository holding a two-line <code>Dockerfile</code>,
+which writes out the command with a <code>--max-memory</code> for the plan:</p>
 
 <pre data-lang="dockerfile" data-label="Dockerfile">FROM ghcr.io/fennec-db/fennec-server:{{version}}
-USER 0:0</pre>
+CMD ["--http", "0.0.0.0:8080", "--file", "/data/data.fennec", "--sync", "250", "--max-memory", "170"]</pre>
 
 <pre data-lang="yaml" data-label="render.yaml">services:
   - type: pserv           # web, for a public URL
@@ -485,10 +510,16 @@ USER 0:0</pre>
   <li><b>Health.</b> Render asks <code>healthCheckPath</code> of a web service
     alone; a private service passes once its port accepts a connection, which
     is once the file is open.</li>
-  <li><b>Memory.</b> The <code>starter</code> plan has 512 MB. Give the
-    <code>Dockerfile</code> a third line with a third of it, every flag
-    written out: <code>CMD ["--http", "0.0.0.0:8080", "--file",
-    "/data/data.fennec", "--sync", "250", "--max-memory", "170"]</code>.</li>
+  <li><b>Memory.</b> The <code>starter</code> plan has 512 MB, and
+    <code>--max-memory 170</code> in the <code>Dockerfile</code> is a third of
+    it; change the two together. A Blueprint can also deploy the image as it is
+    (<code>runtime: image</code>, <code>image: {url: ...}</code>), with the
+    image's command and no <code>--max-memory</code>.</li>
+  <li><b>The disk's owner.</b> Render does not document who owns a disk's
+    mount; whoever does, the server hands it to 65534 at its first start (<a
+    href="#volume-owner">Who owns the volume</a>), as it does an empty Docker
+    volume made with <code>volume-nocopy</code>, which is where that was
+    checked.</li>
   <li><b>One instance, and a gap at every deploy.</b> A disk cannot be shared
     or scaled, and attaching one switches off zero-downtime deploys: Render
     stops the old instance, then starts the new, a few seconds with a large
@@ -507,8 +538,9 @@ USER 0:0</pre>
 <h2 id="railway">Railway</h2>
 
 <p>A service from the image, a volume at <code>/data</code>, and one
-replica. A Railway volume is also not 65534's, and Railway documents the
-way out: <code>RAILWAY_RUN_UID=0</code> runs the service as root.</p>
+replica. A Railway volume is root's, and the server hands it to 65534 at its
+first start (<a href="#volume-owner">Who owns the volume</a>): Railway's
+<code>RAILWAY_RUN_UID=0</code> is not needed.</p>
 
 <ol class="steps-doc">
   <li>
@@ -516,9 +548,8 @@ way out: <code>RAILWAY_RUN_UID=0</code> runs the service as root.</p>
     <code>ghcr.io/fennec-db/fennec-server:{{version}}</code>.</p>
   </li>
   <li>
-    <p>Variables, four:</p>
+    <p>Variables, three:</p>
 <pre data-lang="text">FENNEC_HTTP_TOKEN=&lt;a random string, sealed; keep a copy for your apps&gt;
-RAILWAY_RUN_UID=0
 PORT=8080
 RAILWAY_DEPLOYMENT_DRAINING_SECONDS=60</pre>
     <p><code>PORT</code> is where Railway's health check asks, and the server
@@ -543,7 +574,10 @@ RAILWAY_DEPLOYMENT_DRAINING_SECONDS=60</pre>
     it is the whole command, the program first:
     <code>/usr/local/bin/fennec-server --http 0.0.0.0:8080 --file
     /data/data.fennec --sync 250 --max-memory 340</code>, with
-    <code>--max-memory</code> a third of the service's memory limit.</li>
+    <code>--max-memory</code> a third of the service's memory limit. The
+    image's <code>FENNEC_USER</code> is a variable, not a flag, so the server
+    still hands the volume over and drops root under a command of your
+    own.</li>
   <li><b>A deploy is a brief outage.</b> Railway never runs two deployments
     mounted to one volume, so a redeploy stops the old one first, with a health
     check or not. Replicas cannot be used with volumes.</li>

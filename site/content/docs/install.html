@@ -180,7 +180,9 @@ page lists every file.</p>
 
 <p>The image holds <code>fennec-server</code> and nothing else: no shell, no
 libc, 7 MB. Its data lives in <code>/data</code>, which the command
-below keeps in a volume.</p>
+below keeps in a volume. It starts as root and serves as
+<code>65534:65534</code>, handing over first a volume its platform made root's
+(<a href="cloud.html#volume-owner">Who owns the volume</a>).</p>
 
 <pre data-lang="bash">docker run -d --name fennecdb -v fennecdata:/data \
   -p 127.0.0.1:8080:8080 -e FENNEC_HTTP_TOKEN=a-token \

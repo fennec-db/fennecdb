@@ -394,6 +394,9 @@ Covers `crates/fennec-server/`.
 *Durability*
 - Every way a server stops is the one shutdown.
 
+*Integrations and deploy*
+- Started as root, a server becomes its user before it touches a file.
+
 ### `crates/fennec-import/CLAUDE.md`
 
 Covers `crates/fennec-import/` and `crates/fennec-wire/`; the mirror is `crates/fennec-server/src/mirror.rs`.
