@@ -8,9 +8,9 @@
 # takes on Linux and no other system -- and what it promised is checked
 # there, no batch half there; a cut with no write in flight fails as the
 # rig's (under `--sync 250` only if no acknowledged write was left for a
-# sync to cover either). Two of the cuts also lose the disk's volatile cache: the disk
-# rebuilt as of the last flush the guest asked for (QEMU's blklogwrites,
-# replay.py), checked the same way. Four guests, a matrix entry each:
+# sync to cover either). Two of the cuts also lose the disk's volatile
+# cache: the disk rebuilt as of the last flush the guest asked for (QEMU's
+# blklogwrites, replay.py), checked the same way. Four guests, a matrix entry each:
 #
 #   - `--sync always` on ext4, and on XFS: every acknowledged write there;
 #   - `--sync 250`, the default, on ext4: every write `/_changes` handed

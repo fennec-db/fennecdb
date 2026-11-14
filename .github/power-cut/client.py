@@ -680,12 +680,25 @@ class Check:
         """The acknowledged writes no `/_changes` page had covered when the
         cut came: what a cut under `--sync <ms>` holds the server to without
         any write in flight (`window` checks them against its bound)."""
+        return self.handover()[1]
+
+    def handover(self):
+        """How long each acknowledged write took to reach the disk, from its
+        answer to the first page reaching the change it landed as (unsorted),
+        and how many no page had reached when the cut came."""
+        lags = []
+        unsynced = 0
         nexts = [p["next"] for p in self.pages]
-        return sum(
-            1
-            for q, e in self.acked.items()
-            if e.get("seq") is not None and self.sent[q]["op"] != "k" and bisect.bisect_left(nexts, e["seq"]) == len(nexts)
-        )
+        for q, e in self.acked.items():
+            seq = e.get("seq")
+            if seq is None or self.sent[q]["op"] == "k":
+                continue
+            k = bisect.bisect_left(nexts, seq)
+            if k == len(nexts):
+                unsynced += 1
+            else:
+                lags.append(max(0.0, self.pages[k]["at"] - e["t"]))
+        return lags, unsynced
 
     def in_flight(self):
         """The writes in flight at the cut: sent no later than the host's
@@ -957,20 +970,7 @@ class Check:
                 f"{(self.sync + SYNC_MEDIAN) * 1000:.0f} ms, {self.sync * 1000:.0f} and a median sync's own time of "
                 f"{SYNC_MEDIAN * 1000:.0f} ms at most"
             )
-        # How long an acknowledged write took to reach the disk: from its
-        # answer to the first page reaching the change it landed as.
-        lags = []
-        unsynced = 0
-        nexts = [p["next"] for p in self.pages]
-        for q, e in self.acked.items():
-            seq = e.get("seq")
-            if seq is None or self.sent[q]["op"] == "k":
-                continue
-            k = bisect.bisect_left(nexts, seq)
-            if k == len(nexts):
-                unsynced += 1
-            else:
-                lags.append(max(0.0, self.pages[k]["at"] - e["t"]))
+        lags, unsynced = self.handover()
         lags.sort()
         # The reader's turn: from a page's head to its next request, what a
         # sync done meanwhile waited to be seen.

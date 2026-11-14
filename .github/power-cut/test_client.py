@@ -277,8 +277,9 @@ class MidWrite(unittest.TestCase):
         ev, _, cut_at, killed = load(0.25, 0.008, 3.0)
         ev = [e for e in ev if not (e["ev"] == "send" and e["t"] > cut_at)]
         last = max(e["next"] for e in ev if e["ev"] == "durable")
-        ev = [e for e in ev if not (e["ev"] == "ack" and e["seq"] > last)]
-        ev = [e for e in ev if not (e["ev"] == "send" and e["q"] > last)]
+        dropped = {e["q"] for e in ev if e["ev"] == "ack" and e["seq"] > last}
+        ev = [e for e in ev if not (e["ev"] == "ack" and e["q"] in dropped)]
+        ev = [e for e in ev if not (e["ev"] == "send" and e["q"] in dropped)]
         c = Cut(self, ev, cut_at, killed)
         self.assertEqual(c.check.unsynced(), 0)
         bad = c(c.check.describe_load)
