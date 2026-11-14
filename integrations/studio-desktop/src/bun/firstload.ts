@@ -25,6 +25,8 @@ export const LOAD_TRIES = 3;
 export type FirstLoadView = {
 	on(event: "did-commit-navigation" | "did-navigate", handler: () => void): void;
 	loadURL(url: string): void;
+	/** Set once the view is gone (its window closed): Electrobun's loadURL does not ask, as its executeJavascript does. */
+	isRemoved?: boolean;
 };
 
 /**
@@ -43,7 +45,8 @@ export function loadAgainIfDropped(view: FirstLoadView, url: string, said: (trie
 		committed = true;
 	});
 	view.on("did-navigate", () => {
-		if (committed || tries >= LOAD_TRIES) return;
+		// A window closed under its first load ends that load too: nothing to load again.
+		if (committed || tries >= LOAD_TRIES || view.isRemoved) return;
 		said(++tries);
 		view.loadURL(url);
 	});

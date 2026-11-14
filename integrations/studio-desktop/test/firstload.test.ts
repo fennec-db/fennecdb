@@ -48,6 +48,14 @@ test("a page whose loads are all dropped is loaded again LOAD_TRIES times, not f
 	assert.equal(v.loads.length, LOAD_TRIES);
 });
 
+test("a view whose window closed under its first load is not loaded again", () => {
+	const v = fakeView();
+	loadAgainIfDropped(v.view, URL_, () => {}, "linux");
+	(v.view as { isRemoved?: boolean }).isRemoved = true;
+	v.fire("did-navigate");
+	assert.deepEqual(v.loads, []);
+});
+
 test("on macOS and Windows a did-navigate is a load that succeeded: nothing is watched", () => {
 	for (const platform of ["darwin", "win32"] as const) {
 		const v = fakeView();
