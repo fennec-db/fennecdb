@@ -6,11 +6,13 @@
 // `overview`, a way to a token). So each is held to its own views:// folder
 // by navigation rules, and a navigation anywhere else, a web page, a file, or
 // another of the app's pages, is refused. (sandbox.mjs holds a studio window.)
+// First, the main window as a first run finds it: no database yet, and what
+// each of the ways in that it offers does.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { BUN, EXE, HERE, LINUX, MAC, REPORT, WIN, assertClean, cmd, evalIn, file, lines, quit, startApp, step, until, waitFor, waitNone, waitNotice, webviewWindows, log } from './lib.mjs';
+import { BUN, EXE, HERE, LINUX, MAC, REPORT, WIN, assertClean, cmd, data, evalIn, file, lines, quit, startApp, step, until, waitFor, waitNone, waitNotice, waitStudio, webviewWindows, log } from './lib.mjs';
 
 assertClean('before');
 
@@ -20,17 +22,88 @@ await waitFor((l) => l.what === 'page-text' && l.key === 'launcher' && /Open fil
 
 step("the main window says what each system calls things: the computer, its file manager, its credential store");
 {
-  const words = MAC ? { machine: 'This Mac', reveal: 'Reveal in Finder' } : WIN ? { machine: 'This PC', reveal: 'Show in Explorer' } : { machine: 'This computer', reveal: 'Open its folder' };
+  const words = MAC
+    ? { machine: 'This Mac', reveal: 'Reveal in Finder', files: 'Finder' }
+    : WIN
+      ? { machine: 'This PC', reveal: 'Show in Explorer', files: 'Explorer' }
+      : { machine: 'This computer', reveal: 'Open its folder', files: 'your file manager' };
   // Its words come with the first list it draws; the HTML's own are macOS's.
   await until(async () => (await evalIn('launcher', `return document.getElementById('db-reveal').textContent`)).value === words.reveal, 20000, `the file manager's button: ${words.reveal}`);
   // Every section's text, the hidden ones and the serve sheet's too.
   const text = (await evalIn('launcher', `return document.body.textContent.replace(/\\s+/g, ' ')`)).value;
   assert.ok(text.includes(words.machine) && text.includes(`${words.machine} only`), `the main window names the computer ${words.machine}`);
+  assert.ok(text.includes(`double-clicked in ${words.files} opens here too`), `the empty Databases names the file manager ${words.files}`);
   if (!MAC) assert.doesNotMatch(text, /\bMac\b|Finder|Keychain/, 'no macOS word is left in the main window');
-  log(`${words.machine}, ${words.reveal}`);
+  log(`${words.machine}, ${words.reveal}, ${words.files}`);
 }
-cmd({ cmd: 'newdb' });
-await waitFor((l) => l.what === 'page-text' && l.key === 'newdb' && /New database/.test(l.text), 20000, 'the new-database window drawn');
+
+const sections = async () => (await evalIn('launcher', `return [...document.querySelectorAll('.view')].filter((v) => getComputedStyle(v).display !== 'none').map((v) => v.id)`)).value;
+const showSection = (name) => evalIn('launcher', `[...document.querySelectorAll('.nav')].find((b) => b.dataset.section === ${JSON.stringify(name)}).click(); return 1`);
+
+step('no database yet: Databases says so, its list and search give way to New database, Open a .fennec file… and two ways in from elsewhere, each a button 40 px tall or more');
+// Each check starts with none of the test variant's state (run.mjs's freshState): nothing is listed.
+const empty = JSON.parse(
+  await until(
+    async () =>
+      (
+        await evalIn(
+          'launcher',
+          `const e = document.getElementById('db-empty'); return !e.hidden && JSON.stringify({ text: e.innerText.replace(/\\s+/g, ' '), find: document.getElementById('db-find').hidden, table: document.getElementById('db-table').hidden, actions: [...e.querySelectorAll('button, a, [role=button], [onclick]')].map((b) => ({ id: b.id, tag: b.tagName, label: b.innerText.replace(/\\s+/g, ' ').trim(), height: b.getBoundingClientRect().height })) })`,
+        )
+      ).value,
+    10000,
+    'the empty Databases',
+  ),
+);
+assert.match(empty.text, /No database yet/);
+assert.ok(empty.find && empty.table, 'no empty list, and no search over it');
+assert.deepEqual(
+  empty.actions.map((a) => [a.id, a.tag]),
+  [
+    ['empty-new', 'BUTTON'],
+    ['empty-open', 'BUTTON'],
+    ['empty-connect', 'BUTTON'],
+    ['empty-backup', 'BUTTON'],
+  ],
+);
+// A tile's title and its line under it: whether an engine puts a break between them is its own.
+const [newDb, openOne, connect, fromBackup] = empty.actions.map((a) => a.label);
+assert.equal(newDb, 'New database');
+assert.equal(openOne, 'Open a .fennec file…');
+assert.match(connect, /^Connect to a server ?A fennec-server elsewhere/);
+assert.match(fromBackup, /^Start from a backup ?A folder of backups becomes a database again/);
+for (const a of empty.actions) assert.ok(a.height >= 40, `${a.id} is ${a.height} px tall`);
+
+step('its tiles go where they say: Connect to a server to Remote connections, Start from a backup to Backups, which says where backups become a database');
+await evalIn('launcher', `document.getElementById('empty-connect').click(); return 1`);
+assert.deepEqual(await sections(), ['connections-view']);
+await showSection('databases');
+await evalIn('launcher', `document.getElementById('empty-backup').click(); return 1`);
+assert.deepEqual(await sections(), ['backups']);
+const backupsEmpty = (await evalIn('launcher', `const e = document.getElementById('bk-empty'); return !e.hidden && e.innerText.replace(/\\s+/g, ' ')`)).value;
+assert.match(backupsEmpty, /becomes a database again with New database, started from A backup/);
+await showSection('databases');
+
+step('its New database opens the window that makes one');
+let at = lines().length;
+await evalIn('launcher', `document.getElementById('empty-new').click(); return 1`);
+await waitFor((l, i) => i >= at && l.what === 'page-text' && l.key === 'newdb' && /New database/.test(l.text), 20000, 'the new-database window drawn');
+
+step('its Open a .fennec file… opens what the file dialog answers (the check, as no native dialog can be clicked from outside); then the list shows it, and the empty state is gone');
+const OPENED = data('opened-first', 5);
+cmd({ cmd: 'answer', kind: 'file', path: OPENED });
+at = lines().length;
+await evalIn('launcher', `document.getElementById('empty-open').click(); return 1`);
+await waitStudio(`file:${OPENED}`, at);
+const listed = `[...document.querySelectorAll('tr[data-path]')].some((t) => t.dataset.path === ${JSON.stringify(OPENED)})`;
+await until(
+  async () => (await evalIn('launcher', `return document.getElementById('db-empty').hidden && !document.getElementById('db-table').hidden && ${listed}`)).value === true,
+  10000,
+  'the list with the file in it, the empty state gone',
+);
+cmd({ cmd: 'close', key: `file:${OPENED}` });
+await waitFor((l, i) => i >= at && l.what === 'server-stopped' && l.key === `file:${OPENED}`, 15000, 'its server stopped');
+
 const n = lines().length;
 cmd({ cmd: 'open', path: file('nothing-here') });
 const notice = await waitNotice('That file is gone', 15000, n);

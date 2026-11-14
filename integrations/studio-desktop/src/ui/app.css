@@ -11,13 +11,15 @@
 	--line: #dcd9cf;
 	--field: #ffffff;
 	--card: #ffffff;
-	--accent: #b4650c;
+	/* White on it is 4.96:1, AA; #b4650c was 4.37:1, short of it. */
+	--accent: #a85d0a;
 	--accent-fg: #ffffff;
 	--accent-soft: rgb(180 101 12 / 0.1);
 	--on: #0b7d68;
 	--on-soft: rgb(11 125 104 / 0.1);
 	--bad: #b3261e;
 	--bad-line: #e2b4b0;
+	--bad-soft: rgb(179 38 30 / 0.06);
 	--mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 	font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
 }
@@ -37,6 +39,7 @@
 		--on-soft: rgb(79 224 196 / 0.12);
 		--bad: #ff8a55;
 		--bad-line: #5c3a42;
+		--bad-soft: rgb(255 138 85 / 0.08);
 	}
 }
 * { box-sizing: border-box; }
@@ -62,6 +65,8 @@ code { font-size: 12px; }
 .note { color: var(--muted); font-size: 13px; margin: 0; white-space: pre-line; }
 .err { color: var(--bad); min-height: 1.4em; margin: 0; }
 .empty { color: var(--muted); padding: 14px 16px; margin: 0; }
+.empty p { margin: 0 0 10px; }
+.empty button { min-height: 40px; }
 
 button { font: inherit; font-size: 13px; min-height: 32px; padding: 0 13px; border-radius: 7px; border: 1px solid var(--line); background: transparent; color: var(--fg); cursor: pointer; }
 button:hover { border-color: var(--muted); }
@@ -103,6 +108,7 @@ body.main-window main { flex: 1; max-width: none; margin: 0; padding: 26px 30px 
 .nav { display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 0 12px; border: 0; border-radius: 8px; text-align: left; font-size: 14px; }
 .nav[aria-current="page"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .nav-note { margin-left: auto; font-size: 12px; color: var(--on); font-weight: 400; }
+.nav-note.bad { color: var(--bad); }
 .side-foot { margin-top: auto; padding: 12px; font-size: 12px; color: var(--muted); line-height: 1.5; }
 .side-foot code { color: var(--fg); }
 .view { display: flex; flex-direction: column; gap: 18px; }
@@ -138,7 +144,7 @@ tbody tr.missing .name { color: var(--muted); text-decoration: line-through; }
 .pill.on { background: var(--on-soft); color: var(--on); }
 .chip { display: inline-flex; padding: 2px 10px; border-radius: 999px; font-size: 12px; background: var(--accent-soft); color: var(--muted); }
 .chip.on { background: var(--on-soft); color: var(--on); }
-.chip.bad { color: var(--bad); }
+.chip.bad { color: var(--bad); background: var(--bad-soft); }
 .split { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
 .picks { list-style: none; margin: 0; padding: 0; flex: 1 1 240px; max-width: 320px; display: grid; gap: 8px; }
 .pick-item { width: 100%; text-align: left; display: grid; gap: 3px; padding: 12px 14px; min-height: 0; border-radius: 10px; border: 1px solid var(--line); background: var(--card); }
@@ -153,7 +159,31 @@ form.detail { gap: 10px; }
 .tab[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
 pre { margin: 0; padding: 12px 14px; border-radius: 9px; border: 1px solid var(--line); background: var(--bg); font-size: 12.5px; white-space: pre-wrap; word-break: break-word; }
 pre.log { max-height: 260px; overflow: auto; color: var(--muted); }
+/* The line a server that did not start ended on: its error. */
+pre.log .said { color: var(--bad); }
 code.token { flex: 1; min-width: 0; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--field); overflow-wrap: anywhere; }
+
+/* Databases with none yet: what a first run can do, in place of the list.
+   Its actions are 40 px tall and more, a target a pointer and a finger find. */
+.empty-state { min-height: 420px; border: 1px dashed var(--line); border-radius: 14px; background: var(--side); padding: 40px 24px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; text-align: center; }
+.empty-state > * { max-width: 560px; }
+.empty-state h2 { font-size: 20px; }
+.empty-state p { margin: 0; line-height: 1.6; }
+.empty-state code { font-size: 13px; color: var(--fg); }
+.empty-mark { width: 64px; height: 64px; border-radius: 16px; background: var(--accent-soft); color: var(--accent); display: flex; align-items: center; justify-content: center; }
+.actions.center { justify-content: center; }
+button.big { min-height: 44px; padding: 0 20px; font-size: 14px; }
+.tiles { width: 100%; margin-top: 4px; padding-top: 18px; border-top: 1px solid var(--line); display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+.tile { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-height: 64px; padding: 14px 16px; border-radius: 10px; background: var(--card); font-size: 14px; text-align: left; }
+.tile:hover { border-color: var(--accent); }
+.tile .muted { font-size: 13px; line-height: 1.5; }
+
+/* A served database whose last start failed: why, and the ways on. */
+.callout { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; padding: 14px 16px; border-radius: 10px; border: 1px solid var(--bad-line); background: var(--bad-soft); }
+.callout > svg { flex: none; color: var(--bad); }
+.callout-text { flex: 1 1 280px; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.callout-text .muted { font-size: 13px; line-height: 1.5; }
+.callout button { min-height: 40px; }
 
 /* The serve sheet, over the main window. */
 dialog { width: min(760px, calc(100vw - 32px)); max-height: calc(100vh - 32px); padding: 20px 24px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); color: var(--fg); }
@@ -167,3 +197,20 @@ dialog h1 { font-size: 22px; }
 .dialog p { margin: 0 0 12px; }
 .dialog .hint { margin: 0 0 12px; font-size: 13px; }
 .dialog pre { max-height: 8em; overflow: auto; margin: 0 0 12px; padding: 8px 10px; font-size: 11.5px; color: var(--muted); }
+
+/* The notice window: the title and the message beside a mark, what to do, what
+   the server said in a fold, and the buttons at the foot of the window. The
+   fold's summary keeps its own display (a list item), which draws its marker
+   on every engine; a flex summary lost it on some. */
+.notice { min-height: 100vh; display: flex; flex-direction: column; gap: 14px; }
+.notice-head { display: flex; gap: 14px; align-items: flex-start; }
+.notice-head > div { min-width: 0; overflow-wrap: anywhere; }
+.notice p { margin: 0; line-height: 1.55; }
+.notice-mark { flex: none; width: 40px; height: 40px; border-radius: 10px; background: var(--bad-soft); color: var(--bad); display: flex; align-items: center; justify-content: center; }
+.notice .notice-hint { margin-left: 54px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--muted); font-size: 13px; line-height: 1.5; }
+.notice-detail { margin-left: 54px; }
+.notice-detail summary { min-height: 40px; padding: 10px 0; line-height: 20px; color: var(--muted); font-size: 12.5px; cursor: pointer; }
+.notice-detail summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.notice-detail pre { margin: 0; overflow-wrap: anywhere; }
+.notice .buttons { margin-top: auto; }
+.notice .buttons button { min-height: 40px; }

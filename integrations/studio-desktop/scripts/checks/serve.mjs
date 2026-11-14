@@ -2,10 +2,13 @@
 // port, its token in the Keychain and in no file, argument or URL, a window on
 // that server rather than a second one, start and stop as the server's own
 // shutdown, its output, what another program holding the file or the port
-// does to it, a server that dies, and what a relaunch starts: nothing.
+// does to it and how the Servers list keeps saying so (a callout, the
+// server's own line), the notice's fold of what the server said, a server
+// that dies, and what a relaunch starts: nothing.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createServer } from 'node:net';
+import { basename } from 'node:path';
 import {
   assertClean, cmd, credential, data, evalIn, forgetServeItems, lines, mine, pressNotice, procs, quit, sleep, startApp, startServer, step, until, USER_DATA, waitFor, waitNone, waitNotice, waitStudio, log,
 } from './lib.mjs';
@@ -150,15 +153,107 @@ n = lines().length;
 cmd({ cmd: 'serve', path: OTHER, settings: { port: TAKEN } });
 const taken = await waitNotice(`Port ${TAKEN} is taken`, 15000, n);
 assert.deepEqual(taken.actions, ['settings']);
+assert.equal(taken.detail, undefined, 'found before any server started: nothing is filed as what one said');
 assert.equal(serversOn(OTHER).length, 0, 'nothing left running on it');
+
+/** A served database's row in Servers, by its path, as a script in the page finds it. */
+const pickOf = (path) => `[...document.querySelectorAll('#srv-list li')].find((li) => li.dataset.path === ${JSON.stringify(path)})`;
+/** Servers, with `path`'s row picked, as a click picks it. */
+async function showServerOf(path) {
+  await evalIn('launcher', `[...document.querySelectorAll('.nav')].find((b) => b.dataset.section === 'servers').click(); return 1`);
+  await until(async () => (await evalIn('launcher', `return ${pickOf(path)} !== undefined`)).value === true, 10000, `${basename(path)} in Servers`);
+  await evalIn('launcher', `${pickOf(path)}.querySelector('button').click(); return 1`);
+}
+/** The callout on `path`'s card, once it shows: its role, its words, its row's and its chip's, and its buttons with their heights. */
+const calloutOf = (path) =>
+  until(async () => {
+    const v = (
+      await evalIn(
+        'launcher',
+        `const c = document.getElementById('srv-failed'); return document.getElementById('srv-name').textContent === ${JSON.stringify(basename(path))} && !c.hidden && JSON.stringify({ role: c.getAttribute('role'), text: c.innerText.replace(/\\s+/g, ' '), row: ${pickOf(path)}.innerText.replace(/\\s+/g, ' '), chip: document.getElementById('srv-chip').textContent, note: document.getElementById('running-count').textContent, start: document.getElementById('srv-start').hidden, buttons: [...c.querySelectorAll('button')].filter((b) => !b.hidden).map((b) => [b.textContent, b.getBoundingClientRect().height]) })`,
+      )
+    ).value;
+    return v && JSON.parse(v);
+  }, 10000, `the callout on ${basename(path)}`);
+
+step('Servers keeps saying it: the row and the chip say Did not start, a callout says why, announced, with Change the port and Start again, 40 px tall or more');
+await showServerOf(OTHER);
+const portCallout = await calloutOf(OTHER);
+assert.equal(portCallout.role, 'status', 'announced: a status, as the notice was the alert');
+assert.match(portCallout.text, /It did not start\./);
+assert.match(portCallout.text, new RegExp(`Port ${TAKEN} is in use: something else answers on it, so no server was started\\.`));
+assert.match(portCallout.row, /Did not start/);
+assert.equal(portCallout.chip, 'Did not start');
+assert.equal(portCallout.note, '1 did not start', 'the sidebar says it first');
+assert.equal(portCallout.start, true, 'Start again takes Start\'s place');
+assert.deepEqual(portCallout.buttons.map(([label]) => label), ['Change the port', 'Start again']);
+for (const [label, height] of portCallout.buttons) assert.ok(height >= 40, `${label}: ${height} px tall`);
+
+step('Start again starts it with the same settings: the port still taken, said again');
+n = lines().length;
+await evalIn('launcher', `document.getElementById('srv-failed-start').click(); return 1`);
+const takenAgain = await waitNotice(`Port ${TAKEN} is taken`, 15000, n);
+await pressNotice(takenAgain, 'ok');
+await pressNotice(taken, 'ok');
+
+step('Change the port: the serve sheet on it, at the port that was taken; another port starts it, and the callout goes');
+await evalIn('launcher', `document.getElementById('srv-failed-port').click(); return 1`);
+const sheetOn = await until(async () => (await evalIn('launcher', `return document.getElementById('sheet').open && JSON.stringify([document.getElementById('sheet-title').textContent, document.getElementById('port').value])`)).value, 10000, 'the serve sheet');
+assert.deepEqual(JSON.parse(sheetOn), [`Serve ${basename(OTHER)}`, String(TAKEN)]);
+const MOVED = await freePort();
+n = lines().length;
+await evalIn('launcher', `const p = document.getElementById('port'); p.value = ${JSON.stringify(String(MOVED))}; p.dispatchEvent(new Event('input', { bubbles: true })); document.getElementById('sheet-start').click(); return 1`);
+const moved = await waitFor((l, i) => i >= n && l.what === 'served' && l.path === OTHER, 30000, 'served on the port it was changed to');
+assert.equal(moved.port, MOVED);
+await until(async () => (await evalIn('launcher', `return document.getElementById('srv-failed').hidden && document.getElementById('srv-chip').textContent`)).value === 'Running', 10000, 'the callout gone once it runs');
+assert.equal((await ask({ cmd: 'stop-served', path: OTHER }, 'stop-served-result')).ok, true);
 blocker.close();
 
 step('a file another program serves: said so, and no second writer');
 const holder = await startServer(['--file', HELD, '--http', '127.0.0.1:0'], { FENNEC_HTTP_TOKEN: 'x' });
 n = lines().length;
 cmd({ cmd: 'serve', path: HELD });
-await waitNotice('This database is open in another program', 15000, n);
+const held = await waitNotice('This database is open in another program', 15000, n);
 assert.equal(serversOn(HELD).length, 1, 'only the other program\'s');
+
+step('the notice keeps what the server said in a fold, open as it comes, that its summary closes and opens again');
+// Whether the server's words are drawn is asked of checkVisibility(): WebKit folds a closed
+// details' content by content-visibility: hidden, which leaves it a box of its full size
+// (on macOS a folded one measured taller than 0), where an engine before that left it no box.
+const fold = async () =>
+  JSON.parse(
+    (
+      await evalIn(
+        held.key,
+        `const d = document.getElementById('detail-box'); const s = d.querySelector('summary'); const pre = document.getElementById('detail'); return JSON.stringify({ tag: d.tagName, hidden: d.hidden, open: d.open, summary: s.textContent, summaryHeight: s.getBoundingClientRect().height, inside: d.contains(pre), detail: pre.textContent, drawn: pre.getClientRects().length > 0 && (typeof pre.checkVisibility !== 'function' || pre.checkVisibility()), buttons: [...document.querySelectorAll('#buttons button')].map((b) => [b.textContent, b.getBoundingClientRect().height]) })`,
+      )
+    ).value,
+  );
+const unfolded = await fold();
+assert.equal(unfolded.tag, 'DETAILS');
+assert.equal(unfolded.hidden, false);
+assert.equal(unfolded.summary, 'What the server said');
+assert.ok(unfolded.inside, 'the server\'s words are inside the fold');
+assert.match(unfolded.detail, /it is open already/);
+assert.ok(unfolded.open && unfolded.drawn, 'open as it comes');
+assert.ok(unfolded.summaryHeight >= 40, `its summary is ${unfolded.summaryHeight} px tall`);
+assert.deepEqual(unfolded.buttons.map(([label]) => label), ['Close', 'Try again']);
+for (const [label, height] of unfolded.buttons) assert.ok(height >= 40, `${label}: ${height} px tall`);
+// A click on the summary toggles the fold at once (its `toggle` event comes after): read straight after.
+await evalIn(held.key, `document.querySelector('#detail-box summary').click(); return 1`);
+const folded = await fold();
+assert.ok(!folded.open && !folded.drawn, `folded: the server's words are not drawn: ${JSON.stringify(folded)}`);
+await evalIn(held.key, `document.querySelector('#detail-box summary').click(); return 1`);
+assert.ok((await fold()).open, 'and open again');
+
+step('Servers says that too: why in words, no port to change, and the server\'s own line, its error, ending its output');
+await showServerOf(HELD);
+const heldCallout = await calloutOf(HELD);
+assert.match(heldCallout.text, /held-by-another\.fennec is open in another program, which holds its lock\./);
+assert.deepEqual(heldCallout.buttons.map(([label]) => label), ['Start again'], 'its port was not why');
+const said = await until(async () => (await evalIn('launcher', `const s = document.querySelector('#srv-log .said'); return s !== null && s.textContent`)).value, 10000, 'the server\'s line in its output');
+assert.match(said, /it is open already/);
+await pressNotice(held, 'ok');
 await holder.stop();
 
 step('a served database\'s server that dies: said, with Start again, which starts it with the same settings');
@@ -202,6 +297,9 @@ const listed = await until(async () => {
   return /served\.fennec/.test(t) && /Stopped/.test(t) && t;
 }, 10000, 'the Servers list');
 assert.match(listed, new RegExp(`Port ${PORT} when started`));
+// The failed start is kept with its last run (state.json), so it is said after a relaunch too.
+const heldRow = await until(async () => (await evalIn('launcher', `const li = ${pickOf(HELD)}; return li !== undefined && li.innerText`)).value, 10000, 'the held file\'s row');
+assert.match(heldRow, /Did not start/);
 
 step('Remove from Servers: its settings and its Keychain item go');
 await ask({ cmd: 'remove-served', path: FILE }, 'served-removed');
