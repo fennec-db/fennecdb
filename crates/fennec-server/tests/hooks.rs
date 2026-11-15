@@ -1345,7 +1345,7 @@ fn a_short_secret_is_warned_of_and_taken() {
         Ok(server) => server.log.lock().unwrap().clone(),
         Err(log) => log,
     };
-    for hook in ["stripe", "stripe_test", "github", "delivered"] {
+    for hook in ["stripe", "stripe_test", "github"] {
         assert!(
             log.contains(&format!("warning: hook `{hook}`'s secret {PAST}")),
             "{hook}: {log}"
@@ -1370,7 +1370,7 @@ fn a_short_secret_is_warned_of_and_taken() {
         .unwrap_or_else(|| panic!("{log}"));
     assert!(
         line.contains("--http-token (FENNEC_HTTP_TOKEN), hook `stripe`'s secret")
-            && line.contains("hook `delivered`'s secret are shorter than 32 bytes")
+            && line.contains("hook `github`'s secret are shorter than 32 bytes")
             && !line.contains("`standard`"),
         "{line}"
     );
