@@ -134,6 +134,14 @@ debug-assertions = true
 overflow-checks = true
 panic = "unwind"
 
+# The tests under AddressSanitizer (`make sanitize`, ci.yml's `sanitize`):
+# the test profile's every check -- debug assertions, overflow checks, the
+# standard library's precondition checks -- at opt-level 1, which ASan's
+# own documentation advises for a sanitized build's speed.
+[profile.sanitize]
+inherits = "test"
+opt-level = 1
+
 # For profiling: release speed plus symbols
 [profile.profiling]
 inherits = "release"

@@ -44,7 +44,8 @@ jobs:
           persist-credentials: false
 
       # The nightly is the Makefile's FUZZ_NIGHTLY, a date: AddressSanitizer
-      # is a nightly flag, and only this and ci.yml's fuzz-smoke take one.
+      # is a nightly flag, and only this and ci.yml's fuzz-smoke and
+      # sanitize take one.
       - name: Install the fuzzer's nightly, pinned to a date
         run: make fuzz-toolchain
 
