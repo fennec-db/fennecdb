@@ -184,6 +184,9 @@ These are deliberate, and README explains each one:
   `make memory` is how you calibrate it.
 - **`md5` authentication is not supported** by `fennec import` and
   `--follow` when they sign in to PostgreSQL. SCRAM-SHA-256 or cleartext.
+- **A GitHub webhook event carries no signed time,** so after its hook's
+  `keep` (7 days by default) a captured one can be sent again and is taken
+  again; until then its body's digest answers it.
 
 If you think one of these is worse than the README makes it sound, that is
 worth an issue — as a documentation or design argument, not as an advisory.

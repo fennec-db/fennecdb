@@ -701,7 +701,7 @@ AS BEGIN UPDATE orders SET status = 'paid', intent = $1
     );
 
     // Written as tag 11 after the body, and nowhere for any other:
-    // `Debug`, which `make fennecql-corpus` compares, says it alike.
+    // `Debug` says it alike, and the digest of every other is as it was.
     let bytes = |t: &str| definition(t).canonical().unwrap();
     // Tag 11, a node of kind 7: the name under 1; the node's end and the
     // definition's.

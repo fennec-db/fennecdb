@@ -260,6 +260,7 @@ Covers `crates/fennec-core/`; the browser module's rules bind `crates/fennec-was
 - A `set` or a `del` picks its rows with `order` and `limit`, and `returning` answers them.
 - A key of `order` may be an expression
 - A `put` answers the rows it wrote with `returning`.
+- A write form or an index kind the engine gains is drawn in `tests/model.rs`.
 
 *Indexes*
 - `@unique` is a `@hash` that asks its bucket before a write.
@@ -346,6 +347,7 @@ Covers `crates/fennec-ql/` and the shell in `crates/fennec-cli/`; its rules bind
 
 *FennecQL and schemas*
 - SQL's spellings are FennecQL, read by the one parser
+- No text that parsed reads as another statement, held in CI by canonical digest.
 - A JOIN on a key is a `lookup` answered flat, or one table's `get` with the other's rows a filter
 - `limit`, `offset` and `top` take a parameter, read where the plan reads them
 - `in (get ...)` is answered before the query, as the list it is.
@@ -364,6 +366,7 @@ Covers `crates/fennec-http/`, access aside (below); an open server's rule binds 
 
 *Replication and archives*
 - Replication ships only what is on disk, by the change counter.
+- A copy keeps the time its primary appended each write at, and an archive's times run in order.
 - A node's tenants are archived over one stream
 - `/_changes` reads the writes on disk, documents and all
 - A read can wait for a write on a replica
@@ -510,12 +513,13 @@ Covers `studio/`; fennec-http serves it.
 
 ### `integrations/CLAUDE.md`
 
-Covers `integrations/`.
+Covers `integrations/`; the Flutter plugin's rule binds `tools/flutter_archive_check.py` and CI's `flutter-plugin` job too.
 
 *Integrations and deploy*
 - `integrations/` may use outside packages; the crates may not.
 - The desktop app is a window on a studio a `fennec-server` serves, one server per file.
 - Grafana's data source binds a dashboard's values; it never splices them.
+- The Flutter plugin ships each platform's library once, and no symbolic link.
 
 ### `deploy/CLAUDE.md`
 

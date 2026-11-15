@@ -22,6 +22,21 @@ one made to follow says so on disk before the follow is answered
 (`Tenants::open_as` syncs it), and an image is taken with the record saying
 it inside its rename.
 
+**[A copy keeps the time its primary appended each write at, and an
+archive's times run in order.](../../docs/design/replication.md#a-writes-time)**
+A follower hands the times a `W` message carries to its feed for the
+records it landed (`Feed::sent_times`), under the write lock and before
+its flush, so nothing is sent with the copy's own clock -- not to a copy of
+it, its `/_changes` nor an archive cut from it -- but the landed prefix of
+an apply refused part way under `--replication-buffer 0` or `1`, until the
+next image; a promoted copy times its own writes. Never in `Feed::push`: a
+primary's write path stays the code it was, and a change near it owes a
+look that the release `fennec-server` still inlines `writes_in` there
+(`objdump` of `Feed::push`, built `-C strip=none`), which a third caller
+stopped. `Archive::take` archives no write before the latest it holds
+(`Writer::latest`), nor `hello` an image before it: `prune` reads image
+times as in order.
+
 **[A node's tenants are archived over one stream](../../docs/design/replication.md#a-nodes-archive)**
 (`fennec_http::node_stream`), a sender on each open tenant's feed:
 `Tenants::close` refuses while it has a write left (`Feed::unsent`), and
@@ -49,7 +64,15 @@ its token (`admitted`), a stream's before its head.
 (`seal.rs`, `--key-file`), never the live file. A frame's nonce, as every
 key and nonce, is the system's randomness (`crypto::system_random`, read
 with no descriptor), the seal refused without it: never the clock, which
-only an id may fall back to (`crypto::id_u64`).
+only an id may fall back to (`crypto::id_u64`). A frame is bound to its
+file: its tag covers the file's id -- 16 bytes of that randomness after
+the magic (`FENECSL\x02`, `seal::FileId`) -- its place and whether it is
+the last, so no frame of another file under the key opens in it. A
+version 1 file (no id: 0.1.7 to 0.2.0) still opens and a segment of one
+goes on as one; nothing new is begun so. Only a key that sealed none is
+free of a version 1 file spliced from others' frames: the docs say to
+change keys. A later version is refused by its
+number, and what a tag covers changes only with the magic's version byte.
 
 ### Quotas and retries
 
@@ -154,9 +177,13 @@ node's 401 with no `WWW-Authenticate` too (`audit::hook_forwarded`) -- and
 a verified event never calls `audit::verified`. A secret is a hooks file's
 or a tenant's `<t>.hooks` (fennec-shard's rule), never the database's, an
 archive's, a log's, a trace's or an answer's but `hook-secrets`'. An
-event's key is a value its signature covers, or `X-GitHub-Delivery` where
-its hook says `key delivery`, kept more than twice the tolerance and
-`SKEW_MS`. A sender is told 2xx only once its event
+event's key is a value its signature covers -- GitHub's its body's digest,
+never `X-GitHub-Delivery`, which nothing signs (`key delivery` refused at
+the start and at a hook's `PUT`; a set 0.2.0 kept with it reads whole,
+that hook's verified events refused 409 naming `key body`, listed not
+armed, `Hook::delivery`, `Store::armed`) -- kept more than twice the
+tolerance and `SKEW_MS`. A sender is
+told 2xx only once its event
 is durable whatever `--sync` says (`hooks::taken` flushes as `--sync
 always` does), and a standby holds it (`Feed::standby_sent`, an archiver's
 or a read replica's stream none, each saying so on its request; else 503),

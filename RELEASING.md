@@ -34,8 +34,10 @@ nothing reaches a registry before the notes have had a read.
    it from main, tests it on macOS and an iOS simulator, keeps it as its
    artifact and opens a pull request writing its checksum into
    `Package.swift` (`integrations/swift/set-binary.sh`). It keeps the
-   Flutter plugin's `FennecFFIDynamic.xcframework.zip` beside it, built from
-   the same commit and named by nothing. Merge it.
+   `FennecFFIDynamic.xcframework.zip` beside it -- the frameworks, and
+   macOS's binary again as a plain `libfennec_ffi.dylib`, which the Flutter
+   plugin's macOS pod vendors -- built from the same commit and named by
+   nothing. Merge it.
 3. Tag what was merged and push the tag:
    `git tag vX.Y.Z origin/main && git push origin vX.Y.Z`.
    `release.yml` builds the binaries for Linux and macOS, the Windows zips
@@ -370,6 +372,26 @@ what follows the last colon -- not a host name, refused by the resolver
 node. A record of the directory carries the address alone, so no
 field of it is read another way.
 
+**A sealed frame bound to its file moves a sealed archive at once.** From
+the release that binds it (`docs/design/replication.md#sealed-archives`),
+an archiver restarted on it seals its next image and segment, and `fennec
+backup --key-file` a backup, as version 2 (`FENECSL\x02`, a file id under
+every frame's tag), which a `fennec restore` or `fennec verify` from 0.2.0
+or earlier refuses (`not a sealed file`, `not sealed, where the archive
+is`): its notes say, under their upgrade heading, to upgrade `fennec`
+wherever an archive is restored or verified before any archiver, and that
+files sealed before stay open under their key -- splices of them with it
+-- until a new key (`fennec key`) begins a new archive. The same notes say
+that a tenant's `github` hook 0.2.0 saved with `key delivery` is kept, its
+events answered 409 until it is set again with `key body`, its other hooks
+armed, and that a single server started with `--hooks` whose file has a
+`github` line saying `key delivery` refuses to start on the release (exit
+2, ``<hooks file>: hooks file line N: `key delivery` is refused: ...``): that
+line's `key delivery` is taken out, or made `key body`, before the server
+is restarted on it. `make upgrade-check` drives the archive's case: CK_BASE's `fennec
+restore` and `fennec verify` refuse a backup and an archive this tree
+sealed, which this tree's read.
+
 | Package | From | What it holds |
 | --- | --- | --- |
 | `fennecdb` on PyPI | `integrations/python` | the HTTP client and the LangChain and LlamaIndex stores; the standard library alone |
@@ -405,8 +427,20 @@ every tag. Before a 1.x tag, check:
    `make sync-scenarios-check` pass. `openapi-check` asserts the API only
    grew; the golden targets rewrite their files, so `git diff` must show no
    changed or removed line in them, only added ones.
-2. `make fennecql-corpus` (by hand: no workflow runs it until T6) finds no text reading as another tree, and
-   `GRAMMAR_EPOCH` (`crates/fennec-core/src/named.rs`) is still 4.
+2. `make fennecql-corpus BASE=<the previous 1.x tag>` finds no text
+   reading as another statement or refused: against a 1.x base an
+   `ACCEPTED` entry lets a refusal through only with the grammar epoch
+   raised, as a moved digest, and a statement no definition holds read
+   otherwise only with the epoch or its `same_meaning` -- read every claim
+   the summary prints, each a statement said to mean what it meant (CI
+   runs it against main, and `BASE=frozen` against every frozen corpus, on
+   every pull request). A major version's first tag is frozen with
+   `FREEZE=<tag>`, its file added beside the others in
+   `integrations/fennecql-corpus/` -- a frozen corpus is added, never
+   replaced or removed, which the step against main holds, and a freeze
+   reads the earlier corpora's texts too, so a text deleted since is still
+   held to its release's reading and to the tag's -- and `GRAMMAR_EPOCH`
+   (`crates/fennec-core/src/named.rs`) is still 4.
 3. `fennec.h`'s prototypes, `web/fennec.d.ts`, `web/client.d.ts`, each
    SDK's public names, the CLI flags and exit codes, and `/_metrics` names
    only gained entries. Where a dump is not built yet (T5 of the 1.0 plan,

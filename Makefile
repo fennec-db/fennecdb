@@ -409,13 +409,21 @@ size-report:
 	@python3 crates/fennec-wasm/size_report.py $(BASE) $(if $(WHY),--why '$(WHY)') $(if $(BIN),--bin $(BIN)) $(if $(FEATURES),--features '$(if $(filter none,$(FEATURES)),,$(FEATURES))')
 
 ## Every FennecQL text the repository holds -- the docs' blocks and inline
-## code, the golden files, the sources' strings -- parsed by this tree and by
-## BASE's, both `parse` and `parse_exact` (tools/fennecql_corpus.py, the
-## example crates/fennec-ql/examples/corpus.rs): fails where a text that
-## parsed reads as another tree or is refused, the rule a grammar change
-## keeps (docs/design/fennecql.md). make fennecql-corpus BASE=origin/main
+## code, the golden files, the sources' strings, the hand-written list --
+## this tree's and BASE's, read by both trees with `parse`, `parse_exact`
+## and `stored_definition`, a statement a named statement may hold by its
+## canonical digest (tools/fennecql_corpus.py, the example
+## crates/fennec-ql/examples/corpus.rs): fails where a text that parsed
+## reads as another statement, is refused or panics, printing what changed
+## (docs/design/fennecql.md#the-corpus). BASE=v0.2.0 holds this tree to the
+## texts frozen at the tag, as its own parser read them
+## (integrations/fennecql-corpus/v0.2.0.jsonl), BASE=frozen to every frozen
+## corpus; FREEZE=<tag> adds a tag's from its tree and the earlier frozen
+## corpora's texts, never replacing one. A failure writes every entry to
+## paste beside the builds. CI runs BASE=origin/main and BASE=frozen.
+## make fennecql-corpus BASE=origin/main
 fennecql-corpus:
-	@python3 tools/fennecql_corpus.py $(or $(BASE),origin/main)
+	@python3 tools/fennecql_corpus.py $(if $(FREEZE),--freeze $(FREEZE),$(if $(filter frozen,$(BASE)),--frozen,$(or $(BASE),origin/main)))
 
 # The fuzzer's nightly, a date: AddressSanitizer is a nightly flag, and only
 # the fuzz targets and the jobs running them take one (ci.yml's fuzz-smoke,
@@ -957,6 +965,10 @@ pgvector-up:
 	  sleep 1; done
 	@echo "postgres://postgres:fennec@127.0.0.1:55432/fennecbench"
 
+## Removes the server with its data: the image keeps PostgreSQL's data
+## directory in an anonymous volume, which `--rm` removes with a container
+## that exits, not with one `docker rm` takes running -- without `-v` one
+## was left behind at every up and down, five of them 2.7 GB on one machine.
 pgvector-down:
 	-docker rm -f -v fennecbench-pg
 
@@ -1343,7 +1355,9 @@ packaging-test:
 ## built before them stop in words at this tree's first record, and this
 ## tree's replica follows a primary from before and its server opens that
 ## primary's file; the cases above run CK_BASE's binaries in this tree's
-## place, a binary from before stopping at the checksum first.
+## place, a binary from before stopping at the checksum first. Then a sealed
+## frame bound to its file: CK_BASE's `fennec restore` and `verify` refuse a
+## backup and an archive this tree sealed, which this tree's read.
 ## Builds BASE -- 12d6f8db^, the last main before the kind, unless given --
 ## OP3_BASE -- b73ce4ca, the last before op 3 -- OP4_BASE -- cd907d6c, the
 ## last before op 4 -- OP6_BASE -- 6fb28002, the last before op 6 -- and
