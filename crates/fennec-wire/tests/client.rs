@@ -725,6 +725,8 @@ pub mod interrupt {
     /// cuts.
     pub fn arm() {
         static ARMED: std::sync::Once = std::sync::Once::new();
+        // SAFETY: `nothing` is a handler of the C signature, which touches
+        // nothing, installed once; `siginterrupt` takes a signal and a flag.
         ARMED.call_once(|| unsafe {
             signal(SIGUSR1, nothing as *const () as usize);
             #[cfg(target_vendor = "apple")]
@@ -734,6 +736,8 @@ pub mod interrupt {
 
     /// SIGUSR1 to `thread`, a thread not yet joined.
     pub fn send(thread: RawPthread) {
+        // SAFETY: `thread` is a thread not yet joined (above), so its
+        // `pthread_t` names it still; SIGUSR1 is handled (`arm`).
         unsafe { pthread_kill(thread, SIGUSR1) };
     }
 }
