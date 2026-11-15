@@ -9,8 +9,10 @@
 //! write whose retry makes it again, and a second request with the key
 //! waits for the lock and finds it -- answered once the block holding it is
 //! as durable, and as sent, as the first try's answer waited for it to be
-//! ([`replay`]). A key is the subject's, for a scoped token, so no user is
-//! handed another's answer; the request it came with is kept as a hash,
+//! ([`replay`]). A key is its caller's, for a scoped token -- the issuer,
+//! the subject and every claim deciding what the token may do
+//! (`Scope::authority`) -- so no caller is handed an answer another could
+//! read and it cannot; the request it came with is kept as a hash,
 //! and the key sent with another request is refused (422), as the IETF
 //! draft has it. Kept for `idempotency_ttl`: the collection's `at` is
 //! `@ttl`, so a key past its time is out of every read at once and the
@@ -39,7 +41,7 @@ const NO_SUBJECT: &str = "an Idempotency-Key needs a token with a subject (`sub`
 const SUB_NOT_TEXT: &str = "an Idempotency-Key needs a token with a subject, and the token's \
      `sub` claim must be a string (RFC 7519): a numeric id goes in as its digits, \"42\"";
 
-/// A key, the subject's for a scoped token, and a hash of the request.
+/// A key, its caller's for a scoped token, and a hash of the request.
 pub struct Key {
     name: String,
     request: i64,
@@ -64,14 +66,20 @@ pub fn key(req: &Request, who: &Who) -> std::result::Result<Option<Key>, Respons
             "an Idempotency-Key holds no control character",
         ));
     }
-    // Keys are the subject's: two users' keys never meet. A scoped token
-    // with no subject has no one to keep them for -- nor one whose `sub` is
-    // a number, which names none: told so, an app minting its numeric ids
-    // as `"sub": 42` knows what to change.
+    // Keys are their caller's: two callers' keys never meet. A caller is
+    // everything of its token that decides what it may do -- its issuer,
+    // its subject, its tenants, its roles and every claim a rule reads
+    // (`Scope::authority`) -- so another issuer's user of the same `sub`,
+    // or the same subject's token of another team or role, keeps keys of
+    // its own: found by `sub` alone, each was replayed an answer whose
+    // `returning` rows were those the first token could read. A scoped
+    // token with no subject has no one to keep them for -- nor one whose
+    // `sub` is a number, which names none: told so, an app minting its
+    // numeric ids as `"sub": 42` knows what to change.
     let owner = match who {
-        Who::Full => "",
+        Who::Full => String::new(),
         Who::Scoped(scope) => match scope.subject() {
-            Some(sub) => sub,
+            Some(_) => scope.authority(),
             None => {
                 let why = match scope.sub_not_text() {
                     true => SUB_NOT_TEXT,
@@ -82,7 +90,7 @@ pub fn key(req: &Request, who: &Who) -> std::result::Result<Option<Key>, Respons
         },
     };
     let mut name = String::with_capacity(owner.len() + 1 + given.len());
-    name.push_str(owner);
+    name.push_str(&owner);
     name.push('\u{1f}');
     name.push_str(given);
     Ok(Some(Key {

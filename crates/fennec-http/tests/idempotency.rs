@@ -200,6 +200,71 @@ fn a_key_is_for_one_request_one_user_and_a_write_that_landed() {
     assert!(matches!(peek, 403 | 404), "{peek}");
 }
 
+/// A key is its caller's, and a caller is everything of its token that
+/// decides what it may do: its issuer, its subject, the claims its rules
+/// read. Found by `sub` alone, a key's answer was replayed to another
+/// issuer's user of the same `sub`, and to the same subject's token of
+/// another team, its `returning` rows those of a team that token cannot
+/// read. Each is another caller, and the key its own: the write runs, and
+/// answers what it may.
+#[test]
+fn a_key_is_replayed_only_to_a_caller_of_the_same_authority() {
+    let access =
+        Arc::new(Access::new(SECRET, "teams  read,write  where team = $jwt.team\n").unwrap());
+    let cfg = Config {
+        addr: "127.0.0.1:0".into(),
+        token: Some(ROOT.into()),
+        access: Some(Arc::clone(&access)),
+        ..Config::default()
+    };
+    let db = Arc::new(RwLock::new(Database::new()));
+    let server = Server::new(Arc::clone(&db), cfg);
+    let listener = server.bind().unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let _ = server.serve_on(listener);
+    });
+    let n = Node { port, access, db };
+    n.query(ROOT, None, "create collection teams (team text, t text)");
+    n.query(ROOT, None, "put teams {team: \"red\", t: \"red's plan\"}");
+    n.query(ROOT, None, "put teams {team: \"blue\", t: \"blue's plan\"}");
+    let set = "set teams {t: t} where t != \"\" returning t";
+    let red = n.access.mint(r#"{"sub":"vera","team":"red"}"#).unwrap();
+    let first = n.query(&red, Some("k"), set);
+    assert_eq!(first.status, 200, "{}", first.body);
+    assert!(first.body.contains("red's plan"), "{}", first.body);
+    let again = n.query(&red, Some("k"), set);
+    assert!(
+        again.replayed,
+        "the same caller is replayed: {}",
+        again.body
+    );
+    for (who, claims) in [
+        ("another team", r#"{"sub":"vera","team":"blue"}"#),
+        (
+            "another issuer",
+            r#"{"sub":"vera","team":"red","iss":"https://other.example/"}"#,
+        ),
+        ("a role", r#"{"sub":"vera","team":"red","role":"intern"}"#),
+    ] {
+        let token = n.access.mint(claims).unwrap();
+        let a = n.query(&token, Some("k"), set);
+        assert_eq!(a.status, 200, "{who}: {}", a.body);
+        assert!(
+            !a.replayed,
+            "{who} was replayed the first caller's answer: {}",
+            a.body
+        );
+        if who == "another team" {
+            assert!(
+                !a.body.contains("red's plan") && a.body.contains("blue's plan"),
+                "{who}: {}",
+                a.body
+            );
+        }
+    }
+}
+
 /// A key is kept as its owner, `U+001F` and the key, so a key holding that
 /// character, beside a subject holding it, named another subject's: `sub`
 /// "a\u{1f}b" with key "c" is `sub` "a" with key "b\u{1f}c", which was
