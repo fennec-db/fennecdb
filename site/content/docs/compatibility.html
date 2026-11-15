@@ -73,16 +73,18 @@ statements it breaks.</p>
 
 <p>The latest 1.x minor gets every fix. The previous minor gets security fixes
 for six months after the next one is released. Release candidates are tagged
-<code>1.0.0-rc.N</code>.</p>
+<code>1.0.0-rc.N</code> and published as pre-releases.</p>
 
-<p>A patch to the previous minor is installed by naming it: what takes
-"the newest" stays on the latest minor. The install script and GitHub's
-latest release, the image's <code>latest</code> tag, npm's
-<code>latest</code> and the Homebrew formula keep the newest release; on npm
-the previous minor's patches go out under <code>release-1.N</code>
-(<code>npm install @fennecdb/web@release-1.4</code>) and release candidates
-under <code>next</code>, and every other registry takes the version you ask
-for.</p>
+<p>A patch to the previous minor, or a release candidate, is installed by
+naming it: what takes "the newest" stays on the latest release. The install
+script and GitHub's latest release, the image's <code>latest</code> tag,
+npm's <code>latest</code> and the Homebrew formula keep the newest release;
+on npm the previous minor's patches go out under <code>release-1.N</code>
+(<code>npm install @fennecdb/web@release-1.4</code>) and the newest release
+candidate under <code>next</code>, and every other registry takes the
+version you ask for. Maven Central is the exception: while a candidate is
+its highest version, Gradle's <code>latest.release</code> resolves to it, so
+pin a version there.</p>
 
 <p>Until 1.0.0 fennecdb is 0.x, an alpha: a security bug found in a 0.x release
 gets no advisory and no patch release. The fix lands on <code>main</code> and

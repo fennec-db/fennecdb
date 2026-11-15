@@ -1,6 +1,6 @@
 # AGENTS.md
 
-The install channels' and the workflows' invariants, for `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/windows-zip.sh`, `tools/windows-zip-check.ps1`, `tools/install-ps1-check.ps1`, `tools/linux-ffi.sh`, `tools/linux-ffi-check.sh`, `tools/image-check.sh`, `tools/image-latest.sh`, `tools/release-latest.sh`, `site/install.sh`, `site/install.ps1`, the release workflows, and every workflow in `.github/workflows/` with `tools/workflow_check.py`, `tools/install-flutter.sh` and `.github/dependabot.yml`. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
+The install channels' and the workflows' invariants, for `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/windows-zip.sh`, `tools/windows-zip-check.ps1`, `tools/install-ps1-check.ps1`, `tools/linux-ffi.sh`, `tools/linux-ffi-check.sh`, `tools/image-check.sh`, `tools/image-latest.sh`, `tools/release-latest.sh`, `tools/release-verify.sh`, `site/install.sh`, `site/install.ps1`, the release workflows (`release.yml`, `packages.yml`, `swift-binary.yml` and `desktop.yml`'s attach jobs), and every workflow in `.github/workflows/` with `tools/workflow_check.py`, `tools/install-flutter.sh` and `.github/dependabot.yml`. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
 
 ## Invariants
 
@@ -54,17 +54,35 @@ that 404 and the registry's `not found` for an answer, failing on any
 other, as one finding no `<version>` fails saying so, never green
 (`tools/test_image_latest.py`, under dash). GitHub's Latest, which the
 install scripts read, is held there too: GitHub makes every release it
-publishes Latest, and `packages.yml`'s `github-latest` puts it back where a
-patch to an older minor took it; npm's `latest` names that release alone,
-an older minor's patch going out under `release-X.Y`, a pre-release under
-`next` (`tools/release-latest.sh`, the same `sort -V` and the same reading
-of errors, `tools/test_release_latest.py`, under dash). A new channel names what it
-installs by its checksum. Every file `release.yml` and `desktop.yml` attach,
-and the image's list by its digest, is attested as its run's build by the
-job that attaches it, before it is attached (`actions/attest-build-provenance`,
-`id-token` and `attestations` beside that job's write), never in a job
-that builds; `SHA256SUMS`, which grows after the publish, is not, and
-RELEASING.md's step 6 verifies every other asset and the image
+publishes Latest unless it is a pre-release, so `release.yml` drafts a
+candidate (`vX.Y.Z-<pre-release>`) as one, and `packages.yml`'s
+`github-latest` puts Latest back on the newest published X.Y.Z whatever
+was published, a patch to an older minor or a candidate; npm's `latest`
+names that release alone, an older minor's patch going out under
+`release-X.Y`, and `next` the newest pre-release by version, an older one
+going out under `next-X.Y` (`tools/release-latest.sh`, the same `sort -V`
+and the same reading of errors, `tools/test_release_latest.py`, under
+dash). Neither script takes the API's 404 for a release's tag as a draft in
+the run that release's publish started: it reads again a bounded number of
+times, then fails. A new channel names what it installs by its checksum.
+Every file a release attaches, and the image's list and both its
+architectures' manifests by their digests, is attested as the build of the
+workflow that made it, by a job of that run that builds nothing
+(`actions/attest-build-provenance`, `id-token` and `attestations` beside
+that job's write), before it is attached: `release.yml`'s `publish` and
+`manifest` in the tag's own run alone (its ref the tag, its commit the
+one built), since an attestation names the run's ref and commit as the
+source, a branch's dispatch attaching unattested; `swift-binary.yml`'s
+`pull-request` the XCFramework it built before the tag, which `publish`
+does not attest again; `desktop.yml`'s attach jobs the app. `SHA256SUMS`,
+which grows after the publish, is not. `tools/release-verify.sh`
+(RELEASING.md's step 6) holds a release's assets to the list the workflows
+attach (`tools/test_release_verify.py` holds the list to them), verifies
+each with `--signer-workflow`, `--source-ref` and
+`--deny-self-hosted-runners` -- never `-R` alone, which takes any workflow
+at any ref -- the image by the digest ghcr.io serves, npm's provenance by
+`dist.attestations` (`npm audit signatures` passes a package with none)
+and PyPI's attestations, and fails at the first thing missing or wrong
 ([provenance](../docs/design/integrations.md#provenance)). A release job that builds runs with `contents: read` and
 a checkout keeping no token (`binaries`, `windows`, `linux-ffi`, `wasm`,
 `android`, `linux-packages`, `image`): the crates' build scripts run there, and only
@@ -95,10 +113,15 @@ that reads alone built as an artifact (`release.yml`'s `image` to
 `image-push`, `swift-binary.yml`'s `build` to `pull-request`); and a job
 reading a stored secret names its `environment:`, where the secret is kept
 under rules saying which runs may read it, but never one that does not
-exist yet, which GitHub would create with no rules.
-`tools/workflow_check.py` holds every workflow to all four in CI's fmt
+exist yet, which GitHub would create with no rules; and no `run:` script
+names in an expression a value a person outside the workflow chooses --
+an input, the event's payload, a branch's or a tag's name, `env` (one
+list, `CHOSEN`) -- which GitHub pastes into the script's text, so a tag
+named `v1$(...)` would run as the job: such a value reaches a step through
+`env:` or `with:`, held to its form in the job's first step before any use.
+`tools/workflow_check.py` holds every workflow to all five in CI's fmt
 job, itself held by `tools/test_workflow_check.py`; a job let off the
-third or the last is listed in `WRITE_AND_BUILD` or `REPOSITORY_SECRETS`
+third or the fourth is listed in `WRITE_AND_BUILD` or `REPOSITORY_SECRETS`
 with the reason (site.yml's `deploy`, until the owner creates its
 environment), and an entry nothing needs is a finding: a job let off that
 no longer needs it or is gone, or whose workflow is gone or renamed, an
