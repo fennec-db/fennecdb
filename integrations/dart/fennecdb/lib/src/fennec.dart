@@ -62,18 +62,33 @@ class FennecException implements Exception {
   /// told the [reason] and no name; null otherwise.
   final String? binding;
 
+  /// The code a server named beside its words, its body's `code`
+  /// ([FennecRemote]): `token_expired` on a 401 for a token past its `exp`,
+  /// which a fresh token from its issuer cures. A later server may name
+  /// others; null for none, and for the library's own. Not [code], the
+  /// library's error kind: every SDK names the server's this way.
+  final String? errorCode;
+
   FennecException(this.code, this.message, [this.exact, this.reason, this.binding])
       : status = null,
         at = null,
         completed = null,
         quota = null,
-        retryAfter = null;
+        retryAfter = null,
+        errorCode = null;
 
   /// A server's refusal: its status and, for a batch, where it stopped; for
   /// a tenant's quota, which one and how long to wait; for a `require`, the
   /// reason it gave; for a statement bound to the write, its name.
   FennecException.http(this.code, this.message,
-      {required int this.status, this.at, this.completed, this.quota, this.retryAfter, this.reason, this.binding})
+      {required int this.status,
+      this.at,
+      this.completed,
+      this.quota,
+      this.retryAfter,
+      this.reason,
+      this.binding,
+      this.errorCode})
       : exact = null;
 
   @override
@@ -429,14 +444,28 @@ class Fennec {
   /// member of one name, and [sync] is the fsync. The requests and the
   /// change stream are `dart:io`'s `HttpClient`'s, with the platform's TLS:
   /// iOS and Android refuse cleartext HTTP by default. [tokenProvider] is
-  /// asked for a fresh token when the server answers 401.
+  /// asked for a token when the server answers 401, handed why
+  /// ([TokenRefusal]): it asks the issuer for a fresh one at every 401, and
+  /// completes with an error where it gets none -- the issuer out of reach,
+  /// or refusing, where the app signs out; nothing is sent until a token is
+  /// handed over. A provider that failed, or handed over an empty token, is
+  /// named by the status (`token` [TokenStage.failed], the error "the token
+  /// provider failed: ...") and asked again at `resume()` or
+  /// `setOnline(true)`; it is called once at a time. Nothing bounds its
+  /// time, since it may wait on a sign-in, so it must complete: time out its
+  /// own requests to the issuer and fail. One that never completes holds the
+  /// sync, `token` [TokenStage.asked], until the app hands a token over
+  /// itself (`setToken`). [path] is one account's: a replica is never opened
+  /// for another.
+  /// A function of no argument is no longer taken (before 1.0 it was):
+  /// `(_) => refresh()` for it.
   static Future<Fennec> openSynced({
     required String url,
     String? token,
     required List<Shape> shapes,
     required String path,
     int flags = 0,
-    Future<String> Function()? tokenProvider,
+    Future<String> Function(TokenRefusal refusal)? tokenProvider,
   }) =>
       _openSynced(url: url, token: token, shapes: shapes, path: path, flags: flags, tokenProvider: tokenProvider);
 

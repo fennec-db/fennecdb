@@ -1,6 +1,6 @@
 # AGENTS.md
 
-fennec-http's invariants -- replication and archives, quotas, the HTTP server and held writes -- for code in `crates/fennec-http/`. Access -- scoped tokens and their rules, field lists, the server's own collections, tenant binding and whom a token is for -- is in [src/access/AGENTS.md](src/access/AGENTS.md), beside its code (`src/access.rs`, `src/access/`): read it before changing either, or a path a token's statement takes. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
+fennec-http's invariants -- replication and archives, quotas, the HTTP server and held writes -- for code in `crates/fennec-http/`. Access -- scoped tokens and their rules, field lists, the server's own collections, tenant binding, whom a token is for and its expiry -- is in [src/access/AGENTS.md](src/access/AGENTS.md), beside its code (`src/access.rs`, `src/access/`): read it before changing either, or a path a token's statement takes. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
 
 ## Invariants
 

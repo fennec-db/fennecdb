@@ -668,6 +668,23 @@ Python and Swift, <code>Error.Binding</code> in Go,
 on Swift's, Kotlin's and Dart's own database, from the native library
 alike; <code>FennecError.binding</code> in JavaScript. None where no binding
 refused.</p>
+
+<p id="error-code">The code a refusal's body names beside its words
+(<code>"code"</code>, <a href="/docs/http-reference#statuses">Refusals and their statuses</a>) --
+<code>token_expired</code> on a 401 for a token past its <code>exp</code>,
+which a fresh token from its issuer cures -- has one name in every SDK:
+<code>FennecError.error_code</code> in Python, <code>Error.ErrorCode</code> in
+Go (<code>ErrorCodeTokenExpired</code>), <code>FennecException.ErrorCode</code>
+in .NET, <code>FennecError.errorCode</code> in JavaScript and Swift and
+<code>FennecException.errorCode</code> in Kotlin and Dart, a stream ended at
+the <code>exp</code> carrying it too (Go's <code>Event.Err</code>, .NET's
+<code>Event.ErrorCode</code>, JavaScript's <code>onError</code>). Not
+<code>code</code>: Go's and .NET's <code>Code</code> is the status's name
+(<code>unauthorized</code>), Swift's, Kotlin's and Dart's the library's own
+error kind. None where the body names no code, which is every other refusal
+today; a later server may name others, and a 401 naming none may be cured by
+a fresh token too, so it is no sign-out by itself
+(<a href="/docs/auth#expiry">Expiry</a>).</p>
 </details>
 
 <h2 id="named-statements">Named statements</h2>

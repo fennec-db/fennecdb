@@ -174,9 +174,13 @@ fn index_entry(
     len: u64,
 ) -> Option<(u64, u64)> {
     let (step, n, off) = (uvarint(docs, p)?, uvarint(docs, p)?, uvarint(docs, p)?);
+    // Ascending from 0 a step past 0 at a time, so no id is 0; `DocId::MAX`
+    // is no write's either (`written_id`): taken, the store's next id was
+    // one past it, which overflowed, where the walk the open goes on to
+    // refuses the frame putting it.
     *id = id
         .checked_add(step)
-        .filter(|_| step > 0 && n <= u32::MAX as u64)?;
+        .filter(|&i| step > 0 && i != DocId::MAX && n <= u32::MAX as u64)?;
     let pos = (after(*end, *id, n) as i64)
         .checked_add(crate::codec::unzigzag(off))
         .filter(|&p| p > 0)? as u64;
@@ -635,6 +639,41 @@ pub struct Segment {
 /// image being taken holds them the same way ([`crate::engine::Kept`]),
 /// rather than a copy of every one.
 pub type SegmentBytes = std::sync::Arc<Vec<u8>>;
+
+/// Whether a frame may put document `id`, refused where frames are read --
+/// an open's replay, a replica's apply -- as damage, or a primary's record
+/// no write made, where it is an id no write gives: 0, which `allocate_id`
+/// starts past and a put naming is given another, or `DocId::MAX`, past
+/// which `next_id` has nowhere to go. Taken, 0 went into the id index's
+/// sparse map, and the dense array growing over it indexed slot -1, a
+/// panic; `DocId::MAX` set `next_id` to 0 -- the id the next write was
+/// given -- wrapping (the fuzzer's `image` target found both).
+#[inline]
+pub(crate) fn written_id(id: DocId) -> Result<()> {
+    match id {
+        0 | DocId::MAX => Err(unwritten_id(id)),
+        _ => Ok(()),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn unwritten_id(id: DocId) -> Error {
+    Error::Corrupt(format!("a frame puts document {id}, an id no write gives"))
+}
+
+/// A frame running past the end of the data record holding it, refused as
+/// a replica's apply refuses one. A record reaches a replay whole by its
+/// length, and past the durable point by its sum: a crash's torn tail is
+/// the record the open's walk cuts (`Database::load`), never a frame inside
+/// one. Stopped there as at a torn tail -- what this replay did before
+/// records had lengths -- the frames after it vanished with no word, and
+/// the open went on as if the file held no more of them.
+#[cold]
+#[inline(never)]
+fn cut_frame() -> Error {
+    Error::Corrupt("a write record cut short".into())
+}
 
 /// The segment's bytes to append to.
 #[inline]
@@ -1336,9 +1375,11 @@ impl Store {
             pos += 1;
             let id = get_uvarint(bytes, &mut pos)?;
             let len = get_uvarint(bytes, &mut pos)? as usize;
-            if pos + len > bytes.len() {
-                // Half-written last record: truncate and stop (crash-safe tail).
-                break;
+            // Held to what is left rather than added: a length near 2^64
+            // wrapped `pos + len` past the test, and the frame was sliced
+            // backwards (the fuzzer's `image` target found it).
+            if len > bytes.len() - pos {
+                return Err(cut_frame());
             }
             let frame = &bytes[start..pos + len];
             pos += len;
@@ -1358,6 +1399,7 @@ impl Store {
             self.total_bytes += frame.len();
             match op {
                 OP_PUT => {
+                    written_id(id)?;
                     let loc = Loc {
                         seg,
                         off: off as u32,
@@ -1404,10 +1446,9 @@ impl Store {
             pos += 1;
             let id = get_uvarint(bytes, &mut pos)?;
             let plen = get_uvarint(bytes, &mut pos)? as usize;
-            if pos + plen > bytes.len() {
-                // Half-written last record, as in `replay`.
-                pos = start;
-                break;
+            // Held to what is left, as in `replay_noting`.
+            if plen > bytes.len() - pos {
+                return Err(cut_frame());
             }
             // The bookkeeping `append` does, with the payload left in place.
             let frame_len = pos + plen - start;
@@ -1417,6 +1458,7 @@ impl Store {
             self.total_bytes += frame_len;
             match op {
                 OP_PUT => {
+                    written_id(id)?;
                     self.index
                         .insert(id, Loc::mapped(at + pos as u64, plen as u32));
                     if id >= self.next_id {
@@ -2189,6 +2231,67 @@ mod tests {
                 let mut refused = Store::new();
                 assert!(!refused.adopt_index(&base, at, what, bad), "live {live}");
                 assert_eq!(counts(&refused), (0, 0, 0, 1), "live {live}");
+            }
+        }
+    }
+
+    /// An image's index whose document is `DocId::MAX`, an id no write
+    /// gives, is not taken -- taken, the store's next id was one past it,
+    /// which overflowed, on the mapped open a server runs and the fuzzer's
+    /// `image` target did not -- and the walk an open goes on to refuses
+    /// the frame putting it, so the open is refused, mapped or not.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn an_image_index_reaching_the_last_id_is_not_taken() {
+        let sc = schema();
+        let payload = Store::encode_doc(
+            &sc,
+            &Document {
+                id: 0,
+                fields: vec![("b".into(), Value::Int(1))],
+            },
+        );
+        // Written at the id before the last, then made the last where the
+        // frame and the index each say it: ten bytes either way, its first
+        // a step on.
+        let mut almost = Vec::new();
+        put_uvarint(&mut almost, DocId::MAX - 1);
+        let mut last = Vec::new();
+        put_uvarint(&mut last, DocId::MAX);
+        assert_eq!(almost.len(), last.len());
+        let made_last = |bytes: &mut Vec<u8>| {
+            let at = bytes
+                .windows(almost.len())
+                .position(|w| w == &almost[..])
+                .expect("the id before the last");
+            bytes[at..at + last.len()].copy_from_slice(&last);
+        };
+        for live in [false, true] {
+            let mut st = Store::new();
+            st.append(OP_PUT, DocId::MAX - 1, &payload);
+            let mut image = Vec::new();
+            match live {
+                true => st.write_live(&mut image).unwrap(),
+                false => st.write_image(&mut image).unwrap(),
+            }
+            let mut index = Vec::new();
+            st.image_index(live, &mut index);
+            made_last(&mut image);
+            made_last(&mut index);
+            let at = 4u64;
+            let mut file = vec![0u8; at as usize];
+            file.extend_from_slice(&image);
+            let base: Base = std::sync::Arc::new(file);
+            let len = image.len() as u64;
+            let mut taken = Store::new();
+            assert!(!taken.adopt_index(&base, at, len, &index), "live {live}");
+            assert_eq!((taken.len(), taken.next_id()), (0, 1), "live {live}");
+            match taken.replay_mapped(&base, at, len, &mut |_| {}) {
+                Err(Error::Corrupt(m)) => assert_eq!(
+                    m,
+                    "a frame puts document 18446744073709551615, an id no write gives"
+                ),
+                other => panic!("live {live}: {other:?}"),
             }
         }
     }

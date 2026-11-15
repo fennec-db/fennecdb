@@ -126,9 +126,37 @@ int32_t fennec_warm(uint64_t handle, const uint8_t *only, size_t only_len, char 
  * actions each call writes, a JSON array of
  *   {"do":"request","id":N,"method":..,"url":..,"headers":{..},"body":..|null}
  *   {"do":"stream","id":N,"url":..,"headers":{..}}   an SSE body, fed as it comes
- *   {"do":"cancel","id":N}     {"do":"wait","id":N,"ms":M}     {"do":"token"}
+ *   {"do":"cancel","id":N}     {"do":"wait","id":N,"ms":M}
+ *   {"do":"token","code":..|null,"had_token":B,"attempt":N}
  *   {"do":"changed"}           {"do":"status"}
- *   {"do":"refused","status":S,"message":..,"query":..}
+ *   {"do":"refused","status":S,"message":..,"query":..,"quota":..,"reason":..}
+ * A token action is a 401: nothing is sent until a token is signalled.
+ * "code" is the one the server named, null for none -- "token_expired"
+ * where the token's exp passed; "had_token" whether the refused request
+ * carried a token; "attempt" the asks in a row since the server last took
+ * the token held (a 2xx, a stream opened), 2 and on where the token
+ * signalled at the last was refused too, an expiry starting it at 1 again
+ * for the token the server took last or the first signalled since (any
+ * other was minted expired: a clock ahead of the issuer's). Past 1 the
+ * action comes after a wait, 1 s doubling to 60 s, which the same token
+ * signalled again does not end: a token minted again at once is refused
+ * for what minting does not change (a key the server has not fetched yet,
+ * an nbf its clock has not reached). An app asks its issuer for a fresh
+ * token at every one, whatever the code, and signs out only where the
+ * issuer refuses to issue one: the server keeps no list of revoked tokens.
+ * A file is one account's -- its path names the account, and it is never
+ * opened for another -- and a sign-out keeps it, for that account's next
+ * sign-in to send its pending writes. A 401 to a request sent with a token
+ * since replaced is sent again with the new one, no action. One ask is out
+ * at a time: a binding answers it with {"token":..}, or with
+ * {"token_failed":"why"} where its provider threw or handed over none --
+ * the status's token says so -- and calls its provider once at a time, a
+ * token action meanwhile answered by that call; then {"online":true} asks
+ * again, never while an ask is out or during the wait. Nothing bounds a
+ * provider's time, which may be a sign-in's: one that never returns is
+ * called no second time, and a {"token":..} the app signals itself gets
+ * the sync going.
+ * A binding reading only "do" asks for a token at every one.
  * Once started, a write through fennec_query to a synced collection is
  * applied at once and queued for the server in the same block.
  */
@@ -138,7 +166,8 @@ int32_t fennec_warm(uint64_t handle, const uint8_t *only, size_t only_len, char 
 #define FENNEC_SYNC_BYTES 3    /* a piece of a stream's body */
 #define FENNEC_SYNC_CLOSED 4   /* a stream ended (or never opened): why */
 #define FENNEC_SYNC_TIMER 5    /* a wait ran out */
-#define FENNEC_SYNC_SIGNAL 6   /* {"online":bool} | {"token":".."} | {"stop":true} */
+#define FENNEC_SYNC_SIGNAL 6   /* {"online":bool} | {"token":".."} | {"stop":true}
+                                  | {"token_failed":".."}: the provider gave none */
 
 /* config: {"url":..,"token":..,"seed":"<32 hex>","shapes":[{collection,where?,select?,key?}]}. */
 int32_t fennec_sync_start(uint64_t handle, const uint8_t *config, size_t config_len,
@@ -149,7 +178,19 @@ int32_t fennec_sync_feed(uint64_t handle, uint32_t kind, uint64_t id, int32_t st
                         uint64_t seq, const uint8_t *bytes, size_t len,
                         char **out, size_t *out_len);
 
-/* {"state":"online"|"offline"|"catching_up","pending":N,"error":..,"shapes":[..]}. */
+/*
+ * {"state":"online"|"offline"|"catching_up","pending":N,"error":..,"token":..,
+ * "shapes":[..]}: the error null or {"message":..,"status":S,"quota":..|null,
+ * "code":..|null}, its code the one the 401 a token is wanted for named
+ * ("token_expired"); the token null unless one is wanted, or
+ * {"stage":"delayed"|"asked"|"failed","code":..|null,"had_token":B,"attempt":N}:
+ * delayed while the wait before the ask runs, asked once the token action
+ * came and no token was signalled, failed after {"token_failed":..} until
+ * {"online":true} asks again; code, had_token and attempt the action's, or
+ * the next one's while delayed. While a token is wanted the error is the
+ * token's -- "the token provider failed: <why>" once failed -- whatever else
+ * failed since, a stream that ended among them.
+ */
 int32_t fennec_sync_status(uint64_t handle, char **out, size_t *out_len);
 
 /* Frees text a call wrote through `out`. */
