@@ -365,6 +365,7 @@ Covers `crates/fennec-http/`, access aside (below); an open server's rule binds 
 
 *Replication and archives*
 - Replication ships only what is on disk, by the change counter.
+- A copy keeps the time its primary appended each write at, and an archive's times run in order.
 - A node's tenants are archived over one stream
 - `/_changes` reads the writes on disk, documents and all
 - A read can wait for a write on a replica

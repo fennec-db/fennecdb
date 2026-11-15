@@ -1,6 +1,6 @@
 # Replication and archives
 
-The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md) and [crates/fennec-import/CLAUDE.md](../../crates/fennec-import/CLAUDE.md) list under *Replication and archives*: replication, a node's tenants archived over one stream, `/_changes`, `Fennec-After`, sealed archives and `--follow`. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md) and [crates/fennec-import/CLAUDE.md](../../crates/fennec-import/CLAUDE.md) list under *Replication and archives*: replication, a write's time on a copy and in an archive, a node's tenants archived over one stream, `/_changes`, `Fennec-After`, sealed archives and `--follow`. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Replication
 
@@ -88,7 +88,7 @@ not after the machine dies. Lag is 0.04 ms p50 under `--sync always`
 writes 254 a second against 246; ten failovers under `always` lost no
 acknowledged write. An archive (`fennec archive`,
 `fennec-http/src/archive.rs`) is the same stream written to files, each write
-with the time the primary appended it; `fennec restore` is an image plus the
+with the time the primary appended it -- an archive of a copy too, [below](#a-writes-time); `fennec restore` is an image plus the
 archived writes up to a time or a change, forked -- a fennecdb file is exactly
 that, so a restore is a concatenation checked by opening it. An archive
 takes images of its own end (`Archive::consolidate`, `--image-every`, an
@@ -203,6 +203,119 @@ macOS arm64, release). The image's buffer is
 grown by the record alone: a `Vec` grown its own way took twice a large
 image's size.
 
+## A write's time
+
+**A copy keeps the time its primary appended each write at, and an
+archive's times run in order.** A primary's feed stamps each record with
+its clock as the `Tee` hands it over (`Feed::push`), and its stream sends
+the times beside the records (`W`: the first write, a count, a time for
+each record, the records). The follower took the times off the stream and
+dropped them (`Message::Writes { first, records, .. }`), and applied the
+records, which its own sink's `Tee` stamped with the copy's clock as each
+landed: a copy's feed timed every write at the moment the copy applied it,
+a replication lag after its primary appended it, and so did everything
+read from that feed -- a copy of the copy, the copy's `/_changes` (`at`)
+and an archive cut from it: a `--dir` node's `archive --tenants` covers
+the tenants the node holds as a copy, and `fennec archive` may be pointed
+at a replica. A restore to a moment from such an archive left out writes
+the primary had appended, and answered, before that moment, where the docs
+promise every one. It was found root-causing a failed failover drill, and
+was there from the first release with replication: v0.1.5 to v0.2.0.
+
+The follower now hands the times to its feed after `Database::apply`
+(`Feed::sent_times`), under the write lock and before its flush, which is
+what makes a record it applied durable, so sendable: no record is sent
+before its time is its primary's (a debug assertion holds it). The records
+the apply landed are the ring's newest, one entry a record -- a block that
+spilled and landed (`land`) is sent as the one record it would have been
+(`landed_block`) and applied as one. Where the apply says how many landed
+(its `Ok(n)`: every record of the message) they are paired from the last
+back, which leaves them right where a ring smaller than one message let go
+of the first of them as later ones came in (only `--replication-buffer 0`
+or `1` can be). An apply refused part way lands a prefix, the records after the
+refused one put back and never handed to the sink, and says nothing: its
+records are paired from the first on, where the ring still holds the first,
+and otherwise -- under `--replication-buffer 0` or `1` alone, the one
+place the rule's "nothing is sent with the copy's own clock" does not
+reach -- keep the copy's time until the image the follower connects
+again for starts the feed over (`Feed::start`), as any image (`force_image`)
+does; the writes after an image take their times as any. A copy of a copy
+sends its feed's times, its primary's, so a chain carries the first
+primary's times to its end; a promoted copy has no follower, and its own
+writes take its own clock from the promotion on.
+
+Rejected: handing the times to the feed before the apply, `push` taking
+the next one -- right from the first moment, no window to reason about --
+since `push` is a primary's write path, and would look at a list there on
+every write. Rejected too: counting the message's records' writes to match
+them to the ring by number (`writes_in` a record, as `push` counts them),
+which also matches a refused apply's prefix whatever the ring let go of: a
+third caller of `writes_in` had the release build's LTO stop inlining it
+into `Feed::push`, read off the binary -- 358 instructions and a call
+where `main` inlines it in 519 -- a call more on every write a primary
+makes. As built, `Feed::push` and each of the `Tee`'s sink methods are the
+same instructions as on `main`, addresses aside, every `Feed` and `Tee`
+function but the new one (`fennec-server` built with `-C strip=none`,
+`objdump` of each symbol, macOS arm64). Nothing in the source says LTO
+inlines `writes_in` into `push`, so a change near it -- another caller of
+`writes_in` above all -- owes the same look: `objdump -d --demangle` of
+`fennec-server` built `--release` with `RUSTFLAGS="-C strip=none"`, no
+call to `writes_in` inside `Feed::push`.
+
+*An archive's times run in order.* With a copy's writes carrying its
+primary's times, an archive that follows a copy through its promotion is
+timed by two clocks, the old primary's to the fork and the copy's after it,
+and a copy whose clock is behind sends writes timed before the ones before
+them, as a clock set back does on one machine. A restore to a moment stops
+at the first write timed after it, a prefix either way, but `prune` and a
+restore to a moment before every write kept read the images' times -- a
+consolidated image is timed by its last write (`time_of`) -- as in order:
+`prune` took the newest image timed by its cutoff for the base and let go
+of the images before it, one of which a restore to a moment inside `--keep`
+started from, and that restore answered change 8 after the prune against 3
+before it (`archive::tests`' `an_archives_times_run_in_order_across_a_clock_behind`).
+Now `Archive::take` archives no write at a time before the latest it
+archived (`Writer::latest`, read back from the last segment as the archive
+is opened to be written, so an archiver started again goes on from it): a
+restore to a moment cuts where it cut, the first write past the moment
+being the same, and every time an archive holds runs in order. Rejected:
+keeping the feed's times in order instead (the latest in `push`), on a
+primary's write path, and lost with the process: a copy promoted after a
+restart had no time of its primary's to hold to, where an archive keeps its
+latest on disk. The image a hello brings is timed by the archiver's clock
+as it takes it, and no earlier than the latest write the archive holds
+(`Archive::hello`, `Writer::latest`): by that clock alone, behind the
+writes', it was dated before writes it follows, and a `prune` whose cutoff
+fell between the two took it for the base and let go of the image a
+restore inside `--keep` started from, which then found none to start from
+(`a_hellos_image_is_not_dated_before_the_writes_the_archive_holds`).
+A stored time is so the time the write was appended or, where the clock
+stepped back, the latest one stored before it, which `verify` and a
+restore report. The cost: a clock that ran ahead by some time holds
+pruning back that long, since every later write and image is stored at
+that time until real time passes it, and `prune` keeps the images timed
+after its cutoff. A copy's `/_changes`
+hands over each write's `at` as its feed holds it -- its primary's, then,
+promoted, its own, which may be behind -- a reading of a clock, as on a
+primary; a consumer orders by `seq`.
+
+`tests/replication.rs`' `a_replica_and_an_archive_of_it_keep_the_times_its_primary_appended_at`
+holds a replica back while its primary writes -- a statement's writes and a
+block that spilled and landed -- until the clock is past every time the
+primary appended them at, then lets it apply them: the replica's
+`/_changes`, a replica's of it and a restore to the moment the primary
+appended the last of them, from an archive cut from the replica, each
+hold the primary's times, again after an image the primary sends it
+(buffer 64 KiB), and promoted the replica times its own write by its
+clock. On `main` it fails at its first comparison, every time the
+replica's. `replication::tests`' `a_followers_feed_holds_the_times_its_primary_sent`
+and `a_followers_records_the_ring_kept_take_their_own_times` hold a
+whole message, a refused one's prefix and a ring that let go of a
+message's first records. The cost: `fennec-server`'s `__text` 1 024 bytes
+more (4 819 520 to 4 820 544, 16 bytes on the file; macOS arm64, release);
+a copy's apply walks the records it landed in its ring once more, under the
+lock it holds anyway, and an archiver compares a time a write.
+
 ## A node's archive
 
 **A node's tenants are archived over one stream** (`fennec archive
@@ -294,7 +407,8 @@ or moved to a node whose archiver takes it up from its image on the same
 history -- keeps its archive, and `presence` notes `gone <ms>`, then `back
 <ms>` if it returns: a restore to a moment it was away leaves it out, as one
 deleted, where forgetting the time away gave the copy from before it left.
-The times are the node's clock, as its writes' are: `G` carries when this
+The times are the node's clock, as its own writes' are (a tenant it holds
+as a copy has its primary's, [above](#a-writes-time)): `G` carries when this
 process deleted the tenant (`Tenants::departed`, the last 65 536, kept only
 on a node that replicates its tenants and noted once the file is gone: noted
 before it, a removal refused had the archive read the tenant gone and back

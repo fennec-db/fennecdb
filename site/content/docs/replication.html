@@ -359,7 +359,9 @@ fennec restore /backups/archive before.fennec --to-change 41873
 <details class="deep"><summary>How a restore to a moment works</summary>
 <p>The same stream written to a directory instead of applied is an archive:
 base images, and every write after them with the time the primary appended
-it. The <code>fennec</code> command line writes and reads one.</p>
+it — or, where that clock stepped back, the latest time stored before it,
+which <code>verify</code> and a restore then report. The
+<code>fennec</code> command line writes and reads one.</p>
 
 <p>A restore takes the latest image at or before the point asked for and
 appends the archived writes after it up to there — a fennecdb file is an image
@@ -382,7 +384,7 @@ file then opened in 63 ms; to the load's middle, 7.8 s. A base image a day
 keeps a restore to a day of writes.</p>
 
 <pre data-lang="text">image-&lt;change&gt;-&lt;time&gt;.fennec   a base image: the database at that change
-writes-&lt;first change&gt;.log      per record, the time it was appended and the record
+writes-&lt;first change&gt;.log      per record, its stored time and the record
 history                        the history the archive is on
 </pre>
 
@@ -396,7 +398,9 @@ segments of their own. A restore then replays at most that much. With
 each image: the images before the newest one taken by the window's start,
 which a restore to that moment starts from, and the segments whose writes
 all came before the oldest image kept — never the one being written.
-<code>fennec prune &lt;dir&gt; --keep 7d</code> does the same once.</p>
+<code>fennec prune &lt;dir&gt; --keep 7d</code> does the same once. A clock
+that ran ahead by some time holds pruning back that long: every later write
+and image is stored at that time until real time passes it.</p>
 
 <p><code>fennec verify &lt;dir&gt;</code> reads the archive as a restore
 would: every image opens at the change its name says and each of its
