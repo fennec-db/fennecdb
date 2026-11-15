@@ -40,7 +40,6 @@ fennec-core = { version = "0.2.0", path = "crates/fennec-core", default-features
 fennec-ql = { version = "0.2.0", path = "crates/fennec-ql", default-features = false }
 fennec-abi = { version = "0.2.0", path = "crates/fennec-abi", default-features = false }
 fennec-http = { version = "0.2.0", path = "crates/fennec-http" }
-fennec-server = { version = "0.2.0", path = "crates/fennec-server" }
 # Without TLS (`tls`), which the binaries name: a crate taking either has no
 # dependency from outside the workspace unless it asks for one.
 fennec-wire = { version = "0.2.0", path = "crates/fennec-wire", default-features = false }

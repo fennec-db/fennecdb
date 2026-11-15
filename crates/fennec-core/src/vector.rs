@@ -4815,8 +4815,8 @@ impl VectorIndex {
         for &doc in &self.doc_ids {
             put_le(out, doc, dw);
         }
-        for node in 0..n {
-            out.push(match self.deleted[node] {
+        for (node, &deleted) in self.deleted[..n].iter().enumerate() {
+            out.push(match deleted {
                 true => 1,
                 false => 2 * waiting.get(node).copied().unwrap_or(false) as u8,
             });

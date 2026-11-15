@@ -30,7 +30,7 @@ def main():
         sys.exit("usage: version.py X.Y.Z")
     v = sys.argv[1]
     sub("Cargo.toml", r'^version = "[^"]+"', f'version = "{v}"')
-    for crate in ("core", "ql", "abi", "http", "server", "wire", "import", "tls"):
+    for crate in ("core", "ql", "abi", "http", "wire", "import", "tls"):
         sub("Cargo.toml", rf'^(fennec-{crate} = \{{ version = )"[^"]+"', rf'\g<1>"{v}"')
     sub("integrations/python/pyproject.toml", r'^version = "[^"]+"', f'version = "{v}"')
     for path in ("web/package.json", "integrations/react/package.json", "integrations/cloudflare/package.json", "integrations/langchain/package.json",
