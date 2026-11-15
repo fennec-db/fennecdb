@@ -1,0 +1,6 @@
+-- A collection made past 268 435 455 others: its id five bytes in every
+-- record's head. Its highest row was deleted in the tail.
+collections
+get far order n
+get far where n = 2
+get far count

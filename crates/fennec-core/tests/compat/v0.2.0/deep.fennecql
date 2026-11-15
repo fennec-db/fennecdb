@@ -1,0 +1,10 @@
+-- A [[json]] field whose second row nests 66 levels in all, beside an
+-- ordinary collection: the release reads every row; a later build answers
+-- the ordinary collection alike and refuses the deep row where it reads it.
+get plain order n
+get plain where n = 2
+collections
+get deep where n = 1
+get deep order n select n
+get deep where n = 2
+get deep count

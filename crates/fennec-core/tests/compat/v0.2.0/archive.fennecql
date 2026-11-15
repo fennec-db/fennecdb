@@ -89,3 +89,4 @@ get shapes where cx = "facade" select req
 get shapes match cx "facade" select req
 get shapes match cx "東" select req
 describe statement on_isd
+get retired order n

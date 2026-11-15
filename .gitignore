@@ -9,6 +9,9 @@ pkg/
 !crates/fennec-core/tests/compat/*/*.fennec
 !crates/fennec-core/tests/compat/*/archive/*.fennec
 !crates/fennec-core/tests/compat/*/archive-plain/*.fennec
+!crates/fennec-core/tests/compat/*/node-archive/*/*.fennec
+# A page's copy beside its file, which an editor's `*~` would hide.
+!crates/fennec-core/tests/compat/*/*.fennec~
 # An archive 0.2.0 sealed, which every later binary opens
 # (crates/fennec-http/tests/archive.rs, `a_v1_sealed_archive_still_opens`).
 !crates/fennec-http/tests/sealed-v1/archive/*.fennec
