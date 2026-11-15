@@ -354,10 +354,12 @@ fn json(data: &[u8]) {
     let _ = json::parse_documents(&text);
     let _ = json::parse_params(&text);
     let _ = json::parse_object(&text);
-    // What is read is written back and read as itself, as `=` compares --
-    // a number past a double's range aside: the reader takes `1e400` as
-    // infinity, which JSON cannot say and the writer writes as `null`.
-    if let Some(v) = json::parse_json(&text).ok().filter(finite) {
+    // What is read is written back and read as itself, as `=` compares,
+    // every number among it: one past a double's range, which JSON cannot
+    // say back, is refused by the reader (`num::past_range`), where it
+    // read `1e400` as an infinity written back as `null`, and the round
+    // trip was held to finite values alone.
+    if let Ok(v) = json::parse_json(&text) {
         let out = json::to_string(&v);
         let again =
             json::parse_json(&out).unwrap_or_else(|e| panic!("{out:?} written, then refused: {e}"));
@@ -365,16 +367,6 @@ fn json(data: &[u8]) {
             again.cmp_value(&v) == std::cmp::Ordering::Equal,
             "{text:?} read as {v:?}, written as {out:?}, read back as {again:?}"
         );
-    }
-}
-
-/// Whether every number `v` holds is finite.
-fn finite(v: &Value) -> bool {
-    match v {
-        Value::Float(f) => f.is_finite(),
-        Value::List(items) => items.iter().all(finite),
-        Value::Object(members) => members.iter().all(|(_, v)| finite(v)),
-        _ => true,
     }
 }
 

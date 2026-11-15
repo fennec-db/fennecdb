@@ -499,11 +499,13 @@ dropped with no word: refused, as the apply refuses it
 run the open a server runs, mapped: it does now, where the index an image
 writes of its frames took `u64::MAX` as an id, its next id overflowing
 (`store::tests`). Ten minutes of `image` with the mapped open under ASan
-(95 089 runs) and three of `codec` (181 725) found nothing more. One is
-left for a decision: JSON's reader takes a number past a double's range,
+(95 089 runs) and three of `codec` (181 725) found nothing more. One was
+left for a decision: JSON's reader took a number past a double's range,
 `1e400`, as infinity, which its writer writes as `null` -- no crash, and
-the `json` target holds its round trip to finite values until that is
-decided.
+the `json` target held its round trip to finite values until it was
+decided. It is refused now, naming it
+([vector-search.md](vector-search.md#numbers-in)), and the round trip
+holds every value read.
 
 CI's smoke was red from the day the fuzzer landed, red or green by its
 runner's speed as 30 s reached a finding or not: three runs on two
