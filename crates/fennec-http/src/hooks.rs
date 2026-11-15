@@ -190,7 +190,23 @@ pub struct Hook {
     pub keep_ms: i64,
     /// The body's ceiling, `max-body`: a body past it fails `size`.
     pub ceiling: usize,
+    /// A `github` hook a tenant's set kept as 0.2.0 saved it, `key
+    /// delivery`, which a hooks file and a hook's `PUT` refuse now: read
+    /// all the same -- refusing it put the tenant's whole set away, every
+    /// secret with it, which no router keeps -- and written back as kept,
+    /// every event of it that verifies refused naming `key body` ([`take`]),
+    /// never keyed by `X-GitHub-Delivery`, which its signature does not
+    /// cover.
+    pub delivery: bool,
 }
+
+/// What a hook kept with `key delivery` answers an event that verified:
+/// a 409, as a hook no statement can take its events is, naming the way
+/// to arm it again.
+const KEYED_BY_DELIVERY: &str = "this hook was set with `key delivery`, which is refused now: \
+GitHub does not sign X-GitHub-Delivery, so a copy of an event sent again under a new one would \
+be taken again. Its events are refused until it is set again with `key body`, the default; \
+then redeliver this one";
 
 /// A server's hooks, read from its hooks file at its start.
 pub struct Hooks {
@@ -256,7 +272,7 @@ impl Hooks {
             if words.is_empty() {
                 continue;
             }
-            let hook = hook_of(&words, &hooks, &secret, max_body, &stand_in)
+            let hook = hook_of(&words, &hooks, &secret, max_body, &stand_in, false)
                 .map_err(|why| format!("hooks file line {}: {why}", n + 1))?;
             hooks.push(hook);
         }
@@ -413,13 +429,17 @@ fn compared(mac: &[u8; 32], sig: &[u8; 32]) -> bool {
 }
 
 /// The hook a hooks file's line `words` makes, beside the `hooks` read
-/// before it, or what is wrong with it.
+/// before it, or what is wrong with it. `kept`: a set a node kept -- its
+/// sidecar, or one installed whole, as a router copies and moves one --
+/// whose `key delivery` is read and marked ([`Hook::delivery`]) where a
+/// line and a hook's `PUT` are refused it.
 pub(crate) fn hook_of(
     words: &[&str],
     hooks: &[Hook],
     secret: &impl Fn(&str) -> std::io::Result<Vec<u8>>,
     max_body: usize,
     stand_in: &HmacKey,
+    kept: bool,
 ) -> std::result::Result<Hook, Why> {
     let [name, scheme, rest @ ..] = words else {
         return Err("a hook is `<name> <scheme> <secret file> [<secret file>] [options]`");
@@ -454,9 +474,11 @@ pub(crate) fn hook_of(
             // payload sent twice from a captured one sent again under a new
             // `X-GitHub-Delivery`, and a hook that chose it to take the
             // first would drop it unsaid (docs/design/named-statements.md,
-            // "An event's key").
+            // "An event's key"). A set a node kept with it still reads,
+            // the hook marked and its events refused.
             "key" => match value {
-                "body" => key.replace(()).is_some(),
+                "body" => key.replace(false).is_some(),
+                "delivery" if kept => key.replace(true).is_some(),
                 "delivery" => {
                     return Err("`key delivery` is refused: GitHub does not sign \
                                 X-GitHub-Delivery, so a copy of an event sent again under a new \
@@ -504,6 +526,7 @@ pub(crate) fn hook_of(
         tolerance_ms,
         keep_ms,
         ceiling: ceiling as usize,
+        delivery: key == Some(true),
     })
 }
 
@@ -965,6 +988,15 @@ fn take(
         key: None,
         why: Some(why.to_string()),
     };
+    // A hook kept with `key delivery`: refused only once its event verified,
+    // so a forger is told nothing of it, and before anything of the event
+    // is read or keyed.
+    if hook.delivery {
+        return refused(
+            Response::error(409, KEYED_BY_DELIVERY),
+            "a hook kept with `key delivery`",
+        );
+    }
     // Only now is the content type asked: a forger is told nothing of it.
     let json = req.header("content-type").is_some_and(|t| {
         let media = t.split(';').next().unwrap_or("").trim();
@@ -2236,6 +2268,30 @@ mod tests {
         // A server's lower `--max-body` is a hook's ceiling unless given.
         let low = Hooks::read("a github /run/2\n", read_secret, 512 << 10).unwrap();
         assert_eq!(low.get("a").unwrap().ceiling, 512 << 10);
+        assert!(!h.get("b").unwrap().delivery);
+    }
+
+    /// `key delivery` in a set a node kept -- 0.2.0's -- reads, the hook
+    /// marked, where a line refuses it; on another scheme's hook it is
+    /// refused kept or not, as 0.2.0 refused it.
+    #[test]
+    fn a_kept_sets_key_delivery_reads_and_is_marked() {
+        let key = HmacKey::new(b"stand-in");
+        let made = |line: &str, kept: bool| {
+            let words: Vec<&str> = line.split(' ').collect();
+            hook_of(&words, &[], &read_secret, CEILING, &key, kept)
+        };
+        let h = made("a github /run/2 key delivery", true).unwrap();
+        assert!(h.delivery);
+        assert!(!made("a github /run/2 key body", true).unwrap().delivery);
+        assert!(!made("a github /run/2", true).unwrap().delivery);
+        let refused = made("a github /run/2 key delivery", false).err().unwrap();
+        assert!(
+            refused.contains("does not sign X-GitHub-Delivery"),
+            "{refused}"
+        );
+        let other = made("a stripe file:x key delivery", true).err().unwrap();
+        assert!(other.contains("`github` hook's"), "{other}");
     }
 
     #[test]

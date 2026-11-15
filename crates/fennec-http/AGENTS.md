@@ -54,7 +54,9 @@ file: its tag covers the file's id -- 16 bytes of that randomness after
 the magic (`FENECSL\x02`, `seal::FileId`) -- its place and whether it is
 the last, so no frame of another file under the key opens in it. A
 version 1 file (no id: 0.1.7 to 0.2.0) still opens and a segment of one
-goes on as one; nothing new is begun so. A later version is refused by its
+goes on as one; nothing new is begun so. Only a key that sealed none is
+free of a version 1 file spliced from others' frames: the docs say to
+change keys. A later version is refused by its
 number, and what a tag covers changes only with the magic's version byte.
 
 ### Quotas and retries
@@ -158,7 +160,9 @@ or a tenant's `<t>.hooks` (fennec-shard's rule), never the database's, an
 archive's, a log's, a trace's or an answer's but `hook-secrets`'. An
 event's key is a value its signature covers -- GitHub's its body's digest,
 never `X-GitHub-Delivery`, which nothing signs (`key delivery` refused at
-the start) -- kept more than twice the tolerance and `SKEW_MS`. A sender is
+the start and at a hook's `PUT`; a set 0.2.0 kept with it reads whole,
+that hook's verified events refused 409 naming `key body`,
+`Hook::delivery`) -- kept more than twice the tolerance and `SKEW_MS`. A sender is
 told 2xx only once its event
 is durable whatever `--sync` says (`hooks::taken` flushes as `--sync
 always` does), and a standby holds it (`Feed::standby_sent`, an archiver's

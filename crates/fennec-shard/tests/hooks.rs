@@ -843,3 +843,76 @@ fn a_set_not_read_back_records_every_copy_behind() {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+/// A set 0.2.0 kept with a `github` hook keyed `key delivery` goes with its
+/// tenant through a move: the target's `hook-secrets` `PUT` reads it, so
+/// the move is not undone -- it was, 502 "its hook secrets not taken",
+/// while that `PUT` refused it -- the hook kept as it was on the target and
+/// the new replica, its other hook armed there, its own verified events
+/// refused (409) naming `key body`. A new `key delivery` is refused through
+/// the router as at the node.
+#[test]
+fn a_set_kept_with_key_delivery_moves_with_its_tenant() {
+    let (nodes, port) = three("delivery");
+    create(port, "acme", "n1");
+    assert_eq!(set_hook(port, "acme", "stripe", "whsec_acme").0, 200);
+    let pushes = |key: &str| {
+        let body = format!(r#"{{"scheme":"github","secrets":["gh"],"key":"{key}"}}"#);
+        call(port, "PUT", "/_shard/tenants/acme/hooks/pushes", &[], &body)
+    };
+    let (status, body, _) = pushes("delivery");
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("does not sign X-GitHub-Delivery"), "{body}");
+    let (status, body, _) = pushes("body");
+    assert_eq!(status, 200, "{body}");
+    let (primary, replica) = placed(port, "acme");
+    let replica = replica.expect("a replica of its own");
+    let held = version_on(by_name(&nodes, &primary), "acme");
+    assert!(held.is_some());
+    // Each copy holding the set as 0.2.0 kept it: the version the
+    // directory records, the hook keyed `delivery`.
+    for name in [&primary, &replica] {
+        let nd = by_name(&nodes, name);
+        let token = format!("Bearer adm-delivery{}", &name[1..]);
+        let auth = [("Authorization", token.as_str())];
+        let target = "/_admin/tenants/acme/hook-secrets";
+        let (status, set, _) = call(nd.port, "GET", target, &auth, "");
+        assert_eq!(status, 200);
+        let kept = set.replace(r#""key":"body""#, r#""key":"delivery""#);
+        assert_ne!(kept, set);
+        let (status, body, _) = call(nd.port, "PUT", target, &auth, &kept);
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(version_on(nd, "acme"), held);
+    }
+
+    let to = ["n2", "n3"].into_iter().find(|n| *n != replica).unwrap();
+    let (status, body, _) = call(
+        port,
+        "POST",
+        "/_shard/tenants/acme/move",
+        &[],
+        &format!(r#"{{"to":"{to}"}}"#),
+    );
+    assert_eq!(status, 200, "{body}");
+    let target = by_name(&nodes, to);
+    assert_eq!(version_on(target, "acme"), held);
+    let sidecar = std::fs::read_to_string(target.dir.join("acme.hooks")).unwrap();
+    assert!(sidecar.contains(r#""key":"delivery""#) && sidecar.contains("whsec_acme"));
+    let (_, replica) = placed(port, "acme");
+    let replica = replica.expect("a replica after the move");
+    assert_eq!(version_on(by_name(&nodes, &replica), "acme"), held);
+
+    let (status, body, _) = event(port, "acme", "stripe", "whsec_acme", "evt_1", "o-1");
+    assert_eq!(status, 200, "{body}");
+    let push = r#"{"sha":"abc123"}"#;
+    let mac = hmac_sha256(b"gh", push.as_bytes());
+    let sig: String = mac.iter().map(|b| format!("{b:02x}")).collect();
+    let sig = format!("sha256={sig}");
+    let headers = [
+        ("Content-Type", "application/json"),
+        ("X-Hub-Signature-256", sig.as_str()),
+    ];
+    let (status, body, _) = call(port, "POST", "/t/acme/_hooks/pushes", &headers, push);
+    assert_eq!(status, 409, "{body}");
+    assert!(body.contains("key body"), "{body}");
+}

@@ -45,8 +45,13 @@ fn scratch(tag: &str) -> PathBuf {
 /// A node of tenants, its admin token `adm`, every refusal waiting
 /// nothing; replicating its tenants where `replicated`.
 fn node(tag: &str, replicated: bool) -> Node {
+    serve(scratch(tag), replicated)
+}
+
+/// A node as [`node`] makes one, over `dir`: started again over the
+/// directory a node shut down left.
+fn serve(dir: PathBuf, replicated: bool) -> Node {
     fennec_http::audit::set_delay(0);
-    let dir = scratch(tag);
     let mut tenants = Tenants::new(&dir).expect("dir");
     if replicated {
         tenants = tenants.with_replication(Replicated {
@@ -172,6 +177,26 @@ fn event(port: u16, path: &str, secret: &str, id: &str, order: &str) -> Res {
         &[
             ("Content-Type", "application/json"),
             ("Stripe-Signature", &sig),
+        ],
+        body.as_bytes(),
+    )
+}
+
+/// `body`, signed as GitHub signs a delivery under `secret`, sent to
+/// `path` as a `push` under one `X-GitHub-Delivery`.
+fn github(port: u16, path: &str, secret: &str, body: &str) -> Res {
+    let mac = hmac_sha256(secret.as_bytes(), body.as_bytes());
+    let hex: String = mac.iter().map(|b| format!("{b:02x}")).collect();
+    let sig = format!("sha256={hex}");
+    call(
+        port,
+        "POST",
+        path,
+        &[
+            ("Content-Type", "application/json"),
+            ("X-Hub-Signature-256", &sig),
+            ("X-GitHub-Event", "push"),
+            ("X-GitHub-Delivery", "72d3162e-cc78-11e3-81ab-4c9367dc0958"),
         ],
         body.as_bytes(),
     )
@@ -869,4 +894,176 @@ fn a_set_is_bounded_and_a_frozen_tenants_takes_no_change() {
     assert_eq!(r.status, 200, "{}", r.body);
     let r = admin(n.port, "DELETE", "/_admin/tenants/acme/hooks/h1", "");
     assert_eq!(r.status, 200, "{}", r.body);
+}
+
+/// A set 0.2.0 saved with a `github` hook keyed `key delivery` -- which a
+/// hook's `PUT` and a hooks file refuse now -- still reads as the node
+/// starts again: every secret kept, its other hook armed, the export
+/// writing `delivery` back so a copy and a move carry it, and each event of
+/// that hook that verifies refused (409) naming `key body`, a forged one
+/// the one 401 any forged event is, until one `PUT` with `key body` sets it
+/// again. The first cut of the refusal read the set as one that does not
+/// read and removed the sidecar, the tenant's every secret with it.
+#[test]
+fn a_set_saved_with_key_delivery_survives_a_restart_its_hook_refused_until_set_again() {
+    let n = node("delivery", false);
+    tenant(n.port, "acme");
+    for q in [
+        "create collection pushes (sha text)",
+        "create statement pushed($sha text from event.sha) on hook pushes as insert pushes \
+         {sha: $sha}",
+    ] {
+        let r = query(n.port, "acme", q);
+        assert_eq!(r.status, 200, "{q}: {}", r.body);
+    }
+    const GH: &str = "a word its user chose";
+    let pushes = |port: u16, key: &str| {
+        admin(
+            port,
+            "PUT",
+            "/_admin/tenants/acme/hooks/pushes",
+            &format!(r#"{{"scheme":"github","secrets":["{GH}"],"key":"{key}"}}"#),
+        )
+    };
+    assert_eq!(set_secret(n.port, "acme", "whsec_acme").status, 200);
+    assert_eq!(pushes(n.port, "body").status, 200);
+    let held = n.tenants.hooks().version("acme");
+    assert!(held.is_some());
+    // The sidecar as 0.2.0 wrote it for `key delivery`, in the layout it
+    // shares with this one, the node stopped: its tenant closed, so the
+    // node started again over the directory opens it.
+    assert_eq!(n.tenants.close_idle(Duration::ZERO), 1);
+    n.tenants.shutdown();
+    let sidecar = n.dir.join("acme.hooks");
+    let text = std::fs::read_to_string(&sidecar).unwrap();
+    assert_eq!(text.matches(r#""key":"body""#).count(), 1);
+    let saved = text.replace(r#""key":"body""#, r#""key":"delivery""#);
+    std::fs::write(&sidecar, &saved).unwrap();
+
+    let again = serve(n.dir.clone(), false);
+    assert_eq!(
+        again.tenants.hooks().version("acme"),
+        held,
+        "read, not put away"
+    );
+    assert_eq!(std::fs::read_to_string(&sidecar).unwrap(), saved);
+    let export = admin(again.port, "GET", "/_admin/tenants/acme/hook-secrets", "");
+    assert_eq!(export.status, 200, "{}", export.body);
+    for part in ["whsec_acme", GH, r#""key":"delivery""#] {
+        assert!(export.body.contains(part), "{part} not exported");
+    }
+    let listing = admin(again.port, "GET", "/_admin/tenants/acme/hooks", "");
+    assert!(
+        listing.body.contains(r#""key":"delivery""#),
+        "{}",
+        listing.body
+    );
+
+    // Its other hook is armed.
+    let taken = event(
+        again.port,
+        "/t/acme/_hooks/stripe",
+        "whsec_acme",
+        "evt_1",
+        "o-1",
+    );
+    assert_eq!(taken.status, 200, "{}", taken.body);
+    // The `delivery` hook's verified event: refused naming `key body`,
+    // nothing run; a forged one is the 401 of a hook that is not there.
+    let push = r#"{"sha":"abc123"}"#;
+    let refused = github(again.port, "/t/acme/_hooks/pushes", GH, push);
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert!(refused.body.contains("key body"), "{}", refused.body);
+    assert!(!refused.body.contains(GH), "{}", refused.body);
+    let forged = github(again.port, "/t/acme/_hooks/pushes", "a guess", push);
+    let nosuch = github(again.port, "/t/acme/_hooks/nosuch", GH, push);
+    assert_eq!(nosuch.status, 401, "{}", nosuch.body);
+    assert_eq!((forged.status, &forged.body), (401, &nosuch.body));
+    let count = |port: u16| query(port, "acme", "get pushes count").body;
+    assert!(count(again.port).contains(r#""count":0"#));
+
+    // A change of its other hook keeps it as it was kept.
+    assert_eq!(set_secret(again.port, "acme", "whsec_acme").status, 200);
+    let text = std::fs::read_to_string(&sidecar).unwrap();
+    assert!(text.contains(r#""key":"delivery""#) && text.contains(GH));
+    // `key delivery` is refused at a hook's `PUT` still; `key body` sets
+    // it again, its events taken.
+    let r = pushes(again.port, "delivery");
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert!(
+        r.body.contains("does not sign X-GitHub-Delivery"),
+        "{}",
+        r.body
+    );
+    assert_eq!(pushes(again.port, "body").status, 200);
+    let taken = github(again.port, "/t/acme/_hooks/pushes", GH, push);
+    assert_eq!(taken.status, 200, "{}", taken.body);
+    assert!(count(again.port).contains(r#""count":1"#));
+    let text = std::fs::read_to_string(&sidecar).unwrap();
+    assert!(!text.contains("delivery") && text.contains("whsec_acme"));
+}
+
+/// A sidecar that does not read -- cut short by hand, of a later layout --
+/// is set aside as the node starts, under a name nothing reads, never
+/// removed nor written over: it may hold the only copy of a secret, which
+/// no router keeps. Its hooks answer 401 until set again, a `PUT` writing a
+/// set of its own beside it; one naming another file is put away, as
+/// `a_set_left_behind_never_arms_a_later_tenant_of_the_name` holds.
+#[test]
+fn a_sidecar_that_does_not_read_is_set_aside_never_removed() {
+    let n = node("unread", false);
+    tenant(n.port, "acme");
+    assert_eq!(set_secret(n.port, "acme", "whsec_acme").status, 200);
+    n.tenants.close_idle(Duration::ZERO);
+    n.tenants.shutdown();
+    let sidecar = n.dir.join("acme.hooks");
+    let text = std::fs::read_to_string(&sidecar).unwrap();
+    let set = text.find("\n{").unwrap() + 1;
+    let cut = text[..set + (text.len() - set) / 2].to_string();
+    std::fs::write(&sidecar, &cut).unwrap();
+
+    let again = serve(n.dir.clone(), false);
+    assert_eq!(again.tenants.hooks().version("acme"), None);
+    assert!(!sidecar.exists(), "not read as the tenant's");
+    let aside = n.dir.join("acme.hooks.unread");
+    assert_eq!(
+        std::fs::read_to_string(&aside).unwrap(),
+        cut,
+        "set aside whole"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&aside).unwrap();
+        assert_eq!(mode.permissions().mode() & 0o777, 0o600);
+    }
+    let refused = event(
+        again.port,
+        "/t/acme/_hooks/stripe",
+        "whsec_acme",
+        "evt_1",
+        "o-1",
+    );
+    assert_eq!(refused.status, 401, "{}", refused.body);
+    // Set again: a set of its own, the one set aside untouched.
+    assert_eq!(set_secret(again.port, "acme", "whsec_again").status, 200);
+    assert_eq!(std::fs::read_to_string(&aside).unwrap(), cut);
+
+    // One of a later layout: set aside under the next free name.
+    again.tenants.close_idle(Duration::ZERO);
+    again.tenants.shutdown();
+    let later = std::fs::read_to_string(&sidecar)
+        .unwrap()
+        .replacen("1 ", "2 ", 1);
+    std::fs::write(&sidecar, &later).unwrap();
+    let third = serve(n.dir.clone(), false);
+    assert_eq!(third.tenants.hooks().version("acme"), None);
+    assert!(!sidecar.exists());
+    assert_eq!(
+        std::fs::read_to_string(&aside).unwrap(),
+        cut,
+        "never written over"
+    );
+    let next = n.dir.join("acme.hooks.unread.2");
+    assert_eq!(std::fs::read_to_string(next).unwrap(), later);
 }

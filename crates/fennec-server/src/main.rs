@@ -211,7 +211,7 @@ usage: fennec-server [options]
       --hooks <path>        take webhook events at POST /_hooks/<name> (--file
                             only): a line a hook, `<name> <scheme> <secret
                             file> [<secret file>] [keep <d>] [tolerance <d>]
-                            [key body|delivery] [max-body <size>]`, the
+                            [key body] [max-body <size>]`, the
                             scheme stripe, github or standard (Standard
                             Webhooks, Svix), two secret files while a secret
                             rolls. Each event is verified by its signature

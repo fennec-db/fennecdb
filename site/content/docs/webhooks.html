@@ -155,6 +155,26 @@ time either: once <code>keep</code> (7 days unless the line says
 otherwise) has passed, a captured body can be sent again and is taken
 again. Where that matters, keep keys longer (<code>keep 90d</code>).</p>
 
+<p id="key-delivery-kept">A tenant's hook set with <code>key delivery</code>
+before the upgrade is kept, not lost: its node reads the tenant's set as
+it was, every secret in it, and the tenant's other hooks go on taking
+their events. That hook's events are refused: one whose signature
+verifies is answered <code>409</code>, saying to set the hook again with
+<code>key body</code>, and runs nothing; a forged one is the
+<code>401</code> any forged event is. The node logs each such hook as it
+starts, and its listing says <code>"key":"delivery"</code>. Set it again
+with the same secret and <code>key body</code>, or no <code>key</code>,
+and redeliver from GitHub's log what was refused meanwhile:</p>
+
+<pre data-lang="bash">curl -X PUT https://router.example.com/_shard/tenants/acme/hooks/pushes \
+  -H "Authorization: Bearer $ROUTER_TOKEN" \
+  -d '{"scheme": "github", "secrets": ["..."], "key": "body"}'</pre>
+
+<p>Until then the set moves, fails over and is copied with its tenant as
+it was. An event taken before under its delivery id is keyed by its body
+from then on, so a redelivery of one taken before the upgrade is taken once
+more.</p>
+
 <h2 id="standard">Any sender of Standard Webhooks</h2>
 
 <p>Senders that sign as <a href="https://www.standardwebhooks.com/">Standard
@@ -200,7 +220,7 @@ to write, never the secret's value.</p>
 <tr><td>secret files</td><td>one, or two while a secret rolls: an event verifies under either. The file's trailing newline is not the secret's. An empty file is refused: it would make every signature anyone can compute verify</td></tr>
 <tr><td><code>keep</code></td><td>how long an event's key is kept: 30 days for <code>stripe</code> (Stripe retries for three), 7 for the others. A day at least, and more than twice the tolerance and a minute</td></tr>
 <tr><td><code>tolerance</code></td><td>how far the signed time may be from the server's clock either way: 5 minutes, Stripe's libraries' default; from a second to an hour. <code>github</code> signs no time, and is held to none</td></tr>
-<tr><td><code>key</code></td><td><code>github</code> alone, and <code>body</code> alone: an event is keyed by its body, which its signature covers. <code>delivery</code> is refused (<a href="#github">above</a>)</td></tr>
+<tr><td><code>key</code></td><td><code>github</code> alone, and <code>body</code> alone: an event is keyed by its body, which its signature covers. <code>delivery</code> is refused (<a href="#github">above</a>); a tenant's hook set with it before is kept, its events refused (<a href="#key-delivery-kept">above</a>)</td></tr>
 <tr><td><code>max-body</code></td><td>the largest body taken: 1 MiB unless given (<code>64k</code>, <code>4m</code>), or the server's <code>--max-body</code> where that is lower; at most <code>--max-body</code></td></tr>
 </table>
 
@@ -334,7 +354,7 @@ the request id beside the event's key.</p>
 <tr><td>a read-only server or a replica</td><td>403</td></tr>
 <tr><td>the body not a JSON object; no key, a key past 255 bytes or holding a control character; <code>Fennec-Wait</code></td><td>400</td></tr>
 <tr><td>the key kept: a retry, a duplicate, another body</td><td>as the first was answered, <code>Idempotent-Replayed: true</code></td></tr>
-<tr><td>no statement takes the hook; a statement of the hook that cannot run</td><td>409</td></tr>
+<tr><td>no statement takes the hook; a statement of the hook that cannot run; a tenant's hook kept from 0.2.0 with <code>key delivery</code> (<a href="#key-delivery-kept">above</a>)</td><td>409</td></tr>
 <tr><td>no condition takes the event</td><td>200, <code>{"taken":0}</code>, no key kept</td></tr>
 <tr><td>a parameter missing or of another type; <code>check</code> false</td><td>400, naming the parameter and its path</td></tr>
 <tr><td><code>require</code> unmet</td><td>412, its <code>reason</code></td></tr>

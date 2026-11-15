@@ -3401,8 +3401,10 @@
          ],
          "enum": [
           "body",
+          "delivery",
           null
-         ]
+         ],
+         "description": "A github hook's: body; delivery, 0.2.0's, kept as a set saved with it is, every event of its hook that verifies refused (409) until it is set again with body."
         },
         "max_body": {
          "type": [
