@@ -88,7 +88,8 @@ TARGET=${3:-$here}
 if [ "$TAG" = latest ]; then
     [ -z "${OLD_ASSETS_DIR:-}" ] ||
         die "OLD_ASSETS_DIR holds one release's files: name its tag in place of \`latest\`"
-    tree=$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)
+    # sed quits at the first line, no pipe left to close early under pipefail.
+    tree=$(sed -n 's/^version = "\(.*\)"/\1/p;/^version = /q' "$ROOT/Cargo.toml")
     # Asked once, its failure the script's: inside `for t in $(gh ...)` a
     # failing gh was an empty list, read as "no published release".
     listed=$(gh release list -R "$REPO" --exclude-drafts --exclude-pre-releases \
@@ -216,12 +217,21 @@ echo "release-bins: building fennec-shard from $TAG's sources ($(git -C "$ROOT" 
 cp "$SHARD_TARGET/debug/fennec-shard" "$WORK/installed/bin/fennec-shard"
 
 for b in fennec-server fennec fennec-shard; do
-    said=$("$WORK/installed/bin/$b" --version 2>&1 | head -1)
+    said=$("$WORK/installed/bin/$b" --version 2>&1) || true
+    said=${said%%$'\n'*}
     [ "$said" = "$b $VERSION" ] || die "$b of $TAG says \"$said\", not $b $VERSION: nothing installed in $OUT"
 done
+# Copied into a directory beside OUT first, then renamed in: a copy failing
+# part way (a full disk) leaves OUT as it was, not holding some of the three.
 mkdir -p "$OUT"
+STAGE=$(mktemp -d "$OUT.stage.XXXXXX")
+STAGED=$STAGE
+trap 'rm -rf "$STAGED"; cleanup' EXIT
 for b in fennec-server fennec fennec-shard; do
-    cp "$WORK/installed/bin/$b" "$OUT/$b.new"
-    mv -f "$OUT/$b.new" "$OUT/$b"
+    cp "$WORK/installed/bin/$b" "$STAGE/$b"
 done
+for b in fennec-server fennec fennec-shard; do
+    mv -f "$STAGE/$b" "$OUT/$b"
+done
+rm -rf "$STAGE"
 echo "release-bins: $TAG's fennec-server, fennec and fennec-shard in $OUT"

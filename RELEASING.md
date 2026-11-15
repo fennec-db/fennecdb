@@ -558,22 +558,27 @@ and the first 1.x release's notes name them under their upgrade heading:
    fails whole (`a value nests more than 64 levels deep`) -- `count`, a read
    by another row's id and the fields stored before the deep one still
    answer; a `del` or a `set` of the row is refused; `alter ... drop` of
-   the field is taken but does not help, and an index built over a later
-   field stays refused in the same words. Backups, images and a compact
-   without dropped fields carry the row unchanged; a replica takes it in an
-   image, holds it and refuses its reads alike, and connects again, 100 ms
-   to 5 s apart, while a write touching it cannot be applied. On 1.x alone
-   the way out is to read out the readable rows, drop the collection and
-   make it again.
+   the field is taken and helps only where no field is declared after it
+   (every skip of a dropped place is depth-bound as a read is, so a field
+   after it, and a `del` of the row, are refused in the same words), and
+   an index built over a later field stays refused. Backups and images
+   carry the row unchanged; a replica takes it in an image, holds
+   it and refuses its reads alike, and connects again, 100 ms to 5 s
+   apart, while a write touching it cannot be applied. On 1.x alone the
+   way out is, where the field is its collection's last, to drop it and
+   `del` the row; otherwise to read out the readable rows, drop the
+   collection and make it again.
 2. A type nested past 64 lists,
 3. a point's type under 64 lists, and
-4. a schema's number past its range (`m` past 32 767, a `vector<N>` past
-   10^9 or of 0, a list of such vectors): the whole file is refused at the
-   open, and only v0.2.0 can rewrite it.
+4. a schema's number past its range (`m` under 2 or past 32 767, a
+   `vector<N>` or a `sparse<N>` of 0 or past 10^9, a list of such
+   vectors): the whole file is refused at the open, and only v0.2.0 can
+   rewrite it.
 
-The advice they give: rewrite such values with v0.2.0 before upgrading,
-and do not drop a field of a collection holding such a row and compact it
-on 1.x. `compat.yml` drives the first two with v0.2.0's own binaries.
+The advice they give: rewrite such values with v0.2.0 before upgrading.
+`compat.yml` drives the first two with v0.2.0's own binaries (a3, a3b; the
+engine's tests that hold all four are named in
+`docs/design/compatibility.md#what-1x-does-not-read-of-020s-files`).
 
 The previous minor gets security fixes for six months after the next
 minor's release; a `release/1.N` branch is cut when a backport needs one

@@ -101,22 +101,24 @@ recursion the limit of 64 levels closed:</p>
     that row fails whole with <code>a value nests more than 64 levels
     deep</code>; <code>count</code>, a read of another row by its id, and the
     fields stored before the deep one still answer. A <code>del</code> or a
-    <code>set</code> of the row is refused; dropping the field is taken but
-    does not help, and an index over a later field stays refused. Backups,
-    a replica's image and a compact with no dropped field carry the row
-    unchanged; a replica holds it and refuses its reads alike. On 1.x alone the
-    way out is to read out the readable rows, drop the collection and make it
-    again.</li>
+    <code>set</code> of the row is refused. Dropping the field is taken and
+    helps only where no field is declared after it: a field after it, and a
+    <code>del</code> of the row, are still refused in the same words, and so
+    is an index over a later field. Backups and a replica's image
+    carry the row unchanged; a replica holds it and refuses its reads
+    alike. On 1.x alone the way out is, where the field is the collection's
+    last, to drop it and delete the row; otherwise to read out the
+    readable rows, drop the collection and make it again.</li>
   <li><b>A type nested past 64 lists</b>,</li>
   <li><b>a point's type under 64 lists</b>, and</li>
-  <li><b>a schema's number past its range</b> (an HNSW <code>m</code> past
-    32 767, a <code>vector&lt;N&gt;</code> past 10<sup>9</sup> or of 0, a list
-    of such vectors): the whole file is refused at the open, and only v0.2.0
-    can rewrite it.</li>
+  <li><b>a schema's number past its range</b> (an HNSW <code>m</code> under 2
+    or past 32 767, a <code>vector&lt;N&gt;</code> or a
+    <code>sparse&lt;N&gt;</code> of 0 or past 10<sup>9</sup>, a list of such
+    vectors): the whole file is refused at the open, and only v0.2.0 can
+    rewrite it.</li>
 </ol>
 
-<p>Rewrite such values with v0.2.0 before upgrading. Do not drop a field of a
-collection holding such a row and then compact it on 1.x.</p>
+<p>Rewrite such values with v0.2.0 before upgrading.</p>
 
 <h2>The grammar epoch</h2>
 
