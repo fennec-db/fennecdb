@@ -958,7 +958,7 @@ pgvector-up:
 	@echo "postgres://postgres:fennec@127.0.0.1:55432/fennecbench"
 
 pgvector-down:
-	-docker rm -f fennecbench-pg
+	-docker rm -f -v fennecbench-pg
 
 ## TLS on in the server `make pgvector-up` started (PG=<container> another),
 ## with fennec-wire's test certificates -- a CA of their own, `localhost` --
