@@ -516,6 +516,19 @@ what this build does with them (`ON_PURPOSE`,
 `del` finding it is refused in the same words, a drop of its field and a
 compact work, the compact copying the row as it is.
 
+*A point is a level, as its type is.* A point's bytes (`TAG_GEO`) read as
+the list `[lon, lat]`, which `DataType::depth` counts as a level, but the
+decoder counted none: 64 lists around a point read as a value 65 levels
+deep, whose own bytes written back were refused -- the `codec` target's
+finding, CI's `fuzz-smoke` red from the day the fuzzer landed. The point
+is a function of its own now (`codec::decode_point`, `#[inline(never)]`,
+as a list's and an object's read is, `decode_at` handing the depth on
+untested) refused past the limit, and the skip tests it in its arm. A
+write puts a point only as a field's whole value, a level down, so no file
+a write made reads otherwise. A sparse vector's dimension and the steps
+between its indexes are `u32`s, read whole or refused
+(`codec::get_within`): `as u32` read a dimension of 2^32 + 16 as 16.
+
 A length counting items of several bytes -- a vector's `f32`s, a
 half-precision vector's halves, a sparse vector's weights -- is multiplied
 saturating, and `take` refuses what passes `usize` as longer than the

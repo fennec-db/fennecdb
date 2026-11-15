@@ -2166,17 +2166,23 @@ jobs:
 
   # docs/design/conventions.md#fuzzing: every parser of untrusted bytes --
   # an HTTP request, JSON, FennecQL, the codec, a .fennec file's open and a
-  # replica's apply, a SQLite file -- fuzzed for 30 s each, built with
-  # AddressSanitizer and LLVM's coverage counters on the Makefile's dated
-  # nightly (a nightly only here and in fuzz.yml). The test job runs the same
-  # targets over their seeds in a plain build; fuzz.yml gives each half an
-  # hour a week. It runs on main's pushes too, whose logs and artifacts
-  # anyone reads: a finding keeps no input and says no backtrace, only the
-  # recipe `fennec-fuzz reproduce` makes its input again from (fuzz.yml).
+  # replica's apply, a SQLite file -- fuzzed for a count of runs each (about
+  # 30 s of this runner), built with AddressSanitizer and LLVM's coverage
+  # counters on the Makefile's dated nightly (a nightly only here and in
+  # fuzz.yml). A count, not a time: the same commit hands each target the
+  # same inputs on any runner, so the job passes or fails by the commit,
+  # never by the runner's speed, and anyone makes a finding again with
+  # `make fuzz-smoke` -- which is why it says a panic's message and an
+  # ASan report here, where fuzz.yml's runs, each week's own, say only the
+  # recipe. The test job runs the same targets over their seeds in a plain
+  # build; fuzz.yml gives each half an hour a week. Each target is capped
+  # at six minutes of CPU time (`SMOKE_CAP`), so a commit slowing every run
+  # ends at a named target's cap before this timeout: six just under it
+  # are 36 minutes, and the build a minute and a half.
   fuzz-smoke:
-    name: fuzz-smoke (each target 30 s under ASan)
+    name: fuzz-smoke (each target a count of runs under ASan)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:
@@ -2187,18 +2193,16 @@ jobs:
       - name: Install the fuzzer's nightly, pinned to a date
         run: make fuzz-toolchain
 
-      - name: Each target for 30 s under AddressSanitizer
-        env:
-          ASAN_OPTIONS: log_path=${{ runner.temp }}/asan
-        run: make fuzz-smoke FUZZ_SECONDS=30 FUZZ_FLAGS="--private --corpus none"
+      - name: Each target for its count of runs under AddressSanitizer
+        run: make fuzz-smoke
 
       - name: Say how to make what it found again
         if: failure()
         run: |
-          echo "fennec-fuzz found something at $GITHUB_SHA. Its input is kept nowhere: check out"
-          echo "$GITHUB_SHA, run 'make fuzz-seeds' and 'make fuzz ASAN=1', then the line"
-          echo "'fennec-fuzz reproduce ...' above with target/<host>/fuzz/fennec-fuzz"
-          echo "(docs/design/conventions.md#fuzzing)."
+          echo "fennec-fuzz found something at $GITHUB_SHA: 'make fuzz-smoke' on that commit"
+          echo "makes the same inputs, and the line 'fennec-fuzz reproduce ...' above, run"
+          echo "with target/<host>/fuzz/fennec-fuzz after 'make fuzz ASAN=1', makes the one"
+          echo "that ended it (docs/design/conventions.md#fuzzing)."
 
   # The native library an app links (crates/fennec-ffi) on Android and the
   # JVM, and its Kotlin, Dart and Flutter bindings: the Kotlin library's

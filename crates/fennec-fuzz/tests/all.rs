@@ -1,7 +1,7 @@
 //! The fuzzer's targets built as a plain build makes them -- no sanitizer,
 //! no coverage -- and run over their seeds and a few hundred of their
-//! mutations: what CI's test job runs, beside the `fuzz-smoke` job's half
-//! minute of each under AddressSanitizer.
+//! mutations: what CI's test job runs, beside the `fuzz-smoke` job's count
+//! of runs of each under AddressSanitizer.
 
 use fennec_fuzz::targets::TARGETS;
 use fennec_fuzz::{guard, Inputs, Options, Outcome, Recipe, Target};
@@ -29,6 +29,7 @@ fn options(crashes: PathBuf, runs: u64) -> Options {
         corpus: None,
         crashes,
         timeout: Duration::from_secs(120),
+        cap: None,
         max_alloc: 2048 << 20,
         quiet: true,
         private: false,
@@ -56,6 +57,7 @@ static BOOM: Target = Target {
     name: "boom",
     about: "panics on an input holding `boom`",
     max_len: 64,
+    smoke: 1000,
     seeds: || vec![b"bo".to_vec(), b"om".to_vec(), b"boom".to_vec()],
     dictionary: &[],
     run: |b| {
@@ -86,6 +88,7 @@ static HALVES: Target = Target {
     name: "halves",
     about: "panics on an input holding `boom`, seeded with its halves",
     max_len: 64,
+    smoke: 1000,
     seeds: || vec![b"bo".to_vec(), b"om".to_vec(), b"a longer seed".to_vec()],
     dictionary: &[],
     run: |b| {
@@ -157,6 +160,7 @@ static ABORTS: Target = Target {
     name: "aborts",
     about: "aborts on an input holding `boom`, seeded with its halves",
     max_len: 64,
+    smoke: 1000,
     seeds: || vec![b"bo".to_vec(), b"om".to_vec(), b"a longer seed".to_vec()],
     dictionary: &[],
     run: |b| {
@@ -167,7 +171,7 @@ static ABORTS: Target = Target {
 };
 
 /// Whatever ends a run says its recipe: an abort, from its handler with
-/// system calls alone, and a panic; and a private run -- CI's -- says the
+/// system calls alone, and a panic; and a private run -- the weekly one's -- says the
 /// recipe alone, never the panic's message. Each fuzzes in a child, this
 /// test binary run again, its standard error read and its recipe made
 /// into the input again.
@@ -299,6 +303,131 @@ fn a_runs_input_follows_the_runs_kept_before_it() {
         );
     }
     assert!(fennec_fuzz::reproduce(&HALVES, &recipe(2999, Vec::new())).is_err());
+}
+
+static HANGS: Target = Target {
+    name: "hangs",
+    about: "never returns on an input holding `boom`, seeded with its halves",
+    max_len: 64,
+    smoke: 1000,
+    seeds: || vec![b"bo".to_vec(), b"om".to_vec(), b"a longer seed".to_vec()],
+    dictionary: &[],
+    run: |b| {
+        if b.windows(4).any(|w| w == b"boom") {
+            loop {
+                std::thread::park();
+            }
+        }
+    },
+};
+
+/// A run past its timeout ends the fuzzer, its input written by the
+/// handler of the timer the run set -- no thread watches beside the runs,
+/// whose code the coverage would count -- and its recipe said, which
+/// makes the input again. The fuzzer runs in a child, this test binary run
+/// again; the child's end is the event waited for.
+#[test]
+fn a_run_past_its_timeout_ends_the_fuzzer_and_its_input_is_kept() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    const TEST: &str = "a_run_past_its_timeout_ends_the_fuzzer_and_its_input_is_kept";
+    if std::env::var_os("FENNEC_FUZZ_CHILD").is_some() {
+        let dir = PathBuf::from(std::env::var("FENNEC_FUZZ_CHILD_DIR").unwrap());
+        let mut opts = options(dir, 1_000_000);
+        opts.timeout = Duration::from_millis(200);
+        let outcome = fennec_fuzz::fuzz(&HANGS, opts);
+        panic!("the child went on: {outcome:?}");
+    }
+    let dir = scratch("child-hangs");
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([TEST, "--exact", "--nocapture", "--test-threads=1"])
+        .env("FENNEC_FUZZ_CHILD", "hangs")
+        .env("FENNEC_FUZZ_CHILD_DIR", &dir)
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert!(err.contains("a run took more than 200 ms"), "{err}");
+    let kept: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    let input = std::fs::read(&kept[0]).unwrap();
+    assert!(input.windows(4).any(|w| w == b"boom"), "{input:?}");
+    let command = err
+        .lines()
+        .skip_while(|l| !l.ends_with("made again by"))
+        .nth(1)
+        .unwrap_or_else(|| panic!("no recipe: {err}"));
+    let flags: Vec<String> = command
+        .split_once("fennec-fuzz reproduce hangs ")
+        .unwrap_or_else(|| panic!("{command}"))
+        .1
+        .split_whitespace()
+        .map(String::from)
+        .collect();
+    let (recipe, _) = Recipe::from_args(&flags).unwrap();
+    assert_eq!(fennec_fuzz::reproduce(&HANGS, &recipe).unwrap(), input);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Spends a fixed sum of work a run, whatever the input -- CPU time, not
+/// the wall's, so a loaded machine spends the same -- as a commit that
+/// slowed every run would.
+static SLOW: Target = Target {
+    name: "slow",
+    about: "a few milliseconds of work a run, whatever the input",
+    max_len: 64,
+    smoke: 1000,
+    seeds: || vec![b"x".to_vec()],
+    dictionary: &[],
+    run: |_| {
+        let mut h = 0u64;
+        for i in 0..2_000_000u64 {
+            h = std::hint::black_box(h.wrapping_mul(31).wrapping_add(i));
+        }
+        std::hint::black_box(h);
+    },
+};
+
+/// A fuzzer past its cap of CPU time ends failing, by the handler of a
+/// timer of the process's CPU time -- no thread watches beside the runs --
+/// saying the target and the run it reached of its count, where a count
+/// of runs alone ran on to its job's timeout, naming no target. The cap is
+/// a bound, never a pass: without it the child would end its 1 000 runs
+/// and say it went on. The child's end is the event waited for.
+#[test]
+fn a_fuzzer_past_its_cap_of_cpu_time_ends_naming_the_target_and_its_run() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    const TEST: &str = "a_fuzzer_past_its_cap_of_cpu_time_ends_naming_the_target_and_its_run";
+    if std::env::var_os("FENNEC_FUZZ_CHILD").is_some() {
+        let dir = PathBuf::from(std::env::var("FENNEC_FUZZ_CHILD_DIR").unwrap());
+        let mut opts = options(dir, 1000);
+        opts.cap = Some(Duration::from_millis(300));
+        let outcome = fennec_fuzz::fuzz(&SLOW, opts);
+        panic!("the child went on: {outcome:?}");
+    }
+    let dir = scratch("child-slow");
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([TEST, "--exact", "--nocapture", "--test-threads=1"])
+        .env("FENNEC_FUZZ_CHILD", "slow")
+        .env("FENNEC_FUZZ_CHILD_DIR", &dir)
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(4), "{err}");
+    let said = err
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("fennec-fuzz: slow: past its cap of 300 ms of CPU time at run ")
+        })
+        .unwrap_or_else(|| panic!("no cap said: {err}"));
+    let (run, rest) = said.split_once(" of ").unwrap_or_else(|| panic!("{said}"));
+    let run: u64 = run.parse().unwrap_or_else(|_| panic!("{said}"));
+    assert!(run < 1000 && rest.starts_with("1000: "), "{said}");
+    // No input kept: the run in flight is one of many that slowed.
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// The weekly run fuzzes every target: its matrix names each, and only

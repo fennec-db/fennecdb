@@ -1169,6 +1169,12 @@
    "kind": "interface",
    "head": "interface ShapeSeed<R = Row<Fields>>",
    "members": {
+    "more": [
+     "more: boolean"
+    ],
+    "part": [
+     "part: number"
+    ],
     "rows": [
      "rows: R[]"
     ],
