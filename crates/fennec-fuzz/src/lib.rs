@@ -118,15 +118,95 @@ pub const RUN_STACK: usize = 8 << 20;
 /// an input another did not.
 pub fn fuzz(target: &'static Target, opts: Options) -> Outcome {
     fennec_core::one_thread();
-    let outcome = std::thread::Builder::new()
+    let _stops = Stops;
+    std::thread::Builder::new()
         .name(format!("fuzz-{}", target.name))
         .stack_size(RUN_STACK)
         .spawn(move || fuzz_here(target, &opts))
         .expect("the run's thread")
         .join()
-        .unwrap_or_else(|_| panic!("the fuzzer itself panicked"));
-    guard::cap(None, 0);
-    outcome
+        .unwrap_or_else(|_| panic!("the fuzzer itself panicked"))
+}
+
+/// Stops the timers a fuzzer sets -- its cap of CPU time, a run's
+/// timeout -- as it is dropped: where [`fuzz`] returns, and where it
+/// unwinds from its thread's panic, which skipped the call after the join
+/// that stopped the cap. Left set, a test binary's tests after it ran
+/// under a timer none of them set, whose handler ends the process.
+struct Stops;
+
+impl Drop for Stops {
+    fn drop(&mut self) {
+        guard::disarm();
+        guard::cap(None, 0);
+    }
+}
+
+/// What `fennec-fuzz` says of how it is run, after a flag that does not
+/// read.
+pub const USAGE: &str = "usage: fennec-fuzz list | names | run <target> [--seconds N] [--runs N] \
+    [--smoke] [--seed N] [--corpus DIR|none] [--crashes DIR] [--timeout-ms N] [--max-alloc-mb N] [--quiet] \
+    [--private] | replay <target> <file>... | reproduce <target> --seed N --start HASH \
+    [--corpus DIR] --run N --fnv HASH --kept RUNS [--out FILE]";
+
+/// The options `fennec-fuzz run <target> <args>` fuzzes `target` with, or
+/// what to say of a flag that does not read. Here rather than in the
+/// binary, so that a test holds `--smoke` -- the flag `make fuzz-smoke`
+/// runs each target with -- to the count and the cap of CPU time it sets
+/// ([`SMOKE_CAP`]).
+pub fn run_options(target: &Target, args: &[String]) -> Result<Options, String> {
+    let root = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/fuzz"));
+    let mut opts = Options {
+        seconds: None,
+        runs: None,
+        seed: 1,
+        corpus: Some(root.join("corpus").join(target.name)),
+        crashes: root.join("crashes"),
+        // Wall time: a loop that never ends is caught at any bound, and at
+        // 10 s a machine at a load of 40 took 8 000 numbers of 1e255, 2.5 s
+        // of a quiet one's under ASan, for a hang.
+        timeout: Duration::from_secs(30),
+        cap: None,
+        max_alloc: 2048 << 20,
+        quiet: false,
+        private: false,
+    };
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        let mut value = || {
+            it.next()
+                .cloned()
+                .ok_or_else(|| format!("{flag} takes a value\n{USAGE}"))
+        };
+        let number = |v: String| -> Result<u64, String> {
+            v.parse()
+                .map_err(|_| format!("{flag} takes a number, not `{v}`"))
+        };
+        match flag.as_str() {
+            "--seconds" => opts.seconds = Some(number(value()?)?),
+            "--runs" => opts.runs = Some(number(value()?)?),
+            "--smoke" => {
+                opts.runs = Some(target.smoke);
+                opts.cap = Some(SMOKE_CAP);
+            }
+            "--seed" => opts.seed = number(value()?)?,
+            "--corpus" => {
+                opts.corpus = match value()? {
+                    v if v == "none" => None,
+                    v => Some(PathBuf::from(v)),
+                }
+            }
+            "--crashes" => opts.crashes = PathBuf::from(value()?),
+            "--timeout-ms" => opts.timeout = Duration::from_millis(number(value()?)?),
+            "--max-alloc-mb" => {
+                opts.max_alloc = (number(value()?)? as usize).saturating_mul(1 << 20)
+            }
+            "--quiet" => opts.quiet = true,
+            "--private" => opts.private = true,
+            other => return Err(format!("unknown flag `{other}`\n{USAGE}")),
+        }
+    }
+    Ok(opts)
 }
 
 /// What a run starts from: the target's seeds, and the inputs a corpus
