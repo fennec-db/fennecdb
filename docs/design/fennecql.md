@@ -1175,13 +1175,14 @@ the old reading answered in a tenth of a second
 (`test_two_base_trees_are_each_built`). Each build is some 154 MB, under
 `target/fennecql-corpus/` or `$FENNECQL_CORPUS_TARGET`: CI's is the
 runner's temp, since the test job's cache saves `target/` and two builds
-were 306 MB of it. Here, at a load of 3.5 on 8 cores, a tree built in 7 to
-10 s, the step against main took 12 s with this tree's build made, and
-the frozen step 0.8 s; the first CI runs give the runner's figure.
+were 306 MB of it. Here, at a load of 3 to 4 on 8 cores, a tree built in
+7 to 10 s, the step against main took 24 s from nothing built and 12 s
+with this tree's build made, and the frozen step 0.8 s; the first CI runs
+give the runner's figure.
 
 *Today.* Against v0.2.0's frozen corpus: 8 804 texts, 26 412 readings,
-every one alike. Against main: 12 285 texts (this tree's and main's),
-36 855 readings, alike. Probes, each made in a copy of this tree: a
+every one alike. Against main (4543fc10): 12 440 texts, this tree's and
+main's, 37 320 readings, alike. Probes, each made in a copy of this tree: a
 `temporary: bool` on `Statement::CreateCollection` and an `Option` on
 `named::Call` read alike against both; `drop collection` with its `if
 exists` ignored fails 6 texts against each; an `and` whose right operand
