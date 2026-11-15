@@ -363,7 +363,25 @@ waiting for PostgreSQL to let its slot go
 the line saying why. A first form of that wait ran on a failure too, up to
 10 s, and a SIGTERM in it outlasted `STOP_WAIT` and exited 0, with a
 checkpoint (`fennec-server`'s
-`a_follower_that_fails_stops_the_server_with_its_code_before_it_waits`). A shutdown writes a
+`a_follower_that_fails_stops_the_server_with_its_code_before_it_waits`). A
+follower whose thread panics goes the same way -- the release profile
+unwinds -- by a guard its thread drops on an unwind too
+(`mirror::Ending`), the code stored first: the thread's end let the wait
+go and nothing more, and the server served a mirror that no longer moved
+and exited 0 at its next shutdown, with a checkpoint
+(`a_follower_that_panics_stops_the_server_with_its_code`). The waits before
+the final sync run one after another: the held writes' answers
+(`HELD_GRACE`, 2 s), the TLS ends (`conn::END_GRACE`, 0.5 s), then what
+`before_shutdown` registered, in its order -- the traces' flush (2 s, where
+tracing is on), the follower's wait (`STOP_WAIT`, 5 s). Each hook is given
+the moment the shutdown began, and the follower's wait counts from there:
+the follower began stopping then, at the same flag, beside the waits
+before it. Counted from its own start, with `--follow` and tracing the
+waits came to 9.7 s with `LOOK`, 0.3 s of docker's 10 left for the final
+sync; now it begins 5.2 s after the signal at most
+(`the_wait_for_the_follower_counts_from_the_shutdowns_start`). A SIGKILL
+past the waits cuts the final sync and the checkpoint: what `--sync` left
+unsynced, and the graph's image, which the next open links again. A shutdown writes a
 checkpoint only once the HTTP thread started (`serving`, unless a stop was
 asked for before that thread was: read after it, the flag was a
 supervisor's answer to the thread's own `listening on` line 1 time in 200

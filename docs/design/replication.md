@@ -739,28 +739,81 @@ the socket, the socket is waited on for the rest (a peek, or rustls taking
 whole records in), so the rest of a message begun, and bytes already
 buffered, no longer wait out the socket's own 30 s timeout a read -- the
 first form of the end looked at its deadline before each message only. The
-`CopyDone`'s write is held to it too. 3 s and not 10 because a stop has to
-have one bound it keeps: `fennec-server`'s shutdown waits `STOP_WAIT`,
-5 s, for its follower to settle and end its stream, so at 10 s the
-shutdown cut off any wait past its own 5 s, the stream closed by the
-exit, and the follower's bound never held there; at 3 s the settle's fsync has 2 s before it, which `mirror.rs` asserts at
-compile time (`END_WAIT` + 1 s < `STOP_WAIT`). The waits before the
-shutdown's final sync -- `HELD_GRACE` 2 s, `END_GRACE` 0.5 s, `STOP_WAIT`
--- come to 7.5 s, inside docker's default 10 s before its SIGKILL (the
-repository's `docker-compose.yml` gives 30 s). `deploy/` runs no
-`--follow` unit: its servers are `--dir` nodes (`TimeoutStopSec=120s`),
-which `--follow` refuses, and its routers are `fennec-shard`.
-`fennec import --follow` stops within those 10 s too. What 3 s waits for: 200 000 rows of a table
-the slot does not publish, decoded through disk, held a stop 0.2 s, a
-million in memory 0.5 to 2 s on a loaded machine; a longer transaction is
-not waited for. Past the bound, or when the wait fails, the follower
-closes the connection and says so in one line (`Event::SlotHeld`, the
-shell's `warning`, the server's `follow:` log line): PostgreSQL releases
-the slot when its walsender next reads the connection, a drop meeting
-`55006` until then, which a follower started again waits out
-(`retryable`). The shell's second ctrl-c (`stop::AGAIN`) ends the wait
-within 50 ms (`client::CUT_LOOK`), the steps before it -- the rest of a
-transaction being applied, the settle's fsync -- still run.
+`CopyDone`'s write is held to it too, its socket's write timeout set to
+what is left before each try, and the `Terminate` of the close after it is
+sent only where the socket takes it at once (`Client::drop`, non-blocking):
+at a full send buffer -- a server reading nothing -- the drop's waited a
+whole wait more, twice the bound, and on a failure it waited with no bound
+at all, before `fennec-server` could store its exit code; the close tells
+the server as much once it reads. 3 s and
+not 10 because a stop has to have one bound it keeps: `fennec-server`'s
+shutdown waits `STOP_WAIT`, 5 s, for its follower to settle and end its
+stream, so at 10 s the shutdown cut off any wait past its own 5 s, the
+stream closed by the exit, and the follower's bound never held there; at
+3 s the settle's fsync has 2 s before it, which `mirror.rs` asserts at
+compile time (`END_WAIT` + 1 s < `STOP_WAIT`). `STOP_WAIT` counts from the
+shutdown's start, as the follower's stop does -- it looks at the same
+flag, within its 200 ms `IDLE_WAIT` -- not from its own: the shutdown's
+waits before its final sync run one after another, `HELD_GRACE` 2 s,
+`END_GRACE` 0.5 s, the traces' flush 2 s where tracing is on, then the
+follower's, and counted from its own start that came after theirs: with
+`--follow` and tracing the waits came to 9.7 s with the syncer's `LOOK`,
+0.3 s of docker's default 10 s before its SIGKILL left for the final sync
+(the first form of this text said 7.5 s, leaving the traces out). Counted
+from the shutdown's start the final sync begins 5.2 s after the signal at
+most, the rest of the 10 s left to it and the checkpoint, whose cutting
+off costs the graph's image, never a write (the repository's
+`docker-compose.yml` gives 30 s). `deploy/` runs no `--follow` unit: its servers are `--dir`
+nodes (`TimeoutStopSec=120s`), which `--follow` refuses, and its routers
+are `fennec-shard`. `fennec import --follow` keeps this bound and no other:
+before the wait the rest of a transaction is applied and its fsync made,
+and after it the checkpoint rewrites the whole file, none bounded by a
+time, so a large transaction or file outlasts docker's 10 s. A SIGKILL
+among them loses nothing confirmed -- the follower confirms only what is on
+disk, and the checkpoint is a side file renamed into place -- and leaves
+the slot to be let go when the walsender next reads. What 3 s waits for:
+200 000 rows of a table the slot does not publish, decoded through disk,
+held a stop 0.2 s, a million in memory 0.5 to 2 s on a loaded machine; a
+longer transaction is not waited for. Past the bound, or once cut, the
+follower closes the connection and says so in one line (`Event::SlotHeld`,
+the shell's `warning`, the server's `follow:` log line): the slot still
+held, which PostgreSQL releases when its walsender next reads the
+connection, a drop meeting `55006` until then, which a follower started
+again waits out (`retryable`). Where the wait ended otherwise -- the
+connection closed or failed, or the server answered with an error
+(`client::Unended::Failed`) -- the line says the slot *may* still be held:
+a walsender that exits or fails lets it go, a proxy's close or a network's
+failure need not have reached it. The shell's second ctrl-c (`stop::AGAIN`)
+ends the wait within 50 ms (`client::CUT_LOOK`), the steps before it -- the
+rest of a transaction being applied, the settle's fsync -- and the
+checkpoint after it still run.
+
+*A signal is no failure.* Linux never restarts a `recv` on a socket with a
+timeout, `SA_RESTART` or not (signal(7)), and every socket of the wire
+client's has one; `fennec import --follow` runs its follower on the main
+thread, where a SIGINT or SIGTERM sent to the process lands, and an idle
+follower spends nearly all its time in the 200 ms peek of `WalStream::next`.
+That peek returned `EINTR` as an error, the stream was taken for broken --
+no `CopyDone`, the slot left held, no warning -- and `run` printed "stream
+Interrupted system call (os error 4); again in 500.0ms" before it saw the
+stop. macOS restarts the call, so no run here showed it; a reviewer gave
+the sockets Linux's behaviour with `siginterrupt` and signalled the
+follower's thread, and it failed 3 times in 3. `Conn::readable`, the one
+wait under the idle peek, the end's reads and TLS's, now goes on after an
+interruption for what is left of its wait, never failing and never
+starting the wait again. Every other call of the client's: `connect` is
+std's, which asks again on `EINTR`; every read of a message is `read_exact`
+and every write `write_all`, which ask again; a TLS flush asks again
+(`Conn::flush`); the end's write and reads go through `Until`, which goes
+on for what is left; the drop's `Terminate` is non-blocking and so never
+interrupted; the TLS handshake is rustls's `complete_io`, which asks a
+read again, its sends restarted by the kernel (the handlers are installed
+with `SA_RESTART` and the dial sets no send timeout); the SCRAM nonce's
+`getrandom` asks again. The client accepts nothing. Beside it, nothing on
+the stop's path takes a signal for a failure: std's `sync_data` and
+`sync_all` ask `fsync` again, `thread::sleep` sleeps out what is left, the
+checkpoint's file writes are `write_all` and its rename is not
+interrupted, and the lock is taken with `F_SETLK`, which never waits.
 
 *A failure waits for nothing.* The first form ended the stream when the
 follower stopped on what it read too (a dropped column, a storage error),
@@ -771,27 +824,52 @@ transaction and the final settle's fsync failed; or a SIGTERM in the
 10 s after a failure) ran out of its `STOP_WAIT` first and exited 0, with
 a checkpoint (`checkpoints`), and with no SIGTERM the server served a
 mirror that had stopped moving for those 10 s more. Now only a clean stop
-ends the stream so; a failure closes it (`Terminate`, on the drop) and
-returns at once, and the mirror stores its code before its log line and
-before it lets the shutdown's wait go. On an error of the connection's
-the stream is not ended either: the connection is what broke. A follower
-killed outright cannot end its stream; one started meanwhile meets
-`55006` and retries until the server notices the connection gone.
+ends the stream so; a failure closes it (its `Terminate` sent only where
+the socket takes it at once) and returns at once, and the mirror stores
+its code before its log line and before it lets the shutdown's wait go.
+A panic of the follower's thread goes the same way: `fennec-server`'s
+release profile unwinds, and the thread's end let the shutdown's wait go
+and nothing more, so the server served a mirror that no longer moved and
+exited 0 at its next shutdown, with a checkpoint; the mirror's guard
+(`mirror::Ending`), dropped on an unwind too, stores the code first. On an
+error of the connection's the stream is not ended either: the connection
+is what broke. A follower killed outright cannot end its stream; one
+started meanwhile meets `55006` and retries until the server notices the
+connection gone.
 
 *The tests.* Against stand-ins, every run and every time: fennec-import's
 `a_stopped_follower_returns_once_its_slot_is_let_go` (applied, confirmed,
 `CopyDone` -- never a `Terminate` alone -- and back only after the
 server's answer), `a_follower_that_fails_returns_before_it_waits` (no
 `CopyDone`, an answer that never comes not waited for: 3 s in that test
-without the fix) and `a_second_stop_ends_the_wait_and_says_what_holds_the_slot`;
-fennec-wire's `ending_a_stream_is_bounded` (silent, still sending, and
-stopped in the middle of a message with a whole one buffered before it --
-30 s a read without the bound) and its TLS twin; fennec-server's
+without the fix), `a_second_stop_ends_the_wait_and_says_what_holds_the_slot`,
+`a_stream_the_server_closed_says_the_slot_may_be_held` ("still held"
+before the wording) and `a_signal_is_no_failure_of_the_stream` (SIGUSR1 to
+the follower's thread every 5 ms, its calls made to fail with `EINTR` as
+Linux's do, from its first confirm through the stop: the stream failed
+3 times in 3 with the peek's `EINTR` returned); fennec-wire's
+`ending_a_stream_is_bounded` (silent, still sending, and stopped in the
+middle of a message with a whole one buffered before it -- 30 s a read
+without the bound) and its TLS twin,
+`a_signal_neither_fails_nor_lengthens_the_end_of_a_stream` (signals every
+2 ms through the end; it passed before too, `read_exact` asking the
+interrupted read again against the same deadline, and holds what `Until`
+now does itself), and, over a server that reads nothing with both buffers
+full, `a_full_send_buffer_holds_the_end_no_longer_than_its_wait` and
+`a_drop_never_waits_for_the_server` (both failed before: the end took
+twice its wait, and the drop waited until macOS made room some 5 s later);
+fennec-server's
 `a_follower_that_fails_stops_the_server_with_its_code_before_it_waits`
 (a stand-in PostgreSQL whose walsender sends a change the follower cannot
 read and never answers a `CopyDone`, SIGTERM sent as the follower ends
-its stream: exit 1, no `CopyDone`; with the first form, exit 0) and
-`a_stopped_server_lets_its_slot_go_before_it_exits`. Against PostgreSQL,
+its stream: exit 1, no `CopyDone`; with the first form, exit 0),
+`a_stopped_server_lets_its_slot_go_before_it_exits` (its log read to the
+process's end, the shutdown's own line in it, before it is held to having
+no "still held"), and the mirror's
+`a_follower_that_panics_stops_the_server_with_its_code` (exit code 0
+without the guard) and
+`the_wait_for_the_follower_counts_from_the_shutdowns_start` (5 s counted
+from its own start, under 3 allowed). Against PostgreSQL,
 `a_stopped_follower_lets_its_slot_go` stops a follower once its walsender
 has read up to the commit of 200 000 rows of a table the slot does not
 publish, decoded through disk (`logical_decoding_work_mem` at its least),

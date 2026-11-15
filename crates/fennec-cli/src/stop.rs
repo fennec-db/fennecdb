@@ -10,7 +10,8 @@ pub static STOP: AtomicBool = AtomicBool::new(false);
 /// Set by a second one: what a stop still waits for is waited for no
 /// longer -- `fennec import --follow`'s wait for PostgreSQL to let its slot
 /// go (`follow::END_WAIT`) ends within 50 ms. The steps before it (the rest
-/// of a transaction being applied, the fsync) still run to their end.
+/// of a transaction being applied, the fsync) and the checkpoint after it
+/// still run to their end.
 pub static AGAIN: AtomicBool = AtomicBool::new(false);
 
 /// What a signal does: [`STOP`], then [`AGAIN`]. Atomics alone, which a
