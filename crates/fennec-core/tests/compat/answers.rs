@@ -21,6 +21,111 @@ pub const SETS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../fennec-core/test
 /// statement, why). None so far.
 pub const ACCEPTED: &[(&str, &str, &str, &str)] = &[];
 
+/// What this build does with a file a release wrote that it reads
+/// otherwise on purpose (docs/design/crates.md, *How deep a value nests*
+/// and *Limits*).
+pub enum Otherwise {
+    /// The file opens; a row past a limit is refused where it is read, in
+    /// these words, and every other answer is the release's.
+    RowRefused(&'static str),
+    /// The open is refused, in these words.
+    OpenRefused(&'static str),
+}
+
+/// A set's files this build reads otherwise on purpose, by name: each held
+/// by `compat::the_files_this_build_refuses_on_purpose_are_refused_in_its_words`,
+/// and passed over by the tests that open every other file and write into it.
+pub const ON_PURPOSE: &[(&str, Otherwise)] = &[
+    (
+        "deep",
+        Otherwise::RowRefused("a value nests more than 64 levels deep"),
+    ),
+    (
+        "refused-lists",
+        // A file's schema is read by the value decoder's bound
+        // (`codec::decode_type`), in its words.
+        Otherwise::OpenRefused("a value nests more than 64 levels deep"),
+    ),
+    (
+        "refused-dims",
+        Otherwise::OpenRefused("a vector's dimension is 1 to 1000000000"),
+    ),
+    // Its row is read past the bound today; the change that follows on
+    // `fuzz-codec-image-panics` refuses its schema at the open, and moves
+    // this entry to `OpenRefused`.
+    (
+        "points-deep",
+        Otherwise::RowRefused("a value nests more than 64 levels deep"),
+    ),
+];
+
+/// Whether this build reads `name` otherwise on purpose ([`ON_PURPOSE`]).
+pub fn on_purpose(name: &str) -> bool {
+    ON_PURPOSE.iter().any(|(n, _)| *n == name)
+}
+
+/// The clock a set's answers were read at (its `clock` file, epoch
+/// milliseconds): a scheduled statement's `next` is computed from it, and
+/// this build reads its answers at the same.
+pub fn clock(set: &Path) -> Option<i64> {
+    let text = std::fs::read_to_string(set.join("clock")).ok()?;
+    Some(
+        text.trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("{}/clock: {text:?}", set.display())),
+    )
+}
+
+/// `db` reading the set's clock, as the release's answers were read.
+pub fn at_clock(mut db: Database, set: &Path) -> Database {
+    db.set_clock(clock(set));
+    db
+}
+
+/// The id the release hands the next row put into each collection of
+/// `name` (`<name>.ids`, `<collection> <id>` a line), where the set has it.
+pub fn release_ids(set: &Path, name: &str) -> Option<BTreeMap<String, u64>> {
+    let text = std::fs::read_to_string(set.join(format!("{name}.ids"))).ok()?;
+    Some(
+        text.lines()
+            .map(|l| {
+                let (c, id) = l
+                    .rsplit_once(' ')
+                    .unwrap_or_else(|| panic!("{name}.ids: {l:?}"));
+                (
+                    c.to_string(),
+                    id.parse().unwrap_or_else(|_| panic!("{name}.ids: {l:?}")),
+                )
+            })
+            .collect(),
+    )
+}
+
+/// Each collection whose next id in this build is not the one the release
+/// hands out (`<name>.ids`): a counter read otherwise hands out an id the
+/// release retired, or skips some.
+pub fn id_differences(db: &Database, set: &Path, name: &str, when: &str) -> Vec<String> {
+    let Some(theirs) = release_ids(set, name) else {
+        return Vec::new();
+    };
+    let mut names = db.collection_names();
+    names.sort();
+    let ours: BTreeMap<String, u64> = names
+        .into_iter()
+        .map(|n| {
+            let id = db.collection(&n).unwrap().store.next_id();
+            (n, id)
+        })
+        .collect();
+    match ours == theirs {
+        true => Vec::new(),
+        false => vec![format!(
+            "{}/{name} ({when}): the next ids\n  release: {theirs:?}\n  this build: {ours:?}",
+            set_name(set)
+        )],
+    }
+}
+
 /// Every set, oldest first: those under `FENNEC_COMPAT_SETS` where it names
 /// a directory -- a set `tools/compat_fixtures.py write` has just written,
 /// held to every test before it lands -- and the tree's otherwise. A
@@ -87,7 +192,12 @@ pub fn torn(name: &str) -> bool {
 pub struct Scratch(pub PathBuf);
 impl Scratch {
     pub fn new(tag: &str) -> Scratch {
-        let d = std::env::temp_dir().join(format!("fennec-compat-{tag}-{}", std::process::id()));
+        // Numbered: tests running at once walk the same files under the
+        // same tags, and one's drop would take another's directory.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let d =
+            std::env::temp_dir().join(format!("fennec-compat-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         Scratch(d)
@@ -292,6 +402,9 @@ pub struct Written {
     rows: BTreeMap<(String, i64), String>,
     probes: Vec<(String, i64, bool)>,
     before: BTreeMap<String, BTreeSet<i64>>,
+    /// The id this build handed the first row it put into each collection
+    /// no write had reached since the open: the release's next id.
+    pub first: BTreeMap<String, u64>,
 }
 
 /// This build's writes into the release's file: into every collection of
@@ -315,6 +428,7 @@ pub fn write_after(db: &mut Database) -> Written {
     run(db, "del compat_after where n = 2");
     run(db, "drop collection compat_after");
     let mut probes = Vec::new();
+    let mut first = BTreeMap::new();
     for c in &names {
         let schema = Schema::clone(&db.collection(c).unwrap().schema);
         for k in 0..2 {
@@ -328,10 +442,14 @@ pub fn write_after(db: &mut Database) -> Written {
             // Ids before the put: a statement bound to another
             // collection's write may have written here since.
             let was = ids(db, c);
+            let untouched = k == 0 && was == before[c];
             run(db, &format!("put {c} {{{}}}", doc.join(", ")));
             let new: Vec<i64> = ids(db, c).difference(&was).copied().collect();
             assert_eq!(new.len(), 1, "{c}: one row put, {new:?} new");
             let id = new[0];
+            if untouched {
+                first.insert(c.clone(), id as u64);
+            }
             for f in &schema.fields {
                 let (lit, seed) = &lits[&f.name];
                 for (q, first) in probe(c, f, lit, k, *seed) {
@@ -388,6 +506,7 @@ pub fn write_after(db: &mut Database) -> Written {
         rows,
         probes,
         before,
+        first,
     }
 }
 
@@ -452,11 +571,15 @@ pub fn take_out(db: &mut Database, w: &Written) {
 /// differences.
 pub fn written_and_compacted(path: &Path, set: &Path, name: &str) -> Vec<String> {
     let open = |when: &str| {
-        fennec_core::fs::open(path).unwrap_or_else(|e| panic!("{name}: an open {when}: {e}"))
+        at_clock(
+            fennec_core::fs::open(path).unwrap_or_else(|e| panic!("{name}: an open {when}: {e}")),
+            set,
+        )
     };
     let mut found = Vec::new();
     let mut db = open("to write");
     found.extend(differences(&db, set, name, "open"));
+    found.extend(id_differences(&db, set, name, "open"));
     if db.history().following {
         let c = writable(&db).remove(0);
         let stmt = fennec_ql::parse_for(&db, &format!("put {c} {{}}"))
@@ -468,6 +591,20 @@ pub fn written_and_compacted(path: &Path, set: &Path, name: &str) -> Vec<String>
         }
     } else {
         let w = write_after(&mut db);
+        // The first row put into each collection takes the id the release
+        // hands out next: past every id it retired, its image's counter
+        // (kind 7) and its tail's frames.
+        if let Some(theirs) = release_ids(set, name) {
+            for (c, id) in &w.first {
+                if theirs.get(c) != Some(id) {
+                    found.push(format!(
+                        "{}/{name}: the first row put into {c} took id {id}, the release's next is {:?}",
+                        set_name(set),
+                        theirs.get(c)
+                    ));
+                }
+            }
+        }
         eprintln!(
             "{name}: {} rows written, {} looks through an index",
             w.rows.len(),
@@ -554,8 +691,12 @@ pub fn copied(set: &Path, name: &str, dir: &Path) -> PathBuf {
             fennec_core::fs::read_with_sync_log(&to).unwrap().is_none(),
             "{name}: a log applied to a file it does not name"
         );
+        // A header wiped -- spent by an open, or never begun -- names no
+        // file, the release's nor a copy's: there is nothing to stamp.
         #[cfg(unix)]
-        stamp_log(&to);
+        if std::fs::read(&log).unwrap()[..8] == *b"FENECSYN" {
+            stamp_log(&to);
+        }
     }
     to
 }

@@ -69,10 +69,28 @@ pub const ALTERNATIVES: &[&str] = &[
     "document: fewer values than places",
     "value: bool false",
     "value: bool true",
-    // The id counter, and its index of the data record's frames.
+    // What a release wrote that this build refuses on purpose
+    // (docs/design/crates.md, *How deep a value nests* and *Limits*).
+    "value: nesting past 64 levels",
+    "type: lists nested past 64",
+    "type: a point under 64 lists",
+    "type: a list of vectors past the dimension's range",
+    // The id counter, and its index of the data record's frames; the
+    // counter against the image's live ids.
     "next id: alone",
     "next id: index of one share",
     "next id: index of several shares",
+    "next id: the live ids' next",
+    "next id: past the live ids",
+    // The collections the database's own code makes (`declared::OWN`).
+    "own: _migrations",
+    "own: _idempotency",
+    "own: _consumers",
+    "own: _follow",
+    "own: _hook_events",
+    "own: _sync_shapes",
+    "own: _sync_queue",
+    "own: _sync_temps",
     // A history: kind 8, and an archive's history file.
     "history: taking writes",
     "history: following",
@@ -120,8 +138,22 @@ pub const ALTERNATIVES: &[&str] = &[
     "schedule: zone utc",
     "schedule: zone named",
     "schedule: zone offset",
+    "schedule: every from the epoch",
+    "schedule: every from an origin",
     "mark: ran",
     "mark: refused",
+    "mark: none passed over",
+    "mark: slots passed over",
+    // The statements a file holds at its end, and their last marks.
+    "live schedule: every",
+    "live schedule: months",
+    "live schedule: cron",
+    "live schedule: zone utc",
+    "live schedule: zone named",
+    "live schedule: zone offset",
+    "live schedule: last slot ran",
+    "live schedule: last slot refused",
+    "live schedule: no slot run, its since alone",
     "synced mark",
     // A schema's fields.
     "field: dropped place",
@@ -151,6 +183,7 @@ pub const ALTERNATIVES: &[&str] = &[
     "type: list of timestamp",
     "type: list of sparse",
     "type: list of geo",
+    "type: list of json inside a list",
     "index: metric cosine",
     "index: metric l2",
     "index: metric dot",
@@ -201,6 +234,8 @@ pub const ALTERNATIVES: &[&str] = &[
     "sync log: zeros after the last entry",
     "sync log: a past pass's bytes after the last entry",
     "sync log: an entry torn",
+    "sync log: header wiped, a spent generation after it",
+    "sync log: all zeros, never begun",
     // A sealed file, an archive, the page's stores.
     "seal: whole, one frame",
     "seal: whole, several frames",
@@ -211,10 +246,16 @@ pub const ALTERNATIVES: &[&str] = &[
     "archive: segment",
     "archive: history file",
     "segment: write",
+    "node archive: line followed",
+    "node archive: line moved aside",
+    "node archive: began",
+    "node archive: presence gone",
+    "node archive: presence back",
     "page: image",
     "page: chunk",
     "page: sealed image",
     "page: sealed chunk",
+    "page: a rewrite's copy beside its file",
 ];
 
 /// The releases whose sets are in the tree, oldest first.
@@ -237,11 +278,6 @@ pub const RELEASES: &[Writes] = &[Writes {
             "a record more than 64 GiB past the file's last fsync",
         ),
         (
-            "head: collection id of 5 bytes",
-            "a collection id past 268 435 455: as many collections made in one file's life: half \
-             an hour of writes, where torn-wide's 2 097 152 take 12 seconds",
-        ),
-        (
             "head: length of 5 bytes",
             "a record of 256 MiB: one collection's data in an image that large, 256 MiB of working tree",
         ),
@@ -259,11 +295,6 @@ pub const RELEASES: &[Writes] = &[Writes {
             "graph: steps of 4 bytes",
             "a step past 16 777 215 between a list's links: a graph past 16 777 216 nodes",
         ),
-        (
-            "seal: whole, several frames",
-            "a file sealed whole past 1 MiB: over a mebibyte of ciphertext, which git cannot \
-             compress; its frames are laid out as an appended segment's, which archive/ holds",
-        ),
     ],
 }];
 
@@ -277,6 +308,7 @@ const V0_2_0_SHAPES: &[&str] = &[
     "head: collection id of 2 bytes",
     "head: collection id of 3 bytes",
     "head: collection id of 4 bytes",
+    "head: collection id of 5 bytes",
     "head: length of 1 byte",
     "head: length of 2 bytes",
     "head: length of 3 bytes",
@@ -290,9 +322,23 @@ const V0_2_0_SHAPES: &[&str] = &[
     "document: fewer values than places",
     "value: bool false",
     "value: bool true",
+    "value: nesting past 64 levels",
+    "type: lists nested past 64",
+    "type: a point under 64 lists",
+    "type: a list of vectors past the dimension's range",
     "next id: alone",
     "next id: index of one share",
     "next id: index of several shares",
+    "next id: the live ids' next",
+    "next id: past the live ids",
+    "own: _migrations",
+    "own: _idempotency",
+    "own: _consumers",
+    "own: _follow",
+    "own: _hook_events",
+    "own: _sync_shapes",
+    "own: _sync_queue",
+    "own: _sync_temps",
     "history: taking writes",
     "history: following",
     "history: forked none",
@@ -336,8 +382,21 @@ const V0_2_0_SHAPES: &[&str] = &[
     "schedule: zone utc",
     "schedule: zone named",
     "schedule: zone offset",
+    "schedule: every from the epoch",
+    "schedule: every from an origin",
     "mark: ran",
     "mark: refused",
+    "mark: none passed over",
+    "mark: slots passed over",
+    "live schedule: every",
+    "live schedule: months",
+    "live schedule: cron",
+    "live schedule: zone utc",
+    "live schedule: zone named",
+    "live schedule: zone offset",
+    "live schedule: last slot ran",
+    "live schedule: last slot refused",
+    "live schedule: no slot run, its since alone",
     "synced mark",
     "field: dropped place",
     "field: required",
@@ -366,6 +425,7 @@ const V0_2_0_SHAPES: &[&str] = &[
     "type: list of timestamp",
     "type: list of sparse",
     "type: list of geo",
+    "type: list of json inside a list",
     "index: metric cosine",
     "index: metric l2",
     "index: metric dot",
@@ -410,7 +470,10 @@ const V0_2_0_SHAPES: &[&str] = &[
     "sync log: zeros after the last entry",
     "sync log: a past pass's bytes after the last entry",
     "sync log: an entry torn",
+    "sync log: header wiped, a spent generation after it",
+    "sync log: all zeros, never begun",
     "seal: whole, one frame",
+    "seal: whole, several frames",
     "seal: appended frames",
     "archive: sealed",
     "archive: plain",
@@ -418,16 +481,22 @@ const V0_2_0_SHAPES: &[&str] = &[
     "archive: segment",
     "archive: history file",
     "segment: write",
+    "node archive: line followed",
+    "node archive: line moved aside",
+    "node archive: began",
+    "node archive: presence gone",
+    "node archive: presence back",
     "page: image",
     "page: chunk",
     "page: sealed image",
     "page: sealed chunk",
+    "page: a rewrite's copy beside its file",
 ];
 
 /// The alternatives only fennec-http's walk meets: a seal is opened by
 /// its `seal.rs`, which fennec-core does not have.
 pub fn sealed_only(shape: &str) -> bool {
-    ["seal:", "archive:", "segment:"]
+    ["seal:", "archive:", "segment:", "node archive:"]
         .iter()
         .any(|p| shape.starts_with(p))
 }
@@ -573,6 +642,56 @@ pub struct Seen {
     pub claims: Vec<(usize, usize)>,
     /// Each collection's schema as its last record writes it, by id.
     pub schemas: BTreeMap<u64, Facts>,
+    /// Each collection's id counter as an image's kind 7 writes it, and the
+    /// highest id a landed put frame wrote, by collection id: the next id
+    /// is past both ([`Seen::next_ids`]).
+    pub counters: BTreeMap<u64, u64>,
+    pub puts: BTreeMap<u64, u64>,
+    /// The put frames of each spill, by where its body is: counted once a
+    /// land names it, never where it was put back.
+    spill_puts: BTreeMap<(usize, usize), Vec<(u64, u64)>>,
+    /// The spill whose records are being read, and whether the image's
+    /// records are: its counters, and the ids its frames leave live.
+    in_spill: Option<(usize, usize)>,
+    in_image: bool,
+    image_counters: Vec<(u64, u64)>,
+    image_live: BTreeMap<u64, BTreeSet<u64>>,
+    /// A record failing its sum or cut short was met: what an open keeps of
+    /// the frames is its claims', which the walk does not judge.
+    pub damaged: bool,
+    /// The named statements defined at the file's end, by name, and the
+    /// last mark of each name's slots.
+    pub statements: BTreeMap<String, Def>,
+    pub marks: BTreeMap<String, Mark>,
+    /// The file's history as its last kind-8 record writes it: following,
+    /// and each fork's id and change.
+    pub history: Option<(bool, Vec<(u64, u64)>)>,
+    /// A sync log whose header was wiped: where its first stale entry put
+    /// its bytes in the file.
+    pub spent_log: Option<u64>,
+}
+
+/// A named statement's definition as its record holds it: its version,
+/// and a scheduled one's timing -- the times' tag (1 every, 2 months, 3
+/// cron) and values, the zone and `since`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Def {
+    pub version: (u64, u64),
+    pub timing: Option<(u8, Vec<u64>, String, i64)>,
+}
+
+/// A slot's mark as its record (op 5) holds it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mark {
+    pub at: i64,
+    pub version: (u64, u64),
+    /// Refused: its status and reason; `None` where it ran.
+    pub refused: Option<(u16, String)>,
+    pub skipped: u64,
+}
+
+fn unzigzag(v: u64) -> i64 {
+    ((v >> 1) as i64) ^ -((v & 1) as i64)
 }
 
 /// What a schema's bytes say of a collection's fields, read by the walk:
@@ -640,6 +759,54 @@ impl Seen {
         self.shapes.extend(&other.shapes);
     }
 
+    /// The id the next row put into each live collection takes, by name, as
+    /// the file's records say it: past its image's counter and every id a
+    /// landed put frame wrote, from 1.
+    pub fn next_ids(&self) -> BTreeMap<String, u64> {
+        self.names
+            .iter()
+            .map(|(cid, name)| {
+                let counter = self.counters.get(cid).copied().unwrap_or(1);
+                let put = self.puts.get(cid).map_or(1, |&id| id + 1);
+                (name.clone(), counter.max(put).max(1))
+            })
+            .collect()
+    }
+
+    /// What a file says once every record of it was read: its spills
+    /// landed or dead, and each scheduled statement alive at its end, by
+    /// its timing and its last slot's mark.
+    pub fn finish(&mut self) {
+        self.close_spills();
+        let live: Vec<(Def, Option<Mark>)> = self
+            .statements
+            .iter()
+            .filter(|(_, d)| d.timing.is_some())
+            .map(|(name, d)| {
+                let mark = self.marks.get(name).filter(|m| m.version == d.version);
+                (d.clone(), mark.cloned())
+            })
+            .collect();
+        for (d, mark) in live {
+            let (tag, _, zone, _) = d.timing.as_ref().unwrap();
+            self.shape(match tag {
+                1 => "live schedule: every",
+                2 => "live schedule: months",
+                _ => "live schedule: cron",
+            });
+            self.shape(match zone.as_bytes().first() {
+                None => "live schedule: zone utc",
+                Some(b'+' | b'-') => "live schedule: zone offset",
+                Some(_) => "live schedule: zone named",
+            });
+            self.shape(match mark.map(|m| m.refused.is_some()) {
+                Some(false) => "live schedule: last slot ran",
+                Some(true) => "live schedule: last slot refused",
+                None => "live schedule: no slot run, its since alone",
+            });
+        }
+    }
+
     /// The landed and dead spills, once every record of a file was read.
     pub fn close_spills(&mut self) {
         let spills: Vec<bool> = self.spills.values().copied().collect();
@@ -681,7 +848,18 @@ fn bytes_word(n: usize) -> &'static str {
 /// A value, by the codec's layout: every tag a release writes into a
 /// document and nothing else.
 fn value(c: &mut Cur, seen: &mut Seen) {
+    value_in(c, seen, 0)
+}
+
+/// A value inside `levels` lists and objects: past 64 in all, a value a
+/// release wrote -- a 64-level json value in a `[[json]]` field -- and this
+/// build refuses where it reads it ("a value nests more than 64 levels
+/// deep").
+fn value_in(c: &mut Cur, seen: &mut Seen, levels: usize) {
     let tag = c.u8();
+    if matches!(tag, 7 | 13) && levels == 64 {
+        seen.shape("value: nesting past 64 levels");
+    }
     seen.value_tags.insert(tag);
     match tag {
         0 => {}
@@ -713,7 +891,7 @@ fn value(c: &mut Cur, seen: &mut Seen) {
         }
         7 => {
             for _ in 0..c.uv() {
-                value(c, seen);
+                value_in(c, seen, levels + 1);
             }
         }
         13 => {
@@ -726,7 +904,7 @@ fn value(c: &mut Cur, seen: &mut Seen) {
                     c.fail("an object's keys out of order");
                 }
                 last = Some(k);
-                value(c, seen);
+                value_in(c, seen, levels + 1);
             }
         }
         10 => {
@@ -749,18 +927,34 @@ fn value(c: &mut Cur, seen: &mut Seen) {
 
 // ------------------------------------------------------------- schemas
 
-/// A type as a schema writes it: its tag, and a list's inner type.
-fn ty(c: &mut Cur, seen: &mut Seen, in_list: bool) -> u8 {
+/// A type as a schema writes it inside `lists` lists: its tag, and a
+/// list's inner type. Past 64 lists, a point under 64 and a vector in a
+/// list past a dimension's range are a release's that this build refuses
+/// at the open, or will (docs/design/crates.md).
+fn ty(c: &mut Cur, seen: &mut Seen, lists: usize) -> u8 {
+    let in_list = lists > 0;
     let tag = c.u8();
     match tag {
-        1..=5 | 9 | 14 | 15 => {}
+        1..=5 | 9 | 14 => {}
+        15 => {
+            if lists >= 64 {
+                seen.shape("type: a point under 64 lists");
+            }
+        }
         6 | 8 | 10 => {
-            if c.uv() == 0 {
+            let dim = c.uv();
+            if dim == 0 {
                 c.fail("a dimension of 0");
+            }
+            if in_list && dim > 1_000_000_000 {
+                seen.shape("type: a list of vectors past the dimension's range");
             }
         }
         7 => {
-            let inner = ty(c, seen, true);
+            if lists == 64 {
+                seen.shape("type: lists nested past 64");
+            }
+            let inner = ty(c, seen, lists + 1);
             seen.shape(match inner {
                 1 => "type: list of bool",
                 2 => "type: list of int",
@@ -773,6 +967,9 @@ fn ty(c: &mut Cur, seen: &mut Seen, in_list: bool) -> u8 {
                 9 => "type: list of timestamp",
                 10 => "type: list of sparse",
                 15 => "type: list of geo",
+                // v0.2.0 refuses `[json]`, a field's own list of json, and
+                // not one inside another list (`[[json]]`).
+                14 if in_list => "type: list of json inside a list",
                 t => c.fail(&format!("a list of type {t}, which the release refuses")),
             });
         }
@@ -951,7 +1148,7 @@ pub fn schema(c: &mut Cur, seen: &mut Seen) -> (Facts, usize) {
                 _ => "field tags: collated nocase beside",
             });
         }
-        let t = ty(c, seen, false);
+        let t = ty(c, seen, 0);
         let required = c.u8();
         seen.shape(match required {
             0 => "field: optional",
@@ -1169,6 +1366,7 @@ fn records(c: &mut Cur, seen: &mut Seen, holder: Option<&str>) {
         let kind = k & 0x1f;
         let cut = |c: &mut Cur, seen: &mut Seen| {
             seen.kinds.insert(kind);
+            seen.damaged = true;
             seen.shape(match kind {
                 3 => "torn: kind 3 cut short",
                 _ => {
@@ -1257,6 +1455,7 @@ fn records(c: &mut Cur, seen: &mut Seen, holder: Option<&str>) {
         // which an open reads unchecked below the durable point a later
         // claim names. Its body is read as any other's.
         if let Some(why) = h.torn {
+            seen.damaged = true;
             seen.shape(match (kind, c.done()) {
                 (14, true) => "torn: kind 14 failing its sum",
                 (3, false) => "damage: kind 3 failing its sum, records after it",
@@ -1299,6 +1498,16 @@ fn record(h: &Head, c: &mut Cur, seen: &mut Seen, outer: bool) {
             if h.kind == 1 {
                 seen.kept.retain(|(k, _), _| *k != cid);
                 seen.names.insert(cid, facts.name.clone());
+                // An image makes each collection again under its id: its
+                // counter and frames follow. A collection made anew is a
+                // new id.
+                if !seen.in_image {
+                    seen.counters.remove(&cid);
+                    seen.puts.remove(&cid);
+                }
+                if facts.name.starts_with('_') {
+                    seen.shape(&format!("own: {}", facts.name));
+                }
             } else {
                 seen.touch(cid);
             }
@@ -1307,6 +1516,8 @@ fn record(h: &Head, c: &mut Cur, seen: &mut Seen, outer: bool) {
         }
         2 => {
             c.end("a drop, which has no body");
+            seen.counters.remove(&cid);
+            seen.puts.remove(&cid);
             seen.kept.retain(|(k, _), _| *k != cid);
             seen.names.remove(&cid);
             seen.schemas.remove(&cid);
@@ -1325,9 +1536,25 @@ fn record(h: &Head, c: &mut Cur, seen: &mut Seen, outer: bool) {
                         c.fail(&format!("a frame op the release writes none of: {op}"))
                     }
                 });
-                c.uv();
+                let id = c.uv();
                 let n = c.uv() as usize;
                 let mut doc = c.sub(n);
+                if seen.in_image {
+                    let live = seen.image_live.entry(cid).or_default();
+                    match op {
+                        1 => live.insert(id),
+                        _ => live.remove(&id),
+                    };
+                }
+                if op == 1 {
+                    match seen.in_spill {
+                        Some(spill) => seen.spill_puts.entry(spill).or_default().push((cid, id)),
+                        None => {
+                            let top = seen.puts.entry(cid).or_insert(0);
+                            *top = (*top).max(id);
+                        }
+                    }
+                }
                 if op == 2 {
                     doc.end("a del frame's head, which holds no document");
                     continue;
@@ -1370,7 +1597,11 @@ fn record(h: &Head, c: &mut Cur, seen: &mut Seen, outer: bool) {
         }
         6 => c.fail("a counter head past the image's front"),
         7 => {
-            c.uv();
+            let counter = c.uv();
+            seen.counters.insert(cid, counter);
+            if seen.in_image {
+                seen.image_counters.push((cid, counter));
+            }
             match c.peek() {
                 None => seen.shape("next id: alone"),
                 Some(2) => {
@@ -1406,7 +1637,7 @@ fn record(h: &Head, c: &mut Cur, seen: &mut Seen, outer: bool) {
             c.end("the id counter's index");
         }
         8 => {
-            history(c, seen);
+            seen.history = Some(history(c, seen));
             c.end("a history");
         }
         9 => {
@@ -1420,7 +1651,9 @@ fn record(h: &Head, c: &mut Cur, seen: &mut Seen, outer: bool) {
                 c.fail("a spill inside another record");
             }
             seen.spills.entry((c.base, c.b.len())).or_insert(false);
+            seen.in_spill = Some((c.base, c.b.len()));
             records(c, seen, Some("spill"));
+            seen.in_spill = None;
         }
         11 => {
             if !outer {
@@ -1429,6 +1662,10 @@ fn record(h: &Head, c: &mut Cur, seen: &mut Seen, outer: bool) {
             for _ in 0..c.uv() {
                 let place = c.uv() as usize;
                 let len = c.uv() as usize;
+                for (cid, id) in seen.spill_puts.remove(&(place, len)).unwrap_or_default() {
+                    let top = seen.puts.entry(cid).or_insert(0);
+                    *top = (*top).max(id);
+                }
                 match seen.spills.get_mut(&(place, len)) {
                     Some(landed) => *landed = true,
                     None => c.fail(&format!(
@@ -1474,22 +1711,25 @@ fn record(h: &Head, c: &mut Cur, seen: &mut Seen, outer: bool) {
 
 /// A history (`History::encode`): kind 8's body, and an archive's
 /// `history` file.
-pub fn history(c: &mut Cur, seen: &mut Seen) {
-    seen.shape(match c.u8() {
+pub fn history(c: &mut Cur, seen: &mut Seen) -> (bool, Vec<(u64, u64)>) {
+    let following = c.u8();
+    seen.shape(match following {
         0 => "history: taking writes",
         1 => "history: following",
         b => c.fail(&format!("a following byte of {b}")),
     });
     let forks = c.uv();
+    let mut lineage = Vec::new();
     for _ in 0..forks {
-        c.le(8);
-        c.uv();
+        let id = c.le(8);
+        lineage.push((id, c.uv()));
     }
     seen.shape(match forks {
         0 => "history: forked none",
         1 => "history: forked once",
         _ => "history: forked twice",
     });
+    (following == 1, lineage)
 }
 
 /// A named statement's record (`engine/stored.rs`), every op's fields.
@@ -1497,13 +1737,12 @@ fn statement(c: &mut Cur, seen: &mut Seen) {
     let op = c.u8();
     seen.ops.insert(op);
     if op == 5 {
-        c.str();
-        c.uv();
-        c.uv();
-        c.uv();
+        let name = c.str().to_string();
+        let at = unzigzag(c.uv());
+        let version = (c.uv(), c.uv());
         let outcome = c.u8();
         let status = c.uv();
-        c.uv();
+        let skipped = c.uv();
         let reason = c.str();
         seen.shape(match (outcome, status) {
             (1, 0) if reason.is_empty() => "mark: ran",
@@ -1512,17 +1751,30 @@ fn statement(c: &mut Cur, seen: &mut Seen) {
                 "a slot's outcome the release writes none of: {outcome} {status}"
             )),
         });
+        seen.shape(match skipped {
+            0 => "mark: none passed over",
+            _ => "mark: slots passed over",
+        });
+        let refused = (outcome == 2).then(|| (status as u16, reason.to_string()));
+        seen.marks.insert(
+            name,
+            Mark {
+                at,
+                version,
+                refused,
+                skipped,
+            },
+        );
         return;
     }
     if !matches!(op, 1 | 2 | 3 | 4 | 6) {
         c.at -= 1;
         c.fail(&format!("a statement op the release writes none of: {op}"));
     }
-    c.uv();
-    c.uv();
+    let version = (c.uv(), c.uv());
     c.uv();
     c.le(8);
-    c.str();
+    let name = c.str().to_string();
     for _ in 0..c.uv() {
         c.str();
     }
@@ -1543,8 +1795,10 @@ fn statement(c: &mut Cur, seen: &mut Seen) {
     if op == 2 && !text.is_empty() {
         c.fail("a drop's text");
     }
+    let mut timing = None;
     if op == 4 {
-        let n = match c.u8() {
+        let tag = c.u8();
+        let n = match tag {
             1 => {
                 seen.shape("schedule: every");
                 2
@@ -1559,25 +1813,50 @@ fn statement(c: &mut Cur, seen: &mut Seen) {
             }
             t => c.fail(&format!("a schedule the release writes none of: {t}")),
         };
-        for _ in 0..n {
-            c.uv();
+        let values: Vec<u64> = (0..n).map(|_| c.uv()).collect();
+        if tag == 1 {
+            seen.shape(match values[1] {
+                0 => "schedule: every from the epoch",
+                _ => "schedule: every from an origin",
+            });
         }
-        let zone = c.str();
+        let zone = c.str().to_string();
         seen.shape(match zone.as_bytes().first() {
             None => "schedule: zone utc",
             Some(b'+' | b'-') => "schedule: zone offset",
             Some(_) => "schedule: zone named",
         });
-        c.uv();
+        let since = unzigzag(c.uv());
+        timing = Some((tag, values, zone, since));
     }
     if op == 6 && c.str().is_empty() {
         c.fail("a hook with no name");
+    }
+    match op {
+        2 => {
+            seen.statements.remove(&name);
+        }
+        _ => {
+            seen.statements.insert(name, Def { version, timing });
+        }
     }
 }
 
 /// A database's bytes (`FENECDB\x01`, the counter's head where an image
 /// begins it, the records): what every record holds.
 pub fn database(bytes: &[u8], file: &str, seen: &mut Seen) {
+    // What one file says of its collections, statements and history is its
+    // own: a walk over several (fennec-http's) reads each afresh.
+    seen.names.clear();
+    seen.places.clear();
+    seen.schemas.clear();
+    seen.counters.clear();
+    seen.puts.clear();
+    seen.statements.clear();
+    seen.marks.clear();
+    seen.history = None;
+    seen.spills.clear();
+    seen.spill_puts.clear();
     let mut c = Cur::new(file, bytes, 0);
     if c.take(8) != b"FENECDB\x01" {
         c.fail("no fennecdb signature");
@@ -1602,7 +1881,26 @@ fn image_front(c: &mut Cur, seen: &mut Seen) {
         seen.kinds.insert(6);
         // The image's records end exactly where its head says.
         let mut image = c.sub(len);
+        seen.in_image = true;
         records(&mut image, seen, None);
+        seen.in_image = false;
+        // Each collection's counter against the ids its image keeps live:
+        // past them where a row was deleted before the image was taken.
+        for (cid, counter) in std::mem::take(&mut seen.image_counters) {
+            let next = seen
+                .image_live
+                .get(&cid)
+                .and_then(|l| l.last())
+                .map_or(1, |&top| top + 1);
+            seen.shape(match counter.cmp(&next) {
+                std::cmp::Ordering::Equal => "next id: the live ids' next",
+                std::cmp::Ordering::Greater => "next id: past the live ids",
+                std::cmp::Ordering::Less => image.fail(&format!(
+                    "an id counter of {counter} below a live id's {next}"
+                )),
+            });
+        }
+        seen.image_live.clear();
     } else {
         seen.shape("front: records");
     }
@@ -1614,14 +1912,16 @@ pub fn chunk(bytes: &[u8], file: &str, seen: &mut Seen) {
 }
 
 /// An archive's segment, as it reads once its seal is off:
-/// `FENECLG\x01`, then each write's time and record.
-pub fn segment(bytes: &[u8], file: &str, seen: &mut Seen) {
+/// `FENECLG\x01`, then each write's time and record. Each write's time
+/// and the changes its record holds, in order.
+pub fn segment(bytes: &[u8], file: &str, seen: &mut Seen) -> Vec<(u64, u64)> {
     let mut c = Cur::new(file, bytes, 0);
     if c.take(8) != b"FENECLG\x01" {
         c.fail("no segment signature");
     }
+    let mut writes = Vec::new();
     while !c.done() {
-        c.le(8);
+        let time = c.le(8);
         // The record's head says its length: one record a write.
         let start = c.at;
         let mut probe = Cur::new(file, &c.b[start..], c.base + start);
@@ -1629,26 +1929,84 @@ pub fn segment(bytes: &[u8], file: &str, seen: &mut Seen) {
         probe.uv();
         let len = probe.uv() as usize;
         let mut one = c.sub(probe.at + len);
+        writes.push((time, changes_in(&mut Cur::new(file, one.b, one.base))));
         records(&mut one, seen, None);
         seen.shape("segment: write");
+    }
+    writes
+}
+
+/// The changes a record moves the counter by, as the release counts them
+/// (`engine::writes_in`): a data record's frames, a block's and a land's
+/// records -- a data record's frames each, any other one -- a schema's,
+/// a drop's, an alter's, a field change's and a statement's one, the rest
+/// none.
+fn changes_in(c: &mut Cur) -> u64 {
+    let k = c.u8();
+    let checked = k & 0x80 != 0;
+    c.uv();
+    let len = c.uv() as usize;
+    let room = match checked {
+        true => ((k & 0x60) >> 5) as usize + 1 + 4,
+        false => 0,
+    };
+    let mut body = c.sub(len);
+    body.b = &body.b[..len - room];
+    let frames = |b: &mut Cur| {
+        let mut n = 0;
+        while !b.done() {
+            b.u8();
+            b.uv();
+            let skip = b.uv() as usize;
+            b.take(skip);
+            n += 1;
+        }
+        n
+    };
+    let inner = |b: &mut Cur| {
+        let mut n = 0;
+        while !b.done() {
+            let kind = b.u8() & 0x1f;
+            b.uv();
+            let len = b.uv() as usize;
+            let mut r = b.sub(len);
+            n += match kind {
+                3 => frames(&mut r),
+                _ => 1,
+            };
+        }
+        n
+    };
+    match k & 0x1f {
+        3 => frames(&mut body),
+        9 => inner(&mut body),
+        11 => {
+            for _ in 0..body.uv() {
+                body.uv();
+                body.uv();
+            }
+            inner(&mut body)
+        }
+        1 | 2 | 5 | 12 | 13 => 1,
+        _ => 0,
     }
 }
 
 /// A sealed file's frames (`seal.rs`): its magic, then each frame's length,
-/// nonce, ciphertext and tag, to the file's end. How many frames.
-pub fn seal_frames(bytes: &[u8], file: &str) -> usize {
+/// nonce, ciphertext and tag, to the file's end. Where each frame ends.
+pub fn seal_frames(bytes: &[u8], file: &str) -> Vec<usize> {
     let mut c = Cur::new(file, bytes, 0);
     if c.take(8) != b"FENECSL\x01" {
         c.fail("no seal's signature");
     }
-    let mut frames = 0;
+    let mut ends = Vec::new();
     while !c.done() {
         let n = c.le(4) as usize;
         c.take(12);
         c.take(n + 16);
-        frames += 1;
+        ends.push(c.at);
     }
-    frames
+    ends
 }
 
 // ------------------------------------------------------------- sync log
@@ -1704,6 +2062,39 @@ pub fn sync_log(file: &[u8], log: &[u8], name: &str, seen: &mut Seen) -> Vec<u8>
         c.fail(&format!("a log of {} bytes, not its fixed size", log.len()));
     }
     let word = |i: usize| u64::from_le_bytes(log[i..i + 8].try_into().unwrap());
+    // A header of zeros names no file: a log made and never begun, all
+    // zeros, or one an open spent -- its entries put back, the file synced
+    // and the header wiped, so that they are never put back again. The file
+    // reads as it lies.
+    if log[..LOG_HEAD].iter().all(|&b| b == 0) {
+        if log.iter().all(|&b| b == 0) {
+            seen.shape("sync log: all zeros, never begun");
+            return file.to_vec();
+        }
+        let Some((g, first, _)) = log_entry(log, LOG_HEAD) else {
+            Cur::new(name, log, LOG_HEAD).fail("a wiped header and no whole entry after it")
+        };
+        // Its entries, one generation's in a run, each the bytes the file
+        // holds where it puts them: the open that wiped it put them there.
+        let (mut pos, mut at) = (LOG_HEAD, first);
+        while let Some((g2, a2, bytes)) = log_entry(log, pos) {
+            if g2 != g || a2 != at {
+                break;
+            }
+            if file.get(at as usize..at as usize + bytes.len()) != Some(bytes) {
+                Cur::new(name, log, pos).fail("a spent entry the file does not hold");
+            }
+            pos += 32 + bytes.len();
+            at += bytes.len() as u64;
+        }
+        if log[pos..].iter().any(|&b| b != 0) {
+            Cur::new(name, log, pos)
+                .fail("bytes after a spent generation's entries that are not zeros");
+        }
+        seen.shape("sync log: header wiped, a spent generation after it");
+        seen.spent_log = Some(first);
+        return file.to_vec();
+    }
     if &log[..8] != b"FENECSYN" || log[8..12] != 2u32.to_le_bytes() || log[12..16] != [0; 4] {
         c.fail("no sync log's header of version 2");
     }

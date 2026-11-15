@@ -8,9 +8,15 @@
 //! more. And every byte of each is walked by the release's layout
 //! (`compat/walk.rs`): a seal's frames, an archive's names, images,
 //! segments and history, the database inside each, holding the set to the
-//! seals' and archives' alternatives the release writes, both ways.
-//! Seals by their own magic, never this build's constant: a seal of a
-//! later version beside the release's changes nothing here.
+//! seals' and archives' alternatives the release writes, both ways. A
+//! restore to a time stops at the write the walk's times say; a file
+//! sealed whole in several frames, cut at a frame's end, is refused; and
+//! the node's archive -- a line a tenant, one moved aside, `began` and
+//! `presence` -- restores its tenants as the release's restore did.
+//! A file is told sealed by the release's own magic, `FENECSL\x01`,
+//! never by this build's test of it (`seal::is_sealed`), which is only
+//! held to agree: a seal of a later version beside the release's changes
+//! nothing here.
 
 #[path = "../../fennec-core/tests/compat/answers.rs"]
 mod answers;
@@ -18,11 +24,19 @@ mod answers;
 mod walk;
 
 use answers::{set_name, sets, written_and_compacted, Scratch};
+use fennec_core::prelude::Value;
 use fennec_http::archive::{self, Archive, Target};
+use fennec_http::node_archive::{self, Restoring};
 use fennec_http::seal::{self, Key};
 use std::collections::BTreeSet;
 use std::path::Path;
 use walk::{sealed_only, writes_of, Seen};
+
+/// Whether `bytes` are sealed by the release: version 1's magic, the one
+/// v0.2.0 writes. A file a release seals by another is its set's to name.
+fn release_sealed(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"FENECSL\x01")
+}
 
 fn copy_dir(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();
@@ -39,13 +53,23 @@ fn copy_dir(from: &Path, to: &Path) {
 }
 
 /// A file sealed whole: its frames walked to its end, then opened by this
-/// build's seal with the set's key. Its plaintext.
+/// build's seal with the set's key. Its plaintext. Of several frames, the
+/// file cut at the end of each but the last is refused: the last is
+/// flagged as the last in what its tag covers, so a file cut where a frame
+/// ends is told from a whole one.
 fn sealed_whole(bytes: &[u8], file: &str, key: &Key, seen: &mut Seen) -> Vec<u8> {
-    let frames = walk::seal_frames(bytes, file);
-    seen.shape(match frames {
+    let ends = walk::seal_frames(bytes, file);
+    seen.shape(match ends.len() {
         1 => "seal: whole, one frame",
         _ => "seal: whole, several frames",
     });
+    for &end in &ends[..ends.len() - 1] {
+        assert!(
+            seal::open_whole(key, &bytes[..end]).is_err(),
+            "{file}: opened cut at a frame's end, {end} of {} bytes",
+            bytes.len()
+        );
+    }
     seal::open_whole(key, bytes).unwrap_or_else(|e| panic!("{file}: {e}"))
 }
 
@@ -54,7 +78,7 @@ fn sealed_whole(bytes: &[u8], file: &str, key: &Key, seen: &mut Seen) -> Vec<u8>
 /// other -- each sealed or each plain: the images walked as databases,
 /// then the segments in order, each write's time and record, then the
 /// history.
-fn walk_archive(dir: &Path, label: &str, key: &Key, seen: &mut Seen) {
+fn walk_archive(dir: &Path, label: &str, key: &Key, seen: &mut Seen) -> Vec<(u64, u64, u64)> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -65,7 +89,44 @@ fn walk_archive(dir: &Path, label: &str, key: &Key, seen: &mut Seen) {
     let (mut images, mut segments, mut history) = (Vec::new(), Vec::new(), None);
     for name in &names {
         let bytes = std::fs::read(dir.join(name)).unwrap();
-        kinds.insert(seal::is_sealed(&bytes));
+        // A tenant's line of a node's archive: when its first image was
+        // taken, and the node's word that the tenant was gone or back,
+        // plain whether the archive is sealed or not.
+        if name == "began" {
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(
+                text.strip_suffix('\n')
+                    .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit())),
+                "{label}/began: {text:?}"
+            );
+            seen.shape("node archive: began");
+            continue;
+        }
+        if name == "presence" {
+            let text = String::from_utf8(bytes).unwrap();
+            for line in text.lines() {
+                let (word, at) = line
+                    .split_once(' ')
+                    .unwrap_or_else(|| panic!("{label}/presence: {line:?}"));
+                assert!(
+                    !at.is_empty() && at.bytes().all(|b| b.is_ascii_digit()),
+                    "{label}/presence: {line:?}"
+                );
+                seen.shape(match word {
+                    "gone" => "node archive: presence gone",
+                    "back" => "node archive: presence back",
+                    _ => panic!("{label}/presence: {line:?}"),
+                });
+            }
+            assert!(text.ends_with('\n'), "{label}/presence: {text:?}");
+            continue;
+        }
+        assert_eq!(
+            seal::is_sealed(&bytes),
+            release_sealed(&bytes),
+            "{label}/{name}: this build's test of a seal and the release's magic disagree"
+        );
+        kinds.insert(release_sealed(&bytes));
         if let Some((change, time)) = name
             .strip_prefix("image-")
             .and_then(|r| r.strip_suffix(".fennec"))
@@ -106,10 +167,19 @@ fn walk_archive(dir: &Path, label: &str, key: &Key, seen: &mut Seen) {
             false => bytes.clone(),
         };
         walk::database(&plain, &file, seen);
+        seen.finish();
         seen.shape("archive: image");
     }
+    // Each write's time and the change it ends at, segment by segment.
+    let mut writes = Vec::new();
     for (name, bytes) in &segments {
         let file = format!("{label}/{name}");
+        let first: u64 = name
+            .strip_prefix("writes-")
+            .and_then(|r| r.strip_suffix(".log"))
+            .unwrap()
+            .parse()
+            .unwrap();
         let plain = match sealed {
             true => {
                 walk::seal_frames(bytes, &file);
@@ -122,7 +192,11 @@ fn walk_archive(dir: &Path, label: &str, key: &Key, seen: &mut Seen) {
             }
             false => bytes.clone(),
         };
-        walk::segment(&plain, &file, seen);
+        let mut seq = first - 1;
+        for (time, n) in walk::segment(&plain, &file, seen) {
+            seq += n;
+            writes.push((time, seq, n));
+        }
         seen.shape("archive: segment");
     }
     let history = history.unwrap_or_else(|| panic!("{label}: no history"));
@@ -135,6 +209,140 @@ fn walk_archive(dir: &Path, label: &str, key: &Key, seen: &mut Seen) {
     walk::history(&mut c, seen);
     c.end("the archive's history");
     seen.shape("archive: history file");
+    writes
+}
+
+/// The change a restore to `at` stops at, by the walk's times: the last
+/// write appended at or before it, up to the first appended after it.
+fn change_at(writes: &[(u64, u64, u64)], at: u64) -> Option<u64> {
+    let mut kept = None;
+    for &(time, seq, _) in writes {
+        if time > at {
+            break;
+        }
+        kept = Some(seq);
+    }
+    kept
+}
+
+/// What a restore of every tenant said of each, as the release's `fennec
+/// restore --tenants` prints it.
+fn said(name: &str, r: &Restoring) -> String {
+    let iso = |t: u64| fennec_core::time::format_iso(t as i64);
+    match r {
+        Restoring::Restored(seq, from) if from == name => format!("{name}: change {seq}"),
+        Restoring::Restored(seq, from) => format!("{name}: change {seq}, from {from}"),
+        Restoring::Gone(t) => format!("{name}: gone from the node {}, passed over", iso(*t)),
+        Restoring::NotYet => format!("{name}: archived only from after then, passed over"),
+        Restoring::LetGo(first) => format!(
+            "{name}: that moment was let go of (--keep): its archive holds nothing from before {}",
+            iso(*first)
+        ),
+        Restoring::Failed(e) => format!("{name}: {e}"),
+    }
+}
+
+fn member<'a>(v: &'a Value, name: &str) -> &'a Value {
+    match v {
+        Value::Object(o) => o.iter().find(|(k, _)| k == name).map(|(_, v)| v).unwrap(),
+        _ => panic!("`{name}`: not an object"),
+    }
+}
+
+fn texts(v: &Value) -> Vec<String> {
+    match v {
+        Value::List(l) => l
+            .iter()
+            .map(|x| match x {
+                Value::Text(t) => t.clone(),
+                x => panic!("not a text: {x:?}"),
+            })
+            .collect(),
+        v => panic!("not a list: {v:?}"),
+    }
+}
+
+/// The node's archive: every line walked as an archive, then every tenant
+/// restored at each moment the release restored it to, each saying what
+/// the release's restore said of it, and each restored answering as the
+/// release's did.
+fn node_archive(set: &Path, name: &str, scratch: &Path, key: &Key, seen: &mut Seen) -> Vec<String> {
+    let root = set.join("node-archive");
+    let mut lines = 0;
+    for e in std::fs::read_dir(&root).unwrap() {
+        let label = e.unwrap().file_name().to_string_lossy().into_owned();
+        let moved = match label.split_once('.') {
+            None => false,
+            Some((_, hex)) => {
+                assert!(
+                    hex.len() == 16 && hex.bytes().all(|b| b.is_ascii_hexdigit()),
+                    "{name}/node-archive/{label}"
+                );
+                true
+            }
+        };
+        seen.shape(if moved {
+            "node archive: line moved aside"
+        } else {
+            "node archive: line followed"
+        });
+        walk_archive(
+            &root.join(&label),
+            &format!("{name}/node-archive/{label}"),
+            key,
+            seen,
+        );
+        lines += 1;
+    }
+    assert!(lines >= 3, "{name}/node-archive: {lines} lines");
+    let recorded = std::fs::read_to_string(set.join("node-archive.json")).unwrap();
+    let recorded = fennec_core::json::parse_json(&recorded).unwrap();
+    let statements = answers::statements(set, "node");
+    let mut found = Vec::new();
+    let restores = match member(&recorded, "restores") {
+        Value::List(l) => l.clone(),
+        _ => panic!("restores"),
+    };
+    for (i, r) in restores.iter().enumerate() {
+        let to = match member(r, "to") {
+            Value::Text(t) => Target::Time(fennec_core::time::parse(t).unwrap() as u64),
+            _ => Target::End,
+        };
+        let out = scratch.join(format!("node-{i}"));
+        let done = node_archive::restore_all(&root, &out, to, None).unwrap();
+        let ours: Vec<String> = done.iter().map(|(n, r)| said(n, r)).collect();
+        let theirs: Vec<String> = texts(member(r, "said"))
+            .into_iter()
+            .filter(|l| !l.starts_with("<out>"))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let ours_sorted: Vec<String> = ours
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if ours_sorted != theirs {
+            found.push(format!("{name}/node-archive to {to:?}\n  release: {theirs:?}\n  this build: {ours_sorted:?}"));
+        }
+        let answered = match member(r, "answers") {
+            Value::Object(o) => o.clone(),
+            _ => panic!("answers"),
+        };
+        for (tenant, theirs) in &answered {
+            let file = out.join(format!("{tenant}.fennec"));
+            let db =
+                fennec_core::fs::open_read_only(&file).unwrap_or_else(|e| panic!("{tenant}: {e}"));
+            for (q, theirs) in statements.iter().zip(texts(theirs)) {
+                let ours = answers::answer(&db, q);
+                if ours != theirs {
+                    found.push(format!("{name}/node-archive {tenant} to {to:?}: {q}\n  release: {theirs}\n  this build: {ours}"));
+                }
+            }
+        }
+    }
+    found
 }
 
 #[test]
@@ -150,34 +358,45 @@ fn a_release_s_backup_and_archives_restore_and_answer_as_it_did() {
         let other = Key::from_file(&other).unwrap();
         let mut seen = Seen::default();
 
-        // The backup: a sealed file, the database it holds.
-        let sealed = set.join("backup.sealed");
-        let plain = sealed_whole(
-            &std::fs::read(&sealed).unwrap(),
-            &format!("{name}/backup.sealed"),
-            &key,
-            &mut seen,
-        );
-        walk::database(&plain, &format!("{name}/backup.sealed"), &mut seen);
-        assert!(
-            archive::unseal(&sealed, &other, &scratch.0.join("refused.fennec")).is_err(),
-            "{name}: a sealed backup opened with another key"
-        );
-        let out = scratch.0.join("backup.fennec");
-        let seq = archive::unseal(&sealed, &key, &out)
-            .unwrap_or_else(|e| panic!("{name}/backup.sealed: {e}"));
-        assert!(seq > 0, "{name}: the backup holds no change");
-        found.extend(written_and_compacted(&out, &set, "backup"));
+        // Each backup: a sealed file, the database it holds.
+        let mut backups = 0;
+        for entry in std::fs::read_dir(&set).unwrap() {
+            let file = entry.unwrap().file_name().to_string_lossy().into_owned();
+            let Some(stem) = file.strip_suffix(".sealed") else {
+                continue;
+            };
+            let sealed = set.join(&file);
+            let bytes = std::fs::read(&sealed).unwrap();
+            assert!(
+                release_sealed(&bytes),
+                "{name}/{file}: not sealed by the release's version"
+            );
+            let plain = sealed_whole(&bytes, &format!("{name}/{file}"), &key, &mut seen);
+            walk::database(&plain, &format!("{name}/{file}"), &mut seen);
+            seen.finish();
+            assert!(
+                archive::unseal(&sealed, &other, &scratch.0.join("refused.fennec")).is_err(),
+                "{name}/{file}: a sealed backup opened with another key"
+            );
+            let out = scratch.0.join(format!("{stem}.fennec"));
+            let seq = archive::unseal(&sealed, &key, &out)
+                .unwrap_or_else(|e| panic!("{name}/{file}: {e}"));
+            assert!(seq > 0, "{name}/{file}: the backup holds no change");
+            found.extend(written_and_compacted(&out, &set, stem));
+            backups += 1;
+        }
+        assert!(backups >= 2, "{name}: {backups} sealed backups");
 
         // Each archive, copied: a restore or a verify reads it alone.
         let mut archives = 0;
+        let mut timed = 0;
         for entry in std::fs::read_dir(&set).unwrap() {
             let dirname = entry.unwrap().file_name().to_string_lossy().into_owned();
-            if !set.join(&dirname).is_dir() {
+            if !set.join(&dirname).is_dir() || dirname == "node-archive" {
                 continue;
             }
             archives += 1;
-            walk_archive(
+            let writes = walk_archive(
                 &set.join(&dirname),
                 &format!("{name}/{dirname}"),
                 &key,
@@ -185,7 +404,7 @@ fn a_release_s_backup_and_archives_restore_and_answer_as_it_did() {
             );
             let dir = scratch.0.join(&dirname);
             copy_dir(&set.join(&dirname), &dir);
-            let sealed = seal::is_sealed(&std::fs::read(dir.join("history")).unwrap());
+            let sealed = release_sealed(&std::fs::read(dir.join("history")).unwrap());
             if sealed {
                 let refused = Archive::with_key(&dir, Some(other.clone())).and_then(|a| a.verify());
                 assert!(
@@ -210,7 +429,32 @@ fn a_release_s_backup_and_archives_restore_and_answer_as_it_did() {
                 .unwrap_or_else(|e| panic!("{name}/{dirname}: a restore: {e}"));
             assert_eq!(r.seq, v.last, "{name}/{dirname}: restored to its end");
             found.extend(written_and_compacted(&out, &set, &dirname));
+            // A restore to each write's time, and to a moment before the
+            // next: the change the walk's times say, each.
+            for (i, &(time, _, _)) in writes.iter().enumerate() {
+                let next = writes.get(i + 1).map(|w| w.0);
+                for at in [Some(time), next.filter(|&n| n > time + 1).map(|n| n - 1)]
+                    .into_iter()
+                    .flatten()
+                {
+                    let want = change_at(&writes, at).unwrap();
+                    let out = scratch.0.join(format!("{dirname}-at-{at}.fennec"));
+                    let r = arch
+                        .restore(&out, Target::Time(at))
+                        .unwrap_or_else(|e| panic!("{name}/{dirname}: a restore to {at}: {e}"));
+                    if r.seq != want {
+                        found.push(format!(
+                            "{name}/{dirname}: a restore to {at} stopped at change {}, the walk's times at {want}",
+                            r.seq
+                        ));
+                    }
+                    let _ = std::fs::remove_file(&out);
+                    timed += 1;
+                }
+            }
         }
+        assert!(timed > 2, "{name}: {timed} restores to a time");
+        found.extend(node_archive(&set, &name, &scratch.0, &key, &mut seen));
         assert!(
             archives >= 2,
             "{name}: {archives} archives, not a sealed one and a plain one"

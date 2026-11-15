@@ -127,8 +127,16 @@ export function fakeIndexedDB(held = null) {
   };
 }
 
-/** The origin private file system's directory: files by name, one handle each at a time. */
-export function fakeDir(files = new Map()) {
+/**
+ * The origin private file system's directory: files by name, one handle
+ * each at a time. `stop(name, op)` answering true stops the page there --
+ * the write or truncation refused, as a page closed in the middle leaves
+ * the file system -- which `page-opfs-stopped` is written with.
+ */
+export function fakeDir(files = new Map(), { stop } = {}) {
+  const stopped = (name, op) => {
+    if (stop?.(name, op)) throw Object.assign(new Error(`the page went away at ${name}'s ${op}`), { name: 'AbortError' });
+  };
   return {
     files,
     async getFileHandle(name, { create = false } = {}) {
@@ -154,11 +162,15 @@ export function fakeDir(files = new Map()) {
               return n;
             },
             write(buf, { at = 0 } = {}) {
+              stopped(name, 'write');
               if (at + buf.length > f.bytes.length) resize(at + buf.length);
               f.bytes.set(buf, at);
               return buf.length;
             },
-            truncate: resize,
+            truncate(n) {
+              stopped(name, 'truncate');
+              resize(n);
+            },
             flush() {},
             close() {
               f.open = false;
@@ -341,6 +353,39 @@ async function main([web, out, statementsFile, url, token]) {
   await writeFile(join(out, 'page-opfs.web'), answers(again, reads));
   reopened.close();
   again.close();
+
+  // OPFS, a rewrite stopped: a compact's image flushed into the copy beside
+  // the file (`<name>~`), the page gone before the file was touched -- the
+  // file whole as it stood, the copy whole -- and the page opened again,
+  // which takes the copy.
+  let armed = false;
+  const halted = fakeDir(new Map(), { stop: (name, op) => armed && name === 'page.fennec' && op === 'truncate' });
+  const kept = await page(web, wasm);
+  await openFile(kept, 'page.fennec', { dir: halted });
+  for (const [i, part] of WRITES.entries()) {
+    for (const q of part) await kept.query(q);
+    if (i === 1) await declaredAndSynced(web, kept, url, token);
+  }
+  armed = true;
+  let stopped = false;
+  try {
+    await kept.query('compact');
+  } catch {
+    stopped = true;
+  }
+  if (!stopped) throw new Error('the compact was not stopped');
+  const main = halted.files.get('page.fennec').bytes.slice();
+  const copy = halted.files.get('page.fennec~').bytes.slice();
+  if (!copy.length) throw new Error('no copy beside the file');
+  await writeFile(join(out, 'page-opfs-stopped.fennec'), main);
+  await writeFile(join(out, 'page-opfs-stopped.fennec~'), copy);
+  const left = fakeDir(new Map([['page.fennec', { bytes: main.slice(), open: false }], ['page.fennec~', { bytes: copy.slice(), open: false }]]));
+  const back = await page(web, wasm);
+  const taken = await openFile(back, 'page.fennec', { dir: left });
+  if (left.files.get('page.fennec~').bytes.length) throw new Error('the copy was not taken');
+  await writeFile(join(out, 'page-opfs-stopped.web'), answers(back, reads));
+  taken.close();
+  back.close();
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {

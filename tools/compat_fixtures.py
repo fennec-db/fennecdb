@@ -22,6 +22,16 @@ web/fennec.compat.test.js.
     make compat-fixtures V=0.2.0
         both, into crates/fennec-core/tests/compat/v0.2.0/
 
+What it needs, checked before anything is built or written: rustup, with
+the tag's toolchain and its wasm32-unknown-unknown target -- the version
+the tag's rust-toolchain.toml names, or, where it names a channel
+(v0.2.0's says `stable`), the version its binaries were built with
+(`TOOLCHAINS`); git with the tag; node, for the tag's web client; and
+Docker with the image `make pgvector-up` runs (`PG_IMAGE` in the
+Makefile) already on the machine -- nothing is pulled -- for `--follow`'s
+file, a PostgreSQL server in a container of the writer's own, on a port
+the system picks, removed after (`FENNEC_COMPAT_PG` names it).
+
 What each file holds, what the writer lowers to make it at a few
 kilobytes, what of it cannot be the same twice (a history's id, a seal's
 nonces, a scheduled slot's time) and what no file holds, and why, is in
@@ -51,7 +61,14 @@ COMPAT = ROOT / "tools" / "compat"
 SETS = ROOT / "crates" / "fennec-core" / "tests" / "compat"
 CARGO = os.path.expanduser("~/.cargo/bin/cargo") if os.path.exists(os.path.expanduser("~/.cargo/bin/cargo")) else "cargo"
 
+# The toolchain each release's binaries were built with, where its
+# rust-toolchain.toml names a channel rather than a version: v0.2.0's says
+# `stable`, which was 1.99.1 when it was released and moves since. A tag
+# whose file names a version builds with that one.
+TOOLCHAINS = {"v0.2.0": "1.99.1"}
+
 TOKEN = "compat-token"
+ADMIN = "compat-admin"
 REPLICATION = "compat-replication"
 HOOK_SECRET = "the fixture set's webhook secret"
 # A kept Idempotency-Key and a taken event's key outlive every build that
@@ -109,6 +126,12 @@ PHASE_A = [
     "create collection issues (n int @hash, action text)",
     "create collection gone (n int)",
     "put gone {n: 1}",
+    # The id counter (kind 7) is the image's alone once the compact drops
+    # the highest row: the next id is past every live one, never one the
+    # release handed out before.
+    "create collection retired (n int @hash, s text)",
+    'put retired [{n: 1, s: "kept"}, {n: 2, s: "kept too"}, {n: 3, s: "retired before the compact"}]',
+    "del retired where n = 3",
     "create statement order_by_ref($r text) as get orders select ref, status, total where ref = $r",
     "create statement on_order after insert orders as insert audit {ref: new.ref, what: 'placed'}",
     'put orders [{ref: "o-1", status: "open", total: 2000}, {ref: "o-2", status: "open", total: 500}]',
@@ -564,6 +587,48 @@ def write_graph(bins, work, out):
         die("graph.fennec: the server wrote no checkpoint")
 
 
+# What the release writes that a later build reads otherwise on purpose
+# (docs/design/crates.md, *How deep a value nests* and *Limits*), each a
+# small file of the shell's: a row of a `[[json]]` field nesting 66 levels
+# in all, refused where it is read; a field of 65 nested lists, and one of
+# vectors past a dimension's range in a list (SQL's array of them), each
+# refused at the open; and a point under 64 lists, refused at the open by
+# a change that follows. A later build's test holds each to its words.
+LISTS = "[" * 65 + "int" + "]" * 65
+POINTS = "[" * 64 + "geo" + "]" * 64
+NESTED_JSON = "{a: " * 64 + "1" + "}" * 64
+ON_PURPOSE = {
+    "deep": [
+        "create collection plain (n int @hash, s text)",
+        'put plain [{n: 1, s: "one"}, {n: 2, s: "two"}]',
+        "create collection deep (n int @hash, j [[json]])",
+        f"put deep [{{n: 1, j: [[{{shallow: true}}]]}}, {{n: 2, j: [[{NESTED_JSON}]]}}]",
+    ],
+    "refused-lists": [
+        "create collection plain (n int @hash, s text)",
+        'put plain {n: 1, s: "beside it"}',
+        f"create collection lists (l {LISTS})",
+    ],
+    "refused-dims": [
+        "create table plain (n int, s text)",
+        "insert into plain (n, s) values (1, 'beside it')",
+        "create table wide (e vector(1000000001)[])",
+    ],
+    "points-deep": [
+        "create collection plain (n int @hash, s text)",
+        'put plain {n: 1, s: "beside it"}',
+        f"create collection points (g {POINTS})",
+        "put points {g: " + "[" * 64 + "[13.4, 52.5]" + "]" * 64 + "}",
+    ],
+}
+
+
+def write_on_purpose(bins, out):
+    for name, writes in ON_PURPOSE.items():
+        for q in writes:
+            run(bins / "fennec", out / f"{name}.fennec", "-c", q)
+
+
 def write_shell(bins, out):
     """shell.fennec: the shell's own file, an open and a close a statement."""
     for q in SHELL:
@@ -583,6 +648,253 @@ def write_page(bins, work, out):
         s.stop()
 
 
+def pg_image():
+    """The PostgreSQL image `make pgvector-up` runs, by its digest: one
+    source for both."""
+    m = re.search(r"^PG_IMAGE \?= (\S+)$", (ROOT / "Makefile").read_text(), flags=re.M)
+    if not m:
+        die("the Makefile names no PG_IMAGE")
+    return m.group(1)
+
+
+# The table `--follow` mirrors: its copy, then a change of each kind after
+# it, streamed through the slot.
+FOLLOW_TABLE = [
+    "create table items (id bigint primary key, name text not null, qty integer, price double precision, "
+    "at timestamptz, ok boolean)",
+    "insert into items values (1, 'one', 1, 1.5, '2026-01-01T00:00:00Z', true), "
+    "(2, 'two', 2, 2.5, '2026-01-02T00:00:00Z', false), (3, 'three', 3, 3.5, '2026-01-03T00:00:00Z', null)",
+]
+FOLLOW_CHANGES = [
+    "insert into items values (4, 'four', 4, 4.5, '2026-01-04T00:00:00Z', true)",
+    "update items set qty = 20, name = 'two, updated' where id = 2",
+    "delete from items where id = 3",
+]
+
+
+def write_follow(bins, work, out):
+    """follow.fennec: a PostgreSQL table mirrored by the release's
+    `fennec-server --follow` -- its copy, then an insert, an update and a
+    delete streamed through its slot -- and `_follow`, the record of which
+    collection follows which slot and whether its copy is whole. The
+    server is the image `make pgvector-up` runs, in a container of this
+    writer's own on a port the system picks, removed after; nothing is
+    pulled."""
+    image = pg_image()
+    if subprocess.run(["docker", "image", "inspect", image], capture_output=True).returncode != 0:
+        die(f"{image} is not on this machine: `docker pull {image}` once (the writer pulls nothing)")
+    name = os.environ.get("FENNEC_COMPAT_PG") or f"fennec-compat-pg-{os.getpid()}"
+    run("docker", "run", "-d", "--rm", "--pull=never", "--name", name, "-e", "POSTGRES_PASSWORD=fennec",
+        "-e", "POSTGRES_DB=compat", "-p", "127.0.0.1::5432", image, "-c", "wal_level=logical")
+    try:
+        ready = lambda: subprocess.run(["docker", "exec", name, "pg_isready", "-h", "127.0.0.1", "-U", "postgres",
+                                        "-d", "compat"], capture_output=True).returncode == 0
+        wait_for("PostgreSQL", ready, 120)
+        port = run("docker", "port", name, "5432").split()[0].rsplit(":", 1)[1]
+
+        def psql(sql):
+            run("docker", "exec", name, "psql", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "compat", "-c", sql)
+
+        for sql in FOLLOW_TABLE:
+            psql(sql)
+        url = f"postgres://postgres:fennec@127.0.0.1:{port}/compat?sslmode=disable"
+        s = Server(str(bins / "fennec-server"),
+                   ["--file", str(out / "follow.fennec"), "--http-token", TOKEN, "--auth-delay", "0",
+                    "--follow", url, "--follow-table", "items"], work / "follow.log")
+        try:
+            def rows():
+                status, body = s.ask("POST", "/query", json.dumps({"query": "get items order id"}).encode(),
+                                     {"Content-Type": "application/json"})
+                return json.loads(body) if status == 200 else None
+
+            wait_for("the copy", lambda: (r := rows()) is not None and len(r) == 3, 60)
+            for sql in FOLLOW_CHANGES:
+                psql(sql)
+            wait_for("the changes streamed",
+                     lambda: (r := rows()) is not None and [x["id"] for x in r] == [1, 2, 4]
+                     and r[1].get("qty") == 20, 60)
+        finally:
+            s.stop()
+    finally:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+
+
+def now_ms():
+    return time.time_ns() // 1_000_000
+
+
+def iso(ms):
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ms // 1000)) + f".{ms % 1000:03d}Z"
+
+
+NODE_WRITES = {
+    "a": ["create collection notes (n int @hash, s text)", 'put notes [{n: 1, s: "a one"}, {n: 2, s: "a two"}]'],
+    "b": ["create collection notes (n int @hash, s text)", 'put notes {n: 1, s: "b, its first life"}'],
+    "c": ["create collection notes (n int @hash, s text)", 'put notes {n: 1, s: "c, before it moved"}'],
+}
+
+
+def write_node(bins, work, out):
+    """node-archive/: every tenant of the release's tenant node archived by
+    its `fennec archive --tenants --image-every 1s`, over the node's one
+    stream, then pruned by its `fennec prune --tenants --keep 1s`: `a`,
+    images of it taken by the archiver and its first let go of, its line's
+    `began` written before; `b` deleted -- noted gone in its `presence` --
+    then made again under its name, its first line moved aside to
+    `b.<history>/` and a new one begun; `c` moved away -- its image taken,
+    the tenant deleted, the image installed again -- noted gone and back.
+    And what the release's `fennec verify --tenants` and `prune` said of
+    it, and its `fennec restore --tenants` to the end and to moments --
+    before the tenants, with all three, with `b` gone, with `c` away and
+    with `b` back -- each tenant restored answering `node.fennecql`
+    (node-archive.json)."""
+    tenants = work / "tenants"
+    tenants.mkdir()
+    s = Server(str(bins / "fennec-server"),
+               ["--dir", str(tenants), "--admin-token", ADMIN, "--replication-token", REPLICATION,
+                "--http-token", TOKEN, "--auth-delay", "0", "--no-checkpoint"], work / "node.log")
+    root = out / "node-archive"
+    archiver = None
+    moments = {}
+    try:
+        def admin(method, path, body=b""):
+            host, port = s.addr.rsplit(":", 1)
+            c = http.client.HTTPConnection(host, int(port), timeout=120)
+            c.request(method, f"/_admin/tenants/{path}", body=body, headers={"Authorization": f"Bearer {ADMIN}"})
+            r = c.getresponse()
+            data = r.read()
+            c.close()
+            if r.status // 100 != 2:
+                die(f"{method} /_admin/tenants/{path}: {r.status} {data[:200]!r}")
+            return data
+
+        def query(tenant, q):
+            status, body = s.ask("POST", f"/t/{tenant}/query", json.dumps({"query": q}).encode(),
+                                 {"Content-Type": "application/json"})
+            if status != 200:
+                die(f"{tenant}: {q}: {status} {body}")
+
+        archiver = subprocess.Popen(
+            [bins / "fennec", "archive", "--tenants", f"http://{s.addr}", root, "--token", REPLICATION,
+             "--image-every", "1s"],
+            stdout=open(work / "node-archive.log", "w"), stderr=subprocess.STDOUT)
+
+        def lines():
+            r = subprocess.run([bins / "fennec", "verify", "--tenants", root], capture_output=True, text=True)
+            return r.stdout if r.returncode == 0 else ""
+
+        def last(label):
+            """The last change `label`'s line restores, as verify says it."""
+            m = re.search(rf"^{re.escape(label)}: changes \d+ to (\d+),", lines(), flags=re.M)
+            return int(m.group(1)) if m else -1
+
+        def archived(label, write):
+            """`write` run, and waited for in `label`'s line."""
+            was = last(label)
+            write()
+            wait_for(f"{label}'s write archived", lambda: last(label) > was, 60)
+
+        def noted(label, word):
+            presence = root / label / "presence"
+            return presence.is_file() and word in presence.read_text()
+
+        def moment(name):
+            # Moments the node's clock and the archive's times tell apart.
+            time.sleep(0.05)
+            moments[name] = now_ms()
+            time.sleep(0.05)
+
+        moment("before")
+        for tenant, writes in NODE_WRITES.items():
+            admin("PUT", tenant)
+            for q in writes:
+                query(tenant, q)
+        wait_for("the tenants archived", lambda: all(last(x) >= 2 for x in NODE_WRITES), 60)
+        archived("a", lambda: query("a", 'put notes {n: 3, s: "a three"}'))
+        moment("all three")
+        admin("DELETE", "b")
+        wait_for("b noted gone", lambda: noted("b", "gone"), 60)
+        moment("b gone")
+        image = admin("GET", "c/file")
+        admin("DELETE", "c")
+        wait_for("c noted gone", lambda: noted("c", "gone"), 60)
+        moment("c away")
+        admin("PUT", "c/file", image)
+        wait_for("c noted back", lambda: noted("c", "back"), 60)
+        archived("c", lambda: query("c", 'put notes {n: 2, s: "c, back where it was"}'))
+        admin("PUT", "b")
+        for q in ["create collection notes (n int @hash, s text)", 'put notes {n: 1, s: "b, made again"}',
+                  'put notes {n: 2, s: "b, its second life"}']:
+            query("b", q)
+        wait_for("b's first line moved aside, its second archived",
+                 lambda: any(d.name.startswith("b.") for d in root.iterdir()) and last("b") >= 3, 60)
+        archived("a", lambda: query("a", 'put notes {n: 4, s: "a four"}'))
+        moment("b back")
+        # An image the archiver takes of a's end, after the write: the one a
+        # prune keeps, letting go of the first.
+        wait_for("a's image of its end",
+                 lambda: len(list((root / "a").glob("image-*.fennec"))) >= 2, 60)
+        archiver.send_signal(signal.SIGINT)
+        archiver.wait(60)
+        archiver = None
+    finally:
+        if archiver is not None and archiver.poll() is None:
+            archiver.kill()
+            archiver.wait()
+        s.stop()
+    for lock in root.glob("*.lock"):
+        lock.unlink()
+    time.sleep(1.2)
+    said = {"prune": run(bins / "fennec", "prune", "--tenants", root, "--keep", "1s")}
+    if not (root / "a" / "began").is_file():
+        die("the prune wrote no `began`: a's first image was not let go of")
+    said["verify"] = run(bins / "fennec", "verify", "--tenants", root)
+    said = {k: v.replace(str(root), "<root>").splitlines() for k, v in said.items()}
+    restores = []
+    for label, at in [("end", None), *moments.items()]:
+        into = work / f"node-{label.replace(' ', '-')}"
+        args = [bins / "fennec", "restore", "--tenants", root, into] + ([] if at is None else ["--to", iso(at)])
+        r = subprocess.run(args, capture_output=True, text=True)
+        answers = {}
+        for f in sorted(into.glob("*.fennec")):
+            got = work / f"{f.stem}.answers"
+            run(bins / "compat_writer", "answers", f, COMPAT / "node.fennecql", got)
+            answers[f.stem] = got.read_text().splitlines()
+        restores.append({
+            "to": None if at is None else iso(at), "label": label, "status": r.returncode,
+            "said": (r.stdout + r.stderr).replace(str(into), "<out>").splitlines(),
+            "answers": answers,
+        })
+    (out / "node-archive.json").write_text(json.dumps({**said, "restores": restores}, indent=1,
+                                                      ensure_ascii=False) + "\n")
+
+
+def write_wide_backup(bins, work, out):
+    """backup-wide.sealed: a sealed backup of a database past a mebibyte,
+    sealed whole in several frames -- the last flagged in what its tag
+    covers -- its rows bytes no compressor shrinks: 1 100 rows of 1 000
+    pseudo-random bytes, from a fixed seed."""
+    s = Server(str(bins / "fennec-server"),
+               ["--file", str(work / "wide.fennec"), "--http-token", TOKEN, "--replication-token", REPLICATION,
+                "--auth-delay", "0"], work / "wide.log")
+    try:
+        s.query("create collection blobs (n int @hash, b bytes)")
+        x = 0x2545F491
+        for start in range(0, 1100, 50):
+            rows = []
+            for n in range(start, start + 50):
+                bs = []
+                for _ in range(1000):
+                    x = (x * 6364136223846793005 + 1442695040888963407) & 0xFFFFFFFFFFFFFFFF
+                    bs.append(str(x >> 56))
+                rows.append("{n: %d, b: [%s]}" % (n, ", ".join(bs)))
+            s.query(f"put blobs [{', '.join(rows)}]")
+        run(bins / "fennec", "backup", f"http://{s.addr}", out / "backup-wide.sealed", "--token", REPLICATION,
+            "--key-file", out / "key")
+    finally:
+        s.stop()
+
+
 def statements(path):
     return [l for l in Path(path).read_text().splitlines() if l.strip() and not l.startswith("--")]
 
@@ -595,6 +907,24 @@ def sums(out):
         if p.is_file() and p.name != "SHA256SUMS":
             lines.append(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(out).as_posix()}")
     (out / "SHA256SUMS").write_text("\n".join(lines) + "\n")
+
+
+def forms(tag):
+    """How many forms `RELEASES`' line for `tag` places in a file and names
+    absent (crates/fennec-core/tests/compat/walk.rs): what the set's README
+    states, and the compat tests hold it to."""
+    walk = (SETS / "walk.rs").read_text()
+    m = re.search(r'set: "' + re.escape(tag) + r'",(.*?)\n    \}', walk, flags=re.S)
+    if not m:
+        die(f"walk.rs: RELEASES has no line for {tag}: add it before the set is written")
+    line = m.group(1)
+    shapes = re.search(r"shapes: (\w+),", line).group(1)
+    listed = re.search(r"const " + shapes + r": &\[&str\] = &\[(.*?)\n\];", walk, flags=re.S).group(1)
+    held = len(re.findall(r'^\s*"[^"]+",$', listed, flags=re.M))
+    absent = len(re.findall(r'\(\s*"[^"]+",', line.split("absent:", 1)[1]))
+    numbers = sum(len(re.findall(r"\d+", re.search(k + r": &\[([^\]]*)\]", line).group(1)))
+                  for k in ("kinds", "ops", "graphs", "schema_tags", "value_tags", "indexes"))
+    return held, absent, numbers
 
 
 def readme(out, versions):
@@ -611,16 +941,38 @@ def write(bins, out):
     out = Path(out).resolve()
     if out.exists() and any(out.iterdir()):
         die(f"{out} holds files already: a set is written once, by its release")
+    # What `follow.fennec` and the page need, asked before anything is written.
+    if subprocess.run(["docker", "image", "inspect", pg_image()], capture_output=True).returncode != 0:
+        die(f"{pg_image()} is not on this machine: `docker pull {pg_image()}` once (the writer pulls nothing)")
+    if shutil.which("node") is None:
+        die("node runs the release's web client: install it")
     work = Path(tempfile.mkdtemp(prefix="fennec-compat-"))
     stage = work / "set"
     stage.mkdir()
     try:
-        write_server(bins, work, stage)
-        write_graph(bins, work, stage)
-        write_shell(bins, stage)
-        for what in ("kept", "waiting", "spill", "synclog", "synclog-torn", "torn-wide", "torn-tail", "torn-mark"):
-            run(bins / "compat_writer", what, stage / f"{what}.fennec")
-        write_page(bins, work, stage)
+        started = time.monotonic()
+        took = {}
+
+        def timed(what, f, *args):
+            at = time.monotonic()
+            f(*args)
+            took[what] = time.monotonic() - at
+            print(f"compat_fixtures: {what} written in {took[what]:.0f} s", flush=True)
+
+        timed("server", write_server, bins, work, stage)
+        timed("graph", write_graph, bins, work, stage)
+        timed("shell", write_shell, bins, stage)
+        timed("on purpose", write_on_purpose, bins, stage)
+        for what in ("kept", "waiting", "spill", "synclog", "synclog-torn", "synclog-spent", "synclog-unbegun",
+                     "torn-wide", "torn-tail", "torn-mark", "schedules", "ids"):
+            timed(what, run, bins / "compat_writer", what, stage / f"{what}.fennec")
+        timed("page", write_page, bins, work, stage)
+        timed("follow", write_follow, bins, work, stage)
+        timed("node", write_node, bins, work, stage)
+        timed("backup-wide", write_wide_backup, bins, work, stage)
+        # The clock every answer below is read at (writer.rs's `CLOCK`), which
+        # a later build's tests read theirs at.
+        (stage / "clock").write_text(run(bins / "compat_writer", "clock").strip() + "\n")
         # The lock files the binaries leave beside what they wrote are no
         # part of a database.
         for lock in stage.glob("*.lock"):
@@ -629,27 +981,46 @@ def write(bins, out):
         # file it names, its inode -- a sealed one restored first.
         lists = {"server": "server", "replica": "replica", "promoted": "replica", "shell": "shell", "graph": "graph",
                  "kept": "kept", "waiting": "waiting", "spill": "spill", "synclog": "synclog",
-                 "synclog-torn": "synclog", "torn-wide": "wide", "torn-tail": "torn", "torn-mark": "torn",
-                 "backup": "server", "archive": "server", "archive-plain": "server", "page-opfs": "page",
-                 "page-idb": "page", "page-idb-sealed": "page"}
+                 "synclog-torn": "synclog", "synclog-spent": "synclog", "synclog-unbegun": "unbegun",
+                 "torn-wide": "wide", "torn-tail": "torn", "torn-mark": "torn", "schedules": "schedules",
+                 "ids": "ids", "follow": "follow", "backup": "server", "backup-wide": "wide-backup",
+                 "archive": "server", "archive-plain": "server", "page-opfs": "page", "page-opfs-stopped": "page",
+                 "page-idb": "page", "page-idb-sealed": "page", "node": "node", "deep": "deep",
+                 "refused-lists": "refused-lists", "refused-dims": "refused-dims", "points-deep": "points-deep"}
         for name, src in lists.items():
             shutil.copyfile(COMPAT / f"{src}.fennecql", stage / f"{name}.fennecql")
         for name in ("server", "replica", "promoted", "shell", "graph", "kept", "waiting", "spill", "synclog",
-                     "synclog-torn", "torn-wide", "torn-tail", "torn-mark", "page-opfs"):
+                     "synclog-torn", "synclog-spent", "synclog-unbegun", "torn-wide", "torn-tail", "torn-mark",
+                     "schedules", "ids", "follow", "page-opfs", "deep", "refused-lists", "refused-dims",
+                     "points-deep"):
             run(bins / "compat_writer", "answers", stage / f"{name}.fennec", stage / f"{name}.fennecql",
                 stage / f"{name}.answers")
         for name, src, keyed in (("backup", stage / "backup.sealed", ["--key-file", stage / "key"]),
+                                 ("backup-wide", stage / "backup-wide.sealed", ["--key-file", stage / "key"]),
                                  ("archive", stage / "archive", ["--key-file", stage / "key"]),
                                  ("archive-plain", stage / "archive-plain", [])):
             restored = work / f"{name}.fennec"
             run(bins / "fennec", "restore", src, restored, *keyed)
             run(bins / "compat_writer", "answers", restored, stage / f"{name}.fennecql", stage / f"{name}.answers")
+            if src.is_dir():
+                # What the release's `fennec verify` said of the archive,
+                # whole: its images and segments, the changes it restores and
+                # the times they span, which a later build says alike.
+                said = run(bins / "fennec", "verify", src, *keyed)
+                (stage / f"{name}.verify").write_text(said.replace(str(src), f"<{name}>"))
         versions = {
             "server": run(bins / "fennec-server", "--version").strip(),
             "cli": run(bins / "fennec", "--version").strip(),
             "rustc": os.environ.get("FENNEC_COMPAT_RUSTC") or (bins / "rustc-version").read_text().strip(),
             "node": run("node", "--version").strip(),
         }
+        held, absent, numbers = forms(f"v{versions['server'].split()[-1]}")
+        versions["forms"] = (f"Forms: {held} held in a file of this set, {absent} named absent below, of the "
+                             f"{held + absent} the walk tells apart; and {numbers} numbers -- record kinds, "
+                             "statement ops, graph versions, schema tags, value tags and index kinds -- each "
+                             "in a file.")
+        versions["took"] = ", ".join(f"{k} {v:.0f} s" for k, v in took.items())
+        versions["total"] = f"{(time.monotonic() - started) / 60:.0f}"
         readme(stage, versions)
         sums(stage)
         out.mkdir(parents=True, exist_ok=True)
@@ -659,6 +1030,29 @@ def write(bins, out):
         shutil.rmtree(work, ignore_errors=True)
     size = sum(p.stat().st_size for p in out.rglob("*") if p.is_file())
     print(f"{out}: {len(list(out.rglob('*')))} files, {size} bytes")
+
+
+def toolchain(tag, src):
+    """The toolchain `tag`'s binaries are built with: the version its
+    rust-toolchain.toml names, or where it names a channel the one in
+    `TOOLCHAINS` -- `stable` today is not the stable its release was built
+    with. Refused, naming what to install, where rustup lacks it or its
+    wasm32 target, or node is missing."""
+    m = re.search(r'^channel = "([^"]+)"', (src / "rust-toolchain.toml").read_text(), flags=re.M)
+    channel = m.group(1) if m else ""
+    version = channel if re.fullmatch(r"\d+\.\d+\.\d+", channel) else TOOLCHAINS.get(tag)
+    if not version:
+        die(f"{tag}'s rust-toolchain.toml names `{channel}`, no version: add the version its release was built "
+            "with to TOOLCHAINS")
+    rustup = str(Path(CARGO).with_name("rustup")) if os.path.isabs(CARGO) else "rustup"
+    r = subprocess.run([rustup, "target", "list", "--installed", "--toolchain", version], capture_output=True,
+                       text=True)
+    if r.returncode != 0 or "wasm32-unknown-unknown" not in r.stdout.split():
+        die(f"{tag} builds with Rust {version} and its wasm32 target: `rustup toolchain install {version} "
+            "--target wasm32-unknown-unknown`")
+    if shutil.which("node") is None:
+        die("node runs the tag's web client: install it")
+    return version
 
 
 def build(tag, bins):
@@ -680,8 +1074,9 @@ def build(tag, bins):
         # so, never fetched behind the build's back.
         env = {k: v for k, v in os.environ.items() if k != "CARGO_TARGET_DIR"}
         env["CARGO_NET_OFFLINE"] = "true"
-        # The rustc beside the cargo that builds, as the tag's
-        # rust-toolchain.toml picks it: Homebrew's has no wasm32.
+        env["RUSTUP_TOOLCHAIN"] = toolchain(tag, src)
+        # The rustc beside the cargo that builds, as the toolchain named
+        # above: Homebrew's has no wasm32.
         rustc = str(Path(CARGO).with_name("rustc")) if os.path.isabs(CARGO) else "rustc"
         rustc = subprocess.run([rustc, "--version"], cwd=src, capture_output=True, text=True, env=env).stdout.strip()
         # `--locked`: the tag's Cargo.lock as it was released, never one

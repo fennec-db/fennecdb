@@ -34,14 +34,32 @@ def tagged(root, version):
     return r.returncode == 0
 
 
+def released_tags(root):
+    """Every release this clone has the tag of from v0.2.0 on, oldest
+    first, by its version: `vX.Y.Z` alone -- a release candidate's
+    `v1.0.0-rc.1` writes no set, its release does."""
+    out = subprocess.run(["git", "-C", str(root), "tag", "-l", "v*"], capture_output=True, text=True).stdout
+    versions = []
+    for tag in out.split():
+        m = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", tag)
+        if m and tuple(map(int, m.groups())) >= (0, 2, 0):
+            versions.append(tuple(map(int, m.groups())))
+    return [".".join(map(str, v)) for v in sorted(versions)]
+
+
 def set_problems(set_dir):
     """What keeps `set_dir` from being the set its release wrote: a file
     missing, changed or not listed in its SHA256SUMS, or no SHA256SUMS --
     which `tools/compat_fixtures.py write` writes last, every file by its
-    sum. Empty for a whole set."""
+    sum -- or no file a release wrote beside them: a README and its sums
+    alone are no set. Empty for a whole set."""
     sums = set_dir / "SHA256SUMS"
     if not sums.is_file():
         return [f"{sums}: missing (tools/compat_fixtures.py write writes it last)"]
+    stems = {p.stem for p in set_dir.glob("*.fennec")}
+    if not any((set_dir / f"{s}.answers").is_file() for s in stems):
+        return [f"{set_dir}: no database file beside the release's answers to it (<name>.fennec and "
+                "<name>.answers): not a set its release wrote"]
     listed = {}
     for line in sums.read_text(encoding="utf-8").splitlines():
         digest, _, name = line.partition("  ")
@@ -115,12 +133,34 @@ def named_sets_problems(root):
     return problems
 
 
+def sets_of_tags_problems(root):
+    """What keeps the tree from holding the set of every release this clone
+    has the tag of, from v0.2.0 on ([`released_tags`]): a later release's
+    set deleted with its `RELEASES` line passes every compat test, and is
+    refused here."""
+    problems = []
+    for version in released_tags(root):
+        set_dir = root / "crates" / "fennec-core" / "tests" / "compat" / f"v{version}"
+        if not set_dir.is_dir():
+            problems.append(f"v{version} was released (its tag) and has no fixture set ({set_dir}): write it "
+                            f"from its tag with `make compat-fixtures V={version}` (RELEASING.md, step 6)")
+        else:
+            problems.extend(set_problems(set_dir))
+    return problems
+
+
 def refuse_without_set(root, new):
     """Stops the move to `new` while the release it leaves has no whole
-    fixture set ([`missing_set`])."""
+    fixture set ([`missing_set`]), or any release tagged before it has none
+    ([`sets_of_tags_problems`])."""
     why = missing_set(root, current_version(root), new)
     if why:
         sys.exit(why)
+    if current_version(root) == new:
+        return
+    problems = sets_of_tags_problems(root)
+    if problems:
+        sys.exit("a released version's fixture set is missing or not whole:\n  " + "\n  ".join(problems))
 
 
 def current_version(root):

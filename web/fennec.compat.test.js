@@ -284,3 +284,31 @@ test('a release\'s OPFS file opens and answers as its page did', { skip }, async
   }
   assert.deepEqual(found, [], `${found.length} answers differ:\n${found.join('\n')}`);
 });
+
+test('a release\'s OPFS file and the copy a stopped rewrite left beside it open as its page did', { skip }, async () => {
+  const found = [];
+  for (const set of await everySet()) {
+    const file = new Uint8Array(await readFile(new URL(`${set}/page-opfs-stopped.fennec`, SETS)));
+    const copy = new Uint8Array(await readFile(new URL(`${set}/page-opfs-stopped.fennec~`, SETS)));
+    assert.ok(copy.length > 0, `${set}: an empty copy`);
+    // The two as the release's page left them: its next open takes the
+    // copy, the compact's image, over the file and empties it.
+    const dir = fakeDir(new Map([
+      ['page.fennec', { bytes: file.slice(), open: false }],
+      ['page.fennec~', { bytes: copy.slice(), open: false }],
+    ]));
+    let db = await page();
+    let kept = await openFile(db, 'page.fennec', { dir });
+    assert.equal(dir.files.get('page.fennec~').bytes.length, 0, `${set}: the copy left beside the file`);
+    assert.deepEqual(dir.files.get('page.fennec').bytes, copy, `${set}: the file is not the copy`);
+    found.push(...(await differences(db, set, 'page-opfs-stopped', 'opened')));
+    kept.close();
+    db.close();
+    db = await page();
+    kept = await openFile(db, 'page.fennec', { dir });
+    found.push(...(await differences(db, set, 'page-opfs-stopped', 'opened again')));
+    kept.close();
+    db.close();
+  }
+  assert.deepEqual(found, [], `${found.length} answers differ:\n${found.join('\n')}`);
+});

@@ -55,15 +55,59 @@
 //!   record it was appending), and a close's mark that the file was synced
 //!   (kind 14) whose bytes past its head never reached the disk, read back
 //!   as zeros.
+//! - `schedules <file>`: a statement of every timing a schedule writes --
+//!   every minute, a day on an offset's clock, a week, a month and a cron
+//!   expression on a named zone's, one a cron on a negative offset whose
+//!   slot was refused, one defined after the others whose `since` alone
+//!   says when it runs -- each alive to the file's end, the slots marked
+//!   as a server's scheduler marks them: `run_slot` and `mark_slot` in a
+//!   block, or the refusal's mark alone (`fennec_http::schedule`'s
+//!   `run_slot`). A server reads the system's clock and a day's slot comes
+//!   once a day; the engine's own clock (`set_clock`) puts the definitions
+//!   at [`DEFINED`] and the runs at [`RAN`], which the answers' clock
+//!   ([`CLOCK`]) is after.
+//! - `ids <file>`: a collection id of five bytes in every record's head:
+//!   268 435 456 collections made and dropped, the file compacted every
+//!   8 388 608 so it stays small (a compact keeps the count, which the
+//!   process holds), then a collection made past them, its highest row
+//!   deleted in the file's tail, where the id counter is the frames'
+//!   alone. About half an hour.
+//! - `synclog-spent <file>`: the machine went down as in `synclog`, then a
+//!   process opened the file, which put the log's entries back and wiped
+//!   its header -- spent, its entries left after the zeros -- and ended
+//!   before writing anything.
+//! - `synclog-unbegun <file>`: a log made and never begun, all zeros: the
+//!   first sync fsyncs the file and makes the log, whose header goes out
+//!   with its first entry; the process ended before a second sync.
 //! - `answers <file> <statements> <out>`: the release's answer to each
 //!   statement of a list, a line each as `json::response_to_string` writes
-//!   it (or `{"error": ...}`), the file opened read-only.
+//!   it (or `{"error": ...}`), the file opened read-only, its clock
+//!   [`CLOCK`]; and beside it `<out>` with `.ids` for `.answers`: each
+//!   collection's next id, `<collection> <id>` a line by name, the id the
+//!   release hands the next row put into it.
+//! - `clock`: [`CLOCK`], which the set keeps in its `clock` file for a
+//!   later build's answers to be read at.
 //!
 //! The Rust crates' API is not frozen: a later release's copy of this file
 //! follows its engine's names.
 
+use fennec_core::engine::SlotMark;
 use fennec_core::prelude::*;
 use std::io::Write;
+
+/// When `schedules`' statements were defined: 2026-01-01T00:00:00Z.
+const DEFINED: i64 = 1_767_225_600_000;
+/// When its scheduler ran the slots due: 2026-02-15T10:00:00Z.
+const RAN: i64 = 1_771_149_600_000;
+/// When `fresh` was defined, after the runs: Thursday 2026-02-26T00:00:00Z,
+/// after its Monday's slot (Sunday 15:00 UTC), so at [`CLOCK`] none is
+/// due and its `since` alone says so -- read as earlier, that slot would
+/// be.
+const LATE: i64 = 1_772_064_000_000;
+/// The clock every answer is read at, 2026-03-01T00:00:00Z: a scheduled
+/// statement's `next` is a time it computes from it, and no other answer
+/// moves with the clock (`@ttl`'s rows expire in 2099 or expired in 2000).
+const CLOCK: i64 = 1_772_323_200_000;
 
 fn fail(m: &str) -> ! {
     eprintln!("compat_writer: {m}");
@@ -539,10 +583,178 @@ fn torn_mark(path: &str) {
     std::fs::write(path, bytes).unwrap_or_else(|e| fail(&e.to_string()));
 }
 
+/// Each scheduled statement's slot due at `now`, run and marked as a
+/// server's scheduler runs it (`fennec_http::schedule::run_slot`): its
+/// body and its mark in one block, or -- refused -- the block put back and
+/// the refusal's mark alone, landing with the next block.
+fn run_due(db: &mut Database, now: i64) {
+    for d in db.due(now) {
+        let Some((slot, skipped)) = d.run else {
+            continue;
+        };
+        let version = db
+            .statements()
+            .get(&d.name)
+            .unwrap_or_else(|| fail(&d.name))
+            .version;
+        let ran = db.begin().and_then(|()| {
+            db.run_slot(&d.name, slot, now)?;
+            db.mark_slot(
+                &d.name,
+                SlotMark {
+                    at: slot,
+                    version,
+                    refused: None,
+                    skipped,
+                },
+            )
+        });
+        match ran {
+            Ok(()) => db.commit().unwrap_or_else(|e| fail(&e.to_string())),
+            Err(e) => {
+                db.rollback();
+                if d.name != "noon" {
+                    fail(&format!("{}'s slot refused: {e}", d.name));
+                }
+                let reason = e.reason().unwrap_or_default().to_string();
+                db.mark_slot(
+                    &d.name,
+                    SlotMark {
+                        at: slot,
+                        version,
+                        refused: Some((409, reason)),
+                        skipped,
+                    },
+                )
+                .unwrap_or_else(|e| fail(&e.to_string()));
+            }
+        }
+    }
+}
+
+fn schedules(path: &str) {
+    // The definitions' trees: a statement held unread is refused its slots.
+    fennec_ql::install();
+    let mut db = open(path);
+    db.allow_schedules();
+    db.set_clock(Some(DEFINED));
+    run(
+        &mut db,
+        "create collection runs (s text @hash, at timestamp @sorted)",
+    );
+    run(&mut db, "create collection once (k text @unique)");
+    run(&mut db, "put once {k: 'taken'}");
+    for def in [
+        "create statement minutely every 1m as insert runs {s: 'minutely', at: slot()}",
+        "create statement daily every 1d in '+03:00' as insert runs {s: 'daily', at: slot()}",
+        "create statement weekly every 1w as insert runs {s: 'weekly', at: slot()}",
+        "create statement monthly every 1mo in 'Europe/Berlin' as insert runs {s: 'monthly', at: slot()}",
+        "create statement nightly at '30 4 * * *' in 'Europe/Berlin' as insert runs {s: 'nightly', at: slot()}",
+        // Its insert clashes on `k`'s `@unique`: the slot is refused (409).
+        "create statement noon at '0 12 * * mon' in '-05:00' as insert once {k: 'taken'}",
+    ] {
+        run(&mut db, def);
+    }
+    db.set_clock(Some(RAN));
+    run_due(&mut db, RAN);
+    // A refused slot's mark lands with the next block.
+    run(&mut db, "put runs {s: 'after the runs', at: 1771149600000}");
+    db.set_clock(Some(LATE));
+    run(
+        &mut db,
+        "create statement fresh every 1w in 'Asia/Tokyo' as insert runs {s: 'fresh', at: slot()}",
+    );
+    db.set_clock(None);
+    db.sync().unwrap_or_else(|e| fail(&e.to_string()));
+}
+
+fn ids(path: &str) {
+    let mut db = open(path);
+    let parse = |q: &str| fennec_ql::parse_one(q).unwrap_or_else(|e| fail(&format!("{q}: {e}")));
+    let (create, drop, compact) = (
+        parse("create collection c (n int)"),
+        parse("drop collection c"),
+        parse("compact"),
+    );
+    // Ids from 1: the 268 435 456th is the first of five bytes.
+    for k in 0..(1u64 << 28) {
+        db.execute_with(&create, &[])
+            .unwrap_or_else(|e| fail(&format!("create {k}: {e}")));
+        db.execute_with(&drop, &[])
+            .unwrap_or_else(|e| fail(&format!("drop {k}: {e}")));
+        if k % (1 << 23) == (1 << 23) - 1 {
+            db.execute_with(&compact, &[])
+                .unwrap_or_else(|e| fail(&format!("compact at {k}: {e}")));
+            eprintln!("compat_writer ids: {} of 268435456", k + 1);
+        }
+    }
+    run(&mut db, "create collection far (n int @hash, s text)");
+    run(
+        &mut db,
+        "put far [{n: 1, s: \"one\"}, {n: 2, s: \"two\"}, {n: 3, s: \"three, taken out\"}]",
+    );
+    // The highest id deleted in the tail: the id counter is its put's
+    // frame, past every live row.
+    run(&mut db, "del far where n = 3");
+    db.sync().unwrap_or_else(|e| fail(&e.to_string()));
+}
+
+fn synclog_spent(path: &str) {
+    synclog(path);
+    // A process opens the file: the log's entries put back, the file
+    // synced and the log's header wiped. It ends before it writes.
+    let db = open(path);
+    std::mem::forget(db);
+    let log = std::fs::read(format!("{path}.sync")).unwrap_or_else(|e| fail(&e.to_string()));
+    if log[..64].iter().any(|&b| b != 0) || log[64..].iter().all(|&b| b == 0) {
+        fail("the log is not spent: its header wiped, its entries after it");
+    }
+}
+
+fn synclog_unbegun(path: &str) {
+    fennec_core::fs::keep_sync_log(true);
+    let mut db = open(path);
+    run(&mut db, "create collection kept (n int @hash, s text)");
+    run(
+        &mut db,
+        "put kept [{n: 1, s: \"synced\"}, {n: 2, s: \"synced too\"}]",
+    );
+    // The first sync fsyncs the file and makes the log; its header goes out
+    // with the first entry, which no later sync wrote.
+    durable(&mut db);
+    run(
+        &mut db,
+        &format!(
+            "put kept {{n: 3, s: \"{}\"}}",
+            "written behind ".repeat(4_600)
+        ),
+    );
+    behind(&mut db);
+    std::mem::forget(db);
+    let log = std::fs::read(format!("{path}.sync")).unwrap_or_else(|e| fail(&e.to_string()));
+    if log.iter().any(|&b| b != 0) {
+        fail("the log was begun");
+    }
+}
+
 fn answers(path: &str, statements: &str, out: &str) {
     fennec_ql::install();
-    let db =
+    let mut db =
         fennec_core::fs::open_read_only(path).unwrap_or_else(|e| fail(&format!("{path}: {e}")));
+    db.set_clock(Some(CLOCK));
+    let mut ids = String::new();
+    let mut names = db.collection_names();
+    names.sort();
+    for name in names {
+        let c = db
+            .collection(&name)
+            .unwrap_or_else(|e| fail(&e.to_string()));
+        ids.push_str(&format!("{name} {}\n", c.store.next_id()));
+    }
+    let ids_out = out
+        .strip_suffix(".answers")
+        .unwrap_or_else(|| fail("answers go to <name>.answers"));
+    std::fs::write(format!("{ids_out}.ids"), ids).unwrap_or_else(|e| fail(&e.to_string()));
     let text = std::fs::read_to_string(statements).unwrap_or_else(|e| fail(&e.to_string()));
     let mut lines = String::new();
     for line in text
@@ -576,9 +788,14 @@ fn main() {
         ["waiting", file] => waiting(file),
         ["torn-tail", file] => torn_tail(file),
         ["torn-mark", file] => torn_mark(file),
+        ["schedules", file] => schedules(file),
+        ["ids", file] => ids(file),
+        ["synclog-spent", file] => synclog_spent(file),
+        ["synclog-unbegun", file] => synclog_unbegun(file),
         ["answers", file, statements, out] => answers(file, statements, out),
+        ["clock"] => println!("{CLOCK}"),
         _ => fail(
-            "usage: compat_writer spill|synclog|synclog-torn|torn-wide|kept|waiting|torn-tail|torn-mark <file> | answers <file> <statements> <out>",
+            "usage: compat_writer spill|synclog|synclog-torn|synclog-spent|synclog-unbegun|torn-wide|kept|waiting|torn-tail|torn-mark|schedules|ids <file> | answers <file> <statements> <out> | clock",
         ),
     }
 }

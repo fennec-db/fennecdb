@@ -5,8 +5,12 @@
 //! sealed one with its key alone, its sealed backup restores with its key
 //! alone, and each database the binary restored answers as the release's
 //! own restore of it did -- then is written, opened again, compacted and
-//! answers alike, and verifies. A file the release wrote torn, as a crash
-//! leaves one, is refused as it lies, naming its damage. fennec-core's
+//! answers alike, and verifies; `fennec verify` says of each archive what
+//! the release's said, line for line, and of the node's archive of every
+//! tenant too, whose `fennec restore --tenants` to each moment the
+//! release's was run to says what it said and answers as it did. A file
+//! the release wrote torn, as a crash leaves one, is refused as it lies,
+//! naming its damage. fennec-core's
 //! `compat::` holds the files themselves to their answers, fennec-http's
 //! the archive's library, fennec-server's the server's.
 
@@ -14,8 +18,10 @@
 mod answers;
 
 use answers::{
-    copied, set_name, sets, torn, written_and_compacted, written_then_compacted, Scratch,
+    copied, on_purpose, set_name, sets, torn, written_and_compacted, written_then_compacted,
+    Scratch,
 };
+use fennec_core::prelude::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -29,6 +35,103 @@ fn fennec(args: &[&Path]) -> (i32, String) {
         String::from_utf8_lossy(&out.stderr)
     );
     (out.status.code().unwrap_or(-1), text)
+}
+
+fn member<'a>(v: &'a Value, name: &str) -> &'a Value {
+    match v {
+        Value::Object(o) => o.iter().find(|(k, _)| k == name).map(|(_, v)| v).unwrap(),
+        _ => panic!("`{name}`: not an object"),
+    }
+}
+
+fn texts(v: &Value) -> Vec<String> {
+    match v {
+        Value::List(l) => l
+            .iter()
+            .map(|x| match x {
+                Value::Text(t) => t.clone(),
+                x => panic!("not a text: {x:?}"),
+            })
+            .collect(),
+        v => panic!("not a list: {v:?}"),
+    }
+}
+
+/// The node's archive of every tenant: `fennec verify --tenants` saying
+/// what the release's said of each line, and `fennec restore --tenants`
+/// to the end and to each moment the release's was run to saying what it
+/// said -- the line each tenant came from, passed over gone or not yet
+/// archived, refused where `--keep` let the moment go -- each tenant it
+/// restored answering as the release's restore of it did.
+fn node_archive(set: &Path, name: &str, scratch: &Path) -> Vec<String> {
+    let root = scratch.join("node-archive");
+    copy_dir(&set.join("node-archive"), &root);
+    let recorded = std::fs::read_to_string(set.join("node-archive.json")).unwrap();
+    let recorded = fennec_core::json::parse_json(&recorded).unwrap();
+    let mut found = Vec::new();
+    let (code, out) = fennec(&[Path::new("verify"), Path::new("--tenants"), &root]);
+    let ours: Vec<String> = out
+        .replace(root.to_str().unwrap(), "<root>")
+        .lines()
+        .map(String::from)
+        .collect();
+    let theirs = texts(member(&recorded, "verify"));
+    if code != 0 || ours != theirs {
+        found.push(format!("{name}/node-archive: verify --tenants\n  release: {theirs:?}\n  this build: {code} {ours:?}"));
+    }
+    let statements = answers::statements(set, "node");
+    let Value::List(restores) = member(&recorded, "restores") else {
+        panic!("restores")
+    };
+    for (i, r) in restores.iter().enumerate() {
+        let into = scratch.join(format!("node-{i}"));
+        let mut args: Vec<&Path> = vec![Path::new("restore"), Path::new("--tenants"), &root, &into];
+        let to;
+        if let Value::Text(t) = member(r, "to") {
+            to = t.clone();
+            args.extend([Path::new("--to"), Path::new(&to)]);
+        }
+        let (code, out) = fennec(&args);
+        let ours: Vec<String> = out
+            .replace(into.to_str().unwrap(), "<out>")
+            .lines()
+            .map(String::from)
+            .collect();
+        let theirs = texts(member(r, "said"));
+        let status = match member(r, "status") {
+            Value::Int(n) => *n as i32,
+            v => panic!("status: {v:?}"),
+        };
+        if code != status || ours != theirs {
+            found.push(format!(
+                "{name}/node-archive: restore --tenants {:?}\n  release: {status} {theirs:?}\n  this build: {code} {ours:?}",
+                member(r, "to")
+            ));
+        }
+        let Value::Object(answered) = member(r, "answers") else {
+            panic!("answers")
+        };
+        for (tenant, theirs) in answered {
+            let file = into.join(format!("{tenant}.fennec"));
+            let Ok(db) = fennec_core::fs::open_read_only(&file) else {
+                found.push(format!(
+                    "{name}/node-archive: {tenant} not restored to {:?}",
+                    member(r, "to")
+                ));
+                continue;
+            };
+            for (q, theirs) in statements.iter().zip(texts(theirs)) {
+                let ours = answers::answer(&db, q);
+                if ours != theirs {
+                    found.push(format!(
+                        "{name}/node-archive: {tenant} restored to {:?}: {q}\n  release: {theirs}\n  this build: {ours}",
+                        member(r, "to")
+                    ));
+                }
+            }
+        }
+    }
+    found
 }
 
 fn copy_dir(from: &Path, to: &Path) {
@@ -99,6 +202,11 @@ fn fennec_verifies_and_restores_every_release_s_files() {
                                 );
                             }
                         }
+                        // A file this build reads otherwise on purpose is
+                        // fennec-core's to hold (`ON_PURPOSE`).
+                        if on_purpose(stem) {
+                            return;
+                        }
                         written_then_compacted(&path, stem);
                         let (code, out) = fennec(&[Path::new("verify"), &path]);
                         assert_eq!(code, 0, "{name}/{file} written and compacted: {out}");
@@ -133,7 +241,15 @@ fn fennec_verifies_and_restores_every_release_s_files() {
                 |args: Vec<PathBuf>| fennec(&args.iter().map(PathBuf::as_path).collect::<Vec<_>>());
             let (code, out) = run(with_key(&[Path::new("verify"), &arch]));
             assert_eq!(code, 0, "{name}/{dirname}: {out}");
-            assert!(out.contains("restores changes"), "{name}/{dirname}: {out}");
+            // What the release said of it, whole: its images and segments,
+            // the changes it restores and the times they span.
+            let theirs = std::fs::read_to_string(set.join(format!("{dirname}.verify"))).unwrap();
+            let ours = out.replace(arch.to_str().unwrap(), &format!("<{dirname}>"));
+            if ours != theirs {
+                found.push(format!(
+                    "{name}/{dirname}: fennec verify\n  release: {theirs:?}\n  this build: {ours:?}"
+                ));
+            }
             let (code, out) = run(with_key(&[Path::new("restore"), &arch, &restored]));
             assert_eq!(code, 0, "{name}/{dirname}: {out}");
             found.extend(written_and_compacted(&restored, &set, dirname));
@@ -141,16 +257,19 @@ fn fennec_verifies_and_restores_every_release_s_files() {
             assert_eq!(code, 0, "{name}/{dirname} written and compacted: {out}");
         }
 
-        // The sealed backup: no key, no database.
-        let restored = scratch.0.join("backup.fennec");
-        let sealed = set.join("backup.sealed");
-        let (code, out) = fennec(&[Path::new("restore"), &sealed, &restored]);
-        assert_ne!(code, 0, "{name}/backup.sealed restored with no key: {out}");
-        let (code, out) = fennec(&[Path::new("restore"), &sealed, &restored, key_flag, &key]);
-        assert_eq!(code, 0, "{name}/backup.sealed: {out}");
-        found.extend(written_and_compacted(&restored, &set, "backup"));
-        let (code, out) = fennec(&[Path::new("verify"), &restored]);
-        assert_eq!(code, 0, "{name}/backup written and compacted: {out}");
+        // Each sealed backup: no key, no database.
+        for stem in ["backup", "backup-wide"] {
+            let restored = scratch.0.join(format!("{stem}.fennec"));
+            let sealed = set.join(format!("{stem}.sealed"));
+            let (code, out) = fennec(&[Path::new("restore"), &sealed, &restored]);
+            assert_ne!(code, 0, "{name}/{stem}.sealed restored with no key: {out}");
+            let (code, out) = fennec(&[Path::new("restore"), &sealed, &restored, key_flag, &key]);
+            assert_eq!(code, 0, "{name}/{stem}.sealed: {out}");
+            found.extend(written_and_compacted(&restored, &set, stem));
+            let (code, out) = fennec(&[Path::new("verify"), &restored]);
+            assert_eq!(code, 0, "{name}/{stem} written and compacted: {out}");
+        }
+        found.extend(node_archive(&set, &name, &scratch.0));
     }
     assert!(
         found.is_empty(),

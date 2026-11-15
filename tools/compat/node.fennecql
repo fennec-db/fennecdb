@@ -1,0 +1,5 @@
+-- A tenant of a node, restored from its archive.
+get notes order n
+get notes where n = 1
+get notes count
+collections

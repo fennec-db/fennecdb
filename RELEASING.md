@@ -10,7 +10,10 @@ nothing reaches a registry before the notes have had a read.
    no whole fixture set in the working tree: the workspace's version, from
    v0.2.0 on, needs `crates/fennec-core/tests/compat/v<that version>/`
    (step 6 writes it), every file the bytes its `SHA256SUMS` names, every
-   later build's tests opening its files. It reads the tree it runs in,
+   later build's tests opening its files -- and so does every release this
+   clone has the tag of from v0.2.0 on, a release candidate aside, so a
+   set deleted with its `RELEASES` line is refused here though every compat
+   test passes; a README and its sums alone are no set. It reads the tree it runs in,
    not main: run it on a branch from main once the set's pull request
    landed. And it refuses in a clone without that version's tag, naming
    `git fetch --tags`: a release is cut from a full clone, and one without
@@ -175,7 +178,15 @@ nothing reaches a registry before the notes have had a read.
    holds to *More info*, *Run anyway* -- neither of which a check here can
    click through.
 6. Write the release's fixture set, on macOS or Linux, from the tag alone:
-   `make compat-fixtures V=X.Y.Z`. `tools/compat_fixtures.py build` puts the
+   `make compat-fixtures V=X.Y.Z`. It needs rustup with the tag's
+   toolchain and its wasm32 target -- the version the tag's
+   `rust-toolchain.toml` names, or, where it names a channel (v0.2.0's
+   says `stable`), the one `TOOLCHAINS` in `tools/compat_fixtures.py` pins
+   (v0.2.0: 1.99.1) -- node, and Docker with the Makefile's `PG_IMAGE`
+   already pulled (nothing is pulled: `--follow`'s file is written against
+   a PostgreSQL container of the writer's own, on a port the system picks,
+   removed after); each is asked for before anything is built or written.
+   `tools/compat_fixtures.py build` puts the
    tag's tree in a scratch directory (`git archive`), builds its
    `fennec-server` and `fennec` (`cargo build --release --locked
    --offline`: nothing downloaded, the tag's rustls, ring and webpki-roots
@@ -186,10 +197,16 @@ nothing reaches a registry before the notes have had a read.
    runs them into `crates/fennec-core/tests/compat/vX.Y.Z/`: a server's
    file and its answers over HTTP, a replica's file and that file
    promoted, a shell's, a checkpoint's graphs, the files a crash leaves, a
-   file of the widths no small file holds, a sealed backup, a sealed
-   archive and a plain one, the page's IndexedDB records and OPFS file,
-   the answers the release gave over each, and `SHA256SUMS` last
-   (a minute and a half: two scheduled statements' slots are waited for). Written to
+   file of the widths no small file holds and one of collection ids of
+   five bytes, scheduled statements of every timing alive with their
+   marks, a mirrored PostgreSQL table, the forms a later build reads
+   otherwise on purpose, two sealed backups (one of several frames), a
+   sealed archive and a plain one and what `fennec verify` said of each, a
+   tenant node's archive of every tenant and what the release's restore of
+   it said at each moment, the page's IndexedDB records, its OPFS file and
+   the copy a stopped rewrite left beside one, the answers the release gave
+   over each, and `SHA256SUMS` last (the set's README says how long each
+   part took). Written to
    another directory instead, `FENNEC_COMPAT_SETS=<its parent>` runs every
    `compat::` test and `web/fennec.compat.test.js` over it before it
    lands. A release that writes something new -- a record kind, a form
@@ -200,10 +217,12 @@ nothing reaches a registry before the notes have had a read.
    which fails a set without its line, a line without its set, a form no
    file holds that its line does not name absent with why, and one a file
    holds that its line does not name. The set goes through a pull request
-   like any other, never written again: the next release's `make version`
-   refuses until it is in the tree it runs in, and every later build's
-   `compat::` tests, in fennec-core, fennec-http, fennec and
-   fennec-server, and `web/fennec.compat.test.js` open it.
+   like any other, never written again -- nor its README, whose list of
+   the forms no file holds is never amended: review it before it lands --
+   and `make version` refuses while any release tagged from v0.2.0 on (a
+   release candidate aside) has no whole set in the tree it runs in, and
+   every later build's `compat::` tests, in fennec-core, fennec-http, fennec
+   and fennec-server, and `web/fennec.compat.test.js` open it.
 
 `make packages` runs the same checks locally at any time, NuGet's where
 the .NET SDK is installed.

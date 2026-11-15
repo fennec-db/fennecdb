@@ -507,7 +507,14 @@ its two lists, 66 in all: a row whose value nests past 64 so is refused
 where it is read. And a field whose type nests more than 64 lists, which
 no version bounded: its schema's type is read past the limit
 (`decode_type`), and the file is refused at the open. No write makes
-either now (`Schema::new`), and no test file of the repository's holds one.
+either now (`Schema::new`). v0.2.0's fixture set holds one of each, written
+by its shell (`deep.fennec`, `refused-lists.fennec`, beside a schema whose
+list of vectors is past a dimension's range, `refused-dims.fennec`, and a
+point under 64 lists, `points-deep.fennec`), and its compat test holds
+what this build does with them (`ON_PURPOSE`,
+[compatibility.md](compatibility.md#fixture-sets)): beside the deep row a
+`del` finding it is refused in the same words, a drop of its field and a
+compact work, the compact copying the row as it is.
 
 A length counting items of several bytes -- a vector's `f32`s, a
 half-precision vector's halves, a sparse vector's weights -- is multiplied
