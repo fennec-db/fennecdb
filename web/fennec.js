@@ -119,32 +119,114 @@ function lengthOf(len, what) {
  * later call, on every database of the module, throws the one error
  * saying to open the database again. A `TypeError` is a value no export
  * takes (a `BigInt`), refused before the module runs.
+ *
+ * Each export's guard takes the arguments it does, by name, and so has its
+ * `length`, which `run` tells a module from before vectors went over apart
+ * by: a guard of `(...args)` made an array of them on every call, and a
+ * `run` makes five to eight. No export takes more than `GUARDS` has room
+ * for, and one that did is refused here rather than handed part of what
+ * it was given (`web/fennec.test.js` holds the module's to it).
  */
 function guarded(exports) {
   let trap = null;
   const stopped = () =>
     new FennecError(`the module stopped (${trap?.message ?? trap}): nothing more runs on its databases; open the database again`, { cause: trap });
+  // What a call that threw throws: a trap is kept, and stops every call after.
+  const failed = (e) => {
+    if (e instanceof TypeError) return e;
+    trap = e;
+    return stopped();
+  };
+  const ok = () => {
+    if (trap) throw stopped();
+  };
   const out = {};
   for (const [name, f] of Object.entries(exports)) {
     if (typeof f !== 'function') {
       out[name] = f;
       continue;
     }
-    const call = (...args) => {
-      if (trap) throw stopped();
-      try {
-        return f(...args);
-      } catch (e) {
-        if (e instanceof TypeError) throw e;
-        trap = e;
-        throw stopped();
-      }
-    };
-    // `run` tells a module from before vectors went over apart by it.
-    out[name] = Object.defineProperty(call, 'length', { value: f.length });
+    if (f.length >= GUARDS.length) throw new FennecError(`${name} takes ${f.length} arguments, past the ${GUARDS.length - 1} its guard passes on`);
+    out[name] = GUARDS[f.length](f, ok, failed);
   }
   return out;
 }
+
+/** A guard (`guarded`) by its export's arity: `GUARDS[n](f, ok, failed)` passes `n` arguments on. */
+const GUARDS = [
+  (f, ok, failed) => () => {
+    ok();
+    try {
+      return f();
+    } catch (e) {
+      throw failed(e);
+    }
+  },
+  (f, ok, failed) => (a) => {
+    ok();
+    try {
+      return f(a);
+    } catch (e) {
+      throw failed(e);
+    }
+  },
+  (f, ok, failed) => (a, b) => {
+    ok();
+    try {
+      return f(a, b);
+    } catch (e) {
+      throw failed(e);
+    }
+  },
+  (f, ok, failed) => (a, b, c) => {
+    ok();
+    try {
+      return f(a, b, c);
+    } catch (e) {
+      throw failed(e);
+    }
+  },
+  (f, ok, failed) => (a, b, c, d) => {
+    ok();
+    try {
+      return f(a, b, c, d);
+    } catch (e) {
+      throw failed(e);
+    }
+  },
+  (f, ok, failed) => (a, b, c, d, e) => {
+    ok();
+    try {
+      return f(a, b, c, d, e);
+    } catch (x) {
+      throw failed(x);
+    }
+  },
+  (f, ok, failed) => (a, b, c, d, e, g) => {
+    ok();
+    try {
+      return f(a, b, c, d, e, g);
+    } catch (x) {
+      throw failed(x);
+    }
+  },
+  (f, ok, failed) => (a, b, c, d, e, g, h) => {
+    ok();
+    try {
+      return f(a, b, c, d, e, g, h);
+    } catch (x) {
+      throw failed(x);
+    }
+  },
+  (f, ok, failed) => (a, b, c, d, e, g, h, i) => {
+    ok();
+    try {
+      return f(a, b, c, d, e, g, h, i);
+    } catch (x) {
+      throw failed(x);
+    }
+  },
+];
 
 export class Fennec {
   #wasm; #handle; #collation;
@@ -253,8 +335,14 @@ export class Fennec {
     return new DataView(this.#wasm.memory.buffer).getUint32(ptr, true);
   }
 
-  /** Reads the returned buffer and frees it. */
-  #readBytes(ptr) {
+  /**
+   * Reads the returned buffer and frees it. An address comes back as the
+   * `i32` its bits make, negative from 2 GiB on, where the module's memory,
+   * which has no maximum, may reach: read as the unsigned one it is
+   * (`>>> 0`), here, in `#readString` and where `fennec_alloc` answers.
+   */
+  #readBytes(at) {
+    const ptr = at >>> 0;
     const len = this.#len(ptr);
     // Copies, and has to: the array outlives the buffer freed on the next
     // line, and a view into wasm memory would read whatever lands there next.
@@ -267,7 +355,8 @@ export class Fennec {
   // `#readBytes` makes -- the decode is itself the copy -- and going through
   // it first meant every result was copied twice, which on a large result set
   // is megabytes of pure waste. The decode must finish before the free.
-  #readString(ptr) {
+  #readString(at) {
+    const ptr = at >>> 0;
     const len = this.#len(ptr);
     const out = dec.decode(new Uint8Array(this.#wasm.memory.buffer, ptr + 4, len));
     this.#wasm.fennec_free(ptr, 4 + len);
@@ -282,7 +371,7 @@ export class Fennec {
   #write(data) {
     const bytes = typeof data === 'string' ? enc.encode(data) : data;
     const len = lengthOf(bytes.length, 'a text, its parameters or collation data');
-    const ptr = this.#wasm.fennec_alloc(len || 1);
+    const ptr = this.#wasm.fennec_alloc(len || 1) >>> 0;
     if (!ptr) throw new FennecError(`no room in the module for ${len} bytes`);
     this.#into(ptr, len, bytes);
     return [ptr, len];
@@ -729,7 +818,7 @@ export class Fennec {
   #room(len) {
     if (kept.has(this)) throw new FennecError('the database is kept in a file (openFile): a load would leave the file behind');
     lengthOf(len, "an image's length");
-    const ptr = this.#wasm.fennec_alloc(len);
+    const ptr = this.#wasm.fennec_alloc(len) >>> 0;
     if (!ptr) throw new FennecError(`no room for an image of ${len} bytes`);
     return ptr;
   }
