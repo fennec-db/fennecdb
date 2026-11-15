@@ -15,12 +15,14 @@ promotion halts the follower before it forks, and a following database
 refuses writes (`Error::ReadOnly`). The follower's session looks at a halt
 before each message it reads, as an archiver's does, never at the
 socket's cut alone: on Windows a cut ends only a read already waiting. A
-panic applying the primary's records is a write the follower could not
-apply, caught with the lock held (`Follower::session`): never a thread
-gone, which a halt waits for. A restart reads a copy's role from its file:
-one made to follow says so on disk before the follow is answered
-(`Tenants::open_as` syncs it), and an image is taken with the record saying
-it inside its rename.
+panic in a session is its failure (`Follower::session_caught`), one
+applying the primary's records caught with the lock held, one past them
+failing the copy (`Changing`); the thread says its end however it comes
+(`Ends`), which a halt waits on. A message is held to its kind's bound
+before a byte of it is read, and grown as it comes (`read_kind`). A
+restart reads a copy's role from its file: one made to follow says so on
+disk before the follow is answered (`Tenants::open_as` syncs it), and an
+image is taken with the record saying it inside its rename.
 
 **[A copy keeps the time its primary appended each write at, and an
 archive's times run in order.](../../docs/design/replication.md#a-writes-time)**

@@ -35,13 +35,13 @@
 //! ```
 
 use crate::archive::{Archive, Parent, Took, Writer};
-use crate::replication::{self, read_head, read_message, u64_at, Upstream, MESSAGE};
+use crate::replication::{self, read_head, read_kind, u64_at, Upstream, MESSAGE};
 use crate::seal::Key;
 use crate::tenants::{a_device, shaped};
 use fennec_core::history::History;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
-use std::io::{self, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -654,25 +654,55 @@ fn open(upstream: &Upstream, places: &str) -> io::Result<Receiver> {
     crate::http::write_parts(&mut s, request.as_bytes(), places.as_bytes())?;
     let mut r = BufReader::with_capacity(MESSAGE + 64, s);
     let (status, length) = read_head(&mut r)?;
-    if status != 200 {
-        let mut body = vec![0u8; length.unwrap_or(0).min(64 << 10)];
-        r.read_exact(&mut body)?;
-        return Err(io::Error::other(format!(
-            "the node answered {status}: {}",
-            String::from_utf8_lossy(&body)
-        )));
-    }
+    replication::answered(&mut r, status, length, "node")?;
     Ok(Receiver { r })
 }
 
-struct Receiver {
-    r: BufReader<crate::dial::Stream>,
+/// What a node sends of each kind of message on its stream of every
+/// tenant, at the most: a primary's bound for the kind
+/// ([`replication::LONGEST`], [`replication::SHORT`]) and a tenant's name
+/// before it, 256 bytes at the most; `None` for a kind it never sends.
+fn node_sends(tag: u8) -> Option<u64> {
+    let named = 256;
+    match tag {
+        b'I' | b'W' => Some(replication::LONGEST + named),
+        b'N' | b'H' | b'L' | b'G' | b'K' | b'E' => Some(replication::SHORT + named),
+        _ => None,
+    }
 }
 
-impl Receiver {
+struct Receiver<R = BufReader<crate::dial::Stream>> {
+    r: R,
+}
+
+/// A node's answer read off `r` as its archiver reads it -- the head, then
+/// each message held to its kind's bound and decoded -- until one is
+/// refused or the bytes end: how many messages it read, and what ended it.
+/// The fuzzer's `stream` target (`crates/fennec-fuzz`) hands it what a
+/// stand-in at a node's address could send.
+#[doc(hidden)]
+pub fn read_answer(r: &mut impl BufRead) -> (usize, io::Error) {
+    let mut n = 0;
+    match read_each(r, &mut n) {
+        Err(e) => (n, e),
+        Ok(never) => match never {},
+    }
+}
+
+fn read_each(r: &mut impl BufRead, n: &mut usize) -> io::Result<std::convert::Infallible> {
+    let (status, length) = read_head(r)?;
+    replication::answered(r, status, length, "node")?;
+    let mut rx = Receiver { r };
+    loop {
+        rx.receive()?;
+        *n += 1;
+    }
+}
+
+impl<R: BufRead> Receiver<R> {
     fn receive(&mut self) -> io::Result<NodeMessage> {
         let bad = || io::Error::other("the node sent a message it should not");
-        let (tag, body) = read_message(&mut self.r)?;
+        let (tag, body) = read_kind(&mut self.r, node_sends)?;
         let named = |body: &[u8]| -> io::Result<(String, usize)> {
             let n = *body.first().ok_or_else(bad)? as usize;
             let name = body.get(1..1 + n).ok_or_else(bad)?;
@@ -705,7 +735,7 @@ impl Receiver {
                 let at = u64_at(h, 18);
                 let image = match h[1] {
                     1 => {
-                        let (tag, body) = read_message(&mut self.r)?;
+                        let (tag, body) = read_kind(&mut self.r, node_sends)?;
                         let (of, at) = named(&body)?;
                         if tag != b'I' || of != name {
                             return Err(io::Error::other("the node promised an image"));
