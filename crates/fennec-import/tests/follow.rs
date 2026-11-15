@@ -120,7 +120,16 @@ impl Follower {
             };
             let opts = Options::new(name.clone());
             let mut report = |ev: Event| e.lock().unwrap().push(format!("{ev:?}"));
-            follow::run(&u, &name, &d, &opts, &follow, &s, &mut report)
+            follow::run(
+                &u,
+                &name,
+                &d,
+                &opts,
+                &follow,
+                &s,
+                &AtomicBool::new(false),
+                &mut report,
+            )
         });
         Follower {
             db,

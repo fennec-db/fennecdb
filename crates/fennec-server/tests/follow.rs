@@ -6,12 +6,18 @@
 //! the server through its shutdown.
 //!
 //!     cargo test -p fennec-server --test all follow:: -- --ignored
+//!
+//! And against a stand-in of its own, which every run has: the order a
+//! follower's stop keeps -- a failure's exit code before anything waits,
+//! a clean stop's slot let go before the exit.
 
 use crate::support::{count, Server};
 use fennec_wire::client::{Client, Url};
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 const URL: &str = "postgres://postgres:fennec@127.0.0.1:55432/fennecbench";
@@ -268,6 +274,13 @@ fn a_server_stopped_or_killed_goes_on_without_losing_a_row() {
     let s = start(&file, t);
     holds(&s, t, 20);
     let _ = s.terminate();
+    // The slot is free once the server has exited -- read 100 ms after the
+    // exit (`terminate`), from a walsender idle at the stop, which reads a
+    // bare `Terminate` at once too: this fails only if the stop leaves the
+    // stream open. That the server waits for the release, which a busy
+    // walsender delays, is `a_stopped_server_lets_its_slot_go_before_it_
+    // exits` (below, against a stand-in), and fennec-import's
+    // `a_stopped_follower_lets_its_slot_go` against PostgreSQL.
     assert!(
         !slot_active(&mut c, t),
         "the stopped server's slot is still taken"
@@ -305,4 +318,274 @@ fn a_server_stopped_or_killed_goes_on_without_losing_a_row() {
 
     let _ = s.terminate();
     forget(&mut c, t);
+}
+
+// ------------------------------------------------ against a stand-in
+
+/// What the stand-in PostgreSQL's walsender does once the follower streams.
+#[derive(Clone, Copy, PartialEq)]
+enum Walsends {
+    /// A change the follower cannot read, then nothing: an answer to its
+    /// `CopyDone`, had it sent one, would never come.
+    Unreadable,
+    /// Nothing, until the follower's `CopyDone`, which it answers as
+    /// PostgreSQL does once the slot is let go (`released` set first).
+    Releases,
+}
+
+/// A stand-in PostgreSQL on a port of its own: the catalog a follower asks
+/// for, a copy of two rows of `items (id bigint, title text)`, and a
+/// walsender doing as `Walsends` says.
+struct StandIn {
+    url: String,
+    released: Arc<AtomicBool>,
+    /// The first thing the follower did to end its stream: `c` its
+    /// `CopyDone`, `X` its `Terminate`, `0` a close with neither.
+    ending: mpsc::Receiver<u8>,
+    /// The tags the follower sent once streaming, to its connection's end.
+    sent: mpsc::Receiver<Vec<u8>>,
+}
+
+fn framed(tag: u8, body: &[u8]) -> Vec<u8> {
+    let mut v = vec![tag];
+    v.extend_from_slice(&((body.len() + 4) as i32).to_be_bytes());
+    v.extend_from_slice(body);
+    v
+}
+
+fn message(s: &mut TcpStream) -> Option<(u8, Vec<u8>)> {
+    let mut head = [0u8; 5];
+    s.read_exact(&mut head).ok()?;
+    let len = i32::from_be_bytes([head[1], head[2], head[3], head[4]]) as usize - 4;
+    let mut body = vec![0u8; len];
+    s.read_exact(&mut body).ok()?;
+    Some((head[0], body))
+}
+
+/// A query's answer: its columns, each a name and a type's oid, and rows.
+fn answer(columns: &[(&str, i32)], rows: &[&[&str]]) -> Vec<u8> {
+    let mut t = (columns.len() as i16).to_be_bytes().to_vec();
+    for (name, oid) in columns {
+        t.extend_from_slice(name.as_bytes());
+        t.push(0);
+        t.extend_from_slice(&0i32.to_be_bytes());
+        t.extend_from_slice(&0i16.to_be_bytes());
+        t.extend_from_slice(&oid.to_be_bytes());
+        t.extend_from_slice(&(-1i16).to_be_bytes());
+        t.extend_from_slice(&(-1i32).to_be_bytes());
+        t.extend_from_slice(&0i16.to_be_bytes());
+    }
+    let mut out = framed(b'T', &t);
+    for row in rows {
+        let mut d = (row.len() as i16).to_be_bytes().to_vec();
+        for cell in *row {
+            d.extend_from_slice(&(cell.len() as i32).to_be_bytes());
+            d.extend_from_slice(cell.as_bytes());
+        }
+        out.extend_from_slice(&framed(b'D', &d));
+    }
+    out.extend_from_slice(&framed(b'C', b"SELECT\0"));
+    out.extend_from_slice(&framed(b'Z', b"I"));
+    out
+}
+
+/// One connection of the stand-in: a catalog query or the copy, each
+/// answered by what it asks; or, in replication mode, the walsender.
+fn stand_in_connection(
+    mut s: TcpStream,
+    walsends: Walsends,
+    released: &AtomicBool,
+    ending: &mpsc::Sender<u8>,
+    sent: &mpsc::Sender<Vec<u8>>,
+) {
+    s.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+    let mut len = [0u8; 4];
+    s.read_exact(&mut len).unwrap();
+    let mut startup = vec![0u8; i32::from_be_bytes(len) as usize - 4];
+    s.read_exact(&mut startup).unwrap();
+    let replication = startup.windows(21).any(|w| w == b"replication\0database\0");
+    let mut out = framed(b'R', &0i32.to_be_bytes());
+    out.extend_from_slice(&framed(b'S', b"server_version\x0017.0\x00"));
+    out.extend_from_slice(&framed(b'Z', b"I"));
+    s.write_all(&out).unwrap();
+    while let Some((tag, body)) = message(&mut s) {
+        if tag != b'Q' {
+            return;
+        }
+        let q = String::from_utf8_lossy(&body).to_lowercase();
+        let out = if q.starts_with("start_replication") {
+            assert!(replication, "{q}");
+            break;
+        } else if q.starts_with("show wal_level") {
+            answer(&[("wal_level", 25)], &[&["logical"]])
+        } else if q.contains("::regclass") {
+            answer(&[("nspname", 25), ("relname", 25)], &[&["public", "items"]])
+        } else if q.contains("from pg_type") {
+            answer(&[("typname", 25), ("oid", 26)], &[])
+        } else if q.contains("limit 0") {
+            answer(&[("id", 20), ("title", 25)], &[])
+        } else if q.contains("from pg_publication_tables") {
+            answer(&[("?column?", 23)], &[&["1"]])
+        } else if q.contains("from pg_publication") {
+            answer(
+                &[
+                    ("pubinsert", 16),
+                    ("pubupdate", 16),
+                    ("pubdelete", 16),
+                    ("pubtruncate", 16),
+                ],
+                &[&["t", "t", "t", "t"]],
+            )
+        } else if q.contains("from pg_replication_slots") {
+            answer(
+                &[("plugin", 25), ("slot_type", 25), ("database", 25)],
+                &[&["pgoutput", "logical", "d"]],
+            )
+        } else if q.starts_with("copy (") {
+            let mut out = framed(b'H', &[0, 0, 2, 0, 0, 0, 0]);
+            out.extend_from_slice(&framed(b'd', b"1\tone\n2\ttwo\n"));
+            out.extend_from_slice(&framed(b'c', b""));
+            out.extend_from_slice(&framed(b'C', b"COPY 2\0"));
+            out.extend_from_slice(&framed(b'Z', b"I"));
+            out
+        } else {
+            answer(&[], &[])
+        };
+        s.write_all(&out).unwrap();
+    }
+    if !replication {
+        return;
+    }
+    // The walsender: the stream started, then what it sends.
+    let mut out = framed(b'W', &[0, 0, 0]);
+    if walsends == Walsends::Unreadable {
+        let mut w = vec![b'w'];
+        w.extend_from_slice(&[0u8; 24]);
+        w.push(b'Q');
+        out.extend_from_slice(&framed(b'd', &w));
+    }
+    s.write_all(&out).unwrap();
+    let mut tags = Vec::new();
+    loop {
+        let Some((tag, _)) = message(&mut s) else {
+            if !tags.iter().any(|t| matches!(t, b'c' | b'X')) {
+                let _ = ending.send(0);
+            }
+            break;
+        };
+        tags.push(tag);
+        if matches!(tag, b'c' | b'X')
+            && tags.iter().filter(|t| matches!(t, b'c' | b'X')).count() == 1
+        {
+            let _ = ending.send(tag);
+        }
+        match tag {
+            b'c' if walsends == Walsends::Releases => {
+                released.store(true, Ordering::SeqCst);
+                let mut out = framed(b'c', b"");
+                out.extend_from_slice(&framed(b'C', b"COPY 0\0"));
+                out.extend_from_slice(&framed(b'Z', b"I"));
+                s.write_all(&out).unwrap();
+            }
+            b'X' => break,
+            _ => {}
+        }
+    }
+    let _ = sent.send(tags);
+}
+
+fn stand_in(walsends: Walsends) -> StandIn {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let released = Arc::new(AtomicBool::new(false));
+    let (ending_tx, ending) = mpsc::channel();
+    let (sent_tx, sent) = mpsc::channel();
+    let slot = Arc::clone(&released);
+    std::thread::spawn(move || {
+        for s in listener.incoming() {
+            let Ok(s) = s else { return };
+            let (slot, ending_tx, sent_tx) =
+                (Arc::clone(&slot), ending_tx.clone(), sent_tx.clone());
+            std::thread::spawn(move || {
+                stand_in_connection(s, walsends, &slot, &ending_tx, &sent_tx)
+            });
+        }
+    });
+    StandIn {
+        url: format!("postgres://u@127.0.0.1:{port}/d?sslmode=disable"),
+        released,
+        ending,
+        sent,
+    }
+}
+
+/// A server following `items` from `p`, into a file of its own.
+fn follow_stand_in(p: &StandIn, tag: &str) -> Server {
+    let file = tmp(tag);
+    crate::support::start(&[
+        "--file",
+        file.to_str().unwrap(),
+        "--follow",
+        &p.url,
+        "--follow-table",
+        "items",
+    ])
+}
+
+/// A follower that fails at what it read stores its exit code before
+/// anything of its stop waits: it closes its stream, never asking the
+/// server to end it, and a SIGTERM that comes as it does -- the shutdown
+/// then waiting on the follower -- still exits 1, with no checkpoint. Its
+/// stream once waited for the server's end of it, here never coming, past
+/// the shutdown's wait, and the server exited 0 serving a mirror that had
+/// stopped moving all the while.
+#[test]
+fn a_follower_that_fails_stops_the_server_with_its_code_before_it_waits() {
+    let p = stand_in(Walsends::Unreadable);
+    let s = follow_stand_in(&p, "standin-fails");
+    let first = p
+        .ending
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the follower never ended its stream");
+    let (code, log) = s.terminate();
+    assert_eq!(code, 1, "{log}");
+    assert!(log.contains("the mirror of items stopped"), "{log}");
+    let sent = p.sent.recv_timeout(Duration::from_secs(60)).unwrap();
+    assert_ne!(
+        first, b'c',
+        "the failed follower waited for the server: {sent:?}"
+    );
+    assert!(
+        !sent.contains(&b'c'),
+        "the failed follower waited for the server: {sent:?}"
+    );
+}
+
+/// A server stopped by a signal ends its follower's stream as the protocol
+/// does and exits only once the server answered, which PostgreSQL does
+/// once the slot is let go: a server started again at once, or a drop of
+/// the slot, finds it free. A `Terminate` alone left the slot held for as
+/// long as the walsender did not read, which `a_server_stopped_or_killed_
+/// goes_on_without_losing_a_row`, its walsender idle, cannot show.
+#[test]
+fn a_stopped_server_lets_its_slot_go_before_it_exits() {
+    let p = stand_in(Walsends::Releases);
+    let s = follow_stand_in(&p, "standin-stops");
+    assert!(
+        s.logged("streaming its changes", Duration::from_secs(60)),
+        "{}",
+        s.log.lock().unwrap()
+    );
+    let (code, log) = s.terminate();
+    assert_eq!(code, 0, "{log}");
+    assert!(
+        p.released.load(Ordering::SeqCst),
+        "the server exited before the slot was let go\n{log}"
+    );
+    assert_eq!(
+        p.sent.recv_timeout(Duration::from_secs(60)).unwrap(),
+        b"cX",
+        "{log}"
+    );
+    assert!(!log.contains("still held"), "{log}");
 }

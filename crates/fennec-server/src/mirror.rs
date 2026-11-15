@@ -22,6 +22,7 @@ use fennec_import::follow::{self, lsn_text, Event, Follow};
 use fennec_import::pg::Url;
 use fennec_import::Options;
 use std::cell::Cell;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -36,8 +37,18 @@ thread_local! {
 /// How long the shutdown waits for the follower to put its last changes on
 /// disk and confirm them, then end its stream, the slot let go for the
 /// next start: past it, a copy still being made is left for the next start
-/// to make again, as a copy cut short always is.
+/// to make again, as a copy cut short always is, and a stream the server
+/// has not ended yet is closed by the exit.
+///
+/// The follower's own wait for the stream's end (`follow::END_WAIT`, 3 s)
+/// fits inside it with a second and more for the settle's fsync before, so
+/// it ends by its own bound and says so rather than being cut off here: at
+/// 10 s it never could. The waits before the final sync -- `HELD_GRACE`,
+/// `conn::END_GRACE` and this one -- come to 7.5 s at most, inside
+/// docker's 10 s before its SIGKILL; a checkpoint cut off past it loses
+/// the graph's image, never a write (`durability::shutdown`).
 const STOP_WAIT: Duration = Duration::from_secs(5);
+const _: () = assert!(follow::END_WAIT.as_millis() + 1000 < STOP_WAIT.as_millis());
 
 /// What `--follow` was given.
 pub struct Mirror {
@@ -112,13 +123,27 @@ pub fn start(m: Mirror, db: Arc<RwLock<Database>>) -> std::io::Result<()> {
         .spawn(move || {
             FOLLOWER.with(|f| f.set(true));
             let stop = crate::durability::shutdown_flag();
+            // Nothing cuts the follower's wait for its stream's end short
+            // but its own bound: a second signal starts no second shutdown.
+            let cut = AtomicBool::new(false);
             let mut report = reporter(&m);
-            let ended = follow::run(&m.url, &m.table, &db, &m.opts, &m.follow, stop, &mut report);
+            let ended = follow::run(
+                &m.url,
+                &m.table,
+                &db,
+                &m.opts,
+                &m.follow,
+                stop,
+                &cut,
+                &mut report,
+            );
             if let Err(e) = &ended {
-                fennec_http::log!("follow: the mirror of {} stopped: {e}", m.table);
-                // The code before the wait is let go: a shutdown already
-                // waiting on this thread exits as soon as it is.
+                // The code first, before the line and before the wait is
+                // let go: a shutdown already waiting on this thread exits as
+                // soon as it is, and the follower returned an error before
+                // anything of it waited (`follow::run`).
                 crate::durability::exit_with(1);
+                fennec_http::log!("follow: the mirror of {} stopped: {e}", m.table);
             }
             // Stopped either way: the shutdown's wait for this thread, below,
             // ends here rather than at `STOP_WAIT`.
@@ -198,6 +223,7 @@ fn reporter(m: &Mirror) -> impl FnMut(Event) {
         Event::Reconnecting { error, wait } => {
             fennec_http::log!("follow: {table}: the stream broke ({error}); again in {wait:.1?}")
         }
+        Event::SlotHeld(why) => fennec_http::log!("follow: {table}: {why}"),
     }
     }
 }

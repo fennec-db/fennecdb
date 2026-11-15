@@ -59,13 +59,22 @@ const FIRST_BACKOFF: Duration = Duration::from_millis(500);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 /// How long a follower that stops waits for the server to end its stream
-/// and let the slot go (`WalStream::end`). A walsender answers at once
-/// unless it is decoding a transaction, any table's, which it finishes
-/// before it reads the socket again: a million rows of a table the slot
-/// does not publish held a stop 0.5 to 2 s on a loaded machine. Past the
-/// wait the connection is closed, and the server lets the slot go once it
-/// reads that.
-const END_WAIT: Duration = Duration::from_secs(10);
+/// and let the slot go (`WalStream::end`), every read of it held to what is
+/// left. A walsender answers at once unless it is decoding a transaction,
+/// any table's, which it finishes before it reads the socket again: 200 000
+/// rows of a table the slot does not publish, decoded through disk, held a
+/// stop 0.2 s, a million in memory 0.5 to 2 s on a loaded machine. Past the
+/// wait the connection is closed, the follower says so
+/// ([`Event::SlotHeld`]), and the server lets the slot go once it reads
+/// that.
+///
+/// 3 s, so that a stop has one bound it keeps. `fennec-server`'s shutdown
+/// waits `STOP_WAIT`, 5 s, for its follower to settle and end its stream:
+/// with this at 10 s, the shutdown cut off any wait past its own 5 s, and
+/// this bound never held there; at 3 s the settle's fsync has 2 s before
+/// it, which the server holds at compile time. And `fennec import --follow` stops within a
+/// supervisor's usual grace, docker's 10 s before its SIGKILL.
+pub const END_WAIT: Duration = Duration::from_secs(3);
 
 /// The slot and publication a collection follows through.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,11 +132,20 @@ pub enum Event {
     Ignored(String),
     /// The stream broke, and opens again after `wait`.
     Reconnecting { error: String, wait: Duration },
+    /// A follower that stopped could not wait for the server to let its
+    /// slot go -- the wait ran out ([`END_WAIT`]), was cut short, or
+    /// failed -- and closed the connection: the line to show, which says
+    /// why and what it means for a drop of the slot.
+    SlotHeld(String),
 }
 
 /// Follows `table` into `opts.into` until `stop` is set: the copy first when
 /// there is no whole one, then the changes. Returns once stopped, with every
-/// applied change on disk and confirmed; an error it cannot wait out ends it.
+/// applied change on disk and confirmed and the stream ended, its slot let
+/// go unless the server took longer than [`END_WAIT`] -- or `cut` was set
+/// meanwhile, which ends that wait at once (the shell's second ctrl-c). An
+/// error it cannot wait out ends it at once, with nothing waited for.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     url: &Url,
     table: &str,
@@ -135,6 +153,7 @@ pub fn run(
     opts: &Options,
     follow: &Follow,
     stop: &AtomicBool,
+    cut: &AtomicBool,
     report: &mut dyn FnMut(Event),
 ) -> Result<()> {
     let source = Source::inspect(url, table, opts, follow)?;
@@ -149,7 +168,7 @@ pub fn run(
         if stop.load(Ordering::SeqCst) {
             return Ok(());
         }
-        match stream(&source, db, opts, follow, stop, &mut backoff, report) {
+        match stream(&source, db, opts, follow, stop, cut, &mut backoff, report) {
             Ok(()) => return Ok(()),
             Err(Failure::Stream(e)) if retryable(&e) => {
                 report(Event::Reconnecting {
@@ -607,12 +626,14 @@ fn settle(
 }
 
 /// One stream, from opening it until it breaks or `stop` is set.
+#[allow(clippy::too_many_arguments)]
 fn stream(
     source: &Source,
     db: &RwLock<Database>,
     opts: &Options,
     follow: &Follow,
     stop: &AtomicBool,
+    cut: &AtomicBool,
     backoff: &mut Duration,
     report: &mut dyn FnMut(Event),
 ) -> std::result::Result<(), Failure> {
@@ -623,13 +644,23 @@ fn stream(
     *backoff = FIRST_BACKOFF;
     report(Event::Streaming);
     let ended = apply(source, db, opts, &mut wal, stop, report);
-    // Stopped, or stopped by what it read: the stream is ended as the
-    // protocol ends one, so the follower returns with its slot let go
-    // (`WalStream::end`). One that broke is its connection's to drop, and a
-    // server that does not answer in time lets the slot go once it reads
-    // the connection closed, as it did before.
-    if !matches!(ended, Err(Failure::Stream(_))) {
-        let _ = wal.end(END_WAIT);
+    // A clean stop alone ends the stream as the protocol ends one and waits
+    // for the slot to be let go (`WalStream::end`). A failure goes to the
+    // caller before anything waits: `fennec-server` stores its exit code
+    // when the follower returns, and a shutdown already waiting on the
+    // follower, for `STOP_WAIT` at most, exited 0 when this wait came
+    // first -- with a checkpoint, and a mirror served that had stopped
+    // moving. Its stream is closed (`Terminate`, on the drop), as one that
+    // broke is, and the server lets the slot go once it reads that.
+    if ended.is_ok() {
+        if let Err(e) = wal.end(END_WAIT, cut) {
+            report(Event::SlotHeld(format!(
+                "slot {} still held at the stop ({e}): PostgreSQL releases it once its \
+                 walsender next reads the connection; until then a drop of it meets 55006 \
+                 \"active for PID\", which a follower started again waits out",
+                follow.slot
+            )));
+        }
     }
     ended
 }
@@ -1310,6 +1341,9 @@ fn no_layout() -> Error {
 mod tests {
     use super::*;
     use fennec_core::value::VecPrec;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::{mpsc, Arc};
 
     // ------------------------------------------------ building messages
 
@@ -1739,5 +1773,238 @@ mod tests {
         assert!(client::plain_name(
             &Follow::named_after(&"x".repeat(80)).slot
         ));
+    }
+
+    // ------------------------------------------------ ending a stream
+
+    /// What a stand-in walsender does with the follower's `CopyDone`.
+    #[derive(Clone, Copy)]
+    enum Answer {
+        /// Lets the slot go -- `released`, set before anything goes out,
+        /// as the walsender's `ReplicationSlotRelease` comes before its
+        /// `CommandComplete` -- then sends a change it still had on its
+        /// way, its own `CopyDone`, `CommandComplete` and `ReadyForQuery`.
+        Releases,
+        /// Says nothing until the follower closes the connection, as a
+        /// walsender decoding a transaction reads nothing until it is
+        /// through.
+        Decodes,
+    }
+
+    /// A stand-in walsender over a port of its own: it starts the stream,
+    /// sends `changes`, and answers the follower's `CopyDone` as `Answer`
+    /// says.
+    struct Walsender {
+        url: Url,
+        released: Arc<AtomicBool>,
+        /// A message once the follower's `CopyDone` came.
+        asked: mpsc::Receiver<()>,
+        /// The tags of what the follower sent once streaming, in order, up
+        /// to the end of its connection.
+        sent: mpsc::Receiver<Vec<u8>>,
+    }
+
+    fn framed(tag: u8, body: &[u8]) -> Vec<u8> {
+        let mut v = vec![tag];
+        v.extend_from_slice(&((body.len() + 4) as i32).to_be_bytes());
+        v.extend_from_slice(body);
+        v
+    }
+
+    /// `XLogData` carrying one `pgoutput` message.
+    fn xlog(body: &[u8]) -> Vec<u8> {
+        let mut w = vec![b'w'];
+        w.extend_from_slice(&[0u8; 24]);
+        w.extend_from_slice(body);
+        framed(b'd', &w)
+    }
+
+    fn read_msg(s: &mut TcpStream) -> Option<(u8, Vec<u8>)> {
+        let mut head = [0u8; 5];
+        s.read_exact(&mut head).ok()?;
+        let len = i32::from_be_bytes([head[1], head[2], head[3], head[4]]) as usize - 4;
+        let mut body = vec![0u8; len];
+        s.read_exact(&mut body).ok()?;
+        Some((head[0], body))
+    }
+
+    fn walsender(changes: Vec<Vec<u8>>, answer: Answer) -> Walsender {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let released = Arc::new(AtomicBool::new(false));
+        let (ask, asked) = mpsc::channel();
+        let (tell, sent) = mpsc::channel();
+        let slot = Arc::clone(&released);
+        std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+            let mut len = [0u8; 4];
+            s.read_exact(&mut len).unwrap();
+            let mut startup = vec![0u8; i32::from_be_bytes(len) as usize - 4];
+            s.read_exact(&mut startup).unwrap();
+            let mut out = framed(b'R', &0i32.to_be_bytes());
+            out.extend_from_slice(&framed(b'Z', b"I"));
+            s.write_all(&out).unwrap();
+            let Some((b'Q', _)) = read_msg(&mut s) else {
+                panic!("no START_REPLICATION");
+            };
+            let mut out = framed(b'W', &[0, 0, 0]);
+            for c in &changes {
+                out.extend_from_slice(&xlog(c));
+            }
+            s.write_all(&out).unwrap();
+            let mut tags = Vec::new();
+            while let Some((tag, _)) = read_msg(&mut s) {
+                tags.push(tag);
+                match tag {
+                    b'c' => {
+                        let _ = ask.send(());
+                        if let Answer::Releases = answer {
+                            slot.store(true, Ordering::SeqCst);
+                            let mut out = xlog(&insert(&[Some("2"), Some("two"), None, None]));
+                            out.extend_from_slice(&framed(b'c', b""));
+                            out.extend_from_slice(&framed(b'C', b"COPY 0\0"));
+                            out.extend_from_slice(&framed(b'Z', b"I"));
+                            s.write_all(&out).unwrap();
+                        }
+                    }
+                    b'X' => break,
+                    _ => {}
+                }
+            }
+            let _ = tell.send(tags);
+        });
+        Walsender {
+            url: Url::parse(&format!("postgres://u@127.0.0.1:{port}/d?sslmode=disable")).unwrap(),
+            released,
+            asked,
+            sent,
+        }
+    }
+
+    /// One stream of [`fixture`]'s mirror from the walsender at `url`,
+    /// until `stop` -- which `report` may set -- or a failure; its events.
+    fn follow_from(
+        url: &Url,
+        stop: &AtomicBool,
+        cut: &AtomicBool,
+        mut report: impl FnMut(&Event),
+    ) -> (
+        std::result::Result<(), Failure>,
+        Vec<String>,
+        RwLock<Database>,
+    ) {
+        let (mut source, opts, db) = fixture(None);
+        source.url = url.clone();
+        let mut events = Vec::new();
+        let mut backoff = FIRST_BACKOFF;
+        let follow = Follow::named_after("docs");
+        let ended = stream(
+            &source,
+            &db,
+            &opts,
+            &follow,
+            stop,
+            cut,
+            &mut backoff,
+            &mut |e| {
+                report(&e);
+                events.push(format!("{e:?}"));
+            },
+        );
+        (ended, events, db)
+    }
+
+    /// A follower that stops puts what it applied on disk and confirms it,
+    /// ends its stream with `CopyDone` -- never a `Terminate` alone, which
+    /// left the slot held for as long as the walsender did not read -- and
+    /// returns only once the server answered, which it does once the slot
+    /// is let go. What the server still sent is dropped, unapplied and
+    /// unconfirmed. This fails every time the end is left out, where the
+    /// test against PostgreSQL (`tests/follow.rs`) needs its walsender
+    /// busy at the stop.
+    #[test]
+    fn a_stopped_follower_returns_once_its_slot_is_let_go() {
+        let mut commit = vec![b'C', 0];
+        commit.extend_from_slice(&16u64.to_be_bytes());
+        commit.extend_from_slice(&16u64.to_be_bytes());
+        commit.extend_from_slice(&0i64.to_be_bytes());
+        let w = walsender(
+            vec![
+                vec![b'B'],
+                relation(b'd', &COLS),
+                insert(&[Some("1"), Some("one"), None, None]),
+                commit,
+            ],
+            Answer::Releases,
+        );
+        let stop = AtomicBool::new(false);
+        let (ended, events, db) = follow_from(&w.url, &stop, &AtomicBool::new(false), |e| {
+            // Stopped once what it applied is confirmed.
+            if matches!(e, Event::Confirmed { .. }) {
+                stop.store(true, Ordering::SeqCst);
+            }
+        });
+        assert!(ended.is_ok(), "{events:?}");
+        assert!(
+            w.released.load(Ordering::SeqCst),
+            "the follower returned before the server let its slot go"
+        );
+        // Its confirm, then CopyDone, then the Terminate of the close.
+        assert_eq!(w.sent.recv().unwrap(), b"dcX", "{events:?}");
+        assert!(doc(&db, 1).is_some() && doc(&db, 2).is_none());
+        assert!(
+            !events.iter().any(|e| e.starts_with("SlotHeld")),
+            "{events:?}"
+        );
+    }
+
+    /// A follower that fails at what it read returns its error before it
+    /// waits for anything: it never asks the server to end the stream, so
+    /// never waits for an answer -- here one that never comes -- but closes
+    /// the connection. `fennec-server` stores its exit code when the
+    /// follower returns, and a wait before that let a shutdown already
+    /// waiting on the follower exit 0.
+    #[test]
+    fn a_follower_that_fails_returns_before_it_waits() {
+        let w = walsender(vec![b"Q".to_vec()], Answer::Decodes);
+        let never = AtomicBool::new(false);
+        let (ended, events, _) = follow_from(&w.url, &never, &never, |_| {});
+        assert!(matches!(ended, Err(Failure::Apply(_))), "{events:?}");
+        assert_eq!(
+            w.sent.recv().unwrap(),
+            b"X",
+            "the follower that failed did not close its stream at once"
+        );
+    }
+
+    /// A stop's wait for the server, cut short -- the shell's second ctrl-c
+    /// -- ends while the server still says nothing, the connection closed,
+    /// and says in one line what that means for the slot.
+    #[test]
+    fn a_second_stop_ends_the_wait_and_says_what_holds_the_slot() {
+        let Walsender {
+            url, asked, sent, ..
+        } = walsender(vec![], Answer::Decodes);
+        let cut = Arc::new(AtomicBool::new(false));
+        let cutter = {
+            let cut = Arc::clone(&cut);
+            std::thread::spawn(move || {
+                asked.recv().unwrap();
+                cut.store(true, Ordering::SeqCst);
+            })
+        };
+        let (ended, events, _) = follow_from(&url, &AtomicBool::new(true), &cut, |_| {});
+        assert!(ended.is_ok(), "{events:?}");
+        cutter.join().unwrap();
+        let held: Vec<&String> = events
+            .iter()
+            .filter(|e| e.starts_with("SlotHeld"))
+            .collect();
+        assert_eq!(held.len(), 1, "{events:?}");
+        for word in ["fennec_docs", "cut short", "next reads", "55006"] {
+            assert!(held[0].contains(word), "{word}: {held:?}");
+        }
+        assert_eq!(sent.recv().unwrap(), b"cX");
     }
 }

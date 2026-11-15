@@ -517,17 +517,32 @@ enum Then {
     Decodes,
     /// Goes on sending changes, as one sending a large transaction does.
     Sends,
+    /// Sends a whole change and the first bytes of another in one write,
+    /// then nothing more: the rest of a message, and bytes already
+    /// buffered, are what the client waits on.
+    Stalls,
+}
+
+/// A stand-in walsender's port, and what it saw of the client's end of the
+/// stream.
+struct Walsender {
+    port: u16,
+    released: Arc<AtomicBool>,
+    /// A message once the client's `CopyDone` came.
+    asked: mpsc::Receiver<()>,
+    /// Whether the client then ended the connection: `Terminate`, or, as
+    /// the stand-in goes on sending, a write refused.
+    terminated: mpsc::Receiver<bool>,
 }
 
 /// A stand-in walsender: it starts a stream and sends a keepalive, reads up
-/// to the client's `CopyDone`, then does as `then` says. It tells whether
-/// the client then ended the connection: `Terminate`, or, as it goes on
-/// sending, a write refused.
-fn walsender(then: Then) -> (u16, Arc<AtomicBool>, mpsc::Receiver<bool>) {
+/// to the client's `CopyDone`, then does as `then` says.
+fn walsender(then: Then) -> Walsender {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let released = Arc::new(AtomicBool::new(false));
     let (told, terminated) = mpsc::channel();
+    let (ask, asked) = mpsc::channel();
     let slot = Arc::clone(&released);
     std::thread::spawn(move || {
         let (mut s, _) = listener.accept().unwrap();
@@ -557,6 +572,7 @@ fn walsender(then: Then) -> (u16, Arc<AtomicBool>, mpsc::Receiver<bool>) {
                 break;
             }
         }
+        let _ = ask.send(());
         let mut w = vec![b'w'];
         w.extend_from_slice(&[0u8; 24]);
         w.extend_from_slice(b"B");
@@ -575,18 +591,30 @@ fn walsender(then: Then) -> (u16, Arc<AtomicBool>, mpsc::Receiver<bool>) {
                 while s.write_all(&change).is_ok() {}
                 return told.send(true).unwrap();
             }
+            Then::Stalls => {
+                let mut out = change;
+                out.push(b'd');
+                out.extend_from_slice(&1004i32.to_be_bytes());
+                out.extend_from_slice(&[b'w'; 10]);
+                s.write_all(&out).unwrap();
+            }
         }
         let ended = read_msg(&mut s);
         told.send(ended.is_some_and(|(tag, _)| tag == b'X'))
             .unwrap();
     });
-    (port, released, terminated)
+    Walsender {
+        port,
+        released,
+        asked,
+        terminated,
+    }
 }
 
 /// A stream started against [`walsender`], its keepalive read.
-fn streaming(then: Then) -> (WalStream, Arc<AtomicBool>, mpsc::Receiver<bool>) {
-    let (port, released, terminated) = walsender(then);
-    let c = Client::connect_replication(&url(port, None)).unwrap();
+fn streaming(then: Then) -> (WalStream, Walsender) {
+    let w = walsender(then);
+    let c = Client::connect_replication(&url(w.port, None)).unwrap();
     let mut wal = c.start_replication("fennec_docs", "fennec_docs").unwrap();
     let first = wal.next(Duration::from_secs(30)).unwrap();
     assert_eq!(
@@ -596,7 +624,7 @@ fn streaming(then: Then) -> (WalStream, Arc<AtomicBool>, mpsc::Receiver<bool>) {
             reply: false
         })
     );
-    (wal, released, terminated)
+    (wal, w)
 }
 
 /// Ending a stream waits for the server's answer, which it sends only
@@ -605,28 +633,63 @@ fn streaming(then: Then) -> (WalStream, Arc<AtomicBool>, mpsc::Receiver<bool>) {
 /// read the end of. What the server still sent of the stream is dropped.
 #[test]
 fn ending_a_stream_waits_for_the_server_to_let_the_slot_go() {
-    let (wal, released, terminated) = streaming(Then::Answers);
-    wal.end(Duration::from_secs(30)).unwrap();
+    let (wal, w) = streaming(Then::Answers);
+    wal.end(Duration::from_secs(30), &AtomicBool::new(false))
+        .unwrap();
     assert!(
-        released.load(Ordering::SeqCst),
+        w.released.load(Ordering::SeqCst),
         "the stream ended before the server let the slot go"
     );
-    assert!(terminated.recv().unwrap(), "no Terminate after the end");
+    assert!(w.terminated.recv().unwrap(), "no Terminate after the end");
 }
 
 /// A server that does not answer -- a walsender decoding a transaction
-/// reads nothing until it is through -- or one that goes on sending is
-/// waited for no longer than asked, and the connection is closed as
-/// before.
+/// reads nothing until it is through -- one that goes on sending, and one
+/// that stops in the middle of a message, its first bytes and a whole one
+/// before them already read in, are waited for no longer than asked: every
+/// read is held to what is left of the wait, where the rest of a message
+/// waited out the socket's own timeout, 30 s. The connection is then
+/// closed as before.
 #[test]
 fn ending_a_stream_is_bounded() {
-    for then in [Then::Decodes, Then::Sends] {
-        let (wal, _, terminated) = streaming(then);
+    for then in [Then::Decodes, Then::Sends, Then::Stalls] {
+        let (wal, w) = streaming(then);
         let wait = Duration::from_millis(200);
         let began = Instant::now();
-        let e = wal.end(wait).unwrap_err().to_string();
+        let e = wal
+            .end(wait, &AtomicBool::new(false))
+            .unwrap_err()
+            .to_string();
         assert!(began.elapsed() >= wait, "{:?}", began.elapsed());
-        assert!(e.contains("did not end the replication stream"), "{e}");
-        assert!(terminated.recv().unwrap(), "the connection was not ended");
+        assert!(
+            e.contains("did not end the replication stream within"),
+            "{e}"
+        );
+        assert!(w.terminated.recv().unwrap(), "the connection was not ended");
+    }
+}
+
+/// The caller's second stop ends the wait while the server still says
+/// nothing -- and in the middle of a message -- and the connection is
+/// closed.
+#[test]
+fn ending_a_stream_stops_waiting_once_cut() {
+    for then in [Then::Decodes, Then::Stalls] {
+        let (wal, w) = streaming(then);
+        let cut = Arc::new(AtomicBool::new(false));
+        let cutter = {
+            let cut = Arc::clone(&cut);
+            std::thread::spawn(move || {
+                w.asked.recv().unwrap();
+                cut.store(true, Ordering::SeqCst);
+            })
+        };
+        let e = wal
+            .end(Duration::from_secs(60), &cut)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("cut short"), "{e}");
+        cutter.join().unwrap();
+        assert!(w.terminated.recv().unwrap(), "the connection was not ended");
     }
 }

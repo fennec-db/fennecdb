@@ -18,6 +18,7 @@ use crate::proto::{put_cstr, read_message, Message, Writer, PROTOCOL_V3};
 use fennec_core::error::{Error, Result};
 use std::io::{self as stdio, BufReader, ErrorKind, Read, Write};
 use std::net::TcpStream;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The timeout used while connecting and while waiting for a message.
@@ -416,6 +417,17 @@ impl Conn {
             }
             #[cfg(feature = "tls")]
             Conn::Tls(s) => s.readable(wait),
+        }
+    }
+
+    /// The socket's write timeout, beneath TLS too.
+    fn set_write_timeout(&self, wait: Duration) -> stdio::Result<()> {
+        // A zero timeout is refused by the socket.
+        let wait = Some(wait.max(Duration::from_millis(1)));
+        match self {
+            Conn::Plain(s) => s.set_write_timeout(wait),
+            #[cfg(feature = "tls")]
+            Conn::Tls(s) => s.get_ref().set_write_timeout(wait),
         }
     }
 }
@@ -1057,10 +1069,10 @@ impl WalStream {
     }
 
     /// Ends the stream as the protocol ends one: `CopyDone`, then the
-    /// server's messages read up to its `ReadyForQuery`, `wait` at most in
-    /// all. The walsender lets the slot go before it answers
-    /// (`ReplicationSlotRelease`, then `CommandComplete`), so once this
-    /// returns `Ok` the slot is free: to drop, or to stream again.
+    /// server's messages read up to its `ReadyForQuery`. The walsender lets
+    /// the slot go before it answers (`ReplicationSlotRelease`, then
+    /// `CommandComplete`), so once this returns `Ok` the slot is free: to
+    /// drop, or to stream again.
     ///
     /// Closing the connection instead left the slot held until the
     /// walsender next read its socket, which it does not while it decodes
@@ -1069,35 +1081,49 @@ impl WalStream {
     /// `55006`, "active for PID". What the server still sends of the stream
     /// is dropped unread: nothing of it was applied, so nothing of it is
     /// confirmed, and it comes again from the slot.
-    pub fn end(mut self, wait: Duration) -> Result<()> {
+    ///
+    /// `wait` bounds it all: the `CopyDone`'s write, and every read --
+    /// the rest of a message already begun and what was buffered with it
+    /// included, over TLS too (`Until`) -- where a read of the rest of a
+    /// message waited out the socket's own `TIMEOUT`, 30 s, a read. It
+    /// ends sooner, within [`CUT_LOOK`], once `cut` is set: the caller's
+    /// second stop. Either way the connection is then closed, and the
+    /// server lets the slot go once it reads that.
+    pub fn end(mut self, wait: Duration, cut: &AtomicBool) -> Result<()> {
+        let deadline = Instant::now() + wait;
+        // The write too: a server that reads nothing while it decodes
+        // leaves a write waiting once the buffers between are full -- not
+        // with the little feedback a follower sends, but nothing else would
+        // hold it then. The `Terminate` the drop sends is held to it as well.
+        let conn = self.client.stream.get_ref();
+        conn.set_write_timeout(wait).map_err(io)?;
         let mut w = Writer::new();
         w.msg(b'c', |_| {});
         w.flush_to(self.client.stream.get_mut()).map_err(io)?;
-        let deadline = Instant::now() + wait;
-        let late = || {
-            io(format!(
-                "the server did not end the replication stream within {wait:?}"
-            ))
+        let mut r = Until {
+            stream: &mut self.client.stream,
+            deadline,
+            cut,
+            gave: None,
         };
         let mut failed = None;
         loop {
-            // Looked at before every message, not only an idle socket's: a
-            // server still sending a large transaction keeps it busy.
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return Err(late());
-            }
-            if self.client.stream.buffer().is_empty() {
-                match self.client.stream.get_mut().readable(left) {
-                    Ok(true) => {}
-                    Ok(false) => return Err(late()),
-                    Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
-                        return Err(io("the server closed the replication stream"))
-                    }
-                    Err(e) => return Err(io(e)),
-                }
-            }
-            let m = self.client.read()?;
+            let m =
+                match read_message(&mut r) {
+                    Ok(m) => m,
+                    Err(e) => return Err(match r.gave {
+                        Some(Gave::Late) => io(format!(
+                            "the server did not end the replication stream within {wait:?}"
+                        )),
+                        Some(Gave::Cut) => io(
+                            "the wait for the server to end the replication stream was cut short",
+                        ),
+                        None if e.kind() == ErrorKind::UnexpectedEof => {
+                            io("the server closed the replication stream")
+                        }
+                        None => io(e),
+                    }),
+                };
             match m.tag {
                 b'E' => failed = Some(server_error(&m)),
                 b'Z' => return failed.map_or(Ok(()), Err),
@@ -1106,6 +1132,53 @@ impl WalStream {
                 _ => {}
             }
         }
+    }
+}
+
+/// How often [`WalStream::end`] looks at its `cut` while it waits.
+pub const CUT_LOOK: Duration = Duration::from_millis(50);
+
+/// Why a read of [`Until`] gave up.
+#[derive(Clone, Copy)]
+enum Gave {
+    Late,
+    Cut,
+}
+
+/// A connection read with every read held to a deadline and a flag. A read
+/// that would go to the socket -- the reader's buffer empty -- waits first
+/// for what is left (`Conn::readable`: a peek, or rustls taking whole
+/// records in), in slices of [`CUT_LOOK`] so that `cut` is looked at, and
+/// reads only once bytes are there, which it then takes without waiting.
+/// No read blocks past the deadline, then, even in the middle of a message,
+/// whose rest a plain read would wait for under the socket's timeout.
+/// What it stops in the middle of is never read on: the connection is
+/// closed after it.
+struct Until<'a> {
+    stream: &'a mut BufReader<Conn>,
+    deadline: Instant,
+    cut: &'a AtomicBool,
+    gave: Option<Gave>,
+}
+
+impl Read for Until<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> stdio::Result<usize> {
+        while self.stream.buffer().is_empty() {
+            let left = self.deadline.saturating_duration_since(Instant::now());
+            let gave = if self.cut.load(Ordering::SeqCst) {
+                Gave::Cut
+            } else if left.is_zero() {
+                Gave::Late
+            } else if self.stream.get_mut().readable(left.min(CUT_LOOK))? {
+                break;
+            } else {
+                continue;
+            };
+            self.gave = Some(gave);
+            // Not `Interrupted`, which `read_exact` would ask again.
+            return Err(ErrorKind::TimedOut.into());
+        }
+        self.stream.read(buf)
     }
 }
 
