@@ -1,6 +1,6 @@
 # Access
 
-The long form of the invariants [crates/fennec-http/src/access/CLAUDE.md](../../crates/fennec-http/src/access/CLAUDE.md) lists under *Access* (moved there from `crates/fennec-http/CLAUDE.md` to make room, beside `access.rs` and `access/`): scoped tokens, field lists, rules reading another collection, the server's own collections, a token bound to its tenant, whom a token is for, and empty tokens. Each section below but *The server's own collections* and *Whom a token is for*, added after the move, is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-http/src/access/CLAUDE.md](../../crates/fennec-http/src/access/CLAUDE.md) lists under *Access* (moved there from `crates/fennec-http/CLAUDE.md` to make room, beside `access.rs` and `access/`): scoped tokens, field lists, rules reading another collection, the server's own collections, a token bound to its tenant, whom a token is for, expired tokens, empty tokens and short ones. Each section below but *The server's own collections*, *Whom a token is for*, *Expired tokens* and *Short tokens*, added after the move, is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Scoped tokens
 
@@ -41,9 +41,10 @@ filter the shape matched nothing and a scoped live query never ran again,
 and told of every write it would have had the moments of other users'. A
 stream is ended at its token's `exp` (`Scope::expires_ms`, the keep-alive
 wait bounded by it) with `event: error` and `{"error":"the token has
-expired","status":401}`, which every client takes as a refused request --
-`FennecHttp.live` and `subscribe` stop with a `FennecError` of status 401,
-the sync layer asks for a token (a scenario), Go's stream ends with an
+expired","status":401,"code":"token_expired"}` ([below](#expired-tokens)),
+which every client takes as a refused request -- `FennecHttp.live` and
+`subscribe` stop with a `FennecError` of status 401 and that `code`, the
+sync layer asks for a token as expired (a scenario), Go's stream ends with an
 `*Error` of 401, .NET's with `Event.Status`: a stream opened two seconds
 before `exp` delivered a change written four after, while the token's `get`
 was 401. A scoped read's poll tag is a digest of its answer (`content_tag`,
@@ -51,12 +52,14 @@ the query run every time): the change counter's tag, and a 304 answered
 unrun, told it when anyone wrote to what it reads. The algorithm is the key's,
 never the token's: `--jwt-keys` reads a JWKS file, `oct` keys for HS256 and
 `RSA` keys (2048 bits up, `crypto::RsaKey`, 64-bit limbs: 166 us a check in
-32-bit ones, 38 now) for an identity provider's RS256 and `EC` keys on
-P-256 for its ES256 (below), a `kid` picking the key; an RSA modulus taken
-for an HS256 secret would sign anything. The file is read again as it
-changes, looked at once a second, which is the rotation. A verified token
-is kept by its text (`verified`, 16 shards of 256, emptied when the keys
-change, `exp` asked each time): 0.27 us against 2.9 for HS256.
+32-bit ones, 38 now; held to every case of Wycheproof's 2048-, 3072- and
+4096-bit files, `tests/wycheproof.rs`) for an identity provider's RS256
+and `EC` keys on P-256 for its ES256 (below), a `kid` picking the key; an
+RSA modulus taken for an HS256 secret would sign anything. The file is
+read again as it changes, looked at once a second, which is the rotation.
+A verified token is kept by its text (`verified`, 16 shards of 256,
+emptied when the keys change, `exp` asked each time): 0.27 us against 2.9
+for HS256.
 A token naming no `exp` is refused (`Demands::require_exp`,
 `--jwt-require-exp off` takes it), and `--jwt-max-age` bounds how far ahead
 one may lie; `mint` stamps an hour on claims naming none. Grants are
@@ -1143,6 +1146,307 @@ no wait, on a node's every route) and fennec-server's `tests/providers.rs`
 keys, the warning, a refusal's audit line and a nested claim refused at
 the start) fail without it.
 
+## Expired tokens
+
+**A token past its `exp` is told so by a code, and no other refusal is.**
+A replica's sync was told a token that ran out and every other 401 alike:
+a request's 401 named the check in words, the stream ended at the `exp`
+with `{"error":"the token has expired","status":401}`, and
+`fennec_sync_feed` handed both to the binding as `{"do":"token"}`. vulpes,
+an offline app on the native library whose proxy mints five-minute HS256
+tokens a device, dropped the stream's last frame in its proxy so that a
+device would not take every token's end for a sign-out. A request whose
+token's `exp` passed is now answered 401 `{"error":"the token has
+expired","code":"token_expired"}` (`access::refusal_code`, read where
+`authenticate` builds the refusal, `Response::coded`), and the stream's
+last event says the same (`sse::EXPIRED`,
+`{"error":..,"status":401,"code":"token_expired"}`). Every other 401 names
+no code: a signature no key makes, a `kid` no key has, an issuer, audience
+or client not taken, a token not valid yet (`nbf`), one with no `exp` or
+one further ahead than `--jwt-max-age`, a malformed one, none -- and the
+empty one, which is none ([below](#empty-tokens)). The `exp` is asked after
+the signature and whom the token is for (`Access::verify`), so the code is
+told only of a token this server took until then: a forged token past its
+`exp` is refused for its signature, and one for another audience for that,
+the code telling a sender of a token no key here made nothing it did not
+know.
+
+**A 401 alone is never a sign-out.** The first form of this told an app
+to refresh at `token_expired` and sign out -- deleting the replica -- at
+any other 401, and the second to sign out where a token just minted was
+refused again. The server keeps no list of revoked tokens, so only the
+issuer knows that a session ended: an app asks it for a fresh token at
+every 401, whatever the code, and signs out where it refuses to issue one.
+A fresh token cures an expiry, a token signed with a key the server has
+since dropped (a replica offline past a rotation), a request sent before
+any token was handed over, and every expiry from a v0.2.0 server, which
+names no code. It cures nothing that minting does not change: a key the
+server has not fetched yet (`no key has the token's kid` until the
+refresh job's next run, every five minutes in
+[auth.html](../../site/content/docs/auth.html)), an `nbf` its clock has not
+reached, an issuer, audience or client it does not take. Those a token
+minted again at once meets the same -- the "refused again" the second form
+signed out at, for a lag a minute would have ended -- and the sync waits
+them out (below). The guidance is the same everywhere it is given
+(auth.html, sync.html, mobile.html, `fennec.h`, `fennec.d.ts`, the
+bindings' READMEs and `TokenRefusal`'s comments).
+
+**A replica is one account's.** Its `persist` key or file path names the
+account, and it is never opened for another. Kept through a sign-out for
+its writes' sake, a replica opened under one key for every account would,
+on a browser two people share, have sent the first's queue under the
+second's token and shown the second the first's rows: `sync({persist:
+'tasks', token: B})` restores what A left. Signing out closes the replica
+and keeps it, for that account's next sign-in to send under the keys its
+writes kept; deleting it loses them.
+
+**The provider is handed a value, not a flag.** A bool frozen at 1.0 could
+carry neither "no token was sent" nor a later code, nor how many tokens
+were tried. So the core's action is `{"do":"token","code":..|null,
+"had_token":B,"attempt":N}` and every binding hands its provider a
+`TokenRefusal` of the same three -- `errorCode`, `hadToken`, `attempt` --
+and `expired`, derived from the code: a Swift struct, a Kotlin class that
+is not a data class (a `copy` and `componentN`s would freeze its shape), a
+Dart class and, in the browser, a frozen object. `attempt` counts the asks
+in a row since the server last took the token held (`token_asks`,
+`#tokenAsks`): a 2xx to a request carrying it, or a stream it opened
+(`answered`). Nothing else resets it. A 408, a 429 or a 5xx may come before
+a token is read -- the 503 at the connection ceiling, a router's while a
+tenant moves -- and reset there, a fresh token refused, then a 503, then
+refused again was a first ask again, the wait (below) never reached. A
+code the core does not know is passed on as it came, so a later server's
+code reaches an app without a new core. The status says the same while a
+token is wanted (below), for an app that hands its tokens over with a
+signal rather than a provider.
+
+**A token refused again is asked for again after a wait.** Where the token
+handed over at the last ask is refused too, the next ask comes after 1 s
+doubling to 60 s, 30% jitter on top (`TOKEN_BACKOFF_MS`, the same numbers
+in `#wantToken`), a wait the network's coming back keeps, as it keeps a
+server's `retry_after`: the network says nothing of why a token was
+refused. A second is the soonest a token minted again could fare better --
+an `nbf` a clock or two ahead -- and a minute between asks is what a fleet
+of devices can put to an issuer's token endpoint for as long as a key is
+not fetched or an audience is wrong, a fix landing within a minute. The
+network's own backoff, 250 ms to 15 s, would have asked four times a
+minute a device; and with no wait at all, a provider that hands over a
+token at every ask, reading no `attempt`, looped -- a 401, a token, a 401
+-- at the network's speed. The wait is the core's, held by the scenario
+file, rather than each provider's: the provider no longer decides
+anything from `attempt`, which a provider written for the second form
+ignored.
+
+**An expiry of a token that was good is no escalation.** A fresh token
+cures an expiry however many were asked for before, so `token_expired`
+started the count at 1 again and asked at once: a token handed over while
+the replica was offline may run out before it is sent, and counted as
+refused again it would have waited and, under the second form, signed the
+user out. That held for every token, one minted expired among them: where
+the server's clock runs ahead of the issuer's by a token's lifetime, or an
+issuer sets `exp` wrong, every token arrives expired, and each was asked
+for at once -- a 401, an issuer's call, a resend, a 401: an issuer's call a
+round trip from every device, never a wait (the third review's probe, four
+tokens refused for their expiry at the stream's open, was told `attempt` 1
+each time). So an expiry starts the count over only for a token that was
+good: the one the server took last (`taken`, `#taken`: a 2xx to a request
+carrying it, or a stream it opened), which ran out in use, and the first
+one handed over since (`untaken`, `#untaken`; the token started with,
+before the server took any), which may have run out before it was sent.
+Any later token refused for its expiry counts, and the next ask waits; so
+does the token already refused for its expiry, handed back as it was
+(`expired_gen`, `#expiredGen`) -- a provider reading a cached token by a
+clock behind the server's, a token the server took before. A clock ahead
+by a token's lifetime is asked at 1 s, 2, 4, ... to a minute, the token
+started with and the first after the last one taken asked at once.
+
+**The token just refused, handed over again, keeps the wait.** A token
+handed over before the wait for a second ask ran out ended it, as what the
+ask would have brought -- the same token too, so an app handing its cached
+token back at the status's `errorCode` skipped every wait and resent at the
+network's speed. The same token handed over while the wait runs
+(`Stage::Delayed`, the page's `#stage`) leaves it running; another token
+ends it, as the same one does once the ask is out -- the provider's
+answer, which refused again counts.
+
+**A provider that failed is asked again, and one call is out at a time.**
+A provider that throws -- its issuer out of reach with the network -- hands
+over nothing, and the sync waited for a token no one would ask for again.
+`{"online":true}` asks again: the platform's network signal, the page's
+`online` event and the bindings' `resume()` at the foreground, which each
+binding already sends; not while the wait before an ask runs, which is the
+server's refusal. The first form of this asked again wherever the provider
+was asked and nothing came, the core unable to tell a provider that failed
+from one still at work: each `online` or `resume()` meanwhile started
+another call to the issuer, and the late call's token ended the wait the
+first one's refusal began. So a binding answers each ask -- with the
+token, or with `{"token_failed":"<why>"}` where its provider threw or
+handed over an empty token -- and the core asks again at `{"online":true}`
+only after the second (`Stage::Failed`; the page's `#tokenFailed`). A
+binding calls its provider once at a time besides (`providing`, the page's
+`#providing`): the app's own token, handed over and refused while the
+provider is at work, makes the core ask again, and that ask is the call's
+to answer. The signal was not taken at first: each binding would have had
+to send it, through `fennec.h`, and an app's own `setToken` flow has no
+failure to tell. Both hold still, and are the price: the three bindings
+send it, and an app with no provider, which never fails, goes on at the
+token it hands over -- as does a binding written against the earlier
+actions, which sends no `token_failed`. A sync stopped asks nothing
+(`ask` returns once `stopped`, as `#ask` once `#closed`): an
+`{"online":true}` after a stop called a provider for a token no one would
+send.
+
+**A provider's failure is told in the status.** Only the page told an app
+that its provider threw (`onError`); Swift's `try?`, Kotlin's `runCatching`
+and Dart's `onError: (_) {}` swallowed it, the status saying the sync
+waited for a token, not that none would come. Every SDK says it now in the
+status, its `token` failed and its error `the token provider failed:
+<why>` -- written once by the core for the three native bindings from
+`{"token_failed":..}`, by `#tokenFailed` in the page, and scenarios hold
+both. The status, since every SDK has one (`status()`, Swift's, Kotlin's
+and Dart's `SyncStatus`) and only the page an error callback: a callback
+in each native SDK would have been three APIs more to freeze at 1.0, told
+once, where the status says it until the sync goes on. The page still
+hands what the provider threw to `onError`, as it hands every error in the
+background -- once the status says the failure: the other way round, a
+handler that threw left the ask out for good, and `setOnline(true)` asked
+nothing. An empty token is a failure too: the page took it for nothing
+handed over and said nothing, and a binding handed it to the core, which
+sent the requests with no token, to be refused again.
+
+**While a token is wanted, the status is the token's.** The status has a
+member of its own for it, `token`: null while the sync waits on none,
+otherwise its `stage` -- `delayed` while the wait before the next ask runs,
+`asked` once the provider is asked and no token has come, `failed` where
+it threw or handed over none -- and the code, `had_token` and `attempt`
+the ask said or, delayed, will say (the core's
+`{"stage","code","had_token","attempt"}`; `TokenWait` in every SDK, its
+`refusal` the `TokenRefusal`). The first form of this said it in the
+status's error alone -- its message, `code`, `had_token` and `attempt`,
+the two null during the wait -- set as a fault when the ask was made and
+when the provider failed, and any fault set after was written over it: a
+stream ending, as streams end offline, where providers fail, left "the
+subscription to `tasks` ended: …", the code and the ask's members gone,
+while nothing was sent (the fourth review's probes in both runners: a
+write's 401 and then the stream dropped, and a 401, the provider's failure
+and then a drop). An app reading the error for a failure, or handing its
+tokens over at the ask by the status, as sync.html told it to, missed it
+and stalled. Nothing about the token is kept as a fault now: `status` says
+both from where the ask stands (`want`, `Stage`; the page's `#want`,
+`#stage`, `#tokenWhy`), the error the token's -- its message by the stage,
+its code the 401's -- whatever failed since, and a stage, since a message
+is no contract to freeze. A fault set meanwhile is cleared with the token,
+as it was. `delayed` carries the refusal too, where the first form said
+none: the stage says what the nulls did, that the provider has not been
+asked, and an app at `delayed` hands over nothing -- or another token,
+which ends the wait.
+
+**A provider must return.** Nothing bounds a provider's time: it may wait
+on a sign-in, an issuer's own retries or a person, and a bound the sync
+chose would cut those short or, longer than they take, still leave the app
+waiting on a call it cannot see. So a provider that never returns holds
+the sync -- `token` `asked`, the one call out, which `resume()`,
+`setOnline(true)` and a later refusal call no second time -- and the rule
+is the app's, said in sync.html, mobile.html, `fennec.d.ts`, `fennec.h`
+and each SDK's README: time out the requests to the issuer, and throw. The
+app's own token, handed over meanwhile, gets the sync going whatever the
+stage (`signal`, `setToken`); the call still out answers the next ask
+when it returns, as a call at work always has.
+
+**A 401 to a token since replaced is no refusal of the token held.** Each
+request and stream remembers the token it carried (`Sync::carried`, a
+number bumped at each other token handed over; `#carried` in the page), and
+a 401 to one sent before the token now held is sent again with that one,
+the binding asked nothing (`token_refused`): counted, a write's 401 that
+crossed the handover would have made the next ask wait. The same token
+handed over again keeps its number, so its refusal is asked about rather
+than sent again unasked, which would loop. And a 401 while a token is
+already asked for asks nothing more (`want_token` returns while `paused`,
+as `#wantToken` did): a stream's end at the `exp` beside a write's 401 is
+one question, and asked twice it would count as a token refused again. A
+stream that ends while a token is wanted begins no backoff either: nothing
+is sent while the sync waits for a token, and the core never began one
+there (`retry_stream` returns while `paused`), where the page did -- the
+token opened every other stream at once and that one after its backoff.
+The page does as the core does now (`#stream`), the token opening it as it
+opens the stream a 401 ended.
+
+The code is a member of the body, beside the words: the words are a
+person's and may be put otherwise, and a page on another origin reads a
+header only where CORS exposes it, while a binding hands the sync core a
+body, not headers. `WWW-Authenticate: Bearer error="invalid_token"` (RFC
+6750) was the standard's way and was not taken: its `invalid_token` names
+an expired, a revoked and a malformed token alike. The core reads the code
+alone (`said`), as `web/fennec.js` does: an older server's stream end, the
+words without the code, has no code. A separate `do` was not taken either:
+each binding switches on `do` and passes over what it does not know, so a
+binding written against the earlier actions -- vulpes's, over `fennec.h` --
+would have skipped it and left its replica waiting for a token no one was
+asked for; reading `do` alone it asks for one at every 401, as it did.
+
+**Every SDK names the body's code `errorCode`.** `code` was taken: Go's
+`Error.Code` and .NET's `FennecException.Code` are the status's name
+(`unauthorized`), Swift's `FennecError.code`, Kotlin's and Dart's
+`FennecException.code` the library's own error kind. So the server's
+member is `errorCode` in JavaScript, Swift, Kotlin and Dart (`FennecError`,
+`FennecException`, the sync statuses, `TokenRefusal`), `error_code` in
+Python and `ErrorCode` in Go and .NET (a stream's error event's too: Go's
+through `errorOf`, .NET's `Event.ErrorCode`) -- the name the AWS and Azure
+SDKs give a service's code beside the HTTP status. None changes a field
+that was there; JavaScript's `FennecError.code`, added in the same pull
+request, became `errorCode` before it shipped.
+
+**A stream refused at its open is read before it is cancelled.** The page's
+sync first cancelled such a stream, then read its body: on a real fetch the
+abort throws the body away, so the provider was told no code
+(`#stream`). The body is read first now, the stream's turn checked again,
+then cancelled; and the scenario runner's fetch throws a body away at an
+abort as a real one does (`answered`), so this class fails there.
+
+Nothing is measured beside it: the stream asks the time where it did, at
+the head of each look, the event a constant 23 bytes longer written once a
+stream; a request pays nothing until it is refused, and a refusal compares
+its words with one constant; the sync notes a token's number at each send,
+a branch, and the wait is a timer it asks for only at a token refused
+again. `access.rs`'s `only_an_expired_token_is_told_by_its_code` (a
+forged, early, malformed, empty and foreign-audience token past its `exp`
+or not), `tests/access.rs`'s
+`an_expired_token_is_told_by_its_code_and_no_other_refusal_is` (a request,
+a stream's open, `/_whoami`) and `a_subscription_ends_when_its_token_expires`
+(the stream's end), the core's `a_refusal_code_is_read_from_the_body_alone`,
+twenty-seven scenarios both runners play (a stream ended at the `exp` with
+the code and without it, a write and a stream's open and `GET /collections`
+refused for an expiry, a replica started with no token, a token refused
+again asked for after a wait and the count starting over at a 2xx but not
+a 503, the wait doubling to its cap, a stream that opens starting the count
+over, an expiry after a token handed over offline asked for at once, the
+same token handed back refused for its expiry again, fresh tokens each
+refused for their expiry asked for after a wait and a token the server
+took starting the count over, the same token handed over again during the
+wait keeping it, a write's and a stream's 401 to a token since replaced
+sent again unasked, a stream's open and `GET /collections` answered 401
+after the token was replaced -- an answer the runners hold back -- the same
+token handed over again while a write is out, a second 401 while asked, a
+provider that failed named by the status and asked again when the network
+comes back but never while its ask is out, a token asked for once whatever
+the network says, a sync stopped asking nothing, a stream ended while a
+token is asked for, during the wait before an ask and after the provider
+failed waiting for it and leaving the status the token's, a provider that
+never returns held until the app's own token, a code no client knows; each
+runner fails a scenario whose sync asks again while an ask is out, and
+calls a provider once at a time, as every binding does),
+`web/fennec.client.test.js` (`errorCode` on a refusal and a stream's end),
+`web/fennec.sync.test.js`'s replicas against a server (an expiry at the
+stream's end and at its open on Node's own fetch, a forged token refused
+twice, the second ask no sooner than a second later, the provider's failure
+in the status -- already when `onError` is told -- and asked again at
+`setOnline(true)`, a provider at work called once while the app's own token
+is refused, none sent), each binding's provider against a server (Swift,
+Kotlin, Dart: a provider that threw named by the status and asked again at
+`resume()`, the status's `token` failed, then asked after the wait before
+`attempt` 2, a provider at work called once while `resume()` and the app's
+own token, refused, ask again) and each SDK's refusal naming its code fail
+without it.
+
 ## Empty tokens
 
 **An empty token is no token.** Every check reads a request carrying no
@@ -1167,3 +1471,140 @@ fennec-server, fennec-shard and fennec-cli and fennec-http's
 from `FENNEC_ADMIN_TOKEN` and a router `--replication-token` from
 `FENNEC_SHARD_REPLICATION_TOKEN`, the two that had no variable, so no token
 need be on a command line `ps` shows.
+
+## Short tokens
+
+**A token taken past loopback is 32 bytes at least.** The wait after a
+refusal ([http.md](http.md#audit)) is the one brake on guessing a token
+online, and it is an address's: 100 ms doubled to 5 s for one address, the
+first 100 ms again for the next. Past loopback the guesses come from as many
+addresses as a client holds -- an IPv6 /64 is one count now, but a cloud
+account or a botnet holds thousands of addresses apart -- and every token flag took any
+length: `--http-token secret`, six bytes of a word, falls to a dictionary at
+any of those rates, where the JWT secret beside it was held to 32 bytes from
+the start (`access::SHORT`). So `fennec-server` and `fennec-shard` refuse at
+the start (2), before the file or the directory is opened, a token shorter
+than `fennec_http::TOKEN_MIN` (32 bytes) where a listener taking it binds an
+address past loopback (`fennec_http::short_token`, of the addresses the
+listener is bound on, below): the data and admin tokens on `--http` and `--metrics`,
+whose scrape takes both (`metrics::allowed`), the replication token on
+`--http` alone, and the router's `--token`, `--entry-token` -- the key of
+the entry's mark, which a guess of it forges for any address -- and
+`--replication-token` on `--listen`. The refusal names the flag beside
+the variable it is also read from (`--http-token (FENNEC_HTTP_TOKEN) is
+shorter than 32 bytes, ...`): an environment file's value is as short as a
+command line's. `openssl rand -hex 32`, which the refusal and the kit's env
+files suggest, makes 64 characters; 32 bytes of anything a person would
+type are past a guess at 5 s an address.
+
+Loopback is judged of the addresses the listener is bound on. Each
+listener's name is looked up once, as the flags are read
+(`fennec_http::Listen::look_up`): the token lengths and `exposed` are judged
+of the addresses that lookup answered, and the listener is bound on those
+same addresses (`Listen::bind`, `TcpListener::bind(&addrs[..])`;
+`Router::bind_on` in fennec-shard). Judged of the flag's text
+(`is_remote`) and bound by it again, a name was looked up twice, the second
+answer the one bound, and a lookup that failed was taken for loopback: a
+short token passed for a name the resolver did not answer at the judgment
+and answered with a public address at the bind. A name that cannot be
+looked up is judged past loopback now (`Listen::past_loopback`), so a
+short token on it is refused, the refusal saying first that the name was
+not looked up -- what went wrong, which a refusal naming the length alone
+hid; it binds nothing (`binds_past_loopback`), the lookup's error the
+bind's. Made as the flags are read, the lookup moved in file mode, whose
+listeners are bound after the open (a connection would wait in the backlog
+through it): a name the resolver did not answer as the server started -- a
+boot before DNS is up -- was looked up again at the bind and could be bound
+there, and now fails the start whatever the token, a unit's
+`Restart=on-failure` starting it again. The kit's units give `--http` and
+`--listen` an address, and start after `network-online.target`. A node
+binds before any tenant opens and the router after its directory's open,
+so theirs moved by little.
+
+On loopback any length is taken, for a listener this machine alone
+reaches: `make server TOKEN=secret`, the README's first server, runs as it
+is, as does every test's `secret` on 127.0.0.1. Behind a proxy or a router
+it is reached from past this machine, and 32 bytes are owed there too: a
+TLS proxy in front of a server on 127.0.0.1
+(`site/content/docs/server.html#behind-a-proxy`), or a public router
+relaying to nodes on 127.0.0.1, hands the listener the length was judged by every
+guess the Internet sends -- and behind a plain proxy each refusal is counted
+by the proxy's 127.0.0.1, the connection's peer, which only a router's and
+the entry's marks name otherwise ([http.md](http.md#audit)), so any client's
+good token clears the one count every guess shares. The flags cannot tell
+such a deployment from a laptop's, so the server says so: the lengths are
+judged once, at the start, and where one was taken short on loopback
+(`fennec_http::kept_short`) the first request carrying `Forwarded`,
+`X-Forwarded-For` or `X-Forwarded-Host` -- what Caddy and Traefik send of
+their own, nginx where told, and the router on every forward
+(`cors::FORWARDED_HOST`) -- logs one warning naming the flags
+(`fennec_http::proxied`). A server whose tokens are long pays a relaxed load
+and a branch a request for it, the look at the headers out of line
+(`#[cold]`), and the flag is let go by the warning, so a short one's
+server pays the same after it. Warned, never refused: a client may send
+the headers itself, and nginx's plain `proxy_pass` sends none, so a header
+is a hint about the deployment, never a judgment of the request.
+`--insecure` waives nothing: it lets a server listen past loopback with no
+token, which its name says, where a short token looks like protection and
+is not. The library leaves its embedder's tokens alone -- `Server::bind`
+and `Router::bind` refuse no token past loopback, as before, and a short
+one is the embedder's to choose, as `insecure` is.
+
+A webhook's secret has no minimum, and is warned of the same way: a hook
+whose secret is shorter than 32 bytes as its file or its `PUT` gave it
+(`Hook::short`) is said at the start where `--http` is past loopback,
+naming the hook, joins the tokens' warning on loopback, and, set for a
+tenant through `PUT /_admin/tenants/<t>/hooks/<h>` or its whole set
+through `hook-secrets`, is said in the node's log as it is set
+(`tenant_hooks::said_short`) -- never the secret. Not refused: Stripe's and
+Svix's secrets are their senders' to make, and a refusal would leave a hook
+with none until the sender's settings changed; GitHub's is a person's
+choice, which can be a word, and a word is guessed offline from one event
+it signed, whatever waits online. Counted as the sender shows it, `whsec_`
+and all: a Standard Webhooks key of 24 bytes, Svix's, is 38 bytes shown,
+and counted decoded every Svix secret would be warned of.
+
+The failure table that waits a guess out costs a tail of its own: a
+refusal looks at three places of its queue on the whole (`Table::kept`),
+but the one that finds the queue past half as many again as the counts
+sweeps all of it -- 15 002 places of a full table, a lookup in the counts
+each -- under the table's one mutex, which every verified token takes
+while a count is held, once every 5 000 refusals at most. Measured on a
+copy of its structures, the rounds ending in that refusal against the same
+rounds stopped one short: 4.4 million instructions a sweep (`/usr/bin/time
+-l`, two pairs within 0.3%), some 290 a place, the SipHash of the key
+most of it: under a millisecond at two instructions a cycle and 3 GHz,
+an estimate rather than a timing, the machine it was counted on too
+loaded to time it.
+
+Rejected: *16 bytes*, the plan's other option -- 16 random bytes hold, but
+16 bytes of a word do not, and the minimum is met by people choosing a
+token, not by a generator; 32 is the JWT secret's already. *A token's
+entropy* read from its characters: a guess about a guess. *Loopback held
+too*: every local test, `make server TOKEN=secret` and the docs' first runs
+would need 32 bytes for no attacker. *The router refusing a node's short
+admin token* as `PUT /_shard/nodes` records it: a node past loopback
+refuses its own as it starts, so the router never holds one that is short
+there.
+
+It changed the CLI contract before 1.0 froze it (the 1.0 plan's G51): a
+deployment that listened past loopback with a shorter token stops at the
+start, its log naming the flag. The kit's own already made theirs long
+(`secrets.token_hex(16)` in the drill and `deploy/test/units.py`,
+`token_urlsafe(32)` in the power-cut rigs, 32 random bytes in the desktop
+app); the language and Python integration runs, `make grafana-check` and the
+compose files' examples were given 32 bytes or more. `tests/tokens.rs` in
+fennec-server (each flag and its variable past loopback, exiting 2, the
+data and admin tokens refused on `--metrics` alone past it, a name not
+looked up judged past loopback, 32 bytes passing on an address no machine
+holds, short ones on loopback, the warning through a proxy once, each
+header first to a server of its own, and never for long tokens) and in
+fennec-shard (its three likewise, and the router's warning at each header),
+`a_short_secret_is_warned_of_and_taken` and
+`a_tenants_short_secret_is_said_as_it_is_set` in fennec-server's
+`tests/hooks.rs`, and `a_token_past_loopback_is_32_bytes_at_least`,
+`a_name_not_looked_up_is_judged_past_loopback` and
+`the_address_bound_is_the_one_judged` in fennec-http's `lib.rs`, fail
+without it. Each server test strips the `FENNEC_*_TOKEN` variables it
+inherited (`support::without_tokens`): one a developer's shell exports
+stood in for a flag a test left out.

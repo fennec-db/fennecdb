@@ -994,15 +994,33 @@ fn keys_alone(sel: &mut Select) {
     }
 }
 
-/// pgvector's text of a vector, `[1, 2.5, 3]`.
+/// pgvector's text of a vector, `[1, 2.5, 3]`, or why it is none: a number
+/// past a float's range named as every reader names one -- but in a stored
+/// definition's text, which reads it as it did (`crate::stored_float`): the
+/// SQL holding it is read at the open, and a definition stored with `<#>
+/// '[1, 1e400]'` was marked broken.
 #[inline(never)]
-fn pgvector_text(t: &str) -> Option<Vec<f32>> {
-    let inner = t.trim_ascii().strip_prefix('[')?.strip_suffix(']')?;
+fn pgvector_text(t: &str) -> std::result::Result<Vec<f32>, String> {
+    let bad = || "a vector written as text is pgvector's `'[1, 2, 3]'`".to_string();
+    let inner = t
+        .trim_ascii()
+        .strip_prefix('[')
+        .and_then(|t| t.strip_suffix(']'));
     let mut out = Vec::new();
-    for n in inner.split(',') {
-        out.push(fennec_core::num::parse_f64(n.trim_ascii())? as f32);
+    for n in inner.ok_or_else(bad)?.split(',') {
+        let n = n.trim_ascii();
+        match fennec_core::num::read_f64(n) {
+            Ok(x) => out.push(x as f32),
+            Err(why) => match (crate::stored_float(n, why), why.range()) {
+                (Some(x), _) => out.push(x as f32),
+                (None, Some(range)) => {
+                    return Err(format!("number `{}` {range}", fennec_core::num::shown(n)))
+                }
+                (None, None) => return Err(bad()),
+            },
+        }
     }
-    Some(out)
+    Ok(out)
 }
 
 fn one(mut s: Vec<Statement>) -> Result<Statement> {
@@ -2336,13 +2354,28 @@ impl Parser {
     }
 
     fn data_type(&mut self) -> Result<DataType> {
-        // [type] -> list
-        if matches!(self.peek(), Tok::LBracket) {
+        // [type] -> list: its brackets counted, as deep as a value read back
+        // may nest (`codec::MAX_DEPTH`), never recursed into -- a text of
+        // 100 000 `[` took the stack down, and with it a server.
+        let mut lists = 0;
+        while matches!(self.peek(), Tok::LBracket) {
+            const _: () = assert!(fennec_core::codec::MAX_DEPTH == 64);
+            if lists == fennec_core::codec::MAX_DEPTH {
+                return self.err("a list type nests at most 64 levels");
+            }
             self.skip();
-            let inner = self.data_type()?;
-            self.expect(Tok::RBracket)?;
-            return Ok(DataType::List(Box::new(inner)));
+            lists += 1;
         }
+        let mut ty = self.scalar_type()?;
+        for _ in 0..lists {
+            self.expect(Tok::RBracket)?;
+            ty = DataType::List(Box::new(ty));
+        }
+        Ok(ty)
+    }
+
+    /// [`Self::data_type`] past its lists' brackets.
+    fn scalar_type(&mut self) -> Result<DataType> {
         let name = self.ident()?.to_ascii_lowercase();
         Ok(match name.as_str() {
             "bool" => DataType::Bool,
@@ -3413,9 +3446,7 @@ impl Parser {
         // A sparse vector's text, `'{1:0.5}/30522'`, is read as it is.
         if let Expr::Lit(Value::Text(t)) = &vector {
             if !t.trim_ascii_start().starts_with('{') {
-                vector = Expr::Lit(Value::Vector(pgvector_text(t).ok_or_else(|| {
-                    self.error(&"a vector written as text is pgvector's `'[1, 2, 3]'`")
-                })?));
+                vector = Expr::Lit(Value::Vector(pgvector_text(t).map_err(|e| self.error(&e))?));
             }
         }
         sel.near = Some(Near {

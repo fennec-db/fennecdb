@@ -6,7 +6,7 @@ The long form of the invariants [web/CLAUDE.md](../../web/CLAUDE.md) lists under
 
 **One module and a client entry, by where the queries run, and a test
 build.** `@fennecdb/web` ships `fennec.wasm` (every index and the schema
-check, 285.1 KB brotli) and `@fennecdb/web/client`, so a user has two
+check, 287.7 KB brotli) and `@fennecdb/web/client`, so a user has two
 clear choices: queries on a server through the client entry and no
 module, or a database in the page or a synced replica through the full
 module. `fennec-lite.wasm` (no index, no schema check, 173 KB brotli; `make
@@ -174,6 +174,241 @@ AES-GCM (WebCrypto), a tag over the key, the image's random generation and
 the chunk's number, so one moved, dropped from the middle or kept from an
 image before is refused; a row persists in 0.16 ms either way, the 32 MB
 image in 129 ms against 76. The OPFS file stays plain: it is `fennec-server`'s.
+A database's `persist`, `restore` and `openFile` calls run one after another
+in call order (`inTurn`), each once the one before has settled, refused or
+not: a `persist` called while another is out stores what was written by its
+turn, and one called with none out runs at once, as it always did. One
+not yet run when the database is `close`d is refused, naming the close, as
+is a `restore` or `openFile` that was awaiting IndexedDB or the file, or
+loading it, when it came; a `persist` already storing what it took
+finishes. A `persist` or `openFile` made while a `restore` was out -- till
+the promise it returned settles -- is refused, naming it, when that
+restore fails -- unless a later restore called before it loaded its
+record -- and one called once the failure was answered runs, unless a later
+restore called before it is still out: that restore decides it as it would
+one made while it was out (one that found no record leaves it refused,
+naming the earlier failure). A `persist` after a restore that failed as it
+loaded stores the database whole as it left it; after one refused before
+the load (a wrong `cryptoKey`, a chunk that does not unseal, an IndexedDB
+error) a chunk, the record standing.
+
+### In real browsers
+
+`web/fennec.persist.test.js` and `web/fennec.file.test.js` hold these calls
+to in-memory stand-ins, Node having no IndexedDB and no origin private file
+system. `web/browser/` (`make browser-test`, the `browsers` jobs in CI) runs
+them against each engine's own -- Chrome and Firefox headless through
+puppeteer-core, Safari through safaridriver -- in a page that runs its suite
+itself (`persist.js`) and loads itself again where a test reloads it, its
+state kept between loads by the server that opened it (`run.mjs`). It holds
+what it races rather than timing a reload: a persist's transaction is held
+open by a read after a read until the page is gone (`holdNextWrite`), and
+the worker keeping a file (`file-worker.js`) counts every write, truncate
+and flush `openFile` asks of the file system and stops at the one it is
+armed for -- a write once half its bytes are in -- busy until the reload
+ends it, as a worker the page left in the middle of a flush is. Stopped on
+`Atomics.wait` instead, its file was still held 3 s after the reload in
+Safari 27, which ends a running worker at once. A reload in the middle of
+a chunk's or a new image's transaction loses no acknowledged write, and
+the image keeps its chunks or the new one stands alone; a reload at each
+of a rewrite's eight steps, and in the middle of an append, keeps every
+answered write and empties the copy. Chrome is held to a quota over the
+DevTools protocol (`Storage.overrideQuotaForOrigin`) and Firefox by a
+preference (a group of origins gets a fifth of
+`dom.quotaManager.temporaryStorage.fixedLimit`, never under 10 MiB);
+Safari has neither, and its two quota tests are skipped by name. The page
+is told the quota, not left to read it: Chrome's
+`navigator.storage.estimate()` names 10 GiB whatever it enforces.
+The Chrome and Firefox job and the Safari job run on every pull request,
+in the merge queue and on main. Safari's ran outside pull requests alone
+for a while, to spare the account's 5 macOS slots, which every merge waits
+for; but no browsers job is a required check, so a Safari failure seen
+only in the merge queue would not have stopped a merge, and the job holds
+a slot for 30 s of work (run 43631233253), 18 s of it the suite.
+
+What it found, fixed with it:
+
+- A page reloaded while its worker was busy found its file held: Chrome
+  stops a busy worker only 2 s after its page is gone, its sync access
+  handles open till then, and `openFile` was refused as open elsewhere for
+  1.98 to 2.01 s (Chrome 157). It now asks again for 3 s (`HELD_MS`) before
+  it refuses, a file this worker itself holds refused at once (`holding`).
+  Firefox and Safari end the worker at once: the file opens 50 to 85 ms
+  after the reload in Firefox, about 60 ms in Safari 27.
+- Safari names a held file `InvalidStateError`, where the standard, Chrome
+  and Firefox say `NoModificationAllowedError`: a second opener was
+  handed the DOMException ("The object is in an invalid state.") and never
+  waited. `openFile` takes either as the file held elsewhere.
+- Every `persist`, `restore`, `putState` and `getState` opened a connection
+  and left it open until the collector came, and a delete of the database
+  -- or another page's upgrade of it -- waited on all of them
+  (`indexedDB.deleteDatabase` was blocked in Chrome). They share one now
+  (`idb`), which closes when a delete or an upgrade asks
+  (`versionchange`). Closing each call's own instead cost more than it
+  fixed: a `persist` of one row after the page sat idle 3 s took 8.1 ms
+  in Chrome and 10.2 ms in Firefox, and back to back Firefox's took 0.70
+  ms (a `putState` 2.5). The shared one took it from main's 1.8 ms to 1.4
+  in Chrome and 4.7 to 1.3 in Firefox after the idle, and from 0.14 to
+  0.11 and 0.30 to 0.10 back to back (medians, Chrome 157 and Firefox 160
+  on an Apple M1; `make file-bench`'s row after an image, 0.23 to
+  0.14).
+- Past the quota, Chrome aborts the transaction at its commit, by `abort`
+  alone: `putState`, waiting on `error` and `complete`, never answered.
+  Firefox refuses the request, whose `error` reaches the transaction
+  before the transaction holds it: `persist`'s refusal was `null`. All four
+  read the request's error and the abort's (`inStore`). Firefox then
+  refused that connection's next transactions and requests
+  (InvalidStateError) without saying it closed: the connection a
+  transaction failed on is let go, and a call a closed one refuses is
+  asked again of another.
+- (Found in review.) Deleted under the page -- by a script's
+  `indexedDB.deleteDatabase('fennecdb')`, or the browser clearing the
+  site's data -- the database took the image `persist` believed stored
+  (`stored`), and the next `persist` stored a chunk alone: `restore` found
+  no image, and every write persisted since was lost. A chunk now follows
+  its image only over the connection that stored the image (or that
+  `restore` read it over), open since. A delete asks every connection to
+  let go before it goes ahead (`versionchange`), and clearing the site's
+  data closes them (a forced close: requests refused at once, `close` told
+  after); either way the next `persist` finds another connection and
+  stores an image, written to since or not. A chunk sealed while its
+  connection ended is stored over no other (`inStore`'s `on`): the image
+  is. Dropping the belief on `versionchange` and `close` alone would not
+  do: a call between a forced close and its `close` went to a new
+  connection and stored its chunk there, as the Node test shows. No
+  request is added; after a connection a failed transaction let go -- the
+  quota's case -- each database's next `persist` stores an image.
+  `putState` and `getState` keep nothing between calls, and an open
+  file's size and image end describe a file its sync access handle holds
+  alone: nothing else in the origin writes, truncates or removes it
+  meanwhile.
+- (Found in review; there since chunks came in, v0.1.5.) Two `persist`
+  calls on one database, the second made before the first answered, read
+  the same `stored` entry: the next chunk's number moved on only once a
+  chunk's transaction had landed, so the second chunk was stored under the
+  first's number, over it. In the clear, the first's writes were gone from
+  what `restore` read (`[1, 3]` restored of `[1, 2, 3]`); sealed, that, or,
+  where the first had landed while the second was being sealed, the second
+  stored under the next number but sealed with the first's, a record
+  `restore` refused -- either until a later `persist` folded the chunks
+  into an image. A refused `persist` let one waiting behind it
+  store a chunk after the image its writes were missing from, and a
+  `persist` made while `restore` was reading stored the empty database's
+  image over the one being restored. Each call now runs once the one
+  before it on that database has settled (`turns`, `inTurn`): `persist`,
+  `restore` and `openFile` alike, since each reads what the one before
+  leaves -- the chunk number, the image's connection, the file the
+  database is kept in -- and a second `openFile` made meanwhile took the
+  database to another file, the first's handles held and never written
+  again. A refused call holds up none after it, and `persist`'s retry on
+  an ended connection runs inside its own turn (`persistNow`), or it would
+  wait for itself. Taking the number when a chunk is drained instead, the
+  transactions running side by side, was not enough: a refused chunk
+  leaves a gap a later one is stored past, and a sealed record's
+  transaction is made when WebCrypto has sealed it, not in call order, so
+  an image's delete of its chunks could land after a chunk made after it.
+  Nothing is added for a call with none out -- it runs at once, as before
+  -- nor any IndexedDB request; a call made while another is out waits for
+  that one's commit, where before it raced it. `putState` and `getState`
+  keep nothing between calls, and IndexedDB runs one store's transactions
+  in the order they were made, which is call order for both: each makes
+  its transaction as soon as the shared connection's promise settles. An
+  open file's own state (`FennecFile`'s size and image end) is read and
+  moved on within one synchronous `flush`. `web/fennec.js` grows 1 250
+  bytes, 357 gzip and 311 brotli as served (87 gzip minified, the rest its
+  comments), which took the client past the room `site/build.py` leaves
+  its quoted sizes: 229, 60 and 71 KB are 232, 61 and 72 now.
+  `web/fennec.persist.test.js` and `web/fennec.file.test.js` hold each
+  case, and the browser suite's sixteenth test two persists made before
+  the first answered, plain and sealed.
+- (Found in review of the call order.) A `persist` that ran after
+  `db.close()` stored the closed database's image -- empty: the module
+  gives no chunks for a handle no database holds -- over the record,
+  deleted its chunks, and answered as if it had stored the database;
+  `restore` then refused the record as corrupt. The image was taken only
+  at the call before the calls took turns; in a turn it could be taken
+  later: by one waiting behind a refused `persist`, which owed an image,
+  by one of another key waiting behind the first, and by the retry after
+  an ended connection. `close` now marks the database (`closed`), and
+  `persist`, `restore` and `openFile` refuse it as each begins, the retry
+  too, `restore` and `openFile` again after their awaits, before they
+  touch the database (`alive`), naming the close: a `restore` reading when
+  the close came went on to `emptied`, which opened the closed database
+  again, a handle in the module never let go, and an `openFile` asking for
+  its file kept the closed database in it, an empty file written its
+  empty image and its handles held, so that the next `openFile` of the
+  file in that worker was refused at once. A `persist` already storing
+  what it took finishes: those bytes are the database before the close.
+  An empty image is never stored, whatever the path (`filled`). What else
+  a turn reads after an await holds: the chunk number and the image's
+  connection are moved within the turn, which no other call shares, the
+  sealing key is the call's own, the journal is drained and the image
+  taken in one synchronous stretch, and an open file drains nothing from
+  a closed database, so its fold never takes an empty image. A database
+  closed while kept in a file holds the file until its `close`, as before.
+- (Found in the same review; older than the turns, which left it where a
+  restore fails.) A `persist` or `openFile` waiting behind a `restore`
+  that failed stored what the database held. `restore` empties a
+  database holding only what its schema made before it loads
+  (`emptied`), so one refused after -- its collation data not fetched,
+  say -- left it empty, and that image
+  replaced the record the restore was to read; a sealed record restored
+  under another key went the same way, the database untouched but not
+  the one stored. Each `restore` now notes how it ended, inside its turn
+  (`restoring`: `{prev, loaded, failed}`), and a `persist` or `openFile`
+  made while one was out is refused when it failed, naming it. A later
+  `restore` before it that loaded its record lets it run, the database
+  being that record now; one that found none leaves the database as the
+  failed one left it, which still counts. A call made once the failure
+  was answered runs as any other: its caller has seen it. Refusing every
+  call until a `restore` lands was rejected: the sync layer answers a
+  refused cache by seeding again and persisting the seed. `web/fennec.js`
+  grows 2 404 bytes, 707 gzip and 585 brotli as served (655 and 237 gzip
+  minified), which takes the client's quoted sizes from 232, 61 and 72 KB
+  to 234, 62 and 73 (72.81 KiB gzip measured). `close` adds a `WeakSet`
+  insert, and each call a `WeakSet` and a `WeakMap` lookup and a closure,
+  no request; not timed, the machine standing at a load of 10 to 12 on 8
+  cores under another session's work. `web/fennec.persist.test.js` and `web/fennec.file.test.js`
+  hold each case, failing before; the browser suite's seventeenth and
+  eighteenth tests hold a `persist` and a `restore` waiting at the close,
+  and a `persist` waiting for a `restore` under another key.
+- (A third review; the first older than this work, main doing the same.)
+  A `restore` whose load failed left `persist` believing the database it
+  had stored still there (`stored`). One holding only what its schema
+  made had been given a new handle with no journal on it (`emptied`), so
+  every later `persist` of that key drained nothing and answered 0, the
+  page's writes stored nowhere and no error said; one holding more is
+  emptied by the module when collation data is missing, its journal kept
+  with the writes from before the restore, which the next `persist`
+  appended to a record another may have replaced, of a database that was
+  gone. A `restore` now lets go of `stored` before it loads, and the next
+  `persist` starts the journal again and stores an image of what the
+  database holds. A close while `restore` or `openFile` fetched the
+  collation data the image needs, or checked the code's schema, was
+  refused in the load's or the check's words -- "could not load image
+  (corrupt or incompatible version)" of a good record, "not found: handle
+  N" -- and is now refused naming the close (`alive` after both). No
+  caller branches on the load's message: the sync layer takes any refused
+  `restore` for a cache to seed again, and a closed replica's `persist` is
+  refused, so no close made it store over a good record. A `restore` was
+  let go of as its work ended (`restoring`), jobs before the promise its
+  caller holds settled, so a `persist` made between counted as made after
+  the failure and ran; it is let go of now beside its turn, as that
+  promise settles, before its caller's own handlers, whose calls run. Each
+  holds a test that fails before: `web/fennec.persist.test.js` (a persist
+  after a restore that failed as it loaded, a restore closed under as it
+  loads or checks, a restore out until its caller is answered) and
+  `web/fennec.file.test.js` (an openFile closed under as it loads or
+  checks, which pins its look after the check too); `restore`'s look
+  before it reads is pinned as well, a closed database's key holding
+  nothing answered `false` without it. `web/fennec.js` grows 1 055 bytes,
+  319 gzip and 278 brotli as served (26 gzip minified), the client 73.10
+  KiB gzip, 61.92 brotli and 235 KiB raw; a `restore` adds a promise
+  reaction and `openFile` two, no request, and `persist` is unchanged.
+- A file past the quota: Chrome's file system throws QuotaExceededError,
+  Firefox's writes nothing and says so by its count, which the file now
+  names as the origin out of room. Either way the write is refused, every
+  later one too, and the file opened again holds every answered write.
 
 ## Durable Objects
 

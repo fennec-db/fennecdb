@@ -270,11 +270,16 @@ fn a_list_hiding_a_rounding_is_read_as_written() {
         json::parse_params("[[1e-50]]").unwrap(),
         [Value::List(vec![Value::Float(1e-50)])]
     );
-    for whole in ["[1.0, 2]", "[1e3, -0.0]", "[1e-400]"] {
+    for whole in ["[1.0, 2]", "[1e3, -0.0]", "[0.0e-400]"] {
         assert!(matches!(lit(whole), Value::Vector(_)), "{whole}");
         let p = json::parse_params(&format!("[{whole}]")).unwrap();
         assert!(matches!(p[0], Value::Vector(_)), "{whole}");
     }
+    // A number past a float's range was 0 here, a whole `f32`; it is refused.
+    let e = fennec_ql::parse_one("put t {fs: [1e-400]}").unwrap_err();
+    assert!(e.to_string().contains("past a float's range"), "{e}");
+    let e = json::parse_params("[[1e-400]]").unwrap_err();
+    assert!(e.to_string().contains("past a float's range"), "{e}");
     let mut db = db();
     run(
         &mut db,

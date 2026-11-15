@@ -137,7 +137,7 @@ file is there, when it checks the chain as <code>verify-ca</code>. They keep
 the rows from someone listening on the path, not from someone standing in
 for the server, who would read them, and the password's proof too; and
 <code>prefer</code> goes on in plain text where the server, or whoever stands
-in for it, says it takes no TLS. Only <code>verify-full</code> keeps that
+in for it, refuses TLS. Only <code>verify-full</code> keeps that
 out: it is the mode to use across a network, and on any you do not own.</p>
 
 <p>Without <code>sslrootcert</code>, libpq's own CA file,
@@ -263,7 +263,9 @@ following docs: ctrl-c stops, and the same command resumes
   <li><b>Nothing is lost or applied twice</b> when the connection drops or the
     follower is killed.</li>
   <li><b>Drop the slot when you stop for good,</b> or PostgreSQL keeps its log
-    for it.</li>
+    for it. A follower that stops waits up to 3 s for PostgreSQL to let the
+    slot go, so a drop right after is not refused as "active for PID"; a
+    second ctrl-c stops that wait.</li>
   <li><b>TLS is the connection string's</b>, <code>sslmode</code> and all,
     as for the copy (<a href="#tls">TLS</a>).</li>
 </ul>
@@ -325,6 +327,22 @@ follow-bench</code>):</p>
   <code>select pg_drop_replication_slot('fennec_articles')</code>. PostgreSQL
   13 and later can cap what a forgotten slot holds with
   <code>max_slot_wal_keep_size</code>.</p>
+  <p><b>A follower that stops lets the slot go before it exits, within
+  3 s.</b> It ends the stream the way the replication protocol ends one and
+  waits for PostgreSQL to release the slot, so a drop, or a follower
+  started again, finds it free. PostgreSQL answers at once unless it is
+  decoding a large transaction, of any table. Past 3 s, or at a second
+  ctrl-c, the follower closes the connection and prints a warning that the
+  slot is still held: PostgreSQL then releases it when it next reads the
+  connection, once it is through that transaction, and a drop until then is
+  refused as "active for PID" — run it again a moment later. If the
+  connection broke instead, the warning says the slot may still be held. A
+  follower started again waits that out by itself, as it does after a
+  follower was killed, which cannot end its stream at all. A follower that
+  stops on an error closes the connection without waiting. The 3 s bounds
+  only that wait: the rest of a transaction is applied before it, and the
+  file's checkpoint written after it, however long they take; a kill in the
+  middle of them loses nothing that was confirmed.</p>
 </div>
 
 <p>The follower is the file's only writer, as every fennecdb file has exactly
@@ -382,12 +400,20 @@ writes as ever. A subscriber of the collection
 (<code>GET /articles/changes</code>) hears each change as the follower
 applies it, and so does a replica of the server.</p>
 
-<p>The follower stops with the server, its last changes on disk and
-confirmed, before the shutdown's checkpoint. A server killed outright starts
-the stream again from what it last confirmed; the changes it applies again
-are puts and deletes by id, so nothing is lost and nothing comes twice. An
-error the follower cannot wait out ends the server rather than leave it
-answering from a mirror that no longer moves.</p>
+<p>The follower stops with the server, before the shutdown's checkpoint:
+its last changes on disk and confirmed, then its slot let go, which it
+waits up to 3 s for, as the command does, within the first 5 s of the
+shutdown, which gives the follower no more. A server started again at
+once streams from the slot rather than finding it taken. If the follower
+could not wait long
+enough — it logs that the slot is still held — or the shutdown's 5 s ran
+out first, PostgreSQL lets the slot go once it next reads the connection,
+and a server started again retries until then. A server killed outright
+starts the stream again from what it last confirmed; the changes it
+applies again are puts and deletes by id, so nothing is lost and nothing
+comes twice. An error the follower cannot wait out ends the server at
+once, exit code 1, and so does a bug that ends the follower's thread,
+rather than leave it answering from a mirror that no longer moves.</p>
 
 <p>Against the Makefile's server, 10 000 rows with a <code>vector(384)</code>
 under an HNSW index, a subscriber reading <code>/changes</code> over HTTP
@@ -451,12 +477,20 @@ untouched vector taken from the collection rather than resent (<a
 href="#following">Following changes</a>). A <code>NaN</code> or an
 infinity in a value bound for a vector field — one of pgvector's, a BLOB
 under <code>--vector</code>, a <code>float[]</code> named with it — stops
-the import at its row, naming it: no distance orders by one. A
+the import at its row, naming it: no distance orders by one. So does a
+component past what the field holds, a <code>float8[]</code>'s
+<code>1e39</code>, whose <code>f32</code> is an infinity, or one of
+65 520 or more bound for a <code>vector&lt;N, f16&gt;</code>, which an
+<code>f16</code> rounds to its infinity, named in the engine's words (<a href="limits.html#fixed-limits">limits</a>). A
 <code>float</code> or <code>[float]</code> field keeps its
 <code>NaN</code>s and infinities, as PostgreSQL holds them (<a
 href="fennecql-schema.html">Collections and types</a>); SQLite stores a
 <code>NaN</code> as <code>NULL</code>, and a text <code>NaN</code> read
-into a float column is one.</p>
+into a float column is one. A decimal past a float's range — a
+<code>numeric</code>'s <code>1e400</code>, one in a <code>jsonb</code>,
+a SQLite text's — stops the import at its row, naming the column and the
+number: read as a float it would be an infinity or 0, another number than
+the one held (<a href="limits.html#fixed-limits">limits</a>).</p>
 </details>
 
 <h2>Speed and testing</h2>

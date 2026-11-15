@@ -83,7 +83,8 @@ reason="no such account")` says its own. On a tenant node a quota
 names itself (`e.quota`): `"bytes"` and `"rows"` answer 507, and room is
 made by deleting; `"streams"`, `"requests"`, `"writes"` and `"write_bytes"`
 answer 429 with `e.retry_after`, the seconds the server asks to wait, as a
-tenant being moved or failed over answers its writes 503. A retry after a timeout
+tenant being moved or failed over answers its writes 503. The body's `code` is `e.error_code`:
+`"token_expired"` on a 401 for a token past its `exp`, which a fresh token cures; None otherwise. A retry after a timeout
 cannot tell whether a write ran, so a write that must not run twice goes
 under an idempotency key -- the second answer is the first one kept
 (`db.replayed`), and the key with another request is refused (422):

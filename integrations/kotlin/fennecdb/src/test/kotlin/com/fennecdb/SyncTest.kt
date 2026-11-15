@@ -1,5 +1,6 @@
 package com.fennecdb
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -24,7 +25,7 @@ import kotlin.test.assertTrue
  * binary `cargo build -p fennec-server` makes, named by `fennec.server` (or
  * `FENNEC_SERVER`), as `make kotlin-test` passes it.
  */
-class Server(name: String, private val tenantRows: Int? = null) {
+class Server(name: String, private val tenantRows: Int? = null, private val token: String? = null) {
     private val dir: File = Files.createTempDirectory("fennecdb-kotlin-$name").toFile()
     private val file = File(dir, "server.fennec").path
     private var process: Process? = null
@@ -58,7 +59,8 @@ class Server(name: String, private val tenantRows: Int? = null) {
             null -> listOf("--file", file)
             else -> listOf("--dir", file, "--admin-token", "adm", "--tenant-max-rows", "$tenantRows")
         }
-        val p = ProcessBuilder(listOf(binary, "--http", "127.0.0.1:$port", "--sync", "always") + at)
+        val asks = token?.let { listOf("--http-token", it) } ?: emptyList()
+        val p = ProcessBuilder(listOf(binary, "--http", "127.0.0.1:$port", "--sync", "always") + at + asks)
             .redirectOutput(ProcessBuilder.Redirect.DISCARD)
             .start()
         process = p
@@ -84,7 +86,7 @@ class Server(name: String, private val tenantRows: Int? = null) {
     /** Started again over its file, on the port it had. */
     fun restart() = start(port)
 
-    fun run(text: String): Answer = Fennec.connect(url).runBlocking(text)
+    fun run(text: String): Answer = Fennec.connect(url, token).runBlocking(text)
 
     fun stop() {
         kill()
@@ -136,6 +138,77 @@ class SyncTest {
         // Reads are the file's: the server gone, they go on.
         s.kill()
         assertEquals(2L, db.from("tasks").count())
+        db.close()
+    }
+
+    /**
+     * A 401 hands the provider why -- no token sent (`hadToken` false) --
+     * and the status says the same while the sync waits. A provider that
+     * threw, its issuer out of reach, is named by the status -- its `token`
+     * FAILED, its error why -- and asked again at `resume()`; the token it
+     * hands over then refused too,
+     * it is asked once more after a wait, as `attempt` 2. A lambda asking
+     * nothing, as before 1.0, still takes.
+     */
+    @Test
+    fun aTokenProviderIsHandedWhyATokenIsWanted() = runBlocking {
+        val s = Server("token", token = "right").also { servers.add(it) }
+        val asked = Collections.synchronizedList(mutableListOf<TokenRefusal>())
+        val db = Fennec.sync(url = s.url, shapes = listOf(open), path = path("token"), tokenProvider = { refusal ->
+            val n = synchronized(asked) { asked.add(refusal); asked.size }
+            when (n) {
+                1 -> throw java.net.ConnectException("the issuer is out of reach")
+                2 -> "wrong"
+                else -> "right"
+            }
+        })
+        val first = TokenRefusal(hadToken = false, attempt = 1)
+        eventually("the first ask") { asked.size == 1 }
+        eventually("the status naming the provider's failure") {
+            db.replica!!.refresh().error?.message == "the token provider failed: the issuer is out of reach"
+        }
+        assertEquals(TokenWait(TokenWait.Stage.FAILED, first), db.replica!!.status.value.token)
+        db.replica!!.resume()
+        db.replica!!.ready()
+        assertEquals(listOf(first, first, TokenRefusal(hadToken = true, attempt = 2)), asked.toList())
+        assertTrue(asked.none { it.expired || it.errorCode != null })
+        assertEquals(null, db.replica!!.refresh().token)
+        assertTrue(TokenRefusal("token_expired").expired)
+        assertEquals(listOf("one", "two"), titles(db))
+        db.close()
+
+        val before = Fennec.sync(url = s.url, token = "wrong", shapes = listOf(open), path = path("token-before"), tokenProvider = { "right" })
+        before.replica!!.ready()
+        assertEquals(listOf("one", "two"), titles(before))
+        before.close()
+    }
+
+    /**
+     * A provider at work is called once: `resume()` while it is asks
+     * nothing, nor does the ask after the app's own token, refused, waited
+     * for -- the provider's answer answers it, and the replica goes on.
+     */
+    @Test
+    fun aTokenProviderAtWorkIsCalledOnce() = runBlocking {
+        val s = Server("token-once", token = "right").also { servers.add(it) }
+        val asked = Collections.synchronizedList(mutableListOf<TokenRefusal>())
+        val gate = CompletableDeferred<Unit>()
+        val db = Fennec.sync(url = s.url, shapes = listOf(open), path = path("token-once"), tokenProvider = { refusal ->
+            asked.add(refusal)
+            gate.await()
+            "right"
+        })
+        eventually("the first ask") { asked.size == 1 }
+        db.replica!!.resume()
+        db.replica!!.setToken("wrong")
+        eventually("the ask after the wait") {
+            db.replica!!.refresh().token == TokenWait(TokenWait.Stage.ASKED, TokenRefusal(hadToken = true, attempt = 2))
+        }
+        db.replica!!.resume()
+        gate.complete(Unit)
+        db.replica!!.ready()
+        assertEquals(listOf(TokenRefusal(hadToken = false, attempt = 1)), asked.toList())
+        assertEquals(listOf("one", "two"), titles(db))
         db.close()
     }
 

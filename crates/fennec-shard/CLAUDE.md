@@ -47,7 +47,10 @@ follow, delete, reclaim and restore (`Tenants::put_away`,
 naming another than it opened, and an event verified against a set no
 longer the tenant's is the one 401 (`Store::opened`, `is_current`) --
 carried by its open's own renames alone (`rebind`) and kept by a
-promotion. `hook-secrets` answers a set to the node's admin token alone,
+promotion. One that does not read, or whose file an error but `NotFound`
+hides at the start, is set aside (`Store::set_aside`, `<t>.hooks.unread`),
+never removed nor written over: no router keeps a secret. A set 0.2.0 kept with `key delivery` reads, written back as kept
+(`Hook::delivery`), so a move carries it. `hook-secrets` answers a set to the node's admin token alone,
 never logged or traced. The router's `PUT` is refused (409) while the
 tenant moves -- its claim, its moving mark (`unmoving`), the frozen source
 -- as a quota's is, and is answered once the primary and every copy a

@@ -1,0 +1,12 @@
+{
+  "name": "fennec-web-browser-tests",
+  "private": true,
+  "type": "module",
+  "description": "A page's database kept in real browsers: persist, restore and openFile against Chrome's, Firefox's and Safari's own IndexedDB, WebCrypto and origin private file system (make browser-test). This file holds the drivers' one dependency; the page and its server need none, and Safari's driver is safaridriver over plain WebDriver.",
+  "scripts": {
+    "test": "node run.mjs"
+  },
+  "devDependencies": {
+    "puppeteer-core": "25.12.0"
+  }
+}

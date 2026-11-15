@@ -534,7 +534,7 @@ END";
     assert_eq!(d.text, PAID);
     assert_eq!(fennec_ql::definition(&d.text).unwrap(), d);
     // Written as tag 9 after the body, and nowhere for a callable one:
-    // `Debug`, which `make fennecql-corpus` compares, says it alike.
+    // `Debug` says it alike, and the digest of every other is as it was.
     let bytes = definition("create statement s after del t as del u where id = old.u")
         .canonical()
         .unwrap();

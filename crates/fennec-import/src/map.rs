@@ -323,6 +323,29 @@ mod tests {
         assert_eq!(p.schema.field("title").unwrap().ty, DataType::Bytes);
     }
 
+    /// A `--cast` to a list of vectors is held to the dimension's range
+    /// where the schema is made, as a field's own vector is, naming the
+    /// field: taken, the import wrote a file its next open refused as
+    /// damage (`Schema::decode` reads a list's dimension too).
+    #[test]
+    fn a_cast_to_a_list_of_vectors_past_the_range_is_refused() {
+        let cast = |flag: &str| {
+            let mut o = Options::new("m");
+            o.casts.push(crate::args::parse_cast(flag).unwrap());
+            plan(&cols(), &o).map(|_| ()).map_err(|e| e.to_string())
+        };
+        for (flag, n) in [
+            ("title=vector<1000000001>", 1_000_000_001u64),
+            ("title=[vector<1000000001>]", 1_000_000_001),
+            ("title=[[vector<4294967297, f16>]]", 4_294_967_297),
+        ] {
+            let e = cast(flag).expect_err(flag);
+            let says = format!("`title`: a vector's dimension is 1 to 1000000000, not {n}");
+            assert!(e.contains(&says), "{flag}: {e}");
+        }
+        assert!(cast("title=[vector<1000000000>]").is_ok());
+    }
+
     #[test]
     fn index_on_non_vector_field_fails_in_plan() {
         let mut o = Options::new("m");
