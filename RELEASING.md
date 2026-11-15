@@ -92,6 +92,22 @@ nothing reaches a registry before the notes have had a read.
    released, `gh workflow run linux-power-cut.yml --ref main` and wait for
    it.
 
+   **Two releases beside each other.** Every release needs `compat.yml`
+   green on the release commit: the commit's `fennec-server`, `fennec` and
+   `fennec-shard` beside the last published release's -- its own Linux
+   tarball, checked against its `SHA256SUMS` by `site/install.sh`, and its
+   router built from its tag, since no release ships one -- driven through
+   replication both ways, archives and backups plain and sealed, a router
+   over nodes of the other release and a node at `https://`, a `github`
+   hook kept with `key delivery`, and a rolling upgrade of a router and a
+   node pair under durable writes, no acknowledged write lost (`make
+   compat-check`, `docs/design/compatibility.md#the-compatibility-matrix`).
+   The tag's push runs it on the tag; read it before the draft is published
+   (step 4): `gh run list --workflow compat.yml --commit <sha>`, or run it
+   beforehand, `gh workflow run compat.yml --ref main`. A case that fails
+   is a break or a bug until this file or the compatibility contract
+   promises what it found, and the release waits for that decision.
+
    **Windows.** The zip is unsigned (SmartScreen warns of a program a
    browser downloaded; `install.ps1` takes the mark off what it checked),
    and nothing publishes it but the release itself: there is no winget or
@@ -178,6 +194,20 @@ document version it went out in, and `git diff vA.B.C --
 integrations/openapi/` against the last tag shows each operation added
 and each newly `deprecated`, with its `x-fennec-sunset`. A deprecated route
 is removed no sooner than its sunset, in a release whose notes say so.
+
+**Every reader upgrades before any primary.** Across two releases, every
+binary that reads a file or a stream -- a replica, a standby, an archiver,
+a router, a node, the `fennec` that verifies and restores -- runs the new
+release before any primary does. A binary one release back beside a newer
+one either works or stops in words naming what it does not know -- a
+record kind, a type tag, a version -- and never reads a record as another;
+a newer reader over an older writer always works. The order below and
+`deploy/RUNBOOK.md`'s *Upgrading with no downtime* keep it, and the notes
+of a release that moves a format say which reader stops where it is not
+kept. `compat.yml` (`make compat-check`) drives it with the last published
+release's own binaries, weekly and on every release tag; `make
+upgrade-check` drives the cases below against the commits before a kind,
+an op or the checksums. More than one release back is not driven.
 
 **A release whose first use moves the format says so in its notes.** The
 first release with named statements is one: installing it changes nothing
@@ -390,7 +420,13 @@ armed, and that a single server started with `--hooks` whose file has a
 line's `key delivery` is taken out, or made `key body`, before the server
 is restarted on it. `make upgrade-check` drives the archive's case: CK_BASE's `fennec
 restore` and `fennec verify` refuse a backup and an archive this tree
-sealed, which this tree's read.
+sealed, which this tree's read. `compat.yml` drives each against 0.2.0's
+own binaries: its `fennec` refusing a backup and an archive sealed as
+version 2 in those words, writing no file, and opening what it sealed
+itself; a hooks file's `key delivery` refused at the start, exit 2; and a
+tenant's set kept with it by a 0.2.0 node, its verified event answered 409
+once the router and the node are upgraded, nothing written, until it is
+set again with `key body`.
 
 | Package | From | What it holds |
 | --- | --- | --- |
@@ -457,9 +493,16 @@ every tag. Before a 1.x tag, check:
    version above 1.0 in its `BREAKS` entry.
 4. HEAD opens every file written from v0.2.0 on (`tests/language.fennec`,
    `tests/statements.fennec`; T2 adds each release's own), and
-   `make upgrade-check` (by hand, kind 13 alone; CI check: T3) passes: an older replica stops by name on a record
-   kind or tag it does not know. The notes name any feature whose first use
-   moves the file format, and say that replicas upgrade before primaries.
+   `compat.yml` is green on the release commit: `make compat-check`'s
+   matrix against the previous release's own binaries (*Two releases beside
+   each other*, under A release) -- a replica, an archiver, `fennec`, a
+   router and a node of either release beside the other's, each working or
+   stopping in words, never reading wrong, and a rolling upgrade under
+   writes losing no acknowledged one. `make upgrade-check` (by hand) still
+   passes against the commits before kind 13, its ops and the checksums:
+   an older replica stops by name on a record kind or tag it does not
+   know. The notes name any feature whose first use moves the file format,
+   and say that every reader upgrades before any primary.
 5. No asset of the table above is renamed or dropped.
 6. The size ceilings hold against the 1.0 baseline (the browser module
    +3.5%, native libraries and binaries +5%), and the notes state the

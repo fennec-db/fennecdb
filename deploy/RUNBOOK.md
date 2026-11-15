@@ -810,6 +810,14 @@ alerts between steps:
    next node.
 4. **The entry Worker** last: it reads only the routers' answers.
 
+Every reader -- an archiver, a router, a node, the `fennec` that restores
+-- runs the new release before any primary does, and one a release back
+works beside the new one or stops in words (RELEASING.md). `compat.yml`
+drives steps 2 and 3 with the last release's own binaries, weekly and on
+every release tag: a router restarted in place, then a standby's node,
+then its primary's, under durable writes, every acknowledged write read
+back from both nodes.
+
 **Named statements move the format by their first use, not their
 install.** A `create statement` writes record kind 13, which every binary
 from before refuses: so upgrade in the order above -- archivers, then
