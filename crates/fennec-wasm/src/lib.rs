@@ -437,7 +437,8 @@ pub extern "C" fn fennec_wide() -> u32 {
 /// fennec studio shows of a database in the page.
 ///
 /// # Safety
-/// `ptr` must be valid and `len` bytes long.
+/// `ptr` must be valid and `len` bytes long under modes 0 and 1; the others
+/// read it not at all.
 #[cfg(feature = "schema")]
 #[no_mangle]
 pub unsafe extern "C" fn fennec_schema(
@@ -447,9 +448,15 @@ pub unsafe extern "C" fn fennec_schema(
     mode: u32,
     now: f64,
 ) -> *mut u8 {
-    // SAFETY: as the contract says, `ptr` is valid for `len` bytes, which
-    // the page wrote and keeps across the call.
-    let request = unsafe { str_from(ptr, len) };
+    // Read only where a mode takes it, as the native library's
+    // `FENNEC_SCHEMA_DESCRIBE` does: the page hands a description none
+    // (`describe`), and read first, any pointer with a length was a slice.
+    let request = match mode {
+        // SAFETY: under these modes, as the contract says, `ptr` is valid
+        // for `len` bytes, which the page wrote and keeps across the call.
+        0 | 1 => unsafe { str_from(ptr, len) },
+        _ => "".into(),
+    };
     let now = now.is_finite().then_some(now as i64);
     collate::take_missing();
     let out = with_db(handle, |db| {
@@ -907,6 +914,26 @@ mod tests {
         assert!(!p.is_null());
         // SAFETY: `fennec_alloc(3)`'s, freed once.
         unsafe { fennec_free(p, 3) };
+    }
+
+    /// Modes 3 and 4 describe the database and take no request: their text
+    /// is not read, whatever pointer and length come with it, as the native
+    /// library's `FENNEC_SCHEMA_DESCRIBE` leaves its text unread. Read
+    /// first, a pointer to nothing with a length was made a slice: the
+    /// standard library's precondition check aborted this test.
+    #[cfg(feature = "schema")]
+    #[test]
+    fn a_description_reads_no_request() {
+        let h = fennec_open();
+        run(h, "create collection t (a int)", "", &[]);
+        for (mode, has) in [(3, "\"name\":\"t\""), (4, "create collection t (a int)")] {
+            let nothing = std::ptr::NonNull::<u8>::dangling().as_ptr();
+            // SAFETY: under modes 3 and 4 the contract asks nothing of the
+            // pointer and the length, which are not read.
+            let out = read(unsafe { fennec_schema(h, nothing, usize::MAX, mode, 0.0) });
+            assert!(out.contains(has), "{mode}: {out}");
+        }
+        fennec_close(h);
     }
 
     #[test]
