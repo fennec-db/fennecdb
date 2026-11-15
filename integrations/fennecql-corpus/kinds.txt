@@ -1,0 +1,266 @@
+# FennecQL's texts by kind, written by hand beside the frozen corpora
+# (docs/design/fennecql.md#the-corpus): at least five of every kind of
+# statement fennec-ql reads, of every SQL spelling of one and of every SQL
+# word it refuses naming what to write (tools/fennecql_corpus.py's
+# REQUIRED_KINDS) -- the kinds the repository's own texts hold few of.
+#
+# A text a line; a line beginning with `#` is a comment. The corpus step
+# against main reads every line with both trees; `--freeze <tag>` reads
+# each with the tag's own parser and keeps it whatever it read, a refusal
+# too, so a text a later release reads that the tag refused is told and
+# free. A line added reaches a frozen corpus at the next tag's freeze.
+
+# get
+get notes
+get notes where id = 7
+get notes where tag = 'a' and score >= 3 order score desc limit 10
+get notes match title 'fox' select id, title limit 5
+get docs near embed [0.1, 0.2, 0.3] limit 3
+get orders group customer select customer, count(*) as n, sum(total) as spent
+get posts where id in (get likes where user = 1 select post) select id, title
+get notes where at > now() - 86400000 order at desc limit $1 offset $2
+
+# put
+put notes {title: 'a', score: 1}
+put notes {id: 7, title: 'b'}
+put notes [{title: 'a'}, {title: 'b'}]
+put notes $1
+put events {at: now(), kind: 'login', meta: {ip: '10.0.0.1'}} returning *
+
+# insert
+insert notes {title: 'a'}
+insert notes {id: 1, title: 'a'} if absent
+insert notes {id: 1, title: 'a'} if absent else set {title: new.title}
+insert notes [{id: 1}, {id: 2}] returning id
+insert users {email: 'a@b.c'} require 1
+
+# set
+set notes {score: 2} where id = 7
+set notes {score: score + 1} where tag = 'a'
+set notes {done: true} where id = 7 require 1 else 'not found'
+set notes {rank: 0} where done = false order at limit 10 returning id
+set accounts {balance: balance - $2} where id = $1 and balance >= $2 require 1
+
+# del
+del notes where id = 7
+del notes where done = true
+del notes
+del notes where at < now() - 2592000000 order at limit 100
+del sessions where id = $1 require 1 returning *
+
+# explain get
+explain get notes where id = 7
+explain get notes where tag = 'a' order score desc limit 10
+explain get docs near embed [0.1, 0.2] limit 5
+explain get notes match title 'fox'
+explain get notes where score between 1 and 5 select id
+
+# collections
+collections
+COLLECTIONS
+Collections
+collections;
+collections; statements
+
+# describe
+describe notes
+DESCRIBE notes
+describe docs;
+describe statement
+describe notes; describe docs
+describe "my notes"
+
+# compact
+compact
+compact notes
+COMPACT notes
+compact docs;
+compact; collections
+
+# create collection
+create collection notes (title text, score int)
+create collection if not exists notes (title text @text, tag text @hash, at timestamp @sorted)
+create collection docs (body text @text, embed vector<3> @hnsw)
+create collection users (email text @unique, name text, meta json)
+create collection events (at timestamp @ttl(30d), kind text, @sorted(kind, at desc))
+
+# drop collection
+drop collection notes
+drop collection if exists notes
+DROP COLLECTION notes
+drop collection docs; drop collection users
+drop collection if exists events
+
+# create index
+create index on notes (tag) @hash
+create index on notes (at) @sorted
+create index if not exists on notes (score) @sorted
+create index on notes (owner, at desc) @sorted
+create index on docs (body) @text
+CREATE INDEX notes_tag ON notes (tag)
+CREATE INDEX ON notes USING hash (tag)
+
+# create unique index
+create unique index on users (email)
+CREATE UNIQUE INDEX ON users (email)
+create unique index users_email on users (email)
+create unique index on members (org, slug)
+create unique index if not exists on users (handle)
+CREATE UNIQUE INDEX IF NOT EXISTS ON t (a, b)
+
+# drop index
+drop index on notes (owner, at)
+drop index if exists on notes (owner, at)
+DROP INDEX ON members (org, slug)
+drop index on p (at, slug)
+drop index on events (kind, at)
+
+# alter collection
+alter collection notes add field done bool
+alter collection notes add done bool
+alter collection notes drop field done
+alter collection notes rename field title to name
+alter collection sessions alter field seen @ttl(1h)
+alter collection sessions alter field seen @sorted
+
+# create statement
+create statement recent() as get notes select id, title order at desc limit 10
+create statement by_tag($tag text) as get notes where tag = $tag select id, title
+create statement years($from int, $n int = 2) comment 'oldest first' as get docs select title, year where year >= $from order year limit $n
+create statement mine() claims (sub text) as get accounts select id where owner = $jwt.sub
+create statement purge() public as del notes where done = true
+create statement tidy every 1d as del orders where ref = 'void'
+create statement nightly at '30 2 * * *' in 'Europe/Berlin' scans as del holds where state = 'lapsed'
+create statement took($k text from event.id) on hook stripe as insert taken {k: $k}
+create statement pay($from int, $to int, $n int) public as begin set accounts {balance: balance - $n} where id = $from require 1; set accounts {balance: balance + $n} where id = $to require 1; end
+
+# create or replace statement
+create or replace statement recent() as get notes select id order at desc limit 20
+create or replace statement by_tag($tag text) as get notes where tag = $tag select id
+create or replace statement purge() public as del notes where at < now() - 86400000
+create or replace statement tidy every 1h as del orders where ref = 'void'
+create or replace statement mine() claims (sub text) as get accounts select id, balance where owner = $jwt.sub
+
+# drop statement
+drop statement recent
+drop statement if exists recent
+DROP STATEMENT by_tag
+drop statement pay; drop statement purge
+drop statement if exists tidy
+
+# statements
+statements
+STATEMENTS
+Statements
+statements;
+statements; collections
+
+# describe statement
+describe statement recent
+DESCRIBE STATEMENT recent
+describe statement pay;
+describe statement by_tag
+describe statement recent; describe statement pay
+
+# call
+call recent
+call by_tag {tag: 'a'}
+call pay {from: 1, to: 2, n: 30} as {sub: 'alice'}
+call pay $1
+call pay $1 as $2
+call purge; call recent
+
+# select
+select * from notes
+SELECT id, title FROM notes WHERE score >= 3 ORDER BY score DESC LIMIT 10
+select count(*) from notes where tag = 'a'
+select customer, sum(total) as spent from orders group by customer having sum(total) > 100
+SELECT n.id, u.name FROM notes n JOIN users u ON u.id = n.owner WHERE n.score > 1
+SELECT u.id FROM users u LEFT JOIN notes n ON n.owner = u.id WHERE n.id IS NULL
+select id from notes where id in (select note from likes where user = 1)
+SELECT id FROM docs ORDER BY embed <-> '[0.1, 0.2, 0.3]' LIMIT 5
+
+# insert into
+insert into notes (title, score) values ('a', 1)
+INSERT INTO notes (title, score) VALUES ('a', 1), ('b', 2)
+INSERT INTO notes (title, score) VALUES ($1, $2)
+insert into notes {title: 'a'}
+INSERT INTO users (id, email) VALUES (1, 'a@b.c') RETURNING *
+
+# update
+update notes set score = 2 where id = 7
+UPDATE notes SET score = score + 1 WHERE tag = 'a'
+update notes set {topic: 4} where id = 3
+update notes set topic = 4, body = body || '!' where id = 3 returning *
+UPDATE accounts SET balance = balance - $2 WHERE id = $1
+
+# delete from
+delete from notes where id = 7
+DELETE FROM notes WHERE done = true
+DELETE FROM notes
+DELETE FROM sessions WHERE id = $1 RETURNING *
+delete from notes where id between 100 and 150
+
+# explain select
+explain select * from notes where id = 7
+EXPLAIN SELECT id FROM notes WHERE tag = 'a' ORDER BY score DESC LIMIT 10
+explain select count(*) from notes
+explain select views from a where views < $1
+EXPLAIN SELECT n.id FROM notes n JOIN users u ON u.id = n.owner
+
+# create table
+create table notes (id integer primary key, title text, score int)
+CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT NOT NULL, at TIMESTAMP)
+create table if not exists users (id integer primary key, email text unique, name text)
+CREATE TABLE docs (id BIGINT PRIMARY KEY, body TEXT, embed VECTOR(3))
+create table t (a int);
+
+# alter table: refused, naming `alter collection`
+ALTER TABLE notes ADD COLUMN done boolean
+alter table notes drop column done
+ALTER TABLE notes RENAME COLUMN title TO name
+alter table notes add field x int
+ALTER TABLE notes ALTER COLUMN score TYPE bigint
+
+# drop table: refused, naming `drop collection`
+DROP TABLE notes
+drop table if exists notes
+DROP TABLE IF EXISTS docs;
+drop table notes cascade
+DROP TABLE users, notes
+
+# CALL: SQL's spelling of `call`
+CALL purge()
+CALL by_tag('a')
+CALL pay(1, 2, 30)
+CALL pay(1, to => 2, n => 30)
+call pay($1, $2, $3)
+
+# truncate: refused, naming `del <collection>`
+TRUNCATE notes
+truncate notes
+TRUNCATE TABLE notes
+truncate notes, users
+TRUNCATE
+
+# begin, start transaction, commit, rollback: refused, naming `/batch`
+BEGIN
+begin
+BEGIN TRANSACTION
+begin; put notes {a: 1}; commit
+BEGIN WORK
+START TRANSACTION
+start transaction
+START TRANSACTION READ ONLY
+start transaction; del notes; commit
+START TRANSACTION ISOLATION LEVEL SERIALIZABLE
+COMMIT
+commit
+COMMIT WORK
+commit;
+COMMIT TRANSACTION
+ROLLBACK
+rollback
+ROLLBACK WORK
+rollback;
+ROLLBACK TO SAVEPOINT a

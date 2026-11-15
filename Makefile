@@ -392,17 +392,19 @@ size-report:
 	@python3 crates/fennec-wasm/size_report.py $(BASE) $(if $(WHY),--why '$(WHY)') $(if $(BIN),--bin $(BIN)) $(if $(FEATURES),--features '$(if $(filter none,$(FEATURES)),,$(FEATURES))')
 
 ## Every FennecQL text the repository holds -- the docs' blocks and inline
-## code, the golden files, the sources' strings -- read by this tree and by
-## BASE's with `parse`, `parse_exact` and `stored_definition`, a statement a
-## named statement may hold by its canonical digest (tools/fennecql_corpus.py,
-## the example crates/fennec-ql/examples/corpus.rs): fails where a text that
-## parsed reads as another statement or is refused (docs/design/fennecql.md
-## #the-corpus). BASE=v0.2.0 holds this tree to the texts frozen at the tag,
-## as its own parser read them (integrations/fennecql-corpus/v0.2.0.jsonl);
-## FREEZE=<tag> writes such a file from the tag's tree. CI runs both BASEs.
-## make fennecql-corpus BASE=origin/main
+## code, the golden files, the sources' strings, the hand-written list --
+## this tree's and BASE's, read by both trees with `parse`, `parse_exact`
+## and `stored_definition`, a statement a named statement may hold by its
+## canonical digest (tools/fennecql_corpus.py, the example
+## crates/fennec-ql/examples/corpus.rs): fails where a text that parsed
+## reads as another statement, is refused or panics, printing what changed
+## (docs/design/fennecql.md#the-corpus). BASE=v0.2.0 holds this tree to the
+## texts frozen at the tag, as its own parser read them
+## (integrations/fennecql-corpus/v0.2.0.jsonl), BASE=frozen to every frozen
+## corpus; FREEZE=<tag> adds a tag's from its tree, never replacing one. CI
+## runs BASE=origin/main and BASE=frozen. make fennecql-corpus BASE=origin/main
 fennecql-corpus:
-	@python3 tools/fennecql_corpus.py $(if $(FREEZE),--freeze $(FREEZE),$(or $(BASE),origin/main))
+	@python3 tools/fennecql_corpus.py $(if $(FREEZE),--freeze $(FREEZE),$(if $(filter frozen,$(BASE)),--frozen,$(or $(BASE),origin/main)))
 
 ## PyPI's fennecdb and npm's @fennecdb/web and @fennecdb/react as a release
 ## publishes them, installed into a project and a venv of their own and
