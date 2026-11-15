@@ -263,8 +263,9 @@ following docs: ctrl-c stops, and the same command resumes
   <li><b>Nothing is lost or applied twice</b> when the connection drops or the
     follower is killed.</li>
   <li><b>Drop the slot when you stop for good,</b> or PostgreSQL keeps its log
-    for it. A stopped follower has already let it go, so the drop works at
-    once.</li>
+    for it. A follower that stops waits up to 3 s for PostgreSQL to let the
+    slot go, so a drop right after is not refused as "active for PID"; a
+    second ctrl-c stops that wait.</li>
   <li><b>TLS is the connection string's</b>, <code>sslmode</code> and all,
     as for the copy (<a href="#tls">TLS</a>).</li>
 </ul>
@@ -326,15 +327,18 @@ follow-bench</code>):</p>
   <code>select pg_drop_replication_slot('fennec_articles')</code>. PostgreSQL
   13 and later can cap what a forgotten slot holds with
   <code>max_slot_wal_keep_size</code>.</p>
-  <p><b>A follower that stops lets the slot go before it exits.</b> It ends
-  the stream the way the replication protocol ends one and waits for
-  PostgreSQL to release the slot, so a drop, or a follower started again,
-  never finds it "active for PID". PostgreSQL answers at once unless it is
-  decoding a large transaction, of any table; the follower waits up to
-  10 s for it and then closes the connection. A follower that was killed
-  cannot do this: PostgreSQL holds its slot until it notices the
-  connection is gone, and a follower started meanwhile retries until
-  then.</p>
+  <p><b>A follower that stops lets the slot go before it exits, within
+  3 s.</b> It ends the stream the way the replication protocol ends one and
+  waits for PostgreSQL to release the slot, so a drop, or a follower
+  started again, finds it free. PostgreSQL answers at once unless it is
+  decoding a large transaction, of any table. Past 3 s, or at a second
+  ctrl-c, the follower closes the connection and prints a warning saying
+  so: PostgreSQL then releases the slot when it next reads the connection,
+  once it is through that transaction, and a drop until then is refused as
+  "active for PID" — run it again a moment later. A follower started again
+  waits that out by itself, as it does after a follower was killed, which
+  cannot end its stream at all. A follower that stops on an error closes
+  the connection without waiting.</p>
 </div>
 
 <p>The follower is the file's only writer, as every fennecdb file has exactly
@@ -392,14 +396,19 @@ writes as ever. A subscriber of the collection
 (<code>GET /articles/changes</code>) hears each change as the follower
 applies it, and so does a replica of the server.</p>
 
-<p>The follower stops with the server, its last changes on disk and
-confirmed and its slot let go, before the shutdown's checkpoint: a server
-started again at once streams from the slot rather than finding it taken.
-The shutdown waits 5 s at most for this. A server killed outright starts
-the stream again from what it last confirmed; the changes it applies again
-are puts and deletes by id, so nothing is lost and nothing comes twice. An
-error the follower cannot wait out ends the server rather than leave it
-answering from a mirror that no longer moves.</p>
+<p>The follower stops with the server, before the shutdown's checkpoint:
+its last changes on disk and confirmed, then its slot let go, which it
+waits up to 3 s for, as the command does, within the 5 s the shutdown
+waits for the follower. A server started again at once streams from the
+slot rather than finding it taken. If the follower could not wait long
+enough — it logs that the slot is still held — or the shutdown's 5 s ran
+out first, PostgreSQL lets the slot go once it next reads the connection,
+and a server started again retries until then. A server killed outright
+starts the stream again from what it last confirmed; the changes it
+applies again are puts and deletes by id, so nothing is lost and nothing
+comes twice. An error the follower cannot wait out ends the server at
+once, exit code 1, rather than leave it answering from a mirror that no
+longer moves.</p>
 
 <p>Against the Makefile's server, 10 000 rows with a <code>vector(384)</code>
 under an HNSW index, a subscriber reading <code>/changes</code> over HTTP

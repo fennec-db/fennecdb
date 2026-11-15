@@ -356,7 +356,14 @@ under way, whose `before_shutdown` was waiting for it, the sync among what
 was cut -- and a thread the start cannot make (2, as it exited before).
 The mirror stores its code (`exit_with`), then tells that wait it has
 stopped, so the wait is not its `STOP_WAIT` and the exit cannot come before
-the code, and only then asks for the shutdown. A shutdown writes a
+the code, and only then asks for the shutdown. Nothing waits before the
+code either: the follower returns a failure at once, only a clean stop
+waiting for PostgreSQL to let its slot go
+([replication.md](replication.md#follow)), and the code is stored before
+the line saying why. A first form of that wait ran on a failure too, up to
+10 s, and a SIGTERM in it outlasted `STOP_WAIT` and exited 0, with a
+checkpoint (`fennec-server`'s
+`a_follower_that_fails_stops_the_server_with_its_code_before_it_waits`). A shutdown writes a
 checkpoint only once the HTTP thread started (`serving`, unless a stop was
 asked for before that thread was: read after it, the flag was a
 supervisor's answer to the thread's own `listening on` line 1 time in 200

@@ -710,53 +710,113 @@ while the table was written to held every row 370 ms after it started
 again. The
 follower adds 178 KB to `fennec-server`.
 
-*A follower that stops lets its slot go before it returns.* It ends the
-stream as the protocol ends one (`WalStream::end`): `CopyDone`, then
-the server's messages read up to its `ReadyForQuery`, what it still
-sends of the stream dropped unapplied and so unconfirmed. The walsender
-calls `ReplicationSlotRelease` before its `CommandComplete`, so the slot
-is free once the answer is in. The follower used to send `Terminate`
-and close, which left the slot held until the walsender next read its
-socket -- which it does not while it decodes a transaction, any
-table's, published or not: a slot streaming from far behind, or one
-whose walsender was busy with another table's bulk load, stayed held
-for as long as that took. A drop of the slot just after -- what the
-follower's own note says to do to stop for good -- was refused,
+*A follower that stops lets its slot go before it returns -- within a
+bound, and on a clean stop alone.* It ends the stream as the protocol ends
+one (`WalStream::end`): `CopyDone`, then the server's messages read up to
+its `ReadyForQuery`, what it still sends of the stream dropped unapplied
+and so unconfirmed. The walsender calls `ReplicationSlotRelease` before its
+`CommandComplete`, so the slot is free once the answer is in. The follower
+used to send `Terminate` and close, which left the slot held until the
+walsender next read its socket -- which it does not while it decodes a
+transaction, any table's, published or not: a slot streaming from far
+behind, or one whose walsender was busy with another table's bulk load,
+stayed held for as long as that took. A drop of the slot just after --
+what the follower's own note says to do to stop for good -- was refused,
 `55006`, "active for PID", and a follower started again at once met its
-own slot taken and waited out a retry. CI's `postgres` job met it in 2
-of its first 9 runs (`a_copy_cut_short_is_made_again`, whose second
-follower stopped while its walsender decoded the other tests' writes
-since the slot's last confirm); beside two busy loops in PostgreSQL's
-3-CPU container the suite failed on it first at run 27, once in 109.
-`a_stopped_follower_lets_its_slot_go` stops a follower once its
-walsender has read up to the commit of 200 000 rows of a table the slot
-does not publish, decoded through disk (`logical_decoding_work_mem` at
-its least), and looks at the slot as the follower returns: without the
-end it failed 20 times in 20 under that load; with it the suite passed
-153 times in 153. Its stop waits about 0.2 s, the rest of that
-decoding; the wait is bounded at 10 s (`follow::END_WAIT`), past which
-the connection is closed as before and the server lets the slot go once
-it reads that. The test has a database of its own: every slot reads the
-whole server's log, but one of another database passes over these rows
-at a glance (30 ms for half a million) where one of the same database
-decodes them (550 ms) -- its first form, a million rows beside the other
-tests, held their convergence past its 20 s on a runner whose walsenders
-were off the CPU six tenths of the time. Now `follow::` takes 3.6 to
-4.2 s where main's took 3.5 to 3.6 on the same loaded machine, the new
-test 0.9 s alone and 0.3 to 0.4 s of the suite; under that stall (every
-walsender stopped 600 ms of each 700, PostgreSQL on one CPU) the other
-four take 3.5 to 3.8 s as main's do and the new test 2.2 to 4.8 s, every
-round passing, where main's failed one round in three on `55006`. On an
-error of the connection's the stream is not ended: the connection is
-what broke. A follower killed outright cannot end its stream; one
-started meanwhile meets `55006` and retries (`retryable`) until the
-server notices the connection gone, and the tests' leading drop of a
-slot left by an earlier run is `DROP_REPLICATION_SLOT ... WAIT`, the
-server's own wait for it. They drop each slot right after its follower
-stopped, and cut only their own slot's walsender, by
-`pg_replication_slots.active_pid`: by `application_name`,
-`a_broken_stream_loses_nothing` cut every follow test's stream running
-beside it.
+own slot taken and waited out a retry. CI's `postgres` job met it in 2 of
+its first 9 runs (`a_copy_cut_short_is_made_again`, whose second follower
+stopped while its walsender decoded the other tests' writes since the
+slot's last confirm); beside two busy loops in PostgreSQL's 3-CPU
+container the suite failed on it first at run 27, once in 109. Every
+release since `--follow` came has the bug: v0.1.5 and v0.1.6 (`fenec
+import --follow`, and the server's as `fenec-pg --follow`) through
+v0.2.0 (`fennec-server --follow` from v0.1.7) drop the stream with a
+`Terminate` alone. It loses nothing; it is fixed on main.
+
+*The bound.* `follow::END_WAIT` is 3 s, and every read of the wait is held
+to what is left of it (`client::Until`): before a read that would go to
+the socket, the socket is waited on for the rest (a peek, or rustls taking
+whole records in), so the rest of a message begun, and bytes already
+buffered, no longer wait out the socket's own 30 s timeout a read -- the
+first form of the end looked at its deadline before each message only. The
+`CopyDone`'s write is held to it too. 3 s and not 10 because a stop has to
+have one bound it keeps: `fennec-server`'s shutdown waits `STOP_WAIT`,
+5 s, for its follower to settle and end its stream, so at 10 s the
+shutdown cut off any wait past its own 5 s, the stream closed by the
+exit, and the follower's bound never held there; at 3 s the settle's fsync has 2 s before it, which `mirror.rs` asserts at
+compile time (`END_WAIT` + 1 s < `STOP_WAIT`). The waits before the
+shutdown's final sync -- `HELD_GRACE` 2 s, `END_GRACE` 0.5 s, `STOP_WAIT`
+-- come to 7.5 s, inside docker's default 10 s before its SIGKILL (the
+repository's `docker-compose.yml` gives 30 s). `deploy/` runs no
+`--follow` unit: its servers are `--dir` nodes (`TimeoutStopSec=120s`),
+which `--follow` refuses, and its routers are `fennec-shard`.
+`fennec import --follow` stops within those 10 s too. What 3 s waits for: 200 000 rows of a table
+the slot does not publish, decoded through disk, held a stop 0.2 s, a
+million in memory 0.5 to 2 s on a loaded machine; a longer transaction is
+not waited for. Past the bound, or when the wait fails, the follower
+closes the connection and says so in one line (`Event::SlotHeld`, the
+shell's `warning`, the server's `follow:` log line): PostgreSQL releases
+the slot when its walsender next reads the connection, a drop meeting
+`55006` until then, which a follower started again waits out
+(`retryable`). The shell's second ctrl-c (`stop::AGAIN`) ends the wait
+within 50 ms (`client::CUT_LOOK`), the steps before it -- the rest of a
+transaction being applied, the settle's fsync -- still run.
+
+*A failure waits for nothing.* The first form ended the stream when the
+follower stopped on what it read too (a dropped column, a storage error),
+up to 10 s, before `run` returned -- and `fennec-server` stores its exit
+code (`exit_with(1)`) only when the follower returns. A shutdown already
+waiting on the follower (a SIGTERM while the walsender decoded a large
+transaction and the final settle's fsync failed; or a SIGTERM in the
+10 s after a failure) ran out of its `STOP_WAIT` first and exited 0, with
+a checkpoint (`checkpoints`), and with no SIGTERM the server served a
+mirror that had stopped moving for those 10 s more. Now only a clean stop
+ends the stream so; a failure closes it (`Terminate`, on the drop) and
+returns at once, and the mirror stores its code before its log line and
+before it lets the shutdown's wait go. On an error of the connection's
+the stream is not ended either: the connection is what broke. A follower
+killed outright cannot end its stream; one started meanwhile meets
+`55006` and retries until the server notices the connection gone.
+
+*The tests.* Against stand-ins, every run and every time: fennec-import's
+`a_stopped_follower_returns_once_its_slot_is_let_go` (applied, confirmed,
+`CopyDone` -- never a `Terminate` alone -- and back only after the
+server's answer), `a_follower_that_fails_returns_before_it_waits` (no
+`CopyDone`, an answer that never comes not waited for: 3 s in that test
+without the fix) and `a_second_stop_ends_the_wait_and_says_what_holds_the_slot`;
+fennec-wire's `ending_a_stream_is_bounded` (silent, still sending, and
+stopped in the middle of a message with a whole one buffered before it --
+30 s a read without the bound) and its TLS twin; fennec-server's
+`a_follower_that_fails_stops_the_server_with_its_code_before_it_waits`
+(a stand-in PostgreSQL whose walsender sends a change the follower cannot
+read and never answers a `CopyDone`, SIGTERM sent as the follower ends
+its stream: exit 1, no `CopyDone`; with the first form, exit 0) and
+`a_stopped_server_lets_its_slot_go_before_it_exits`. Against PostgreSQL,
+`a_stopped_follower_lets_its_slot_go` stops a follower once its walsender
+has read up to the commit of 200 000 rows of a table the slot does not
+publish, decoded through disk (`logical_decoding_work_mem` at its least),
+and looks at the slot as the follower returns. It is the end-to-end check,
+not the guard: the walsender is busy 159 to 198 ms after that commit and
+the follower notices its stop at a random point of its 200 ms
+`IDLE_WAIT`, so without the end it passed 5 to 20 % of runs on the
+review's Mac, more on faster hardware. With the end the suite passed 153
+times in 153 under load. The test has a database of its own: every slot
+reads the whole server's log, but one of another database passes over
+these rows at a glance (30 ms for half a million) where one of the same
+database decodes them (550 ms) -- its first form, a million rows beside
+the other tests, held their convergence past its 20 s on a runner whose
+walsenders were off the CPU six tenths of the time. `follow::` takes 3.28
+to 3.66 s, 3.44 at the median, over 30 runs in a row on a shared Mac (load
+average 2.2 to 6.1), where main's took 3.5 to 3.6; the new test 0.9 s
+alone. The tests drop each slot right after its follower stopped, and
+cut only their own slot's walsender, by `pg_replication_slots.active_pid`:
+by `application_name`, `a_broken_stream_loses_nothing` cut every follow
+test's stream running beside it; their leading drop of a slot left by an
+earlier run is `DROP_REPLICATION_SLOT ... WAIT`, the server's own wait.
+fennec-server's `a_server_stopped_or_killed_goes_on_without_losing_a_row`
+finds the slot free after a SIGTERM, but its walsender is idle and the
+look comes 100 ms after the exit, so it holds only that the stop leaves no
+stream open.
 
 TLS to the source (`sslmode`, `fennec_wire::client::SslMode`) is asked
 for as libpq asks: an `SSLRequest` before the startup message, so the
