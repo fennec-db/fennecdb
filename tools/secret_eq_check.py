@@ -57,6 +57,9 @@ PART_WORDS = frozenset(PARTS + tuple(w + "s" for w in PARTS))
 # the file has it, and why. A second one of the same text is a comparison
 # nobody weighed, so a count, never the text alone, lets one through.
 ALLOWED = {
+    "crates/fennec-abi/src/sync/mod.rs": {
+        "t == self.token": (1, "the token an app's own provider handed over against the one its replica holds, in the app's process: no peer times it"),
+    },
     "crates/fennec-core/src/engine.rs": {
         "sel.marks[i].label() == *col": (1, "a select list's items (`marks`), found by their labels"),
     },

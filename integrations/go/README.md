@@ -67,7 +67,8 @@ docs.Where("year", "<", 2000).Delete(ctx)      // no filter: refused unless fenn
   as `Reason`, which tells one guard's refusal from another's where `At` moves with every statement added in
   front; a read's `Require(1, Reason("no such account"))` says its own. A tenant's quota names itself, `Quota` (the `Quota*` constants): `QuotaBytes` and `QuotaRows` answer 507
   (`CodeFull`), and room is made by deleting; the rest answer 429 (`CodeTooMany`) with `RetryAfter`, the wait the
-  server asks for, as a tenant being moved or failed over answers its writes 503 (`CodeUnavailable`).
+  server asks for, as a tenant being moved or failed over answers its writes 503 (`CodeUnavailable`). The body's `code` is `ErrorCode`
+  (`ErrorCodeTokenExpired` on a 401 for a token past its `exp`, which a fresh token cures; `""` otherwise), a stream's ended at the `exp` included.
 - A `[]float32` goes out as the decimals that read back as each `f32`, so a vector round-trips to the bit.
 
 - The builder's options are functional: `Ef`, `Exact`, `K`, `Candidates`, `Collate`, `All`, and `On`, `ParentKey`,

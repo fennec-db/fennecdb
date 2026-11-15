@@ -542,10 +542,10 @@ export class FennecHttp {
    * rules are ANDed in by the server. A stream that ends -- a tenant moved,
    * the network -- is opened again (250 ms, doubling to 15 s) and seeds
    * again; one refused or ended for its token (401, as the server ends one
-   * at its token's `exp`) is not, for the app to subscribe again with a
-   * fresh one. `onError` hears why a stream ended, `onState` `'open'` at
-   * each seed and `'retry'` as it waits to open again. Returns the
-   * function that stops it.
+   * at its token's `exp`, the error's `errorCode` then `token_expired`) is
+   * not, for the app to subscribe again with a fresh one. `onError` hears
+   * why a stream ended, `onState` `'open'` at each seed and `'retry'` as it
+   * waits to open again. Returns the function that stops it.
    *
    * @param {string} collection
    * @param {Record<string, string | string[]>} [shape]
@@ -683,6 +683,11 @@ async function refusal(res, collection) {
 function refused(res, body, message) {
   const e = new FennecError(message ?? body?.error ?? `HTTP ${res.status}`);
   e.status = res.status;
+  // What a program tells the refusal by, where the words are a person's:
+  // the body's `code`, `token_expired` on a 401 for a token past its `exp`.
+  // `errorCode`, the name every SDK gives it: Go's and .NET's `Code` is the
+  // status's name, Swift's, Kotlin's and Dart's the library's error kind.
+  if (typeof body?.code === 'string' && body.code) e.errorCode = body.code;
   if (typeof body?.at === 'number') e.at = body.at;
   // What a `require n else '<reason>'` said: the statement's own words.
   if (typeof body?.reason === 'string') e.reason = body.reason;
@@ -793,8 +798,9 @@ function pause(ms, signal) {
 }
 
 /**
- * A stream's `error` event as the error it is: `status` 401 where the
- * server ended it at its token's `exp`, as it refuses a request.
+ * A stream's `error` event as the error it is: `status` 401 and `errorCode`
+ * `token_expired` where the server ended it at its token's `exp`, as it
+ * refuses a request.
  */
 function streamError(data) {
   let msg = {};
@@ -805,6 +811,7 @@ function streamError(data) {
   }
   const e = new FennecError(msg.error ?? 'subscription error');
   if (typeof msg.status === 'number') e.status = msg.status;
+  if (typeof msg.code === 'string' && msg.code) e.errorCode = msg.code;
   return e;
 }
 

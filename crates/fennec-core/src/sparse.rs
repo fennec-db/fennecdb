@@ -83,6 +83,8 @@ pub fn parse(s: &str) -> Result<(u32, Vec<(u32, f32)>)> {
         space(&mut at);
         b.get(at) == Some(&b'{')
     };
+    // A weight past a float's range, refused in its own words.
+    let mut past = None;
     at += 1;
     space(&mut at);
     if ok && b.get(at) != Some(&b'}') {
@@ -90,10 +92,14 @@ pub fn parse(s: &str) -> Result<(u32, Vec<(u32, f32)>)> {
             let i = uint(token(&mut at, false));
             ok &= b.get(at) == Some(&b':');
             at += 1;
-            let v = crate::num::parse_f64(token(&mut at, true));
+            let v = crate::num::read_f64(token(&mut at, true));
             match (i, v) {
-                (Some(i), Some(v)) if ok && i >= 1 && i <= u32::MAX as u64 => {
+                (Some(i), Ok(v)) if ok && i >= 1 && i <= u32::MAX as u64 => {
                     entries.push((i as u32 - 1, v as f32));
+                }
+                (_, Err(why)) => {
+                    past = why.range();
+                    ok = false;
                 }
                 _ => ok = false,
             }
@@ -110,6 +116,9 @@ pub fn parse(s: &str) -> Result<(u32, Vec<(u32, f32)>)> {
     at += 1;
     let dim = uint(token(&mut at, false)).filter(|d| ok && at == b.len() && *d >= 1);
     let bad = |why: &str| Error::Type(format!("sparse vector `{s}`: {why}"));
+    if let Some(range) = past {
+        return Err(bad(&format!("a weight {range}")));
+    }
     let Some(dim) = dim else {
         return Err(bad("expected {index:value,...}/dimension, indices from 1"));
     };
@@ -138,8 +147,14 @@ pub fn normalise(
     if entries.last().is_some_and(|e| e.0 >= dim) {
         return Err("an index is outside the dimension".into());
     }
-    if entries.iter().any(|e| !e.1.is_finite()) {
-        return Err("a value is not finite".into());
+    // A weight past an `f32`'s range read as its infinity -- `{1:1e39}/3` --
+    // named by its index as the text writes it, from 1, as a vector's
+    // component is (`value::unheld`).
+    if let Some(e) = entries.iter().find(|e| !e.1.is_finite()) {
+        return Err(format!(
+            "index {}: a sparse vector's weight is a number at most 3.4028235e38 either side of 0",
+            e.0 as u64 + 1
+        ));
     }
     entries.retain(|e| e.1 != 0.0);
     Ok((dim, entries))
@@ -724,6 +739,20 @@ mod tests {
             "1:1/3",
         ] {
             assert!(parse(bad).is_err(), "{bad} was read");
+        }
+    }
+
+    /// A weight past a float's range is refused naming the range, as every
+    /// reader of a number refuses one, where `1e-400` read as a 0 dropped.
+    #[test]
+    fn a_weight_past_a_float_s_range_is_refused_naming_it() {
+        for (text, says) in [
+            ("{1:0.5,2:1e400}/3", "at most 1.7976931348623157e308"),
+            ("{1:-1e-400}/3", "0 or at least 5e-324"),
+        ] {
+            let e = parse(text).expect_err(text).to_string();
+            let said = format!("sparse vector `{text}`: a weight is past a float's range");
+            assert!(e.contains(&said) && e.contains(says), "{e}");
         }
     }
 

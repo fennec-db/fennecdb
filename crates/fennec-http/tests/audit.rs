@@ -70,6 +70,29 @@ fn ask(port: u16, method: &str, target: &str, headers: &str, body: &str) -> (u16
     (out[9..12].parse().unwrap(), out)
 }
 
+/// An image's import with `headers`, its head declaring `declared` bytes
+/// of body of which only `sent` goes out: its status and the whole
+/// answer, read with the rest of the body never sent -- a node reading it
+/// would wait for the rest, and no answer would come.
+fn unread_import(port: u16, headers: &str, declared: usize, sent: &str) -> (u16, String) {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    write!(
+        s,
+        "PUT /_admin/tenants/copy/file HTTP/1.1\r\nHost: localhost\r\n{headers}\
+         Content-Length: {declared}\r\n\r\n"
+    )
+    .unwrap();
+    // A refusal from the head may end the connection under this write.
+    let _ = s.write_all(sent.as_bytes());
+    let mut out = String::new();
+    let _ = s.read_to_string(&mut out);
+    match out.get(9..12).and_then(|c| c.parse().ok()) {
+        Some(status) => (status, out),
+        None => panic!("no answer while the body was unsent: {out:?}"),
+    }
+}
+
 /// A case: a request's method, target, headers and body, and its status.
 type Case<'a> = (&'a str, &'a str, &'a str, &'a str, u16);
 
@@ -499,8 +522,10 @@ fn a_tenant_node_starts_a_count_again_on_a_token_it_verified_alone() {
             token: Some("data".into()),
             access: Some(Arc::clone(&access)),
             cors: Some("*".into()),
-            // A body past this and within the import's ceiling is read
-            // whole, and refused before its token is looked at.
+            // A body past this is refused (413) from its head, before its
+            // token is looked at: only an image's import carrying the
+            // admin token is read to the import's ceiling, and one
+            // carrying a guess is refused (401) from its head.
             max_body: 1024,
             max_import: 1 << 20,
             ..Config::default()
@@ -539,13 +564,26 @@ fn a_tenant_node_starts_a_count_again_on_a_token_it_verified_alone() {
         held,
     );
     verify_nothing(bare, &[("GET", "/_admin/stats", "", "", 404)], held);
-
     let vera = access.mint(r#"{"sub":"vera","tenant":"acme"}"#).unwrap();
     let elsewhere = access.mint(r#"{"sub":"vera","tenant":"beta"}"#).unwrap();
     let (vera, elsewhere) = (
         format!("Authorization: Bearer {vera}\r\n"),
         format!("Authorization: Bearer {elsewhere}\r\n"),
     );
+    // An import carrying anything but the admin token -- a guess, the
+    // node's data token, a tenant's JWT, the last two good where they
+    // belong -- is a refusal of its token as every other: answered from
+    // its head, its body unread, waited out, and counted, each next
+    // refusal waiting twice as long. Its head declares the import's
+    // ceiling and `big` of it is sent: a node reading the body would wait
+    // for the rest, and no answer would come.
+    let mut wait = held;
+    for auth in [GUESSED, data, vera.as_str()] {
+        let (got, out) = unread_import(port, auth, 1 << 20, &big);
+        assert_eq!(got, 401, "{auth}{out}");
+        wait *= 2;
+        assert_eq!(would_wait(LOCAL), wait, "{auth}");
+    }
     let adm = "Authorization: Bearer adm\r\n";
     verify(
         port,
@@ -557,6 +595,9 @@ fn a_tenant_node_starts_a_count_again_on_a_token_it_verified_alone() {
             ("GET", "/t/acme/notes", &elsewhere, "", 403),
             ("GET", "/_admin/stats", adm, "", 200),
             ("GET", "/_metrics", adm, "", 200),
+            // Carrying the admin token, an import is read past
+            // `max_body`, and refused as no image.
+            ("PUT", "/_admin/tenants/copy/file", adm, &big, 400),
         ],
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -645,4 +686,90 @@ fn a_signed_token_for_another_audience_clears_no_wait() {
     let auth = format!("Authorization: Bearer {mine}\r\n");
     verify(port, &[("POST", "/t/acme/query", &auth, get, 200)]);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ipv6_refusals_count_by_their_64() {
+    // Every address of a /64 is its host's to send from: refusals from any
+    // of them are one count, and a token verified from any of them starts
+    // it again. The next /64 counts apart, as an IPv4 address does.
+    let _turn = turn();
+    let ip = |s: &str| Some(s.parse::<IpAddr>().unwrap());
+    let (a, b, next) = (
+        ip("2001:db8:1:2::1"),
+        ip("2001:db8:1:2:ffff:ffff:ffff:fffe"),
+        ip("2001:db8:1:3::1"),
+    );
+    audit::succeeded(a);
+    audit::succeeded(next);
+    assert_eq!(audit::failed(a), ms(50));
+    assert_eq!(audit::failed(b), ms(100), "another address of the /64");
+    assert_eq!(would_wait(ip("2001:db8:1:2:1234:5678:9abc:def0")), ms(200));
+    assert_eq!(would_wait(next), ms(50), "the next /64 counts apart");
+    assert_eq!(would_wait(LOCAL), ms(50));
+    audit::succeeded(b);
+    assert_eq!(would_wait(a), ms(50), "a token verified in the /64");
+
+    // Through a server, where this machine has IPv6: a refusal from ::1 is
+    // counted as its /64's, which ::2 is in too.
+    if std::net::TcpListener::bind("[::1]:0").is_err() {
+        return;
+    }
+    audit::succeeded(ip("::1"));
+    let db = Arc::new(RwLock::new(Database::new()));
+    let port = serve(Server::new(
+        db,
+        Config {
+            addr: "[::1]:0".into(),
+            token: Some(ROOT.into()),
+            ..Config::default()
+        },
+    ));
+    let mut s = TcpStream::connect(("::1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    write!(
+        s,
+        "GET /_schema HTTP/1.1\r\nHost: localhost\r\n{GUESSED}Connection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).unwrap();
+    assert!(out.starts_with("HTTP/1.1 401"), "{out}");
+    assert_eq!(would_wait(ip("::2")), ms(100), "{out}");
+    audit::succeeded(ip("::1"));
+}
+
+#[test]
+fn a_full_failure_table_keeps_its_counts() {
+    // A table holding as many counts as it keeps lets the one refused
+    // longest ago go as each new address comes, never every count: an
+    // address guessing while ten thousand others are refused keeps its
+    // count, where a table cleared whole at 10 000 forgave it.
+    let _turn = turn();
+    let guessing = Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)));
+    let other = |i: usize| Some(IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + i as u32)));
+    audit::succeeded(guessing);
+    assert_eq!(audit::failed(guessing), ms(50));
+    for i in 0..audit::ADDRESSES {
+        assert_eq!(audit::failed(other(i)), ms(50), "{i}");
+        if i % 2_500 == 2_499 {
+            audit::failed(guessing);
+        }
+    }
+    // Its five refusals counted: the sixth would wait 50 ms doubled five
+    // times.
+    assert_eq!(would_wait(guessing), ms(1_600));
+    // The table let the address refused longest ago go, and it alone.
+    assert_eq!(would_wait(other(0)), ms(50), "the oldest count went");
+    assert_eq!(would_wait(other(1)), ms(100), "the next one stayed");
+    // One more new address lets the next go.
+    audit::failed(other(audit::ADDRESSES));
+    assert_eq!(would_wait(other(1)), ms(50));
+    assert_eq!(would_wait(other(2)), ms(100));
+    assert_eq!(would_wait(guessing), ms(1_600));
+    // The test's counts let go, for the tests after it.
+    for i in 0..=audit::ADDRESSES {
+        audit::succeeded(other(i));
+    }
+    audit::succeeded(guessing);
 }

@@ -31,7 +31,9 @@ make docs-builder  # the SDKs' tests of the site's builder tabs (site/builder_ta
 make schema-golden  # integrations/schema-golden.json rewritten through the module (web/schema-golden.mjs)
 make openapi-golden  # integrations/openapi/ rewritten from the served documents; openapi-check: the API only grew
 make types-check  # web/fennec.d.ts held to web/fennec.js and a caller's code under tsc --strict, then docs-types
+make perf-gate  # this tree against BASE's in instructions and heap bytes an op under callgrind, CI's perf jobs (Linux; on macOS in Docker)
 make studio-highlight  # studio/highlight.js and the Grafana data source's copy rewritten from site/highlight.js
+make browser-test  # persist, restore and openFile in real browsers, reloaded mid-write (BROWSERS="chrome firefox safari")
 make pgvector-up  # PostgreSQL 17 + pgvector in Docker on 127.0.0.1:55432 for comparisons and --follow (pgvector-down)
 make server TOKEN=secret HTTP=127.0.0.1:8080  # the server against ./data.fennec
 make node ADMIN=secret  # a tenant node: fennec-server --dir tenants
@@ -98,6 +100,8 @@ and `web/client.d.ts` hold the types, `fennec types <file>` a schema's.
 (`fennec_journal`, `fennec_drain`; off until asked for), sealed by a
 `cryptoKey`; `openFile` keeps `fennec-server`'s own file in OPFS, never
 sealed, flushing a new image into `<name>~` before writing over the file.
+`web/browser/` holds both in real Chrome, Firefox and Safari, the page
+reloaded in the middle of their writes.
 
 ## Invariants
 
@@ -123,7 +127,12 @@ to a 32-bit `usize`; a list's elements too, each read as written and
 refused naming the field and the element. A schema read off the bytes is
 held to the same ranges, `Error::Corrupt` past them (`Schema::decode`), by
 the one test every schema a write makes meets (`schema::out_of_range`), a
-list's dimension too: no read refuses what a write took.
+list's dimension too: no read refuses what a write took. A vector's
+component is a number its field holds -- no `NaN`, no infinity (`1e39`'s
+`f32`), none an `f16` rounds past 65 504 -- refused naming the field or the
+query and the element wherever a write or `near` takes one (`value::held`, a
+`put` in its copy into the document, `held_copy`), never stored to go out as
+`null`; what a file holds is read as it is.
 
 **[Profiles differ on purpose.](docs/design/crates.md#profiles)**
 `fennec-cli` takes `cli` (`panic = abort`), `fennec-server` `release`: a
@@ -204,6 +213,15 @@ so before changing code, find here every rule it may touch and read the
 file that holds it. Each entry names a file, the directories it covers and
 its rules' titles by section; `tools/agents_md.py --check` holds the index
 to the files.
+
+### `crates/CLAUDE.md`
+
+Covers `crates/`.
+
+*Conventions*
+- Unit tests live inline
+- Every parser of untrusted bytes is fuzzed
+- A secret is compared by `crypto::ct_eq` alone
 
 ### `crates/fennec-core/CLAUDE.md`
 
@@ -367,6 +385,7 @@ Covers `crates/fennec-http/`, access aside (below); an open server's rule binds 
 - A webhook is verified by its signature before anything of it is read, and every refusal before is one 401.
 - A statement is parsed once, and an answer goes out in one write.
 - A text's lists are read as written at once from its second request.
+- A body is held to the ceiling its head earns.
 - A chunked body grows as it comes, held to the ceiling
 - A plain `get` is written as JSON from the stored documents.
 - A row's tag is its JSON as its reader is shown it, and a write's preconditions are judged under the lock that writes it.
@@ -391,7 +410,7 @@ Covers `crates/fennec-http/src/mcp/`.
 
 ### `crates/fennec-http/src/access/CLAUDE.md`
 
-Covers `crates/fennec-http/src/access.rs` and `src/access/`; access binds fennec-core's hooks (`plugin::Hook`, `Check`), its `Filter` -- the order an `and`'s terms are tested in, `@ttl`'s `alive` first (`Chain`, `answer_filter`) -- and its own collections' names (`declared::OWN`), and every path a token's statement takes, a stream's among them (`sse.rs`).
+Covers `crates/fennec-http/src/access.rs` and `src/access/`; access binds fennec-core's hooks (`plugin::Hook`, `Check`), its `Filter` -- the order an `and`'s terms are tested in, `@ttl`'s `alive` first (`Chain`, `answer_filter`) -- and its own collections' names (`declared::OWN`), and every path a token's statement takes, a stream's among them (`sse.rs`), and how a replica's sync reads a 401 (`fennec_abi::sync`, `web/fennec.js`).
 
 *Access*
 - A scoped token is held to its rules at every level, twice for writes.
@@ -400,7 +419,9 @@ Covers `crates/fennec-http/src/access.rs` and `src/access/`; access binds fennec
 - A collection whose name starts with `_` is the server's, out of every rule's reach.
 - A token is bound to the tenant it names.
 - A token is taken only from the issuers, for the audiences and clients, a server was told.
+- A token past its `exp` is told so by a code, and no other refusal is.
 - An empty token is no token.
+- A token taken past loopback is 32 bytes at least.
 
 ### `crates/fennec-server/CLAUDE.md`
 
@@ -473,6 +494,7 @@ Covers `web/`; its retry rule binds Python's clients (`integrations/python/`), G
 - A Durable Object keeps a database as a file would.
 - An object's alarm keeps its database.
 - A live query learns what changed from the change ring.
+- A page's IndexedDB calls share one connection, and let it go when asked.
 - A number from 2^53 on goes out as every digit.
 - A client sends a request again only where it cannot have run or may run twice, and bounds every request in time.
 
@@ -509,67 +531,43 @@ Covers `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/wind
 
 ### `crates/fennec-bench/CLAUDE.md`
 
-Covers `crates/fennec-bench/`.
+Covers `crates/fennec-bench/`; its gate rule binds `tools/perf_gate.py`, `crates/fennec-http/examples/gate.rs`, CI's `perf (count)` and `perf (instructions)` jobs and `.github/workflows/perf-holdout.yml` too.
 
 *Benchmarks*
 - `make scale-bench` holds fennec-server to pgvector, each over its own protocol.
 - `make ycsb` is fennecdb as a general database.
+- A pull request is held to its base in instructions and heap bytes an op.
+- Two builds' instruction counts
 
 ## Conventions
 
 - `Error` (`fennec-core/src/error.rs`) is the single error type,
   allocation-free, no `Box`; `fennec-http` maps it onto HTTP statuses
   (`api::status_of`).
-- [Unit tests live inline](docs/design/conventions.md#test-binaries)
-  (`#[cfg(test)] mod tests`); cross-crate and protocol tests in
-  `crates/*/tests/`, a file each, one binary a crate through `tests/all.rs`
-  (`autotests = false`: a new file needs its `mod` line). A test reading the
-  process's own counts (`/_metrics`, the statements'), one whose servers
-  hold many threads and one opening the audit log (`tests/audit.rs`,
-  `tests/refusals.rs`) are each a `[[test]]` of its own, the other tests'
-  servers asking with no refusal wait (`audit::set_delay(0)`). Measurement
-  programs (`examples/`, `fennec-bench`) are wired to `make`, not CI.
 - [A test that fails and passes on a rerun](docs/design/conventions.md#reruns)
   is a bug, the test's or the code's: reproduce it in a loop under load
   (`docker run --cpus=3` beside busy loops is GitHub's runner) and fix it,
   never retry it away or lengthen a sleep. A test waits for an event, not a
   time: it holds what it races (`Replica.setOnline(false)` before a write it
   reads back) and bounds only the wait for what must happen. A step
-  launching Chrome reads Chrome's files first (`warm`, `warm-chrome.mjs`),
-  never waiting longer for its port. A CI log names each failing test and
-  its assertion (spec reporters, Gradle's `testLogging`); a failing mobile
-  job uploads `test-reports-android` or `test-results-apple`.
+  launching a browser reads its files first (`warm`, `warm-chrome.mjs`),
+  never waiting longer for its port; a page reloaded in a test keeps its
+  state with the server that opened it (`web/browser/`). A CI log names
+  each failing test and its assertion (spec reporters, Gradle's
+  `testLogging`); a failing mobile job uploads `test-reports-android` or
+  `test-results-apple`.
 - [A test reads the clock from below](docs/design/conventions.md#the-clock)
   (`took >= wait`), bounding it from above only where the time is the
   property, by what it stands against with seconds to spare; elsewhere it
   asserts the event, the count or the order (`audit::would_wait`,
   `Router::grants_waiting`, `Router::round_grants`). A timeout given a
   test's servers or clients bounds every request they make.
-- [Two builds' instruction counts](docs/design/benchmarks.md#instruction-counts)
-  differing by under ~500 a request are read over re-signed copies'
-  UUIDs or a trace (`make instr-compare`), never from plain pairs: on
-  macOS the allocator draws its path from a binary's identity.
 - [A server a test or a harness starts](docs/design/conventions.md#ports)
   listens on port 0, never a fixed or found-free port, found by its
   `listening on: http://<address>` stderr line, a router told its nodes by
-  the addresses they said; only a site needing its address before it binds
-  takes a system-picked port, held by a stand-in listener till then.
-- [Every parser of untrusted bytes is fuzzed](docs/design/conventions.md#fuzzing)
-  by `crates/fennec-fuzz`, the repository's own mutator under ASan (`make
-  fuzz` lists the targets; CI's `fuzz-smoke` runs each 30 s, `fuzz.yml`
-  weekly): a new parser owes its target and `fuzz.yml`'s matrix line, a
-  finding a regression test in its own crate.
-- [A secret is compared by `crypto::ct_eq` alone](docs/design/conventions.md#secrets-compared)
-  -- a token, a mark, a MAC, a signature, a proof, a password -- never by
-  `==` or `!=`, which leave at the first byte that differs:
-  `tools/secret_eq_check.py` (CI's fmt job) refuses one on an operand so
-  named in `crates/*/src` outside tests, each operand read whole, a name
-  that is no secret allowed with why and how many times. A primitive we
-  write is held to its RFC's vectors, every one, to every case of Project
-  Wycheproof's file for it where there is one (committed unchanged, an
-  `acceptable` case to the answer chosen for its kind), and where a key
-  meets its block to another implementation's, each test's count of cases
-  held.
+  the addresses they said; only a site needing its address before it binds,
+  or a program naming no port it chose (safaridriver), takes a
+  system-picked port, held by a stand-in listener till then.
 - [A change a user meets](docs/design/conventions.md#docs-a-change-owes)
   says so in the same pull request: its page under `site/content/docs/`,
   README's feature table and the links beside it, the home page and docs

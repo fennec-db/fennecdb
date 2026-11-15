@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-fennec-http's invariants -- replication and archives, quotas, the HTTP server and held writes -- for code in `crates/fennec-http/`. Access -- scoped tokens and their rules, field lists, the server's own collections, tenant binding and whom a token is for -- is in [src/access/CLAUDE.md](src/access/CLAUDE.md), beside its code (`src/access.rs`, `src/access/`): read it before changing either, or a path a token's statement takes. The rules every change meets, and where every other area's are, are in the root's [CLAUDE.md](../../CLAUDE.md).
+fennec-http's invariants -- replication and archives, quotas, the HTTP server and held writes -- for code in `crates/fennec-http/`. Access -- scoped tokens and their rules, field lists, the server's own collections, tenant binding, whom a token is for and its expiry -- is in [src/access/CLAUDE.md](src/access/CLAUDE.md), beside its code (`src/access.rs`, `src/access/`): read it before changing either, or a path a token's statement takes. The rules every change meets, and where every other area's are, are in the root's [CLAUDE.md](../../CLAUDE.md).
 
 ## Invariants
 
@@ -104,6 +104,10 @@ A replay is a write's answer on every path, a call made to read's too
 waits.](../../docs/design/http.md#audit)** Only `audit::verified`, where a token
 checks out, clears the wait; a new check must call it, and nothing infers
 it from an answer. A node believes `Fennec-Router` from the router alone.
+A refusal is counted by its address, an IPv6 one's /64
+(`audit::counted_ip`, the hooks' count's key too), in a table that, full,
+lets the count refused longest ago go (`audit::ADDRESSES`): never every
+count at once.
 
 **[Every request has an id, in its answer and every line it
 wrote.](../../docs/design/http.md#request-ids)** `tests/datadog.rs` and
@@ -188,6 +192,16 @@ request, a whole list read so given back as the quick read's vector
 tenant left it. A hint keeps at most 4 096 places, a shard of long texts'
 16 384 (`HINT_PLACES`, `HINT_BUDGET`); a page's documents' lists are read
 again alone (`fennec_ql::read_listed`).
+
+**[A body is held to the ceiling its head
+earns.](../../docs/design/http.md#a-bodys-ceiling)** `max_body`, judged
+from the head before a byte of the body is read (`body_ceiling`,
+`http::read_head`): a tenant node reads an image's import, `PUT
+/_admin/tenants/<t>/file`, to `max_import` where it carries the admin token
+alone (`admin::carries`), and refuses one carrying another or none with its
+route's 401, waited out as every refusal is, its body unread. A route
+reading past `max_body` is judged so there, from its head, never by a
+ceiling raised for every request and refused after the read.
 
 **[A chunked body grows as it comes, held to the
 ceiling](../../docs/design/http.md#chunked-bodies)** (`read_onto`); a framing

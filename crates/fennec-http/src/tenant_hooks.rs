@@ -653,6 +653,7 @@ impl Store {
         let (mut hooks, mut kept) = self.others(name, hook);
         let max_body = self.max_body.load(Ordering::Relaxed);
         let (h, k) = self.made(hook, given, &hooks, now_ms(), max_body, false)?;
+        let short = h.short;
         hooks.push(h);
         kept.push(k);
         let set = Set {
@@ -660,7 +661,11 @@ impl Store {
             hooks,
             kept,
         };
-        self.replace(name, Some(set), open).map(|v| v.unwrap_or(0))
+        let version = self.replace(name, Some(set), open)?;
+        if short {
+            said_short(name, hook);
+        }
+        Ok(version.unwrap_or(0))
     }
 
     /// `DELETE /_admin/tenants/<t>/hooks/<hook>`: the set's version after,
@@ -697,7 +702,14 @@ impl Store {
         open: u64,
     ) -> Result<Option<u64>, Refused> {
         let set = self.set_of(body, self.max_body.load(Ordering::Relaxed))?;
+        let short: Vec<String> = (set.iter().flat_map(|s| &s.hooks))
+            .filter(|h| h.short)
+            .map(|h| h.name.clone())
+            .collect();
         let version = self.replace(name, set, open)?;
+        for hook in &short {
+            said_short(name, hook);
+        }
         if let Some(set) = self.current(name) {
             refusing(name, &set);
         }
@@ -968,6 +980,21 @@ fn object(body: &[u8]) -> Result<Vec<(String, Value)>, Refused> {
         Ok(Value::Object(m)) => Ok(m),
         _ => Err(Refused(400, "the body is a JSON object".into())),
     }
+}
+
+/// Tenant `name`'s `hook` was set through a `PUT` with a secret shorter
+/// than [`crate::TOKEN_MIN`] bytes (`Hook::short`): said in the node's log,
+/// naming the tenant and the hook, never the secret, and taken -- refused,
+/// a secret its sender made would leave the hook's events none. Said
+/// whatever the node binds: a tenant's events come from its sender, past
+/// this machine, through the router.
+fn said_short(name: &str, hook: &str) {
+    crate::log!(
+        "warning: tenant `{name}`'s hook `{hook}` was set with a secret shorter than {} \
+         bytes: a shorter one can be guessed, from one event signed with it too. Where its \
+         sender lets you choose it, make one with `openssl rand -hex 32`",
+        crate::TOKEN_MIN
+    );
 }
 
 /// `set` as `hook-secrets` answers it, and its sidecar holds it.

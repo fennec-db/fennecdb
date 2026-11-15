@@ -548,7 +548,8 @@ class FennecRemote private constructor(
          * `require n else '<reason>'` that refused it said and the statement bound to the write that
          * refused it, and where a tenant's quota refused it the
          * quota and how many seconds to wait -- to the millisecond where the body says it
-         * (`retry_after_ms`), else `Retry-After`, or the same in the body.
+         * (`retry_after_ms`), else `Retry-After`, or the same in the body -- and the code the
+         * server named (`errorCode`, a text not empty alone).
          */
         fun refused(status: Int, r: Row?, retryAfter: String?): FennecException {
             val quota = r?.string("quota")
@@ -560,6 +561,7 @@ class FennecRemote private constructor(
                 retryAfter = waitOf(r, retryAfter),
                 reason = r?.string("reason"),
                 binding = r?.string("binding"),
+                errorCode = r?.string("code")?.takeIf { it.isNotEmpty() },
             )
         }
 

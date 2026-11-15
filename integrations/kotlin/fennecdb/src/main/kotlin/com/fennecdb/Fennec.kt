@@ -55,6 +55,14 @@ class FennecException internal constructor(
      * token told the [reason] and no name; null otherwise.
      */
     val binding: String? = null,
+    /**
+     * The code a server named beside its words, its body's `code`
+     * ([FennecRemote]): "token_expired" on a 401 for a token past its `exp`,
+     * which a fresh token from its issuer cures. A later server may name
+     * others; null for none, and for the library's own. Not [code], the
+     * library's error kind: every SDK names the server's this way.
+     */
+    val errorCode: String? = null,
 ) : RuntimeException(message) {
     constructor(code: Code, message: String) : this(code, message, null)
 

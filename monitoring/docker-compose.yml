@@ -4,16 +4,17 @@
 # (grafana/fennecdb-data-plugin.json, with an alert rule), and through the
 # Infinity plugin and POST /query (grafana/fennecdb-data.json):
 #
-#   FENNEC_HTTP_TOKEN=secret FENNEC_METRICS_TOKEN=scrape \
-#   FENNEC_JWT_SECRET=$(openssl rand -hex 32) \
-#     docker compose -f monitoring/docker-compose.yml up -d --build
+#   export FENNEC_HTTP_TOKEN=$(openssl rand -hex 32) \
+#     FENNEC_METRICS_TOKEN=$(openssl rand -hex 32) FENNEC_JWT_SECRET=$(openssl rand -hex 32)
+#   docker compose -f monitoring/docker-compose.yml up -d --build
 #   open http://127.0.0.1:3000/d/fennecdb
 #   open http://127.0.0.1:3000/d/fennecdb-data-plugin
 #   open http://127.0.0.1:3000/d/fennecdb-data
 #
 # fennec-server serves /_metrics on a listener of its own (--metrics), so the
 # data port need not be on the compose network. That listener is on it
-# alone and still takes a token: a non-loopback address wants one.
+# alone and still takes a token: a non-loopback address wants one, and
+# every token taken past loopback is 32 bytes at least.
 #
 # `seed` writes thirty days of a site's events and a week of trades into the
 # database the first time, and mints the token Grafana reads them with.
@@ -37,7 +38,7 @@ services:
       - --metrics
       - 0.0.0.0:9464
       - --admin-token
-      - "${FENNEC_METRICS_TOKEN:?set a scrape token, e.g. FENNEC_METRICS_TOKEN=scrape}"
+      - "${FENNEC_METRICS_TOKEN:?set a scrape token of 32 bytes or more, as openssl rand -hex 32 makes}"
       # Statements that take 100 ms or longer go to the log with their text.
       - --slow-ms
       - "100"
@@ -50,7 +51,7 @@ services:
       - --policy
       - /etc/fennec/policy.txt
     environment:
-      FENNEC_HTTP_TOKEN: "${FENNEC_HTTP_TOKEN:?set a token first, e.g. FENNEC_HTTP_TOKEN=secret}"
+      FENNEC_HTTP_TOKEN: "${FENNEC_HTTP_TOKEN:?set a token of 32 bytes or more first, as openssl rand -hex 32 makes}"
     secrets:
       - fennec_jwt_secret
     ports:
