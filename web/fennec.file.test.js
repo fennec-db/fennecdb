@@ -557,6 +557,35 @@ test('a file is let go of when the module stopped, and opens again', { skip }, a
   assert.deepEqual(titles(again), ['a']);
 });
 
+// The copy beside the file may be the one whole database left: one the
+// module cannot try -- no room for it -- is kept, and the refusal names
+// it, where it named neither the copy nor what to do with it.
+test('a copy beside the file that cannot be tried is kept, and named', { skip }, async () => {
+  const dir = fakeDir();
+  const before = await open();
+  before.run('create collection docs (title text)');
+  before.run('put docs {title: "a"}');
+  dir.put('c.fennec', before.snapshot());
+  before.run('put docs {title: "b"}');
+  const copy = before.snapshot();
+  dir.put('c.fennec~', copy);
+  const db = await openWrapped((x) => ({ ...x, fennec_alloc: (len) => (len === copy.length ? 0 : x.fennec_alloc(len)) }));
+  await assert.rejects(
+    openFile(db, 'c.fennec', { dir }),
+    (e) =>
+      e instanceof FennecError &&
+      e.message ===
+        `c.fennec~, the copy a rewrite of c.fennec left beside it, could not be tried (no room for an image of ${copy.length} bytes): ` +
+          "it is kept, since it may hold the database's last writes; save its bytes and open them where there is room, then remove it",
+  );
+  assert.deepEqual(dir.bytes('c.fennec~'), copy, 'the copy kept');
+  assert.equal(dir.files.get('c.fennec').open, false);
+  assert.equal(dir.files.get('c.fennec~').open, false);
+  // With room, the copy is taken: it holds every write.
+  const { db: again } = await reopen(dir, 'c.fennec');
+  assert.deepEqual(titles(again), ['a', 'b']);
+});
+
 /** `dir` as the main thread sees it: no synchronous access. */
 function noSync(dir) {
   return {

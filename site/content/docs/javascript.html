@@ -438,6 +438,18 @@ the origin's quota is refused so: Chrome's file system throws
 <code>QuotaExceededError</code>, Firefox's writes nothing, and either way the
 file opened again holds every write <code>run</code> answered.</p>
 
+<p>A copy the module cannot try — no room in it for the copy, or a module
+that stopped as it loaded it — is kept, since it may be the one whole
+database, and <code>openFile</code> is refused naming it
+(<code>notes.fennec~, the copy a rewrite of notes.fennec left beside it,
+could not be tried</code>, and why) until it is dealt with: save its bytes
+(<code>getFileHandle('notes.fennec~')</code> in the origin private file
+system, then <code>getFile()</code>), open them where there is room —
+<code>fennec</code>, a server, or a module opened again with
+<code>Fennec.open</code> — and once they are safe remove the copy
+(<code>removeEntry('notes.fennec~')</code>): the next <code>openFile</code>
+takes the file as it stands.</p>
+
 <p>A module that traps -- out of memory while it answers, say -- is left
 where it stopped, so every later call on any of its databases throws one
 <code>FennecError</code>: the module stopped, and the database has to be

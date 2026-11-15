@@ -1571,6 +1571,25 @@ function loads(fennec, bytes) {
 }
 
 /**
+ * `loads` of the copy a rewrite left beside `name`, which may be the one
+ * whole database left: a copy that cannot be tried -- no room in the
+ * module, a module that stopped -- is kept, and the error names it, every
+ * `openFile` of `name` refused so until it is dealt with (the docs'
+ * "Keeping a database" says how). Thrown as it came, it named neither.
+ */
+function copyLoads(fennec, copy, name) {
+  try {
+    return loads(fennec, copy);
+  } catch (e) {
+    throw new FennecError(
+      `${name}~, the copy a rewrite of ${name} left beside it, could not be tried (${e?.message ?? e}): ` +
+        `it is kept, since it may hold the database's last writes; save its bytes and open them where there is room, then remove it`,
+      { cause: e },
+    );
+  }
+}
+
+/**
  * Keeps the database in a file of the origin private file system, the bytes
  * fennec-server keeps on disk. A file holding some is loaded into the database,
  * which must hold nothing yet; an empty one takes the database's image. From
@@ -1616,7 +1635,7 @@ async function openFileNow(fennec, name, opts) {
       // when it is not.
       const end = imageEnd(readAt(aside, Math.min(beside, HEAD)));
       const copy = end > 0 && end <= beside ? readAt(aside, beside) : null;
-      if (copy && loads(fennec, copy)) overwrite(main, copy);
+      if (copy && copyLoads(fennec, copy, name)) overwrite(main, copy);
       aside.truncate(0);
       aside.flush();
     }
