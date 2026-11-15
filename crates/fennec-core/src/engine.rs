@@ -4205,6 +4205,13 @@ pub struct TextIndexStats {
     pub bytes: usize,
 }
 
+/// `explain`'s words for a set an equality's bucket gave. A debug build
+/// holds `Database::candidates_held`'s `given` to them; a release build
+/// compares them no more, which cost every read by an id or a bucket 108
+/// instructions.
+const BY_ID: &str = "the id index";
+const BY_HASH: &str = "the hash index on";
+
 /// The candidate set for a filter on `id`, or `None` when the index cannot
 /// answer it.
 ///
@@ -11362,7 +11369,7 @@ impl Database {
                     .unwrap_or(true)
                 {
                     candidates = Some(hit);
-                    source = ("the id index", "id");
+                    source = (BY_ID, "id");
                     given = Some((field, val));
                 }
                 continue;
@@ -11387,7 +11394,7 @@ impl Database {
                 .unwrap_or(true)
             {
                 candidates = Some(bucket);
-                source = ("the hash index on", field);
+                source = (BY_HASH, field);
                 given = Some((field, val));
             }
         }
@@ -11631,8 +11638,24 @@ impl Database {
         // several fields took its place. Told here by `explain`'s words, a
         // read by id or by a bucket paid 108 instructions of `memcmp` for
         // it (indexes.md, *Bound filters*).
+        //
+        // Letting it go is each set's own line to write: a set that took the
+        // candidates and kept it would have rows no bucket gave tested
+        // without a term, under a token's rules too. A debug build holds it
+        // to those words, which every set says for `explain`, so any test
+        // reaching a new set that kept it fails. Bound to the candidates in
+        // one type, it could not be kept; but every set would move that
+        // type, on the reads this was made cheaper for, where the check
+        // costs a release build nothing.
         #[cfg(not(target_arch = "wasm32"))]
         {
+            debug_assert_eq!(
+                given.is_some(),
+                composed_said.is_none() && (source.0 == BY_ID || source.0 == BY_HASH),
+                "the equality held ({:?}) and the set the rows came from ({source:?}, \
+                 {composed_said:?}) disagree",
+                given.map(|(field, _)| field),
+            );
             *held = given;
         }
         #[cfg(target_arch = "wasm32")]
