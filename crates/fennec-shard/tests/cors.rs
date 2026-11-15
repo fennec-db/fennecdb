@@ -467,14 +467,31 @@ fn without_http_cors_the_nodes_headers_pass_through() {
     let r = ask(port, "GET", "/t/acme/collections", Some(APP), "");
     assert_eq!(r.status, 200, "{}", r.body);
     assert_eq!(r.one("access-control-allow-origin"), Some("*"));
-    let r = ask(port, "GET", "/t/nosuch/collections", Some(APP), "");
+    // The router's own answer, a tenant it does not place told to a caller
+    // holding its token, carries none.
+    let root = "Authorization: Bearer root\r\n";
+    let r = ask(port, "GET", "/t/nosuch/collections", Some(APP), root);
     assert_eq!(r.status, 404);
     r.tells_nothing();
+    // Anyone else's goes to a node in the tenant's place, which answers it
+    // as it answers a tenant it holds: its headers pass through.
+    let r = ask(port, "GET", "/t/nosuch/collections", Some(APP), "");
+    assert_eq!(r.status, 404, "{}", r.body);
+    assert_eq!(r.one("access-control-allow-origin"), Some("*"));
     // The preflight goes to the node, which answers it.
     let r = ask(port, "OPTIONS", "/t/acme/query", Some(APP), PREFLIGHT);
     assert_eq!(r.status, 204, "{}", r.body);
     assert_eq!(r.one("access-control-allow-origin"), Some("*"));
     let r = ask(port, "OPTIONS", "/t/nosuch/query", Some(APP), PREFLIGHT);
+    assert_eq!(r.status, 204, "{}", r.body);
+    assert_eq!(r.one("access-control-allow-origin"), Some("*"));
+    let r = ask(
+        port,
+        "OPTIONS",
+        "/t/nosuch/query",
+        Some(APP),
+        &format!("{root}{PREFLIGHT}"),
+    );
     assert_eq!(r.status, 404);
     r.tells_nothing();
 }
@@ -694,6 +711,136 @@ fn a_token_router_tells_an_open_node_the_name_its_client_reached_it_by() {
     }
     let other = "X-Forwarded-Host: evil.example\r\n";
     let r = send(port, "GET", "/t/acme/notes", "localhost", other, "");
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = send(port, "GET", "/t/acme/collections", "localhost", "", "");
+    assert!(r.body.contains("\"notes\""), "{}", r.body);
+}
+
+/// A `--dir` node taking no data token, `--insecure` where `insecure`.
+fn open_node(tag: &str, insecure: bool) -> Node {
+    fennec_http::audit::set_delay(0);
+    let dir = std::env::temp_dir().join(format!(
+        "fennec-shard-cors-{tag}-{}-{:?}",
+        std::process::id(),
+        Instant::now()
+    ));
+    let tenants = Arc::new(Tenants::new(&dir).unwrap());
+    let cfg = fennec_http::Config {
+        addr: "127.0.0.1:0".into(),
+        admin_token: Some("adm".into()),
+        insecure,
+        ..fennec_http::Config::default()
+    };
+    let server = fennec_http::Server::with_tenants(tenants, cfg);
+    let listener = server.bind().unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let _ = server.serve_on(listener);
+    });
+    Node { addr, dir }
+}
+
+/// The `--token` of [`past_loopback`]'s routers: 32 bytes, as past loopback
+/// a router takes no shorter one.
+const PAST_ROOT: &str = "a router's token of thirty-two bytes, at least";
+
+/// A router with `--token` listening on every address of this machine,
+/// `0.0.0.0` -- a listener past loopback, as one reached from the network
+/// is, which a test reaches on 127.0.0.1 -- in front of `n`, which holds
+/// `acme`: `--insecure` where `insecure`.
+fn past_loopback(n: &Node, insecure: bool) -> u16 {
+    fennec_http::audit::set_delay(0);
+    let root = PAST_ROOT;
+    let cfg = Config {
+        addr: "0.0.0.0:0".into(),
+        token: Some(root.into()),
+        insecure,
+        ..Config::default()
+    };
+    let router = Router::new(Directory::in_memory(), cfg);
+    let listener = router.bind().unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let _ = router.serve_on(listener);
+    });
+    let auth = format!("Authorization: Bearer {root}\r\n");
+    let body = format!(r#"{{"addr":"{}","token":"adm"}}"#, n.addr);
+    let r = send(port, "PUT", "/_shard/nodes/n1", "localhost", &auth, &body);
+    assert_eq!(r.status, 201, "{}", r.body);
+    let r = send(port, "PUT", "/_shard/tenants/acme", "localhost", &auth, "");
+    assert_eq!(r.status, 201, "{}", r.body);
+    port
+}
+
+/// A router with `--token` listening past loopback, in front of a node
+/// that takes no data token: the router asks no token of a tenant's
+/// request, and the node took the client's `Host` -- `localhost`, the
+/// router's own address -- for this machine's, so anyone on the network
+/// read and wrote every tenant through it, though nobody passed
+/// `--insecure`. The router refuses to forward to such a node, and the
+/// node refuses a request a router listening past loopback forwarded;
+/// each lets it through where its own operator said `--insecure`, and a
+/// router on loopback in front of one, the local recipe, forwards as
+/// before ([`a_token_router_tells_an_open_node_the_name_its_client_reached_it_by`]).
+#[test]
+fn a_router_past_loopback_reaches_no_node_that_takes_no_token() {
+    let make = r#"{"query":"create collection notes (title text)"}"#;
+    let refused = |port: u16, by: &str| {
+        let own = format!("127.0.0.1:{port}");
+        for host in ["localhost", own.as_str()] {
+            for (method, target, body) in [
+                ("GET", "/t/acme/collections", ""),
+                ("GET", "/t/acme/_changes", ""),
+                ("POST", "/t/acme/query", make),
+            ] {
+                let r = send(port, method, target, host, "", body);
+                assert_eq!(
+                    r.status, 403,
+                    "{by}: {method} {target} as {host}: {}",
+                    r.body
+                );
+                assert!(r.body.contains("--insecure"), "{by}: {}", r.body);
+                assert!(r.body.contains("token"), "{by}: {}", r.body);
+            }
+        }
+    };
+    // Neither said so: the router refuses, naming the fix.
+    let n = open_node("past-neither", false);
+    let port = past_loopback(&n, false);
+    refused(port, "the router");
+    let r = send(port, "GET", "/t/acme/collections", "localhost", "", "");
+    assert!(
+        r.body.contains("n1"),
+        "the refusal names the node: {}",
+        r.body
+    );
+    // Each of the seven refusals counted, in the process's count.
+    let auth = format!("Authorization: Bearer {PAST_ROOT}\r\n");
+    let scrape = send(port, "GET", "/_metrics", "localhost", &auth, "");
+    let counted = (scrape.body.lines())
+        .find_map(|l| l.strip_prefix("fennec_router_open_node_refusals_total "))
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    assert!(counted >= 7, "{}", scrape.body);
+    // Nothing was written: the node, asked on its own loopback, holds no
+    // collection.
+    let node_port: u16 = n.addr.rsplit_once(':').unwrap().1.parse().unwrap();
+    let straight = send(node_port, "GET", "/t/acme/collections", "localhost", "", "");
+    assert_eq!(straight.status, 200, "{}", straight.body);
+    assert!(!straight.body.contains("notes"), "{}", straight.body);
+
+    // The node said so alone: the router still refuses.
+    let n = open_node("past-node", true);
+    refused(past_loopback(&n, false), "the router, the node --insecure");
+
+    // The router said so alone: the node refuses what it forwards.
+    let n = open_node("past-router", false);
+    refused(past_loopback(&n, true), "the node");
+
+    // Both said so: anyone on the network reaches it, as they were told.
+    let n = open_node("past-both", true);
+    let port = past_loopback(&n, true);
+    let r = send(port, "POST", "/t/acme/query", "localhost", "", make);
     assert_eq!(r.status, 200, "{}", r.body);
     let r = send(port, "GET", "/t/acme/collections", "localhost", "", "");
     assert!(r.body.contains("\"notes\""), "{}", r.body);

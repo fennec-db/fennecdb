@@ -367,7 +367,14 @@ impl Router {
             return None;
         }
         let n = dir.node(&r.node)?;
-        Some((r.node.clone(), n.addr.clone(), self.mark(&n.token)))
+        let marked = self.marked(n);
+        // A copy on a node that said it asks no token, this router
+        // listening past loopback: its reads go home, which is asked as
+        // any forward is (`Router::open_node`).
+        if self.guards_open_nodes() && self.open_copy(&n.addr, &marked) {
+            return None;
+        }
+        Some((r.node.clone(), n.addr.clone(), self.mark_of(&marked)))
     }
 
     /// Whether `tenant`'s marked reads pass its read replica on `node` by

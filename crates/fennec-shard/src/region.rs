@@ -125,26 +125,30 @@ pub(crate) fn homed(resp: Response, home: &Option<String>) -> Response {
     }
 }
 
-/// The region to name in an answer's [`HOME_HEADER`]: the placing node's,
-/// where `req` asks and the node is in one -- the unnamed region is every
-/// router's, and there is nothing to learn.
-pub(crate) fn home_asked(req: &Request, region: &str) -> Option<String> {
-    (!region.is_empty() && req.header(HOME_HEADER).is_some()).then(|| region.to_string())
-}
-
 /// A whole answer from another router: its status, headers and body.
 type Whole = (u16, Vec<(String, String)>, Vec<u8>);
 
 /// Where a tenant this router's own directory does not place is.
 pub(crate) enum Target {
     /// On a node the global directory places it on: its name, address,
-    /// mark and region.
-    Node(String, String, Arc<str>, String),
+    /// marks and region -- or a node of this router's that stands in for a
+    /// tenant it cannot tell a caller of ([`Router::stand_in`]), with no
+    /// region to name.
+    Node(String, String, Arc<crate::Marked>, String),
     /// At home in a region keeping its own directory: the region and its
     /// routers.
     Region(String, Vec<String>),
     /// Nowhere this router can send it: the answer.
     Answer(Response),
+}
+
+/// What [`Router::elsewhere`] found before it asks who the caller is:
+/// where a request goes, or an answer saying the tenant is not here --
+/// absent, or at home where no router is recorded -- which a caller it
+/// cannot vouch for is not told.
+enum Told {
+    Target(Target),
+    Missing(Response),
 }
 
 /// What stands for a region's routers where a node's name goes: a label
@@ -193,22 +197,80 @@ impl Router {
     /// global directory says -- this router's own, or its copy of it.
     /// `relayed`: another router sent the request here, and it goes on to
     /// no third.
-    pub(crate) fn elsewhere(&self, tenant: &str, relayed: bool) -> Target {
+    ///
+    /// Where the answer would tell a caller that no such tenant is here,
+    /// or the region it lives in with no router to relay to, a router with
+    /// `--token` tells it so only where it can vouch for the caller
+    /// ([`Router::vouches_for`]); anyone else's request goes to a node of
+    /// this router's in the tenant's place ([`Router::stand_in`]), which
+    /// answers it as it answers a tenant it holds -- the token asked first,
+    /// a hook's event the one 401 -- so a caller holding nothing learns
+    /// which tenants exist no more from the router than from a node.
+    pub(crate) fn elsewhere(&self, req: &Request, tenant: &str, relayed: bool) -> Target {
+        match self.elsewhere_told(tenant, relayed) {
+            Told::Missing(answer) if !self.vouches_for(req) => {
+                self.stand_in(tenant).unwrap_or(Target::Answer(answer))
+            }
+            Told::Missing(answer) => Target::Answer(answer),
+            Told::Target(t) => t,
+        }
+    }
+
+    /// The region to name in an answer's [`HOME_HEADER`]: the placing
+    /// node's, where `req` asks and the node is in one -- the unnamed
+    /// region is every router's, and there is nothing to learn -- and only
+    /// to a caller this router vouches for ([`Self::vouches_for`]), the
+    /// global entry among them where it names its client under
+    /// `--entry-token`. Named to anyone asking, it told a caller holding
+    /// nothing a tenant's region, and which names were tenants -- a 401
+    /// carrying it and one not -- where a node asks the token before it
+    /// looks a tenant up so as to tell no one that.
+    pub(crate) fn home_asked(&self, req: &Request, region: &str) -> Option<String> {
+        (!region.is_empty() && req.header(HOME_HEADER).is_some() && self.vouches_for(req))
+            .then(|| region.to_string())
+    }
+
+    /// Whether this router may tell the caller of `req` that a tenant is not
+    /// here, or where it lives: any caller of one without `--token`, whose
+    /// `/_shard/` lists every tenant to whoever reaches it; another router
+    /// relaying under the `--token` both hold, or the global entry naming
+    /// its client under `--entry-token` (`audit::vouched`); or a caller
+    /// holding this router's `--token`. Asked only where a tenant is not
+    /// placed here or a request asks for its home.
+    pub(crate) fn vouches_for(&self, req: &Request) -> bool {
+        let Some(token) = self.cfg.token.as_deref() else {
+            return true;
+        };
+        if fennec_http::audit::vouched() {
+            return true;
+        }
+        let given = req
+            .header("authorization")
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .unwrap_or("");
+        fennec_http::crypto::ct_eq(given.as_bytes(), token.as_bytes())
+    }
+
+    /// [`Self::elsewhere`], before what a caller may be told is asked.
+    fn elsewhere_told(&self, tenant: &str, relayed: bool) -> Told {
+        // A tenant of this region moving or being made, or one relayed here
+        // by a router that knows it lives here: the region is the asker's
+        // already, and it comes back.
         let not_here = |region: &str| {
-            Target::Answer(Response::retry_after(
+            Told::Target(Target::Answer(Response::retry_after(
                 503,
                 &format!(
                     "tenant `{tenant}` lives in region `{region}`, and is not in its directory \
                      as this router has it: it is moving, or being made"
                 ),
                 1,
-            ))
+            )))
         };
         let to_region = |dir: &Directory, region: &str| match dir.routers(region) {
             Some(routers) if !routers.is_empty() => {
-                Target::Region(region.to_string(), routers.to_vec())
+                Told::Target(Target::Region(region.to_string(), routers.to_vec()))
             }
-            _ => Target::Answer(Response::retry_after(
+            _ => Told::Missing(Response::retry_after(
                 503,
                 &format!("no router is recorded for region `{region}`"),
                 1,
@@ -223,18 +285,20 @@ impl Router {
         }
         let arrived = dir.arrived();
         drop(dir);
-        let absent = |arrived: bool| {
-            Target::Answer(match arrived {
-                // A standby whose maps have not come from the primary yet
-                // cannot say a tenant does not exist: 404 tells a client to
-                // stop asking, this to ask again.
-                false => Response::retry_after(
-                    503,
-                    "the directory has not arrived from the primary yet",
-                    1,
-                ),
-                true => Response::error(404, &format!("no tenant `{tenant}` in the directory")),
-            })
+        let absent = |arrived: bool| match arrived {
+            // A standby whose maps have not come from the primary yet
+            // cannot say a tenant does not exist: 404 tells a client to
+            // stop asking, this to ask again. Every tenant's answer then, it
+            // tells no one which exist.
+            false => Told::Target(Target::Answer(Response::retry_after(
+                503,
+                "the directory has not arrived from the primary yet",
+                1,
+            ))),
+            true => Told::Missing(Response::error(
+                404,
+                &format!("no tenant `{tenant}` in the directory"),
+            )),
         };
         let Some(global) = &self.global else {
             return absent(arrived);
@@ -242,8 +306,9 @@ impl Router {
         let g = read(global);
         if let Some(p) = g.placement(tenant) {
             if let Some(n) = g.node(&p.node) {
-                let mark = self.mark(&n.token);
-                return Target::Node(p.node.clone(), n.addr.clone(), mark, n.region.clone());
+                let marked = self.marked(n);
+                let to = Target::Node(p.node.clone(), n.addr.clone(), marked, n.region.clone());
+                return Told::Target(to);
             }
         }
         if let Some(region) = g.home(tenant) {
@@ -253,6 +318,34 @@ impl Router {
             return to_region(&g, region);
         }
         absent(arrived && g.arrived())
+    }
+
+    /// A node of this router's own directory to send a request for a
+    /// tenant it does not place to, in the tenant's place: the node judges
+    /// the request's token before it looks the tenant up, and answers a
+    /// caller as it answers one of a tenant it holds -- a refusal, the one
+    /// 401 of a hook -- or, to a token that reaches the tenant, that it holds
+    /// no file of it. Chosen by the tenant's name, so one name asks one
+    /// node, and the node's region, no home of the tenant's, is not named.
+    /// `None` where the directory holds no node, and so no tenant to keep
+    /// from anyone.
+    #[cold]
+    pub(crate) fn stand_in(&self, tenant: &str) -> Option<Target> {
+        let dir = self.read_dir();
+        let nodes = dir.nodes();
+        let at = (tenant.bytes()).fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+            (h ^ b as u64).wrapping_mul(0x100_0000_01b3)
+        });
+        let (name, n) = nodes
+            .iter()
+            .nth((at % nodes.len().max(1) as u64) as usize)?;
+        let marked = self.marked(n);
+        Some(Target::Node(
+            name.clone(),
+            n.addr.clone(),
+            marked,
+            String::new(),
+        ))
     }
 
     /// The index of the router of `region`'s list to ask first: the one
@@ -303,6 +396,24 @@ impl Router {
         client: Option<&fennec_http::conn::Conn>,
         taken: bool,
     ) -> std::io::Result<Answer> {
+        // A tenant's home is named to a caller this router vouches for
+        // alone ([`Self::home_asked`]): asked on another's behalf, the
+        // home's router would name it to this one, and this one pass it on.
+        let kept;
+        let headers = match headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case(HOME_HEADER))
+            && !self.vouches_for(req)
+        {
+            true => {
+                kept = (headers.iter())
+                    .filter(|(k, _)| !k.eq_ignore_ascii_case(HOME_HEADER))
+                    .copied()
+                    .collect::<Vec<_>>();
+                &kept[..]
+            }
+            false => headers,
+        };
         let start = self.first_router(region, routers);
         let mut last = None;
         let mut refused = None;

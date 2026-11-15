@@ -225,6 +225,65 @@ clients reach the router by any other name, the router needs
 token does not stand in for it.</p>
 </details>
 
+<h3 id="open-nodes">A node with no token behind a router</h3>
+
+<p>A router asks a tenant's request no token: the node does. So a node with
+no data token (<code>--http-token</code> or JSON Web Tokens) is reached
+through a router by whoever reaches the router, and a client names any
+<code>Host</code> it likes, <code>localhost</code> among them. A router
+whose <code>--listen</code> is not loopback alone therefore forwards
+nothing to such a node: it answers <b>403</b> naming the node and what to
+give it, counts it in <code>fennec_router_open_node_refusals_total</code>
+and says it in its log once a node. It learns whether a node asks a token
+as the node is added (<code>GET /_admin/stats</code>'s
+<code>no_token</code>), and of one it has not asked since it started at the
+first request to it; a node given a token later is reached within 10
+seconds, no router started again. The node holds the same line itself: the
+router says under its mark whether it listens on loopback alone, and a node
+with no data token answers a router listening past it only when the node
+runs <code>--insecure</code>. A request another region's router relayed, or
+the <a href="sharding-entry.html#global-entry">global entry</a> named the
+client of, is the network's whatever the router listens on.</p>
+
+<pre data-lang="bash"># one machine: router and nodes on 127.0.0.1, no data token (make shard, make node)
+fennec-shard --listen 127.0.0.1:8090 --token "$ROOT" ...     # works as it is
+
+# a router others reach: give every node a data token
+fennec-server --dir /data/n1 --http 127.0.0.1:8081 --admin-token "$ADMIN1" \
+         --http-token "$DATA_TOKEN"
+fennec-shard --listen 0.0.0.0:8090 --token "$ROOT" ...
+
+# or say that the network may read and write every tenant: both of them
+fennec-server --dir /data/n1 --http 127.0.0.1:8081 --admin-token "$ADMIN1" --insecure
+fennec-shard --listen 0.0.0.0:8090 --token "$ROOT" --insecure ...</pre>
+
+<p>A router on loopback behind a proxy or a tunnel on its machine (nginx,
+<code>cloudflared</code>) is reached by the network through it, and cannot
+tell: give its nodes a data token there. The router's own mark travels to
+the node on every forward, in the clear over <code>http://</code>: where the
+network between a router and its nodes is not trusted, give each node an
+<code>https://</code> address (<a href="#https-nodes">Nodes that serve
+HTTPS</a>), as whoever reads that hop can name any client to the node and
+skip its wait after a refused token.</p>
+
+<h3 id="missing-tenants">A tenant the router does not place</h3>
+
+<p>A node asks a request's token before it looks its tenant up, so a caller
+holding none cannot tell a tenant that exists from one that does not. A
+router with <code>--token</code> keeps it that way: it says that a tenant
+is not in its directory (<b>404</b>), or names a tenant's region in
+<code>Fennec-Home</code>, only to a caller it can vouch for — one holding
+its <code>--token</code>, another router relaying, the
+<a href="sharding-entry.html#global-entry">global entry</a> naming its
+client under <code>--entry-token</code>. Anyone else's request for a tenant
+it does not place goes to one of its nodes in the tenant's place, which
+answers it as it answers any tenant: <b>401</b> without a good token,
+<b>403</b> for a token bound to another tenant, a webhook's one
+<b>401</b>, and <b>404</b> only to a token that would reach the tenant. A
+router with no nodes, or no <code>--token</code> — whose
+<code>/_shard/tenants</code> lists every tenant to whoever reaches it —
+answers 404 itself.</p>
+
 <h3 id="https-nodes">Nodes that serve HTTPS</h3>
 
 <p>A node started with <code>--tls-cert</code> and <code>--tls-key</code> is
@@ -289,7 +348,7 @@ it.</p>
 <tr><td><code>-l, --listen &lt;address&gt;</code></td><td>Where the router listens. Port 0 takes one the system picks: the <code>listening on: http://&lt;address&gt;</code> line on stderr (<code>https://</code> with <code>--tls-cert</code>) names it. Default <code>127.0.0.1:8090</code>.</td></tr>
 <tr><td><code>-d, --directory &lt;path&gt;</code></td><td>The directory file: which node holds which tenant (<a href="#the-router-fennec-shard">The router</a>). Default <code>shard.fennec</code>. The router holds <code>&lt;path&gt;.lock</code> while it runs, as a node holds each open tenant's, so a second router or a shell over the file is refused, the holder named (exit 1). A lock file that cannot be made — its folder missing, or not the router's to write — is refused as a directory file that cannot be opened is (exit 2).</td></tr>
 <tr><td><code>--token &lt;value&gt;</code></td><td>Requires <code>Authorization: Bearer &lt;value&gt;</code> on <code>/_shard/</code>. Data requests pass their own <code>Authorization</code> through to the nodes, which check it against <code>--http-token</code> (<a href="#tokens">Tokens</a>). Without it the router answers only under this machine's name and to its own pages and its <code>--http-cors</code>'s (<a href="#cors">the router's CORS rule</a>). Where <code>--listen</code> is past loopback, 32 bytes at least, as every token of the router's.</td></tr>
-<tr><td><code>--insecure</code></td><td>Allows a non-loopback address without <code>--token</code>. Off by default.</td></tr>
+<tr><td><code>--insecure</code></td><td>Allows a non-loopback address without <code>--token</code>, and, listening past loopback, forwarding to a node that asks no data token, which answers it only under its own <code>--insecure</code> (<a href="#open-nodes">A node with no token behind a router</a>). Off by default.</td></tr>
 <tr><td><code>--tls-cert &lt;pem&gt;</code></td><td>Serves clients HTTPS alone, with this certificate chain: the router's certificate first, then its intermediates. Needs <code>--tls-key</code>, both or neither; a file that cannot be read or parsed, or a key that is not the certificate's, is refused at the start. A plain HTTP request is answered 400, naming <code>https://</code>. Read at the start: a renewed certificate takes a restart (<a href="server.html#tls">HTTPS</a>).</td></tr>
 <tr><td><code>--tls-key &lt;pem&gt;</code></td><td>The private key of that certificate, PKCS#8, PKCS#1 or SEC1. The router ends the clients' TLS with it; what the router dials itself does not need it.</td></tr>
 <tr><td><code>--tls-ca &lt;pem&gt;</code></td><td>The CAs every <code>https://</code> the router dials is held to &mdash; its nodes, a region's routers, <code>--replica-of</code> and <code>--global</code> &mdash; in place of Mozilla's roots, which it trusts without the flag. A file that cannot be read, or holds no certificate, is refused at the start (<a href="#https-nodes">Nodes that serve HTTPS</a>).</td></tr>
@@ -456,7 +515,10 @@ which the router sends on every forward, <code>X-Forwarded-For</code> or
 listen on a non-loopback address without one unless given
 <code>--insecure</code>. A node with no data token answers only requests made
 under this machine's name, <code>localhost</code> or an address, through the
-router as straight to it (<a href="#cors">CORS through the router</a>).</p>
+router as straight to it (<a href="#cors">CORS through the router</a>), and
+through a router listening past loopback none unless both run
+<code>--insecure</code> (<a href="#open-nodes">A node with no token behind a
+router</a>).</p>
 
 <p>With <code>--jwt-secret</code> or <code>--jwt-keys</code> a node also takes
 JSON Web Tokens held to its <code>--policy</code>, and the policy is the
@@ -532,8 +594,8 @@ in the body.</p>
 <thead><tr><th>Status</th><th>When</th></tr></thead>
 <tbody>
 <tr><td><b>401</b></td><td>A request to the router's <code>/_shard/</code> without its <code>--token</code>, a user's token or a node's data token included (<a href="sharding-tenants.html#across-tenants">A query across tenants</a>); a node's <code>/_admin/</code> asked without its <code>--admin-token</code>; where the node was started with none, <code>/_admin/</code> is off and answers <b>404</b> (<a href="#the-node-fennec-server-dir">The node</a>)</td></tr>
-<tr><td><b>403</b></td><td>A token whose <code>tenant</code> claim does not name the tenant under <code>/t/&lt;tenant&gt;/</code> (<a href="#tokens">Tokens</a>); a statement that writes, in a query across tenants, which every node refuses before it runs; a write sent marked as a read, <code>Fennec-Read: replica</code> (<a href="sharding-read-replicas.html#read-replicas">Read replicas</a>)</td></tr>
-<tr><td><b>404</b></td><td>A tenant the router's directory, or a node, does not hold: a request never creates one (<a href="#the-node-fennec-server-dir">The node</a>); at the global entry, every path but <code>/t/&lt;tenant&gt;/...</code> and, where the entry is told to, <code>/_shard/</code> (<a href="sharding-entry.html#global-entry">One URL for every region</a>); a node named as another's standby that the router does not know (<a href="sharding.html#get-started">Get started</a>)</td></tr>
+<tr><td><b>403</b></td><td>A token whose <code>tenant</code> claim does not name the tenant under <code>/t/&lt;tenant&gt;/</code> (<a href="#tokens">Tokens</a>); a statement that writes, in a query across tenants, which every node refuses before it runs; a write sent marked as a read, <code>Fennec-Read: replica</code> (<a href="sharding-read-replicas.html#read-replicas">Read replicas</a>); a tenant's request to a node that asks no data token, through a router listening past loopback without <code>--insecure</code>, refused by the router or the node (<a href="#open-nodes">A node with no token behind a router</a>)</td></tr>
+<tr><td><b>404</b></td><td>A tenant the router's directory, or a node, does not hold: a request never creates one (<a href="#the-node-fennec-server-dir">The node</a>), the router's said only to a caller it can vouch for (<a href="#missing-tenants">A tenant the router does not place</a>); at the global entry, every path but <code>/t/&lt;tenant&gt;/...</code> and, where the entry is told to, <code>/_shard/</code> (<a href="sharding-entry.html#global-entry">One URL for every region</a>); a node named as another's standby that the router does not know (<a href="sharding.html#get-started">Get started</a>)</td></tr>
 <tr><td><b>409</b></td><td>A tenant created that exists; a change asked of a standby router's <code>/_shard/</code>, which answers it naming the primary (<a href="sharding-failover.html#standby-router">A standby router</a>); a region with no node named for a tenant, or a node and a region that disagree (<a href="sharding-regions.html#regions">Regions</a>); a copy a node refuses to promote because it is not its tenant as the directory knows it, unless forced (<a href="sharding-failover.html#replicas-of-tenants">Replicas of tenants</a>); a node's refusal of a grant, a promotion or the re-pointing of replicas from a router that a newer one superseded, naming who holds the node (<code>held_by</code>) (<a href="sharding-regions.html#region-directories">A region that keeps its own directory</a>)</td></tr>
 <tr><td><b>411</b></td><td>At the global entry, a body sent with no length past a mebibyte</td></tr>
 <tr><td><b>413</b></td><td>A query across tenants that gathers more rows or bytes than <code>--fanout-max-rows</code> or <code>--fanout-max-bytes</code> allow (<a href="sharding-tenants.html#across-tenants">A query across tenants</a>)</td></tr>
