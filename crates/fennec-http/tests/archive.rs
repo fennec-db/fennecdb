@@ -1004,7 +1004,8 @@ fn reached(a: &Archive, probe: &Path, seq: u64) {
 /// write: the archive verifies and restores to the segment before it. An
 /// archiver stopped there, or after the magic and before the first write,
 /// goes on in the segment before, sent the writes after it or an image.
-/// Plain and sealed, where the magic is the seal's and a frame of its own.
+/// Plain and sealed, where the magic is a frame of its own after the seal's
+/// head -- its magic and the file's id.
 /// `a_copy_taken_while_the_archive_writes_restores_or_says_why_not` met
 /// one as "not an archive segment".
 #[test]
@@ -1049,11 +1050,11 @@ fn a_segment_cut_as_it_was_made_holds_no_write() {
 
         // The next segment as it was being made, cut at each length short
         // of its magic: plain, a start of it; sealed, a start of the seal's
-        // or of the frame after it.
+        // magic, of the file's id or of the frame after them.
         let head = std::fs::read(named(&arch, "writes-").remove(0)).unwrap();
         let cuts: &[usize] = match sealed {
             false => &[0, 3],
-            true => &[0, 5, seal::MAGIC.len() + 10],
+            true => &[0, 5, seal::MAGIC.len() + 6, seal::START + 10],
         };
         let next = |dir: &Path| dir.join(format!("writes-{:020}.log", p.seq() + 1));
         for &cut in cuts {
@@ -1086,9 +1087,9 @@ fn a_segment_cut_as_it_was_made_holds_no_write() {
         // with the one made left, it went on from its last image, and an
         // image sent put a segment after one cut short.
         let short = *cuts.last().unwrap();
-        // Sealed, the magic is the seal's and a frame: a 16-byte head and
-        // tag around the log's 8.
-        let whole = if sealed { seal::MAGIC.len() + 40 } else { 8 };
+        // Sealed, the magic is the seal's head and a frame: a 16-byte head
+        // and tag around the log's 8.
+        let whole = if sealed { seal::START + 40 } else { 8 };
         for (writes, image, cut) in [(2, false, short), (2, false, whole), (200, true, short)] {
             let (images, segments) = (files(&arch, "image-"), files(&arch, "writes-"));
             std::fs::write(next(&arch), &head[..cut]).unwrap();
@@ -1130,7 +1131,7 @@ fn a_segment_cut_as_it_was_made_holds_no_write() {
 /// mid-frame goes on from the last whole one.
 #[test]
 fn a_sealed_archive_restores_with_its_key_and_nothing_else() {
-    use fennec_http::seal::Key;
+    use fennec_http::seal::{self, Key};
     let d = dir("sealed");
     let key = Key::from_hex(&"ab".repeat(32)).unwrap();
     let wrong = Key::from_hex(&"cd".repeat(32)).unwrap();
@@ -1204,11 +1205,27 @@ fn a_sealed_archive_restores_with_its_key_and_nothing_else() {
         .verify()
         .is_err());
     assert!(Archive::new(&arch).unwrap().verify().is_err());
-    let mut bytes = std::fs::read(&segment).unwrap();
-    let at = bytes.len() / 2;
-    bytes[at] ^= 1;
-    std::fs::write(&segment, bytes).unwrap();
+    // The byte is one a frame's tag covers: the first sealed byte of the
+    // first write's frame, which begins past the seal's head and the frame
+    // around the log's magic (a 16-byte head and tag around its 8).
+    let whole = std::fs::read(&segment).unwrap();
+    let frame = seal::START + 40;
+    let mut bytes = whole.clone();
+    bytes[frame + 16] ^= 1;
+    std::fs::write(&segment, &bytes).unwrap();
     assert!(sealed.verify().is_err());
+    // A frame's length is under no tag. Made to run past the segment's
+    // end it is a frame cut short there, which nothing tells from the one
+    // a crash leaves, and the archive verifies with the bytes from that
+    // frame on as its torn tail (`seal`'s tests walk every bit). This test
+    // changed the segment's middle byte once, wherever it fell, and looked
+    // for a refusal: the archiver seals a frame a flush, so where the
+    // frames begin is each run's own, and the run whose middle byte was
+    // the third or fourth of a length verified.
+    let mut bytes = whole.clone();
+    bytes[frame + 3] ^= 1;
+    std::fs::write(&segment, &bytes).unwrap();
+    assert_eq!(sealed.verify().unwrap().torn, whole.len() - frame);
 
     // A backup file sealed with the key opens into the database it holds.
     let upstream = Upstream::new(&p.url, TOKEN.into()).unwrap();
@@ -1219,6 +1236,107 @@ fn a_sealed_archive_restores_with_its_key_and_nothing_else() {
     assert_eq!(archive::unseal(&file, &key, &opened).unwrap(), seq);
     let db = fennec_core::fs::open(&opened).unwrap();
     assert_eq!(rows(&db, "get c"), rows(&p.db.read().unwrap(), "get c"));
+}
+
+/// An archive and a backup 0.2.0 sealed -- version 1, its frames bound to
+/// their places alone, as that code wrote them (`tests/sealed-v1/`, key
+/// `ab` 32 times) -- open as they did: verified, restored and unsealed,
+/// the wrong key refused. Files the archive takes after them are version
+/// 2 beside them, and a segment an older archiver began goes on as one of
+/// its own version.
+#[test]
+fn a_v1_sealed_archive_still_opens() {
+    use fennec_http::seal::{self, FileId, Key};
+    let d = dir("sealed-v1");
+    let key = Key::from_hex(&"ab".repeat(32)).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/sealed-v1");
+    let arch = copy_of(&fixture.join("archive"), &d.join("archive"));
+    for e in std::fs::read_dir(&arch).unwrap() {
+        let bytes = std::fs::read(e.unwrap().path()).unwrap();
+        assert!(bytes.starts_with(seal::MAGIC_V1));
+    }
+    let want: Vec<Vec<Value>> = (0..6)
+        .map(|i| vec![Value::Int(i), Value::Text(format!("secret {i}"))])
+        .collect();
+    let values = |db: &Database| -> Vec<Vec<Value>> {
+        let rows = rows(db, "get c select x, t order x");
+        rows.into_iter().map(|r| r.1).collect()
+    };
+    let a = Archive::with_key(&arch, Some(key.clone())).unwrap();
+    let v = a.verify().unwrap();
+    assert_eq!((v.images, v.segments, v.last, v.torn), (1, 1, 7, 0));
+    let out = d.join("restored.fennec");
+    assert_eq!(a.restore(&out, Target::End).unwrap().seq, 7);
+    assert_eq!(values(&fennec_core::fs::open(&out).unwrap()), want);
+    let wrong = Key::from_hex(&"cd".repeat(32)).unwrap();
+    assert!(Archive::with_key(&arch, Some(wrong.clone()))
+        .unwrap()
+        .verify()
+        .is_err());
+    let opened = d.join("unsealed.fennec");
+    let backup = fixture.join("backup.sealed");
+    assert_eq!(archive::unseal(&backup, &key, &opened).unwrap(), 7);
+    assert_eq!(values(&fennec_core::fs::open(&opened).unwrap()), want);
+    assert!(archive::unseal(&backup, &wrong, &d.join("wrong.fennec")).is_err());
+    // An image of its end taken beside the version 1 files is version 2,
+    // and the archive reads both.
+    assert_eq!(a.consolidate().unwrap(), Some(7));
+    let images = named(&arch, "image-");
+    assert_eq!(images.len(), 2);
+    assert!(std::fs::read(&images[1]).unwrap().starts_with(seal::MAGIC));
+    assert_eq!(a.verify().unwrap().last, 7);
+    assert_eq!(a.restore(&out, Target::End).unwrap().seq, 7);
+
+    // A segment an older archiver began, its writes in version 1 frames:
+    // the archiver goes on in it with version 1 frames, which it opens.
+    let p = primary(&d.join("p.fennec"), replication::DEFAULT_BUFFER);
+    p.exec("create collection c (x int)");
+    let live = d.join("live");
+    let follow = || {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (flag, path, url, key) = (Arc::clone(&stop), live.clone(), p.url.clone(), key.clone());
+        let done = std::thread::spawn(move || {
+            let upstream = Upstream::new(&url, TOKEN.into()).unwrap();
+            Archive::with_key(&path, Some(key))?.follow(&upstream, &flag, &|_| {})
+        });
+        Archiver { stop, done }
+    };
+    let b = Archive::with_key(&live, Some(key.clone())).unwrap();
+    let probe = d.join("probe.fennec");
+    let archiver = follow();
+    first_image(&live);
+    for i in 0..5 {
+        p.exec(&format!("put c {{x: {i}}}"));
+        reached(&b, &probe, p.seq());
+    }
+    archiver.finish();
+    let segment = named(&live, "writes-").remove(0);
+    let (plain, _, _, file) = seal::open_appended(&key, &std::fs::read(&segment).unwrap()).unwrap();
+    assert_ne!(file, FileId::V1, "a segment begun now has an id");
+    let mut older = seal::MAGIC_V1.to_vec();
+    seal::seal_frame(&key, &FileId::V1, 0, false, &plain[..8], &mut older).unwrap();
+    seal::seal_frame(&key, &FileId::V1, 1, false, &plain[8..], &mut older).unwrap();
+    std::fs::write(&segment, &older).unwrap();
+    let archiver = follow();
+    for i in 5..10 {
+        p.exec(&format!("put c {{x: {i}}}"));
+        reached(&b, &probe, p.seq());
+    }
+    archiver.finish();
+    assert_eq!(named(&live, "writes-"), std::slice::from_ref(&segment));
+    let bytes = std::fs::read(&segment).unwrap();
+    let (_, end, frames, file) = seal::open_appended(&key, &bytes).unwrap();
+    assert_eq!((file, end), (FileId::V1, bytes.len()));
+    assert!(
+        frames > 2,
+        "{frames} frames: the writes after went on in it"
+    );
+    let v = b.verify().unwrap();
+    assert_eq!((v.last, v.torn), (p.seq(), 0));
+    let out = d.join("live.fennec");
+    assert_eq!(b.restore(&out, Target::End).unwrap().seq, p.seq());
+    let db = fennec_core::fs::open(&out).unwrap();
+    assert_eq!(rows(&db, "get c").len(), 10);
 }
 
 /// A primary restored to an earlier moment and served again is on a history

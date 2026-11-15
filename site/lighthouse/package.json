@@ -9,5 +9,8 @@
   "devDependencies": {
     "@lhci/cli": "0.16.0",
     "lighthouse": "13.6.0"
+  },
+  "overrides": {
+    "basic-ftp": "6.2.4"
   }
 }

@@ -356,7 +356,39 @@ under way, whose `before_shutdown` was waiting for it, the sync among what
 was cut -- and a thread the start cannot make (2, as it exited before).
 The mirror stores its code (`exit_with`), then tells that wait it has
 stopped, so the wait is not its `STOP_WAIT` and the exit cannot come before
-the code, and only then asks for the shutdown. A shutdown writes a
+the code, and only then asks for the shutdown. Nothing waits before the
+code either: the follower returns a failure at once, only a clean stop
+waiting for PostgreSQL to let its slot go
+([replication.md](replication.md#follow)), and the code is stored before
+the line saying why. A first form of that wait ran on a failure too, up to
+10 s, and a SIGTERM in it outlasted `STOP_WAIT` and exited 0, with a
+checkpoint (`fennec-server`'s
+`a_follower_that_fails_stops_the_server_with_its_code_before_it_waits`). A
+follower whose thread panics goes the same way -- the release profile
+unwinds -- by a guard its thread drops on an unwind too
+(`mirror::Ending`), the code stored first: the thread's end let the wait
+go and nothing more, and the server served a mirror that no longer moved
+and exited 0 at its next shutdown, with a checkpoint
+(`a_follower_that_panics_stops_the_server_with_its_code`). The waits before
+the final sync run one after another: the held writes' answers
+(`HELD_GRACE`, 2 s), the TLS ends (`conn::END_GRACE`, 0.5 s), then what
+`before_shutdown` registered, in its order -- the traces' flush (2 s, where
+tracing is on), the follower's wait (`STOP_WAIT`, 5 s). Each hook is given
+the moment the shutdown began, and the follower's wait counts from there:
+the follower began stopping then, at the same flag, beside the waits
+before it. Counted from its own start, with `--follow` and tracing the
+waits came to 9.7 s with `LOOK`, 0.3 s of docker's 10 left for the final
+sync; now it begins 5.2 s after the signal at most
+(`the_wait_for_the_follower_counts_from_the_shutdowns_start`). That is
+`LOOK` and `STOP_WAIT` alone: the final sync waits besides for the write
+lock -- a long statement, or the follower's own batch put where its wait
+ran out inside one -- on Windows, past a close, a logoff or the system's
+shutdown, for `sync_first`'s two fsyncs where they and the graces outlast
+`STOP_WAIT`, and, where the syncer was inside a periodic fsync when the
+signal came, for that fsync, the shutdown beginning only once it is
+through. A SIGKILL
+past the waits cuts the final sync and the checkpoint: what `--sync` left
+unsynced, and the graph's image, which the next open links again. A shutdown writes a
 checkpoint only once the HTTP thread started (`serving`, unless a stop was
 asked for before that thread was: read after it, the flag was a
 supervisor's answer to the thread's own `listening on` line 1 time in 200

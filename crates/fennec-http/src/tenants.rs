@@ -1667,9 +1667,10 @@ impl Tenants {
         // statement taking a hook the tenant holds none for is said.
         self.hooks.opened(name, bound, opened);
         db.allow_hooks();
-        // The listings' `armed`: whether the tenant's set holds a hook's
-        // secret as a listing is written -- the router sets and takes them
-        // away while the tenant is open.
+        // The listings' `armed`: whether the tenant's set holds a hook that
+        // takes its events as a listing is written -- not one kept with
+        // `key delivery`, its events refused -- the router setting and
+        // taking them away while the tenant is open.
         let (store, tenant) = (Arc::clone(&self.hooks), name.to_string());
         db.arm_hooks(Arc::new(move |h| store.armed(&tenant, h)));
         self.hooks.log_unarmed(name, &db);

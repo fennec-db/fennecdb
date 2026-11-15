@@ -4,3 +4,5 @@
 * text=auto eol=lf
 # The font's licence holds CRLF as its authors wrote it, kept as it is.
 site/fonts/OFL-IBMPlexMono.txt -text
+# Files 0.2.0 sealed, opened byte for byte: no line ending is theirs.
+crates/fennec-http/tests/sealed-v1/** binary

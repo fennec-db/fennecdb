@@ -18,6 +18,16 @@ crate's `examples/` and `fennec-bench`'s binaries, wired to `make` targets,
 not to CI -- but for the perf gate's workloads
 (`crates/fennec-http/examples/gate.rs`), which CI counts in instructions on
 every pull request ([benchmarks.md](benchmarks.md#the-gate)).
+An example that is a check rather than a measurement runs in
+CI: fennec-ql's `corpus`, which `make fennecql-corpus` builds in this tree
+and in main's from an archive of it, run by the test job's two steps on
+the ubuntu runner -- against main, and against every corpus frozen at a
+tag (`integrations/fennecql-corpus/`) -- its reader held by
+`tools/test_fennecql_corpus.py` in the fmt job and in the test job's
+ubuntu leg, before the steps ([fennecql.md](fennecql.md#the-corpus)). It is an example, not a test,
+because it is built in two trees, BASE's taking this tree's file as it
+stands; its own tests (`test = true`), which only this tree builds, run
+with fennec-ql's.
 
 ## Skips
 
