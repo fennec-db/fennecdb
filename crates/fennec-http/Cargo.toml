@@ -21,6 +21,10 @@ fennec-tls = { workspace = true, optional = true }
 [dev-dependencies]
 # The tests' clients of an HTTPS listener.
 fennec-tls.workspace = true
+# The perf gate's `sync-apply` (examples/gate.rs): a replica's sync, which
+# only the native library builds otherwise. tools/perf_gate.py asks for it
+# on the command line too, for a base whose manifest predates this line.
+fennec-abi = { workspace = true, features = ["sync"] }
 
 [features]
 # `timing`: where a request's time goes, phase by phase, at `GET /_timing`
