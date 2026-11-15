@@ -2199,24 +2199,20 @@ fn torn_mark(cut: &[u8]) -> bool {
     cut.len() <= head.len() + SUM && cut.iter().zip(&head).all(|(&b, &m)| b == m || b == 0)
 }
 
-/// How many records a walk frames from `at` on: what a cut there takes. A
-/// head naming a collection no create gives frames by its length as any
-/// other of its kind, and as a version before framed and counted it: one
-/// record, the count going on past it, where the walk stops at it.
+/// How many records a walk frames from `at` on, by their kinds and
+/// lengths: what a cut there takes, never at the counter's head. A head
+/// naming a collection no create gives, which a walk stops at, frames as
+/// any other of its kind, and is counted as a version before counted it,
+/// the count going on past it -- by `framed_at` alone, where the walk and
+/// a framing of that head after it took 222 bytes more of the browser
+/// module.
 fn records_from(bytes: &[u8], at: usize) -> u64 {
-    let mut walk = Walk::stopping(bytes, at);
-    let mut n = 0;
-    loop {
-        match walk.next() {
-            Ok(Some(_)) => n += 1,
-            Ok(None) if walk.refused.take().is_some() && known(bytes[walk.pos]) => {
-                match framed_at(bytes, walk.pos) {
-                    Ok(Some((_, end))) => {
-                        n += 1;
-                        walk.pos = end;
-                    }
-                    _ => break,
-                }
+    let (mut at, mut n) = (at, 0);
+    while let Some(&kind) = bytes.get(at) {
+        match framed_at(bytes, at) {
+            Ok(Some((_, end))) if known(kind) => {
+                n += 1;
+                at = end;
             }
             _ => break,
         }
