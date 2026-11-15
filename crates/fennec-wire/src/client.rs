@@ -383,11 +383,16 @@ impl Write for Conn {
         }
     }
 
+    /// Records rustls holds go out here, a send that a signal's handler
+    /// may interrupt: nothing of a record is lost, and the flush is asked
+    /// again here, since `Writer::flush_to` asks no flush again as
+    /// `write_all` asks a write, and failed on it.
     fn flush(&mut self) -> stdio::Result<()> {
-        match self {
-            Conn::Plain(s) => s.flush(),
-            #[cfg(feature = "tls")]
-            Conn::Tls(s) => s.flush(),
+        loop {
+            match self.flush_once() {
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                done => return done,
+            }
         }
     }
 }
@@ -398,7 +403,32 @@ impl Conn {
     /// time out halfway through a message, which would leave the rest of it
     /// to be taken for the start of the next one: on a plain socket a peek,
     /// over TLS rustls taking whole records in (`TlsStream::readable`).
+    ///
+    /// A signal is no answer: a wait a signal's handler interrupted goes
+    /// on, for what is left of `wait`. Linux never restarts a `recv` on a
+    /// socket with a timeout, `SA_RESTART` or not (signal(7)), and every
+    /// socket here has one; a SIGINT or SIGTERM lands on the thread that
+    /// runs `fennec import --follow`'s follower, its main one, which waits
+    /// here nearly all the time it follows an idle table. Returned, the
+    /// `EINTR` was a broken stream: the follower closed it without ending
+    /// it, its slot left held, and said it would connect again.
     fn readable(&mut self, wait: Duration) -> stdio::Result<bool> {
+        let deadline = Instant::now() + wait;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.readable_within(left) {
+                Err(e) if e.kind() == ErrorKind::Interrupted => {
+                    if left.is_zero() {
+                        return Ok(false);
+                    }
+                }
+                got => return got,
+            }
+        }
+    }
+
+    /// [`Conn::readable`]'s one wait, which a signal may interrupt.
+    fn readable_within(&mut self, wait: Duration) -> stdio::Result<bool> {
         match self {
             Conn::Plain(sock) => {
                 // A zero timeout is refused by the socket, and means
@@ -428,6 +458,27 @@ impl Conn {
             Conn::Plain(s) => s.set_write_timeout(wait),
             #[cfg(feature = "tls")]
             Conn::Tls(s) => s.get_ref().set_write_timeout(wait),
+        }
+    }
+
+    /// One flush, which a signal may interrupt: `Until` looks at its
+    /// deadline between two, where [`Write::flush`]'s asking again would
+    /// not.
+    fn flush_once(&mut self) -> stdio::Result<()> {
+        match self {
+            Conn::Plain(s) => s.flush(),
+            #[cfg(feature = "tls")]
+            Conn::Tls(s) => s.flush(),
+        }
+    }
+
+    /// The socket made non-blocking, beneath TLS too: a write then takes
+    /// what fits at once and waits for nothing.
+    fn set_nonblocking(&self) -> stdio::Result<()> {
+        match self {
+            Conn::Plain(s) => s.set_nonblocking(true),
+            #[cfg(feature = "tls")]
+            Conn::Tls(s) => s.get_ref().set_nonblocking(true),
         }
     }
 }
@@ -1082,55 +1133,82 @@ impl WalStream {
     /// is dropped unread: nothing of it was applied, so nothing of it is
     /// confirmed, and it comes again from the slot.
     ///
-    /// `wait` bounds it all: the `CopyDone`'s write, and every read --
-    /// the rest of a message already begun and what was buffered with it
-    /// included, over TLS too (`Until`) -- where a read of the rest of a
-    /// message waited out the socket's own `TIMEOUT`, 30 s, a read. It
-    /// ends sooner, within [`CUT_LOOK`], once `cut` is set: the caller's
-    /// second stop. Either way the connection is then closed, and the
-    /// server lets the slot go once it reads that.
-    pub fn end(mut self, wait: Duration, cut: &AtomicBool) -> Result<()> {
-        let deadline = Instant::now() + wait;
-        // The write too: a server that reads nothing while it decodes
-        // leaves a write waiting once the buffers between are full -- not
-        // with the little feedback a follower sends, but nothing else would
-        // hold it then. The `Terminate` the drop sends is held to it as well.
-        let conn = self.client.stream.get_ref();
-        conn.set_write_timeout(wait).map_err(io)?;
-        let mut w = Writer::new();
-        w.msg(b'c', |_| {});
-        w.flush_to(self.client.stream.get_mut()).map_err(io)?;
+    /// `wait` bounds it all: the `CopyDone`'s write and every read -- the
+    /// rest of a message already begun and what was buffered with it
+    /// included, over TLS too, where a read of the rest of a message waited
+    /// out the socket's own `TIMEOUT`, 30 s, a read (`Until`) -- and the
+    /// `Terminate` of the close after it, which the drop sends only where
+    /// the socket takes it at once. A signal neither ends the wait nor
+    /// starts it again. It ends sooner, within [`CUT_LOOK`], once `cut` is
+    /// set: the caller's second stop. Either way the connection is then
+    /// closed, and the server lets the slot go once it reads that, if it
+    /// still holds it ([`Unended`] says which).
+    pub fn end(mut self, wait: Duration, cut: &AtomicBool) -> std::result::Result<(), Unended> {
         let mut r = Until {
             stream: &mut self.client.stream,
-            deadline,
+            deadline: Instant::now() + wait,
             cut,
             gave: None,
         };
         let mut failed = None;
-        loop {
-            let m =
-                match read_message(&mut r) {
-                    Ok(m) => m,
-                    Err(e) => return Err(match r.gave {
-                        Some(Gave::Late) => io(format!(
-                            "the server did not end the replication stream within {wait:?}"
-                        )),
-                        Some(Gave::Cut) => io(
-                            "the wait for the server to end the replication stream was cut short",
-                        ),
-                        None if e.kind() == ErrorKind::UnexpectedEof => {
-                            io("the server closed the replication stream")
-                        }
-                        None => io(e),
-                    }),
-                };
-            match m.tag {
-                b'E' => failed = Some(server_error(&m)),
-                b'Z' => return failed.map_or(Ok(()), Err),
-                // CopyData still on its way, the server's CopyDone, its
-                // CommandComplete, a notice.
-                _ => {}
-            }
+        let ended = ending(&mut r, &mut failed);
+        match (ended, r.gave) {
+            (Ok(()), _) => failed.map_or(Ok(()), |e| Err(Unended::Failed(e))),
+            (Err(_), Some(Gave::Late)) => Err(Unended::Held(io(format!(
+                "the server did not end the replication stream within {wait:?}"
+            )))),
+            (Err(_), Some(Gave::Cut)) => Err(Unended::Held(io(
+                "the wait for the server to end the replication stream was cut short",
+            ))),
+            // The server's own error, when it closed after it.
+            (Err(e), None) => Err(Unended::Failed(failed.unwrap_or_else(|| {
+                if e.kind() == ErrorKind::UnexpectedEof {
+                    io("the server closed the replication stream")
+                } else {
+                    io(e)
+                }
+            }))),
+        }
+    }
+}
+
+/// [`WalStream::end`]'s exchange: `CopyDone` out, then the server's messages
+/// up to its `ReadyForQuery`, an error it sent kept in `failed`.
+fn ending(r: &mut Until<'_>, failed: &mut Option<Error>) -> stdio::Result<()> {
+    let mut w = Writer::new();
+    w.msg(b'c', |_| {});
+    w.flush_to(r)?;
+    loop {
+        let m = read_message(r)?;
+        match m.tag {
+            b'E' => *failed = Some(server_error(&m)),
+            b'Z' => return Ok(()),
+            // CopyData still on its way, the server's CopyDone, its
+            // CommandComplete, a notice.
+            _ => {}
+        }
+    }
+}
+
+/// Why [`WalStream::end`] returned short of the server's answer. The
+/// connection is closed either way, and the server lets the slot go once
+/// it reads that -- if it still holds it.
+#[derive(Debug)]
+pub enum Unended {
+    /// The server said nothing within the wait, or the wait was cut short:
+    /// it is busy -- decoding a transaction -- and holds the slot until it
+    /// next reads the connection.
+    Held(Error),
+    /// The connection ended or failed first, or the server answered with
+    /// an error: its walsender may have let the slot go, as one that exits
+    /// or fails does, or not yet -- a proxy's close, a network's failure.
+    Failed(Error),
+}
+
+impl std::fmt::Display for Unended {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Unended::Held(e) | Unended::Failed(e) => e.fmt(f),
         }
     }
 }
@@ -1138,22 +1216,26 @@ impl WalStream {
 /// How often [`WalStream::end`] looks at its `cut` while it waits.
 pub const CUT_LOOK: Duration = Duration::from_millis(50);
 
-/// Why a read of [`Until`] gave up.
+/// Why a read or write of [`Until`] gave up.
 #[derive(Clone, Copy)]
 enum Gave {
     Late,
     Cut,
 }
 
-/// A connection read with every read held to a deadline and a flag. A read
-/// that would go to the socket -- the reader's buffer empty -- waits first
-/// for what is left (`Conn::readable`: a peek, or rustls taking whole
-/// records in), in slices of [`CUT_LOOK`] so that `cut` is looked at, and
-/// reads only once bytes are there, which it then takes without waiting.
-/// No read blocks past the deadline, then, even in the middle of a message,
-/// whose rest a plain read would wait for under the socket's timeout.
-/// What it stops in the middle of is never read on: the connection is
-/// closed after it.
+/// A connection read and written with every wait held to a deadline and a
+/// flag. A read that would go to the socket -- the reader's buffer empty --
+/// waits first for what is left (`Conn::readable`: a peek, or rustls taking
+/// whole records in), and reads only once bytes are there, which it then
+/// takes without waiting; a write waits for room no longer than what is
+/// left, the socket's write timeout set to it before each try. Either
+/// waits in slices of [`CUT_LOOK`], so that `cut` is looked at, and goes
+/// on after a signal for what is left: no read or write blocks past the
+/// deadline, then, even in the middle of a message, whose rest a plain
+/// read would wait for under the socket's timeout, nor at a full send
+/// buffer, nor starts its wait again at each signal, as `read_exact` and
+/// `write_all`, asking again, would. What it stops in the middle of is
+/// never read or written on: the connection is closed after it.
 struct Until<'a> {
     stream: &'a mut BufReader<Conn>,
     deadline: Instant,
@@ -1161,24 +1243,66 @@ struct Until<'a> {
     gave: Option<Gave>,
 }
 
+impl Until<'_> {
+    /// The next wait: a slice of what is left, or, cut or past the
+    /// deadline, the error that gives up, `gave` saying why.
+    fn slice(&mut self) -> stdio::Result<Duration> {
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        let gave = if self.cut.load(Ordering::SeqCst) {
+            Gave::Cut
+        } else if left.is_zero() {
+            Gave::Late
+        } else {
+            return Ok(left.min(CUT_LOOK));
+        };
+        self.gave = Some(gave);
+        // Not `Interrupted`, which `read_exact` and `write_all` would ask
+        // again.
+        Err(ErrorKind::TimedOut.into())
+    }
+
+    /// `step` -- a write, or a flush of what rustls holds -- tried until
+    /// it is done or the wait is over: a try that took nothing as the
+    /// slice ran out, or that a signal interrupted, is made again.
+    fn sending<T>(
+        &mut self,
+        mut step: impl FnMut(&mut Conn) -> stdio::Result<T>,
+    ) -> stdio::Result<T> {
+        loop {
+            let wait = self.slice()?;
+            let conn = self.stream.get_mut();
+            conn.set_write_timeout(wait)?;
+            match step(conn) {
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+                    ) => {}
+                done => return done,
+            }
+        }
+    }
+}
+
 impl Read for Until<'_> {
     fn read(&mut self, buf: &mut [u8]) -> stdio::Result<usize> {
         while self.stream.buffer().is_empty() {
-            let left = self.deadline.saturating_duration_since(Instant::now());
-            let gave = if self.cut.load(Ordering::SeqCst) {
-                Gave::Cut
-            } else if left.is_zero() {
-                Gave::Late
-            } else if self.stream.get_mut().readable(left.min(CUT_LOOK))? {
+            let wait = self.slice()?;
+            if self.stream.get_mut().readable(wait)? {
                 break;
-            } else {
-                continue;
-            };
-            self.gave = Some(gave);
-            // Not `Interrupted`, which `read_exact` would ask again.
-            return Err(ErrorKind::TimedOut.into());
+            }
         }
         self.stream.read(buf)
+    }
+}
+
+impl Write for Until<'_> {
+    fn write(&mut self, buf: &[u8]) -> stdio::Result<usize> {
+        self.sending(|c| c.write(buf))
+    }
+
+    fn flush(&mut self) -> stdio::Result<()> {
+        self.sending(|c| c.flush_once())
     }
 }
 
@@ -1209,11 +1333,19 @@ fn wal_message(b: &[u8]) -> Result<Wal> {
 }
 
 impl Drop for Client {
+    /// Terminate, which lets the server close the connection cleanly --
+    /// sent only where the socket takes it at once. A drop waits for
+    /// nothing: where the send buffer is full the server is reading
+    /// nothing, and the close tells it as much once it reads. Waiting held
+    /// a stop's end a whole `wait` past its bound, and a failed follower's
+    /// return -- which `fennec-server`'s mirror stores its exit code after
+    /// -- with no bound at all.
     fn drop(&mut self) {
-        // Terminate: let the server close the connection cleanly.
-        let mut w = Writer::new();
-        w.msg(b'X', |_| {});
-        let _ = w.flush_to(self.stream.get_mut());
+        if self.stream.get_ref().set_nonblocking().is_ok() {
+            let mut w = Writer::new();
+            w.msg(b'X', |_| {});
+            let _ = w.flush_to(self.stream.get_mut());
+        }
     }
 }
 
@@ -1545,5 +1677,115 @@ mod tests {
             .err()
             .unwrap();
         assert!(e.to_string().contains("not 4294967295"), "{e}");
+    }
+
+    // ------------------------------------------------ a full send buffer
+
+    /// A socket's send or receive buffer set to 64 KiB, which stops the
+    /// system growing it, and the fill below quick. libc's `setsockopt`,
+    /// declared here as the crates declare what they take of it.
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+    fn fixed_buffer(sock: &impl std::os::fd::AsRawFd, send: bool) {
+        extern "C" {
+            fn setsockopt(fd: i32, level: i32, name: i32, value: *const i32, len: u32) -> i32;
+        }
+        #[cfg(target_vendor = "apple")]
+        let (level, sndbuf, rcvbuf) = (0xffff, 0x1001, 0x1002);
+        #[cfg(target_os = "linux")]
+        let (level, sndbuf, rcvbuf) = (1, 7, 8);
+        let name = if send { sndbuf } else { rcvbuf };
+        let size: i32 = 64 << 10;
+        // SAFETY: an `int` the call reads, which outlives it.
+        let r = unsafe { setsockopt(sock.as_raw_fd(), level, name, &size, 4) };
+        assert_eq!(r, 0, "{}", std::io::Error::last_os_error());
+    }
+
+    /// A replication stream whose socket cannot send: the server, the
+    /// socket returned beside it, reads nothing, and the client's send
+    /// buffer and the server's receive buffer are full. A server decoding
+    /// a long transaction reads nothing either; a follower fills nothing
+    /// with its little feedback, but nothing else holds its writes then.
+    /// Full for seconds, not for good: macOS makes room again some 5 s
+    /// later (the server's buffer compacted, the next window probe told of
+    /// it), and a blocked write goes through then.
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+    fn deaf() -> (WalStream, TcpStream) {
+        use std::net::TcpListener;
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        // An accepted socket takes the listener's.
+        fixed_buffer(&l, false);
+        let mut c = TcpStream::connect(l.local_addr().unwrap()).unwrap();
+        fixed_buffer(&c, true);
+        let (server, _) = l.accept().unwrap();
+        c.set_nonblocking(true).unwrap();
+        // Until a round takes nothing: what one took drains into the
+        // server's buffer until that is full as well, and room a delayed
+        // acknowledgement makes comes up to 200 ms later -- after a pause of
+        // 20 ms the 5 bytes of a `CopyDone` went through.
+        loop {
+            let mut took = 0;
+            while let Ok(n) = c.write(&[0u8; 4096]) {
+                took += n;
+            }
+            while let Ok(n) = c.write(&[0u8; 1]) {
+                took += n;
+            }
+            if took == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        c.set_nonblocking(false).unwrap();
+        c.set_read_timeout(Some(TIMEOUT)).unwrap();
+        let client = Client {
+            stream: BufReader::new(Conn::Plain(c)),
+            server_version: String::new(),
+        };
+        (WalStream { client }, server)
+    }
+
+    /// A server that reads nothing holds the end's `CopyDone` for as long
+    /// as the buffers stay full: the end is held to its wait all the same,
+    /// the `Terminate` after it too, where the drop's waited a whole wait
+    /// more -- twice the bound.
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+    #[test]
+    fn a_full_send_buffer_holds_the_end_no_longer_than_its_wait() {
+        let (wal, _server) = deaf();
+        let wait = Duration::from_secs(2);
+        let began = Instant::now();
+        let e = wal
+            .end(wait, &AtomicBool::new(false))
+            .unwrap_err()
+            .to_string();
+        let took = began.elapsed();
+        assert!(
+            e.contains("did not end the replication stream within"),
+            "{e}"
+        );
+        assert!(
+            took >= wait && took < wait + Duration::from_secs(1),
+            "{took:?}"
+        );
+    }
+
+    /// A client dropped with its send buffer full returns at once, its
+    /// `Terminate` unsent: the close says as much to a server once it
+    /// reads. A failed follower's drop waited for room, with no bound,
+    /// before `fennec-server` could store its exit code: for good on Linux,
+    /// and here until macOS made room, seconds after the 2 s allowed.
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+    #[test]
+    fn a_drop_never_waits_for_the_server() {
+        let (wal, _server) = deaf();
+        let (dropped, told) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(wal);
+            let _ = dropped.send(());
+        });
+        assert!(
+            told.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "the drop's Terminate waited for room the server never made"
+        );
     }
 }

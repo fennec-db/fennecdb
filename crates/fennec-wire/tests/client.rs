@@ -693,3 +693,88 @@ fn ending_a_stream_stops_waiting_once_cut() {
         assert!(w.terminated.recv().unwrap(), "the connection was not ended");
     }
 }
+
+/// SIGUSR1 sent to one thread, its handler doing nothing, installed as the
+/// shell installs its own (`signal`, `SA_RESTART`): Linux restarts no
+/// `recv` on a socket with a timeout all the same (signal(7)) -- and every
+/// socket of the client's has one -- and fails it with `EINTR`; macOS
+/// restarts it, and `siginterrupt` gives it Linux's way there. A
+/// process-directed SIGINT or SIGTERM lands so on the thread that runs
+/// `fennec import --follow`'s follower, its main one. libc's calls are
+/// declared here, as the crates declare what they take of it, to add no
+/// dependency.
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+pub mod interrupt {
+    use std::os::unix::thread::RawPthread;
+
+    #[cfg(target_os = "linux")]
+    const SIGUSR1: i32 = 10;
+    #[cfg(target_vendor = "apple")]
+    const SIGUSR1: i32 = 30;
+
+    extern "C" {
+        fn signal(sig: i32, handler: usize) -> usize;
+        #[cfg(target_vendor = "apple")]
+        fn siginterrupt(sig: i32, flag: i32) -> i32;
+        fn pthread_kill(thread: RawPthread, sig: i32) -> i32;
+    }
+
+    extern "C" fn nothing(_sig: i32) {}
+
+    /// SIGUSR1 handled, by nothing, and on macOS restarting nothing it
+    /// cuts.
+    pub fn arm() {
+        static ARMED: std::sync::Once = std::sync::Once::new();
+        ARMED.call_once(|| unsafe {
+            signal(SIGUSR1, nothing as *const () as usize);
+            #[cfg(target_vendor = "apple")]
+            siginterrupt(SIGUSR1, 1);
+        });
+    }
+
+    /// SIGUSR1 to `thread`, a thread not yet joined.
+    pub fn send(thread: RawPthread) {
+        unsafe { pthread_kill(thread, SIGUSR1) };
+    }
+}
+
+/// A signal is neither a failure of the end's wait nor a new start of it:
+/// signals every 2 ms through the end of a stream -- the server answering,
+/// silent, or stopped in the middle of a message -- and the end comes out
+/// as it would without them, a silent server's when its wait is out. A
+/// wait begun again at each signal would outlast them all, 10 s.
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+#[test]
+fn a_signal_neither_fails_nor_lengthens_the_end_of_a_stream() {
+    use std::os::unix::thread::JoinHandleExt;
+    interrupt::arm();
+    for then in [Then::Answers, Then::Decodes, Then::Stalls] {
+        let (wal, w) = streaming(then);
+        let wait = Duration::from_millis(500);
+        let began = Instant::now();
+        let ender = std::thread::spawn(move || {
+            wal.end(wait, &AtomicBool::new(false))
+                .map_err(|e| e.to_string())
+        });
+        let until = Instant::now() + Duration::from_secs(10);
+        while !ender.is_finished() && Instant::now() < until {
+            interrupt::send(ender.as_pthread_t());
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let ended = ender.join().unwrap();
+        let took = began.elapsed();
+        if then == Then::Answers {
+            assert_eq!(ended, Ok(()));
+            assert!(w.released.load(Ordering::SeqCst));
+        } else {
+            let e = ended.unwrap_err();
+            assert!(
+                e.contains("did not end the replication stream within"),
+                "{e}"
+            );
+            assert!(took >= wait, "{took:?}");
+            assert!(took < Duration::from_secs(5), "{took:?}");
+        }
+        assert!(w.terminated.recv().unwrap(), "the connection was not ended");
+    }
+}
