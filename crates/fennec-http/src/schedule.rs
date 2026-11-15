@@ -470,8 +470,8 @@ fn scheduler(stop: fn()) {
 fn looking() {
     loop {
         for w in due() {
-            #[cfg(debug_assertions)]
-            debug_fault();
+            #[cfg(feature = "test-clock")]
+            test_fault();
             if let Some(db) = w.db.upgrade() {
                 w.woken.store(false, Ordering::Release);
                 look(&w, &db, now_ms(), true, None);
@@ -480,15 +480,20 @@ fn looking() {
     }
 }
 
-/// A debug build's fault -- `cargo test`'s binaries; a release compiles
-/// none: with `FENNEC_TEST_SCHEDULER_PANIC` set, the scheduler's thread
-/// panics outside any run as a database comes due, a file's or a node's
-/// tenant's. No failure a release can meet ends that thread on demand, and
+/// A test build's fault, behind `test-clock` with the test build's clock:
+/// with `FENNEC_TEST_SCHEDULER_PANIC` set, the scheduler's thread panics
+/// outside any run as a database comes due, a file's or a node's tenant's.
+/// No failure a release can meet ends that thread on demand, and
 /// fennec-server's `tests/scheduled.rs` stops a real server's scheduler
 /// with this to hold the server's exit to 1 (`durability::stop_failed`):
 /// the unit tests here see `stop` called, never the code it exits with.
-#[cfg(debug_assertions)]
-pub(crate) fn debug_fault() {
+/// Behind `debug_assertions` it was live in every debug fennec-server --
+/// `cargo run`, the one the web tests start -- and a release test build
+/// (`cargo test --release`) waited for it in vain; the feature is held out
+/// of a release by `tools/release_features_check.py` and release.yml's
+/// `+test-clock` check, and a build without it never reads the variable.
+#[cfg(feature = "test-clock")]
+pub(crate) fn test_fault() {
     if std::env::var_os("FENNEC_TEST_SCHEDULER_PANIC").is_some() {
         panic!("FENNEC_TEST_SCHEDULER_PANIC is set");
     }

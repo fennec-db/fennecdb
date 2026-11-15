@@ -410,6 +410,18 @@ jobs:
             tenants::tests::a_tenant_busy_as_its_clock_shift_ends_takes_the_systems_clock_back \
             | tee /dev/stderr | grep -q 'test result: ok. 1 passed'
 
+      # The scheduler's stop ends fennec-server with 1, held on a real server
+      # through the scheduler's fault (`FENNEC_TEST_SCHEDULER_PANIC`), which
+      # is a test build's, behind `test-clock` with its clock: a debug build
+      # without it -- `cargo run`'s, the web tests' -- reads no such
+      # variable. Built with the feature here, the test named whole.
+      - name: A scheduler's failure ends the server with 1
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo test -p fennec-server --features test-clock --test all -- --exact \
+            scheduled::a_scheduler_s_failure_ends_the_server_with_1 \
+            | tee /dev/stderr | grep -q 'test result: ok. 1 passed'
+
       # fennec studio (`--studio`) in the runner's Chrome against the debug
       # fennec-server `make test` built: signed in with the server's token
       # and as one user of a policy, a scroll through 100 000 rows held to

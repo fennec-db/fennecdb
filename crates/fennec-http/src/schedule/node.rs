@@ -352,8 +352,8 @@ impl Node {
             match due {
                 Some((name, st)) => {
                     // Outside the look's own catch: the node's thread ends.
-                    #[cfg(debug_assertions)]
-                    super::debug_fault();
+                    #[cfg(feature = "test-clock")]
+                    super::test_fault();
                     self.look_caught(&tenants, &name, st, now_ms(), true, None)
                 }
                 None => {
