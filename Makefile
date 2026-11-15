@@ -405,14 +405,17 @@ fennecql-corpus:
 # fuzz.yml). Moved forward in a pull request of its own.
 FUZZ_NIGHTLY ?= nightly-2026-11-01
 FUZZ_SECONDS ?=
-# Flags for each run, CI's: `--private --corpus none` (a finding says its
-# recipe alone), the weekly run's `--seed`.
+# Flags for each run, CI's: `--corpus none`, and the weekly run's
+# `--private` (a finding says its recipe alone) and `--seed`.
 FUZZ_FLAGS ?=
 ASAN ?= 0
 FUZZ_HOST = $(shell $(CARGO) -vV | sed -n 's/^host: //p')
+comma := ,
 # AddressSanitizer, and LLVM's coverage counters on every edge, which the
 # fuzzer reads to keep the inputs reaching new ones (crates/fennec-fuzz/src/cover.rs).
-FUZZ_RUSTFLAGS = -Zsanitizer=address -Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=3 -Cllvm-args=-sanitizer-coverage-inline-8bit-counters
+# On Linux the binary's `getrandom`, std's hash keys fixed, exported too:
+# std may look it up by name (crates/fennec-fuzz/src/main.rs).
+FUZZ_RUSTFLAGS = -Zsanitizer=address -Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=3 -Cllvm-args=-sanitizer-coverage-inline-8bit-counters $(if $(findstring linux,$(FUZZ_HOST)),-Clink-arg=-Wl$(comma)--export-dynamic-symbol=getrandom)
 FUZZ_BIN = $(if $(filter 1,$(ASAN)),target/$(FUZZ_HOST)/fuzz/fennec-fuzz,target/fuzz/fennec-fuzz)
 
 ## The fuzzer (crates/fennec-fuzz, docs/design/conventions.md#fuzzing): its
@@ -431,13 +434,17 @@ else
 endif
 	@if [ -z "$(TARGET)" ]; then $(FUZZ_BIN) list; else $(FUZZ_BIN) run $(TARGET) $(if $(FUZZ_SECONDS),--seconds $(FUZZ_SECONDS)) $(FUZZ_FLAGS); fi
 
-## Every target of the fuzzer for FUZZ_SECONDS (30) under AddressSanitizer,
-## guided by coverage: CI's fuzz-smoke job. SMOKE_ASAN=0 runs a plain build
+## Every target of the fuzzer for a count of runs its own (`--smoke`, about
+## 30 s each on CI) under AddressSanitizer, guided by coverage, from the
+## repository's seeds alone: CI's fuzz-smoke job. A count, never a time: a
+## commit's smoke hands each the same inputs on any machine of a platform,
+## and ends on the same line. FUZZ_SECONDS=N runs each that long instead;
+## SMOKE_ASAN=0 a plain build
 SMOKE_ASAN ?= 1
 fuzz-smoke:
 	@$(MAKE) --no-print-directory fuzz ASAN=$(SMOKE_ASAN)
 	@bin=$(if $(filter 1,$(SMOKE_ASAN)),target/$(FUZZ_HOST)/fuzz/fennec-fuzz,target/fuzz/fennec-fuzz); \
-	for t in $$($$bin names); do $$bin run $$t --seconds $(or $(FUZZ_SECONDS),30) $(FUZZ_FLAGS) || exit 1; done
+	for t in $$($$bin names); do $$bin run $$t $(if $(FUZZ_SECONDS),--seconds $(FUZZ_SECONDS),--smoke) --corpus none $(FUZZ_FLAGS) || exit 1; done
 
 ## FUZZ_NIGHTLY, the one nightly the fuzzer is built with
 fuzz-toolchain:

@@ -297,7 +297,9 @@ AddressSanitizer's report end in `abort` -- ASan told so by
 `__asan_default_options` -- whose handler writes the input from where the
 run left it with nothing but system calls. A run past `--timeout-ms`
 (30 s of wall time: at 10 s a machine at a load of 40 took a 2.5 s input
-for a hang) is written by a watchdog thread, an allocation past
+for a hang) is written the same way by the handler of a timer the run
+sets (`setitimer`, `SIGALRM`) -- a watchdog thread beside the runs ran
+code the coverage counts, below -- an allocation past
 `--max-alloc-mb` (2 GiB) aborts before it is made: a length read off the
 input and allocated before it met the input. A run is on a thread of a
 server's connection's stack, 8 MiB (`RUN_STACK`), so what overflows here
@@ -312,7 +314,7 @@ took, so a seed, the start and the runs kept make the same inputs again, on
 another machine and in a build that counts no coverage; the fuzzer's own
 edges are taken as seen by a mutator of their own, which draws nothing from
 the run's. Whatever ends a run -- a panic, an abort's handler, the
-watchdog -- says its recipe (`guard::say_recipe`, with system calls alone):
+timer's -- says its recipe (`guard::say_recipe`, with system calls alone):
 the target, the run, the input's length and FNV hash, and the command that
 makes it again, `fennec-fuzz reproduce <target> --seed N --start HASH
 [--corpus DIR] --run N --fnv HASH --kept RUNS`, the start's fingerprint
@@ -322,10 +324,38 @@ in base 36. `reproduce` checks both hashes, writes the input and runs it as
 and made into its input, an abort's from its handler in a child process,
 a run's input following the runs kept before it, and every target's start
 the same bytes in two processes -- the `image` target's seeds are files
-the engine writes, which must hold no clock, path or hash map's order.
-Coverage itself is not reproducible -- a hash map's random keys, threads,
-the platform's own code -- which is why the corpus's growth is written
-down rather than taken again.
+the engine writes, which must hold no clock, path or hash map's order --
+and a run past its timeout, from the timer's handler.
+
+*What a run reaches is the same in every process of a platform*, so a
+count of runs from a seed keeps the same inputs wherever it runs, and
+`make fuzz-smoke` -- each target for a count of its own (`Target::smoke`,
+`--smoke`), from the repository's seeds alone (`--corpus none`) -- ends
+each target on the same line on every runner: the runs, the seed, the
+corpus's size and fingerprint, the edges (the time on the line before).
+Four things made one process keep an input another did not, found by
+running a target twice for the same count and comparing those lines --
+`codec` kept 597 inputs in one process and 601 in the next over 20 000
+runs, `image` 1 052 and 1 040 over 15 000, its seeds alone reaching 13 298
+edges in one and 13 301 in the other. std's hash maps were keyed at random
+in each process, and a map's probes are code the counters count: the
+binary takes std's call for keys (`CCRandomGenerateBytes` on Apple's
+systems, `getrandom` on Linux, which the Makefile exports too, should std
+look it up by name) and hands back the same bytes each time, and a run
+says where it could not (`guard::KEYS_FIXED`); with keys drawn at random
+`codec` stayed the same and `image` did not. The engine's tasks cut in
+shares over threads -- an image's index of its frames, a graph's lists,
+its copies table, a batch's links -- bumped the same counters unlocked,
+losing counts as the scheduler had it: the fuzzer holds them to the
+thread that asked (`fennec_core::one_thread`, each share the same work
+either way, [hnsw.md](hnsw.md#parallel-linking)), which `image` needed
+with the keys fixed. A watchdog thread woke beside the runs, its code
+counted in whichever run was in flight: a timer now. And progress was said
+every five seconds, a clock's comparison counted in the next run: where a
+count bounds the run it is said by the count. The platform's own code
+differs -- a commit's smoke is the same on every Linux runner and on
+every Mac, not on both -- and the counts were set from CI's runner, about
+30 s each under ASan.
 
 *A finding is a regression test in its own crate*, the input's bytes or
 the file made by hand, failing before the fix. The pull request that added
@@ -365,17 +395,47 @@ left for a decision: JSON's reader takes a number past a double's range,
 the `json` target holds its round trip to finite values until that is
 decided.
 
-*CI* runs each target for 30 s under ASan on every pull request and push
-(ci.yml's `fuzz-smoke`, `make fuzz-smoke`) and for 30 minutes each on
-Sundays (`fuzz.yml`). The repository is public, and so are a job's log and
-its artifacts for 90 days, while SECURITY.md asks a finding be reported
-privately: so a job keeps no input and no corpus, and says no message and
-no backtrace (`--private`; ASan's report goes into a file of the runner's,
-`ASAN_OPTIONS=log_path`), only the recipe and the commit, from which a
-maintainer makes the input again on a machine of their own. The first
-version kept a finding's input and backtrace as the job's artifact, and
-carried the weekly corpus from week to week in the Actions cache: inputs
-no maintainer holds, which no recipe could make again. Each week starts
+CI's smoke was red from the day the fuzzer landed, red or green by its
+runner's speed as 30 s reached a finding or not: three runs on two
+commits failed, a fourth passed. It had found a point 64 lists down read
+as a value 65 levels deep (`codec`,
+[crates.md](crates.md#how-deep-a-value-nests)), and a record naming
+collection `u32::MAX`, whose `cid + 1` overflowed in the open and in a
+replica's apply (`image`, `tests/damage.rs`): a record's collection is now
+one a create gives, below the last `u32`, or the record is damage --
+one past `u32` among them, which `as u32` had read as another
+collection's -- and a create in a file that gave the last id is refused.
+Making the smoke reproducible found one more, a stored vector's count
+multiplied unchecked where an open restoring a graph reads the
+documents' vectors (`store::tests`), and a sparse vector's dimension went
+the way of the collection's id (`codec::tests`). Each finding's input is a
+seed of its target since (`crates/fennec-fuzz/seeds/<target>/`), every run
+handing it over again. Ten minutes each of `codec` and `image` under ASan
+and three of every other target, a round a seed, found nothing more: two
+rounds with the first two fixed (`codec` 1 807 846 and 1 143 649 runs,
+`image` 641 173 and 347 255), then with every fix, going on from their
+corpus (`codec` 1 408 861, `image` 342 251) and from the seeds alone
+(542 458 and 134 768, on a machine others held at a load of 20 to 100).
+Two runs of `make fuzz-smoke` in a row, one at a load near 100 and one
+near 20, ended each target on the same line.
+
+*CI* runs each target for its count of runs under ASan on every pull
+request and push (ci.yml's `fuzz-smoke`, `make fuzz-smoke`), about 30 s
+each on its runner, and for 30 minutes each on Sundays (`fuzz.yml`), by
+the clock and from a seed of each week's own (the run's number), to look
+where the smoke does not. The repository is public, and so are a job's
+log and its artifacts for 90 days, while SECURITY.md asks a finding be
+reported privately. The smoke's inputs are its commit's, which anyone
+makes again with `make fuzz-smoke`: it says a panic's message and where
+it was raised, and ASan's report, and keeps no input and no corpus. The
+weekly run's are its week's: it keeps no input and no corpus, and says no
+message and no backtrace (`--private`; ASan's report goes into a file of
+the runner's, `ASAN_OPTIONS=log_path`), only the recipe and the commit,
+from which a maintainer makes the input again on a machine of their own.
+The first version kept a finding's input and backtrace as the job's
+artifact, and carried the weekly corpus from week to week in the Actions
+cache: inputs no maintainer holds, which no recipe could make again. And
+it gave the smoke 30 s, so its inputs were its runner's. Each week starts
 from the repository's seeds instead, its seed the run's number, so each
 week's mutations are its own. Not yet fuzzed, after 1.0: a sealed archive's
 and a backup's frames (`seal.rs`), an archive's segments, PostgreSQL's

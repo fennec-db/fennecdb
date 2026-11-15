@@ -6,11 +6,12 @@
 //!     fennec-fuzz replay <target> <file>...  run one over inputs, as a finding is reproduced
 //!     fennec-fuzz reproduce <target> <recipe>  a finding's input made again from its recipe, and run
 //!
-//! run's options: --seconds N, --runs N, --seed N, --corpus DIR (kept
-//! inputs, read at the start; default target/fuzz/corpus/<target>, `none`
-//! for none), --crashes DIR (default target/fuzz/crashes), --timeout-ms N
-//! (default 30000), --max-alloc-mb N (default 2048), --quiet, --private (a
-//! finding says its recipe alone: CI's).
+//! run's options: --seconds N, --runs N, --smoke (the runs `make fuzz-smoke`
+//! gives the target), --seed N, --corpus DIR (kept inputs, read at the
+//! start; default target/fuzz/corpus/<target>, `none` for none), --crashes
+//! DIR (default target/fuzz/crashes), --timeout-ms N (default 30000),
+//! --max-alloc-mb N (default 2048), --quiet, --private (a finding says its
+//! recipe alone: the weekly run's).
 //!
 //! A finding says its recipe -- `--seed N --start HASH [--corpus DIR] --run
 //! N --fnv HASH --kept RUNS` -- which `reproduce` takes, writing the input
@@ -24,12 +25,52 @@
 
 use fennec_fuzz::targets::TARGETS;
 use fennec_fuzz::{Options, Outcome};
+use std::os::raw::c_void;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
+/// std's hash maps take their keys from the system's random source, and a
+/// map's probes are code the coverage counts: keyed anew in each process,
+/// one input reached other counts in another, and what the corpus took --
+/// every input after it -- was that process's alone. The fuzzer's process
+/// takes the same bytes each time std asks, so a seed and a count of runs
+/// make the same inputs on every machine of a platform
+/// (docs/design/conventions.md#fuzzing): its keys are none of a server's.
+/// Defined in the binary, an object the linker always takes, so std's
+/// reference binds here rather than to the system's -- on Apple's systems
+/// `CCRandomGenerateBytes`, on Linux `getrandom`, a weak reference the
+/// Makefile exports this one for too, should std look it up by name.
+fn fixed_bytes(buf: *mut u8, len: usize) {
+    for i in 0..len {
+        // SAFETY: the `len` bytes at `buf` std handed to be filled.
+        unsafe { *buf.add(i) = (i as u8).wrapping_mul(0x9d) ^ 0x5a };
+    }
+    fennec_fuzz::guard::KEYS_FIXED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// # Safety
+///
+/// `bytes` holds `count` bytes to be written, as the system's call takes.
+#[cfg(target_vendor = "apple")]
+#[no_mangle]
+pub unsafe extern "C" fn CCRandomGenerateBytes(bytes: *mut c_void, count: usize) -> i32 {
+    fixed_bytes(bytes.cast(), count);
+    0
+}
+
+/// # Safety
+///
+/// `buf` holds `len` bytes to be written, as the system's call takes.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[no_mangle]
+pub unsafe extern "C" fn getrandom(buf: *mut c_void, len: usize, _flags: u32) -> isize {
+    fixed_bytes(buf.cast(), len);
+    len as isize
+}
+
 const USAGE: &str = "usage: fennec-fuzz list | names | run <target> [--seconds N] [--runs N] \
-    [--seed N] [--corpus DIR|none] [--crashes DIR] [--timeout-ms N] [--max-alloc-mb N] [--quiet] \
+    [--smoke] [--seed N] [--corpus DIR|none] [--crashes DIR] [--timeout-ms N] [--max-alloc-mb N] [--quiet] \
     [--private] | replay <target> <file>... | reproduce <target> --seed N --start HASH \
     [--corpus DIR] --run N --fnv HASH --kept RUNS [--out FILE]";
 
@@ -109,6 +150,7 @@ fn run(args: &[String]) -> ExitCode {
         match flag.as_str() {
             "--seconds" => opts.seconds = Some(number(value())),
             "--runs" => opts.runs = Some(number(value())),
+            "--smoke" => opts.runs = Some(t.smoke),
             "--seed" => opts.seed = number(value()),
             "--corpus" => {
                 opts.corpus = match value() {

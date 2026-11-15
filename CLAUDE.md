@@ -557,7 +557,7 @@ Covers `crates/fennec-bench/`.
   takes a system-picked port, held by a stand-in listener till then.
 - [Every parser of untrusted bytes is fuzzed](docs/design/conventions.md#fuzzing)
   by `crates/fennec-fuzz`, the repository's own mutator under ASan (`make
-  fuzz` lists the targets; CI's `fuzz-smoke` runs each 30 s, `fuzz.yml`
+  fuzz` lists targets; CI's `fuzz-smoke` runs each by count, `fuzz.yml`
   weekly): a new parser owes its target and `fuzz.yml`'s matrix line, a
   finding a regression test in its own crate.
 - [A secret is compared by `crypto::ct_eq` alone](docs/design/conventions.md#secrets-compared)

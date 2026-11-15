@@ -15,6 +15,7 @@ pub static TARGETS: &[Target] = &[
         name: "http",
         about: "fennec_http::http::read_request: a request's head, its body by length or chunked, pipelined, read whole or a few bytes at a time",
         max_len: 64 << 10,
+        smoke: 120_000,
         seeds: http_seeds,
         dictionary: HTTP_TOKENS,
         run: http,
@@ -23,6 +24,7 @@ pub static TARGETS: &[Target] = &[
         name: "json",
         about: "fennec_core::json: parse_json, parse, a page's documents and a query's parameters; what parses is written back and read as itself",
         max_len: 64 << 10,
+        smoke: 70_000,
         seeds: json_seeds,
         dictionary: JSON_TOKENS,
         run: json,
@@ -31,6 +33,7 @@ pub static TARGETS: &[Target] = &[
         name: "fennecql",
         about: "fennec_ql::parse and parse_exact, FennecQL and SQL's spellings, over the repository's corpus of texts",
         max_len: 16 << 10,
+        smoke: 180_000,
         seeds: fennecql_seeds,
         dictionary: FENNECQL_TOKENS,
         run: fennecql,
@@ -39,6 +42,7 @@ pub static TARGETS: &[Target] = &[
         name: "codec",
         about: "fennec_core::codec: a value's and a type's encoding decoded, skipped, read by a path and as a document's fields",
         max_len: 64 << 10,
+        smoke: 60_000,
         seeds: codec_seeds,
         dictionary: CODEC_TOKENS,
         run: codec,
@@ -47,6 +51,7 @@ pub static TARGETS: &[Target] = &[
         name: "image",
         about: "a .fennec file opened read into memory (Database::load) and mapped as a server opens it (load_mapped: an image's index of its frames adopted, in shares on threads, the rest replayed in place), each read whole, its indexes built and its vectors linked, and its records applied as a replica applies a primary's",
         max_len: 256 << 10,
+        smoke: 35_000,
         seeds: image_seeds,
         dictionary: IMAGE_TOKENS,
         run: image,
@@ -55,6 +60,7 @@ pub static TARGETS: &[Target] = &[
         name: "sqlite",
         about: "fennec_import::sqlite: a SQLite file's schema found, its table's rows read and counted",
         max_len: 64 << 10,
+        smoke: 80_000,
         seeds: sqlite_seeds,
         dictionary: SQLITE_TOKENS,
         run: sqlite,
@@ -91,6 +97,19 @@ fn seeds_dir() -> PathBuf {
         Some(d) => PathBuf::from(d),
         None => repo().join("target/fuzz/seeds"),
     }
+}
+
+/// The inputs the repository keeps for target `name`, in
+/// `crates/fennec-fuzz/seeds/<name>/`, in the order of their names: a
+/// target's fixtures, and each finding's input once it was fixed, so every
+/// run -- `cargo test` among them -- hands it the target again.
+fn kept_seeds(name: &str) -> Vec<Vec<u8>> {
+    let dir = repo().join("crates/fennec-fuzz/seeds").join(name);
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        .unwrap_or_default();
+    files.sort();
+    files.iter().filter_map(|f| std::fs::read(f).ok()).collect()
 }
 
 /// `with` before each of `inputs`: a target whose first byte picks how it
@@ -572,6 +591,7 @@ fn codec_seeds() -> Vec<Vec<u8>> {
         fennec_core::codec::encode_type(&mut b, &ty);
         s.push(b);
     }
+    s.extend(kept_seeds("codec"));
     s
 }
 
@@ -727,7 +747,10 @@ fn image_seeds() -> Vec<Vec<u8>> {
             files.push(b);
         }
     }
-    each_way(&files, 2)
+    // A finding's input carries the byte that says how it was read.
+    let mut seeds = each_way(&files, 2);
+    seeds.extend(kept_seeds("image"));
+    seeds
 }
 
 /// The collections of `db` read whole -- every document decoded, every
@@ -810,12 +833,7 @@ const SQLITE_TOKENS: &[&[u8]] = &[
 ];
 
 fn sqlite_seeds() -> Vec<Vec<u8>> {
-    let dir = repo().join("crates/fennec-fuzz/seeds/sqlite");
-    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).collect())
-        .unwrap_or_default();
-    files.sort();
-    files.iter().filter_map(|f| std::fs::read(f).ok()).collect()
+    kept_seeds("sqlite")
 }
 
 fn sqlite(data: &[u8]) {

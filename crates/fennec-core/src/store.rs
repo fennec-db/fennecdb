@@ -254,7 +254,7 @@ fn adopt_shares(
         parts.push(Mutex::new(part));
         rest = after;
     }
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let threads = crate::threads();
     let mut states = vec![(); threads.min(shares)];
     let done = crate::vector::spread(shares, &mut states, |_, i| {
         let mut part = parts[i].lock().unwrap_or_else(|e| e.into_inner());
