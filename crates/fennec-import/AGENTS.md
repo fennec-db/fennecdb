@@ -8,7 +8,11 @@
 
 **[`--follow` confirms nothing that is not on disk.](../../docs/design/replication.md#follow)**
 Every write is a put or delete by id; the mirror is a `fennec-server` thread,
-its collections' only writer. A wire message's length is held to
+its collections' only writer. A follower that stops ends its stream as the
+protocol does and returns with its slot let go (`WalStream::end`, 10 s at
+most), never closing a connection the walsender may not read for as long as
+a transaction takes it to decode: a slot is dropped, or followed again,
+right after. A wire message's length is held to
 `proto::MAX_MESSAGE` before anything is allocated (`proto::zeroed`), and
 the iteration count a server asks SCRAM for to `SCRAM_MAX_ITERATIONS`
 (2^22) before PBKDF2 runs, refused naming the range and what brings a
