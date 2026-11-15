@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-fennec-core's invariants -- storage, writes, indexes, the HNSW graph, vector and text search, `lookup` and aggregates, and the browser module's builds -- for code in `crates/fennec-core/`. The engine's lock and blocks -- prepared blocks and pinned reads -- are in [src/engine/CLAUDE.md](src/engine/CLAUDE.md), beside their code; the text index's words -- the tokenizer's fold and the table of words -- in [src/text/CLAUDE.md](src/text/CLAUDE.md): read it before changing `text.rs` or `text/`. The rules every change meets, and where every other area's are, are in the root's [CLAUDE.md](../../CLAUDE.md).
+fennec-core's invariants -- storage, writes, indexes, the HNSW graph, vector and text search, `lookup` and aggregates, and the browser module's builds -- for code in `crates/fennec-core/`. The engine's lock and blocks -- prepared blocks and pinned reads -- and the storage rules of its handover, maintenance beside the database and compaction are in [src/engine/CLAUDE.md](src/engine/CLAUDE.md), beside their code; the text index's words -- the tokenizer's fold and the table of words -- in [src/text/CLAUDE.md](src/text/CLAUDE.md): read it before changing `text.rs` or `text/`. The rules every change meets, and where every other area's are, are in the root's [CLAUDE.md](../../CLAUDE.md).
 
 ## Invariants
 
@@ -16,30 +16,9 @@ and a volume without POSIX renames or a share is read into memory
 (`fs::mappable`). In code, docs and site, "page cache" is the operating
 system's, a "buffer pool" a database's own, which fennecdb has none of.
 
-**[Writes are handed over to the mapped file.](../../docs/design/storage.md#handover)**
-Past `HANDOVER_AT` or `HANDOVER_DOCS`, `Database::hand_over` points the
-stores at it, never with a block open, the file the same byte for byte; on
-Windows at a view laid past the last, a mapping of many views let go of
-on a thread, not under the write lock (`map::Teardown`).
-
 **[A block past 16 MB spills into the file before it lands.](../../docs/design/storage.md#spills)**
 A spill (kind 10) counts only where a land (kind 11) names it; the feed
 sends the block as one record (`landed_block`).
-
-**[A lone `create index` or `compact` runs beside the database](../../docs/design/storage.md#maintenance-beside-the-database)**
-(`Database::maintain`): every write must pass `Database::note`; a schema
-change meanwhile fails it, and an image adopted meanwhile marks every tail
-changed (`Tails::all_changed`).
-
-**[A file compacts itself once half of it is dead](../../docs/design/storage.md#compaction)**
-and 64 MB: `CompactPolicy` is the one rule, run beside the database by
-`Compactor` or `fennec_http::link` (`--auto-compact`), on replicas too.
-
-**[A file is compacted before it outgrows the page cache](../../docs/design/storage.md#compaction-and-the-page-cache)**
-(`CompactPolicy::memory`) so its live records fit the cache's room
-(`cache::room`): once a third of what it writes is dead and the file
-reached `ROOM_SHARE` of that room or the process faults
-(`cache::faulting`), its own faults forgotten (`cache::forget_faults`).
 
 **[File format](../../docs/design/storage.md#file-format):** a record is
 `[kind][collection-id][length][body]`, its length always read; this

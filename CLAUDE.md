@@ -211,11 +211,7 @@ Covers `crates/fennec-core/`; the browser module's rules bind `crates/fennec-was
 
 *Storage*
 - No buffer pool of its own, and the file is mapped.
-- Writes are handed over to the mapped file.
 - A block past 16 MB spills into the file before it lands.
-- A lone `create index` or `compact` runs beside the database
-- A file compacts itself once half of it is dead
-- A file is compacted before it outgrows the page cache
 - File format
 - A value read off the bytes nests no deeper than JSON's limit.
 
@@ -311,6 +307,12 @@ Covers `crates/fennec-core/src/engine/`.
 *The engine's lock and blocks*
 - A block's documents are built beside the readers
 - A long read is pinned, and read with no lock held
+
+*Storage*
+- Writes are handed over to the mapped file.
+- A lone `create index` or `compact` runs beside the database
+- A file compacts itself once half of it is dead
+- A file is compacted before it outgrows the page cache
 
 ### `crates/fennec-core/src/text/CLAUDE.md`
 
