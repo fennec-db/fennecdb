@@ -551,6 +551,15 @@ impl FileSink {
     /// [`Database::load`]). Left there, it swallowed the first write
     /// appended after it -- acknowledged, and gone on the next open.
     pub fn cut(&mut self, len: usize) -> Result<()> {
+        // Out of the mapping first, which then covers no byte past the
+        // file's end: a page wholly past it is the process's end to read
+        // (`SIGBUS`), and the appends after the cut land in those bytes, in
+        // place, under every slice of the mapping a reader takes
+        // (`Mapping::as_ref`). Only an open cuts, before anything reads.
+        #[cfg(all(unix, target_pointer_width = "64"))]
+        if let Some(m) = &self.mapping {
+            m.cover(len);
+        }
         let mut disk = lock(&self.disk);
         disk.file.set_len(len as u64)?;
         disk.file.sync_data()?;
@@ -935,10 +944,13 @@ impl FileSink {
 /// writes nothing back -- they are the file's. `mmap` is declared here
 /// rather than taken from a crate, as `signal` is in fennec-server.
 ///
-/// The file is never truncated or written in place while mapped: writes
-/// append past the mapped length, and a rewrite (`compact`, `checkpoint`)
-/// renames a new file over it, so the mapping keeps the old one's pages
-/// until it is dropped.
+/// What a mapping covers is never cut or written in place: writes append
+/// past the mapped length, a rewrite (`compact`, `checkpoint`) renames a
+/// new file over it, so the mapping keeps the old one's pages until it is
+/// dropped, and the one cut, a torn tail at the open, takes the bytes past
+/// it out of the mapping first ([`FileSink::cut`]). A compact beside the
+/// database patches its side file's head in place, before that file's
+/// stores are the database's (`Database::finish_beside`).
 ///
 /// A database's own file is mapped with room past its end (`with_room`),
 /// which the appends grow into: the pages a write adds to the file are the
@@ -1089,16 +1101,24 @@ impl AsRef<[u8]> for Mapping {
     fn as_ref(&self) -> &[u8] {
         let len = self.len.load(std::sync::atomic::Ordering::Relaxed);
         // SAFETY: `ptr` starts a mapping of `reserved` bytes, live until
-        // `drop` and so for as long as `&self`; `len <= reserved` (`cover`
-        // takes no more) and is never past what the file holds -- a mapping
-        // is made and `cover`ed with the file's length after its writes --
-        // so no byte of the slice is a page past the file's end, which
-        // would fault. Those bytes do not change while the slice lives: the
-        // file is never written in place or cut while mapped (above),
-        // appends landing past `len` and a rewrite renaming a new file over
-        // it; another process doing either is what the `<file>.lock` every
-        // opener of a file to write holds keeps out (root CLAUDE.md,
-        // *Single writer*).
+        // `drop` and so for as long as `&self`, and `len <= reserved`
+        // (`cover` takes no more). `len` is never past what the file
+        // holds, so no byte of the slice is on a page past its end, which
+        // would fault: a mapping is made with the file's length, `cover`
+        // grows it only over bytes written (`written_through`), and the one
+        // cut, a torn tail at the open, takes the bytes past it out first
+        // (`FileSink::cut`). Nor does a byte of it change while the slice
+        // lives: appends land past `len`, a rewrite renames a new file over
+        // this one (root CLAUDE.md, *A storage error stops writes*), and
+        // the one write in place, the counter's head a compact beside the
+        // database patches into its side file (`finish_beside`), lands
+        // before that file's stores are the database's, on the one thread
+        // holding them, no slice of its mapping alive across it. Another
+        // process writing the file is what the `<file>.lock` every opener
+        // of a file to write holds keeps out (*Single writer*); a reader
+        // taking none (`open_read_only`) is the exception
+        // docs/design/conventions.md#unsafe-code names, a server's open
+        // cutting a torn tail past every record that reader reads.
         unsafe { std::slice::from_raw_parts(self.ptr, len) }
     }
 }
@@ -1422,8 +1442,8 @@ fn open_mapped_into(
         return windows::cut_and_open(db, deferred, sink, whole, wrap);
     }
     if whole < len {
-        // The pages past the cut stay mapped and are never read: no record
-        // points there.
+        // The pages past the cut stay mapped, past what the mapping covers
+        // ([`FileSink::cut`]): no record points there.
         sink.cut(whole)?;
     }
     db.set_sink(wrap(Box::new(sink))?);
@@ -1567,6 +1587,38 @@ mod tests {
                 "a sync stored {d} as durable, inside a record"
             );
         }
+        drop(sink);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A torn tail cut at the open (`open_mapped_into`) is cut out of the
+    /// mapping too. Left covered, a slice of the mapping held pages wholly
+    /// past the file's new end, which are the process's end to read
+    /// (`SIGBUS`), and the first appends after the cut landed in its bytes
+    /// in place, under every slice a reader took: what `Mapping::as_ref`
+    /// says never happens.
+    #[cfg(all(unix, target_pointer_width = "64"))]
+    #[test]
+    fn a_cut_takes_the_bytes_past_it_out_of_the_mapping() {
+        let dir = std::env::temp_dir().join(format!("fennecdb-fs-cut-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cut.fennec");
+        // Pages past the cut whatever the system's page: 4 KB, 16 KB, 64 KB.
+        let len = 3 << 16;
+        std::fs::write(&path, vec![7u8; len]).unwrap();
+        let (mut sink, _) = FileSink::open(&path).unwrap();
+        let mapping = Arc::new(Mapping::with_room(&lock(&sink.disk).file, len).unwrap());
+        sink.mapping = Some(mapping.clone());
+        sink.cut(100).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 100);
+        assert_eq!((*mapping).as_ref().len(), 100);
+        // Every page of what it covers read: one past the file's end would
+        // end this process.
+        touch(&(mapping.clone() as crate::store::Base));
+        sink.append(&[1, 2, 3]).unwrap();
+        sink.sync().unwrap();
+        assert_eq!((*mapping).as_ref(), &[7u8; 100][..]);
         drop(sink);
         let _ = std::fs::remove_dir_all(&dir);
     }

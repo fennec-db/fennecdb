@@ -70,7 +70,11 @@ types` open with `fs::open_read_only`, which maps the file at its length
 at the open, passes a record a server is in the middle of appending over
 as a torn tail, cuts nothing and plays no sync log -- the file only grows
 and is replaced only by rename, so the bytes it read are never written
-under it; it reads the file as it stood at the open. The shell refuses a
+under it; it reads the file as it stood at the open. The one exception is
+a server opening the file after a crash, which cuts a torn tail past every
+record the reader reads: only the reader's own open, walking the file at
+that moment, reads past it, and ends (`SIGBUS`)
+([conventions.md](conventions.md#unsafe-code)). The shell refuses a
 write there before the engine sees it: handed over, the read-only sink's
 refusal was a storage error, after which every write said so.
 
