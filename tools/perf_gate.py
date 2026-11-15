@@ -76,10 +76,13 @@ each entry, and each edit of the gate's own files, which `edits` names.
 The holdout (.github/workflows/perf-holdout.yml) replays merged pairs and
 knows what each must do: `--expect` names the workloads that fail and by
 which metric, and the check passes only when exactly those fail -- `pass`,
-when none does. A pair whose base predates what a workload's setup asks for
-names it with `--cannot-run` and the words the base's error says it in: held
-to nothing then, where a workload so named that the base ran, or did not
-for another reason, fails, as does any other the base did not run.
+when none does; a metric marked `?` may fail or not, for a figure its runs
+put within their spread of the bar. A pair whose base predates what a
+workload's setup asks for names it with `--cannot-run` and the words the
+base's error says it in, WHY_AT_LEAST characters at the least: held to
+nothing then, where a workload so named that the base ran, or did not for
+another reason, or this tree ran fewer than RUNS times, fails, as does any
+other the base did not run.
 
 `run` and `measure` count with valgrind, which runs on Linux: elsewhere they
 say so and exit 0 (on macOS, in Docker: docs/design/benchmarks.md#the-gate).
@@ -327,8 +330,9 @@ def judge(results, entries=(), threshold=THRESHOLD, base_names=None, cannot_run=
     not run, where a workload new to this tree is held to nothing.
     `cannot_run`, {name: why}, the holdout's: workloads a replayed base is
     known not to run, the words `why` in its error -- held to nothing where
-    the base did not run one and said so, failed where it ran one or did
-    not for another reason."""
+    the base did not run one and said so and this tree ran it RUNS times,
+    failed where the base ran one or did not for another reason, or this
+    tree ran it fewer times."""
     if results.get("metric") != "instructions":
         raise ValueError(f"these results hold {results.get('metric')!r}, not instructions")
     names = set(results["workloads"])
@@ -377,6 +381,11 @@ def judge(results, entries=(), threshold=THRESHOLD, base_names=None, cannot_run=
                 verdict = f"FAILED: named as one the base cannot run ({why}), and the base ran it"
             elif why not in (w.get("base_error") or ""):
                 verdict = f"FAILED: the base did not run it, its error not the one named ({why})"
+            elif len(head) < RUNS:
+                # Held to nothing on its base's side, it is held to its
+                # count on this tree's: a build that ran it fewer times
+                # crashed in a run, which no other row would say.
+                verdict = f"FAILED: the base cannot run it, as named, and this tree's ran it fewer than {RUNS} times"
             else:
                 verdict = None
             if verdict:
@@ -446,32 +455,67 @@ def failures_said(failures):
     return ", ".join(f"`{n}` {said(k)}" for n, k in sorted(failures.items())) or "none"
 
 
+# A cannot-run's words, the least: enough to tell the base's error from
+# another -- a crash, a panic -- where a word or two is in every error.
+WHY_AT_LEAST = 16
+
+
 def expected_of(text):
-    """`--expect`'s text read, {name: metrics}: `pass`, no workload failing,
-    or each workload that fails as `name:metric` -- `instructions`, `bytes`
-    or `both` -- apart by spaces or commas. Anything else is refused: an
-    expectation left empty is no `pass`."""
+    """`--expect`'s text read, {name: (must, may)}: `pass`, no workload
+    failing, or each workload named as `name:metrics` -- `instructions`,
+    `bytes` or `both`, two joined by `+` -- apart by spaces or commas, the
+    metrics it must fail by in `must`, those marked `?` in `may`: they may
+    fail or not, for a figure its runs put within their spread of the bar
+    (`a:bytes+instructions?`, `a:instructions?`). Anything else is refused:
+    an expectation left empty is no `pass`, a metric named twice no
+    expectation."""
     text = text.strip()
     if text == "pass":
         return {}
+    usage = (
+        "an expectation is `pass` or `<workload>:<metric>[+<metric>]`, "
+        "each `instructions`, `bytes` or `both`, `?` after one that may fail"
+    )
     out = {}
     for item in re.split(r"[\s,]+", text) if text else []:
-        name, _, metric = item.rpartition(":")
-        kinds = set(METRICS) if metric == "both" else {metric}
-        if not name or not kinds <= set(METRICS):
-            raise ValueError(f"an expectation is `pass` or `<workload>:instructions|bytes|both`: {item!r}")
+        name, _, metrics = item.rpartition(":")
+        if not name:
+            raise ValueError(f"{usage}: {item!r}")
+        must, may = set(), set()
+        for term in metrics.split("+"):
+            optional = term.endswith("?")
+            word = term[:-1] if optional else term
+            kinds = set(METRICS) if word == "both" else {word}
+            if not kinds <= set(METRICS):
+                raise ValueError(f"{usage}: {item!r}")
+            if kinds & (must | may):
+                raise ValueError(f"{item!r} names a metric twice")
+            (may if optional else must).update(kinds)
         if name in out:
             raise ValueError(f"{name!r} is expected twice")
-        out[name] = kinds
+        out[name] = (frozenset(must), frozenset(may))
     if not out:
-        raise ValueError("an expectation is `pass` or the workloads that fail, each `<workload>:<metric>`")
+        raise ValueError(f"{usage}: the workloads that fail, or `pass`")
     return out
+
+
+def expected_said(expected):
+    """{name: (must, may)} as a line, each as `--expect` spells it:
+    "`a` both, `b` bytes+instructions?", or "none"."""
+
+    def said(kinds, mark):
+        return ["both" + mark] if kinds == set(METRICS) else [k + mark for k in sorted(kinds)]
+
+    return ", ".join(
+        f"`{n}` {'+'.join(said(must, '') + said(may, '?'))}" for n, (must, may) in sorted(expected.items())
+    ) or "none"
 
 
 def cannot_run_of(text):
     """`--cannot-run`'s text read, {name: why}: `name[,name...]=why`, the
     workloads a replayed base cannot run and the words its error says why
-    in; none where the text is empty."""
+    in, WHY_AT_LEAST characters at the least; none where the text is
+    empty."""
     text = text.strip()
     if not text:
         return {}
@@ -480,22 +524,29 @@ def cannot_run_of(text):
     listed = [n for n in re.split(r"[\s,]+", names.strip()) if n]
     if not why or not listed:
         raise ValueError(f"a workload the base cannot run is named `<workload>[,<workload>...]=<its error's words>`: {text!r}")
+    if len(why) < WHY_AT_LEAST:
+        raise ValueError(
+            f"the words of the base's error tell it from another error, {WHY_AT_LEAST} characters at the least: {why!r}"
+        )
     return {n: why for n in listed}
 
 
 def unexpected(rows, expected):
     """How what failed in `rows` differs from `expected` (`expected_of`): a
-    line for each workload that failed unnamed, by another metric than
-    named or for no metric's reason, or that was named and did not fail.
-    None when exactly those failed."""
+    line for each workload that failed unnamed, by a metric not named, for
+    no metric's reason, or that was named and did not fail by every metric
+    it must. None when each failed by those it must, and by none but those
+    it may besides."""
     found, verdicts = failing(rows), {r[0]: r[5] for r in rows}
     said = lambda k: " and ".join(sorted(k)) if k else "nothing"
     out = []
     for n in sorted(set(found) | set(expected)):
-        got, want = found.get(n, set()), expected.get(n, set())
-        if got != want:
+        got = found.get(n, set())
+        must, may = expected.get(n, (frozenset(), frozenset()))
+        if "other" in got or not must <= got <= must | may:
             how = verdicts[n] if "other" in got else f"failed by {said(got)}"
-            out.append(f"`{n}`: expected to fail by {said(want)}, {how}")
+            want = said(must) + (f" (maybe {said(may)})" if may else "")
+            out.append(f"`{n}`: expected to fail by {want}, {how}")
     return out
 
 
@@ -1094,9 +1145,9 @@ def main(argv=None):
     c.add_argument("--base-program", help="the base's own gate.rs, whose workloads this tree's are held to (empty: none)")
     c.add_argument("--summary", help="append the table to this file (a step summary)")
     c.add_argument("--expect", help="a holdout pair: `pass`, or the workloads that fail, `name:instructions|bytes|both` "
-                   "each; exit 0 when exactly those fail")
+                   "each, two joined by `+`, `?` after one that may fail or not; exit 0 when exactly those fail")
     c.add_argument("--cannot-run", action="append", help="a holdout pair: `name[,name...]=why`, workloads its base "
-                   "cannot run, the words of the base's error (empty: none)")
+                   f"cannot run, the words of the base's error, {WHY_AT_LEAST} characters at the least (empty: none)")
 
     h = sub.add_parser("reaches", help="whether a change reaches what the gate builds: built=true|false")
     h.add_argument("--base", required=True)

@@ -11,19 +11,29 @@
 # regressions still fail.
 #
 # Each pair says what it must do (`expect`): `pass`, no workload failing,
-# or the workloads that fail and by what -- instructions, bytes or both --
-# each a cost its change was shown to have, function by function in the
-# two sides' profiles, or the regression it stands for; the job is as
-# expected only when exactly those fail, one more or one fewer failing it,
-# and a workload failing for no metric -- dropped, unrun -- never is. A pair
-# whose base predates what a workload's setup asks for names it
-# (`cannot_run`) with the words of the base's error, and is judged on the
-# workloads both sides run: one so named that the base runs, or does not
-# for another reason, fails the job, as does any other the base does not
-# run. The first run (43682293646, main at 8743f0d9) expected every merged
-# pair to pass and failed five: the expectations below are what their
-# profiles showed (docs/design/benchmarks.md, *The holdout*). The gate
-# stays a check no merge requires until this workflow's run is green.
+# or the workloads that fail and by what -- instructions, bytes or both,
+# two joined by `+` -- each a cost its change was shown to have, function
+# by function in the two sides' profiles, or the regression it stands for;
+# the job is as expected only when exactly those fail, one more or one
+# fewer failing it, and a workload failing for no metric -- dropped,
+# unrun -- never is. A metric marked `?` may fail or not
+# (`http-scoped-get:bytes+instructions?`), for a judged figure its own
+# runs put within their spread of the bar: none is, in the two runs below.
+# Every judged figure within 0.2 points of the bar, failing or passing,
+# came out the same in both, its runs the same to the instruction or the
+# byte on both sides but `core-put`'s, 0.014% apart at the most and 0.195
+# points over the bar; each is said beside its pair. A pair whose base
+# predates what a workload's setup asks for names it (`cannot_run`) with
+# the words of the base's error, 16 characters at the least, and is judged
+# on the workloads both sides run: one so named that the base runs, or
+# does not for another reason, or this tree runs fewer than five times,
+# fails the job, as does any other the base does not run. The first run
+# (43682293646, main at 8743f0d9) expected every merged pair to pass and
+# failed five: the expectations below are what their profiles showed
+# (docs/design/benchmarks.md, *The holdout*). The second (43686447758,
+# this workflow on its branch) held every pair and the control as
+# expected. The gate stays a check no merge requires until this workflow,
+# on main, has a green run.
 #
 # Run by hand at a quiet hour, never on a push: by dispatch once this file
 # is on main, or before by the `perf-holdout` label on the pull request
@@ -61,10 +71,12 @@ jobs:
         include:
           # The holdout: merged, none of them the calibration's.
           - { name: "#592", slug: "592", base: 10f653a2, head: 378f4a81, expect: pass }
-          # A read by an id or a `@hash` bucket collects its `and`'s terms
-          # apart (`Filter::without`, 32 bytes) and compares its index's
-          # name (`candidates_held`): +326 to +426 instructions of its own
-          # and an allocation more an op, its cost to win back.
+          # A read by an id or a `@hash` bucket compares its index's name
+          # (`candidates_held`) and collects its `and`'s terms apart
+          # (`Filter::without`, inlined: a 32-byte vector): +326 to +426
+          # instructions an op outside the allocator, and an allocation
+          # more, its cost to win back. `core-filter-limit`'s bytes +1.012%
+          # in both runs, every run the same to the byte.
           - name: "#593"
             slug: "593"
             base: b7a92e30
@@ -73,6 +85,9 @@ jobs:
           # Every record carries a CRC32C: summed as a write or a compaction
           # writes it, the longer records growing the buffers, and checked
           # as an open reads it -- SSE4.2's `crc32`, as on a user's x86_64.
+          # In both runs `core-put` +1.196% and +1.197%, its runs 0.014%
+          # apart at the most; `http-put` +1.131% and `http-patch`'s
+          # instructions +0.891%, passing, the same to the instruction.
           - name: "#568"
             slug: "568"
             base: 0bbc77a5
@@ -81,7 +96,8 @@ jobs:
           - { name: "#559", slug: "559", base: 58ed72d5, head: 16f6eca9, expect: pass }
           - { name: "#556", slug: "556", base: 6ebadaf8, head: debef146, expect: pass }
           # Every scoped request charged to its caller's `--request-rate`
-          # (`rate::admitted`): +652 to +696 instructions, nothing allocated.
+          # (`rate::admitted`, inlined into `authenticate`): +652 to +696
+          # instructions an op outside the allocator, nothing allocated.
           - name: "#554"
             slug: "554"
             base: fa6afcc4
@@ -117,11 +133,19 @@ jobs:
             expect: pass
             cannot_run: "http-scoped-insert,http-scoped-set=`wake` is none of read"
           - { name: "recheck regression #511 undone", slug: "r511", base: 82319b7f, head: 9da6411e, expect: "core-json-page:instructions" }
+          # `http-get-row` +1.119% and `http-scoped-get` +0.898%, passing,
+          # in both runs, the same to the instruction.
           - name: "recheck regression #542 first head"
             slug: "r542"
             base: de23ce27
             head: 0e05fe22
             expect: "http-get-row:instructions http-patch:instructions"
+          # `http-scoped-get` +1.115% and bytes +1.087% in both runs, its
+          # runs as judged the same to the instruction: the 0.29% its table
+          # shows is the plain count's, the allocator's cost a call by the
+          # heap's layout (178.7 or 180.0), which the judged figure prices
+          # at the base's (178.1 or 178.5 a run, pooled); with 53 calls an
+          # op on both sides, only 231 a call would put it at +1%.
           - name: "recheck regression #474 first head"
             slug: "r474"
             base: e1d6a47c
@@ -171,7 +195,7 @@ jobs:
               with open(sys.argv[1], encoding="utf-8") as f:
                   rows, _ = gate.judge(json.load(f), [], base_names=names,
                                        cannot_run=gate.cannot_run_of(os.environ["CANNOT_RUN"]))
-              wanted = gate.failures_said(gate.expected_of(expect))
+              wanted = gate.expected_said(gate.expected_of(expect))
           except ValueError as e:
               print(f"| {pair} | {expect} | refused: {e} | {verdict} | - | - |")
               sys.exit()
