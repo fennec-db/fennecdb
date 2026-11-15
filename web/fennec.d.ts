@@ -1731,6 +1731,10 @@ export interface PersistOptions {
  * not yet run when the database is closed is refused, naming the close; one
  * called while a `restore` is out is refused when that restore fails,
  * naming it, unless a later `restore` called before it loads its record.
+ * One made once that failure was answered runs, unless a later `restore`
+ * called before it is still out: that one decides it as it would one made
+ * while it was out (finding no record, it leaves it refused, naming the
+ * earlier failure).
  */
 export function persist(fennec: Fennec<any, any>, key?: string, opts?: PersistOptions): Promise<number>;
 /**
@@ -1772,7 +1776,7 @@ export interface FennecFile {
  * reloaded while it was busy lets go of it only once it has ended. In turn
  * with `persist` and `restore`: refused, its file let go of, once the
  * database is closed before it is done opening the file, and, called while
- * a `restore` is out, when that restore fails.
+ * a `restore` is out, when that restore fails (as `persist`, which see).
  */
 export function openFile(
   fennec: Fennec<any, any>,

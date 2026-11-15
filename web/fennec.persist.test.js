@@ -681,8 +681,17 @@ test("a restore is out until its caller is answered, and the caller's own handle
   const made = [];
   let restoring = null;
   let answered = false;
+  // Capped: were the failure sent through a macrotask, an uncapped tick
+  // would spin the microtask queue for ever (node:test has no timeout).
+  const cap = 10_000;
+  let ticks = 0;
+  let stuck = null;
   const tick = () => {
     if (answered) return;
+    if (++ticks > cap) {
+      stuck = new Error(`the caller was never answered within ${cap} microtask ticks`);
+      return;
+    }
     made.push([inspect(restoring).includes('<pending>'), persist(page, `t${made.length}`)]);
     queueMicrotask(tick);
   };
@@ -700,6 +709,7 @@ test("a restore is out until its caller is answered, and the caller's own handle
     assert.match(e.message, /offline/);
     own = persist(page, 'own');
   });
+  assert.equal(stuck, null, stuck?.message);
   const ended = await Promise.allSettled(made.map(([, p]) => p));
   assert.ok(made.some(([out]) => out) && made.some(([out]) => !out), 'calls made on both sides of the answer');
   made.forEach(([out], i) => {

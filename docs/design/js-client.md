@@ -184,8 +184,13 @@ loading it, when it came; a `persist` already storing what it took
 finishes. A `persist` or `openFile` made while a `restore` was out -- till
 the promise it returned settles -- is refused, naming it, when that
 restore fails -- unless a later restore called before it loaded its
-record -- and one called once the failure was answered runs, a `persist`
-storing the database whole as the failed restore left it.
+record -- and one called once the failure was answered runs, unless a later
+restore called before it is still out: that restore decides it as it would
+one made while it was out (one that found no record leaves it refused,
+naming the earlier failure). A `persist` after a restore that failed as it
+loaded stores the database whole as it left it; after one refused before
+the load (a wrong `cryptoKey`, a chunk that does not unseal, an IndexedDB
+error) a chunk, the record standing.
 
 ### In real browsers
 

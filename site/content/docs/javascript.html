@@ -449,8 +449,13 @@ it came; a
 the database is not the one it waited for, and stored it would replace the
 record the restore could not read. A <code>restore</code> called after the
 failed one that loads its record lets them run, and a call made once the
-failure was answered runs as any other, a <code>persist</code> storing the
-database whole as the failed restore left it. The calls share one connection, which closes
+failure was answered runs as any other -- unless a later restore, called
+before it, is still out: that restore decides it as it would a call made
+while it was out (one that found no record leaves it refused, naming the
+earlier failure). A <code>persist</code> after a restore that failed as it
+loaded stores the database whole as it left it; after one refused before
+the load (a wrong <code>cryptoKey</code>, a chunk that does not unseal, an
+IndexedDB error) it stores a chunk, the record standing. The calls share one connection, which closes
 as soon as a delete of the database
 (<code>indexedDB.deleteDatabase('fennecdb')</code>) or an upgrade asks, so
 nothing of fennecdb's holds either up. Deleted under the page, or with the
