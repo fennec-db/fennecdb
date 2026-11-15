@@ -225,9 +225,21 @@ the browser module not a byte. `<file>.lock` (`fennec_abi::lock`, moved
 from fennec-ffi) is taken by `fennec mcp --file`, `fennec-server --file`, the
 native library and the shell alike, so any two refuse each other
 ([engine.md](engine.md#single-writer)). Calls are held to
-`--mcp-calls-per-sec` by a scoped token's subject or the caller's address,
-counted in `fennec_mcp_tool_calls_total` once a process serves MCP, and a
-write tool's call is an `mcp` line of the audit log. A row by id costs
+`--mcp-calls-per-sec` by a scoped token's issuer and subject or the
+caller's address, in the database it calls (`mcp::admitted_at`), counted in
+`fennec_mcp_tool_calls_total` once a process serves MCP, and a write
+tool's call is an `mcp` line of the audit log. Keyed by `sub` alone, one
+subject shared a bucket across every tenant of a node and with another
+issuer's user of its name (the G14 review); the database is its address in
+the process, so a tenant closed and another opened in its place shares no
+spent bucket for more than the second a bucket holds. The map keeps 4 096
+callers and, full, lets go first every bucket full again -- one a new
+caller would get, so forgetting it forgives nothing -- then the one called
+longest ago (`room_for_one`), a scan of the map as a caller new to a full
+one comes, where it was cleared whole and a client calling as that many
+subjects forgave its own spent bucket with the rest. `mcp/mod.rs`'s
+`a_callers_rate_is_its_own_in_each_database_and_a_full_map_forgives_no_one`
+holds both, its clock given. A row by id costs
 3.8 us through the `query` tool against `/query`'s 1.2 in process, 21.9
 against 17.7 us p50 over HTTP, a search 1-2% more (`make mcp-bench`);
 a server without `--mcp` pays a comparison a request, and `make
@@ -355,6 +367,56 @@ the mark of the `--token` they share (`audit::request`, the relay's
 at the router by reading a client's headers -- "no `Authorization`, so ask
 the `Host`" -- for a rebound page sets whichever it likes.
 
+That still left the network itself in (the G14 review, finding 1): a
+router with `--token` listening past loopback in front of an open node --
+`make node`'s recipe on the router's machine, or a node in a private
+network given `--insecure` to bind there -- forwarded `GET /t/acme/notes`
+with no `Authorization` and `Host: localhost` from any peer: the router
+asks a forward no token, the node took the client's own `localhost` for
+this machine's name, and every tenant answered, writes included, though
+no one had said `--insecure` for that. The host check holds off a page,
+never a peer, which names any host it likes. So the party that knows its
+listener decides, and the node holds the line where a router does not.
+A router whose listener is not loopback alone and that was not started
+`--insecure` forwards nothing to a node that asks no data token
+(fennec-shard's `Router::open_node`): 403 naming the node and the fix,
+counted (`fennec_router_open_node_refusals_total`) and said in its log once
+a node. It learns it from the node's `GET /_admin/stats`, which says
+`no_token` now: as the node is added, and of a node it has not asked since
+it started -- one its directory held, one a standby's directory brought --
+on a thread of its own beside the first request, which goes on; a node
+that said so is asked again by a refused request once its word is 10 s old,
+so one given a token since is reached with no router started again. And
+the router says what it listens on under its mark: one bound on loopback
+alone marks a request no other router relayed and the global entry named
+no client of with `audit::router_mark_local`, an HMAC of the node's admin
+token over other words, which a mark seen on the wire cannot be turned
+into; every other forward carries the mark it always did. An open node
+answers a marked request only under that second mark or its own
+`--insecure` (`open_refusal`, `audit::routed_past_loopback`), so a router
+from before, or a new one past loopback, reaches it no further than the
+operator said: `--insecure` on the router lets the router forward, and on
+the node lets the node answer, each operator's word for its own
+listener. The local recipe -- `make shard` and `make node` on 127.0.0.1 --
+works as it did with no flag: the router is loopback alone, its marks say
+so. A relayed request, and one the global entry sent, came from past this
+machine whatever the router listens on, and goes with the first mark. Not
+closed: a router on loopback behind a proxy or a tunnel on its machine
+(nginx, `cloudflared`) is reached by the network through it, as an open
+server behind one is (above); its nodes take a token there, as the docs
+say. The class is judged of the address each listener is bound on
+(`serve_on`), `0.0.0.0` and `[::]` past loopback, and before a router
+serves it is past loopback. A node now tells a router the class costs
+nothing on a server with a token -- `open_refusal` returns before it --
+and on an open node two thread-local loads; the router, one load where
+it is loopback alone or `--insecure`, two where it guards, and a node's
+second mark compared only where the first is not the one sent.
+`tests/cors.rs`'s `a_router_past_loopback_reaches_no_node_that_takes_no_token`
+holds the four cases, the operator of neither, the node, the router and
+both saying `--insecure`, on a router bound on `0.0.0.0` and reached on
+127.0.0.1; the recipe's `a_token_router_tells_an_open_node_the_name_its_client_reached_it_by`
+stays as it was.
+
 `X-Forwarded-Host` rather than RFC 7239's `Forwarded: host=`, the
 standard's own: one value where `Forwarded` is a list of hops, each a list
 of quoted pairs, parsed on every request of an open server; and it is the
@@ -401,6 +463,28 @@ leaves them out.
 A write without a key is rendered after the lock as before; with one, 16
 200 single puts a second over HTTP against 18 300 -- with its statements
 parsed each time and the collection made if missing every time, 14 600.
+
+**A key is its caller's** (`Scope::authority`). It was the subject's,
+`sub` alone (the G14 review): another issuer's user of the same `sub` --
+two identity providers taken, each with its `vera` -- or the same
+subject's token of another team or role was replayed an answer kept for
+the first, its `returning` rows those of a team the second token cannot
+read. A caller is now everything of its token that decides what it may
+do: its issuer and subject, the claims naming its tenants and its roles
+(`--jwt-tenant-claim`, `--jwt-role-claim`), and every claim a rule reads,
+each value as JSON, an absent one told from a `null`, under SHA-256, 32
+hex digits kept in the subject's place; the server's own token is one
+caller, as before. Two tokens of one caller name one key, and a token of
+another issuer or other rights another, which runs the write as a key
+seen for the first time does. The names are worked out once a policy
+(`authority_claims`, in the `Lines` every scope shares), and the digest
+only where a key is sent: a write without one asks nothing new, and the
+statement cache, a row's tag and the token cache read nothing of it --
+none hashes a token on a request's path. Keys kept by a server from
+before are their subject's, and are no caller's now: a retry across the
+upgrade, within the key's day, runs again. `tests/idempotency.rs`'s
+`a_key_is_replayed_only_to_a_caller_of_the_same_authority` holds another
+team, another issuer and a role, each of them run and never replayed.
 
 **A replay answers only once the first try's record is as durable, and as
 sent, as its answer was to be** (`idempotent::replay`,
@@ -563,13 +647,44 @@ sends on and clears its client's count on it alone. Against main in
 three ABBA rounds (`make requests-bench` with and without a token, `make
 shard-bench`'s latency, a node and the router asked with a data token and
 a JWT; one side of twelve left out, the machine's load past 6 from other
-builds), every median stayed inside the runs' spread. The count is an
-address's, not a token's: a client holding any good token -- a JWT an app
-hands every user among them -- clears its own between guesses at another,
-as it always could. `tests/audit.rs` (fennec-http) and `tests/refusals.rs`
+builds), every median stayed inside the runs' spread. `tests/audit.rs` (fennec-http) and `tests/refusals.rs`
 (fennec-shard) send a guessed token to each of those answers and hold the
 count where it was, a good token to the others and see it cleared, and
 fail with the inference put back.
+
+The count is an address's, and a kind's (`audit::Kind`): a good token
+clears the count of refusals of its own kind alone. It was every count of
+the address, so a client holding any good token -- a JWT an app hands every
+user among them -- cleared its own count between guesses at another (the
+G14 review, finding 3): one request with its own JWT after each guess at
+the server's or the admin's token, and every guess waited the first 100
+ms, never the doubling to 5 s. Two kinds: a token the server holds -- its
+own, the admin's, a replication or a scrape's, the router's -- and a JSON
+Web Token. A JWT verified starts the JWTs' count again
+(`audit::verified_jwt`), any other the tokens' (`verified`). A refusal is a
+token's where its value could have been one: `admin::refused`, the
+replication tokens', a scrape's (`metrics::allowed`), and `authenticate`'s
+where the server holds a token and the value is not shaped as a JWT --
+two dots -- unless the token is so shaped too; any other of
+`authenticate`'s is a JWT's, a missing token's among them, which guesses
+nothing (`refused_as`, read as the 401 is counted). A value with two dots
+equals no token without two, so a guess shaped to be counted as a JWT's
+can never be the server's token, and a JWT an app refreshes still clears
+its user's expiry the way it did. Behind a router the node says which:
+`Fennec-Verified: jwt` for a JWT verified, `1` for a token as before, and
+on a 401 refused as a JWT's `Fennec-Refused: jwt`, both read and dropped
+by the router (`answer_out`, the second off a 401 alone, one comparison a
+header there); a router counting every node's 401 as a token's would have
+left a JWT app's users behind one address -- a NAT, an office -- waiting
+longer at each expiry within a minute, their good tokens clearing nothing
+of it. A router from before takes `jwt` for `1`, and passes
+`Fennec-Refused` on. The success path asks the table as before -- only
+while a count is held -- and a refusal counts one key: `would_wait`, which
+tests read, the longest of an address's counts. `tests/audit.rs`'s
+`a_good_jwt_clears_no_count_of_guesses_at_a_servers_token` interleaves
+guesses at the data and the admin token with the guesser's own good JWT and
+holds the doubled waits, and a JWT-only server's refused JWT cleared by a
+good one.
 An IPv6 address is counted by its /64 (`audit::counted_ip`, the hooks'
 count's key too): a /64 is the least a network is given -- the prefix
 SLAAC hands a link's hosts their addresses from, what a provider gives a
@@ -611,6 +726,17 @@ waits none for a request bearing `Fennec-Router: <address> <mark>`, the mark
 `Config::router_mark`), the address the log's `peer` (the router `via`):
 the router drops the header from what a client sends, and a node believes
 it from no one else. At the router the count is one across every node.
+The mark is a value fixed for each node, sent on every forwarded request,
+and in the clear over an `http://` hop: whoever reads that hop holds it,
+and with it a request to the node skips the node's wait after a refused
+token and names any address as its client in the node's audit lines --
+and, of a router on loopback alone, its second mark lets an open node
+answer it. It opens no `/_admin/` and no `/_shard/`. So the hop between a
+router and its nodes is `https://` wherever the network between them is
+not trusted, which is the node's URL's to say ([Dialing HTTPS](#dialing-https));
+binding the mark to each request, as the entry's is bound to its address
+and time, was weighed against an HMAC a request at the node and left for
+a hop that needs no TLS (the G14 review, a known finding).
 Behind the global entry the router's peer is Cloudflare's address, so with
 `--entry-token` it counts, clears, logs and names onwards the address the
 entry's `Fennec-Client` names (`audit::entry`, `NAMED`; under *One URL

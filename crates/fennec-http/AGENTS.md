@@ -105,9 +105,9 @@ which a client sends again whole.
 
 **[An `Idempotency-Key` makes a write
 once.](../../docs/design/http.md#idempotency-keys)** The write and its key's
-`_idempotency` row are one block, the key the subject's for a scoped token
-and the key with another request 422; a failed write or a `compact` keeps
-none. A replay answers only once the first try's record is as durable and
+`_idempotency` row are one block, the key its caller's for a scoped
+token (`Scope::authority`) and the key with another request 422; a failed
+write or a `compact` keeps none. A replay answers only once the first try's record is as durable and
 sent as its answer was to be: under `--sync always` every path that finds
 a key runs `Database::durability` after its lock (`idempotent::replay`),
 and a failed fsync is its answer, never the kept success; after a storage
@@ -116,9 +116,9 @@ A replay is a write's answer on every path, a call made to read's too
 (`metrics::wrote`), asked of a tenant's lease (`answered_under_lease`).
 
 **[Refusals and schema changes are logged; a refusal
-waits.](../../docs/design/http.md#audit)** Only `audit::verified`, where a token
-checks out, clears the wait; a new check must call it, and nothing infers
-it from an answer. A node believes `Fennec-Router` from the router alone.
+waits.](../../docs/design/http.md#audit)** Only `audit::verified_as`,
+where a token checks out, clears its kind's wait (`audit::Kind`); a new
+check must call it, and nothing infers it from an answer. A node believes `Fennec-Router` from the router alone.
 A refusal is counted by its address, an IPv6 one's /64
 (`audit::counted_ip`, the hooks' count's key too), in a table that, full,
 lets the count refused longest ago go (`audit::ADDRESSES`): never every
@@ -354,8 +354,9 @@ name, and a page only of its own origin or
 `--http-token` and JWTs (`open_refusal`), `cors::foreign` refuses (403),
 before routing but for `/_health` and an allowed preflight, a `Host` or
 `X-Forwarded-Host` (only refusing) not localhost's nor an IP, and an
-`Origin` not its own, scheme and all, nor `--http-cors`'s; the router's is
-fennec-shard's.
+`Origin` not its own, scheme and all, nor `--http-cors`'s, and, unless
+`--insecure`, a router's forward past loopback
+(`audit::routed_past_loopback`); the router's is fennec-shard's.
 
 ### Held writes
 

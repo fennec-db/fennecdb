@@ -168,7 +168,15 @@ These are deliberate. The [server](https://fennecdb.com/docs/server),
   says `https://`, against Mozilla's roots or `--tls-ca`'s, and no client
   certificates are asked or presented; the shell's `fennec backup` dials its
   primary the same way
-  ([server docs](https://fennecdb.com/docs/server#tls)).
+  ([server docs](https://fennecdb.com/docs/server#tls)). The hop from a
+  router to its nodes carries the router's mark for each node
+  (`Fennec-Router`), a value fixed for that node: whoever reads an
+  `http://` hop can, with it, name any client to the node -- skipping the
+  wait after a refused token and choosing the address its audit lines
+  name -- though it opens no `/_admin/` and no `/_shard/`. Where the network
+  between a router and its nodes is not trusted, give each node an
+  `https://` address
+  ([sharding reference](https://fennecdb.com/docs/sharding-reference#https-nodes)).
 - **`--insecure` does what it says.** Binding to a non-loopback address without
   authentication is refused unless that flag is passed deliberately. A server
   that asks for no token answers only under this machine's name
@@ -177,7 +185,16 @@ These are deliberate. The [server](https://fennecdb.com/docs/server),
   name was pointed at 127.0.0.1 reads nothing; to reach it by another name,
   give it a token. `--http-cors '*'` lets every origin in: any site can then
   read and write an open loopback server, so give a server that is open a
-  named origin, or a token.
+  named origin, or a token. A router asks a tenant's request no token, the
+  node does, and a client names any host it likes: so a `fennec-shard`
+  listening past loopback forwards nothing to a node asking no data token
+  (403, `fennec_router_open_node_refusals_total`), and such a node answers
+  a router listening past loopback -- told by the router's mark -- or a
+  request another region's router relayed or the global entry named, only
+  under its own `--insecure`; the router's `--insecure` lets it forward.
+  On one machine, router and nodes on 127.0.0.1, nothing changes. A router
+  on loopback behind a proxy or a tunnel on its machine cannot tell its
+  clients are the network's: give its nodes a data token there.
 - **A short token is taken on loopback alone.** Past loopback `fennec-server`
   and `fennec-shard` refuse at the start a token shorter than 32 bytes --
   `--http-token`, `--admin-token`, `--replication-token`, the router's
@@ -196,7 +213,10 @@ These are deliberate. The [server](https://fennecdb.com/docs/server),
   doubled to 5 s, by its address -- an IPv6 address by its /64 -- in a table
   of 10 000 counts that lets the one refused longest ago go when full:
   against a client holding more addresses than that, the token's length is
-  what holds.
+  what holds. The counts are kept by kind, a server's own tokens apart from
+  JSON Web Tokens, and a good token starts its own kind's again alone: a
+  client holding a JWT does not clear its count of guesses at the server's
+  or the admin token by using it.
 - **A webhook's secret has no minimum.** One shorter than 32 bytes is taken
   and warned of -- at the start where `--http` is past loopback, through a
   proxy as a short token is, and in a node's log as a tenant's is set --
