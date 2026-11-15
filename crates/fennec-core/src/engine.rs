@@ -1407,6 +1407,20 @@ impl Rec<'_> {
     }
 }
 
+/// A record naming a collection id no create gives: one past `u32`, which
+/// `as u32` read as its low bits -- another collection's id -- or the last
+/// `u32`, past which the next id has nowhere to go
+/// ([`Database::create_collection`] gives every id below it). Taken, an
+/// open's and a replica's `cid + 1` overflowed (the fuzzer's `image`
+/// target).
+#[cold]
+#[inline(never)]
+fn unmade_collection(cid: u64) -> Error {
+    Error::Corrupt(format!(
+        "a record names collection {cid}, an id no create gives"
+    ))
+}
+
 /// The record at `*pos` -- `[kind][collection][length][body]`, its claim
 /// and sum after the body where its kind's high bit says, or the counter's
 /// fixed-width head -- and `*pos` moved past it: the one place a head is
@@ -1430,7 +1444,10 @@ fn record_at<'a>(bytes: &'a [u8], pos: &mut usize) -> Result<Rec<'a>> {
         });
     }
     let mut p = at + 1;
-    let cid = get_uvarint(bytes, &mut p)? as u32;
+    let cid = match get_uvarint(bytes, &mut p)? {
+        c if c < u32::MAX as u64 => c as u32,
+        c => return Err(unmade_collection(c)),
+    };
     let len = get_uvarint(bytes, &mut p)? as usize;
     let all = bytes
         .get(p..p.saturating_add(len))
@@ -10271,7 +10288,15 @@ impl Database {
             }
             return Err(Error::Exists(format!("collection `{}`", schema.name)));
         }
+        // Every id below the last `u32`, which an open refuses
+        // (`unmade_collection`): reached only from a file naming an id near
+        // it, where `+= 1` overflowed, or wrapped to 0 in a release build.
         let cid = self.next_coll_id;
+        if cid == u32::MAX {
+            return Err(Error::Query(
+                "no collection id is left in this file: it gave every one".into(),
+            ));
+        }
         self.next_coll_id += 1;
         let name = schema.name.clone();
         self.wal(REC_CREATE, cid, &schema.encode())?;
