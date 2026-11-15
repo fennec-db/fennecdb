@@ -1906,6 +1906,13 @@ impl Block {
 /// Zeros from a head to the end are a torn tail too, when [`zero_tail`]
 /// says they start there; any other zero head is refused. Judged only once
 /// a head reads as no kind: a walk's known records pay nothing.
+///
+/// A head naming a collection no create gives ([`unmade_collection`]) is
+/// refused here too, once its length fits, so that a walk
+/// [`Walk::stopping`] judges it as a head no record reads from: stale
+/// bytes past the durable point read as one (`0a ff ff ff ff 0f 05`), and
+/// refused by [`record_at`] after this said whole, an open refused what a
+/// version before cut. One cut short is a torn tail whatever it names.
 fn whole_record(bytes: &[u8], at: usize, edge: usize) -> Result<bool> {
     let kind = bytes[at];
     if !known(kind) {
@@ -1916,16 +1923,23 @@ fn whole_record(bytes: &[u8], at: usize, edge: usize) -> Result<bool> {
         };
     }
     let mut pos = at + 1;
-    let mut len = 0;
     // The collection's id, then the body's length.
-    for _ in 0..2 {
-        len = match get_uvarint(bytes, &mut pos) {
+    let mut head = [0u64; 2];
+    for v in &mut head {
+        *v = match get_uvarint(bytes, &mut pos) {
             Ok(v) => v,
             Err(_) if pos >= bytes.len() => return Ok(false),
             Err(e) => return Err(e),
         };
     }
-    Ok(len <= (bytes.len() - pos) as u64)
+    let [cid, len] = head;
+    if len > (bytes.len() - pos) as u64 {
+        return Ok(false);
+    }
+    if cid >= u32::MAX as u64 {
+        return Err(unmade_collection(cid));
+    }
+    Ok(true)
 }
 
 /// Whether `byte`, a record's first, is a kind this version reads with a
@@ -2009,7 +2023,9 @@ fn head_at(bytes: &[u8], at: usize, any: bool) -> Head {
         kind,
         REC_BLOCK | REC_SPILL | REC_LAND | REC_HISTORY | REC_STATEMENT | REC_SYNCED
     );
-    if cid > u32::MAX as u64
+    // An id no create gives, the last `u32` among them, as the walk reads
+    // it ([`whole_record`]).
+    if cid >= u32::MAX as u64
         || (none && cid != 0)
         || len < trailer
         || (kind == REC_SYNCED && len != trailer)

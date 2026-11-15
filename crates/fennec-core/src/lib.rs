@@ -101,7 +101,7 @@ static ONE_THREAD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 /// the machine's cores, or one where [`one_thread`] asked: each share is
 /// the same work either way (`vector::spread`). Read once a task.
 #[cfg(not(target_family = "wasm"))]
-pub fn threads() -> usize {
+pub(crate) fn threads() -> usize {
     if ONE_THREAD.load(std::sync::atomic::Ordering::Relaxed) {
         return 1;
     }
@@ -113,6 +113,7 @@ pub fn threads() -> usize {
 /// counters are bumped unlocked, so that threads beside one another made
 /// what a run counted -- and so the inputs after it -- their scheduler's
 /// (docs/design/conventions.md#fuzzing).
+#[doc(hidden)]
 #[cfg(not(target_family = "wasm"))]
 pub fn one_thread() {
     ONE_THREAD.store(true, std::sync::atomic::Ordering::Relaxed);
