@@ -37,6 +37,14 @@ files.
 
 **[A SQLite file's lengths are held to the file before anything is
 allocated, and its walk reaches a page once.](../../docs/design/crates.md#a-sqlite-files-lengths)**
-A cell's payload to the file's length (`Pager::payload`), a child to the
-file's pages and visited once (`Walk::visit`), a page's usable part to
-SQLite's 480 bytes (`MIN_USABLE`).
+A cell's payload to the file's length (`Pager::held_to_file`), a page --
+a b-tree's or an overflow chain's -- to the file's pages and reached once
+by any path (`Reached::reach`), a chain to the pages its payload needs
+(`Pager::chain`), a page's cells apart (`Walk::cells_apart`) and each
+read as it is yielded, so a walk holds a page and a row; a page's usable
+part to SQLite's 480 bytes (`MIN_USABLE`). A table's columns are read
+where SQLite puts them -- comments spaces, a VIRTUAL generated column in
+no record and named in the summary (`Source::left_out`), `""` kept as
+`column<N>`, a lacking column its default (`Absent`) -- and a file
+beside a non-empty `-wal` or a hot `-journal` is refused
+(`check_side_files`).

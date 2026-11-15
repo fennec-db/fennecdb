@@ -88,6 +88,35 @@ KEY</code> becomes the document id, <code>--vector field:N</code> turns
 little-endian <code>f32</code> BLOBs into <code>vector&lt;N&gt;</code>, and
 untyped columns are resolved from the first 1000 rows.</p>
 
+<p>Each column is read where SQLite puts it in a row. A <code>VIRTUAL</code>
+generated column (<code>b AS (a * 2)</code>), which SQLite computes as a row
+is read and never stores, is left out, and the import names it in a
+<code>warning</code> line; a <code>STORED</code> one comes across as a plain
+field holding the values SQLite stored. The import computes no expression. A
+column named <code>""</code> keeps its place as <code>column&lt;N&gt;</code>,
+N its place from 1, as SQLite names a result column that has no name. A row
+written before an <code>ALTER TABLE ... ADD COLUMN</code> reads the column
+as its default, as SQLite does, and <code>NULL</code> where it has none; a
+default no import can compute, such as <code>CURRENT_TIMESTAMP</code>, stops
+the import at a row that needs it. A <code>WITHOUT ROWID</code> table is
+refused by name; a <code>STRICT</code> one is read.</p>
+
+<p>The file is read alone, so the import looks beside it for the two files
+SQLite keeps there, and refuses the file while either holds what the file
+does not: a <code>&lt;file&gt;-wal</code> with changes not yet checkpointed
+(<code>sqlite3 data.sqlite "PRAGMA wal_checkpoint(TRUNCATE)"</code> moves
+them in), or a hot <code>&lt;file&gt;-journal</code>, left by a writer
+stopped in the middle of a transaction, beside a file that may be torn (one
+read with SQLite rolls it back: <code>sqlite3 data.sqlite "PRAGMA
+user_version"</code>). An empty <code>-wal</code>, and a journal whose header
+is zeroed as <code>journal_mode=PERSIST</code> leaves it, are not in the
+way.</p>
+
+<p>A damaged or hostile file is refused naming the page — a page reached
+twice, cells that overlap, an overflow chain longer than its row — and an
+import holds about a page and a row in memory at a time, whatever lengths
+the file declares.</p>
+
 <p><b>PostgreSQL.</b> It connects to the live server and streams
 <code>COPY ... TO STDOUT</code> — no <code>psql</code>, no
 <code>pg_dump</code>. Authentication is SCRAM-SHA-256, hand-written in
