@@ -697,29 +697,61 @@ a second, and the driver's own `GET /_health` over a third once the run is
 answered; what is counted is what any thread of the server did between its
 taking the second connection and its taking the third (`accept4`, traced
 for that), so the start-up and the setup before, and the shutdown's sync
-after, are not. Counted, each to the call: the fsync family's calls on
-files -- `fsync`, `fdatasync` and `sync_file_range`; `syncfs`, which syncs
-the file system, as the file's it names; `msync`, which names no
-descriptor, as `(mapped)`'s; `sync`, at the least an fsync of every file,
-as `(every file)`'s -- renames (`rename`, `renameat`, `renameat2`), the
-calls writing to a file (`write`, `pwrite64`, `writev`, `pwritev`,
-`pwritev2`, `copy_file_range`, `sendfile`, `splice`, and `fallocate`, which
-gives a file room and returns no bytes) and the bytes they returned, and
-the calls of those that failed (`failed`, their bytes none). A descriptor
-is a file where `-y` names it by a path outside `/dev`, `/proc` and `/sys`,
-one unlinked since it was opened by the name it had (`(deleted)`): an
-answer written to a socket is no file's, nor the server's log, its stderr,
-which is the driver's pipe, nor its stdout, `/dev/null`. A call strace is
-not asked for is a write the gate cannot see, and one a change adds would
-pass on counts that never moved; so a server that sets up io_uring
-anywhere in the trace -- its submissions read off a ring by the kernel, no
-call each -- is refused, the gate to learn the call before it counts
-such a server. Beside the counts, the database file's size once the setup
-was answered (`file_before`). The table gives each count in total, fsyncs
-an answer, bytes written a byte the client sent and a byte of the file the
-setup left, and under it each file's counts by its name in the data
-directory: the database, its `.sync` log, the file a compact writes, `.`
-the directory.
+after, are not. Counted, each to the call and each by its name: the syncs
+that make a file durable (`fsyncs`) -- `fsync` and `fdatasync` of the file
+they name; `syncfs`, which syncs a whole file system, as `(file system)`'s;
+`msync`, which names no descriptor, as `(mapped)`'s, and a durability only
+with `MS_SYNC` (`MS_ASYNC` asks for nothing the kernel does not do
+anyway); `sync`, at the least an fsync of every file, as `(every file)`'s
+-- and apart from them the writebacks that make nothing durable
+(`writebacks`): `sync_file_range`, whatever its flags, since it flushes
+neither the drive's cache nor the file's metadata, arm's
+`sync_file_range2`, and an `msync` without `MS_SYNC`. Then renames
+(`rename`, `renameat`, `renameat2`); the calls writing to a file (`write`,
+`pwrite64`, `writev`, `pwritev`, `pwritev2`, `copy_file_range`,
+`sendfile`, `splice`, and `fallocate`, which gives a file room and returns
+no bytes) and the bytes they returned; the files created (an open with
+`O_CREAT` or `O_TMPFILE`, whether or not the file was there, which the
+trace cannot tell and a run repeats; `creat`; `mkdir`), truncated
+(`ftruncate`, `truncate`, an open with `O_TRUNC`), linked (`link`,
+`linkat`) and unlinked (`unlink`, `unlinkat`, `rmdir`); and the calls of
+all these that failed (`failed`, their bytes none). A descriptor is a file
+where `-y` names it by a path outside `/dev`, `/proc` and `/sys`, one
+unlinked since it was opened by its name and ` (deleted)`, a file of its
+own: an answer written to a socket is no file's, nor the server's log, its
+stderr, which is the driver's pipe, nor its stdout, `/dev/null`. Beside the
+counts, the database file's size once the setup was answered
+(`file_before`). The table gives each count in total, fsyncs an answer,
+bytes written a byte the client sent and a byte of the file the setup
+left, and under it each file's counts by its name in the data directory --
+the database, its `.sync` log, the file a compact writes, `.` the
+directory -- each sync by its call.
+
+*What the trace cannot see is refused.* A call strace is not asked for is
+a write the gate cannot see, and one a change adds would pass on counts
+that never moved; worse, some ways of making a write durable, or of
+writing it at another cost, use the very calls the gate counts. So a
+server is refused -- the run cannot be judged, in words naming the call,
+the file and the flag -- where anywhere in the trace, the start-up as the
+stretch, it set up io_uring (its submissions read off a ring by the
+kernel, no call each) or Linux AIO (`io_setup`, `io_submit`: submitted in
+batches, completed with no call); opened a file of the data directory with
+`O_SYNC` or `O_DSYNC`, whose every write then flushes the device with the
+same calls, or `O_DIRECT` (by `fcntl` too), which passes the page cache by
+and changes what a byte written costs; or wrote with `pwritev2` and
+`RWF_SYNC` or `RWF_DSYNC`. One the kernel refused took nothing and is
+passed over. The engine's own opens use none of these flags: in `crates/`,
+`custom_flags` appears on Unix only in `fennec-server`'s hand-over of its
+files to `--user`, read-only and `O_NOFOLLOW | O_NONBLOCK`, which runs
+before a server under the gate ever starts, and on Windows
+(`FILE_FLAG_BACKUP_SEMANTICS`); no `O_SYNC`, `O_DSYNC`, `O_DIRECT`,
+`RWF_*`, `io_setup` or `pwritev2` is called, so the base passes every
+refusal. And every file a counted call names is named within the data
+directory: the scratch directory is resolved first (`realpath`) and the
+server handed that, since `-y` names a file by its path with every link
+resolved -- through a linked work directory every file would have read as
+outside it on both sides, and been judged as one -- and a run that counts a
+file outside it is refused, naming the call and the path.
 
 *Exact, so held to the call.* Nothing a workload sends, or the server
 writes between those connections, is sized by a clock or a draw. The ids,
@@ -740,18 +772,33 @@ fails naming every run's value of each count that moved; and any count of
 this tree's that is not the base's fails, up or down -- fewer fsyncs a
 durable write is durability lost -- unless the pull request adds a
 `PERF_ACCEPTED` entry naming the workload and the count (`"metric":
-"fsyncs"`, `"renames"`, `"writes"`, `"written"`, `"failed"` or
+"fsyncs"`, `"writebacks"`, `"renames"`, `"writes"`, `"written"`,
+`"failed"`, `"creates"`, `"truncates"`, `"links"`, `"unlinks"` or
 `"file_before"`) and how far it may move, and which way: a signed share of
 the base's count or a signed number (`"+100%"`, `"+1"`, `"-50%"`). No
 threshold: a count that holds to the call has no draw to stand above.
 
-*File by file.* Fsyncs and bytes written are judged by the file they went
-to, named within the data directory, which is the same from run to run,
-and their entry names it (`"file": "io.fennec"`); write calls, renames and
-failed calls are judged in total. A change that syncs the database where
-it synced its log -- as many fsyncs, each some 356 µs where the log's took
-65 ([durability.md](durability.md#the-sync-log)) -- or writes to one what
-it wrote to the other moves no total, and is what the log exists against.
+*File by file, call by call.* Fsyncs, writebacks and bytes written are
+judged by the file they went to, named within the data directory, which is
+the same from run to run, and their entry names it (`"file":
+"io.fennec"`); each sync and writeback by its call too -- `` fdatasync of
+`io.fennec.sync` `` is one count, `` fsync of `io.fennec.sync` `` another --
+and its entry names the call as it names the file (`"call":
+"fdatasync"`); write calls, renames, failed calls and the files created,
+truncated, linked and unlinked are judged in total, an entry letting each
+through as any count. A change that syncs the database where it synced its
+log -- as many fsyncs, each some 356 µs where the log's took 65
+([durability.md](durability.md#the-sync-log)) -- or writes to one what it
+wrote to the other moves no total, and is what the log exists against. One
+that syncs the log with `fsync` where it did with `fdatasync` -- one word,
+`sync_data` to `sync_all` -- moves no file's count, and on ext4 adds a
+journal commit to every durable put, the cost the log exists to save; a
+`syncfs` in its place syncs the whole file system each time; a
+`sync_file_range` makes nothing durable. Judged file by file alone, as the
+second version was, all three passed; judged by call, each is two counts
+that moved, and the last is under `io-put`'s floor too. The table shows
+each file's fsyncs summed beside its calls: the sum moves only where a
+call's count does, and is not judged twice.
 
 *The file after the setup.* The client sends both sides the same setup,
 so the size the database file has once it is answered is the server's: a
@@ -776,7 +823,19 @@ entries are the instructions' -- added by the pull request, never let
 through by the base's, read as data -- and so is the rule for a workload:
 one the base's own `gate.rs` lists that this tree dropped, or the base's
 server did not run, fails; one new to the program that the base cannot run
-is held to nothing.
+is held to nothing. A count that moved past the entries naming it is said
+with them (``which its entries (`+1`) do not let through``), and a share
+given for a count from none says so besides.
+
+*What a workload sends is this tree's.* Its requests -- `IO_WORKLOADS`'
+count, and what each holds -- are not held to the base's program's for a
+workload both list: both sides are sent this tree's client's requests,
+byte for byte, so a count compares like with like whatever they are, and
+the run's floor follows the requests answered. A workload resized or
+rewritten is an edit of `gate.rs`, which the judge names for the owner, as
+it is for an instruction workload's ops; held to the base's number, a
+resize would fail with no entry to say why, and a rewrite that kept the
+number -- a row of 200 bytes for one of 530 -- would pass all the same.
 
 *Floors.* Counts that missed would agree with each other: a strace asked
 for none of a call, or a `-y` that named no file, counts nothing on both
@@ -784,9 +843,12 @@ sides, and every workload would pass. So each workload has a floor
 (`IO_FLOORS`), and a run of either side under it fails, whatever an entry
 says. Each sends durable writes, one at a time, under `--sync always`,
 where a write is answered only once it has synced and one request in
-flight shares its sync with none: an fsync an answer at the least, and a
-write call. `io-put`'s floor is 500 fsyncs and a write call; `io-batch`'s
-and `io-spill`'s, one answer each, an fsync and a write call;
+flight shares its sync with none: an fsync an answer at the least -- a
+sync that makes a file durable (`fsync`, `fdatasync`, `syncfs`, `sync`,
+an `msync` with `MS_SYNC`), never a writeback, so a `sync_file_range` in
+a durable write's place falls under it -- and a write call. `io-put`'s
+floor is 500 fsyncs and a write call; `io-batch`'s and `io-spill`'s, one
+answer each, an fsync and a write call;
 `io-compact`'s an fsync, a write call and a rename, the new file renamed
 over the old. Under it a durable write was answered before its sync, or
 the trace missed a call, and neither is a count to let through. A workload
@@ -797,28 +859,43 @@ purpose names its own.
 *By the base's checker but once.* The pull request that brought the I/O
 counts was counted and judged by its own checker: its base's `gate.rs`
 listed no `IO_WORKLOADS`, and its checker had no `io`. Which checker runs
-is the base's program's to say (`perf_gate.py io-checker`, held by the
-tests): the base's wherever the base's `gate.rs` lists `IO_WORKLOADS`,
-this tree's only where it lists none, and a base checker that then cannot
-count them fails the step. The first version asked the base's checker for
-`io --help` and fell back where it failed: a later change that dropped or
-broke `io` would have had every pull request after it counted and judged
-by its own. The decision is this tree's copy's, in both jobs -- a gate
-file, its every edit named for the owner, as the jobs' steps are. The
-base's server answers every request the workloads send, so all four are
-compared from that first run on, as the gate's own first run compared
-every workload its base ran.
+is the base's program's to say: the base's wherever the base's `gate.rs`
+lists `IO_WORKLOADS`, this tree's only where it lists none, and a base
+checker that then cannot count them fails the step. Both jobs decide it
+in two lines of shell, no Python of the change's -- `checker=tools/perf_gate.py`,
+then a `grep -Eq '^[[:space:]]*const IO_WORKLOADS\b'` of the base's
+`gate.rs` setting `checker=tools/perf_gate_base.py` -- and
+`tools/test_perf_gate.py` runs each job's two lines under bash against
+programs that list the table, list none, or name it otherwise, and holds
+their choice to `io_checker`'s own pattern, so the two cannot drift. The
+first version asked the base's checker for `io --help` and fell back
+where it failed: a later change that dropped or broke `io` would have had
+every pull request after it counted and judged by its own. The second ran
+this tree's `perf_gate.py io-checker` to decide: a pull request editing
+it, or the checker's dispatch, chose the checker that counted and judged
+it, and the judge job, whose comment says nothing of the change runs
+there, ran the pull request's Python. The command is gone, not kept as a
+convenience: a local `make perf-gate-io` counts and judges with this
+tree's checker anyway, and a command no job runs would be a second
+statement of the rule to drift. The base's server answers every request
+the workloads send, so all four are compared from that first run on, as
+the gate's own first run compared every workload its base ran.
 
 *The results kept apart.* The count job keeps the instructions' results
-before the I/O runs, and the I/O's beside them after, in the same artifact
-(`perf-results`): a strace refused, a server's crash, a run answering
-fewer requests or a phase past its 300 s leaves the instructions to be
-judged. The judge judges each set whatever became of the other, says which
-it lacks (`results.json`, `io.json`), and then fails a count that did not
-end well. Without strace, `io` and `io-measure` say so and count nothing --
-on a Mac, whose developer runs them in Docker -- but fail under CI
-(`GITHUB_ACTIONS`); a results file the judge cannot read is a failure that
-names it.
+(`perf-results`) before the I/O runs, and the I/O's in an artifact of
+their own after (`perf-io-results`), each step running whatever became of
+the other (`!cancelled()`): a strace refused, a server's crash, a run
+answering fewer requests or a phase past its 300 s leaves the
+instructions to be judged, and an instruction count that failed leaves
+the I/O to be. The first artifact is never uploaded again -- the second
+version re-uploaded both files under its name, `overwrite: true`, which
+deletes the first before it uploads, so a second upload that failed lost
+both. The judge downloads each apart, judges each set whatever became of
+the other, says which it lacks (`results.json`, `io.json`), and then fails
+a count that did not end well. Without strace, `io` and `io-measure` say
+so and count nothing -- on a Mac, whose developer runs them in Docker --
+but fail under CI (`GITHUB_ACTIONS`); a results file the judge cannot read
+is a failure that names it.
 
 *The counts, held to themselves.* One build's server against itself, 20
 runs a side -- 40 runs of each workload, in Docker on an M1 (aarch64 musl,
@@ -915,11 +992,12 @@ slower on one file system than another, a write that waits for the disk,
 the kernel writing back a mapped file's pages, and reads -- the file is
 mapped, and a read is a page fault no call shows -- are not counted, nor
 is a store into a mapped file, which is no call; a call the trace does not
-ask for is not seen, and io_uring's is refused rather than counted. Nor
-is anything the clock runs, `--sync <ms>`'s syncer and the write behind the
-lock outside `--sync always` among them
-([durability.md](durability.md#writes-behind-the-lock)), nor a server's
-open and shutdown. Every workload runs on one thread -- an I/O workload
+ask for is not seen, and io_uring, Linux AIO and a flag that makes each
+write durable or direct are refused rather than counted. Nothing outside
+the counted span is counted -- a server's open, the setup, and the
+shutdown's sync -- nor anything the clock runs, `--sync <ms>`'s syncer and
+the write behind the lock outside `--sync always` among them
+([durability.md](durability.md#writes-behind-the-lock)). Every workload runs on one thread -- an I/O workload
 one connection, a request in flight -- so what threads cost -- a lock's
 contention, connections side by side and the fsync their writes share, a
 batch's vectors linked in parallel -- is not counted. One target: x86_64
@@ -970,7 +1048,14 @@ and no file -- so a durable write's fsync would stand among the answers'
 writes, and a sync moved from the log to the database would read the same;
 counting by descriptor, file and stretch is what holds a run to the call.
 The I/O judged in total alone, as the first version had it: an fsync of
-the database where the log's was passed. The file after the setup held
+the database where the log's was passed. Every call of the fsync family
+one count, judged file by file, as the second had it: an `fsync` where an
+`fdatasync` was, a `syncfs` and a `sync_file_range` all passed, the last
+meeting `io-put`'s floor of 500 though it made nothing durable, and an
+`msync` with `MS_ASYNC`, which does nothing, met it too. Refusing every
+open of the data directory rather than reading its flags: the engine
+opens and makes files in the counted stretch -- the compact's side file,
+the log's next generation -- and those are counts. The file after the setup held
 as the requests sent are: a change to what the setup writes failed every
 workload, and no entry could let it through. One entry for it across the
 four workloads: each setup grows by its own share, and a workload whose

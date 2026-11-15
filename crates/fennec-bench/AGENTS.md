@@ -29,8 +29,9 @@ calls at the base's cost a call, never a call line's inclusive cost -- or
 in the bytes asked of it: a call's cost moves with the heap's layout, the
 calls and bytes with the code. Both jobs run the base's copy of
 `tools/perf_gate.py` -- for the I/O too, but where the base's `gate.rs`
-lists no `IO_WORKLOADS` (`io-checker`): only the pull request that brought
-them was counted and judged by its own -- and a workload the base's
+lists no `IO_WORKLOADS`, which each job reads with a `grep` held to
+`io_checker`, never Python of the change's: only the pull request that
+brought them was counted and judged by its own -- and a workload the base's
 `gate.rs` lists that this tree dropped, or that the base did not run,
 fails. A cost taken on purpose
 is a `PERF_ACCEPTED` entry the pull request adds -- the workload, its
@@ -46,16 +47,20 @@ against itself, 0.1% at most), and stands for a claim in the design file's
 table: a hot path a page quotes gets one. An I/O workload (`IO_WORKLOADS`)
 is sent by `gate.rs` to each side's `fennec-server` under `--sync always`,
 the server alone under `strace -f`, counted from its taking the workload's
-connection to the driver's next: the fsync family's calls, renames, the
-calls writing to files and their bytes, never a socket's or a pipe's --
-fsyncs and bytes file by file -- and the database's size after the setup;
-a server that sets up io_uring, which no call shows, is refused, and a
-call the trace does not ask for is one the gate cannot see. Nothing it
+connection to the driver's next: the syncs that make a file durable and
+the writebacks that do not, renames, the calls writing to files and their
+bytes, never a socket's or a pipe's, the files made, truncated, linked and
+unlinked -- each sync by its call and file, bytes file by file -- and the
+database's size after the setup; a server that sets up io_uring or Linux
+AIO, or opens a file of the data directory `O_SYNC`, `O_DSYNC` or
+`O_DIRECT`, whose writes the calls do not show, is refused, as is a run
+counting a file outside it, and a call the trace does not ask for is one
+the gate cannot see. Nothing it
 sends or the server writes then is sized by a clock or a draw, so every
 run of a side counts the same to the call; a run under its workload's
-floor (`IO_FLOORS`: an fsync a durable write answered, a write call)
-fails, and a count that is not the base's, up or down, fails unless an
-entry names it, and its file.
+floor (`IO_FLOORS`: a durable sync a durable write answered, a write
+call) fails, and a count that is not the base's, up or down, fails unless
+an entry names it, its file and its call.
 
 **[Two builds' instruction counts](../../docs/design/benchmarks.md#instruction-counts)**
 differing by under ~500 a request are read over re-signed copies'

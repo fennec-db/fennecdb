@@ -1211,9 +1211,11 @@ jobs:
   # the same trees and target directories, sent gate.rs's requests under
   # strace -f -- its fsyncs, renames and bytes written to files. The
   # instructions' results are kept before the I/O runs, so a failed I/O
-  # count leaves them to be judged. valgrind, strace (which the runner's
-  # image lacks) and musl-gcc (ring's C, through the examples'
-  # dev-dependency on fennec-tls) are the runner's packages, no crate.
+  # count leaves them to be judged, and the I/O runs whatever became of
+  # them, its results an artifact of their own. valgrind, strace (which
+  # the runner's image lacks) and musl-gcc (ring's C, through the
+  # examples' dev-dependency on fennec-tls) are the runner's packages, no
+  # crate.
   perf-count:
     name: perf (count)
     if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
@@ -1293,30 +1295,31 @@ jobs:
       # By the base's checker wherever the base's gate.rs lists
       # IO_WORKLOADS; this tree's only where it lists none -- the pull
       # request that brought them, counted by its own as the gate's first
-      # was (`io-checker`, held by tools/test_perf_gate.py). A base checker
-      # that cannot count them fails the step.
+      # was. Chosen by a grep, never by Python of the change's, which the
+      # tests hold to the checker's `io_checker`; a base checker that
+      # cannot count them fails the step. Run whatever became of the
+      # instructions' count, which is judged apart.
       - name: Count each I/O workload's fsyncs, renames and bytes written against the base's server and this one's
-        if: steps.reach.outputs.built == 'true'
+        if: ${{ !cancelled() && steps.reach.outputs.built == 'true' }}
         run: |
           sudo apt-get install -y --no-install-recommends strace
           git show HEAD^1:crates/fennec-http/examples/gate.rs > "$RUNNER_TEMP/base_gate.rs" \
             || : > "$RUNNER_TEMP/base_gate.rs"
-          checker=$(python3 -I tools/perf_gate.py io-checker --base-program "$RUNNER_TEMP/base_gate.rs" \
-            tools/perf_gate_base.py tools/perf_gate.py)
+          checker=tools/perf_gate.py
+          grep -Eq '^[[:space:]]*const IO_WORKLOADS\b' "$RUNNER_TEMP/base_gate.rs" && checker=tools/perf_gate_base.py
+          echo "the I/O counted by $checker"
           python3 -I "$checker" io --base HEAD^1 --target x86_64-unknown-linux-musl \
             --work "$RUNNER_TEMP/perf" --out "$RUNNER_TEMP/perf/io.json" --no-check
 
-      # The same artifact, the I/O's results beside the instructions'.
+      # An artifact of its own: the instructions' is never uploaded again,
+      # so a failed upload here loses nothing of theirs.
       - name: Keep the I/O results beside them
-        if: steps.reach.outputs.built == 'true'
+        if: ${{ !cancelled() && steps.reach.outputs.built == 'true' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: perf-results
-          path: |
-            ${{ runner.temp }}/perf/results.json
-            ${{ runner.temp }}/perf/io.json
+          name: perf-io-results
+          path: ${{ runner.temp }}/perf/io.json
           if-no-files-found: error
-          overwrite: true
           retention-days: 14
 
   # docs/design/benchmarks.md#the-gate: perf (count)'s results held to the
@@ -1331,9 +1334,9 @@ jobs:
   # a count that did not end well fails it after both. A job of its own:
   # the count runs the change's build scripts and programs, which could
   # put anything on a later step's PATH ($GITHUB_PATH); here nothing of the
-  # change runs but the gate's own files, whose every edit it names for the
-  # owner -- these steps and `perf_gate.py io-checker` -- and git and
-  # python3 are the runner's. It names every edit of the gate's own files
+  # change runs but these steps, whose every edit it names for the owner --
+  # the checker the base's, but where the base's gate.rs lists no
+  # IO_WORKLOADS, chosen by a grep -- and git and python3 are the runner's. It names every edit of the gate's own files
   # and every entry added, which the owner approves before the change
   # merges. This job is the check a merge may require.
   perf:
@@ -1371,14 +1374,22 @@ jobs:
         id: reach
         run: python3 -I tools/perf_gate_base.py reaches --base HEAD^1 --output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
 
-      # Whatever the count left: a file it lacks is said by the step that
-      # judges it.
+      # Whatever the count left, each artifact apart: a file it lacks is
+      # said by the step that judges it.
       - name: The count's results
         if: ${{ !cancelled() && steps.reach.outputs.built == 'true' }}
         continue-on-error: true
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: perf-results
+          path: ${{ runner.temp }}/judge
+
+      - name: The I/O count's results
+        if: ${{ !cancelled() && steps.reach.outputs.built == 'true' }}
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: perf-io-results
           path: ${{ runner.temp }}/judge
 
       - name: Hold them to the base's, by the base's checker
@@ -1401,7 +1412,8 @@ jobs:
             --base-program "$RUNNER_TEMP/judge/base_gate.rs" --summary "$GITHUB_STEP_SUMMARY"
 
       # Judged whether or not the instructions passed, so the summary holds
-      # both tables; by the checker that counted them (`io-checker`).
+      # both tables; by the checker that counted them, chosen as the count
+      # chose it.
       - name: Hold the I/O counts to the base's, by the base's checker
         if: ${{ !cancelled() && steps.reach.outputs.built == 'true' }}
         env:
@@ -1412,8 +1424,9 @@ jobs:
             echo "perf (count) left no I/O results (io.json): the I/O is not judged." >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
-          checker=$(python3 -I tools/perf_gate.py io-checker --base-program "$RUNNER_TEMP/judge/base_gate.rs" \
-            tools/perf_gate_base.py tools/perf_gate.py)
+          checker=tools/perf_gate.py
+          grep -Eq '^[[:space:]]*const IO_WORKLOADS\b' "$RUNNER_TEMP/judge/base_gate.rs" && checker=tools/perf_gate_base.py
+          echo "the I/O judged by $checker"
           held=()
           if [ "$BASE_HAD" = true ]; then
             held=(--accepted-base tools/perf_gate_base.py)

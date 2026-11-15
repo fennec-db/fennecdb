@@ -91,35 +91,38 @@ file of its own): each of gate.rs's IO_WORKLOADS sent by that program to a
 real fennec-server of each side under `--sync always`, the server alone run
 under `strace -f`, IO_RUNS (3) times a side. Counted between the server
 taking the workload's connection and its taking the driver's next one: the
-fsync family's calls, renames, the calls writing to files and the bytes
-they wrote, and the calls of those that failed -- fsyncs and bytes written
-file by file -- and beside them the database file's size once the setup
-was answered. Each to the call, so every run of a side must count the
-same, and any count of this tree's that is not the base's fails, up or
-down (fewer fsyncs a durable write is durability lost), unless the pull
-request adds a PERF_ACCEPTED entry naming the workload and the count, and
-the file where the count is a file's (`"metric": "fsyncs", "file":
-"io.fennec"`, a `most` of `+100%` or `+1`). A run under its workload's
-floor (IO_FLOORS) -- no fsync, no write, fewer fsyncs than durable writes
-answered -- fails: the trace missed what the server did. A server that
-sets up io_uring, whose writes no call shows, is refused.
+syncs that make a file durable and the writebacks that make nothing
+durable, each by its call and its file; renames; the calls writing to
+files and the bytes they wrote, file by file; the files created,
+truncated, linked and unlinked; the calls of those that failed -- and
+beside them the database file's size once the setup was answered. Each to
+the call, so every run of a side must count the same, and any count of
+this tree's that is not the base's fails, up or down (fewer fsyncs a
+durable write is durability lost), unless the pull request adds a
+PERF_ACCEPTED entry naming the workload and the count, the file where the
+count is a file's and the call where it is a call's (`"metric": "fsyncs",
+"file": "io.fennec.sync", "call": "fdatasync"`, a `most` of `+100%` or
+`+1`). A run under its workload's floor (IO_FLOORS) -- no fsync, no write,
+fewer fsyncs than durable writes answered -- fails: the trace missed what
+the server did. A server whose writes the trace cannot see -- io_uring,
+Linux AIO, a file of the data directory opened O_SYNC, O_DSYNC or
+O_DIRECT, a `pwritev2` with a sync flag -- is refused, and so is a run
+that counts a file outside its data directory.
 
     python3 tools/perf_gate.py io --base origin/main      # make perf-gate-io
     python3 tools/perf_gate.py io-measure --base-server B --head-server H \\
         --client G --out IO.json                          # two built servers
     python3 tools/perf_gate.py check IO.json              # judged as above
-    python3 tools/perf_gate.py io-checker --base-program BASE_GATE_RS \\
-        BASE_CHECKER THIS_CHECKER                         # which checker CI runs
 
 CI counts and judges the I/O with the base's checker too, but where the
-base's own gate.rs lists no IO_WORKLOADS (`io-checker`): the pull request
-that brought them was counted and judged by its own.
+base's own gate.rs lists no IO_WORKLOADS: the pull request that brought
+them was counted and judged by its own. Both jobs choose it in the shell
+(`io_checker`, which the tests hold their `grep` to).
 
 `run` and `measure` count with valgrind, `io` and `io-measure` with strace,
 both on Linux: elsewhere they say so and exit 0 (on macOS, in Docker:
 docs/design/benchmarks.md#the-gate) -- `io` and `io-measure` fail under CI
-(GITHUB_ACTIONS). `check`, `io-checker`, `reaches` and `edits` run
-anywhere.
+(GITHUB_ACTIONS). `check`, `reaches` and `edits` run anywhere.
 """
 
 import argparse
@@ -188,15 +191,24 @@ JOBS = ("perf-count", "perf")
 # allocator priced), or the heap bytes an op; or one of an I/O workload's
 # counts (IO_METRICS, below).
 INSTRUCTION_METRICS = ("instructions", "bytes")
-# An I/O workload's counts, each judged to the call: the fsync family's
-# calls, renames, the calls writing to files, the bytes they wrote, and
-# the calls of those that failed.
-IO_COUNTS = ("fsyncs", "renames", "writes", "written", "failed")
+# An I/O workload's counts, each judged to the call: the syncs that make
+# a file durable (IO_DURABLE), the calls that start a writeback and make
+# nothing durable (IO_WRITEBACKS), renames, the calls writing to files,
+# the bytes they wrote, the calls of those that failed, and the files
+# made, truncated, linked and unlinked.
+IO_COUNTS = (
+    "fsyncs", "writebacks", "renames", "writes", "written", "failed", "creates", "truncates", "links", "unlinks",
+)
 # Of those, the ones judged file by file, each file named within the data
 # directory: an fsync of the database where its sync log's was -- the same
 # count, some 356 against 65 microseconds an fsync (durability.md) -- or
 # its bytes written to the other is a change, which a total does not show.
-IO_BY_FILE = ("fsyncs", "written")
+IO_BY_FILE = ("fsyncs", "writebacks", "written")
+# Of those, the ones judged call by call too: an `fsync` of the log where
+# its `fdatasync` was is the same count of the same file, and a journal
+# commit on ext4 every durable write -- what the log exists to save -- and
+# a `syncfs` in its place syncs the whole file system each time.
+IO_BY_CALL = ("fsyncs", "writebacks")
 # What an entry may name of an I/O workload: its counts, and the database
 # file's size once the setup was answered (`file_before`), which the
 # server's encoding of the setup decides -- a record's, the schema's, the
@@ -209,7 +221,9 @@ METRICS = INSTRUCTION_METRICS + IO_METRICS
 # count of nothing. Each sends durable writes one at a time under `--sync
 # always`, where a write is answered only once it has synced and one
 # request in flight shares its sync with none: an fsync an answer at the
-# least ("answered", the requests the run answered), and a write call. A
+# least ("answered", the requests the run answered) -- a sync that makes a
+# file durable (IO_DURABLE), never a writeback, which a durable write
+# answered on would have lost its durability -- and a write call. A
 # compact renames its new file over the old. A workload named nowhere here
 # is held to IO_FLOOR; one that writes nothing on purpose names its own.
 IO_FLOOR = {"fsyncs": 1, "writes": 1}
@@ -227,8 +241,9 @@ IO_FLOORS = {
 # later regression of the same workload needs an entry of its own. `metric`
 # says what it lets through, "bytes" for the heap's bytes and the figure
 # where it is left out; one entry a metric. An I/O workload's entry names
-# its count (IO_METRICS) -- and the file, for a count judged file by file
-# (IO_BY_FILE) -- and lets it move only in its `most`'s direction, by at
+# its count (IO_METRICS) -- the file, for a count judged file by file
+# (IO_BY_FILE), and the call, for one judged call by call (IO_BY_CALL) --
+# and lets it move only in its `most`'s direction, by at
 # most that share of the base's count or that many: "+100%", "+1", "-50%".
 # A share of a count of none is none, so a count from 0 is let through by
 # a number alone; of several entries naming one count, any lets through
@@ -243,7 +258,7 @@ IO_FLOORS = {
 #    "reason": "a key's row now holds its request's digest, which a replay
 #               checks: +260 instructions a keyed put (make perf-gate),
 #               +1.5% by make instr-compare MODES=keyed on an M1"}
-#   {"workload": "io-compact", "metric": "fsyncs", "file": ".", "most": "+1",
+#   {"workload": "io-compact", "metric": "fsyncs", "file": ".", "call": "fsync", "most": "+1",
 #    "reason": "the directory is synced after the rename too, or a power
 #               cut could bring the old file back: one fsync a compact"}
 PERF_ACCEPTED = []
@@ -251,7 +266,7 @@ PERF_ACCEPTED = []
 # What an entry must say, what it may, and how long its reason is at the
 # least: a written justification, not a word.
 ENTRY_KEYS = {"workload", "most", "reason"}
-ENTRY_OPTIONAL = {"metric", "file"}
+ENTRY_OPTIONAL = {"metric", "file", "call"}
 REASON_AT_LEAST = 40
 
 
@@ -323,16 +338,17 @@ def checked(entries):
     """`entries` held to the form an entry takes: each a dict of ENTRY_KEYS
     and at most ENTRY_OPTIONAL, a workload's name, a metric, a `most` above
     the threshold -- an I/O count's signed (`io_most`) -- a file where the
-    count is judged file by file (IO_BY_FILE) and none elsewhere, and a
-    reason in words. A malformed entry is the gate's failure, never one
-    passed over."""
+    count is judged file by file (IO_BY_FILE) and none elsewhere, a call
+    of its kind where it is judged call by call (IO_BY_CALL) and none
+    elsewhere, and a reason in words. A malformed entry is the gate's
+    failure, never one passed over."""
     if not isinstance(entries, list):
         raise ValueError("PERF_ACCEPTED is a list of entries")
     for e in entries:
         if not isinstance(e, dict) or not ENTRY_KEYS <= set(e) <= ENTRY_KEYS | ENTRY_OPTIONAL:
             raise ValueError(
                 f"an entry names {sorted(ENTRY_KEYS)}, and `metric` where it lets bytes or an I/O count through, "
-                f"`file` where that count is a file's: {e!r}"
+                f"`file` where that count is a file's, `call` where it is a call's: {e!r}"
             )
         if not isinstance(e["workload"], str) or not e["workload"]:
             raise ValueError(f"an entry's workload is a name: {e!r}")
@@ -347,6 +363,18 @@ def checked(entries):
                 )
         elif "file" in e:
             raise ValueError(f"{e['workload']}: {metric_of(e)} is judged in total, and its entry names no file: {e!r}")
+        if metric_of(e) in IO_BY_CALL:
+            # And call by call: an `fsync` where an `fdatasync` was is a
+            # change of its own, which its entry names as it names the file.
+            calls = IO_CALLS_OF[metric_of(e)]
+            if e.get("call") not in calls:
+                raise ValueError(
+                    f"{e['workload']}: {metric_of(e)} is judged call by call, and its entry names the call, "
+                    f"one of {', '.join(sorted(calls))} (`\"call\": \"fdatasync\"`): {e!r}"
+                )
+        elif "call" in e:
+            raise ValueError(f"{e['workload']}: {metric_of(e)} is judged in total of every call, and its entry "
+                             f"names no call: {e!r}")
         if metric_of(e) in IO_METRICS:
             # Counted to the call: any move is one, and its direction is
             # named -- fewer fsyncs a durable write is durability lost.
@@ -756,23 +784,47 @@ def table(results, rows):
     return "\n".join(out) + "\n"
 
 
+def io_label(metric, f=None, call=None):
+    """A count as a verdict names it: `fdatasync of `io.fennec.sync``, one
+    count, and `fsync of `io.fennec.sync`` another; a writeback's call
+    said to make nothing durable; a file's share of a count by the file;
+    a total by its name."""
+    if metric == "file_before":
+        return "the file after the setup (`file_before`)"
+    if call is not None:
+        said = f"{call} of `{f}`"
+        return said if metric == "fsyncs" else f"{said} (no durability)"
+    return metric if f is None else f"{metric} of `{f}`"
+
+
+# A file's own counts beside its calls, each run of a side agreeing on
+# every one: fsyncs and writebacks the sums of their calls'.
+IO_FILE_COUNTS = ("fsyncs", "writebacks", "written", "writes", "renames", "creates", "truncates", "links", "unlinks")
+# A call's kind, as a run's files hold its counts.
+IO_CALL_KEYS = {"fsyncs": "fsync_calls", "writebacks": "writeback_calls"}
+
+
 def io_flat(run):
     """A run's counts as {label: value}: every one each run of a side must
     agree on -- the requests sent and answered (IO_SENT), each count in
-    total and each file's apiece, and the file after the setup."""
+    total, each file's apiece and each call's of each file, and the file
+    after the setup."""
     out = {k: run.get(k) for k in IO_SENT + IO_METRICS}
     for f, c in sorted((run.get("files") or {}).items()):
-        for k in ("fsyncs", "written", "writes", "renames"):
-            out[f"{k} of `{f}`"] = c.get(k, 0)
+        for k in IO_FILE_COUNTS:
+            out[io_label(k, f)] = c.get(k, 0)
+        for k, key in IO_CALL_KEYS.items():
+            for call, n in sorted((c.get(key) or {}).items()):
+                out[io_label(k, f, call)] = n
     return out
 
 
 def io_side(runs):
     """A side's runs of an I/O workload: the one run they agree on, and each
     count they differ in (`io_flat`'s label) with every run's value, in the
-    runs' order -- a file one run wrote and another did not is 0 in the
-    other. Counted to the call, a count that moves from one run to the next
-    is the clock's or a draw's, and no count to judge by."""
+    runs' order -- a file or a call one run counted and another did not is
+    0 in the other. Counted to the call, a count that moves from one run to
+    the next is the clock's or a draw's, and no count to judge by."""
     flats = [io_flat(r) for r in runs]
     labels = dict.fromkeys(k for f in flats for k in f)
     differ = [(k, [f.get(k, 0) for f in flats]) for k in labels if len({f.get(k, 0) for f in flats}) > 1]
@@ -796,26 +848,27 @@ def io_moved(b, h):
 
 
 def io_judged(run):
-    """What of a run is held to the other side's, {(metric, file): value}:
-    fsyncs and bytes written file by file (IO_BY_FILE), the rest of the
-    counts and the file after the setup in total, their file None."""
-    out = {(k, None): run[k] for k in IO_METRICS if k not in IO_BY_FILE}
+    """What of a run is held to the other side's, {(metric, file, call):
+    value}: each sync call of each file, durable or a writeback, by its
+    name (IO_BY_CALL); bytes written file by file (IO_BY_FILE); the rest of
+    the counts and the file after the setup in total, their file and call
+    None. A file's fsyncs, the sum of its calls', move only where a call's
+    does, and are the table's, not judged twice."""
+    out = {(k, None, None): run[k] for k in IO_METRICS if k not in IO_BY_FILE}
     for f, c in (run.get("files") or {}).items():
         for k in IO_BY_FILE:
-            out[(k, f)] = c.get(k, 0)
+            if k in IO_BY_CALL:
+                for call, n in (c.get(IO_CALL_KEYS[k]) or {}).items():
+                    out[(k, f, call)] = n
+            else:
+                out[(k, f, None)] = c.get(k, 0)
     return out
-
-
-def io_label(metric, f):
-    """A judged count as the verdict names it."""
-    if metric == "file_before":
-        return "the file after the setup (`file_before`)"
-    return metric if f is None else f"{metric} of `{f}`"
 
 
 def io_floor(name, run):
     """What `run` of workload `name` counts under its floor (IO_FLOORS):
-    [(count, counted, the least)], none where it holds."""
+    [(count, counted, the least)], none where it holds. Its fsyncs are the
+    syncs that made a file durable, never a writeback's call."""
     out = []
     for k, least in IO_FLOORS.get(name, IO_FLOOR).items():
         at_least = run["answered"] if least == "answered" else least
@@ -827,16 +880,16 @@ def io_floor(name, run):
 def judge_io(results, entries=(), base_names=None):
     """Each I/O workload of `results` judged: (rows, failed), a row (name,
     requests, base, head, verdict, moved) -- base and head the run each
-    side's runs agree on, or None, and moved {(metric, file): (base, head)}
-    for each judged count (`io_judged`) that is not the base's. Any such
-    move fails unless one of `entries`, the pull request's own, names the
-    workload, the count and its file where it has one, and lets it so far
-    in its direction (`io_lets`). A side whose runs differ fails, naming
-    every run's value; so does one under its workload's floor (`io_floor`),
-    and sides sent different requests. As the instructions' (`judge`): a
-    workload of `base_names` -- the base's own program's IO_WORKLOADS --
-    this tree dropped, or the base's build did not run, fails, where one
-    new to this tree is held to nothing."""
+    side's runs agree on, or None, and moved {(metric, file, call): (base,
+    head)} for each judged count (`io_judged`) that is not the base's. Any
+    such move fails unless one of `entries`, the pull request's own, names
+    the workload, the count, its file and its call where it has them, and
+    lets it so far in its direction (`io_lets`). A side whose runs differ
+    fails, naming every run's value; so does one under its workload's floor
+    (`io_floor`), and sides sent different requests. As the instructions'
+    (`judge`): a workload of `base_names` -- the base's own program's
+    IO_WORKLOADS -- this tree dropped, or the base's build did not run,
+    fails, where one new to this tree is held to nothing."""
     if results.get("metric") != "io":
         raise ValueError(f"these results hold {results.get('metric')!r}, not I/O counts")
     # The instructions' entries are `judge`'s.
@@ -848,7 +901,7 @@ def judge_io(results, entries=(), base_names=None):
             raise ValueError(f"PERF_ACCEPTED names {e['workload']!r}, which no I/O workload is")
     allowed = {}
     for e in entries:
-        allowed.setdefault((e["workload"], metric_of(e), e.get("file")), []).append(e["most"])
+        allowed.setdefault((e["workload"], metric_of(e), e.get("file"), e.get("call")), []).append(e["most"])
     order = {k: i for i, k in enumerate(IO_METRICS)}
 
     rows, failed = [], False
@@ -904,17 +957,22 @@ def judge_io(results, entries=(), base_names=None):
         bj, hj = io_judged(b), io_judged(h)
         moved = {
             key: (bj.get(key, 0), hj.get(key, 0))
-            for key in sorted(set(bj) | set(hj), key=lambda k: (order[k[0]], k[1] or ""))
+            for key in sorted(set(bj) | set(hj), key=lambda k: (order[k[0]], k[1] or "", k[2] or ""))
             if bj.get(key, 0) != hj.get(key, 0)
         }
         failures, accepted = [], []
-        for (k, f), (was, now) in moved.items():
-            said = f"{io_label(k, f)} {io_moved(was, now)}"
-            mosts = allowed.get((name, k, f), [])
+        for (k, f, call), (was, now) in moved.items():
+            said = f"{io_label(k, f, call)} {io_moved(was, now)}"
+            mosts = allowed.get((name, k, f, call), [])
             if any(io_lets(most, was, now) for most in mosts):
                 accepted.append(said)
-            elif was == 0 and any(io_most(m)[0] == "share" for m in mosts):
-                failures.append(said + ", where a share of none lets nothing through: an entry names a count (`+1`)")
+            elif mosts:
+                # Entries name it and none lets this move through: said, so
+                # the author reads why, not only that.
+                past = f"{said}, which its entries ({', '.join(f'`{m}`' for m in mosts)}) do not let through"
+                if was == 0 and any(io_most(m)[0] == "share" for m in mosts):
+                    past += " -- a share of none is none: from none an entry names a count (`+1`)"
+                failures.append(past)
             else:
                 failures.append(said)
         if failures:
@@ -929,23 +987,31 @@ def judge_io(results, entries=(), base_names=None):
     return rows, failed
 
 
+def io_named(counts, skip=()):
+    """A cell naming each count of `counts` that is not none, `syncfs 2,
+    msync 1`, or `-`."""
+    said = [f"{k} {v:,}" for k, v in counts.items() if v and k not in skip]
+    return ", ".join(said) or "-"
+
+
 def io_table(results, rows):
     """The I/O judgement as Markdown, a step summary's: each workload's
     counts in total, `base → this tree` where they differ, the ratios a
-    reader weighs them by, and each file's counts -- by which fsyncs and
-    bytes written are judged."""
+    reader weighs them by, and each file's counts -- each sync call by its
+    name, by which with bytes written the files are judged."""
     out = [
         f"### I/O a workload, base against this tree ({results.get('runs', '?')} runs a side of each "
         "side's fennec-server under `strace -f`, every run of a side alike)",
         "",
-        "| workload | answered | rows | bytes sent | file after setup | fsyncs | fsyncs an answer | renames "
-        "| write calls | bytes written | written a byte sent | written a byte of the file | verdict |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| workload | answered | rows | bytes sent | file after setup | fsyncs | fsyncs an answer | writebacks "
+        "| renames | created | truncated | linked | unlinked | write calls | bytes written | written a byte sent "
+        "| written a byte of the file | verdict |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
 
-    def cell(sides, key, of=lambda r, k: r[k]):
+    def cell(sides, key, of=lambda r, k: r.get(k, 0)):
         vals = [of(r, key) for r in sides]
-        return " → ".join(f"{v:,}" for v in dict.fromkeys(vals)) if vals else "-"
+        return " → ".join(f"{v:,}" if isinstance(v, int) else str(v) for v in dict.fromkeys(vals)) if vals else "-"
 
     for name, n, b, h, verdict, _ in rows:
         sides = [r for r in (b, h) if r]
@@ -954,44 +1020,60 @@ def io_table(results, rows):
             vals = [f"{r[num] / r[den]:,.{digits}f}" if r[den] else "-" for r in sides]
             return " → ".join(dict.fromkeys(vals)) or "-"
 
+        counts = " | ".join(
+            cell(sides, k) for k in ("writebacks", "renames", "creates", "truncates", "links", "unlinks", "writes",
+                                     "written")
+        )
         out.append(
             f"| {name} | {cell(sides, 'answered')} | {cell(sides, 'rows')} | {cell(sides, 'sent')} "
             f"| {cell(sides, 'file_before')} | {cell(sides, 'fsyncs')} | {ratio('fsyncs', 'answered', 2)} "
-            f"| {cell(sides, 'renames')} | {cell(sides, 'writes')} | {cell(sides, 'written')} "
-            f"| {ratio('written', 'sent', 3)} | {ratio('written', 'file_before', 3)} | {verdict} |"
+            f"| {counts} | {ratio('written', 'sent', 3)} | {ratio('written', 'file_before', 3)} | {verdict} |"
         )
+    def file_cells(c):
+        """A file's counts as its row gives them, a cell each."""
+        calls = c.get("fsync_calls") or {}
+        return (
+            c.get("fsyncs", 0), calls.get("fsync", 0), calls.get("fdatasync", 0),
+            io_named(calls, skip=("fsync", "fdatasync")), io_named(c.get("writeback_calls") or {}),
+            c.get("written", 0), c.get("writes", 0), c.get("renames", 0),
+            io_named({said: c.get(k, 0) for k, said in (("creates", "created"), ("truncates", "truncated"),
+                                                        ("links", "linked"), ("unlinks", "unlinked"))}),
+        )
+
     files = []
     for name, _, b, h, _, _ in rows:
         sides = [r for r in (b, h) if r]
-        share = lambda r, k, f=None: ((r.get("files") or {}).get(f) or {}).get(k, 0)
         for f in sorted({f for r in sides for f in (r.get("files") or {})}):
-            of = lambda r, k, f=f: share(r, k, f)
-            files.append(
-                f"| {name} | `{f}` | {cell(sides, 'fsyncs', of)} | {cell(sides, 'written', of)} "
-                f"| {cell(sides, 'writes', of)} | {cell(sides, 'renames', of)} |"
-            )
+            each = [file_cells((r.get("files") or {}).get(f) or {}) for r in sides]
+            cells = [cell(each, i, lambda r, i: r[i]) for i in range(len(each[0]))]
+            files.append(f"| {name} | `{f}` | " + " | ".join(cells) + " |")
     if files:
         out += [
             "",
             "Each file's counts, named within the data directory -- the database, its `.sync` log, the file a "
-            "compact writes, `.` the directory -- fsyncs and bytes written judged file by file:",
+            "compact writes, `.` the directory; `(file system)` a `syncfs`'s, `(every file)` a `sync`'s, "
+            "`(mapped)` an `msync`'s -- each sync call judged by its name and its file, bytes written file by "
+            "file:",
             "",
-            "| workload | file | fsyncs | bytes written | write calls | renamed to it |",
-            "|---|---|---:|---:|---:|---:|",
+            "| workload | file | fsyncs | fsync | fdatasync | other syncs | writebacks | bytes written | write calls "
+            "| renamed to it | created, truncated, linked, unlinked |",
+            "|---|---|---:|---:|---:|---|---|---:|---:|---:|---|",
             *files,
         ]
     out += [
         "",
         "Any count of this tree's that is not the base's fails, up or down -- fewer fsyncs a durable "
         "write is durability lost -- unless the pull request adds a PERF_ACCEPTED entry (tools/perf_gate.py) "
-        "naming the workload and the count, and the file for fsyncs and bytes written, which the owner "
-        "approves: docs/design/benchmarks.md#the-gate. Counted from the server taking the workload's "
-        "connection to its taking the driver's next: the fsync family's calls (fsync, fdatasync, "
-        "sync_file_range, syncfs, msync, sync) on files, renames, and the calls writing to files (write, "
-        "pwrite64, writev, pwritev, pwritev2, copy_file_range, sendfile, splice, fallocate) and the bytes "
-        "they returned -- never a socket's or a pipe's, the log being a pipe; *answered* and *bytes sent* "
-        "are the client's, *file after setup* the database's size once the setup was answered, judged as a "
-        "count is.",
+        "naming the workload and the count, the file for a sync or bytes written and the call for a sync, "
+        "which the owner approves: docs/design/benchmarks.md#the-gate. Counted from the server taking the "
+        "workload's connection to its taking the driver's next: the syncs that make a file durable (fsync, "
+        "fdatasync, syncfs, sync, msync with MS_SYNC) and the writebacks that make nothing durable "
+        "(sync_file_range, msync without MS_SYNC), each by its call; renames; the calls writing to files "
+        "(write, pwrite64, writev, pwritev, pwritev2, copy_file_range, sendfile, splice, fallocate) and the "
+        "bytes they returned -- never a socket's or a pipe's, the log being a pipe; files created (an open "
+        "with O_CREAT or O_TMPFILE, creat, mkdir), truncated (ftruncate, truncate, an open with O_TRUNC), "
+        "linked and unlinked; *answered* and *bytes sent* are the client's, *file after setup* the database's "
+        "size once the setup was answered, judged as a count is.",
     ]
     errors = [(n, w["base_error"]) for n, w in sorted(results["workloads"].items()) if w.get("base_error")]
     if errors:
@@ -1167,16 +1249,22 @@ def gate_edits(base, head):
     old = accepted_text(old, f"{base}:{CHECKER}") if old else []
     new = accepted_text(new, f"{head}:{CHECKER}") if new else []
     for e in added(new, old):
-        notes.append(
-            f"PERF_ACCEPTED gains an entry: `{e.get('workload')}`, {e.get('metric', 'instructions')} "
-            f"up to {e.get('most')} -- {e.get('reason')}"
-        )
+        notes.append(f"PERF_ACCEPTED gains an entry: {entry_said(e)} -- {e.get('reason')}")
     for e in added(old, new):
-        notes.append(
-            f"PERF_ACCEPTED loses an entry, the list's history cut or an entry edited: `{e.get('workload')}` "
-            f"up to {e.get('most')}"
-        )
+        notes.append(f"PERF_ACCEPTED loses an entry, the list's history cut or an entry edited: {entry_said(e)}")
     return notes
+
+
+def entry_said(e):
+    """Entry `e` as the owner reads it: its workload, what it lets through
+    -- the file and the call too where it names them, the I/O's judged by
+    both -- and how far."""
+    what = e.get("metric", "instructions")
+    if isinstance(e, dict) and e.get("file") is not None:
+        what += f" of `{e['file']}`"
+    if isinstance(e, dict) and e.get("call") is not None:
+        what += f" by {e['call']}"
+    return f"`{e.get('workload')}`, {what} up to {e.get('most')}"
 
 
 def annotation(text):
@@ -1456,23 +1544,40 @@ def measure(args):
 # should not.
 IO_RUNS = 3
 # What strace is asked for: the connections the server takes, which mark
-# the counted stretch, every call that syncs, renames or writes, and those
-# whose writes no call shows (IO_REFUSED). Each goes as `?name`, which
-# strace passes over where the architecture has no such call (aarch64 has
-# no `rename`, x86_64's musl calls it). A call missing here is a write the
+# the counted stretch; every call that writes, syncs or starts a writeback;
+# every call that renames, makes, truncates, links or unlinks a file; the
+# opens and `fcntl`, read for a flag that makes every write durable or
+# passes the cache by (IO_FLAGS_REFUSED); and the calls whose writes no
+# call shows (IO_REFUSED). Each goes as `?name`, which strace passes over
+# where the architecture has no such call (aarch64 has no `rename`, no
+# `open`, x86_64's musl calls both). A call missing here is a write the
 # gate cannot see: an added one would pass on counts that never moved.
 IO_CALLS = (
-    "accept", "accept4", "write", "pwrite64", "writev", "pwritev", "pwritev2", "copy_file_range", "sendfile",
-    "splice", "fallocate", "fsync", "fdatasync", "sync_file_range", "msync", "syncfs", "sync", "rename",
-    "renameat", "renameat2", "io_uring_setup",
+    "accept", "accept4",
+    "write", "pwrite64", "writev", "pwritev", "pwritev2", "copy_file_range", "sendfile", "splice", "fallocate",
+    "fsync", "fdatasync", "syncfs", "sync", "msync", "sync_file_range", "sync_file_range2",
+    "rename", "renameat", "renameat2", "open", "openat", "openat2", "creat", "mkdir", "mkdirat",
+    "truncate", "ftruncate", "link", "linkat", "unlink", "unlinkat", "rmdir",
+    "fcntl", "io_uring_setup", "io_setup", "io_submit",
 )
 IO_ACCEPTS = frozenset({"accept", "accept4"})
-# The fsync family, each an fsync of the file it names: `syncfs` syncs the
-# file system that file is on, `msync` names no descriptor and is a mapped
-# file's, `(mapped)`, and `sync` syncs everything, `(every file)` -- at the
-# least an fsync of each.
-IO_SYNCS = frozenset({"fsync", "fdatasync", "sync_file_range", "msync", "syncfs", "sync"})
-IO_UNNAMED = {"msync": "(mapped)", "sync": "(every file)"}
+# The syncs that make a file durable (`fsyncs`), each counted by its name
+# and the file it names: `syncfs` syncs a whole file system, `(file
+# system)`; `msync` names no descriptor and is a mapped file's, `(mapped)`,
+# a durability only with MS_SYNC -- MS_ASYNC asks for nothing the kernel
+# does not do anyway; `sync` syncs everything, `(every file)`. These alone
+# meet a floor.
+IO_DURABLE = frozenset({"fsync", "fdatasync", "syncfs", "sync", "msync"})
+# The calls that start a writeback and make nothing durable
+# (`writebacks`): `sync_file_range`, whatever its flags -- it flushes
+# neither the drive's cache nor the file's metadata -- arm's
+# `sync_file_range2`, and an `msync` without MS_SYNC. Counted, each by its
+# name and file, so one in an fsync's place is two moves and under a
+# floor, never a sync.
+IO_WRITEBACKS = frozenset({"sync_file_range", "sync_file_range2", "msync"})
+IO_CALLS_OF = {"fsyncs": IO_DURABLE, "writebacks": IO_WRITEBACKS}
+IO_SYNCS = IO_DURABLE | IO_WRITEBACKS
+IO_UNNAMED = {"msync": "(mapped)", "sync": "(every file)", "syncfs": "(file system)"}
 IO_RENAMES = frozenset({"rename", "renameat", "renameat2"})
 # A call writing to a file, and which of its descriptors (`-y` shows each
 # with its path) is the one written to: copy_file_range's and splice's
@@ -1482,11 +1587,28 @@ IO_WRITES = {
     "write": 0, "pwrite64": 0, "writev": 0, "pwritev": 0, "pwritev2": 0, "copy_file_range": 1, "sendfile": 0,
     "splice": 1, "fallocate": 0,
 }
+# The opens. One with O_CREAT or O_TMPFILE, or `creat`, counts as a file
+# created -- whether or not it was there, which the trace cannot tell and
+# a run repeats -- and one with O_TRUNC, or `creat`, as one truncated.
+IO_OPENS = frozenset({"open", "openat", "openat2", "creat"})
+# The directory's other changes, each counted in total as its kind.
+IO_CHANGES = {
+    "mkdir": "creates", "mkdirat": "creates", "truncate": "truncates", "ftruncate": "truncates",
+    "link": "links", "linkat": "links", "unlink": "unlinks", "unlinkat": "unlinks", "rmdir": "unlinks",
+}
+# What makes a write durable, or costs its bytes otherwise, with the same
+# calls -- an open of a file in the data directory with O_SYNC or O_DSYNC,
+# whose every write flushes the device, or O_DIRECT (by `fcntl` too),
+# which passes the page cache by; a `pwritev2` with RWF_SYNC or RWF_DSYNC
+# -- is refused anywhere in the trace, where it took: the counts would
+# read the same.
+IO_FLAGS_REFUSED = frozenset({"O_SYNC", "O_DSYNC", "O_DIRECT", "RWF_SYNC", "RWF_DSYNC"})
 # A call whose writes and syncs no call of the trace shows -- io_uring's
-# ring is read by the kernel, its submissions no system call each -- so a
+# ring is read by the kernel, its submissions no system call each; Linux
+# AIO's are submitted in batches, their completions no call either -- so a
 # server that sets one up anywhere in the trace is refused, never counted:
 # the gate learns the call first.
-IO_REFUSED = frozenset({"io_uring_setup"})
+IO_REFUSED = frozenset({"io_uring_setup", "io_setup", "io_submit"})
 # What else each run of a side must agree on, and both sides: the client's
 # requests answered, and rows and bytes sent in the run and in the setup.
 IO_SENT = ("answered", "rows", "sent", "setup_sent")
@@ -1498,6 +1620,10 @@ IO_SENT = ("answered", "rows", "sent", "setup_sent")
 IO_SERVER = ("--http", "127.0.0.1:0", "--sync", "always", "--auto-compact", "off", "--exit-on-stdin-close")
 # A phase that takes longer has hung.
 IO_TIMEOUT = 300
+# Where a counted call's file is not in the data directory: a run that
+# counts one is refused, since a data directory the trace names otherwise
+# -- through a link -- would put every file there on both sides.
+IO_OUTSIDE = "(outside the data directory)"
 
 STRACE_LINE = re.compile(r"^(?:\[pid\s+)?(\d+)\]?\s+(.*)$")
 STRACE_RESUMED = re.compile(r"^<\.\.\. (\w+) resumed>(.*)$")
@@ -1514,13 +1640,14 @@ UNFINISHED = "<unfinished ...>"
 
 
 def strace_calls(lines):
-    """The calls a `strace -f -y` trace holds, (name, arguments, return) --
-    the return an int, None where the process ended inside the call -- in
-    the order they returned: a call another thread's interleaved, written
-    `<unfinished ...>` where it began and `<... name resumed>` where it
-    returned, is joined by its thread's id and yielded where it returned.
-    Exits and signals are passed over, and so is a call resumed whose
-    beginning the trace does not hold."""
+    """The calls a `strace -f -y` trace holds, (name, arguments, return,
+    the returned descriptor's path) -- the return an int, None where the
+    process ended inside the call, the path None where it returned none
+    -- in the order they returned: a call another thread's interleaved,
+    written `<unfinished ...>` where it began and `<... name resumed>`
+    where it returned, is joined by its thread's id and yielded where it
+    returned. Exits and signals are passed over, and so is a call resumed
+    whose beginning the trace does not hold."""
     begun = {}
     for raw in lines:
         m = STRACE_LINE.match(raw.rstrip("\n"))
@@ -1549,43 +1676,92 @@ def strace_calls(lines):
         if not done:
             continue
         v = re.match(r"-?\d+", done.group(2))
-        yield name, done.group(1), int(v.group()) if v else None
+        fd = STRACE_FD.match(done.group(2))
+        yield name, done.group(1), int(v.group()) if v else None, fd.group(2) if fd else None
+
+
+def strace_path(args):
+    """The last path a call's arguments name -- the new name of a rename
+    or a link, the one an open, an unlink or a truncate names -- joined to
+    the directory whose descriptor stands before it where it is relative:
+    "" where there is none, or no directory to join it to."""
+    quoted = list(re.finditer(r'"([^"]*)"', args))
+    if not quoted:
+        return ""
+    path = quoted[-1].group(1)
+    if not path.startswith("/"):
+        before = STRACE_FD.findall(args[: quoted[-1].start()])
+        path = before[-1][1] + "/" + path if before else ""
+    return path
+
+
+def strace_flags(args, after_path=True):
+    """The flags a call's arguments spell, `O_RDWR|O_CREAT` and the like,
+    as a set of names: those after its last path where it names one, so
+    no name in a path is read as a flag."""
+    quoted = list(re.finditer(r'"([^"]*)"', args))
+    tail = args[quoted[-1].end():] if after_path and quoted else args
+    return set(re.findall(r"\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b", tail))
 
 
 def io_counts(lines, data_dir, start=2, end=3):
     """What a server's trace (`lines`) did to files between the `start`th
-    connection it took and the `end`th: {fsyncs, renames, writes, written,
-    failed, files}, and the connections it took in all. A call counts where
-    it returned. A descriptor counts as a file where `-y` names it by a path
-    outside /dev, /proc and /sys -- never a socket, a pipe (the server's
-    log, its stderr, is the driver's pipe) or /dev/null; one unlinked since
-    it was opened, `(deleted)`, by its name. A call that failed counts in
+    connection it took and the `end`th: {fsyncs, writebacks, renames,
+    writes, written, failed, creates, truncates, links, unlinks, files},
+    and the connections it took in all. A call counts where it returned. A
+    descriptor counts as a file where `-y` names it by a path outside /dev,
+    /proc and /sys -- never a socket, a pipe (the server's log, its stderr,
+    is the driver's pipe) or /dev/null; one unlinked since it was opened by
+    its name and ` (deleted)`, its own file. A call that failed counts in
     `failed` alone, its bytes none; `files` gives each file's share, named
-    within `data_dir`. A call of IO_REFUSED anywhere in the trace is a
-    RuntimeError: the run cannot be counted."""
+    within `data_dir` -- the directory as the trace names it, its links
+    resolved -- and each sync's call. A RuntimeError, the run not to be
+    counted: a call of IO_REFUSED anywhere in the trace, a flag of
+    IO_FLAGS_REFUSED that took on a file in the data directory, or a count
+    of a file outside it."""
     data_dir = data_dir.rstrip("/")
 
     def file_of(path):
-        path = path.removesuffix(" (deleted)")
+        path, deleted = (path[: -len(" (deleted)")], " (deleted)") if path.endswith(" (deleted)") else (path, "")
         if not path.startswith("/") or path.startswith(("/dev/", "/proc/", "/sys/")):
             return None
         if path == data_dir:
-            return "."
+            return "." + deleted
         if path.startswith(data_dir + "/"):
-            return path[len(data_dir) + 1:]
-        return "(outside the data directory)"
+            return path[len(data_dir) + 1:] + deleted
+        return IO_OUTSIDE
 
-    out = {"fsyncs": 0, "renames": 0, "writes": 0, "written": 0, "failed": 0, "files": {}}
+    out = {k: 0 for k in IO_COUNTS}
+    out["files"] = {}
 
-    def share(f, key, n=1):
-        c = out["files"].setdefault(f, {"writes": 0, "written": 0, "fsyncs": 0, "renames": 0})
+    def share(name, path, f, key, n=1, call=None):
+        if f == IO_OUTSIDE:
+            raise RuntimeError(
+                f"the server's {name} of {path} counts a file outside its data directory {data_dir}: every "
+                "file is named within it, or files would be judged as one on both sides"
+            )
+        c = out["files"].setdefault(f, {
+            **{k: 0 for k in ("writes", "written", "fsyncs", "writebacks", "renames", "creates", "truncates",
+                              "links", "unlinks")},
+            "fsync_calls": {}, "writeback_calls": {},
+        })
         c[key] += n
+        out[key] += n
+        if call:
+            calls = c["fsync_calls" if key == "fsyncs" else "writeback_calls"]
+            calls[call] = calls.get(call, 0) + n
+
+    def refuse(name, what, path):
+        raise RuntimeError(
+            f"the server's {name} of {path} {what}: the trace's calls would read the same, so the gate cannot "
+            "judge this server (tools/perf_gate.py, IO_FLAGS_REFUSED)"
+        )
 
     taken = 0
-    for name, args, ret in strace_calls(lines):
+    for name, args, ret, shown in strace_calls(lines):
         ok = ret is not None and ret >= 0
         if name in IO_REFUSED:
-            # Set up before the stretch, a ring could write in it.
+            # Set up before the stretch, a ring or a context could write in it.
             if ok:
                 raise RuntimeError(
                     f"the server called {name}, whose writes and syncs no call of the trace shows: the gate "
@@ -1595,22 +1771,31 @@ def io_counts(lines, data_dir, start=2, end=3):
         if name in IO_ACCEPTS:
             taken += ok
             continue
+        fds = STRACE_FD.findall(args)
+        # Refused wherever it took, the stretch or before it: a file opened
+        # O_DSYNC at the start makes each later write a device flush.
+        if name in IO_OPENS or name == "fcntl" or name == "pwritev2":
+            if name in IO_OPENS:
+                path = shown or strace_path(args)
+                flags = strace_flags(args)
+            elif name == "fcntl":
+                path = fds[0][1] if fds else ""
+                flags = strace_flags(args, after_path=False) if "F_SETFL" in args else set()
+            else:
+                path = fds[0][1] if fds else ""
+                flags = strace_flags(args, after_path=False)
+            f = file_of(path) if path else None
+            bad = sorted(flags & IO_FLAGS_REFUSED)
+            if ok and bad and f not in (None, IO_OUTSIDE):
+                refuse(name, f"with {'|'.join(bad)}", path)
         if not start <= taken < end:
             continue
-        fds = STRACE_FD.findall(args)
         if name in IO_RENAMES:
-            # The new name: the last path, joined to the directory whose
-            # descriptor stands before it where renameat's is relative.
-            quoted = list(re.finditer(r'"([^"]*)"', args))
-            target = quoted[-1].group(1) if quoted else ""
-            if quoted and not target.startswith("/"):
-                before = STRACE_FD.findall(args[: quoted[-1].start()])
-                target = before[-1][1] + "/" + target if before else ""
+            target = strace_path(args)
             if not ok:
                 out["failed"] += 1
                 continue
-            out["renames"] += 1
-            share(file_of(target) or "(not a file)", "renames")
+            share(name, target, file_of(target) or "(not a file)", "renames")
         elif name in IO_SYNCS:
             f = IO_UNNAMED.get(name) or (file_of(fds[0][1]) if fds else None)
             if f is None:
@@ -1618,8 +1803,8 @@ def io_counts(lines, data_dir, start=2, end=3):
             if not ok:
                 out["failed"] += 1
                 continue
-            out["fsyncs"] += 1
-            share(f, "fsyncs")
+            durable = name in IO_DURABLE and (name != "msync" or "MS_SYNC" in strace_flags(args, after_path=False))
+            share(name, fds[0][1] if fds else f, f, "fsyncs" if durable else "writebacks", call=name)
         elif name in IO_WRITES:
             i = IO_WRITES[name]
             f = file_of(fds[i][1]) if len(fds) > i else None
@@ -1628,10 +1813,31 @@ def io_counts(lines, data_dir, start=2, end=3):
             if not ok:
                 out["failed"] += 1
                 continue
-            out["writes"] += 1
-            out["written"] += ret
-            share(f, "writes")
-            share(f, "written", ret)
+            share(name, fds[i][1], f, "writes")
+            share(name, fds[i][1], f, "written", ret)
+        elif name in IO_OPENS:
+            # The file it opened as `-y` names it, else the path it named.
+            path = shown or strace_path(args)
+            flags = strace_flags(args) | ({"O_CREAT", "O_TRUNC"} if name == "creat" else set())
+            kinds = [k for k, made in (("creates", {"O_CREAT", "O_TMPFILE"}), ("truncates", {"O_TRUNC"}))
+                     if flags & made]
+            f = file_of(path) if path else None
+            if not kinds or f is None:
+                continue
+            if not ok:
+                out["failed"] += 1
+                continue
+            for k in kinds:
+                share(name, path, f, k)
+        elif name in IO_CHANGES:
+            path = fds[0][1] if name == "ftruncate" and fds else strace_path(args)
+            f = file_of(path) if path else None
+            if f is None:
+                continue
+            if not ok:
+                out["failed"] += 1
+                continue
+            share(name, path, f, IO_CHANGES[name])
     return out, taken
 
 
@@ -1673,6 +1879,14 @@ def phase(client, which, name, addr):
     return dict(zip(("answered", "rows", "sent"), map(int, m.groups())))
 
 
+def io_data_dir(scratch, name):
+    """A new data directory for a run of workload `name` in `scratch`, as
+    the trace names it, its links resolved: a scratch directory reached
+    through a link (macOS's /tmp, a runner's) would name every file outside
+    it, on both sides alike, and fail the run (`io_counts`)."""
+    return os.path.realpath(tempfile.mkdtemp(prefix=f"{name}.", dir=scratch))
+
+
 def io_one_run(server, client, name, requests, scratch, keep=None):
     """Runs I/O workload `name` once against `server`, the server alone
     under `strace -f`: the setup over one connection, the size it left the
@@ -1681,7 +1895,7 @@ def io_one_run(server, client, name, requests, scratch, keep=None):
     its one shutdown. What the server did to files in between
     (`io_counts`) beside what the client sent. With `keep`, the trace is
     copied there."""
-    data_dir = tempfile.mkdtemp(prefix=f"{name}.", dir=scratch)
+    data_dir = io_data_dir(scratch, name)
     trace = data_dir + ".strace"
     cmd = [
         "strace", "-f", "-qq", "-y", "-s", "0", "--seccomp-bpf", "-o", trace,
@@ -1804,6 +2018,12 @@ def measure_io(base_server, head_server, client, runs, jobs, scratch, log=print,
     return results
 
 
+# The line both jobs choose the checker by, in the shell, no Python of the
+# change's run to choose it: the base's own gate.rs listing IO_WORKLOADS.
+# tools/test_perf_gate.py holds each job's `grep` to `io_checker`.
+IO_CHECKER_LINE = re.compile(r"^\s*const IO_WORKLOADS\b", re.M)
+
+
 def io_checker(base_program):
     """Which checker counts and judges the I/O, by the base's own gate.rs
     (`base_program`, its text, empty where it had none): "base" wherever
@@ -1812,21 +2032,10 @@ def io_checker(base_program):
     counted and judged by its own as the gate's first was. Never by
     whether the base's checker runs `io`: a later change that dropped or
     broke it would hand every pull request after it to its own checker
-    for good, where this fails it."""
-    return "base" if re.search(r"^\s*const IO_WORKLOADS\b", base_program, re.M) else "this tree"
-
-
-def io_checker_cmd(args):
-    with open(args.base_program, encoding="utf-8") as f:
-        which = io_checker(f.read())
-    if which == "this tree":
-        print(
-            "the base's gate.rs lists no IO_WORKLOADS: this pull request brings the I/O counts, and its own "
-            "checker counts and judges them, as the gate's first run was",
-            file=sys.stderr,
-        )
-    print(args.base_checker if which == "base" else args.this_checker)
-    return 0
+    for good, where this fails it. Both jobs decide it in the shell, by a
+    `grep` of the same line (IO_CHECKER_LINE), which the tests hold to
+    this: a pull request's own copy of this function decides nothing."""
+    return "base" if IO_CHECKER_LINE.search(base_program) else "this tree"
 
 
 def io_measure(args):
@@ -2103,12 +2312,6 @@ def main(argv=None):
 
     check_options(sub.add_parser("check", help="judge a results file"))
 
-    w = sub.add_parser("io-checker", help="the checker that counts and judges the I/O: the base's, but where "
-                       "the base's gate.rs lists no IO_WORKLOADS")
-    w.add_argument("--base-program", required=True, help="the base's own gate.rs (empty: none)")
-    w.add_argument("base_checker", help="printed where the base's program lists IO_WORKLOADS")
-    w.add_argument("this_checker", help="printed where it lists none: the pull request that brings them")
-
     h = sub.add_parser("reaches", help="whether a change reaches what the gate builds: built=true|false")
     h.add_argument("--base", required=True)
     h.add_argument("--head", default="HEAD")
@@ -2124,7 +2327,7 @@ def main(argv=None):
     try:
         commands = {
             "run": run, "measure": measure, "io": io, "io-measure": io_measure, "check": check,
-            "io-checker": io_checker_cmd, "reaches": reach, "edits": edits,
+            "reaches": reach, "edits": edits,
         }
         return commands[args.command](args)
     except (ValueError, RuntimeError, OSError, subprocess.CalledProcessError) as e:
