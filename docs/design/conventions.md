@@ -669,11 +669,19 @@ bytes as they change. Another process writing the file is what the
 CLAUDE.md, *Single writer*); a process ignoring it can end a reader with
 `SIGBUS`. A reader that takes no lock (`open_read_only`: `fennec types`,
 `--read-only`) maps the file as it stood at its open, and a server opening
-it after a crash cuts a torn tail under it: past every record the reader
-reads, which only its own open's walk of the file reads past, ending the
-reader should the two meet. Windows' mapping is views laid end to end,
-which only grow (`fs::windows::map`), and its cut drops the database and
-its views first (`cut_and_open`).
+it after a crash cuts a torn tail under it. So the reader's open covers its
+mapping only to the records it took (`Mapping::cover` once the load
+returns, `a_reader_is_covered_to_the_records_its_open_took`), and no slice
+it takes after its open spans a byte past the cut. Until 2026-11-15 it kept
+the length the file had at its open, every slice spanning the pages past
+the file's new end once a server had cut it -- no record pointed there, so
+no read reached them, but no slice may span them. What is left is the
+open's own walk of the file, which reads to the length the file had: a
+server's open cutting it in the middle of that walk ends the reader. On
+Windows the reader's view refuses the cut (`ERROR_USER_MAPPED_FILE`, the
+server's open failing by name: [windows.md](windows.md)); its mapping is
+views laid end to end, which only grow (`fs::windows::map`), and its own
+cut drops the database and its views first (`cut_and_open`).
 
 ## Sanitizers
 

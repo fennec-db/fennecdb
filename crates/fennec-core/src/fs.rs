@@ -1115,10 +1115,13 @@ impl AsRef<[u8]> for Mapping {
         // before that file's stores are the database's, on the one thread
         // holding them, no slice of its mapping alive across it. Another
         // process writing the file is what the `<file>.lock` every opener
-        // of a file to write holds keeps out (*Single writer*); a reader
-        // taking none (`open_read_only`) is the exception
-        // docs/design/conventions.md#unsafe-code names, a server's open
-        // cutting a torn tail past every record that reader reads.
+        // of a file to write holds keeps out (*Single writer*). A reader
+        // taking none (`open_read_only`) is covered only to the records
+        // its open took, so a server's open cutting a torn tail under it
+        // cuts no byte of a slice it takes after its open; what is left is
+        // its open's own walk of the file, which reads to the length the
+        // file had and meets that cut if the two run at once
+        // (docs/design/conventions.md#unsafe-code).
         unsafe { std::slice::from_raw_parts(self.ptr, len) }
     }
 }
@@ -1490,7 +1493,18 @@ pub fn open_read_only(path: impl AsRef<Path>) -> Result<Database> {
                 "invalid fennecdb signature".into(),
             ));
         }
-        db.load_mapped(Arc::new(Mapping::of(&file, len)?))?;
+        let mapping = Arc::new(Mapping::of(&file, len)?);
+        #[cfg_attr(not(unix), allow(unused_variables))]
+        let whole = db.load_mapped(mapping.clone())?;
+        // Covered no further than the records the open took: a torn tail
+        // past them is what a server opening the file after a crash cuts,
+        // under this reader, which takes no lock -- covered still, every
+        // slice of the mapping spanned the pages past the file's new end,
+        // a read of which ends the process (`SIGBUS`). On Windows the
+        // reader's view refuses that cut (`ERROR_USER_MAPPED_FILE`, the
+        // server's open failing), and its mapping only grows.
+        #[cfg(unix)]
+        mapping.cover(whole);
     }
     #[cfg(not(all(any(unix, windows), target_pointer_width = "64")))]
     db.load(&std::fs::read(path)?)?;
@@ -1620,6 +1634,75 @@ mod tests {
         sink.sync().unwrap();
         assert_eq!((*mapping).as_ref(), &[7u8; 100][..]);
         drop(sink);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A reader that takes no lock (`open_read_only`) over a file a crash
+    /// left a torn record at the end of is covered to the records its open
+    /// took: a server opening the file then cuts the tail under it, and no
+    /// slice the reader takes after reaches past the file's new end. Before,
+    /// it kept the length the file had at its open: after the cut its slice
+    /// was 131 139 bytes over a file of 40, the pages past the end a read of
+    /// which ends the process (`SIGBUS`).
+    #[cfg(all(unix, target_pointer_width = "64"))]
+    #[test]
+    fn a_reader_is_covered_to_the_records_its_open_took() {
+        use crate::query::{Expr, Statement};
+        use crate::schema::{Field, Schema};
+        use crate::value::{DataType, Value};
+        let dir = std::env::temp_dir().join(format!("fennecdb-fs-reader-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("reader.fennec");
+        let put = |a: String| Statement::Put {
+            collection: "t".into(),
+            docs: vec![vec![("a".into(), Expr::Lit(Value::Text(a)))]],
+            docs_param: None,
+            insert: false,
+            if_absent: false,
+            else_set: None,
+            require: None,
+            pick: None,
+        };
+        {
+            let mut db = open(&path).unwrap();
+            let schema = Schema::new("t", vec![Field::new("a", DataType::Text)]).unwrap();
+            db.execute(&Statement::CreateCollection {
+                schema,
+                if_not_exists: false,
+            })
+            .unwrap();
+            db.execute(&put("one".into())).unwrap();
+            // Pages past the cut whatever the system's page: 4 KB, 16 KB, 64 KB.
+            db.execute(&put("x".repeat(3 << 16))).unwrap();
+            db.sync().unwrap();
+        }
+        // The last record torn: the crash came in the middle of its append.
+        let torn = std::fs::metadata(&path).unwrap().len() - (1 << 16);
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.set_len(torn).unwrap();
+        drop(f);
+        let reader = open_read_only(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            torn,
+            "the reader cut"
+        );
+        // A server's open after the crash, under the reader.
+        drop(open(&path).unwrap());
+        let cut = std::fs::metadata(&path).unwrap().len();
+        assert!(cut < torn, "the open cut nothing: {cut} of {torn}");
+        let t = reader.collection("t").unwrap();
+        let base = t
+            .store
+            .mapped_base()
+            .expect("the reader's records are mapped");
+        assert_eq!((**base).as_ref().len() as u64, cut);
+        // Every page of what it covers read: one past the file's end would
+        // end this process.
+        touch(base);
+        assert_eq!(t.stats().documents, 1);
+        drop(reader);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

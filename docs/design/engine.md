@@ -72,8 +72,10 @@ as a torn tail, cuts nothing and plays no sync log -- the file only grows
 and is replaced only by rename, so the bytes it read are never written
 under it; it reads the file as it stood at the open. The one exception is
 a server opening the file after a crash, which cuts a torn tail past every
-record the reader reads: only the reader's own open, walking the file at
-that moment, reads past it, and ends (`SIGBUS`)
+record the reader reads: the reader's mapping covers only the records its
+open took, so no slice it takes after reaches the cut, and only its own
+open, walking the file at that moment, reads past it, and ends (`SIGBUS`);
+on Windows the reader's view refuses the cut
 ([conventions.md](conventions.md#unsafe-code)). The shell refuses a
 write there before the engine sees it: handed over, the read-only sink's
 refusal was a storage error, after which every write said so.
