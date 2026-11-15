@@ -28,12 +28,14 @@ allocator's own functions' self cost counted as the program's tally of
 calls at the base's cost a call, never a call line's inclusive cost -- or
 in the bytes asked of it: a call's cost moves with the heap's layout, the
 calls and bytes with the code. Both jobs run the base's copy of
-`tools/perf_gate.py` -- for the I/O too, but where the base's `gate.rs`
-lists no `IO_WORKLOADS`, which each job reads with a `grep` held to
-`io_checker`, never Python of the change's: only the pull request that
-brought them was counted and judged by its own -- and a workload the base's
-`gate.rs` lists that this tree dropped, or that the base did not run,
-fails. A cost taken on purpose
+`tools/perf_gate.py`, written from the base's file as git reads it to a
+path the pull request tracks nothing at -- this tree's only where git says
+the base has none, never on another error -- for the I/O too, but where
+the base's `gate.rs` mentions no `IO_WORKLOADS`, which each job reads with
+a `grep` held to `io_checker`, never Python of the change's: only the pull
+request that brought them was counted and judged by its own. A workload
+the base's `gate.rs` lists that this tree dropped, or that the base did
+not run, fails. A cost taken on purpose
 is a `PERF_ACCEPTED` entry the pull request adds -- the workload, its
 metric, the most and why -- never the threshold, the runs, `ALLOCATOR` or a
 workload changed to pass. The owner approves each entry and each edit of
@@ -49,18 +51,21 @@ is sent by `gate.rs` to each side's `fennec-server` under `--sync always`,
 the server alone under `strace -f`, counted from its taking the workload's
 connection to the driver's next: the syncs that make a file durable and
 the writebacks that do not, renames, the calls writing to files and their
-bytes, never a socket's or a pipe's, the files made, truncated, linked and
-unlinked -- each sync by its call and file, bytes file by file -- and the
-database's size after the setup; a server that sets up io_uring or Linux
-AIO, or opens a file of the data directory `O_SYNC`, `O_DSYNC` or
-`O_DIRECT`, whose writes the calls do not show, is refused, as is a run
-counting a file outside it, and a call the trace does not ask for is one
+bytes, never a socket's or a pipe's, the bytes not yet durable when the
+server next writes to a socket, the files made, truncated, linked and
+unlinked, the calls that failed -- each sync and failure by its call and
+file, bytes file by file -- and the database's size after the setup; a
+server that sets up io_uring or Linux AIO, or opens a file of the data
+directory `O_SYNC`, `O_DSYNC` or `O_DIRECT` or sets its attributes by
+`ioctl`, whose writes the calls do not show, is refused, as is a run
+counting a file outside it or a call strace did not name the file of, and
+a call the trace does not ask for -- a mapping, a store into one -- is one
 the gate cannot see. Nothing it
 sends or the server writes then is sized by a clock or a draw, so every
 run of a side counts the same to the call; a run under its workload's
 floor (`IO_FLOORS`: a durable sync a durable write answered, a write
 call) fails, and a count that is not the base's, up or down, fails unless
-an entry names it, its file and its call.
+an entry names it, its file, its call and the move, exactly.
 
 **[Two builds' instruction counts](../../docs/design/benchmarks.md#instruction-counts)**
 differing by under ~500 a request are read over re-signed copies'
