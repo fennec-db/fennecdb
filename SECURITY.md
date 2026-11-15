@@ -60,13 +60,15 @@ FennecQL, the file format's codec, a `.fennec` file's open, mapped as a
 server opens it, and a replica's apply, a SQLite file — under
 AddressSanitizer on every pull request and for longer each week: `make
 fuzz` lists the targets (`crates/fennec-fuzz`). An input that crashes one is
-a report worth making, privately as above. CI's runs publish no crashing
-input. A pull request's run hands each target a count of inputs made from
-its commit alone, the same wherever `make fuzz-smoke` runs, so it prints a
-panic's message and where it was raised; the weekly run, a week's own,
-prints only a recipe — the target, a seed, a run and the input's hash —
-from which `fennec-fuzz reproduce` makes the input again on a maintainer's
-machine.
+a report worth making, privately as above. A pull request's run hands
+each target a count of inputs made from its commit alone — the tree's
+seeds and a fixed seed — the same wherever `make fuzz-smoke` runs, so it
+prints a panic's message, which may quote the input as decoded, and where
+it was raised: a crashing input it shows is one anyone makes again from
+that commit. The weekly run, from a week's own seed, publishes no crashing
+input: it prints only a recipe — the target, a seed, a run and the input's
+hash — from which `fennec-fuzz reproduce` makes the input again on a
+maintainer's machine.
 
 ## What is documented behaviour, not a vulnerability
 

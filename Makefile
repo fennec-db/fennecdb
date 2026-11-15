@@ -410,12 +410,12 @@ FUZZ_SECONDS ?=
 FUZZ_FLAGS ?=
 ASAN ?= 0
 FUZZ_HOST = $(shell $(CARGO) -vV | sed -n 's/^host: //p')
-comma := ,
 # AddressSanitizer, and LLVM's coverage counters on every edge, which the
 # fuzzer reads to keep the inputs reaching new ones (crates/fennec-fuzz/src/cover.rs).
-# On Linux the binary's `getrandom`, std's hash keys fixed, exported too:
-# std may look it up by name (crates/fennec-fuzz/src/main.rs).
-FUZZ_RUSTFLAGS = -Zsanitizer=address -Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=3 -Cllvm-args=-sanitizer-coverage-inline-8bit-counters $(if $(findstring linux,$(FUZZ_HOST)),-Clink-arg=-Wl$(comma)--export-dynamic-symbol=getrandom)
+# std's hash keys are fixed by the binary's own `getrandom` on Linux, which
+# std references weakly, so it binds at the static link: no flag of ours
+# (crates/fennec-fuzz/src/main.rs).
+FUZZ_RUSTFLAGS = -Zsanitizer=address -Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=3 -Cllvm-args=-sanitizer-coverage-inline-8bit-counters
 FUZZ_BIN = $(if $(filter 1,$(ASAN)),target/$(FUZZ_HOST)/fuzz/fennec-fuzz,target/fuzz/fennec-fuzz)
 
 ## The fuzzer (crates/fennec-fuzz, docs/design/conventions.md#fuzzing): its
@@ -438,8 +438,9 @@ endif
 ## 30 s each on CI) under AddressSanitizer, guided by coverage, from the
 ## repository's seeds alone: CI's fuzz-smoke job. A count, never a time: a
 ## commit's smoke hands each the same inputs on any machine of a platform,
-## and ends on the same line. FUZZ_SECONDS=N runs each that long instead;
-## SMOKE_ASAN=0 a plain build
+## and ends on the same line; four minutes of CPU time end one failing,
+## named. FUZZ_SECONDS=N runs each that long instead; SMOKE_ASAN=0 a plain
+## build
 SMOKE_ASAN ?= 1
 fuzz-smoke:
 	@$(MAKE) --no-print-directory fuzz ASAN=$(SMOKE_ASAN)

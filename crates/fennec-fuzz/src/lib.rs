@@ -35,7 +35,8 @@ pub struct Target {
     pub max_len: usize,
     /// The runs `make fuzz-smoke` gives it (`--smoke`): a count, never a
     /// time, so a commit's smoke hands it the same inputs on any runner --
-    /// about what 30 s of CI's runner ran under ASan when it was set.
+    /// about what 30 s of CI's runner ran under ASan when it was set --
+    /// bounded by [`SMOKE_CAP`] of CPU time.
     pub smoke: u64,
     /// The inputs it starts from: built here, and read from the
     /// repository's fixtures where they are found.
@@ -61,6 +62,11 @@ pub struct Options {
     pub crashes: PathBuf,
     /// A run longer than this is a finding.
     pub timeout: Duration,
+    /// The CPU time every run together may take, past which the process
+    /// ends failing, naming the target and the run it reached
+    /// ([`guard::cap`]): `--smoke`'s [`SMOKE_CAP`]. A bound on a fuzzer
+    /// whose runs all slowed, never what ends one that passes.
+    pub cap: Option<Duration>,
     /// The most one allocation may ask for.
     pub max_alloc: usize,
     /// Progress lines, or none.
@@ -89,6 +95,16 @@ pub enum Outcome {
     },
 }
 
+/// The CPU time a target's smoke may take (`--smoke`, [`Options::cap`]):
+/// four minutes, eight times the 30 s of CI's runner each count was set
+/// from. Generous, so a machine slower than the runner, or a run of it
+/// slower than the one the counts were read from, never meets it; and
+/// short enough that six targets each just under it, 24 minutes, end
+/// inside the job's 30 with the build's minute and a half: a smoke slowed
+/// past the job's timeout ends at a target's cap first, named, rather
+/// than at the timeout, naming none.
+pub const SMOKE_CAP: Duration = Duration::from_secs(240);
+
 /// The stack a run is on: a server's connection thread's
 /// (`fennec_http::CONNECTION_STACK`), which a request parses, plans and
 /// reads on, so that what overflows here overflows there.
@@ -101,13 +117,15 @@ pub const RUN_STACK: usize = 8 << 20;
 /// an input another did not.
 pub fn fuzz(target: &'static Target, opts: Options) -> Outcome {
     fennec_core::one_thread();
-    std::thread::Builder::new()
+    let outcome = std::thread::Builder::new()
         .name(format!("fuzz-{}", target.name))
         .stack_size(RUN_STACK)
         .spawn(move || fuzz_here(target, &opts))
         .expect("the run's thread")
         .join()
-        .unwrap_or_else(|_| panic!("the fuzzer itself panicked"))
+        .unwrap_or_else(|_| panic!("the fuzzer itself panicked"));
+    guard::cap(None, 0);
+    outcome
 }
 
 /// What a run starts from: the target's seeds, and the inputs a corpus
@@ -395,6 +413,9 @@ fn fuzz_here(target: &'static Target, opts: &Options) -> Outcome {
         }
     }
 
+    // From the first run on, the seeds made and taken in: what the runs
+    // spend.
+    guard::cap(opts.cap, opts.runs.unwrap_or(0));
     let started = Instant::now();
     let mut last_report = Instant::now();
     // Where a count of runs bounds the run, progress is said by the count:

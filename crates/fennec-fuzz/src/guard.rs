@@ -12,6 +12,10 @@
 //! the target, the seed, the run and its input's hash, and the runs whose
 //! inputs the corpus took -- all a maintainer needs to make the input
 //! again ([`crate::reproduce`]), where CI keeps none (`--private`).
+//!
+//! A smoke past its cap of CPU time ends the process the same way, by a
+//! timer's handler, saying the run it reached rather than keeping one
+//! input of many that slowed ([`cap`]).
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::Path;
@@ -53,6 +57,11 @@ static PRIVATE: AtomicBool = AtomicBool::new(false);
 pub static KEYS_FIXED: AtomicBool = AtomicBool::new(false);
 /// The run in flight, counted from 0.
 static RUN: AtomicU64 = AtomicU64::new(0);
+/// The CPU time a fuzzer's runs may take, in milliseconds, and the runs it
+/// was asked for: what the handler of the cap's timer says ([`cap`]).
+static CAP_MS: AtomicU64 = AtomicU64::new(0);
+static OF_RUNS: AtomicU64 = AtomicU64::new(0);
+static CAPPED: std::sync::Once = std::sync::Once::new();
 /// The recipe's parts: the target's name; the command making the input
 /// again, up to the run; the runs kept, as [`push_kept`] writes them; and
 /// the last of them.
@@ -371,6 +380,27 @@ pub fn arm(run: u64, input: &[u8]) {
     sys::set_timer(TIMEOUT_US.load(Ordering::Relaxed));
 }
 
+/// Ends the process, failing with 4, once its runs have spent `cpu` of
+/// CPU time from here, saying the target and the run it reached of
+/// `runs`: a bound on a fuzzer whose every run slowed, which a count of
+/// runs alone would leave to its job's timeout, naming no target. Set by
+/// `--smoke` ([`crate::SMOKE_CAP`]); `None` stops it. A timer of the
+/// process's CPU time (`ITIMER_PROF`, `SIGPROF`), set once: nothing runs
+/// beside the runs until it goes off -- a thread watching would run code
+/// the coverage counts, as [`TIMEOUT_US`]'s timer says -- so a smoke that
+/// ends within it ran the inputs it would have run without it. CPU time,
+/// not the wall's: a machine others load runs a target slower by the
+/// clock, not by its own work.
+pub fn cap(cpu: Option<Duration>, runs: u64) {
+    let ms = cpu.map_or(0, |c| c.as_millis().clamp(1, u64::MAX as u128) as u64);
+    CAP_MS.store(ms, Ordering::Relaxed);
+    OF_RUNS.store(runs, Ordering::Relaxed);
+    if ms > 0 {
+        CAPPED.call_once(sys::on_cap);
+    }
+    sys::set_cpu_timer(ms.saturating_mul(1000));
+}
+
 /// The run is over, its timer stopped.
 pub fn disarm() {
     sys::set_timer(0);
@@ -420,7 +450,10 @@ mod sys {
 
     const SIGABRT: c_int = 6;
     const SIGALRM: c_int = 14;
+    /// The same number on Linux and Apple's systems, as the timer's is.
+    const SIGPROF: c_int = 27;
     const ITIMER_REAL: c_int = 0;
+    const ITIMER_PROF: c_int = 2;
 
     /// Writes `bytes` to standard error, a system call and nothing else.
     pub fn say(bytes: &[u8]) {
@@ -482,6 +515,30 @@ mod sys {
         exit(3);
     }
 
+    /// The cap's handler ([`super::cap`]), on whatever thread took the
+    /// signal: the target, the cap and how far its runs got, with system
+    /// calls alone, then the process ended. No input is kept: the run in
+    /// flight is one of many that slowed, its recipe the same as the
+    /// smoke's own.
+    extern "C" fn capped_out(_: c_int) {
+        let (mut ms, mut run, mut of) = ([0u8; 20], [0u8; 20], [0u8; 20]);
+        for part in [
+            &b"fennec-fuzz: "[..],
+            super::NAME.read(),
+            b": past its cap of ",
+            super::digits(super::CAP_MS.load(Ordering::Relaxed), &mut ms),
+            b" ms of CPU time at run ",
+            super::digits(super::RUN.load(Ordering::Relaxed), &mut run),
+            b" of ",
+            super::digits(super::OF_RUNS.load(Ordering::Relaxed), &mut of),
+            b": its runs took far longer than its count was set for (`Target::smoke`), \
+              a commit's slowing or the machine's\n",
+        ] {
+            say(part);
+        }
+        exit(4);
+    }
+
     /// The input of the run in flight written to the NUL-ended `path`, and
     /// where said after `saying`: whether a run was in flight.
     fn keep_input((path, path_len): (*const u8, usize), saying: &[u8]) -> bool {
@@ -523,9 +580,25 @@ mod sys {
         }
     }
 
+    pub fn on_cap() {
+        // SAFETY: as `on_abort`.
+        unsafe {
+            signal(SIGPROF, capped_out as extern "C" fn(c_int) as usize);
+        }
+    }
+
     /// The process's one real-time timer set to go off in `us`
     /// microseconds, or stopped at 0.
     pub fn set_timer(us: u64) {
+        set(ITIMER_REAL, us);
+    }
+
+    /// The process's CPU-time timer, the same way.
+    pub fn set_cpu_timer(us: u64) {
+        set(ITIMER_PROF, us);
+    }
+
+    fn set(which: c_int, us: u64) {
         let value = Timeval {
             sec: (us / 1_000_000).min(i64::MAX as u64) as i64,
             usec: (us % 1_000_000) as _,
@@ -536,7 +609,7 @@ mod sys {
         };
         // SAFETY: a timer of the C layout, read and not kept.
         unsafe {
-            setitimer(ITIMER_REAL, &timer, std::ptr::null_mut());
+            setitimer(which, &timer, std::ptr::null_mut());
         }
     }
 }
@@ -550,6 +623,10 @@ mod sys {
     pub fn on_timer() {}
 
     pub fn set_timer(_: u64) {}
+
+    pub fn on_cap() {}
+
+    pub fn set_cpu_timer(_: u64) {}
 
     pub fn say(bytes: &[u8]) {
         use std::io::Write;

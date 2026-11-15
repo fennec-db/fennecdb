@@ -7,7 +7,7 @@
 //!     fennec-fuzz reproduce <target> <recipe>  a finding's input made again from its recipe, and run
 //!
 //! run's options: --seconds N, --runs N, --smoke (the runs `make fuzz-smoke`
-//! gives the target), --seed N, --corpus DIR (kept inputs, read at the
+//! gives the target, within `SMOKE_CAP` of CPU time), --seed N, --corpus DIR (kept inputs, read at the
 //! start; default target/fuzz/corpus/<target>, `none` for none), --crashes
 //! DIR (default target/fuzz/crashes), --timeout-ms N (default 30000),
 //! --max-alloc-mb N (default 2048), --quiet, --private (a finding says its
@@ -20,7 +20,8 @@
 //!
 //! The exit status is 0 when every run answered or refused, 1 on a panic,
 //! 2 on an abort (a stack overflow, a failed allocation, AddressSanitizer's
-//! report), 3 on a run past the timeout: the input is written either way.
+//! report), 3 on a run past the timeout: the input is written either way;
+//! 4 on a smoke past its cap of CPU time, naming the run it reached.
 //! `reproduce` exits 65 where the recipe makes no input of its hash.
 
 use fennec_fuzz::targets::TARGETS;
@@ -39,8 +40,10 @@ use std::time::Duration;
 /// (docs/design/conventions.md#fuzzing): its keys are none of a server's.
 /// Defined in the binary, an object the linker always takes, so std's
 /// reference binds here rather than to the system's -- on Apple's systems
-/// `CCRandomGenerateBytes`, on Linux `getrandom`, a weak reference the
-/// Makefile exports this one for too, should std look it up by name.
+/// `CCRandomGenerateBytes`; on Linux `getrandom`, which std's
+/// `hashmap_random_keys` calls through its `weak!` macro, a symbol of
+/// `extern_weak` linkage the static link resolves to this definition, so
+/// no flag exports it.
 fn fixed_bytes(buf: *mut u8, len: usize) {
     for i in 0..len {
         // SAFETY: the `len` bytes at `buf` std handed to be filled.
@@ -129,6 +132,7 @@ fn run(args: &[String]) -> ExitCode {
         // 10 s a machine at a load of 40 took 8 000 numbers of 1e255, 2.5 s
         // of a quiet one's under ASan, for a hang.
         timeout: Duration::from_secs(30),
+        cap: None,
         max_alloc: 2048 << 20,
         quiet: false,
         private: false,
@@ -150,7 +154,10 @@ fn run(args: &[String]) -> ExitCode {
         match flag.as_str() {
             "--seconds" => opts.seconds = Some(number(value())),
             "--runs" => opts.runs = Some(number(value())),
-            "--smoke" => opts.runs = Some(t.smoke),
+            "--smoke" => {
+                opts.runs = Some(t.smoke);
+                opts.cap = Some(fennec_fuzz::SMOKE_CAP);
+            }
             "--seed" => opts.seed = number(value()),
             "--corpus" => {
                 opts.corpus = match value() {

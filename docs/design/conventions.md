@@ -340,8 +340,9 @@ runs, `image` 1 052 and 1 040 over 15 000, its seeds alone reaching 13 298
 edges in one and 13 301 in the other. std's hash maps were keyed at random
 in each process, and a map's probes are code the counters count: the
 binary takes std's call for keys (`CCRandomGenerateBytes` on Apple's
-systems, `getrandom` on Linux, which the Makefile exports too, should std
-look it up by name) and hands back the same bytes each time, and a run
+systems; `getrandom` on Linux, which std calls through its `weak!` macro,
+a symbol of `extern_weak` linkage that the static link binds to the
+binary's own) and hands back the same bytes each time, and a run
 says where it could not (`guard::KEYS_FIXED`); with keys drawn at random
 `codec` stayed the same and `image` did not. The engine's tasks cut in
 shares over threads -- an image's index of its frames, a graph's lists,
@@ -355,7 +356,17 @@ every five seconds, a clock's comparison counted in the next run: where a
 count bounds the run it is said by the count. The platform's own code
 differs -- a commit's smoke is the same on every Linux runner and on
 every Mac, not on both -- and the counts were set from CI's runner, about
-30 s each under ASan.
+30 s each under ASan. Nor does a target read the wall clock: the `image`
+target's databases read a fixed time as now (`set_clock`), where a
+`@ttl` collection's read asked the system's for its cutoff, a row alive
+in one run and expired in a later one. A count still needs a bound in
+time, or a commit slowing every run ends at the job's timeout naming no
+target: `--smoke` caps each target at four minutes of CPU time
+(`SMOKE_CAP`, eight times its 30 s on CI, six targets just under it
+inside the job's 30 minutes with the build), by a timer of the process's
+CPU time (`ITIMER_PROF`) set once, whose handler says the target and the
+run it reached and exits 4. A bound, never a pass; CPU time, so a
+machine others load is not slower by it.
 
 *A finding is a regression test in its own crate*, the input's bytes or
 the file made by hand, failing before the fix. The pull request that added
@@ -405,6 +416,18 @@ replica's apply (`image`, `tests/damage.rs`): a record's collection is now
 one a create gives, below the last `u32`, or the record is damage --
 one past `u32` among them, which `as u32` had read as another
 collection's -- and a create in a file that gave the last id is refused.
+Its review found the first version of that refusal where a record's head
+is read (`record_at`), past the walk's judgment of a head: stale bytes
+past the durable point reading as one (`0a ff ff ff ff 0f 05 hello`, and
+checked as kind 3) refused the open a version before cut. The walk judges
+the id where it judges a head (`whole_record`, `head_at`), so such a head
+is damage, cut past the durable point and refused before it
+(`persist::stale_bytes_past_the_durable_point_are_judged_as_damage`); and
+the other refusals the fix added -- a point's level, a stored vector's
+count -- an open meets only in a record its walk kept, a torn one cut
+before a byte of its documents is read
+(`persist::a_torn_tail_is_cut_before_its_documents_are_read`), a sparse
+vector's numbers in no open at all.
 Making the smoke reproducible found one more, a stored vector's count
 multiplied unchecked where an open restoring a graph reads the
 documents' vectors (`store::tests`), and a sparse vector's dimension went

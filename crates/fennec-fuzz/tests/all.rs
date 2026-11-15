@@ -29,6 +29,7 @@ fn options(crashes: PathBuf, runs: u64) -> Options {
         corpus: None,
         crashes,
         timeout: Duration::from_secs(120),
+        cap: None,
         max_alloc: 2048 << 20,
         quiet: true,
         private: false,
@@ -367,6 +368,65 @@ fn a_run_past_its_timeout_ends_the_fuzzer_and_its_input_is_kept() {
         .collect();
     let (recipe, _) = Recipe::from_args(&flags).unwrap();
     assert_eq!(fennec_fuzz::reproduce(&HANGS, &recipe).unwrap(), input);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Spends a fixed sum of work a run, whatever the input -- CPU time, not
+/// the wall's, so a loaded machine spends the same -- as a commit that
+/// slowed every run would.
+static SLOW: Target = Target {
+    name: "slow",
+    about: "a few milliseconds of work a run, whatever the input",
+    max_len: 64,
+    smoke: 1000,
+    seeds: || vec![b"x".to_vec()],
+    dictionary: &[],
+    run: |_| {
+        let mut h = 0u64;
+        for i in 0..2_000_000u64 {
+            h = std::hint::black_box(h.wrapping_mul(31).wrapping_add(i));
+        }
+        std::hint::black_box(h);
+    },
+};
+
+/// A fuzzer past its cap of CPU time ends failing, by the handler of a
+/// timer of the process's CPU time -- no thread watches beside the runs --
+/// saying the target and the run it reached of its count, where a count
+/// of runs alone ran on to its job's timeout, naming no target. The cap is
+/// a bound, never a pass: without it the child would end its 1 000 runs
+/// and say it went on. The child's end is the event waited for.
+#[test]
+fn a_fuzzer_past_its_cap_of_cpu_time_ends_naming_the_target_and_its_run() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    const TEST: &str = "a_fuzzer_past_its_cap_of_cpu_time_ends_naming_the_target_and_its_run";
+    if std::env::var_os("FENNEC_FUZZ_CHILD").is_some() {
+        let dir = PathBuf::from(std::env::var("FENNEC_FUZZ_CHILD_DIR").unwrap());
+        let mut opts = options(dir, 1000);
+        opts.cap = Some(Duration::from_millis(300));
+        let outcome = fennec_fuzz::fuzz(&SLOW, opts);
+        panic!("the child went on: {outcome:?}");
+    }
+    let dir = scratch("child-slow");
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([TEST, "--exact", "--nocapture", "--test-threads=1"])
+        .env("FENNEC_FUZZ_CHILD", "slow")
+        .env("FENNEC_FUZZ_CHILD_DIR", &dir)
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(4), "{err}");
+    let said = err
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("fennec-fuzz: slow: past its cap of 300 ms of CPU time at run ")
+        })
+        .unwrap_or_else(|| panic!("no cap said: {err}"));
+    let (run, rest) = said.split_once(" of ").unwrap_or_else(|| panic!("{said}"));
+    let run: u64 = run.parse().unwrap_or_else(|_| panic!("{said}"));
+    assert!(run < 1000 && rest.starts_with("1000: "), "{said}");
+    // No input kept: the run in flight is one of many that slowed.
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

@@ -777,6 +777,17 @@ fn read_all(db: &Database) {
     }
 }
 
+/// The time every database of the `image` target reads as now, in
+/// milliseconds: 2026-01-01T00:00:00Z. A read of a collection whose rows
+/// expire (`@ttl`, seed `s`'s `e`) asks the clock for its cutoff
+/// (`Database::alive`), and the system's moves between runs and between
+/// processes: a row alive in one run and expired in the next reached
+/// other code, the corpus a process's own -- what a count of runs must
+/// never be (docs/design/conventions.md#fuzzing). Before seed `s`'s
+/// `2030-01-01` and after the epoch, so its row is read alive and a
+/// mutated time on either side of it is met.
+const CLOCK: i64 = 1_767_225_600_000;
+
 fn image(data: &[u8]) {
     let Some((&how, bytes)) = data.split_first() else {
         return;
@@ -789,6 +800,7 @@ fn image(data: &[u8]) {
     }
     let _ = fennec_core::engine::check_records(&file);
     let mut db = Database::new();
+    db.set_clock(Some(CLOCK));
     if db.load(&file).is_ok() {
         read_all(&db);
     }
@@ -799,6 +811,7 @@ fn image(data: &[u8]) {
     // of the graphs linked after, as a server links them beside its
     // queries.
     let mut served = Database::new();
+    served.set_clock(Some(CLOCK));
     served.defer_linking();
     let base: fennec_core::store::Base = std::sync::Arc::new(file.clone());
     if served.load_mapped(base).is_ok() {
@@ -808,6 +821,7 @@ fn image(data: &[u8]) {
     let magic = fennec_core::engine::MAGIC.len();
     if file.len() > magic && file[..magic] == fennec_core::engine::MAGIC[..] {
         let mut replica = Database::new();
+        replica.set_clock(Some(CLOCK));
         if replica.apply(&file[magic..]).is_ok() {
             read_all(&replica);
         }
