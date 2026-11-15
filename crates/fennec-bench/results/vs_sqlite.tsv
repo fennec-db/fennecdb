@@ -1,0 +1,14 @@
+run	commit	machine	date	family	cell	metric	value
+hand	539e6a7d	hand-measured	2026-09-27	vs_sqlite	fennec:data_write_no_index	rows_s	936000
+hand	539e6a7d	hand-measured	2026-09-27	vs_sqlite	sqlite:data_write_no_index	rows_s	430000
+hand	868fa079	hand-measured	2026-09-27	vs_sqlite	fennec:disk_size	mb	59.3
+hand	868fa079	hand-measured	2026-09-27	vs_sqlite	sqlite:disk_size	mb	59.8
+hand	79a989b5	hand-measured	2026-09-27	vs_sqlite	fennec:scalar_filter_indexed	us	1250
+hand	79a989b5	hand-measured	2026-09-27	vs_sqlite	sqlite:scalar_filter_indexed	us	14100
+hand	79a989b5	hand-measured	2026-09-27	vs_sqlite	fennec:vector_top10_exact	us	2900
+hand	79a989b5	hand-measured	2026-09-27	vs_sqlite	sqlite:vector_top10_exact	us	30200
+hand	7083a1b8	hand-measured	2026-10-01	vs_sqlite	fennec:vector_top10_approx	us	91
+hand	0b084014	hand-measured	2026-10-14	vs_sqlite	fennec:open_then_read_by_id	us	6000
+hand	0b084014	hand-measured	2026-10-14	vs_sqlite	sqlite:open_then_read_by_id	us	460
+hand	0b084014	hand-measured	2026-10-14	vs_sqlite	fennec:open_then_vector_top10	us	6100
+hand	0b084014	hand-measured	2026-10-14	vs_sqlite	sqlite:open_then_vector_top10	us	30500
