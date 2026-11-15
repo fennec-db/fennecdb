@@ -387,6 +387,64 @@ fn a_write_that_is_not_there_to_apply_is_refused() {
     assert!(matches!(replica.apply(&w[0].1), Err(Error::Corrupt(_))));
 }
 
+/// A record of a kind no version writes, and one whose sum fails -- a
+/// primary's damaged on the way, or a stand-in's at the primary's address
+/// -- are each refused in words, nothing of it applied: the records before
+/// it in the message landed, the counter at the last of them, and none
+/// after it taken. Sent again whole, the writes land.
+#[test]
+fn a_record_of_an_unknown_kind_or_failing_its_sum_is_refused_and_none_of_it_applied() {
+    let primary_file = Tap::default();
+    let mut primary = primary_file.database();
+    exec(&mut primary, "create collection c (x int @hash)", &[]);
+    for x in 1..=3 {
+        exec(&mut primary, "put c {x: $1}", &[Value::Int(x)]);
+    }
+    let w = primary_file.since(0);
+    assert_eq!(w.len(), 4);
+    // The second put's record, its kind made 30 under the checked bit and
+    // its claim's width, and summed anew -- its CRC32C over all but its
+    // last four bytes, there: framed and summed as a write is, of a kind
+    // no version writes.
+    let unknown = {
+        let mut r = w[2].1.clone();
+        assert_eq!(r[0] & 0x80, 0x80, "a checked record");
+        r[0] = (r[0] & !0x1f) | 30;
+        let end = r.len() - 4;
+        let sum = fennec_core::crc::crc32c(0, &r[..end]);
+        r[end..].copy_from_slice(&sum.to_le_bytes());
+        r
+    };
+    // The same record with a byte of its body changed, its sum as written.
+    let damaged = {
+        let mut r = w[2].1.clone();
+        let mid = r.len() / 2;
+        r[mid] ^= 0x40;
+        r
+    };
+    for (case, bad, says) in [
+        ("an unknown kind", unknown, "kind 30"),
+        ("a failing sum", damaged, "checksum"),
+    ] {
+        let mut replica = Database::new();
+        let mut records = w[0].1.clone();
+        records.extend_from_slice(&w[1].1);
+        records.extend_from_slice(&bad);
+        records.extend_from_slice(&w[3].1);
+        let e = replica.apply(&records).expect_err(case);
+        assert!(e.to_string().contains(says), "{case}: {e}");
+        assert_eq!(replica.change_seq(), 2, "{case}");
+        assert_eq!(rows(&replica, "get c where x = 1", &[]).len(), 1, "{case}");
+        for x in [2, 3] {
+            let found = rows(&replica, "get c where x = $1", &[Value::Int(x)]);
+            assert!(found.is_empty(), "{case}: x = {x} applied");
+        }
+        replica.apply(&w[2].1).unwrap();
+        replica.apply(&w[3].1).unwrap();
+        assert_eq!(replica.change_seq(), 4, "{case}");
+    }
+}
+
 /// A replica applies a write through the write path's index upkeep, so an
 /// update of another field keeps the vector's node there as on its primary:
 /// it retired the node and inserted it again, a tombstone per update.

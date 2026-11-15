@@ -14,6 +14,7 @@ mod logs;
 mod mcp;
 mod openapi;
 mod otlp;
+mod primaries;
 mod providers;
 mod scheduled;
 mod shutdown;

@@ -2497,4 +2497,59 @@ mod tests {
         let times = fed(None);
         assert!(times.iter().all(|&t| t >= before), "{times:?}");
     }
+
+    /// A stand-in's stream: a message's head announcing `len` bytes, then
+    /// `given` bytes of its body and the stream's end. It notes the longest
+    /// read asked of it: the most of the body held in memory at once.
+    struct Announcing {
+        head: Vec<u8>,
+        given: usize,
+        read: usize,
+        longest: usize,
+    }
+
+    impl Announcing {
+        fn new(tag: u8, len: u64, given: usize) -> Announcing {
+            let mut head = vec![tag];
+            head.extend_from_slice(&len.to_le_bytes());
+            Announcing {
+                head,
+                given,
+                read: 0,
+                longest: 0,
+            }
+        }
+    }
+
+    impl Read for Announcing {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            self.longest = self.longest.max(out.len());
+            let all = self.head.len() + self.given;
+            let n = out.len().min(all - self.read);
+            for (i, b) in out[..n].iter_mut().enumerate() {
+                let at = self.read + i;
+                *b = self.head.get(at).copied().unwrap_or(0);
+            }
+            self.read += n;
+            Ok(n)
+        }
+    }
+
+    /// A message's body is held in memory as it comes, never as it was
+    /// announced: a write of a terabyte announced and three mebibytes sent
+    /// is refused as cut short, a few mebibytes held at the most. The
+    /// terabyte was asked of the allocator before a byte came, which
+    /// Linux's overcommit refuses -- and a refused allocation aborts the
+    /// process, a node with every tenant it holds.
+    #[test]
+    fn a_message_is_held_as_it_comes_not_as_it_was_announced() {
+        let mut r = Announcing::new(b'W', 1 << 40, 3 << 20);
+        let e = read_message(&mut r).unwrap_err();
+        assert!(
+            r.longest <= 8 << 20,
+            "a read of {} bytes asked for, {} sent: {e}",
+            r.longest,
+            3 << 20
+        );
+    }
 }
