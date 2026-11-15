@@ -139,7 +139,8 @@ Six parsers are fuzzed, the targets of `crates/fennec-fuzz`: an HTTP request
 replica's apply (`image`), and a SQLite file (`sqlite`), under
 AddressSanitizer on every pull request and for longer each week (`make fuzz`
 lists them). **Not fuzzed today:** the PostgreSQL wire and `pgoutput`
-reader, the framing of a sealed file and of an archive, JWT and JWKS
+reader, the certificate walk that picks a channel binding's hash
+(`fennec-tls`), the framing of a sealed file and of an archive, JWT and JWKS
 reading, and a webhook's headers; a report there is as welcome, and a fuzz
 target for each is a contribution. An input that crashes a target is a
 report worth making, privately as above.
@@ -305,16 +306,26 @@ These are deliberate. The [server](https://fennecdb.com/docs/server),
   per address is the operator's, in front. A client that reads an answer
   slowly, taking some of each write within `--write-timeout`, is never cut.
 - **A PostgreSQL connection is protected as its `sslmode` says.** Only
-  `verify-full` keeps out someone standing in for the server. `prefer` is the
-  default, as libpq's, and goes on in plain text where the server, or whoever
-  stands in for it, refuses TLS; `require` checks nothing without a CA file,
-  and `verify-ca` checks the chain but not the host's name. And the client
-  answers a cleartext-password request under any mode, so whoever stands in
-  for the server gets the password as well as the rows. Use `verify-full`,
-  and a role that signs in by SCRAM-SHA-256 alone
-  ([import docs](https://fennecdb.com/docs/import#tls)).
+  `verify-full` keeps out someone standing in for the server, and it is the
+  default for a host off this machine; on this machine the default is
+  `prefer`, as libpq's everywhere, which goes on in plain text where the
+  server, or whoever stands in for it, refuses TLS. A string that names
+  `prefer`, `require` (which checks nothing without a CA file) or
+  `verify-ca` (the chain, not the host's name) gets what it names. Holding
+  a password, the client signs in by SCRAM-SHA-256 alone unless the
+  string's `require_auth` says otherwise, bound to the TLS session where
+  the server offers `SCRAM-SHA-256-PLUS`, so a stand-in under `require`
+  gets neither the password nor a sign-in it can relay; it still gets the
+  rows ([import docs](https://fennecdb.com/docs/import#tls)).
+- **What a followed PostgreSQL sends is the mirror's content, and it can
+  stop the server.** A follower that cannot go on stops `fennec-server
+  --follow` on purpose (exit 1), so whoever answers at the follower's
+  address -- the server itself under `verify-full` -- can. Its words are
+  escaped and cut before a log line or a terminal shows them, and over a
+  connection no CA checked an error's own text is not shown at all.
 - **`md5` authentication is not supported** by `fennec import` and
-  `--follow` when they sign in to PostgreSQL. SCRAM-SHA-256 or cleartext.
+  `--follow` when they sign in to PostgreSQL. SCRAM-SHA-256, or cleartext
+  where `require_auth=password` asks for it.
 - **A GitHub webhook event carries no signed time,** so after its hook's
   `keep` (7 days by default) a captured one can be sent again and is taken
   again; until then its body's digest answers it.
