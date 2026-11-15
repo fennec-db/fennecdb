@@ -405,6 +405,9 @@ Covers `crates/fennec-http/`, access aside (below); an open server's rule binds 
 - A write wakes the held writes reading what it wrote, a row going to the group ranking it first
 - One held request looks for every group, and a group finding nothing looks among the rows written since
 
+*Durability*
+- A node syncs each tenant on a thread of its own.
+
 ### `crates/fennec-http/src/mcp/CLAUDE.md`
 
 Covers `crates/fennec-http/src/mcp/`.
