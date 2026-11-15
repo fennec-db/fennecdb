@@ -880,8 +880,12 @@ pgvector-up:
 	  sleep 1; done
 	@echo "postgres://postgres:fennec@127.0.0.1:55432/fennecbench"
 
+## Removes the server with its data: the image keeps PostgreSQL's data
+## directory in an anonymous volume, which `--rm` removes with a container
+## that exits, not with one `docker rm` takes running -- without `-v` one
+## was left behind at every up and down, five of them 2.7 GB on one machine.
 pgvector-down:
-	-docker rm -f fennecbench-pg
+	-docker rm -f -v fennecbench-pg
 
 ## TLS on in the server `make pgvector-up` started (PG=<container> another),
 ## with fennec-wire's test certificates -- a CA of their own, `localhost` --
