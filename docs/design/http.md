@@ -1451,8 +1451,9 @@ A seed takes as long to send as the rows it holds, but its first byte no
 longer waits for its last row's JSON: the parts are read while the ones
 before them are on the wire. Through a proxy sending the server's bytes at
 a set rate (four runs a side): at 200 Mbit 169 -> 130 ms for 100 000 rows
-in gzip, 604 -> 313 for 300 000, 641 -> 621 and 1 944 -> 1 868 as they
-are; at 50 Mbit in gzip 450 -> 417 and 1 317 -> 1 247. In gzip the parts
+in gzip, 457 -> 314 for 300 000 (again at a load under 3), 641 -> 621 and
+1 944 -> 1 868 as they are; at 50 Mbit in gzip 450 -> 417 and 1 317 ->
+1 247. In gzip the parts
 are 2.59 MB on the wire for 100 000 rows either way, 7.76 -> 7.79 MB for
 300 000 (+0.4%: each part's first 32 KB find no window behind them). The
 resident peak counts the file's mapped pages the read touched, the same
@@ -1461,7 +1462,13 @@ either way. The server's release binary grows 16 528 bytes (6 941 776 to
 
 The writes beside a seed are as they were: the pin and the ring's hold are
 taken as before, and the lock path holds its lock for no longer -- the
-ids, rather than the rows decoded and written as JSON.
+ids, rather than the rows decoded and written as JSON. `make seed-bench`
+(single writes at 1 000 a second beside a subscriber seeded over and over
+from a million rows, 57 MB a seed, now 57 parts; two turns a side, ABBA,
+at a load under 3): the writes beside the seeds 0.73 and 0.72 ms at p99
+before, 0.57 and 0.58 after, 5.6 and 5.3 ms at most against 5.1 and 5.1,
+and the seeds themselves 283 and 279 ms at their median against 217 and
+218, so 32 seeds in the run where 26 were.
 
 ## Connections without a thread
 
