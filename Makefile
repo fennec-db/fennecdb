@@ -422,8 +422,8 @@ version:
 ## keeps the binaries instead) and run into
 ## crates/fennec-core/tests/compat/v$(V)/, the files they write and the
 ## answers they gave, which every later build's compat:: tests open
-## (RELEASING.md, step 6). macOS or Linux: the builds about two and a half
-## minutes, the writes 20 seconds to a minute and a half
+## (RELEASING.md, step 6). macOS or Linux: the builds about four minutes,
+## the writes a minute and a half
 compat-fixtures:
 	@test -n "$(V)" || (echo "V=<version> is required: make compat-fixtures V=0.2.0"; exit 1)
 	@bin=$${BIN:-$$(mktemp -d)}; \
