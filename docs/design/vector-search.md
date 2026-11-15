@@ -60,7 +60,10 @@ at 768 dimensions. Neither changes a bit of the graph.
 and a row's `_score` as the shortest text that reads back as the `f32`
 (`json::num32_into`), as pgvector and a sparse vector's weights
 do: `0.1`, where the `f64` each widens to wrote
-`0.10000000149011612`. JavaScript reads it as an `f64` and a
+`0.10000000149011612`. A `NaN` or an infinity goes out as `null`, and no
+write stores one now: a component no `f32` holds is refused where a write
+or `near` takes it ([crates.md](crates.md#limits), *A vector's
+components*). JavaScript reads it as an `f64` and a
 `Float32Array` rounds that again, which gives every `f32` back but
 `7.038531e-26`: as an `f64` it lands exactly between itself and the `f32`
 above, and the tie goes to the even one, so it keeps its `f64`'s text
@@ -316,13 +319,18 @@ more.
 ## Vector parameters
 
 **A vector parameter goes into the module as `f32`s.** `web/fennec.js`'s
-`run` takes each parameter that is a typed array or an array of finite
-numbers -- which the module reads as a vector either way -- out of the
-JSON, where it leaves `null`, and hands it over beside it: its place, its
-length and its values (`vectorsApart`; `fennec_query`'s two arguments
-before its last, the clock; `with_vectors`). A `-0` goes over as `0`, as JSON writes it,
-so the file is the same either way (`web/fennec.test.js`). 200 768-dim
-vectors went in in 21.9 ms as JSON and take 4.4, and `make wasm-speed`
+`run` takes each parameter that is a typed array, whatever numbers it
+holds, or an array of finite numbers -- which the module reads as a vector
+either way -- out of the JSON, where it leaves `null`, and hands it over
+beside it: its place, its length and its values (`vectorsApart`;
+`fennec_query`'s two arguments before its last, the clock;
+`with_vectors`). A `-0` goes over as `0`, as JSON writes it, so the file
+is the same either way (`web/fennec.test.js`). A typed array's `NaN` or
+infinity, and an array's `1e39` -- an `f32`'s infinity -- go over too,
+and the module refuses each where a vector field or `near` takes it,
+naming the element, as a server does ([crates.md](crates.md#limits),
+*A vector's components*): in the JSON the typed array was an object.
+200 768-dim vectors went in in 21.9 ms as JSON and take 4.4, and `make wasm-speed`
 builds 10 000 128-dim ones with their graph in 1 165 ms against 1 307.
 
 **A vector marked exact is a list of numbers as it came.** Since a list

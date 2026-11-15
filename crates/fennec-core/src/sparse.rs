@@ -138,8 +138,14 @@ pub fn normalise(
     if entries.last().is_some_and(|e| e.0 >= dim) {
         return Err("an index is outside the dimension".into());
     }
-    if entries.iter().any(|e| !e.1.is_finite()) {
-        return Err("a value is not finite".into());
+    // A weight past an `f32`'s range read as its infinity -- `{1:1e39}/3` --
+    // named by its index as the text writes it, from 1, as a vector's
+    // component is (`value::unheld`).
+    if let Some(e) = entries.iter().find(|e| !e.1.is_finite()) {
+        return Err(format!(
+            "index {}: a sparse vector's weight is a number at most 3.4028235e38 either side of 0",
+            e.0 as u64 + 1
+        ));
     }
     entries.retain(|e| e.1 != 0.0);
     Ok((dim, entries))
