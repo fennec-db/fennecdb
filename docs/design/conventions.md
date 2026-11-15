@@ -27,8 +27,9 @@ missing prerequisite throws (`web/ci-prereq.mjs`'s `needs`, called after the
 suite finds what it needs, as `studio/test/transport.test.mjs` already did),
 and a Rust test that skips for a missing program (`fixture!` in
 `fennec-import/tests/sqlite.rs`, the inflater in `fennec-http/src/gzip.rs`)
-panics. What no runner can run -- the tests that need a live PostgreSQL, the
-exhaustive float sweeps -- is counted: `make test` copies node's spec
+panics. What `make test` cannot run -- the tests that need a live PostgreSQL, which
+CI's `postgres (import and --follow)` job runs and fails unless every one
+passed (`replication.md`), and the exhaustive float sweeps, run by hand -- is counted: `make test` copies node's spec
 reporter and each cargo run to `target/skips/`, and `tools/skips_check.py`
 fails a job whose `skipped` or `ignored` sum passes
 `tools/skips-allowlist.json`'s count for its runner (`Linux`, `macOS`;

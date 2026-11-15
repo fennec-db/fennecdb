@@ -6,25 +6,55 @@
 // prints beside it; since phase 2 none is.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const WINDOWS = process.platform === "win32";
 /** A program's file name ends so: the release's Windows zip holds `fennec-server.exe`. */
 export const EXE = WINDOWS ? ".exe" : "";
 
-/**
- * PowerShell 7 (`pwsh`) where there is one, else Windows PowerShell: on
- * windows-11-arm the latter runs emulated and took over 40 s to ask WMI, `pwsh`
- * under a second (scripts/checks/lib.mjs's POWERSHELL says the same).
- */
-const POWERSHELL = (process.env["PATH"] ?? "").split(delimiter).some((d) => d !== "" && existsSync(join(d, "pwsh.exe"))) ? "pwsh.exe" : "powershell.exe";
+// A path, not a URL's: a `file:` URL's pathname is /D:/a/... on Windows.
+const APP = fileURLToPath(new URL("../", import.meta.url));
 
-/** A process's command line, as the system shows it to every user (`ps`), or to its own on Windows (WMI). */
+/**
+ * Windows: the Bun the app is built with and runs on, where
+ * scripts/electrobun.mjs fetched it (HUTCH_HOME, else .hutch-home/) and held
+ * it to hutch-pin.json; `npm run typecheck` fetches it before the tests, as
+ * CI runs them.
+ */
+function pinnedBun(): string {
+	const home = process.env["HUTCH_HOME"] || join(APP, ".hutch-home");
+	const pin = JSON.parse(readFileSync(join(APP, "hutch-pin.json"), "utf8")) as Record<string, { runtime?: Record<string, unknown> }>;
+	const system = `windows-${process.arch}`;
+	const dir = Object.keys(pin[system]?.runtime ?? {}).find((d) => d.startsWith("toolchains/bun/"));
+	if (!dir) throw new Error(`hutch-pin.json pins no Bun for ${system}`);
+	const bun = join(home, ...dir.split("/"), "bun.exe");
+	if (!existsSync(bun)) throw new Error(`${bun} is not there: \`npm run typecheck\` fetches it`);
+	return bun;
+}
+
+/**
+ * Windows: `test/win32-read.ts` run by the app's Bun, which asks Windows
+ * through the app's own calls (win32.ts). Not by PowerShell, as the tests
+ * did: `pwsh` crashed on the arm64 runner once in some 600 to 1000 starts,
+ * "Internal CLR error. (0x80131506)" and exit 0xC0000005, or a
+ * SynchronizationLockException, the process asked about alive (jobs
+ * 132046665510, 132452559288, 132452559492), with or without its startup
+ * profile written, so a test failed with nothing of the app's wrong.
+ */
+function readWin32(what: "command-line" | "security", of: string): string {
+	return execFileSync(pinnedBun(), [join(APP, "test", "win32-read.ts"), what, of]).toString();
+}
+
+/**
+ * A process's command line, as the system shows it to every user (`ps`), or
+ * on Windows to its own: by the app's own reader, as Task Manager reads one
+ * (win32.ts's `processCommandLine`).
+ */
 export function argvOf(pid: number): string {
 	if (!WINDOWS) return execFileSync("ps", ["-ww", "-o", "command=", "-p", String(pid)]).toString();
-	const ps = `(Get-CimInstance Win32_Process -Filter "ProcessId=${Number(pid)}").CommandLine`;
-	return execFileSync(POWERSHELL, ["-NoProfile", "-NonInteractive", "-Command", ps]).toString();
+	return readWin32("command-line", String(Number(pid)));
 }
 
 /**
@@ -38,16 +68,14 @@ export function ownerAlone(path: string): true | string {
 		const mode = statSync(path).mode & 0o777;
 		return mode === 0o600 || `mode ${mode.toString(8)}`;
 	}
-	// The path goes in by the environment, not into the script's text.
-	const ps =
-		"$acl = Get-Acl -LiteralPath $env:FENNEC_TEST_PATH; " +
-		"$me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value; " +
-		"$rules = @($acl.Access); " +
-		"$said = ($rules | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value + ' ' + $_.AccessControlType + ' ' + $_.FileSystemRights + ' inherited ' + $_.IsInherited }) -join '; '; " +
-		"if ($acl.AreAccessRulesProtected -and $rules.Count -eq 1 -and $rules[0].AccessControlType -eq 'Allow' -and $rules[0].FileSystemRights -eq 'FullControl' -and $rules[0].IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq $me) { 'owner alone' } " +
-		"else { 'protected ' + $acl.AreAccessRulesProtected + ', me ' + $me + ': ' + $said }";
-	const said = execFileSync(POWERSHELL, ["-NoProfile", "-NonInteractive", "-Command", ps], { env: { ...process.env, FENNEC_TEST_PATH: path } })
-		.toString()
-		.trim();
-	return said === "owner alone" || said;
+	// Its owner and DACL as SDDL, read by the app's own call (win32.ts's
+	// `pipeSddl`), as scripts/checks/pages.mjs reads the pipe's. SDDL writes an
+	// account it has an alias for by the alias (the built-in Administrator, RID
+	// 500, which the runners run as, is LA), and the DACL's flags as letters: P,
+	// protected, and AI where the call that set it adds it. One entry, its flags none:
+	// every right (FA, FILE_ALL_ACCESS) to this user, and nothing to anyone else.
+	const [me = "", sddl = ""] = readWin32("security", path).split("\n");
+	if (!/^S-1-[0-9-]+$/.test(me)) return `no SID: ${me}`;
+	const who = me.endsWith("-500") ? `(?:LA|${me})` : me;
+	return new RegExp(`D:P(?:AI)?\\(A;;FA;;;${who}\\)$`).test(sddl) || `me ${me}: ${sddl}`;
 }

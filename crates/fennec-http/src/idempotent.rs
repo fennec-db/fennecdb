@@ -31,6 +31,14 @@ pub const KEYS: &str = fennec_core::declared::IDEMPOTENCY;
 /// a write's answer is a count, and a batch's reads can be long.
 const KEPT_BODY: usize = 64 << 10;
 
+/// The refusal of a key sent with a scoped token that has no subject.
+const NO_SUBJECT: &str = "an Idempotency-Key needs a token with a subject (`sub`)";
+
+/// The refusal of a key sent with a scoped token whose `sub` is no text
+/// ([`crate::access::Scope::sub_not_text`]).
+const SUB_NOT_TEXT: &str = "an Idempotency-Key needs a token with a subject, and the token's \
+     `sub` claim must be a string (RFC 7519): a numeric id goes in as its digits, \"42\"";
+
 /// A key, the subject's for a scoped token, and a hash of the request.
 pub struct Key {
     name: String,
@@ -57,16 +65,19 @@ pub fn key(req: &Request, who: &Who) -> std::result::Result<Option<Key>, Respons
         ));
     }
     // Keys are the subject's: two users' keys never meet. A scoped token
-    // with no subject has no one to keep them for.
+    // with no subject has no one to keep them for -- nor one whose `sub` is
+    // a number, which names none: told so, an app minting its numeric ids
+    // as `"sub": 42` knows what to change.
     let owner = match who {
         Who::Full => "",
         Who::Scoped(scope) => match scope.subject() {
             Some(sub) => sub,
             None => {
-                return Err(Response::error(
-                    400,
-                    "an Idempotency-Key needs a token with a subject (`sub`)",
-                ))
+                let why = match scope.sub_not_text() {
+                    true => SUB_NOT_TEXT,
+                    false => NO_SUBJECT,
+                };
+                return Err(Response::error(400, why));
             }
         },
     };
