@@ -288,7 +288,7 @@ nothing reaches a registry before the notes have had a read.
    runs only after a signing. The run's red `attach-unsigned` is the
    expected end; what it proves is the attest step's log, and an artifact
    of the run verifying: `gh run download <run-id> -R fennec-db/fennecdb
-   -n fennec-studio-app-linux-x64`, then `gh attestation verify
+   -n fennec-studio-app-Linux-X64`, then `gh attestation verify
    fennec-studio-linux-x64.tar.xz -R fennec-db/fennecdb --signer-workflow
    fennec-db/fennecdb/.github/workflows/desktop.yml --source-ref
    refs/heads/main --deny-self-hosted-runners`.
