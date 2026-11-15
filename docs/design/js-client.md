@@ -722,7 +722,10 @@ So a seed of several parts into a collection with a collated field fetches
 every chunk first (`collation('all')`, 190 KB once); a seed of one part
 there lands in a block (`#landSeed`), put back whole where a statement is
 refused, the chunks it named fetched and the seed landed again, as it did
--- only what it names. The leader tab hands each part to the others as it
+-- only what it names. A module built without the schema check has no
+`describe()` to name a collated field by (`#described`); a statement
+refused half way there empties the shape, as a refused one does, and the
+chunks it named fetched, the seed lands again. The leader tab hands each part to the others as it
 came (`{t: 'seed', data}`), and a tab that missed one waits for the seed
 begun again; a new tab is handed what the leader holds as a seed in parts
 of 2 000 rows (`HELLO_ROWS`), posted in one task, so it lands them as one.

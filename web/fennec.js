@@ -2956,9 +2956,14 @@ export class FennecSync {
         landed = this.#landParts(s, seq, texts, whole);
         if (whole) block(this.#local, landed ? 1 : 2);
       } catch (e) {
-        if (!whole) throw e;
-        block(this.#local, 2);
-        back();
+        if (whole) {
+          block(this.#local, 2);
+          back();
+        }
+        // Without a block, a statement half way refused for collation data
+        // left the shape emptied (`#landParts`), never half seeded: a module
+        // built without the schema check cannot say which fields are
+        // collated (`start`). The data fetched, the seed lands again.
         if (!e.collation || !(await this.#local.collation(...e.collation))) throw e;
         continue;
       }
@@ -3024,6 +3029,19 @@ export class FennecSync {
     } catch (e) {
       if (begun && !inBlock) this.#emptyShape(s);
       throw e;
+    }
+  }
+
+  /**
+   * The replica's collections as `describe()` tells them, collations named;
+   * none from a module built without the schema check, which has no
+   * description (`make wasm SCHEMA=0`).
+   */
+  #described() {
+    try {
+      return this.#local.describe().collections ?? [];
+    } catch {
+      return [];
     }
   }
 
@@ -3239,7 +3257,7 @@ export class FennecSync {
     }
     const schemas = this.#local.schemas();
     // `schemas` names no collation; the description does.
-    const described = schemas.length ? this.#local.describe().collections ?? [] : [];
+    const described = schemas.length ? this.#described() : [];
     for (const s of this.#shapes.values()) {
       const schema = schemas.find((x) => x.name === s.collection);
       s.made = !!schema;
