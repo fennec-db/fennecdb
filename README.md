@@ -449,6 +449,11 @@ FennecQL does not share with SQL, and
 
 ---
 
+## Security
+
+To report a vulnerability, privately, see [`SECURITY.md`](SECURITY.md): what is
+in scope, the supported versions and the acknowledgement within 3 working days.
+
 ## Contributing
 
 `CONTRIBUTING.md` has the setup, the narrower test invocations and the

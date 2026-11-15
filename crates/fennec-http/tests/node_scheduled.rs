@@ -627,7 +627,7 @@ fn a_run_charges_no_rate() {
 
 /// The node's one shutdown, for a scheduler thread a test starts: it ends
 /// as its registry goes.
-fn ignored(_: i32) {}
+fn ignored() {}
 
 /// Waits for what must happen, bounded.
 fn until(what: &str, f: impl Fn() -> bool) {

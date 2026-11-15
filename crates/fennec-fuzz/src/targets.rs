@@ -15,6 +15,7 @@ pub static TARGETS: &[Target] = &[
         name: "http",
         about: "fennec_http::http::read_request: a request's head, its body by length or chunked, pipelined, read whole or a few bytes at a time",
         max_len: 64 << 10,
+        smoke: 120_000,
         seeds: http_seeds,
         dictionary: HTTP_TOKENS,
         run: http,
@@ -23,6 +24,7 @@ pub static TARGETS: &[Target] = &[
         name: "json",
         about: "fennec_core::json: parse_json, parse, a page's documents and a query's parameters; what parses is written back and read as itself",
         max_len: 64 << 10,
+        smoke: 70_000,
         seeds: json_seeds,
         dictionary: JSON_TOKENS,
         run: json,
@@ -31,6 +33,7 @@ pub static TARGETS: &[Target] = &[
         name: "fennecql",
         about: "fennec_ql::parse and parse_exact, FennecQL and SQL's spellings, over the repository's corpus of texts",
         max_len: 16 << 10,
+        smoke: 180_000,
         seeds: fennecql_seeds,
         dictionary: FENNECQL_TOKENS,
         run: fennecql,
@@ -39,6 +42,7 @@ pub static TARGETS: &[Target] = &[
         name: "codec",
         about: "fennec_core::codec: a value's and a type's encoding decoded, skipped, read by a path and as a document's fields",
         max_len: 64 << 10,
+        smoke: 60_000,
         seeds: codec_seeds,
         dictionary: CODEC_TOKENS,
         run: codec,
@@ -47,6 +51,7 @@ pub static TARGETS: &[Target] = &[
         name: "image",
         about: "a .fennec file opened read into memory (Database::load) and mapped as a server opens it (load_mapped: an image's index of its frames adopted, in shares on threads, the rest replayed in place), each read whole, its indexes built and its vectors linked, and its records applied as a replica applies a primary's",
         max_len: 256 << 10,
+        smoke: 35_000,
         seeds: image_seeds,
         dictionary: IMAGE_TOKENS,
         run: image,
@@ -55,6 +60,7 @@ pub static TARGETS: &[Target] = &[
         name: "sqlite",
         about: "fennec_import::sqlite: a SQLite file's schema found, its table's rows read and counted",
         max_len: 64 << 10,
+        smoke: 80_000,
         seeds: sqlite_seeds,
         dictionary: SQLITE_TOKENS,
         run: sqlite,
@@ -91,6 +97,19 @@ fn seeds_dir() -> PathBuf {
         Some(d) => PathBuf::from(d),
         None => repo().join("target/fuzz/seeds"),
     }
+}
+
+/// The inputs the repository keeps for target `name`, in
+/// `crates/fennec-fuzz/seeds/<name>/`, in the order of their names: a
+/// target's fixtures, and each finding's input once it was fixed, so every
+/// run -- `cargo test` among them -- hands it the target again.
+fn kept_seeds(name: &str) -> Vec<Vec<u8>> {
+    let dir = repo().join("crates/fennec-fuzz/seeds").join(name);
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        .unwrap_or_default();
+    files.sort();
+    files.iter().filter_map(|f| std::fs::read(f).ok()).collect()
 }
 
 /// `with` before each of `inputs`: a target whose first byte picks how it
@@ -335,10 +354,12 @@ fn json(data: &[u8]) {
     let _ = json::parse_documents(&text);
     let _ = json::parse_params(&text);
     let _ = json::parse_object(&text);
-    // What is read is written back and read as itself, as `=` compares --
-    // a number past a double's range aside: the reader takes `1e400` as
-    // infinity, which JSON cannot say and the writer writes as `null`.
-    if let Some(v) = json::parse_json(&text).ok().filter(finite) {
+    // What is read is written back and read as itself, as `=` compares,
+    // every number among it: one past a double's range, which JSON cannot
+    // say back, is refused by the reader (`num::past_range`), where it
+    // read `1e400` as an infinity written back as `null`, and the round
+    // trip was held to finite values alone.
+    if let Ok(v) = json::parse_json(&text) {
         let out = json::to_string(&v);
         let again =
             json::parse_json(&out).unwrap_or_else(|e| panic!("{out:?} written, then refused: {e}"));
@@ -346,16 +367,6 @@ fn json(data: &[u8]) {
             again.cmp_value(&v) == std::cmp::Ordering::Equal,
             "{text:?} read as {v:?}, written as {out:?}, read back as {again:?}"
         );
-    }
-}
-
-/// Whether every number `v` holds is finite.
-fn finite(v: &Value) -> bool {
-    match v {
-        Value::Float(f) => f.is_finite(),
-        Value::List(items) => items.iter().all(finite),
-        Value::Object(members) => members.iter().all(|(_, v)| finite(v)),
-        _ => true,
     }
 }
 
@@ -572,6 +583,7 @@ fn codec_seeds() -> Vec<Vec<u8>> {
         fennec_core::codec::encode_type(&mut b, &ty);
         s.push(b);
     }
+    s.extend(kept_seeds("codec"));
     s
 }
 
@@ -727,7 +739,10 @@ fn image_seeds() -> Vec<Vec<u8>> {
             files.push(b);
         }
     }
-    each_way(&files, 2)
+    // A finding's input carries the byte that says how it was read.
+    let mut seeds = each_way(&files, 2);
+    seeds.extend(kept_seeds("image"));
+    seeds
 }
 
 /// The collections of `db` read whole -- every document decoded, every
@@ -754,6 +769,17 @@ fn read_all(db: &Database) {
     }
 }
 
+/// The time every database of the `image` target reads as now, in
+/// milliseconds: 2026-01-01T00:00:00Z. A read of a collection whose rows
+/// expire (`@ttl`, seed `s`'s `e`) asks the clock for its cutoff
+/// (`Database::alive`), and the system's moves between runs and between
+/// processes: a row alive in one run and expired in the next reached
+/// other code, the corpus a process's own -- what a count of runs must
+/// never be (docs/design/conventions.md#fuzzing). Before seed `s`'s
+/// `2030-01-01` and after the epoch, so its row is read alive and a
+/// mutated time on either side of it is met.
+const CLOCK: i64 = 1_767_225_600_000;
+
 fn image(data: &[u8]) {
     let Some((&how, bytes)) = data.split_first() else {
         return;
@@ -766,6 +792,7 @@ fn image(data: &[u8]) {
     }
     let _ = fennec_core::engine::check_records(&file);
     let mut db = Database::new();
+    db.set_clock(Some(CLOCK));
     if db.load(&file).is_ok() {
         read_all(&db);
     }
@@ -776,6 +803,7 @@ fn image(data: &[u8]) {
     // of the graphs linked after, as a server links them beside its
     // queries.
     let mut served = Database::new();
+    served.set_clock(Some(CLOCK));
     served.defer_linking();
     let base: fennec_core::store::Base = std::sync::Arc::new(file.clone());
     if served.load_mapped(base).is_ok() {
@@ -785,6 +813,7 @@ fn image(data: &[u8]) {
     let magic = fennec_core::engine::MAGIC.len();
     if file.len() > magic && file[..magic] == fennec_core::engine::MAGIC[..] {
         let mut replica = Database::new();
+        replica.set_clock(Some(CLOCK));
         if replica.apply(&file[magic..]).is_ok() {
             read_all(&replica);
         }
@@ -810,12 +839,7 @@ const SQLITE_TOKENS: &[&[u8]] = &[
 ];
 
 fn sqlite_seeds() -> Vec<Vec<u8>> {
-    let dir = repo().join("crates/fennec-fuzz/seeds/sqlite");
-    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).collect())
-        .unwrap_or_default();
-    files.sort();
-    files.iter().filter_map(|f| std::fs::read(f).ok()).collect()
+    kept_seeds("sqlite")
 }
 
 fn sqlite(data: &[u8]) {

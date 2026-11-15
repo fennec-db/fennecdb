@@ -9,9 +9,22 @@ use fennec_core::query::{Expr, Statement};
 use fennec_core::schema::{Composite, IndexKind};
 use fennec_core::value::DataType;
 
-/// Applies `flag`, one of the options above, with its `value`: `None` for
-/// a flag that is not one of them.
+/// The options above, each taking a value: the one list `fennec import`
+/// reads and `fennec-server` offers as `--follow-<name>`, whose tests hold
+/// each to the binary's help and its dump of flags
+/// (`integrations/api-golden/`): the server makes those flags from this
+/// list at run time, where no scan of its sources sees them.
+pub const OPTIONS: [&str; 6] = [
+    "--where", "--vector", "--index", "--cast", "--id", "--batch",
+];
+
+/// Applies `flag`, one of [`OPTIONS`], with its `value`: `None` for a flag
+/// that is not one of them.
 pub fn option(opts: &mut Options, flag: &str, value: &str) -> Option<Result<(), String>> {
+    // Only the list's: an arm below it does not name is no option.
+    if !OPTIONS.contains(&flag) {
+        return None;
+    }
     let done = match flag {
         "--where" => parse_where(value).map(|e| opts.filter = Some(e)),
         "--vector" => parse_vector(value).map(|v| opts.vectors.push(v)),
@@ -225,5 +238,27 @@ mod tests {
         assert!(parse_composite("org,slug@unique").unwrap().unwrap().unique);
         assert!(parse_composite("org,slug@hash").unwrap().is_err());
         assert!(parse_composite("org@hash").is_none());
+    }
+
+    /// Every option of the list is one `option` reads, and nothing else is:
+    /// the list is what the server's flags and both binaries' dumps are held
+    /// to, so an arm it leaves out would be a flag no test sees.
+    #[test]
+    fn the_list_is_every_option_read() {
+        for flag in OPTIONS {
+            let mut o = Options::new("");
+            assert!(option(&mut o, flag, "x").is_some(), "{flag}");
+        }
+        let mut o = Options::new("");
+        for flag in [
+            "--table",
+            "--into",
+            "--limit",
+            "--follow",
+            "--where-not",
+            "where",
+        ] {
+            assert!(option(&mut o, flag, "x").is_none(), "{flag}");
+        }
     }
 }
