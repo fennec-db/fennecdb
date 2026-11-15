@@ -158,6 +158,11 @@ pub fn tmp(tag: &str, name: &str) -> PathBuf {
     path
 }
 
+/// How long [`Server::signal`] waits, past the process's exit, for the
+/// reader to meet the pipe's end: within it, at once but where another
+/// test's server holds the pipe open ([`Server::read_out`]).
+const READ_OUT: Duration = Duration::from_secs(10);
+
 pub struct Server {
     pub child: Child,
     pub port: u16,
@@ -287,9 +292,7 @@ impl Server {
             _ => panic!("signal {sig}: Windows has Ctrl+Break and TerminateProcess alone"),
         }
         let status = self.child.wait().expect("could not wait for the process");
-        // The reader thread takes the last lines as the pipe closes.
-        std::thread::sleep(Duration::from_millis(100));
-        let log = self.log.lock().unwrap().clone();
+        let log = self.read_out(Instant::now() + READ_OUT);
         (status.code().unwrap_or(-1), log)
     }
 
@@ -314,19 +317,26 @@ impl Server {
             }
             std::thread::sleep(Duration::from_millis(20));
         };
-        // Every line is in once the reader has met the pipe's end -- unless
-        // a server another test spawned meanwhile inherited the pipe's write
-        // end (macOS marks a new pipe close-on-exec after making it, not
-        // with it), which holds the pipe open past this one's exit: waited
-        // for within the same bound, the lines then those read so far.
+        let log = self.read_out(deadline);
+        Some((status.code().unwrap_or(-1), log))
+    }
+
+    /// Everything an ended process logged: every line is in once the
+    /// reader has met the pipe's end -- unless a server another test
+    /// spawned meanwhile inherited the pipe's write end (macOS marks a new
+    /// pipe close-on-exec after making it, not with it), which holds the
+    /// pipe open past this one's exit: waited for until `deadline`, the
+    /// lines then those read so far. A fixed 100 ms for the reader, as
+    /// `signal` gave it, was a guess, and a line not yet read made a test's
+    /// "never logged" pass without having looked.
+    fn read_out(&mut self, deadline: Instant) -> String {
         while self.reader.as_ref().is_some_and(|r| !r.is_finished()) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
         if let Some(reader) = self.reader.take_if(|r| r.is_finished()) {
             let _ = reader.join();
         }
-        let log = self.log.lock().unwrap().clone();
-        Some((status.code().unwrap_or(-1), log))
+        self.log.lock().unwrap().clone()
     }
 }
 

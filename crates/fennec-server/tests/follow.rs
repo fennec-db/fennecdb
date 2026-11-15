@@ -252,7 +252,7 @@ fn a_follower_that_cannot_go_on_stops_the_server_through_the_shutdown() {
         .expect("the server went on serving a mirror that no longer moves");
     assert_eq!(code, 1, "{log}");
     assert!(log.contains("the mirror of"), "{log}");
-    assert!(log.contains("shutting down"), "{log}");
+    assert!(log.contains("shutting down: "), "{log}");
     let db = fennec_core::fs::open_read_only(&file).unwrap();
     let held = db.stats().iter().find(|x| x.name == t).map(|x| x.documents);
     assert_eq!(held, Some(11), "{log}");
@@ -587,5 +587,8 @@ fn a_stopped_server_lets_its_slot_go_before_it_exits() {
         b"cX",
         "{log}"
     );
+    // Read through the shutdown's own line, which comes after any of the
+    // follower's: the line saying the slot is held was looked for.
+    assert!(log.contains("shutting down: "), "{log}");
     assert!(!log.contains("still held"), "{log}");
 }

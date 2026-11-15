@@ -512,7 +512,7 @@ fn start_tracing(options: fennec_http::trace::Options, service: &str) {
             }
             fennec_http::log!("tracing: OTLP/HTTP JSON to {url}, sampling {sample}");
             // The last second's spans go out before the process does.
-            durability::before_shutdown(|| {
+            durability::before_shutdown(|_| {
                 fennec_http::trace::flush(std::time::Duration::from_secs(2))
             });
         }
