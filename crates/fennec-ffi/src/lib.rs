@@ -861,8 +861,9 @@ pub const FENNEC_SCHEMA_DESCRIBE: u32 = 3;
 /// SDK makes its declarations from.
 ///
 /// # Safety
-/// `text` is null with length 0 or valid for its length; `out` and
-/// `out_len` are null or valid to write.
+/// `text` is null with length 0 or valid for its length, and anything under
+/// `FENNEC_SCHEMA_DESCRIBE`, which reads it not at all; `out` and `out_len`
+/// are null or valid to write.
 #[no_mangle]
 pub unsafe extern "C" fn fennec_schema(
     handle: u64,
@@ -874,9 +875,14 @@ pub unsafe extern "C" fn fennec_schema(
 ) -> i32 {
     call(out, out_len, || {
         let n = native(handle)?;
+        // Before the text is read: fennec.h says this mode leaves it
+        // unread, so a caller may hand it anything. Read as UTF-8 first, a
+        // pointer to nothing with a length was a slice of memory not there.
+        if mode == FENNEC_SCHEMA_DESCRIBE {
+            return Ok(Some(fennec_abi::describe(&*n.read()?, false)));
+        }
         let request = text(text_ptr, text_len, "the description")?;
         let outcome = match mode {
-            FENNEC_SCHEMA_DESCRIBE => return Ok(Some(fennec_abi::describe(&*n.read()?, false))),
             FENNEC_SCHEMA_FOLLOW => fennec_abi::follow(&*n.read()?, request),
             FENNEC_SCHEMA_PLAN | FENNEC_SCHEMA_APPLY => {
                 let now = std::time::SystemTime::now()
