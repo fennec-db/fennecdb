@@ -3,11 +3,11 @@
 
     tools/ci_flakes.py [-n 50] [--repo fennec-db/fennecdb] [--json]
 
-Lists the failed jobs of the last N completed ci.yml runs (push to main and
-merge_group, in the order they ran), names each one's failing step, and says
-whether a later commit fixed it, so that the 1.0 plan's exit criterion --
-"0 failures without a fixing commit in the last 50" -- is a number. Standard
-library and `gh` (authenticated) only.
+Lists the failed jobs of the last N completed ci.yml runs (push to main,
+schedule on main and merge_group, in the order they ran), names each one's
+failing step, and says whether a later commit fixed it, so that the 1.0
+plan's exit criterion -- "0 failures without a fixing commit in the last 50"
+-- is a number. Standard library and `gh` (authenticated) only.
 
 "Fixed by a commit" is decided from files, never from a rerun. A file counts
 only if it is source: not documentation (*.md, docs/, site/content/), not a
@@ -20,8 +20,8 @@ lockfile, and one the failing job's area owns (AREAS below: `fmt` and
     author's work: the same files over a moved base count unfixed. The same
     blobs passing later is a rerun that passed, which is a flake, whatever
     the cause (infrastructure included).
-  * a push failure is fixed when, up to the first later push run that passed
-    the job, a commit on main touched such a file.
+  * a push or schedule failure is fixed when, up to the first later push or
+    schedule run on main that passed the job, a commit on main touched such a file.
   * a failure with no later run to judge by is "open", counted unfixed.
 Every job conclusion but success, skipped and cancelled is a failure
 (timed_out and startup_failure included). The count that matters is
@@ -163,7 +163,7 @@ def merge_group_verdict(repo, r, later, job):
 def push_verdict(repo, r, later, job):
     owned = []
     for x in later:
-        if x["event"] != "push":
+        if x["event"] not in ("push", "schedule"):
             continue
         c = commit_of(repo, x["headSha"])
         owned += [p for p in (c[1] if c else {}) if owns(job, p)]
@@ -176,7 +176,9 @@ def push_verdict(repo, r, later, job):
 
 def ledger(repo, n):
     allruns = []
-    for ev in ("push", "merge_group"):
+    # ci.yml's push run on main starts only when a lockfile, the toolchain
+    # or the workflow changed: its scheduled run is main's whole run.
+    for ev in ("push", "schedule", "merge_group"):
         allruns += runs(repo, ev, n * 3)
     # push runs on branches other than main are not the ledger's.
     allruns = [r for r in allruns if r["status"] == "completed" and r["conclusion"] != "cancelled"
@@ -213,7 +215,7 @@ def main():
         json.dump(rows, sys.stdout, indent=1)
         print()
         return 0
-    print(f"{len(window)} completed ci.yml runs (push to main, merge_group), "
+    print(f"{len(window)} completed ci.yml runs (push and schedule on main, merge_group), "
           f"{window[-1]['createdAt'][:10]} to {window[0]['createdAt'][:10]}" if window else "no runs")
     for x in rows:
         print(f"- {x['event']:11} run {x['run']} {x['sha']} {x['job']!r} step {x['step']!r}"

@@ -1,0 +1,4 @@
+{
+  "_doc": "Advisories the dependency audit (.github/workflows/audit.yml) accepts for now. Each entry: id (GHSA, OSV, GO or CVE), package, reason (why it does not reach a user, or what waits on a fix) and expires (YYYY-MM-DD). tools/osv_check.py fails the run on an entry past its expiry, and reads npm audit, govulncheck and dotnet list output against the list. Never add an entry without a date.",
+  "ignore": []
+}

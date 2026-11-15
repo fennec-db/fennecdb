@@ -120,6 +120,14 @@ usage: fennec-server [options]
                             `compact` peaks at ~3x the file. With --dir it
                             covers the open tenants together, and opening one
                             more over it closes the idle ones first
+      --user <uid>:<gid>    started as root, run as this user and group: the
+                            directory the server writes in (--file's, or
+                            --dir) handed to them first where it is a volume
+                            of its own holding nothing but the database,
+                            then root dropped for good, before any file is
+                            opened. Also read from FENNEC_USER, which the
+                            image sets to 65534:65534; started as anyone
+                            else, the variable is passed over. Unix only
       --insecure            allow listening without a token on a non-loopback
                             address
       --tls-cert <pem>      serve HTTPS alone, with this certificate chain
@@ -566,6 +574,14 @@ fn main() {
     let mut studio_connect: Option<String> = None;
     let mut mcp: Option<fennec_http::mcp::Options> = None;
     let mut tracing = fennec_http::trace::Options::default();
+    // `--user`, and the files the flags name that are read or made before
+    // the server runs: each opened once root is dropped (below the
+    // arguments), never as they are read.
+    let mut user_flag: Option<String> = None;
+    let mut audit_paths: Vec<String> = Vec::new();
+    let mut jwt_secret_file: Option<String> = None;
+    let mut policy_path: Option<String> = None;
+    let mut tls_ca: Option<String> = None;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut metrics: Option<String> = None;
@@ -695,12 +711,8 @@ fn main() {
                 let v = next(&mut i, "--trace-sample");
                 tracing.sample(&v).unwrap_or_else(|e| fail(&e));
             }
-            "--audit" => {
-                let path = next(&mut i, "--audit");
-                if let Err(e) = fennec_http::audit::open(std::path::Path::new(&path)) {
-                    fail(&format!("could not open {path}: {e}"));
-                }
-            }
+            "--audit" => audit_paths.push(next(&mut i, "--audit")),
+            "--user" => user_flag = Some(next(&mut i, "--user")),
             "--auth-delay" => {
                 let v = next(&mut i, "--auth-delay");
                 let ms: u64 = v.parse().unwrap_or_else(|_| {
@@ -716,7 +728,11 @@ fn main() {
                 fennec_http::metrics::set_slow(ms);
             }
             "--http-token" => http_cfg.token = Some(next(&mut i, "--http-token")),
-            "--jwt-secret" => jwt_secret = Some(next(&mut i, "--jwt-secret")),
+            // The later of the secret and its file is the one taken.
+            "--jwt-secret" => {
+                jwt_secret = Some(next(&mut i, "--jwt-secret"));
+                jwt_secret_file = None;
+            }
             "--jwt-keys" => jwt_keys = Some(next(&mut i, "--jwt-keys")),
             "--jwt-require-exp" => {
                 demands.require_exp = match next(&mut i, "--jwt-require-exp").as_str() {
@@ -754,25 +770,8 @@ fn main() {
                     .unwrap_or_else(|_| fail(&format!("--jwt-max-age expects seconds, got `{v}`")));
                 demands.max_age = (secs > 0).then_some(secs);
             }
-            "--jwt-secret-file" => {
-                let path = next(&mut i, "--jwt-secret-file");
-                not_stdin("--jwt-secret-file", &path);
-                match std::fs::read_to_string(&path) {
-                    Ok(s) if s.trim_end_matches(['\n', '\r']).is_empty() => {
-                        fail(&format!("--jwt-secret-file {path} is empty"))
-                    }
-                    Ok(s) => jwt_secret = Some(s.trim_end_matches(['\n', '\r']).to_string()),
-                    Err(e) => fail(&format!("could not read {path}: {e}")),
-                }
-            }
-            "--policy" => {
-                let path = next(&mut i, "--policy");
-                not_stdin("--policy", &path);
-                match std::fs::read_to_string(&path) {
-                    Ok(s) => policy = Some(s),
-                    Err(e) => fail(&format!("could not read {path}: {e}")),
-                }
-            }
+            "--jwt-secret-file" => jwt_secret_file = Some(next(&mut i, "--jwt-secret-file")),
+            "--policy" => policy_path = Some(next(&mut i, "--policy")),
             "--hooks" => {
                 let path = next(&mut i, "--hooks");
                 not_stdin("--hooks", &path);
@@ -891,10 +890,7 @@ fn main() {
             "--insecure" => http_cfg.insecure = true,
             "--tls-cert" => tls_cert = Some(next(&mut i, "--tls-cert")),
             "--tls-key" => tls_key = Some(next(&mut i, "--tls-key")),
-            // Before any dial: every one is made after the flags are read.
-            "--tls-ca" => {
-                fennec_http::dial::trust_ca(&next(&mut i, "--tls-ca")).unwrap_or_else(|e| fail(&e))
-            }
+            "--tls-ca" => tls_ca = Some(next(&mut i, "--tls-ca")),
             "--studio" => studio = true,
             "--mcp" => {
                 mcp.get_or_insert_with(Default::default);
@@ -973,12 +969,78 @@ fn main() {
         i += 1;
     }
 
+    // Started as root with `--user` or `FENNEC_USER` -- the image sets the
+    // variable, and starts as root to hand a volume its platform made
+    // root's over -- the server becomes that user here, straight after the
+    // arguments (fennec_server::user). Before any file is opened -- the
+    // audit log, a secret, the policy, `<file>.lock` -- so every file the
+    // server makes is the user's, and every one it reads is read as the
+    // user will read it again (a keys file it watches); before any thread,
+    // so none keeps root. `--ping`, the image's health check, and
+    // `--mint-token` drop root too, handing nothing over: run as root in
+    // the container, they make nothing root's. `--help` and `--version`
+    // ended above, having opened nothing.
+    #[cfg(unix)]
+    {
+        use fennec_server::user;
+        let (euid, now) = user::current();
+        let env = std::env::var("FENNEC_USER").ok();
+        match user::wanted(user_flag.as_deref(), env.as_deref(), euid, now) {
+            Err(e) => fail(&e),
+            Ok(None) => {}
+            Ok(Some((who, _))) if ping || mint.is_some() => {
+                user::become_user(who).unwrap_or_else(|e| fail(&e))
+            }
+            Ok(Some((who, from))) => {
+                let audit = audit_paths.first().map(std::path::Path::new);
+                let writes = match (&file, &dir) {
+                    (Some(f), _) => user::Writes::file(std::path::Path::new(f), audit),
+                    (None, Some(d)) => user::Writes::node(std::path::Path::new(d), audit),
+                    (None, None) => None,
+                };
+                user::start_as(who, from, writes.as_ref()).unwrap_or_else(|e| fail(&e));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    if user_flag.is_some() {
+        fail("--user is a Unix server's: a Windows service runs as the account it is given");
+    }
+
     // Before any check of how a server would be configured: a probe runs in
     // the server's container and inherits its environment, so behind the
     // checks a `FENNEC_JWT_SECRET` with no `--policy` on the probe's command
     // line failed it (2), and the container never turned healthy.
     if ping {
         std::process::exit(health_check(&http_cfg.addr));
+    }
+
+    // The files the flags name, opened as the user the server runs as: the
+    // CAs before any dial, the audit log before any request.
+    if let Some(pem) = &tls_ca {
+        fennec_http::dial::trust_ca(pem).unwrap_or_else(|e| fail(&e));
+    }
+    for path in &audit_paths {
+        if let Err(e) = fennec_http::audit::open(std::path::Path::new(path)) {
+            fail(&format!("could not open {path}: {e}"));
+        }
+    }
+    if let Some(path) = &jwt_secret_file {
+        not_stdin("--jwt-secret-file", path);
+        match std::fs::read_to_string(path) {
+            Ok(s) if s.trim_end_matches(['\n', '\r']).is_empty() => {
+                fail(&format!("--jwt-secret-file {path} is empty"))
+            }
+            Ok(s) => jwt_secret = Some(s.trim_end_matches(['\n', '\r']).to_string()),
+            Err(e) => fail(&format!("could not read {path}: {e}")),
+        }
+    }
+    if let Some(path) = &policy_path {
+        not_stdin("--policy", path);
+        match std::fs::read_to_string(path) {
+            Ok(s) => policy = Some(s),
+            Err(e) => fail(&format!("could not read {path}: {e}")),
+        }
     }
 
     // Both or neither, each read and the key the certificate's, refused

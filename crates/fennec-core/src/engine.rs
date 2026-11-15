@@ -2449,6 +2449,13 @@ pub trait Sink: Send {
         self.sync()?;
         Ok(None)
     }
+    /// Syncs the file and removes the sync log beside it, as dropping the
+    /// sink would, and keeps none from then on: for a database that is
+    /// never dropped ([`Database::close_log`]). Nothing for every sink but
+    /// a file's; a sink around another passes it on, or the file's is
+    /// skipped.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn close_log(&mut self) {}
 }
 
 /// What makes the writes a [`Sink::flush`] handed over durable: an fsync on
@@ -7788,6 +7795,20 @@ impl Database {
         self.behind = true;
         let due = self.handover_due(1);
         self.sink_mut().write_behind(due)
+    }
+
+    /// Syncs the file and removes the sync log beside it (Linux and
+    /// Android, `synclog.rs`), as a close does ([`Sink::close_log`]), for
+    /// an owner that exits holding the database rather than drop it: a
+    /// server holds the write lock to `process::exit`, so that no write is
+    /// answered after its last sync, and its database's drop, which lets
+    /// the log go, never ran -- every file a server had served, and every
+    /// tenant a node had open, kept its 260 KB log after a clean stop.
+    /// Called after the last sync and checkpoint. Writes after it go on,
+    /// each sync then the file's own fsync: none begins a log again.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn close_log(&mut self) {
+        self.sink_mut().close_log();
     }
 
     /// Records a storage failure found outside the engine, a
