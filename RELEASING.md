@@ -465,7 +465,8 @@ minor's release; a `release/1.N` branch is cut when a backport needs one
 The policy a reporter reads is [SECURITY.md](SECURITY.md#supported-versions).
 Until 1.0.0 there is no such release: a 0.x bug is fixed on `main` and ships
 in the next release, with no advisory, no CVE and no patch release, and the
-pull request names the releases that had it. From 1.0.0, a report of a bug in
+pull request names the releases that had it; a report is still acknowledged
+within 3 working days, and its reporter told where the fix stands. From 1.0.0, a report of a bug in
 a supported release (the latest 1.x minor, and the previous one for 6 months
 after the next ships) goes this way. The owner does each step that needs a
 tag, a setting or a secret.
@@ -478,10 +479,16 @@ tag, a setting or a secret.
    minor.
 2. **Open a draft advisory** from the report (`Security`, `Advisories`),
    naming the affected versions and the first fixed one, and, if the fix
-   needs a branch to work on, **a temporary private fork** from it. Nothing
-   of the fix is public until step 6: not in a pull request, an issue, a
-   commit pushed to a public branch or a CI log. Do not assume the fork runs
-   the repository's workflows; run the tests the fix touches by hand.
+   needs a branch to work on, **a temporary private fork** from it. Until
+   step 5 pushes it, the fix is in the fork alone: prepare it and have it
+   reviewed there, with no pull request, issue or commit on the public
+   repository. Do not assume the fork runs the repository's workflows; run
+   the tests the fix touches by hand. The fix becomes public at step 5, at
+   the push to `release/1.N`: the swift-binary run is on a public branch and
+   opens a public pull request, the tag publishes the commit, and
+   `release.yml`'s logs are public. So keep what follows the push short:
+   the push, swift-binary, the tag, the publish and the advisory (step 6)
+   back to back, with everything else ready beforehand.
 3. **Request a CVE** from the advisory (GitHub is the CNA) once the bug is
    confirmed and the affected range known.
 4. **Fix on the oldest supported branch and carry it forward.** Cut
@@ -493,22 +500,46 @@ tag, a setting or a secret.
    table above says which package carries which part), and replicas
    upgrade before primaries, as for any release.
 5. **Build and publish the patch from its branch.** `make version V=1.N.P`
-   and the change reviewed on `release/1.N` (or in the private fork), as in
-   [A release](#a-release), step 2 too if the Swift binary changed; the
-   owner tags the branch's commit (`git tag v1.N.P <commit>`, then `git push
+   and the change reviewed in the private fork, then pushed to
+   `release/1.N`, and from here the fix is public. Then, as in
+   [A release](#a-release): step 2, always, since `release.yml` stops a tag
+   whose `Package.swift` `release` is not the tag's version and wants a
+   swift-binary run for it, and `make version` moves `release` but not the
+   checksum: `gh workflow run swift-binary.yml --ref release/1.N -f
+   version=1.N.P`. Its pull request is opened with no `--base`, so it
+   targets `main`: retarget it, `gh pr edit <n> --base release/1.N`, and
+   merge it there (the workflow is not changed for this). Then the owner
+   tags the branch's commit (`git tag v1.N.P <commit>`, then `git push
    origin v1.N.P`) and `release.yml` drafts the release. A tag already
    pushed is built again by `gh workflow run release.yml --ref release/1.N
-   -f tag=v1.N.P`. Read the draft, publish it, and `packages.yml` follows,
-   as in steps 4 and 5 there: every channel of the table above -- PyPI,
-   npm, NuGet, Maven Central, pub.dev, Homebrew, the `.deb` and `.rpm`, the
-   image on ghcr.io, the Go module's tag, the Swift package's tag and zip,
-   the install scripts (which read the latest release) and the desktop
-   app -- gets the patch; check each by installing it. A supported minor
-   that is not the latest gets its patch the same way, from its own branch,
-   and the Homebrew formula and the install scripts keep naming the newest
-   release (the tap is never moved back).
+   -f tag=v1.N.P`. The power-cut checks of step 3 are read the same way,
+   with `--ref release/1.N` where they say `--ref main`. Read the draft,
+   publish it, and `packages.yml` follows, as in steps 4 and 5 there: every
+   channel of the table above -- PyPI, npm, NuGet, Maven Central, pub.dev,
+   Homebrew, the `.deb` and `.rpm`, the image on ghcr.io, the Go module's
+   tag, the Swift package's tag and zip, the install scripts (which read
+   the latest release) and the desktop app -- gets the patch; check each by
+   installing it.
+
+   **A minor that is not the newest must not be published yet.** The
+   pipeline has pointers that mean "the newest", and only one is guarded:
+   the Homebrew tap is never moved back (`packages.yml`'s `homebrew` job
+   skips a release older than the formula). The others would move to the
+   backport: a published release becomes GitHub's Latest, which
+   `site/install.sh` and `site/install.ps1` read; `release.yml` tags the
+   image `:latest` on every run; `packages.yml`'s `npm publish` has no
+   `--tag`, so npm's `latest` moves. Where a hand step exists today it is
+   `gh release edit v1.N.P --latest=false` (publish with `--draft=false
+   --latest=false`); the image's `:latest` and npm's dist-tag
+   (`npm dist-tag add <pkg>@<newest> latest`) have none in the workflows.
+   **Owed before the first backport to a non-newest minor:** `release.yml`
+   and `packages.yml` keep the image's `:latest`, npm's `latest` and the
+   GitHub Latest on the newest release, and swift-binary opens its pull
+   request against the branch it ran on. Tracked apart from this file; until
+   it lands, the previous minor's fix waits, or is released with those three
+   put back by hand at once. A patch to the newest minor has none of this.
 6. **Disclose.** Publish the advisory (with the CVE) the same hour the
-   release is published, and put it in the release's notes with the first
+   release is published, as step 2 says, and put it in the release's notes with the first
    fixed version of each supported minor. Merge the private fork's changes
    into the public branches where the fix was made there. Credit the
    reporter if they agree, and close the report.

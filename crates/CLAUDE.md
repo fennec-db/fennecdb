@@ -34,4 +34,6 @@ write is held to its RFC's vectors, every one, to every case of Project
 Wycheproof's file for it where there is one (committed unchanged, an
 `acceptable` case to the answer chosen for its kind), and where a key
 meets its block to another implementation's, each test's count of cases
-held.
+held. `SECURITY.md` is held to the tree the same way, by
+`tools/security_md_check.py` (CI's fmt job): a flag, path, link or primitive
+it names that is gone fails, and so does any kind of check counting zero.

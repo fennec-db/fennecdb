@@ -6,13 +6,18 @@ A security policy that names a flag no binary reads, a file that is gone or a
 primitive nobody wrote any more is worse than none: a reporter and an
 operator act on it. The check refuses, naming each:
 
-- a `--flag` the file names that no binary's argument parser reads
-  (`"--flag" =>` in fennec-server's, fennec-shard's or fennec-cli's sources);
+- a `--flag` the file names that the binary it is said of does not read
+  (`"--flag" =>` in fennec-server's, fennec-shard's or fennec-cli's sources:
+  where the 240 characters before the flag, in its paragraph or bullet, name a binary
+  -- `fennec-server`, `fennec-shard` or `the router`, `fennec import` or the
+  shell -- one of those is meant; where they name none, any of the three);
 - a path it names, in backticks or as a link's target, that is not in the
   repository, and an anchor on one -- a heading of a Markdown file, an `id`
   of a site page -- that is not there;
-- a primitive of its list of in-tree cryptography (PRIMITIVES) whose function
-  is gone, one the list does not hold named in the file, or one the file
+- a primitive of its list of in-tree cryptography (PRIMITIVES) whose
+  function is gone (each needle is the item itself, `pub fn sha256(`, found
+  outside the file's test module, so a test of the same name does not hold
+  it up), one the list does not hold named in the file, or one the file
   does not name that the list holds;
 - a stale claim, found by phrase (STALE, case-insensitive) in SECURITY.md,
   `crates/*/src` and `site/content/docs`, outside ALLOWED. `no TLS` was true
@@ -25,8 +30,17 @@ operator act on it. The check refuses, naming each:
   its acknowledgement in working days, and the procedure for a release that
   carries a fix in RELEASING.md ("A security release").
 
-It prints how many things it checked and fails on zero: a pattern that
-stopped matching would otherwise pass for ever.
+It prints how many things it checked of each kind and fails when any one
+kind is zero, not only the total: files scanned for stale phrases are most of
+a total, so a file with every flag, path and link stripped would pass on them.
+A pattern that stopped matching would otherwise pass for ever.
+
+What a line scan cannot tell, and this does not claim to: a flag read by a
+helper called from a parser rather than named in an arm (it is not found, so
+it is reported -- add the arm's spelling or the flag's use); a comment it
+does not see as one (a block comment, a `//` inside a string, a raw string);
+test code outside a `#[cfg(test)] mod` at the start of a line; and which
+binary a sentence means where no name is near its flag.
 
     python3 tools/security_md_check.py
 """
@@ -37,21 +51,35 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
-# The binaries whose argument parsers SECURITY.md's flags are read by.
-BINARIES = ("crates/fennec-server/src", "crates/fennec-shard/src", "crates/fennec-cli/src")
+# The binaries whose argument parsers SECURITY.md's flags are read by, and
+# the words the file says each by.
+BINARIES = {
+    "fennec-server": "crates/fennec-server/src",
+    "fennec-shard": "crates/fennec-shard/src",
+    "fennec-cli": "crates/fennec-cli/src",
+}
+SAID = {
+    "fennec-server": re.compile(r"fennec-server", re.I),
+    "fennec-shard": re.compile(r"fennec-shard|\brouter", re.I),
+    "fennec-cli": re.compile(r"fennec-cli|fennec import|\bthe shell|`fennec [a-z]", re.I),
+}
+WINDOW = 240
 
 # The cryptography we wrote, as SECURITY.md lists it: the words the file
-# says it by (found case-insensitively), the file and the function that is
-# it. Only what is in the tree; TLS is rustls's and is not here.
+# says it by (found case-insensitively), the file and the item that is it,
+# each needle the item's own declaration. Only what is in the tree; TLS is
+# rustls's and is not here.
 PRIMITIVES = {
-    "SHA-256": ("crates/fennec-http/src/crypto.rs", "fn sha256"),
-    "HMAC-SHA-256": ("crates/fennec-http/src/crypto.rs", "fn hmac_sha256"),
-    "PBKDF2-HMAC-SHA-256": ("crates/fennec-http/src/crypto.rs", "fn pbkdf2_sha256"),
-    "ChaCha20-Poly1305": ("crates/fennec-http/src/crypto.rs", "fn seal_in_place"),
-    "RSA PKCS#1 v1.5 verification": ("crates/fennec-http/src/crypto.rs", "struct RsaKey"),
-    "ECDSA P-256 verification": ("crates/fennec-http/src/crypto/p256.rs", "fn verify_sha256"),
-    "SCRAM-SHA-256": ("crates/fennec-wire/src/client.rs", "pbkdf2_sha256("),
+    "SHA-256": ("crates/fennec-http/src/crypto.rs", "pub fn sha256("),
+    "HMAC-SHA-256": ("crates/fennec-http/src/crypto.rs", "pub fn hmac_sha256("),
+    "PBKDF2-HMAC-SHA-256": ("crates/fennec-http/src/crypto.rs", "pub fn pbkdf2_sha256("),
+    "ChaCha20-Poly1305": ("crates/fennec-http/src/crypto.rs", "pub fn seal_in_place("),
+    "RSA PKCS#1 v1.5 verification": ("crates/fennec-http/src/crypto.rs", "pub struct RsaKey"),
+    "ECDSA P-256 verification": ("crates/fennec-http/src/crypto/p256.rs", "pub fn verify_sha256("),
+    "SCRAM-SHA-256": ("crates/fennec-wire/src/client.rs", "fn scram(&mut self"),
 }
+# A file's code before its test module.
+TESTS = re.compile(r"^#\[cfg\(test\)\]\s*\n\s*(?:pub\s+)?mod\b", re.M)
 
 # What is searched for, and where.
 STALE = (
@@ -93,13 +121,28 @@ ROOTS = ("crates/", "tools/", "docs/", "examples/", "site/", ".github/", "web/",
 SITE = "https://fennecdb.com"
 
 
+def untested(text):
+    """A source file's text before its `#[cfg(test)] mod`."""
+    m = TESTS.search(text)
+    return text[:m.start()] if m else text
+
+
+def code_lines(text):
+    """The lines of `text` with a `//` comment taken off (a `//` inside a
+    string is taken for one too: it can only hide a flag, never invent one)."""
+    for line in untested(text).splitlines():
+        yield line.split("//", 1)[0]
+
+
 def parser_flags(root):
-    """Every flag an argument parser of the three binaries reads."""
-    found = set()
-    for d in BINARIES:
+    """Every flag an argument parser of each binary reads, by binary."""
+    found = {}
+    for name, d in BINARIES.items():
+        found[name] = set()
         for f in sorted((root / d).rglob("*.rs")):
-            for m in ARM.finditer(f.read_text(errors="replace")):
-                found.add(m.group(1) or m.group(2))
+            for line in code_lines(f.read_text(errors="replace")):
+                for m in ARM.finditer(line):
+                    found[name].add(m.group(1) or m.group(2))
     return found
 
 
@@ -173,12 +216,26 @@ def anchors_of_text(text):
     return {slug(m.group(1)) for m in re.finditer(r"^#+\s+(.*)$", text, re.M)}
 
 
+def meant(text, at):
+    """The binaries the paragraph says of the flag at `at`: those named in
+    the WINDOW characters before it, or all where none is."""
+    start = max(text.rfind("\n\n", 0, at) + 2, text.rfind("\n- ", 0, at) + 1, at - WINDOW, 0)
+    before = text[start:at]
+    named = [b for b, rx in SAID.items() if rx.search(before)]
+    return named or list(BINARIES)
+
+
 def check_flags(root, text, notes):
-    flags = set(FLAG.findall(text))
     known = parser_flags(root)
-    problems = [f"SECURITY.md names {f}, which no binary's argument parser reads"
-                for f in sorted(flags - known)]
-    return problems, len(flags)
+    problems, seen = [], set()
+    for m in FLAG.finditer(text):
+        flag, who = m.group(0), meant(text, m.start())
+        seen.add(flag)
+        if not any(flag in known[b] for b in who):
+            where = " or ".join(who) if len(who) < len(BINARIES) else "any binary"
+            problems.append(f"SECURITY.md names {flag}, which {where}'s argument parser "
+                            "does not read")
+    return sorted(set(problems)), len(seen)
 
 
 def check_primitives(root, text):
@@ -189,7 +246,7 @@ def check_primitives(root, text):
             problems.append(f"SECURITY.md does not name {name}, which PRIMITIVES lists: "
                             "the list of what is written in-tree and the file must agree")
         path = root / file
-        if not path.exists() or needle not in path.read_text(errors="replace"):
+        if not path.exists() or needle not in untested(path.read_text(errors="replace")):
             problems.append(f"SECURITY.md names {name}, but `{needle}` is not in {file}")
     return problems, len(PRIMITIVES)
 
@@ -241,28 +298,35 @@ def check_promises(root, text):
     return problems, 3
 
 
+KINDS = ("flags", "paths and anchors", "primitives", "files searched", "promises")
+
+
 def run(root, allowed=ALLOWED):
+    """The problems, and how many things of each kind were checked."""
     text = (root / "SECURITY.md").read_text()
-    problems, total = [], 0
-    for result in (check_flags(root, text, None), check_references(root, text, None),
-                   check_primitives(root, text), check_stale(root, allowed), check_promises(root, text)):
+    problems, counts = [], {}
+    for kind, result in zip(KINDS, (check_flags(root, text, None), check_references(root, text, None),
+                                    check_primitives(root, text), check_stale(root, allowed),
+                                    check_promises(root, text))):
         problems += result[0]
-        total += result[1]
-    return problems, total
+        counts[kind] = result[1]
+    for kind, n in counts.items():
+        if n == 0:
+            problems.append(f"security_md_check: checked no {kind}: the pattern for them no "
+                            "longer matches, or the file stopped naming any")
+    return problems, counts
 
 
 def main():
-    problems, total = run(ROOT)
+    problems, counts = run(ROOT)
     for p in problems:
         print(p, file=sys.stderr)
-    if total == 0:
-        print("security_md_check: checked nothing: the patterns no longer match", file=sys.stderr)
-        return 1
+    total = sum(counts.values())
     if problems:
         print(f"security_md_check: {len(problems)} wrong, of {total} things checked", file=sys.stderr)
         return 1
-    print(f"security_md_check: {total} things checked "
-          "(flags, paths and anchors, primitives, files searched, promises)")
+    print(f"security_md_check: {total} things checked ("
+          + ", ".join(f"{n} {k}" for k, n in counts.items()) + ")")
     return 0
 
 

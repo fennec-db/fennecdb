@@ -645,8 +645,10 @@ HMAC's 0.01.
 `SECURITY.md` is what a reporter and an operator act on, so it is held to
 the tree by `tools/security_md_check.py`, in CI's fmt job beside
 `tools/secret_eq_check.py` (its fixtures: `tools/test_security_md_check.py`).
-It fails on a `--flag` the file names that no argument parser of
-fennec-server, fennec-shard or fennec-cli reads (`"--flag" =>`), a path or a
+It fails on a `--flag` the file names that the argument parser of the binary
+it says it of does not read (`"--flag" =>` in fennec-server's, fennec-shard's
+or fennec-cli's sources, outside comments and the `#[cfg(test)] mod`; any of
+the three where no binary is named near the flag), a path or a
 link's anchor it names that is not in the repository, a primitive of its
 list of in-tree cryptography whose function is gone (or one the file stopped
 naming), a missing "Supported versions" section or acknowledgement in working
@@ -655,8 +657,13 @@ also searches `SECURITY.md`, `crates/*/src` and `site/content/docs` for
 phrases once true and since false -- `no TLS` first, which fennec-tls made
 untrue and which a comment, a help text and a page went on saying -- outside `ALLOWED`: the messages a build made without
 the `tls` feature gives, each an entry with its reason, an entry that finds
-nothing refused. It prints how many things it checked (321 when written) and
-fails on zero.
+nothing refused. It prints how many things it checked of each kind (332 when
+written: 26 flags, 47 paths and anchors, 7 primitives, 249 files searched,
+3 promises) and fails when any one kind is zero, not only the total: the
+files searched alone would let a file stripped of every flag, path and link
+pass. Each primitive's needle is its own declaration (`pub fn sha256(`), so a
+test function of a like name does not hold it. What a line scan cannot tell
+is in the tool's header.
 
 The policy itself: 0.x has no advisories, CVEs or patch releases, a fix
 lands on `main` and the pull request says which releases had the bug; from

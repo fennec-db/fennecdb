@@ -30,6 +30,9 @@ and RSA PKCS#1 v1.5 verification and ECDSA P-256 verification and
 SCRAM-SHA-256.
 """
 
+CRYPTO = ("pub fn sha256(a) pub fn hmac_sha256(a) pub fn pbkdf2_sha256(a) "
+          "pub fn seal_in_place(a) pub struct RsaKey\n")
+
 FILES = {
     "SECURITY.md": GOOD,
     "RELEASING.md": "## A security release\n",
@@ -38,10 +41,9 @@ FILES = {
     "crates/fennec-server/src/main.rs": '"--http-token" => 1,\n',
     "crates/fennec-shard/src/main.rs": '"--tls-ca" => 1,\n',
     "crates/fennec-cli/src/main.rs": "",
-    "crates/fennec-http/src/crypto.rs":
-        "fn sha256 fn hmac_sha256 fn pbkdf2_sha256 fn seal_in_place struct RsaKey\n",
-    "crates/fennec-http/src/crypto/p256.rs": "fn verify_sha256\n",
-    "crates/fennec-wire/src/client.rs": "pbkdf2_sha256(\n",
+    "crates/fennec-http/src/crypto.rs": CRYPTO,
+    "crates/fennec-http/src/crypto/p256.rs": "pub fn verify_sha256(\n",
+    "crates/fennec-wire/src/client.rs": "    fn scram(&mut self, p: &str) {}\n",
 }
 
 
@@ -73,9 +75,9 @@ def run(**changes):
 
 class Holds(unittest.TestCase):
     def test_a_true_file_passes_and_counts(self):
-        problems, total = run()
+        problems, counts = run()
         self.assertEqual(problems, [])
-        self.assertGreater(total, 0)
+        self.assertTrue(all(n > 0 for n in counts.values()), counts)
 
 
 class Refused(unittest.TestCase):
@@ -99,7 +101,40 @@ class Refused(unittest.TestCase):
         self.wrong("a heading it has not", **{"SECURITY.md": GOOD + "\n[x](#nothing)\n"})
 
     def test_a_primitive_whose_function_is_gone(self):
-        self.wrong("fn hmac_sha256", **{"crates/fennec-http/src/crypto.rs": "fn sha256\n"})
+        self.wrong("pub fn hmac_sha256(",
+                   **{"crates/fennec-http/src/crypto.rs": CRYPTO.replace("pub fn hmac_sha256(", "fn other(")})
+
+    def test_a_primitive_renamed_but_still_a_test_function(self):
+        # `fn sha256_vectors` and a test's `fn sha256(` in the test module are not it.
+        tests = "#[cfg(test)]\nmod tests {\n    pub fn sha256(a) pub fn pbkdf2_sha256(a)\n}\n"
+        text = CRYPTO.replace("pub fn sha256(", "pub fn renamed(").replace("pub fn pbkdf2_sha256(", "pub fn x(")
+        self.wrong("pub fn sha256(", **{"crates/fennec-http/src/crypto.rs": text + tests})
+        self.wrong("pub fn pbkdf2_sha256(", **{"crates/fennec-http/src/crypto.rs": text + tests})
+
+    def test_a_flag_another_binary_reads_is_not_the_one_meant(self):
+        # The router's `--token` is fennec-cli's `backup` flag, not fennec-shard's.
+        self.wrong("--token", **{
+            "SECURITY.md": GOOD + "\nThe router's `--token` is checked.\n",
+            "crates/fennec-cli/src/main.rs": '"--token" => 1,\n'})
+        problems, _ = run(**{"SECURITY.md": GOOD + "\nThe router's `--token` is checked.\n",
+                             "crates/fennec-shard/src/main.rs": '"--tls-ca" => 1, "--token" => 1,\n'})
+        self.assertEqual(problems, [])
+
+    def test_a_flag_in_a_comment_or_a_test_is_not_read(self):
+        self.wrong("--tls-ca", **{"crates/fennec-shard/src/main.rs": '// "--tls-ca" => 1,\n'})
+        self.wrong("--tls-ca", **{"crates/fennec-shard/src/main.rs":
+                                  '#[cfg(test)]\nmod tests {\n    "--tls-ca" => 1,\n}\n'})
+
+    def test_a_file_without_flags_paths_or_links_is_refused_though_files_are_scanned(self):
+        bare = "# Security policy\n\nAcknowledged within 3 working days.\n\n## Supported versions\n\n" \
+               "Own SHA-256 and HMAC-SHA-256 and PBKDF2-HMAC-SHA-256 and ChaCha20-Poly1305 and RSA " \
+               "PKCS#1 v1.5 verification and ECDSA P-256 verification and SCRAM-SHA-256.\n"
+        problems, counts = run(**{"SECURITY.md": bare})
+        self.assertEqual(counts["flags"], 0)
+        self.assertEqual(counts["paths and anchors"], 0)
+        self.assertGreater(counts["files searched"], 0)
+        self.assertTrue(any("checked no flags" in p for p in problems), problems)
+        self.assertTrue(any("checked no paths and anchors" in p for p in problems), problems)
 
     def test_a_primitive_the_file_stopped_naming(self):
         self.wrong("does not name SCRAM-SHA-256",
@@ -146,13 +181,14 @@ class Counts(unittest.TestCase):
     def test_a_file_naming_nothing_counts_zero_flags(self):
         with Tree() as root:
             self.assertEqual(check.check_flags(root, "", None)[1], 0)
+            self.assertEqual(check.check_flags(root, "", None)[0], [])
 
 
 class Repository(unittest.TestCase):
     def test_the_repositorys_own_file(self):
-        problems, total = check.run(check.ROOT)
+        problems, counts = check.run(check.ROOT)
         self.assertEqual(problems, [])
-        self.assertGreater(total, 0)
+        self.assertTrue(all(n > 0 for n in counts.values()), counts)
 
 
 if __name__ == "__main__":
