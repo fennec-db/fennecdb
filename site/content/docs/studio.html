@@ -623,6 +623,11 @@ open "integrations/studio-desktop/build/stable-macos-arm64/fennec studio.app"
 </figure>
 
 <ul>
+  <li><b>A first run.</b> With no database yet, Databases says so and offers
+    New database and Open a <code>.fennec</code> file…, and the ways in from
+    elsewhere: Connect to a server (Remote connections) and Start from a
+    backup (Backups, and from there New database's start from a folder of
+    backups).</li>
   <li><b>A file.</b> File, Open…, or a double-click on a <code>.fennec</code>
     file in Finder (and, on Windows and Linux, Explorer or a file manager). The app
     starts a <code>fennec-server</code> it carries, on the file, and opens a
@@ -649,7 +654,10 @@ open "integrations/studio-desktop/build/stable-macos-arm64/fennec studio.app"
     <code>.env</code> (the token stays out), and its output. A server runs
     until you stop it or quit the app; after a relaunch it is listed stopped,
     with the settings it ran with, and starts again with one click. Nothing
-    starts at login, and no server outlives the app.</li>
+    starts at login, and no server outlives the app. One that did not start
+    says so, and why, until it starts: a port something else answers on, with
+    Change the port, or a file another program holds, with the line the
+    server wrote; Start again tries once more.</li>
   <li><b>Backups.</b> A folder for each database's backups: Back up now takes
     an image of it while it runs (<code>fennec backup</code>), sealed with a key
     file if you choose one (<code>fennec key</code> makes it), which must be
@@ -670,7 +678,8 @@ open "integrations/studio-desktop/build/stable-macos-arm64/fennec studio.app"
   <li><b>A message, not a blank window.</b> A file another program has open, a
     port another program has, a server that stopped, one that cannot be
     reached, one with no studio and a token it refuses each say so in a window
-    of the app's own, with the way forward.</li>
+    of the app's own, with the way forward, and what the server said folded
+    under it.</li>
   <li><b>On Windows and Linux</b> the app registers <code>.fennec</code> files
     to open in it each time it starts, for you alone, and never over a
     program you picked for them; a double-click starts it with the file, or

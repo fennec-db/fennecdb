@@ -40,9 +40,20 @@ fn text(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
 }
 
+/// The line: the name and the version, a test build's mark after it
+/// (`+test-clock`), which a release's package check refuses.
+fn line() -> String {
+    let mark = if cfg!(feature = "test-clock") {
+        "+test-clock"
+    } else {
+        ""
+    };
+    format!("fennec-server {}{mark}\n", env!("CARGO_PKG_VERSION"))
+}
+
 #[test]
 fn version_and_v_print_the_name_and_version_on_stdout() {
-    let want = format!("fennec-server {}\n", env!("CARGO_PKG_VERSION"));
+    let want = line();
     for flag in ["--version", "-V"] {
         let out = server(&[flag]);
         assert_eq!(out.status.code(), Some(0), "{flag}: {}", text(&out.stderr));
@@ -60,7 +71,7 @@ fn a_version_among_the_flags_opens_and_binds_nothing() {
     let port = held.local_addr().unwrap().to_string();
     let file = dir.0.join("data.fennec");
     let file = file.to_str().unwrap();
-    let want = format!("fennec-server {}\n", env!("CARGO_PKG_VERSION"));
+    let want = line();
     for args in [
         &["--file", file, "--http", &port, "--version"][..],
         &["--dir", file, "-V", "--http", &port][..],

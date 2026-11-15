@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { needs } from './ci-prereq.mjs';
 import { from, call, Call, or, not, raw, inc, expr, distance, param, Query, FennecError } from './fennec.js';
 
 const q = () => from('articles');
@@ -531,6 +532,7 @@ test('the conditional filter pattern', () => {
 import { readFile } from 'node:fs/promises';
 
 const wasm = await readFile(new URL('./fennec.wasm', import.meta.url)).catch(() => null);
+needs(['web/fennec.wasm', wasm, 'make wasm']);
 
 // A Cloudflare Worker imports a `.wasm` file compiled, and cannot compile
 // bytes at run time: `open` takes the module that way too, and the database
@@ -743,6 +745,9 @@ test('a number past 32 bits is refused in the module, never cut to its low bits'
     ['create collection v (e vector<1000000001>)', "a vector's dimension is 1 to 1000000000, not 1000000001"],
     ['create collection v (s sparse<4294967297>)', "a vector's dimension is 1 to 1000000000, not 4294967297"],
     ['create table v (e vector(4294967297))', "`e`: a vector's dimension is 1 to 1000000000"],
+    // A list of them too, as the module reads a file's schema back: taken, its
+    // image was refused as damage at the next restore.
+    ['create table v (e vector(1000000001)[])', "`e`: a vector's dimension is 1 to 1000000000, not 1000000001"],
     ['create collection v (e vector<2> @hnsw(m=4294967298))', '`m` is 2 to 32767, not 4294967298'],
     ['create collection v (e vector<2> @hnsw(ef_construction=4294967300))', '`ef_construction` is 4 to 4294967295, not 4294967300'],
     [`${fuse} candidates 4294967297`, '`candidates` is 1 to 10000, not 4294967297'],
@@ -1377,6 +1382,7 @@ test('end to end on wasm', { skip: wasm ? false : 'no web/fennec.wasm (make wasm
 // what the full one wrote, and the full one what it wrote: a build without
 // an index opens a file that declares one, and hands it back.
 const lite = await readFile(new URL('./fennec-lite.wasm', import.meta.url)).catch(() => null);
+needs(['web/fennec-lite.wasm', lite, 'make wasm-lite']);
 
 test('the module made without indexes and the full one open each other\'s files', {
   skip: wasm && lite ? false : 'no web/fennec.wasm and web/fennec-lite.wasm (make wasm wasm-lite)',
@@ -1564,6 +1570,7 @@ test('near without the graph is the full module\'s near ... exact', {
 // answers, points read, and what needs a missing feature is refused, the
 // feature named, through the module's own errors as a page meets them.
 const min = await readFile(new URL('./fennec-min.wasm', import.meta.url)).catch(() => null);
+needs(['web/fennec-min.wasm', min, 'make wasm-min']);
 
 test('the module made with no feature opens a file declaring every one', {
   skip: wasm && min ? false : 'no web/fennec.wasm and web/fennec-min.wasm (make wasm wasm-min)',

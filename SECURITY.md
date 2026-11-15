@@ -23,12 +23,17 @@ The latest release and `main`. Older tags get no backported fixes.
 ## Where the risk actually is
 
 fennecdb takes **no external crates** in the shipped crates — own codec, own
-JSON, own HNSW, own SHA-256/HMAC/PBKDF2, RSA verification and
+JSON, own HNSW, own SHA-256/HMAC/PBKDF2, RSA and P-256 verification and
 ChaCha20-Poly1305, and the client half of SCRAM `fennec import` signs in to
 PostgreSQL with. That removes the upstream CVE surface entirely and puts all
 of it in this repository instead. The crypto in
 `crates/fennec-http/src/crypto.rs` and `crates/fennec-wire/src/client.rs` is
-exactly the code that most deserves a second pair of eyes.
+exactly the code that most deserves a second pair of eyes. Each primitive is
+held to its RFC's vectors and, where Project Wycheproof has a file for it, to
+every case of that file: ChaCha20-Poly1305, RSA PKCS#1 v1.5 with SHA-256 at
+2048 to 4096 bits, ECDSA P-256, HMAC-SHA-256 and PBKDF2-HMAC-SHA-256
+([docs/design/conventions.md](docs/design/conventions.md#secrets-compared)).
+Vectors are no proof: a bug they miss is as welcome a report as any.
 
 In scope, and worth reporting:
 
@@ -38,8 +43,10 @@ In scope, and worth reporting:
   and the WASM boundary.
 - Anything that authenticates when it should not, or that lets a client skip
   authentication: the bearer token, a JWT and the policy it is held to.
-- A non-constant-time comparison on a secret. The HTTP bearer token is compared
-  in constant time on purpose; a regression there is a bug worth reporting.
+- A non-constant-time comparison on a secret. Every token, mark, MAC and
+  signature is compared in constant time on purpose, by `crypto::ct_eq` alone,
+  and CI refuses `==` on one by its name (`tools/secret_eq_check.py`); a
+  regression there is a bug worth reporting.
 - Allocation driven by an unauthenticated peer. A request's head is capped and
   its body bounded by `max_body` before it is read; a path around either is a
   vulnerability.
@@ -47,6 +54,16 @@ In scope, and worth reporting:
   expected to reject a damaged or hostile file, not to be exploited by it.
 - Query text reaching an identifier or a value without validation, from any
   client surface.
+
+Most of the parsers named above are fuzzed — an HTTP request, JSON,
+FennecQL, the file format's codec, a `.fennec` file's open, mapped as a
+server opens it, and a replica's apply, a SQLite file — under
+AddressSanitizer on every pull request and for longer each week: `make
+fuzz` lists the targets (`crates/fennec-fuzz`). An input that crashes one is
+a report worth making, privately as above. CI's runs publish no crashing
+input and no backtrace: a finding prints only a recipe — the target, a
+seed, a run and the input's hash — from which `fennec-fuzz reproduce` makes
+the input again on a maintainer's machine.
 
 ## What is documented behaviour, not a vulnerability
 

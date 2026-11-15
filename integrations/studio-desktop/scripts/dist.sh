@@ -109,6 +109,14 @@ archive() {
   set -- "$app"/Resources/*.tar.zst
   [ ! -e "$1" ] || die "the unpacked app holds a payload of its own"
 
+  # build.win.icon reaches neither exe the user sees: bun.exe, which owns every
+  # window, kept Bun's dumpling, and launcher.exe, which the shortcuts start,
+  # had no icon (checks/icons.mjs holds both). Written here, in Node, from the
+  # same icon/icon.ico.
+  if [ "$sys" = windows ]; then
+    node scripts/set-exe-icon.mjs icon/icon.ico "$app/bin/bun.exe" "$launcher" || die "could not write the icon into the app's exes"
+  fi
+
   rm -f "$out"
   if [ "$sys" = windows ]; then
     # Deflate at its best where this tar.exe's libarchive takes the option.

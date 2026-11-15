@@ -180,7 +180,9 @@ page lists every file.</p>
 
 <p>The image holds <code>fennec-server</code> and nothing else: no shell, no
 libc, 7 MB. Its data lives in <code>/data</code>, which the command
-below keeps in a volume.</p>
+below keeps in a volume. It starts as root and serves as
+<code>65534:65534</code>, handing over first a volume its platform made root's
+(<a href="cloud.html#volume-owner">Who owns the volume</a>).</p>
 
 <pre data-lang="bash">docker run -d --name fennecdb -v fennecdata:/data \
   -p 127.0.0.1:8080:8080 -e FENNEC_HTTP_TOKEN=a-token \
@@ -192,7 +194,8 @@ only, as the <a href="quickstart.html">Quickstart</a> does. Its command is
 <code>--http 0.0.0.0:8080 --file /data/data.fennec --sync 250</code>: write every
 flag out when you override it, or the file is dropped. <a
 href="server.html#containers">Run it in a container</a> has the rest: one
-instance a file, memory limits, Kubernetes.</p>
+instance a file, memory limits. <a href="cloud.html">Cloud platforms</a> has
+the config for Fly.io, Render, Railway, a VM on any cloud and Kubernetes.</p>
 
 <h2 id="packages">A package for your language</h2>
 

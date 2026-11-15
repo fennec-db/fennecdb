@@ -4,7 +4,7 @@ import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { answerOf, askSecretService, externalAuth, methodCall, readMessages, sessionAddresses, socketPath, storeRefusal } from "../src/bun/secretservice.ts";
+import { READ_ALIAS_TRIES, answerOf, askSecretService, externalAuth, methodCall, readMessages, sessionAddresses, socketPath, storeRefusal } from "../src/bun/secretservice.ts";
 import { WINDOWS } from "./platform.ts";
 
 // Linux's credential store, asked before Bun.secrets is: the bus's address,
@@ -78,8 +78,8 @@ function message(type: number, serial: number, fields: [number, string, string |
 	return Buffer.from([...out, ...bodyBytes]);
 }
 
-/** A bus that takes any uid and answers ReadAlias as `answer` says, or never. */
-async function bus(answer: "collection" | "slash" | "unknown" | "silent" | "refuse-auth"): Promise<{ path: string; server: Server; saw: string[] }> {
+/** A bus that takes any uid and answers ReadAlias as `answer` says, or never; `slash-first`, "/" to a connection's first ReadAlias alone, as gnome-keyring does to a connection it does not know yet. */
+async function bus(answer: "collection" | "slash" | "slash-first" | "unknown" | "silent" | "refuse-auth"): Promise<{ path: string; server: Server; saw: string[] }> {
 	const path = join(work, `bus-${answer}-${Math.random().toString(36).slice(2)}`);
 	const saw: string[] = [];
 	const server = createServer((c: Socket) => {
@@ -106,9 +106,11 @@ async function bus(answer: "collection" | "slash" | "unknown" | "silent" | "refu
 				if (s === 1) c.write(message(2, 1, [[5, "u", 1], [6, "s", ":1.9"]], "s", [":1.9"]));
 				// Signals a bus sends between replies are passed over.
 				if (s === 1) c.write(message(4, 2, [[1, "o", "/org/freedesktop/DBus"], [2, "s", "org.freedesktop.DBus"], [3, "s", "NameAcquired"]], "s", [":1.9"]));
-				if (s === 2 && answer === "collection") c.write(message(2, 3, [[5, "u", 2]], "o", ["/org/freedesktop/secrets/collection/login"]));
-				if (s === 2 && answer === "slash") c.write(message(2, 3, [[5, "u", 2]], "o", ["/"]));
-				if (s === 2 && answer === "unknown") c.write(message(3, 3, [[4, "s", "org.freedesktop.DBus.Error.ServiceUnknown"], [5, "u", 2]], "s", ["The name org.freedesktop.secrets was not provided by any .service files"]));
+				// Every call after Hello is a ReadAlias, each answered to its own serial.
+				const slash = answer === "slash" || (answer === "slash-first" && s === 2);
+				if (s >= 2 && (answer === "collection" || answer === "slash-first") && !slash) c.write(message(2, s + 1, [[5, "u", s]], "o", ["/org/freedesktop/secrets/collection/login"]));
+				if (s >= 2 && slash) c.write(message(2, s + 1, [[5, "u", s]], "o", ["/"]));
+				if (s >= 2 && answer === "unknown") c.write(message(3, s + 1, [[4, "s", "org.freedesktop.DBus.Error.ServiceUnknown"], [5, "u", s]], "s", ["The name org.freedesktop.secrets was not provided by any .service files"]));
 			}
 		});
 		c.on("error", () => {});
@@ -138,6 +140,18 @@ test("a store with no default collection is no store: never 'no token'", { skip:
 		assert.equal(a.ok, false);
 		assert.equal(!a.ok && a.why, "no-default");
 		assert.match(storeRefusal(a as Extract<typeof a, { ok: false }>), /no default keyring/);
+		assert.deepEqual(b.saw.slice(1), ["call 1: ", ...Array.from({ length: READ_ALIAS_TRIES }, (_, i) => `call ${i + 2}: default`)], "asked READ_ALIAS_TRIES times, each on the answer before it");
+	} finally {
+		b.server.close();
+	}
+});
+
+test("a '/' from a store that did not know the connection yet is asked again, and its collection answers", { skip: unixBus }, async () => {
+	const b = await bus("slash-first");
+	try {
+		const a = await askSecretService({ DBUS_SESSION_BUS_ADDRESS: `unix:path=${b.path}` }, 2000, 1000);
+		assert.deepEqual(a, { ok: true, collection: "/org/freedesktop/secrets/collection/login" });
+		assert.deepEqual(b.saw.slice(1), ["call 1: ", "call 2: default", "call 3: default"], "one connection: Hello, the first ReadAlias, and once more");
 	} finally {
 		b.server.close();
 	}

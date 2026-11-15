@@ -350,7 +350,7 @@ pub fn router_mark(admin_token: &str) -> String {
 pub fn request(req: &crate::http::Request, mark: Option<&str>) -> Option<IpAddr> {
     let client = mark.and_then(|mark| {
         let (client, given) = req.header(ROUTER_HEADER)?.trim().rsplit_once(' ')?;
-        if !crate::constant_eq(given.as_bytes(), mark.as_bytes()) {
+        if !crate::crypto::ct_eq(given.as_bytes(), mark.as_bytes()) {
             return None;
         }
         client.parse::<IpAddr>().ok()
@@ -434,7 +434,7 @@ pub fn check_client(value: &str, key: &EntryKey, now: u64) -> Result<IpAddr, Unn
     else {
         return Err(Unnamed::BadMark);
     };
-    if !crate::constant_eq(mark.as_bytes(), &key.mark(address, seconds)) {
+    if !crate::crypto::ct_eq(mark.as_bytes(), &key.mark(address, seconds)) {
         return Err(Unnamed::BadMark);
     }
     // Made by the entry from an integer and an address; anything else is

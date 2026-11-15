@@ -1,12 +1,15 @@
-# The kit's three binaries for Linux, and the two images its checks run:
+# The kit's three binaries for Linux, and the images its checks run:
 #
 #   docker build -f deploy/Dockerfile --target kit -t fennec-kit .       # make drill
 #   docker build -f deploy/Dockerfile --target systemd -t fennec-kit-systemd . # make deploy-check
+#   docker build -f deploy/Dockerfile --target chaos -t fennec-kit-chaos . # make chaos
 #
 # `kit` is fennec-server, fennec-shard and fennec on Alpine -- a shell for the
 # drill's checks, nothing else -- one container a process, as the drill
 # runs a deployment's machines. `systemd` is the same binaries where the
-# units go, under a real systemd (deploy/test/units.py boots it).
+# units go, under a real systemd (deploy/test/units.py boots it). `chaos`
+# is the kit with a test build's fennec-server and the tools its faults use
+# (below).
 #
 # Built as the repository's Dockerfile builds fennec-server: statically with
 # musl, so the binaries run on any Linux, glibc or not, and through
@@ -47,6 +50,24 @@ COPY --from=build /built/ /usr/local/bin/
 # the drill removes, and nothing here is a deployment's hardening -- that
 # is the units' (deploy/systemd/), which `systemd` below holds.
 CMD ["fennec-server", "--help"]
+
+# ----------------------------------------------------------------- chaos
+# `make chaos` (deploy/drill/chaos.py): the kit, its fennec-server built again
+# with `test-clock` -- a file moves a tenant node's clock, which Docker cannot
+# move for one container -- and what the run's faults and driver use: tc for
+# netem, python3 and the Docker CLI. The one place the feature is named: a
+# release builds none of it (release.yml, the repository's Dockerfile), and
+# the binary says `+test-clock` in its version, which a release's package
+# check refuses. The same cache mount as the kit's build: only the crates
+# the feature changes compile again.
+FROM build AS chaos-build
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=fennec-image-cargo,target=/work,sharing=locked \
+    tools/image-cargo.sh /built-chaos --release -p fennec-server --features test-clock
+
+FROM kit AS chaos
+RUN apk add --no-cache iproute2-tc python3 docker-cli
+COPY --from=chaos-build /built-chaos/fennec-server /usr/local/bin/fennec-server
 
 # --------------------------------------------------------------- systemd
 # Debian, since systemd: python3 is the checks' HTTP client, procps their

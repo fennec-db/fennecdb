@@ -36,6 +36,7 @@ import {
   dropTable,
   rebuild,
 } from './schema.js';
+import { needs } from './ci-prereq.mjs';
 
 const wasm = await readFile(new URL('./fennec.wasm', import.meta.url)).catch(() => null);
 const skip = wasm ? false : 'no web/fennec.wasm (make wasm)';
@@ -46,6 +47,7 @@ const fennec = await (async () => {
   }
   return null;
 })();
+needs(['web/fennec.wasm', wasm, 'make wasm'], ['fennec', fennec, 'cargo build']);
 
 /** A schema and its migrations as the engine takes them: FennecQL, as an open hands them over. */
 const desc = (schema, migrations = []) => ({ format: 1, fennecql: toFennecQL(schema), migrations });

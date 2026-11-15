@@ -261,6 +261,18 @@ mod x86 {
 mod tests {
     use super::*;
 
+    /// The hardware path is the one `raw` takes where the environment says
+    /// the CPU has it (`FENNEC_EXPECT_SSE42=1`, set by the Rosetta job): the
+    /// fallback to the table is silent, so a detection that failed there
+    /// would otherwise pass every test. Asserts nothing without the variable.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn hardware_path_is_chosen() {
+        if std::env::var("FENNEC_EXPECT_SSE42").as_deref() == Ok("1") {
+            assert!(std::is_x86_feature_detected!("sse4.2"));
+        }
+    }
+
     /// The check value of the CRC catalogue and RFC 3720's vectors.
     #[test]
     fn the_published_values() {

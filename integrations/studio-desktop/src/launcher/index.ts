@@ -29,6 +29,15 @@ function say(text: string | undefined, bad = false) {
 	status.classList.toggle("bad", bad);
 }
 
+/**
+ * Sets `e`'s text only when it differs. For a live region: the list is drawn
+ * again at every refresh, and a text set again, though the same, is a change
+ * a screen reader may read out again.
+ */
+function setText(e: HTMLElement, text: string) {
+	if (e.textContent !== text) e.textContent = text;
+}
+
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, props: Partial<HTMLElementTagNameMap[K]> & { class?: string } = {}, ...kids: (Node | string)[]) {
 	const e = document.createElement(tag);
 	const { class: cls, ...rest } = props as any;
@@ -120,7 +129,10 @@ function render() {
 	if (!o) return;
 	$("bundled").textContent = o.bundled;
 	const running = o.databases.filter((d) => d.served?.state === "running").length;
-	$("running-count").textContent = running ? `${running} running` : "";
+	// One that did not start is what the sidebar says first: the rest run as asked.
+	const notStarted = o.databases.filter((d) => d.served?.failed).length;
+	$("running-count").textContent = notStarted ? `${notStarted} did not start` : running ? `${running} running` : "";
+	$("running-count").classList.toggle("bad", notStarted > 0);
 	renderDatabases();
 	renderServers();
 	renderConnections();
@@ -131,6 +143,7 @@ function render() {
 	// The system's own words: "This PC" on Windows, "This computer" on Linux, Explorer for Finder.
 	for (const e of document.querySelectorAll(".machine")) e.textContent = o.machine;
 	for (const e of document.querySelectorAll(".machine-lower")) e.textContent = o.machine.replace(/^This/, "this");
+	for (const e of document.querySelectorAll(".file-manager")) e.textContent = o.fileManager;
 	$("db-reveal").textContent = o.reveal;
 }
 
@@ -152,7 +165,11 @@ function renderDatabases() {
 	const q = find.value.trim().toLowerCase();
 	const list = o.databases.filter((d) => !q || d.name.toLowerCase().includes(q) || d.folder.toLowerCase().includes(q));
 	$("db-count").textContent = `${o.databases.length} ${o.databases.length === 1 ? "database" : "databases"}${q ? `, ${list.length} shown` : ""}`;
-	$("db-empty").hidden = o.databases.length > 0;
+	// None at all: what a first run can do, in place of an empty list and its search.
+	const none = o.databases.length === 0;
+	$("db-empty").hidden = !none;
+	$("db-find").hidden = none;
+	$("db-table").hidden = none;
 	if (selected && !row(selected)) selected = null;
 	$("db-rows").replaceChildren(
 		...list.map((d) => {
@@ -243,6 +260,14 @@ $("db-serve").addEventListener("click", () => selected && void openSheet(selecte
 $("db-stop").addEventListener("click", () => selected && void run(ask.stopServer({ path: selected }), "Stopping…"));
 $("open").addEventListener("click", () => void run(ask.chooseFile({})));
 $("new").addEventListener("click", () => void run(ask.newDatabase({})));
+// The empty Databases: the same two as the header's, and two ways in from elsewhere.
+$("empty-new").addEventListener("click", () => void run(ask.newDatabase({})));
+$("empty-open").addEventListener("click", () => void run(ask.chooseFile({})));
+$("empty-connect").addEventListener("click", () => {
+	show("connections");
+	if (editing === null) input("name").focus();
+});
+$("empty-backup").addEventListener("click", () => show("backups"));
 
 // The File menu's keys in the main window itself, where no menu takes them
 // first: Linux has no application menu, and on Windows the page is WebView2's,
@@ -282,17 +307,20 @@ function renderServers() {
 		...list.map((d) => {
 			const s = d.served!;
 			const on = s.state === "running";
-			return el(
+			const li = el(
 				"li",
 				{},
 				el(
 					"button",
 					{ type: "button", class: `pick-item${d.path === selectedServer ? " selected" : ""}`, onclick: () => ((selectedServer = d.path), renderServers(), void tick()) },
-					el("span", { class: "strong" }, el("span", { class: `dot${on ? " on" : ""}`, ariaHidden: "true" }), d.name),
+					el("span", { class: "strong" }, el("span", { class: `dot${on ? " on" : s.failed ? " bad" : ""}`, ariaHidden: "true" }), d.name),
 					el("span", { class: "mono muted" }, on && s.url ? s.url : s.settings.port ? `Port ${s.settings.port} when started` : "Any free port when started"),
-					el("span", { class: "muted" }, stateWords(d)),
+					el("span", { class: s.failed ? "warn" : "muted" }, stateWords(d)),
 				),
 			);
+			// Found by its path, as a database's row is (`tr[data-path]`), by whoever drives the list.
+			li.dataset["path"] = d.path;
+			return li;
 		}),
 	);
 	const d = row(selectedServer);
@@ -300,21 +328,31 @@ function renderServers() {
 	if (!d || !d.served) return;
 	const s = d.served;
 	const on = s.state === "running";
+	const failed = s.failed;
 	$("srv-name").textContent = d.name;
-	$("srv-chip").textContent = on ? "Running" : s.state === "stopped" ? "Stopped" : s.state === "starting" ? "Starting" : "Stopping";
-	$("srv-chip").className = `chip${on ? " on" : ""}`;
+	$("srv-chip").textContent = on ? "Running" : failed ? "Did not start" : s.state === "stopped" ? "Stopped" : s.state === "starting" ? "Starting" : "Stopping";
+	$("srv-chip").className = `chip${on ? " on" : failed ? " bad" : ""}`;
 	$("srv-open").hidden = !on;
 	$("srv-restart").hidden = !on;
 	$("srv-stop").hidden = !on;
-	$("srv-start").hidden = s.state !== "stopped";
+	$("srv-start").hidden = s.state !== "stopped" || failed !== null;
 	$("srv-remove").hidden = s.state !== "stopped";
+	$("srv-failed").hidden = !failed;
+	setText($("srv-failed-reason"), failed?.reason ?? "");
+	// Changing the port is the way on only where the port was the reason; Start again is then the second choice.
+	$("srv-failed-port").hidden = !failed?.port;
+	$("srv-failed-start").className = failed?.port ? "" : "primary";
 	const f = live.get(d.path);
 	const fresh = on && f?.live;
 	$("srv-rate").textContent = fresh && f.perSecond != null ? (f.perSecond < 10 ? f.perSecond.toFixed(1) : String(Math.round(f.perSecond))) : "—";
 	$("srv-median").textContent = fresh && f.median != null ? formatSeconds(f.median) : "—";
 	$("srv-conns").textContent = fresh && f.connections != null ? String(f.connections) : "—";
 	$("srv-file").textContent = d.size === null ? "—" : formatBytes(d.size);
-	$("srv-facts").textContent = on ? s.facts : `${s.lastRan ? `Stopped ${when(s.lastRan.at).toLowerCase()}: ${s.lastRan.why}. ` : ""}Starts with the settings it last ran with.`;
+	$("srv-facts").textContent = on
+		? s.facts
+		: failed && s.lastRan
+			? `Tried ${when(s.lastRan.at).toLowerCase()}. Starts again with the settings it was started with.`
+			: `${s.lastRan ? `Stopped ${when(s.lastRan.at).toLowerCase()}: ${s.lastRan.why}. ` : ""}Starts with the settings it last ran with.`;
 	$("srv-where").textContent = [...s.networkUrls.map((u) => `On your network: ${u}`), ...(s.metricsUrl ? [`Metrics: ${s.metricsUrl}`] : [])].join("\n");
 	$("srv-connect").hidden = !s.snippets;
 	for (const b of document.querySelectorAll<HTMLButtonElement>(".tab")) b.setAttribute("aria-pressed", String(b.dataset["tab"] === tab));
@@ -327,6 +365,7 @@ function stateWords(d: DatabaseRow): string {
 	if (s.state === "running") return s.startedAt ? `Running for ${since(s.startedAt)}` : "Running";
 	if (s.state === "starting") return "Starting…";
 	if (s.state === "stopping") return "Stopping…";
+	if (s.failed) return s.lastRan ? `Did not start · ${when(s.lastRan.at).toLowerCase()}` : "Did not start";
 	return s.lastRan ? `Stopped · last ran ${when(s.lastRan.at).toLowerCase()}` : "Stopped";
 }
 
@@ -336,7 +375,12 @@ async function loadLog(path: string) {
 	const shown = fullLog ? lines : lines.slice(-12);
 	const pre = $("srv-log");
 	const atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4;
-	pre.textContent = shown.join("\n") || (row(path)?.served?.state === "running" ? "" : "Nothing yet: its output shows here while it runs.");
+	const said = row(path)?.served?.failed?.said;
+	if (!shown.length && said) {
+		// What the server wrote as it failed to start, kept with the failure: its error is the last line.
+		const all = said.split("\n");
+		pre.replaceChildren(all.slice(0, -1).map((l) => `${l}\n`).join(""), el("span", { class: "said" }, all[all.length - 1]!));
+	} else pre.textContent = shown.join("\n") || (row(path)?.served?.state === "running" ? "" : "Nothing yet: its output shows here while it runs.");
 	if (atEnd) pre.scrollTop = pre.scrollHeight;
 }
 
@@ -355,10 +399,14 @@ $("srv-open").addEventListener("click", () => selectedServer && void run(ask.ope
 $("srv-settings").addEventListener("click", () => selectedServer && void openSheet(selectedServer));
 $("srv-restart").addEventListener("click", () => selectedServer && void run(ask.restartServer({ path: selectedServer }), "Restarting…"));
 $("srv-stop").addEventListener("click", () => selectedServer && void run(ask.stopServer({ path: selectedServer }), "Stopping…"));
-$("srv-start").addEventListener("click", () => {
+const startSelected = () => {
 	const d = row(selectedServer);
 	if (d?.served) void run(ask.serve({ path: d.path, settings: d.served.settings, sync: d.sync }), `Starting ${d.name}…`);
-});
+};
+$("srv-start").addEventListener("click", startSelected);
+// A start that failed: again as it was, or the serve sheet with the port to change, focused.
+$("srv-failed-start").addEventListener("click", startSelected);
+$("srv-failed-port").addEventListener("click", () => selectedServer && void openSheet(selectedServer));
 $("srv-remove").addEventListener("click", async () => {
 	if (!selectedServer) return;
 	o = await ask.removeServer({ path: selectedServer });
@@ -693,6 +741,8 @@ function sealChanged() {
 }
 for (const r of document.querySelectorAll<HTMLInputElement>("input[name=seal]")) r.addEventListener("change", sealChanged);
 $("bk-setup-cancel").addEventListener("click", () => ($("bk-setup").hidden = true));
+// No database yet: New database is where a folder of backups becomes one (its "A backup").
+$("bk-empty-new").addEventListener("click", () => void run(ask.newDatabase({})));
 $("bk-dir-choose").addEventListener("click", async () => {
 	const d = row(backupFor);
 	const { folder } = await ask.chooseFolder({ from: $<HTMLInputElement>("bk-dir").value });

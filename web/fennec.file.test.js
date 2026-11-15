@@ -16,6 +16,7 @@ import { readFile, writeFile, access, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Fennec, FennecError, openFile, persist, sync } from './fennec.js';
+import { needs } from './ci-prereq.mjs';
 
 const wasm = await readFile(new URL('./fennec.wasm', import.meta.url)).catch(() => null);
 const skip = !wasm && 'no web/fennec.wasm (make wasm)';
@@ -398,6 +399,7 @@ async function binary(name) {
 }
 const bin = await binary('fennec-server');
 const cli = await binary('fennec');
+needs(['web/fennec.wasm', wasm, 'make wasm'], ['fennec-server', bin, 'cargo build'], ['fennec', cli, 'cargo build']);
 
 // A test that fails or times out never reaches its kill; the server would
 // hold the test runner open. Live ones are killed for certain at exit.
