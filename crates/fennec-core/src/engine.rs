@@ -4172,11 +4172,6 @@ pub struct TextIndexStats {
     pub bytes: usize,
 }
 
-/// `explain`'s words for a set an equality's bucket gave, which
-/// `Database::candidates_held` reads back to know that it did.
-const BY_ID: &str = "the id index";
-const BY_HASH: &str = "the hash index on";
-
 /// The candidate set for a filter on `id`, or `None` when the index cannot
 /// answer it.
 ///
@@ -11205,8 +11200,19 @@ impl Database {
         let (found, test) = {
             let mut held = None;
             let found = self.candidates_held(c, f, params, range_want, &mut held)?;
+            // The index's answer is the filter's: no filter is bound for
+            // rows that need no second look. Bound before, every read by an
+            // id or by a bucket made one it never asked, and freed it
+            // (indexes.md, *Bound filters*). The browser module binds first
+            // and answers below, as it did: answered ahead of the binding
+            // there too, it was 8 bytes larger.
+            if let Some((mut b, true)) = found {
+                b.truncate(want);
+                self.examine(b.len())?;
+                return Ok(b);
+            }
             let test = match held {
-                Some(eq) => Filter::without(c, f, &ctx, eq, params),
+                Some(eq) => Filter::without(c, f, &ctx, eq),
                 None => Filter::new(c, f, &ctx),
             };
             (found, test)
@@ -11315,7 +11321,7 @@ impl Database {
                     .unwrap_or(true)
                 {
                     candidates = Some(hit);
-                    source = (BY_ID, "id");
+                    source = ("the id index", "id");
                     given = Some((field, val));
                 }
                 continue;
@@ -11340,7 +11346,7 @@ impl Database {
                 .unwrap_or(true)
             {
                 candidates = Some(bucket);
-                source = (BY_HASH, field);
+                source = ("the hash index on", field);
                 given = Some((field, val));
             }
         }
@@ -11368,6 +11374,7 @@ impl Database {
                 {
                     candidates = Some(hit);
                     source = ("the id index, `in`", "id");
+                    given = None;
                     bare_in = matches!(f, Expr::In(..) | Expr::InParam(..));
                 }
                 continue;
@@ -11428,6 +11435,7 @@ impl Database {
             {
                 candidates = Some(union);
                 source = ("the hash index, `in`, on", field);
+                given = None;
                 // Exact only when the list is the whole filter. With anything
                 // `and`ed on, every candidate still has to be tested -- and a
                 // filter holding an equality as well cannot be a bare `in`,
@@ -11484,6 +11492,7 @@ impl Database {
                     ids.dedup();
                 }
                 candidates = Some(ids);
+                given = None;
                 composed_said = Some(composed_text(comp, &p));
                 composed_exact = Some(p.exact);
             }
@@ -11528,6 +11537,7 @@ impl Database {
                 if let Some(ids) = ix.range_ids(&range, cap) {
                     candidates = Some(ids);
                     source = ("the ordered index on", field);
+                    given = None;
                     bare_range = exact && f.only_ranges_on(field, params);
                     bare_in = false;
                     (composed_exact, composed_said) = (None, None);
@@ -11561,6 +11571,7 @@ impl Database {
                 if let Some(ids) = ix.candidates(&shape, cap) {
                     candidates = Some(ids);
                     source = ("the point index on", field);
+                    given = None;
                     (bare_range, bare_in) = (false, false);
                     (composed_exact, composed_said) = (Some(false), None);
                 } else {
@@ -11574,10 +11585,13 @@ impl Database {
             }
         }
 
-        // The equality's bucket, unless an `in`, a range, a box or an index
-        // over several fields took its place.
+        // The equality whose bucket the rows are, known where the bucket was
+        // taken and let go wherever an `in`, a range, a box or an index over
+        // several fields took its place. Told here by `explain`'s words, a
+        // read by id or by a bucket paid 108 instructions of `memcmp` for
+        // it (indexes.md, *Bound filters*).
         #[cfg(not(target_arch = "wasm32"))]
-        if composed_said.is_none() && (source.0 == BY_ID || source.0 == BY_HASH) {
+        {
             *held = given;
         }
         #[cfg(target_arch = "wasm32")]
@@ -15242,7 +15256,16 @@ fn build_path_index(c: &mut Collection, path: &str) -> Result<()> {
 /// Tests `ids` against `test` until `want` of them match, pushing those
 /// onto `out`: how many it tested. A filter's candidates and the scan, the
 /// one loop each always was; a call bounds it by a `take` around `ids`.
-#[inline(always)]
+///
+/// Natively a function of its own. Inlined, the loop took its registers
+/// from the function around it, and any change to the binding ahead of it
+/// in `matching_ids_to` laid the scan out anew: binding no filter for an
+/// index's whole answer cost the gate's `core-lookup`, a scan of some 530
+/// rows a query, an instruction a row (+0.12%), other layouts of the same
+/// change up to +0.35%. Apart, its rows cost what they did, and the call 42
+/// instructions a scan. The browser module keeps it inlined, as it was.
+#[cfg_attr(target_arch = "wasm32", inline(always))]
+#[cfg_attr(not(target_arch = "wasm32"), inline(never))]
 fn test_each(
     ids: impl Iterator<Item = DocId>,
     want: usize,
@@ -17159,6 +17182,38 @@ impl<'q> Chain<'q> {
         *part = Some(and_of(part.take(), t));
     }
 
+    /// [`Chain::place`] of `e` but for the first of its terms that is
+    /// `held`'s equality -- its field compared with the very value
+    /// [`Database::candidates_held`] took the bucket by -- which is let go
+    /// once met, so a second alike is placed. Walked in place, nothing
+    /// collected: a list of the terms was made and freed at every read of a
+    /// bucket's rows.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn place_but(
+        &mut self,
+        c: &Collection,
+        e: &'q Expr,
+        ctx: &EvalCtx,
+        positions: &mut Vec<usize>,
+        paths: &mut Vec<(usize, &'q str)>,
+        held: &mut Option<(&str, &Value)>,
+    ) {
+        if let Expr::And(a, b) = e {
+            self.place_but(c, a, ctx, positions, paths, held);
+            self.place_but(c, b, ctx, positions, paths, held);
+            return;
+        }
+        if let Some((field, value)) = *held {
+            if e.equality_key(ctx.params)
+                .is_some_and(|(k, v)| std::ptr::eq(v, value) && k == field)
+            {
+                *held = None;
+                return;
+            }
+        }
+        self.place(c, e, ctx, positions, paths);
+    }
+
     /// The `and` laid out; `f`, evaluated, where it held no term.
     fn tests(self, f: &'q Expr) -> Test<'q> {
         match (self.first, self.then) {
@@ -17249,29 +17304,16 @@ impl<'q> Filter<'q> {
     /// the rows it was, and what fails fails alike: the term left out is a
     /// comparison with a value, which fails over no row.
     #[cfg(not(target_arch = "wasm32"))]
-    fn without(
-        c: &'q Collection,
-        f: &'q Expr,
-        ctx: &EvalCtx,
-        (field, value): (&str, &Value),
-        params: &[Value],
-    ) -> Filter<'q> {
-        let mut terms = Vec::new();
-        f.conjuncts(&mut terms);
-        let held = terms.iter().position(|t| {
-            t.equality_key(params)
-                .is_some_and(|(k, v)| k == field && std::ptr::eq(v, value))
-        });
-        // A filter of that term alone was answered by its bucket.
-        let (Some(at), true) = (held, terms.len() > 1) else {
+    fn without(c: &'q Collection, f: &'q Expr, ctx: &EvalCtx, held: (&str, &Value)) -> Filter<'q> {
+        // A filter of that term alone is its bucket's answer, which no
+        // filter is bound for (`matching_ids_to`): never met here, it is
+        // bound whole all the same.
+        if !matches!(f, Expr::And(..)) {
             return Filter::new(c, f, ctx);
-        };
-        terms.remove(at);
+        }
         let (mut positions, mut paths) = (Vec::new(), Vec::new());
         let mut chain = Chain::default();
-        for t in terms {
-            chain.place(c, t, ctx, &mut positions, &mut paths);
-        }
+        chain.place_but(c, f, ctx, &mut positions, &mut paths, &mut Some(held));
         Filter::made(c, chain.tests(f), positions, paths)
     }
 

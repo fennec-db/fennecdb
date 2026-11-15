@@ -342,6 +342,56 @@ term left out that no other reads takes its field out of
 rules, binds the filter whole as before: 33 bytes more of it (852 824 ->
 852 857, brotli 70), inside the layout's own noise.
 
+**What a read is told once a query: which equality gave its rows, and
+whether its filter is needed at all.** The gate's holdout replayed that
+change (#593, run 43682293646): it cost every read by an id or a bucket,
+scoped or not -- `core-get-id` 11 760 -> 12 525 instructions an op
+(+6.51%), its allocator calls 31 -> 33 and bytes 807 -> 839, and
+`core-filter-limit`, `http-get-row`, `http-patch` and `http-scoped-get`
++2.15 to +4.09%, the same two calls and 32 bytes each. The profiles put it
+in two places. `candidates_held` told whether the rows were a bucket's by
+comparing `explain`'s words for the index that gave them (`source.0 ==
+"the id index"`), 108 instructions of `memcmp` an op; and
+`Filter::without` collected the `and`'s terms into a list to take the
+equality out -- a malloc and a free -- even where the filter was that
+equality alone, whose answer the bucket is and whose filter no row is
+asked. Now the equality is held where its bucket is taken and let go
+wherever an `in`, a range, a box or an index over several fields takes the
+bucket's place (`given`; `tests/buckets.rs` holds each of the five to the
+scan); `Filter::without` walks the `and` in place, leaving out the first
+term that is the equality (`Chain::place_but`), every other term placed and
+tested as before; and natively `matching_ids_to` binds no filter where the
+index's answer is the filter's -- which before #593 too made one no row
+asked and freed it: its table of fields, and each value it bound, a text's
+copy among them. Those first two alone took back 631 of the 768
+instructions #593 added to `core-get-id` (82%), both its calls and its 32
+bytes; binding no filter took the rest and more. Counted by the gate on
+aarch64 musl in Docker, five runs a side, #593 replayed cost the five 764
+to 846 instructions an op; this takes back 1 490 to 2 726 against the tree
+it was made on, 192 to 322% of that: `core-get-id` 11 716 -> 10 183
+(-13.09%; allocator calls 33 -> 29, bytes 839 -> 791), `core-filter-limit`
+33 280 -> 30 554 (-8.19%; 81 -> 73, 3 194 -> 3 111), `http-get-row`
+-8.23%, `http-patch` -7.12% and `http-scoped-get` -6.15% (each 4 calls
+and 48 bytes fewer), and beside them `http-put-keyed` -1.66% and
+`http-scoped-set` -1.09%; every other workload within 0.02% of its base
+but `core-near-filtered`, -0.21%, and `core-lookup`, +0.01% (below). The
+browser module binds first and answers after, as it did: answered before
+binding there too, it was 8 bytes larger. As it is, each of the three
+modules is its base's size to the byte: 859 538, 626 647 and 565 541.
+
+**The scan's loop is a function of its own natively** (`test_each`). It
+was inlined so every statement's loop stayed the one it was when calls
+came in (named-statements.md, *Size and time*), and inlined it takes its
+registers from `matching_ids_to` around it: each of five layouts of the
+change above moved `core-lookup`, a scan of some 530 rows a query from an
+id floor, by about an instruction a row, +0.12 to +0.35%, its calls and
+bytes the same -- two more spills a row in the loop (`objdump` of both
+builds). Out of line, its rows cost what they did, and the call 42
+instructions a scan: `core-lookup` 457 740 -> 457 782 (+0.01%), and a
+candidates' test 25 to 75 instructions a query more than inlined
+(`http-scoped-set`, `http-put-keyed`), each still below its base. The
+browser module keeps it inlined, its size the same.
+
 Left out so, the equality is the bucket's to answer, and a bucket and the
 scan must read its value alike. A `bytes` field's did not: `Value::key_as`
 reads a list of numbers from 0 to 255, or a vector of them, as the bytes

@@ -319,3 +319,71 @@ fn rows_a_bucket_gave_answer_as_the_scan_without_its_equality() {
         }
     }
 }
+
+/// The rows an index took over from an equality's bucket -- an `in` by id
+/// or over a `@hash`, an index over several fields, a range of a
+/// `@sorted` field, a box of a `@geo` one, each narrower than the bucket --
+/// are tested with that equality: they need not hold it, and only the
+/// bucket's own rows are tested without it (`Database::candidates_held`
+/// lets the equality go wherever another set takes its place).
+#[test]
+fn rows_another_index_took_over_are_tested_with_the_equality() {
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection hashed (k text @hash, n int @sorted, g int @hash, a int, b int, \
+         loc geo @geo, @sorted(a, b))",
+    );
+    run(
+        &mut db,
+        "create collection plain (k text, n int, g int, a int, b int, loc geo)",
+    );
+    for c in ["hashed", "plain"] {
+        for i in 0..60 {
+            let put = format!(
+                "put {c} {{k: \"k{}\", n: {i}, g: {i}, a: {}, b: {}, loc: $1}}",
+                i % 3,
+                i % 20,
+                i % 7,
+            );
+            let loc = Value::List(vec![Value::Float(i as f64 / 10.0), Value::Float(0.5)]);
+            db.execute_with(&fennec_ql::parse_one(&put).unwrap(), &[loc])
+                .unwrap_or_else(|e| panic!("{put}: {e}"));
+        }
+    }
+    let boxed = Value::List([1.05, 0.0, 1.45, 1.0].map(Value::Float).to_vec());
+    let mut wrong = Vec::new();
+    for filter in [
+        "k = \"k1\" and id in [2, 3, 4]",
+        "k = \"k1\" and g in [2, 3, 4]",
+        "k = \"k1\" and a = 5",
+        "k = \"k1\" and a = 5 and b >= 0",
+        "k = \"k1\" and n > 55",
+        "n > 55 and k = \"k1\"",
+        "k = \"k1\" and within(loc, $1)",
+        // The bucket narrower than the range: its rows tested without it.
+        "k = \"k1\" and n > 2",
+    ] {
+        let answer = |c: &str, tail: &str| {
+            let stmt = fennec_ql::parse_one(&format!("get {c} where {filter} {tail}")).unwrap();
+            db.query(&stmt, std::slice::from_ref(&boxed))
+                .map(|r| format!("{:?}", r.rows().unwrap().rows))
+                .map_err(|e| e.to_string())
+        };
+        for tail in ["order id", "count", "limit 2"] {
+            let (hashed, plain) = (answer("hashed", tail), answer("plain", tail));
+            if hashed != plain {
+                wrong.push(format!(
+                    "{filter} {tail}: {hashed:?} where the scan said {plain:?}"
+                ));
+            }
+        }
+        // Each filter answers some rows and leaves some out.
+        let rows = answer("plain", "count").unwrap();
+        assert!(
+            !rows.contains("Int(0)") && !rows.contains("Int(60)"),
+            "{filter}: {rows}"
+        );
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
