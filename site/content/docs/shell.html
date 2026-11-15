@@ -174,13 +174,18 @@ prompt. <code>fennec --help</code> lists each, and <code>fennec &lt;command&gt;
 
 <p id="exit-codes">Each command reads its own flags alone: one it does not
 read — another command's among them — is refused, as is a flag missing its
-value, before anything it names is opened, read or made. Its exit code says
+value; and every refusal of the line — an argument missing, a flag the
+command needs, a malformed URL, a token not given — comes before anything a
+flag names (<code>--tls-ca</code>'s CAs, <code>--key-file</code>'s key) is
+opened, read or made. Its exit code says
 how it ended: <code>0</code> when it did what it was asked (or printed
 <code>--help</code> or <code>--version</code>); <code>1</code> when its work
 failed — a statement of <code>-c</code>, a file that cannot be opened or
 synced or whose lock another holds, an import, a backup, an archive or a
-restore, a <code>verify</code> finding what cannot be restored, the file
-<code>fennec types</code> reads or the one it writes; <code>2</code> when the
+restore, a <code>verify</code> finding what cannot be restored, a key
+<code>fennec key</code> cannot make (the system giving it no randomness) or
+write, the file <code>fennec types</code> reads or the one it writes;
+<code>2</code> when the
 line was refused before anything ran — a flag, a value or an argument, a file
 it would write over without <code>--force</code>, or a subcommand this build
 was made without.</p>

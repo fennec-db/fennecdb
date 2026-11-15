@@ -235,10 +235,9 @@ pub fn top_keys(text: &str) -> BTreeSet<String> {
 
 /// The string literals of every `.rs` file under `dir`, with the file each
 /// is in, an item under `#[cfg(test)]` left out (a unit test's literals are
-/// another program's flags, or names it holds absent). A lexer of its own:
-/// line and block comments and char literals are passed over, raw strings
-/// read whole, so a quote in any of them pairs no literal and a brace in
-/// none counts.
+/// another program's flags, or names it holds absent). Read past what is
+/// not code ([`not_code`]), so a quote in a comment, a char or a raw string
+/// pairs no literal and a brace in none counts.
 pub fn literals(dir: &Path) -> Vec<(PathBuf, String)> {
     let mut out = Vec::new();
     let mut files = Vec::new();
@@ -267,20 +266,20 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn literals_of(src: &str) -> Vec<String> {
+pub fn literals_of(src: &str) -> Vec<String> {
     let b = src.as_bytes();
     let (mut i, n) = (0, b.len());
     let mut out = Vec::new();
     // The brace depth, and the depth a `#[cfg(test)]` item's body opened
     // at while in one: its literals are not kept.
     let (mut depth, mut test_at, mut pending) = (0usize, None::<usize>, false);
-    let keep = |lit: String, test_at: Option<usize>, out: &mut Vec<String>| {
-        if test_at.is_none() {
-            out.push(lit);
-        }
-    };
     while i < n {
-        if b[i..].starts_with(b"#[cfg(test)]") {
+        if let Some((end, text)) = not_code(src, i) {
+            if let (Some(text), None) = (text, test_at) {
+                out.push(src[text].to_string());
+            }
+            i = end;
+        } else if b[i..].starts_with(b"#[cfg(test)]") {
             pending = true;
             i += "#[cfg(test)]".len();
         } else if b[i] == b'{' {
@@ -299,53 +298,81 @@ fn literals_of(src: &str) -> Vec<String> {
         } else if b[i] == b';' {
             pending = false;
             i += 1;
-        } else if b[i..].starts_with(b"//") {
-            while i < n && b[i] != b'\n' {
-                i += 1;
-            }
-        } else if b[i..].starts_with(b"/*") {
-            i = src[i + 2..].find("*/").map_or(n, |j| i + 2 + j + 2);
-        } else if b[i] == b'r'
-            && (i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_'))
-            && matches!(b.get(i + 1), Some(b'"' | b'#'))
-        {
-            let hashes = b[i + 1..].iter().take_while(|&&c| c == b'#').count();
-            let open = i + 1 + hashes;
-            if b.get(open) != Some(&b'"') {
-                i += 1;
-                continue;
-            }
-            let close = format!("\"{}", "#".repeat(hashes));
-            let end = src[open + 1..].find(&close).map_or(n, |j| open + 1 + j);
-            keep(src[open + 1..end].to_string(), test_at, &mut out);
-            i = end + close.len();
-        } else if b[i] == b'\'' {
-            // A char literal ('"', '\'', '\u{..}') or a lifetime ('a).
-            if b.get(i + 1) == Some(&b'\\') {
-                // Past the escaped character, which may be a quote: `'\''`.
-                i = (src.get(i + 3..).and_then(|r| r.find('\''))).map_or(n, |j| i + 3 + j + 1);
-            } else if b.get(i + 2) == Some(&b'\'') {
-                i += 3;
-            } else {
-                i += 1;
-            }
-        } else if b[i] == b'"' {
-            let mut j = i + 1;
-            let mut lit = String::new();
-            while j < n && b[j] != b'"' {
-                if b[j] == b'\\' {
-                    j += 1;
-                }
-                j += 1;
-            }
-            lit.push_str(&src[i + 1..j.min(n)]);
-            keep(lit, test_at, &mut out);
-            i = j + 1;
         } else {
             i += 1;
         }
     }
     out
+}
+
+/// What is not code at `src[i]`, if anything starts there: a comment, a
+/// string or a char literal -- its end, and a string's text (between its
+/// quotes, escapes as written). Every form Rust has: `//`, a `/* */` that
+/// nests, `"..."` and `b"..."`/`c"..."` (their prefix read as code, which
+/// it harms nothing to be), a raw string `r"..."`, `br"..."` or `cr"..."`
+/// with any number of `#`, in which a backslash escapes nothing, and a
+/// char (`'"'`, `'\''`, `'é'`) where a lifetime (`'a`) is code. Read as a
+/// plain string, `br"a\"` ran on to the next quote and hid the code after
+/// it; `br#"..."#` holding one quote hid all of the file after it.
+pub fn not_code(src: &str, i: usize) -> Option<(usize, Option<std::ops::Range<usize>>)> {
+    let b = src.as_bytes();
+    let n = b.len();
+    if b[i..].starts_with(b"//") {
+        return Some((src[i..].find('\n').map_or(n, |j| i + j), None));
+    }
+    if b[i..].starts_with(b"/*") {
+        let (mut j, mut depth) = (i + 2, 1);
+        while j < n && depth > 0 {
+            if b[j..].starts_with(b"/*") {
+                depth += 1;
+                j += 2;
+            } else if b[j..].starts_with(b"*/") {
+                depth -= 1;
+                j += 2;
+            } else {
+                j += 1;
+            }
+        }
+        return Some((j.min(n), None));
+    }
+    // A raw string's prefix stands at a word's start: `r`, `br` or `cr`.
+    let word_start = i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
+    let prefix = match (b[i], b.get(i + 1)) {
+        (b'r', _) => 1,
+        (b'b' | b'c', Some(b'r')) => 2,
+        _ => 0,
+    };
+    if prefix > 0 && word_start {
+        let hashes = b[i + prefix..].iter().take_while(|&&c| c == b'#').count();
+        let open = i + prefix + hashes;
+        // `r#name` is a raw identifier, code.
+        if b.get(open) == Some(&b'"') {
+            let close = format!("\"{}", "#".repeat(hashes));
+            let end = src[open + 1..].find(&close).map_or(n, |j| open + 1 + j);
+            return Some(((end + close.len()).min(n), Some(open + 1..end)));
+        }
+        return None;
+    }
+    if b[i] == b'"' {
+        let mut j = i + 1;
+        while j < n && b[j] != b'"' {
+            j += if b[j] == b'\\' { 2 } else { 1 };
+        }
+        return Some(((j + 1).min(n), Some(i + 1..j.min(n))));
+    }
+    if b[i] == b'\'' {
+        let c = src[i + 1..].chars().next().map_or(0, char::len_utf8);
+        // Its closing quote after the escaped character, which may be one:
+        // `'\''`.
+        if b.get(i + 1) == Some(&b'\\') {
+            let end = (src.get(i + 3..).and_then(|r| r.find('\''))).map_or(n, |j| i + 3 + j + 1);
+            return Some((end, None));
+        }
+        if b.get(i + 1 + c) == Some(&b'\'') {
+            return Some((i + 2 + c, None));
+        }
+    }
+    None
 }
 
 // ------------------------------------------------------------ processes
@@ -354,7 +381,24 @@ fn literals_of(src: &str) -> Vec<String> {
 /// then stderr. A probe that runs past [`WITHIN`] -- it started serving --
 /// is killed and fails the test.
 pub fn run(exe: &Path, args: &[&str], cwd: &Path) -> (i32, String) {
-    let mut child = Command::new(exe)
+    run_command(Command::new(exe), exe, args, cwd)
+}
+
+/// [`run`] with none of this process's `FENNEC_` variables: a token or a
+/// key file the environment gives would answer for what the line leaves
+/// out.
+pub fn run_clean(exe: &Path, args: &[&str], cwd: &Path) -> (i32, String) {
+    let mut cmd = Command::new(exe);
+    for (k, _) in std::env::vars_os() {
+        if k.to_string_lossy().starts_with("FENNEC_") {
+            cmd.env_remove(k);
+        }
+    }
+    run_command(cmd, exe, args, cwd)
+}
+
+fn run_command(mut cmd: Command, exe: &Path, args: &[&str], cwd: &Path) -> (i32, String) {
+    let mut child = cmd
         .args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
@@ -771,118 +815,183 @@ pub fn exits_held(src: &Path, listed: &[String]) {
 }
 
 /// The ways out of the process the source `src` takes other than
-/// `exit::now`, each named: `std::process::exit` or `abort`, by its path or
-/// by a name a `use` gave it (`use std::process::{self, exit}`, `use
-/// std::process as p`), an `ExitCode`, and the binary's `main()` returning
-/// a value -- an `Err` from one exits 1 with no `Code`. Comments and
-/// literals are not code: a message naming `process::exit` is none.
+/// `exit::now`, each named, read from its code alone ([`code_of`]: a
+/// message naming `process::exit` is none) as tokens, so spacing hides
+/// nothing (`process :: exit`):
+///
+/// - `process::exit` or `process::abort` by any path (`std::`, `::std::`,
+///   a module renamed, `r#exit`);
+/// - a `use` taking `exit` or `abort` in from `process`, under any name
+///   (`exit`, `exit as quit`, `{self, exit}`, nested in `std::{...}`);
+/// - a `use` taking in all of `process`'s names (`std::process::*`), or
+///   the module under another name (`process as p`, `{self as p}`), under
+///   which a call is no longer written `process::exit`;
+/// - an `ExitCode`, and the binary's `main()` returning a value -- an
+///   `Err` from one exits 1 with no `Code`.
 pub fn other_exits(src: &str) -> Vec<&'static str> {
     let code = code_of(src);
+    let t = tokens(&code);
     let mut out = Vec::new();
-    for (word, way) in [
-        ("process::exit", "std::process::exit"),
-        ("process::abort", "std::process::abort"),
-        ("ExitCode", "an ExitCode"),
-    ] {
-        if !at_words(&code, word).is_empty() {
-            out.push(way);
+    let mut way = |w: &'static str| {
+        if !out.contains(&w) {
+            out.push(w);
+        }
+    };
+    for w in t.windows(3) {
+        match w {
+            ["process", "::", "exit"] => way("std::process::exit"),
+            ["process", "::", "abort"] => way("std::process::abort"),
+            _ => {}
         }
     }
-    for at in at_words(&code, "use") {
-        let stmt = code[at..].split(';').next().unwrap_or("");
-        let words: Vec<&str> = stmt
-            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-            .filter(|w| !w.is_empty())
-            .collect();
-        let after_process = |w: &str| words.windows(2).any(|p| p[0] == "process" && p[1] == w);
-        if words.contains(&"process") && (words.contains(&"exit") || words.contains(&"abort")) {
-            out.push("std::process's exit or abort taken in by a use");
-        } else if after_process("as") {
-            out.push("std::process renamed by a use");
+    if t.contains(&"ExitCode") {
+        way("an ExitCode");
+    }
+    for k in (0..t.len()).filter(|&k| t[k] == "use") {
+        let mut taken = Vec::new();
+        use_tree(&t, &mut (k + 1), Vec::new(), &mut taken);
+        for (path, name) in taken {
+            let n = path.len();
+            if n >= 2 && path[n - 2] == "process" && matches!(path[n - 1], "exit" | "abort") {
+                way("std::process's exit or abort taken in by a use");
+            } else if path.last() == Some(&"process") && name == "*" {
+                way("std::process's names all taken in by a use (`process::*`)");
+            } else if path.last() == Some(&"process") && name != "process" {
+                way("std::process renamed by a use");
+            }
         }
     }
-    for at in at_words(&code, "fn") {
-        let rest = code[at + 2..].trim_start();
-        let Some(params) = rest.strip_prefix("main") else {
-            continue;
-        };
-        // The binary's, which takes no arguments: a subcommand's `main(args)`
-        // hands its `Code` to the binary's.
-        let Some(after) = params.trim_start().strip_prefix('(') else {
-            continue;
-        };
-        let Some(after) = after.trim_start().strip_prefix(')') else {
-            continue;
-        };
-        if after.split('{').next().unwrap_or("").contains("->") {
-            out.push("a main returning a value");
-        }
+    if t.windows(5).any(|w| w == ["fn", "main", "(", ")", "->"]) {
+        way("a main returning a value");
     }
     out
 }
 
-/// Where `word` stands in `code` as a whole: neither end inside a longer
-/// name.
-fn at_words(code: &str, word: &str) -> Vec<usize> {
-    let ident = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
-    code.match_indices(word)
-        .map(|(i, _)| i)
-        .filter(|&i| {
-            !ident(code[..i].chars().next_back()) && !ident(code[i + word.len()..].chars().next())
-        })
-        .collect()
+/// The tokens of `code`: names (a raw one, `r#exit`, as its name), `::`,
+/// `->`, and every other character on its own, spacing dropped.
+fn tokens(code: &str) -> Vec<&str> {
+    let b = code.as_bytes();
+    let name = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80;
+    let (mut out, mut i) = (Vec::new(), 0);
+    while i < b.len() {
+        if b[i].is_ascii_whitespace() {
+            i += 1;
+        } else if name(b[i]) {
+            let at = i;
+            while i < b.len() && name(b[i]) {
+                i += 1;
+            }
+            out.push(&code[at..i]);
+        } else if b[i..].starts_with(b"::") || b[i..].starts_with(b"->") {
+            out.push(&code[i..i + 2]);
+            i += 2;
+        } else {
+            out.push(&code[i..i + 1]);
+            i += 1;
+        }
+    }
+    // `r # name` is the name: a raw string was blanked as a literal.
+    let mut named = Vec::with_capacity(out.len());
+    let mut k = 0;
+    while k < out.len() {
+        let raw = out[k] == "r"
+            && out.get(k + 1) == Some(&"#")
+            && out.get(k + 2).is_some_and(|w| name(w.as_bytes()[0]));
+        if raw {
+            k += 2;
+        }
+        named.push(out[k]);
+        k += 1;
+    }
+    named
 }
 
-/// `src` with its comments and its string and char literals blanked, line
-/// breaks kept.
+/// The names the `use` tree at `t[*at]` takes in, each with the path it
+/// names: `a::b::{c, d as e, self as f, *}` takes `c` as `c`, `d` as `e`,
+/// `a::b` as `f`, and `a::b`'s every name (`*`). Read until what is not a
+/// tree: a macro's `$crate` ends it.
+fn use_tree<'a>(
+    t: &[&'a str],
+    at: &mut usize,
+    mut path: Vec<&'a str>,
+    out: &mut Vec<(Vec<&'a str>, &'a str)>,
+) {
+    let named = |w: &str| w.starts_with(|c: char| c.is_alphabetic() || c == '_' || !c.is_ascii());
+    if t.get(*at) == Some(&"::") {
+        *at += 1;
+    }
+    loop {
+        match t.get(*at).copied() {
+            Some("*") => {
+                *at += 1;
+                out.push((path, "*"));
+                return;
+            }
+            Some("{") => {
+                *at += 1;
+                while let Some(&w) = t.get(*at) {
+                    if w == "}" {
+                        *at += 1;
+                        return;
+                    }
+                    if w == "," {
+                        *at += 1;
+                        continue;
+                    }
+                    let before = *at;
+                    use_tree(t, at, path.clone(), out);
+                    if *at == before {
+                        return;
+                    }
+                }
+                return;
+            }
+            Some(w) if named(w) => {
+                path.push(w);
+                *at += 1;
+                if t.get(*at) == Some(&"::") {
+                    *at += 1;
+                    continue;
+                }
+                // `{self}` and `{self as p}` name the module they are in.
+                if path.len() > 1 && path.last() == Some(&"self") {
+                    path.pop();
+                }
+                let name = if t.get(*at) == Some(&"as") {
+                    *at += 1;
+                    let name = t.get(*at).copied().unwrap_or("_");
+                    *at += 1;
+                    name
+                } else {
+                    path.last().copied().unwrap_or("_")
+                };
+                out.push((path, name));
+                return;
+            }
+            _ => return,
+        }
+    }
+}
+
+/// `src` with what is not code ([`not_code`]) blanked, line breaks kept.
 fn code_of(src: &str) -> String {
-    let b = src.as_bytes();
     let (mut out, mut i) = (String::with_capacity(src.len()), 0);
-    let blank = |out: &mut String, s: &str| {
-        out.extend(s.chars().map(|c| if c == '\n' { '\n' } else { ' ' }));
-    };
-    while i < b.len() {
-        let end = if b[i..].starts_with(b"//") {
-            src[i..].find('\n').map_or(b.len(), |j| i + j)
-        } else if b[i..].starts_with(b"/*") {
-            src[i + 2..].find("*/").map_or(b.len(), |j| i + 2 + j + 2)
-        } else if b[i] == b'r'
-            && (i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_'))
-            && matches!(b.get(i + 1), Some(b'"' | b'#'))
-            && b[i + 1..].iter().find(|&&c| c != b'#') == Some(&b'"')
-        {
-            let hashes = b[i + 1..].iter().take_while(|&&c| c == b'#').count();
-            let close = format!("\"{}", "#".repeat(hashes));
-            let open = i + 1 + hashes;
-            src[open + 1..]
-                .find(&close)
-                .map_or(b.len(), |j| open + 1 + j + close.len())
-        } else if b[i] == b'"' {
-            let mut j = i + 1;
-            while j < b.len() && b[j] != b'"' {
-                j += if b[j] == b'\\' { 2 } else { 1 };
+    while i < src.len() {
+        match not_code(src, i) {
+            Some((end, _)) => {
+                out.extend(
+                    src[i..end]
+                        .chars()
+                        .map(|c| if c == '\n' { '\n' } else { ' ' }),
+                );
+                i = end;
             }
-            (j + 1).min(b.len())
-        } else if b[i] == b'\'' {
-            // A char literal ('"', '\'', 'é') or a lifetime ('a).
-            let c = src[i + 1..].chars().next().map_or(0, char::len_utf8);
-            // Its closing quote after the escaped character, which may be
-            // one: `'\''`.
-            if b.get(i + 1) == Some(&b'\\') {
-                (src.get(i + 3..).and_then(|r| r.find('\''))).map_or(b.len(), |j| i + 3 + j + 1)
-            } else if b.get(i + 1 + c) == Some(&b'\'') {
-                i + 2 + c
-            } else {
-                i + 1
+            None => {
+                let c = src[i..].chars().next().unwrap();
+                out.push(c);
+                i += c.len_utf8();
             }
-        } else {
-            let c = src[i..].chars().next().unwrap();
-            out.push(c);
-            i += c.len_utf8();
-            continue;
-        };
-        blank(&mut out, &src[i..end]);
-        i = end;
+        }
     }
     out
 }

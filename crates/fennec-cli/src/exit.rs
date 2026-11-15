@@ -32,7 +32,8 @@ impl Code {
             Code::Failed => {
                 "failed: a statement of -c, the file's open or its sync, its lock another's, or \
                  the subcommand's work (an import, a backup, a restore, a verify finding what \
-                 cannot be restored, the file `fennec types` reads or the one it writes)"
+                 cannot be restored, a key `fennec key` cannot make or write, the file `fennec \
+                 types` reads or the one it writes)"
             }
             Code::Refused => {
                 "refused before anything ran: a flag the command does not read, a value or an \

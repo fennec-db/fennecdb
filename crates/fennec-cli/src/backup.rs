@@ -189,6 +189,18 @@ fn reads(command: &str, flag: &str) -> bool {
     }
 }
 
+/// How many arguments `command` takes, and what they are, for its refusal.
+fn arguments(command: &str, tenants: bool) -> (usize, &'static str) {
+    match (command, tenants) {
+        ("key", _) => (1, "the file to write the key into"),
+        ("archive", true) => (2, "the node and the root directory"),
+        ("verify" | "prune", true) => (1, "the root directory"),
+        ("restore", true) => (2, "the root directory and the directory to restore into"),
+        ("verify" | "prune", false) => (1, "the archive's directory"),
+        _ => (2, "two arguments"),
+    }
+}
+
 /// Writes `text` into a new file only its owner can read: a DACL on Windows.
 fn write_private(path: &str, text: &str) -> std::io::Result<()> {
     let mut opts = std::fs::OpenOptions::new();
@@ -210,9 +222,12 @@ fn fail(msg: &str) -> ! {
 }
 
 /// Runs `fennec backup|archive|restore ...`; the return value is the process
-/// exit code. The whole line is read, and refused where a flag is not the
-/// command's or wants a value it lacks, before anything a flag names is
-/// read, made or opened.
+/// exit code. The whole line is read, and every refusal of it -- a flag not
+/// the command's or wanting a value it lacks, the arguments, a flag the
+/// command needs, the primary's address and token, a sealed backup's key --
+/// comes before anything a flag names is read, made or opened, and before
+/// a lock is taken: only a file there already, which a backup or a restore
+/// writes over with `--force` alone, is asked about under its lock.
 pub fn main(command: &str, args: &[String]) -> Code {
     let mut positional = Vec::new();
     // Set and empty is unset, as an environment file leaves a line it does
@@ -301,20 +316,30 @@ pub fn main(command: &str, args: &[String]) -> Code {
     if tenants && matches!(target, Target::Change(_)) {
         fail("--to-change names one database's change: a node's tenants are restored to a moment (--to)");
     }
+    // Every refusal of the line comes before any file a flag names is read
+    // -- `--tls-ca`'s, `--key-file`'s -- or before the lock on a file
+    // restored into is taken: the arguments, `prune`'s `--keep`, the
+    // primary's address and token, a sealed backup's key.
+    let (count, what) = arguments(command, tenants);
+    if positional.len() != count {
+        let tenants = if tenants { " --tenants" } else { "" };
+        fail(&format!(
+            "`fennec {command}{tenants}` takes {what}\n{}",
+            usage(command)
+        ));
+    }
     if command == "key" {
-        let [path] = positional.as_slice() else {
-            fail(&format!(
-                "`fennec key` takes the file to write the key into\n{}",
-                usage(command)
-            ));
-        };
+        let path = &positional[0];
         if Path::new(path).exists() {
             fail(&format!(
                 "{path} is there already: a key written over is an archive lost"
             ));
         }
+        // The system failing the work, not the line refused: 1, as a key
+        // that cannot be written is.
         let Some(hex) = Key::generate() else {
-            fail("no randomness from the system to make a key with");
+            eprintln!("fennec key: no randomness from the system to make a key with");
+            return Code::Failed;
         };
         return match write_private(path, &format!("{hex}\n")) {
             Ok(()) => {
@@ -340,6 +365,32 @@ pub fn main(command: &str, args: &[String]) -> Code {
              out for an archive or a backup in the clear",
         );
     }
+    if command == "prune" && keep.is_none() {
+        fail("`fennec prune` needs --keep <duration>");
+    }
+    // The stream a backup or an archive reads: one database's primary, or
+    // a node's every tenant.
+    let upstream = match (command, tenants) {
+        ("backup" | "archive", false) => {
+            let token = token
+                .unwrap_or_else(|| fail("the primary asks for its replication token: --token"));
+            Some(Upstream::new(&positional[0], token).unwrap_or_else(|e| fail(&e)))
+        }
+        ("archive", true) => {
+            let token =
+                token.unwrap_or_else(|| fail("the node asks for its replication token: --token"));
+            Some(node_archive::node_upstream(&positional[0], token).unwrap_or_else(|e| fail(&e)))
+        }
+        _ => None,
+    };
+    // A backup file is sealed, and opens with its key: refused without one
+    // before `<file>.lock` is taken -- after it, the refusal left the lock
+    // file made. Looked at once: the restore below is the one this says.
+    let sealed = command == "restore" && !tenants && Path::new(&positional[0]).is_file();
+    if sealed && key_file.is_none() {
+        fail("a sealed backup opens with --key-file");
+    }
+    // The files the flags name, once the line is not refused.
     if let Some(pem) = &tls_ca {
         fennec_http::dial::trust_ca(pem).unwrap_or_else(|e| fail(&e));
     }
@@ -353,16 +404,11 @@ pub fn main(command: &str, args: &[String]) -> Code {
             &positional,
             key.as_ref(),
             (target, every, keep),
-            token,
+            upstream,
         );
     }
     if command == "verify" {
-        let [dir] = positional.as_slice() else {
-            fail(&format!(
-                "`fennec verify` takes the archive's directory\n{}",
-                usage(command)
-            ));
-        };
+        let dir = &positional[0];
         if std::path::Path::new(dir).is_file() {
             // The sync log's writes put back first, as an open would: after
             // the machine went down they are in the log alone, and the file
@@ -414,13 +460,8 @@ pub fn main(command: &str, args: &[String]) -> Code {
         };
     }
     if command == "prune" {
-        let [dir] = positional.as_slice() else {
-            fail(&format!(
-                "`fennec prune` takes the archive's directory\n{}",
-                usage(command)
-            ));
-        };
-        let keep = keep.unwrap_or_else(|| fail("`fennec prune` needs --keep <duration>"));
+        let dir = &positional[0];
+        let keep = keep.expect("`fennec prune` without --keep: refused with the line");
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as u64);
@@ -435,22 +476,7 @@ pub fn main(command: &str, args: &[String]) -> Code {
             }
         };
     }
-    let [a, b] = positional.as_slice() else {
-        fail(&format!(
-            "`fennec {command}` takes two arguments\n{}",
-            usage(command)
-        ));
-    };
-    let upstream = || {
-        let token = token
-            .clone()
-            .unwrap_or_else(|| fail("the primary asks for its replication token: --token"));
-        Upstream::new(a, token).unwrap_or_else(|e| fail(&e))
-    };
-
-    // The primary's address and token are checked first: a token missing
-    // is said, exit 2, before anything is made beside the file.
-    let backup_from = (command == "backup").then(upstream);
+    let (a, b) = (&positional[0], &positional[1]);
 
     // A database file a backup or a restore writes is renamed into its
     // place, its sync log removed first: held meanwhile, so a server or an
@@ -477,16 +503,19 @@ pub fn main(command: &str, args: &[String]) -> Code {
              database unasked: name a new file, or give --force to replace it"
         ));
     }
+    // The primary's stream, for a backup or an archive: made with the line.
+    let primary = || {
+        upstream
+            .as_ref()
+            .expect("a backup's or an archive's primary: made with the line")
+    };
     let result = match command {
-        "backup" => {
-            let from = backup_from.unwrap_or_else(upstream);
-            archive::backup(&from, Path::new(b), key.as_ref()).map(|seq| {
-                println!("{b}: the database at change {seq}");
-            })
-        }
+        "backup" => archive::backup(primary(), Path::new(b), key.as_ref()).map(|seq| {
+            println!("{b}: the database at change {seq}");
+        }),
         "archive" => {
             on_signals();
-            let upstream = upstream();
+            let upstream = primary();
             archive(b).and_then(|arch| {
                 eprintln!("archiving {} into {b}; interrupt to stop", upstream.url());
                 // Its own images and the pruning beside the stream, on a
@@ -495,18 +524,19 @@ pub fn main(command: &str, args: &[String]) -> Code {
                 std::thread::scope(|s| {
                     let beside =
                         s.spawn(|| arch.keep_up(every, keep, &STOP, &|line| eprintln!("{line}")));
-                    let followed = arch.follow(&upstream, &STOP, &|line| eprintln!("{line}"));
+                    let followed = arch.follow(upstream, &STOP, &|line| eprintln!("{line}"));
                     STOP.store(true, std::sync::atomic::Ordering::SeqCst);
                     let kept = beside.join().unwrap_or(Ok(()));
                     followed.and(kept)
                 })
             })
         }
-        // A sealed backup file: the database it holds.
-        "restore" if Path::new(a).is_file() => {
+        // A sealed backup file: the database it holds, its key asked for
+        // with the line.
+        "restore" if sealed => {
             let key = key
                 .as_ref()
-                .unwrap_or_else(|| fail("a sealed backup opens with --key-file"));
+                .expect("a sealed backup's key: refused without one with the line");
             archive::unseal(Path::new(a), key, Path::new(b)).map(|seq| {
                 println!("{b}: the database at change {seq}");
             })
@@ -543,19 +573,14 @@ fn every_tenant(
     positional: &[String],
     key: Option<&Key>,
     (target, every, keep): (Target, Duration, Option<Duration>),
-    token: Option<String>,
+    upstream: Option<Upstream>,
 ) -> Code {
+    // The arguments' count, `--keep` and the node's stream were each held
+    // with the line.
     match command {
         "archive" => {
-            let [node, root] = positional else {
-                fail(&format!(
-                    "`fennec archive --tenants` takes the node and the root directory\n{}",
-                    usage(command)
-                ));
-            };
-            let token =
-                token.unwrap_or_else(|| fail("the node asks for its replication token: --token"));
-            let upstream = node_archive::node_upstream(node, token).unwrap_or_else(|e| fail(&e));
+            let root = &positional[1];
+            let upstream = upstream.expect("the node's stream: made with the line");
             on_signals();
             let result = NodeArchive::new(root, key.cloned()).and_then(|arch| {
                 eprintln!(
@@ -584,14 +609,8 @@ fn every_tenant(
             }
         }
         "verify" | "prune" => {
-            let [root] = positional else {
-                fail(&format!(
-                    "`fennec {command} --tenants` takes the root directory\n{}",
-                    usage(command)
-                ));
-            };
-            let keep = (command == "prune")
-                .then(|| keep.unwrap_or_else(|| fail("`fennec prune` needs --keep <duration>")));
+            // `prune`'s, which `verify` reads none of.
+            let root = &positional[0];
             // Every line, those moved aside too: each is an archive a restore
             // to a moment may take. A root that cannot be read is the work
             // failing (1), as an archive's directory that cannot be is to
@@ -656,13 +675,7 @@ fn every_tenant(
             }
         }
         "restore" => {
-            let [root, out] = positional else {
-                fail(&format!(
-                    "`fennec restore --tenants` takes the root directory and the directory \
-                     to restore into\n{}",
-                    usage(command)
-                ));
-            };
+            let (root, out) = (&positional[0], &positional[1]);
             let iso = |t: u64| fennec_core::time::format_iso(t as i64);
             // Failing here -- a root that cannot be read, a directory that
             // cannot be made or synced -- the restore did not do its work

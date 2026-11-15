@@ -420,7 +420,16 @@ line, refusing a flag it does not read or a value missing, before it
 makes, opens, reads or locks anything a flag names: the router opened
 `--audit`'s file as the flag was read, so its probe left a file named
 `--help`, and the router, the backup family and `fennec mcp` read
-`--tls-ca`'s. Each probe runs in an empty directory of its own, which it
+`--tls-ca`'s. The shell's subcommands go further: every refusal of the
+line -- the arguments, a flag the command needs, a URL, a token not given,
+a sealed backup's key -- comes before a file a flag names (`--tls-ca`'s,
+`--key-file`'s) is read or a lock is taken, held by fennec-cli's
+`every_refusal_comes_before_a_file_a_flag_names` beside an unreadable
+`--tls-ca` or `--key-file`; only whether the file a backup or a restore
+writes is there already (2 without `--force`) is asked under its lock, so
+nothing makes it between the asking and the rename. The router reads its
+CAs and opens its audit log before it starts tracing, as fennec-server
+does. Each probe runs in an empty directory of its own, which it
 must leave empty, and its answer must carry no system error (`(os
 error`, a file named `--help` read). A command reads, and its help names,
 its own flags alone: `fennec key`, `verify` and `prune` shared `backup`'s
@@ -437,19 +446,31 @@ the words of its help line are not held, so a value read in other units is
 not seen. The exit codes are each binary's `exit::Code` (`src/exit.rs`)
 with its meaning: every exit goes through `exit::now` or a subcommand
 returning a `Code`, and the test refuses any other way out of the process
-in the crate's sources, comments and literals aside -- `std::process::exit`
-or `abort` by any path or a name a `use` gave it, an `ExitCode`, the
-binary's `main()` returning a value (an `Err` exits 1 with no `Code`),
+in the crate's sources, read as tokens with comments and literals aside
+-- `std::process::exit` or `abort` by any path (spaced out, `r#exit`), a
+`use` taking either in under any name, or `process`'s every name (`*`), or
+the module under another (`process as p`, `{self as p}`), an `ExitCode`,
+the binary's `main()` returning a value (an `Err` exits 1 with no `Code`),
 each seeded in fennec-cli's `every_way_out_but_exit_now_is_refused` -- and
-a variant `Code::ALL` leaves out. The scheduler hands the server a failure
+a variant `Code::ALL` leaves out. Its lexer is the literal scan's
+(`api_dump::not_code`): every comment, string and char form Rust has, a
+nested `/* */` and a raw byte or C string (`br#"..."#`, `cr"..."`) among
+them, which it once read as a plain string, an exit after one unseen. The scheduler hands the server a failure
 (`fn()`), never a number, so no code is decided outside it, and
 fennec-server's `a_scheduler_s_failure_ends_the_server_with_1` holds that
-stop to 1, a file's server and a node's, through a debug build's fault
-(`FENNEC_TEST_SCHEDULER_PANIC`; a release compiles none): no failure a
-release can meet ends that thread on demand. A code means what the code
+stop to 1, a file's server and a node's, through a test build's fault
+(`FENNEC_TEST_SCHEDULER_PANIC`) behind the `test-clock` feature, which
+`tools/release_features_check.py` and release.yml's `+test-clock` check
+hold out of a release: no failure a release can meet ends that thread on
+demand. Behind `debug_assertions` it was live in every debug server
+(`cargo run`, the web tests'), and `cargo test --release` waited for it in
+vain; built without the feature a server reads no such variable
+(`a_build_without_test_clock_has_no_scheduler_fault`), and CI's `test` job
+runs the test built with it, by name. A code means what the code
 does: 2 is a line refused before anything ran, 1 the work failing -- `fennec
 types` exits 1 for a file it cannot read or parse and an `-o` it cannot
-write, as the shell does for a file it cannot open, `verify`, `prune` and
+write, as the shell does for a file it cannot open, `fennec key` 1 when
+the system gives it no randomness, as for a key it cannot write, `verify`, `prune` and
 `restore --tenants` 1 for a root they cannot read, as for one archive, and
 the router 2 for a lock file it cannot make, as for a directory it cannot open, keeping 1 for
 a lock another holds. A code removed or its meaning reworded is a break;
