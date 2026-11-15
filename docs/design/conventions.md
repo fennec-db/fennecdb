@@ -120,6 +120,69 @@ days, the 10 GB limit). Jobs gated on the event: `test (macos x86_64,
 Rosetta)` runs on everything but a pull request, so on the schedule, and `size
 (browser module)` only on a pull request.
 
+**Every cache is restored by every run and saved by a run on main alone, and
+what main saves is small.** A cache saved on a pull request's ref is read by
+no other run, so each pull request that missed a key saved a private copy and
+pushed main's entries out of the 10 GB: at 01:15Z on 2026-11-15 the repository
+held 49 entries, 11.31 GiB (pull-request refs 35 entries, 7.18 GiB; main 12,
+3.36 GiB; merge groups 0.24 GiB), and main's Gradle entry was gone within
+about 1.5 hours, so 6 of the Android job's 50 runs restored it. Now the 21
+cargo steps and the Unicode table are `actions/cache/restore` with a
+`restore-keys` fallback (a pull request that moves `Cargo.lock` restores the
+last entry) and an `actions/cache/save` step at the job's end under
+`github.ref == 'refs/heads/main'`, keyed by the restore step's
+`cache-primary-key` and skipped on an exact hit. `setup-node`'s and
+`setup-go`'s `cache` and `subosito/flutter-action`'s save from any ref and
+have no read-only switch, so the Grafana job's npm (`~/.npm`) and Go
+(`~/go/pkg/mod`, `~/.cache/go-build`) caches are the same restore and save
+pair over the paths the actions used, and the Flutter caches are gone.
+`setup-gradle` writes only on main by its own default (`cache-read-only`).
+`desktop.yml`'s Cargo and Hutch caches and `site.yml`'s are the same pair
+(`site-lighthouse.yml`, which runs on pull requests alone, restores only).
+`desktop.yml` and `site.yml` run on main by their own paths filters, the
+caches' inputs among them, and `desktop.yml` gained a schedule, Monday and
+Thursday at 05:41 UTC, so that an entry evicted or unused for 7 days is saved
+again. The cargo keys moved to a `v2-` prefix so that no run restores the
+unpruned entries through `restore-keys`.
+
+*What main keeps of `target/`.* A checkout's files carry new times, so cargo
+builds the workspace's crates again whatever `target/` holds; what a restored
+`target/` saves is the crates from outside the workspace, and the workspace's
+test binaries and debug info were most of every entry.
+`tools/ci_prune_target.sh` runs on main just before a save and keeps only the
+units whose dep-info (`deps/*.d`) names a file under the registry or a git
+checkout, with their build scripts and fingerprints. Measured on a local build
+of the fennec-server and fennec-import tests: 822 MiB to 59 MiB, and the next
+build compiled only the workspace's own crates, none of rustls, ring or libc
+(mtimes are kept, as the cache's tar keeps them; a copy that does not keep
+them makes cargo rebuild everything). An entry is now 0 to 47 MiB, but for the
+clippy job's 373 MiB (it checks the Windows target too), against 15 to 801 MiB
+before (`ubuntu-latest-cargo` 801, `ubuntu-24.04-arm` 643, `macos-latest` 522,
+`clippy` 440 MiB). Four of the 21 are 0 MiB because fennec-core and the C
+library have no crate from outside the workspace: they were 15 to 31 MiB of
+workspace objects. Nor did the cache save time in those jobs: a hit and a
+miss of `windows (http)` took 242 and 241 s, of `test (ubuntu-latest)` 962 and
+940 s (runs 43648331326, 43644153745, 43638860592), because the workspace is
+what takes the time.
+
+*Flutter, Go and the rest.* The SDK's entry was 2.0 GiB on macOS and 1.6 GiB
+on Linux, and restoring it saved 28 s (35 s against 63 s) on macOS and 16 s
+(13 s against 29 s) on Linux of a download (run 43663494522), under 3% of
+either job; it is not cached, nor is the pub cache (25 to 30 MiB). The Go
+cache is 436 MiB, the npm one 93 MiB, `desktop.yml`'s Hutch caches 68 to 98
+MiB a system (435 MiB in all) and Gradle's 2.1 GiB (setup-gradle's entries:
+dependencies 1090, transforms 656, wrapper zips 179, the distribution 130
+MiB, measured with `cache-read-only: false` on the job as it was before the
+wrapper above: the Gradle User Home it keeps now is of that order, not
+measured).
+
+*The set main will hold*, measured on a test branch that saved as main does
+(run 43665618926): about 1.0 GiB of cargo entries, 0.44 GiB Go, 0.09 GiB npm,
+0.43 GiB Hutch and 2.1 GiB Gradle, about 4.1 GiB in some 40 entries, against
+about 11 GiB projected for the same keys unpruned with the Flutter SDKs. A key
+change leaves the old entries until they age out, so for a while the
+repository holds both, up to 7.4 GiB with main's 3.36 GiB: under the 10 GB.
+
 Which `ci.yml` jobs are required checks is a repository setting (classic
 branch protection on main, not the merge queue's ruleset). All of them are,
 but `size (browser module)`, which only runs on a pull request and so would
