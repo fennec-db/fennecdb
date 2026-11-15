@@ -186,8 +186,10 @@ def main():
         write(tree, {"a/src/lib.rs": lib(5)})
         code, out, err = build(tree, "c")
         expect("the library changed, built for it alone", (code, out), (0, "c 5"), err)
-        in_volume("touch -d '2030-01-01 00:00:00' /work/target/release/deps/b-* "
-                  "/work/target/release/.fingerprint/b-*/* /work/target/release/b")
+        # Cargo's build-dir (1.100.0 on): a unit's outputs and fingerprint
+        # in build/<package>/<hash>/, a binary's output named for its crate.
+        in_volume("touch -d '2030-01-01 00:00:00' /work/target/release/build/b/*/out/b* "
+                  "/work/target/release/build/b/*/fingerprint/* /work/target/release/b")
         code, out, err = build(tree)
         named = "compiled from other bytes" in err and ".rlib: FAILED" in err and "/liba-" in err
         expect("a binary kept from another build of its library",
