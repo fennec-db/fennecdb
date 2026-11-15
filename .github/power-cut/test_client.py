@@ -14,8 +14,11 @@ from the pages being judged, letting pass (bounds of 3 058 and 1 708 ms;
 3 050 and 1 707 here). A cut with no write in flight fails as the rig's
 (under `--sync 250` only if no acknowledged write was unsynced either),
 and so does a standby far behind the node; one at its tip counts what a
-promotion at the cut would have lost. The standard library alone, as
-client.py: ci.yml's fmt job runs it.
+promotion at the cut would have lost. Under `--sync 250` a node's standby
+is held from when a write was on disk, the first page reaching it: one at
+the last sync, or a sync behind, passes, and one lacking what was on disk
+2 s before the cut fails. The standard library alone, as client.py:
+ci.yml's fmt job runs it.
 """
 
 import argparse
@@ -333,6 +336,44 @@ class Standby(unittest.TestCase):
         bad = c(lambda: c.check.standby_near(held, held + 200))
         self.assertTrue(has(bad, "the standby lacked a write the node acknowledged"), bad)
         self.assertIn("RIG the standby lacked", c.out.getvalue())
+
+
+class StandbySynced(unittest.TestCase):
+    """A node under `--sync 250`: a write is answered before it is on disk
+    and sent to the standby once a sync covered it, so the standby's lag is
+    read from the pages, not the answers."""
+
+    def cut(self):
+        ev, _, cut_at, killed = load(0.25, 0.008, 5.0, every=0.01)
+        return Cut(self, ev, cut_at, killed)
+
+    def test_a_standby_at_the_last_sync_passes(self):
+        # It holds every write the last page reached and none after: the
+        # writes it lacks were answered up to 258 ms before the cut, and
+        # none was on disk.
+        c = self.cut()
+        last = c.check.pages[-1]["next"]
+        tip = max(e["seq"] for e in c.check.acked.values())
+        self.assertGreater(tip, last)
+        bad = c(lambda: c.check.standby_near(last, last))
+        self.assertEqual(bad, [], c.out.getvalue())
+        self.assertIn(f"{tip - last} acknowledged writes above it, 0 of them on the node's disk", c.out.getvalue())
+
+    def test_a_standby_one_sync_behind_passes(self):
+        # The last sync's writes still in the node's socket at the cut.
+        c = self.cut()
+        held = c.check.pages[-2]["next"]
+        bad = c(lambda: c.check.standby_near(held, held))
+        self.assertEqual(bad, [], c.out.getvalue())
+        self.assertIn("of them on the node's disk, the oldest from", c.out.getvalue())
+
+    def test_a_standby_lacking_writes_on_disk_for_2_s_fails(self):
+        # The pages reaching the writes it lacks came from 2 s before the
+        # cut: the node had them on disk, and the standby did not follow.
+        c = self.cut()
+        held = max(p["next"] for p in c.check.pages if p["at"] < c.check.cut_at - 2.0)
+        bad = c(lambda: c.check.standby_near(held, held))
+        self.assertTrue(has(bad, "the standby lacked a write the node acknowledged and had on disk"), bad)
 
 
 if __name__ == "__main__":
