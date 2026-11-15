@@ -661,6 +661,116 @@ fn sock_peer(sock: &TcpStream) -> String {
         .map_or_else(|_| "the client".to_string(), |a| a.to_string())
 }
 
+// ------------------------------------------------------ channel binding
+
+/// RFC 5929's `tls-server-end-point` of a certificate, its DER bytes: their
+/// hash by the hash function the certificate's `signatureAlgorithm` uses,
+/// SHA-256 where that is MD5 or SHA-1 (section 4.1), as PostgreSQL's server
+/// and libpq compute it (`be_tls_get_certificate_hash`,
+/// `pgtls_get_peer_certificate_hash`) -- RSASSA-PSS by the hash its
+/// parameters name, SHA-1 where they name none. Where the algorithm uses no
+/// single hash (Ed25519, Ed448) the binding is undefined, an error, as it is
+/// to PostgreSQL ("could not find digest"); so is SHA-224, which ring has
+/// not. The walk reads three elements of the DER and no further, each length
+/// held to the bytes there: a certificate from whoever answered a dial that
+/// checked nothing is no one's to trust.
+pub fn server_end_point(cert: &[u8]) -> Result<Vec<u8>, Error> {
+    let undefined = |why: &str| config(format!("tls-server-end-point is undefined here: {why}"));
+    let hash = end_point_hash(cert).map_err(undefined)?;
+    Ok(ring::digest::digest(hash, cert).as_ref().to_vec())
+}
+
+/// One DER element at the start of `b`: its tag, its contents and what
+/// follows it. `None` where its length runs past `b` or is not one DER
+/// writes (an indefinite length, more than four bytes of it).
+fn der(b: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    let (&tag, rest) = b.split_first()?;
+    let (&first, rest) = rest.split_first()?;
+    let (len, rest) = if first < 0x80 {
+        (first as usize, rest)
+    } else {
+        let n = (first & 0x7f) as usize;
+        if n == 0 || n > 4 {
+            return None;
+        }
+        let (bytes, rest) = (rest.get(..n)?, rest.get(n..)?);
+        (bytes.iter().fold(0usize, |l, &d| l << 8 | d as usize), rest)
+    };
+    Some((tag, rest.get(..len)?, rest.get(len..)?))
+}
+
+const SEQUENCE: u8 = 0x30;
+const OID: u8 = 0x06;
+
+/// The hash a certificate's binding is made with, read off its
+/// `signatureAlgorithm` (RFC 5280: `Certificate ::= SEQUENCE {
+/// tbsCertificate, signatureAlgorithm, signatureValue }`).
+fn end_point_hash(cert: &[u8]) -> Result<&'static ring::digest::Algorithm, &'static str> {
+    use ring::digest::{SHA256, SHA384, SHA512};
+    let malformed = "the certificate is not DER";
+    let (SEQUENCE, outer, _) = der(cert).ok_or(malformed)? else {
+        return Err(malformed);
+    };
+    let (SEQUENCE, _, rest) = der(outer).ok_or(malformed)? else {
+        return Err(malformed);
+    };
+    let (SEQUENCE, alg, _) = der(rest).ok_or(malformed)? else {
+        return Err(malformed);
+    };
+    let (OID, oid, params) = der(alg).ok_or(malformed)? else {
+        return Err(malformed);
+    };
+    // 1.2.840.113549.1.1.x, PKCS #1's; 1.2.840.10045.4.x, ECDSA's.
+    const RSA: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01];
+    const ECDSA: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04];
+    let sha224 = "the certificate is signed with SHA-224, which this client has not";
+    let none =
+        "the certificate's signature uses no single hash (Ed25519, Ed448, or one not known here)";
+    match oid {
+        // md5WithRSAEncryption, sha1WithRSAEncryption, ecdsa-with-SHA1:
+        // SHA-256, by the RFC's rule.
+        [p @ .., 4 | 5] if p == RSA => Ok(&SHA256),
+        [p @ .., 0x01] if p == ECDSA => Ok(&SHA256),
+        [p @ .., 0x0b] if p == RSA => Ok(&SHA256),
+        [p @ .., 0x0c] if p == RSA => Ok(&SHA384),
+        [p @ .., 0x0d] if p == RSA => Ok(&SHA512),
+        [p @ .., 0x0e] if p == RSA => Err(sha224),
+        [p @ .., 0x03, 0x02] if p == ECDSA => Ok(&SHA256),
+        [p @ .., 0x03, 0x03] if p == ECDSA => Ok(&SHA384),
+        [p @ .., 0x03, 0x04] if p == ECDSA => Ok(&SHA512),
+        [p @ .., 0x03, 0x01] if p == ECDSA => Err(sha224),
+        // RSASSA-PSS: the hash its parameters name, `[0]`, SHA-1 (so
+        // SHA-256) where they name none (RFC 4055).
+        [p @ .., 0x0a] if p == RSA => {
+            let (SEQUENCE, params, _) = der(params).ok_or(malformed)? else {
+                return Err(malformed);
+            };
+            match der(params) {
+                Some((0xa0, hash, _)) => {
+                    let (SEQUENCE, hash, _) = der(hash).ok_or(malformed)? else {
+                        return Err(malformed);
+                    };
+                    let (OID, hash, _) = der(hash).ok_or(malformed)? else {
+                        return Err(malformed);
+                    };
+                    // 1.3.14.3.2.26, SHA-1; 2.16.840.1.101.3.4.2.x, the rest.
+                    const NIST: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02];
+                    match hash {
+                        [0x2b, 0x0e, 0x03, 0x02, 0x1a] => Ok(&SHA256),
+                        [p @ .., 1] if p == NIST => Ok(&SHA256),
+                        [p @ .., 2] if p == NIST => Ok(&SHA384),
+                        [p @ .., 3] if p == NIST => Ok(&SHA512),
+                        [p @ .., 4] if p == NIST => Err(sha224),
+                        _ => Err(none),
+                    }
+                }
+                _ => Ok(&SHA256),
+            }
+        }
+        _ => Err(none),
+    }
+}
+
 /// A fatal `internal_error` alert, a record of its own in the clear: what
 /// a listener tells a connection it will not serve without running a
 /// handshake for it, the one answer TLS has before keys are agreed. Its
@@ -737,6 +847,23 @@ impl TlsStream {
             Conn::Client(c) => c.alpn_protocol(),
             Conn::Server(c) => c.alpn_protocol(),
         }
+    }
+
+    /// A dial's channel binding, RFC 5929's `tls-server-end-point`: the hash
+    /// of the certificate the server showed ([`server_end_point`]), which
+    /// SCRAM-SHA-256-PLUS signs into its exchange, so a sign-in relayed
+    /// through someone else's TLS fails at the server. The one channel
+    /// binding PostgreSQL takes. The certificate is the one shown whatever
+    /// the dial checked of it: under an unverified dial it is whoever
+    /// answered, which is the point -- the server compares it with its own.
+    /// An error for an accepted connection, which has no server's.
+    pub fn server_end_point(&self) -> Result<Vec<u8>, Error> {
+        let shown = match &self.conn {
+            Conn::Client(c) => c.peer_certificates().and_then(|c| c.first()),
+            Conn::Server(_) => None,
+        };
+        let cert = shown.ok_or_else(|| config("the server showed no certificate"))?;
+        server_end_point(cert.as_ref())
     }
 
     /// Whether plaintext is ready to read, waiting up to `wait` for it:
@@ -1802,6 +1929,129 @@ mod tests {
     /// wire_certs` writes them again (valid 2026 to 2126); otherwise this holds
     /// them to what they are for -- the server's chain is good for `localhost`
     /// under `ca.pem` and unknown under `other-ca.pem`.
+    /// A self-signed certificate's DER, signed with `alg`.
+    fn signed_with(alg: &'static rcgen::SignatureAlgorithm) -> Vec<u8> {
+        let key = KeyPair::generate_for(alg).unwrap();
+        let p = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        p.self_signed(&key).unwrap().der().to_vec()
+    }
+
+    /// A DER element, its length written short or long as its size asks.
+    fn element(tag: u8, contents: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag];
+        match contents.len() {
+            n @ 0..=0x7f => out.push(n as u8),
+            n @ 0x80..=0xff => out.extend_from_slice(&[0x81, n as u8]),
+            n => out.extend_from_slice(&[0x82, (n >> 8) as u8, n as u8]),
+        }
+        out.extend_from_slice(contents);
+        out
+    }
+
+    /// A certificate's shape with `alg` its signatureAlgorithm, the parts
+    /// the walk passes over empty.
+    fn shaped(alg: &[u8]) -> Vec<u8> {
+        let mut body = element(SEQUENCE, &[]);
+        body.extend_from_slice(&element(SEQUENCE, alg));
+        body.extend_from_slice(&element(0x03, &[0]));
+        element(SEQUENCE, &body)
+    }
+
+    fn oid(bytes: &[u8]) -> Vec<u8> {
+        element(OID, bytes)
+    }
+
+    /// RFC 5929's rule, as PostgreSQL's server and libpq follow it: the hash
+    /// of the signature's algorithm, SHA-256 for MD5 and SHA-1, and none
+    /// for a signature with no single hash, Ed25519's. The binding is that
+    /// hash of the certificate's whole DER.
+    #[test]
+    fn a_channel_binding_hashes_by_the_certificates_signature() {
+        use ring::digest::{digest, SHA256, SHA384};
+        let p256 = signed_with(&rcgen::PKCS_ECDSA_P256_SHA256);
+        assert_eq!(
+            server_end_point(&p256).unwrap(),
+            digest(&SHA256, &p256).as_ref()
+        );
+        let p384 = signed_with(&rcgen::PKCS_ECDSA_P384_SHA384);
+        let bound = server_end_point(&p384).unwrap();
+        assert_eq!(bound, digest(&SHA384, &p384).as_ref());
+        assert_eq!(bound.len(), 48);
+        let e = server_end_point(&signed_with(&rcgen::PKCS_ED25519)).unwrap_err();
+        assert!(e.to_string().contains("no single hash"), "{e}");
+
+        let rsa = |last: u8| {
+            let mut o = vec![0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, last];
+            o = oid(&o);
+            o.extend_from_slice(&element(0x05, &[]));
+            o
+        };
+        let len = |alg: &[u8]| end_point_hash(&shaped(alg)).map(|h| h.output_len());
+        assert_eq!(len(&rsa(4)), Ok(32), "md5WithRSAEncryption: SHA-256");
+        assert_eq!(len(&rsa(5)), Ok(32), "sha1WithRSAEncryption: SHA-256");
+        assert_eq!(len(&rsa(0x0b)), Ok(32));
+        assert_eq!(len(&rsa(0x0c)), Ok(48));
+        assert_eq!(len(&rsa(0x0d)), Ok(64));
+        assert!(len(&rsa(0x0e)).unwrap_err().contains("SHA-224"));
+        let ecdsa_sha1 = oid(&[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x01]);
+        assert_eq!(len(&ecdsa_sha1), Ok(32));
+        let ecdsa_sha512 = oid(&[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x04]);
+        assert_eq!(len(&ecdsa_sha512), Ok(64));
+        // RSASSA-PSS: the hash its parameters name, SHA-1's default (so
+        // SHA-256) where they name none.
+        let pss = |params: &[u8]| {
+            let mut o = oid(&[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0a]);
+            o.extend_from_slice(&element(SEQUENCE, params));
+            o
+        };
+        let named = |last: u8| {
+            let hash = oid(&[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, last]);
+            element(0xa0, &element(SEQUENCE, &hash))
+        };
+        assert_eq!(len(&pss(&named(2))), Ok(48));
+        assert_eq!(len(&pss(&named(3))), Ok(64));
+        assert_eq!(len(&pss(&[])), Ok(32));
+        let sha1 = element(
+            0xa0,
+            &element(SEQUENCE, &oid(&[0x2b, 0x0e, 0x03, 0x02, 0x1a])),
+        );
+        assert_eq!(len(&pss(&sha1)), Ok(32));
+        assert!(len(&pss(&named(4))).unwrap_err().contains("SHA-224"));
+        assert!(len(&oid(&[0x2b, 0x65, 0x70]))
+            .unwrap_err()
+            .contains("no single hash"));
+    }
+
+    /// The walk's lengths are the certificate's, which a dial that checked
+    /// nothing took from whoever answered: every cut of a certificate and
+    /// every byte of it changed is an error or a hash, never a panic nor a
+    /// read past its end; a length of more than four bytes, or one past
+    /// the bytes, is refused.
+    #[test]
+    fn a_certificate_cut_or_changed_never_panics_the_binding() {
+        for cert in [
+            signed_with(&rcgen::PKCS_ECDSA_P256_SHA256),
+            signed_with(&rcgen::PKCS_ED25519),
+        ] {
+            for n in 0..cert.len() {
+                assert!(server_end_point(&cert[..n]).is_err(), "cut at {n}");
+                for x in [0x00, 0x7f, 0x80, 0x84, 0x85, 0xff] {
+                    let mut changed = cert.clone();
+                    changed[n] = x;
+                    let _ = server_end_point(&changed);
+                }
+            }
+        }
+        assert_eq!(der(&[0x30, 0x85, 1, 0, 0, 0, 0]), None);
+        assert_eq!(der(&[0x30, 0x80]), None);
+        assert_eq!(der(&[0x30, 0x84, 0xff, 0xff, 0xff, 0xff, 0]), None);
+        assert_eq!(der(&[0x30, 0x02, 0x01]), None);
+        assert_eq!(
+            der(&[0x30, 0x01, 0x01, 0x02]),
+            Some((0x30, &[1u8][..], &[2u8][..]))
+        );
+    }
+
     #[test]
     fn wire_certs() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fennec-wire/tests/certs");
