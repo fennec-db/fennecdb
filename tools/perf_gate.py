@@ -56,6 +56,8 @@ held to the same 1%.
     python3 tools/perf_gate.py measure --base-bin B --head-bin B \\
         --head-leak 65536 --out R.json                    # the heap-shift control
     python3 tools/perf_gate.py check R.json               # this tree's entries
+    python3 tools/perf_gate.py check R.json --expect "core-put:both" \\
+        --cannot-run "http-scoped-set=<its error's words>"   # a holdout pair
     python3 tools/perf_gate.py reaches --base HEAD^1      # whether a change is counted
     python3 tools/perf_gate.py edits --base HEAD^1        # the gate's own files it edits
 
@@ -70,6 +72,14 @@ its workload through only in the pull request that adds it -- one the base
 holds already (`--accepted-base`) lets nothing through -- so the list is
 the history of what was let through, never removed. The owner approves
 each entry, and each edit of the gate's own files, which `edits` names.
+
+The holdout (.github/workflows/perf-holdout.yml) replays merged pairs and
+knows what each must do: `--expect` names the workloads that fail and by
+which metric, and the check passes only when exactly those fail -- `pass`,
+when none does. A pair whose base predates what a workload's setup asks for
+names it with `--cannot-run` and the words the base's error says it in: held
+to nothing then, where a workload so named that the base ran, or did not
+for another reason, fails, as does any other the base did not run.
 
 `run` and `measure` count with valgrind, which runs on Linux: elsewhere they
 say so and exit 0 (on macOS, in Docker: docs/design/benchmarks.md#the-gate).
@@ -304,7 +314,7 @@ def heap_figures(name, w):
     return {"calls": (med(base, "calls"), med(head, "calls")), "bytes": (bb, hb), "delta": delta}
 
 
-def judge(results, entries=(), threshold=THRESHOLD, base_names=None):
+def judge(results, entries=(), threshold=THRESHOLD, base_names=None, cannot_run=None):
     """Each workload of `results` judged: (rows, failed), a row (name, ops,
     base, head, delta, verdict, counted, heap) -- base and head figures for
     the whole loop, the allocator's instructions counted as its calls at the
@@ -314,7 +324,11 @@ def judge(results, entries=(), threshold=THRESHOLD, base_names=None):
     the pull request's own; `base_names` the workloads the base's own
     program lists ({name: ops}), or None where unknown: a workload of them
     this tree dropped fails, and so does one of them the base's build did
-    not run, where a workload new to this tree is held to nothing."""
+    not run, where a workload new to this tree is held to nothing.
+    `cannot_run`, {name: why}, the holdout's: workloads a replayed base is
+    known not to run, the words `why` in its error -- held to nothing where
+    the base did not run one and said so, failed where it ran one or did
+    not for another reason."""
     if results.get("metric") != "instructions":
         raise ValueError(f"these results hold {results.get('metric')!r}, not instructions")
     names = set(results["workloads"])
@@ -322,6 +336,10 @@ def judge(results, entries=(), threshold=THRESHOLD, base_names=None):
     for e in entries:
         if e["workload"] not in known:
             raise ValueError(f"PERF_ACCEPTED names {e['workload']!r}, which no workload is")
+    cannot_run = cannot_run or {}
+    for name in sorted(cannot_run):
+        if name not in names:
+            raise ValueError(f"{name!r} is named as a workload the base cannot run, which no workload is")
     allowed = {}
     for e in entries:
         key = (e["workload"], metric_of(e))
@@ -349,6 +367,23 @@ def judge(results, entries=(), threshold=THRESHOLD, base_names=None):
         if not head:
             rows.append((name, w["ops"], figure(base) if base else None, None, None, "FAILED: this tree's build did not run it", None, None))
             failed = True
+            continue
+        why = cannot_run.get(name)
+        if why is not None:
+            # A base older than what the workload's setup asks for, said
+            # by the error it gave: one it ran, or did not for another
+            # reason -- a crash -- is no workload it cannot run.
+            if base:
+                verdict = f"FAILED: named as one the base cannot run ({why}), and the base ran it"
+            elif why not in (w.get("base_error") or ""):
+                verdict = f"FAILED: the base did not run it, its error not the one named ({why})"
+            else:
+                verdict = None
+            if verdict:
+                rows.append((name, w["ops"], figure(base) if base else None, figure(head), None, verdict, None, None))
+                failed = True
+            else:
+                rows.append((name, w["ops"], None, figure(head), None, f"the base cannot run it, as named: {why}", None, None))
             continue
         if not base:
             had = name in base_names if base_names is not None else bool(w.get("base_error"))
@@ -387,6 +422,81 @@ def judge(results, entries=(), threshold=THRESHOLD, base_names=None):
         rows.append((name, w["ops"], b, h, delta, verdict, counted, heap))
     rows.sort(key=lambda r: r[0])
     return rows, failed
+
+
+# ------------------------------------------------------------------ the holdout
+
+
+def failing(rows):
+    """What failed in `rows` (`judge`'s), {name: kinds}: the metrics a
+    workload failed by, `instructions` and `bytes`, or `other` for a failure
+    no metric is -- dropped, not run on a side, too few runs, named as one
+    the base cannot run and run."""
+    found = {}
+    for name, *_, verdict, _counted, _heap in rows:
+        if verdict.startswith("FAILED: "):
+            parts = verdict[len("FAILED: "):].split("; ")
+            found[name] = {p.split(" ", 1)[0] if p.split(" ", 1)[0] in METRICS else "other" for p in parts}
+    return found
+
+
+def failures_said(failures):
+    """{name: kinds} as a line: "`a` both, `b` bytes", or "none"."""
+    said = lambda k: "both" if k == set(METRICS) else ", ".join(sorted(k))
+    return ", ".join(f"`{n}` {said(k)}" for n, k in sorted(failures.items())) or "none"
+
+
+def expected_of(text):
+    """`--expect`'s text read, {name: metrics}: `pass`, no workload failing,
+    or each workload that fails as `name:metric` -- `instructions`, `bytes`
+    or `both` -- apart by spaces or commas. Anything else is refused: an
+    expectation left empty is no `pass`."""
+    text = text.strip()
+    if text == "pass":
+        return {}
+    out = {}
+    for item in re.split(r"[\s,]+", text) if text else []:
+        name, _, metric = item.rpartition(":")
+        kinds = set(METRICS) if metric == "both" else {metric}
+        if not name or not kinds <= set(METRICS):
+            raise ValueError(f"an expectation is `pass` or `<workload>:instructions|bytes|both`: {item!r}")
+        if name in out:
+            raise ValueError(f"{name!r} is expected twice")
+        out[name] = kinds
+    if not out:
+        raise ValueError("an expectation is `pass` or the workloads that fail, each `<workload>:<metric>`")
+    return out
+
+
+def cannot_run_of(text):
+    """`--cannot-run`'s text read, {name: why}: `name[,name...]=why`, the
+    workloads a replayed base cannot run and the words its error says why
+    in; none where the text is empty."""
+    text = text.strip()
+    if not text:
+        return {}
+    names, _, why = text.partition("=")
+    why = why.strip()
+    listed = [n for n in re.split(r"[\s,]+", names.strip()) if n]
+    if not why or not listed:
+        raise ValueError(f"a workload the base cannot run is named `<workload>[,<workload>...]=<its error's words>`: {text!r}")
+    return {n: why for n in listed}
+
+
+def unexpected(rows, expected):
+    """How what failed in `rows` differs from `expected` (`expected_of`): a
+    line for each workload that failed unnamed, by another metric than
+    named or for no metric's reason, or that was named and did not fail.
+    None when exactly those failed."""
+    found, verdicts = failing(rows), {r[0]: r[5] for r in rows}
+    said = lambda k: " and ".join(sorted(k)) if k else "nothing"
+    out = []
+    for n in sorted(set(found) | set(expected)):
+        got, want = found.get(n, set()), expected.get(n, set())
+        if got != want:
+            how = verdicts[n] if "other" in got else f"failed by {said(got)}"
+            out.append(f"`{n}`: expected to fail by {said(want)}, {how}")
+    return out
 
 
 def spread(runs):
@@ -463,8 +573,21 @@ def check(args):
         if args.base_program:
             with open(args.base_program, encoding="utf-8") as f:
                 names = workload_names(f.read())
-        rows, failed = judge(results, added(head, base), base_names=names)
+        cannot = {}
+        for text in args.cannot_run or []:
+            cannot.update(cannot_run_of(text))
+        rows, failed = judge(results, added(head, base), base_names=names, cannot_run=cannot)
         text = table(results, rows)
+        if args.expect is not None:
+            # A holdout pair: as expected when exactly the workloads named
+            # fail, each by the metrics named -- one more or one fewer is
+            # not, nor one failing for no metric's reason.
+            off = unexpected(rows, expected_of(args.expect))
+            if off:
+                text += "\n**Not as expected**:\n\n" + "".join(f"- {line}\n" for line in off)
+            else:
+                text += f"\n**As expected**: failed, {failures_said(failing(rows))}.\n"
+            failed = bool(off)
     except ValueError as e:
         # Said where the pull request's author reads the gate's table.
         text, failed = f"### The perf gate refused its input\n\n{e}\n", True
@@ -932,7 +1055,7 @@ def run(args):
         f.write(show(sha, PROGRAM))
     ns = argparse.Namespace(
         results=out, accepted_from=os.path.abspath(__file__), accepted_base=accepted_base,
-        base_program=base_program, summary=args.summary,
+        base_program=base_program, summary=args.summary, expect=None, cannot_run=None,
     )
     return check(ns)
 
@@ -970,6 +1093,10 @@ def main(argv=None):
     c.add_argument("--accepted-base", help="the checker whose PERF_ACCEPTED the base holds already")
     c.add_argument("--base-program", help="the base's own gate.rs, whose workloads this tree's are held to (empty: none)")
     c.add_argument("--summary", help="append the table to this file (a step summary)")
+    c.add_argument("--expect", help="a holdout pair: `pass`, or the workloads that fail, `name:instructions|bytes|both` "
+                   "each; exit 0 when exactly those fail")
+    c.add_argument("--cannot-run", action="append", help="a holdout pair: `name[,name...]=why`, workloads its base "
+                   "cannot run, the words of the base's error (empty: none)")
 
     h = sub.add_parser("reaches", help="whether a change reaches what the gate builds: built=true|false")
     h.add_argument("--base", required=True)

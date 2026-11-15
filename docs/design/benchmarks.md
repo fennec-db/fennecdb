@@ -516,8 +516,65 @@ job judges a pull request, every one to pass or to fail on a cost its
 change is shown to have; the calibration's nine pairs again, judged by
 self costs where the calibration priced by call lines, its six merged
 changes to pass and its three regressions to fail; and the heap-shift
-control on x86_64 musl. `perf (instructions)` stays a check no merge
-requires until it passes.
+control on x86_64 musl. Each pair says what it must do (`expect`): `pass`,
+no workload failing, or the workloads that fail and by what --
+instructions, bytes or both -- and is as expected only when exactly those
+fail, a workload failing for no metric's reason (dropped, unrun) never; a
+pair whose base predates what a workload's setup asks for names it
+(`cannot_run`) with the words of the base's error, and is judged on the
+workloads both sides run, one so named that the base runs, or does not for
+another reason, failing it (`perf_gate.py check --expect --cannot-run`).
+Its first run (43682293646, main at 8743f0d9), every merged pair expected
+to pass, held the control and twenty pairs as expected, each side's five
+runs within 0.03% of each other but `core-group`'s, 0.11% at most, most of
+them the same to the instruction; five were not, each cost found in the two
+sides' median profiles, function by function, and in the lines its change
+wrote. #593: a read by an id or a `@hash` bucket asks `candidates_held`,
+which compares the index's name to know a bucket gave its rows, and builds
+its test with `Filter::without`, which collects the `and`'s terms into a
+vector even where the equality is the only one -- +326 to +426
+instructions of its own an op, and an allocation of 32 bytes and its free:
+`core-get-id` +6.51% (31 → 33 calls, 807 → 839 bytes an op, +3.97%),
+`core-filter-limit` +2.15% (+1.01%), `http-get-row` +4.09% (+2.55%),
+`http-patch` +3.56% (+1.99%), `http-scoped-get` +3.02% (+1.45%), a cost to
+win back in a change of its own. #554: every scoped request charged to its
+caller's `--request-rate` as its token is checked (`rate::admitted`: the
+table's lock, the subject's hash lookup, a clock read), +652 to +696
+instructions and nothing allocated -- `http-scoped-get` +2.85%,
+`http-scoped-insert` +1.63%, `http-scoped-set` +1.22%. #568: every record
+carries a CRC32C -- an open checks each it reads, `file-open` +20.23%, 257
+instructions a record of 100 000 (`Rec::summed` 80, the sum 77, the walk
+over each record's framing 100); a compaction sums each it writes,
+`file-compact` +21.76% (141 a record); a write sums its record,
+`Database::commit` 81, the sum 35, a copy 37 and `record_at` 17,
+`core-insert` +1.82%, `core-put` +1.20%, `http-put` +1.13%, the longer
+records growing the buffers they are written into, `core-insert` +1.54%,
+`core-put` +1.24% and `http-patch` +1.32% in bytes, all of them `realloc`'s
+growth -- the write's cost the owner accepted as it merged. The sum ran as
+SSE4.2's `crc32` (`crc::x86::raw`, no table in any profile): valgrind's
+CPUID offered SSE4.2, as every x86_64 processor made since 2011 does, and
+an aarch64 with `crc` takes its own instruction a word, so the figures are
+a user's; only the browser module and a processor without the instruction
+take the slicing-by-8 table, eight lookups and their XORs for the eight
+bytes one instruction sums. Recheck #524: `http-batch` -3.18% in
+instructions, 4 calls a put fewer, and +2.85% in bytes: a batch's lines
+are parsed into `Query`s, each its text and what its first read found,
+then moved by `exactly_batch` into a vector of exactly their number, where
+the base pushed each statement into its one vector -- `realloc`'s growth
+840 480 bytes a batch less (824 an element, over the 1 020 it grows by),
+911 736 allocated outright more, 71 a put. Recheck #474: its scoped writes'
+policy grants `wake`, which #474 brought, and its base refuses the policy
+before the loop: the two workloads "the base's build did not run" are
+named as its cannot-run now, and the other 23 passed. #474's first head
+against its fix -- a base that reads `wake`, and ran every workload --
+failed on its regression alone: `http-scoped-insert` +3.25% (+3.26% in
+bytes), `http-scoped-set` +2.42% (+2.79%), `http-scoped-get` +1.11%
+(+1.09%). The pairs with a cost and the three regressions now name the
+workloads and metrics above -- #511 undone `core-json-page`'s
+instructions, #542's first head `http-get-row`'s and `http-patch`'s -- and
+every pair, judged again by the new step from the first run's results,
+came out as expected. `perf (instructions)` stays a check no merge
+requires until the corrected workflow's run is green.
 
 *Why fennec-http's examples.* The program reaches every crate a request
 does and no more. In `fennec-bench`, its bundled SQLite, the MongoDB

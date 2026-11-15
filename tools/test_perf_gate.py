@@ -4,10 +4,14 @@ a synthetic +1% fails, an entry the pull request adds lets it through, one
 the base holds already does not, a median holds a seed's step, an
 allocation's cost moving with the heap passes where an allocation more
 fails, a +1% in heap bytes fails as the figure's does, a workload the base
-had and this tree dropped or the base did not run fails -- the reading of
-a profile's calls into the allocator, of a run's heap tally, of the base's
-workloads, of PERF_ACCEPTED as data, never run; which changes are counted,
-and the gate's own files a change edits; then the committed list.
+had and this tree dropped or the base did not run fails, a holdout pair is
+as expected only when exactly the workloads it names fail, by the metrics
+it names, a workload its base cannot run held to nothing only when named
+with its error's words -- the reading of a profile's calls into the
+allocator, of a run's heap tally, of the base's workloads, of
+PERF_ACCEPTED as data, never run; which changes are counted, and the gate's
+own files a change edits; then the committed list and the holdout's
+matrix.
 
     python3 tools/test_perf_gate.py
 """
@@ -18,6 +22,7 @@ import io
 import json
 import math
 import os
+import re
 import subprocess
 import tempfile
 import textwrap
@@ -541,6 +546,157 @@ class Names(unittest.TestCase):
         self.assertTrue(failed)
 
 
+WAKE = "policy line 4: `wake` is none of read, read(<fields>), insert"
+
+
+def unrun(res, name, error=f'called `Result::unwrap()` on an `Err` value: "{WAKE}"'):
+    """`res` with workload `name` not run by the base, which said `error`."""
+    res["workloads"][name]["base"] = []
+    res["workloads"][name]["base_error"] = error
+    return res
+
+
+class Holdout(unittest.TestCase):
+    """A replayed pair's verdict: the workloads its base cannot run named
+    with their error's words, the workloads that fail named with their
+    metrics, and the job as expected only when exactly those fail."""
+
+    NAMES = {"a": 1_000, "b": 1_000}
+
+    def judged(self, res, cannot_run=None):
+        rows, failed = gate.judge(res, [], base_names=self.NAMES, cannot_run=cannot_run)
+        return rows, failed, {r[0]: r[5] for r in rows}
+
+    def test_a_workload_named_that_the_base_could_not_run_is_held_to_nothing(self):
+        rows, failed, v = self.judged(unrun(results(), "a"), {"a": "`wake` is none of"})
+        self.assertFalse(failed, v)
+        self.assertTrue(v["a"].startswith("the base cannot run it"), v)
+        self.assertEqual(gate.failing(rows), {})
+
+    def test_a_workload_named_that_the_base_ran_fails(self):
+        rows, failed, v = self.judged(results(), {"a": "`wake` is none of"})
+        self.assertTrue(failed)
+        self.assertIn("the base ran it", v["a"])
+        self.assertEqual(gate.failing(rows), {"a": {"other"}})
+
+    def test_a_workload_named_that_the_base_did_not_run_for_another_reason_fails(self):
+        res = unrun(results(), "a", "a: exit 101\nthread 'main' panicked at index out of bounds")
+        rows, failed, v = self.judged(res, {"a": "`wake` is none of"})
+        self.assertTrue(failed)
+        self.assertIn("not the one named", v["a"])
+        self.assertEqual(gate.failing(rows), {"a": {"other"}})
+
+    def test_a_workload_the_base_did_not_run_and_none_named_fails(self):
+        res = unrun(unrun(results(), "a"), "b")
+        rows, failed, v = self.judged(res, {"a": "`wake` is none of"})
+        self.assertTrue(failed)
+        self.assertTrue(v["a"].startswith("the base cannot run it"), v)
+        self.assertIn("did not run it", v["b"])
+        self.assertEqual(gate.failing(rows), {"b": {"other"}})
+
+    def test_a_workload_named_that_none_is_is_refused(self):
+        with self.assertRaises(ValueError):
+            gate.judge(results(), [], base_names=self.NAMES, cannot_run={"nothing": "why"})
+
+    def test_failing_reads_each_metric_and_every_other_failure(self):
+        res = tallied(with_heaps(results(a=0.02, b=0.02, c=0.0, d=0.02, e=0.0)), "b", 500_000, 510_000)
+        res = tallied(res, "c", 500_000, 510_000)
+        res["workloads"]["e"]["head"] = []
+        res["workloads"]["e"]["heap"]["head"] = []
+        rows, _ = gate.judge(res, [entry("d", most="+2.5%")], base_names={**self.NAMES, "gone": 20})
+        self.assertEqual(
+            gate.failing(rows),
+            {"a": {"instructions"}, "b": {"instructions", "bytes"}, "c": {"bytes"}, "e": {"other"}, "gone": {"other"}},
+        )
+        res = results()
+        res["workloads"]["a"]["head"] = res["workloads"]["a"]["head"][:3]
+        self.assertEqual(gate.failing(gate.judge(res, [])[0]), {"a": {"other"}})
+
+    def test_an_expectation_is_pass_or_workloads_and_their_metrics(self):
+        self.assertEqual(gate.expected_of("pass"), {})
+        self.assertEqual(gate.expected_of(" pass\n"), {})
+        self.assertEqual(
+            gate.expected_of("a:both b:bytes,\n c:instructions"),
+            {"a": {"instructions", "bytes"}, "b": {"bytes"}, "c": {"instructions"}},
+        )
+        for bad in ("", "fail", "a", "a:", ":both", "a:cycles", "a:Bytes", "a:both a:bytes", "pass a:both"):
+            with self.subTest(text=bad), self.assertRaises(ValueError):
+                gate.expected_of(bad)
+
+    def test_workloads_the_base_cannot_run_are_named_with_their_errors_words(self):
+        self.assertEqual(gate.cannot_run_of(""), {})
+        self.assertEqual(gate.cannot_run_of("  "), {})
+        self.assertEqual(gate.cannot_run_of("a,b=`wake` is none of"), {"a": "`wake` is none of", "b": "`wake` is none of"})
+        self.assertEqual(gate.cannot_run_of("a = x = y"), {"a": "x = y"})
+        for bad in ("a", "a=", "=why", " , =why"):
+            with self.subTest(text=bad), self.assertRaises(ValueError):
+                gate.cannot_run_of(bad)
+
+    def test_exactly_the_named_failures_are_as_expected(self):
+        rows, _ = gate.judge(tallied(with_heaps(results(a=0.02)), "b", 500_000, 510_000), [])
+        self.assertEqual(gate.unexpected(rows, {"a": {"instructions"}, "b": {"bytes"}}), [])
+        for expected in (
+            {},  # pass: two failed
+            {"a": {"instructions"}},  # one fewer
+            {"a": {"instructions"}, "b": {"bytes"}, "c": {"bytes"}},  # one more
+            {"a": {"instructions", "bytes"}, "b": {"bytes"}},  # a's bytes did not fail
+            {"a": {"instructions"}, "b": {"instructions"}},  # b failed by another metric
+        ):
+            with self.subTest(expected=expected):
+                self.assertTrue(gate.unexpected(rows, expected))
+
+    def test_a_failure_of_no_metric_is_never_as_expected(self):
+        rows, _ = gate.judge(unrun(results(a=0.02), "b"), [], base_names=self.NAMES)
+        for expected in ({"a": {"instructions"}}, {"a": {"instructions"}, "b": {"instructions", "bytes"}}):
+            with self.subTest(expected=expected):
+                self.assertTrue(gate.unexpected(rows, expected))
+
+
+class HoldoutCheck(unittest.TestCase):
+    """`check --expect --cannot-run`: the holdout's step, its exit 0 only as
+    expected."""
+
+    setUp = Reading.setUp
+    write = Reading.write
+    run_check = Reading.run_check
+
+    def holdout(self, res, expect, *cannot_run):
+        program = self.write("gate.rs", GATE_RS.replace('    ("gone", 20, core_gone),\n', ""))
+        more = ["--base-program", program, "--expect", expect]
+        for text in cannot_run:
+            more += ["--cannot-run", text]
+        return self.run_check(res, [], [], more)
+
+    def test_a_pair_failing_as_named_is_as_expected(self):
+        code, summary = self.holdout(results(a=0.02), "a:instructions")
+        self.assertEqual(code, 0, summary)
+        self.assertIn("**As expected**: failed, `a` instructions.", summary)
+
+    def test_a_pair_failing_otherwise_is_not(self):
+        code, summary = self.holdout(results(a=0.02, b=0.02), "a:instructions")
+        self.assertEqual(code, 1)
+        self.assertIn("**Not as expected**", summary)
+        self.assertIn("`b`: expected to fail by nothing, failed by instructions", summary)
+        code, _ = self.holdout(results(), "a:instructions")
+        self.assertEqual(code, 1)
+
+    def test_pass_is_no_workload_failing(self):
+        self.assertEqual(self.holdout(results(), "pass")[0], 0)
+        self.assertEqual(self.holdout(results(a=0.02), "pass")[0], 1)
+
+    def test_a_workload_the_base_cannot_run_is_named_or_fails(self):
+        res = unrun(results(), "a")
+        self.assertEqual(self.holdout(res, "pass", "a=`wake` is none of")[0], 0)
+        self.assertEqual(self.holdout(res, "pass", "")[0], 1)
+        self.assertEqual(self.holdout(res, "pass", "a=no such statement")[0], 1)
+        self.assertEqual(self.holdout(results(), "pass", "a=`wake` is none of")[0], 1)
+
+    def test_an_expectation_left_empty_is_refused(self):
+        code, summary = self.holdout(results(), "")
+        self.assertEqual(code, 1)
+        self.assertIn("refused", summary)
+
+
 class Reaches(unittest.TestCase):
     """What the job counts: everything but what no build reads, so a place a
     build reads is counted before anyone lists it."""
@@ -708,6 +864,27 @@ class Committed(unittest.TestCase):
         self.assertGreaterEqual(len(names), 25)
         self.assertIn("sync-apply", names)
         self.assertTrue(all(ops > 0 for ops in names.values()))
+
+    def test_the_holdouts_pairs_name_workloads_the_program_runs(self):
+        # Each pair's `expect` and `cannot_run` as the job reads them, held
+        # here rather than first at a dispatch: a name misspelt would fail
+        # the pair an hour into its run.
+        root = os.path.dirname(HERE)
+        with open(os.path.join(root, gate.PROGRAM), encoding="utf-8") as f:
+            names = gate.workload_names(f.read())
+        with open(os.path.join(root, ".github/workflows/perf-holdout.yml"), encoding="utf-8") as f:
+            text = f.read()
+        expects = re.findall(r'\bexpect: (?:"([^"]*)"|([a-z]+))', text)
+        self.assertEqual(len(expects), len(re.findall(r'\bslug: "', text)))
+        self.assertGreaterEqual(len(expects), 24)
+        for quoted, bare in expects:
+            for name in gate.expected_of(quoted or bare):
+                self.assertIn(name, names)
+        cannot = re.findall(r'\bcannot_run: "([^"]*)"', text)
+        self.assertTrue(cannot)
+        for spec in cannot:
+            for name in gate.cannot_run_of(spec):
+                self.assertIn(name, names)
 
     def test_the_workflow_holds_the_jobs_edits_watches(self):
         with open(os.path.join(os.path.dirname(HERE), gate.WORKFLOW), encoding="utf-8") as f:
