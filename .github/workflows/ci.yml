@@ -1229,15 +1229,45 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
 
-      # Under tools/, so it reads this checkout as its tree; this tree's
-      # only where the base has none yet.
+      # Under tools/, so it reads this checkout as its tree -- a checker
+      # finds it as the directory above its own -- and chosen by the base
+      # alone: the base's file as git reads it, this tree's only where git
+      # says the base has none. Whatever the pull request tracks at the
+      # path is refused, never written into or run, and a git error is no
+      # base without a checker. The base's gate.rs is read here too, before
+      # anything of the change runs.
       - name: The base's checker
         run: |
-          if git show HEAD^1:tools/perf_gate.py > tools/perf_gate_base.py; then
+          at_base() {
+            local s=0
+            git cat-file -e "HEAD^1:$1" 2>/dev/null || s=$?
+            [ "$s" = 0 ] && return 0
+            [ "$s" = 128 ] && return 1
+            echo "::error title=perf gate::git cannot read the base's $1 (git cat-file -e exited $s): a git error chooses no checker"
+            exit 1
+          }
+          if [ -L tools ] || [ ! -d tools ]; then
+            echo "::error title=perf gate::this change's tools/ is not a directory, and the base's checker is written into it"
+            exit 1
+          fi
+          tracked=$(git ls-tree --name-only HEAD -- tools/perf_gate_base.py)
+          if [ -n "$tracked" ]; then
+            echo "::error title=perf gate::this change tracks tools/perf_gate_base.py, where the job writes the base's checker: remove it"
+            exit 1
+          fi
+          rm -rf tools/perf_gate_base.py
+          git cat-file -e 'HEAD^1^{tree}' || { echo "::error title=perf gate::git cannot read the base, HEAD^1"; exit 1; }
+          if at_base tools/perf_gate.py; then
+            git show HEAD^1:tools/perf_gate.py > tools/perf_gate_base.py
             echo "counted by the base's checker"
           else
             cp tools/perf_gate.py tools/perf_gate_base.py
             echo "the base has no tools/perf_gate.py yet: this tree's counts"
+          fi
+          if at_base crates/fennec-http/examples/gate.rs; then
+            git show HEAD^1:crates/fennec-http/examples/gate.rs > "$RUNNER_TEMP/base_gate.rs"
+          else
+            : > "$RUNNER_TEMP/base_gate.rs"
           fi
 
       # Counted unless every path is the site's, the docs', an
@@ -1292,21 +1322,20 @@ jobs:
           path: ${{ runner.temp }}/perf/profiles/
           retention-days: 14
 
-      # By the base's checker wherever the base's gate.rs lists
-      # IO_WORKLOADS; this tree's only where it lists none -- the pull
-      # request that brought them, counted by its own as the gate's first
-      # was. Chosen by a grep, never by Python of the change's, which the
-      # tests hold to the checker's `io_checker`; a base checker that
-      # cannot count them fails the step. Run whatever became of the
-      # instructions' count, which is judged apart.
+      # By the base's checker wherever the base's gate.rs mentions
+      # IO_WORKLOADS, however spelt; this tree's only where grep reads it
+      # and finds none -- the pull request that brought them, counted by
+      # its own as the gate's first was. Chosen by a grep, never by Python
+      # of the change's, which the tests hold to the checker's
+      # `io_checker`; a base checker that cannot count them fails the step.
+      # Run whatever became of the instructions' count, which is judged
+      # apart.
       - name: Count each I/O workload's fsyncs, renames and bytes written against the base's server and this one's
         if: ${{ !cancelled() && steps.reach.outputs.built == 'true' }}
         run: |
           sudo apt-get install -y --no-install-recommends strace
-          git show HEAD^1:crates/fennec-http/examples/gate.rs > "$RUNNER_TEMP/base_gate.rs" \
-            || : > "$RUNNER_TEMP/base_gate.rs"
-          checker=tools/perf_gate.py
-          grep -Eq '^[[:space:]]*const IO_WORKLOADS\b' "$RUNNER_TEMP/base_gate.rs" && checker=tools/perf_gate_base.py
+          checker=tools/perf_gate_base.py
+          grep -q IO_WORKLOADS "$RUNNER_TEMP/base_gate.rs" || test $? -ne 1 || checker=tools/perf_gate.py
           echo "the I/O counted by $checker"
           python3 -I "$checker" io --base HEAD^1 --target x86_64-unknown-linux-musl \
             --work "$RUNNER_TEMP/perf" --out "$RUNNER_TEMP/perf/io.json" --no-check
@@ -1335,10 +1364,12 @@ jobs:
   # the count runs the change's build scripts and programs, which could
   # put anything on a later step's PATH ($GITHUB_PATH); here nothing of the
   # change runs but these steps, whose every edit it names for the owner --
-  # the checker the base's, but where the base's gate.rs lists no
-  # IO_WORKLOADS, chosen by a grep -- and git and python3 are the runner's. It names every edit of the gate's own files
-  # and every entry added, which the owner approves before the change
-  # merges. This job is the check a merge may require.
+  # the checker the base's, but where the base's gate.rs mentions no
+  # IO_WORKLOADS, chosen by a grep, and never what the change put where
+  # the copy is written -- and git and python3 are the runner's. It names
+  # every edit of the gate's own files and every entry added, which the
+  # owner approves before the change merges. This job is the check a
+  # merge may require.
   perf:
     name: perf (instructions)
     needs: perf-count
@@ -1353,19 +1384,46 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
 
+      # As the count chose it: the base's file as git reads it, this
+      # tree's only where git says the base has none, whatever the pull
+      # request tracks at the path refused, a git error no base without a
+      # checker. The base's gate.rs beside none of the artifacts, which
+      # are downloaded each into a directory of its own.
       - name: The base's checker and program
         id: base
         run: |
-          mkdir -p "$RUNNER_TEMP/judge"
-          if git show HEAD^1:tools/perf_gate.py > tools/perf_gate_base.py; then
+          at_base() {
+            local s=0
+            git cat-file -e "HEAD^1:$1" 2>/dev/null || s=$?
+            [ "$s" = 0 ] && return 0
+            [ "$s" = 128 ] && return 1
+            echo "::error title=perf gate::git cannot read the base's $1 (git cat-file -e exited $s): a git error chooses no checker"
+            exit 1
+          }
+          if [ -L tools ] || [ ! -d tools ]; then
+            echo "::error title=perf gate::this change's tools/ is not a directory, and the base's checker is written into it"
+            exit 1
+          fi
+          tracked=$(git ls-tree --name-only HEAD -- tools/perf_gate_base.py)
+          if [ -n "$tracked" ]; then
+            echo "::error title=perf gate::this change tracks tools/perf_gate_base.py, where the job writes the base's checker: remove it"
+            exit 1
+          fi
+          rm -rf tools/perf_gate_base.py
+          git cat-file -e 'HEAD^1^{tree}' || { echo "::error title=perf gate::git cannot read the base, HEAD^1"; exit 1; }
+          if at_base tools/perf_gate.py; then
+            git show HEAD^1:tools/perf_gate.py > tools/perf_gate_base.py
             echo "had=true" >> "$GITHUB_OUTPUT"
             echo "judged by the base's checker"
           else
             cp tools/perf_gate.py tools/perf_gate_base.py
             echo "the base has no tools/perf_gate.py yet: this tree's judges"
           fi
-          git show HEAD^1:crates/fennec-http/examples/gate.rs > "$RUNNER_TEMP/judge/base_gate.rs" \
-            || : > "$RUNNER_TEMP/judge/base_gate.rs"
+          if at_base crates/fennec-http/examples/gate.rs; then
+            git show HEAD^1:crates/fennec-http/examples/gate.rs > "$RUNNER_TEMP/base_gate.rs"
+          else
+            : > "$RUNNER_TEMP/base_gate.rs"
+          fi
 
       - name: The gate's own files this change edits, for the owner
         run: python3 -I tools/perf_gate_base.py edits --base HEAD^1 --summary "$GITHUB_STEP_SUMMARY"
@@ -1374,15 +1432,16 @@ jobs:
         id: reach
         run: python3 -I tools/perf_gate_base.py reaches --base HEAD^1 --output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
 
-      # Whatever the count left, each artifact apart: a file it lacks is
-      # said by the step that judges it.
+      # Whatever the count left, each artifact apart and into a directory
+      # of its own, which holds nothing the judge reads but its results: a
+      # file it lacks is said by the step that judges it.
       - name: The count's results
         if: ${{ !cancelled() && steps.reach.outputs.built == 'true' }}
         continue-on-error: true
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: perf-results
-          path: ${{ runner.temp }}/judge
+          path: ${{ runner.temp }}/judge/count
 
       - name: The I/O count's results
         if: ${{ !cancelled() && steps.reach.outputs.built == 'true' }}
@@ -1390,14 +1449,14 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: perf-io-results
-          path: ${{ runner.temp }}/judge
+          path: ${{ runner.temp }}/judge/io
 
       - name: Hold them to the base's, by the base's checker
         if: ${{ !cancelled() && steps.reach.outputs.built == 'true' }}
         env:
           BASE_HAD: ${{ steps.base.outputs.had }}
         run: |
-          if [ ! -f "$RUNNER_TEMP/judge/results.json" ]; then
+          if [ ! -f "$RUNNER_TEMP/judge/count/results.json" ]; then
             echo "::error title=perf gate::perf (count) left no instruction results (results.json): its count failed or never ran, and its log says why"
             echo "perf (count) left no instruction results (results.json): the instructions are not judged." >> "$GITHUB_STEP_SUMMARY"
             exit 1
@@ -1407,9 +1466,9 @@ jobs:
           if [ "$BASE_HAD" = true ]; then
             held=(--accepted-base tools/perf_gate_base.py)
           fi
-          python3 -I tools/perf_gate_base.py check "$RUNNER_TEMP/judge/results.json" \
+          python3 -I tools/perf_gate_base.py check "$RUNNER_TEMP/judge/count/results.json" \
             --accepted-from tools/perf_gate.py "${held[@]}" \
-            --base-program "$RUNNER_TEMP/judge/base_gate.rs" --summary "$GITHUB_STEP_SUMMARY"
+            --base-program "$RUNNER_TEMP/base_gate.rs" --summary "$GITHUB_STEP_SUMMARY"
 
       # Judged whether or not the instructions passed, so the summary holds
       # both tables; by the checker that counted them, chosen as the count
@@ -1419,21 +1478,21 @@ jobs:
         env:
           BASE_HAD: ${{ steps.base.outputs.had }}
         run: |
-          if [ ! -f "$RUNNER_TEMP/judge/io.json" ]; then
+          if [ ! -f "$RUNNER_TEMP/judge/io/io.json" ]; then
             echo "::error title=perf gate::perf (count) left no I/O results (io.json): its I/O count failed or never ran, and its log says why"
             echo "perf (count) left no I/O results (io.json): the I/O is not judged." >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
-          checker=tools/perf_gate.py
-          grep -Eq '^[[:space:]]*const IO_WORKLOADS\b' "$RUNNER_TEMP/judge/base_gate.rs" && checker=tools/perf_gate_base.py
+          checker=tools/perf_gate_base.py
+          grep -q IO_WORKLOADS "$RUNNER_TEMP/base_gate.rs" || test $? -ne 1 || checker=tools/perf_gate.py
           echo "the I/O judged by $checker"
           held=()
           if [ "$BASE_HAD" = true ]; then
             held=(--accepted-base tools/perf_gate_base.py)
           fi
-          python3 -I "$checker" check "$RUNNER_TEMP/judge/io.json" \
+          python3 -I "$checker" check "$RUNNER_TEMP/judge/io/io.json" \
             --accepted-from tools/perf_gate.py "${held[@]}" \
-            --base-program "$RUNNER_TEMP/judge/base_gate.rs" --summary "$GITHUB_STEP_SUMMARY"
+            --base-program "$RUNNER_TEMP/base_gate.rs" --summary "$GITHUB_STEP_SUMMARY"
 
       # A count that failed, or never ran, is no pass: said after what it
       # left was judged.

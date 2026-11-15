@@ -115,9 +115,12 @@ that counts a file outside its data directory.
     python3 tools/perf_gate.py check IO.json              # judged as above
 
 CI counts and judges the I/O with the base's checker too, but where the
-base's own gate.rs lists no IO_WORKLOADS: the pull request that brought
+base's own gate.rs mentions no IO_WORKLOADS: the pull request that brought
 them was counted and judged by its own. Both jobs choose it in the shell
-(`io_checker`, which the tests hold their `grep` to).
+(`io_checker`, which the tests hold their `grep` to). Each writes the
+base's copy of this checker under tools/ -- where the pull request tracks
+nothing, the path cleared first -- from the base's file as git reads it,
+this tree's only where git says the base has none.
 
 `run` and `measure` count with valgrind, `io` and `io-measure` with strace,
 both on Linux: elsewhere they say so and exit 0 (on macOS, in Docker:
@@ -2018,24 +2021,31 @@ def measure_io(base_server, head_server, client, runs, jobs, scratch, log=print,
     return results
 
 
-# The line both jobs choose the checker by, in the shell, no Python of the
-# change's run to choose it: the base's own gate.rs listing IO_WORKLOADS.
-# tools/test_perf_gate.py holds each job's `grep` to `io_checker`.
-IO_CHECKER_LINE = re.compile(r"^\s*const IO_WORKLOADS\b", re.M)
+# The word both jobs choose the checker by, in the shell, no Python of the
+# change's run to choose it: the base's own gate.rs naming IO_WORKLOADS
+# anywhere, however its table is spelt. tools/test_perf_gate.py holds each
+# job's `grep` to `io_checker`.
+IO_CHECKER_WORD = "IO_WORKLOADS"
 
 
 def io_checker(base_program):
     """Which checker counts and judges the I/O, by the base's own gate.rs
     (`base_program`, its text, empty where it had none): "base" wherever
-    that program lists IO_WORKLOADS, "this tree" only where it lists none
-    -- the pull request that brought the I/O counts, whose base had none,
-    counted and judged by its own as the gate's first was. Never by
-    whether the base's checker runs `io`: a later change that dropped or
-    broke it would hand every pull request after it to its own checker
-    for good, where this fails it. Both jobs decide it in the shell, by a
-    `grep` of the same line (IO_CHECKER_LINE), which the tests hold to
-    this: a pull request's own copy of this function decides nothing."""
-    return "base" if IO_CHECKER_LINE.search(base_program) else "this tree"
+    that program mentions IO_WORKLOADS, "this tree" only where it mentions
+    it nowhere -- the pull request that brought the I/O counts, whose base
+    had none, counted and judged by its own as the gate's first was. Any
+    mention, not a table spelt one way: one anchored on `const` read a
+    `pub const`, a `pub(crate) const` or a `static` table as none, and a
+    pull request making the table public would have handed every one after
+    it to its own checker. A base checker that then cannot count fails the
+    step, never the other way. Never by whether the base's checker runs
+    `io`: a later change that dropped or broke it would hand every pull
+    request after it to its own checker for good, where this fails it.
+    Both jobs decide it in the shell, by a `grep` of the same word
+    (IO_CHECKER_WORD) that chooses the base's too where it cannot read the
+    file, which the tests hold to this: a pull request's own copy of this
+    function decides nothing."""
+    return "base" if IO_CHECKER_WORD in base_program else "this tree"
 
 
 def io_measure(args):

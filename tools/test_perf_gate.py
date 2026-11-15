@@ -1320,56 +1320,74 @@ def steps_of(job):
 
 class Checker(unittest.TestCase):
     """Which checker counts and judges the I/O: the base's, but where the
-    base's own gate.rs lists no IO_WORKLOADS -- the pull request that
+    base's own gate.rs mentions no IO_WORKLOADS -- the pull request that
     brought them -- whatever the base's checker can run; chosen in both
     jobs by a grep of the base's gate.rs, no Python of the change's."""
 
-    CHOICE = re.compile(
-        r"^ *checker=(\S+)\n *grep -Eq '([^']*)' \"(\$RUNNER_TEMP/[^\"]*base_gate\.rs)\" && checker=(\S+)$", re.M
-    )
+    # Each job's two lines: the base's checker, unless grep read the base's
+    # program and found no mention.
+    CHOICE = re.compile(r"^ *checker=\S+\n *grep [^\n]*$", re.M)
 
-    def test_the_base_wherever_its_program_lists_them(self):
+    def test_the_base_wherever_its_program_mentions_them(self):
         self.assertEqual(gate.io_checker(GATE_RS), "base")
         self.assertEqual(gate.io_checker(GATE_RS.split("const IO_WORKLOADS")[0]), "this tree")
         self.assertEqual(gate.io_checker(""), "this tree")
-        self.assertEqual(gate.io_checker("// no const IO_WORKLOADS here\n"), "this tree")
+        # However the table is spelt, or a comment naming it: the base's.
+        for source in ("// no const IO_WORKLOADS here\n", "pub const IO_WORKLOADS: &[] = &[];\n",
+                       "pub(crate) const IO_WORKLOADS: &[] = &[];\n", "static IO_WORKLOADS: &[] = &[];\n"):
+            with self.subTest(source):
+                self.assertEqual(gate.io_checker(source), "base")
 
     def test_both_jobs_choose_it_by_a_grep_held_to_io_checker(self):
-        # The jobs' two lines, run by bash as the runner runs them, choose as
-        # `io_checker` does for every program: a pull request's edit of the
-        # checker's dispatch, or of `io_checker`, chooses nothing, and the
-        # two cannot drift. The first version asked the base's checker for
-        # `io --help` and fell back where it failed; the second ran this
-        # tree's `perf_gate.py io-checker`, the pull request's Python.
+        # The jobs' own two lines, run by bash as the runner runs them,
+        # choose as `io_checker` does for every program: a pull request's
+        # edit of the checker's dispatch, or of `io_checker`, chooses
+        # nothing, and the two cannot drift. The first version asked the
+        # base's checker for `io --help` and fell back where it failed; the
+        # second ran this tree's `perf_gate.py io-checker`, the pull
+        # request's Python; the third grepped for `const IO_WORKLOADS` at a
+        # line's start, which read a `pub const` table as none.
+        with open(os.path.join(os.path.dirname(HERE), gate.PROGRAM), encoding="utf-8") as f:
+            committed = f.read()
         programs = [
             GATE_RS, GATE_RS.split("const IO_WORKLOADS")[0], "", "// no const IO_WORKLOADS here\n",
             "    const IO_WORKLOADS: &[(&str, usize, IoPhase, IoPhase)] = &[\n",
             "const IO_WORKLOADS_OLD: &[(&str, usize)] = &[];\n", "pub const IO_WORKLOADS: &[] = &[];\n",
+            "pub(crate) const IO_WORKLOADS: &[] = &[];\n", "static IO_WORKLOADS: &[] = &[];\n",
+            "const WORKLOADS: &[] = &[];\n", committed,
         ]
+        chosen = {}
         with tempfile.TemporaryDirectory() as d:
+            env = dict(os.environ, RUNNER_TEMP=d)
+            program = os.path.join(d, "base_gate.rs")
             for job, text in ci_jobs().items():
                 with self.subTest(job):
                     found = self.CHOICE.findall(text)
                     self.assertEqual(len(found), 1, text)
-                    this, pattern, path, base = found[0]
-                    self.assertEqual((this, base), ("tools/perf_gate.py", "tools/perf_gate_base.py"))
+                    lines = textwrap.dedent(found[0]) + "\n"
+                    chosen[job] = lines
+                    self.assertIn('"$RUNNER_TEMP/base_gate.rs"', lines)
                     self.assertNotIn("io-checker", text)
                     self.assertNotIn("--help", text)
                     # No step runs this tree's checker: only where the base
-                    # lists no I/O workloads is it `$checker`.
+                    # mentions no I/O workload is it `$checker`.
                     self.assertIsNone(re.search(r"python3[^\n]* tools/perf_gate\.py", text), text)
-                    program = os.path.join(d, "base_gate.rs")
                     for source in programs:
                         with open(program, "w", encoding="utf-8") as f:
                             f.write(source)
-                        ran = subprocess.run(
-                            ["bash", "-c", f"checker={this}\ngrep -Eq '{pattern}' \"$1\" && checker={base}\n"
-                             "echo \"$checker\"", "-", program],
-                            capture_output=True, text=True, check=True,
-                        )
-                        want = base if gate.io_checker(source) == "base" else this
-                        self.assertEqual(ran.stdout.strip(), want, source)
-            self.assertEqual(len({self.CHOICE.search(t).group(2) for t in ci_jobs().values()}), 1)
+                        ran = subprocess.run(["bash", "--noprofile", "--norc", "-e", "-c", lines + 'echo "$checker"\n'],
+                                             env=env, capture_output=True, text=True, check=True)
+                        want = "tools/perf_gate_base.py" if gate.io_checker(source) == "base" else "tools/perf_gate.py"
+                        self.assertEqual(ran.stdout.strip(), want, source[:200])
+                    # A program grep cannot read chooses the base's checker,
+                    # which then fails on it: never this tree's.
+                    os.unlink(program)
+                    os.mkdir(program)
+                    ran = subprocess.run(["bash", "--noprofile", "--norc", "-e", "-c", lines + 'echo "$checker"\n'],
+                                         env=env, capture_output=True, text=True, check=True)
+                    self.assertEqual(ran.stdout.strip(), "tools/perf_gate_base.py")
+                    os.rmdir(program)
+        self.assertEqual(len(set(chosen.values())), 1, chosen)
 
 
 class KeptApart(unittest.TestCase):
@@ -1390,12 +1408,204 @@ class KeptApart(unittest.TestCase):
         self.assertNotIn("overwrite", ci_jobs()["perf-count"])
 
     def test_the_judge_downloads_each_apart(self):
-        steps = steps_of(ci_jobs()["perf"])
-        for step, name in (("The count's results", "perf-results"), ("The I/O count's results", "perf-io-results")):
+        # Each into a directory of its own, which holds nothing else the
+        # judge reads: an artifact carrying a `base_gate.rs`, unpacked
+        # beside the base's, would have chosen this tree's checker.
+        job = ci_jobs()["perf"]
+        steps = steps_of(job)
+        paths = []
+        for step, name, where in (("The count's results", "perf-results", "count"),
+                                  ("The I/O count's results", "perf-io-results", "io")):
             with self.subTest(step):
                 self.assertIn(f"name: {name}", steps[step])
                 self.assertIn("continue-on-error: true", steps[step])
                 self.assertIn("!cancelled()", steps[step])
+                self.assertIn(f"path: ${{{{ runner.temp }}}}/judge/{where}\n", steps[step] + "\n")
+                paths.append(f"$RUNNER_TEMP/judge/{where}/")
+        for read in re.findall(r'"(\$RUNNER_TEMP/[^"]+)"', job):
+            with self.subTest(read=read):
+                inside = [p for p in paths if read.startswith(p)]
+                if read.endswith(("results.json", "io.json")):
+                    self.assertEqual(len(inside), 1, read)
+                else:
+                    self.assertEqual(inside, [], read)
+
+
+def run_script(step):
+    """A step's `run:` as the runner hands it to bash: the block under
+    `run: |`, its indentation taken off, or the one line after `run:`;
+    None where the step runs nothing (a `uses:`)."""
+    lines = step.splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(r"^( *)run: ?(.*)$", line)
+        if not m:
+            continue
+        if m.group(2).strip() != "|":
+            return m.group(2) + "\n"
+        body = []
+        for more in lines[i + 1:]:
+            if len(more) - len(more.lstrip()) <= len(m.group(1)):
+                break
+            body.append(more)
+        return textwrap.dedent("\n".join(body)) + "\n"
+    return None
+
+
+# A checker each side of a scratch repository commits: what it prints says
+# whose ran.
+STUB_CHECKER = 'import sys\nprint("{who} CHECKER RAN", *sys.argv[1:])\nPERF_ACCEPTED = []\n'
+
+
+class TheBasesChecker(unittest.TestCase):
+    """Where both jobs write the base's checker, and which they run: the
+    base's file as git reads it, this tree's only where git says the base
+    has none -- never chosen by what the pull request's tree put at the
+    path the copy is written to, nor by a git error. Each job's own first
+    steps run under bash, as the runner runs them, in a scratch repository
+    whose HEAD is the pull request on its base (HEAD^1)."""
+
+    # Each job's steps up to its first run of the copy.
+    FIRST = {
+        "perf-count": ("The base's checker", "Whether the change reaches what the gate builds"),
+        "perf": ("The base's checker and program", "The gate's own files this change edits, for the owner",
+                 "Whether the change reaches what the gate builds"),
+    }
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.repo = os.path.join(self.dir.name, "repo")
+        self.temp = os.path.join(self.dir.name, "runner-temp")
+        os.makedirs(self.repo)
+
+    def sh(self, *args):
+        return subprocess.run(["git", *args], cwd=self.repo, capture_output=True, text=True, check=True).stdout.strip()
+
+    def commit(self, files=(), links=(), dirs=()):
+        """A commit of `files` ({path: text}), `links` ({path: target}) and
+        `dirs` ({path: {name: text}}) over the last: its id."""
+        if not os.path.isdir(os.path.join(self.repo, ".git")):
+            self.sh("init", "-q", "-b", "main")
+            self.sh("config", "user.email", "gate@example.com")
+            self.sh("config", "user.name", "gate")
+        for path, text in dict(files).items():
+            full = os.path.join(self.repo, path)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "w", encoding="utf-8") as f:
+                f.write(text)
+        for path, target in dict(links).items():
+            full = os.path.join(self.repo, path)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            os.symlink(target, full)
+        for path, inside in dict(dirs).items():
+            for name, text in inside.items():
+                full = os.path.join(self.repo, path, name)
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                with open(full, "w", encoding="utf-8") as f:
+                    f.write(text)
+        self.sh("add", "-A")
+        self.sh("-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "change")
+        return self.sh("rev-parse", "HEAD")
+
+    def base_and_head(self, base=True, **head):
+        """A base committing its checker (or none) and README, and a pull
+        request on it committing its own checker and `head`'s files."""
+        files = {"README.md": "x\n"}
+        if base:
+            files[gate.CHECKER] = STUB_CHECKER.format(who="BASE")
+        self.commit(files)
+        self.commit({gate.CHECKER: STUB_CHECKER.format(who="HEAD"), **head.pop("files", {})}, **head)
+
+    def run_job(self, job):
+        """The job's first steps (FIRST) in the repository, as the runner
+        runs them -- `bash -e`, stopping at the first that fails: (its exit
+        status, all they printed)."""
+        os.makedirs(self.temp, exist_ok=True)
+        env = dict(os.environ, RUNNER_TEMP=self.temp, GITHUB_OUTPUT=os.path.join(self.temp, "output"),
+                   GITHUB_STEP_SUMMARY=os.path.join(self.temp, "summary"))
+        steps, said = steps_of(ci_jobs()[job]), []
+        for name in self.FIRST[job]:
+            p = subprocess.run(["bash", "--noprofile", "--norc", "-e", "-c", run_script(steps[name])],
+                               cwd=self.repo, env=env, capture_output=True, text=True)
+            said.append(f"[{name}]\n{p.stdout}{p.stderr}")
+            if p.returncode:
+                return p.returncode, "\n".join(said)
+        return 0, "\n".join(said)
+
+    def assertRefused(self, job, *words):
+        """The job failed, ran nothing of the pull request's, and said why."""
+        code, said = self.run_job(job)
+        for theirs in ("HEAD CHECKER RAN", "HEAD CODE RAN"):
+            self.assertNotIn(theirs, said)
+        self.assertNotEqual(code, 0, said)
+        for w in words:
+            self.assertIn(w, said)
+        return said
+
+    def test_a_directory_at_the_path_runs_nothing_of_the_pull_requests(self):
+        # The pull request commits a directory where the copy is written,
+        # its `__main__.py` what `python3 tools/perf_gate_base.py` would run.
+        # Before the base alone chose, the write failed into it ("is a
+        # directory"), this tree's checker was copied in, and every later
+        # call ran the pull request's own `__main__.py`.
+        self.base_and_head(dirs={"tools/perf_gate_base.py": {"__main__.py": 'print("HEAD CODE RAN")\n'}})
+        for job in self.FIRST:
+            with self.subTest(job):
+                self.assertRefused(job, "tools/perf_gate_base.py", "::error")
+
+    def test_a_link_at_the_path_runs_nothing_of_the_pull_requests(self):
+        # A link to /dev/null took the base's copy and ran nothing: no
+        # `built=`, every judging step skipped, the job green.
+        self.base_and_head(links={"tools/perf_gate_base.py": "/dev/null"})
+        for job in self.FIRST:
+            with self.subTest(job):
+                self.assertRefused(job, "tools/perf_gate_base.py", "::error")
+        # And `tools/` itself a link: the copy written through it.
+        self.dir.cleanup()
+        os.makedirs(self.repo)
+        self.commit({"README.md": "x\n", gate.CHECKER: STUB_CHECKER.format(who="BASE")})
+        self.sh("rm", "-q", "-r", "tools")
+        self.commit({"elsewhere/perf_gate.py": STUB_CHECKER.format(who="HEAD")}, links={"tools": "elsewhere"})
+        for job in self.FIRST:
+            with self.subTest(job, tools="a link"):
+                self.assertRefused(job, "tools", "::error")
+
+    def test_this_trees_copy_only_where_the_base_has_none(self):
+        # The bootstrap: a base before the checker, whose pull request is
+        # counted by its own -- and only then.
+        self.base_and_head(base=False)
+        for job in self.FIRST:
+            with self.subTest(job):
+                code, said = self.run_job(job)
+                self.assertEqual(code, 0, said)
+                self.assertIn("HEAD CHECKER RAN", said)
+                self.assertNotIn("BASE CHECKER RAN", said)
+        self.dir.cleanup()
+        os.makedirs(self.repo)
+        self.base_and_head()
+        for job in self.FIRST:
+            with self.subTest(job, base="has one"):
+                code, said = self.run_job(job)
+                self.assertEqual(code, 0, said)
+                self.assertIn("BASE CHECKER RAN", said)
+                self.assertNotIn("HEAD CHECKER RAN", said)
+
+    def test_a_git_error_is_no_base_without_a_checker(self):
+        # A base git cannot read is no base without a checker: no parent
+        # (a checkout one commit deep), or the base's checker's object
+        # missing. Before, any failure of the write fell back to this tree's.
+        self.commit({"README.md": "x\n", gate.CHECKER: STUB_CHECKER.format(who="HEAD")})
+        for job in self.FIRST:
+            with self.subTest(job, base="none"):
+                self.assertRefused(job, "::error")
+        self.dir.cleanup()
+        os.makedirs(self.repo)
+        self.base_and_head()
+        blob = self.sh("rev-parse", f"HEAD^1:{gate.CHECKER}")
+        os.unlink(os.path.join(self.repo, ".git", "objects", blob[:2], blob[2:]))
+        for job in self.FIRST:
+            with self.subTest(job, base="its checker unreadable"):
+                self.assertRefused(job, "::error")
 
 
 class Tracing(unittest.TestCase):
@@ -1937,8 +2147,12 @@ class Committed(unittest.TestCase):
 
     def test_the_program_lists_the_io_workloads(self):
         with open(os.path.join(os.path.dirname(HERE), gate.PROGRAM), encoding="utf-8") as f:
-            names = gate.io_workload_names(f.read())
-        self.assertEqual(set(names), {"io-put", "io-batch", "io-spill", "io-compact"})
+            source = f.read()
+        self.assertEqual(set(gate.io_workload_names(source)), {"io-put", "io-batch", "io-spill", "io-compact"})
+        # Once it is a base, every pull request after it is counted and
+        # judged by the base's checker: the jobs' grep, held to this
+        # (`Checker`), reads the committed program so too.
+        self.assertEqual(gate.io_checker(source), "base")
 
     def test_the_holdouts_pairs_name_workloads_the_program_runs(self):
         # Each pair's `expect` and `cannot_run` as the job reads them, held
