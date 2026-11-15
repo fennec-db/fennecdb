@@ -408,7 +408,30 @@ its lineage (the review's `empty_refused.rs`). `{"force": true}` on `POST
 /_admin/tenants/<t>/promote` or `POST /_shard/nodes/<n>/failover` promotes
 whatever the copy holds, an audit event on each (`promote_forced`,
 `failover_forced`), and `promoted()` then records the other file's lineage
-as the tenant's, the one before among those it was. And a repair gives no
+as the tenant's, the one before among those it was. Every promotion goes
+through that route (`Tenants::promote_as`). A copy's own replication route,
+`/t/<t>/_replication/promote`, forked it with the replication token alone --
+every node of a `--replicas` region holds that token, so does every
+archiver, and a stand-in at a primary's address read it off a follow over
+plain HTTP -- past the lease's fence (`admin::superseded`), the lineage and
+history it is held to (`refusal`), `forget_following`, the identity, the
+node's stream and the audit: a standby forked unknown to the router, which
+counted it a standby still, and on a node without `--lease` took writes
+beside its primary. No router called it. A tenant node answers it 404, as
+any path it does not serve (`replication::handle_tenant`, G14's review,
+area D, a break before 1.0: [compatibility.md](compatibility.md)); a
+file's server and a router's directory keep theirs. Nor does a copy stop
+following any other way and stay promotable as though current: its
+follower ends for good only where its database failed -- its disk, or a
+panic that may have left it part way ([replication.md](replication.md#replication),
+`Changing`) -- whose fork every promotion is refused with, forced or not
+(500, named among a failover's `failed`), until the file is opened again;
+where its primary was of another lineage, the copy deleting itself; and at
+a halt, which a promotion forks after and a release closes the tenant or
+starts the follower again behind (`reopen_streams`). A copy whose follower
+runs but is behind -- its primary slow, or its images refused -- is
+promoted as far as it got, the trade a failover makes, which its status's
+`behind` and `fennec_replica_behind` show; the router asks no position. And a repair gives no
 tenant a copy while its primary does not answer its `GET /_admin/tenants`
 -- one that ran between a node's death and its lapse attached a copy
 following nothing, which the failover promoted and the node's return wiped

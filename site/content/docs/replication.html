@@ -742,10 +742,13 @@ it.</p>
 
 <h2>Endpoints</h2>
 
-<p>Three endpoints — a <code>--dir</code> node's tenants each have them
-under <code>/t/&lt;tenant&gt;/</code>, and the node one more, the stream of
-every tenant — all on the HTTP listener and all wanting the replication
-token, not the <code>--http-token</code>.</p>
+<p>Three endpoints — a <code>--dir</code> node's tenants each have the
+first two under <code>/t/&lt;tenant&gt;/</code>, and the node one more, the
+stream of every tenant — all on the HTTP listener and all wanting the
+replication token, not the <code>--http-token</code>. A tenant's copy is
+promoted by the node's admin, <code>POST /_admin/tenants/&lt;t&gt;/promote</code>,
+which a router's failover calls (<a href="/docs/sharding-reference">Sharding
+reference</a>); <code>/t/&lt;tenant&gt;/_replication/promote</code> is a 404.</p>
 
 <pre data-lang="http">GET  /_replication?since=&lt;change&gt;&amp;history=&lt;id&gt;   the stream a replica is fed
 GET  /_replication/status                          role, position, replicas, lag
@@ -757,7 +760,9 @@ POST /_replication/tenants                         on a --dir node: every tenant
 <details class="deep"><summary>Which token the endpoints want, and the status</summary>
 <p>All of them want <code>Authorization: Bearer &lt;replication token&gt;</code>,
 not the <code>--http-token</code>: the token is for replicas and for whoever
-promotes them. The status of a replica names its primary and says whether it
+promotes a file's replica. On a node it promotes nothing: a tenant's copy is
+held to the router's lease and to what the router knows of the tenant, which
+only the admin's promotion asks. The status of a replica names its primary and says whether it
 is connected, how many writes it is <code>behind</code> the primary's disk,
 and how long ago it last heard from it; a primary's lists the replicas it is
 feeding and how far each has been sent.</p>

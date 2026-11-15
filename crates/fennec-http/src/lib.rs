@@ -1398,7 +1398,12 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
                 // subscription: it takes the connection over.
                 trace::discard();
                 let _ = out.set_read_timeout(None);
-                match replication::handle(&mut out, db, repl, &req) {
+                // A tenant's copy is promoted by the node's admin alone.
+                let answered = match &tenant {
+                    Some(_) => replication::handle_tenant(&mut out, db, repl, &req),
+                    None => replication::handle(&mut out, db, repl, &req),
+                };
+                match answered {
                     None => return,
                     Some(resp) => {
                         audit::http(&req, resp.status, peer);

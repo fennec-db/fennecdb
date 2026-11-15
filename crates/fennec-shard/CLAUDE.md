@@ -27,7 +27,8 @@ last it sent (`Leases::turn`, `lease::round_due`). Every write path meets
 the engine's fence (`Database::set_fence`), every route answering a write
 asks `answered_under_lease` (500 `outcome: unknown` once lapsed), and a node
 promotes only a copy of the tenant's lineage and history
-(`tenants::Expected`, 409) unless `force`d.
+(`tenants::Expected`, 409) unless `force`d, and through its admin alone
+(`replication::handle_tenant`: `/t/<t>/_replication/promote` is 404).
 
 **[A failed attach is tried again, a file left taken back by
 identity.](../../docs/design/tenants.md#replicas-tried-again)** `try_again`

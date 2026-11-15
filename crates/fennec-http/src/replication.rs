@@ -1204,13 +1204,46 @@ impl Replication {
     }
 }
 
-/// `/_replication/...`, answered here. `None` means the request was a
-/// stream, which took the connection over and has ended.
+/// `/_replication/...` of a file's server or a router's directory,
+/// answered here: the stream, the status and the promotion. `None` means
+/// the request was a stream, which took the connection over and has
+/// ended.
 pub fn handle(
     out: &mut &crate::conn::Conn,
     db: &Arc<RwLock<Database>>,
     repl: &Replication,
     req: &Request,
+) -> Option<Response> {
+    answer(out, db, repl, req, promoting)
+}
+
+/// `/t/<tenant>/_replication/...` of a node of tenants: the stream and the
+/// status, and no promotion. A tenant's copy is promoted by the node's
+/// admin alone (`POST /_admin/tenants/<t>/promote`, `Tenants::promote_as`),
+/// which a router's failover calls, held to the lease's fence and to the
+/// lineage and history the router knows, its `.follows` forgotten, its
+/// identity renewed, the node's stream told and the audit written. Here,
+/// with the replication token every node of a region and every archiver
+/// holds, the copy forked past all of it: the router counted it a standby
+/// still, and without `--lease` it took writes beside its primary. The
+/// path is 404 as any a node does not serve.
+pub fn handle_tenant(
+    out: &mut &crate::conn::Conn,
+    db: &Arc<RwLock<Database>>,
+    repl: &Replication,
+    req: &Request,
+) -> Option<Response> {
+    answer(out, db, repl, req, |_, req| unknown(req))
+}
+
+/// The routes every replication answers, the token asked first; `rest`
+/// answers any other.
+fn answer(
+    out: &mut &crate::conn::Conn,
+    db: &Arc<RwLock<Database>>,
+    repl: &Replication,
+    req: &Request,
+    rest: fn(&Replication, &Request) -> Response,
 ) -> Option<Response> {
     use crate::http::Method;
     if !repl.authorized(req) {
@@ -1225,7 +1258,16 @@ pub fn handle(
             None
         }
         (Method::Get, ["_replication", "status"]) => Some(status(db, repl)),
-        (Method::Post, ["_replication", "promote"]) => Some(match &repl.follower {
+        _ => Some(rest(repl, req)),
+    }
+}
+
+/// `POST /_replication/promote`: a file's server's and a router's
+/// directory's, never a tenant's ([`handle_tenant`]).
+fn promoting(repl: &Replication, req: &Request) -> Response {
+    use crate::http::Method;
+    match (req.method, req.segments().as_slice()) {
+        (Method::Post, ["_replication", "promote"]) => match &repl.follower {
             None => Response::error(409, "this server is not a replica"),
             Some(f) => match f.promote(fresh_id()) {
                 Ok((seq, id)) => Response::json(
@@ -1234,9 +1276,13 @@ pub fn handle(
                 ),
                 Err(e) => Response::error(500, &e.to_string()),
             },
-        }),
-        _ => Some(Response::error(404, &format!("path `{}`", req.path))),
+        },
+        _ => unknown(req),
     }
+}
+
+fn unknown(req: &Request) -> Response {
+    Response::error(404, &format!("path `{}`", req.path))
 }
 
 impl Replication {

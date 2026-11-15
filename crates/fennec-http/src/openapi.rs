@@ -685,7 +685,7 @@ const OPS: &[Op] = &[
     Op {
         method: "post",
         path: "/_replication/promote",
-        at: FILE | TENANT | ROUTER,
+        at: FILE | ROUTER,
         id: "promote",
         tag: "Replication",
         summary: "Promote this replica: it takes writes from now on",
@@ -1308,7 +1308,7 @@ fn build_of(kind: Kind, table: &'static [Op]) -> String {
 /// `info.version`: the document's, not the binary's (see [`build`]). A
 /// break made on purpose moves it, its `BREAKS` entry in
 /// `tools/openapi_compat.py` naming the version it went out in.
-const DOCUMENT_VERSION: &str = "2";
+const DOCUMENT_VERSION: &str = "3";
 
 const ABOUT: &str = " A request takes `Authorization: Bearer` with the server's token \
 (--http-token) or a scoped JSON Web Token (--jwt-secret, --jwt-keys), held to the --policy \
@@ -2175,6 +2175,15 @@ mod tests {
             func: "",
             after: "",
             at: FILE | TENANT | ROUTER,
+            below: &[],
+        },
+        // Its promotion: a file's and a router's directory's, never a
+        // tenant's, whose copy the node's admin promotes.
+        Region {
+            file: "fennec-http/src/replication.rs",
+            func: "promoting",
+            after: "",
+            at: FILE | ROUTER,
             below: &[],
         },
         Region {
