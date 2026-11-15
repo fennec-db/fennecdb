@@ -533,9 +533,14 @@ mod tests {
     use super::*;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-    /// A directory of this test's own, empty.
+    /// A directory of this call's own, empty: the tag, the process and a
+    /// count make its name. The tag and the process alone made it once, and
+    /// two tests asking for `link` each removed the other's, one of them
+    /// failing on a directory that was gone whenever both ran at once.
     fn dir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("fennec-user-{tag}-{}", std::process::id()));
+        static CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("fennec-user-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         // Canonical: macOS's temporary directory is reached through
