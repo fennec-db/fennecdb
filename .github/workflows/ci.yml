@@ -1073,6 +1073,103 @@ jobs:
             --accepted-from tools/perf_gate.py "${held[@]}" \
             --base-program "$RUNNER_TEMP/judge/base_gate.rs" --summary "$GITHUB_STEP_SUMMARY"
 
+  # A page's database kept in real browsers (web/browser/, `make
+  # browser-test`): persist and restore against each engine's IndexedDB and
+  # WebCrypto, openFile against its origin private file system, the page
+  # reloaded in the middle of a persist's transaction and at each step of a
+  # file's flush, and a quota passed. web/fennec.persist.test.js and
+  # web/fennec.file.test.js hold the same calls to in-memory stand-ins. The
+  # module is built once, here, and both browser jobs test those bytes: the
+  # macOS job, on the account's scarce Mac runners, builds nothing.
+  browsers-module:
+    name: browsers (module)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the pinned toolchain
+        run: rustup show
+
+      - name: Build the module
+        run: make wasm
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: browsers-fennec-wasm
+          path: web/fennec.wasm
+          if-no-files-found: error
+          retention-days: 1
+
+  # Chrome and Firefox headless on Linux, driven by puppeteer-core, each
+  # browser's files read before its first launch (run.mjs's `warm`). Chrome
+  # stops a busy worker 2 s after its page goes, so its run waits that long
+  # at each of the nine reloads in the middle of a flush: 80 s on #650's
+  # run, the module's 34 s (2026-11-14).
+  browsers:
+    name: browsers (chrome, firefox)
+    needs: browsers-module
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: browsers-fennec-wasm
+          path: web
+
+      - name: puppeteer-core
+        working-directory: web/browser
+        run: npm ci --no-audit --no-fund --loglevel=error
+
+      - name: The suite in Chrome and Firefox
+        env:
+          CHROME_PATH: /usr/bin/google-chrome
+          FIREFOX_PATH: /usr/bin/firefox
+        run: node web/browser/run.mjs chrome firefox
+
+  # Safari on macOS through safaridriver, which the runner allows once
+  # `--enable`d. On every run, a pull request's too: no browsers job is a
+  # required check, so a Safari failure seen only in the merge queue would
+  # not stop the merge, and a pull request's own run is where it is read.
+  # It costs one of the 5 macOS slots (CI's bottleneck) for 30 s a run (run
+  # 43631233253 on #650, 18 s of it the suite). Bounded by the rule above
+  # from that run -- twice 30 s is 1 minute, plus 2 minutes 2.5 -- and 20
+  # suite runs in a row on macos-latest took 9 to 25 s each (2026-11-14).
+  browsers-safari:
+    name: browsers (safari)
+    needs: browsers-module
+    runs-on: macos-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: browsers-fennec-wasm
+          path: web
+
+      - name: Allow safaridriver to drive Safari
+        run: sudo safaridriver --enable
+
+      - name: The suite in Safari
+        run: node web/browser/run.mjs safari
+
   integrations:
     name: integrations (python, react)
     runs-on: ubuntu-latest
