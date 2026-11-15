@@ -54,8 +54,10 @@ engine writes it (`GET /_schema?as=fennecql`) and every change as its
 statement and `/_schema/plan` of the collection as it would be; a drop
 runs once its name is typed, and a text box's `change` on blur no longer
 asks the plan again, which held the apply button back. The live view is a
-subscription of the typed shape, refused past 10 000 rows since its seed
-holds them all; the admin view, for the server's token, reads
+subscription of the typed shape, refused past 10 000 rows: the seed comes
+in parts the server never holds whole ([Seeds in parts](#seeds-in-parts)),
+but the view keeps every row it shows and orders them again at each
+write, so the bound is the page's; the admin view, for the server's token, reads
 `/_stats/statements`, `/_metrics` and on a router `/_shard/tenants?bytes`
 (each node's `/_admin/sizes`). The site's playground is the same studio
 over a database in the page: every view reads through `state.db`, one
@@ -1256,7 +1258,9 @@ server; `gzip`'s test holds every piece to the mark). No window is carried from 
 next: zlib's streaming deflate keeps 256 KB a stream for its window and
 hash chains, where a stream here keeps 8 bytes, the CRC and the length,
 and the tables a seed is compressed with (sized to it: 24 KB for a 2 KB
-event, 320 KB at most) are let go as it is sent. A live event of a few
+event, 320 KB at most) are let go as it is sent -- a part's, for a seed in
+parts, each part an event deflated alone ([Seeds in parts](#seeds-in-parts)),
+so a stream's tables are at most a part's whatever its seed. A live event of a few
 rows loses the window's matches against the seed, and one under the bytes
 is stored -- a change is mostly small, and a stored piece costs 5 bytes.
 The stream's end writes the member's end (`Drop for Events`): Node's zlib
@@ -1368,6 +1372,110 @@ An answer under the bytes: one compare. `make instr-compare` against main
 The server's release binary grows 33 056 bytes (+0.48%, 6 842 080 to
 6 875 136 on macOS arm64): `__text` +27 008, `__const` +8 192 (the CRC's
 tables). The browser module holds none of it.
+
+## Seeds in parts
+
+**A seed goes in parts, read a page at a time.** A stream's seed was one
+event: the server read the shape, decoded every row, wrote their JSON,
+copied it into the event's text and deflated that, all of it held at once,
+and the client parsed and wrote the event whole. A 300 000-row seed of
+155-byte rows (46.7 MB of JSON) took the server's physical footprint from
+6.5 to 207.8 MB while it was sent, and every stream seeding at once held
+its own. Now a seed past `SEED_PART` (1 MiB) of rows is several `seed`
+events of the same `seq`:
+
+```text
+event: seed
+data: {"seq":42,"rows":[...],"more":true}
+
+event: seed
+data: {"seq":42,"part":1,"rows":[...]}
+```
+
+`part` is there past the first, `more` before the last, and a seed under a
+mebibyte is the one event it always was. The rows are read a page at a time
+(`sse::send_seed`): the shape's statement with `id > $1` ANDed in after its
+own terms -- a scan starts from it (`Expr::conjunct_id_floor`) -- and `limit
+$2`, one statement whose parameters each page's are, so a filter holding a
+long list is never copied a page. The first page is 1 000 rows; each after
+it is sized to the room left in the part by the bytes the rows so far took,
+64 to 65 536 rows. Each page is written straight into the part's event
+text, which is sent once it passes the mebibyte; the gzip of a stream
+deflates each event alone, as it always did ([A stream](#a-stream)).
+
+Where the rows are read from is where the whole seed was:
+
+- **The pin** ([engine.md](engine.md#pinned-reads)): a shape the pin takes
+  is read on it a page at a time with no lock held, as its one read was.
+  The pin lives until the last part is sent, rather than until the read
+  ended: its copy of the id index (12 bytes a row) and the segments it
+  shares are held through the sending, as the change ring already was.
+  Before the last part, as before the one event, the lock is asked whether
+  the ring still reaches back to the pin's change and no image was adopted
+  since; where not, the seed is read again under the lock.
+- **The lock**: a shape an index answers, a short one, or one read again,
+  was read whole under the lock, its rows decoded there. Now the lock reads
+  its first 1 000 rows and one past them; a shape that short is sent from
+  that answer. A longer one has its ids read under the lock and those rows
+  pinned (`Database::pin_rows`, 12 bytes a row of the answer, not of the
+  collection), the hold taken under the same lock, and is read on that pin
+  a page at a time as a pinned shape is: the lock holds what it held to
+  read the ids, and no row's JSON. Past the pins' budget, or where a page
+  of that pin reached for an index, it is read whole under the lock, as
+  every seed was.
+
+A seed read again after parts of it went out -- the ring passed its pin --
+is sent from its start, its first part without `part`: a client lets go of
+the parts it holds whenever a part without `part` comes, so the server may
+begin a seed anew at any point and the client never lands a mix. A part
+whose number is not the next is a stream to end, opened again and seeded
+from its start. No part is resumed: the parts after a dropped stream's last
+are of a pin that is gone, and a stream opened again is seeded whole at the
+change it then reads.
+
+Rejected: building the parts from the whole answer (the rows decoded at
+once were most of the footprint); a page of ids read under the lock and
+its rows read under the lock a page at a time, the lock let go between
+(the pages would be of different moments); a page per `offset` (each would
+scan from the start, a 300 000-row seed's pages 45 times over); resuming a
+dropped stream's seed from its last id (the rows past it would be of
+another change than the ones before, and only a reseed tells their
+deletions).
+
+Measured on an M1 at loads of 1.9 to 3.5 (other work on the machine), a
+fresh `fennec-server --sync off` a run over a file of 155-byte rows (a
+name, an email, an age, a city, a bio of words), the seed of the whole
+collection read to its last byte by a Python client on loopback, the
+server's footprint sampled every millisecond (`proc_pid_rusage`), the old
+binary against the new in ABBA turns, six runs a side:
+
+| seed | identity | gzip | the server's footprint at its peak (idle) | its resident peak (idle) |
+| --- | ---: | ---: | ---: | ---: |
+| 100 000 rows (15.5 MB, 15 parts) | 91.7 -> 51.0 ms | 173.1 -> 111.8 ms | 70.3 -> 9.0 MB (2.5) | 104.6 -> 22.6 MB (15.2) |
+| 300 000 rows (46.7 MB, 45 parts) | 285.5 -> 144.5 ms | 453.0 -> 314.4 ms | 207.8 -> 14.5 MB (6.5) | 295.5 -> 49.6 MB (40.8) |
+
+A seed takes as long to send as the rows it holds, but its first byte no
+longer waits for its last row's JSON: the parts are read while the ones
+before them are on the wire. Through a proxy sending the server's bytes at
+a set rate (four runs a side): at 200 Mbit 169 -> 130 ms for 100 000 rows
+in gzip, 457 -> 314 for 300 000 (again at a load under 3), 641 -> 621 and
+1 944 -> 1 868 as they are; at 50 Mbit in gzip 450 -> 417 and 1 317 ->
+1 247. In gzip the parts
+are 2.59 MB on the wire for 100 000 rows either way, 7.76 -> 7.79 MB for
+300 000 (+0.4%: each part's first 32 KB find no window behind them). The
+resident peak counts the file's mapped pages the read touched, the same
+either way. The server's release binary grows 16 528 bytes (6 941 776 to
+6 958 304 on macOS arm64).
+
+The writes beside a seed are as they were: the pin and the ring's hold are
+taken as before, and the lock path holds its lock for no longer -- the
+ids, rather than the rows decoded and written as JSON. `make seed-bench`
+(single writes at 1 000 a second beside a subscriber seeded over and over
+from a million rows, 57 MB a seed, now 57 parts; two turns a side, ABBA,
+at a load under 3): the writes beside the seeds 0.73 and 0.72 ms at p99
+before, 0.57 and 0.58 after, 5.6 and 5.3 ms at most against 5.1 and 5.1,
+and the seeds themselves 283 and 279 ms at their median against 217 and
+218, so 32 seeds in the run where 26 were.
 
 ## Connections without a thread
 

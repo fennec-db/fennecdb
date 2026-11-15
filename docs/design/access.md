@@ -830,7 +830,8 @@ its bookkeeping in collections of its file: `_idempotency` (each
 `_consumers` (`/_changes`' cursors), `_migrations` (the migrations a
 schema declared in code ran), `--follow`'s `_follow`, a webhook consumer's
 `_hook_events` (F4, an event's key a row, `Database::take_event`), and in a synced replica's
-own file `_sync_shapes`, `_sync_queue` and `_sync_temps`. Most surfaces
+own file `_sync_shapes`, `_sync_queue`, `_sync_temps` and `_sync_seed`
+(the parts of a seed held aside until its last). Most surfaces
 held them out already by the name's `_` (`declared::own`): the description
 `/_schema` writes, `fennec types`, MCP's listing, a named statement's or a
 binding's body, the row quota. A rule did not: `*` matched every name
