@@ -63,6 +63,9 @@ const replaceable = (f) => untouched.get(f) === f.changeSeq;
 /** A `compact`, which `batch` cannot put back: a batch holding one runs each statement on its own. */
 const COMPACT = /^(?:\s|--[^\n]*|#[^\n]*)*compact\b/i;
 
+/** The module's word that bytes are no image of a database (`#take`). */
+const NOT_AN_IMAGE = 'could not load image (corrupt or incompatible version)';
+
 /** A second database over a database's module (`Fennec`'s static block). */
 let sibling;
 /** A database made empty again, its handle a new one (`Fennec`'s static block). */
@@ -82,6 +85,57 @@ function whyNoModule(err) {
   return WebAssembly.validate(SIMD_PROBE)
     ? err
     : new FennecError('fennec.wasm needs WebAssembly SIMD (Chrome 91+, Firefox 89+, Safari 16.4+)');
+}
+
+/**
+ * The most bytes the module is handed at once. It reads a length as an
+ * `i32`, which JavaScript makes of any number by ToInt32: 2^32 + 8 went
+ * over as 8 and `NaN` or `undefined` as 0, an allocation smaller than what
+ * was then written into it, over the module's heap. Past 2^31 - 1, its
+ * `isize::MAX`, the module has no room for any.
+ */
+const MAX_LEN = 0x7fffffff;
+
+/** `len`, refused unless it is a length the module can be handed. */
+function lengthOf(len, what) {
+  if (Number.isInteger(len) && len >= 0 && len <= MAX_LEN) return len;
+  throw new FennecError(`${what} must be a whole number of bytes from 0 to ${MAX_LEN}, not ${String(len)}`);
+}
+
+/**
+ * The module's exports, each call made through a guard. A trap -- an
+ * abort where the module has no memory left to answer in, a bound it
+ * checks -- leaves the instance as it stopped: its stack pointer where the
+ * call left it, a statement landed and neither answered nor flushed to its
+ * file. Run on, it answered from that state or trapped again; so every
+ * later call, on every database of the module, throws the one error
+ * saying to open the database again. A `TypeError` is a value no export
+ * takes (a `BigInt`), refused before the module runs.
+ */
+function guarded(exports) {
+  let trap = null;
+  const stopped = () =>
+    new FennecError(`the module stopped (${trap?.message ?? trap}): nothing more runs on its databases; open the database again`, { cause: trap });
+  const out = {};
+  for (const [name, f] of Object.entries(exports)) {
+    if (typeof f !== 'function') {
+      out[name] = f;
+      continue;
+    }
+    const call = (...args) => {
+      if (trap) throw stopped();
+      try {
+        return f(...args);
+      } catch (e) {
+        if (e instanceof TypeError) throw e;
+        trap = e;
+        throw stopped();
+      }
+    };
+    // `run` tells a module from before vectors went over apart by it.
+    out[name] = Object.defineProperty(call, 'length', { value: f.length });
+  }
+  return out;
 }
 
 export class Fennec {
@@ -157,7 +211,7 @@ export class Fennec {
     // Instantiated from a compiled module, `instantiate` gives the instance
     // alone, and from bytes the module and the instance: read as the
     // latter, a Worker's module had no exports and `open` threw.
-    const wasm = (mod instanceof WebAssembly.Instance ? mod : mod.instance).exports;
+    const wasm = guarded((mod instanceof WebAssembly.Instance ? mod : mod.instance).exports);
     // With `schema`, what the code declares is checked and made: a load
     // (`restore`, `openFile`) checks the database it brings in again.
     const db = new Fennec(wasm, wasm.fennec_open(), opts.collation ?? beside(src));
@@ -215,10 +269,21 @@ export class Fennec {
    */
   #write(data) {
     const bytes = typeof data === 'string' ? enc.encode(data) : data;
-    const ptr = this.#wasm.fennec_alloc(bytes.length || 1);
-    if (!ptr) throw new FennecError(`no room in the module for ${bytes.length} bytes`);
-    new Uint8Array(this.#wasm.memory.buffer).set(bytes, ptr);
-    return [ptr, bytes.length];
+    const len = lengthOf(bytes.length, 'a text, its parameters or collation data');
+    const ptr = this.#wasm.fennec_alloc(len || 1);
+    if (!ptr) throw new FennecError(`no room in the module for ${len} bytes`);
+    this.#into(ptr, len, bytes);
+    return [ptr, len];
+  }
+
+  /**
+   * Writes `bytes` at `at` into the allocation of `len` at `ptr`, through a
+   * view of that allocation alone: bytes past it are a `RangeError`, never
+   * the module's memory beyond. A view each time: a call into the module
+   * may have grown its memory, which detaches the buffer before.
+   */
+  #into(ptr, len, bytes, at = 0) {
+    new Uint8Array(this.#wasm.memory.buffer, ptr, len).set(bytes, at);
   }
 
   /**
@@ -248,19 +313,25 @@ export class Fennec {
     const known = vectors && !asJson ? this.#asked?.get(sql) : null;
     if (known) return this.#run(sql, params, known, quiet);
     const [sp, sl] = this.#write(sql);
-    // Not `jsonOf`: the module reads an int no double holds as the double
-    // it rounds to (`as_double`), and a look here cost every `run`.
-    const [pp, pl] = this.#write(JSON.stringify(json));
-    const [vp, vl] = vectors ? this.#write(vectors) : [0, 0];
+    let pp = 0;
+    let pl = 0;
+    let vp = 0;
+    let vl = 0;
     let out;
     try {
+      // Not `jsonOf`: the module reads an int no double holds as the double
+      // it rounds to (`as_double`), and a look here cost every `run`.
+      [pp, pl] = this.#write(JSON.stringify(json));
+      if (vectors) [vp, vl] = this.#write(vectors);
       // The time a read of a collection whose rows expire (`@ttl`) is
       // answered at: the module has no clock of its own.
       out = this.#readString(this.#wasm.fennec_query(this.#handle, sp, sl, pp, pl, vp, vl, this.now()));
     } finally {
+      // Those written before one that could not be -- a parameter
+      // `JSON.stringify` refuses, no room -- too.
       this.#wasm.fennec_free(sp, sl || 1);
-      this.#wasm.fennec_free(pp, pl || 1);
-      if (vectors) this.#wasm.fennec_free(vp, vl || 1);
+      if (pp) this.#wasm.fennec_free(pp, pl || 1);
+      if (vp) this.#wasm.fennec_free(vp, vl || 1);
     }
     // After an error too: the change ring says what landed, after the task.
     if (this.#lives?.size && !quiet) this.#touch();
@@ -350,12 +421,12 @@ export class Fennec {
     });
     const got = await Promise.all(want.map((name) => this.#chunk(name)));
     got.forEach((bytes, k) => {
-      const [ptr] = this.#write(bytes);
+      const [ptr, len] = this.#write(bytes);
       let at;
       try {
-        at = this.#wasm.fennec_add_chunk(ptr, bytes.length);
+        at = this.#wasm.fennec_add_chunk(ptr, len);
       } finally {
-        this.#wasm.fennec_free(ptr, bytes.length || 1);
+        this.#wasm.fennec_free(ptr, len || 1);
       }
       if (chunks[at] !== want[k]) {
         throw new FennecError(`${want[k]}.bin is not this module's collation data (another version's?)`);
@@ -564,7 +635,9 @@ export class Fennec {
    * answer is simply "everything is stale" -- no data is lost.
    */
   setChangeCapacity(n) {
-    this.#wasm.fennec_set_change_capacity(this.#handle, whole(n, 'capacity'));
+    // The module takes a `u32`: 2^32 went over as 0, a ring of one.
+    if (whole(n, 'capacity') > 0xffffffff) throw new FennecError(`capacity must be at most ${0xffffffff}: ${n}`);
+    this.#wasm.fennec_set_change_capacity(this.#handle, n);
   }
 
   /** Collection schemas (the `collections` output). */
@@ -630,14 +703,20 @@ export class Fennec {
    * `restore` fetches it and loads the image again.
    */
   load(bytes) {
-    const ptr = this.#room(bytes.length);
-    new Uint8Array(this.#wasm.memory.buffer).set(bytes, ptr);
-    return this.#take(ptr, bytes.length);
+    if (!(bytes instanceof Uint8Array)) throw new FennecError('load takes the image as a Uint8Array');
+    const len = bytes.length;
+    const ptr = this.#room(len);
+    this.#into(ptr, len, bytes);
+    return this.#take(ptr, len);
   }
 
-  /** Room in the module for an image of `len`: never 0, which is the module's own data. */
+  /**
+   * Room in the module for an image of `len`: never 0, which is the module's
+   * own data, and never for a length that is not one (`lengthOf`).
+   */
   #room(len) {
     if (kept.has(this)) throw new FennecError('the database is kept in a file (openFile): a load would leave the file behind');
+    lengthOf(len, "an image's length");
     const ptr = this.#wasm.fennec_alloc(len);
     if (!ptr) throw new FennecError(`no room for an image of ${len} bytes`);
     return ptr;
@@ -661,7 +740,7 @@ export class Fennec {
       const e = new FennecError('the image needs collation data the module has not been handed');
       throw Object.assign(e, { collation: chunks.filter((_, i) => (r >>> 2) & (1 << i)), ran: 0 });
     }
-    if (r !== 0) throw new FennecError('could not load image (corrupt or incompatible version)');
+    if (r !== 0) throw new FennecError(NOT_AN_IMAGE);
     // Another database now, whose counter may stand where a live query's
     // cursor did: every live query runs again, whatever the ring says.
     if (this.#lives?.size) {
@@ -705,9 +784,12 @@ export class Fennec {
     let at = 0;
     const put = (p) => {
       const bytes = p instanceof ArrayBuffer ? new Uint8Array(p) : p;
+      // Anything else's `length` is not its bytes': a `DataView` has none,
+      // and the next part went at `ptr + NaN`, the module's address 0.
+      if (!(bytes instanceof Uint8Array)) throw new FennecError('each part is a Uint8Array or an ArrayBuffer');
       if (at + bytes.length > length) throw new FennecError(`the parts hold more than the ${length} bytes said`);
       // A view each part: an await may let in a write that grows the memory.
-      new Uint8Array(this.#wasm.memory.buffer, ptr + at, bytes.length).set(bytes);
+      this.#into(ptr, length, bytes, at);
       at += bytes.length;
     };
     try {
@@ -1240,7 +1322,9 @@ function loads(fennec, bytes) {
   } catch (e) {
     // Refused for collation data: they loaded, and the text needs it.
     if (e.collation) return true;
-    if (e instanceof FennecError) return false;
+    // No room, a module that stopped: the copy is no less a database, and
+    // a false here empties it.
+    if (e instanceof FennecError && e.message === NOT_AN_IMAGE) return false;
     throw e;
   } finally {
     trial.close();

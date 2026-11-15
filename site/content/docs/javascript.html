@@ -416,6 +416,15 @@ keeps those versions until it opens the file again or runs
 queries the way a server and an app do. Once the file refuses a write, every later write is
 refused too; the database has to be opened from the file again.</p>
 
+<p>A module that traps -- out of memory while it answers, say -- is left
+where it stopped, so every later call on any of its databases throws one
+<code>FennecError</code>: the module stopped, and the database has to be
+opened again (<code>Fennec.open</code>, then <code>openFile</code> or
+<code>restore</code>). The file holds every write <code>run</code> answered
+before; the writes of the statement that stopped are not in it, though the
+module may have landed them, since neither its answer nor the flush after
+it came. <code>persist</code>'s keys hold what its last call stored.</p>
+
 <p><code>persist</code> and <code>restore</code> keep the same bytes in
 IndexedDB, wherever a page runs: the image once, then only the writes since
 the last call, as chunks. <code>persist</code> stores what was written when

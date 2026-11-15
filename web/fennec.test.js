@@ -3135,6 +3135,109 @@ test('an image loaded in parts is the image loaded whole', { skip: wasm ? false 
   assert.deepEqual(answers(short), answers(db));
 });
 
+/**
+ * `Fennec.open` over the module's exports as `wrap` makes them: what the
+ * glue hands the module, and what it does when the module traps, seen from
+ * outside it.
+ */
+async function openWrapped(Fennec, wrap) {
+  const instantiate = WebAssembly.instantiate;
+  WebAssembly.instantiate = async (...args) => {
+    const { module, instance } = await instantiate(...args);
+    return { module, instance: { exports: wrap(instance.exports) } };
+  };
+  try {
+    return await Fennec.open(wasm);
+  } finally {
+    WebAssembly.instantiate = instantiate;
+  }
+}
+
+/** `f`, with the arity `like` has: `run` reads a module's age by it. */
+const arity = (f, like) => Object.defineProperty(f, 'length', { value: like.length });
+
+// The module reads a length as an `i32`, which JavaScript makes of any
+// number by ToInt32: 2^32 + 8 went over as 8 and NaN as 0, the dangling
+// address 1, and each part was then written through a view bounded only
+// by the module's memory -- over its heap, the next query trapping with
+// "memory access out of bounds". Each is refused by name before anything
+// is allocated, and every part is written through a view of the allocation
+// alone, so the module answers on.
+test('a length that is no length is refused before the module is handed it', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const { Fennec, FennecError } = await import('./fennec.js');
+  const db = await Fennec.open(wasm);
+  db.run('create collection c (n int)');
+  db.run('put c {n: 1}');
+  const named = (what) => (e) => e instanceof FennecError && e.message === `an image's length must be a whole number of bytes from 0 to 2147483647, not ${what}`;
+  for (const [length, size] of [[2 ** 32 + 8, 64 << 10], [NaN, 1 << 20], [undefined, 16], [-1, 16], [1.5, 16], [2 ** 31, 16], ['8', 8], [8n, 8]]) {
+    await assert.rejects(db.loadParts(length, () => [new Uint8Array(size).fill(0xab)]), named(String(length)), String(length));
+    assert.deepEqual(db.rows('get c select n'), [{ n: 1 }], String(length));
+  }
+  // A part past the room it was promised, and parts whose `length` is not
+  // their bytes': a `DataView` has none, and the part after it went at
+  // `ptr + NaN`, the module's address 0.
+  await assert.rejects(db.loadParts(8, () => [new Uint8Array(9)]), /the parts hold more than the 8 bytes said$/);
+  await assert.rejects(db.loadParts(8, () => [new Uint8Array(4), new Uint8Array(5)]), /the parts hold more than the 8 bytes said/);
+  await assert.rejects(db.loadParts(8, () => [new DataView(new ArrayBuffer(4)), new Uint8Array(4)]), /each part is a Uint8Array or an ArrayBuffer/);
+  await assert.rejects(db.loadParts(3, () => [new Uint16Array(3)]), /each part is a Uint8Array or an ArrayBuffer/);
+  assert.throws(() => db.load(new ArrayBuffer(8)), /load takes the image as a Uint8Array/);
+  assert.throws(() => db.load([1, 2, 3]), /load takes the image as a Uint8Array/);
+  assert.throws(() => db.setChangeCapacity(2 ** 32), /capacity must be at most 4294967295/);
+  db.run('put c {n: 2}');
+  assert.deepEqual(db.rows('get c select n order n'), [{ n: 1 }, { n: 2 }]);
+});
+
+// A `run` whose parameters cannot be handed over -- one `JSON.stringify`
+// refuses -- had written its text already, and left it allocated.
+test('a run that cannot hand over its parameters frees the text it wrote', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const { Fennec } = await import('./fennec.js');
+  const live = new Map();
+  const db = await openWrapped(Fennec, (x) => ({
+    ...x,
+    fennec_alloc: (len) => {
+      const p = x.fennec_alloc(len);
+      live.set(p, len);
+      return p;
+    },
+    fennec_free: (p, len) => {
+      live.delete(p);
+      return x.fennec_free(p, len);
+    },
+  }));
+  db.run('create collection c (n int)');
+  assert.equal(live.size, 0);
+  assert.throws(() => db.run('get c where n = $1', [1n]), TypeError);
+  assert.deepEqual([...live], [], 'nothing left allocated');
+  assert.deepEqual(db.rows('get c where n = $1', [1]), []);
+  assert.equal(live.size, 0);
+});
+
+// A trap -- `boxed`'s abort when the module has no memory to answer in --
+// leaves the instance as it stopped, the statement landed and neither
+// answered nor flushed. Every later call, on every database of the module,
+// throws one error saying to open the database again, rather than answer
+// from that state or trap again with "unreachable".
+test('after the module traps every call says to open the database again', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const { Fennec, FennecError } = await import('./fennec.js');
+  let trap = false;
+  const db = await openWrapped(Fennec, (x) => ({
+    ...x,
+    fennec_query: arity((...a) => {
+      const out = x.fennec_query(...a);
+      if (trap) throw new WebAssembly.RuntimeError('unreachable');
+      return out;
+    }, x.fennec_query),
+  }));
+  db.run('create collection c (n int)');
+  trap = true;
+  const stopped = (e) => e instanceof FennecError && e.message === 'the module stopped (unreachable): nothing more runs on its databases; open the database again';
+  assert.throws(() => db.run('put c {n: 1}'), (e) => stopped(e) && e.cause instanceof WebAssembly.RuntimeError);
+  trap = false;
+  const calls = [() => db.run('get c'), () => db.changeSeq, () => db.snapshot(), () => db.load(new Uint8Array(8)), () => db.stats(), () => db.close()];
+  for (const call of calls) assert.throws(call, stopped, String(call));
+  await assert.rejects(db.batch(['get c']), stopped);
+});
+
 // The brief at /llms.txt is what a coding agent copies from, so every example
 // in it has to run as written. They live in site/build.py, which renders it.
 test('every example in the llms brief runs', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
