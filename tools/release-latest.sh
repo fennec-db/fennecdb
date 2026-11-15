@@ -94,11 +94,11 @@ nl='
 '
 release_version() {
     case $1 in *"$nl"*) return 1 ;; esac
-    printf '%s\n' "$1" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+'
+    printf '%s\n' "$1" | grep -Eqx '(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
 }
 pre_version() {
     case $1 in *"$nl"*) return 1 ;; esac
-    printf '%s\n' "$1" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+-rc\.[1-9][0-9]*'
+    printf '%s\n' "$1" | grep -Eqx '(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-rc\.[1-9][0-9]*'
 }
 
 # The published releases' versions, X.Y.Z alone, ascending, into

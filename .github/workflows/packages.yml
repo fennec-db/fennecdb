@@ -534,7 +534,8 @@ jobs:
             echo "set=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if ! printf '%s' "${RELEASE_TAG#v}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+          re='^[0-9]+\.[0-9]+\.[0-9]+$'
+          if ! [[ ${RELEASE_TAG#v} =~ $re ]]; then
             echo "::notice::$RELEASE_TAG is not a release version: the Homebrew tap offers releases only"
             echo "set=false" >> "$GITHUB_OUTPUT"
             exit 0

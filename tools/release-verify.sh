@@ -109,13 +109,15 @@ ok() {
     echo "ok   $*"
 }
 
-# grep matches line by line: a tag of two lines, each a release's, is none.
+# Whether $2 is wholly the extended regular expression $1. grep matches
+# line by line: a value of two lines, one of them right, is none.
 nl='
 '
-case $tag in
-    *"$nl"*) false ;;
-    *) printf '%s\n' "$tag" | grep -Eqx 'v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?' ;;
-esac || fails "$tag is no release's tag: vX.Y.Z, or vX.Y.Z-rc.N for a candidate, N from 1"
+whole() {
+    case $2 in *"$nl"*) return 1 ;; esac
+    printf '%s\n' "$2" | grep -Eqx "$1"
+}
+whole 'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?' "$tag" || fails "$tag is no release's tag: vX.Y.Z, or vX.Y.Z-rc.N for a candidate, N from 1"
 case $version in
     *-*) candidate=yes ;;
     *) candidate=no ;;
@@ -208,7 +210,7 @@ if [ "$draft" = false ]; then
     if ! latest=$(gh api "repos/$repo/releases/latest" --jq .tag_name 2>"$err"); then
         fails "GitHub's Latest could not be read: $(said)"
     fi
-    printf '%s\n' "$latest" | grep -Eqx 'v[0-9]+\.[0-9]+\.[0-9]+' ||
+    whole 'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)' "$latest" ||
         fails "GitHub's Latest is $latest, no X.Y.Z release: install.sh and install.ps1 install it (tools/release-latest.sh github $tag puts it back)"
     ok "GitHub's Latest is $latest, a release"
 fi
@@ -233,7 +235,7 @@ done <"$work/want"
 
 # gh attestation verify of $1 as built by workflow $2 at ref $3.
 verified() {
-    gh attestation verify "$1" -R "$repo" --signer-workflow "$repo/.github/workflows/$2" --source-ref "$3" \
+    gh attestation verify "$1" -R "$repo" --cert-identity "https://github.com/$repo/.github/workflows/$2@$3" --source-ref "$3" \
         --deny-self-hosted-runners >/dev/null 2>"$err"
 }
 
@@ -264,6 +266,18 @@ while read -r kind name; do
 done <"$work/want"
 [ "$(grep -c . "$sums")" -eq "$listed" ] || fails "SHA256SUMS has $(grep -c . "$sums") lines for $listed assets"
 ok "SHA256SUMS lists $listed assets, each by its sum"
+
+# A .checksum file is no line of SHA256SUMS: the digest of the zip beside
+# it, which Package.swift's binaryTarget names. Held to that zip here.
+doing "each .checksum"
+while read -r kind name; do
+    case $name in *.checksum) ;; *) continue ;; esac
+    zip=${name%.checksum}
+    [ -f "$work/assets/$zip" ] || fails "$name: $zip, the zip it stands beside, is not an asset"
+    held=$(cat "$work/assets/$name")
+    [ "$held" = "$(sha256 "$work/assets/$zip")" ] || fails "$name holds [$held], and $zip is $(sha256 "$work/assets/$zip")"
+    ok "$name is $zip's SHA-256"
+done <"$work/want"
 
 doing "each asset's attestation"
 while read -r kind name; do
@@ -299,8 +313,8 @@ for ref in "$version" "$version-amd64" "$version-arm64"; do
         -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json' \
         "https://$host/v2/$path/manifests/$ref" 2>"$err") || fails "$image:$ref is not on the registry: $(said)"
     digest=$(printf '%s\n' "$headers" | tr -d '\r' | awk 'tolower($0) ~ /^docker-content-digest:/ { sub(/^[^:]*: */, ""); print }')
-    printf '%s\n' "$digest" | grep -Eqx 'sha256:[0-9a-f]{64}' || fails "$image:$ref: the registry names no digest ([$digest])"
-    subjects=$(gh attestation verify "oci://$image:$ref" -R "$repo" --signer-workflow "$repo/.github/workflows/release.yml" \
+    whole 'sha256:[0-9a-f]{64}' "$digest" || fails "$image:$ref: the registry names no digest ([$digest])"
+    subjects=$(gh attestation verify "oci://$image:$ref" -R "$repo" --cert-identity "https://github.com/$repo/.github/workflows/release.yml@refs/tags/$tag" \
         --source-ref "refs/tags/$tag" --deny-self-hosted-runners --format json \
         --jq '.[].verificationResult.statement.subject[].digest.sha256' 2>"$err") ||
         fails "$image:$ref ($digest): no attestation by release.yml at refs/tags/$tag: $(said)"

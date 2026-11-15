@@ -48,7 +48,7 @@ jobs:
       # and its. Held here, before the build, as well as where it attests.
       - name: The version is a release's, and the run is on its branch
         run: |
-          re='^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$'
+          re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$'
           [[ $VERSION =~ $re ]] || { echo "::error::the version asked for is no release's: X.Y.Z, or X.Y.Z-rc.N for a candidate, N from 1"; exit 1; }
           core=${VERSION%%-*}
           if [ "${core##*.}" -eq 0 ]; then want=main; else want="release/${core%.*}"; fi
@@ -144,7 +144,7 @@ jobs:
       # before either.
       - name: The version is a release's, and the run is on its branch
         run: |
-          re='^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$'
+          re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$'
           [[ $VERSION =~ $re ]] || { echo "::error::the version asked for is no release's: X.Y.Z, or X.Y.Z-rc.N for a candidate, N from 1"; exit 1; }
           core=${VERSION%%-*}
           if [ "${core##*.}" -eq 0 ]; then want=main; else want="release/${core%.*}"; fi

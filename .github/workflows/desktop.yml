@@ -223,7 +223,8 @@ jobs:
           RELEASE: ${{ github.event.inputs.release }}
         run: |
           set -eu
-          if [ -n "$RELEASE" ] && ! printf '%s' "$RELEASE" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$'; then
+          re='^v?[0-9]+\.[0-9]+\.[0-9]+$'
+          if [ -n "$RELEASE" ] && ! [[ $RELEASE =~ $re ]]; then
             echo "::error::release is a tag such as v0.2.0"
             exit 1
           fi
@@ -326,7 +327,9 @@ jobs:
 
       # A dispatch's input goes into a release's name and a URL: only a release's name gets past this.
       - name: The release asked for is a release's name
-        run: printf '%s' "$STUDIO_SERVER_RELEASE" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::release is a tag such as v0.2.0"; exit 1; }
+        run: |
+          re='^v?[0-9]+\.[0-9]+\.[0-9]+$'
+          [[ $STUDIO_SERVER_RELEASE =~ $re ]] || { echo "::error::release is a tag such as v0.2.0"; exit 1; }
 
       # Where the checks keep their data, reports and logs, so a failure can upload them.
       - name: Where the checks write
@@ -655,7 +658,8 @@ jobs:
         if: steps.have.outputs.available == 'true'
         run: |
           set -eu
-          if [ -n "$RELEASE" ] && ! printf '%s' "$RELEASE" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$'; then
+          re='^v?[0-9]+\.[0-9]+\.[0-9]+$'
+          if [ -n "$RELEASE" ] && ! [[ $RELEASE =~ $re ]]; then
             echo "::error::release is a tag such as v0.1.12"
             exit 1
           fi
@@ -799,7 +803,8 @@ jobs:
           RELEASE: ${{ github.event.inputs.release }}
         run: |
           set -eu
-          printf '%s' "$RELEASE" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::release is a tag such as v0.1.12"; exit 1; }
+          re='^v?[0-9]+\.[0-9]+\.[0-9]+$'
+          [[ $RELEASE =~ $re ]] || { echo "::error::release is a tag such as v0.1.12"; exit 1; }
           version="${RELEASE#v}"
           for dmg in dist/*.dmg; do
             mv "$dmg" "dist/fennec-studio-v$version-$(basename "$dmg")"

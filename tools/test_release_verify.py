@@ -47,7 +47,7 @@ def key(text):
 # download TAG -R o/r -D DIR` copies $STATE/files/*; `gh api
 # repos/o/r/releases/latest --jq .tag_name` answers $STATE/latest, a 404
 # where there is none. `gh attestation verify SUBJECT -R o/r
-# --signer-workflow o/r/.github/workflows/W --source-ref REF
+# --cert-identity https://github.com/o/r/.github/workflows/W@REF --source-ref REF
 # [--deny-self-hosted-runners] [--format json --jq Q]` finds the subject's
 # digest -- a file's SHA-256, or for oci://IMAGE:REF what $STATE/gh-sees/REF
 # names, else $STATE/registry/REF -- among $STATE/attested's lines
@@ -79,11 +79,11 @@ case "$1 $2" in
 "attestation verify")
     subject=$3
     shift 3
-    repo= wf= ref= deny= format= q=
+    repo= id= ref= deny= format= q=
     while [ $# -gt 0 ]; do
         case $1 in
         -R) repo=$2; shift 2 ;;
-        --signer-workflow) wf=$2; shift 2 ;;
+        --cert-identity) id=$2; shift 2 ;;
         --source-ref) ref=$2; shift 2 ;;
         --deny-self-hosted-runners) deny=1; shift ;;
         --format) format=$2; shift 2 ;;
@@ -92,9 +92,16 @@ case "$1 $2" in
         esac
     done
     [ "$repo" = o/r ] || { echo "gh attestation verify -R $repo: not the repository" >&2; exit 1; }
+    # The identity as a whole, never a prefix: https://github.com/o/r/.github/workflows/W@REF
+    case $id in
+    https://github.com/o/r/.github/workflows/*@*) ;;
+    *) echo "gh attestation verify --cert-identity $id: not stood in for" >&2; exit 1 ;;
+    esac
+    wf=${id#https://github.com/o/r/.github/workflows/}
+    wf=${wf%@*}
+    [ "${id##*@}" = "$ref" ] || { echo "gh attestation verify: the identity's ref is not $ref" >&2; exit 1; }
     case $wf in
-    o/r/.github/workflows/*) ;;
-    *) echo "gh attestation verify --signer-workflow $wf: not stood in for" >&2; exit 1 ;;
+    *[!A-Za-z0-9.-]*) echo "gh attestation verify: no such workflow $wf" >&2; exit 1 ;;
     esac
     case $subject in
     oci://*)
@@ -114,7 +121,7 @@ case "$1 $2" in
     fi
     if ! awk -v d="$d" -v w="${wf##*/}" -v r="$ref" -v deny="$deny" \
         '$1 == d && $2 == w && $3 == r && (deny == "" || $4 == "github-hosted") { found = 1 } END { exit !found }' "$STATE/attested"; then
-        echo "Error: verifying with issuer \"sigstore.dev\": failed to verify certificate identity: no matching CertificateIdentity found, last error: expected SAN value to match regex \"^https://github.com/$wf\", or source ref $ref" >&2
+        echo "Error: verifying with issuer \"sigstore.dev\": failed to verify certificate identity: no matching CertificateIdentity found, last error: expected SAN value to match \"$id\", or source ref $ref" >&2
         exit 1
     fi
     if [ "$format" = json ]; then
@@ -264,6 +271,8 @@ class ReleaseVerify(unittest.TestCase):
             if name == "SHA256SUMS":
                 continue
             data = f"{name} as {kind} built it\n".encode()
+            if name.endswith(".checksum"):
+                data = (hashlib.sha256((files / name.removesuffix(".checksum")).read_bytes()).hexdigest() + "\n").encode()
             (files / name).write_bytes(data)
             if not name.endswith(".checksum"):
                 sums.append(f"{hashlib.sha256(data).hexdigest()}  {name}\n")
@@ -436,6 +445,19 @@ class ReleaseVerify(unittest.TestCase):
                     "refs/heads/topic")
         self.assertFails(self.run_it("v1.0.0"), "FennecFFI.xcframework.zip: no attestation by swift-binary.yml at"
                          " refs/heads/main:")
+
+    def test_a_checksum_naming_another_digest(self):
+        name = "FennecFFI.xcframework.zip.checksum"
+        self.given("v1.0.0")
+        (self.state / "files" / name).write_text("0" * 64 + "\n")
+        self.assertFails(self.run_it("v1.0.0"), f"{name} holds [{'0' * 64}], and FennecFFI.xcframework.zip is")
+
+    def test_a_signer_workflow_of_a_longer_name(self):
+        # `release.yml-x.yml` at the right ref satisfied a prefix match.
+        name = "fennec-v1.0.0-x86_64-unknown-linux-musl.tar.gz"
+        self.given("v1.0.0", skip=[("attest", name)])
+        self.attest((self.state / "files" / name).read_bytes(), "release.yml-x.yml", "refs/tags/v1.0.0")
+        self.assertFails(self.run_it("v1.0.0"), f"{name}: no attestation by release.yml at refs/tags/v1.0.0")
 
     def test_a_self_hosted_runners_attestation(self):
         name = "fennec-web-v1.0.0.tar.gz"
@@ -821,10 +843,14 @@ class Assets(unittest.TestCase):
 # version, without its `v`) hold it in their first step, before any
 # checkout, where no file of the tree can be read: so each copy of it is
 # held here to this one, and run.
-TAG_FORM = r"^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$"
+TAG_FORM = r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$"
 TAKEN = ("v0.2.0", "v1.0.0", "v1.4.2", "v1.0.0-rc.1", "v1.0.0-rc.10", "v12.34.56-rc.7")
-REFUSED = ("v1.0.0-1", "v1.0.0-rc.0", "v1.0.0-rc.01", "v1.0.0-beta.1", "v1.0.0-rc", "v1.0.0-rc.1.2", "v1.0.0-RC.1",
+REFUSED = ("v01.0.0", "v1.00.0", "v1.0.00", "v1.0.0-1", "v1.0.0-rc.0", "v1.0.0-rc.01", "v1.0.0-beta.1", "v1.0.0-rc", "v1.0.0-rc.1.2", "v1.0.0-RC.1",
            "v1.0", "1.0.0", "v1.0.0;id", "v1.0.0\nv1.0.0", "v1.0.0-rc.1$(id)", "")
+# What a value that is more than one line, or holds a control character, or
+# nothing, must meet: grep matches by line and `$` in a shell's pattern is
+# the string's end, so each copy is run with these as well.
+HOLES = ("{ok}\nversion=$(id)", "version=$(id)\n{ok}", "{ok}\n", "{ok}\r", "\n{ok}", "{ok}\x01", "")
 WORDS = "vX.Y.Z, or vX.Y.Z-rc.N for a candidate, N from 1"
 
 
@@ -890,6 +916,119 @@ class TagForm(unittest.TestCase):
                     got = on(version, "branch", "main")
                     self.assertEqual(got.returncode, 1, version)
                     self.assertIn("no release's: X.Y.Z, or X.Y.Z-rc.N for a candidate, N from 1", got.stdout)
+
+    def holes(self, ok):
+        return [h.replace("{ok}", ok) for h in HOLES]
+
+    def step(self, workflow, job, needle):
+        steps = [str(s["run"]) for s in wc.steps(self.workflow(workflow)["jobs"][job]) if needle in str(s.get("run", ""))]
+        self.assertEqual(len(steps), 1, (workflow, job, needle))
+        return steps[0]
+
+    def cut(self, run, marker):
+        """The step up to the line holding marker, where its check ends."""
+        lines = run.splitlines()
+        at = next(i for i, line in enumerate(lines) if marker in line)
+        return "\n".join(lines[:at] + ["echo PASSED"])
+
+    def test_desktops_releases_are_judged_whole(self):
+        # An X.Y.Z with or without its `v`, as before; the dispatch's
+        # input is a make variable's value and a release's name.
+        # `empty_ok`: the two steps where an empty input means this
+        # checkout's server and shell.
+        copies = (
+            ("app", "The server to bundle", "RELEASE", self.cut(
+                self.step("desktop.yml", "app", 'echo "version=${RELEASE#v}"'), 'if [ -n "$RELEASE" ]; then echo'), True),
+            ("other-systems", "The release asked for", "STUDIO_SERVER_RELEASE",
+             self.step("desktop.yml", "other-systems", "$STUDIO_SERVER_RELEASE =~") + "\necho PASSED", False),
+            ("sign", "The release asked for", "RELEASE",
+             self.step("desktop.yml", "sign", 'echo "version=${RELEASE#v}"') + "\necho PASSED", True),
+            ("attach", "Attach", "RELEASE", self.cut(
+                self.step("desktop.yml", "attach", "mv \"$dmg\""), 'version="${RELEASE#v}"'), False),
+        )
+        for job, name, var, run, empty_ok in copies:
+            for ok in ("0.2.0", "v0.2.0", "10.20.30", "v1.4.2"):
+                with self.subTest(copy=name, value=ok):
+                    out = tempfile.NamedTemporaryFile("r")
+                    got = self.bash(run, **{var: ok, "GITHUB_OUTPUT": out.name})
+                    self.assertEqual(got.returncode, 0, (got.stdout, got.stderr))
+                    self.assertIn("PASSED", got.stdout)
+            bad = [v for ok in ("0.2.0", "v0.2.0") for v in self.holes(ok)[:-1]] + ["", "v", "1.0", "1.0.0-rc.1", "1.0.0;id"]
+            for value in bad:
+                with self.subTest(copy=name, value=value):
+                    out = tempfile.NamedTemporaryFile("r")
+                    got = self.bash(run, **{var: value, "GITHUB_OUTPUT": out.name})
+                    if value == "" and empty_ok:
+                        self.assertEqual(got.returncode, 0, (got.stdout, got.stderr))
+                        continue
+                    self.assertEqual(got.returncode, 1, (value, got.stdout, got.stderr))
+                    self.assertNotIn("PASSED", got.stdout)
+                    self.assertIn("::error::release is a tag such as", got.stdout)
+                    self.assertEqual(out.read(), "", "nothing reached $GITHUB_OUTPUT")
+
+    def test_attach_sh_judges_its_release_whole(self):
+        script = HERE.parent / "integrations" / "studio-desktop" / "scripts" / "attach.sh"
+        for ok in ("0.2.0", "v0.2.0", "v10.20.30"):
+            got = subprocess.run([DASH, str(script), ok], capture_output=True, text=True, timeout=60)
+            self.assertIn("nothing to attach", got.stderr, (ok, got.stderr))
+        for value in [v for ok in ("0.2.0", "v0.2.0") for v in self.holes(ok)] + ["v", "1.0", "1.0.0-rc.1"]:
+            with self.subTest(value=value):
+                got = subprocess.run([DASH, str(script), value], capture_output=True, text=True, timeout=60)
+                self.assertEqual(got.returncode, 1)
+                self.assertIn("release is a tag such as", got.stderr)
+
+    def test_packages_homebrew_judges_its_version_whole(self):
+        run = self.cut(self.step("packages.yml", "homebrew", "is not a release version"), "The release says what it is")
+        for ok in ("0.2.0", "v0.2.0", "v10.20.30"):
+            got = self.bash(run, RELEASE_TAG=ok, HOMEBREW_TAP_TOKEN="t")
+            self.assertEqual((got.returncode, "PASSED" in got.stdout), (0, True), (ok, got.stdout, got.stderr))
+        for value in [v for ok in ("0.2.0", "v0.2.0") for v in self.holes(ok)] + ["v1.0.0-rc.1", "v", "1.0"]:
+            with self.subTest(value=value):
+                out = tempfile.NamedTemporaryFile("r")
+                got = self.bash(run, RELEASE_TAG=value, HOMEBREW_TAP_TOKEN="t", GITHUB_OUTPUT=out.name)
+                self.assertNotIn("PASSED", got.stdout)
+                self.assertEqual(out.read(), "set=false\n")
+
+    def test_image_latests_version_is_judged_whole(self):
+        text = (HERE / "image-latest.sh").read_text(encoding="utf-8")
+        block = re.search(r"^nl='\n'\nif ! \{ case \$version in\n(?:.*\n)*?^fi\n", text, re.M)
+        self.assertTrue(block)
+        for value, ok in [("1.4.2", True), ("0.2.0", True), ("1.0.0-rc.1", False), ("v1.0.0", False), ("", False)] + \
+                [(v, False) for v in self.holes("1.4.2")]:
+            with self.subTest(value=value):
+                script = f'set -eu\nsays() {{ echo "SAYS $*"; }}\nversion=$1\nset -- x "$1"\n{block.group(0)}echo PASSED\n'
+                got = subprocess.run([DASH, "-c", script, "sh", value], capture_output=True, text=True, timeout=60)
+                self.assertEqual("PASSED" in got.stdout, ok, (value, got.stdout, got.stderr))
+
+    def test_every_digest_and_latest_is_judged_whole(self):
+        loop = re.search(r"re='\^sha256[^\n]*\n\s*for d in \"\$list\" \"\$amd\" \"\$arm\"; do\n(?:.*\n)*?\s*done\n",
+                         self.step("release.yml", "manifest", "a digest of"))
+        self.assertTrue(loop)
+        ok = digest(7)
+        for position in range(3):
+            for value, good in [(ok, True)] + [(h, False) for h in self.holes(ok)] + [("sha256:abc", False)]:
+                with self.subTest(position=position, value=value):
+                    vals = [ok, ok, ok]
+                    vals[position] = value
+                    got = self.bash(f'list=$LIST amd=$AMD arm=$ARM IMAGE=i version=v\n{loop.group(0)}echo PASSED',
+                                    LIST=vals[0], AMD=vals[1], ARM=vals[2])
+                    self.assertEqual(got.returncode == 0, good, (value, got.stdout))
+
+    def test_release_verifys_whole_matches(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        helper = re.search(r"^whole\(\) \{\n(?:.*\n)*?^\}\n", text, re.M)
+        self.assertTrue(helper)
+        uses = re.findall(r"whole '([^']+)' \"\$(\w+)\"", text)
+        self.assertEqual(sorted(v for _, v in uses), ["digest", "latest", "tag"])
+        valid = {"tag": ("v0.2.0", "v1.0.0-rc.3"), "latest": ("v1.4.2",), "digest": (digest(3),)}
+        nl = "nl='\n'\n"
+        for pattern, var in uses:
+            for ok in valid[var]:
+                for value, good in [(ok, True)] + [(h, False) for h in self.holes(ok)]:
+                    with self.subTest(var=var, value=value):
+                        got = subprocess.run([DASH, "-c", f"{nl}{helper.group(0)}whole '{pattern}' \"$1\"", "sh", value],
+                                             capture_output=True, text=True, timeout=60)
+                        self.assertEqual(got.returncode == 0, good, (value, got.stderr))
 
     def test_the_scripts_take_it(self):
         bin_ = tempfile.TemporaryDirectory()

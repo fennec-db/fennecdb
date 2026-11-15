@@ -129,7 +129,12 @@ move() {
     fails "$image:latest is [$held] after the move, neither $1's list $2 nor a newer published release's"
 }
 
-if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+nl='
+'
+if ! { case $version in
+    *"$nl"*) false ;;
+    *) printf '%s\n' "$version" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+' ;;
+    esac; }; then
     says "latest names releases alone, and $2 is no X.Y.Z: it is not moved"
     exit 0
 fi
