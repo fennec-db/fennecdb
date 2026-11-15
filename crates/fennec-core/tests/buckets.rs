@@ -325,7 +325,10 @@ fn rows_a_bucket_gave_answer_as_the_scan_without_its_equality() {
 /// `@sorted` field, a box of a `@geo` one, each narrower than the bucket --
 /// are tested with that equality: they need not hold it, and only the
 /// bucket's own rows are tested without it (`Database::candidates_held`
-/// lets the equality go wherever another set takes its place).
+/// lets the equality go wherever another set takes its place). Each case's
+/// plan names the set that answered, so a case whose set stops taking
+/// over -- a box past its cap, a range declined -- fails rather than
+/// passing as the bucket's.
 #[test]
 fn rows_another_index_took_over_are_tested_with_the_equality() {
     let mut db = Database::new();
@@ -353,16 +356,54 @@ fn rows_another_index_took_over_are_tested_with_the_equality() {
     }
     let boxed = Value::List([1.05, 0.0, 1.45, 1.0].map(Value::Float).to_vec());
     let mut wrong = Vec::new();
-    for filter in [
-        "k = \"k1\" and id in [2, 3, 4]",
-        "k = \"k1\" and g in [2, 3, 4]",
-        "k = \"k1\" and a = 5",
-        "k = \"k1\" and a = 5 and b >= 0",
-        "k = \"k1\" and n > 55",
-        "n > 55 and k = \"k1\"",
-        "k = \"k1\" and within(loc, $1)",
+    // Each filter, and the start of its plan's line for the set that gave
+    // the rows: the bucket of `k = "k1"`, 20 rows, is chosen first and the
+    // set named here takes its place, but in the last case.
+    for (filter, answered) in [
+        (
+            "k = \"k1\" and id in [2, 3, 4]",
+            "filter: the id index, `in`, 3 rows",
+        ),
+        (
+            "k = \"k1\" and g in [2, 3, 4]",
+            "filter: the hash index, `in`, on g, 3 rows",
+        ),
+        (
+            "k = \"k1\" and a = 5",
+            "filter: the index on (a, b), a fixed, 3 rows",
+        ),
+        (
+            "k = \"k1\" and a = 5 and b >= 0",
+            "filter: the index on (a, b), a fixed, a range on b, 3 rows",
+        ),
+        (
+            "k = \"k1\" and a in [5, 6, 7]",
+            "filter: the index on (a, b), a fixed, 3 spans, 9 rows",
+        ),
+        // The bucket, then the index over (a, b) above, then a range
+        // narrower than both: the rows whose `n` is 26 and 27 hold every
+        // term but the equality, whose bucket they are not in.
+        (
+            "k = \"k1\" and a in [5, 6, 7] and n >= 25 and n <= 27",
+            "filter: the ordered index on n, 3 rows",
+        ),
+        (
+            "k = \"k1\" and n > 55",
+            "filter: the ordered index on n, 4 rows",
+        ),
+        (
+            "n > 55 and k = \"k1\"",
+            "filter: the ordered index on n, 4 rows",
+        ),
+        (
+            "k = \"k1\" and within(loc, $1)",
+            "filter: the point index on loc, ",
+        ),
         // The bucket narrower than the range: its rows tested without it.
-        "k = \"k1\" and n > 2",
+        (
+            "k = \"k1\" and n > 2",
+            "filter: the hash index on k, 20 rows",
+        ),
     ] {
         let answer = |c: &str, tail: &str| {
             let stmt = fennec_ql::parse_one(&format!("get {c} where {filter} {tail}")).unwrap();
@@ -376,6 +417,35 @@ fn rows_another_index_took_over_are_tested_with_the_equality() {
                 wrong.push(format!(
                     "{filter} {tail}: {hashed:?} where the scan said {plain:?}"
                 ));
+            }
+            let sql = format!("explain get hashed where {filter} {tail}");
+            let plan: Vec<String> = db
+                .query(
+                    &fennec_ql::parse_one(&sql).unwrap(),
+                    std::slice::from_ref(&boxed),
+                )
+                .unwrap_or_else(|e| panic!("{sql}: {e}"))
+                .rows()
+                .unwrap()
+                .rows
+                .iter()
+                .map(|r| match &r.values[..] {
+                    [Value::Text(s)] => s.clone(),
+                    other => panic!("{sql}: a plan row holds {other:?}"),
+                })
+                .collect();
+            assert!(
+                plan.iter().any(|l| l.starts_with(answered)),
+                "{sql}: no line {answered:?} in {plan:#?}"
+            );
+            // The index over (a, b) took the bucket's place before the
+            // range took its own: declined, the range would have taken the
+            // bucket's place alone.
+            if filter.contains("a in") {
+                assert!(
+                    !plan.iter().any(|l| l.contains("(a, b) not used")),
+                    "{sql}: {plan:#?}"
+                );
             }
         }
         // Each filter answers some rows and leaves some out.
