@@ -698,18 +698,28 @@ answered; what is counted is what any thread of the server did between its
 taking the second connection and its taking the third (`accept4`, traced
 for that), so the start-up and the setup before, and the shutdown's sync
 after, are not. Counted, each to the call: the fsync family's calls on
-files (`fsync`, `fdatasync`, `sync_file_range`, `syncfs`, and `msync`,
-which names no descriptor), renames (`rename`, `renameat`, `renameat2`),
-the calls writing to a file (`write`, `pwrite64`, `writev`, `pwritev`,
-`pwritev2`, `copy_file_range`, `sendfile`) and the bytes they returned, and
+files -- `fsync`, `fdatasync` and `sync_file_range`; `syncfs`, which syncs
+the file system, as the file's it names; `msync`, which names no
+descriptor, as `(mapped)`'s; `sync`, at the least an fsync of every file,
+as `(every file)`'s -- renames (`rename`, `renameat`, `renameat2`), the
+calls writing to a file (`write`, `pwrite64`, `writev`, `pwritev`,
+`pwritev2`, `copy_file_range`, `sendfile`, `splice`, and `fallocate`, which
+gives a file room and returns no bytes) and the bytes they returned, and
 the calls of those that failed (`failed`, their bytes none). A descriptor
-is a file where `-y` names it by a path outside `/dev`, `/proc` and `/sys`:
-an answer written to a socket is no file's, nor the server's log, its
-stderr, which is the driver's pipe, nor its stdout, `/dev/null`. The table
-gives fsyncs an answer, bytes written a byte the client sent and a byte of
-the file the setup left beside the counts, and each file's share by its
-name in the data directory: the database, its `.sync` log, the file a
-compact writes, the directory.
+is a file where `-y` names it by a path outside `/dev`, `/proc` and `/sys`,
+one unlinked since it was opened by the name it had (`(deleted)`): an
+answer written to a socket is no file's, nor the server's log, its stderr,
+which is the driver's pipe, nor its stdout, `/dev/null`. A call strace is
+not asked for is a write the gate cannot see, and one a change adds would
+pass on counts that never moved; so a server that sets up io_uring
+anywhere in the trace -- its submissions read off a ring by the kernel, no
+call each -- is refused, the gate to learn the call before it counts
+such a server. Beside the counts, the database file's size once the setup
+was answered (`file_before`). The table gives each count in total, fsyncs
+an answer, bytes written a byte the client sent and a byte of the file the
+setup left, and under it each file's counts by its name in the data
+directory: the database, its `.sync` log, the file a compact writes, `.`
+the directory.
 
 *Exact, so held to the call.* Nothing a workload sends, or the server
 writes between those connections, is sized by a clock or a draw. The ids,
@@ -724,24 +734,91 @@ written at the open, before the counted stretch. A record's claim --
 where a completed fsync left the file -- is the same place every run when
 every write is answered before the next; the idempotency keys' rows, a
 `@ttl` read and `now()` are no workload's. So the counts repeat to the
-call, and are judged so: every run of a side must count the same, or the
-job fails naming the count that moved, and any count of this tree's that
-is not the base's fails, up or down -- fewer fsyncs a durable write is
-durability lost -- unless the pull request adds a `PERF_ACCEPTED` entry
-naming the workload and the count
-(`"metric": "fsyncs"`, `"renames"`, `"writes"`, `"written"` or `"failed"`)
-and how far it may move, and which way: a signed share of the base's count
-or a signed number (`"+100%"`, `"+1"`, `"-50%"`). No threshold: a count
-that holds to the call has no draw to stand above. The entries are the
-instructions' -- added by the pull request, never let through by the
-base's, read as data -- and so is the rule for a workload: one the base's
-own `gate.rs` lists that this tree dropped, or the base's server did not
-run, fails; one new to the program that the base cannot run is held to
-nothing. The pull request that brought the I/O counts is counted and
-judged by its own checker, the base's having no `io` (`io --help` tells
-the jobs which); the base's server answers every request the workloads
-send, so all four are compared from that first run on, as the gate's own
-first run compared every workload its base ran.
+call, and are judged so: every run of a side must count the same -- each
+count in total and each file's, and the file after the setup -- or the job
+fails naming every run's value of each count that moved; and any count of
+this tree's that is not the base's fails, up or down -- fewer fsyncs a
+durable write is durability lost -- unless the pull request adds a
+`PERF_ACCEPTED` entry naming the workload and the count (`"metric":
+"fsyncs"`, `"renames"`, `"writes"`, `"written"`, `"failed"` or
+`"file_before"`) and how far it may move, and which way: a signed share of
+the base's count or a signed number (`"+100%"`, `"+1"`, `"-50%"`). No
+threshold: a count that holds to the call has no draw to stand above.
+
+*File by file.* Fsyncs and bytes written are judged by the file they went
+to, named within the data directory, which is the same from run to run,
+and their entry names it (`"file": "io.fennec"`); write calls, renames and
+failed calls are judged in total. A change that syncs the database where
+it synced its log -- as many fsyncs, each some 356 µs where the log's took
+65 ([durability.md](durability.md#the-sync-log)) -- or writes to one what
+it wrote to the other moves no total, and is what the log exists against.
+
+*The file after the setup.* The client sends both sides the same setup,
+so the size the database file has once it is answered is the server's: a
+change to what the setup writes -- a record's encoding, the schema's, the
+file's header -- grows it for the same documents, and that is worth a pull
+request saying so. Every run of a side must agree on it, as on a count;
+between the sides it is judged as the count it is, its failure naming the
+file after the setup, never requests that differed, and an entry lets it
+through (`"metric": "file_before"`). Each workload's entry is its own, as
+every other count's is: the setups differ -- a collection's schema alone
+in three, 4 MB of rows in the compact's -- so one change moves each by its
+own share, and an entry for all four would let through a workload whose
+setup grew for another reason.
+
+*What an entry lets through.* A share is of the base's count, so a share
+of a count of none is none: a file a side did not sync, synced now, is let
+through by a number (`"+1"`), and the verdict says so where a share was
+given. Of several entries naming one count, each lets through what it
+would alone, so the widest stands and none narrows another: a `+1` beside
+a `+5` lets a move of five through, and a `+1` beside a `-1` either. The
+entries are the instructions' -- added by the pull request, never let
+through by the base's, read as data -- and so is the rule for a workload:
+one the base's own `gate.rs` lists that this tree dropped, or the base's
+server did not run, fails; one new to the program that the base cannot run
+is held to nothing.
+
+*Floors.* Counts that missed would agree with each other: a strace asked
+for none of a call, or a `-y` that named no file, counts nothing on both
+sides, and every workload would pass. So each workload has a floor
+(`IO_FLOORS`), and a run of either side under it fails, whatever an entry
+says. Each sends durable writes, one at a time, under `--sync always`,
+where a write is answered only once it has synced and one request in
+flight shares its sync with none: an fsync an answer at the least, and a
+write call. `io-put`'s floor is 500 fsyncs and a write call; `io-batch`'s
+and `io-spill`'s, one answer each, an fsync and a write call;
+`io-compact`'s an fsync, a write call and a rename, the new file renamed
+over the old. Under it a durable write was answered before its sync, or
+the trace missed a call, and neither is a count to let through. A workload
+named nowhere there is held to an fsync and a write call, and one new to
+the program, held to nothing, to no floor: one that writes nothing on
+purpose names its own.
+
+*By the base's checker but once.* The pull request that brought the I/O
+counts was counted and judged by its own checker: its base's `gate.rs`
+listed no `IO_WORKLOADS`, and its checker had no `io`. Which checker runs
+is the base's program's to say (`perf_gate.py io-checker`, held by the
+tests): the base's wherever the base's `gate.rs` lists `IO_WORKLOADS`,
+this tree's only where it lists none, and a base checker that then cannot
+count them fails the step. The first version asked the base's checker for
+`io --help` and fell back where it failed: a later change that dropped or
+broke `io` would have had every pull request after it counted and judged
+by its own. The decision is this tree's copy's, in both jobs -- a gate
+file, its every edit named for the owner, as the jobs' steps are. The
+base's server answers every request the workloads send, so all four are
+compared from that first run on, as the gate's own first run compared
+every workload its base ran.
+
+*The results kept apart.* The count job keeps the instructions' results
+before the I/O runs, and the I/O's beside them after, in the same artifact
+(`perf-results`): a strace refused, a server's crash, a run answering
+fewer requests or a phase past its 300 s leaves the instructions to be
+judged. The judge judges each set whatever became of the other, says which
+it lacks (`results.json`, `io.json`), and then fails a count that did not
+end well. Without strace, `io` and `io-measure` say so and count nothing --
+on a Mac, whose developer runs them in Docker -- but fail under CI
+(`GITHUB_ACTIONS`); a results file the judge cannot read is a failure that
+names it.
 
 *The counts, held to themselves.* One build's server against itself, 20
 runs a side -- 40 runs of each workload, in Docker on an M1 (aarch64 musl,
@@ -808,7 +885,9 @@ nothing here, and a change that trades instructions for any of them
 passes. The I/O is counted in calls and bytes, not in time: an fsync
 slower on one file system than another, a write that waits for the disk,
 the kernel writing back a mapped file's pages, and reads -- the file is
-mapped, and a read is a page fault no call shows -- are not counted; nor
+mapped, and a read is a page fault no call shows -- are not counted, nor
+is a store into a mapped file, which is no call; a call the trace does not
+ask for is not seen, and io_uring's is refused rather than counted. Nor
 is anything the clock runs, `--sync <ms>`'s syncer and the write behind the
 lock outside `--sync always` among them
 ([durability.md](durability.md#writes-behind-the-lock)), nor a server's
@@ -816,8 +895,10 @@ open and shutdown. Every workload runs on one thread -- an I/O workload
 one connection, a request in flight -- so what threads cost -- a lock's
 contention, connections side by side and the fsync their writes share, a
 batch's vectors linked in parallel -- is not counted. One target: x86_64
-musl's code on Linux, not aarch64's NEON kernels, macOS's or Windows'
-builds -- nor their I/O: macOS keeps no sync log and flushes the drive by
+musl's code on Linux -- the I/O counts were shown exact on aarch64 musl in
+Docker, and x86_64's first runs are the pull request's that brought them,
+in CI -- not aarch64's NEON kernels, macOS's or Windows' builds -- nor
+their I/O: macOS keeps no sync log and flushes the drive by
 `F_FULLFSYNC`, Windows flushes the renamed file and its directory
 ([windows.md](windows.md#3-durability-on-ntfs)) -- nor the browser
 module's (wasm32, whose size `make wasm-sizes` and the size job hold). No
@@ -853,4 +934,16 @@ would no longer be the one that ships -- the counting one hands every call
 to musl's. The count by the pull request's own checker, as the first
 version had it: an entry in `ALLOCATOR` priced a function away in the pull
 request that added it. The count and the judgement in one job: the
-change's code had run before the judgement, on the same `PATH`.
+change's code had run before the judgement, on the same `PATH`. For the
+I/O, `strace -c`, the plan's first thought: its table is each call's
+total over the process by name -- the start-up, the setup and the shutdown
+with the run, a socket's writes and the log's pipe with a file's, no byte
+and no file -- so a durable write's fsync would stand among the answers'
+writes, and a sync moved from the log to the database would read the same;
+counting by descriptor, file and stretch is what holds a run to the call.
+The I/O judged in total alone, as the first version had it: an fsync of
+the database where the log's was passed. The file after the setup held
+as the requests sent are: a change to what the setup writes failed every
+workload, and no entry could let it through. One entry for it across the
+four workloads: each setup grows by its own share, and a workload whose
+setup grew for another reason would pass with the rest.

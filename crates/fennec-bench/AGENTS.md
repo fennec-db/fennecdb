@@ -28,8 +28,11 @@ allocator's own functions' self cost counted as the program's tally of
 calls at the base's cost a call, never a call line's inclusive cost -- or
 in the bytes asked of it: a call's cost moves with the heap's layout, the
 calls and bytes with the code. Both jobs run the base's copy of
-`tools/perf_gate.py`, and a workload the base's `gate.rs` lists that this
-tree dropped, or that the base did not run, fails. A cost taken on purpose
+`tools/perf_gate.py` -- for the I/O too, but where the base's `gate.rs`
+lists no `IO_WORKLOADS` (`io-checker`): only the pull request that brought
+them was counted and judged by its own -- and a workload the base's
+`gate.rs` lists that this tree dropped, or that the base did not run,
+fails. A cost taken on purpose
 is a `PERF_ACCEPTED` entry the pull request adds -- the workload, its
 metric, the most and why -- never the threshold, the runs, `ALLOCATOR` or a
 workload changed to pass. The owner approves each entry and each edit of
@@ -44,10 +47,15 @@ table: a hot path a page quotes gets one. An I/O workload (`IO_WORKLOADS`)
 is sent by `gate.rs` to each side's `fennec-server` under `--sync always`,
 the server alone under `strace -f`, counted from its taking the workload's
 connection to the driver's next: the fsync family's calls, renames, the
-calls writing to files and their bytes, never a socket's or a pipe's.
-Nothing it sends or the server writes then is sized by a clock or a draw,
-so every run of a side counts the same to the call, and a count that is
-not the base's, up or down, fails unless an entry names it.
+calls writing to files and their bytes, never a socket's or a pipe's --
+fsyncs and bytes file by file -- and the database's size after the setup;
+a server that sets up io_uring, which no call shows, is refused, and a
+call the trace does not ask for is one the gate cannot see. Nothing it
+sends or the server writes then is sized by a clock or a draw, so every
+run of a side counts the same to the call; a run under its workload's
+floor (`IO_FLOORS`: an fsync a durable write answered, a write call)
+fails, and a count that is not the base's, up or down, fails unless an
+entry names it, and its file.
 
 **[Two builds' instruction counts](../../docs/design/benchmarks.md#instruction-counts)**
 differing by under ~500 a request are read over re-signed copies'

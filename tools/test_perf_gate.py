@@ -33,6 +33,7 @@ import subprocess
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("perf_gate", os.path.join(HERE, "perf_gate.py"))
@@ -307,7 +308,7 @@ class Reading(unittest.TestCase):
         self.assertIn("dropped", summary)
 
     def test_the_check_judges_io_results_by_their_metric(self):
-        res = io_results(**{"io-put": {"fsyncs": 2_002}})
+        res = io_results(**{"io-put": fsyncs_of("io.fennec", 4)})
         code, summary = self.run_check(res, [], [])
         self.assertEqual(code, 1)
         self.assertIn("fsyncs an answer", summary)
@@ -320,6 +321,19 @@ class Reading(unittest.TestCase):
         code, summary = self.run_check(io_results(), [], [], ["--base-program", program])
         self.assertEqual(code, 1)
         self.assertIn("| io-gone |", summary)
+
+    def test_a_missing_results_file_is_a_named_failure(self):
+        # A count that failed leaves none: the judge says so, never a
+        # traceback.
+        summary = os.path.join(self.dir.name, "summary.md")
+        missing = os.path.join(self.dir.name, "io.json")
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = gate.main(["check", missing, "--summary", summary])
+        self.assertEqual(code, 1)
+        with open(summary, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("refused its input", text)
+        self.assertIn(f"no results to judge at {missing}", text)
 
     def test_the_check_says_which_program_ran(self):
         res = results()
@@ -533,7 +547,7 @@ class Strace(unittest.TestCase):
         counts, taken = gate.io_counts(trace("failing-calls.strace"), "/tmp/fx", start=1, end=2)
         self.assertEqual(taken, 2)
         self.assertEqual(
-            {k: counts[k] for k in gate.IO_METRICS},
+            {k: counts[k] for k in gate.IO_COUNTS},
             {"fsyncs": 3, "renames": 1, "writes": 3, "written": 303, "failed": 2},
         )
         self.assertEqual(counts["files"]["data"], {"writes": 3, "written": 303, "fsyncs": 3, "renames": 0})
@@ -542,7 +556,7 @@ class Strace(unittest.TestCase):
     def test_nothing_outside_the_stretch_counts(self):
         counts, taken = gate.io_counts(trace("failing-calls.strace"), "/tmp/fx", start=2, end=3)
         self.assertEqual(taken, 2)
-        self.assertEqual(sum(counts[k] for k in gate.IO_METRICS), 0)
+        self.assertEqual(sum(counts[k] for k in gate.IO_COUNTS), 0)
 
     def test_a_servers_compact_is_counted_between_its_second_and_third_connection(self):
         # fennec-server under `perf_gate.py io`, workload io-compact: the
@@ -556,7 +570,7 @@ class Strace(unittest.TestCase):
         counts, taken = gate.io_counts(trace("io-compact.strace"), d)
         self.assertEqual(taken, 3)
         self.assertEqual(
-            {k: counts[k] for k in gate.IO_METRICS},
+            {k: counts[k] for k in gate.IO_COUNTS},
             {"fsyncs": 6, "renames": 1, "writes": 5, "written": 2_139_997, "failed": 0},
         )
         self.assertEqual(counts["files"]["io.fennec.beside"], {"writes": 5, "written": 2_139_997, "fsyncs": 3, "renames": 0})
@@ -573,10 +587,57 @@ class Strace(unittest.TestCase):
         counts, taken = gate.io_counts(trace("io-spill.strace"), d)
         self.assertEqual(taken, 3)
         self.assertEqual(
-            {k: counts[k] for k in gate.IO_METRICS},
+            {k: counts[k] for k in gate.IO_COUNTS},
             {"fsyncs": 1, "renames": 0, "writes": 2, "written": 16_785_520 + 1_234_392, "failed": 0},
         )
         self.assertEqual(list(counts["files"]), ["io.fennec"])
+
+    def test_the_forms_no_capture_holds_are_counted_by_what_they_are(self):
+        # hand-written.strace, typed as strace 6 prints: x86_64's rename(;
+        # copy_file_range's and splice's second descriptor, sendfile's first,
+        # a socket's and a pipe's passed over; fallocate a write call of no
+        # bytes; msync the mapped file's fsync and sync every file's; syncfs
+        # the file it names; a file unlinked since it was opened by its name.
+        lines = trace("hand-written.strace")
+        self.assertTrue(lines[0].startswith("# Hand-written, not captured"))
+        counts, taken = gate.io_counts(lines, "/tmp/hw")
+        self.assertEqual(taken, 3)
+        self.assertEqual(
+            {k: counts[k] for k in gate.IO_COUNTS},
+            {"fsyncs": 4, "renames": 1, "writes": 5, "written": 360, "failed": 0},
+        )
+        self.assertEqual(counts["files"]["dst"], {"writes": 4, "written": 350, "fsyncs": 1, "renames": 0})
+        self.assertEqual(counts["files"]["old"], {"writes": 1, "written": 10, "fsyncs": 1, "renames": 0})
+        self.assertEqual(counts["files"]["data"], {"writes": 0, "written": 0, "fsyncs": 0, "renames": 1})
+        self.assertEqual(counts["files"]["(mapped)"]["fsyncs"], 1)
+        self.assertEqual(counts["files"]["(every file)"]["fsyncs"], 1)
+        self.assertEqual(set(counts["files"]), {"dst", "old", "data", "(mapped)", "(every file)"})
+
+    def test_a_server_that_sets_up_io_uring_is_refused_wherever_it_did(self):
+        # Its ring's writes are no call of the trace: refused, before the
+        # stretch as in it, and named for the gate to learn.
+        ring = (
+            "39    io_uring_setup(8, {flags=0, sq_thread_cpu=0, sq_thread_idle=0, sq_entries=8, cq_entries=16, "
+            "features=IORING_FEAT_SINGLE_MMAP|IORING_FEAT_NODROP, sq_off={head=0, tail=64}, "
+            "cq_off={head=128, tail=192}}) = 12<anon_inode:[io_uring]>"
+        )
+        lines = trace("hand-written.strace")
+        for at in (8, len(lines) - 1):
+            with self.subTest(at=at), self.assertRaises(RuntimeError) as e:
+                gate.io_counts(lines[:at] + [ring] + lines[at:], "/tmp/hw")
+            self.assertIn("io_uring_setup", str(e.exception))
+            self.assertIn("must learn it", str(e.exception))
+        # One the kernel refused set nothing up.
+        refused = ring.split(" = ")[0] + " = -1 ENOSYS (Function not implemented)"
+        counts, _ = gate.io_counts(lines[:8] + [refused] + lines[8:], "/tmp/hw")
+        self.assertEqual(counts["fsyncs"], 4)
+
+    def test_every_call_counted_or_refused_is_asked_of_strace(self):
+        asked = set(gate.IO_CALLS)
+        for kind in (gate.IO_ACCEPTS, gate.IO_SYNCS, gate.IO_RENAMES, set(gate.IO_WRITES), gate.IO_REFUSED):
+            self.assertLessEqual(set(kind), asked)
+        for call in ("sync", "syncfs", "sync_file_range", "fallocate", "splice", "msync", "io_uring_setup"):
+            self.assertIn(call, asked)
 
     def test_a_line_that_is_no_call_is_passed_over(self):
         lines = [
@@ -604,15 +665,29 @@ const IO_WORKLOADS: &[(&str, usize, IoPhase, IoPhase)] = &[
 """
 
 
-def io_run(**counts):
-    """One run of an I/O workload, io-put's shape -- a thousand durable puts,
-    a fsync each and two more as the sync log turned over -- `counts` over
-    it."""
+# io-put's files as the server names them, a thousand durable puts: each
+# put's record written into the database and into its sync log, an fsync
+# each of the log but where the log filled -- the file synced in its
+# place -- and the log's header written for its next generation.
+IO_FILES = {
+    "io.fennec": {"writes": 1_000, "written": 550_000, "fsyncs": 2, "renames": 0},
+    "io.fennec.sync": {"writes": 1_002, "written": 581_000, "fsyncs": 998, "renames": 0},
+}
+
+
+def io_run(files=None, **counts):
+    """One run of an I/O workload, io-put's shape: each file's counts those
+    of IO_FILES with `files` over them, the totals theirs, and `counts` over
+    the rest."""
+    fs = {f: dict(c) for f, c in IO_FILES.items()}
+    for f, c in (files or {}).items():
+        fs.setdefault(f, {"writes": 0, "written": 0, "fsyncs": 0, "renames": 0}).update(c)
     run = {
         "answered": 1_000, "rows": 1_000, "sent": 383_000, "setup_sent": 151, "file_before": 4_400,
-        "fsyncs": 1_002, "renames": 0, "writes": 2_002, "written": 538_000, "failed": 0,
-        "files": {"io.fennec": {"writes": 1_001, "written": 260_000, "fsyncs": 1, "renames": 0}},
+        "failed": 0, "files": fs,
     }
+    for k in ("fsyncs", "renames", "writes", "written"):
+        run[k] = sum(c[k] for c in fs.values())
     run.update(counts)
     return run
 
@@ -630,8 +705,18 @@ def io_results(**heads):
     return {"metric": "io", "tool": "strace", "runs": gate.IO_RUNS, "workloads": workloads}
 
 
-def io_entry(workload="io-put", metric="fsyncs", most="+100%"):
-    return {"workload": workload, "metric": metric, "most": most, "reason": REASON}
+def fsyncs_of(f, n):
+    """A head's counts with file `f`'s fsyncs `n`, the totals following."""
+    return {"files": {f: {"fsyncs": n}}}
+
+
+def io_entry(workload="io-put", metric="fsyncs", most="+100%", file=None):
+    e = {"workload": workload, "metric": metric, "most": most, "reason": REASON}
+    if metric in gate.IO_BY_FILE:
+        e["file"] = file or "io.fennec"
+    elif file:
+        e["file"] = file
+    return e
 
 
 def io_verdicts(res, entries=(), base_names=None):
@@ -640,58 +725,147 @@ def io_verdicts(res, entries=(), base_names=None):
 
 
 class Io(unittest.TestCase):
-    """The I/O workloads' counts, each judged to the call: any move fails,
-    up or down, unless an entry the pull request adds names the workload
-    and the count and lets it so far."""
+    """The I/O workloads' counts, each judged to the call -- fsyncs and
+    bytes written file by file, the file after the setup as a count: any
+    move fails, up or down, unless an entry the pull request adds names the
+    workload, the count and its file, and lets it so far."""
 
     def test_one_more_fsync_a_write_fails(self):
-        v, failed = io_verdicts(io_results(**{"io-put": {"fsyncs": 2_002}}))
+        v, failed = io_verdicts(io_results(**{"io-put": fsyncs_of("io.fennec", 1_002)}))
         self.assertTrue(failed)
         self.assertTrue(v["io-put"].startswith("FAILED"), v)
-        self.assertIn("fsyncs 1,002 → 2,002 (+99.8%)", v["io-put"])
+        self.assertIn("fsyncs of `io.fennec` 2 → 1,002 (+50,000.0%)", v["io-put"])
         self.assertEqual(v["io-batch"], "ok")
 
     def test_an_entry_the_pull_request_adds_lets_it_through(self):
-        v, failed = io_verdicts(io_results(**{"io-put": {"fsyncs": 2_002}}), [io_entry()])
+        res = io_results(**{"io-put": fsyncs_of("io.fennec", 1_002)})
+        v, failed = io_verdicts(res, [io_entry(most="+1000")])
         self.assertFalse(failed, v)
         self.assertTrue(v["io-put"].startswith("accepted"), v)
+        self.assertIn("fsyncs of `io.fennec`", v["io-put"])
 
     def test_an_entry_the_base_holds_lets_nothing_through(self):
-        e = io_entry()
-        _, failed = io_verdicts(io_results(**{"io-put": {"fsyncs": 2_002}}), gate.added([e], [e]))
+        e = io_entry(most="+1000")
+        _, failed = io_verdicts(io_results(**{"io-put": fsyncs_of("io.fennec", 1_002)}), gate.added([e], [e]))
         self.assertTrue(failed)
 
     def test_a_single_byte_more_fails(self):
-        _, failed = io_verdicts(io_results(**{"io-batch": {"written": 538_001}}))
+        v, failed = io_verdicts(io_results(**{"io-batch": {"files": {"io.fennec": {"written": 550_001}}}}))
         self.assertTrue(failed)
+        self.assertIn("written of `io.fennec` 550,000 → 550,001", v["io-batch"])
 
     def test_fewer_fsyncs_fail_too(self):
         # A durable write that syncs less has lost what made it durable: a
         # drop is named as a rise is, and a rise's entry lets none through.
-        res = io_results(**{"io-put": {"fsyncs": 2}})
+        # (Below one an answer, io-put's floor fails it whatever an entry
+        # says: `Floors`.)
+        res = io_results(**{"io-other": fsyncs_of("io.fennec.sync", 997)})
         v, failed = io_verdicts(res)
         self.assertTrue(failed)
-        self.assertIn("fsyncs 1,002 → 2 (-99.8%)", v["io-put"])
-        _, failed = io_verdicts(res, [io_entry(most="+100%")])
+        self.assertIn("fsyncs of `io.fennec.sync` 998 → 997 (-0.1%)", v["io-other"])
+        _, failed = io_verdicts(res, [io_entry("io-other", most="+1", file="io.fennec.sync")])
         self.assertTrue(failed)
-        _, failed = io_verdicts(res, [io_entry(most="-100%")])
+        _, failed = io_verdicts(res, [io_entry("io-other", most="-1", file="io.fennec.sync")])
         self.assertFalse(failed)
 
+    def test_an_fsync_of_the_file_where_the_log_was_fails_with_the_count_the_same(self):
+        # 998 syncs of the log moved onto the file: as many fsyncs, each some
+        # 356 microseconds where the log's took 65 -- what the log is for.
+        res = io_results(**{"io-put": {"files": {"io.fennec": {"fsyncs": 1_000}, "io.fennec.sync": {"fsyncs": 0}}}})
+        self.assertEqual(res["workloads"]["io-put"]["head"][0]["fsyncs"], res["workloads"]["io-put"]["base"][0]["fsyncs"])
+        v, failed = io_verdicts(res)
+        self.assertTrue(failed)
+        self.assertIn("fsyncs of `io.fennec` 2 → 1,000", v["io-put"])
+        self.assertIn("fsyncs of `io.fennec.sync` 998 → 0 (-100.0%)", v["io-put"])
+        # An entry a file lets that file alone through.
+        v, failed = io_verdicts(res, [io_entry(most="+998")])
+        self.assertTrue(failed)
+        self.assertNotIn("fsyncs of `io.fennec` 2", v["io-put"])
+        v, failed = io_verdicts(res, [io_entry(most="+998"), io_entry(most="-100%", file="io.fennec.sync")])
+        self.assertFalse(failed, v)
+
+    def test_bytes_moved_from_one_file_to_another_fail(self):
+        res = io_results(**{"io-batch": {"files": {"io.fennec": {"written": 550_100}, "io.fennec.sync": {"written": 580_900}}}})
+        v, failed = io_verdicts(res)
+        self.assertTrue(failed)
+        self.assertIn("written of `io.fennec` 550,000 → 550,100", v["io-batch"])
+        self.assertIn("written of `io.fennec.sync` 581,000 → 580,900", v["io-batch"])
+
+    def test_a_file_new_to_a_side_is_a_count_from_none(self):
+        res = io_results(**{"io-put": {"files": {"io.fennec.beside": {"writes": 1, "written": 64, "fsyncs": 1}}}})
+        v, failed = io_verdicts(res)
+        self.assertTrue(failed)
+        self.assertIn("fsyncs of `io.fennec.beside` 0 → 1 (from none)", v["io-put"])
+        self.assertIn("written of `io.fennec.beside` 0 → 64 (from none)", v["io-put"])
+
+    def test_a_share_of_a_count_of_none_lets_nothing_through(self):
+        # +100% of none is none: from 0 a count moves only by a number, and
+        # the verdict says so where a share was given.
+        res = io_results(**{"io-put": fsyncs_of("io.fennec.beside", 1)})
+        v, failed = io_verdicts(res, [io_entry(most="+100%", file="io.fennec.beside")])
+        self.assertTrue(failed)
+        self.assertIn("a share of none lets nothing through: an entry names a count (`+1`)", v["io-put"])
+        v, failed = io_verdicts(res, [io_entry(most="+1", file="io.fennec.beside")])
+        self.assertFalse(failed, v)
+        self.assertFalse(gate.io_lets("+100000%", 0, 1))
+
+    def test_of_several_entries_for_one_count_any_lets_through_what_it_would_alone(self):
+        two = [io_entry(most="+1"), io_entry(most="+5")]
+        _, failed = io_verdicts(io_results(**{"io-put": fsyncs_of("io.fennec", 5)}), two)
+        self.assertFalse(failed)
+        _, failed = io_verdicts(io_results(**{"io-put": fsyncs_of("io.fennec", 8)}), two)
+        self.assertTrue(failed)
+        # Either way, each lets its own direction through.
+        both = [io_entry("io-other", most="+1"), io_entry("io-other", most="-1")]
+        for n in (1, 3):
+            with self.subTest(n=n):
+                _, failed = io_verdicts(io_results(**{"io-other": fsyncs_of("io.fennec", n)}), both)
+                self.assertFalse(failed)
+
     def test_an_entry_lets_through_its_count_alone_and_no_further(self):
-        res = io_results(**{"io-put": {"fsyncs": 1_003, "written": 538_100}})
+        res = io_results(**{"io-put": {"files": {"io.fennec": {"fsyncs": 3, "written": 550_100}}}})
         _, failed = io_verdicts(res, [io_entry(most="+1")])
         self.assertTrue(failed)
         v, failed = io_verdicts(res, [io_entry(most="+1"), io_entry(metric="written", most="+100")])
         self.assertFalse(failed, v)
-        _, failed = io_verdicts(io_results(**{"io-put": {"fsyncs": 1_004}}), [io_entry(most="+1")])
+        _, failed = io_verdicts(io_results(**{"io-put": fsyncs_of("io.fennec", 4)}), [io_entry(most="+1")])
         self.assertTrue(failed)
-        _, failed = io_verdicts(io_results(**{"io-put": {"fsyncs": 2_005}}), [io_entry(most="+100%")])
+        _, failed = io_verdicts(io_results(**{"io-put": fsyncs_of("io.fennec", 5)}), [io_entry(most="+100%")])
         self.assertTrue(failed)
-        _, failed = io_verdicts(io_results(**{"io-put": {"fsyncs": 1_003}}), [io_entry("io-batch", most="+1")])
+        _, failed = io_verdicts(io_results(**{"io-put": fsyncs_of("io.fennec", 3)}), [io_entry("io-batch", most="+1")])
+        self.assertTrue(failed)
+        _, failed = io_verdicts(io_results(**{"io-put": {"renames": 1}}), [io_entry(metric="writes", most="+1")])
         self.assertTrue(failed)
 
+    def test_the_file_after_the_setup_is_a_count_an_entry_names(self):
+        # The server's encoding of the setup -- a record's, the schema's, the
+        # header's -- decides it: the same requests sent, and the failure
+        # says what moved, never that the requests differed.
+        res = io_results(**{"io-put": {"file_before": 4_408}, "io-batch": {"file_before": 4_408}})
+        v, failed = io_verdicts(res)
+        self.assertTrue(failed)
+        self.assertIn("the file after the setup (`file_before`) 4,400 → 4,408 (+0.2%)", v["io-put"])
+        self.assertNotIn("requests", v["io-put"])
+        # An entry each: one for io-put lets io-batch's own move fail.
+        v, failed = io_verdicts(res, [io_entry(metric="file_before", most="+8")])
+        self.assertTrue(failed)
+        self.assertTrue(v["io-put"].startswith("accepted"), v)
+        self.assertTrue(v["io-batch"].startswith("FAILED"), v)
+        entries = [io_entry(metric="file_before", most="+8"), io_entry("io-batch", "file_before", "+1%")]
+        v, failed = io_verdicts(res, entries)
+        self.assertFalse(failed, v)
+        _, failed = io_verdicts(res, [io_entry(metric="file_before", most="+7"), entries[1]])
+        self.assertTrue(failed)
+
+    def test_runs_whose_file_after_the_setup_differs_fail(self):
+        res = io_results()
+        res["workloads"]["io-put"]["head"][2] = io_run(file_before=4_401)
+        v, failed = io_verdicts(res)
+        self.assertTrue(failed)
+        self.assertIn("file_before 4,400 (run 1), 4,400 (run 2), 4,401 (run 3)", v["io-put"])
+
     def test_a_workload_only_this_tree_has_is_reported_not_judged(self):
-        res = io_results(**{"io-new": {"fsyncs": 7}})
+        res = io_results(**{"io-new": {"renames": 7}})
         res["workloads"]["io-new"]["base"] = []
         res["workloads"]["io-new"]["base_error"] = "io-new: `io` exited 101"
         rows, failed = gate.judge_io(res, [], base_names={"io-put": 1_000, "io-batch": 1})
@@ -711,21 +885,30 @@ class Io(unittest.TestCase):
         self.assertTrue(failed)
         self.assertTrue(v["io-gone"].startswith("FAILED: dropped"), v)
 
-    def test_runs_that_differ_fail(self):
+    def test_runs_that_differ_fail_naming_every_runs_value(self):
         res = io_results()
-        res["workloads"]["io-put"]["head"][1] = io_run(written=538_064)
+        res["workloads"]["io-put"]["head"][1] = io_run(files={"io.fennec": {"written": 550_064}})
         v, failed = io_verdicts(res)
         self.assertTrue(failed)
-        self.assertIn("runs differ in written", v["io-put"])
+        self.assertIn("this tree's runs differ", v["io-put"])
+        self.assertIn("written 1,131,000 (run 1), 1,131,064 (run 2), 1,131,000 (run 3)", v["io-put"])
+        self.assertIn("written of `io.fennec` 550,000 (run 1), 550,064 (run 2), 550,000 (run 3)", v["io-put"])
         res = io_results()
-        res["workloads"]["io-batch"]["base"][2] = io_run(fsyncs=1_003)
+        res["workloads"]["io-batch"]["base"][2] = io_run(files={"io.fennec.sync": {"fsyncs": 999}})
         v, failed = io_verdicts(res)
         self.assertTrue(failed)
-        self.assertIn("base's runs differ in fsyncs", v["io-batch"])
+        self.assertIn("the base's runs differ", v["io-batch"])
+        self.assertIn("fsyncs of `io.fennec.sync` 998 (run 1), 998 (run 2), 999 (run 3)", v["io-batch"])
+        # A file one run wrote and the others did not.
+        res = io_results()
+        res["workloads"]["io-put"]["head"][0] = io_run(files={"stray": {"writes": 1, "written": 9}})
+        v, _ = io_verdicts(res)
+        self.assertIn("writes of `stray` 1 (run 1), 0 (run 2), 0 (run 3)", v["io-put"])
 
-    def test_sides_sent_other_requests_fail(self):
-        _, failed = io_verdicts(io_results(**{"io-put": {"sent": 383_001}}))
+    def test_sides_sent_other_requests_fail_naming_what(self):
+        v, failed = io_verdicts(io_results(**{"io-put": {"sent": 383_001}}))
         self.assertTrue(failed)
+        self.assertIn("the two sides were not sent the same requests: sent 383,000 → 383,001", v["io-put"])
 
     def test_fewer_runs_fail(self):
         res = io_results()
@@ -743,12 +926,24 @@ class Io(unittest.TestCase):
             gate.judge_io(io_results(), [io_entry("io-nothing")])
 
     def test_the_form_of_an_io_entry(self):
-        gate.checked([io_entry(), io_entry(most="-50%"), io_entry(most="+1"), io_entry(metric="written", most="-4096")])
+        gate.checked([
+            io_entry(), io_entry(most="-50%"), io_entry(most="+1"), io_entry(metric="written", most="-4096"),
+            io_entry(metric="renames", most="+1"), io_entry(metric="file_before", most="+8"),
+        ])
         for bad in ("100%", "+0", "-0%", "+1.5", "1", "+1,5%", "more"):
             with self.subTest(most=bad), self.assertRaises(ValueError):
                 gate.checked([io_entry(most=bad)])
         self.assertEqual(gate.io_most("+100%"), ("share", 1.0))
         self.assertEqual(gate.io_most("-2"), ("count", -2))
+        # A count judged file by file names its file; one in total, and an
+        # instructions entry, name none.
+        for bad in (
+            dict(io_entry(), file=""), {k: v for k, v in io_entry(metric="written").items() if k != "file"},
+            io_entry(metric="renames", most="+1", file="io.fennec"), io_entry(metric="file_before", file="io.fennec"),
+            dict(entry(), file="io.fennec"),
+        ):
+            with self.subTest(entry=bad), self.assertRaises(ValueError):
+                gate.checked([bad])
 
     def test_the_bases_io_workloads_are_read_off_its_table(self):
         self.assertEqual(gate.io_workload_names(GATE_RS), {"io-put": 1_000, "io-batch": 1, "io-gone": 1})
@@ -756,20 +951,133 @@ class Io(unittest.TestCase):
         with self.assertRaises(ValueError):
             gate.io_workload_names(GATE_RS.replace('("io-batch", 1,', '("io-batch", N,'))
 
-    def test_the_table_shows_each_count_and_its_ratios(self):
-        res = io_results(**{"io-put": {"fsyncs": 2_002}})
+    def test_the_table_shows_each_count_its_ratios_and_each_file(self):
+        res = io_results(**{"io-put": fsyncs_of("io.fennec", 1_002)})
         rows, _ = gate.judge_io(res, [])
         text = gate.io_table(res, rows)
-        self.assertIn("1,002 → 2,002", text)
-        self.assertIn("1.00 → 2.00", text)
-        self.assertIn("| 538,000 | 1.405 |", text)
-        self.assertIn("`io.fennec`", text)
+        self.assertIn("| io-put | 1,000 | 1,000 | 383,000 | 4,400 | 1,000 → 2,000 | 1.00 → 2.00 |", text)
+        self.assertIn("| 1,131,000 | 2.953 | 257.045 |", text)
+        self.assertIn("| io-put | `io.fennec` | 2 → 1,002 | 550,000 | 1,000 | 0 |", text)
+        self.assertIn("| io-put | `io.fennec.sync` | 998 | 581,000 | 1,002 | 0 |", text)
+        self.assertIn("| io-batch | `io.fennec` | 2 | 550,000 | 1,000 | 0 |", text)
 
     def test_results_of_another_metric_are_refused(self):
         with self.assertRaises(ValueError):
             gate.judge_io(results(), [])
         with self.assertRaises(ValueError):
             gate.judge(io_results(), [])
+
+
+def floored(name, **counts):
+    """Results of workload `name` alone, both sides' runs `io_run(**counts)`
+    -- agreeing, so only a floor can fail them."""
+    runs = lambda: [io_run(**counts) for _ in range(gate.IO_RUNS)]
+    return {"metric": "io", "runs": gate.IO_RUNS, "workloads": {name: {"requests": 1, "base": runs(), "head": runs()}}}
+
+
+class Floors(unittest.TestCase):
+    """What a run of each workload counts at the least: under it the trace
+    missed what the server did, and both sides missing it alike would pass
+    on nothing."""
+
+    def test_each_workloads_floor(self):
+        put = io_run()
+        self.assertEqual(gate.io_floor("io-put", put), [])
+        none = {"files": {f: {"fsyncs": 0, "writes": 0} for f in IO_FILES}}
+        for name in ("io-put", "io-batch", "io-spill", "io-compact"):
+            with self.subTest(name):
+                v, failed = io_verdicts(floored(name, **none))
+                self.assertTrue(failed)
+                self.assertIn("the base's runs counted fsyncs 0", v[name])
+                self.assertIn("this tree's runs counted writes 0, under", v[name])
+                self.assertIn("the trace missed what the server did", v[name])
+
+    def test_a_durable_put_answered_is_an_fsync_at_the_least(self):
+        # io-put: 1 000 answered, 999 fsyncs -- one put answered unsynced, or
+        # a sync the trace did not see -- and no entry lets it through.
+        short = fsyncs_of("io.fennec.sync", 997)
+        self.assertEqual(gate.io_floor("io-put", io_run(**short)), [("fsyncs", 999, 1_000)])
+        v, failed = io_verdicts(floored("io-put", **short))
+        self.assertTrue(failed)
+        self.assertIn("fsyncs 999, under io-put's floor of 1,000", v["io-put"])
+        res = io_results(**{"io-put": short})
+        v, failed = io_verdicts(res, [io_entry(most="-1", file="io.fennec.sync")])
+        self.assertTrue(failed)
+        self.assertIn("this tree's runs counted fsyncs 999, under io-put's floor", v["io-put"])
+        self.assertIn("a write was answered before its sync", v["io-put"])
+        # io-batch's is its one answer's: the same counts hold it.
+        self.assertEqual(gate.io_floor("io-batch", io_run(answered=1, **short)), [])
+        self.assertEqual(gate.io_floor("io-batch", io_run(answered=1, files={f: {"fsyncs": 0} for f in IO_FILES})),
+                         [("fsyncs", 0, 1)])
+
+    def test_a_compact_renames(self):
+        self.assertEqual(gate.io_floor("io-compact", io_run(answered=1)), [("renames", 0, 1)])
+        self.assertEqual(gate.io_floor("io-compact", io_run(answered=1, files={"io.fennec": {"renames": 1}})), [])
+        self.assertEqual(gate.io_floor("io-spill", io_run(answered=1, files={"io.fennec.sync": {"writes": 0}})), [])
+
+    def test_a_workload_named_nowhere_is_held_to_an_fsync_and_a_write(self):
+        self.assertEqual(gate.io_floor("io-new", io_run()), [])
+        nothing = io_run(files={f: {"fsyncs": 0, "writes": 0} for f in IO_FILES})
+        self.assertEqual(gate.io_floor("io-new", nothing), [("fsyncs", 0, 1), ("writes", 0, 1)])
+
+    def test_a_new_workload_held_to_nothing_meets_no_floor(self):
+        res = floored("io-new", files={f: {"fsyncs": 0, "writes": 0} for f in IO_FILES})
+        res["workloads"]["io-new"]["base"] = []
+        v, failed = io_verdicts(res, base_names={})
+        self.assertFalse(failed, v)
+
+
+class Checker(unittest.TestCase):
+    """Which checker counts and judges the I/O: the base's, but where the
+    base's own gate.rs lists no IO_WORKLOADS -- the pull request that
+    brought them -- whatever the base's checker can run."""
+
+    setUp = Reading.setUp
+    write = Reading.write
+
+    def test_the_base_wherever_its_program_lists_them(self):
+        self.assertEqual(gate.io_checker(GATE_RS), "base")
+        self.assertEqual(gate.io_checker(GATE_RS.split("const IO_WORKLOADS")[0]), "this tree")
+        self.assertEqual(gate.io_checker(""), "this tree")
+        self.assertEqual(gate.io_checker("// no const IO_WORKLOADS here\n"), "this tree")
+
+    def test_the_command_prints_the_checker_to_run(self):
+        def ran(text):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                code = gate.main(["io-checker", "--base-program", self.write("g.rs", text), "B.py", "T.py"])
+            return code, out.getvalue().strip()
+
+        self.assertEqual(ran(GATE_RS), (0, "B.py"))
+        self.assertEqual(ran(""), (0, "T.py"))
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(gate.main(["io-checker", "--base-program", "/nonexistent/g.rs", "B.py", "T.py"]), 1)
+
+    def test_both_jobs_ask_it_and_probe_nothing(self):
+        # The fallback was `io --help` on the base's checker: a base that
+        # dropped or broke `io` would have handed every later pull request
+        # to its own checker.
+        with open(os.path.join(os.path.dirname(HERE), gate.WORKFLOW), encoding="utf-8") as f:
+            jobs = gate.jobs_of(f.read())
+        for job in gate.JOBS:
+            with self.subTest(job):
+                self.assertIn("io-checker --base-program", jobs[job])
+                self.assertNotIn("--help", jobs[job])
+
+
+class Tracing(unittest.TestCase):
+    """Where strace cannot count, `io` and `io-measure` count nothing: exit
+    0 on a developer's machine, a failure under CI."""
+
+    def test_no_strace_fails_under_ci_alone(self):
+        with mock.patch.object(gate.shutil, "which", return_value=None), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+                self.assertEqual(gate.main(["io-measure", "--head-server", "s", "--client", "c", "--out", "o.json"]), 1)
+            with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": ""}):
+                self.assertEqual(gate.main(["io-measure", "--head-server", "s", "--client", "c", "--out", "o.json"]), 0)
+        self.assertIn("nothing measured", err.getvalue())
+        self.assertIn("Nothing measured", err.getvalue())
 
 
 class Names(unittest.TestCase):
