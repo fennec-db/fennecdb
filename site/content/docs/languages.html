@@ -164,7 +164,7 @@ hits, err := docs.Select("title").Match("title", "oasys", fennecdb.Fuzzy(2)).Row
 n, err := docs.Where("title", "~", "Dunes").Count(ctx)</pre>
 <p><code>Query</code> gives rows as <code>[]map[string]any</code>;
 <code>Batch</code>, <code>IdempotencyKey</code>, <code>After</code> for a
-replica, <code>Subscribe</code>, <code>Changes</code> and
+replica, <code>Subscribe</code> (a long seed comes in parts: an event's <code>Part</code> and <code>More</code>), <code>Changes</code> and
 <code>WithTenant</code> cover the rest of the <a href="http.html">HTTP
 endpoint</a> and its <a href="http-reference.html">reference</a> (<a href="https://github.com/fennec-db/fennecdb/tree/main/integrations/go">integrations/go</a>);
 a refusal is an <code>*fennecdb.Error</code>, and a batch's says which
@@ -286,7 +286,7 @@ var n = await docs.Where("title", "~", "Dunes").CountAsync();</pre>
 on every call. <code>QueryAsync&lt;T&gt;</code> maps rows to records or
 classes by property name, any case; <code>BatchAsync</code>,
 <code>WithIdempotencyKey</code>, <code>After</code> for a replica,
-<code>SubscribeAsync</code> as an <code>IAsyncEnumerable</code>,
+<code>SubscribeAsync</code> as an <code>IAsyncEnumerable</code> (a long seed comes in parts: an event's <code>Part</code> and <code>More</code>),
 <code>ChangesAsync</code> and a <code>Tenant</code> option cover the rest
 of the <a href="http.html">HTTP endpoint</a> and its
 <a href="http-reference.html">reference</a>

@@ -462,8 +462,9 @@ in 491 and 2 801 mapped, 866 read.
 
 *Cut, or refused.* Past D, damage -- a record failing its sum, or a head no
 record reads from: zeros, stale bytes, a record of no sum after checked
-ones, a counter's head anywhere but the front -- is judged by what follows
-it (`judge_after`). A whole record after it, by its sum, whose claim is
+ones, a counter's head anywhere but the front, a head naming a collection
+no create gives (`u32::MAX` on, `whole_record`, whose length fits) -- is
+judged by what follows it (`judge_after`). A whole record after it, by its sum, whose claim is
 past the damage says an fsync covered the damaged bytes before that
 record was appended: they were on the disk and changed since, and the
 open is refused, naming both ("the record at 1234 fails its checksum, and
