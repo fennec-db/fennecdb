@@ -26,8 +26,10 @@ DASH = "/bin/dash"
 # repos/o/r/releases/tags/TAG` answers as the API does: a published release
 # alone, from $STATE/releases (a line "tag draft prerelease" a release), put
 # through --jq; a draft, or no release, is a 404, its body on stdout and
-# gh's line on stderr, and $STATE/api-error holds another error's line (a
-# rate limit, a 5xx) to answer instead. `gh release list` honours the flags
+# gh's line on stderr, and so is a published one for the first
+# $STATE/tag-lag reads (the API a moment behind its publish);
+# $STATE/api-error holds another error's line (a rate limit, a 5xx) to
+# answer instead. `gh release list` honours the flags
 # it is given -- a draft or a pre-release listed unless excluded, newest
 # first, -L, --json tagName put through -q -- leaving out $STATE/unlisted's
 # names (a list a moment behind the publish), then runs
@@ -65,6 +67,11 @@ api)
         exit 1
     fi
     line=$(awk -v t="$tag" '$1 == t && $2 == "false"' "$STATE/releases")
+    lag=$(cat "$STATE/tag-lag" 2>/dev/null || echo 0)
+    if [ "$lag" -gt 0 ]; then
+        echo $((lag - 1)) >"$STATE/tag-lag"
+        line=
+    fi
     if [ -z "$line" ]; then
         echo '{"message":"Not Found","documentation_url":"https://docs.github.com/rest/releases/releases#get-a-release-by-tag-name","status":"404"}'
         echo 'gh: Not Found (HTTP 404)' >&2
@@ -190,9 +197,11 @@ class ImageLatest(unittest.TestCase):
         (self.state / hook).write_text("".join(f"{line}\n" for line in lines))
 
     def run_it(self, tag, **env):
-        e = {k: v for k, v in os.environ.items() if k not in ("EVENT_PRERELEASE", "GH_TOKEN")}
+        e = {k: v for k, v in os.environ.items()
+             if k not in ("EVENT_PRERELEASE", "GH_TOKEN", "GITHUB_EVENT_NAME", "API_LAG_TRIES", "API_LAG_WAIT")}
         e.update(PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}", STATE=str(self.state),
-                 GITHUB_REPOSITORY="o/r", GITHUB_STEP_SUMMARY=str(self.summary), RUNNER_TEMP=self.dir.name)
+                 GITHUB_REPOSITORY="o/r", GITHUB_STEP_SUMMARY=str(self.summary), RUNNER_TEMP=self.dir.name,
+                 API_LAG_WAIT="0")
         e.update(env)
         return subprocess.run([DASH, str(SCRIPT), IMAGE, tag], env=e, capture_output=True, text=True, timeout=60)
 
@@ -262,11 +271,13 @@ class ImageLatest(unittest.TestCase):
 
     def test_a_draft_seen_from_either_caller_leaves_it(self):
         # At the tag's push release.yml's run finds the release a draft,
-        # with `manifest`'s list made, and a dispatch of packages.yml for a
-        # draft's tag (or the tag of no release) finds the same: the API
-        # answers a 404 by the tag, whatever the token, and both end green.
-        callers = (("release.yml", {}), ("packages.yml, dispatched", {"EVENT_PRERELEASE": ""}),
-                   ("packages.yml, by a release event", {"EVENT_PRERELEASE": "false"}))
+        # with `manifest`'s list made, and a dispatch of either workflow
+        # for a draft's tag (or the tag of no release) finds the same: the
+        # API answers a 404 by the tag, whatever the token, and each ends
+        # green.
+        callers = (("release.yml, at the tag's push", {"GITHUB_EVENT_NAME": "push"}),
+                   ("release.yml, dispatched", {"GITHUB_EVENT_NAME": "workflow_dispatch"}),
+                   ("packages.yml, dispatched", {"EVENT_PRERELEASE": "", "GITHUB_EVENT_NAME": "workflow_dispatch"}))
         for caller, env in callers:
             for tag in ("v0.3.0", "v0.9.0"):
                 with self.subTest(caller=caller, tag=tag):
@@ -277,6 +288,25 @@ class ImageLatest(unittest.TestCase):
                     self.assertLeft(got, f"{tag} is not published yet: packages.yml moves latest when it is",
                                     digest(2))
                     self.assertNotIn("::error::", got.stderr)
+
+    def test_a_404_in_the_publishs_own_run_is_read_again(self):
+        # packages.yml's run, started by the release's publish: the release
+        # is there, and the API a moment behind it.
+        self.given(["v0.2.0", "v0.3.0"], {"0.2.0": digest(2), "0.3.0": digest(3), "latest": digest(2)})
+        (self.state / "tag-lag").write_text("2")
+        got = self.run_it("v0.3.0", GITHUB_EVENT_NAME="release", EVENT_PRERELEASE="false")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertIn("read again in 0 s (2 of 6)", got.stderr)
+        self.assertEqual(self.latest(), digest(3))
+
+    def test_a_404_that_stays_in_the_publishs_own_run_fails(self):
+        # Taken for a draft, it ended green with latest left behind.
+        self.given(["v0.2.0", "v0.3.0"], {"0.2.0": digest(2), "0.3.0": digest(3), "latest": digest(2)})
+        (self.state / "tag-lag").write_text("9")
+        self.assertFails(self.run_it("v0.3.0", GITHUB_EVENT_NAME="release", EVENT_PRERELEASE="false",
+                                     API_LAG_TRIES="3"),
+                         "v0.3.0's release is published -- this run is its publish's -- and the API answered its"
+                         " tag with a 404 3 times, 0 s apart", digest(2))
 
     def test_a_pre_release_and_no_version_leave_it(self):
         self.given(["v0.2.0", "v0.4.0 false true", "v1.0.0-rc.1 false true"],

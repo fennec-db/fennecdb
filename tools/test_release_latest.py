@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """tools/release-latest.sh, which keeps GitHub's Latest and npm's `latest`
-on the newest release when one that is not the newest goes out (a patch to
-the previous minor), against a stand-in for `gh` that keeps the releases in
-a folder and answers as gh does, in the pattern of test_image_latest.py:
-where it moves Latest, which dist-tag it names, where it leaves things and
-says why, and where it fails. Every case runs the script under /bin/dash,
-the `sh` of the runners packages.yml runs it on.
+and `next` on the newest release and pre-release whatever goes out (a patch
+to the previous minor, a release candidate), against a stand-in for `gh`
+that keeps the releases in a folder and answers as gh does, in the pattern
+of test_image_latest.py: where it moves Latest, which dist-tag it names,
+where it leaves things and says why, and where it fails. Every case runs
+the script under /bin/dash, the `sh` of the runners packages.yml runs it
+on.
 
     python3 tools/test_release_latest.py
 """
@@ -24,12 +25,15 @@ DASH = "/bin/dash"
 # gh as packages.yml's tokens meet it. `gh api repos/o/r/releases/tags/TAG`
 # answers a published release alone, from $STATE/releases (a line "tag
 # draft prerelease" a release), through --jq; a draft, or no release, is a
-# 404, its body on stdout and gh's line on stderr. `gh api
+# 404, its body on stdout and gh's line on stderr, and so is a published
+# one for the first $STATE/tag-lag reads (the API a moment behind its
+# publish). `gh api
 # repos/o/r/releases/latest` answers the tag $STATE/latest names, a 404
 # where it is empty or missing. $STATE/api-error holds another error's line
 # (a rate limit, a 5xx) for every `gh api` to answer instead. `gh release
 # list` honours the flags it is given -- a draft or a pre-release listed
-# unless excluded, newest first, -L, --json tagName put through -q --
+# unless excluded, newest first, -L, --json tagName or
+# tagName,isPrerelease put through -q --
 # leaving out $STATE/unlisted's names (a list a moment behind the publish),
 # then runs $STATE/after-list-<n> after its n-th answer. `gh release edit
 # TAG -R o/r --latest` makes a published, non-pre-release TAG Latest, as
@@ -76,6 +80,11 @@ api)
     fi
     tag=${path#repos/o/r/releases/tags/}
     [ "$tag" != "$path" ] || { echo "gh api $path: not stood in for" >&2; exit 1; }
+    lag=$(cat "$STATE/tag-lag" 2>/dev/null || echo 0)
+    if [ "$lag" -gt 0 ]; then
+        echo $((lag - 1)) >"$STATE/tag-lag"
+        notfound
+    fi
     line=$(awk -v t="$tag" '$1 == t && $2 == "false"' "$STATE/releases")
     [ -n "$line" ] || notfound
     set -- $line
@@ -98,15 +107,20 @@ release)
             esac
         done
         [ "$repo" = o/r ] || { echo "gh release list -R $repo: not the repository" >&2; exit 1; }
-        [ "$fields" = tagName ] || { echo "gh release list --json $fields: not stood in for" >&2; exit 1; }
+        case $fields in
+        tagName) object='{tagName: .[0]}' ;;
+        tagName,isPrerelease) object='{tagName: .[0], isPrerelease: (.[1] == "true")}' ;;
+        *) echo "gh release list --json $fields: not stood in for" >&2; exit 1 ;;
+        esac
         n=$(($(cat "$STATE/lists" 2>/dev/null || echo 0) + 1))
         echo "$n" >"$STATE/lists"
         touch "$STATE/unlisted"
-        awk -v d="$drafts" -v p="$prereleases" '(d == "true" || $2 == "false") && (p == "true" || $3 == "false") { print $1 }' "$STATE/releases" |
-            grep -vxF -f "$STATE/unlisted" |
+        awk -v d="$drafts" -v p="$prereleases" -v u="$STATE/unlisted" '
+            BEGIN { while ((getline l < u) > 0) gone[l] = 1 }
+            (d == "true" || $2 == "false") && (p == "true" || $3 == "false") && !($1 in gone) { print $1, $3 }' "$STATE/releases" |
             awk '{ l[NR] = $0 } END { for (i = NR; i > 0; i--) print l[i] }' |
             head -n "$limit" |
-            jq -R . | jq -rs "map({tagName: .}) | $filter"
+            jq -R 'split(" ")' | jq -rs "map($object) | $filter"
         if [ -f "$STATE/after-list-$n" ]; then sh "$STATE/after-list-$n"; fi
         ;;
     edit)
@@ -182,9 +196,11 @@ class ReleaseLatest(unittest.TestCase):
         (self.state / hook).write_text("".join(f"{line}\n" for line in lines))
 
     def run_it(self, mode, tag, **env):
-        e = {k: v for k, v in os.environ.items() if k not in ("EVENT_PRERELEASE", "GH_TOKEN")}
+        e = {k: v for k, v in os.environ.items()
+             if k not in ("EVENT_PRERELEASE", "GH_TOKEN", "GITHUB_EVENT_NAME", "API_LAG_TRIES", "API_LAG_WAIT")}
         e.update(PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}", STATE=str(self.state),
-                 GITHUB_REPOSITORY="o/r", GITHUB_STEP_SUMMARY=str(self.summary), RUNNER_TEMP=self.dir.name)
+                 GITHUB_REPOSITORY="o/r", GITHUB_STEP_SUMMARY=str(self.summary), RUNNER_TEMP=self.dir.name,
+                 API_LAG_WAIT="0")
         e.update(env)
         return subprocess.run([DASH, str(SCRIPT), mode, tag], env=e, capture_output=True, text=True, timeout=60)
 
@@ -255,14 +271,110 @@ class ReleaseLatest(unittest.TestCase):
         self.assertEqual(got.returncode, 0, got.stderr)
         self.assertEqual(self.latest(), "v1.1.0")
 
-    def test_a_draft_a_pre_release_and_no_version_leave_it(self):
+    def test_a_draft_or_a_pre_release_is_not_among_the_newest(self):
+        # Latest is held on the newest published X.Y.Z all the same: here
+        # it is there already.
         self.given(["v1.1.0", "v1.2.0 true false", "v1.2.0-rc.1 false true", "v1.3.0 false true"], latest="v1.1.0")
         self.assertLeft(self.run_it("github", "v1.2.0"), "v1.2.0 is not published yet", "v1.1.0")
         self.assertLeft(self.run_it("github", "v1.9.0"), "v1.9.0 is not published yet", "v1.1.0")
         self.assertLeft(self.run_it("github", "v1.3.0"), "v1.3.0 is a pre-release", "v1.1.0")
-        self.assertLeft(self.run_it("github", "v1.2.0-rc.1"), "v1.2.0-rc.1 is no X.Y.Z", "v1.1.0")
+        self.assertLeft(self.run_it("github", "v1.2.0-rc.1"), "v1.2.0-rc.1 is a pre-release", "v1.1.0")
         self.assertLeft(self.run_it("github", "v1.1.0", EVENT_PRERELEASE="true"), "v1.1.0 is a pre-release",
                         "v1.1.0")
+
+    def test_a_draft_or_a_pre_release_holding_latest_gives_it_back(self):
+        # A dispatch for a draft's tag, or a pre-release's, finds Latest
+        # where a publish took it, and puts it back all the same.
+        for tag in ("v1.2.0", "v1.3.0", "v1.2.0-rc.1"):
+            with self.subTest(tag=tag):
+                self.fresh()
+                self.given(["v1.1.0", "v1.2.0 true false", "v1.2.0-rc.1 false false", "v1.3.0 false true"],
+                           latest="v1.2.0-rc.1")
+                got = self.run_it("github", tag)
+                self.assertEqual(got.returncode, 0, got.stderr)
+                self.assertEqual(self.edits(), ["latest to v1.1.0"])
+                self.assertEqual(self.latest(), "v1.1.0")
+
+    # Release candidates: GitHub makes a candidate Latest when it is
+    # published without `--prerelease`, and install.sh would take it.
+
+    def test_a_candidate_before_its_release(self):
+        # Published as a pre-release, it took nothing.
+        self.given(["v0.1.12", "v0.2.0", "v1.0.0-rc.1 false true"], latest="v0.2.0")
+        self.assertLeft(self.run_it("github", "v1.0.0-rc.1"), "GitHub's Latest is v0.2.0 already", "v0.2.0")
+        # Published as a release, it took Latest, which goes back to 0.2.0.
+        self.fresh()
+        self.given(["v0.1.12", "v0.2.0", "v1.0.0-rc.1"], latest="v1.0.0-rc.1")
+        got = self.run_it("github", "v1.0.0-rc.1")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertEqual(self.edits(), ["latest to v0.2.0"])
+        self.assertEqual(self.latest(), "v0.2.0")
+        self.assertIn("GitHub's Latest is v0.2.0, moved from v1.0.0-rc.1", got.stdout)
+
+    def test_a_candidate_of_a_later_minor_while_an_earlier_one_is_newest(self):
+        self.given(["v1.0.3", "v1.1.0-rc.1", "v1.1.0-rc.2 false true"], latest="v1.1.0-rc.1")
+        got = self.run_it("github", "v1.1.0-rc.2")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertEqual(self.edits(), ["latest to v1.0.3"])
+        self.assertEqual(self.latest(), "v1.0.3")
+
+    def test_a_release_after_its_candidates(self):
+        self.given(["v0.2.0", "v1.0.0-rc.1 false true", "v1.0.0-rc.2 false true", "v1.0.0"], latest="v1.0.0")
+        self.assertLeft(self.run_it("github", "v1.0.0"), "GitHub's Latest is v1.0.0 already", "v1.0.0")
+        # A list a moment behind the publish, and Latest left on 0.2.0 (a
+        # publish with --latest=false by mistake): it goes to 1.0.0.
+        self.fresh()
+        self.given(["v0.2.0", "v1.0.0-rc.1 false true", "v1.0.0-rc.2 false true", "v1.0.0"], latest="v0.2.0")
+        (self.state / "unlisted").write_text("v1.0.0\n")
+        got = self.run_it("github", "v1.0.0")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertEqual(self.edits(), ["latest to v1.0.0"])
+
+    def test_a_candidate_with_no_release_to_hold_latest_on(self):
+        self.given(["v1.0.0-rc.1 false true"])
+        self.assertLeft(self.run_it("github", "v1.0.0-rc.1"), "no X.Y.Z release is published, and none is Latest",
+                        None)
+        self.fresh()
+        self.given(["v1.0.0-rc.1"], latest="v1.0.0-rc.1")
+        self.assertFails(self.run_it("github", "v1.0.0-rc.1"), "GitHub's Latest is v1.0.0-rc.1, and no X.Y.Z"
+                         " release is published to hold it on", "v1.0.0-rc.1")
+
+    def test_a_tag_that_is_no_release_fails(self):
+        self.given(["v1.0.0"], latest="v1.0.0")
+        for tag in ("vfoo", "v1.0", "1.0.0", "v1.0.0-", "v1.0.0+build"):
+            with self.subTest(tag=tag):
+                self.assertFails(self.run_it("github", tag), f"{tag} is no release's tag", "v1.0.0")
+                got = self.run_it("npm-tag", tag)
+                self.assertEqual((got.returncode, got.stdout), (1, ""))
+
+    # A run its publish started: the release is there, and a 404 is the API
+    # behind it.
+
+    def test_a_404_in_the_publishs_own_run_is_read_again(self):
+        self.given(["v1.0.3", "v1.1.0", "v1.0.4"], latest="v1.0.4")
+        (self.state / "tag-lag").write_text("2")
+        got = self.run_it("github", "v1.0.4", GITHUB_EVENT_NAME="release")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertIn("read again in 0 s (2 of 6)", got.stderr)
+        self.assertEqual(self.edits(), ["latest to v1.1.0"])
+        self.fresh()
+        self.given(["v1.0.3", "v1.1.0"])
+        (self.state / "tag-lag").write_text("1")
+        self.assertEqual(self.npm_tag("v1.1.0", GITHUB_EVENT_NAME="release"), "latest\n")
+
+    def test_a_404_that_stays_in_the_publishs_own_run_fails(self):
+        self.given(["v1.0.3", "v1.1.0"], latest="v1.1.0")
+        (self.state / "tag-lag").write_text("9")
+        self.assertFails(self.run_it("github", "v1.1.0", GITHUB_EVENT_NAME="release", API_LAG_TRIES="3"),
+                         "v1.1.0's release is published -- this run is its publish's -- and the API answered its"
+                         " tag with a 404 3 times, 0 s apart", "v1.1.0")
+        (self.state / "tag-lag").write_text("9")
+        got = self.run_it("npm-tag", "v1.1.0", GITHUB_EVENT_NAME="release", API_LAG_TRIES="3")
+        self.assertEqual((got.returncode, got.stdout), (1, ""))
+        # Started by a dispatch, the 404 is a draft's.
+        (self.state / "tag-lag").write_text("9")
+        self.assertLeft(self.run_it("github", "v1.1.0", GITHUB_EVENT_NAME="workflow_dispatch"),
+                        "v1.1.0 is not published yet", "v1.1.0")
 
     def test_a_release_saying_neither_true_nor_false_fails(self):
         self.given(["v1.0.0", "v1.1.0 false null"], latest="v1.0.0")
@@ -361,11 +473,32 @@ class ReleaseLatest(unittest.TestCase):
         self.assertEqual(self.npm_tag("v1.1.0"), "release-1.1\n")
 
     def test_a_pre_release_goes_out_under_next(self):
-        self.given(["v1.0.3", "v1.1.0 false true"])
+        self.given(["v1.0.3", "v1.1.0-rc.1 false true"])
         self.assertEqual(self.npm_tag("v1.1.0-rc.1"), "next\n")
+        # The next one, which a list read just after its publish lacks.
+        self.assertEqual(self.npm_tag("v1.1.0-rc.2"), "next\n")
+        self.given(["v1.0.3", "v1.1.0 false true"])
         self.assertEqual(self.npm_tag("v1.1.0"), "next\n")
         self.given(["v1.0.3", "v1.1.0"])
         self.assertEqual(self.npm_tag("v1.1.0", EVENT_PRERELEASE="true"), "next\n")
+
+    def test_next_follows_version_order_among_pre_releases(self):
+        # 1.1.0-rc.1 after 2.0.0-rc.1 would move `next` back.
+        self.given(["v1.0.3", "v2.0.0-rc.1 false true", "v1.1.0-rc.1 false true"])
+        self.assertEqual(self.npm_tag("v1.1.0-rc.1"), "next-1.1\n")
+        self.assertEqual(self.npm_tag("v2.0.0-rc.1"), "next\n")
+        # rc.10 is newer than rc.2, as a sort of the text would not say.
+        self.given(["v1.0.0-rc.2 false true", "v1.0.0-rc.10 false true"])
+        self.assertEqual(self.npm_tag("v1.0.0-rc.10"), "next\n")
+        self.assertEqual(self.npm_tag("v1.0.0-rc.2"), "next-1.0\n")
+        # X.Y.Z published as a pre-release is newer than its own candidates,
+        # as semver says and sort -V does not.
+        self.given(["v1.0.0-rc.2 false true", "v1.0.0 false true"])
+        self.assertEqual(self.npm_tag("v1.0.0"), "next\n")
+        self.assertEqual(self.npm_tag("v1.0.0-rc.2"), "next-1.0\n")
+        # A draft or a release is no pre-release `next` is held to.
+        self.given(["v1.0.0-rc.1 false true", "v1.0.0-rc.3 true true", "v1.0.0"])
+        self.assertEqual(self.npm_tag("v1.0.0-rc.2"), "next\n")
 
     def test_a_list_a_moment_behind_and_a_newer_draft_or_pre_release_leave_latest(self):
         self.given(["v1.0.3", "v1.1.0", "v1.2.0 true false", "v1.3.0 false true"])

@@ -10,8 +10,10 @@
 # newer Flutter is a change of the version and its sum, made on purpose. The
 # archive the list names is held to the list's sum and to SHA256 before it
 # is unpacked: a list or a download that is not what was looked at is
-# refused. An SDK already in DIR (the workflow's cache) is taken as it is,
-# and either is then held to VERSION as Flutter itself reports it.
+# refused. Nothing caches the SDK (ci.yml's mobile jobs and packages.yml's
+# `pub` fetch the archive every run), so DIR holds no SDK yet: one there
+# already is refused, never taken unchecked. The SDK unpacked is then held
+# to VERSION as Flutter itself reports it.
 # ci.yml's mobile jobs and packages.yml's `pub` come through here, in place
 # of subosito/flutter-action, whose own steps run actions/cache by its tag
 # (docs/design/integrations.md#workflows).
@@ -26,58 +28,58 @@ dir=$4
 
 command -v jq >/dev/null 2>&1 || { echo "jq reads Flutter's lists and its version, and there is none" >&2; exit 1; }
 
-if [ -x "$dir/flutter/bin/flutter" ]; then
-    echo "Flutter in $dir, from the cache"
-else
-    case "$(uname -m)" in
-        x86_64 | amd64) arch=x64 ;;
-        arm64 | aarch64) arch=arm64 ;;
-        *)
-            echo "no Flutter archive for $(uname -m)" >&2
-            exit 1
-            ;;
-    esac
-    tmp=$(mktemp -d "${TMPDIR:-/tmp}/install-flutter.XXXXXX")
-    trap 'rm -rf "$tmp"' EXIT
-    curl -fsSL --retry 3 -o "$tmp/releases.json" "$releases"
-    # The one stable release of that version for this processor: its
-    # archive's URL and the sum the list gives it.
-    entry=$(jq -r --arg v "$version" --arg a "$arch" '
-        .base_url as $base
-        | [.releases[] | select(.channel == "stable" and .version == $v and (.dart_sdk_arch // "x64") == $a)]
-        | if length == 1 then "\($base)/\(.[0].archive) \(.[0].sha256)" else "none none" end' "$tmp/releases.json")
-    url=${entry% *}
-    listed=${entry##* }
-    if [ "$listed" != "$want" ]; then
-        echo "$releases gives Flutter $version for $arch as [$entry], not the $want asked for" >&2
-        exit 1
-    fi
-    curl -fsSL --retry 3 -o "$tmp/archive" "$url"
-    if command -v sha256sum >/dev/null 2>&1; then
-        got=$(sha256sum "$tmp/archive" | awk '{ print $1 }')
-    else
-        got=$(shasum -a 256 "$tmp/archive" | awk '{ print $1 }')
-    fi
-    if [ "$got" != "$want" ]; then
-        echo "$url is $got, not the $want $releases gives it" >&2
-        exit 1
-    fi
-    # Unpacked beside its place and moved in whole: an unpacking cut short
-    # leaves no SDK that a later run would take as one.
-    rm -rf "$dir/.unpacking"
-    mkdir -p "$dir/.unpacking"
-    case $url in
-        *.zip) unzip -q "$tmp/archive" -d "$dir/.unpacking" ;;
-        *) tar -xf "$tmp/archive" -C "$dir/.unpacking" ;;
-    esac
-    mv "$dir/.unpacking/flutter" "$dir/flutter"
-    rmdir "$dir/.unpacking"
-    echo "Flutter $version in $dir, from $url ($got)"
+if [ -e "$dir/flutter" ]; then
+    echo "$dir/flutter is there already: nothing caches Flutter, and an SDK this script did not hold to its sum is not taken" >&2
+    exit 1
 fi
+case "$(uname -m)" in
+    x86_64 | amd64) arch=x64 ;;
+    arm64 | aarch64) arch=arm64 ;;
+    *)
+        echo "no Flutter archive for $(uname -m)" >&2
+        exit 1
+        ;;
+esac
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/install-flutter.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT
+curl -fsSL --retry 3 -o "$tmp/releases.json" "$releases"
+# The one stable release of that version for this processor: its
+# archive's URL and the sum the list gives it.
+entry=$(jq -r --arg v "$version" --arg a "$arch" '
+    .base_url as $base
+    | [.releases[] | select(.channel == "stable" and .version == $v and (.dart_sdk_arch // "x64") == $a)]
+    | if length == 1 then "\($base)/\(.[0].archive) \(.[0].sha256)" else "none none" end' "$tmp/releases.json")
+url=${entry% *}
+listed=${entry##* }
+if [ "$listed" != "$want" ]; then
+    echo "$releases gives Flutter $version for $arch as [$entry], not the $want asked for" >&2
+    exit 1
+fi
+curl -fsSL --retry 3 -o "$tmp/archive" "$url"
+if command -v sha256sum >/dev/null 2>&1; then
+    got=$(sha256sum "$tmp/archive" | awk '{ print $1 }')
+else
+    got=$(shasum -a 256 "$tmp/archive" | awk '{ print $1 }')
+fi
+if [ "$got" != "$want" ]; then
+    echo "$url is $got, not the $want $releases gives it" >&2
+    exit 1
+fi
+# Unpacked beside its place and moved in whole: an unpacking cut short
+# leaves no half an SDK at DIR/flutter.
+rm -rf "$dir/.unpacking"
+mkdir -p "$dir/.unpacking"
+case $url in
+    *.zip) unzip -q "$tmp/archive" -d "$dir/.unpacking" ;;
+    *) tar -xf "$tmp/archive" -C "$dir/.unpacking" ;;
+esac
+mv "$dir/.unpacking/flutter" "$dir/flutter"
+rmdir "$dir/.unpacking"
+echo "Flutter $version in $dir, from $url ($got)"
 
-# The SDK is VERSION's, whether this run unpacked it or the cache held it:
-# the cache's key is a name the workflow writes, and a key and a version
-# that part would run another Flutter, green. Flutter's own answer
+# The SDK is VERSION's: the archive's sum is the list's, and the list's
+# entry is VERSION's, but the version is held where Flutter says it, not
+# where a list names it. Flutter's own answer
 # (`--machine`, a JSON object, which a first run's notices may come before
 # on its output) and not a file of its tree.
 machine=$("$dir/flutter/bin/flutter" --version --machine) || {

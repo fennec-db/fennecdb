@@ -1,37 +1,48 @@
 #!/bin/sh
-# The pointers that mean "the newest release", kept there when a release
-# that is not the newest goes out -- a patch to the previous minor:
+# The pointers that mean "the newest release", kept there whatever goes out
+# -- a patch to the previous minor, a release candidate:
 #
 #   tools/release-latest.sh github TAG
 #   tools/release-latest.sh npm-tag TAG
 #
-# TAG is the release's (vX.Y.Z). `github` holds GitHub's Latest, which
-# site/install.sh and site/install.ps1 read (`releases/latest/download/`),
-# on the newest published release: GitHub makes every release it publishes
+# TAG is the release's (vX.Y.Z, or vX.Y.Z-<pre-release> for a candidate).
+# `github` holds GitHub's Latest, which site/install.sh and site/install.ps1
+# read (`releases/latest/download/`), on the newest published X.Y.Z release,
+# whatever TAG it was run for: GitHub makes every release it publishes
 # Latest, whatever its version, unless it is published with
-# `--latest=false`, so packages.yml's `github-latest` runs this once a
-# release is published and puts Latest back where a patch to an older minor
-# took it. Nothing is moved, each saying why and ending well, for a TAG that
-# is no X.Y.Z, a release not published yet (the API answers a draft by its
-# tag with a 404 whatever the token), or a pre-release, which GitHub makes
-# no Latest. A move is read back and held, or to a newer published
-# release, which that release's own run moved it to between the move and
-# the read-back; then the release list is read again, and a newer release
-# published meanwhile, whose own run may have run before this one's move,
-# gets it back.
+# `--latest=false` or as a pre-release, so packages.yml's `github-latest`
+# runs this once a release is published and puts Latest back where a patch
+# to an older minor, or a candidate published without `--prerelease`, took
+# it. TAG's own version is among the published ones where its release is
+# published and no pre-release; a draft (the API answers a draft by its tag
+# with a 404 whatever the token), a pre-release or a TAG that is no X.Y.Z
+# is not, and Latest is held on the newest of the others all the same. A
+# move is read back and held, or to a newer published release, which that
+# release's own run moved it to between the move and the read-back; then
+# the release list is read again, and a newer release published meanwhile,
+# whose own run may have run before this one's move, gets it back.
 #
 # `npm-tag` prints the dist-tag packages.yml's `npm` publishes TAG's
-# packages under: `latest` for the newest published release, `next` for a
-# pre-release (as its version, the release or EVENT_PRERELEASE says), and
-# `release-X.Y` for an older X.Y.Z, so that npm's `latest`, which `npm
-# install` takes, never moves back. Not `vX.Y`: npm refuses a dist-tag that
-# reads as a semver range, and `v1.4` reads as >=1.4.0 <1.5.0. A dispatch
-# for a draft's tag is judged by its version.
+# packages under: `latest` for the newest published release, `release-X.Y`
+# for an older X.Y.Z, so that npm's `latest`, which `npm install` takes,
+# never moves back; `next` for the newest pre-release (as its version, the
+# release or EVENT_PRERELEASE says), by version among the published
+# pre-releases and TAG's own, and `next-X.Y` for an older one, so that
+# `next` never moves back either (1.1.0-rc.1 after 2.0.0-rc.1). Not `vX.Y`:
+# npm refuses a dist-tag that reads as a semver range, and `v1.4` reads as
+# >=1.4.0 <1.5.0. A dispatch for a draft's tag is judged by its version. A
+# package's first publish ever is `latest` whatever this names: the
+# registry gives a package with no `latest` that version.
 #
 # "The newest" as tools/image-latest.sh decides it: `sort -V` over the
 # published releases' X.Y.Z, drafts and pre-releases left out, and TAG's
-# own, which a list read just after the publish may not hold yet. Any error
-# of gh but the API's 404 fails, never taken for an answer.
+# own, which a list read just after the publish may not hold yet; among
+# pre-releases, the same with X.Y.Z after its own candidates, as semver
+# orders them. Any error of gh but the API's 404 fails, never taken for an
+# answer, and so does that 404 where GITHUB_EVENT_NAME is `release` -- this
+# run is TAG's publish's own, so the release is there, and the 404 is the
+# API a moment behind -- once API_LAG_TRIES reads API_LAG_WAIT seconds
+# apart (6 and 10) have all had it.
 #
 # GH_TOKEN and GITHUB_REPOSITORY as a workflow sets them; `github` writes
 # with `gh release edit --latest`, which wants `contents: write`. POSIX sh
@@ -53,6 +64,8 @@ mode=$1
 tag=$2
 version=${2#v}
 repo=${GITHUB_REPOSITORY:?GITHUB_REPOSITORY names the repository}
+tries=${API_LAG_TRIES:-6}
+wait=${API_LAG_WAIT:-10}
 
 err=$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/release-latest.XXXXXX")
 trap 'rm -f "$err"' EXIT
@@ -74,9 +87,17 @@ said() {
     tr '\n' ' ' <"$err"
 }
 
+# Whether $1 is X.Y.Z alone, or X.Y.Z and a pre-release.
+release_version() {
+    printf '%s\n' "$1" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+'
+}
+pre_version() {
+    printf '%s\n' "$1" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.]+'
+}
+
 # The published releases' versions, X.Y.Z alone, ascending, into
 # `published`, and the newest of them into `newest`, version $1's among
-# them.
+# them where it is one (an empty $1 adds none).
 releases() {
     if ! tags=$(gh release list -R "$repo" --exclude-drafts --exclude-pre-releases -L 1000 --json tagName -q '.[].tagName' 2>"$err"); then
         fails "the release list could not be read: $(said)"
@@ -85,15 +106,42 @@ releases() {
     newest=$(printf '%s\n' "$published" | tail -n 1)
 }
 
+# The newest of the published pre-releases' versions and $1, into
+# `newest_pre`. sort -V puts X.Y.Z before X.Y.Z-rc.1, which semver puts
+# after: each is sorted by a key that puts a version with no pre-release
+# after its own candidates (X.Y.Z.1 against X.Y.Z.0.rc.1), rc.2 before
+# rc.10 still.
+prereleases() {
+    if ! tags=$(gh release list -R "$repo" --exclude-drafts -L 1000 --json tagName,isPrerelease -q '.[] | select(.isPrerelease) | .tagName' 2>"$err"); then
+        fails "the release list could not be read: $(said)"
+    fi
+    newest_pre=$(printf '%s\nv%s\n' "$tags" "$1" |
+        sed -n 's/^v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\(-[0-9A-Za-z.][0-9A-Za-z.]*\)\{0,1\}\)$/\1/p' |
+        awk '{ i = index($0, "-"); print (i ? substr($0, 1, i - 1) ".0." substr($0, i + 1) : $0 ".1") " " $0 }' |
+        sort -V | tail -n 1 | cut -d' ' -f2)
+}
+
 # Whether the release of TAG is a pre-release, into `prerelease`: true or
 # false as the release says, `draft` where the API answers its tag with a
 # 404 -- a draft, or no release -- and true where EVENT_PRERELEASE says so.
-# gh writes the API's error body to stdout and its status to stderr.
+# In a run its publish started (GITHUB_EVENT_NAME `release`) the release is
+# published, and a 404 is the API behind it: read again, a bounded number of
+# times, then failed. gh writes the API's error body to stdout and its
+# status to stderr.
 release_kind() {
-    if ! prerelease=$(gh api "repos/$repo/releases/tags/$tag" --jq .prerelease 2>"$err"); then
+    n=1
+    while ! prerelease=$(gh api "repos/$repo/releases/tags/$tag" --jq .prerelease 2>"$err"); do
         grep -q 'HTTP 404' "$err" || fails "$tag's release could not be read: $(said)"
-        prerelease=draft
-    fi
+        if [ "${GITHUB_EVENT_NAME:-}" != release ]; then
+            prerelease=draft
+            break
+        fi
+        [ "$n" -lt "$tries" ] ||
+            fails "$tag's release is published -- this run is its publish's -- and the API answered its tag with a 404 $tries times, $wait s apart"
+        echo "$tag's release is published, and the API answers its tag with a 404 still: read again in $wait s ($n of $tries)" >&2
+        sleep "$wait"
+        n=$((n + 1))
+    done
     [ "${EVENT_PRERELEASE:-}" != true ] || prerelease=true
     case $prerelease in
         true | false | draft) ;;
@@ -136,47 +184,59 @@ hold() {
     fails "GitHub's Latest is [$latest] after the move, neither v$1 nor a newer published release"
 }
 
+if [ "$tag" = "$version" ] || { ! release_version "$version" && ! pre_version "$version"; }; then
+    fails "$tag is no release's tag: vX.Y.Z, or vX.Y.Z-<pre-release> for a candidate"
+fi
+
 if [ "$mode" = npm-tag ]; then
-    if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-        says "$tag is no X.Y.Z: its packages go out under next, and npm's latest stays"
-        echo next
-        exit 0
+    if release_version "$version"; then
+        release_kind
+        if [ "$prerelease" != true ]; then
+            releases "$version"
+            if [ "$newest" = "$version" ]; then
+                says "$tag is the newest release: its packages go out under latest"
+                echo latest
+            else
+                says "$tag is older than the newest published release, $newest: its packages go out under release-${version%.*}, and npm's latest stays"
+                echo "release-${version%.*}"
+            fi
+            exit 0
+        fi
     fi
-    release_kind
-    if [ "$prerelease" = true ]; then
-        says "$tag is a pre-release: its packages go out under next, and npm's latest stays"
+    prereleases "$version"
+    core=${version%%-*}
+    if [ "$newest_pre" = "$version" ]; then
+        says "$tag is the newest pre-release: its packages go out under next, and npm's latest stays"
         echo next
-        exit 0
-    fi
-    releases "$version"
-    if [ "$newest" = "$version" ]; then
-        says "$tag is the newest release: its packages go out under latest"
-        echo latest
     else
-        says "$tag is older than the newest published release, $newest: its packages go out under release-${version%.*}, and npm's latest stays"
-        echo "release-${version%.*}"
+        says "$tag is older than the newest pre-release, $newest_pre: its packages go out under next-${core%.*}, and npm's next and latest stay"
+        echo "next-${core%.*}"
     fi
     exit 0
 fi
 
-if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-    says "$tag is no X.Y.Z, and GitHub makes no pre-release Latest: nothing to hold"
-    exit 0
+# GitHub's Latest, on the newest published X.Y.Z whatever TAG is. TAG's own
+# version joins the list, which a list read just after the publish may not
+# hold yet, where its release is published and no pre-release.
+own=
+if release_version "$version"; then
+    release_kind
+    case $prerelease in
+        false) own=$version ;;
+        draft) says "$tag is not published yet: GitHub's Latest is held on the newest published release, which it is not among" ;;
+        true) says "$tag is a pre-release, which GitHub makes no Latest: it is held on the newest published release" ;;
+    esac
+else
+    says "$tag is a pre-release, which GitHub makes no Latest unless it is published as a release: it is held on the newest published X.Y.Z release"
 fi
-release_kind
-case $prerelease in
-    draft)
-        says "$tag is not published yet: GitHub's Latest is held once it is"
-        exit 0
-        ;;
-    true)
-        says "$tag is a pre-release, which GitHub makes no Latest: nothing to hold"
-        exit 0
-        ;;
-esac
 
-releases "$version"
-if [ "$newest" != "$version" ]; then
+releases "$own"
+if [ -z "$newest" ]; then
+    latest_tag
+    [ -n "$latest" ] || { says "no X.Y.Z release is published, and none is Latest: nothing to hold"; exit 0; }
+    fails "GitHub's Latest is $latest, and no X.Y.Z release is published to hold it on"
+fi
+if [ -n "$own" ] && [ "$newest" != "$own" ]; then
     echo "::warning::$tag is older than the newest published release, v$newest: GitHub's Latest is held on v$newest (publish such a release with --latest=false, and Latest does not move at all)"
 fi
 # `hold` reads the release list itself, so the version it is handed is kept

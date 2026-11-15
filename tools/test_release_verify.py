@@ -1,0 +1,624 @@
+#!/usr/bin/env python3
+"""tools/release-verify.sh, RELEASING.md's step 6, against stand-ins for
+`gh`, `npm` and `curl` that keep a release, its attestations, the
+registry's digests and the packages' provenance in a folder, in the
+pattern of test_release_latest.py: a release, a candidate and a draft that
+verify, and each thing missing or wrong failing it, at the first, naming
+it. Then its list of assets, held to what release.yml, swift-binary.yml and
+desktop.yml attach and the scripts that name the files. Every case runs
+the script under /bin/dash.
+
+    python3 tools/test_release_verify.py
+"""
+
+import base64
+import hashlib
+import importlib.util
+import json
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import tempfile
+import unittest
+
+HERE = pathlib.Path(__file__).resolve().parent
+ROOT = HERE.parent
+SCRIPT = HERE / "release-verify.sh"
+DASH = "/bin/dash"
+IMAGE = "ghcr.io/o/fennec-server"
+SLSA = "https://slsa.dev/provenance/v1"
+NPM = ("@fennecdb/web", "@fennecdb/react", "@fennecdb/cloudflare", "@fennecdb/langchain")
+
+spec = importlib.util.spec_from_file_location("workflow_check", HERE / "workflow_check.py")
+wc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(wc)
+
+
+def key(text):
+    """A URL or a package's spec as a file name, as the stand-ins spell it."""
+    return re.sub(r"[^A-Za-z0-9]", "_", text)
+
+
+# gh as the owner's login meets it. `gh release view TAG -R o/r --json
+# isDraft,isPrerelease,assets` answers $STATE/release.json; `gh release
+# download TAG -R o/r -D DIR` copies $STATE/files/*; `gh api
+# repos/o/r/releases/latest --jq .tag_name` answers $STATE/latest, a 404
+# where there is none. `gh attestation verify SUBJECT -R o/r
+# --signer-workflow o/r/.github/workflows/W --source-ref REF
+# [--deny-self-hosted-runners] [--format json --jq Q]` finds the subject's
+# digest -- a file's SHA-256, or for oci://IMAGE:REF what $STATE/gh-sees/REF
+# names, else $STATE/registry/REF -- among $STATE/attested's lines
+# ("digest workflow ref runner"), and fails as gh does where no line has
+# that workflow and ref and, with --deny-self-hosted-runners, a GitHub-hosted
+# runner. Anything else is not stood in for.
+GH = r"""#!/bin/sh
+set -eu
+case "$1 $2" in
+"release view")
+    [ "$4 $5 $6 $7" = "-R o/r --json isDraft,isPrerelease,assets" ] || { echo "gh $*: not stood in for" >&2; exit 1; }
+    [ -f "$STATE/release.json" ] || { echo "release not found" >&2; exit 1; }
+    cat "$STATE/release.json"
+    ;;
+"release download")
+    [ "$4 $5 $6" = "-R o/r -D" ] && [ $# -eq 7 ] || { echo "gh $*: not stood in for" >&2; exit 1; }
+    cp "$STATE/files/"* "$7/"
+    ;;
+"api repos/o/r/releases/latest")
+    [ "$3 $4" = "--jq .tag_name" ] || { echo "gh $*: not stood in for" >&2; exit 1; }
+    t=$(cat "$STATE/latest" 2>/dev/null || true)
+    if [ -z "$t" ]; then
+        echo '{"message":"Not Found","status":"404"}'
+        echo 'gh: Not Found (HTTP 404)' >&2
+        exit 1
+    fi
+    echo "$t"
+    ;;
+"attestation verify")
+    subject=$3
+    shift 3
+    repo= wf= ref= deny= format= q=
+    while [ $# -gt 0 ]; do
+        case $1 in
+        -R) repo=$2; shift 2 ;;
+        --signer-workflow) wf=$2; shift 2 ;;
+        --source-ref) ref=$2; shift 2 ;;
+        --deny-self-hosted-runners) deny=1; shift ;;
+        --format) format=$2; shift 2 ;;
+        --jq | -q) q=$2; shift 2 ;;
+        *) echo "gh attestation verify $1: not stood in for" >&2; exit 1 ;;
+        esac
+    done
+    [ "$repo" = o/r ] || { echo "gh attestation verify -R $repo: not the repository" >&2; exit 1; }
+    case $wf in
+    o/r/.github/workflows/*) ;;
+    *) echo "gh attestation verify --signer-workflow $wf: not stood in for" >&2; exit 1 ;;
+    esac
+    case $subject in
+    oci://*)
+        r=${subject##*:}
+        d=$(cat "$STATE/gh-sees/$r" 2>/dev/null || cat "$STATE/registry/$r")
+        d=${d#sha256:}
+        ;;
+    *)
+        if command -v sha256sum >/dev/null 2>&1; then d=$(sha256sum "$subject" | cut -d' ' -f1)
+        else d=$(shasum -a 256 "$subject" | cut -d' ' -f1); fi
+        ;;
+    esac
+    touch "$STATE/attested"
+    if ! awk -v d="$d" '$1 == d { found = 1 } END { exit !found }' "$STATE/attested"; then
+        echo "Error: HTTP 404: Not Found (https://api.github.com/repos/o/r/attestations/sha256:$d?per_page=30&predicate_type=https%3A%2F%2Fslsa.dev%2Fprovenance%2Fv1)" >&2
+        exit 1
+    fi
+    if ! awk -v d="$d" -v w="${wf##*/}" -v r="$ref" -v deny="$deny" \
+        '$1 == d && $2 == w && $3 == r && (deny == "" || $4 == "github-hosted") { found = 1 } END { exit !found }' "$STATE/attested"; then
+        echo "Error: verifying with issuer \"sigstore.dev\": failed to verify certificate identity: no matching CertificateIdentity found, last error: expected SAN value to match regex \"^https://github.com/$wf\", or source ref $ref" >&2
+        exit 1
+    fi
+    if [ "$format" = json ]; then
+        printf '[{"verificationResult":{"statement":{"subject":[{"digest":{"sha256":"%s"}}]}}}]\n' "$d" | jq -r "$q"
+    else
+        echo "Loaded digest sha256:$d"
+        echo "The following policy criteria will be enforced: ..."
+        echo "✓ Verification succeeded!"
+    fi
+    ;;
+*)
+    echo "gh $*: not stood in for" >&2
+    exit 1
+    ;;
+esac
+"""
+
+# npm: `npm view PKG@V dist.attestations --json` answers $STATE/npm/<key>,
+# nothing where there is no such file (a field npm does not have), a 404
+# where $STATE/npm/<key>.missing is; `npm init -y` and `npm install` write
+# nothing of note; `npm audit signatures` fails where
+# $STATE/npm-audit-fails is.
+NPM_STANDIN = r"""#!/bin/sh
+set -eu
+echo "npm $*" >>"$STATE/npm-calls"
+case $1 in
+view)
+    [ "$3 $4" = "dist.attestations --json" ] || { echo "npm $*: not stood in for" >&2; exit 1; }
+    k=$(printf '%s' "$2" | tr -c 'A-Za-z0-9' '_')
+    if [ -f "$STATE/npm/$k.missing" ]; then echo "npm error 404 Not Found - GET https://registry.npmjs.org/$2" >&2; exit 1; fi
+    if [ -f "$STATE/npm/$k" ]; then cat "$STATE/npm/$k"; fi
+    ;;
+init) echo '{}' >package.json ;;
+install) ;;
+audit)
+    [ "$2" = signatures ] || { echo "npm $*: not stood in for" >&2; exit 1; }
+    if [ -f "$STATE/npm-audit-fails" ]; then
+        echo "audited 4 packages"
+        echo "1 package has an invalid attestation: @fennecdb/web"
+        exit 1
+    fi
+    echo "audited 4 packages: 4 verified registry signatures, 4 verified attestations"
+    ;;
+*) echo "npm $*: not stood in for" >&2; exit 1 ;;
+esac
+"""
+
+# curl: the URL (its last argument) answers $STATE/http/<key>, or with -I
+# $STATE/http/<key>.head, and a 404 as `curl -f` fails where there is none.
+CURL = r"""#!/bin/sh
+set -eu
+head= url=
+while [ $# -gt 0 ]; do
+    case $1 in
+    -H) shift 2 ;;
+    --*) shift ;;
+    -*I*) head=.head; shift ;;
+    -*) shift ;;
+    *) url=$1; shift ;;
+    esac
+done
+k=$(printf '%s' "$url" | tr -c 'A-Za-z0-9' '_')
+if [ ! -f "$STATE/http/$k$head" ]; then
+    echo "curl: (22) The requested URL returned error: 404" >&2
+    exit 22
+fi
+cat "$STATE/http/$k$head"
+"""
+
+
+def digest(n):
+    return "sha256:" + format(n, "064x")
+
+
+class ReleaseVerify(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if not os.access(DASH, os.X_OK):
+            raise AssertionError(f"{DASH}, the runners' sh, is what the script is held to, and is not here")
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.dir.name)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        for name, text in (("gh", GH), ("npm", NPM_STANDIN), ("curl", CURL)):
+            (self.bin / name).write_text(text)
+            (self.bin / name).chmod(0o755)
+        self.state = self.root / "state"
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def run_it(self, *args, **env):
+        e = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "REPO", "IMAGE")}
+        e.update(PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}", STATE=str(self.state), REPO="o/r",
+                 IMAGE=IMAGE, TMPDIR=self.dir.name)
+        e.update(env)
+        return subprocess.run([DASH, str(SCRIPT), *args], env=e, capture_output=True, text=True, timeout=120)
+
+    def listed(self, tag):
+        got = self.run_it("--assets", tag)
+        self.assertEqual(got.returncode, 0, got.stderr)
+        return [tuple(line.split(" ", 1)) for line in got.stdout.splitlines()]
+
+    def http(self, url, body, head=False):
+        (self.state / "http").mkdir(exist_ok=True)
+        (self.state / "http" / (key(url) + (".head" if head else ""))).write_text(body)
+
+    def attest(self, data, workflow, ref, runner="github-hosted"):
+        d = hashlib.sha256(data).hexdigest() if isinstance(data, bytes) else data.removeprefix("sha256:")
+        with open(self.state / "attested", "a") as f:
+            f.write(f"{d} {workflow} {ref} {runner}\n")
+
+    def given(self, tag, draft=False, prerelease=None, latest="v0.2.0", skip=()):
+        """A release that verifies: every asset there, attested by its
+        workflow at its ref, the image's three tags on the registry and
+        attested, npm's four packages and PyPI's files attested by
+        packages.yml. `skip` leaves out what a case breaks."""
+        if self.state.exists():
+            shutil.rmtree(self.state)
+        self.state.mkdir()
+        version = tag[1:]
+        candidate = "-" in version
+        app = not draft and not candidate
+        assets = [(kind, name) for kind, name in self.listed(tag) if app or kind != "desktop"]
+        files = self.state / "files"
+        files.mkdir()
+        sums = []
+        for kind, name in assets:
+            if name == "SHA256SUMS":
+                continue
+            data = f"{name} as {kind} built it\n".encode()
+            (files / name).write_bytes(data)
+            if not name.endswith(".checksum"):
+                sums.append(f"{hashlib.sha256(data).hexdigest()}  {name}\n")
+            if ("attest", name) in skip:
+                continue
+            ref = {"release": f"refs/tags/{tag}", "swift": "refs/heads/main", "desktop": "refs/heads/main"}[kind]
+            self.attest(data, {"release": "release.yml", "swift": "swift-binary.yml",
+                               "desktop": "desktop.yml"}[kind], ref)
+        (files / "SHA256SUMS").write_text("".join(sums))
+        self.release = {"isDraft": draft, "isPrerelease": candidate if prerelease is None else prerelease,
+                        "assets": [{"name": n} for _, n in assets]}
+        self.write_release()
+        if latest:
+            (self.state / "latest").write_text(latest + "\n")
+        # The image: the registry's digest for each tag, and attested.
+        (self.state / "registry").mkdir()
+        self.http("https://ghcr.io/token?scope=repository:o/fennec-server:pull", '{"token":"t"}')
+        for n, ref in enumerate((version, f"{version}-amd64", f"{version}-arm64"), 1):
+            (self.state / "registry" / ref).write_text(digest(n))
+            self.http(f"https://ghcr.io/v2/o/fennec-server/manifests/{ref}",
+                      f"HTTP/2 200\r\ncontent-type: x\r\ndocker-content-digest: {digest(n)}\r\n\r\n", head=True)
+            if ("image", ref) not in skip:
+                self.attest(digest(n), "release.yml", f"refs/tags/{tag}")
+        # npm and PyPI.
+        (self.state / "npm").mkdir()
+        for pkg in NPM:
+            self.npm(pkg, version)
+        pyversion = re.sub(r"-rc\.(\d+)$", r"rc\1", version)
+        names = [f"fennecdb-{pyversion}-py3-none-any.whl", f"fennecdb-{pyversion}.tar.gz"]
+        self.http(f"https://pypi.org/pypi/fennecdb/{pyversion}/json",
+                  json.dumps({"urls": [{"filename": f} for f in names]}))
+        for f in names:
+            self.pypi(pyversion, f)
+
+    def write_release(self):
+        (self.state / "release.json").write_text(json.dumps(self.release))
+
+    def npm(self, pkg, version, workflow=".github/workflows/packages.yml", repository="https://github.com/o/r",
+            provenance=True):
+        spec_ = f"{pkg}@{version}"
+        url = f"https://registry.npmjs.org/-/npm/v1/attestations/{pkg.replace('/', '%2f')}@{version}"
+        if provenance:
+            (self.state / "npm" / key(spec_)).write_text(json.dumps(
+                {"url": url, "provenance": {"predicateType": SLSA}}))
+        statement = {"predicate": {"buildDefinition": {"externalParameters": {"workflow": {
+            "ref": "refs/tags/v" + version, "repository": repository, "path": workflow}}}}}
+        payload = base64.b64encode(json.dumps(statement).encode()).decode()
+        self.http(url, json.dumps({"attestations": [
+            {"predicateType": "https://github.com/npm/attestation/tree/main/specs/publish/v0.1", "bundle": {}},
+            {"predicateType": SLSA, "bundle": {"dsseEnvelope": {"payload": payload}}}]}))
+
+    def pypi(self, pyversion, f, workflow="packages.yml", repository="o/r"):
+        self.http(f"https://pypi.org/integrity/fennecdb/{pyversion}/{f}/provenance", json.dumps(
+            {"version": 1, "attestation_bundles": [{"publisher": {
+                "kind": "GitHub", "repository": repository, "workflow": workflow, "environment": "pypi"},
+                "attestations": [{}]}]}))
+
+    def assertVerifies(self, got, assets):
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        self.assertNotIn("FAIL", got.stdout + got.stderr)
+        self.assertIn(f"holds its {assets} assets, no more", got.stdout)
+        return got.stdout
+
+    def assertFails(self, got, *why):
+        self.assertEqual(got.returncode, 1, got.stdout + got.stderr)
+        fail = [line for line in got.stderr.splitlines() if line.startswith("FAIL ")]
+        self.assertEqual(len(fail), 1, got.stderr)
+        for w in why:
+            self.assertIn(w, fail[0])
+        return fail[0]
+
+    # What verifies.
+
+    def test_a_release_verifies(self):
+        self.given("v1.0.0")
+        out = self.assertVerifies(self.run_it("v1.0.0"), 23)
+        for line in ("ok   fennec-v1.0.0-x86_64-unknown-linux-musl.tar.gz: release.yml at refs/tags/v1.0.0",
+                     "ok   FennecFFI.xcframework.zip: swift-binary.yml at refs/heads/main",
+                     "ok   fennec-studio-v1.0.0-macos-arm64.dmg: desktop.yml at refs/heads/main",
+                     f"ok   {IMAGE}:1.0.0 {digest(1)}: release.yml at refs/tags/v1.0.0",
+                     f"ok   {IMAGE}:1.0.0-arm64 {digest(3)}: release.yml at refs/tags/v1.0.0",
+                     "ok   SHA256SUMS lists 21 assets, each by its sum",
+                     "ok   npm @fennecdb/langchain@1.0.0: SLSA provenance, packages.yml at refs/tags/v1.0.0",
+                     "ok   npm audit signatures",
+                     "ok   PyPI fennecdb-1.0.0.tar.gz: attested, packages.yml of o/r",
+                     "ok   v1.0.0 verified"):
+            self.assertIn(line, out)
+        # One line an asset but SHA256SUMS, which has its own.
+        self.assertEqual(sum(1 for line in out.splitlines() if re.match(r"ok   \S+: \S+\.yml at ", line)), 22)
+
+    def test_a_candidate_has_no_app_and_verifies(self):
+        self.given("v1.0.0-rc.1")
+        out = self.assertVerifies(self.run_it("v1.0.0-rc.1"), 18)
+        self.assertIn("a candidate has no app files", out)
+        self.assertIn("ok   PyPI fennecdb-1.0.0rc1-py3-none-any.whl", out)
+        self.assertNotIn("fennec-studio", out)
+
+    def test_a_draft_verifies_as_far_as_a_draft_goes(self):
+        self.given("v1.0.0", draft=True, latest="")
+        out = self.assertVerifies(self.run_it("v1.0.0"), 18)
+        self.assertIn("verified as far as a draft goes", out)
+        self.assertFalse((self.state / "npm-calls").exists())
+
+    def test_xcframework_built_on_a_release_branch(self):
+        self.given("v1.4.2")
+        lines = (self.state / "attested").read_text().replace("swift-binary.yml refs/heads/main",
+                                                               "swift-binary.yml refs/heads/release/1.4")
+        (self.state / "attested").write_text(lines)
+        out = self.assertVerifies(self.run_it("v1.4.2"), 23)
+        self.assertIn("ok   FennecFFIDynamic.xcframework.zip: swift-binary.yml at refs/heads/release/1.4", out)
+
+    # An asset missing or wrong.
+
+    def test_a_missing_attestation(self):
+        self.given("v1.0.0", skip=[("attest", "fennecdb_1.0.0-1_arm64.deb")])
+        self.assertFails(self.run_it("v1.0.0"), "fennecdb_1.0.0-1_arm64.deb: no attestation by release.yml at"
+                         " refs/tags/v1.0.0", "HTTP 404")
+
+    def test_a_wrong_signer(self):
+        # A server tarball vouched for by desktop.yml's `attach`, or by a
+        # workflow of a branch: each run of the repository can attest.
+        for workflow, ref in (("desktop.yml", "refs/heads/main"), ("release.yml", "refs/heads/main"),
+                              ("release.yml", "refs/heads/evil"), ("release.yml", "refs/tags/v0.9.9")):
+            with self.subTest(workflow=workflow, ref=ref):
+                name = "fennec-v1.0.0-x86_64-unknown-linux-musl.tar.gz"
+                self.given("v1.0.0", skip=[("attest", name)])
+                self.attest((self.state / "files" / name).read_bytes(), workflow, ref)
+                self.assertFails(self.run_it("v1.0.0"), f"{name}: no attestation by release.yml at refs/tags/v1.0.0",
+                                 "no matching CertificateIdentity")
+        # The app attested by release.yml, and the XCFramework by a branch.
+        name = "fennec-studio-v1.0.0-linux-x64.tar.xz"
+        self.given("v1.0.0", skip=[("attest", name)])
+        self.attest((self.state / "files" / name).read_bytes(), "release.yml", "refs/tags/v1.0.0")
+        self.assertFails(self.run_it("v1.0.0"), f"{name}: no attestation by desktop.yml at refs/heads/main")
+        self.given("v1.0.0", skip=[("attest", "FennecFFI.xcframework.zip")])
+        self.attest((self.state / "files" / "FennecFFI.xcframework.zip").read_bytes(), "swift-binary.yml",
+                    "refs/heads/topic")
+        self.assertFails(self.run_it("v1.0.0"), "FennecFFI.xcframework.zip: no attestation by swift-binary.yml at"
+                         " refs/heads/main or refs/heads/release/1.0")
+
+    def test_a_self_hosted_runners_attestation(self):
+        name = "fennec-web-v1.0.0.tar.gz"
+        self.given("v1.0.0", skip=[("attest", name)])
+        self.attest((self.state / "files" / name).read_bytes(), "release.yml", "refs/tags/v1.0.0", "self-hosted")
+        self.assertFails(self.run_it("v1.0.0"), f"{name}: no attestation by release.yml")
+
+    def test_an_attestation_of_other_bytes(self):
+        # A rebuild attested; the release holds the first build's bytes.
+        name = "fennecdb-android-1.0.0.aar"
+        self.given("v1.0.0", skip=[("attest", name)])
+        self.attest(b"a rebuild", "release.yml", "refs/tags/v1.0.0")
+        self.assertFails(self.run_it("v1.0.0"), f"{name}: no attestation by release.yml")
+
+    def test_a_missing_asset(self):
+        for name in ("fennec-v1.0.0-aarch64-pc-windows-msvc.zip", "FennecFFI.xcframework.zip.checksum",
+                     "fennec-studio-v1.0.0-windows-arm64.zip", "SHA256SUMS"):
+            with self.subTest(name=name):
+                self.given("v1.0.0")
+                self.release["assets"].remove({"name": name})
+                self.write_release()
+                self.assertFails(self.run_it("v1.0.0"), f"v1.0.0 lacks {name}")
+
+    def test_an_extra_asset(self):
+        self.given("v1.0.0")
+        self.release["assets"].append({"name": "fennec-v1.0.0-riscv64-unknown-linux-musl.tar.gz"})
+        self.write_release()
+        self.assertFails(self.run_it("v1.0.0"), "holds fennec-v1.0.0-riscv64-unknown-linux-musl.tar.gz, which no"
+                         " workflow attaches")
+        # The app's downloads on a candidate, which desktop.yml never makes.
+        self.given("v1.0.0-rc.1")
+        self.release["assets"].append({"name": "fennec-studio-v1.0.0-rc.1-macos-arm64.dmg"})
+        self.write_release()
+        self.assertFails(self.run_it("v1.0.0-rc.1"), "holds fennec-studio-v1.0.0-rc.1-macos-arm64.dmg")
+
+    def test_a_candidate_that_is_no_pre_release_and_the_reverse(self):
+        self.given("v1.0.0-rc.1", prerelease=False)
+        self.assertFails(self.run_it("v1.0.0-rc.1"), "v1.0.0-rc.1 is a candidate and its release is no"
+                         " pre-release")
+        self.given("v1.0.0", prerelease=True)
+        self.assertFails(self.run_it("v1.0.0"), "v1.0.0 is a release and is marked a pre-release")
+
+    def test_latest_on_a_candidate(self):
+        self.given("v1.0.0-rc.1", latest="v1.0.0-rc.1")
+        self.assertFails(self.run_it("v1.0.0-rc.1"), "GitHub's Latest is v1.0.0-rc.1, no X.Y.Z release")
+
+    def test_sha256sums_held_to_the_assets(self):
+        name = "fennec-ffi-v1.0.0-x86_64-unknown-linux-gnu.tar.gz"
+        sums = self.state / "files" / "SHA256SUMS"
+        cases = (
+            ("a wrong sum", lambda t: re.sub(r"^\w+(  " + re.escape(name) + ")", "0" * 64 + r"\1", t, flags=re.M),
+             f"SHA256SUMS lists {name} with {'0' * 64}"),
+            ("a line missing", lambda t: "".join(l for l in t.splitlines(True) if not l.endswith(name + "\n")),
+             f"SHA256SUMS lists no {name}"),
+            ("a line twice", lambda t: t + next(l for l in t.splitlines(True) if l.endswith(name + "\n")),
+             f"SHA256SUMS lists {name} more than once"),
+            ("a line for no asset", lambda t: t + "0" * 64 + "  other.tar.gz\n", "SHA256SUMS has 22 lines for 21"),
+        )
+        for what, change, why in cases:
+            with self.subTest(what=what):
+                self.given("v1.0.0")
+                sums.write_text(change(sums.read_text()))
+                self.assertFails(self.run_it("v1.0.0"), why)
+
+    # The image.
+
+    def test_the_image_unattested(self):
+        for ref in ("1.0.0", "1.0.0-amd64", "1.0.0-arm64"):
+            with self.subTest(ref=ref):
+                self.given("v1.0.0", skip=[("image", ref)])
+                self.assertFails(self.run_it("v1.0.0"), f"{IMAGE}:{ref} (sha256:", "no attestation by release.yml"
+                                 " at refs/tags/v1.0.0")
+
+    def test_the_image_not_on_the_registry(self):
+        self.given("v1.0.0")
+        (self.state / "http" / (key("https://ghcr.io/v2/o/fennec-server/manifests/1.0.0-amd64") + ".head")).unlink()
+        self.assertFails(self.run_it("v1.0.0"), f"{IMAGE}:1.0.0-amd64 is not on the registry")
+
+    def test_the_attested_digest_is_not_the_one_served(self):
+        # gh found an attested list; the registry serves another for the tag.
+        self.given("v1.0.0")
+        (self.state / "gh-sees").mkdir()
+        (self.state / "gh-sees" / "1.0.0").write_text(digest(9))
+        self.attest(digest(9), "release.yml", "refs/tags/v1.0.0")
+        self.assertFails(self.run_it("v1.0.0"), f"{IMAGE}:1.0.0: the attestation names [{digest(9)[7:]}], not"
+                         f" {digest(1)}")
+
+    # npm and PyPI.
+
+    def test_an_npm_package_without_provenance(self):
+        self.given("v1.0.0")
+        (self.state / "npm" / key("@fennecdb/cloudflare@1.0.0")).unlink()
+        self.assertFails(self.run_it("v1.0.0"), "npm @fennecdb/cloudflare@1.0.0 carries no SLSA provenance")
+
+    def test_an_npm_package_not_published(self):
+        self.given("v1.0.0")
+        (self.state / "npm" / (key("@fennecdb/react@1.0.0") + ".missing")).write_text("")
+        self.assertFails(self.run_it("v1.0.0"), "npm @fennecdb/react@1.0.0 could not be read", "404")
+
+    def test_an_npm_package_from_another_workflow(self):
+        for workflow, repository in ((".github/workflows/release.yml", "https://github.com/o/r"),
+                                     (".github/workflows/packages.yml", "https://github.com/someone/r")):
+            with self.subTest(workflow=workflow, repository=repository):
+                self.given("v1.0.0")
+                self.npm("@fennecdb/web", "1.0.0", workflow=workflow, repository=repository)
+                self.assertFails(self.run_it("v1.0.0"), "npm @fennecdb/web@1.0.0: its provenance names"
+                                 f" [{repository} {workflow} refs/tags/v1.0.0]")
+
+    def test_npm_audit_signatures_failing(self):
+        self.given("v1.0.0")
+        (self.state / "npm-audit-fails").write_text("")
+        self.assertFails(self.run_it("v1.0.0"), "npm audit signatures over the four packages",
+                         "invalid attestation")
+
+    def test_a_pypi_file_without_attestations(self):
+        self.given("v1.0.0")
+        (self.state / "http" / key("https://pypi.org/integrity/fennecdb/1.0.0/fennecdb-1.0.0.tar.gz/provenance")
+         ).unlink()
+        self.assertFails(self.run_it("v1.0.0"), "PyPI's fennecdb-1.0.0.tar.gz has no attestation")
+
+    def test_a_pypi_file_attested_by_another_publisher(self):
+        self.given("v1.0.0")
+        self.pypi("1.0.0", "fennecdb-1.0.0-py3-none-any.whl", workflow="other.yml")
+        self.assertFails(self.run_it("v1.0.0"), "PyPI's fennecdb-1.0.0-py3-none-any.whl: its attestations name no"
+                         " publisher packages.yml of o/r")
+
+    def test_no_pypi_release(self):
+        self.given("v1.0.0")
+        (self.state / "http" / key("https://pypi.org/pypi/fennecdb/1.0.0/json")).unlink()
+        self.assertFails(self.run_it("v1.0.0"), "PyPI holds no files of fennecdb 1.0.0")
+
+    def test_the_usage_and_a_tag_that_is_no_release(self):
+        for args in ([], ["--assets"], ["a", "b"]):
+            got = subprocess.run([DASH, str(SCRIPT), *args], capture_output=True, text=True, timeout=60)
+            self.assertEqual(got.returncode, 2)
+            self.assertIn("tools/release-verify.sh TAG", got.stderr)
+        for tag in ("1.0.0", "v1.0", "vfoo", "v1.0.0;id"):
+            with self.subTest(tag=tag):
+                self.assertFails(self.run_it(tag), f"{tag} is no release's tag")
+
+
+class Assets(unittest.TestCase):
+    """The script's list, held to what the workflows attach: release.yml's
+    builds' matrices and the names their steps and scripts give the files,
+    the XCFramework's three as swift-binary.yml keeps and attests them,
+    SHA256SUMS, and the app's five as desktop.yml's attach.sh names them."""
+
+    def listed(self, tag):
+        got = subprocess.run([DASH, str(SCRIPT), "--assets", tag], capture_output=True, text=True, timeout=60)
+        self.assertEqual(got.returncode, 0, got.stderr)
+        return {name: kind for kind, name in (line.split(" ", 1) for line in got.stdout.splitlines())}
+
+    def workflow(self, name):
+        return wc.read((ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8"))
+
+    def runs(self, job):
+        return "\n".join(str(s["run"]) for s in wc.steps(job) if "run" in s)
+
+    def matrix(self, job, key_):
+        return [str(e[key_]) for e in job["strategy"]["matrix"]["include"]]
+
+    def text(self, path):
+        return (ROOT / path).read_text(encoding="utf-8")
+
+    def built(self, version):
+        """Every file release.yml's publish attaches, from the workflows and
+        the scripts that name them, each with the workflow that attests it."""
+        jobs = self.workflow("release.yml")["jobs"]
+        want = {}
+        binaries = self.runs(jobs["binaries"])
+        self.assertIn('stage="fennec-v${version}-${t}"', binaries)
+        self.assertIn('tar -czf "dist/${stage}.tar.gz"', binaries)
+        for targets in self.matrix(jobs["binaries"], "targets"):
+            for t in targets.split():
+                want[f"fennec-v{version}-{t}.tar.gz"] = "release"
+        self.assertIn('tools/windows-zip.sh "${TAG#v}" ${{ matrix.target }} dist', self.runs(jobs["windows"]))
+        self.assertIn("stage=fennec-v$version-$target", self.text("tools/windows-zip.sh"))
+        self.assertIn('"$stage.zip"', self.text("tools/windows-zip.sh"))
+        for t in self.matrix(jobs["windows"], "target"):
+            want[f"fennec-v{version}-{t}.zip"] = "release"
+        self.assertIn('tools/linux-ffi.sh "${TAG#v}" ${{ matrix.target }} dist', self.runs(jobs["linux-ffi"]))
+        self.assertIn("stage=fennec-ffi-v$version-$target", self.text("tools/linux-ffi.sh"))
+        self.assertIn('"$dist/$stage.tar.gz"', self.text("tools/linux-ffi.sh"))
+        for t in self.matrix(jobs["linux-ffi"], "target"):
+            want[f"fennec-ffi-v{version}-{t}.tar.gz"] = "release"
+        self.assertIn('tar -czf "dist/fennec-web-v${version}.tar.gz"', self.runs(jobs["wasm"]))
+        want[f"fennec-web-v{version}.tar.gz"] = "release"
+        self.assertIn('"$OUT/fennecdb-android-$version.aar"', self.text("integrations/kotlin/build-aar.sh"))
+        want[f"fennecdb-android-{version}.aar"] = "release"
+        packages = self.text("tools/linux-packages.sh")
+        self.assertIn("deb) file=fennecdb_${version}-1_$arch.deb ;;", packages)
+        self.assertIn("rpm) file=fennecdb-$version-1.$triple.rpm ;;", packages)
+        triples = dict(re.findall(r"^\s*(amd64|arm64)\) triple=(\w+) ;;", packages, re.M))
+        for arch in self.matrix(jobs["linux-packages"], "arch"):
+            want[f"fennecdb_{version}-1_{arch}.deb"] = "release"
+            want[f"fennecdb-{version}-1.{triples[arch]}.rpm"] = "release"
+        # The XCFramework: what `apple` hands on is what swift-binary.yml
+        # kept and attests; `publish` sets the three aside while it attests.
+        apple = [s for s in wc.steps(jobs["apple"]) if str(s.get("uses", "")).startswith("actions/upload-artifact")]
+        names = [pathlib.PurePath(p).name for p in str(apple[0]["with"]["path"]).split()]
+        swift = self.workflow("swift-binary.yml")["jobs"]
+        kept = [s for s in wc.steps(swift["build"]) if str(s.get("uses", "")).startswith("actions/upload-artifact")]
+        self.assertEqual(names, [pathlib.PurePath(p).name for p in str(kept[0]["with"]["path"]).split()])
+        self.assertTrue(any(str(s.get("uses", "")).startswith("actions/attest-build-provenance")
+                            for s in wc.steps(swift["pull-request"])))
+        publish = self.runs(jobs["publish"])
+        self.assertIn("mv dist/" + " dist/".join(names) + " swift/", publish)
+        for n in names:
+            want[n] = "swift"
+        self.assertIn("sha256sum *.tar.gz *.zip *.aar *.deb *.rpm > SHA256SUMS", publish)
+        want["SHA256SUMS"] = "sums"
+        return want
+
+    def app(self, version):
+        attach = self.text("integrations/studio-desktop/scripts/attach.sh")
+        bases = re.search(r"^\s*case \$base in\n\s*(.+?)\) ;;", attach, re.M).group(1).split(" | ")
+        self.assertIn("name=fennec-studio-v$version-${base#fennec-studio-}", attach)
+        desktop = (ROOT / ".github" / "workflows" / "desktop.yml").read_text(encoding="utf-8")
+        self.assertIn("sh integrations/studio-desktop/scripts/attach.sh", desktop)
+        return {f"fennec-studio-v{version}-{b.removeprefix('fennec-studio-')}": "desktop" for b in bases}
+
+    def test_a_release_is_what_the_workflows_attach(self):
+        want = {**self.built("1.4.2"), **self.app("1.4.2")}
+        self.assertEqual(self.listed("v1.4.2"), want)
+        self.assertEqual(len(want), 23)
+
+    def test_a_candidate_has_no_app(self):
+        # desktop.yml and attach.sh take X.Y.Z alone.
+        for path in (".github/workflows/desktop.yml", "integrations/studio-desktop/scripts/attach.sh"):
+            self.assertIn("'^v?[0-9]+\\.[0-9]+\\.[0-9]+$'", self.text(path))
+        self.assertEqual(self.listed("v1.0.0-rc.1"), self.built("1.0.0-rc.1"))
+        self.assertEqual(len(self.listed("v1.0.0-rc.1")), 18)
+
+
+if __name__ == "__main__":
+    unittest.main()

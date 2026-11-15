@@ -24,7 +24,12 @@
 # release event started the run), or a release older than the newest
 # published one: `sort -V` over the release list and TAG itself, which a
 # list read just after the publish may not hold yet. Any other error fails:
-# the API's but that 404, the registry's but a tag's not found.
+# the API's but that 404, the registry's but a tag's not found. That 404
+# fails too where GITHUB_EVENT_NAME is `release` -- packages.yml's run, which
+# TAG's publish started, so the release is there and the API is a moment
+# behind it -- once API_LAG_TRIES reads API_LAG_WAIT seconds apart (6 and
+# 10) have all had it: taken for a draft, it ended that run green with
+# `latest` left behind.
 #
 # A move copies the list (`imagetools create` from one list writes its
 # bytes again) and holds `latest` to its digest, or to a newer published
@@ -44,6 +49,8 @@ set -eu
 image=$1
 version=${2#v}
 repo=${GITHUB_REPOSITORY:?GITHUB_REPOSITORY names the repository}
+tries=${API_LAG_TRIES:-6}
+wait=${API_LAG_WAIT:-10}
 
 err=$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/image-latest.XXXXXX")
 trap 'rm -f "$err"' EXIT
@@ -127,15 +134,23 @@ if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
     exit 0
 fi
 
-# The release by its tag: a published one alone, a draft a 404. gh writes
-# the API's error body to stdout and its status to stderr.
-if ! prerelease=$(gh api "repos/$repo/releases/tags/v$version" --jq .prerelease 2>"$err"); then
-    if grep -q 'HTTP 404' "$err"; then
+# The release by its tag: a published one alone, a draft a 404 -- but in
+# the run its publish started, where a 404 is the API behind the publish,
+# read again a bounded number of times. gh writes the API's error body to
+# stdout and its status to stderr.
+n=1
+while ! prerelease=$(gh api "repos/$repo/releases/tags/v$version" --jq .prerelease 2>"$err"); do
+    grep -q 'HTTP 404' "$err" || fails "v$version's release could not be read: $(said)"
+    if [ "${GITHUB_EVENT_NAME:-}" != release ]; then
         says "v$version is not published yet: packages.yml moves latest when it is"
         exit 0
     fi
-    fails "v$version's release could not be read: $(said)"
-fi
+    [ "$n" -lt "$tries" ] ||
+        fails "v$version's release is published -- this run is its publish's -- and the API answered its tag with a 404 $tries times, $wait s apart"
+    echo "v$version's release is published, and the API answers its tag with a 404 still: read again in $wait s ($n of $tries)" >&2
+    sleep "$wait"
+    n=$((n + 1))
+done
 [ "${EVENT_PRERELEASE:-}" != true ] || prerelease=true
 case $prerelease in
     false) ;;
