@@ -420,6 +420,12 @@ class WritesAndBuilds(unittest.TestCase):
                        "a script under `shell: python`, which this check does not read")
         # A listed action, written in another case, is that action.
         self.assertEqual(self.job("id-token: write", None, uses=f"nuget/LOGIN@{PIN} # v1.2.0"), [])
+        # The attestation of what a job publishes, beside the write it
+        # publishes with; the action it wraps is not listed by itself.
+        self.assertEqual(self.job("contents: write\nid-token: write\nattestations: write", None,
+                                  uses=f"actions/attest-build-provenance@{PIN} # v4.2.2"), [])
+        self.assertOff(self.job("id-token: write\nattestations: write", None, uses=f"actions/attest@{PIN} # v4.2.1"),
+                       "the action `actions/attest`, which WRITE_ACTIONS does not list")
         got = findings(workflow("""
             a:
               permissions:

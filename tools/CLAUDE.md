@@ -53,7 +53,13 @@ whatever the token (`gh release view` fails on one), and takes no error but
 that 404 and the registry's `not found` for an answer, failing on any
 other, as one finding no `<version>` fails saying so, never green
 (`tools/test_image_latest.py`, under dash); a new channel names what it
-installs by its checksum. A release job that builds runs with `contents: read` and
+installs by its checksum. Every file `release.yml` and `desktop.yml` attach,
+and the image's list by its digest, is attested as its run's build by the
+job that attaches it, before it is attached (`actions/attest-build-provenance`,
+`id-token` and `attestations` beside that job's write), never in a job
+that builds; `SHA256SUMS`, which grows after the publish, is not, and
+RELEASING.md's step 6 verifies every other asset and the image
+([provenance](../docs/design/integrations.md#provenance)). A release job that builds runs with `contents: read` and
 a checkout keeping no token (`binaries`, `windows`, `linux-ffi`, `wasm`,
 `android`, `linux-packages`, `image`): the crates' build scripts run there, and only
 the jobs that publish write (`publish`, `image-push`, `manifest`,

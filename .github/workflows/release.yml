@@ -11,7 +11,9 @@ on:
 
 # Every job reads alone but the four that publish, each naming the one
 # write it uses: `publish` contents (the release, the Go module's tag),
-# `image-push`, `manifest` and `image-latest` packages (ghcr.io). A job
+# `image-push`, `manifest` and `image-latest` packages (ghcr.io); `publish`
+# and `manifest` also attest what they publish (`id-token` and
+# `attestations`, below). A job
 # that builds holds no write and its checkout keeps no token: the crates'
 # build scripts (ring, cc, ...), Gradle's plugins and the image's build run
 # there, and what they make reaches a job that writes only as an artifact.
@@ -651,6 +653,8 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       packages: write
+      id-token: write
+      attestations: write
     env:
       IMAGE: ghcr.io/${{ github.repository_owner }}/fennec-server
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
@@ -671,6 +675,7 @@ jobs:
       # v2 manifests, linux/amd64 and linux/arm64, each the one its arch tag
       # names, as v0.2.0's is.
       - name: The list is v0.2.0's kind, naming the two arch tags
+        id: list
         run: |
           set -eu
           version="${TAG#v}"
@@ -688,6 +693,25 @@ jobs:
             exit 1
           fi
           echo "$IMAGE:$version: a Docker manifest list of linux/amd64 $amd and linux/arm64 $arm"
+          list=$(digest "$IMAGE:$version")
+          printf '%s' "$list" | grep -Eq '^sha256:[0-9a-f]{64}$' || { echo "::error::$IMAGE:$version's digest reads [$list]"; exit 1; }
+          echo "digest=$list" >> "$GITHUB_OUTPUT"
+
+      # docs/design/integrations.md#provenance: the list attested by its
+      # digest, which names each architecture's manifest by its own, so
+      # `gh attestation verify oci://<image>:<version>` holds both images;
+      # `latest`, a copy of the list, has its digest. Pushed to ghcr.io
+      # beside the image as well (`push-to-registry`, with the login above),
+      # where a registry's own tools look; the list itself is not changed.
+      # No storage record: it wants `artifact-metadata: write`, and nothing
+      # here reads one.
+      - name: Attest the image's build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.list.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
 
   # `latest` on ghcr.io, once `manifest` has made `<version>`, the list it
   # copies. tools/image-latest.sh moves it, as packages.yml's `image-latest`
@@ -741,12 +765,17 @@ jobs:
   # The one job writing to the repository: the release and its assets, and
   # the Go module's tag, pushed with the checkout's token. It builds nothing:
   # what it attaches is the artifacts of the jobs above, which read alone.
+  # Each file it attaches carries a build provenance attestation, made here
+  # before the release is drafted: `id-token` asks Sigstore for the run's
+  # signing certificate, `attestations` stores what it signed.
   publish:
     name: publish the release
     needs: [binaries, windows, linux-ffi, wasm, apple, android, linux-packages]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -757,6 +786,20 @@ jobs:
           path: dist
           pattern: dist-*
           merge-multiple: true
+
+      # docs/design/integrations.md#provenance: every file the release
+      # gets, by its SHA-256, signed as this run's build (SLSA provenance,
+      # Sigstore's public instance, stored by GitHub's attestations API):
+      # `gh attestation verify <file> -R <repo>` proves which workflow, run
+      # and commit made it, where SHA256SUMS, fetched from the same place,
+      # proves only that the file is the one listed. Before the checksums,
+      # so that dist/ holds the attached files alone: SHA256SUMS is not
+      # attested, as desktop.yml appends the app's lines to it after the
+      # publish. Before the draft, so that no file goes out unattested.
+      - name: Attest the build provenance of every file
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
 
       - name: Checksums
         run: |

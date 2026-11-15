@@ -1258,6 +1258,10 @@ WRITE_SCRIPTS = {
 # local action (`./...`) and a `docker://` image are code this check does
 # not read, and are refused.
 WRITE_ACTIONS = {
+    "actions/attest-build-provenance": "signs a statement of the files' or the image's digests as this"
+    " run's build, with a certificate Sigstore gives for the job's OIDC token, and stores it with"
+    " GitHub's attestations API (and the registry, where asked): it hashes what it is given and runs"
+    " none of it",
     "actions/checkout": "puts a commit's files in place and runs none of them",
     "actions/download-artifact": "takes what a job that read alone made, and runs none of it",
     "actions/setup-node": "puts Node and npm on PATH (npm's trusted publishing wants 11.5) and"

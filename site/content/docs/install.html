@@ -311,6 +311,21 @@ shasum -a 256 -c --ignore-missing SHA256SUMS    # Linux: sha256sum -c --ignore-m
 (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
 Select-String -SimpleMatch $zip SHA256SUMS</pre>
 
+<p>A sum says the file is the one listed beside it, fetched from the same
+place. Who built it is said by its attestation: releases after 0.2.0 carry
+one for every file and for the image, signed by the GitHub Actions run that
+built it, which the <a href="https://cli.github.com/">GitHub CLI</a>
+checks against this repository's workflows:</p>
+
+<pre data-lang="bash">gh attestation verify fennec-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz -R fennec-db/fennecdb
+gh attestation verify oci://ghcr.io/fennec-db/fennec-server:X.Y.Z -R fennec-db/fennecdb</pre>
+
+<p>Each prints the repository and the workflow that built it, and fails on a
+file no run of this repository built. <code>SHA256SUMS</code> itself has none: it
+grows as the app's downloads are attached, each of them attested. The npm
+packages carry npm's provenance (<code>npm audit signatures</code>) and
+PyPI's files their attestations, from the same workflow.</p>
+
 <h2 id="next">Next</h2>
 
 <ul>

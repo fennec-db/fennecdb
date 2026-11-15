@@ -60,7 +60,9 @@ nothing reaches a registry before the notes have had a read.
    manifests and gzip layers; `latest` waits for step 4 -- takes the
    XCFramework zips step 2's run kept -- the static one held to the checksum the tag's
    `Package.swift` names, and stopping the release where none matches --
-   and drafts the release with all of them and their checksums. It also
+   and drafts the release with all of them and their checksums, each file
+   attested first as this run's build (`publish`), and the image's list
+   once it is made (`manifest`; step 6 verifies both). It also
    makes a `.deb` and an `.rpm` for amd64 and arm64 from the musl tarballs
    (`tools/linux-packages.sh`, `packaging/nfpm.yaml`), each architecture on a
    runner of its own, installs them in a Debian and a Fedora container and
@@ -187,7 +189,45 @@ nothing reaches a registry before the notes have had a read.
    Anyway* in System Settings, Privacy & Security opens it; and start the
    Windows zip's `bin\launcher.exe` downloaded by a browser, which SmartScreen
    holds to *More info*, *Run anyway* -- neither of which a check here can
-   click through.
+   click through. `attach` and `attach-unsigned` attest each download before
+   they attach it, as `publish` does.
+6. Verify the provenance of everything the release ships, once step 5 has
+   attached the app's downloads. Each file was attested where it was
+   attached -- `release.yml`'s `publish`, `desktop.yml`'s `attach` and
+   `attach-unsigned` -- and the image's list by `manifest`, each signed as
+   its workflow run's build ([docs/design/integrations.md](docs/design/integrations.md#provenance)).
+   `SHA256SUMS` alone is not: `desktop.yml` appends to it after the
+   publish, and every file it lists is attested itself.
+
+       d=$(mktemp -d) && gh release download vX.Y.Z -R fennec-db/fennecdb -D "$d"
+       n=0 ok=0
+       for f in "$d"/*; do
+         [ "$(basename "$f")" = SHA256SUMS ] && continue
+         n=$((n + 1))
+         if gh attestation verify "$f" -R fennec-db/fennecdb >/dev/null; then ok=$((ok + 1)); else echo "NOT VERIFIED: $f"; fi
+       done
+       echo "$ok of $n files verified"
+       gh attestation verify oci://ghcr.io/fennec-db/fennec-server:X.Y.Z -R fennec-db/fennecdb
+
+   Every file verifies, and `n` is the release's assets but `SHA256SUMS`
+   (`gh release view vX.Y.Z --json assets -q '.assets | length'`, less one):
+   22 for 1.0, `release.yml`'s 17 and the app's 5. The image's line verifies the list
+   `X.Y.Z` names, and with it both architectures' images, which the list
+   names by digest; `latest`, once moved, is the same list. Then the
+   registries' own: npm's signatures and provenance, which `npm publish
+   --provenance` gives every package (`@fennecdb/web` is checked; the other
+   three publish the same way), and PyPI's attestations (PEP 740), which
+   `pypa/gh-action-pypi-publish` makes under trusted publishing alone -- with
+   `PYPI_API_TOKEN` set it makes none:
+
+       mkdir "$d/npm" && (cd "$d/npm" && npm init -y >/dev/null && npm install @fennecdb/web@X.Y.Z && npm audit signatures)
+       for f in $(curl -fsS https://pypi.org/pypi/fennecdb/X.Y.Z/json | jq -r '.urls[].filename'); do
+         curl -fsS -o /dev/null "https://pypi.org/integrity/fennecdb/X.Y.Z/$f/provenance" && echo "attested: $f" || echo "NOT ATTESTED: $f"
+       done
+
+   A file that does not verify is a release job that attaches without
+   attesting: fix the workflow, and the next release carries it (a
+   published release's files are never replaced).
 
 `make packages` runs the same checks locally at any time, NuGet's where
 the .NET SDK is installed.
