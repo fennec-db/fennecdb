@@ -133,10 +133,11 @@ a studio that a `fennec-server` serves
 ([`integrations/CLAUDE.md`](integrations/CLAUDE.md)); what a page shows of
 the server's data is the server's to decide, as in a browser.
 
-Six parsers are fuzzed, the targets of `crates/fennec-fuzz`: an HTTP request
+Seven parsers are fuzzed, the targets of `crates/fennec-fuzz`: an HTTP request
 (`http`), JSON (`json`), FennecQL (`fennecql`), the file format's codec
 (`codec`), a `.fennec` file's open, mapped as a server opens it, with a
-replica's apply (`image`), and a SQLite file (`sqlite`), under
+replica's apply (`image`), a SQLite file (`sqlite`), and a primary's
+stream as a replica, an archiver and a backup read it (`stream`), under
 AddressSanitizer on every pull request and for longer each week (`make fuzz`
 lists them). **Not fuzzed today:** the PostgreSQL wire and `pgoutput`
 reader, the framing of a sealed file and of an archive, JWT and JWKS

@@ -362,8 +362,15 @@ on threads past 16 384 documents, any other replayed in place,
 `replay_mapped` -- each read whole, its indexes built and its vectors
 linked, and its records applied as a replica applies a primary's; the
 first byte of an input says whether its records are summed anew, so an
-open reads what a record holds rather than stopping at its sum) and
-`sqlite` (`fennec import`'s reader over a file). `make fuzz`
+open reads what a record holds rather than stopping at its sum),
+`sqlite` (`fennec import`'s reader over a file) and `stream` (a primary's
+answer as a replica, `fennec archive` and `fennec backup` read it --
+`replication::read_head`, each message held to its kind's bound,
+`read_message`, and decoded, `Receiver::receive` -- and a node's stream of
+every tenant as its archiver reads it, whole or a few bytes a read; its
+seeds hold the two findings that came before it, a count of writes
+wrapping its message and writes of a terabyte announced,
+[replication.md](replication.md#replication)). `make fuzz`
 lists them, `make fuzz TARGET=<name>` runs one; a new parser of untrusted
 bytes gets its target in the pull request that adds it, and
 `.github/workflows/fuzz.yml`'s matrix its name, which the crate's tests
@@ -459,14 +466,16 @@ every five seconds, a clock's comparison counted in the next run: where a
 count bounds the run it is said by the count. The platform's own code
 differs -- a commit's smoke is the same on every Linux runner and on
 every Mac, not on both -- and the counts were set from CI's runner, about
-30 s each under ASan. Nor does a target read the wall clock: the `image`
+30 s each under ASan; `stream`'s, 120 000, from a plain build's CPU time
+beside `http`'s (3.9 s for 120 000 runs of each on a Mac, no nightly at
+hand), until CI's smoke says its own. Nor does a target read the wall clock: the `image`
 target's databases read a fixed time as now (`set_clock`), where a
 `@ttl` collection's read asked the system's for its cutoff, a row alive
 in one run and expired in a later one. A count still needs a bound in
 time, or a commit slowing every run ends at the job's timeout naming no
 target: `--smoke` caps each target at six minutes of CPU time
 (`SMOKE_CAP`, twelve times its 30 s on CI and three times the most a Mac
-under ASan spent, `http`'s 110 s; six targets just under it end inside
+under ASan spent, `http`'s 110 s; seven targets just under it end inside
 the job's 45 minutes with the build), by a timer of the process's CPU
 time (`ITIMER_PROF`) set once, whose handler says the target and the run
 it reached and exits 4. A bound, never a pass; CPU time, which a machine

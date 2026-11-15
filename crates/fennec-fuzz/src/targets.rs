@@ -65,6 +65,15 @@ pub static TARGETS: &[Target] = &[
         dictionary: SQLITE_TOKENS,
         run: sqlite,
     },
+    Target {
+        name: "stream",
+        about: "a primary's answer as a replica, an archiver and a backup read it (fennec_http::replication: read_head, read_message, Receiver::receive) and a node's stream of every tenant as its archiver reads it (node_archive), read whole or a few bytes at a time",
+        max_len: 64 << 10,
+        smoke: 120_000,
+        seeds: stream_seeds,
+        dictionary: STREAM_TOKENS,
+        run: stream,
+    },
 ];
 
 /// The repository, where the fixtures the seeds are read from are.
@@ -860,4 +869,148 @@ fn sqlite(data: &[u8]) {
         }
         let _ = fennec_import::sqlite::count_rows(&path, table);
     }
+}
+
+// --------------------------------------------------------------- stream
+
+const STREAM_TOKENS: &[&[u8]] = &[
+    b"HTTP/1.1 200 OK\r\n",
+    b"HTTP/1.1 401 Unauthorized\r\n",
+    b"Content-Length: ",
+    b"Content-Type: application/x-fennec-replication\r\n",
+    b"\r\n",
+    b"\r\n\r\n",
+    b"H",
+    b"I",
+    b"W",
+    b"K",
+    b"E",
+    b"N",
+    b"L",
+    b"G",
+    &[0x01],
+    &[0, 0, 0, 0, 0, 0, 0, 0],
+    &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+    // 1 MiB, the bound of a message but an image or writes; 1 TiB, theirs;
+    // 2^61, a count of writes whose times wrap past 2^64 bytes.
+    &[0, 0, 0x10, 0, 0, 0, 0, 0],
+    &[0, 0, 0, 0, 0, 1, 0, 0],
+    &[0, 0, 0, 0, 0, 0, 0, 0x20],
+];
+
+/// A message as a stream frames it: its kind, its length, its body.
+fn framed(tag: u8, body: &[u8]) -> Vec<u8> {
+    let mut m = vec![tag];
+    m.extend_from_slice(&(body.len() as u64).to_le_bytes());
+    m.extend_from_slice(body);
+    m
+}
+
+/// A primary's answer and a node's, as their streams write them, and a few
+/// a stand-in might send: a refusal, a count of writes past its message, a
+/// head with no end. The first byte says which reader reads it -- even a
+/// replica's, odd a node's archiver's -- and how many bytes a read takes.
+fn stream_seeds() -> Vec<Vec<u8>> {
+    let head: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/x-fennec-replication\r\n\
+Cache-Control: no-cache, no-transform\r\nConnection: close\r\n\r\n";
+    let mut db = Database::new();
+    for q in ["create collection c (x int @hash)", "put c {x: 1}"] {
+        db.execute(&fennec_ql::parse_one(q).expect("a statement"))
+            .expect("a statement");
+    }
+    let image = db.snapshot();
+    // Records as a feed holds them: an image's, after its magic.
+    let records = image[fennec_core::engine::MAGIC.len()..].to_vec();
+    let lineage = History {
+        lineage: vec![((7 << 32) | 1, 0), ((7 << 32) | 9, 2)],
+        following: false,
+    }
+    .encode();
+    let u64s = |v: &[u64]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
+    let hello = |image: bool| {
+        let mut b = vec![1, image as u8];
+        b.extend(u64s(&[2, 2, 1_700_000_000_000]));
+        b.extend_from_slice(&lineage);
+        b
+    };
+    let mut writes = u64s(&[3, 2, 1_700_000_000_001, 1_700_000_000_002]);
+    writes.extend_from_slice(&records);
+    let alive = u64s(&[3, 3, 1_700_000_000_003]);
+    let answer = |messages: &[Vec<u8>]| {
+        let mut a = head.to_vec();
+        for m in messages {
+            a.extend_from_slice(m);
+        }
+        a
+    };
+    let replica = [
+        answer(&[
+            framed(b'H', &hello(true)),
+            framed(b'I', &image),
+            framed(b'W', &writes),
+            framed(b'K', &alive),
+            framed(b'E', b"the database is closing"),
+        ]),
+        answer(&[framed(b'H', &hello(false)), framed(b'W', &writes)]),
+        b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 36\r\n\r\ninvalid or missing replication token"
+            .to_vec(),
+        answer(&[
+            framed(b'H', &hello(false)),
+            framed(b'W', &[u64s(&[3, 1 << 61]), vec![0; 16]].concat()),
+        ]),
+        // Writes of a terabyte announced, a few bytes of them sent.
+        [
+            answer(&[framed(b'H', &hello(false))]),
+            vec![b'W'],
+            u64s(&[1 << 40]),
+            vec![0; 64],
+        ]
+        .concat(),
+        b"HTTP/1.1 200 OK\r\nX-Endless: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_vec(),
+    ];
+    let named = |body: &[u8]| [&[4u8][..], b"acme", body].concat();
+    let node = [answer(&[
+        framed(b'N', &[1]),
+        framed(b'H', &named(&hello(true))),
+        framed(b'I', &named(&image)),
+        framed(b'W', &named(&writes)),
+        framed(b'L', &named(&lineage)),
+        framed(b'G', &named(&u64s(&[1_700_000_000_004]))),
+        framed(b'K', &u64s(&[1_700_000_000_005])),
+        framed(b'E', b"the node is shutting down"),
+    ])];
+    let mut s = Vec::new();
+    for (inputs, first) in [(&replica[..], 0u8), (&node[..], 1)] {
+        for i in inputs {
+            for way in [first, first + 2, first + 6] {
+                s.push([&[way][..], i].concat());
+            }
+        }
+    }
+    s
+}
+
+/// The bytes after the first read as a stand-in's answer: by a replica's
+/// reader or a node archiver's (the first byte's lowest bit), whole or a
+/// few bytes a read (the rest of it), as a slow peer's socket hands them.
+fn stream(data: &[u8]) {
+    let Some((&how, bytes)) = data.split_first() else {
+        return;
+    };
+    let node = how & 1 == 1;
+    match (how >> 1) % 4 {
+        0 => answer(&mut std::io::BufReader::new(bytes), node),
+        n => {
+            let step = 1 + (how as usize >> 3) % 7 * n as usize;
+            let mut r = std::io::BufReader::with_capacity(step, Trickle { bytes, step });
+            answer(&mut r, node)
+        }
+    }
+}
+
+fn answer<R: BufRead>(r: &mut R, node: bool) {
+    let _ = match node {
+        true => fennec_http::node_archive::read_answer(r),
+        false => fennec_http::replication::read_answer(r),
+    };
 }
