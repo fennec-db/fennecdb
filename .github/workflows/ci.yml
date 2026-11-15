@@ -187,6 +187,13 @@ jobs:
       - name: The power cut's check fails a late sync, a loss past the window, a cut between writes and a standby far behind
         run: python3 -B .github/power-cut/test_client.py
 
+      # docs/design/conventions.md#coverage: the weekly report's tables over
+      # a hand-made export -- a crate's and a boundary's figures, a
+      # registry's file left out, a listed path that is gone failing the
+      # tool -- and the committed list's paths existing.
+      - name: tools/coverage_report.py's tables, and its boundary list's paths
+        run: python3 tools/test_coverage_report.py
+
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.unicode-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
