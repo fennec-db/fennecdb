@@ -1216,9 +1216,18 @@ fn build_of(kind: Kind, table: &'static [Op]) -> String {
     o.push_str(r#","description":"#);
     let mut about = String::from(match kind {
         Kind::File => "fennec-server's REST API over one database file.",
+        // The ceilings are told in words: a 413 is the `default` refusal
+        // every operation lists, the import's 401 its own, and neither
+        // says it comes from the head, the body unread -- what a client
+        // sending an image, or one past 64 MiB, needs to know.
         Kind::Node => {
             "A tenant node's REST API (fennec-server --dir): each tenant's routes below \
-             /t/{tenant}, the node's own at the root, /_admin/ with --admin-token."
+             /t/{tenant}, the node's own at the root, /_admin/ with --admin-token. A body \
+             past 64 MiB is refused 413, by its Content-Length before a byte of it is read, \
+             chunked at the chunk that would pass it; the one read past it is an image's \
+             import, PUT /_admin/tenants/{tenant}/file, to 1 GiB where its head carries the \
+             admin token, refused 401 from its head, its body unread, where it carries \
+             another token or none."
         }
         Kind::Router => {
             "fennec-shard's REST API: each tenant's routes below /t/{tenant}, forwarded to \
