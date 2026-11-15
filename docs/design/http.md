@@ -406,11 +406,14 @@ closed: a router on loopback behind a proxy or a tunnel on its machine
 server behind one is (above); its nodes take a token there, as the docs
 say. The class is judged of the address each listener is bound on
 (`serve_on`), `0.0.0.0` and `[::]` past loopback, and before a router
-serves it is past loopback. A node now tells a router the class costs
-nothing on a server with a token -- `open_refusal` returns before it --
-and on an open node two thread-local loads; the router, one load where
-it is loopback alone or `--insecure`, two where it guards, and a node's
-second mark compared only where the first is not the one sent.
+serves it is past loopback. A node from before says nothing of
+`no_token` and is taken for one asking a token, and does not ask a mark's
+class: behind a new router it is held only once upgraded, which the
+upgrade order (routers, then nodes) leaves for last. The class costs
+nothing on a node with a token -- `open_refusal` returns before it -- and
+on an open node two thread-local loads; the router, one load where it is
+loopback alone or `--insecure`, two where it guards, and a node's second
+mark compared only where the first is not the one sent.
 `tests/cors.rs`'s `a_router_past_loopback_reaches_no_node_that_takes_no_token`
 holds the four cases, the operator of neither, the node, the router and
 both saying `--insecure`, on a router bound on `0.0.0.0` and reached on
