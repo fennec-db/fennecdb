@@ -5,5 +5,5 @@
 # release, by digest, and tools/toolchain_check.py holds them alike; a bump
 # is a pull request of its own.
 [toolchain]
-channel = "1.99.1"
+channel = "1.100.0"
 targets = ["wasm32-unknown-unknown"]

@@ -16,7 +16,7 @@
 # The release rust-toolchain.toml names, by digest: the compiler CI tests
 # with is the one the image ships. tools/toolchain_check.py fails CI when
 # the two name different releases, or a FROM here names no digest.
-FROM rust:1.99.1-alpine@sha256:44819b27be4c97b0e4d7203bd2e02c4820f97700211b6a37fb4c246a2de59383 AS build
+FROM rust:1.100.0-alpine@sha256:de1e0058543a81ed7b046629167db587c67a94bdf37cce14eb27f0ec83baaffb AS build
 
 RUN apk add --no-cache musl-dev rsync
 
