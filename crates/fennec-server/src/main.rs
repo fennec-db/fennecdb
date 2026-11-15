@@ -1769,7 +1769,7 @@ fn serve_dir(
         // tenants on the power-cut rig handed a write over 772 ms after its
         // answer, past the 650 ms a file's window holds (run 43696612848).
         if matches!(sync, SyncPolicy::Interval(_)) {
-            tenants.sync_every(sync.tick(), durability::stop_with)?;
+            tenants.sync_every(sync.tick(), || durability::stop_with(1))?;
         }
         // Before the thread that says it listens, as a file server reads it.
         let asked = durability::shutdown_requested();

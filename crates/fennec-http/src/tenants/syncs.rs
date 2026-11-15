@@ -12,7 +12,8 @@
 //! through a spill, which the pass's look at it waited out. Two tenants on
 //! the power-cut rig handed a write over 772 and 734 ms after its answer
 //! (runs 43696612848 and 43697476087), past the 650 ms a file's window
-//! holds; MEASURED-TODO.
+//! holds, and on a laptop a node of 32 tenants' pages came 415-419 ms apart
+//! at the median where a file's come 256 (`make node-sync-bench`).
 //!
 //! Here a clock of its own ([`Tenants::sync_every`]) hands each dirty
 //! tenant to a thread every interval ([`Tenants::sync_each`]) and goes on:
@@ -30,8 +31,8 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, TryLockError};
 use std::time::Duration;
 
 /// How many tenants a node syncs at once. A sync waits on the disk, not
-/// the processor, and its threads are made as tenants are handed over with
-/// every thread busy, so a node of a few tenants holds a few. Past this
+/// the processor, and a thread is made only where more tenants wait than
+/// threads are free, so a node of a few tenants holds a few. Past this
 /// many slow at once, the rest wait their turn.
 pub(crate) const THREADS: usize = 16;
 
@@ -48,7 +49,7 @@ struct Inner {
     /// The one shutdown, which a sync's panic asks for: the node never
     /// serves on with a tenant whose writes nothing syncs. Unset where no
     /// clock runs (a test's own calls), where the panic is logged alone.
-    stop: OnceLock<fn(i32)>,
+    stop: OnceLock<fn()>,
     /// Whether a thread that could not be made was said.
     said: AtomicBool,
 }
@@ -141,7 +142,7 @@ impl Inner {
                             "tenant `{}`'s sync panicked ({words}): the node stops",
                             t.name
                         );
-                        stop(1);
+                        stop();
                     }
                     None => crate::log!("tenant `{}`'s sync panicked ({words})", t.name),
                 }
@@ -197,12 +198,13 @@ impl Tenants {
     /// every `every` ([`Self::sync_each`]), counted from its last look,
     /// until the registry is gone or shutting down -- the shutdown's sync,
     /// under the locks it keeps to the exit, takes in what is left. `stop`
-    /// is the one shutdown, asked for should the thread or a sync panic.
+    /// is the one shutdown for a failure, asked for should the thread or a
+    /// sync panic.
     /// An `Err` where the thread cannot be made, for the server to stop on.
     pub fn sync_every(
         self: &Arc<Self>,
         every: Duration,
-        stop: fn(i32),
+        stop: fn(),
     ) -> std::result::Result<(), String> {
         let _ = self.syncs.inner.stop.set(stop);
         let me = Arc::downgrade(self);
@@ -220,7 +222,7 @@ impl Tenants {
                 if let Err(p) = ended {
                     let words = crate::schedule::panic_words(p.as_ref());
                     crate::log!("the tenants' syncer stopped ({words}): the node stops with it");
-                    stop(1);
+                    stop();
                 }
             })
             .map(|_| ())
