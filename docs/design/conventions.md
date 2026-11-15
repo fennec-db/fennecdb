@@ -27,7 +27,13 @@ tag (`integrations/fennecql-corpus/`) -- its reader held by
 ubuntu leg, before the steps ([fennecql.md](fennecql.md#the-corpus)). It is an example, not a test,
 because it is built in two trees, BASE's taking this tree's file as it
 stands; its own tests (`test = true`), which only this tree builds, run
-with fennec-ql's.
+with fennec-ql's. A measurement program's own unit tests are checks too,
+where a long run is judged by them: `ycsb`'s -- the register checker
+`--verify` and the soak hold every answer to (`src/register.rs`), the
+soak's report on synthetic runs, a larger-than-memory cell's lines -- run in
+the clippy job beside the bench crate's SQL joins test (`cargo test -p
+fennec-bench --bin ycsb`), so that the hours a soak takes are never spent
+on a checker nothing ran.
 
 ## Skips
 

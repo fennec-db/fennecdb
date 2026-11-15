@@ -306,6 +306,16 @@ jobs:
       - name: SQL's joins answer what SQLite answers
         run: cargo test -p fennec-bench --test joins_sqlite
 
+      # `ycsb`'s own tests: the register checker `--verify` and the soak
+      # hold every answer to, the soak's report on synthetic runs (each
+      # criterion passed and broken alone), a larger-than-memory cell's
+      # lines, the open loop. On the joins' dependencies, already built:
+      # the binary's own build (7 s incrementally on a loaded M1) and
+      # about 10 s of run, most of it the report's 30 synthetic 8-hour
+      # runs in a debug build.
+      - name: ycsb's checker, the soak's report and the cells' lines
+        run: cargo test -p fennec-bench --bin ycsb
+
       - name: Prune target/ to the crates from outside the workspace (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
         shell: bash

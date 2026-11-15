@@ -992,7 +992,10 @@ def results_medians():
     of the two middle runs when there are an even number, as `ycsb report`
     takes them. A run's cell measured again (a run cut short, completed
     later under its own id) counts once, as its last line; a value that is
-    not a number is left out."""
+    not a number is left out. A run's cell whose last `failed` or
+    `env_failed` is 1 counts in no median, none of its metrics: a cell the
+    system or the environment failed measured nothing (`ycsb` writes it no
+    figure, and a line written before that rule could hold `ops_s 0`)."""
     superseded = set()
     path = os.path.join(RESULTS_DIR, "superseded.tsv")
     if os.path.exists(path):
@@ -1004,8 +1007,12 @@ def results_medians():
         if (r["family"], r["run"], r["cell"].split(":")[0]) in superseded:
             continue
         latest[(r["family"], r["cell"], r["metric"], r["run"])] = r["value"]
+    failed = {(family, cell, run) for (family, cell, metric, run), v in latest.items()
+              if metric in ("failed", "env_failed") and v.strip() in ("1", "1.0")}
     runs = {}
-    for (family, cell, metric, _), v in latest.items():
+    for (family, cell, metric, run), v in latest.items():
+        if (family, cell, run) in failed:
+            continue
         try:
             runs.setdefault((family, cell, metric), []).append(float(v))
         except ValueError:

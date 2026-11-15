@@ -85,7 +85,8 @@ been the last one left (one ended before it and not followed by another
 that did, or one overlapping it), a scan consecutive keys as far as it
 could see, a write one record -- every write logged, since a read under
 concurrent writes is judged by every write's span, and nothing compared
-in an operation's time. A pass over all six systems found no mismatch
+in an operation's time. The rule is `src/register.rs`'s, which the soak
+holds its hours to as well (below). A pass over all six systems found no mismatch
 (`ycsb/verify.tsv`). `results/ycsb.tsv` is the three runs the site
 quotes, appended to and never rewritten -- a run's cell measured again
 counts as its last line, and a run a later one replaced is named in
@@ -170,8 +171,8 @@ container.
 ## Data larger than memory
 
 `ycsb/run-larger-than-memory.sh` runs YCSB's B, C and E over live data at
-least twice the memory the system may use -- 4 000 000 records of 1 KB,
-4.4 GB, under `--memory 2g` by default -- durable and buffered, three runs
+least twice the memory the system may use -- 4 700 000 records, 4.8 GB
+live, under `--memory 2g` by default -- durable and buffered, three runs
 a cell, every answer held to what was written (`--verify`). Two systems,
 in turns: `server-docker`, fennec-server in a container started with
 `--memory` and `--memory-swap` the same (a page the limit pushes out is
@@ -183,7 +184,14 @@ from the disk at a major fault, and the derived indexes are on the heap
 beside it. What was measured before was a file past the page cache only
 through its dead bytes (`compact-bench`'s `docker run --memory 2g`, and
 YCSB's files growing between compacts); here the live records alone are
-twice the memory.
+twice the memory. The default was 4 000 000 at first, sized at 1 100 bytes
+a record; the dry run measured 1 026 to 1 059, which made 4 000 000 1.92 to
+1.96 times 2 GiB and every cell a failure of the criterion three hours in.
+4 700 000 x 1 026 bytes is 2.24 times it at the smallest record measured.
+The script refuses a size under twice the limit at that record before
+anything starts, and after each load `ycsb` reads the live bytes and the
+cgroup's own limit and refuses, naming both, when the live bytes are under
+twice it: no cell runs over data that would not count.
 
 Each cell's line carries, beside YCSB's figures, its cgroup looked at each
 second through the measured window -- by a shell in the server's process
@@ -195,16 +203,35 @@ in its worst second; `cg_peak`, the most the cgroup was charged, page
 cache and all; `anon_peak`, the most of it anonymous -- the heap, the
 indexes and, in process, the verify logs; `file_mean`, its files' pages on
 average, the mapped database's among them; `limit` and `live`, the live
-records' bytes (`fennec_data_bytes`, or the engine's stats in process).
-`failed` and `oom` are on every line under `--memory`: a cell whose
+records' bytes (`fennec_data_bytes`, or the engine's stats in process) --
+`limit` being what the cgroup's own `memory.max` says, never the
+`--memory` asked for. `failed` and `oom` are on every line under
+`--memory`: a cell whose
 clients panicked -- a refused request, the server gone -- is a line with
 `failed 1`, and `oom 1` where Docker says the kernel killed it for its
 memory; a system that failed is a failed line for each cell it would have
 run; and a process the kernel killed whole, which can write nothing, has
 its cells written failed by `ycsb fill` from the script. No cell asked for
-is ever a missing line. `mismatches` and `undecided` are the cell's
-verdict. `ycsb report` takes them as it takes the rest: a failed run counts
-in no median and is counted apart.
+is ever a missing line. A failed cell writes no measured value at all --
+no `ops_s 0` a median could take -- and `site/build.py`'s reading of the
+results drops every metric of a run's cell marked failed, so a figure
+naming the cell never averages it in (`site/test_results.py`).
+`mismatches` and `undecided` are the cell's verdict. `ycsb report` takes
+them as it takes the rest: a failed run, and one whose live bytes were
+under twice its limit (`under_2x`), counts in no median and is counted
+apart.
+
+The machine is shared, so the environment is looked at all along, not only
+at the start (`ycsb/env-check.sh`, both scripts): before each system's turn
+and, through `ycsb --gate`, before each load and each cell, the load must
+be down to `QUIET_LOAD` (waited for, `ENV_LOAD_WAIT` s at most) and both
+disks must have room -- this host's and Docker's VM's, a container's `df`
+on the data volume, since the VM's disk fills on its own -- and while a
+step runs both are looked at every `ENV_EVERY` s and the step stopped under
+a floor, before a write fails for want of room, which would read as the
+server's error. A step the environment cannot take ends the run, its cells
+written `env_failed 1`: the environment's failure, counted in the report's
+`env` column, never a pass and never `failed`.
 
 In process, the verify logs are the measured process's own memory, under
 the limit: `--verify-max` (half the limit, from the script) ends a cell's
@@ -227,10 +254,18 @@ collection of as many rows -- a 16-letter token for `@hash`, an integer for
 `@sorted`, eight words of a 10 000-word vocabulary drawn zipfian for
 `@text`, a `vector<32>` for `@hnsw(cosine)` -- each index made by `create
 index`, measured once no vector waits to be linked
-(`fennec_vectors_unlinked`), and dropped before the next, in the same
-container under the same limit: `server-docker:heap:<kind>`, with
+(`fennec_vectors_unlinked`), and dropped with its field before the
+next, the server started again over its file so that no freed memory of
+one kind's build is reused by the next: `server-docker:heap:<kind>`, with
 `bytes`, `bytes_row`, `build_s`, `rows` and `live`, failed where the
-server was killed building it.
+server was killed building it. It runs with no memory limit: `@hnsw` over
+millions of vectors is heap that has to fit, and under the cells' 2 GB the
+dry run's was killed, which says nothing of how much it takes. Beside the
+engine's own accounting (`bytes_row`, what each index's tables hold:
+`@sorted` came out at exactly 20.0 bytes a row) the line has what the
+kernel charged, the container's anonymous memory changed by the build
+(`cg_anon_bytes`, `cg_anon_bytes_row`): the allocator's own and every
+buffer the build kept.
 
 Not measured: a machine with a disk slower than this Mac's SSD behind
 Docker's VM (a major fault here is the VM's block device on APFS), a
@@ -242,80 +277,184 @@ heap figures say how much it takes.
 ## The soak
 
 `ycsb/run-soak.sh <sync>` runs `ycsb soak` (`src/soak.rs`, a module of
-`ycsb` rather than a program of its own: its records, keys, histograms and
-checker are YCSB's): fennec-server in a container whose `--memory` (512 MB
-by default) is under its file's size (1 000 000 records, 1.1 GB live), a
-second container following it as a replica, for 8 hours a run. First the
-peak the mix reaches as fast as it is answered, four minutes; then the
-soak open loop at 50% and at 80% of it, a run each. The mix, over 32
-connections: 40% read and 40% update of YCSB's records (A, its scrambled
-zipfian), 3% insert of new keys and 3% delete of the oldest inserted, 2%
-read of an inserted key, 4% insert into `sessions`, whose `seen
-timestamp @ttl(60s)` expires them, and 2% read of one (one past its time
-must be gone, one well inside it there), 2% `match` on a `@text` body, 2%
-`near` on a `vector<16> @hnsw(cosine)`, 2% update of a doc; beside it 64
-subscriptions to `GET /usertable/changes`, a range of 64 keys each, held
-open and read; `compact usertable` every 20 minutes; every 120 a backup
-over the replication stream (`fennec backup` into an archive), restored
-(`fennec restore`) and verified; and every 30 the server killed
-(`docker kill --signal KILL`), its file held to its checksums (`fennec
-verify`, from `ycsb/linux-tools.sh`'s build) before it starts again.
+`ycsb` rather than a program of its own): fennec-server in a container
+whose `--memory` (512 MB by default) is under its file's size (1 000 000
+records, 1.1 GB live), a second container following it as a replica, for
+8 hours a run. First the peak the mix reaches as fast as it is answered,
+four minutes; then the soak open loop at 50% and at 80% of it, a run each.
 
-Every read and write is held to what was written as the run goes
-(`Checker`): `check`'s rule -- a read answers, field by field, the value of
-a write that could have been the last before it or one beside it, and a
-record's being there or not likewise -- run each minute over the reads
-that ended before the earliest operation still in flight, each field's
-register letting go of the writes no later read can be answered from. A
-kill makes it looser, never wrong: a write not answered may or may not
-have landed, and under `--sync 250` one answered in the 2 s before the
-kill may have been lost (the syncer's 250 ms and its fsync, with room), so
-either value holds until a write after the restart ends. A register keeps
-those writes until then: nothing settles inside that window. Under
-`--sync always` an answered write is on disk, and only one in flight is
-uncertain.
+**One checker.** `soak.rs` is the driver -- the mix, the schedule, the
+kills, the minute's line and the report -- and decides no answer: whether
+a read could have been answered so is `src/register.rs`'s alone, the rule
+`--verify`'s `check` holds YCSB's cells to (above), moved into a module
+both use. A register is a field of a record, the record's being there, a
+session's, or a counter; a read over `[s, e]` may answer a write beside it,
+one that could have been the last before it, or, where no certain write
+ended before it, what the register held. The soak's mix needed three
+things YCSB's did not, each in the module with its tests: a delete (a
+write of the record's absence), a row a `@ttl` expired (a write of its
+absence over the span its time can fall in), and a write that may not have
+landed -- one not answered, and one a kill may have taken (below). Every
+such write is a value a read may answer, never one that makes an earlier
+value impossible. Counters are the module's too: an increment is not
+idempotent, so a read must answer at least the certain increments that
+ended before it and at most every one begun by its end. The table of
+histories in `register.rs`'s tests is run both ways the module is used: a
+cell at once, and settled a minute at a time behind the reads as the soak
+settles it.
 
-A minute's line, `results/soak.tsv`, family `soak`, cell
+**What a kill may take.** Under `--sync always` a write is answered after
+its fsync: a `kill -9` takes nothing answered. Under `--sync 250` a write
+is answered from the process's buffer, which reaches the kernel -- after
+which a kill of the process takes nothing, the kernel surviving it -- at the
+first of a write behind after a request once the buffer holds 64 KB (passed
+over while a durability holds the disk), an append past the buffer's
+bounds, or the syncer's next flush, which writes the buffer before its
+fsync. The syncer sleeps 250 ms, then takes the lock, writes and fsyncs: a
+write answered just after one flush's write waits out that sync's own time,
+the interval, and the next one's lock and write. So it is in the kernel
+within 250 ms and two syncs' own time: the window the power-cut rig holds a
+cut to (`.github/power-cut/client.py`, 200 ms a sync, 650 ms), which also
+covers the second sync's fsync a kill does not need. The soak holds a kill
+to that: a write answered within 650 ms of the kill (or after it was sent,
+until the server answered again) may be gone for a read ending after the
+kill; one answered earlier must be there. A write not answered may or may
+not have landed under either mode.
+
+**The mix**, over 32 connections: 36% read and 37% update of YCSB's records
+(A, its scrambled zipfian) and 4% read of them through the replica, sent
+after the latest write answered (`Fennec-After`: the replica answers once
+it holds it, so its answer is held to the registers as the primary's is --
+never across a restart, where it would wait out the primary's absence); 2%
+increment of one of 1 000 counters (`set counters {n: n + 1}`) and 1% read
+of one; 3% insert of new keys and 3% delete of the oldest inserted; 2% read
+of an inserted key; 4% insert into `sessions`, whose `seen timestamp
+@ttl(60s)` expires them, and 2% read of them -- by id, through a filter of
+16 ids, and counted (`count`), each held to the registers: a row is there
+until its time and gone from it in every read ("every read leaves them out
+at once"), within 5 s either way. The 5 s is the clocks', not the server's:
+this host's, which times each operation, against Docker's VM's, which
+`now()` and the expiry read and which Docker Desktop keeps to the host's --
+a drift of seconds is what it allows for, nothing on the server's side;
+2% `match` on a `@text` body, 2% `near` on a `vector<16> @hnsw(cosine)`
+(ten rows), 2% update of a doc. Two rows for one id, or a row not asked
+for, is a mismatch.
+
+Beside it 64 subscriptions to `GET /usertable/changes`, a range of 64 keys
+each, held to the writes in their range by the change each write was
+answered as (`Fennec-Seq`): within a connection the changes rise strictly
+from the seed's; each write in the range is in the first event at or past
+its change -- a write that may not have landed aside -- and no key is in an
+event without a write to it in the changes the event covers; a stream open
+past a write in its range for 10 s without reporting it is silent. Each
+event's rows are held to the registers over the span from the write that
+took its change to when it was read. A reconnect -- the server killed --
+may replay one thing, the seed: the whole range again, every record of it
+there and as written. Each minute a sample of three `match` and three
+`near` queries is held to a scan of the same rows: every doc read, `match`
+as a filter (`order id`: every row holding a word of the query) against
+the docs read holding one, its ranked page among them; `near ... exact`,
+the server's own scan, against the ranking over the vectors read, to the
+last digits of the f32 sums; and the `@hnsw` walk against `exact` by
+recall@10, the run's mean held to 0.925 -- the lowest the site states
+(`benchmarks-vector.html`, ef 40 over 1 000 000 x 128), a far harder set
+than 20 000 x 16. A doc written while a sample ran is left out of it.
+
+**The schedule.** `compact usertable` every 20 minutes; every 120 from
+minute 50 a backup over the replication stream (`fennec backup` into an
+archive), restored (`fennec restore`) and the restored file verified, each
+step counted; every 30 the server killed (`docker kill --signal KILL`),
+its file held to its checksums (`fennec verify`) before it starts again.
+They queue one behind another, so a backup due with a compact runs after
+it (the first version let the compact take the minute, and with a compact
+every 20 minutes no backup ever ran); a kill waits for the queue but every
+90 minutes, when it lands a second into a compact of its own: a crash in
+the middle of a compact is what a soak should meet, and the file must
+verify after it (a mapped file is replaced only by rename). After each
+restart the keys written in the 10 s before the kill, or by a write not
+answered, are read back; at the end every key is, every counter and every
+session.
+
+**A minute's line**, `results/soak.tsv`, family `soak`, cell
 `<sync>:<fraction>:m<minute>`, appended as the minute ends so that a run
-cut short keeps what it measured: `ops` and `ops_s` against `rate`; `p50`,
-`p99`, `p999` and `max` in microseconds, each operation timed from when it
-was due; `p99_hour`, the p99 of the 60 minutes to then; `errors` --
-refusals, and connections lost outside a kill's window -- and `down`,
-operations that met a restart; `mismatches`, the checker's and the
-sessions'; `file`, the database file's length alone, read through
-`/proc/1/root` (never the image a compact writes beside it), and `live`,
-`fennec_data_bytes` over every collection; `compactions` so far, the
-server's own (`fennec_auto_compactions_total`, carried across restarts)
-and the run's; `rss_anon`, the server's `RssAnon` -- its heap, never the
-mapped file's pages -- beside `memory_bytes`, `cg_anon`, `cg_file` and
-`cg_current` from its cgroup; `majflt`, the server's major faults in the
-minute; `threads` and `fds`; `lag`, the change sequence the replica trails
-by; `events` and `streams`, the subscriptions'; `sessions`, the rows
-`@ttl` has not swept; `kill`, `verify`, `verify_failed`, `backup`,
-`backup_failed`, `compact` and `compact_failed`, the run's own doings in
-the minute (each done after a minute's line, so its cost shows in the
-next); and `load1` and `load5`, the host's load average: the machine is
-shared, and a minute it was busy shows. `<sync>:<fraction>:end` closes a
-finished run: totals, the primary's and the replica's files verified after
-both stopped as a supervisor stops them, and whether the replica, caught
-up, holds the primary's documents (`replica_differs`).
+cut short keeps what it measured, each line stamped with the harness's
+start (`started`, so a run id used again is told apart: the report judges
+the latest attempt) and the primary's `life` (its restarts before it):
+`ops`, `ops_s` against `rate`, `idle_workers` (connections that ended no
+operation in the minute); the steady operations' `p50`, `p99`, `p999` and
+`max` in microseconds, each timed from when it was due, and `p99_hour`, the
+steady p99 of the 60 minutes to then; apart from them `restart_ops` and
+`p99_restart`, the operations due from a second before a kill until the
+server answered again, and `compact_ops` and `p99_compact`, those due while
+a compact ran; `errors`, `refused` (writes refused by their status) and
+`down`; `mismatches`; the streams' `stream_missing`, `stream_twice`,
+`stream_order`, `stream_late`, `stream_silent`, `events` and `streams`
+open; `file`, the database file's length alone, read through `/proc/1/root`
+(never the image a compact writes beside it), and `live`,
+`fennec_data_bytes`; `compactions` so far, the server's own and the run's;
+`rss_anon`, `memory_bytes`, `cg_anon`, `cg_file`, `cg_current`, `majflt`,
+`threads`, `fds` and `connections` (`fennec_connections`) of the primary,
+`r_rss_anon`, `r_threads`, `r_fds` and `r_connections` of the replica;
+`lag` (`/_replication/status`'s `behind`), `lag_s` (those writes at the
+minute's write rate) and `r_connected`; the sample's `match_n`,
+`match_differs`, `near_n`, `exact_differs`, `recall_sum` and
+`sample_skipped`; `host_free` and `vm_free`, the disk on each side; the
+run's doings in the minute (`kill`, `verify`, `verify_failed`, `backup`,
+`restore`, `backup_failed`, `compact`, `compact_failed`, `compact_killed`,
+`restart_ms`, `swept`), `died`, `oom` and `r_died` (a server gone that the
+run did not kill, the kernel's OOM kills of it); and `load1`, `load5`, the
+host's load: the machine is shared, and a minute it was busy shows.
+`:start` says the run's settings, `:end` closes a finished run: totals,
+`swept` against `keys`, the replica's `catchup_s`, `p99_restart` and
+`restart_ms_max` over the run, both files verified after both stopped as a
+supervisor stops them, and `replica_differs`: the same ordered read of
+`usertable`, `counters` and `docs` on both once the replica is at the
+primary's change, its pages' bytes digested (`sessions` aside: time, not
+the position, decides its rows).
 
-`ycsb soak report soak.tsv [<run>]` judges a run by the item's exit
-criterion, a line each with the minutes that broke it: 8 hours and an end
-line; the last hour's p99 at most 1.25 times the first's (`p99_hour` at
-minute 60 against the last minute's); the file at most 2.2 times the live
-bytes every minute; `rss_anon` grown less than 5% after the first hour
-(against minute 60's); threads and descriptors within 2 of their medians;
-no error, no mismatch; every verify clean, at each restart, each backup
-and the end. It lists the minutes the host's load was 4 or more beside the
-verdicts, and exits 1 unless every line passed. A run shorter than the
-criteria's hours still gets every verdict, `FAIL` where an hour is
-missing.
+**The report**, `ycsb soak report soak.tsv [<run>]`, judges a run by the
+item's exit criterion and what holds it, a line each with the minutes that
+broke it: 8 hours and an end line; the planned minutes run; every minute
+with operations from every connection (the dead-man: a minute nothing was
+answered in, or a worker stuck); the last steady hour's p99 at most 1.25
+times the first's -- the restarts' windows and the compacts' apart, so that
+hours holding two kills and three compacts compare with one holding one
+and two (with no dry run yet, the compacts were put apart without data:
+`p99_compact` says whether it was needed); the file at most 2.2 times the
+live bytes every minute; the primary's `rss_anon` grown less than 5% from
+the fifth minute of each life to its last, every life (it is killed every
+30 minutes, so a run-long baseline would see processes at most 30 minutes
+old), and the replica's, never killed, from minute 60 to every minute
+after; threads and descriptors less the connections open, within 2 of
+their median, for both (each connection is a thread and a socket; a compact
+or a backup running at the look, the replica's reconnect and the scrape's
+own connection still move them); no error -- a status other than a 2xx is
+one wherever it falls, and so is a connection error or a 503 saying when to
+come back outside a restart's window, which within one is `down`; no
+mismatch; every stream held and all 64 open each minute; the replica
+connected each minute and within 5 s of the primary, its first follow
+within 1 800 s, caught up at the end within 300 s, and holding the
+primary's rows; every restart within 120 s and the restarts' p99 within
+122 s (the announced second, the restart and a request after it) -- a
+bound set without a measured restart, which the first run's `restart_ms`
+must show room under; the kills and verifies the schedule owes for the
+run's length (`(minutes - 1) / 30`), its compacts, kills in a compact,
+backups and restores; every verify clean; match and near as a scan; every
+key read back at the end; no server died and none was OOM-killed. A disk
+short of `--disk-floor` (3 GB) on either side ends the run as the
+environment's: the report says so and judges nothing of it (exit 2), never
+a pass and never the server's failure. It lists the minutes the host's
+load was 4 or more, and exits 1 unless every line passed. Each criterion
+has a synthetic run of lines that passes it and one that breaks it alone
+(`the_report_passes_a_good_run_and_fails_each_criterion_alone`).
 
 Not measured: the servers outside Docker's VM (the soak's kill, cgroup and
 `/proc` looks are Linux containers'), a primary under a failover (P5's),
 and a load the machine shares: the minutes it did are flagged, not taken
-out.
+out. A sweep of every key after each restart, rather than of those the kill
+could have touched: it would read the whole file through the cgroup's
+512 MB sixteen times under load and push the working set out each time,
+into the tail the p99 is judged on.
 
 ## Instruction counts
 

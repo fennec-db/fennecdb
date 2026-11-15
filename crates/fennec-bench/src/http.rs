@@ -23,6 +23,10 @@ pub struct Http {
     head: Vec<u8>,
     body: Vec<u8>,
     line: String,
+    /// The last answer's `Fennec-Seq`, the change a write left the
+    /// database at, and whether it said `Retry-After`.
+    seq: Option<u64>,
+    retry_after: bool,
 }
 
 impl Http {
@@ -55,6 +59,8 @@ impl Http {
             head: Vec::with_capacity(256),
             body: Vec::new(),
             line: String::new(),
+            seq: None,
+            retry_after: false,
         })
     }
 
@@ -67,10 +73,23 @@ impl Http {
         content_type: &str,
         body: &[u8],
     ) -> std::io::Result<(u16, &[u8])> {
+        self.try_request_with(method, path, content_type, "", body)
+    }
+
+    /// [`Http::try_request`] with header lines of its own, each ending in
+    /// `\r\n`.
+    pub fn try_request_with(
+        &mut self,
+        method: &str,
+        path: &str,
+        content_type: &str,
+        headers: &str,
+        body: &[u8],
+    ) -> std::io::Result<(u16, &[u8])> {
         self.head.clear();
         write!(
             self.head,
-            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n",
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: {content_type}\r\n{headers}Content-Length: {}\r\n\r\n",
             body.len()
         )?;
         self.head.extend_from_slice(body);
@@ -81,8 +100,34 @@ impl Http {
 
     /// `POST /query` of `text` with `params`, as [`Http::try_request`].
     pub fn try_query(&mut self, text: &str, params: &str) -> std::io::Result<(u16, &[u8])> {
+        self.try_query_with(text, params, "")
+    }
+
+    /// [`Http::try_query`] with header lines of its own.
+    pub fn try_query_with(
+        &mut self,
+        text: &str,
+        params: &str,
+        headers: &str,
+    ) -> std::io::Result<(u16, &[u8])> {
         let body = format!("{{\"query\":{},\"params\":[{params}]}}", json_string(text));
-        self.try_request("POST", "/query", "application/json", body.as_bytes())
+        self.try_request_with(
+            "POST",
+            "/query",
+            "application/json",
+            headers,
+            body.as_bytes(),
+        )
+    }
+
+    /// The last answer's `Fennec-Seq`.
+    pub fn seq(&self) -> Option<u64> {
+        self.seq
+    }
+
+    /// Whether the last answer said when to come back (`Retry-After`).
+    pub fn retry_after(&self) -> bool {
+        self.retry_after
     }
 
     /// Sends one request and reads the whole answer: its status and body.
@@ -219,6 +264,8 @@ impl Http {
         let mut len = 0usize;
         let mut chunked = false;
         let bad = |what: String| std::io::Error::new(std::io::ErrorKind::InvalidData, what);
+        self.seq = None;
+        self.retry_after = false;
         loop {
             self.line.clear();
             let n = self.r.read_line(&mut self.line)?;
@@ -248,6 +295,10 @@ impl Http {
                 len = v.parse().map_err(|_| bad(format!("Content-Length: {v}")))?;
             } else if k.eq_ignore_ascii_case("transfer-encoding") {
                 chunked = v.eq_ignore_ascii_case("chunked");
+            } else if k.eq_ignore_ascii_case("fennec-seq") {
+                self.seq = v.parse().ok();
+            } else if k.eq_ignore_ascii_case("retry-after") {
+                self.retry_after = true;
             }
         }
         self.body.clear();

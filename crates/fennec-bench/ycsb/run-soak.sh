@@ -17,7 +17,8 @@
 #
 #   MINUTES=480 FRACTIONS="50 80" PEAK_MINUTES=4 RECORDS=1000000
 #   MEMORY=512m THREADS=32 SUBSCRIPTIONS=64 KILL_EVERY=30
-#   COMPACT_EVERY=20 BACKUP_EVERY=120 RUN=p6 QUIET_LOAD=4
+#   COMPACT_EVERY=20 BACKUP_EVERY=120 BACKUP_AT=50 KILL_IN_COMPACT_EVERY=90
+#   RUN=p6 QUIET_LOAD=4
 #   OUT=crates/fennec-bench/results/soak.tsv
 #
 # A minute's line is appended to OUT (family `soak`) as the minute ends, so
@@ -29,6 +30,12 @@
 # Refused before anything starts: --memory not under the file's size, a
 # Docker VM without room for the server and its replica, less free disk
 # than the run needs (printed), a load average over QUIET_LOAD (printed).
+# Before the peak and each fraction the load must be down to QUIET_LOAD
+# again (waited for, ENV_LOAD_WAIT s at most) and the host's and Docker's
+# VM's disks must have what the run needs, and while one runs both disks
+# are held to a floor (ycsb/env-check.sh): a step the environment cannot
+# take ends the run with a line `<sync>:<fraction>:env env_failed 1` --
+# the environment's failure, never a pass and never the server's.
 # Everything it starts is named p6-* and removed when it ends, however it
 # ends: `kill <its pid>` stops it cleanly, the lines written so far kept.
 set -eu
@@ -52,9 +59,13 @@ SUBSCRIPTIONS=${SUBSCRIPTIONS:-64}
 KILL_EVERY=${KILL_EVERY:-30}
 COMPACT_EVERY=${COMPACT_EVERY:-20}
 BACKUP_EVERY=${BACKUP_EVERY:-120}
+BACKUP_AT=${BACKUP_AT:-50}
+KILL_IN_COMPACT_EVERY=${KILL_IN_COMPACT_EVERY:-90}
 RUN=${RUN:-p6}
 QUIET_LOAD=${QUIET_LOAD:-4}
 OUT=${OUT:-crates/fennec-bench/results/soak.tsv}
+ENV_PREFIX=p6
+. crates/fennec-bench/ycsb/env-check.sh
 
 bytes() {
     echo "$1" | awk '{
@@ -86,6 +97,12 @@ fi
 # beside it, the replica's the same, a backup and its restore, the tools'
 # build, the image and room to spare.
 need=$(((live * 17 / 2) / 1024 + (4 << 20)))
+# A running step stops when either disk is under what a compact's image, a
+# backup and its restore of the live records and a GB need: before a write
+# fails for want of room, which would be the server's error.
+ENV_FLOOR=$((live * 3 / 1024 + (1 << 20)))
+ENV_GATE='' ENV_MARKER="${TMPDIR:-/tmp}/p6-env.$$" ENV_VOLUME=p6-data
+ENV_KILL="p6-server p6-replica p6-server-look p6-replica-look p6-verify p6-backup"
 free=$(df -k . | awk 'NR == 2 {print $4}')
 echo "needs $((need >> 20)) GB of disk, $((free >> 20)) GB free; refused over a load of $QUIET_LOAD"
 if [ "$free" -lt "$need" ]; then
@@ -101,7 +118,9 @@ child=
 # shellcheck disable=SC2329 # the EXIT trap's
 cleanup() {
     [ -n "$child" ] && kill "$child" 2>/dev/null
-    for c in p6-server p6-replica p6-look p6-verify p6-backup p6-build; do
+    env_stop_guard
+    rm -f "$ENV_MARKER"
+    for c in p6-server p6-replica p6-server-look p6-replica-look p6-verify p6-backup p6-build p6-df; do
         docker rm -f "$c" >/dev/null 2>&1
     done
     for v in p6-data p6-replica-data p6-backup-data p6-tools; do
@@ -137,11 +156,21 @@ step "$cargo" build --release -q -p fennec-bench --bin ycsb --no-default-feature
 common="--sync $sync --records $RECORDS --memory $MEMORY --threads $THREADS
     --subscriptions $SUBSCRIPTIONS --tools p6-tools --name p6 --out $OUT"
 
+# The environment failed run $1 (cell $2): marked so, and the run ends.
+env_failed() {
+    echo "$(date '+%F %H:%M') the environment's failure: $3" >&2
+    ./target/release/ycsb mark "$OUT" soak "$1" "$2" env_failed 1
+    exit 3
+}
+
 echo "$(date '+%F %H:%M') the peak, $PEAK_MINUTES minutes as fast as answered"
+env_check "$need" p6-data || env_failed "$RUN-s$sync-peak" "$sync:peak:env" "$ENV_WHY"
 peaks="${TMPDIR:-/tmp}/run-soak-peak.$$"
 # shellcheck disable=SC2086
-step $awake ./target/release/ycsb soak $common --peak --minutes "$PEAK_MINUTES" \
-    --run-id "$RUN-s$sync-peak" >"$peaks"
+guarded $awake ./target/release/ycsb soak $common --peak --minutes "$PEAK_MINUTES" \
+    --run-id "$RUN-s$sync-peak" >"$peaks" || true
+[ -s "$ENV_MARKER" ] &&
+    env_failed "$RUN-s$sync-peak" "$sync:peak:env" "$(cat "$ENV_MARKER")"
 peak=$(awk '$1 == "peak" {print $2}' "$peaks")
 rm -f "$peaks"
 [ -n "$peak" ] || {
@@ -155,10 +184,13 @@ for f in $FRACTIONS; do
     rate=$((peak * f / 100))
     run="$RUN-s$sync-$f"
     echo "$(date '+%F %H:%M') $run: $MINUTES minutes at $rate a second, $f% of the peak"
+    env_check "$need" p6-data || env_failed "$run" "$sync:$f:env" "$ENV_WHY"
     # shellcheck disable=SC2086
-    step $awake ./target/release/ycsb soak $common --rate "$rate" --label "$f" \
+    guarded $awake ./target/release/ycsb soak $common --rate "$rate" --label "$f" \
         --minutes "$MINUTES" --kill-every "$KILL_EVERY" --compact-every "$COMPACT_EVERY" \
-        --backup-every "$BACKUP_EVERY" --run-id "$run" || status=1
+        --backup-every "$BACKUP_EVERY" --backup-at "$BACKUP_AT" \
+        --kill-in-compact-every "$KILL_IN_COMPACT_EVERY" --run-id "$run" || status=1
+    [ -s "$ENV_MARKER" ] && env_failed "$run" "$sync:$f:env" "$(cat "$ENV_MARKER")"
     ./target/release/ycsb soak report "$OUT" "$run" || status=1
 done
 echo "$(date '+%F %H:%M') done"
