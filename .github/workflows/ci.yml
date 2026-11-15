@@ -129,6 +129,14 @@ jobs:
           python3 tools/secret_eq_check.py --self-test
           python3 tools/secret_eq_check.py
 
+      # docs/design/conventions.md#security-policy: SECURITY.md names flags,
+      # paths and primitives, and says nothing of TLS or the crates that the
+      # tree has since made untrue; a file or a comment that does is found.
+      - name: SECURITY.md's flags, paths and primitives are the tree's, and no stale claim is left
+        run: |
+          python3 tools/test_security_md_check.py
+          python3 tools/security_md_check.py
+
       # docs/design/integrations.md#the-chaos-drill: `test-clock` moves a
       # tenant node's clock by a file, for `make chaos` alone. No crate's
       # default features reach it, no other feature or dependency turns it
