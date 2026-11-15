@@ -237,9 +237,10 @@ fn without_rowid_tables_are_rejected_clearly() {
         "create table t (a text primary key, b int) without rowid;
          insert into t values ('x', 1);"
     );
-    let mut r = Reader::open(&db, "t").unwrap();
-    let e = r.next_row().unwrap_err().to_string();
-    assert!(e.contains("WITHOUT ROWID"), "{e}");
+    // Refused as the table is opened, by its `CREATE` text, so `--dry-run`
+    // says so too.
+    let e = Reader::open(&db, "t").unwrap_err().to_string();
+    assert!(e.contains("`t`") && e.contains("WITHOUT ROWID"), "{e}");
 }
 
 /// When an unprocessed WAL exists the main file shows stale data; stopping
@@ -291,9 +292,15 @@ fn sqlite_varint(v: u64) -> Vec<u8> {
 /// row table `t` (`sql`) rooted at page 2, then `pages` from page 2 on.
 /// `reserved` is the header's reserved bytes a page.
 fn hand_made(sql: &str, reserved: u8, pages: &[Vec<u8>]) -> Vec<u8> {
-    let mut f = vec![0u8; 512];
+    hand_made_of(512, sql, reserved, pages)
+}
+
+/// [`hand_made`], of pages of `size` bytes: 65 536 is the header's 1.
+fn hand_made_of(size: usize, sql: &str, reserved: u8, pages: &[Vec<u8>]) -> Vec<u8> {
+    let mut f = vec![0u8; size];
     f[..16].copy_from_slice(b"SQLite format 3\0");
-    f[16..18].copy_from_slice(&512u16.to_be_bytes());
+    let field = if size == 65_536 { 1 } else { size as u16 };
+    f[16..18].copy_from_slice(&field.to_be_bytes());
     f[18] = 1;
     f[19] = 1;
     f[20] = reserved;
@@ -312,14 +319,14 @@ fn hand_made(sql: &str, reserved: u8, pages: &[Vec<u8>]) -> Vec<u8> {
     let mut cell = sqlite_varint(record.len() as u64);
     cell.push(1);
     cell.extend_from_slice(&record);
-    let at = 512 - cell.len();
+    let at = size - cell.len();
     f[at..].copy_from_slice(&cell);
     f[100] = 0x0d;
     f[103..105].copy_from_slice(&1u16.to_be_bytes());
     f[105..107].copy_from_slice(&(at as u16).to_be_bytes());
     f[108..110].copy_from_slice(&(at as u16).to_be_bytes());
     for p in pages {
-        assert_eq!(p.len(), 512);
+        assert_eq!(p.len(), size);
         f.extend_from_slice(p);
     }
     f
@@ -403,6 +410,497 @@ fn a_page_under_sqlites_usable_floor_is_refused() {
         e.contains("usable part is 479 bytes, under SQLite's 480"),
         "{e}"
     );
+}
+
+/// A table leaf of 512 bytes holding `cells`, laid from the page's end
+/// down, their pointers in order.
+fn leaf(cells: &[Vec<u8>]) -> Vec<u8> {
+    let mut at = 512;
+    let mut placed = Vec::new();
+    for c in cells {
+        at -= c.len();
+        placed.push(at);
+    }
+    raw_leaf(
+        &cells
+            .iter()
+            .zip(&placed)
+            .map(|(c, &at)| (at, c.as_slice()))
+            .collect::<Vec<_>>(),
+        &placed,
+    )
+}
+
+/// A table leaf of 512 bytes with `bytes` laid where each says and
+/// `pointers` as its cell pointers, whatever they point at.
+fn raw_leaf(bytes: &[(usize, &[u8])], pointers: &[usize]) -> Vec<u8> {
+    let mut p = vec![0u8; 512];
+    p[0] = 0x0d;
+    p[3..5].copy_from_slice(&(pointers.len() as u16).to_be_bytes());
+    let first = bytes.iter().map(|(at, _)| *at).min().unwrap_or(512);
+    p[5..7].copy_from_slice(&(first as u16).to_be_bytes());
+    for (i, at) in pointers.iter().enumerate() {
+        p[8 + 2 * i..10 + 2 * i].copy_from_slice(&(*at as u16).to_be_bytes());
+    }
+    for (at, b) in bytes {
+        p[*at..*at + b.len()].copy_from_slice(b);
+    }
+    p
+}
+
+/// A table leaf cell: its payload's length, its rowid, the payload's bytes
+/// the page holds and, where it spills, its first overflow page.
+fn cell(total: usize, rowid: u64, local: &[u8], overflow: Option<u32>) -> Vec<u8> {
+    let mut c = sqlite_varint(total as u64);
+    c.extend_from_slice(&sqlite_varint(rowid));
+    c.extend_from_slice(local);
+    if let Some(page) = overflow {
+        c.extend_from_slice(&page.to_be_bytes());
+    }
+    c
+}
+
+/// A record of `total` bytes holding one blob, the rest of them.
+fn blob_record(total: usize) -> Vec<u8> {
+    let serial = sqlite_varint(12 + 2 * (total as u64 - 3));
+    assert_eq!(serial.len(), 2, "a header of three bytes");
+    let mut r = vec![3];
+    r.extend_from_slice(&serial);
+    r.resize(total, 0x5a);
+    r
+}
+
+/// An overflow page of 512 bytes naming `next` as the chain's next page.
+fn overflow(next: u32) -> Vec<u8> {
+    let mut p = vec![0u8; 512];
+    p[..4].copy_from_slice(&next.to_be_bytes());
+    p
+}
+
+/// An interior table page of 512 bytes: a cell a child of `children`, then
+/// its right-most child.
+fn interior_of(children: &[u32], rightmost: u32) -> Vec<u8> {
+    let mut p = interior(rightmost);
+    let mut at = 512;
+    for (i, child) in children.iter().enumerate() {
+        let mut c = child.to_be_bytes().to_vec();
+        c.extend_from_slice(&sqlite_varint(i as u64 + 1));
+        at -= c.len();
+        p[at..at + c.len()].copy_from_slice(&c);
+        p[12 + 2 * i..14 + 2 * i].copy_from_slice(&(at as u16).to_be_bytes());
+    }
+    p[3..5].copy_from_slice(&(children.len() as u16).to_be_bytes());
+    p[5..7].copy_from_slice(&(at as u16).to_be_bytes());
+    p
+}
+
+/// The review's file (G14, finding C3): pages of 64 KiB, one leaf whose
+/// `pointers` cell pointers all name its one cell, whose payload is the
+/// file's length, its overflow chain a page naming itself.
+fn reviews_leaf(pointers: usize) -> Vec<u8> {
+    const PAGE: usize = 65_536;
+    let file = 3 * PAGE;
+    // The least a cell keeps in a page of 65 536 usable bytes once it
+    // spills: SQLite's M, (U - 12) * 32 / 255 - 23.
+    let local = (PAGE - 12) * 32 / 255 - 23;
+    let c = cell(file, 1, &vec![0; local], Some(3));
+    let at = PAGE - c.len();
+    assert!(8 + 2 * pointers <= at, "the pointers run into the cell");
+    let mut leaf = vec![0u8; PAGE];
+    leaf[0] = 0x0d;
+    leaf[3..5].copy_from_slice(&(pointers as u16).to_be_bytes());
+    leaf[5..7].copy_from_slice(&(at as u16).to_be_bytes());
+    for i in 0..pointers {
+        leaf[8 + 2 * i..10 + 2 * i].copy_from_slice(&(at as u16).to_be_bytes());
+    }
+    leaf[at..].copy_from_slice(&c);
+    let mut chain = vec![0u8; PAGE];
+    chain[..4].copy_from_slice(&3u32.to_be_bytes());
+    hand_made_of(PAGE, "CREATE TABLE t (a INTEGER)", 0, &[leaf, chain])
+}
+
+/// The review's leaf: every pointer was read as a cell, and every cell of
+/// a leaf before the first was yielded, so a 192 KiB file asked for 28 660
+/// copies of itself, 5.2 GiB, and a 1 MiB one for 28 GiB -- `--count`
+/// too. A pointer repeating or overlapping another is refused before a
+/// cell is read, and a walk holds a page and one row at most: under four
+/// of its pages here, both reading and counting.
+#[test]
+fn a_leaf_naming_one_cell_again_and_again_is_refused_holding_a_page() {
+    for pointers in [1_000, 28_660] {
+        let path = written(&format!("review-leaf-{pointers}"), &reviews_leaf(pointers));
+        let (read, held) = crate::held::peak(|| {
+            let mut r = Reader::open(&path, "t")?;
+            r.next_row().map(|_| ())
+        });
+        assert!(
+            held < 4 * 65_536,
+            "{pointers} pointers: the walk held {held} bytes at once"
+        );
+        let e = read.unwrap_err().to_string();
+        assert!(
+            e.contains("page 2's cell 1 repeats or overlaps another of its cells"),
+            "{e}"
+        );
+        let (count, held) =
+            crate::held::peak(|| fennec_import::sqlite::count_rows(&path, "t").map(|_| ()));
+        assert!(
+            held < 4 * 65_536,
+            "{pointers} pointers: counting held {held} bytes at once"
+        );
+        assert!(count.is_err());
+    }
+}
+
+/// A cell overlapping another, or lying in the page's header or pointers,
+/// is refused as its page is entered: read, it was a row of other cells'
+/// bytes.
+#[test]
+fn a_cell_sharing_bytes_or_outside_the_cell_area_is_refused() {
+    let sql = "CREATE TABLE t (a BLOB)";
+    let row = cell(10, 1, &[0; 10], None);
+    let overlapping = raw_leaf(&[(500, row.as_slice())], &[500, 505]);
+    let path = written("overlap", &hand_made(sql, 0, &[overlapping]));
+    refused(
+        &path,
+        "page 2's cell 1 repeats or overlaps another of its cells, at byte 505",
+    );
+    let in_pointers = raw_leaf(&[(500, row.as_slice())], &[500, 9]);
+    let path = written("in-pointers", &hand_made(sql, 0, &[in_pointers]));
+    refused(&path, "page 2's cell 1 lies outside the page's cell area");
+}
+
+/// An overflow chain naming a page it already holds went round, each time
+/// round read as the payload's next bytes: a row of one page's bytes
+/// again and again, and memory of the cells times the file's length.
+#[test]
+fn an_overflow_chain_that_cycles_is_refused() {
+    // 2 000 bytes: 476 in the page, 1 524 in three overflow pages, which
+    // the chain names as page 3 three times; two pages more make the file
+    // longer than the payload.
+    let record = blob_record(2_000);
+    let row = leaf(&[cell(2_000, 1, &record[..476], Some(3))]);
+    let path = written(
+        "chain-cycle",
+        &hand_made(
+            "CREATE TABLE t (a BLOB)",
+            0,
+            &[row, overflow(3), overflow(0), overflow(0)],
+        ),
+    );
+    refused(&path, "page 3 is reached twice");
+}
+
+/// A chain is as long as its payload needs: a page past the last was never
+/// read, a file naming one is not SQLite's (`PRAGMA integrity_check`:
+/// "overflow list length").
+#[test]
+fn an_overflow_chain_longer_than_its_payload_is_refused() {
+    // 800 bytes: 292 in the page, 508 in one overflow page, which names a
+    // next page all the same.
+    let record = blob_record(800);
+    let row = leaf(&[cell(800, 1, &record[..292], Some(3))]);
+    let path = written(
+        "chain-long",
+        &hand_made(
+            "CREATE TABLE t (a BLOB)",
+            0,
+            &[row, overflow(4), overflow(0)],
+        ),
+    );
+    refused(&path, "goes on past its payload's 800 bytes, to page 4");
+}
+
+/// A page is one node of one b-tree or one page of one overflow chain: a
+/// leaf read as a cell's overflow page was imported as the end of that row
+/// and then walked as a leaf of its own.
+#[test]
+fn an_overflow_page_that_is_a_btree_page_is_refused() {
+    let record = blob_record(800);
+    let row = leaf(&[cell(800, 1, &record[..292], Some(4))]);
+    let path = written(
+        "chain-into-leaf",
+        &hand_made(
+            "CREATE TABLE t (a BLOB)",
+            0,
+            &[interior_of(&[3], 4), row, leaf(&[])],
+        ),
+    );
+    refused(&path, "page 4 is reached twice");
+}
+
+/// Two interior pages naming one child are refused at the second, whose
+/// rows would have been read twice.
+#[test]
+fn a_page_named_by_two_parents_is_refused() {
+    let path = written(
+        "two-parents",
+        &hand_made(
+            "CREATE TABLE t (a BLOB)",
+            0,
+            &[interior_of(&[3], 4), interior(5), interior(5), leaf(&[])],
+        ),
+    );
+    refused(&path, "page 5 is reached twice");
+}
+
+/// A row lacking a column whose default the importer does not compute --
+/// `CURRENT_TIMESTAMP`, an expression -- is refused naming the table, the
+/// column and the default, where it was read as `NULL`. SQLite's own
+/// `ADD COLUMN` takes constants alone, so only a file made otherwise has one.
+#[test]
+fn a_default_the_importer_does_not_compute_is_refused_where_a_row_needs_it() {
+    let row = leaf(&[cell(3, 1, &[2, 1, 7], None)]);
+    let path = written(
+        "unread-default",
+        &hand_made(
+            "CREATE TABLE t (a INTEGER, b TEXT DEFAULT CURRENT_TIMESTAMP)",
+            0,
+            &[row],
+        ),
+    );
+    let mut r = Reader::open(&path, "t").unwrap();
+    let e = r.next_row().unwrap_err().to_string();
+    assert!(
+        e.contains("row 1 of `t`") && e.contains("`b`") && e.contains("CURRENT_TIMESTAMP"),
+        "{e}"
+    );
+}
+
+// ------------------------------------------ files SQLite wrote, kept here
+
+/// A file SQLite wrote for these tests, read where it is
+/// (`tests/sqlite-files/README.md` says how each was made): no test runs
+/// `sqlite3`.
+fn kept(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/sqlite-files")
+        .join(name)
+}
+
+/// A table's column names and rows.
+fn read_whole(path: &Path, table: &str) -> (Vec<String>, Vec<Vec<Value>>) {
+    let mut r = Reader::open(path, table).unwrap_or_else(|e| panic!("{table}: {e}"));
+    let names = r.columns().unwrap().into_iter().map(|c| c.name).collect();
+    let mut out = Vec::new();
+    while let Some(row) = r.next_row().unwrap_or_else(|e| panic!("{table}: {e}")) {
+        out.push(row);
+    }
+    (names, out)
+}
+
+fn text(s: &str) -> Value {
+    Value::Text(s.into())
+}
+
+/// SQLite stores no VIRTUAL generated column in a record -- it computes
+/// one as a row is read -- and a STORED one where it is declared: a record
+/// holds every other column, in order. Read as if every column were in it,
+/// each column after `b` took the value of the one before it.
+#[test]
+fn a_virtual_generated_column_is_left_out_and_the_rest_keep_their_places() {
+    let db = kept("generated.sqlite");
+    let (names, rows) = read_whole(&db, "t");
+    assert_eq!(names, ["a", "c", "d", "e"]);
+    assert_eq!(
+        rows,
+        [
+            vec![Value::Int(1), text("x"), Value::Int(2), text("y")],
+            vec![Value::Int(2), text("p"), Value::Int(3), text("q")],
+        ]
+    );
+}
+
+/// What a VIRTUAL generated column was is named in the import's summary,
+/// and a STORED one's values come across as a plain field's.
+#[test]
+fn a_generated_column_is_named_in_the_summary() {
+    let db = kept("generated.sqlite");
+    let mut src = Reader::open(&db, "t").unwrap();
+    let cols = src.columns().unwrap();
+    let stored = cols[2].note.as_deref().unwrap_or_default();
+    assert!(stored.contains("STORED generated"), "{stored}");
+    let mut target = Database::new();
+    let s = load::run(&mut src, &mut target, &Options::new("g")).unwrap();
+    assert_eq!(s.rows, 2);
+    let virtuals: Vec<&String> = s
+        .warnings
+        .iter()
+        .filter(|w| w.contains("VIRTUAL generated column"))
+        .collect();
+    assert_eq!(virtuals.len(), 2, "{:?}", s.warnings);
+    assert!(virtuals[0].starts_with("`b`") && virtuals[1].starts_with("`f`"));
+}
+
+/// A column `ALTER TABLE ADD COLUMN` added is in no record written before
+/// it: SQLite reads it there as its default made a value of the column's
+/// affinity, `NULL` where it has none. Every one read as `NULL`, a `NOT
+/// NULL DEFAULT 7` column's too. The text `RENAME COLUMN` rewrote names a
+/// column as it is now, and a VIRTUAL column added among them moves none.
+#[test]
+fn a_column_added_later_reads_as_its_default_in_older_rows() {
+    let (names, rows) = read_whole(&kept("defaults.sqlite"), "t");
+    assert_eq!(
+        names,
+        ["a", "b two", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n"]
+    );
+    // SQLite's own reading, `SELECT quote(..)`:
+    // 1|'one'|7|'5'|2.0|-3.5|X'00FF'|1|300000|12|NULL|'last'|'abc'|'-16'
+    assert_eq!(
+        rows[0],
+        [
+            Value::Int(1),
+            text("one"),
+            Value::Int(7),
+            text("5"),
+            Value::Float(2.0),
+            Value::Float(-3.5),
+            Value::Bytes(vec![0x00, 0xff]),
+            Value::Int(1),
+            Value::Int(300_000),
+            Value::Int(12),
+            Value::Null,
+            text("last"),
+            text("abc"),
+            text("-16"),
+        ]
+    );
+    assert_eq!(
+        rows[1],
+        [
+            Value::Int(2),
+            text("two"),
+            Value::Int(8),
+            text("w"),
+            Value::Float(1.5),
+            Value::Int(0),
+            Value::Bytes(vec![0x01]),
+            Value::Int(0),
+            Value::Int(1),
+            Value::Int(2),
+            text("k"),
+            text("l"),
+            text("m"),
+            text("n"),
+        ]
+    );
+}
+
+/// Names in each of SQLite's four quotes, a type holding a comma, table
+/// constraints holding commas, and a table whose quoted name holds a
+/// parenthesis -- where the body was looked for.
+#[test]
+fn quoted_names_and_constraints_keep_every_column_in_place() {
+    let db = kept("names.sqlite");
+    let (names, rows) = read_whole(&db, "quotes");
+    assert_eq!(names, ["dq", "sq", "bt", "br", "x", "z"]);
+    assert_eq!(
+        rows,
+        [vec![
+            Value::Int(1),
+            text("s"),
+            Value::Int(2),
+            text("b"),
+            Value::Float(4.5),
+            Value::Int(9),
+        ]]
+    );
+    let (names, rows) = read_whole(&db, "my (table");
+    assert_eq!(names, ["a", "b"]);
+    assert_eq!(rows, [vec![Value::Int(1), text("b")]]);
+}
+
+/// A comment is a space to SQLite, which keeps it in the `CREATE` text: a
+/// comma in one split a column in two, and a quote opened a string that
+/// ran on over the columns after it.
+#[test]
+fn a_comment_in_the_create_text_moves_no_column() {
+    let (names, rows) = read_whole(&kept("names.sqlite"), "comments");
+    assert_eq!(names, ["a", "b", "c", "d"]);
+    assert_eq!(
+        rows,
+        [vec![
+            Value::Int(1),
+            text("two"),
+            text("not -- a comment, ("),
+            Value::Int(4),
+        ]]
+    );
+}
+
+/// A column named `""` was dropped, and each after it took its left
+/// neighbour's values. It keeps its place, as `column<N>` -- SQLite's own
+/// name for a result column with none, N its place from 1.
+#[test]
+fn a_column_with_an_empty_name_keeps_its_place() {
+    let (names, rows) = read_whole(&kept("names.sqlite"), "empty");
+    assert_eq!(names, ["a", "column2", "c"]);
+    assert_eq!(rows, [vec![Value::Int(1), Value::Int(2), text("three")]]);
+}
+
+/// SQLite's rowid alias is an `INTEGER` column that is its table's primary
+/// key, named by a column's constraint or the table's `PRIMARY KEY(..)` --
+/// in any case, with `ASC`, `DESC` or `COLLATE`, after a `CONSTRAINT`'s
+/// name -- but for SQLite's own exception, a column declared `INTEGER
+/// PRIMARY KEY DESC`, which keeps its value in the record. Each row here
+/// holds 10, read as the rowid (1) or as `NULL` where the alias was
+/// misread, and `PRIMARY KEY` inside a default's text made one.
+#[test]
+fn the_rowid_alias_is_the_column_sqlite_takes_for_it() {
+    let db = kept("rowid.sqlite");
+    for table in ["desc_pk", "table_desc", "named_pk", "cased", "in_text"] {
+        let (_, rows) = read_whole(&db, table);
+        assert_eq!(rows, [vec![Value::Int(10), text("a")]], "{table}");
+    }
+}
+
+/// A WITHOUT ROWID table is refused as it is opened, by its name; a
+/// STRICT table, whose records are laid out as any other's, is read.
+#[test]
+fn a_without_rowid_table_is_refused_by_name_and_a_strict_one_is_read() {
+    let db = kept("without-rowid.sqlite");
+    let e = Reader::open(&db, "Ünits").unwrap_err().to_string();
+    assert!(e.contains("`Ünits`") && e.contains("WITHOUT ROWID"), "{e}");
+    let e = fennec_import::sqlite::count_rows(&db, "Ünits")
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("`Ünits`") && e.contains("WITHOUT ROWID"), "{e}");
+    let (_, rows) = read_whole(&db, "plain");
+    assert_eq!(rows, [vec![Value::Int(1), text("one")]]);
+}
+
+/// A rollback journal whose first byte is not zero is hot (SQLite's
+/// `hasHotJournal`): a writer stopped inside a transaction, and the file
+/// alone may hold part of it -- here SQLite was killed with its pages
+/// spilled into the file. Read, the import took what was never committed.
+/// A journal PERSIST mode left, its header zeroed, is not hot.
+#[test]
+fn a_hot_rollback_journal_is_refused() {
+    let hot = kept("hot.sqlite");
+    let e = match Reader::open(&hot, "t") {
+        Ok(mut r) => panic!("the torn file was read, its first row {:?}", r.next_row()),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        e.contains("hot.sqlite-journal is a hot rollback journal"),
+        "{e}"
+    );
+    let e = fennec_import::sqlite::count_rows(&hot, "t")
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("hot rollback journal"), "{e}");
+    let (_, rows) = read_whole(&kept("persist.sqlite"), "t");
+    assert_eq!(rows, [vec![Value::Int(1), text("kept")]]);
+}
+
+/// A file of SQLite's largest pages, 65 536 bytes -- the header's 1 --
+/// with a row spilling into an overflow page.
+#[test]
+fn a_file_of_the_largest_pages_is_read() {
+    let (_, rows) = read_whole(&kept("large-pages.sqlite"), "t");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0], [Value::Int(1), Value::Bytes(vec![0; 70_000])]);
+    assert_eq!(rows[1], [Value::Int(2), Value::Bytes(vec![1, 2])]);
 }
 
 #[test]

@@ -272,7 +272,10 @@ fn run(
     };
 
     let columns = src.columns()?;
-    let plan = map::plan(&columns, opts)?;
+    let mut plan = map::plan(&columns, opts)?;
+    // What the source left out -- a SQLite table's VIRTUAL generated
+    // columns -- is a warning line of the plan and of the import.
+    plan.warnings.extend(src.left_out());
 
     if dry_run {
         print_plan(&plan, &columns, target, total.or_else(|| src.row_count()));

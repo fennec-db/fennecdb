@@ -108,6 +108,14 @@ pub trait Source {
     fn row_count(&self) -> Option<u64> {
         None
     }
+
+    /// What the source has that its rows do not carry, a line each, which
+    /// the import's summary names beside its warnings: a SQLite table's
+    /// VIRTUAL generated columns, which SQLite computes as a row is read and
+    /// never stores.
+    fn left_out(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Where the document's `id` comes from.

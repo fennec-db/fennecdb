@@ -119,11 +119,14 @@ fn load(
     // does not rebuild the index.
     db.checkpoint()?;
 
+    // What the source left out is the summary's to say too.
+    let mut warnings = plan.warnings;
+    warnings.extend(src.left_out());
     Ok(Summary {
         rows,
         skipped,
         elapsed: t0.elapsed(),
-        warnings: plan.warnings,
+        warnings,
     })
 }
 
