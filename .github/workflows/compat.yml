@@ -4,8 +4,9 @@
 # musl tarball, checked against its SHA256SUMS by site/install.sh, and its
 # router built from its tag, which no release ships (tools/release-bins.sh)
 # -- through tools/compat-matrix.sh: replication both ways, archives and
-# backups plain and sealed, a router over nodes of the other release, and a
-# rolling upgrade of a router and a node pair under durable writes.
+# backups plain and sealed, the values 0.2.0 wrote that this tree does not
+# read whole, a router over nodes of the other release, and a rolling
+# upgrade of a router and a node pair under durable writes.
 #
 # Minutes, and a check of a release rather than of a change: weekly, on a
 # release's tag, and by hand with the release to hold this tree to. Not
@@ -47,6 +48,21 @@ jobs:
       - name: Install the pinned toolchain
         run: rustup show
 
+      # The harness held to its own promises first: a case dying part way
+      # or a part unsaid failing the run, every record kind, tag and op of
+      # the tree named in its history, a tampered tarball refused with
+      # nothing installed (ci.yml's fmt job runs the same on every change).
+      - name: The harness's own tests
+        run: |
+          bash tools/compat-matrix.sh --self-test
+          bash tools/test_release_bins.sh
+
+      # #662's pattern: restored on every run, saved on main's alone -- the
+      # weekly run is main's (a schedule runs on the default branch) and so
+      # is a dispatch from main, and they save; a run on a release's tag
+      # only restores. target/ holds this tree's build and the old router's
+      # (target/compat-shard, tools/release-bins.sh), so neither builds its
+      # dependencies cold.
       - id: cargo-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -76,7 +92,7 @@ jobs:
           {
             echo '### The compatibility matrix'
             echo '```'
-            grep -E '^(old:|[a-e][0-9]* (ok|FAILED):|compat-matrix:)' "$RUNNER_TEMP/compat.log" || true
+            grep -E '^(old:|new:|[a-z][0-9a-z]* (ok|FAILED):|compat-matrix:)' "$RUNNER_TEMP/compat.log" || true
             echo '```'
           } >>"$GITHUB_STEP_SUMMARY"
           exit "$status"

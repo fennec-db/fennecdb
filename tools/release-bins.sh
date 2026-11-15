@@ -4,9 +4,11 @@
 #
 #   tools/release-bins.sh TAG OUT_DIR [TARGET]
 #
-# TAG is a release's tag (v0.2.0), or `latest`: the newest published release
-# before this tree's version, not one tagged at this commit, so a release's own
-# run is held to the one before it (asked of GitHub with `gh`).
+# TAG is a release's tag (v0.2.0), or `latest`: the published release, not a
+# draft nor a pre-release, highest in version order up to this tree's
+# version, and not one tagged at this commit, so a release's own run is held
+# to the one before it (asked of GitHub with `gh`; a `gh` that fails stops
+# the script, never read as "no release").
 #
 # `fennec-server` and `fennec` come from the release's own tarball,
 # `fennec-<TAG>-<TARGET>.tar.gz`, held to its line of the release's
@@ -22,13 +24,19 @@
 # The release ships no `fennec-shard`: release.yml packs `fennec` and
 # `fennec-server` alone. So the router is built from the tag's own sources
 # (`git archive`, fetched where this clone lacks the tag and no
-# OLD_ASSETS_DIR is set), with this tree's toolchain, a debug build into
-# SHARD_TARGET_DIR (default a directory made and removed here) -- the code
-# the release was cut from, not a binary it published.
+# OLD_ASSETS_DIR is set) with the tag's Cargo.lock (`--locked`) and this
+# tree's toolchain, a debug build into SHARD_TARGET_DIR (default
+# target/compat-shard, kept: compat.yml's cargo cache holds target/, so the
+# router's dependencies are not built cold each run) -- the code the release
+# was cut from, not a binary it published.
+#
+# Nothing reaches OUT_DIR until all three binaries are in hand and each
+# one's `--version` is the tag's: a tarball whose sum differs, a tag with no
+# sources, a router that does not build, each leaves OUT_DIR as it was
+# (tools/test_release_bins.sh holds the first, a byte of a copy flipped).
 #
 # TARGET defaults to this machine's, the one install.sh installs; another is
-# refused, since the matrix runs these binaries here. Each binary's
-# `--version` is held to the tag's version.
+# refused, since the matrix runs these binaries here.
 
 set -euo pipefail
 
@@ -46,7 +54,11 @@ cleanup() {
     fi
     rm -rf "$WORK"
 }
-trap cleanup EXIT INT TERM
+# EXIT cleans up; a signal ends the script, whose EXIT trap then runs
+# (cleaning up on the signal and going on would build a router after a ^C).
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 die() {
     echo "release-bins: $*" >&2
@@ -77,23 +89,46 @@ if [ "$TAG" = latest ]; then
     [ -z "${OLD_ASSETS_DIR:-}" ] ||
         die "OLD_ASSETS_DIR holds one release's files: name its tag in place of \`latest\`"
     tree=$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)
-    head=$(git -C "$ROOT" rev-parse HEAD)
-    found=
-    for t in $(gh release list -R "$REPO" --exclude-drafts --exclude-pre-releases \
-        --limit 100 --json tagName -q '.[].tagName'); do
-        v=${t#v}
-        # A release cut at this very commit is this tree: the run on its
-        # tag is held to the release before it.
-        [ "$(git -C "$ROOT" rev-parse -q --verify "refs/tags/$t^{commit}" 2>/dev/null || true)" = "$head" ] &&
-            continue
-        if [ "$(printf '%s\n%s\n' "$v" "$tree" | sort -V | head -1)" = "$v" ]; then
-            found=$t
-            break
-        fi
-    done
-    [ -n "$found" ] || die "no published release before this tree's version, $tree"
-    TAG=$found
-    echo "release-bins: the newest published release before $tree is $TAG"
+    # Asked once, its failure the script's: inside `for t in $(gh ...)` a
+    # failing gh was an empty list, read as "no published release".
+    listed=$(gh release list -R "$REPO" --exclude-drafts --exclude-pre-releases \
+        --limit 200 --json tagName,isDraft,isPrerelease) ||
+        die "gh could not list $REPO's releases"
+    # A release cut at this very commit is this tree: the run on its tag is
+    # held to the release before it.
+    here_tags=$(git -C "$ROOT" tag --points-at HEAD)
+    # Version order, not the list's (creation dates: a patch of an older
+    # minor made after a newer minor would come first): X.Y.Z compared as
+    # numbers, a pre-release below its release, and never above this tree.
+    TAG=$(printf '%s' "$listed" | python3 -I -c '
+import json, re, sys
+
+tree, here = sys.argv[1], set(sys.argv[2].split())
+
+
+def key(v):
+    m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?", v)
+    if not m:
+        return None
+    pre = m.group(4)
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)), pre is None, pre or "")
+
+
+top = key(tree)
+if top is None:
+    sys.exit("this tree'"'"'s version, %r, is no X.Y.Z" % tree)
+best = None
+for r in json.load(sys.stdin):
+    t = r.get("tagName", "")
+    if r.get("isDraft") or r.get("isPrerelease") or t in here or not t.startswith("v"):
+        continue
+    k = key(t[1:])
+    if k is not None and k <= top and (best is None or k > best[0]):
+        best = (k, t)
+print(best[1] if best else "")
+' "$tree" "$here_tags") || die "could not read $REPO's releases"
+    [ -n "$TAG" ] || die "no published release up to this tree's version, $tree"
+    echo "release-bins: the newest published release up to $tree is $TAG"
 fi
 case $TAG in
     v[0-9]*) ;;
@@ -115,7 +150,8 @@ if [ -n "${OLD_ASSETS_DIR:-}" ]; then
         cp "$OLD_ASSETS_DIR/$f" "$SITE/download/$TAG/$f"
     done
 else
-    gh release download "$TAG" -R "$REPO" -p "$NAME" -p SHA256SUMS -D "$SITE/download/$TAG"
+    gh release download "$TAG" -R "$REPO" -p "$NAME" -p SHA256SUMS -D "$SITE/download/$TAG" ||
+        die "gh could not download $NAME and SHA256SUMS of $TAG"
 fi
 
 # A server on a port the system picks, found by the file it writes, as
@@ -145,41 +181,47 @@ done
 [ -s "$WORK/port" ] || die "the file server for install.sh named no port"
 
 # install.sh checks the tarball against SHA256SUMS before it unpacks it, and
-# installs nothing where they differ.
+# installs nothing where they differ. It installs into this run's own
+# directory; OUT_DIR is written only once all three binaries are here.
 if ! FENNEC_BASE_URL="http://127.0.0.1:$(cat "$WORK/port")" FENNEC_VERSION="$VERSION" \
     FENNEC_INSTALL="$WORK/installed" HOME="$WORK" sh "$ROOT/site/install.sh" >"$WORK/install.log" 2>&1; then
     cat "$WORK/install.log" >&2
-    die "install.sh did not install $NAME"
+    die "install.sh did not install $NAME: nothing installed in $OUT"
 fi
 grep -q '^Checksum ok' "$WORK/install.log" || {
     cat "$WORK/install.log" >&2
-    die "install.sh said nothing of $NAME's checksum"
+    die "install.sh said nothing of $NAME's checksum: nothing installed in $OUT"
 }
 echo "release-bins: $NAME, $(grep '^Checksum ok' "$WORK/install.log") against the release's SHA256SUMS"
-mkdir -p "$OUT"
-for b in fennec-server fennec; do
-    cp "$WORK/installed/bin/$b" "$OUT/$b.new"
-    mv -f "$OUT/$b.new" "$OUT/$b"
-done
+kill "$SERVER_PID" 2>/dev/null || true
+wait "$SERVER_PID" 2>/dev/null || true
+SERVER_PID=
 
 # The router, from the tag's sources.
 if ! git -C "$ROOT" rev-parse -q --verify "refs/tags/$TAG^{commit}" >/dev/null; then
-    [ -z "${OLD_ASSETS_DIR:-}" ] || die "this clone has no tag $TAG to build its fennec-shard from"
-    git -C "$ROOT" fetch --quiet --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"
+    [ -z "${OLD_ASSETS_DIR:-}" ] || die "this clone has no tag $TAG to build its fennec-shard from: nothing installed in $OUT"
+    git -C "$ROOT" fetch --quiet --no-tags origin "refs/tags/$TAG:refs/tags/$TAG" ||
+        die "could not fetch the tag $TAG: nothing installed in $OUT"
 fi
 mkdir "$WORK/src"
 git -C "$ROOT" archive "$TAG" | tar -x -C "$WORK/src"
-echo "release-bins: building fennec-shard from $TAG's sources ($(git -C "$ROOT" rev-parse --short "$TAG^{commit}")) ..."
+SHARD_TARGET=${SHARD_TARGET_DIR:-$ROOT/target/compat-shard}
+echo "release-bins: building fennec-shard from $TAG's sources ($(git -C "$ROOT" rev-parse --short "$TAG^{commit}")) into $SHARD_TARGET ..."
 # Built from here, not from the sources' directory, so the toolchain is this
 # tree's (rustup reads rust-toolchain.toml from the working directory): the
-# tag's may not be installed.
-(cd "$ROOT" && CARGO_TARGET_DIR="${SHARD_TARGET_DIR:-$WORK/target}" "${CARGO:-cargo}" build --quiet \
-    --locked --manifest-path "$WORK/src/Cargo.toml" -p fennec-shard)
-cp "${SHARD_TARGET_DIR:-$WORK/target}/debug/fennec-shard" "$OUT/fennec-shard.new"
-mv -f "$OUT/fennec-shard.new" "$OUT/fennec-shard"
+# tag's may not be installed. --locked: the tag's own Cargo.lock.
+(cd "$ROOT" && CARGO_TARGET_DIR="$SHARD_TARGET" "${CARGO:-cargo}" build --quiet \
+    --locked --manifest-path "$WORK/src/Cargo.toml" -p fennec-shard) ||
+    die "fennec-shard did not build from $TAG's sources: nothing installed in $OUT"
+cp "$SHARD_TARGET/debug/fennec-shard" "$WORK/installed/bin/fennec-shard"
 
 for b in fennec-server fennec fennec-shard; do
-    said=$("$OUT/$b" --version 2>&1 | head -1)
-    [ "$said" = "$b $VERSION" ] || die "$OUT/$b says \"$said\", not $b $VERSION"
+    said=$("$WORK/installed/bin/$b" --version 2>&1 | head -1)
+    [ "$said" = "$b $VERSION" ] || die "$b of $TAG says \"$said\", not $b $VERSION: nothing installed in $OUT"
+done
+mkdir -p "$OUT"
+for b in fennec-server fennec fennec-shard; do
+    cp "$WORK/installed/bin/$b" "$OUT/$b.new"
+    mv -f "$OUT/$b.new" "$OUT/$b"
 done
 echo "release-bins: $TAG's fennec-server, fennec and fennec-shard in $OUT"

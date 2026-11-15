@@ -1445,19 +1445,24 @@ upgrade-check:
 
 ## Two releases' processes beside each other: this tree's fennec-server,
 ## fennec and fennec-shard against the last published release's, OLD (a tag;
-## `latest`, the default, is the newest published release before this
-## tree's version, asked of GitHub with gh), through tools/compat-matrix.sh:
-## replication both ways, archives and backups plain and sealed, a router
-## over nodes of the other release, and a rolling upgrade of a router and a
-## node pair under durable writes, 0 acknowledged writes lost
-## (docs/design/compatibility.md#the-compatibility-matrix). The release's
-## fennec-server and fennec come from its tarball, checked against its
-## SHA256SUMS by site/install.sh (OLD_ASSETS_DIR, a directory holding the
-## two files, in place of `gh release download`); its fennec-shard, which no
-## release ships, is built from the tag's sources (tools/release-bins.sh).
-## compat.yml runs it weekly, on release tags and by dispatch: minutes.
-## Needs curl, jq and python3.
+## `latest`, the default, is the published release highest in version order
+## up to this tree's, asked of GitHub with gh), through
+## tools/compat-matrix.sh: replication both ways, archives and backups plain
+## and sealed, the values 0.2.0 wrote that this tree does not read whole, a
+## router over nodes of the other release, and a rolling upgrade of a router
+## and a node pair under durable writes, each write classed and read back
+## (docs/design/compatibility.md#the-compatibility-matrix). The harness's
+## own tests run first. The release's fennec-server and fennec come from its
+## tarball, checked against its SHA256SUMS by site/install.sh
+## (OLD_ASSETS_DIR, a directory holding the two files, in place of `gh
+## release download`); its fennec-shard, which no release ships, is built
+## from the tag's sources into target/compat-shard (SHARD_TARGET_DIR), kept
+## (tools/release-bins.sh). compat.yml runs it weekly, on release tags and
+## by dispatch: minutes. Needs curl, jq, openssl and python3, and gh unless
+## OLD_ASSETS_DIR holds the release's files and this clone its tag.
 compat-check:
+	bash tools/compat-matrix.sh --self-test
+	bash tools/test_release_bins.sh
 	$(CARGO) build -p fennec-server -p fennec-cli -p fennec-shard
 	CARGO=$(CARGO) bash tools/release-bins.sh $(or $(OLD),latest) $(CURDIR)/target/compat-old
 	bash tools/compat-matrix.sh $(CURDIR)/target/compat-old $(CURDIR)/target/debug

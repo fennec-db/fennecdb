@@ -5,26 +5,33 @@
 # tree's, NEW_BIN_DIR, each case driven both ways where it has two:
 #
 #   tools/compat-matrix.sh OLD_BIN_DIR NEW_BIN_DIR
+#   tools/compat-matrix.sh --self-test
 #
 # Each directory holds `fennec-server`, `fennec` and `fennec-shard`
-# (`make compat-check` builds this tree's and takes the release's). The
-# policy it holds is RELEASING.md's (*Every reader upgrades before any
-# primary*): every reader of a file or a stream -- replica, standby,
-# archiver, router, node, the `fennec` CLI -- upgrades before any primary; a
-# binary one release back beside a newer one works or stops in words naming
-# what it does not know (a record kind, a tag, a version), and never reads
-# wrong; a newer reader over an older writer always works. The cases:
+# (`make compat-check` builds this tree's and takes the release's; the old
+# router is built from the release's tag, which publishes none). The policy
+# it holds is RELEASING.md's (*Every reader upgrades before any primary*):
+# a binary one release back beside a newer one works or stops in words, and
+# never reads wrong -- naming the record kind, tag or version where it names
+# one -- and a newer reader reads what an older writer wrote, but for the
+# values and types no write makes any more that compatibility.md lists. The
+# cases, each printing one line a part, CASES below their list:
 #
-#   a1  an old primary and a new replica: the replica follows, its image and
-#       its records, its reads the primary's, its file opened again whole;
-#   a2  a new primary and an old replica: it follows until a write it does
-#       not know, where it stops in words, and its file, opened by the old
-#       binary, holds exactly a prefix of the primary's history (every
-#       snapshot taken, one after each write, is a candidate) -- each record
-#       kind, tag or op added since the release is a write of HISTORY, named
-#       in UNKNOWN_TO_OLD;
-#   a3  an old primary's value nested past this tree's 64 levels, followed
-#       by a new replica;
+#   a1  an old primary and a new replica: the first HALF writes in the
+#       replica's one image (`images` 1), the rest as records, its reads and
+#       its file opened again the primary's;
+#   a2  a new primary and an old replica, placed by position: the primary's
+#       change counter after each write against the replica's, so a stop is
+#       put on the write it is at, never on a later one; there the write
+#       must be one of UNKNOWN_TO_OLD (by its text) and the stop's words its
+#       entry's, the kind or tag named where the old binary names one; its
+#       reads and its file, opened by the old binary, the primary's then;
+#   a3  an old primary's `[[json]]` row nested 66 levels deep, which this
+#       tree refuses where it reads it (crates.md, "How deep a value
+#       nests"): a new replica takes an image and holds it, a new server
+#       opens the file, and each answers what compatibility.md says;
+#   a3b an old file whose schema holds a type of 65 nested lists, refused by
+#       this tree's server at the open, in words;
 #   a4  what the old release writes and this tree no longer takes -- a
 #       stored definition holding 1e400, a vector component of 1e39 --
 #       followed by a new replica and read there as the old primary reads it;
@@ -40,50 +47,63 @@
 #       tenant created, written, copied to its replica, moved and deleted;
 #   e   a rolling upgrade under durable writes: a router and two `--dir`
 #       nodes, one the other's standby, all of the release, upgraded in
-#       RELEASING.md's and deploy/RUNBOOK.md's order -- the router in place,
-#       the standby's node, then the primary's -- every acknowledged write
-#       counted and read back at the end;
+#       RELEASING.md's and deploy/RUNBOOK.md's order -- the router, the
+#       standby's node, then the primary's, the runbook's condition met
+#       between the nodes -- each write classed acknowledged, not sent or
+#       unknown and read back from both nodes at the end. Every restart is a
+#       graceful TERM: what a kill keeps is the power-cut and chaos rigs';
 #   f1-f2  a `github` hook kept with `key delivery`, which RELEASING.md says
 #       the release refuses: a single server's hooks file line, and a
 #       tenant's set kept by an old node, the router and node upgraded;
 #   g1-g2  a node serving HTTPS, recorded at https:// by a router of the
 #       other release.
 #
+# Not driven, each for its reason (compatibility.md says the same):
+# `token_expired` and a seed sent in parts (#665) are the sync client's,
+# the native library's and the browser module's, neither in the release's
+# tarball nor reachable from a shell -- an old client against a new server
+# is T4's; a copy keeping its primary's write times is driven by no case
+# (b's archivers follow a primary, not a replica of the other release); a
+# replica's follow record synced before the follow is answered is e's only
+# as far as a graceful restart reads the copy's role the old node wrote,
+# its durability under a kill being the power-cut rig's; OP_MARK, REC_SPILL
+# and REC_LAND as FORMAT says.
+#
+# FORMAT holds every record kind, type tag and op of the tree (REC_*, TAG_*
+# and OP_* in FORMAT_SOURCES) to a write of HISTORY that makes it, or to a
+# reason none is needed; a run and the self-test fail on one it does not
+# name, so the next addition cannot be forgotten.
+#
 # COMPAT_CASES, where set, names the cases to run (`a2 e`): a case that
 # failed under load is run again alone before it is believed.
 #
-# Each case prints one line, `ok` and what it held, or what differed; the
-# script exits 1 where any differed. A difference is one of three: promised
-# in RELEASING.md or compatibility.md, which the case asserts in the promised
-# words; a break nobody wrote down; or a bug. The last two fail the case
-# until someone decides: nothing here passes over one. Every server listens on
-# port 0, found by its `listening on:` line (a node restarted in case e takes
-# the port it was first given, as a machine keeps its address); everything
-# started is killed and every path made removed on the way out, and a
-# failure prints the logs' tails. COMPAT_LOGS, where set, is a directory the
-# logs are copied into before they go. Needs curl, jq and openssl.
+# A case runs in a subshell of its own under `set -eE`: a command failing
+# anywhere in it fails it, its line and command written down whatever it
+# printed before, a case that exits other than 0 fails, and each part a
+# case owes (CASES) must print exactly one line of its own: a part unsaid
+# fails by name, and the run ends held to the whole list. The script exits 1
+# where any part failed or went unsaid. A difference is one of three:
+# promised in RELEASING.md or compatibility.md, which the case asserts in
+# the promised words; a break nobody wrote down; or a bug. The last two fail
+# the case until someone decides: nothing here passes over one.
+#
+# Every server listens on port 0, found by its `listening on:` line, and a
+# server restarted takes port 0 again and is told to whatever finds it --
+# but for e's primary node, whose standby follows it by the address it was
+# started with: a machine keeps its address across `systemctl restart`, so
+# that node comes back at its own. Everything started is killed and every
+# path made removed on the way out, and a failure prints the logs' tails.
+# COMPAT_LOGS, where set, is a directory the logs are copied into before
+# they go. Needs curl, jq and openssl; --self-test, jq alone.
 
 set -uo pipefail
 # One collation for sort and comm, which reads its lines in sort's order.
 export LC_ALL=C
 
-usage='usage: tools/compat-matrix.sh OLD_BIN_DIR NEW_BIN_DIR'
+usage='usage: tools/compat-matrix.sh OLD_BIN_DIR NEW_BIN_DIR | --self-test'
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-OLD=$(cd "${1:?$usage}" && pwd)
-NEW=$(cd "${2:?$usage}" && pwd)
-for dir in "$OLD" "$NEW"; do
-    for b in fennec-server fennec fennec-shard; do
-        [ -x "$dir/$b" ] || { echo "compat-matrix: $dir holds no $b" >&2; exit 2; }
-    done
-done
-for tool in curl jq openssl; do
-    command -v "$tool" >/dev/null || { echo "compat-matrix: needs $tool" >&2; exit 2; }
-done
-OLD_SAYS=$("$OLD/fennec-server" --version 2>&1 | head -1)
-NEW_SAYS=$("$NEW/fennec-server" --version 2>&1 | head -1)
 
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/fennec-compat.XXXXXX")
-: >"$WORK/pids"
+# --- What a case does with ---------------------------------------------------
 
 # Stops each process: TERM, a server's own shutdown, then KILL after 20 s.
 stop() {
@@ -111,13 +131,8 @@ cleanup() {
     fi
     rm -rf "$WORK"
 }
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
 
-# --- What a case does with ---------------------------------------------------
-
-# The line a case or a part of it ends on.
+# The line a part of a case ends on.
 held() { echo "$1 ok: $2" >>"$C/lines"; }
 differs() { echo "$1 FAILED: $2" >>"$C/lines"; }
 # A difference that ends the case where it stands.
@@ -184,13 +199,20 @@ q() {
         -d "$(jq -cn --arg q "$2" '{query: $q}')" "$1/query"
 }
 
-# w URL QUERY [TOKEN]: a write the case needs, its refusal the case's end.
+# w URL QUERY [TOKEN]: a write the case needs, answered 2xx and no error,
+# anything else the case's end.
 w() {
-    local out
-    out=$(q "$@") || fail "\`$2\` had no answer from $1"
-    case $out in
-    *'"error"'*) fail "\`$2\` was refused by $1: $out" ;;
+    local code
+    code=$(curl -sS --max-time 60 -o "$C/w.out" -w '%{http_code}' -H "Authorization: Bearer ${3:-t}" \
+        -H 'Content-Type: application/json' -d "$(jq -cn --arg q "$2" '{query: $q}')" "$1/query") ||
+        fail "\`$2\` had no answer from $1"
+    case $code in
+    2??) ;;
+    *) fail "\`$2\` was answered $code by $1: $(head -c 300 "$C/w.out")" ;;
     esac
+    if grep -q '"error"' "$C/w.out"; then
+        fail "\`$2\` was answered $code with an error by $1: $(head -c 300 "$C/w.out")"
+    fi
 }
 
 # admin URL METHOD PATH [BODY] [TOKEN]: the status; the body in $C/admin.out.
@@ -199,50 +221,132 @@ admin() {
         -H "Authorization: Bearer ${5:-root}" ${4:+-d "$4"} "$1$3"
 }
 
-# The history every case writes: a record of each kind a write makes, kind
-# 13's ops 1, 3, 4 and 6 (a definition, a binding, a schedule whose slot
-# deletes nothing, a webhook consumer), tag 17 (`nocase`) and tag 18
-# (`@text` beside a `@hash`) among them. v0.2.0 reads every record kind, tag and op this tree writes: a
-# release that adds one adds a write making it here, and its index to
-# UNKNOWN_TO_OLD, where case a2 asks the old replica to stop in words.
+# status URL [TOKEN]: URL's /_replication/status.
+status() {
+    curl -sS --max-time 30 -H "Authorization: Bearer ${2:-r}" "$1/_replication/status"
+}
+
+# seq_of URL: the change counter URL's status says it is at.
+seq_of() {
+    status "$1" | jq -er .seq
+}
+
+# The history every case writes. Each record kind, type tag and op a write
+# makes comes from one of these (FORMAT names which); kind 13's ops 1 to 4
+# and 6, tags 11 to 18 among them. A release that adds a kind, a tag or an
+# op adds a write making it here and its line to FORMAT; where the last
+# release does not read it, its text to UNKNOWN_TO_OLD.
 HISTORY=(
     "create collection notes (title text nocase @hash @text, kind text @hash, n int @sorted, meta json)"
     "create collection docs (v vector<3> @hnsw(cosine), label text @text)"
     "create collection ledger (o int)"
-    "put notes [{title: 'Hello', kind: 'open', n: 1, meta: {a: [1, 2], b: 'x'}}, {title: 'two', kind: 'open', n: 2}, {title: 'three', kind: 'void', n: 3}]"
+    "create collection kinds (b bool, f float, raw bytes, h vector<2, f16>, at timestamp, sp sparse<8>, name text collate tr, place geo @geo, gone int, k1 int, k2 text, @sorted(k1, k2))"
+    "put notes [{title: 'Hello', kind: 'open', n: 1, meta: {a: [1, 2], b: 'x', c: true, f: 1.5}}, {title: 'two', kind: 'open', n: 2, meta: null}, {title: 'three', kind: 'void', n: 3}]"
     "put docs [{v: [1, 0, 0.5], label: 'first'}, {v: [0, 1, 0], label: 'second'}, {v: [0.25, 0.25, 1], label: 'third'}]"
+    "put kinds [{b: true, f: 1.5, raw: 'aGVsbG8=', h: [0.5, 0.25], at: '2026-11-15T10:00:00Z', sp: '{1:0.5,7:0.25}/8', name: 'Ilık', place: [13.4, 52.5], gone: 1, k1: 1, k2: 'a'}, {b: false, name: 'ırmak', k1: 2, k2: 'b'}]"
     "create statement titles() as get notes select title order n"
+    "create statement gone() as get notes count"
     "create statement paid after set notes where new.kind = 'paid' as insert ledger {o: new.id}"
     "create statement tidy every 1d as del notes where kind = 'gone'"
     "create statement two() public as begin insert ledger {o: 100}; insert ledger {o: 101} end"
     "create statement pushed(\$sha text from event.after) on hook gh where hook.event = 'push' as insert ledger {o: 7}"
+    "drop statement gone"
     "call two"
     "set notes {kind: 'paid'} where title = 'HELLO'"
     "del notes where n = 3"
     "alter collection notes add field extra text"
+    "create index on ledger (o) @sorted"
+    "alter collection kinds drop field gone"
     "create collection scratch (x int)"
     "drop collection scratch"
     "put notes {title: 'after', kind: 'open', n: 4, extra: 'x'}"
     "set docs {label: 'moved'} where label = 'second'"
     "put notes {title: 'last', kind: 'open', n: 5}"
 )
-UNKNOWN_TO_OLD=()
 # Where a replica started after the history began takes its image.
-HALF=10
+HALF=12
+
+# The files whose record kinds, type tags and ops FORMAT is held to.
+FORMAT_SOURCES="crates/fennec-core/src/engine.rs crates/fennec-core/src/engine/stored.rs crates/fennec-core/src/store.rs crates/fennec-core/src/codec.rs"
+# NAME|the start of the write of HISTORY that makes it, or NAME|- why none
+# is needed. Every REC_*, TAG_* and OP_* constant of FORMAT_SOURCES has its
+# line, and no line names one the tree no longer has (check_format).
+FORMAT=(
+    "REC_CREATE|create collection notes"
+    "REC_DROP|drop collection scratch"
+    "REC_DATA|put notes ["
+    "REC_GRAPH|- not a write: an image holds it (a1's and a2's replicas each take one, docs' graph in it), and a server appends it as it saves its graphs"
+    "REC_ALTER|create index on ledger (o) @sorted"
+    "REC_SEQ|- not a write: the head of every image (a1's and a2's replicas each take one)"
+    "REC_NEXTID|- not a write: an image holds one a collection (a1's and a2's replicas each take one)"
+    "REC_HISTORY|- not a write and never sent as one: a replica takes its primary's history from the stream, and a file's own is written as it is made and promoted (a1 and a2 open a copy with --promote)"
+    "REC_BLOCK|set notes {kind: 'paid'}"
+    "REC_SPILL|- a block past 16 MB, in its primary's file alone: never sent (the feed sends the block as REC_BLOCK), and a write of 16 MB in every case's history costs the run more than it would show"
+    "REC_LAND|- a spilled block's landing, in its primary's file alone: REC_SPILL's reason"
+    "REC_FIELDS|alter collection notes add field extra text"
+    "REC_STATEMENT|create statement titles()"
+    "REC_SYNCED|- not a write and never sent: a file's server appends it as it closes, which c2's file, closed by the new server and opened by the old, holds"
+    "OP_PUT|put notes ["
+    "OP_DEL|del notes where n = 3"
+    "OP_DEFINE|create statement titles()"
+    "OP_DROP|drop statement gone"
+    "OP_BOUND|create statement paid after"
+    "OP_SCHEDULED|create statement tidy every 1d"
+    "OP_MARK|- a scheduled run's mark, written by the primary's clock at a slot: a slot each second would move the change counter between the history's writes, by which a2 places the old replica"
+    "OP_HOOKED|create statement pushed("
+    "TAG_NULL|put notes ["
+    "TAG_BOOL|put kinds ["
+    "TAG_INT|put notes ["
+    "TAG_FLOAT|put kinds ["
+    "TAG_TEXT|put notes ["
+    "TAG_BYTES|put kinds ["
+    "TAG_VECTOR|put docs ["
+    "TAG_LIST|put notes ["
+    "TAG_VECTOR_F16|put kinds ["
+    "TAG_TIMESTAMP|put kinds ["
+    "TAG_SPARSE|put kinds ["
+    "TAG_COLLATED|create collection kinds"
+    "TAG_DROPPED|alter collection kinds drop field gone"
+    "TAG_OBJECT|put notes ["
+    "TAG_JSON|create collection notes"
+    "TAG_GEO|create collection kinds"
+    "TAG_COMPOSITES|create collection kinds"
+    "TAG_NOCASE|create collection notes"
+    "TAG_BESIDE|create collection notes"
+)
+# A write of HISTORY the last release does not read, by its text, and the
+# words (an extended regex) its replica must stop with: the kind or tag
+# number where the old binary names one -- `record kind 15`, `type tag 19`
+# -- or `a statement record this version does not read` for an op. Empty:
+# every kind, tag and op this tree writes is 0.2.0's (kinds 1 to 14, tags 0
+# to 18, ops 1 to 6).
+UNKNOWN_TO_OLD=()
 READS=(
     "get notes order id"
     "get docs select id, v, label order id"
     "get ledger order id"
+    "get kinds order id"
     "call titles"
+    "describe notes"
+    "describe kinds"
+    "statements"
+    "get notes where title = 'HELLO' select id, title"
+    "get notes match title 'hello' select id"
+    "get docs near v [1, 0, 0.4] limit 2 select id, label"
+    "get kinds order name collate tr select id, name"
+    "get kinds where k1 = 2 and k2 = 'b' select id"
 )
 
-# Every read of READS at URL, one normalized answer a line; a refusal is
-# `"error"`, whatever its words, so states of two versions compare.
+# Every read of READS at URL, one normalized answer a line: a refusal is
+# `"error"`, whatever its words, so states of two versions compare; a
+# score is left out (the order is the ranking) and so are a schedule's
+# `next` and `last`, which the clock moves.
 state() {
     local r
     for r in "${READS[@]}"; do
         q "$1" "$r" "${2:-t}" |
-            jq -S -c 'if type == "object" and has("error") then "error" else . end' 2>/dev/null ||
+            jq -S -c 'if type == "object" and has("error") then "error" else . end
+                | walk(if type == "object" then del(._score, .next, .last) else . end)' 2>/dev/null ||
             echo "no answer to $r"
     done
 }
@@ -265,16 +369,21 @@ first_difference() {
     diff <(echo "$1") <(echo "$2") | grep '^[<>]' | head -2 | cut -c1-300 | tr '\n' ' '
 }
 
-# history URL FROM TO: HISTORY's writes FROM to TO (exclusive), a snapshot of
-# URL's state after each kept in SNAP[i+1].
+# history URL FROM TO [STATUS_URL]: HISTORY's writes FROM to TO
+# (exclusive), URL's state after each kept in SNAP[i+1] and, with
+# STATUS_URL, its change counter in PSEQ[i+1].
 history() {
     local i
     for ((i = $2; i < $3; i++)); do
         w "$1" "${HISTORY[$i]}"
         SNAP[i + 1]=$(state "$1")
+        if [ -n "${4:-}" ]; then
+            PSEQ[i + 1]=$(seq_of "$4") || fail "no change counter from $4 after write $((i + 1))"
+        fi
     done
 }
 SNAP=()
+PSEQ=()
 
 # opened NAME BIN_DIR FILE: FILE opened by BIN_DIR's server, its state in
 # OPENED; a replica's file is opened as a copy, promoted.
@@ -296,97 +405,225 @@ copy_of() {
 
 case_a1() {
     server primary "$OLD" --file "$C/p.fennec" --http-token t --replication-token r
-    local P=$ADDR
+    local P=$ADDR n=${#HISTORY[@]}
     history "$P" 0 "$HALF"
+    # Restarted, its ring of writes is empty, so a replica starting from
+    # nothing takes an image: the first HALF writes come in it, the rest as
+    # records (a primary whose ring held them all would send records alone).
+    stop "$PID"
+    server primary-again "$OLD" --file "$C/p.fennec" --http-token t --replication-token r
+    P=$ADDR
     server replica "$NEW" --file "$C/r.fennec" --http-token t --replication-token r --replica-of "$P"
     local R=$ADDR RPID=$PID
-    history "$P" "$HALF" "${#HISTORY[@]}"
-    local want=${SNAP[${#HISTORY[@]}]}
-    if ! until_state "$R" "$want"; then
-        fail "the new replica's reads are not the old primary's: $(first_difference "$want" "$(state "$R")"); its log: $(grep -m1 -i 'could not\|refus' "$C/replica.log")"
-    fi
+    history "$P" "$HALF" "$n"
+    local want=${SNAP[$n]} images
     case $want in
     *'"error"'*) fail "the old primary refused a read of its own history: $want" ;;
     esac
+    if ! until_state "$R" "$want"; then
+        fail "the new replica's reads are not the old primary's: $(first_difference "$want" "$(state "$R")"); its log: $(grep -m1 -i 'could not\|refus' "$C/replica.log")"
+    fi
+    images=$(status "$R" | jq -r .images)
+    [ "$images" = 1 ] ||
+        fail "the new replica says it took $images images, not the one holding the first $HALF writes: $(status "$R")"
     stop "$RPID"
     opened reopened "$NEW" "$(copy_of "$C/r.fennec")" --promote
     [ "$OPENED" = "$want" ] ||
         fail "the new replica's file, opened again, is not what it answered: $(first_difference "$want" "$OPENED")"
-    held a1 "the new replica followed the old primary's ${#HISTORY[@]} writes, $HALF in its image and the rest as records; its reads and its file opened again are the primary's"
+    held a1 "the new replica followed the old primary's $n writes, the first $HALF in its one image (\`images\` 1) and the rest as records; its reads and its file opened again are the primary's"
+}
+
+# The text of UNKNOWN_TO_OLD's entry for a write, and its stop words.
+unknown_entry() {
+    local e
+    for e in ${UNKNOWN_TO_OLD[@]+"${UNKNOWN_TO_OLD[@]}"}; do
+        if [ "${e%%|*}" = "$1" ]; then
+            echo "${e#*|}"
+            return 0
+        fi
+    done
+    return 1
 }
 
 case_a2() {
     server primary "$NEW" --file "$C/p.fennec" --http-token t --replication-token r
-    local P=$ADDR
+    local P=$ADDR n=${#HISTORY[@]} i
     SNAP[0]=$(state "$P")
-    history "$P" 0 "$HALF"
+    PSEQ[0]=$(seq_of "$P")
+    history "$P" 0 "$HALF" "$P"
+    stop "$PID"
+    server primary-again "$NEW" --file "$C/p.fennec" --http-token t --replication-token r
+    P=$ADDR
     server replica "$OLD" --file "$C/r.fennec" --http-token t --replication-token r --replica-of "$P"
     local R=$ADDR RPID=$PID
-    history "$P" "$HALF" "${#HISTORY[@]}"
-    local n=${#HISTORY[@]} got k i stopped=
-    until_state "$R" "${SNAP[$n]}" 30 || true
-    got=$(state "$R")
-    k=
-    for ((i = n; i >= 0; i--)); do
-        if [ "${SNAP[$i]}" = "$got" ]; then
+    history "$P" "$HALF" "$n" "$P"
+    # Each write moved the counter, so a position names one write.
+    for ((i = 1; i <= n; i++)); do
+        [ "${PSEQ[$i]}" -gt "${PSEQ[$((i - 1))]}" ] ||
+            fail "write $i, \`${HISTORY[$((i - 1))]}\`, left the primary's counter at ${PSEQ[$i]}: a position would name two writes"
+    done
+    # The replica at the primary's last position, or stopped short of it
+    # and standing there (a second of the same counter after its stop).
+    local at= last= steady=0 k= stopped= words
+    for _ in $(seq 1 600); do
+        at=$(seq_of "$R" 2>/dev/null || true)
+        [ "$at" = "${PSEQ[$n]}" ] && break
+        if grep -q 'could not apply' "$C/replica.log" && [ -n "$at" ] && [ "$at" = "$last" ]; then
+            steady=$((steady + 1))
+            if [ "$steady" -ge 20 ]; then break; fi
+        else
+            steady=0
+        fi
+        last=$at
+        sleep 0.05
+    done
+    for ((i = 0; i <= n; i++)); do
+        if [ "${PSEQ[$i]}" = "$at" ]; then
             k=$i
             break
         fi
     done
     [ -n "$k" ] ||
-        fail "the old replica holds what no prefix of the primary's history holds: $(first_difference "${SNAP[$n]}" "$got")"
+        fail "the old replica stands at change '$at', where no write of the primary's history ended (${PSEQ[*]}): $(grep -m1 'could not apply' "$C/replica.log" || true)"
+    local got
+    got=$(state "$R")
+    [ "$got" = "${SNAP[$k]}" ] ||
+        fail "the old replica stands where write $k left the primary, but its reads are not the primary's then: $(first_difference "${SNAP[$k]}" "$got")"
     if [ "$k" -lt "$n" ]; then
         stopped=$(grep -m1 'could not apply' "$C/replica.log" || true)
-        local unknown=
-        for i in "${UNKNOWN_TO_OLD[@]:-}"; do [ "$i" = "$k" ] && unknown=1; done
-        if [ -z "$unknown" ]; then
-            fail "the old replica stopped before write $((k + 1)), \`${HISTORY[$k]}\`, which $OLD_SAYS reads: ${stopped:-it said nothing}"
-        fi
-        echo "$stopped" | grep -Eq 'record kind [0-9]+|type tag [0-9]+|version|does not read' ||
-            fail "the old replica stopped before \`${HISTORY[$k]}\` without naming what it does not know: ${stopped:-it said nothing}"
+        words=$(unknown_entry "${HISTORY[$k]}") ||
+            fail "the old replica stopped at write $((k + 1)), \`${HISTORY[$k]}\`, which UNKNOWN_TO_OLD does not name ($OLD_SAYS reads it): ${stopped:-it said nothing}"
+        echo "$stopped" | grep -Eq "$words" ||
+            fail "the old replica stopped at write $((k + 1)), \`${HISTORY[$k]}\`, without the words UNKNOWN_TO_OLD gives it ($words): ${stopped:-it said nothing}"
+    else
+        local images
+        images=$(status "$R" | jq -r .images)
+        [ "$images" = 1 ] ||
+            fail "the old replica says it took $images images, not the one holding the first $HALF writes: $(status "$R")"
     fi
     stop "$RPID"
     opened reopened "$OLD" "$(copy_of "$C/r.fennec")" --promote
     [ "$OPENED" = "$got" ] ||
         fail "the old replica's file, opened by $OLD_SAYS, is not what it answered: $(first_difference "$got" "$OPENED")"
     if [ "$k" -lt "$n" ]; then
-        held a2 "the old replica stopped in words before write $((k + 1)) (${stopped}); its file, opened by the old binary, holds the history's first $k writes"
+        held a2 "the old replica stopped in UNKNOWN_TO_OLD's words at write $((k + 1)), \`${HISTORY[$k]}\` (${stopped}), its counter the primary's after write $k; its reads and its file, opened by the old binary, the primary's then"
     else
-        held a2 "the old replica followed all ${n} writes of the new primary (no record kind, tag or op is new since $OLD_SAYS); its file, opened by the old binary, holds them all"
+        held a2 "the old replica followed all ${n} writes of the new primary, the first $HALF in its one image, to the primary's counter (${PSEQ[$n]}); every kind, tag and op FORMAT names is one $OLD_SAYS reads; its reads -- describe, statements, nocase, match, near among them -- and its file, opened by the old binary, the primary's"
     fi
+}
+
+# The answer this tree gives a read of a row nested past 64 levels, and a
+# write that would decode it: compatibility.md's exception (i).
+DEEP_REFUSED='{"error":"a value nests more than 64 levels deep"}'
+
+# answers URL QUERY WANT WHAT: QUERY's answer at URL is WANT exactly, or
+# the case ends naming WHAT.
+answers() {
+    local got
+    got=$(q "$1" "$2")
+    [ "$got" = "$3" ] || fail "$4: \`$2\` answered $(echo "$got" | cut -c1-200), not $3"
 }
 
 case_a3() {
     local deep='1' i
     for ((i = 0; i < 63; i++)); do deep="[$deep]"; done
     server primary "$OLD" --file "$C/p.fennec" --http-token t --replication-token r
-    local P=$ADDR PPID_=$PID
-    w "$P" "create collection deep (v [[json]])"
-    w "$P" "put deep {v: [[$deep]]}"
-    local want
-    want=$(q "$P" "get deep count")
+    local P=$ADDR
+    w "$P" "create collection other (n int, s text)"
+    w "$P" "put other [{n: 1, s: 'a'}, {n: 2, s: 'b'}]"
+    # A field before the deep one, and one after it.
+    w "$P" "create collection deep (name text, v [[json]], after int)"
+    w "$P" "put deep {name: 'deep', v: [[$deep]], after: 7}"
+    # The old primary reads it whole.
+    q "$P" "get deep order id" | jq -e 'length == 1 and .[0].after == 7' >/dev/null ||
+        fail "$OLD_SAYS does not read the row it took: $(q "$P" "get deep order id" | cut -c1-200)"
+    # Restarted, so the new replica starts from an image holding the row.
+    stop "$PID"
+    server primary-again "$OLD" --file "$C/p.fennec" --http-token t --replication-token r
+    P=$ADDR
+    local PP=$PID
     server replica "$NEW" --file "$C/r.fennec" --http-token t --replication-token r --replica-of "$P"
-    local R=$ADDR
-    w "$P" "put deep {v: [[1]]}"
-    want=$(q "$P" "get deep select id order id")
-    local got=
-    for _ in $(seq 1 300); do
-        got=$(q "$R" "get deep select id order id")
-        [ "$got" = "$want" ] && break
-        grep -q 'could not apply' "$C/replica.log" && break
-        sleep 0.1
+    local R=$ADDR RP=$PID
+    w "$P" "put deep {name: 'shallow', v: [[1]], after: 8}"
+    local pseq other st=
+    pseq=$(seq_of "$P")
+    other=$(q "$P" "get other order id")
+    # Its steady state: connected, an image taken, at the primary's
+    # counter, the counts the primary's (not the first "could not apply").
+    for _ in $(seq 1 600); do
+        st=$(status "$R" 2>/dev/null || true)
+        if echo "$st" | jq -e --argjson s "$pseq" '.connected == true and .images >= 1 and .seq == $s and .behind == 0' >/dev/null 2>&1 &&
+            [ "$(q "$R" "get deep count")" = '[{"count":2}]' ] &&
+            [ "$(q "$R" "get other count")" = '[{"count":2}]' ]; then
+            break
+        fi
+        st=
+        sleep 0.05
     done
-    if [ "$got" = "$want" ] && [ "$(q "$R" "get deep order id" | jq -c length)" = 2 ]; then
-        held a3 "a value nested 66 levels deep, which $OLD_SAYS writes, followed and read by the new replica"
-        return
-    fi
-    local old_read new_read new_open
-    old_read=$(q "$P" "get deep select id order id")
-    new_read=$(q "$R" "get deep order id" | cut -c1-200)
-    stop "$PPID_"
-    server reopen "$NEW" --file "$C/p.fennec" --http-token t
-    new_open=$(q "$ADDR" "get deep order id" | cut -c1-200)
-    differs a3 "an old primary's \`[[json]]\` value nested 66 levels deep (\`put deep {v: [[<64 levels>]]}\`, which $OLD_SAYS takes): the old primary answers \`get deep select id order id\` with $old_read; the new replica logs \`$(grep -m1 'could not apply' "$C/replica.log" | sed 's/^ *//')\` and answers \`get deep order id\` with $new_read; the new server opening the old primary's file answers it with $new_open"
+    [ -n "$st" ] ||
+        fail "the new replica did not reach its primary's counter $pseq with an image and the counts: $(status "$R" 2>&1 | cut -c1-300); its log: $(grep -m1 'could not apply' "$C/replica.log" || true)"
+    answers "$R" "get deep order id" "$DEEP_REFUSED" "the new replica's read of the deep row"
+    answers "$R" "get other order id" "$other" "the new replica's other collection"
+    answers "$R" "get deep where id = 2" '[{"id":2,"name":"shallow","v":[[1]],"after":8}]' "the new replica's other row"
+    stop "$RP" "$PP"
+
+    # This tree's server opening the file 0.2.0 wrote.
+    server reopen "$NEW" --file "$C/p.fennec" --http-token t --replication-token r
+    local N=$ADDR NP=$PID
+    answers "$N" "get other order id" "$other" "another collection of the file"
+    answers "$N" "get deep count" '[{"count":2}]' "the deep collection's count"
+    answers "$N" "get deep where id = 2" '[{"id":2,"name":"shallow","v":[[1]],"after":8}]' "the deep collection's other row"
+    answers "$N" "get deep select name order id" '[{"name":"deep"},{"name":"shallow"}]' "a field stored before the deep one"
+    answers "$N" "get deep order id" "$DEEP_REFUSED" "a read decoding the deep row"
+    answers "$N" "del deep where id = 1" "$DEEP_REFUSED" "a del of the deep row"
+    answers "$N" "set deep {name: 'x'} where id = 1" "$DEEP_REFUSED" "a set of the deep row"
+    answers "$N" "create index on deep (after) @sorted" "$DEEP_REFUSED" "an index over a field after the deep one"
+    answers "$N" "get deep count" '[{"count":2}]' "the count after the refused writes"
+    # A backup carries the row as it is.
+    "$NEW/fennec" backup "$N" "$C/backup.fennec" --token r >"$C/backup.log" 2>&1 ||
+        fail "the new \`fennec backup\` of the file failed: $(tr '\n' ' ' <"$C/backup.log")"
+    # A compact without dropped fields copies the row's bytes, kept across
+    # a reopen.
+    q "$N" compact | grep -q '"message":"compaction done' ||
+        fail "a compact of the file (no dropped field) was refused: $(q "$N" compact | cut -c1-200)"
+    stop "$NP"
+    server compacted "$NEW" --file "$C/p.fennec" --http-token t
+    N=$ADDR
+    answers "$N" "get deep count" '[{"count":2}]' "the deep collection's count after a compact and a reopen"
+    answers "$N" "get deep order id" "$DEEP_REFUSED" "the deep row after a compact and a reopen"
+    answers "$N" "get other order id" "$other" "another collection after a compact and a reopen"
+    # NOT DRIVEN until the branch `compact-refused-midway` lands: this
+    # tree's compact over a collection holding both a dropped field and the
+    # deep row is refused part way and leaves the other collections changed
+    # in memory (an engine bug fixed on that branch). Its case goes here
+    # once it lands: `alter collection deep drop field after`, then
+    # `compact` refused in DEEP_REFUSED's words, every other collection
+    # read as before, and the file reopened the same.
+    w "$N" "drop collection deep"
+    q "$N" collections | jq -e '[.[].name] == ["other"]' >/dev/null ||
+        fail "\`drop collection deep\` left: $(q "$N" collections | cut -c1-200)"
+    answers "$N" "get other order id" "$other" "another collection after the deep one was dropped"
+    stop "$PID"
+    server backup "$NEW" --file "$C/backup.fennec" --http-token t
+    answers "$ADDR" "get deep count" '[{"count":2}]' "the backup's deep collection"
+    answers "$ADDR" "get deep order id" "$DEEP_REFUSED" "the backup's deep row"
+    stop "$PID"
+    held a3 "a \`[[json]]\` row nested 66 levels deep, which $OLD_SAYS takes and reads: this tree's replica takes it in an image and stands steady at its primary's counter (connected, \`behind\` 0, the counts equal), and this tree's server opens the file; each reads every other collection and row, \`count\` 2 and a field stored before the deep one, answers a read of the row exactly $DEEP_REFUSED, refuses its \`del\`, its \`set\` and an index over a later field in the same words, the count still 2; a backup and a compact (no dropped field) carry the row unchanged across a reopen, and \`drop collection deep\` works"
+}
+
+case_a3b() {
+    local t='int' i
+    for ((i = 0; i < 65; i++)); do t="[$t]"; done
+    server primary "$OLD" --file "$C/p.fennec" --http-token t
+    w "$ADDR" "create collection deeptype (v $t)"
+    stop "$PID"
+    local rc=0
+    "$NEW/fennec-server" --file "$C/p.fennec" --http 127.0.0.1:0 --http-token t >"$C/new.log" 2>&1 || rc=$?
+    local said_
+    said_=$(grep -m1 'could not open' "$C/new.log" | bare || true)
+    [ "$rc" = 1 ] && [ "$said_" = "could not open p.fennec: corrupt: a value nests more than 64 levels deep" ] ||
+        fail "the new server opening a file whose type nests 65 lists exited $rc, saying: $(tr '\n' ' ' <"$C/new.log" | bare | cut -c1-300)"
+    held a3b "a file whose schema holds a type of 65 nested lists, which $OLD_SAYS takes: this tree's server refuses it at the open, exit 1, \"$said_\""
 }
 
 # What the old release writes and this tree no longer takes, but reads: a
@@ -408,14 +645,19 @@ case_a4() {
     server replica "$NEW" --file "$C/r.fennec" --http-token t --replication-token r --replica-of "$P"
     local R=$ADDR want broken
     want=$(state "$P")
+    # The old primary's own answers are no refusal: two refusals would
+    # compare equal whatever each said.
+    case $want in
+    *'"error"'*) fail "$OLD_SAYS refused a read of what it wrote: $want" ;;
+    esac
     if until_state "$R" "$want" 30; then
         # The listing's other fields may grow between releases; whether the
         # definition is marked broken may not.
-        broken=$(q "$R" statements | jq -c '[.[] | select(.name == "below") | .broken]')
-        [ "$broken" = '[null]' ] || {
+        broken=$(q "$R" statements | jq -c '[.[] | select(.name == "below") | .broken]' 2>/dev/null || echo "no listing")
+        if [ "$broken" != '[null]' ]; then
             differs a4 "the new replica marks the old primary's definition holding 1e400 broken: $broken"
-            return
-        }
+            return 0
+        fi
         held a4 "a definition holding 1e400 and a vector component of 1e39, which $OLD_SAYS takes and this tree refuses to write, followed by the new replica, read and called there as the old primary reads and calls them"
     else
         differs a4 "what $OLD_SAYS writes and this tree refuses (a definition holding 1e400, a vector component of 1e39), on the new replica: $(first_difference "$want" "$(state "$R")")"
@@ -436,8 +678,10 @@ archived() {
     opened "$(basename "$out" .fennec)" "$bin" "$out"
 }
 
-# The magic a sealed file starts with, its version byte as a digit.
+# The magic a sealed file starts with, its version byte as a digit; nothing
+# for no file (an archive that took no image), which its case then says.
 sealed_version() {
+    [ -n "$1" ] && [ -f "$1" ] || return 0
     head -c 8 "$1" | od -An -c | tr -d ' \n' | sed -n 's/^FENECSL00\([0-9]\)$/\1/p'
 }
 
@@ -469,7 +713,7 @@ case_b() {
     sleep 1.5
     history "$P" "$HALF" "${#HISTORY[@]}"
     local want=${SNAP[${#HISTORY[@]}]} seq
-    seq=$(curl -sS -H 'Authorization: Bearer r' "$P/_replication/status" | jq -r .seq)
+    seq=$(seq_of "$P")
     for a in old-plain new-plain; do
         for _ in $(seq 1 600); do
             "$NEW/fennec" verify "$C/$a" 2>&1 | grep -q "to $seq," && break
@@ -548,11 +792,12 @@ case_b() {
 
     # b4: the new archiver's sealed archive is version 2, which the old
     # `fennec` refuses as RELEASING.md says ("not a sealed file", "not sealed,
-    # where the archive is"), writing nothing; the new reads it.
+    # where the archive is"), writing nothing; the new reads it. Words that
+    # name no version: 0.2.0 knew of no other.
     why=
     v=$(sealed_version "$(find "$C/new-sealed" -name 'image-*' | head -1)")
     [ "$v" = 2 ] || why="its image is no version 2 sealed file (version '$v')"
-    local verify_said restore_said
+    local verify_said= restore_said=
     if [ -z "$why" ]; then
         if "$OLD/fennec" verify "$C/new-sealed" --key-file "$C/new.key" >"$C/b4-verify.log" 2>&1; then
             why="the old verify read it"
@@ -577,7 +822,7 @@ case_b() {
         [ "$OPENED" = "$want" ] || why="the new restore of it: $(first_difference "$want" "$OPENED")"
     fi
     if [ -z "$why" ]; then
-        held b4 "the new archiver's sealed archive (version 2) refused by the old \`fennec\` as promised -- verify: \"$verify_said\"; restore: \"$restore_said\", no file written -- and restored by the new"
+        held b4 "the new archiver's sealed archive (version 2) refused by the old \`fennec\` as promised, in words naming no version -- verify: \"$verify_said\"; restore: \"$restore_said\", no file written -- and restored by the new"
     else
         differs b4 "the new archiver's sealed archive: $why"
     fi
@@ -679,7 +924,7 @@ case_c() {
         said_=$(grep -m1 'not a sealed file' "$C/c3-restore.log" | bare || true)
     fi
     if [ -z "$why" ]; then
-        held c3 "the new \`fennec backup\` opened by the old server; sealed (version 2), refused by the old restore as promised: \"$said_\", no file written"
+        held c3 "the new \`fennec backup\` opened by the old server; sealed (version 2), refused by the old restore as promised, in words naming no version: \"$said_\", no file written"
     else
         differs c3 "the new \`fennec backup\`: $why"
     fi
@@ -721,7 +966,9 @@ router_case() {
     until_state "$(node_at "$rep")/t/acme" "$want" ||
         fail "the replica on $rep is not the tenant: $(first_difference "$want" "$(state "$(node_at "$rep")/t/acme")")"
     local to=
-    for n in n2 n3; do [ "$n" != "$rep" ] && to=$n; done
+    for n in n2 n3; do
+        if [ "$n" != "$rep" ]; then to=$n; fi
+    done
     code=$(admin "$RT" POST /_shard/tenants/acme/move "{\"to\":\"$to\"}")
     case $code in
     2??) ;;
@@ -742,7 +989,7 @@ router_case() {
     code=$(admin "$RT" DELETE /_shard/tenants/acme)
     [ "$code" = 204 ] || fail "the delete answered $code: $(cat "$C/admin.out")"
     for n in n1 n2 n3; do
-        [ -e "$C/$n/acme.fennec" ] && fail "the delete left $n's acme.fennec"
+        if [ -e "$C/$n/acme.fennec" ]; then fail "the delete left $n's acme.fennec"; fi
     done
     held "$name" "a tenant created on a node with a replica on another, its history written through the router, copied, moved to a third node with its replica following, and deleted from every node"
 }
@@ -752,125 +999,183 @@ case_d2() { router_case d2 "$NEW" "$OLD"; }
 
 # --- e: a rolling upgrade under writes ---------------------------------------------
 
-# restart NAME BIN_DIR PORT ARGS...: a node or a router stopped, then started
-# again by BIN_DIR on the port it was first given.
-WRITES=3000
+# New acknowledgements each step waits for before the next, so every step
+# meets writes; the writer's pause between two writes, and after a write
+# not acknowledged (a refusal is no reason to spin); and the writes it may
+# send at most, whose end before the case's is the case's failure.
+STEP_ACKS=50
+WRITER_PAUSE=0.02
+REFUSED_PAUSE=0.1
+WRITER_CAP=100000
+
+# The runbook's wait between two nodes' restarts: the standby's own
+# /t/<tenant>/_replication/status connected with `behind` 0, and the
+# primary's listing a stream whose `sent` is its `durable`.
+standby_caught_up() {
+    local s= p=
+    for _ in $(seq 1 1200); do
+        s=$(status "$E_N2/t/acme" 2>/dev/null || true)
+        p=$(status "$E_N1/t/acme" 2>/dev/null || true)
+        if echo "$s" | jq -e '.connected == true and .behind == 0' >/dev/null 2>&1 &&
+            echo "$p" | jq -e '.durable as $d | [.replicas[] | select(.sent == $d)] | length >= 1' >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.05
+    done
+    fail "the standby did not catch up in 60 s ($1): the standby's status $(echo "$s" | cut -c1-200); the primary's $(echo "$p" | cut -c1-200)"
+}
 
 case_e() {
-    local n1 n2 rt n1p n2p rtp p
+    local n1 n2 rt n1p n2p rtp p code
     server n1 "$OLD" --dir "$C/n1" --admin-token a1 --replication-token r --sync always
     n1=$ADDR n1p=$PID
     server n2 "$OLD" --dir "$C/n2" --admin-token a2 --replication-token r --replica-of "$n1"
     n2=$ADDR n2p=$PID
     router router "$OLD" --directory "$C/router.fennec" --token root
     rt=$ADDR rtp=$PID
-    local code
     code=$(admin "$rt" PUT /_shard/nodes/n2 "{\"addr\":\"${n2#http://}\",\"token\":\"a2\"}")
     case $code in 2??) ;; *) fail "the router took no node n2 ($code): $(cat "$C/admin.out")" ;; esac
     code=$(admin "$rt" PUT /_shard/nodes/n1 "{\"addr\":\"${n1#http://}\",\"token\":\"a1\",\"standby\":\"n2\"}")
     case $code in 2??) ;; *) fail "the router took no node n1 ($code): $(cat "$C/admin.out")" ;; esac
     code=$(admin "$rt" PUT /_shard/tenants/acme '{"node":"n1"}')
     case $code in 2??) ;; *) fail "the create was refused ($code): $(cat "$C/admin.out")" ;; esac
+    # @hash, not @unique: a seq landing twice -- a write run twice by a
+    # resend -- must show as two rows, not as a refusal.
     w "$rt/t/acme" "create collection seqs (seq int @hash)"
     echo "$rt" >"$C/router.addr"
+    E_N1=$n1 E_N2=$n2
 
-    # One writer, a fixed number of writes, each answered or not: an answer
-    # with no error is acknowledged, durable (--sync always) on the primary.
+    # One writer, each write a new seq, sent through whatever router.addr
+    # names, classed by its answer: `ack` a 2xx (durable on the primary,
+    # --sync always), `unsent` curl's exit 7 (no connection) or the router's
+    # 503 saying the request was not sent (`Fennec-Unsent`), `unknown`
+    # anything else (a timeout, a 502), which may have run.
     (
-        # Its refusals are counted, not the case's end.
         trap - ERR
-        set +eE
+        set +eEu
         trap 'exit 0' TERM
-        for ((i = 1; i <= WRITES; i++)); do
-            [ -e "$C/writer.stop" ] && break
-            body=$(curl -sS --max-time 10 -H 'Authorization: Bearer t' -H 'Content-Type: application/json' \
-                -d "{\"query\":\"put seqs {seq: $i}\"}" "$(cat "$C/router.addr")/t/acme/query" 2>&1) || true
-            case $body in
-            *'"affected":1'*) echo "$i ok" ;;
-            *) echo "$i no ${body:0:120}" ;;
-            esac
+        i=0
+        while [ ! -e "$C/writer.stop" ] && [ "$i" -lt "$WRITER_CAP" ]; do
+            i=$((i + 1))
+            rm -f "$C/writer.body" "$C/writer.head"
+            code=$(curl -sS --max-time 10 -o "$C/writer.body" -D "$C/writer.head" -w '%{http_code}' \
+                -H 'Authorization: Bearer t' -H 'Content-Type: application/json' \
+                -d "{\"query\":\"put seqs {seq: $i}\"}" "$(cat "$C/router.addr")/t/acme/query" 2>/dev/null)
+            rc=$?
+            body=$(head -c 160 "$C/writer.body" 2>/dev/null | tr '\n' ' ')
+            if [ "$rc" = 0 ] && [ "${code#2}" != "$code" ] && echo "$body" | grep -q '"affected":1'; then
+                echo "$i ack"
+            elif [ "$rc" = 7 ]; then
+                echo "$i unsent: no connection (curl exit 7)"
+                sleep "$REFUSED_PAUSE"
+            elif [ "$code" = 503 ] && { grep -qi '^fennec-unsent: *1' "$C/writer.head" 2>/dev/null ||
+                echo "$body" | grep -q 'the request was not sent'; }; then
+                echo "$i unsent: $body"
+                sleep "$REFUSED_PAUSE"
+            else
+                echo "$i unknown: curl exit $rc, status $code, $body"
+                sleep "$REFUSED_PAUSE"
+            fi
+            sleep "$WRITER_PAUSE"
         done >"$C/writer.out"
         echo done >>"$C/writer.out"
     ) &
     local writer=$!
     echo "$writer" >>"$WORK/pids"
     echo "$writer" >>"$C/pids"
-    acked() { grep -c ' ok$' "$C/writer.out" 2>/dev/null || true; }
-    # Writes acknowledged before each step, so each step meets writes.
+    acked() { grep -c ' ack$' "$C/writer.out" 2>/dev/null || true; }
+    # wait_acked WHAT: STEP_ACKS writes acknowledged after WHAT; a writer
+    # gone before them fails the case, as a step that let none through does.
     wait_acked() {
-        local before
+        local before now
         before=$(acked)
-        for _ in $(seq 1 600); do
-            [ "$(acked)" -ge $((before + $1)) ] && return 0
-            kill -0 "$writer" 2>/dev/null || return 0
+        for _ in $(seq 1 1200); do
+            now=$(acked)
+            [ "$now" -ge $((before + STEP_ACKS)) ] && return 0
+            kill -0 "$writer" 2>/dev/null ||
+                fail "the writer is gone after $now acknowledged writes, waiting for $STEP_ACKS after $1: $(tail -2 "$C/writer.out" | tr '\n' ' ')"
             sleep 0.05
         done
-        fail "no write was acknowledged for 30 s: $(tail -2 "$C/writer.out")"
+        fail "$((now - before)) of $STEP_ACKS writes acknowledged in 60 s after $1: $(tail -3 "$C/writer.out" | tr '\n' ' ')"
     }
-    wait_acked 100
+    wait_acked "the start"
 
-    # 1. Archivers: none here. 2. The router, restarted in place.
-    p=${rt##*:}
+    # 1. Archivers: none here. 2. The router: a router is found by its
+    # tunnel's name, not its port, so it comes back on a port of its own
+    # and the writer is told it.
     stop "$rtp"
-    spawn "$C/router-new.log" "$NEW/fennec-shard" --listen "127.0.0.1:$p" --directory "$C/router.fennec" --token root
-    rtp=$SPAWNED
-    rt=$(addr "$C/router-new.log" "$rtp") || exit 1
-    wait_acked 100
+    router router-new "$NEW" --directory "$C/router.fennec" --token root
+    rtp=$PID rt=$ADDR
+    echo "$rt" >"$C/router.addr.new"
+    mv -f "$C/router.addr.new" "$C/router.addr"
+    wait_acked "the router's upgrade"
 
-    # 3. The nodes, one at a time, the standby's first. The next waits for
-    # the standby to hold every write the primary acknowledged (the
-    # runbook's "FennecTenantsWithoutReplica to clear" for a pair).
-    p=${n2##*:}
+    # 3. The nodes, one at a time, the standby's first, back on a port of
+    # its own, its new address told to the router.
+    standby_caught_up "before the standby's node"
     stop "$n2p"
-    spawn "$C/n2-new.log" "$NEW/fennec-server" --http "127.0.0.1:$p" --dir "$C/n2" --admin-token a2 \
-        --replication-token r --replica-of "$n1"
-    n2p=$SPAWNED
-    addr "$C/n2-new.log" "$n2p" >/dev/null || exit 1
-    wait_acked 100
-    local held_by_n1
-    held_by_n1=$(q "$n1/t/acme" "get seqs count" | jq -r '.[0].count')
-    for _ in $(seq 1 600); do
-        [ "$(q "$n2/t/acme" "get seqs count" | jq -r '.[0].count // 0' 2>/dev/null)" -ge "$held_by_n1" ] && break
-        sleep 0.05
-    done
-    [ "$(q "$n2/t/acme" "get seqs count" | jq -r '.[0].count // 0' 2>/dev/null)" -ge "$held_by_n1" ] ||
-        fail "the upgraded standby did not catch up: $(q "$n2/t/acme" "get seqs count") of $held_by_n1; $(tail -2 "$C/n2-new.log")"
+    server n2-new "$NEW" --dir "$C/n2" --admin-token a2 --replication-token r --replica-of "$n1"
+    n2p=$PID n2=$ADDR E_N2=$ADDR
+    code=$(admin "$rt" PUT /_shard/nodes/n2 "{\"addr\":\"${n2#http://}\",\"token\":\"a2\"}")
+    case $code in 2??) ;; *) fail "the router took no new address for n2 ($code): $(cat "$C/admin.out")" ;; esac
+    standby_caught_up "after the standby's node's upgrade"
+    wait_acked "the standby's node's upgrade"
 
+    # The primary's node, back at its own address: its standby follows it
+    # by the address it was started with (--replica-of), as a machine keeps
+    # its address across a restart. Its tenant takes no write meanwhile:
+    # the router answers "was not sent" (automatic failover is off unless
+    # --auto-failover asks).
+    standby_caught_up "before the primary's node"
     p=${n1##*:}
     stop "$n1p"
     spawn "$C/n1-new.log" "$NEW/fennec-server" --http "127.0.0.1:$p" --dir "$C/n1" --admin-token a1 \
         --replication-token r --sync always
     n1p=$SPAWNED
     addr "$C/n1-new.log" "$n1p" >/dev/null || exit 1
-    wait_acked 100
+    wait_acked "the primary's node's upgrade"
     touch "$C/writer.stop"
     for _ in $(seq 1 600); do
         kill -0 "$writer" 2>/dev/null || break
         sleep 0.05
     done
+    if kill -0 "$writer" 2>/dev/null; then fail "the writer did not stop in 30 s"; fi
+    grep -qx done "$C/writer.out" || fail "the writer ended without its last line: $(tail -2 "$C/writer.out" | tr '\n' ' ')"
+    standby_caught_up "the end"
 
-    # Every acknowledged write is on the primary, read through the router,
-    # and on the standby.
-    local sent ok refused have lost lost_standby
+    # Each class held to the rows of the primary and of the standby.
+    local sent ok unsent unknown landed_unknown
+    # awk, not grep: a class with no write is no failure.
+    awk '$2 == "ack" { print $1 }' "$C/writer.out" | sort >"$C/acked.seqs"
+    awk '$2 == "unsent:" { print $1 }' "$C/writer.out" | sort >"$C/unsent.seqs"
+    awk '$2 == "unknown:" { print $1 }' "$C/writer.out" | sort >"$C/unknown.seqs"
     sent=$(grep -c '^[0-9]' "$C/writer.out" || true)
-    ok=$(acked)
-    refused=$((sent - ok))
-    q "$rt/t/acme" "get seqs select seq" | jq -r '.[].seq' | sort >"$C/primary.seqs"
-    grep ' ok$' "$C/writer.out" | cut -d' ' -f1 | sort >"$C/acked.seqs"
-    lost=$(comm -23 "$C/acked.seqs" "$C/primary.seqs" | wc -l | tr -d ' ')
-    have=$(wc -l <"$C/primary.seqs" | tr -d ' ')
-    for _ in $(seq 1 600); do
-        [ "$(q "$n2/t/acme" "get seqs count" | jq -r '.[0].count // 0' 2>/dev/null)" -ge "$have" ] && break
-        sleep 0.05
+    ok=$(wc -l <"$C/acked.seqs" | tr -d ' ')
+    unsent=$(wc -l <"$C/unsent.seqs" | tr -d ' ')
+    unknown=$(wc -l <"$C/unknown.seqs" | tr -d ' ')
+    [ "$((ok + unsent + unknown))" = "$sent" ] ||
+        fail "the writer's lines do not class every write: $ok + $unsent + $unknown of $sent"
+    local where count
+    for where in primary standby; do
+        local at=$n1
+        [ "$where" = standby ] && at=$n2
+        q "$at/t/acme" "get seqs select seq" | jq -r '.[].seq' | sort >"$C/$where.all" ||
+            fail "the $where's rows were not read: $(q "$at/t/acme" "get seqs count" | cut -c1-200)"
+        count=$(q "$at/t/acme" "get seqs count" | jq -r '.[0].count')
+        [ "$(wc -l <"$C/$where.all" | tr -d ' ')" = "$count" ] ||
+            fail "the $where's rows read are not its count, $count"
+        [ -z "$(uniq -d "$C/$where.all")" ] ||
+            fail "a seq landed twice on the $where: $(uniq -d "$C/$where.all" | head -5 | tr '\n' ' ')"
+        uniq "$C/$where.all" >"$C/$where.seqs"
+        [ -z "$(comm -23 "$C/acked.seqs" "$C/$where.seqs")" ] ||
+            fail "$(comm -23 "$C/acked.seqs" "$C/$where.seqs" | wc -l | tr -d ' ') of $ok acknowledged writes are not on the $where: $(comm -23 "$C/acked.seqs" "$C/$where.seqs" | head -5 | tr '\n' ' ')"
+        [ -z "$(comm -12 "$C/unsent.seqs" "$C/$where.seqs")" ] ||
+            fail "writes the router said it did not send landed on the $where: $(comm -12 "$C/unsent.seqs" "$C/$where.seqs" | head -5 | tr '\n' ' ')"
     done
-    q "$n2/t/acme" "get seqs select seq" | jq -r '.[].seq' | sort >"$C/standby.seqs"
-    lost_standby=$(comm -23 "$C/acked.seqs" "$C/standby.seqs" | wc -l | tr -d ' ')
-    [ "$ok" -gt 0 ] || fail "no write was acknowledged"
-    [ "$lost" = 0 ] ||
-        fail "$lost of $ok acknowledged writes are not on the primary: $(comm -23 "$C/acked.seqs" "$C/primary.seqs" | head -5 | tr '\n' ' ')"
-    [ "$lost_standby" = 0 ] ||
-        fail "$lost_standby of $ok acknowledged writes are not on the standby: $(comm -23 "$C/acked.seqs" "$C/standby.seqs" | head -5 | tr '\n' ' ')"
-    held e "the router, the standby's node and the primary's node upgraded in turn under one writer: $sent writes sent, $ok acknowledged, $refused not ($((have - ok)) of them landed), 0 acknowledged lost on the primary or the standby"
+    cmp -s "$C/primary.seqs" "$C/standby.seqs" ||
+        fail "the standby, caught up, does not hold the primary's rows: $(diff "$C/primary.seqs" "$C/standby.seqs" | head -4 | tr '\n' ' ')"
+    landed_unknown=$(comm -12 "$C/unknown.seqs" "$C/primary.seqs" | wc -l | tr -d ' ')
+    held e "the router, the standby's node and the primary's node upgraded in turn under one writer, $STEP_ACKS writes acknowledged after each and the standby caught up (its status connected, \`behind\` 0; the primary's \`sent\` its \`durable\`) before each node: $sent writes sent, $ok acknowledged (every one on the primary and the standby), $unsent not sent (none landed), $unknown unknown ($landed_unknown landed), no seq twice. Each restart a graceful TERM: durability under a kill is the power-cut and chaos rigs', not this case's"
 }
 
 # --- f: a GitHub hook kept with `key delivery` ---------------------------------------
@@ -909,11 +1214,12 @@ case_f() {
     fi
 
     # f2: a tenant's hook, set on the old node; the router and then the node
-    # upgraded in turn.
+    # upgraded in turn, each on a port of its own, the router told the
+    # node's new address.
     server n1 "$OLD" --dir "$C/n1" --admin-token a1
     local n1=$ADDR n1p=$PID
     router router "$OLD" --directory "$C/router.fennec" --token root
-    local rt=$ADDR rtp=$PID code out p
+    local rt=$ADDR rtp=$PID code out
     code=$(admin "$rt" PUT /_shard/nodes/n1 "{\"addr\":\"${n1#http://}\",\"token\":\"a1\"}")
     case $code in 2??) ;; *) fail "the router took no node ($code): $(cat "$C/admin.out")" ;; esac
     code=$(admin "$rt" PUT /_shard/tenants/acme '{"node":"n1"}')
@@ -926,40 +1232,39 @@ case_f() {
     out=$(event "$rt/t/acme/_hooks/gh" '{"after":"aaa","ref":"refs/heads/main"}' d1)
     case $out in *' 200') ;; *) fail "the old node took no event: $out" ;; esac
 
-    p=${rt##*:}
     stop "$rtp"
-    spawn "$C/router-new.log" "$NEW/fennec-shard" --listen "127.0.0.1:$p" --directory "$C/router.fennec" --token root
-    rtp=$SPAWNED
-    rt=$(addr "$C/router-new.log" "$rtp") || exit 1
-    p=${n1##*:}
+    router router-new "$NEW" --directory "$C/router.fennec" --token root
+    rtp=$PID rt=$ADDR
     stop "$n1p"
-    spawn "$C/n1-new.log" "$NEW/fennec-server" --http "127.0.0.1:$p" --dir "$C/n1" --admin-token a1
-    n1p=$SPAWNED
-    addr "$C/n1-new.log" "$n1p" >/dev/null || exit 1
+    server n1-new "$NEW" --dir "$C/n1" --admin-token a1
+    n1p=$PID n1=$ADDR
+    code=$(admin "$rt" PUT /_shard/nodes/n1 "{\"addr\":\"${n1#http://}\",\"token\":\"a1\"}")
+    case $code in 2??) ;; *) fail "the new router took no new address for n1 ($code): $(cat "$C/admin.out")" ;; esac
 
     local why= refused listing armed
-    refused=$(event "$rt/t/acme/_hooks/gh" '{"after":"bbb","ref":"refs/heads/main"}' d2)
+    refused=$(event "$rt/t/acme/_hooks/gh" '{"after":"bbb","ref":"refs/heads/main"}' d2 || true)
     case $refused in
     *'set again with `key body`'*' 409') ;;
     *) why="its verified event was answered $refused" ;;
     esac
-    [ -n "$why" ] || [ "$(q "$rt/t/acme" "get pushes count" | jq -r '.[0].count')" = 1 ] ||
+    [ -n "$why" ] || [ "$(q "$rt/t/acme" "get pushes count" | jq -r '.[0].count' 2>/dev/null || true)" = 1 ] ||
         why="the refused event wrote: $(q "$rt/t/acme" "get pushes")"
     [ -n "$why" ] || grep -q 'was set with `key delivery`' "$C/n1-new.log" ||
         why="the upgraded node said nothing of the hook as it started: $(tail -3 "$C/n1-new.log" | tr '\n' ' ')"
-    listing=$(curl -sS -H 'Authorization: Bearer root' "$rt/_shard/tenants/acme/hooks")
-    [ -n "$why" ] || echo "$listing" | jq -e '.hooks[0].key == "delivery"' >/dev/null ||
+    listing=$(curl -sS -H 'Authorization: Bearer root' "$rt/_shard/tenants/acme/hooks" || true)
+    [ -n "$why" ] || echo "$listing" | jq -e '.hooks[0].key == "delivery"' >/dev/null 2>&1 ||
         why="its listing does not say \"key\":\"delivery\": $listing"
-    armed=$(q "$rt/t/acme" "statements" | jq -c '[.[] | select(.name == "pushed") | .armed]')
+    armed=$(q "$rt/t/acme" "statements" | jq -c '[.[] | select(.name == "pushed") | .armed]' 2>/dev/null ||
+        echo "a listing that is no list: $(q "$rt/t/acme" statements | cut -c1-200)")
     [ -n "$why" ] || [ "$armed" = '[false]' ] || why="its statement's \`armed\` is $armed"
     if [ -z "$why" ]; then
         code=$(admin "$rt" PUT /_shard/tenants/acme/hooks/gh "{\"scheme\":\"github\",\"secrets\":[\"$GH_SECRET\"],\"key\":\"body\"}")
         case $code in 2??) ;; *) why="setting it again with \`key body\` was refused ($code): $(cat "$C/admin.out")" ;; esac
     fi
     if [ -z "$why" ]; then
-        out=$(event "$rt/t/acme/_hooks/gh" '{"after":"bbb","ref":"refs/heads/main"}' d3)
+        out=$(event "$rt/t/acme/_hooks/gh" '{"after":"bbb","ref":"refs/heads/main"}' d3 || true)
         case $out in *' 200') ;; *) why="the redelivery after \`key body\` was answered $out" ;; esac
-        [ -n "$why" ] || [ "$(q "$rt/t/acme" "get pushes count" | jq -r '.[0].count')" = 2 ] ||
+        [ -n "$why" ] || [ "$(q "$rt/t/acme" "get pushes count" | jq -r '.[0].count' 2>/dev/null || true)" = 2 ] ||
             why="the redelivery wrote nothing: $(q "$rt/t/acme" "get pushes")"
     fi
     if [ -z "$why" ]; then
@@ -1006,40 +1311,286 @@ case_g2() { https_case g2 "$NEW" "$OLD"; }
 
 # --- The run -----------------------------------------------------------------------
 
-echo "old: $OLD_SAYS ($OLD); new: $NEW_SAYS ($NEW)"
-FAILED=0
-for c in ${COMPAT_CASES:-a1 a2 a3 a4 b c d1 d2 e f g1 g2}; do
-    CASE=$c
-    C=$WORK/$c
-    mkdir -p "$C"
-    : >"$C/pids"
-    : >"$C/lines"
-    SNAP=()
-    (
-        set -eEuo pipefail
-        trap '[ -s "$C/lines" ] || echo "$CASE FAILED: line $LINENO: \`$BASH_COMMAND\` failed" >>"$C/lines"' ERR
-        # shellcheck disable=SC2046 # one pid a word
-        trap 'stop $(cat "$C/pids")' EXIT
-        "case_$c"
-    ) >"$C/case.out" 2>&1
-    rc=$?
-    [ -s "$C/lines" ] || echo "$c FAILED: exit $rc, nothing said" >>"$C/lines"
-    cat "$C/lines"
-    if grep -q ' FAILED: ' "$C/lines"; then
-        FAILED=$((FAILED + 1))
-        {
-            echo "--- $c: what it printed"
-            tail -20 "$C/case.out"
-            for f in "$C"/*.log; do
-                [ -e "$f" ] || continue
-                echo "--- $f"
-                tail -12 "$f"
+# Every case, and the parts it owes: each prints exactly one line a part,
+# and the run is held to every part of the cases it ran.
+CASES=(
+    "a1:a1"
+    "a2:a2"
+    "a3:a3"
+    "a3b:a3b"
+    "a4:a4"
+    "b:b1 b2 b3 b4"
+    "c:c1 c2 c3"
+    "d1:d1"
+    "d2:d2"
+    "e:e"
+    "f:f1 f2"
+    "g1:g1"
+    "g2:g2"
+)
+
+# check_format ROOT: every REC_*, TAG_* and OP_* constant of ROOT's
+# FORMAT_SOURCES has its line in FORMAT, a write of HISTORY or a reason;
+# FORMAT names none the tree has not; UNKNOWN_TO_OLD names writes of
+# HISTORY. Says what is wrong; 1 where anything is.
+check_format() {
+    local root=$1 bad=0 names name entry how found f h dups
+    # shellcheck disable=SC2086 # one path a word
+    names=$(cd "$root" && grep -hE '^ *(pub(\([a-z]+\))? +)?const +(REC|TAG|OP)_[A-Z0-9_]+ *: *u8' $FORMAT_SOURCES |
+        sed -E 's/^.*const +([A-Z0-9_]+).*$/\1/' | sort) || true
+    if [ -z "$names" ]; then
+        echo "compat-matrix: no record kind, type tag or op in $FORMAT_SOURCES"
+        return 1
+    fi
+    for name in $names; do
+        found=
+        for entry in "${FORMAT[@]}"; do
+            if [ "${entry%%|*}" = "$name" ]; then found=$entry; fi
+        done
+        if [ -z "$found" ]; then
+            echo "compat-matrix: $name has no line in FORMAT: add a write making it to HISTORY and name it, or say why none is needed"
+            bad=1
+            continue
+        fi
+        how=${found#*|}
+        case $how in
+        '- '?*) ;;
+        *)
+            h=
+            for f in "${HISTORY[@]}"; do
+                case $f in "$how"*) h=1 ;; esac
             done
-        } >&2
+            if [ -z "$h" ]; then
+                echo "compat-matrix: FORMAT gives $name the write \`$how\`, which no write of HISTORY begins with"
+                bad=1
+            fi
+            ;;
+        esac
+    done
+    for entry in "${FORMAT[@]}"; do
+        if ! grep -qx "${entry%%|*}" <<<"$names"; then
+            echo "compat-matrix: FORMAT names ${entry%%|*}, which $FORMAT_SOURCES do not hold"
+            bad=1
+        fi
+    done
+    dups=$(for entry in "${FORMAT[@]}"; do echo "${entry%%|*}"; done | sort | uniq -d)
+    if [ -n "$dups" ]; then
+        echo "compat-matrix: FORMAT names more than once: $(echo "$dups" | tr '\n' ' ')"
+        bad=1
+    fi
+    for entry in ${UNKNOWN_TO_OLD[@]+"${UNKNOWN_TO_OLD[@]}"}; do
+        h=
+        for f in "${HISTORY[@]}"; do
+            if [ "$f" = "${entry%%|*}" ]; then h=1; fi
+        done
+        if [ -z "$h" ] || [ "${entry#*|}" = "$entry" ]; then
+            echo "compat-matrix: UNKNOWN_TO_OLD's \`${entry%%|*}\` is no write of HISTORY, or has no stop words"
+            bad=1
+        fi
+    done
+    return $bad
+}
+
+# run_cases SPEC...: each SPEC `case:part ...`, case_<case> run in a
+# subshell of its own; its lines printed, its logs' tails where it failed.
+# 1 where any case failed or any part went unsaid.
+run_cases() {
+    local spec c parts p n line own rc failed=0 expected= missing=
+    : >"$WORK/all-lines"
+    for spec in "$@"; do
+        c=${spec%%:*}
+        parts=${spec#*:}
+        expected="$expected $parts"
+        CASE=$c
+        C=$WORK/$c
+        mkdir -p "$C"
+        : >"$C/pids"
+        : >"$C/lines"
+        rm -f "$C/lines.extra"
+        SNAP=()
+        PSEQ=()
+        (
+            set -eEuo pipefail
+            # Always written down, whatever the case printed before: a case
+            # dying after its first part is a failure, not a pass.
+            trap 'echo "$CASE FAILED: line $LINENO: \`$BASH_COMMAND\` failed (exit $?)" >>"$C/lines"' ERR
+            # shellcheck disable=SC2046 # one pid a word
+            trap 'stop $(cat "$C/pids")' EXIT
+            "case_$c"
+        ) >"$C/case.out" 2>&1
+        rc=$?
+        if [ "$rc" != 0 ] && ! grep -q "^$c FAILED: " "$C/lines"; then
+            echo "$c FAILED: the case exited $rc" >>"$C/lines"
+        fi
+        # Each part said once, and nothing said of a part not its own.
+        for p in $parts; do
+            n=$(grep -Ec "^$p (ok|FAILED): " "$C/lines" || true)
+            if [ "$n" = 0 ]; then
+                echo "$p FAILED: case $c printed no line for it (it stopped before, or never said it)" >>"$C/lines"
+            elif [ "$n" != 1 ]; then
+                echo "$p FAILED: case $c printed $n lines for it" >>"$C/lines"
+            fi
+        done
+        while read -r line; do
+            own=
+            for p in $parts; do
+                if [ "${line%% *}" = "$p" ]; then own=1; fi
+            done
+            # The case's own lines are its failures.
+            case $line in "$c FAILED: "*) own=1 ;; esac
+            [ -n "$own" ] || echo "$c FAILED: it printed a line of no part of its own ($parts): $line" >>"$C/lines.extra"
+        done <"$C/lines"
+        if [ -s "$C/lines.extra" ]; then cat "$C/lines.extra" >>"$C/lines"; fi
+        cat "$C/lines"
+        cat "$C/lines" >>"$WORK/all-lines"
+        if [ "$rc" != 0 ] || grep -q ' FAILED: ' "$C/lines"; then
+            failed=$((failed + 1))
+            {
+                echo "--- $c: what it printed"
+                tail -20 "$C/case.out"
+                for f in "$C"/*.log; do
+                    [ -e "$f" ] || continue
+                    echo "--- $f"
+                    tail -12 "$f"
+                done
+            } >&2
+        fi
+    done
+    # The end of the run held to the whole list.
+    for p in $expected; do
+        if ! grep -Eq "^$p ok: " "$WORK/all-lines" || grep -Eq "^$p FAILED: " "$WORK/all-lines"; then
+            missing="$missing $p"
+        fi
+    done
+    if [ "$failed" -gt 0 ] || [ -n "$missing" ]; then
+        echo "compat-matrix: $failed case(s) failed; parts not held:${missing:- none (a case failed after its parts)}"
+        return 1
+    fi
+    echo "compat-matrix: every part held:$expected"
+}
+
+# --self-test: the harness held to its own promises with toy cases and no
+# binary -- a case dying after its first part, one printing a part too few,
+# one dying in a command substitution (b2's path with no image), one
+# printing a part not its own, each failing the run -- and FORMAT held to
+# the tree, then to a tree with a constant more.
+self_test() {
+    local out bad=0 toy
+    case_t_good() { held t1 one; held t2 two; }
+    case_t_dies() { held t3 one; false; held t4 two; }
+    case_t_short() { held t5 one; }
+    case_t_subst() {
+        local v
+        v=$(head -c 8 "$(find "$C" -name 'image-*' | head -1)" | od -An -c)
+        held t6 "$v"
+    }
+    case_t_alien() { held t7 one; held t8 "not its own"; }
+    # expect WHAT STATUS PATTERN SPEC...: run_cases on SPEC exits STATUS
+    # (0, or 1 for any failure) and prints a line matching PATTERN.
+    expect() {
+        local what=$1 want=$2 pattern=$3 got
+        shift 3
+        out=$( (run_cases "$@") 2>/dev/null)
+        got=$?
+        [ "$got" -gt 1 ] && got=1
+        if [ "$got" != "$want" ] || ! echo "$out" | grep -Eq "$pattern"; then
+            echo "compat-matrix self-test FAILED: $what: exit $got, not $want, or no line /$pattern/: $(echo "$out" | tr '\n' ' ')"
+            bad=1
+        else
+            echo "compat-matrix self-test ok: $what"
+        fi
+    }
+    expect "a case printing every part passes" 0 '^compat-matrix: every part held: t1 t2$' "t_good:t1 t2"
+    expect "a case dying after its first part fails, its unsaid part named" 1 '^t4 FAILED: case t_dies printed no line' \
+        "t_good:t1 t2" "t_dies:t3 t4"
+    expect "a case dying after its first part names its line" 1 '^t_dies FAILED: line [0-9]+: `false` failed' \
+        "t_dies:t3 t4"
+    expect "a case printing a part too few fails by the part's name" 1 'parts not held: t5b$' "t_short:t5 t5b"
+    expect "a command failing in a substitution fails the case" 1 '^t_subst FAILED: ' "t_subst:t6"
+    expect "a line of a part not its own fails the case" 1 '^t_alien FAILED: it printed a line of no part of its own' \
+        "t_alien:t7"
+    if out=$(check_format "$ROOT"); then
+        echo "compat-matrix self-test ok: FORMAT names every record kind, type tag and op of the tree"
+    else
+        echo "compat-matrix self-test FAILED: FORMAT against the tree: $out"
+        bad=1
+    fi
+    toy=$WORK/toy
+    for f in $FORMAT_SOURCES; do
+        mkdir -p "$toy/$(dirname "$f")"
+        cp "$ROOT/$f" "$toy/$f"
+    done
+    echo 'const REC_NEXT_ONE: u8 = 15;' >>"$toy/crates/fennec-core/src/engine.rs"
+    if out=$(check_format "$toy"); then
+        echo "compat-matrix self-test FAILED: a kind FORMAT does not name passed"
+        bad=1
+    elif echo "$out" | grep -q 'REC_NEXT_ONE has no line in FORMAT'; then
+        echo "compat-matrix self-test ok: a record kind FORMAT does not name fails, by its name"
+    else
+        echo "compat-matrix self-test FAILED: a kind FORMAT does not name failed in other words: $out"
+        bad=1
+    fi
+    if out=$(FORMAT=("${FORMAT[@]}" "TAG_NEXT_ONE|put nothing") && check_format "$ROOT"); then
+        echo "compat-matrix self-test FAILED: a FORMAT line for no constant, its write in no HISTORY, passed"
+        bad=1
+    else
+        echo "compat-matrix self-test ok: a FORMAT line naming no constant of the tree fails"
+    fi
+    return $bad
+}
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/fennec-compat.XXXXXX")
+: >"$WORK/pids"
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if [ "${1:-}" = --self-test ]; then
+    command -v jq >/dev/null || { echo "compat-matrix: needs jq" >&2; exit 2; }
+    self_test
+    exit $?
+fi
+
+OLD=$(cd "${1:?$usage}" && pwd)
+NEW=$(cd "${2:?$usage}" && pwd)
+for dir in "$OLD" "$NEW"; do
+    for b in fennec-server fennec fennec-shard; do
+        [ -x "$dir/$b" ] || { echo "compat-matrix: $dir holds no $b" >&2; exit 2; }
+    done
+done
+for tool in curl jq openssl; do
+    command -v "$tool" >/dev/null || { echo "compat-matrix: needs $tool" >&2; exit 2; }
+done
+OLD_SAYS=$("$OLD/fennec-server" --version 2>&1 | head -1)
+NEW_SAYS=$("$NEW/fennec-server" --version 2>&1 | head -1)
+
+# Both trees may say the same version (this tree's is bumped at a release),
+# so the binaries are told apart by their paths and bytes.
+digest() {
+    if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
+for side in OLD NEW; do
+    dir=$OLD
+    [ "$side" = NEW ] && dir=$NEW
+    for b in fennec-server fennec fennec-shard; do
+        echo "$(echo "$side" | tr 'A-Z' 'a-z'): $dir/$b, sha256 $(digest "$dir/$b"), says \"$("$dir/$b" --version 2>&1 | head -1)\""
+    done
+done
+for b in fennec-server fennec fennec-shard; do
+    if [ "$(digest "$OLD/$b")" = "$(digest "$NEW/$b")" ]; then
+        echo "compat-matrix: $OLD/$b and $NEW/$b are the same bytes: the matrix would hold a release to itself" >&2
+        exit 2
     fi
 done
-if [ "$FAILED" -gt 0 ]; then
-    echo "compat-matrix: $FAILED case(s) differ"
-    exit 1
-fi
-echo "compat-matrix: every case held"
+check_format "$ROOT" || exit 1
+
+SPECS=()
+for c in ${COMPAT_CASES:-a1 a2 a3 a3b a4 b c d1 d2 e f g1 g2}; do
+    found=
+    for spec in "${CASES[@]}"; do
+        if [ "${spec%%:*}" = "$c" ]; then found=$spec; fi
+    done
+    [ -n "$found" ] || { echo "compat-matrix: no case $c (${CASES[*]})" >&2; exit 2; }
+    SPECS+=("$found")
+done
+run_cases "${SPECS[@]}"
