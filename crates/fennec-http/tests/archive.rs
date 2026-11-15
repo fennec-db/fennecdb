@@ -1131,7 +1131,7 @@ fn a_segment_cut_as_it_was_made_holds_no_write() {
 /// mid-frame goes on from the last whole one.
 #[test]
 fn a_sealed_archive_restores_with_its_key_and_nothing_else() {
-    use fennec_http::seal::Key;
+    use fennec_http::seal::{self, Key};
     let d = dir("sealed");
     let key = Key::from_hex(&"ab".repeat(32)).unwrap();
     let wrong = Key::from_hex(&"cd".repeat(32)).unwrap();
@@ -1205,11 +1205,27 @@ fn a_sealed_archive_restores_with_its_key_and_nothing_else() {
         .verify()
         .is_err());
     assert!(Archive::new(&arch).unwrap().verify().is_err());
-    let mut bytes = std::fs::read(&segment).unwrap();
-    let at = bytes.len() / 2;
-    bytes[at] ^= 1;
-    std::fs::write(&segment, bytes).unwrap();
+    // The byte is one a frame's tag covers: the first sealed byte of the
+    // first write's frame, which begins past the seal's head and the frame
+    // around the log's magic (a 16-byte head and tag around its 8).
+    let whole = std::fs::read(&segment).unwrap();
+    let frame = seal::START + 40;
+    let mut bytes = whole.clone();
+    bytes[frame + 16] ^= 1;
+    std::fs::write(&segment, &bytes).unwrap();
     assert!(sealed.verify().is_err());
+    // A frame's length is under no tag. Made to run past the segment's
+    // end it is a frame cut short there, which nothing tells from the one
+    // a crash leaves, and the archive verifies with the bytes from that
+    // frame on as its torn tail (`seal`'s tests walk every bit). This test
+    // changed the segment's middle byte once, wherever it fell, and looked
+    // for a refusal: the archiver seals a frame a flush, so where the
+    // frames begin is each run's own, and the run whose middle byte was
+    // the third or fourth of a length verified.
+    let mut bytes = whole.clone();
+    bytes[frame + 3] ^= 1;
+    std::fs::write(&segment, &bytes).unwrap();
+    assert_eq!(sealed.verify().unwrap().torn, whole.len() - frame);
 
     // A backup file sealed with the key opens into the database it holds.
     let upstream = Upstream::new(&p.url, TOKEN.into()).unwrap();
