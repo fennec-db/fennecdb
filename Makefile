@@ -976,10 +976,13 @@ deploy-check:
 ## behind the global router and its standby; writers record every write
 ## answered while a node is killed and brought back, a region's router is
 ## killed and its standby promoted, the global routers are cut off, and a
-## tenant is restored from its archive; every answered write is read back
-## (lost = 0) and the times printed. No fixed port, everything removed after.
+## tenant is restored from its archive to a moment (the rows answered by then,
+## and the one after them only where its answer never came); every answered
+## write is read back (lost = 0) and the times printed. No fixed port,
+## everything removed after. Its judgments' tests run first, with no Docker.
 ## DRILL_LEASE, DRILL_TENANTS, DRILL_RATE, DRILL_KEEP=1, DRILL_JSON=<path>
 drill:
+	python3 deploy/drill/test_drill.py
 	docker build -f deploy/Dockerfile --target kit -t fennec-kit .
 	python3 deploy/drill/drill.py
 
