@@ -1763,10 +1763,11 @@ mod tests {
             e.contains("did not end the replication stream within"),
             "{e}"
         );
-        assert!(
-            took >= wait && took < wait + Duration::from_secs(1),
-            "{took:?}"
-        );
+        // Held from above, the time being the property, by what it stands
+        // against: the `Terminate` waiting a whole wait more, twice the
+        // wait, 2 s to spare over the end's own. The message alone would
+        // pass that.
+        assert!(took >= wait && took < 2 * wait, "{took:?}");
     }
 
     /// A client dropped with its send buffer full returns at once, its

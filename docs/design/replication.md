@@ -869,7 +869,8 @@ read and never answers a `CopyDone`, SIGTERM sent as the follower ends
 its stream: exit 1, no `CopyDone`; with the first form, exit 0),
 `a_stopped_server_lets_its_slot_go_before_it_exits` (its log read to the
 process's end, the shutdown's own line in it, before it is held to having
-no "still held"), and the mirror's
+no "held at the stop", which the line saying the slot is held and the one
+saying it may be both say), and the mirror's
 `a_follower_that_panics_stops_the_server_with_its_code` (exit code 0
 without the guard) and
 `the_wait_for_the_follower_counts_from_the_shutdowns_start` (5 s counted

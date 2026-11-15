@@ -588,7 +588,8 @@ fn a_stopped_server_lets_its_slot_go_before_it_exits() {
         "{log}"
     );
     // Read through the shutdown's own line, which comes after any of the
-    // follower's: the line saying the slot is held was looked for.
+    // follower's: neither line saying the slot is or may be held was
+    // written -- "still held at the stop", "may still be held at the stop".
     assert!(log.contains("shutting down: "), "{log}");
-    assert!(!log.contains("still held"), "{log}");
+    assert!(!log.contains("held at the stop"), "{log}");
 }
