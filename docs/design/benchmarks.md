@@ -990,6 +990,9 @@ checker.
 1-minute load of 3.98 (4.21 after), a run of `io-put` took 1.1 s, of the
 others 0.3 to 0.5 s, and the step's 24 -- four workloads, three runs a
 side, four at a time -- 2.5 s (10 s while the machine ran a load of 20).
+Those runs traced the syncs, renames and writes alone; the opens, `fcntl`
+and the directory's changes traced since are a few calls a run more, not
+timed again: the machine's load stayed past 30 for the hour they waited.
 What the step pays is the two servers' build. On a hosted runner
 `build (release + cli profile)` built fennec-server in 73 s, 53 of them its
 own crate and the link, full LTO into one codegen unit; neither tree's
