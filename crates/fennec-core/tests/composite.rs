@@ -852,6 +852,61 @@ fn a_binary_from_before_refuses_the_schema() {
     );
 }
 
+/// A file's schema holding an index over no field, or one or nine, is
+/// damage, refused where it is read: one of none was taken, and the first
+/// `get` over the collection planned with its first part, a panic (the
+/// fuzzer's `image` target found it, crates/fennec-fuzz).
+#[test]
+fn a_schema_holding_an_index_over_too_few_or_too_many_fields_is_refused() {
+    let stmt =
+        fennec_ql::parse_one("create collection s (a int, b text, @sorted(a, b desc))").unwrap();
+    let Statement::CreateCollection { schema, .. } = stmt else {
+        panic!()
+    };
+    let bytes = schema.encode();
+    // Past the tag: how many composites, one, then whether it is unique,
+    // then its parts' count, two -- written over with 0, 1 and 9.
+    let tag = bytes
+        .windows(2)
+        .position(|w| w == [0, fennec_core::codec::TAG_COMPOSITES])
+        .expect("a nameless place behind the tag")
+        + 1;
+    let parts = tag + 3;
+    assert_eq!(bytes[parts], 2);
+    for n in [0u8, 1, 9] {
+        let mut b = bytes.clone();
+        b[parts] = n;
+        match fennec_core::schema::Schema::decode(&b, &mut 0) {
+            Err(Error::Corrupt(m)) => assert_eq!(
+                m,
+                format!("an index over several fields holds 2 to 8 of them, not {n}")
+            ),
+            other => panic!("{n}: {other:?}"),
+        }
+    }
+    // Through a file's open too, where the plan of a `get` met it.
+    let mut db = Database::new();
+    db.execute(&stmt_of(
+        "create collection s (a int, b text, @sorted(a, b desc))",
+    ))
+    .unwrap();
+    let mut image = db.snapshot();
+    let at = image
+        .windows(bytes.len())
+        .position(|w| w == bytes.as_slice())
+        .expect("the schema in the image");
+    image[at + parts] = 0;
+    fennec_core::engine::resum_all(&mut image);
+    assert!(matches!(
+        Database::new().load(&image),
+        Err(Error::Corrupt(_))
+    ));
+}
+
+fn stmt_of(text: &str) -> Statement {
+    fennec_ql::parse_one(text).unwrap()
+}
+
 /// Over a field whose rows expire, the walk leaves out the rows past their
 /// time as the scan does: every read tests the expiry, which no index says.
 #[test]
