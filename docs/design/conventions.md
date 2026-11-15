@@ -1,6 +1,6 @@
 # Conventions
 
-The long form of the test and docs conventions [CLAUDE.md](../../CLAUDE.md) lists under *Conventions*: where tests live and which run alone, a test that fails on one run, Chrome's launch, the clock, ports, what a change a user meets owes the docs, the fuzzing of every parser of untrusted bytes, and how a secret is compared and a primitive held to its vectors. They hold no invariant of the code, so [README.md](README.md#the-original-order) does not number them. Each section below is a bullet moved word for word from CLAUDE.md, which keeps its rule in a sentence or two.
+The long form of the test and docs conventions [CLAUDE.md](../../CLAUDE.md) lists under *Conventions*: where tests live and which run alone, a test that fails on one run, Chrome's launch, the clock, ports, what a change a user meets owes the docs, the fuzzing of every parser of untrusted bytes, why each `unsafe` block is sound and the sanitized tests that hold it, and how a secret is compared and a primitive held to its vectors. They hold no invariant of the code, so [README.md](README.md#the-original-order) does not number them. Each section below is a bullet moved word for word from CLAUDE.md, which keeps its rule in a sentence or two.
 
 ## Test binaries
 
@@ -121,18 +121,26 @@ Rosetta)` runs on everything but a pull request, so on the schedule, and `size
 (browser module)` only on a pull request.
 
 Which `ci.yml` jobs are required checks is a repository setting (classic
-branch protection on main, not the merge queue's ruleset). All of them are,
-but `size (browser module)`, which only runs on a pull request and so would
-never report in the merge queue. A job skipped by an `if:` reports success
-and can be required (the Rosetta job is one, skipped on a pull request); a
-whole workflow skipped by a path or branch filter reports nothing, its checks
-stay pending, and a required check of one blocks a merge it should not, so
-`ci.yml`'s `pull_request` and `merge_group` triggers take no filter (its
-`push` has a path filter, which no required check is read from). GitHub's
-"Troubleshooting required status checks" says both. `size (browser module)`
-is left out because a required check that never reports in the merge queue
-holds every group. A new job needs adding to the list unless it is one of
-those.
+branch protection on main, not the merge queue's ruleset). Three are, read
+on 2026-11-15 (`gh api
+repos/fennec-db/fennecdb/branches/main/protection/required_status_checks`):
+`test (ubuntu-latest)`, `test (macos-latest)` and `build (release + cli
+profile)`; a pull request merges past any other job red. A job skipped by
+an `if:` reports success and can be required, as can one whose steps skip
+(`sanitize`, below); a whole workflow skipped by a path or branch filter
+reports nothing, its checks stay pending, and a required check of one
+blocks a merge it should not, so `ci.yml`'s `pull_request` and
+`merge_group` triggers take no filter (its `push` has a path filter, which
+no required check is read from). GitHub's "Troubleshooting required status
+checks" says both. `size (browser module)`, which only runs on a pull
+request, must never be required: a check that never reports in the merge
+queue holds every group. Nor is `sanitize` ([below](#sanitizers)): its
+verdict rests on a dated nightly and a sanitizer's runtime, which a runner
+image can break with no change of ours -- a kernel laying out more of the
+address space at random than the sanitizer's shadow memory leaves room for
+has done so to ASan before -- and a merge queue held by that holds every
+change. A red `sanitize` is read and fixed in a change of its own, and a
+release waits for a green one (RELEASING.md).
 
 The mobile jobs upload build products nothing downloads
 (`fennecdb-android`, `fennecdb-xcframework`) with `continue-on-error`: an
@@ -383,6 +391,121 @@ messages and `pgoutput` (`fennec-wire`), a JWT and a JWKS (`access`), the
 sync's messages through the native library and the browser module, and
 IndexedDB's chunks; nor is each target held to a count of runs since its
 code last changed.
+
+## Unsafe code
+
+Every `unsafe` block and `unsafe impl` says why it is sound, in a `//
+SAFETY:` comment on the lines above it or above the statement holding it
+(attributes may stand between): what the caller or the code around it
+guarantees, by name, that makes each access in bounds, aligned and alive
+for as long as it is used. For the C ABIs that is the contract written for
+the caller -- fennec.h's *Pointers and lengths*, each function's `# Safety`
+section, `fennec-wasm`'s memory contract -- for a mapping the file's
+length and the lock that keeps another process from cutting it, for a
+system call the layout of the struct it writes. A comment that restates
+the operation, or says "the caller guarantees" without saying where that
+is written, is not one.
+
+Clippy's `undocumented_unsafe_blocks` holds it: denied in the root
+Cargo.toml's `[workspace.lints.clippy]`, which every crate takes by
+`[lints] workspace = true` -- `tools/lints_check.py`, in CI's fmt job,
+fails a member of the workspace that does not, a new crate too -- so every
+clippy run CI makes refuses a site without one: the workspace's, wasm32's
+and each feature set's, Windows', the JNI functions' and `test-clock`'s.
+An `unsafe fn`'s body needs no block in edition 2021, so the lint asks
+nothing of it, and `unsafe_op_in_unsafe_fn` stays off; the C ABIs' raw
+reads and writes carry their comments all the same.
+
+When the lint was turned on (2026-11-15) the crates held 236 `unsafe`
+blocks and impls, 127 of them commented -- most of the rest in tests,
+examples and fennec-ffi's callers of its own ABI -- and writing the reasons
+down found three that had none. `fennec_alloc` made a `Layout` of any
+length the page asked for, unchecked: past `isize::MAX`, 2 GiB on wasm32,
+that is undefined behaviour, and `fennec_load_owned` then took the block as
+a `Vec`; it answers a null now. `boxed` copied an answer through the null a
+failed allocation answers, address 0 in a module, the bottom of its stack:
+it aborts now, and the page's `#write` throws on a null rather than write
+there. And `fennec_schema` read its text as UTF-8 before it looked at the
+mode, where fennec.h says `FENNEC_SCHEMA_DESCRIBE` leaves it unread: it
+answers the description first now. Each has its test, the first and last
+aborting on the standard library's precondition checks before the fix.
+
+What a comment cannot make so: a mapped file's bytes are a `&[u8]` the
+process's own writes never change -- appends land past it, a rewrite
+renames a new file over it -- but another process writing the file in
+place or cutting it would, which only the `<file>.lock` every opener of a
+file to write takes keeps out (root CLAUDE.md, *Single writer*); a process
+ignoring it can end a reader with `SIGBUS`. Windows' sites are linted by
+CI's Windows clippy run alone.
+
+## Sanitizers
+
+The crates whose `unsafe` code an app's or a page's pointers reach run
+their tests under AddressSanitizer: `make sanitize`, CI's `sanitize` job
+on x86_64-unknown-linux-gnu, is `cargo test -p fennec-ffi -p fennec-abi -p
+fennec-core --lib --tests` built with `-Zsanitizer=address` on the
+Makefile's `FUZZ_NIGHTLY`, the fuzzer's dated nightly, for the host's
+triple, so build scripts and proc macros run uninstrumented (the nightly is
+only here, in `fuzz-smoke` and in `fuzz.yml`), in the `sanitize` profile:
+the test profile's checks -- debug assertions, overflow checks, the
+standard library's preconditions -- at opt-level 1, as ASan's own
+documentation advises. A report -- a read or write past a block, after its
+free, a double free -- ends that test binary, failed, the others run on
+(`--no-fail-fast`) and the run fails at its end. Three tests are skipped
+(`SANITIZE_SKIP`): those held to the standard library's own Unicode, which
+a nightly moves ahead of the pinned release's -- they fail on a new
+Unicode by design, for the case tables to be written again (`case.rs`,
+`tests/nocase.rs`), and say nothing of memory.
+`fennec-ffi`'s `tests/bounds.rs` calls each function of the C ABI at its
+edges -- a length of 0, a NULL with the largest length a `size_t` holds,
+a buffer exactly as long as it says, a heap block of that length alone or
+one whose bytes past the length change the answer if read, a vector
+claiming more `f32`s than its block holds, a place past the parameters, a
+handle no database holds, every mode, kind and status past the last -- so
+a read past a block is a report rather than a wrong answer.
+
+Every unsafe site of the three crates that the job's target compiles is
+reached by a test it runs, checked by a probe never committed: each site
+noted its number in a file the first time a process reached it, over the
+same tests on macOS (`make sanitize`'s run, ASan or not, reaches the
+same paths), and each Linux-only site by its macOS twin's path -- the
+`posix_fadvise` a compact past the page cache asks where macOS asks
+`F_NOCACHE`, the `fcntl` lock's struct, the CRC's SSE 4.2 path where macOS
+takes the ARM one. What the job does not reach: Windows' sites (the
+mapping in views, the lock's kernel32 calls), the browser module's
+(`vector::simd` is safe Rust; `Rows::row` and fennec-wasm's exports are
+wasm32's, which has no ASan, and run natively only in fennec-wasm's own
+tests), the `flock` lock of a Unix that is neither Linux nor Apple's, and
+the JNI functions, which need a JVM; aarch64's NEON kernels, prefetch and
+CRC instructions run under it on Apple silicon (`make sanitize`), not in
+CI's x86_64 leg.
+
+Leaks are not looked for (`detect_leaks=0`): a leak is no undefined
+behaviour, the engine's tests forget a database on purpose as a killed
+process leaves one (`fs::tests`), and LeakSanitizer does not run on Apple
+silicon, where the rest of the job is run again by hand. Nor does the job
+hold the binaries' own unsafe code -- fennec-http's sockets, `poll`,
+`getrandom` and file ACLs, fennec-server's signals and user switch,
+fennec-shard's and the shell's -- which the clippy lint holds to its
+comments alone; uninitialized reads (MemorySanitizer) and data races
+(ThreadSanitizer), each a build of the standard library of its own; doc
+tests; or what Miri checks of aliasing and provenance, which follows.
+Its first step looks at the files a pull request, a merge group or a push
+changed against the commit it starts from and skips the tests -- the job
+still reporting success -- where none is under `crates/`, the Makefile, a
+manifest or the lock file, `rust-toolchain.toml`, `.cargo/` or `ci.yml`;
+the schedule and a dispatch run them whatever changed. A pull request
+merges past a red one (it is no required check, [above](#reruns)), and a
+release waits for a green one at its commit (RELEASING.md).
+
+Its first run, on an M-series Mac on 2026-11-15, found nothing: 1 000
+tests, no report. Built at opt-level 1 they ran no longer than the
+unsanitized debug build's: fennec-core's unit tests 54 s against 79,
+`tests/all.rs` 198 against 258, the machine shared with other builds (a
+load of 35 to 46 through the sanitized run); the build took 104 s. In CI's
+test job the same binaries, unsanitized, take 3.5 minutes (60 s and 146
+s), so the job, the nightly's install and the build with it, is bounded at
+30 minutes and expected within 15.
 
 ## Secrets compared
 
