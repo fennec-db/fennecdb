@@ -732,8 +732,8 @@ a write the gate cannot see, and one a change adds would pass on counts
 that never moved; worse, some ways of making a write durable, or of
 writing it at another cost, use the very calls the gate counts. So a
 server is refused -- the run cannot be judged, in words naming the call,
-the file and the flag -- where anywhere in the trace, the start-up as the
-stretch, it set up io_uring (its submissions read off a ring by the
+the file and the flag -- where, anywhere in the trace, the start-up as
+much as the stretch, it set up io_uring (its submissions read off a ring by the
 kernel, no call each) or Linux AIO (`io_setup`, `io_submit`: submitted in
 batches, completed with no call); opened a file of the data directory with
 `O_SYNC` or `O_DSYNC`, whose every write then flushes the device with the
@@ -741,12 +741,13 @@ same calls, or `O_DIRECT` (by `fcntl` too), which passes the page cache by
 and changes what a byte written costs; or wrote with `pwritev2` and
 `RWF_SYNC` or `RWF_DSYNC`. One the kernel refused took nothing and is
 passed over. The engine's own opens use none of these flags: in `crates/`,
-`custom_flags` appears on Unix only in `fennec-server`'s hand-over of its
-files to `--user`, read-only and `O_NOFOLLOW | O_NONBLOCK`, which runs
-before a server under the gate ever starts, and on Windows
-(`FILE_FLAG_BACKUP_SEMANTICS`); no `O_SYNC`, `O_DSYNC`, `O_DIRECT`,
-`RWF_*`, `io_setup` or `pwritev2` is called, so the base passes every
-refusal. And every file a counted call names is named within the data
+`custom_flags` appears in shipped Unix code only in `fennec-server`'s
+hand-over of its files to `--user`, read-only and `O_NOFOLLOW |
+O_NONBLOCK`, which only a server started as root runs, never one under
+the gate, and otherwise on Windows (`FILE_FLAG_BACKUP_SEMANTICS`) and in
+tests (`O_NOCTTY`); no `O_SYNC`, `O_DSYNC`, `O_DIRECT`, `RWF_*`,
+`io_setup` or `pwritev2` is named, so the base passes every refusal, as
+the round that brought them showed: every run of all four workloads. And every file a counted call names is named within the data
 directory: the scratch directory is resolved first (`realpath`) and the
 server handed that, since `-y` names a file by its path with every link
 resolved -- through a linked work directory every file would have read as
