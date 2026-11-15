@@ -31,7 +31,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { readdirSync, readFileSync, readlinkSync } from 'node:fs';
-import { LINUX, LIST, MAC, assertClean, cmd, data, describe, forgetServeItems, mine, procs, startApp, startServer, step, until, waitFor, waitStudio, log } from './lib.mjs';
+import { LINUX, LIST, MAC, assertClean, cmd, data, describe, forgetServeItems, mine, procs, startApp, startServer, step, until, waitFor, waitWindow, log } from './lib.mjs';
 
 /** macOS: the pipes and sockets each pid holds, from lsof: pid -> [{fd, type, own, peer}], `own` and `peer` the kernel's addresses of the two ends. */
 function lsofEnds(pids) {
@@ -147,8 +147,12 @@ const C = data('served-one', 10);
 const app = startApp('orphan', { FENNEC_DESKTOP_OPEN: `${A}${LIST}${B}` });
 const a = await waitFor((l) => l.what === 'server-started' && l.path === A, 60000, 'the first server started');
 const b = await waitFor((l) => l.what === 'server-started' && l.path === B, 60000, 'the second server started');
-await waitStudio(`file:${A}`);
-await waitStudio(`file:${B}`);
+// Each window made and its page asked for, so the app's processes, its windows' engines too, are
+// there to be read and killed; never the pages loaded, which nothing here tests: two cold WebView2
+// browsers opening at once took 25.5 s to send their first request in job 132701210526, and the
+// check, waiting for both studios, timed out with both committed (lib.mjs's `waitWindow`).
+await waitWindow(`file:${A}`);
+await waitWindow(`file:${B}`);
 // A served database's server, started after both: the same pipe, the same end, whatever its window does.
 cmd({ cmd: 'serve', path: C });
 const c = await waitFor((l) => l.what === 'served' && l.path === C, 60000, 'the served one started');

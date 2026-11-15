@@ -732,7 +732,16 @@ AES-GCM because it has no secret-indexed tables in software, Poly1305 in
 last-ness in the AAD (below); an image and the history are sealed whole
 (`open_whole` refuses a file cut short), a segment a frame for
 each batch of writes, whole records in each, so a crash cuts off a frame as
-it cut a record (`open_appended`, the segment's `sealed` state). A file of
+it cut a record (`open_appended`, the segment's `sealed` state). A frame's
+length is under no tag: changed, the bytes then read as its tag are not it
+and the frame is refused, unless the length now runs past the segment's
+end, which is a frame cut short there and nothing tells from a crash's --
+a verify then counts the bytes from it on as torn, as it would in a
+segment whoever can write the archive had cut
+(`a_bit_changed_is_refused_unless_a_length_then_runs_past_the_end` walks
+every bit of a file; the archive's own test changed its segment's middle
+byte, wherever the run's flushes had put it, and failed the run that put a
+length there). A file of
 the other kind than the archive is refused. About 400 MB/s either way on
 one core. The live file stays plain -- mapped and read in place -- for the
 disk to encrypt. A checksum a record was measured and not taken: hardware
