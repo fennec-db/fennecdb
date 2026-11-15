@@ -1232,15 +1232,24 @@ pub fn claimed_into(
 /// sum holds and, where it does, the point it claims every byte before
 /// which was durable as it was appended (0 for none). What an archive's
 /// reader finds how far a segment was synced from ([`claimed_into`]).
+///
+/// A record naming a collection no create gives, which [`record_at`]
+/// refuses, is summed as any other ([`whole_head`]): read as carrying no
+/// sum, one whole by it was judged as damage and cut from the segment
+/// where nothing after it claimed past it, where a version before took it
+/// and a restore refused it as it applied it -- as an open refuses it.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn checked_claim(record: &[u8], at: usize) -> Option<(bool, usize)> {
-    let r = record_at(record, &mut 0).ok()?;
-    let c = r.claim_at?;
-    if !r.holds(record) {
-        return Some((false, 0));
-    }
+    let (c, sum_at) = match record_at(record, &mut 0) {
+        Ok(r) if !r.holds(record) => return Some((false, 0)),
+        Ok(r) => (r.claim_at?, r.sum_at),
+        Err(_) => match whole_head(record, 0)? {
+            (_, _, false) => return Some((false, 0)),
+            (end, w, true) => (end - SUM - w, end - SUM),
+        },
+    };
     let mut v = [0u8; 4];
-    let raw = &record[c..r.sum_at];
+    let raw = &record[c..sum_at];
     v[..raw.len()].copy_from_slice(raw);
     let point = match u64::from(u32::from_le_bytes(v)) {
         0 => 0,
@@ -1909,10 +1918,11 @@ impl Block {
 ///
 /// A head naming a collection no create gives ([`unmade_collection`]) is
 /// refused here too, once its length fits, so that a walk
-/// [`Walk::stopping`] judges it as a head no record reads from: stale
-/// bytes past the durable point read as one (`0a ff ff ff ff 0f 05`), and
-/// refused by [`record_at`] after this said whole, an open refused what a
-/// version before cut. One cut short is a torn tail whatever it names.
+/// [`Walk::stopping`] stops at it and the load judges it as it judges a
+/// head no record reads from ([`whole_head`]): stale bytes past the
+/// durable point read as one (`0a ff ff ff ff 0f 05`), and refused by
+/// [`record_at`] after this said whole, an open refused what a version
+/// before cut. One cut short is a torn tail whatever it names.
 fn whole_record(bytes: &[u8], at: usize, edge: usize) -> Result<bool> {
     let kind = bytes[at];
     if !known(kind) {
@@ -1922,24 +1932,30 @@ fn whole_record(bytes: &[u8], at: usize, edge: usize) -> Result<bool> {
             _ => Err(unknown_kind(kind, at)),
         };
     }
+    match framed_at(bytes, at)? {
+        None => Ok(false),
+        Some((cid, _)) if cid >= u32::MAX as u64 => Err(unmade_collection(cid)),
+        Some(_) => Ok(true),
+    }
+}
+
+/// The collection the head at `at` of a kind this version knows names,
+/// and where its length ends its record: `None` where its head or its
+/// length runs past the end of the bytes. How a walk frames a record
+/// ([`whole_record`]), and what a cut counts ([`records_from`]).
+fn framed_at(bytes: &[u8], at: usize) -> Result<Option<(u64, usize)>> {
     let mut pos = at + 1;
     // The collection's id, then the body's length.
     let mut head = [0u64; 2];
     for v in &mut head {
         *v = match get_uvarint(bytes, &mut pos) {
             Ok(v) => v,
-            Err(_) if pos >= bytes.len() => return Ok(false),
+            Err(_) if pos >= bytes.len() => return Ok(None),
             Err(e) => return Err(e),
         };
     }
     let [cid, len] = head;
-    if len > (bytes.len() - pos) as u64 {
-        return Ok(false);
-    }
-    if cid >= u32::MAX as u64 {
-        return Err(unmade_collection(cid));
-    }
-    Ok(true)
+    Ok((len <= (bytes.len() - pos) as u64).then(|| (cid, pos + len as usize)))
 }
 
 /// Whether `byte`, a record's first, is a kind this version reads with a
@@ -1981,10 +1997,12 @@ enum Head {
 }
 
 /// The record a head at `at` frames as [`judge_after`] reads one: checked,
-/// of a kind this version knows (any, `any` said), its collection id 0
-/// where its kind has none, and its length holding its claim and sum --
-/// and for the close's mark nothing more. Cheap to ask at every byte: no
-/// more than the head is read.
+/// of a kind this version knows, naming a collection a create gives -- 0
+/// where its kind has none -- and its length holding its claim and sum,
+/// and for the close's mark nothing more. With `any`, a checked record of
+/// any kind naming any collection whose length holds a claim and a sum:
+/// what [`whole_head`] sums. Cheap to ask at every byte: no more than the
+/// head is read.
 fn head_at(bytes: &[u8], at: usize, any: bool) -> Head {
     let Some(&byte) = bytes.get(at) else {
         return Head::Past;
@@ -2024,11 +2042,14 @@ fn head_at(bytes: &[u8], at: usize, any: bool) -> Head {
         REC_BLOCK | REC_SPILL | REC_LAND | REC_HISTORY | REC_STATEMENT | REC_SYNCED
     );
     // An id no create gives, the last `u32` among them, as the walk reads
-    // it ([`whole_record`]).
-    if cid >= u32::MAX as u64
-        || (none && cid != 0)
-        || len < trailer
-        || (kind == REC_SYNCED && len != trailer)
+    // it ([`whole_record`]), frames no record a judgment goes on from; a
+    // record that names one and is whole by its sum is no crash's leaving
+    // all the same, refused where the walk stopped at it ([`whole_head`]).
+    if len < trailer
+        || !any
+            && (cid >= u32::MAX as u64
+                || (none && cid != 0)
+                || (kind == REC_SYNCED && len != trailer))
     {
         return Head::No;
     }
@@ -2081,16 +2102,20 @@ fn may_head(b: u8) -> bool {
     HEADS[(b >> 6) as usize] >> (b & 63) & 1 != 0
 }
 
-/// Whether a checked record of any kind starts at `at`, whole by its sum:
-/// one of a kind this version does not know is a later version's, refused
-/// for its kind rather than judged as damage.
-fn whole_unknown(bytes: &[u8], at: usize) -> bool {
+/// Where a checked record of any kind starting at `at`, naming any
+/// collection, ends by its length, its claim's width, and whether it is
+/// whole by its sum: what the load asks of a head its walk stopped at.
+/// One whole is no crash's leaving -- a crash leaves bytes no sum holds --
+/// so it is refused as the walk refused it, never cut: a later version's
+/// kind, or a collection no create gives. One whose sum fails is damage
+/// judged as a crash's may be.
+fn whole_head(bytes: &[u8], at: usize) -> Option<(usize, usize, bool)> {
     match head_at(bytes, at, true) {
-        Head::Fits { end, .. } => {
+        Head::Fits { end, w } => {
             let sum = u32::from_le_bytes(bytes[end - SUM..end].try_into().unwrap());
-            crc32c(0, &bytes[at..end - SUM]) == sum
+            Some((end, w, crc32c(0, &bytes[at..end - SUM]) == sum))
         }
-        _ => false,
+        _ => None,
     }
 }
 
@@ -2174,12 +2199,27 @@ fn torn_mark(cut: &[u8]) -> bool {
     cut.len() <= head.len() + SUM && cut.iter().zip(&head).all(|(&b, &m)| b == m || b == 0)
 }
 
-/// How many records a walk frames from `at` on: what a cut there takes.
+/// How many records a walk frames from `at` on: what a cut there takes. A
+/// head naming a collection no create gives frames by its length as any
+/// other of its kind, and as a version before framed and counted it: one
+/// record, the count going on past it, where the walk stops at it.
 fn records_from(bytes: &[u8], at: usize) -> u64 {
     let mut walk = Walk::stopping(bytes, at);
     let mut n = 0;
-    while let Ok(Some(_)) = walk.next() {
-        n += 1;
+    loop {
+        match walk.next() {
+            Ok(Some(_)) => n += 1,
+            Ok(None) if walk.refused.take().is_some() && known(bytes[walk.pos]) => {
+                match framed_at(bytes, walk.pos) {
+                    Ok(Some((_, end))) => {
+                        n += 1;
+                        walk.pos = end;
+                    }
+                    _ => break,
+                }
+            }
+            _ => break,
+        }
     }
     n
 }
@@ -7205,19 +7245,34 @@ impl Database {
                 // In a file this version wrote to, a head no record reads
                 // from -- zeros with a byte after them, stale bytes -- is
                 // judged as a record failing its sum is, by whether a whole
-                // record after it claims the file durable past it. A whole
-                // record of a kind this version does not know is a later
-                // version's, refused as before.
-                if whole_unknown(bytes, at) {
-                    return Err(unknown_kind(bytes[at], at));
+                // record after it claims the file durable past it. A record
+                // whole by its sum is not what a crash leaves, so it is
+                // refused as the walk refused it -- a later version's kind,
+                // as before, or a collection no create gives, which judged
+                // as stale bytes were cut, the file truncated, where a
+                // version before refused it. One of a kind this version
+                // knows whose sum fails is a record failing its sum, judged
+                // from its end, as a version before framed it.
+                let head = whole_head(bytes, at);
+                if let (Some((_, _, true)), Some(e)) = (head, walk.refused) {
+                    return Err(e);
                 }
-                judge(
-                    bytes,
-                    at,
-                    None,
-                    durable,
-                    format_args!("no whole record starts at {at}"),
-                )?;
+                match head {
+                    Some((end, ..)) if known(bytes[at]) => judge(
+                        bytes,
+                        at,
+                        Some(end),
+                        durable,
+                        format_args!("the record at {at} fails its checksum"),
+                    )?,
+                    _ => judge(
+                        bytes,
+                        at,
+                        None,
+                        durable,
+                        format_args!("no whole record starts at {at}"),
+                    )?,
+                }
             } else if let Some(e) = walk.refused {
                 // One a version before wrote: zeros only where they run to the
                 // end from a head (`zero_tail`), any other byte refused.
