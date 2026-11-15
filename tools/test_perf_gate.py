@@ -857,6 +857,11 @@ class Io(unittest.TestCase):
         _, failed = io_verdicts(res, [io_entry(metric="file_before", most="+7"), entries[1]])
         self.assertTrue(failed)
 
+    def test_a_move_says_its_share_however_small(self):
+        self.assertEqual(gate.io_moved(4_199_800, 4_199_808), "4,199,800 → 4,199,808 (+0.00019%)")
+        self.assertEqual(gate.io_moved(1, 501), "1 → 501 (+50,000.0%)")
+        self.assertEqual(gate.io_moved(0, 1), "0 → 1 (from none)")
+
     def test_runs_whose_file_after_the_setup_differs_fail(self):
         res = io_results()
         res["workloads"]["io-put"]["head"][2] = io_run(file_before=4_401)

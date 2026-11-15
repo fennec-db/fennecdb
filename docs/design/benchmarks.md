@@ -824,14 +824,30 @@ names it.
 runs a side -- 40 runs of each workload, in Docker on an M1 (aarch64 musl,
 strace 6.19), four at a time while the machine around it ran a load of 20
 to 70 -- counted each workload the same to the call and the byte, every
-run one line of counts. Those counts:
+run one line of counts; the build merged with what landed since counted
+the same, three runs a side. x86_64's first runs are CI's: the pull
+request that brought the I/O counts changes no server code, so its own
+run is the base against itself on x86_64 musl, every workload's line the
+same on both sides. Those counts, in total and file by file, as the
+judgement's table gives them:
 
-| workload | answered | fsyncs | an answer | renames | write calls | bytes written | a byte sent | a byte of the file before |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `io-put` | 500 | 500: 499 of the log, 1 of the file | 1.00 | 0 | 1 001 | 565 166 | 1.64 | - |
-| `io-batch` | 1 | 1, of the log | 1.00 | 0 | 3 | 47 862 | 0.60 | - |
-| `io-spill` | 1 | 1, of the file | 1.00 | 0 | 2 | 18 019 912 | 0.99 | - |
-| `io-compact` | 1 | 6 | 6.00 | 1 | 5 | 2 139 997 | - | 0.51 of 4 199 800 |
+| workload | answered | file after setup | fsyncs | an answer | renames | write calls | bytes written | a byte sent | a byte of the file after setup |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `io-put` | 500 | 32 | 500 | 1.00 | 0 | 1 001 | 565 166 | 1.64 | - |
+| `io-batch` | 1 | 32 | 1 | 1.00 | 0 | 3 | 47 862 | 0.60 | - |
+| `io-spill` | 1 | 32 | 1 | 1.00 | 0 | 2 | 18 019 912 | 0.99 | - |
+| `io-compact` | 1 | 4 199 800 | 6 | 6.00 | 1 | 5 | 2 139 997 | - | 0.51 |
+
+| workload | file | fsyncs | bytes written | write calls | renamed to it |
+|---|---|---:|---:|---:|---:|
+| `io-put` | `io.fennec` | 1 | 274 810 | 500 | 0 |
+| `io-put` | `io.fennec.sync` | 499 | 290 356 | 501 | 0 |
+| `io-batch` | `io.fennec` | 0 | 23 883 | 1 | 0 |
+| `io-batch` | `io.fennec.sync` | 1 | 23 979 | 2 | 0 |
+| `io-spill` | `io.fennec` | 1 | 18 019 912 | 2 | 0 |
+| `io-compact` | `io.fennec.beside` | 3 | 2 139 997 | 5 | 0 |
+| `io-compact` | `io.fennec` | 1 | 0 | 0 | 1 |
+| `io-compact` | `.` | 2 | 0 | 0 | 0 |
 
 A durable put is one fsync, and its record's bytes written twice -- into
 the file and into the log beside it, 550 and 581 bytes a put, the log's
@@ -849,17 +865,29 @@ after the rename. One of the six syncs nothing: the image synced, the
 first catch-up round (`maintenance.rs`) finds no write made meanwhile --
 there is one writer, waiting on the compact -- and syncs the side file
 again, an `fdatasync` with nothing written since. Dropping it is a change
-of its own; the gate would read it as `io-compact`'s fsyncs 6 → 5, let
-through by an entry of `"-1"`.
+of its own; the gate would read it as `io-compact`'s fsyncs of
+`io.fennec.beside` 3 → 2, let through by an entry of `"-1"` naming that
+file.
 
-*One fsync more fails.* A build with one `fdatasync` more a durable write
-(`FileSink`'s sync, a patch never committed) against its base, three runs
-a side: `io-put` 500 → 1 000 fsyncs, `io-batch` 1 → 2, `io-spill` 1 → 2,
-every run of a side alike, and `io-compact`'s six as they were, its
-rewrite syncing as before. The checker failed the three; let them through
-with an entry each that the pull request added (`"metric": "fsyncs",
-"most": "+100%"`); and failed them again with the same entries the base
-held.
+*What fails, and what lets it through.* Three builds, each a patch never
+committed, against the build they patch, three runs a side, through the
+checker as the judge runs it. One `fdatasync` of the database more a
+durable write (`FileSink`'s sync): `io-put`'s fsyncs of `io.fennec` 1 →
+501, `io-batch`'s 0 → 1 and `io-spill`'s 1 → 2 failed, every run of a side
+alike, `io-compact` as it was; an entry each that the pull request added
+let them through (`+500`, `+1` -- a `+100%` of none let nothing through,
+and said so -- and `+100%`), and the same entries held by the base failed
+them again. Eight bytes more in the schema record `create` writes, which
+its reading passes over: the file after the setup 32 → 40 in three
+workloads and 4 199 800 → 4 199 808 in the compact's, every count of the
+runs the same; failed as the file after the setup, let through by a
+`file_before` entry of `+8` each, failed again with the base holding them
+-- where the first version's checker failed all four as sides sent other
+requests, past any entry. The database synced where its log was
+(`SyncLog::append` syncing nothing, its caller the file): `io-put`'s fsyncs
+of `io.fennec` 1 → 500 and of `io.fennec.sync` 499 → 0, `io-batch`'s 0 →
+1 and 1 → 0, every total the same -- failed, where the first version's
+checker, judging totals, passed all four.
 
 *Its time.* The runs are short: in Docker on the M1, started at a
 1-minute load of 3.98 (4.21 after), a run of `io-put` took 1.1 s, of the

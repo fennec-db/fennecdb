@@ -787,8 +787,11 @@ def io_values(differ):
 
 
 def io_moved(b, h):
-    """A count's move from `b` to `h`, as the verdict says it."""
-    share = f"{(h - b) / b * 100:+,.1f}%" if b else "from none"
+    """A count's move from `b` to `h`, as the verdict says it: its share
+    to a tenth of a percent, or to two figures where it is smaller -- eight
+    bytes more of a 4 MB file is no +0.0%."""
+    pct = (h - b) / b * 100 if b else None
+    share = "from none" if pct is None else f"{pct:+,.1f}%" if abs(pct) >= 0.1 else f"{pct:+.2g}%"
     return f"{b:,} → {h:,} ({share})"
 
 
