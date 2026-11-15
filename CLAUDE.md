@@ -212,6 +212,7 @@ Covers `crates/`.
 *Conventions*
 - Unit tests live inline
 - Every parser of untrusted bytes is fuzzed
+- Every `unsafe` block says why it is sound.
 - A secret is compared by `crypto::ct_eq` alone
 
 ### `crates/fennec-core/CLAUDE.md`

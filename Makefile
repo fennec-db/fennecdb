@@ -447,7 +447,7 @@ fuzz-smoke:
 ## triple, as the fuzzer is built, so build scripts and proc macros run
 ## uninstrumented; a report ends the run, failed. Leaks are not looked for
 ## (SANITIZE_ASAN_OPTIONS): the engine's tests forget a database on purpose,
-## a process killed
+## as a killed process leaves one
 SANITIZE_RUSTFLAGS = -Zsanitizer=address
 SANITIZE_ASAN_OPTIONS ?= detect_leaks=0
 # The tests held to the standard library's own Unicode, which a nightly

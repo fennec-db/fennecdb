@@ -1474,14 +1474,16 @@ jobs:
   # fuzz.yml), built for the runner's triple so build scripts run plain. A
   # report ends the run, failed. Leaks are not looked for: the engine's
   # tests forget a database on purpose, as a killed process leaves one. Not
-  # a required check (conventions.md, "Reruns", says why): it skips its
-  # tests where a change touches no crate, the schedule runs it whole, and
+  # a required check (conventions.md, "Reruns", says why), so it does not
+  # run for a merge group, where nothing waits for it: it skips its tests
+  # where a change touches no crate, the schedule runs it whole, and
   # RELEASING.md asks it green at a release's commit. Bounded as fuzz-smoke
   # is until it has runs to be bounded by: its tests took 3.5 minutes in the
   # test job unsanitized (fennec-core's lib 60 s, tests/all.rs 146 s), and
   # sanitized at opt-level 1 they took on a Mac what unsanitized ones did.
   sanitize:
     name: sanitize (fennec-ffi, fennec-abi, fennec-core tests under ASan)
+    if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -1491,19 +1493,19 @@ jobs:
         with:
           persist-credentials: false
 
-      # A pull request's, a merge group's and a push's files, against the
-      # commit each starts from: only the trees of the two are fetched. A
-      # scheduled or dispatched run, and one whose base cannot be fetched,
-      # tests whatever it finds.
+      # A pull request's and a push's files, against the commit each starts
+      # from: only the trees of the two are fetched. A scheduled or
+      # dispatched run, and one whose base cannot be fetched, tests whatever
+      # it finds.
       - name: Whether the change touches what the job tests
         id: touched
         env:
           EVENT: ${{ github.event_name }}
-          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           run=1
           case "$EVENT" in
-            pull_request|merge_group|push)
+            pull_request|push)
               if [ -n "$BASE" ] && git fetch --no-tags --depth=1 origin "$BASE"; then
                 files=$(git diff --name-only "$BASE" HEAD)
                 if ! printf '%s\n' "$files" | grep -qE '^(crates/|Makefile$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.cargo/|\.github/workflows/ci\.yml$)'; then

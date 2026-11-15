@@ -406,15 +406,37 @@ system call the layout of the struct it writes. A comment that restates
 the operation, or says "the caller guarantees" without saying where that
 is written, is not one.
 
-Clippy's `undocumented_unsafe_blocks` holds it: denied in the root
-Cargo.toml's `[workspace.lints.clippy]`, which every crate takes by
-`[lints] workspace = true` -- `tools/lints_check.py`, in CI's fmt job,
-fails a member of the workspace that does not, a new crate too -- so every
-clippy run CI makes refuses a site without one: the workspace's, wasm32's
-and each feature set's, Windows', the JNI functions' and `test-clock`'s.
-An `unsafe fn`'s body needs no block in edition 2021, so the lint asks
-nothing of it, and `unsafe_op_in_unsafe_fn` stays off; the C ABIs' raw
-reads and writes carry their comments all the same.
+Two checks hold it, each where the other cannot reach. Clippy's
+`undocumented_unsafe_blocks` is denied in the root Cargo.toml's
+`[workspace.lints.clippy]`, which every crate takes by `[lints] workspace
+= true` -- `tools/lints_check.py` fails a member of the workspace that does
+not, a new crate too -- so every clippy run CI makes refuses a site without
+one in the code it compiles: the workspace's, wasm32's and each feature
+set's, part of Windows', the JNI functions' and `test-clock`'s. That is
+x86_64 Linux, wasm32 and Windows' check; about 48 of the 255 sites, a
+review counted, compile in none of them -- aarch64's NEON kernels, prefetch and CRC instructions,
+Apple's system calls (the page cache's `F_NOCACHE`, `vm_statistics64`,
+`rusage_info_v4`, the lease's clock), the macOS-only examples, Windows'
+TLS and tests. So `tools/lints_check.py`, in CI's fmt job, also reads every
+`.rs` file the repository holds, whatever its `cfg`, comments, strings and
+characters masked, and refuses an `unsafe` block or `unsafe impl` with no
+comment saying `SAFETY:` where clippy reads one: on the lines just above it,
+blank lines skipped, or above the statement it is -- itself, or a `let`,
+`static` or `const` whose value it is -- attributes included. It is a
+reader of text, never a compiler, and so reads only where the comment is,
+never whether it is true; `tools/test_lints_check.py` holds it to a case
+of each kind it refuses and each place it reads a comment from, and to
+the repository's own files.
+
+An unsafe operation in an `unsafe fn` goes in a block of its own, which
+says why it is sound like any other: rustc's `unsafe_op_in_unsafe_fn`,
+denied in `[workspace.lints.rust]`, is a lint of the compiler, not of
+clippy, so every build for every target refuses one outside a block --
+the release's for macOS, Linux on ARM and Windows, the mobile jobs', a
+developer's -- and the scanner holds that block's comment whatever builds
+it. Turned on on 2026-11-15, it moved the C ABIs' raw reads and writes --
+fennec-wasm's exports, fennec-ffi's and every JNI function -- into blocks,
+each with its comment; the binaries' code was byte for byte what it was.
 
 When the lint was turned on (2026-11-15) the crates held 236 `unsafe`
 blocks and impls, 127 of them commented -- most of the rest in tests,
@@ -430,13 +452,37 @@ mode, where fennec.h says `FENNEC_SCHEMA_DESCRIBE` leaves it unread: it
 answers the description first now. Each has its test, the first and last
 aborting on the standard library's precondition checks before the fix.
 
-What a comment cannot make so: a mapped file's bytes are a `&[u8]` the
-process's own writes never change -- appends land past it, a rewrite
-renames a new file over it -- but another process writing the file in
-place or cutting it would, which only the `<file>.lock` every opener of a
-file to write takes keeps out (root CLAUDE.md, *Single writer*); a process
-ignoring it can end a reader with `SIGBUS`. Windows' sites are linted by
-CI's Windows clippy run alone.
+A mapping's bytes are a `&[u8]` (`fs::Mapping::as_ref`), so two things
+must hold of them while a slice lives: no byte of it is on a page past the
+file's end, which a read ends the process at (`SIGBUS`), and no byte of it
+changes. A database's mapping covers the file's length when it is made and
+grows only over bytes written (`FileSink::written_through`). The one cut, a
+torn tail at the open, takes the bytes past it out of the mapping before
+the file is cut (`FileSink::cut`, `a_cut_takes_the_bytes_past_it_out_of_the_mapping`):
+until 2026-11-15 it left them covered, a slice of the mapping spanning
+pages past the file's end until the first handover, and the first appends
+after the cut landed in its bytes in place. No read reached them -- no
+record points past the cut, the cut runs before the open returns the
+database, and the appends were read from memory until a handover covered
+them anew -- but no slice may span them either. Appends land past what the
+mapping covers, and a rewrite renames a new file over the old (root
+CLAUDE.md, *A mapped file is replaced only by rename*). The one write in
+place is a compact's beside the database: the counter's head patched into
+its side file under the write lock (`finish_beside`), after `Beside::write`
+mapped that file and pointed the compact's stores at it. Those stores are
+the compact's alone until the swap, which comes after the patch, all on
+the one thread that runs it, and no slice of the mapping outlives the read
+that took it (the touch of every page ends before), so no read meets those
+bytes as they change. Another process writing the file is what the
+`<file>.lock` every opener of a file to write takes keeps out (root
+CLAUDE.md, *Single writer*); a process ignoring it can end a reader with
+`SIGBUS`. A reader that takes no lock (`open_read_only`: `fennec types`,
+`--read-only`) maps the file as it stood at its open, and a server opening
+it after a crash cuts a torn tail under it: past every record the reader
+reads, which only its own open's walk of the file reads past, ending the
+reader should the two meet. Windows' mapping is views laid end to end,
+which only grow (`fs::windows::map`), and its cut drops the database and
+its views first (`cut_and_open`).
 
 ## Sanitizers
 
@@ -490,7 +536,9 @@ fennec-shard's and the shell's -- which the clippy lint holds to its
 comments alone; uninitialized reads (MemorySanitizer) and data races
 (ThreadSanitizer), each a build of the standard library of its own; doc
 tests; or what Miri checks of aliasing and provenance, which follows.
-Its first step looks at the files a pull request, a merge group or a push
+It runs for a pull request, a push to main, the schedule and a dispatch,
+never for a merge group, where nothing waits for a check that is not
+required. Its first step looks at the files a pull request or a push
 changed against the commit it starts from and skips the tests -- the job
 still reporting success -- where none is under `crates/`, the Makefile, a
 manifest or the lock file, `rust-toolchain.toml`, `.cargo/` or `ci.yml`;
