@@ -62,6 +62,10 @@ on:
       - 'crates/fennec-server/src/durability.rs'
       - 'crates/fennec-http/src/replication.rs'
       - 'crates/fennec-http/src/cdc.rs'
+      # A --dir node's tenants are synced by Tenants::sync_dirty, called from
+      # serve_dir's loop, not run_syncer: the `dir250` guest cuts that path.
+      - 'crates/fennec-http/src/tenants.rs'
+      - 'crates/fennec-server/src/main.rs'
       - '.github/linux-power-cut/**'
       - '.github/power-cut/**'
       - '.github/workflows/linux-power-cut.yml'
