@@ -1553,6 +1553,8 @@ const LANDING = -1;
 const APART = /^(vector<|bytes$)/;
 /** Whether a field of `schema` is `APART`'s. */
 const apartIn = (schema) => !!schema?.fields.some((f) => APART.test(f.type));
+/** Whether a field of `schema` compares by a collation: the server's schema and `describe()` name it, `schemas()` does not. */
+const collatedIn = (schema) => !!schema?.fields.some((f) => f.collate);
 /** An answer with no `Fennec-Seq`: no stream is known to be past it. */
 const NO_SEQ = Number.MAX_SAFE_INTEGER;
 /** The longest a server's `retry_after` is waited: `setTimeout` fires at once past 2^31 ms. */
@@ -2487,6 +2489,7 @@ export class FennecSync {
     const c = s.collection;
     const had = this.#local.schemas().some((x) => x.name === c);
     s.apart = apartIn(schema);
+    s.collated = collatedIn(schema);
     if (had) {
       const fields = new Set(schema.fields.map((f) => f.name));
       const rows = (this.#local.run(`get ${c}`).rows ?? []).map((r) =>
@@ -2704,9 +2707,8 @@ export class FennecSync {
    * seed landed again -- only those, as a write fetches them.
    */
   async #landSeed(s, seq, texts) {
-    const collated = this.#collated(s.collection);
-    const whole = collated && texts.length === 1;
-    if (collated && !whole) await this.#local.collation('all');
+    const whole = s.collated && texts.length === 1;
+    if (s.collated && !whole) await this.#local.collation('all');
     for (;;) {
       // What a block changes in memory -- the temporary rows, the undo of
       // each write waiting (`#heard`) -- kept to put back with it: the
@@ -2742,28 +2744,27 @@ export class FennecSync {
     return true;
   }
 
-  /** Whether a field of `c` compares by a collation the module may lack the data of. */
-  #collated(c) {
-    return !!this.#local.describe().collections?.find((x) => x.name === c)?.fields.some((f) => f.collate);
-  }
-
   /**
    * A seed landed, a part at a time, each parsed as it lands and its rows
    * written in chunks (`PUT_ROWS`). Every part is the rows of one statement
    * of the server's, its columns the same, so the first holding rows is the
    * one that may name a field the replica has not got: false then, nothing
-   * written. The shape's row says a landing is under way (`LANDING`) from
-   * the first write to the last, which writes its cursor: a page that ended
-   * between them -- a replica in a file (`openFile`) holds each statement
-   * as it lands -- finds it as it opens again and empties the shape before
-   * anything reads it (`start`), the rows of writes not yet answered kept,
-   * to be seeded again; a statement refused half way empties it so at once,
-   * but `inBlock`, which `#landSeed` puts back.
+   * written. A replica in a file (`openFile`) holds each statement as it
+   * lands, so there the shape's row says a landing is under way (`LANDING`)
+   * from the first write to the last, which writes its cursor: a page that
+   * ended between them finds it as it opens again and empties the shape
+   * before anything reads it (`start`), the rows of writes not yet answered
+   * kept, to be seeded again. Elsewhere the writes reach storage after the
+   * task, `persist`'s drain one chunk, and the mark would cost a seed of
+   * 5 000 rows a write the module had not compiled yet, 1.2 ms of 28. A
+   * statement refused half way empties the shape at once, but `inBlock`,
+   * which `#landSeed` puts back.
    */
   #landParts(s, seq, texts, inBlock) {
     const c = s.collection;
     const held = (this.#local.run(`get ${c} select id`).rows ?? []).map((r) => r.id);
     const came = new Set();
+    const mark = !inBlock && kept.has(this.#local);
     let begun = false;
     try {
       for (const text of texts) {
@@ -2773,7 +2774,7 @@ export class FennecSync {
           if (!begun) return false;
           throw new FennecError(`a part of the seed of \`${c}\` names a field the parts before it did not`);
         }
-        if (!begun) this.#local.run(PUT_SHAPE, [s.row, c, s.fingerprint, LANDING, false]);
+        if (!begun && mark) this.#local.run(PUT_SHAPE, [s.row, c, s.fingerprint, LANDING, false]);
         begun = true;
         for (const r of rows) came.add(r.id);
         this.#reconcile(s, rows);
@@ -3006,11 +3007,14 @@ export class FennecSync {
       this.#emptyShape(s);
     }
     const schemas = this.#local.schemas();
+    // `schemas` names no collation; the description does.
+    const described = schemas.length ? this.#local.describe().collections ?? [] : [];
     for (const s of this.#shapes.values()) {
       const schema = schemas.find((x) => x.name === s.collection);
       s.made = !!schema;
       s.fields = new Set(schema?.fields.map((f) => f.name));
       s.apart = apartIn(schema);
+      s.collated = collatedIn(described.find((x) => x.name === s.collection));
     }
     this.#flushing = this.#queue.length > 0;
     if (this.#allSeeded) this.#resolveReady();
@@ -3412,6 +3416,9 @@ function normalizeShape(raw, url) {
     fields: new Set(),
     // Whether its rows go by the builder's text (`#putRows`).
     apart: false,
+    // Whether a field compares by a collation, whose data the module may
+    // lack (`#landSeed`).
+    collated: false,
     rebuild: false,
     fresh: false,
     // A seed in parts under way: its change and its parts' texts (`#seedPart`).

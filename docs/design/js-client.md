@@ -464,16 +464,22 @@ a block keeps every write it makes until it lands -- its frames, doubling
 as they grow, and an undo a write -- in the module's memory, which never
 gives them back. Landed in one block, a 300 000-row seed left the module at
 168.9 MB against 68.7 without one, and a 5 000-row seed of one part at 5.0
-against 3.8. Without it, a page that ends half way -- a replica in a file
-(`openFile`), which flushes each statement, or a `persist` journal drained
-part way -- keeps the first writes of a landing. So the landing writes the
-shape's row first, its cursor `LANDING` (-1, no change of the server's),
-and its last write puts the seed's change there: a replica opened with
-`LANDING` in a shape's row deletes the shape's rows but those of writes
-not yet answered before anything reads them, and seeds it again whole
-(`start`, `#emptyShape`). A statement refused half way -- a value a
-`@unique` field of the replica's holds -- empties the shape so too, before
-the error ends the stream.
+against 3.8. Without it, a replica in a file (`openFile`), which flushes
+each statement as it lands, keeps the first writes of a landing a page
+ended half way through. So there the landing writes the shape's row first,
+its cursor `LANDING` (-1, no change of the server's), and its last write
+puts the seed's change there: a replica opened with `LANDING` in a shape's
+row deletes the shape's rows but those of writes not yet answered before
+anything reads them, and seeds it again whole (`start`, `#emptyShape`).
+Elsewhere no mark is written: `persist` drains what a task wrote after it,
+into one chunk stored in one transaction, so a landing reaches IndexedDB
+whole or not at all, and the mark's write -- a statement the module had
+not compiled yet at the first seed -- took 1.2 ms of a 5 000-row seed's
+28. A statement refused half way -- a value a `@unique` field of the
+replica's holds -- empties the shape at once, before the error ends the
+stream. Whether a collection is collated is noted with its schema
+(`collatedIn`), not asked of `describe()` at each seed, which took
+0.3 ms of the same seed.
 
 A collated field's statement is refused where the module lacks the
 collation data its text needs, and that data is fetched, which is awaited.

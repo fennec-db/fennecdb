@@ -38,9 +38,10 @@ never in the module, and lands them once the last came, a part at a time
 with nothing awaited between the first write and the last (`#landParts`),
 never in a block, whose writes the module's memory would keep -- but one
 part into a collated collection (`#landSeed`), put back for the data it
-lacks; several there fetch it all first. The shape's row says `LANDING`
-until the cursor is written; an open finding it, or a write refused half
-way, empties the shape before anything reads it (`#emptyShape`).
+lacks; several there fetch it all first. In a file (`openFile`), which
+holds each statement as it lands, the shape's row says `LANDING` until the
+cursor is written; an open finding it, or a write refused half way,
+empties the shape before anything reads it (`#emptyShape`).
 
 **[A number from 2^53 on goes out as every
 digit.](../docs/design/indexes.md#sorted)** Whatever sends values to a
