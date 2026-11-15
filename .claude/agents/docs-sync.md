@@ -12,8 +12,8 @@ change.
 
 - All prose is English. Match the surrounding pages' voice: short sentences,
   what holds and why, no marketing.
-- A figure on the site comes from a results file in the repo (for YCSB,
-  `ycsb/results.tsv`, held by `site/build.py`); never type a number you did
+- A figure on the site comes from a results file in the repo (`crates/fennec-bench/results/<family>.tsv`,
+  held by `site/build.py`); never type a number you did
   not read from one.
 - After editing CLAUDE.md run `make agents-md`. After a builder change run
   `make builder-golden`; after a schema change `make schema-golden`; after

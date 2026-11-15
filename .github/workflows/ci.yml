@@ -7,12 +7,16 @@ name: ci
 # behind that backlog). So a push starts this workflow only when an input of
 # a cache moved, or the workflow itself: a run on main is the only one whose
 # caches other branches may restore (a pull request's and a merge group's are
-# scoped to their own refs). The caches and their inputs:
-#   - the 21 cargo actions/cache steps: Cargo.lock and rust-toolchain.toml
-#     (the one Unicode table step is keyed by its version, pinned here);
-#   - setup-node `cache: npm`, the Grafana job: its package-lock.json;
-#   - setup-go, the same job: go.sum, and go.mod for the Go version;
-#   - the Flutter caches: the version pinned in this file;
+# scoped to their own refs). Every cache is restored by every run and saved by
+# the runs on main alone (`actions/cache/restore`, and a `save` step under
+# `github.ref == 'refs/heads/main'`), so the entries a pull request would save
+# for itself, and that push main's out of the 10 GB, are never made. The caches
+# and their inputs:
+#   - the 21 cargo cache steps: Cargo.lock and rust-toolchain.toml (the one
+#     Unicode table step is keyed by its version, pinned here);
+#   - the Grafana job's npm and Go caches: its package-lock.json, go.mod and
+#     go.sum;
+#   - no Flutter cache: it cost more of the cap than the download it saved;
 #   - setup-gradle: its key is the job and the commit, not a file's hash, and
 #     only main writes it (`cache-read-only` off the default branch), so what
 #     it holds is as old as main's last run; the Gradle build files, the
@@ -87,7 +91,8 @@ jobs:
       # its script alone, through rustfmt, from Unicode's UnicodeData.txt --
       # kept by its version, so a run asks unicode.org only on a miss, and
       # held to the checksum gen.py pins either way.
-      - uses: actions/cache@v6
+      - id: unicode-cache
+        uses: actions/cache/restore@v6
         with:
           path: ~/.cache/unicode/17.0.0
           key: unicode-17.0.0-UnicodeData
@@ -142,6 +147,13 @@ jobs:
       - name: tools/instr's UUID copies, figures and trace deltas
         run: python3 tools/instr/test_instr.py
 
+      # docs/design/benchmarks.md#the-gate: the perf job's judgement -- a
+      # synthetic +1% fails, a PERF_ACCEPTED entry the pull request adds
+      # lets it through, one the base holds does not -- and the entries
+      # read as data.
+      - name: tools/perf_gate.py fails +1% and lets an entry through
+        run: python3 tools/test_perf_gate.py
+
       # docs/design/http.md#compatibility: the checker the test job runs on
       # the served documents finds each kind of break, lets each addition
       # through, and holds BREAKS and the committed baseline.
@@ -155,6 +167,13 @@ jobs:
       # behind -- is held here on every one.
       - name: The power cut's check fails a late sync, a loss past the window, a cut between writes and a standby far behind
         run: python3 -B .github/power-cut/test_client.py
+
+      - name: Save the cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.unicode-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.cache/unicode/17.0.0
+          key: ${{ steps.unicode-cache.outputs.cache-primary-key }}
 
   clippy:
     name: clippy
@@ -170,15 +189,16 @@ jobs:
           rustup show
           rustup component add clippy
 
-      - uses: actions/cache@v6
+      - id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ubuntu-latest-clippy-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: ubuntu-latest-clippy-
+          key: v2-ubuntu-latest-clippy-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-ubuntu-latest-clippy-
 
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -233,6 +253,22 @@ jobs:
       - name: SQL's joins answer what SQLite answers
         run: cargo test -p fennec-bench --test joins_sqlite
 
+      - name: Prune target/ to the crates from outside the workspace (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: sh tools/ci_prune_target.sh
+
+      - name: Save the cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -264,15 +300,16 @@ jobs:
         with:
           node-version: '22'
 
-      - uses: actions/cache@v6
+      - id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: ${{ matrix.os }}-cargo-
+          key: v2-${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-${{ matrix.os }}-cargo-
 
       # The browser bundle comes first: the JS suites skip themselves on a
       # machine with no web/fennec.wasm and throw under CI (web/ci-prereq.mjs),
@@ -303,6 +340,7 @@ jobs:
           # The studio editor's live highlighter is written from build.py's rules
           # and must colour every statement as the docs do.
           python3 site/test_highlight.py
+          python3 site/test_results.py
 
       # Rust first, then the JS tests -- `cargo test` is also what builds the
       # fennec-server binary that the sync tests run against.
@@ -384,6 +422,22 @@ jobs:
       # it was, and a runner that skipped a scenario fails the job.
       - name: Both sync runners ran every scenario
         run: node integrations/sync-scenarios-check.mjs
+
+      - name: Prune target/ to the crates from outside the workspace (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: sh tools/ci_prune_target.sh
+
+      - name: Save the cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   # docs/design/replication.md#follow: the import's PostgreSQL arm and
   # `--follow` -- COPY, pgoutput, the mirror fennec-server serves, SCRAM
@@ -478,15 +532,16 @@ jobs:
       - name: Install the pinned toolchain
         run: rustup show
 
-      - uses: actions/cache@v6
+      - id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: windows-latest-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: windows-latest-cargo-
+          key: v2-windows-latest-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-windows-latest-cargo-
 
       - name: Build fennec-server, fennec and the native library
         run: cargo build -p fennec-server -p fennec-cli -p fennec-ffi
@@ -497,6 +552,22 @@ jobs:
       # Beside fennec-server's binary, which the build above put there.
       - name: A second process over a served file is refused
         run: cargo test -p fennec-cli --test lock
+
+      - name: Prune target/ to the crates from outside the workspace (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: sh tools/ci_prune_target.sh
+
+      - name: Save the cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   # macOS x86_64 ships (release.yml cross-builds fennec and fennec-server
   # for it), and only an x86_64 process runs fennec-core's SSE/AVX and CRC
@@ -520,15 +591,16 @@ jobs:
           rustup show
           rustup target add x86_64-apple-darwin
 
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: macos-x86_64-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: macos-x86_64-cargo-
+          key: v2-macos-x86_64-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-macos-x86_64-cargo-
 
       # crc.rs falls back to the table silently where detection fails; this
       # makes the test `hardware_path_is_chosen` assert Rosetta runs SSE4.2.
@@ -539,6 +611,22 @@ jobs:
           cargo test --target x86_64-apple-darwin \
             -p fennec-core -p fennec-ql -p fennec-abi -p fennec-http \
             -p fennec-cli -p fennec-server
+
+      - name: Prune target/ to the crates from outside the workspace (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: sh tools/ci_prune_target.sh
+
+      - name: Save the cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   # fennec-core whole on Windows (docs/design/windows.md, decision 5):
   # the file mapped in views laid end to end in a placeholder (slice 2),
@@ -560,15 +648,16 @@ jobs:
       - name: Install the pinned toolchain
         run: rustup show
 
-      - uses: actions/cache@v6
+      - id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ matrix.os }}-core-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: ${{ matrix.os }}-core-
+          key: v2-${{ matrix.os }}-core-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-${{ matrix.os }}-core-
 
       # The library's and the integration tests; not the examples, which
       # `cargo test` builds otherwise: measurement programs `make` runs on
@@ -627,6 +716,22 @@ jobs:
       - name: fennec-core's suite
         run: cargo test -p fennec-core --lib --tests -- --skip 'fs::'
 
+      - name: Prune target/ to the crates from outside the workspace (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: sh tools/ci_prune_target.sh
+
+      - name: Save the cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
   # docs/design/windows.md, slice 3: fennec-server's suite on Windows, each
   # of its servers stopped by Ctrl+Break to the process group the harness
   # started it in -- the one shutdown, through the console's events -- and
@@ -647,15 +752,16 @@ jobs:
       - name: Install the pinned toolchain
         run: rustup show
 
-      - uses: actions/cache@v6
+      - id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ matrix.os }}-server-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: ${{ matrix.os }}-server-
+          key: v2-${{ matrix.os }}-server-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-${{ matrix.os }}-server-
 
       - name: Build the suites
         run: cargo test -p fennec-server -p fennec-abi -p fennec-cli -p fennec-ffi --no-run
@@ -679,6 +785,22 @@ jobs:
       - name: fennec-abi's, fennec's and the native library's suites
         run: cargo test -p fennec-abi -p fennec-cli -p fennec-ffi
 
+      - name: Prune target/ to the crates from outside the workspace (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: sh tools/ci_prune_target.sh
+
+      - name: Save the cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
   # docs/design/windows.md, slice 4: fennec-http's suite on Windows -- its
   # servers run in the tests' own process, over files mapped as slice 2
   # maps them -- beside fennec-ql's and fennec-import's. With `tls`, as the
@@ -695,15 +817,16 @@ jobs:
       - name: Install the pinned toolchain
         run: rustup show
 
-      - uses: actions/cache@v6
+      - id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: windows-latest-http-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: windows-latest-http-
+          key: v2-windows-latest-http-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-windows-latest-http-
 
       - name: Build the suites
         run: cargo test -p fennec-http -p fennec-ql -p fennec-import --features fennec-http/tls --lib --tests --no-run
@@ -739,6 +862,22 @@ jobs:
       - name: fennec-http's suite
         if: ${{ !cancelled() }}
         run: cargo test -p fennec-http --features tls --lib --tests --no-fail-fast
+
+      - name: Prune target/ to the crates from outside the workspace (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: sh tools/ci_prune_target.sh
+
+      - name: Save the cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   # docs/design/windows.md, slice 5: the Windows release's zip, made as
   # release.yml makes it on a tag (tools/windows-zip.sh: the release and cli
@@ -797,15 +936,16 @@ jobs:
           rustup show
           rustup target add ${{ matrix.target }}
 
-      - uses: actions/cache@v6
+      - id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ matrix.os }}-release-zip-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: ${{ matrix.os }}-release-zip-
+          key: v2-${{ matrix.os }}-release-zip-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-${{ matrix.os }}-release-zip-
 
       - name: The zip, as release.yml makes it
         run: tools/windows-zip.sh "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)" ${{ matrix.target }} dist
@@ -821,6 +961,22 @@ jobs:
         run: |
           $zip = Get-Item dist/*.zip
           ./site/test_install.ps1 -Zip $zip.FullName -Version ($zip.Name -replace '^fennec-v(.+)-${{ matrix.target }}\.zip$', '$1')
+
+      - name: Prune target/ to the crates from outside the workspace (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: sh tools/ci_prune_target.sh
+
+      - name: Save the cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   # The C library for Linux as release.yml makes it (tools/linux-ffi.sh) and
   # holds it before it keeps it (tools/linux-ffi-check.sh: its exports, the
@@ -850,15 +1006,16 @@ jobs:
           rustup target add ${{ matrix.target }}
           command -v pkg-config >/dev/null || { sudo apt-get update && sudo apt-get install -y pkg-config; }
 
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ matrix.os }}-linux-ffi-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: ${{ matrix.os }}-linux-ffi-
+          key: v2-${{ matrix.os }}-linux-ffi-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-${{ matrix.os }}-linux-ffi-
 
       - name: The tarball, as release.yml makes it
         run: tools/linux-ffi.sh "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)" ${{ matrix.target }} dist
@@ -871,6 +1028,22 @@ jobs:
           name: fennec-ffi-${{ matrix.target }}
           path: dist/*.tar.gz
           if-no-files-found: error
+
+      - name: Prune target/ to the crates from outside the workspace (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: sh tools/ci_prune_target.sh
+
+      - name: Save the cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   # What a pull request does to the browser module against the branch it goes
   # into, on the run's summary page: raw, gzip and brotli, the code by crate,
@@ -900,6 +1073,268 @@ jobs:
           sudo apt-get install -y --no-install-recommends brotli
           python3 crates/fennec-wasm/size_report.py HEAD^1 "$BASE"
 
+  # docs/design/benchmarks.md#the-gate: every workload of
+  # crates/fennec-http/examples/gate.rs counted under callgrind in the
+  # base's build and this one's -- the static musl build that ships, the
+  # same program on both sides -- five runs a side, each with its tally of
+  # what it asked of the allocator. Counted by the base's copy of the
+  # checker, so a pull request's edit of it -- a function priced away, the
+  # runs cut -- counts nothing until it has landed; judged apart, by
+  # `perf`. The base is the merge's first parent, a pull request's base
+  # branch or the commit a merge group queues onto, built with its own
+  # toolchain. valgrind and musl-gcc (ring's C, through the examples'
+  # dev-dependency on fennec-tls) are the runner's packages, no crate.
+  perf-count:
+    name: perf (count)
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      # Under tools/, so it reads this checkout as its tree; this tree's
+      # only where the base has none yet.
+      - name: The base's checker
+        run: |
+          if git show HEAD^1:tools/perf_gate.py > tools/perf_gate_base.py; then
+            echo "counted by the base's checker"
+          else
+            cp tools/perf_gate.py tools/perf_gate_base.py
+            echo "the base has no tools/perf_gate.py yet: this tree's counts"
+          fi
+
+      # Counted unless every path is the site's, the docs', an
+      # integration's, the browser client's, the studio's, deploy/'s or
+      # Markdown: the root manifest's profiles, .cargo/ or a tool reach
+      # the build as a crate does.
+      - name: Whether the change reaches what the gate builds
+        id: reach
+        run: python3 -I tools/perf_gate_base.py reaches --base HEAD^1 --output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+
+      # The base's channel beside this tree's: a pull request moving
+      # rust-toolchain.toml builds its base with the base's compiler.
+      - name: Install both sides' toolchains, the musl target, valgrind and musl-gcc
+        if: steps.reach.outputs.built == 'true'
+        run: |
+          rustup show
+          rustup target add x86_64-unknown-linux-musl
+          base=$(git show HEAD^1:rust-toolchain.toml 2>/dev/null | sed -n 's/^channel *= *"\([^"]*\)".*/\1/p')
+          if [ -n "$base" ]; then
+            rustup toolchain install "$base" --profile minimal --target x86_64-unknown-linux-musl
+          fi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends valgrind musl-tools
+
+      - name: Count each workload's instructions and heap in the base's build and this one's
+        if: steps.reach.outputs.built == 'true'
+        run: |
+          python3 -I tools/perf_gate_base.py run --base HEAD^1 --target x86_64-unknown-linux-musl \
+            --work "$RUNNER_TEMP/perf" --out "$RUNNER_TEMP/perf/results.json" --no-check
+
+      - name: Keep the results for the judgement
+        if: steps.reach.outputs.built == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: perf-results
+          path: ${{ runner.temp }}/perf/results.json
+          retention-days: 14
+
+      # Each side's median run of each workload, by function: what
+      # `callgrind_annotate` diffs to name where a count grew.
+      - name: Keep the median runs' profiles
+        if: steps.reach.outputs.built == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: perf-profiles
+          path: ${{ runner.temp }}/perf/profiles/
+          retention-days: 14
+
+      # P50, the I/O counts -- fsyncs and bytes written a durable write and
+      # a compact, under strace -f -c -- goes here, over the same two
+      # builds and the same checker: a results file of its own `metric`.
+
+  # docs/design/benchmarks.md#the-gate: perf (count)'s results held to the
+  # base's by the base's copy of the checker, the pull request's
+  # PERF_ACCEPTED read as data and the workloads held to the base's own
+  # program's: +1% or more in instructions or in heap bytes an op fails
+  # unless the pull request adds an entry naming the workload, and so does
+  # a workload the base's program runs that this tree dropped or the base
+  # did not run. A job of its own: the count runs the change's build
+  # scripts and programs, which could put anything on a later step's PATH
+  # ($GITHUB_PATH); here nothing of the change runs, and git and python3
+  # are the runner's. It names every edit of the gate's own files and
+  # every entry added, which the owner approves before the change merges.
+  # This job is the check a merge may require.
+  perf:
+    name: perf (instructions)
+    needs: perf-count
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: The base's checker and program
+        id: base
+        run: |
+          mkdir -p "$RUNNER_TEMP/judge"
+          if git show HEAD^1:tools/perf_gate.py > tools/perf_gate_base.py; then
+            echo "had=true" >> "$GITHUB_OUTPUT"
+            echo "judged by the base's checker"
+          else
+            cp tools/perf_gate.py tools/perf_gate_base.py
+            echo "the base has no tools/perf_gate.py yet: this tree's judges"
+          fi
+          git show HEAD^1:crates/fennec-http/examples/gate.rs > "$RUNNER_TEMP/judge/base_gate.rs" \
+            || : > "$RUNNER_TEMP/judge/base_gate.rs"
+
+      - name: The gate's own files this change edits, for the owner
+        run: python3 -I tools/perf_gate_base.py edits --base HEAD^1 --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Whether the change reaches what the gate builds
+        id: reach
+        run: python3 -I tools/perf_gate_base.py reaches --base HEAD^1 --output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+
+      # A count that failed, or never ran, is no pass.
+      - name: The count ran
+        if: steps.reach.outputs.built == 'true'
+        env:
+          COUNT: ${{ needs.perf-count.result }}
+        run: |
+          if [ "$COUNT" != success ]; then
+            echo "::error title=perf gate::perf (count) ended $COUNT: nothing to judge, its log says why"
+            echo "perf (count) ended $COUNT: nothing to judge." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: The count's results
+        if: steps.reach.outputs.built == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: perf-results
+          path: ${{ runner.temp }}/judge
+
+      - name: Hold them to the base's, by the base's checker
+        if: steps.reach.outputs.built == 'true'
+        env:
+          BASE_HAD: ${{ steps.base.outputs.had }}
+        run: |
+          # The entries the base holds already let nothing through.
+          held=()
+          if [ "$BASE_HAD" = true ]; then
+            held=(--accepted-base tools/perf_gate_base.py)
+          fi
+          python3 -I tools/perf_gate_base.py check "$RUNNER_TEMP/judge/results.json" \
+            --accepted-from tools/perf_gate.py "${held[@]}" \
+            --base-program "$RUNNER_TEMP/judge/base_gate.rs" --summary "$GITHUB_STEP_SUMMARY"
+
+  # A page's database kept in real browsers (web/browser/, `make
+  # browser-test`): persist and restore against each engine's IndexedDB and
+  # WebCrypto, openFile against its origin private file system, the page
+  # reloaded in the middle of a persist's transaction and at each step of a
+  # file's flush, and a quota passed. web/fennec.persist.test.js and
+  # web/fennec.file.test.js hold the same calls to in-memory stand-ins. The
+  # module is built once, here, and both browser jobs test those bytes: the
+  # macOS job, on the account's scarce Mac runners, builds nothing.
+  browsers-module:
+    name: browsers (module)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the pinned toolchain
+        run: rustup show
+
+      - name: Build the module
+        run: make wasm
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: browsers-fennec-wasm
+          path: web/fennec.wasm
+          if-no-files-found: error
+          retention-days: 1
+
+  # Chrome and Firefox headless on Linux, driven by puppeteer-core, each
+  # browser's files read before its first launch (run.mjs's `warm`). Chrome
+  # stops a busy worker 2 s after its page goes, so its run waits that long
+  # at each of the nine reloads in the middle of a flush: 80 s on #650's
+  # run, the module's 34 s (2026-11-14).
+  browsers:
+    name: browsers (chrome, firefox)
+    needs: browsers-module
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: browsers-fennec-wasm
+          path: web
+
+      - name: puppeteer-core
+        working-directory: web/browser
+        run: npm ci --no-audit --no-fund --loglevel=error
+
+      - name: The suite in Chrome and Firefox
+        env:
+          CHROME_PATH: /usr/bin/google-chrome
+          FIREFOX_PATH: /usr/bin/firefox
+        run: node web/browser/run.mjs chrome firefox
+
+  # Safari on macOS through safaridriver, which the runner allows once
+  # `--enable`d. On every run, a pull request's too: no browsers job is a
+  # required check, so a Safari failure seen only in the merge queue would
+  # not stop the merge, and a pull request's own run is where it is read.
+  # It costs one of the 5 macOS slots (CI's bottleneck) for 30 s a run (run
+  # 43631233253 on #650, 18 s of it the suite). Bounded by the rule above
+  # from that run -- twice 30 s is 1 minute, plus 2 minutes 2.5 -- and 20
+  # suite runs in a row on macos-latest took 9 to 25 s each (2026-11-14).
+  browsers-safari:
+    name: browsers (safari)
+    needs: browsers-module
+    runs-on: macos-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: browsers-fennec-wasm
+          path: web
+
+      - name: Allow safaridriver to drive Safari
+        run: sudo safaridriver --enable
+
+      - name: The suite in Safari
+        run: node web/browser/run.mjs safari
+
   integrations:
     name: integrations (python, react)
     runs-on: ubuntu-latest
@@ -914,15 +1349,16 @@ jobs:
         with:
           node-version: '22'
 
-      - uses: actions/cache@v6
+      - id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ubuntu-latest-integrations-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: ubuntu-latest-integrations-
+          key: v2-ubuntu-latest-integrations-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-ubuntu-latest-integrations-
 
       # LangChain's standard vector store suite and the tests LlamaIndex's
       # own integrations run, from a python:3.13 container, against a
@@ -999,6 +1435,22 @@ jobs:
           integrations/packages.sh
           integrations/dotnet/package.sh
 
+      - name: Prune target/ to the crates from outside the workspace (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: sh tools/ci_prune_target.sh
+
+      - name: Save the cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
   # examples/: the Notes app in each language that runs on the runner, on
   # this checkout's build -- npm packs of web/ and integrations/react, the
   # Python client by PYTHONPATH, a Go replace, a .NET project reference,
@@ -1019,20 +1471,37 @@ jobs:
         with:
           node-version: '22'
 
-      - uses: actions/cache@v6
+      - id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ubuntu-latest-examples-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: ubuntu-latest-examples-
+          key: v2-ubuntu-latest-examples-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-ubuntu-latest-examples-
 
       - name: The Notes examples
         run: |
           make wasm
           examples/run-tests.sh node-server web-local react python go dotnet rust
+
+      - name: Prune target/ to the crates from outside the workspace (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: sh tools/ci_prune_target.sh
+
+      - name: Save the cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   # examples/shop: the Next.js shop over a release fennec-server -- the
   # catalog seeded, the site built, its lint, its correctness, security and
@@ -1053,15 +1522,16 @@ jobs:
         with:
           node-version: '22'
 
-      - uses: actions/cache@v6
+      - id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ubuntu-latest-shop-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: ubuntu-latest-shop-
+          key: v2-ubuntu-latest-shop-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-ubuntu-latest-shop-
 
       - name: The shop
         run: |
@@ -1069,6 +1539,22 @@ jobs:
           cargo build --release -p fennec-server
           SHOP_FENNEC_SERVER="$PWD/target/release/fennec-server" SHOP_LIGHTHOUSE=1 \
             CHROME_PATH="$(command -v google-chrome)" examples/run-tests.sh shop
+
+      - name: Prune target/ to the crates from outside the workspace (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: sh tools/ci_prune_target.sh
+
+      - name: Save the cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   # examples/ledger: the payments ledger over a release fennec-server tenant
   # node -- 16 clients making 20 000 operations in process and over HTTP and
@@ -1089,15 +1575,16 @@ jobs:
         with:
           node-version: '22'
 
-      - uses: actions/cache@v6
+      - id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ubuntu-latest-ledger-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: ubuntu-latest-ledger-
+          key: v2-ubuntu-latest-ledger-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-ubuntu-latest-ledger-
 
       - name: The ledger
         run: |
@@ -1105,6 +1592,22 @@ jobs:
           cargo build --release -p fennec-server -p fennec-cli
           LEDGER_FENNEC_SERVER="$PWD/target/release/fennec-server" LEDGER_FENNEC_CLI="$PWD/target/release/fennec" \
             examples/run-tests.sh ledger
+
+      - name: Prune target/ to the crates from outside the workspace (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: sh tools/ci_prune_target.sh
+
+      - name: Save the cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   # examples/saas: Trellis, the team workspace, over release fennec-server
   # tenant nodes and fennec-shard -- its auth and token attack tests, the
@@ -1125,15 +1628,16 @@ jobs:
         with:
           node-version: '22'
 
-      - uses: actions/cache@v6
+      - id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ubuntu-latest-saas-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: ubuntu-latest-saas-
+          key: v2-ubuntu-latest-saas-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-ubuntu-latest-saas-
 
       - name: Trellis
         run: |
@@ -1141,6 +1645,22 @@ jobs:
           cargo build --release -p fennec-server -p fennec-shard
           SAAS_FENNEC_SERVER="$PWD/target/release/fennec-server" SAAS_FENNEC_SHARD="$PWD/target/release/fennec-shard" \
             examples/run-tests.sh saas
+
+      - name: Prune target/ to the crates from outside the workspace (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: sh tools/ci_prune_target.sh
+
+      - name: Save the cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   # examples/recipes: the docs' guides to auth, files in S3 or R2, and functions
   # and webhooks, each run against this checkout's debug fennec-server and
@@ -1163,20 +1683,37 @@ jobs:
         with:
           node-version: '22'
 
-      - uses: actions/cache@v6
+      - id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ubuntu-latest-recipes-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: ubuntu-latest-recipes-
+          key: v2-ubuntu-latest-recipes-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-ubuntu-latest-recipes-
 
       - name: The recipes
         run: |
           make wasm
           make recipes-test
+
+      - name: Prune target/ to the crates from outside the workspace (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: sh tools/ci_prune_target.sh
+
+      - name: Save the cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   # examples/dispatch: Plover, courier dispatch over release fennec-server
   # tenant nodes and fennec-shard -- 50 couriers claiming at once and waiting
@@ -1198,15 +1735,16 @@ jobs:
         with:
           node-version: '22'
 
-      - uses: actions/cache@v6
+      - id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ubuntu-latest-dispatch-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: ubuntu-latest-dispatch-
+          key: v2-ubuntu-latest-dispatch-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-ubuntu-latest-dispatch-
 
       - name: Plover
         run: |
@@ -1214,6 +1752,22 @@ jobs:
           cargo build --release -p fennec-server -p fennec-shard
           DISPATCH_FENNEC_SERVER="$PWD/target/release/fennec-server" DISPATCH_FENNEC_SHARD="$PWD/target/release/fennec-shard" \
             examples/run-tests.sh dispatch
+
+      - name: Prune target/ to the crates from outside the workspace (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: sh tools/ci_prune_target.sh
+
+      - name: Save the cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   # examples/analytics: Kestrel, product analytics over a release
   # fennec-server tenant node -- 40 days of history folded by the rollup
@@ -1235,15 +1789,16 @@ jobs:
         with:
           node-version: '22'
 
-      - uses: actions/cache@v6
+      - id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ubuntu-latest-analytics-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: ubuntu-latest-analytics-
+          key: v2-ubuntu-latest-analytics-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-ubuntu-latest-analytics-
 
       - name: Kestrel
         run: |
@@ -1251,6 +1806,22 @@ jobs:
           cargo build --release -p fennec-server
           ANALYTICS_FENNEC_SERVER="$PWD/target/release/fennec-server" ANALYTICS_LIGHTHOUSE=1 \
             CHROME_PATH="$(command -v google-chrome)" examples/run-tests.sh analytics
+
+      - name: Prune target/ to the crates from outside the workspace (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: sh tools/ci_prune_target.sh
+
+      - name: Save the cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   # fennecdb-datasource (integrations/grafana) as a release would ship it --
   # its frontend's types, lint, tests and webpack build, its backend built
@@ -1268,16 +1839,33 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # setup-node's and setup-go's `cache` save in their post step from any
+      # ref, and have no read-only switch, so the two caches are the
+      # actions' own paths, restored here and saved by main alone below.
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
-          cache: npm
-          cache-dependency-path: integrations/grafana/package-lock.json
 
       - uses: actions/setup-go@v7
         with:
           go-version-file: integrations/grafana/go.mod
-          cache-dependency-path: integrations/grafana/go.sum
+          cache: false
+
+      - id: npm-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.npm
+          key: v2-npm-${{ runner.os }}-${{ hashFiles('integrations/grafana/package-lock.json') }}
+          restore-keys: v2-npm-${{ runner.os }}-
+
+      - id: go-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: v2-go-${{ runner.os }}-${{ hashFiles('integrations/grafana/go.mod', 'integrations/grafana/go.sum') }}
+          restore-keys: v2-go-${{ runner.os }}-
 
       - name: The plugin's frontend
         working-directory: integrations/grafana
@@ -1304,6 +1892,22 @@ jobs:
           docker create --name fennec-server fennecdb
           docker cp fennec-server:/usr/local/bin/fennec-server "$RUNNER_TEMP/fennec-server"
           FENNEC_SERVER="$RUNNER_TEMP/fennec-server" go test -count=1 ./pkg/...
+
+      - name: Save the npm cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.npm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.npm
+          key: ${{ steps.npm-cache.outputs.cache-primary-key }}
+
+      - name: Save the Go cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.go-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ steps.go-cache.outputs.cache-primary-key }}
 
   # deploy/: the alert rules under promtool, every systemd unit booted in
   # two privileged containers running systemd, and the failover drill --
@@ -1402,15 +2006,16 @@ jobs:
       - name: Install the pinned toolchain
         run: rustup show
 
-      - uses: actions/cache@v6
+      - id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ubuntu-latest-build-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: ubuntu-latest-build-
+          key: v2-ubuntu-latest-build-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-ubuntu-latest-build-
 
       # `make small` is the smallest shell binary and the only build of the
       # CLI without its default features, import and backup. fennec-core
@@ -1420,6 +2025,22 @@ jobs:
 
       - name: Build the server (release)
         run: cargo build --release -p fennec-server
+
+      - name: Prune target/ to the crates from outside the workspace (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: sh tools/ci_prune_target.sh
+
+      - name: Save the cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   # docs/design/conventions.md#fuzzing: every parser of untrusted bytes --
   # an HTTP request, JSON, FennecQL, the codec, a .fennec file's open and a
@@ -1477,15 +2098,16 @@ jobs:
           rustup show
           rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
 
-      - uses: actions/cache@v6
+      - id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ubuntu-latest-mobile-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: ubuntu-latest-mobile-
+          key: v2-ubuntu-latest-mobile-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-ubuntu-latest-mobile-
 
       - uses: actions/setup-java@v6
         with:
@@ -1551,11 +2173,15 @@ jobs:
       # package:flutter/material.dart, which `flutter analyze` fails on in the
       # examples (#590). Raised by hand, once the examples take what a new
       # release asks: 3.50.0 after they moved to package:material_ui (#591).
+      # No cache: the action's own saves from any ref and has no read-only
+      # switch, the SDK's entry was 2.0 GiB (macOS) and 1.6 GiB (Linux) and
+      # restoring it saved 28 s and 16 s of a download (docs/design/conventions.md).
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
           flutter-version: 3.50.0
-          cache: true
+          cache: false
+          pub-cache: false
 
       # The Dart package under Flutter's own Dart -- its sync tests against
       # a server run-tests.sh builds -- then the plugin's test.
@@ -1619,6 +2245,22 @@ jobs:
           find "$GRADLE_USER_HOME/caches/modules-2/files-2.1" -name '*.gradle.plugin-*.pom' -newer "$m" 2>/dev/null | sed 's|.*/|Plugin downloaded: |'
           echo "Artifacts downloaded: $(find "$GRADLE_USER_HOME/caches/modules-2/files-2.1" -type f -newer "$m" 2>/dev/null | wc -l)"
 
+      - name: Prune target/ to the crates from outside the workspace (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: sh tools/ci_prune_target.sh
+
+      - name: Save the cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
   # The same on Apple's platforms: every slice of the XCFramework, the Swift
   # package's tests on macOS and on an iOS simulator, the library's size
   # linked for each target, and the Flutter plugin's example built for the
@@ -1637,15 +2279,16 @@ jobs:
           rustup show
           rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios x86_64-apple-darwin
 
-      - uses: actions/cache@v6
+      - id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: macos-latest-mobile-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: macos-latest-mobile-
+          key: v2-macos-latest-mobile-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-macos-latest-mobile-
 
       - name: XCFramework (macOS, iOS, the simulator)
         run: integrations/swift/build-xcframework.sh --zip
@@ -1695,11 +2338,15 @@ jobs:
             | tee -a "$GITHUB_STEP_SUMMARY" "$RUNNER_TEMP/ffi-sizes.md"
           python3 integrations/ffi_sizes_check.py "$RUNNER_TEMP/ffi-sizes.md"
 
+      # No cache: the action's own saves from any ref and has no read-only
+      # switch, the SDK's entry was 2.0 GiB (macOS) and 1.6 GiB (Linux) and
+      # restoring it saved 28 s and 16 s of a download (docs/design/conventions.md).
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
           flutter-version: 3.50.0
-          cache: true
+          cache: false
+          pub-cache: false
 
       - name: The Flutter plugin in an iOS app
         run: |
@@ -1733,3 +2380,19 @@ jobs:
           path: integrations/swift/build/ios-tests.xcresult
           retention-days: 7
           if-no-files-found: ignore
+
+      - name: Prune target/ to the crates from outside the workspace (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: sh tools/ci_prune_target.sh
+
+      - name: Save the cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}

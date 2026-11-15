@@ -131,6 +131,13 @@ on:
       - 'site/install.sh'
       - 'site/test_install.sh'
       - 'site/install.ps1'
+  # The backstop for an evicted cache, as ci.yml's: a push to main saves the
+  # Cargo and Hutch caches only when a path above changed, and an entry unused
+  # for 7 days is evicted, so twice a week (Monday and Thursday, minute 41 to
+  # stay off the top of the hour) main's run saves what is missing. Nothing
+  # is attached or signed by it (`attach-unsigned` and `sign` take a dispatch).
+  schedule:
+    - cron: '41 5 * * 1,4'
   workflow_dispatch:
     inputs:
       release:
@@ -173,22 +180,24 @@ jobs:
         with:
           node-version: '22'
 
-      - uses: actions/cache@v6
+      - id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: macos-latest-desktop-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: macos-latest-desktop-cargo-
+          key: v2-macos-latest-desktop-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-macos-latest-desktop-cargo-
 
       # The build tool (Hutch, its Bun, the Electrobun runtime) goes into this
       # directory, not the home one (scripts/electrobun.mjs), 130 to 210 MB
       # that Electrobun's own release hosts and the checks need not fetch again.
       # scripts/electrobun.mjs holds what is in it to hutch-pin.json on every
       # run, so a restored cache is not trusted for being one.
-      - uses: actions/cache@v6
+      - id: hutch-cache
+        uses: actions/cache/restore@v6
         with:
           path: integrations/studio-desktop/.hutch-home
           key: desktop-hutch-${{ hashFiles('integrations/studio-desktop/package-lock.json', 'integrations/studio-desktop/hutch.config.ts', 'integrations/studio-desktop/hutch-pin.json') }}
@@ -260,6 +269,31 @@ jobs:
           path: integrations/studio-desktop/artifacts/dist/fennec-studio-macos-arm64.dmg
           retention-days: 7
           if-no-files-found: error
+
+      - name: Prune target/ to the crates from outside the workspace (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: sh tools/ci_prune_target.sh
+
+      - name: Save the cargo cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+      # Saved by main alone: an entry on a pull request's ref is read by no
+      # other run (docs/design/conventions.md, "ci.yml runs on a pull request").
+      - name: Save the Hutch cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.hutch-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: integrations/studio-desktop/.hutch-home
+          key: ${{ steps.hutch-cache.outputs.cache-primary-key }}
 
   # Windows and Linux (the header): built and checked; a dispatch from main
   # that names a release attaches their downloads (`attach-unsigned`).
@@ -347,7 +381,8 @@ jobs:
 
       # As the macOS job's, a cache per system: scripts/electrobun.mjs holds what is
       # in it to hutch-pin.json on every run.
-      - uses: actions/cache@v6
+      - id: hutch-cache
+        uses: actions/cache/restore@v6
         with:
           path: integrations/studio-desktop/.hutch-home
           key: desktop-hutch-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('integrations/studio-desktop/package-lock.json', 'integrations/studio-desktop/hutch.config.ts', 'integrations/studio-desktop/hutch-pin.json') }}
@@ -522,6 +557,15 @@ jobs:
           path: integrations/studio-desktop/artifacts/dist/fennec-studio-*
           retention-days: 7
           if-no-files-found: error
+
+      # Saved by main alone: an entry on a pull request's ref is read by no
+      # other run (docs/design/conventions.md, "ci.yml runs on a pull request").
+      - name: Save the Hutch cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.hutch-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: integrations/studio-desktop/.hutch-home
+          key: ${{ steps.hutch-cache.outputs.cache-primary-key }}
 
       - name: The logs of the checks
         if: failure()

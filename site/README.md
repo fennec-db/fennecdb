@@ -96,6 +96,15 @@ prompt and none of the answers beneath. A set of tabs that are not languages
 names its own `data-tabs` and `data-key` (the Quickstart's macOS and Linux
 and Docker).
 
+Every figure with a unit that README.md, the home page, benchmarks.html and
+the `vs-*` pages quote as a measurement is held the same way, to the median of
+a `(family, cell, metric)` in `crates/fennec-bench/results/<family>.tsv` (YCSB's
+cells as `ycsb:` claims, the rest as `figures.py`'s `FIGURES`). A figure with
+no recorded run behind it is held to a `hand` row, marked hand-measured with the
+commit that first wrote it, until a night measures it; the detail pages
+(`benchmarks-vector`, `-requests`, `-text`) carry a dated "measured at" note
+(`{{measured: <families>}}`) instead of a claim for each figure.
+
 Because it has the module in hand, `build.py` also checks the numbers the prose
 puts on it. The module's size is written into eight files and had drifted by
 13 KB across all of them before this existed; `CLAIMS` at the top of the

@@ -7,7 +7,8 @@
 //! random enough that neither gzip nor brotli takes anything off it. The
 //! algorithm around it is only 469 bytes; the table *is* the cost.
 //!
-//! So the table goes and three table-free paths stay:
+//! So the table goes, and four paths read a number with what the module
+//! holds already:
 //!
 //! * **Fast.** When the mantissa fits in 53 bits and the decimal exponent is
 //!   within ±22, both `m` and `10^e` are exact `f64`s, so one IEEE multiply
@@ -17,14 +18,30 @@
 //!   divided by `5^n`, to a quotient of 55 bits and a remainder that round
 //!   exactly (`divided`). That is what JavaScript writes: seventeen digits
 //!   for most floats, every `f32` it widens among them, past Clinger's 53.
-//! * **Slow.** Otherwise the digits are shifted as a decimal string until the
-//!   value sits in `[1/2, 1)`, and the mantissa bits are read off one at a
-//!   time. This is what the standard library falls back to as well, and it
-//!   measured 2 854 bytes there -- the part worth keeping.
+//! * **Multiplied.** Any other number's first 19 digits times its power of
+//!   five to 125 bits -- Ryu's multipliers, which `f64_into` below writes
+//!   with (`pow5`, `inv_pow5`), every bit of the product kept -- give a span
+//!   the number lies in, and where both its ends round to one `f64`, that is
+//!   the number's (`near`): Eisel and Lemire's algorithm, on the table the
+//!   module holds instead of theirs. A span is never wider than 2^-59 of the
+//!   number, so only one within that of a midpoint between two `f64`s is
+//!   left over: one written with more digits, or now and then a 19-digit one.
+//! * **Exact.** That number's every digit, as one integer, is compared with
+//!   the midpoint's bits, both brought to one power of ten and of two
+//!   (`exact`, `Big`): a few thousand instructions at most.
+//!
+//! The digits were shifted as a decimal string before, 27 bits a pass, for
+//! every number the first two paths did not take: `1e255` cost 137 000
+//! instructions where `1e25` cost 211, so a 64 MiB body of them was minutes
+//! of a core; and a number past an `f64`'s range read as an infinity, which
+//! JSON writes as `null`, or a number not 0 as 0. One is refused now
+//! ([`read_f64`]), as an int past its range is.
 //!
 //! Every path is correctly rounded, and the tests check exactly that against
 //! `str::parse::<f64>()`: on the host the reference costs nothing, and only
 //! the wasm build pays for the table it replaces.
+
+use std::cmp::Ordering;
 
 /// `10^0` through `10^22` -- every power of ten that is exact in an `f64`.
 /// `10^23` is not, which is where the fast path stops.
@@ -33,9 +50,10 @@ pub(crate) const POW10: [f64; 23] = [
     1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
 ];
 
-/// Digits kept in the slow path. The smallest subnormal needs 751 significant
-/// decimal digits, and shifting adds a few; beyond this the tail cannot move
-/// a rounding decision, so it is dropped and recorded in `truncated`.
+/// Digits [`exact`] compares. A midpoint between two `f64`s has at most 768
+/// significant digits -- `(2m + 1) × 2^-1075` -- so past these a digit
+/// cannot move the comparison but where it is equal, which whether any
+/// digit past them is not 0 settles.
 const MAX_DIGITS: usize = 800;
 
 /// `s` as an `i64`, as `str::parse` reads one: a sign, then a digit or
@@ -72,8 +90,97 @@ pub fn parse_i64(s: &str) -> Option<i64> {
 
 /// Parses a decimal number. `None` for anything that is not one -- the JSON
 /// scanner hands over whatever run of `[0-9.eE+-]` it found, so `1.2.3` and
-/// `--1` do arrive here and have to be rejected rather than guessed at.
+/// `--1` do arrive here and have to be rejected rather than guessed at --
+/// and for a number past an `f64`'s range, which [`read_f64`] tells apart.
+/// Inlined, as `read_f64` is: a call of its own around the reader cost a
+/// number a dozen instructions.
+#[inline]
 pub fn parse_f64(s: &str) -> Option<f64> {
+    match read(s) {
+        (x, None) => Some(x),
+        _ => None,
+    }
+}
+
+/// Why a text reads as no `f64`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unread {
+    /// Not a decimal number: `1.2.3`, `--1`, `1e`.
+    Malformed,
+    /// Past the largest `f64`, 1.7976931348623157e308 either side of 0:
+    /// `1e400`, which would round to an infinity -- a value JSON writes as
+    /// `null`.
+    TooLarge,
+    /// Not 0, but nearer it than the smallest `f64`, 5e-324: `1e-400`,
+    /// which would round to 0.
+    TooSmall,
+}
+
+/// What a refusal says after a number past the largest `f64`.
+const TOO_LARGE: &str =
+    "is past a float's range: a float is at most 1.7976931348623157e308 either side of 0";
+
+/// What a refusal says after a number nearer 0 than the smallest `f64`.
+const TOO_SMALL: &str = "is past a float's range: a float is 0 or at least 5e-324 either side of 0";
+
+impl Unread {
+    /// What a refusal says after the number, for one past a float's range;
+    /// `None` for a malformed one, which each reader words its own way.
+    pub fn range(self) -> Option<&'static str> {
+        match self {
+            Unread::Malformed => None,
+            Unread::TooLarge => Some(TOO_LARGE),
+            Unread::TooSmall => Some(TOO_SMALL),
+        }
+    }
+}
+
+/// Whether a refusal's words `m` are those of a number past a float's
+/// range, whichever reader wrote them: they end in the range's
+/// ([`Unread::range`]). What a reader of a text handed in passes on as
+/// said -- `near`'s text of a vector, an imported json cell -- where its
+/// own words for a text it cannot read ("unparseable", "expected JSON")
+/// would call a number past the range a malformed text. The end's bytes
+/// compared, never the words searched for: a search for a pattern of
+/// several bytes brings the string searcher into the browser module (7.8
+/// KB, `Error::reason`). The two texts compared as constants: asked of
+/// [`Unread::range`] in a closure, it was 142 bytes of the module.
+pub fn past_range(m: &str) -> bool {
+    m.ends_with(TOO_LARGE) || m.ends_with(TOO_SMALL)
+}
+
+/// A number's text as a refusal names it: whole up to 40 characters, and
+/// past them its first 40 and its length -- a body of one 64 MiB number is
+/// not told back whole.
+pub fn shown(text: &str) -> String {
+    match text.get(..40) {
+        Some(head) if text.len() > 40 => format!("{head}... ({} characters)", text.len()),
+        _ => text.to_string(),
+    }
+}
+
+/// A decimal number as the `f64` nearest it, or why it is none: a text that
+/// is no number, or a number past the range -- read as an infinity or as 0
+/// it would be another number than the one written, and a limit errors, it
+/// does not truncate. A number past the largest `f64` but nearer it than the
+/// next power of two's midpoint rounds to it (1.7976931348623158e308), and
+/// one nearer 0 than the smallest `f64` but past half of it rounds up to it
+/// (3e-324), as rounding to the nearest says.
+#[inline]
+pub fn read_f64(s: &str) -> Result<f64, Unread> {
+    match read(s) {
+        (x, None) => Ok(x),
+        (_, Some(why)) => Err(why),
+    }
+}
+
+/// The reading [`read_f64`] and [`parse_f64`] wrap: `(x, None)` for a
+/// number, `(0, Some(why))` for none. A pair of two scalars comes back in
+/// two registers, where a `Result<f64, Unread>` came back through memory,
+/// its tag and number stored and loaded again -- some 5 instructions a
+/// JSON document's number, read as main's `Option<f64>` was.
+fn read(s: &str) -> (f64, Option<Unread>) {
+    let malformed = (0.0, Some(Unread::Malformed));
     let b = s.as_bytes();
     let mut i = 0;
 
@@ -108,10 +215,10 @@ pub fn parse_f64(s: &str) -> Option<f64> {
 
     // A lone `.`, or `-`, is not a number.
     if int.is_empty() && frac.is_empty() {
-        return None;
+        return malformed;
     }
 
-    let mut exp: i32 = 0;
+    let mut exp: i64 = 0;
     if i < b.len() && (b[i] | 0x20) == b'e' {
         i += 1;
         let eneg = match b.get(i) {
@@ -130,14 +237,16 @@ pub fn parse_f64(s: &str) -> Option<f64> {
             i += 1;
         }
         if i == start {
-            return None; // `1e`, `1e+`
+            return malformed; // `1e`, `1e+`
         }
-        // Saturating: an exponent this far out only decides zero or infinity,
-        // and both are settled below without the digits ever being shifted.
-        let mut e: i32 = 0;
+        // Cut short past 2^40: an exponent that far out decides zero or
+        // infinity whatever digits a text in memory holds, settled below
+        // before a digit is read. Cut at 100 000 before, `0.` and a million
+        // zeros then `1e1000001` -- 1 -- read as an infinity.
+        let mut e: i64 = 0;
         for &d in &b[start..i] {
-            e = e.saturating_mul(10).saturating_add((d - b'0') as i32);
-            if e > 100_000 {
+            e = e * 10 + (d - b'0') as i64;
+            if e > 1 << 40 {
                 break;
             }
         }
@@ -145,13 +254,16 @@ pub fn parse_f64(s: &str) -> Option<f64> {
     }
 
     if i != b.len() {
-        return None; // trailing junk: `1.2.3`, `1x`
+        return malformed; // trailing junk: `1.2.3`, `1x`
     }
 
-    Some(convert(neg, int, frac, exp))
+    match convert(neg, int, frac, exp) {
+        Ok(x) => (x, None),
+        Err(why) => (0.0, Some(why)),
+    }
 }
 
-fn convert(neg: bool, int: &[u8], frac: &[u8], exp: i32) -> f64 {
+fn convert(neg: bool, int: &[u8], frac: &[u8], exp: i64) -> Result<f64, Unread> {
     // Leading zeros are not significant and would otherwise eat into the
     // 19-digit budget of the fast path: `0.00000001` must still take it.
     let int = {
@@ -164,7 +276,7 @@ fn convert(neg: bool, int: &[u8], frac: &[u8], exp: i32) -> f64 {
 
     // Fast path: accumulate while the mantissa is certainly exact.
     let mut mant: u64 = 0;
-    let mut digits = 0;
+    let mut digits: i64 = 0;
     let mut truncated = false;
     let mut e10 = exp;
     for &d in int {
@@ -192,16 +304,16 @@ fn convert(neg: bool, int: &[u8], frac: &[u8], exp: i32) -> f64 {
     }
 
     if mant == 0 {
-        return if neg { -0.0 } else { 0.0 };
+        return Ok(if neg { -0.0 } else { 0.0 });
     }
 
     if !truncated && mant <= (1u64 << 53) {
         let m = mant as f64;
         if (0..=22).contains(&e10) {
-            return sign(neg, m * POW10[e10 as usize]);
+            return Ok(sign(neg, m * POW10[e10 as usize]));
         }
         if (-22..0).contains(&e10) {
-            return sign(neg, m / POW10[(-e10) as usize]);
+            return Ok(sign(neg, m / POW10[(-e10) as usize]));
         }
         // A little further up: if the surplus above 10^22 still fits in the
         // mantissa, absorbing it there keeps both operands exact and the
@@ -211,20 +323,43 @@ fn convert(neg: bool, int: &[u8], frac: &[u8], exp: i32) -> f64 {
             let spare = POW10[(e10 - 22) as usize] as u64;
             if let Some(scaled) = mant.checked_mul(spare) {
                 if scaled <= 1u64 << 53 {
-                    return sign(neg, (scaled as f64) * POW10[22]);
+                    return Ok(sign(neg, (scaled as f64) * POW10[22]));
                 }
             }
         }
     }
     // Seventeen digits, as JavaScript writes most floats and every `f32`
     // it widens, are past the 53 bits Clinger's path takes, and went the
-    // decimal way below: a page of 200 768-dim vectors took 74.6 ms to read
-    // in the browser module, and takes 51.9 this way.
-    if !truncated && (1..STEP as i32).contains(&-e10) {
-        return sign(neg, divided(mant, (-e10) as usize));
+    // decimal way: a page of 200 768-dim vectors took 74.6 ms to read in the
+    // browser module, and takes 51.9 this way.
+    if !truncated && (1..STEP as i64).contains(&-e10) {
+        return Ok(sign(neg, divided(mant, (-e10) as usize)));
     }
 
-    sign(neg, Decimal::new(int, frac, exp).into_f64())
+    // The number is from 10^lead up to 10^(lead + 1): from 10^309 it is
+    // past the largest `f64`, and under 10^-324 -- half the smallest is
+    // 2.47e-324 -- it rounds to 0, both settled before a multiplier is
+    // looked up, which leaves `near` the powers from 10^-342 to 10^308.
+    let lead = e10 + digits - 1;
+    if lead > 308 {
+        return Err(Unread::TooLarge);
+    }
+    if lead < -324 {
+        return Err(Unread::TooSmall);
+    }
+    let bits = match near(mant, e10 as i32, truncated) {
+        Ok(bits) => bits,
+        Err(below) => exact(int, frac, exp, below),
+    };
+    // Both readings round the magnitude, so 0 is all bits clear.
+    let x = f64::from_bits(bits);
+    if bits == 0 {
+        Err(Unread::TooSmall)
+    } else if x.is_infinite() {
+        Err(Unread::TooLarge)
+    } else {
+        Ok(sign(neg, x))
+    }
 }
 
 /// `w / 10^n`, correctly rounded, where `5^n` fits in 64 bits: `w × 2^s`
@@ -287,258 +422,208 @@ fn sign(neg: bool, v: f64) -> f64 {
     }
 }
 
-/// `floor(i * log2(10))` for `i` in `0..=8`: how many bits a shift may take
-/// without overshooting `i` decimal places. Always an under-estimate, so the
-/// normalising loops below converge rather than oscillate.
-const POWTAB: [u32; 9] = [1, 3, 6, 9, 13, 16, 19, 23, 26];
-
-/// Largest shift the digit arithmetic below can take at once: the carries
-/// hold `10 * 2^k`, so this has to leave room in a `u64`, and 57 does with
-/// four bits to spare.
-const MAX_SHIFT: u32 = 57;
-
-/// Largest step the normalising loops may take, `floor(9 * log2(10))`. It has
-/// to stay near the table's reach rather than run up to `MAX_SHIFT`: the two
-/// loops run one after the other, so a right shift that overshoots far below
-/// zero lets the left shift that corrects it land back above zero, and the
-/// value never settles in `[1/2, 1)`.
-const MAX_STEP: u32 = 27;
-
-/// `0.d[0]d[1]... * 10^dp`, with no leading or trailing zero digit.
-struct Decimal {
-    d: [u8; MAX_DIGITS],
-    nd: usize,
-    dp: i32,
-    truncated: bool,
+/// `w × 10^q` rounded to the nearest `f64`, its bits -- an infinity's past
+/// the largest, 0's under half the smallest -- where the multipliers tell
+/// it: `Err` with the lower of the two it falls between where they cannot,
+/// for [`exact`] to choose. `wide` where `w` is the first 19 of more
+/// digits, the number above `w × 10^q` and under `(w + 1) × 10^q`; `q`
+/// from -342 to 308, which `convert` holds it to.
+///
+/// The multiplier is Ryu's: `5^q` cut to 125 bits for `q` from 0, all of it
+/// to `5^53`, and one more than `2^k / 5^-q` cut below 0. Times `w`, every
+/// bit of the product kept, it puts the number in a span of `w` -- of
+/// `w + t` where digits were cut -- in the product's last place, never
+/// wider than 2^-59 of it: where both ends round to one `f64`, so does the
+/// number, and only one within that of a midpoint is left to `exact`.
+/// Eisel and Lemire read the same product from a 128-bit table of every
+/// power -- 12 KB the module does not hold -- and argue where its error
+/// could cross a rounding; this table is the 0.8 KB `f64_into` holds
+/// anyway, and the span says itself whether it crosses one.
+///
+/// Never inlined into the reader (`read`): there its registers were the digit
+/// loops', which then spilled -- a number Clinger's path takes cost up to
+/// 20 instructions more.
+#[inline(never)]
+fn near(w: u64, q: i32, wide: bool) -> Result<u64, u64> {
+    let (t, e2) = match q >= 0 {
+        true => (pow5(q as u32), q + pow5_bits(q) - BITS),
+        false => (inv_pow5(-q as u32), q - pow5_bits(-q) + 1 - BITS),
+    };
+    let (a, b) = (w as u128 * (t >> 64), w as u128 * (t as u64) as u128);
+    let p = (a + (b >> 64), b as u64);
+    let add = |(hi, lo): (u128, u64), x: u128| {
+        let (lo, carry) = lo.overflowing_add(x as u64);
+        (hi + (x >> 64) + carry as u128, lo)
+    };
+    let (lo, hi) = match q >= 0 {
+        true if q <= 53 && !wide => (p, p),
+        true => (p, add(p, w as u128 + if wide { t + 1 } else { 0 })),
+        false => {
+            let (low, borrow) = p.1.overflowing_sub(w);
+            (
+                (p.0 - borrow as u128, low),
+                if wide { add(p, t) } else { p },
+            )
+        }
+    };
+    let below = rounded(lo, e2);
+    match hi == lo || rounded(hi, e2) == below {
+        true => Ok(below),
+        false => Err(below),
+    }
 }
 
-impl Decimal {
-    fn new(int: &[u8], frac: &[u8], exp: i32) -> Decimal {
-        let mut dec = Decimal {
-            d: [0; MAX_DIGITS],
-            nd: 0,
-            dp: 0,
-            truncated: false,
+/// `(hi × 2^64 + lo) × 2^e2` rounded to the nearest `f64`, an exact half to
+/// the even one: its bits, an infinity's past the largest. `hi` is at least
+/// 2^59, so every bit rounding cuts above `lo` is in `hi`.
+fn rounded((hi, lo): (u128, u64), e2: i32) -> u64 {
+    let n = 192 - hi.leading_zeros() as i32;
+    // 53 bits kept, fewer under 2^-1022, where each is worth 2^-1074.
+    let keep = (n + e2 + 1074).min(53);
+    if keep < 1 {
+        // Under 2^-1074: past half of it rounds up to it, half of it to 0.
+        return (keep == 0 && (lo != 0 || !hi.is_power_of_two())) as u64;
+    }
+    let cut = (n - 64 - keep) as u32;
+    let mant = (hi >> cut) as u64;
+    let rest = hi & ((1u128 << cut) - 1);
+    let half = 1u128 << (cut - 1);
+    let up = rest > half || rest == half && (lo != 0 || mant & 1 == 1);
+    assemble(mant + up as u64, n - keep + e2).to_bits()
+}
+
+/// Where [`near`]'s span holds the midpoint between `below` and the `f64`
+/// after it, which of the two the number written rounds to -- the even one
+/// where it is the midpoint: its digits as one integer, `x × 10^q`, against
+/// the midpoint's `(2m + 1) × 2^(e - 1)`, each multiplied by the power of
+/// five and of two the other holds, and compared whole: 800 digits, or a
+/// midpoint by 5^1123, some 2 660 bits at most -- some thousands of
+/// instructions, where shifting the digits took up to 183 000. Cold: only
+/// a number within 2^-59 of a midpoint comes here.
+#[cold]
+#[inline(never)]
+fn exact(int: &[u8], frac: &[u8], exp: i64, below: u64) -> u64 {
+    #[cfg(test)]
+    tests::EXACT.with(|n| n.set(n.get() + 1));
+    // Past `MAX_DIGITS`, a digit only says whether the number is above the
+    // integer the ones before make (`tail`). Nine digits a word.
+    let mut x = Big::of(0);
+    let (mut word, mut len, mut kept) = (0u32, 0u32, 0usize);
+    let (mut dropped, mut tail) = (0i64, false);
+    for &c in int.iter().chain(frac) {
+        let d = (c - b'0') as u32;
+        if kept == 0 && d == 0 {
+            continue;
+        }
+        if kept == MAX_DIGITS {
+            dropped += 1;
+            tail |= d != 0;
+            continue;
+        }
+        (word, len, kept) = (word * 10 + d, len + 1, kept + 1);
+        if len == 9 {
+            x.mul_add(1_000_000_000, word);
+            (word, len) = (0, 0);
+        }
+    }
+    x.mul_add(10u32.pow(len), word);
+    let q = exp - frac.len() as i64 + dropped;
+    let field = (below >> 52) as i64;
+    let m = below & ((1 << 52) - 1) | ((field > 0) as u64) << 52;
+    let e = field.max(1) - 1075;
+    let mut y = Big::of(2 * m + 1);
+    match q >= 0 {
+        true => x.mul_pow5(q as u64),
+        false => y.mul_pow5(-q as u64),
+    }
+    match e - 1 - q {
+        s if s >= 0 => y.shl(s as u64),
+        s => x.shl(-s as u64),
+    }
+    let tail = match tail {
+        true => Ordering::Greater,
+        false => Ordering::Equal,
+    };
+    match x.against(&y).then(tail) {
+        Ordering::Less => below,
+        Ordering::Greater => below + 1,
+        Ordering::Equal => below + (below & 1),
+    }
+}
+
+/// The words a [`Big`] holds: 2 816 bits, where [`exact`]'s widest number
+/// takes some 2 660 -- 800 digits, or a midpoint times `5^1123`.
+const WORDS: usize = 88;
+
+/// A whole number for [`exact`], in 32-bit words, the lowest first, `n` of
+/// them used and the last of those not 0. Of 32 bits, so the browser
+/// module multiplies them itself: a 64-bit word's product is a call to its
+/// 128-bit multiply there.
+struct Big {
+    w: [u32; WORDS],
+    n: usize,
+}
+
+impl Big {
+    fn of(v: u64) -> Big {
+        let mut b = Big {
+            w: [0; WORDS],
+            n: 0,
         };
-        for &c in int {
-            dec.push(c - b'0');
+        b.mul_add(1, v as u32);
+        if v >> 32 != 0 {
+            b.w[1] = (v >> 32) as u32;
+            b.n = 2;
         }
-        dec.dp = int.len() as i32;
-        for &c in frac {
-            // A fraction's leading zeros move the point instead of being
-            // stored, so `0.0001` keeps its four digits of headroom.
-            if dec.nd == 0 && c == b'0' {
-                dec.dp -= 1;
-                continue;
-            }
-            dec.push(c - b'0');
-        }
-        dec.dp += exp;
-        dec.trim();
-        dec
+        b
     }
 
-    fn push(&mut self, digit: u8) {
-        if self.nd < MAX_DIGITS {
-            self.d[self.nd] = digit;
-            self.nd += 1;
-        } else if digit != 0 {
-            self.truncated = true;
+    /// `self × m + a`.
+    fn mul_add(&mut self, m: u32, a: u32) {
+        let mut carry = a as u64;
+        for x in &mut self.w[..self.n] {
+            let t = *x as u64 * m as u64 + carry;
+            *x = t as u32;
+            carry = t >> 32;
+        }
+        if carry != 0 {
+            self.w[self.n] = carry as u32;
+            self.n += 1;
         }
     }
 
-    /// Drops leading zeros (moving the point) and trailing zeros (which carry
-    /// nothing). Every operation below assumes this has run.
-    fn trim(&mut self) {
-        let mut k = 0;
-        while k < self.nd && self.d[k] == 0 {
-            k += 1;
+    /// `self × 5^k`, `5^13` a step: the most a word holds.
+    fn mul_pow5(&mut self, mut k: u64) {
+        while k >= 13 {
+            self.mul_add(SMALL[13] as u32, 0);
+            k -= 13;
         }
-        if k > 0 {
-            self.d.copy_within(k..self.nd, 0);
-            self.nd -= k;
-            self.dp -= k as i32;
-        }
-        while self.nd > 0 && self.d[self.nd - 1] == 0 {
-            self.nd -= 1;
-        }
-        if self.nd == 0 {
-            self.dp = 0;
-        }
+        self.mul_add(SMALL[k as usize] as u32, 0);
     }
 
-    /// value *= 2^k, for `k` up to `MAX_SHIFT`.
-    ///
-    /// Doubling one bit at a time is a page shorter but costs a pass over
-    /// every digit per bit: measured at 0.24 ms for `1e-300`, against 18 ns
-    /// for the standard library. Taking 57 bits per pass is what closes that.
-    fn shl(&mut self, k: u32) {
-        debug_assert!(k <= MAX_SHIFT);
-        // 0.302 > log10(2), so this never under-counts the digits gained.
-        let extra = (k as usize * 302) / 1000 + 1;
-        if self.nd + extra > MAX_DIGITS {
-            let keep = MAX_DIGITS - extra;
-            if self.d[keep..self.nd].iter().any(|&x| x != 0) {
-                self.truncated = true;
-            }
-            self.nd = keep;
-        }
-        let mut out = [0u8; MAX_DIGITS];
-        let mut carry: u64 = 0;
-        for r in (0..self.nd).rev() {
-            let acc = ((self.d[r] as u64) << k) + carry;
-            out[r + extra] = (acc % 10) as u8;
-            carry = acc / 10;
-        }
-        for i in (0..extra).rev() {
-            out[i] = (carry % 10) as u8;
-            carry /= 10;
-        }
-        debug_assert_eq!(carry, 0);
-        self.d = out;
-        self.nd += extra;
-        self.dp += extra as i32;
-        self.trim();
+    /// `self × 2^k`.
+    fn shl(&mut self, k: u64) {
+        self.mul_add(1 << (k % 32), 0);
+        let words = (k / 32) as usize;
+        self.w.copy_within(..self.n, words);
+        self.w[..words].fill(0);
+        self.n += words;
     }
 
-    /// value /= 2^k, for `k` up to `MAX_SHIFT`.
-    fn shr(&mut self, k: u32) {
-        debug_assert!(k <= MAX_SHIFT);
-        let mask: u64 = (1u64 << k) - 1;
-        let mut r = 0; // read position
-        let mut w = 0; // write position
-        let mut n: u64 = 0;
-        // Pull in digits until the first quotient digit is not a zero, so
-        // the write below always emits a significant digit.
-        while (n >> k) == 0 {
-            if r >= self.nd {
-                if n == 0 {
-                    self.nd = 0;
-                    self.dp = 0;
-                    return;
-                }
-                while (n >> k) == 0 {
-                    n *= 10;
-                    r += 1;
-                }
-                break;
-            }
-            n = n * 10 + self.d[r] as u64;
-            r += 1;
+    /// A loop, not `iter().rev().cmp(..)`: the iterators' copies were 278
+    /// bytes of the browser module.
+    fn against(&self, other: &Big) -> Ordering {
+        if self.n != other.n {
+            return self.n.cmp(&other.n);
         }
-        self.dp -= r as i32 - 1;
-        let mut out = [0u8; MAX_DIGITS];
-        while r < self.nd {
-            let c = self.d[r] as u64;
-            out[w] = (n >> k) as u8;
-            w += 1;
-            n = (n & mask) * 10 + c;
-            r += 1;
-        }
-        while n > 0 {
-            let dig = (n >> k) as u8;
-            if w < MAX_DIGITS {
-                out[w] = dig;
-                w += 1;
-            } else if dig > 0 {
-                self.truncated = true;
-            }
-            n = (n & mask) * 10;
-        }
-        self.d = out;
-        self.nd = w;
-        self.trim();
-    }
-
-    /// Bits a shift may take to move the point `places` decimal digits.
-    fn step(places: i32) -> u32 {
-        let p = places.unsigned_abs() as usize;
-        if p >= POWTAB.len() {
-            MAX_STEP
-        } else {
-            POWTAB[p]
-        }
-    }
-
-    /// The integer part, with the fraction rounded in -- half to even, and a
-    /// truncated tail counting as more than half.
-    fn rounded_integer(&self) -> u64 {
-        let mut n: u64 = 0;
-        let mut i = 0;
-        while i < self.dp {
-            let c = if (i as usize) < self.nd {
-                self.d[i as usize] as u64
-            } else {
-                0
-            };
-            n = n * 10 + c;
-            i += 1;
-        }
-        if self.round_up() {
-            n += 1;
-        }
-        n
-    }
-
-    fn round_up(&self) -> bool {
-        if self.dp < 0 || self.dp as usize >= self.nd {
-            return false; // nothing past the point
-        }
-        let i = self.dp as usize;
-        if self.d[i] == 5 && i + 1 == self.nd {
-            // Exactly half, unless digits were dropped off the tail.
-            if self.truncated {
-                return true;
-            }
-            return i > 0 && self.d[i - 1] & 1 != 0;
-        }
-        self.d[i] >= 5
-    }
-
-    fn into_f64(mut self) -> f64 {
-        if self.nd == 0 {
-            return 0.0;
-        }
-        // Decided by magnitude alone, before any shifting: the largest f64 is
-        // ~1.8e308 and the smallest subnormal ~4.9e-324, so anything past
-        // these margins is settled and the loops below never have to run.
-        if self.dp > 400 {
-            return f64::INFINITY;
-        }
-        if self.dp < -400 {
-            return 0.0;
-        }
-
-        // Normalise to `m * 2^exp2` with m in [1/2, 1).
-        let mut exp2: i32 = 0;
-        while self.dp > 0 {
-            let k = Decimal::step(self.dp);
-            self.shr(k);
-            exp2 += k as i32;
-        }
-        while self.dp < 0 || (self.dp == 0 && self.d[0] < 5) {
-            let k = Decimal::step(self.dp);
-            self.shl(k);
-            exp2 -= k as i32;
-        }
-        if self.nd == 0 {
-            return 0.0;
-        }
-
-        // 53 bits of mantissa, fewer once the exponent enters subnormal
-        // territory -- there the exponent is pinned at 2^-1074 and precision
-        // is what gives way instead. Below that the value is under half the
-        // smallest subnormal (m < 1 keeps it off the tie), so it is zero.
-        let mut nbits: i32 = 53;
-        if exp2 < -1021 {
-            nbits = exp2 + 1074;
-            if nbits < 0 {
-                return 0.0;
+        let mut i = self.n;
+        while i > 0 {
+            i -= 1;
+            if self.w[i] != other.w[i] {
+                return self.w[i].cmp(&other.w[i]);
             }
         }
-
-        self.shl(nbits as u32);
-        assemble(self.rounded_integer(), exp2 - nbits)
+        Ordering::Equal
     }
 }
 
@@ -815,7 +900,9 @@ const POW5_FIX: [u32; 21] = [
 ];
 
 /// `5^-(26b)` as Ryu multiplies by it: `⌊2^(⌈log2 5^i⌉ - 1 + 125) / 5^i⌋ + 1`.
-const POW5_INV: [u128; 13] = [
+/// To `5^-364`: Ryu reaches `5^-290`, an `f64`'s largest, and reading a
+/// number `5^-342`, its smallest subnormal's under 19 digits (`near`).
+const POW5_INV: [u128; 15] = [
     0x20000000000000000000000000000001,
     0x18c240c4aecb13bb52a6c95fc0655034,
     0x1327fc58da0f6ff57ca8d50071dfc806,
@@ -829,12 +916,14 @@ const POW5_INV: [u128; 13] = [
     0x13ae3591f5b4d936adeee7f86c07b696,
     0x1e74404f3daada914d686a4eaf182222,
     0x17900ea4fda7c25798c0a106e09ebd9f,
+    0x123b140576d820b28f20e37371497d0e,
+    0x1c35f4275f7a29adb043138134743d85,
 ];
 
-const POW5_INV_FIX: [u32; 19] = [
+const POW5_INV_FIX: [u32; 22] = [
     0x54544554, 0x04055545, 0x10041000, 0x00400414, 0x40010000, 0x41155555, 0x00000454, 0x00010044,
     0x40000000, 0x44000041, 0x50454450, 0x55550054, 0x51655554, 0x40004000, 0x01000001, 0x00010500,
-    0x51515411, 0x05555554, 0x00000000,
+    0x51515411, 0x05555554, 0x50411500, 0x40040000, 0x05040110, 0x00000000,
 ];
 
 fn fix(table: &[u32], i: u32) -> u128 {
@@ -854,7 +943,8 @@ fn pow5(i: u32) -> u128 {
     (low >> shift) + (high << (64 - shift)) + fix(&POW5_FIX, i)
 }
 
-/// The multiplier for `5^-i`, `i` up to 290 (an `f64`'s largest).
+/// The multiplier for `5^-i`, `i` up to 342: 290 for an `f64`'s largest
+/// written, 342 for the smallest read (`near`).
 fn inv_pow5(i: u32) -> u128 {
     let base = i.div_ceil(STEP);
     let (mul, off) = (POW5_INV[base as usize], base * STEP - i);
@@ -1106,12 +1196,36 @@ mod tests {
 
     use super::*;
 
+    thread_local! {
+        /// How many numbers this thread's reading took to [`exact`]: a test
+        /// holds itself to reaching it.
+        pub(super) static EXACT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn exacts() -> usize {
+        EXACT.with(|n| n.get())
+    }
+
     /// Bit-for-bit, so a mismatched sign on a zero or a one-ulp slip in the
-    /// last place both fail rather than comparing equal.
+    /// last place both fail rather than comparing equal -- and refused where
+    /// the reference reads an infinity, or 0 of a number that is not.
     #[track_caller]
     fn same(text: &str) {
         let want: f64 = text.parse().expect("the reference should parse this");
-        let got = parse_f64(text).expect("parse_f64 should parse this");
+        let mantissa = text.split(['e', 'E']).next().unwrap_or_default();
+        let zero = !mantissa.bytes().any(|c| (b'1'..=b'9').contains(&c));
+        let got = read_f64(text);
+        let range = match want {
+            w if w.is_infinite() => Some(Unread::TooLarge),
+            w if w == 0.0 && !zero => Some(Unread::TooSmall),
+            _ => None,
+        };
+        if let Some(range) = range {
+            assert_eq!(got, Err(range), "{text}");
+            assert_eq!(parse_f64(text), None, "{text}");
+            return;
+        }
+        let got = got.expect("read_f64 should read this");
         assert_eq!(
             got.to_bits(),
             want.to_bits(),
@@ -1119,6 +1233,37 @@ mod tests {
             got.to_bits(),
             want.to_bits()
         );
+    }
+
+    /// `m × 2^e` written out whole -- every digit, `5^-e` times `m` over
+    /// `10^-e` below 1 -- as a midpoint between two `f64`s is written.
+    fn written(m: u64, e: i32) -> String {
+        let mut d: Vec<u8> = m.to_string().bytes().rev().map(|c| c - b'0').collect();
+        let (by, times) = if e >= 0 { (2, e) } else { (5, -e) };
+        for _ in 0..times {
+            let mut carry = 0;
+            for x in d.iter_mut() {
+                let t = *x * by + carry;
+                (*x, carry) = (t % 10, t / 10);
+            }
+            if carry > 0 {
+                d.push(carry);
+            }
+        }
+        let mut s: String = d.iter().rev().map(|&x| (b'0' + x) as char).collect();
+        if e < 0 {
+            s.push_str(&format!("e{e}"));
+        }
+        s
+    }
+
+    /// The midpoint between `x`, positive and finite, and the `f64` above
+    /// it, as `(2m + 1) × 2^(e - 1)`.
+    fn midpoint(x: f64) -> (u64, i32) {
+        let bits = x.to_bits();
+        let field = (bits >> 52) as i32;
+        let m = bits & ((1 << 52) - 1) | ((field > 0) as u64) << 52;
+        (2 * m + 1, field.max(1) - 1075 - 1)
     }
 
     /// Both fuzz tests below run this many rounds, so 200 000 comparisons
@@ -1351,7 +1496,165 @@ mod tests {
             "1..2", "1x", " 1", "1 ", "inf", "nan", "0x10",
         ] {
             assert!(parse_f64(text).is_none(), "{text:?} should be rejected");
+            assert_eq!(read_f64(text), Err(Unread::Malformed), "{text:?}");
         }
+    }
+
+    /// The ends of the range, read or refused: the largest `f64` and the
+    /// decimals rounding to it, the midpoint past it (a tie, to the even
+    /// infinity) and a hair either side; the smallest subnormal, the
+    /// midpoint under it (a tie, to the even 0) and a hair either side.
+    #[test]
+    fn a_number_past_a_float_s_range_is_refused() {
+        use Unread::{TooLarge, TooSmall};
+        let max = f64::MAX;
+        let tiny = f64::from_bits(1);
+        // The midpoint between the largest `f64` and 2^1024, and under the
+        // smallest subnormal, written whole.
+        let over = written((1 << 54) - 1, 970);
+        let under = written(1, -1075);
+        let (under_digits, _) = under.split_once('e').unwrap();
+        // Each less one in its last digit, a 2 and a 5.
+        let mut below_over = over.clone().into_bytes();
+        *below_over.last_mut().unwrap() -= 1;
+        let below_over = String::from_utf8(below_over).unwrap();
+        let mut below_under = under_digits.to_string().into_bytes();
+        *below_under.last_mut().unwrap() -= 1;
+        let below_under = format!("{}e-1075", String::from_utf8(below_under).unwrap());
+        let cases: Vec<(String, Result<f64, Unread>)> = vec![
+            ("1.7976931348623157e308".into(), Ok(max)),
+            ("1.7976931348623158e308".into(), Ok(max)),
+            ("-1.7976931348623157e308".into(), Ok(-max)),
+            (below_over, Ok(max)),
+            (over.clone(), Err(TooLarge)),
+            (format!("{over}.000000000000000000000000001"), Err(TooLarge)),
+            ("1.7976931348623159e308".into(), Err(TooLarge)),
+            ("1e309".into(), Err(TooLarge)),
+            ("1e400".into(), Err(TooLarge)),
+            ("-1e400".into(), Err(TooLarge)),
+            (format!("1{}", "0".repeat(309)), Err(TooLarge)),
+            ("1e99999999999999999999".into(), Err(TooLarge)),
+            ("4.9406564584124654e-324".into(), Ok(tiny)),
+            ("5e-324".into(), Ok(tiny)),
+            ("-5e-324".into(), Ok(-tiny)),
+            ("3e-324".into(), Ok(tiny)),
+            ("2.4703282292062328e-324".into(), Ok(tiny)),
+            (format!("{under_digits}1e-1076"), Ok(tiny)),
+            (under.clone(), Err(TooSmall)),
+            (below_under, Err(TooSmall)),
+            ("2.4703282292062327e-324".into(), Err(TooSmall)),
+            ("1e-324".into(), Err(TooSmall)),
+            ("1e-400".into(), Err(TooSmall)),
+            ("-1e-400".into(), Err(TooSmall)),
+            ("1e-99999999999999999999".into(), Err(TooSmall)),
+            // 0 written any way is 0, its sign kept.
+            ("0e-400".into(), Ok(0.0)),
+            ("-0.0e999999".into(), Ok(-0.0)),
+            ("0.000e+99999999999999999999".into(), Ok(0.0)),
+            // An exponent past what was read whole before, and the digits
+            // that bring the number back: 1, read as an infinity and 0.
+            (format!("0.{}1e1000001", "0".repeat(1_000_000)), Ok(1.0)),
+            (format!("1{}e-1000000", "0".repeat(1_000_000)), Ok(1.0)),
+        ];
+        for (text, want) in cases {
+            let got = read_f64(&text);
+            match (got, want) {
+                (Ok(g), Ok(w)) => assert_eq!(g.to_bits(), w.to_bits(), "{text:.60}"),
+                (g, w) => assert_eq!(g, w, "{text:.60}"),
+            }
+            assert_eq!(parse_f64(&text).is_some(), want.is_ok(), "{text:.60}");
+            if text.len() < 2_000 {
+                same(&text);
+            }
+        }
+        assert!(TooLarge.range().unwrap().contains("1.7976931348623157e308"));
+        assert!(TooSmall.range().unwrap().contains("5e-324"));
+        assert_eq!(Unread::Malformed.range(), None);
+    }
+
+    /// A midpoint between two `f64`s is a tie, to the even one; a hair
+    /// above it rounds up, and its first 25 digits, under it, down. Every
+    /// binade's, written whole: the numbers the multiplied path leaves to
+    /// the exact one, which these hold to the reference.
+    #[test]
+    fn a_midpoint_and_a_hair_either_side_round_as_the_reference_does() {
+        let mut rng = Rng(0x0dd5_eed5_4a1f_0001);
+        let before = exacts();
+        for k in 0..400 {
+            let x = match k {
+                0 => f64::MAX,
+                1 => f64::from_bits(1),
+                2 => f64::MIN_POSITIVE,
+                3 => 1.0,
+                4 => 9007199254740992.0,
+                _ => f64::from_bits(rng.next() % 0x7ff0_0000_0000_0000),
+            };
+            let (m, e) = midpoint(x);
+            let text = written(m, e);
+            same(&text);
+            let (digits, exp) = match text.split_once('e') {
+                Some((d, x)) => (d.to_string(), x.parse::<i64>().unwrap()),
+                None => (text.clone(), 0),
+            };
+            same(&format!("{digits}1e{}", exp - 1));
+            if digits.len() > 25 {
+                let cut = (digits.len() - 25) as i64;
+                same(&format!("{}e{}", &digits[..25], exp + cut));
+            }
+        }
+        // Most of them reached the exact path: the multiplied one cannot
+        // tell a midpoint from a hair beside it.
+        assert!(exacts() - before > 600, "{}", exacts() - before);
+    }
+
+    /// Past the 800 digits compared, a digit only tells whether the number
+    /// is above the midpoint its first 800 write: zeros keep the tie, a 1
+    /// a thousand digits on breaks it upwards.
+    #[test]
+    fn a_digit_past_those_compared_still_breaks_a_tie() {
+        for x in [
+            f64::from_bits(3),
+            f64::from_bits(0x000f_ffff_ffff_fffe),
+            0.1,
+            1e300,
+        ] {
+            let (m, e) = midpoint(x);
+            let text = written(m, e);
+            let (digits, exp) = match text.split_once('e') {
+                Some((d, x)) => (d.to_string(), x.parse::<i64>().unwrap()),
+                None => (text.clone(), 0),
+            };
+            let pad = 1_000 - digits.len().min(999);
+            let zeros = format!("{digits}{}e{}", "0".repeat(pad), exp - pad as i64);
+            same(&zeros);
+            let one = format!("{digits}{}1e{}", "0".repeat(pad), exp - pad as i64 - 1);
+            same(&one);
+            let even = x.to_bits() & 1 == 0;
+            let tie = read_f64(&zeros).unwrap().to_bits();
+            assert_eq!(tie, x.to_bits() + !even as u64, "{x:e}");
+            assert_eq!(read_f64(&one).unwrap().to_bits(), x.to_bits() + 1, "{x:e}");
+        }
+    }
+
+    /// The numbers JSON brings -- 19 digits or fewer, over any exponent --
+    /// reach the exact path only within 2^-70 of a midpoint, which none of
+    /// these is: `1e255` read the decimal way took 138 000 instructions.
+    #[test]
+    fn a_short_number_is_read_without_its_digits_compared() {
+        let before = exacts();
+        let mut rng = Rng(0x05ee_d0f5_ca1e_0019);
+        for e in -342..=308 {
+            same(&format!("1e{e}"));
+            same(&format!(
+                "{}e{e}",
+                rng.next() % 10u64.pow(1 + (rng.next() % 19) as u32)
+            ));
+        }
+        for _ in 0..SAMPLES {
+            let x = f64::from_bits(rng.next() % 0x7ff0_0000_0000_0000);
+            same(&format!("{x:e}"));
+        }
+        assert_eq!(exacts(), before);
     }
 
     /// A little-endian bignum of 32-bit words, only to hold the multipliers
@@ -1408,24 +1711,25 @@ mod tests {
     fn the_multipliers_are_the_powers_of_five_they_claim() {
         use std::cmp::Ordering::*;
         let mut p = big(1);
-        for i in 0..=325u32 {
-            // `pow5(i)` is the top 125 bits of 5^i, cut, not rounded.
+        for i in 0..=342u32 {
             assert_eq!(bits(&p), pow5_bits(i as i32), "5^{i}");
-            let v = pow5(i);
+            // `pow5(i)` is the top 125 bits of 5^i, cut, not rounded, to
+            // 5^325.
             let shift = bits(&p) - BITS;
-            if shift >= 0 {
-                let unit = two_to(shift as u32);
-                assert_ne!(cmp(&times(&big(v), &unit), &p), Greater, "5^{i}");
-                assert_eq!(cmp(&times(&big(v + 1), &unit), &p), Greater, "5^{i}");
-            } else {
-                assert_eq!(
-                    cmp(&big(v), &times(&p, &two_to(-shift as u32))),
-                    Equal,
-                    "5^{i}"
-                );
+            if i <= 325 {
+                let v = pow5(i);
+                if shift >= 0 {
+                    let unit = two_to(shift as u32);
+                    assert_ne!(cmp(&times(&big(v), &unit), &p), Greater, "5^{i}");
+                    assert_eq!(cmp(&times(&big(v + 1), &unit), &p), Greater, "5^{i}");
+                } else {
+                    let whole = times(&p, &two_to(-shift as u32));
+                    assert_eq!(cmp(&big(v), &whole), Equal, "5^{i}");
+                }
             }
-            // `inv_pow5(i)` is one more than 2^k / 5^i, cut.
-            if i <= 290 {
+            // `inv_pow5(i)` is one more than 2^k / 5^i, cut, to 5^-342: the
+            // smallest power a number is read with (`near`).
+            {
                 let whole = two_to((pow5_bits(i as i32) - 1 + BITS) as u32);
                 let v = inv_pow5(i);
                 assert_ne!(cmp(&times(&big(v - 1), &p), &whole), Greater, "5^-{i}");

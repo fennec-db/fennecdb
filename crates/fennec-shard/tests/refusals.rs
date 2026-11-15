@@ -293,8 +293,10 @@ fn the_router_starts_a_count_again_on_a_token_verified_alone() {
             token: Some("data".into()),
             access: Some(Arc::clone(&access)),
             cors: Some("*".into()),
-            // A body past this and within the import's ceiling is read
-            // whole, and refused before its token is looked at.
+            // A body past this is refused (413) from its head, before its
+            // token is looked at: only an image's import carrying the
+            // admin token is read to the import's ceiling, and one
+            // carrying a guess is refused (401) from its head.
             max_body: 1024,
             max_import: 1 << 20,
             ..fennec_http::Config::default()

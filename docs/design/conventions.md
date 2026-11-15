@@ -1,6 +1,6 @@
 # Conventions
 
-The long form of the test and docs conventions [CLAUDE.md](../../CLAUDE.md) lists under *Conventions*: where tests live and which run alone, a test that fails on one run, Chrome's launch, the clock, ports, what a change a user meets owes the docs, the fuzzing of every parser of untrusted bytes, and how a secret is compared and a primitive held to its vectors. They hold no invariant of the code, so [README.md](README.md#the-original-order) does not number them. Each section below is a bullet moved word for word from CLAUDE.md, which keeps its rule in a sentence or two.
+The long form of the test and docs conventions [CLAUDE.md](../../CLAUDE.md) lists under *Conventions*: where tests live and which run alone, a test that fails on one run, a browser's launch and a page's reload, the clock, ports, what a change a user meets owes the docs, the fuzzing of every parser of untrusted bytes, and how a secret is compared and a primitive held to its vectors. They hold no invariant of the code, so [README.md](README.md#the-original-order) does not number them. Each section below is a bullet moved word for word from CLAUDE.md, which keeps its rule in a sentence or two; those on test binaries, fuzzing and secrets are now kept by [crates/CLAUDE.md](../../crates/CLAUDE.md).
 
 ## Test binaries
 
@@ -15,7 +15,9 @@ server answers 503 to whichever test asked), and so are `fennec-http`'s
 refusal is the process's, so the other tests' servers ask with none
 (`audit::set_delay(0)` in their helpers). Measurement programs are each
 crate's `examples/` and `fennec-bench`'s binaries, wired to `make` targets,
-not to CI.
+not to CI -- but for the perf gate's workloads
+(`crates/fennec-http/examples/gate.rs`), which CI counts in instructions on
+every pull request ([benchmarks.md](benchmarks.md#the-gate)).
 
 ## Skips
 
@@ -120,6 +122,69 @@ days, the 10 GB limit). Jobs gated on the event: `test (macos x86_64,
 Rosetta)` runs on everything but a pull request, so on the schedule, and `size
 (browser module)` only on a pull request.
 
+**Every cache is restored by every run and saved by a run on main alone, and
+what main saves is small.** A cache saved on a pull request's ref is read by
+no other run, so each pull request that missed a key saved a private copy and
+pushed main's entries out of the 10 GB: at 01:15Z on 2026-11-15 the repository
+held 49 entries, 11.31 GiB (pull-request refs 35 entries, 7.18 GiB; main 12,
+3.36 GiB; merge groups 0.24 GiB), and main's Gradle entry was gone within
+about 1.5 hours, so 6 of the Android job's 50 runs restored it. Now the 21
+cargo steps and the Unicode table are `actions/cache/restore` with a
+`restore-keys` fallback (a pull request that moves `Cargo.lock` restores the
+last entry) and an `actions/cache/save` step at the job's end under
+`github.ref == 'refs/heads/main'`, keyed by the restore step's
+`cache-primary-key` and skipped on an exact hit. `setup-node`'s and
+`setup-go`'s `cache` and `subosito/flutter-action`'s save from any ref and
+have no read-only switch, so the Grafana job's npm (`~/.npm`) and Go
+(`~/go/pkg/mod`, `~/.cache/go-build`) caches are the same restore and save
+pair over the paths the actions used, and the Flutter caches are gone.
+`setup-gradle` writes only on main by its own default (`cache-read-only`).
+`desktop.yml`'s Cargo and Hutch caches and `site.yml`'s are the same pair
+(`site-lighthouse.yml`, which runs on pull requests alone, restores only).
+`desktop.yml` and `site.yml` run on main by their own paths filters, the
+caches' inputs among them, and `desktop.yml` gained a schedule, Monday and
+Thursday at 05:41 UTC, so that an entry evicted or unused for 7 days is saved
+again. The cargo keys moved to a `v2-` prefix so that no run restores the
+unpruned entries through `restore-keys`.
+
+*What main keeps of `target/`.* A checkout's files carry new times, so cargo
+builds the workspace's crates again whatever `target/` holds; what a restored
+`target/` saves is the crates from outside the workspace, and the workspace's
+test binaries and debug info were most of every entry.
+`tools/ci_prune_target.sh` runs on main just before a save and keeps only the
+units whose dep-info (`deps/*.d`) names a file under the registry or a git
+checkout, with their build scripts and fingerprints. Measured on a local build
+of the fennec-server and fennec-import tests: 822 MiB to 59 MiB, and the next
+build compiled only the workspace's own crates, none of rustls, ring or libc
+(mtimes are kept, as the cache's tar keeps them; a copy that does not keep
+them makes cargo rebuild everything). An entry is now 0 to 47 MiB, but for the
+clippy job's 373 MiB (it checks the Windows target too), against 15 to 801 MiB
+before (`ubuntu-latest-cargo` 801, `ubuntu-24.04-arm` 643, `macos-latest` 522,
+`clippy` 440 MiB). Four of the 21 are 0 MiB because fennec-core and the C
+library have no crate from outside the workspace: they were 15 to 31 MiB of
+workspace objects. Nor did the cache save time in those jobs: a hit and a
+miss of `windows (http)` took 242 and 241 s, of `test (ubuntu-latest)` 962 and
+940 s (runs 43648331326, 43644153745, 43638860592), because the workspace is
+what takes the time.
+
+*Flutter, Go and the rest.* The SDK's entry was 2.0 GiB on macOS and 1.6 GiB
+on Linux, and restoring it saved 28 s (35 s against 63 s) on macOS and 16 s
+(13 s against 29 s) on Linux of a download (run 43663494522), under 3% of
+either job; it is not cached, nor is the pub cache (25 to 30 MiB). The Go
+cache is 436 MiB, the npm one 93 MiB, `desktop.yml`'s Hutch caches 68 to 98
+MiB a system (435 MiB in all) and Gradle's 2.1 GiB (setup-gradle's entries:
+dependencies 1090, transforms 656, wrapper zips 179, the distribution 130
+MiB, measured with `cache-read-only: false` on the job as it was before the
+wrapper above: the Gradle User Home it keeps now is of that order, not
+measured).
+
+*The set main will hold*, measured on a test branch that saved as main does
+(run 43665618926): about 1.0 GiB of cargo entries, 0.44 GiB Go, 0.09 GiB npm,
+0.43 GiB Hutch and 2.1 GiB Gradle, about 4.1 GiB in some 40 entries, against
+about 11 GiB projected for the same keys unpruned with the Flutter SDKs. A key
+change leaves the old entries until they age out, so for a while the
+repository holds both, up to 7.4 GiB with main's 3.36 GiB: under the 10 GB.
+
 Which `ci.yml` jobs are required checks is a repository setting (classic
 branch protection on main, not the merge queue's ruleset). All of them are,
 but `size (browser module)`, which only runs on a pull request and so would
@@ -162,13 +227,26 @@ A step after the builds, `What Gradle fetched`, names each distribution
 unpacked and each plugin fetched, and counts the artifacts written after the
 restore, so a run's log says whether the cache served it.
 
-## Chrome
+## Browsers
 
-A step that launches Chrome reads Chrome's own files first, or a cold
+A step that launches a browser reads its own files first, or a cold
 runner's disk spends 5 to 20 s of the launcher's wait (`waiting for
-dynamic debugging port`): the studio's harness (`warm`) and
-`examples/{shop,analytics}/scripts/warm-chrome.mjs` do; a longer wait only
-moves the bound.
+dynamic debugging port`): the studio's harness (`warm`),
+`examples/{shop,analytics}/scripts/warm-chrome.mjs` and
+`web/browser/run.mjs` (Chrome's and Firefox's, `warm`) do; a longer wait
+only moves the bound.
+
+A test of what a page keeps across a reload (`web/browser/`) has the page
+run its suite itself, its state kept between loads by the server that
+opened it: a reload is the page's own `location.reload()`, and the one
+suite runs under puppeteer and under safaridriver alike. It holds what it
+reloads in the middle of until the page is gone -- a persist's transaction
+by a read after a read, a worker's flush by keeping the worker busy, which
+every engine ends with its page (one waiting on `Atomics.wait` Safari did
+not) -- never catching it with a timer. A test a
+browser cannot run is skipped by name in `run.mjs`'s `SKIPS`, with why --
+Safari's quota tests, no driver setting its quota -- and any other skip
+fails the run, as does a listed one that ran.
 
 A `waitForFunction` predicate returns `null` for what is not on the page
 yet and never throws. Puppeteer starts the page's poller with `void
@@ -210,9 +288,11 @@ its own (`CREATE_NEW_PROCESS_GROUP`), on the console it shares with them
 -- and kills one with `SIGKILL`, on Windows `TerminateProcess`
 (fennec-server's `support::Server::signal`). Only a site
 whose address is needed before it binds -- a Next.js build renders it, the
-database's CORS names it -- takes a port the system picks, held by a
+database's CORS names it -- or a program that takes its port on its
+command line and names none it chose -- safaridriver, whose `-p 0` is a
+default port of its own -- takes a port the system picks, held by a
 stand-in listener until the moment it starts (`examples/shop`,
-`examples/dispatch`'s `ci.sh`).
+`examples/dispatch`'s `ci.sh`, `web/browser/run.mjs`).
 
 An address a test means nothing to listen on is `127.0.0.1:1`, which no
 system hands out, never a port picked and let go of: Linux hands a free

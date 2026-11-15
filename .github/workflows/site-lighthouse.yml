@@ -45,15 +45,18 @@ jobs:
         with:
           node-version: '22'
 
-      - uses: actions/cache@v6
+      # Restore only: this runs on pull requests alone, and an entry saved on
+      # a pull request's ref is read by no other run. site.yml saves it on
+      # main (docs/design/conventions.md, "ci.yml runs on a pull request").
+      - uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: site-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: site-cargo-
+          key: v2-site-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-site-cargo-
 
       # As the deploy's build has them: minified assets, and the brotli
       # figures build.py checks the site's quoted sizes against.

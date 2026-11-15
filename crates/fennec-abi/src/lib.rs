@@ -888,6 +888,61 @@ mod tests {
         assert!(r.contains("field `xs`, element 1"), "{r}");
     }
 
+    /// A vector handed over as `f32`s holding a `NaN` or an infinity --
+    /// marked exact or not -- is refused naming the field or the query and
+    /// the element, as one read from JSON past an `f32`'s range is, where a
+    /// vector field or `near` takes it: stored, it went out as `null`. The
+    /// largest `f32` and the smallest subnormal are taken.
+    #[test]
+    fn a_vector_handed_over_holding_no_number_is_refused_naming_it() {
+        let mut db = Database::new();
+        run(
+            &mut db,
+            "create collection t (e vector<3> @hnsw(cosine), h vector<3, f16>)",
+            "",
+            &[],
+        );
+        let vector = |at: u32, v: &[f32]| {
+            let mut b = [at.to_le_bytes(), (v.len() as u32).to_le_bytes()].concat();
+            v.iter().for_each(|x| b.extend(x.to_le_bytes()));
+            b
+        };
+        let range = "a vector's component is a number at most 3.4028235e38 either side of 0";
+        for (bits, at) in [
+            ([f32::NAN, 0.5, 0.25], 0),
+            ([0.5, f32::INFINITY, 0.25], 1),
+            ([0.5, 0.25, f32::from_bits(0xff80_0000)], 2),
+        ] {
+            for place in [0, EXACT] {
+                let r = run(&mut db, "put t {e: $1}", "[null]", &vector(place, &bits));
+                let says = format!("field `e`, element {at}: {range}");
+                assert!(r.contains(&says), "{r}");
+                let r = run(&mut db, "put t {h: $1}", "[null]", &vector(place, &bits));
+                let says = format!(
+                    "field `h`, element {at}: an f16 vector's component is a number at most 65504"
+                );
+                assert!(r.contains(&says), "{r}");
+                let near = "get t near e $1 limit 1";
+                let r = run(&mut db, near, "[null]", &vector(place, &bits));
+                let says = format!("the query vector for `e`, element {at}: {range}");
+                assert!(r.contains(&says), "{r}");
+            }
+        }
+        // From JSON, a number past an `f32`'s range is refused alike.
+        let r = run(&mut db, "put t {e: $1}", "[[0.5, 1e39, 0]]", &[]);
+        assert!(r.contains(&format!("field `e`, element 1: {range}")), "{r}");
+        let ends = vector(EXACT, &[f32::MAX, -f32::MAX, f32::from_bits(1)]);
+        let r = run(&mut db, "put t {e: $1}", "[null]", &ends);
+        assert_eq!(r, r#"{"kind":"affected","count":1}"#);
+        let r = run(&mut db, "get t select e", "", &[]);
+        assert!(
+            r.contains(
+                r#"[{"e":[340282350000000000000000000000000000000,-340282350000000000000000000000000000000,0.000000000000000000000000000000000000000000001]}]"#
+            ),
+            "{r}"
+        );
+    }
+
     /// A collection gaining an `[int]` by `alter collection` after a text
     /// ran asks for that text's list as JSON at its next call, the answer
     /// at a look gone with it (`Database::exactly_needs`); losing it, the
