@@ -1,0 +1,15 @@
+-- The statements every later build answers over graph.fennec: its
+-- checkpoint's graphs, every metric and quantization.
+describe vecs
+get vecs count
+get vecs near c [0.5, -0.5, 0.25, 0, 0.1, -0.2, 0.3, 0.4] limit 3 select n
+get vecs near c [0.5, -0.5, 0.25, 0, 0.1, -0.2, 0.3, 0.4] exact limit 3 select n
+get vecs near l [0.5, -0.5, 0.25, 0, 0.1, -0.2, 0.3, 0.4] limit 3 select n
+get vecs near l [0.5, -0.5, 0.25, 0, 0.1, -0.2, 0.3, 0.4] exact limit 3 select n
+get vecs near d [0.5, -0.5, 0.25, 0, 0.1, -0.2, 0.3, 0.4] limit 3 select n
+get vecs near d [0.5, -0.5, 0.25, 0, 0.1, -0.2, 0.3, 0.4] exact limit 3 select n
+get vecs near q [0.5, -0.5, 0.25, 0, 0.1, -0.2, 0.3, 0.4] limit 3 select n
+get vecs near bits [0.5, -0.5, 0.25, 0, 0.1, -0.2, 0.3, 0.4] limit 3 select n
+get vecs near h [0.5, -0.5, 0.25, 0, 0.1, -0.2, 0.3, 0.4] limit 3 select n
+get vecs near h [0.5, -0.5, 0.25, 0, 0.1, -0.2, 0.3, 0.4] exact limit 3 select n
+get vecs where n < 4 order n select n, c, h

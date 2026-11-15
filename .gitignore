@@ -4,6 +4,10 @@ pkg/
 # A file only a build with every feature can write, which the builds
 # without them open (crates/fennec-core/tests/language_file.rs).
 !crates/fennec-core/tests/language.fennec
+# Each release's fixture set: the files its own binaries wrote
+# (tools/compat_fixtures.py), opened by every later build's tests.
+!crates/fennec-core/tests/compat/*/*.fennec
+!crates/fennec-core/tests/compat/*/archive/*.fennec
 .DS_Store
 node_modules/
 web/fennec-schema.d.ts

@@ -148,6 +148,12 @@ jobs:
       - name: tools/openapi_compat.py finds every break and passes every addition
         run: python3 tools/test_openapi_compat.py
 
+      # docs/design/compatibility.md: a release after one with no fixture
+      # set (crates/fennec-core/tests/compat/v<version>/, RELEASING.md's
+      # step 6) is refused where its version is set.
+      - name: make version refuses a release after one with no fixture set
+        run: python3 tools/test_version.py
+
       # docs/design/durability.md#a-power-cut: the power cuts run by hand,
       # weekly and on a push to main, never on a pull request; what their
       # shared check must fail -- a sync come late, a write lost past

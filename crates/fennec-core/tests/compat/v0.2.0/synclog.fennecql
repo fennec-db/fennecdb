@@ -1,0 +1,6 @@
+-- The statements every later build answers over synclog.fennec with the
+-- sync log beside it: the writes the log holds and the file lost.
+get events count
+get events order n
+get events where n = 2
+get events order at desc limit 2 select n, at

@@ -1,0 +1,24 @@
+-- The statements every later build answers over the page's stores --
+-- IndexedDB's image and chunks, sealed or not, and the OPFS file -- as the
+-- release's page answered them.
+collections
+describe kinds
+describe notes
+get kinds order i
+get kinds select i, v, vh, sp order i
+get kinds where email = "ALICE@example.com" select i
+get kinds where tag = "green fox" select i
+get kinds match t "fox" select i
+get kinds where j.kind = "b" select i, j
+get kinds order tr select i, tr
+get kinds near v [1, 0, 0, 0] limit 2 select i
+get kinds near v [1, 0, 0, 0] exact limit 2 select i
+get kinds near sp "{1:1}/8" limit 2 select i
+get kinds near g [13, 52] limit 1 select i
+get kinds where a = 1 order z desc select i, z
+get kinds where exp != null select i
+get notes order n
+get notes match body "cafe" select n
+get notes match body "naive" select n
+get filler count
+get filler where n = 29 select n, body

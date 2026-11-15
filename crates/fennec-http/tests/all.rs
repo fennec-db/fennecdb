@@ -13,6 +13,7 @@ mod changes;
 mod chunked;
 mod claim_values;
 mod claims;
+mod compat;
 mod conditional;
 mod dials;
 mod empty_tokens;

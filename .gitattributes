@@ -2,5 +2,12 @@
 # `core.autocrlf` says: a test comparing a golden file byte for byte passes
 # in a developer's checkout as on CI (docs/design/windows.md, decision 8).
 * text=auto eol=lf
+# Each release's fixture set (crates/fennec-core/tests/compat/): the files
+# its own binaries wrote, held byte for byte -- never a line ending turned,
+# never a diff shown. Its statements and answers are text, LF everywhere.
+crates/fennec-core/tests/compat/*/*.fennec binary
+crates/fennec-core/tests/compat/*/*.sync binary
+crates/fennec-core/tests/compat/*/*.sealed binary
+crates/fennec-core/tests/compat/*/archive/** binary
 # The font's licence holds CRLF as its authors wrote it, kept as it is.
 site/fonts/OFL-IBMPlexMono.txt -text

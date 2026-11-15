@@ -6,7 +6,10 @@ nothing reaches a registry before the notes have had a read.
 
 ## A release
 
-1. `make version V=X.Y.Z`: the one version goes into the workspace, the
+1. `make version V=X.Y.Z` refuses while the release it moves on from has
+   no fixture set: the workspace's version, from v0.2.0 on, needs
+   `crates/fennec-core/tests/compat/v<that version>/` (step 6 writes it),
+   every later build's tests opening its files. Then the one version goes into the workspace, the
    Python package, the npm packages, the NuGet package, the Kotlin and Dart
    packages, the Flutter plugin, `Package.swift`'s release, the image the
    README pulls and the examples' dependencies (`examples/`). The site needs
@@ -164,6 +167,26 @@ nothing reaches a registry before the notes have had a read.
    Windows zip's `bin\launcher.exe` downloaded by a browser, which SmartScreen
    holds to *More info*, *Run anyway* -- neither of which a check here can
    click through.
+6. Write the release's fixture set, on macOS or Linux, from the tag alone:
+   `make compat-fixtures V=X.Y.Z`. `tools/compat_fixtures.py build` puts the
+   tag's tree in a scratch directory (`git archive`), builds its
+   `fennec-server` and `fennec` (`cargo build --release`), its module (the
+   tag's `make wasm`) and `tools/compat/writer.rs` as an example of its
+   fennec-core, keeps the binaries and the tag's `web/` and deletes the
+   rest; `write` runs them into `crates/fennec-core/tests/compat/vX.Y.Z/`:
+   a server's file and a shell's, a checkpoint's graphs, a sealed backup
+   and archive, the page's IndexedDB records and OPFS file, and the
+   answers the release gave over each (about a minute and a half: a
+   scheduled statement's slot is waited for). A release that writes
+   something new -- a record kind, a type tag, an index -- adds the
+   statements writing it to `tools/compat_fixtures.py` or
+   `tools/compat/` before its set is written, and its line naming what
+   it writes to `RELEASES` in `crates/fennec-core/tests/compat.rs`, which
+   fails a set without one. The set goes through a pull request like any
+   other, never written again: the next release's `make version` refuses
+   until it is on main, and every later build's `compat::` tests, in
+   fennec-core, fennec-http and fennec, and `web/fennec.compat.test.js`
+   open it.
 
 `make packages` runs the same checks locally at any time, NuGet's where
 the .NET SDK is installed.
@@ -412,8 +435,10 @@ every tag. Before a 1.x tag, check:
    only gained entries. Where a dump is not built yet (T5 of the 1.0 plan,
    which also dumps the CLI usage text, exit codes and metric names)
    diff them by hand against the previous tag.
-4. HEAD opens every file written from v0.2.0 on (`tests/language.fennec`,
-   `tests/statements.fennec`; T2 adds each release's own), and
+4. HEAD opens every file written from v0.2.0 on: the `compat::` tests pass
+   over every release's set (`crates/fennec-core/tests/compat/`, step 6 of
+   *A release*), beside `tests/language.fennec` and
+   `tests/statements.fennec`, and
    `make upgrade-check` (by hand, kind 13 alone; CI check: T3) passes: an older replica stops by name on a record
    kind or tag it does not know. The notes name any feature whose first use
    moves the file format, and say that replicas upgrade before primaries.

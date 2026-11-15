@@ -1,0 +1,5 @@
+{"kind":"schemas","collections":[{"name":"notes","fields":[{"name":"n","type":"int","index":"hash"},{"name":"body","type":"text","index":"text(k1=0.9, b=0.4)"},{"name":"at","type":"timestamp","index":"sorted"}]}]}
+{"kind":"rows","result":{"columns":["id","n","body","at"],"rows":[{"id":2,"n":2,"body":"second, edited","at":"2026-02-02T00:00:00Z"},{"id":3,"n":3,"body":"third","at":null}]}}
+{"kind":"rows","result":{"columns":["n"],"rows":[{"n":2,"_score":0.65197015}]}}
+{"kind":"rows","result":{"columns":["n","at"],"rows":[{"n":2,"at":"2026-02-02T00:00:00Z"},{"n":3,"at":null}]}}
+{"kind":"rows","result":{"columns":["count"],"rows":[{"count":2}]}}

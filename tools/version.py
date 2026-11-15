@@ -25,10 +25,36 @@ def sub(path, pattern, repl):
     p.write_text(text, encoding="utf-8")
 
 
+def missing_set(root, current, new):
+    """Why the release after `current` cannot be cut yet, or None: from
+    v0.2.0 on, a release's fixture set -- the files its own binaries wrote,
+    which every later build's tests open (tools/compat_fixtures.py) --
+    exists before the version moves past it. Setting the version a release
+    already has asks for nothing."""
+    m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", current)
+    if current == new or not m or tuple(map(int, m.groups())) < (0, 2, 0):
+        return None
+    if (root / "crates" / "fennec-core" / "tests" / "compat" / f"v{current}" / "README.md").is_file():
+        return None
+    return (f"v{current} has no fixture set (crates/fennec-core/tests/compat/v{current}/): write it from "
+            f"its tag with `make compat-fixtures V={current}` and land it before the release after it "
+            "(RELEASING.md, step 6)")
+
+
+def current_version(root):
+    m = re.search(r'^version = "([^"]+)"', (root / "Cargo.toml").read_text(encoding="utf-8"), flags=re.M)
+    if not m:
+        sys.exit("Cargo.toml: no workspace version")
+    return m.group(1)
+
+
 def main():
     if len(sys.argv) != 2 or not re.fullmatch(r"\d+\.\d+\.\d+", sys.argv[1]):
         sys.exit("usage: version.py X.Y.Z")
     v = sys.argv[1]
+    why = missing_set(ROOT, current_version(ROOT), v)
+    if why:
+        sys.exit(why)
     sub("Cargo.toml", r'^version = "[^"]+"', f'version = "{v}"')
     for crate in ("core", "ql", "abi", "http", "server", "wire", "import", "tls"):
         sub("Cargo.toml", rf'^(fennec-{crate} = \{{ version = )"[^"]+"', rf'\g<1>"{v}"')

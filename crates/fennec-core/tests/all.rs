@@ -18,6 +18,7 @@ mod calls;
 mod changes;
 mod claims;
 mod collate;
+mod compat;
 mod composite;
 mod composite_lookup;
 mod counts;
