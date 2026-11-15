@@ -917,8 +917,12 @@ jobs:
   # runs cut -- counts nothing until it has landed; judged apart, by
   # `perf`. The base is the merge's first parent, a pull request's base
   # branch or the commit a merge group queues onto, built with its own
-  # toolchain. valgrind and musl-gcc (ring's C, through the examples'
-  # dev-dependency on fennec-tls) are the runner's packages, no crate.
+  # toolchain. Then the I/O workloads: each side's fennec-server, built in
+  # the same trees and target directories, sent gate.rs's requests under
+  # strace -f -- its fsyncs, renames and bytes written to files. valgrind,
+  # strace (which the runner's image lacks) and musl-gcc (ring's C, through
+  # the examples' dev-dependency on fennec-tls) are the runner's packages,
+  # no crate.
   perf-count:
     name: perf (count)
     if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
@@ -953,7 +957,7 @@ jobs:
 
       # The base's channel beside this tree's: a pull request moving
       # rust-toolchain.toml builds its base with the base's compiler.
-      - name: Install both sides' toolchains, the musl target, valgrind and musl-gcc
+      - name: Install both sides' toolchains, the musl target, valgrind, strace and musl-gcc
         if: steps.reach.outputs.built == 'true'
         run: |
           rustup show
@@ -963,20 +967,37 @@ jobs:
             rustup toolchain install "$base" --profile minimal --target x86_64-unknown-linux-musl
           fi
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends valgrind musl-tools
+          sudo apt-get install -y --no-install-recommends valgrind strace musl-tools
 
+      # `--keep`: the I/O step builds fennec-server in the same trees and
+      # target directories, the crates both reach built once.
       - name: Count each workload's instructions and heap in the base's build and this one's
         if: steps.reach.outputs.built == 'true'
         run: |
           python3 -I tools/perf_gate_base.py run --base HEAD^1 --target x86_64-unknown-linux-musl \
-            --work "$RUNNER_TEMP/perf" --out "$RUNNER_TEMP/perf/results.json" --no-check
+            --work "$RUNNER_TEMP/perf" --out "$RUNNER_TEMP/perf/results.json" --no-check --keep
+
+      # By the base's checker where it counts I/O; this tree's only where
+      # the base's cannot yet, as the gate's own first run was counted.
+      - name: Count each I/O workload's fsyncs, renames and bytes written against the base's server and this one's
+        if: steps.reach.outputs.built == 'true'
+        run: |
+          checker=tools/perf_gate_base.py
+          if ! python3 -I "$checker" io --help > /dev/null 2>&1; then
+            checker=tools/perf_gate.py
+            echo "the base's checker counts no I/O yet: this tree's counts it"
+          fi
+          python3 -I "$checker" io --base HEAD^1 --target x86_64-unknown-linux-musl \
+            --work "$RUNNER_TEMP/perf" --out "$RUNNER_TEMP/perf/io.json" --no-check
 
       - name: Keep the results for the judgement
         if: steps.reach.outputs.built == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: perf-results
-          path: ${{ runner.temp }}/perf/results.json
+          path: |
+            ${{ runner.temp }}/perf/results.json
+            ${{ runner.temp }}/perf/io.json
           retention-days: 14
 
       # Each side's median run of each workload, by function: what
@@ -989,22 +1010,19 @@ jobs:
           path: ${{ runner.temp }}/perf/profiles/
           retention-days: 14
 
-      # P50, the I/O counts -- fsyncs and bytes written a durable write and
-      # a compact, under strace -f -c -- goes here, over the same two
-      # builds and the same checker: a results file of its own `metric`.
-
   # docs/design/benchmarks.md#the-gate: perf (count)'s results held to the
   # base's by the base's copy of the checker, the pull request's
   # PERF_ACCEPTED read as data and the workloads held to the base's own
   # program's: +1% or more in instructions or in heap bytes an op fails
   # unless the pull request adds an entry naming the workload, and so does
   # a workload the base's program runs that this tree dropped or the base
-  # did not run. A job of its own: the count runs the change's build
-  # scripts and programs, which could put anything on a later step's PATH
-  # ($GITHUB_PATH); here nothing of the change runs, and git and python3
-  # are the runner's. It names every edit of the gate's own files and
-  # every entry added, which the owner approves before the change merges.
-  # This job is the check a merge may require.
+  # did not run; an I/O workload's count that is not the base's, up or
+  # down, fails unless an entry names that count. A job of its own: the
+  # count runs the change's build scripts and programs, which could put
+  # anything on a later step's PATH ($GITHUB_PATH); here nothing of the
+  # change runs, and git and python3 are the runner's. It names every edit
+  # of the gate's own files and every entry added, which the owner approves
+  # before the change merges. This job is the check a merge may require.
   perf:
     name: perf (instructions)
     needs: perf-count
@@ -1053,6 +1071,7 @@ jobs:
           fi
 
       - name: The count's results
+        id: results
         if: steps.reach.outputs.built == 'true'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -1070,6 +1089,27 @@ jobs:
             held=(--accepted-base tools/perf_gate_base.py)
           fi
           python3 -I tools/perf_gate_base.py check "$RUNNER_TEMP/judge/results.json" \
+            --accepted-from tools/perf_gate.py "${held[@]}" \
+            --base-program "$RUNNER_TEMP/judge/base_gate.rs" --summary "$GITHUB_STEP_SUMMARY"
+
+      # Judged whether or not the instructions passed, so the summary holds
+      # both tables. By the base's checker where it judges I/O; this tree's
+      # only where the base's cannot yet, as the gate's own first run was.
+      - name: Hold the I/O counts to the base's, by the base's checker
+        if: ${{ !cancelled() && steps.results.outcome == 'success' }}
+        env:
+          BASE_HAD: ${{ steps.base.outputs.had }}
+        run: |
+          checker=tools/perf_gate_base.py
+          if ! python3 -I "$checker" io --help > /dev/null 2>&1; then
+            checker=tools/perf_gate.py
+            echo "the base's checker judges no I/O yet: this tree's judges it"
+          fi
+          held=()
+          if [ "$BASE_HAD" = true ]; then
+            held=(--accepted-base tools/perf_gate_base.py)
+          fi
+          python3 -I "$checker" check "$RUNNER_TEMP/judge/io.json" \
             --accepted-from tools/perf_gate.py "${held[@]}" \
             --base-program "$RUNNER_TEMP/judge/base_gate.rs" --summary "$GITHUB_STEP_SUMMARY"
 

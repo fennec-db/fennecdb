@@ -71,16 +71,35 @@ holds already (`--accepted-base`) lets nothing through -- so the list is
 the history of what was let through, never removed. The owner approves
 each entry, and each edit of the gate's own files, which `edits` names.
 
-`run` and `measure` count with valgrind, which runs on Linux: elsewhere they
-say so and exit 0 (on macOS, in Docker: docs/design/benchmarks.md#the-gate).
-`check`, `reaches` and `edits` run anywhere. The I/O counts (P50, under
-strace) are another metric of the same results file, to come: `metric`
-names what a file holds.
+The I/O a write costs, which callgrind does not see -- it counts no system
+call -- is another metric of the same checker (`"metric": "io"` in a results
+file of its own): each of gate.rs's IO_WORKLOADS sent by that program to a
+real fennec-server of each side under `--sync always`, the server alone run
+under `strace -f`, IO_RUNS (3) times a side. Counted between the server
+taking the workload's connection and its taking the driver's next one: the
+fsync family's calls, renames, the calls writing to files and the bytes
+they wrote, and the calls of those that failed -- each to the call, so
+every run of a side must count the same, and any count of this tree's that
+is not the base's fails, up or down (fewer fsyncs a durable write is
+durability lost), unless the pull request adds a PERF_ACCEPTED entry naming
+the workload and the count (`"metric": "fsyncs"`, a `most` of `+100%` or
+`+1`).
+
+    python3 tools/perf_gate.py io --base origin/main      # make perf-gate-io
+    python3 tools/perf_gate.py io-measure --base-server B --head-server H \\
+        --client G --out IO.json                          # two built servers
+    python3 tools/perf_gate.py check IO.json              # judged as above
+
+`run` and `measure` count with valgrind, `io` and `io-measure` with strace,
+both on Linux: elsewhere they say so and exit 0 (on macOS, in Docker:
+docs/design/benchmarks.md#the-gate). `check`, `reaches` and `edits` run
+anywhere.
 """
 
 import argparse
 import ast
 import concurrent.futures
+import http.client
 import json
 import math
 import os
@@ -91,6 +110,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -139,8 +159,14 @@ UNREAD = ("site/", "docs/", "integrations/", "web/", "studio/", "deploy/")
 WORKFLOW = ".github/workflows/ci.yml"
 JOBS = ("perf-count", "perf")
 # What an entry lets through: the figure (instructions an op, the
-# allocator priced), or the heap bytes an op.
-METRICS = ("instructions", "bytes")
+# allocator priced), or the heap bytes an op; or one of an I/O workload's
+# counts (IO_METRICS, below).
+INSTRUCTION_METRICS = ("instructions", "bytes")
+# An I/O workload's counts, each judged to the call: the fsync family's
+# calls, renames, the calls writing to files, the bytes they wrote, and
+# the calls of those that failed.
+IO_METRICS = ("fsyncs", "renames", "writes", "written", "failed")
+METRICS = INSTRUCTION_METRICS + IO_METRICS
 
 # Every workload a pull request made slower on purpose, in the order they
 # went out, never removed: the history of what the gate let through. An
@@ -148,16 +174,22 @@ METRICS = ("instructions", "bytes")
 # to `most`, the measured delta with room for the merge queue's rerun; a
 # later regression of the same workload needs an entry of its own. `metric`
 # says what it lets through, "bytes" for the heap's bytes and the figure
-# where it is left out; one entry a metric. `reason` says what the cost
-# buys and how it was measured (`make perf-gate`, `make instr-compare`'s
-# figure on macOS). The owner approves an entry before its pull request
-# merges. A literal: the base's checker reads it from a pull request's
-# copy as data, never running it (`--accepted-from`).
+# where it is left out; one entry a metric. An I/O workload's entry names
+# its count (IO_METRICS) and lets it move only in its `most`'s direction,
+# by at most that share of the base's count or that many: "+100%", "+1",
+# "-50%". `reason` says what the cost buys and how it was measured (`make
+# perf-gate`, `make perf-gate-io`, `make instr-compare`'s figure on macOS).
+# The owner approves an entry before its pull request merges. A literal:
+# the base's checker reads it from a pull request's copy as data, never
+# running it (`--accepted-from`).
 #
 #   {"workload": "http-put-keyed", "most": "+1.8%",
 #    "reason": "a key's row now holds its request's digest, which a replay
 #               checks: +260 instructions a keyed put (make perf-gate),
 #               +1.5% by make instr-compare MODES=keyed on an M1"}
+#   {"workload": "io-compact", "metric": "fsyncs", "most": "+1",
+#    "reason": "the directory is synced after the rename too, or a power
+#               cut could bring the old file back: one fsync a compact"}
 PERF_ACCEPTED = []
 
 # What an entry must say, what it may, and how long its reason is at the
@@ -196,6 +228,35 @@ def percent(text):
     return float(m.group(1)) / 100
 
 
+def io_most(text):
+    """An I/O entry's `most`: ("share", +1.0) for `+100%`, ("count", -2) for
+    `-2` -- signed, the direction the count may move, never 0; anything else
+    a ValueError."""
+    s = str(text).strip()
+    m = re.fullmatch(r"([+-])(\d+(?:\.\d+)?)(%?)", s)
+    if not m or float(m.group(2)) == 0 or (not m.group(3) and "." in m.group(2)):
+        raise ValueError(
+            f"an I/O entry's `most` is a signed share of the base's count or a signed whole count, "
+            f"as \"+100%\", \"-50%\" or \"+1\": {text!r}"
+        )
+    sign = 1 if m.group(1) == "+" else -1
+    if m.group(3):
+        return "share", sign * float(m.group(2)) / 100
+    return "count", sign * int(m.group(2))
+
+
+def io_lets(most, base, head):
+    """Whether an I/O entry's `most` lets a count move from `base` to
+    `head`: the same direction, and no further."""
+    kind, v = io_most(most)
+    d = head - base
+    if d == 0 or (d > 0) != (v > 0):
+        return False
+    if kind == "count":
+        return abs(d) <= abs(v)
+    return base != 0 and abs(d / base) <= abs(v)
+
+
 def metric_of(e):
     """What entry `e` lets through: its `metric`, the figure's where none."""
     return e.get("metric", "instructions")
@@ -204,19 +265,24 @@ def metric_of(e):
 def checked(entries):
     """`entries` held to the form an entry takes: each a dict of ENTRY_KEYS
     and at most ENTRY_OPTIONAL, a workload's name, a metric, a `most` above
-    the threshold and a reason in words. A malformed entry is the gate's
-    failure, never one passed over."""
+    the threshold -- an I/O count's signed (`io_most`) -- and a reason in
+    words. A malformed entry is the gate's failure, never one passed over."""
     if not isinstance(entries, list):
         raise ValueError("PERF_ACCEPTED is a list of entries")
     for e in entries:
         if not isinstance(e, dict) or not ENTRY_KEYS <= set(e) <= ENTRY_KEYS | ENTRY_OPTIONAL:
-            raise ValueError(f"an entry names {sorted(ENTRY_KEYS)}, and `metric` where it lets bytes through: {e!r}")
+            raise ValueError(
+                f"an entry names {sorted(ENTRY_KEYS)}, and `metric` where it lets bytes or an I/O count through: {e!r}"
+            )
         if not isinstance(e["workload"], str) or not e["workload"]:
             raise ValueError(f"an entry's workload is a name: {e!r}")
         if metric_of(e) not in METRICS:
             raise ValueError(f"{e['workload']}: `metric` is one of {', '.join(METRICS)}: {e['metric']!r}")
-        most = percent(e["most"])
-        if most < THRESHOLD:
+        if metric_of(e) in IO_METRICS:
+            # Counted to the call: any move is one, and its direction is
+            # named -- fewer fsyncs a durable write is durability lost.
+            io_most(e["most"])
+        elif percent(e["most"]) < THRESHOLD:
             raise ValueError(f"{e['workload']}: `most` {e['most']} is under the threshold, which needs no entry")
         if not isinstance(e["reason"], str) or len(e["reason"].strip()) < REASON_AT_LEAST:
             raise ValueError(f"{e['workload']}: the reason is a written justification, {REASON_AT_LEAST} characters at the least")
@@ -245,6 +311,21 @@ def workload_names(source):
     if not found or len(found) != len(re.findall(r'\(\s*"', body)):
         raise ValueError("the base's gate.rs lists workloads this checker cannot read whole")
     return {name: int(ops.replace("_", "")) for name, ops in found}
+
+
+def io_workload_names(source):
+    """The I/O workloads a gate.rs `source` lists, {name: requests}: none
+    where it has no IO_WORKLOADS table -- a base before the I/O gate. A
+    table this cannot read whole is refused, never read as fewer."""
+    m = re.search(r"const IO_WORKLOADS\s*:[^=]*=\s*&\[(.*?)\n\];", source, re.S)
+    if not m:
+        return {}
+    body = m.group(1)
+    ident = r"[A-Za-z_][A-Za-z0-9_]*"
+    found = re.findall(rf'\(\s*"([^"]+)"\s*,\s*([0-9_]+)\s*,\s*{ident}\s*,\s*{ident}\s*,?\s*\)', body)
+    if not found or len(found) != len(re.findall(r'\(\s*"', body)):
+        raise ValueError("the base's gate.rs lists I/O workloads this checker cannot read whole")
+    return {name: int(n.replace("_", "")) for name, n in found}
 
 
 # ------------------------------------------------------------------ judging
@@ -317,6 +398,8 @@ def judge(results, entries=(), threshold=THRESHOLD, base_names=None):
     not run, where a workload new to this tree is held to nothing."""
     if results.get("metric") != "instructions":
         raise ValueError(f"these results hold {results.get('metric')!r}, not instructions")
+    # An I/O workload's entries are the I/O judgement's (`judge_io`).
+    entries = [e for e in entries if metric_of(e) in INSTRUCTION_METRICS]
     names = set(results["workloads"])
     known = names | set(base_names or ())
     for e in entries:
@@ -453,18 +536,193 @@ def table(results, rows):
     return "\n".join(out) + "\n"
 
 
+def io_side(runs):
+    """A side's runs of an I/O workload: the one run they agree on, and the
+    counts they differ in. Counted to the call, a count that moves from one
+    run to the next is the clock's or a draw's, and no count to judge by."""
+    first = runs[0]
+    return first, [k for k in IO_METRICS + IO_SENT if any(r.get(k) != first.get(k) for r in runs)]
+
+
+def io_moved(b, h):
+    """A count's move from `b` to `h`, as the verdict says it."""
+    share = f"{(h - b) / b * 100:+.1f}%" if b else "from none"
+    return f"{b:,} → {h:,} ({share})"
+
+
+def judge_io(results, entries=(), base_names=None):
+    """Each I/O workload of `results` judged: (rows, failed), a row (name,
+    requests, base, head, verdict, moved) -- base and head the run each
+    side's runs agree on, or None, and moved {count: (base, head)} for each
+    count of IO_METRICS that is not the base's. Any such move fails unless
+    one of `entries`, the pull request's own, names the workload and the
+    count and lets it so far in its direction (`io_lets`). A side whose
+    runs differ fails, and so do sides sent different requests. As the
+    instructions' (`judge`): a workload of `base_names` -- the base's own
+    program's IO_WORKLOADS -- this tree dropped, or the base's build did not
+    run, fails, where one new to this tree is held to nothing."""
+    if results.get("metric") != "io":
+        raise ValueError(f"these results hold {results.get('metric')!r}, not I/O counts")
+    # The instructions' entries are `judge`'s.
+    entries = [e for e in entries if metric_of(e) in IO_METRICS]
+    names = set(results["workloads"])
+    known = names | set(base_names or ())
+    for e in entries:
+        if e["workload"] not in known:
+            raise ValueError(f"PERF_ACCEPTED names {e['workload']!r}, which no I/O workload is")
+    allowed = {}
+    for e in entries:
+        allowed.setdefault((e["workload"], metric_of(e)), []).append(e["most"])
+
+    rows, failed = [], False
+    for name, n in sorted((base_names or {}).items()):
+        if name not in names:
+            rows.append((name, n, None, None, "FAILED: dropped -- the base's program runs it, this tree's does not", {}))
+            failed = True
+    for name in sorted(names):
+        w = results["workloads"][name]
+        n, base, head = w["requests"], w.get("base") or [], w.get("head") or []
+
+        def fail(why, b=None, h=None):
+            rows.append((name, n, b, h, "FAILED: " + why, {}))
+            return True
+
+        if not head:
+            failed |= fail("this tree's build did not run it")
+            continue
+        h, differ = io_side(head)
+        if differ:
+            failed |= fail(f"this tree's runs differ in {', '.join(differ)}: a count no run repeats", h=h)
+            continue
+        if not base:
+            had = name in base_names if base_names is not None else bool(w.get("base_error"))
+            if had:
+                # The base had it: a run that crashed is no count to pass on.
+                failed |= fail("the base's build did not run it", h=h)
+            else:
+                rows.append((name, n, None, h, "new: held to nothing", {}))
+            continue
+        if min(len(base), len(head)) < IO_RUNS:
+            failed |= fail(f"fewer than {IO_RUNS} runs a side")
+            continue
+        b, differ = io_side(base)
+        if differ:
+            failed |= fail(f"the base's runs differ in {', '.join(differ)}: a count no run repeats", b, h)
+            continue
+        sent = [k for k in IO_SENT if b.get(k) != h.get(k)]
+        if sent:
+            failed |= fail(f"the two sides were not sent the same requests ({', '.join(sent)})", b, h)
+            continue
+        moved = {k: (b[k], h[k]) for k in IO_METRICS if b[k] != h[k]}
+        failures, accepted = [], []
+        for k, (was, now) in moved.items():
+            said = f"{k} {io_moved(was, now)}"
+            if any(io_lets(most, was, now) for most in allowed.get((name, k), [])):
+                accepted.append(said)
+            else:
+                failures.append(said)
+        if failures:
+            verdict = "FAILED: " + "; ".join(failures)
+            failed = True
+        elif accepted:
+            verdict = "accepted (PERF_ACCEPTED): " + "; ".join(accepted)
+        else:
+            verdict = "ok"
+        rows.append((name, n, b, h, verdict, moved))
+    rows.sort(key=lambda r: r[0])
+    return rows, failed
+
+
+def io_table(results, rows):
+    """The I/O judgement as Markdown, a step summary's: each workload's
+    counts, `base → this tree` where they differ, the ratios a reader
+    weighs them by, and each file's share."""
+    out = [
+        f"### I/O a workload, base against this tree ({results.get('runs', '?')} runs a side of each "
+        "side's fennec-server under `strace -f`, every run of a side alike)",
+        "",
+        "| workload | answered | rows | bytes sent | fsyncs | fsyncs an answer | renames | write calls "
+        "| bytes written | written a byte sent | file before | written a byte of it | verdict |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+    ]
+    for name, n, b, h, verdict, _ in rows:
+        sides = [r for r in (b, h) if r]
+
+        def cell(key):
+            vals = [r[key] for r in sides]
+            if not vals:
+                return "-"
+            return " → ".join(f"{v:,}" for v in dict.fromkeys(vals))
+
+        def ratio(num, den, digits):
+            vals = [f"{r[num] / r[den]:,.{digits}f}" if r[den] else "-" for r in sides]
+            return " → ".join(dict.fromkeys(vals)) or "-"
+
+        out.append(
+            f"| {name} | {cell('answered')} | {cell('rows')} | {cell('sent')} | {cell('fsyncs')} "
+            f"| {ratio('fsyncs', 'answered', 2)} | {cell('renames')} | {cell('writes')} | {cell('written')} "
+            f"| {ratio('written', 'sent', 3)} | {cell('file_before')} | {ratio('written', 'file_before', 3)} | {verdict} |"
+        )
+    out += [
+        "",
+        f"Any count of this tree's that is not the base's fails, up or down -- fewer fsyncs a durable "
+        "write is durability lost -- unless the pull request adds a PERF_ACCEPTED entry (tools/perf_gate.py) "
+        "naming the workload and the count, which the owner approves: docs/design/benchmarks.md#the-gate. "
+        "Counted from the server taking the workload's connection to its taking the driver's next: the "
+        "fsync family's calls (fsync, fdatasync, sync_file_range, msync, syncfs) on files, renames, and "
+        "the calls writing to files and the bytes they returned -- never a socket's or a pipe's, the log "
+        "being a pipe; *answered* and *bytes sent* are the client's, *file before* the database's size "
+        "once the setup was answered.",
+    ]
+    detail = []
+    for name, _, b, h, _, _ in rows:
+        for side, r in (("base", b), ("this tree", h)):
+            if not r or (side == "base" and h and h.get("files") == r.get("files")):
+                continue
+            label = "both" if side == "this tree" and b and b.get("files") == r.get("files") else side
+            for f, c in sorted((r.get("files") or {}).items()):
+                detail.append(
+                    f"| {name} | {label} | `{f}` | {c.get('writes', 0):,} | {c.get('written', 0):,} "
+                    f"| {c.get('fsyncs', 0):,} | {c.get('renames', 0):,} |"
+                )
+    if detail:
+        out += [
+            "",
+            "<details><summary>Each file's share, as the server named it in the data directory</summary>",
+            "",
+            "| workload | side | file | write calls | bytes written | fsyncs | renamed to it |",
+            "|---|---|---|---:|---:|---:|---:|",
+            *detail,
+            "",
+            "</details>",
+        ]
+    errors = [(n, w["base_error"]) for n, w in sorted(results["workloads"].items()) if w.get("base_error")]
+    if errors:
+        out += ["", "<details><summary>What the base's build said of the I/O workloads it did not run</summary>", ""]
+        for n, e in errors:
+            tail = " / ".join(line.strip() for line in e.strip().splitlines()[-3:] if line.strip())
+            out.append(f"- `{n}`: {tail.replace('`', chr(39))}")
+        out += ["", "</details>"]
+    return "\n".join(out) + "\n"
+
+
 def check(args):
     try:
         with open(args.results, encoding="utf-8") as f:
             results = json.load(f)
         head = checked(accepted_in(args.accepted_from or os.path.abspath(__file__)))
         base = checked(accepted_in(args.accepted_base)) if args.accepted_base else []
+        of_io = results.get("metric") == "io"
         names = None
         if args.base_program:
             with open(args.base_program, encoding="utf-8") as f:
-                names = workload_names(f.read())
-        rows, failed = judge(results, added(head, base), base_names=names)
-        text = table(results, rows)
+                names = (io_workload_names if of_io else workload_names)(f.read())
+        if of_io:
+            rows, failed = judge_io(results, added(head, base), base_names=names)
+            text = io_table(results, rows)
+        else:
+            rows, failed = judge(results, added(head, base), base_names=names)
+            text = table(results, rows)
     except ValueError as e:
         # Said where the pull request's author reads the gate's table.
         text, failed = f"### The perf gate refused its input\n\n{e}\n", True
@@ -830,6 +1088,349 @@ def measure(args):
     return 0
 
 
+# ------------------------------------------------------------------ I/O
+
+# Runs of each I/O workload a side. Its counts are exact -- the same to the
+# call run after run, 20 runs of one build held to each other in the
+# design document -- so three are no median: every run of a side must
+# count the same (`io_side`), and a count that moves fails as a count
+# should not.
+IO_RUNS = 3
+# What strace is asked for: the connections the server takes, which mark
+# the counted stretch, and every call that syncs, renames or writes. Each
+# goes as `?name`, which strace passes over where the architecture has no
+# such call (aarch64 has no `rename`, x86_64's musl calls it).
+IO_CALLS = (
+    "accept", "accept4", "write", "pwrite64", "writev", "pwritev", "pwritev2", "copy_file_range", "sendfile",
+    "fsync", "fdatasync", "sync_file_range", "msync", "syncfs", "rename", "renameat", "renameat2",
+)
+IO_ACCEPTS = frozenset({"accept", "accept4"})
+# The fsync family. `msync` names no descriptor, and is a mapped file's.
+IO_SYNCS = frozenset({"fsync", "fdatasync", "sync_file_range", "msync", "syncfs"})
+IO_RENAMES = frozenset({"rename", "renameat", "renameat2"})
+# A call writing bytes, and which of its descriptors (`-y` shows each with
+# its path) is the one written to: copy_file_range's second.
+IO_WRITES = {"write": 0, "pwrite64": 0, "writev": 0, "pwritev": 0, "pwritev2": 0, "copy_file_range": 1, "sendfile": 0}
+# What else each run of a side must agree on, and both sides: the client's
+# requests answered, rows and bytes sent in the run (and in the setup), and
+# the database's size once the setup was answered.
+IO_SENT = ("answered", "rows", "sent", "setup_sent", "file_before")
+# The server: the workload's file, a port the system picks (its `listening
+# on` line names it), every write durable before it is answered, no
+# compaction of its own -- looked for every 5 s, by the clock -- and the one
+# shutdown once its stdin closes, which also ends a server whose driver
+# died, so none is left behind.
+IO_SERVER = ("--http", "127.0.0.1:0", "--sync", "always", "--auto-compact", "off", "--exit-on-stdin-close")
+# A phase that takes longer has hung.
+IO_TIMEOUT = 300
+
+STRACE_LINE = re.compile(r"^(?:\[pid\s+)?(\d+)\]?\s+(.*)$")
+STRACE_RESUMED = re.compile(r"^<\.\.\. (\w+) resumed>(.*)$")
+STRACE_CALL = re.compile(r"^(\w+)\((.*)$")
+# A call's arguments and what it returned, after the last `) =`: an int,
+# `-1 EBADF (...)`, a descriptor with its path, or `?` where the process
+# ended inside the call.
+STRACE_RETURN = re.compile(r"^(.*)\)\s+=\s+(\S.*)$")
+# A descriptor as `-y` shows it, `3</data/io.fennec>`, `5<socket:[812]>`,
+# and the working directory a relative path of renameat's is in,
+# `AT_FDCWD</data>`.
+STRACE_FD = re.compile(r"(-?\d+|AT_FDCWD)<([^<>]*)>")
+UNFINISHED = "<unfinished ...>"
+
+
+def strace_calls(lines):
+    """The calls a `strace -f -y` trace holds, (name, arguments, return) --
+    the return an int, None where the process ended inside the call -- in
+    the order they returned: a call another thread's interleaved, written
+    `<unfinished ...>` where it began and `<... name resumed>` where it
+    returned, is joined by its thread's id and yielded where it returned.
+    Exits and signals are passed over, and so is a call resumed whose
+    beginning the trace does not hold."""
+    begun = {}
+    for raw in lines:
+        m = STRACE_LINE.match(raw.rstrip("\n"))
+        if not m:
+            continue
+        tid, body = m.groups()
+        if body.startswith(("+++", "---")):
+            continue
+        r = STRACE_RESUMED.match(body)
+        if r:
+            start = begun.pop(tid, None)
+            if start is None or start[0] != r.group(1):
+                continue
+            name, text = start[0], start[1] + r.group(2)
+        else:
+            c = STRACE_CALL.match(body)
+            if not c:
+                continue
+            name, text = c.groups()
+            if text.endswith(UNFINISHED):
+                begun[tid] = (name, text[: -len(UNFINISHED)].rstrip())
+                continue
+        # strace pads before the `=` where a call was resumed or its
+        # arguments were short: `<... write resumed>)        = 100`.
+        done = STRACE_RETURN.match(text)
+        if not done:
+            continue
+        v = re.match(r"-?\d+", done.group(2))
+        yield name, done.group(1), int(v.group()) if v else None
+
+
+def io_counts(lines, data_dir, start=2, end=3):
+    """What a server's trace (`lines`) did to files between the `start`th
+    connection it took and the `end`th: {fsyncs, renames, writes, written,
+    failed, files}, and the connections it took in all. A call counts where
+    it returned. A descriptor counts as a file where `-y` names it by a path
+    outside /dev, /proc and /sys -- never a socket, a pipe (the server's
+    log, its stderr, is the driver's pipe) or /dev/null. A call that failed
+    counts in `failed` alone, its bytes none; `files` gives each file's
+    share, named within `data_dir`."""
+    data_dir = data_dir.rstrip("/")
+
+    def file_of(path):
+        path = path.removesuffix(" (deleted)")
+        if not path.startswith("/") or path.startswith(("/dev/", "/proc/", "/sys/")):
+            return None
+        if path == data_dir:
+            return "."
+        if path.startswith(data_dir + "/"):
+            return path[len(data_dir) + 1:]
+        return "(outside the data directory)"
+
+    out = {"fsyncs": 0, "renames": 0, "writes": 0, "written": 0, "failed": 0, "files": {}}
+
+    def share(f, key, n=1):
+        c = out["files"].setdefault(f, {"writes": 0, "written": 0, "fsyncs": 0, "renames": 0})
+        c[key] += n
+
+    taken = 0
+    for name, args, ret in strace_calls(lines):
+        if name in IO_ACCEPTS:
+            taken += ret is not None and ret >= 0
+            continue
+        if not start <= taken < end:
+            continue
+        ok = ret is not None and ret >= 0
+        fds = STRACE_FD.findall(args)
+        if name in IO_RENAMES:
+            # The new name: the last path, joined to the directory whose
+            # descriptor stands before it where renameat's is relative.
+            quoted = list(re.finditer(r'"([^"]*)"', args))
+            target = quoted[-1].group(1) if quoted else ""
+            if quoted and not target.startswith("/"):
+                before = STRACE_FD.findall(args[: quoted[-1].start()])
+                target = before[-1][1] + "/" + target if before else ""
+            if not ok:
+                out["failed"] += 1
+                continue
+            out["renames"] += 1
+            share(file_of(target) or "(not a file)", "renames")
+        elif name in IO_SYNCS:
+            f = "(mapped)" if name == "msync" else file_of(fds[0][1]) if fds else None
+            if f is None:
+                continue
+            if not ok:
+                out["failed"] += 1
+                continue
+            out["fsyncs"] += 1
+            share(f, "fsyncs")
+        elif name in IO_WRITES:
+            i = IO_WRITES[name]
+            f = file_of(fds[i][1]) if len(fds) > i else None
+            if f is None:
+                continue
+            if not ok:
+                out["failed"] += 1
+                continue
+            out["writes"] += 1
+            out["written"] += ret
+            share(f, "writes")
+            share(f, "written", ret)
+    return out, taken
+
+
+def tracing():
+    """Whether strace can count here: Linux with strace on the PATH."""
+    if platform.system() != "Linux" or shutil.which("strace") is None:
+        print(
+            "perf_gate: the I/O workloads are counted on Linux with strace installed; on macOS run "
+            "them in Docker (docs/design/benchmarks.md#the-gate). Nothing measured.",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
+def listed_io(client):
+    """The I/O workloads the client program runs: [(name, requests)]; none
+    where it has no `--list-io` (a program from before them)."""
+    p = subprocess.run([client, "--list-io"], capture_output=True, text=True)
+    if p.returncode != 0:
+        return []
+    return [(name, int(n)) for name, n in (line.split() for line in p.stdout.splitlines() if line.strip())]
+
+
+def phase(client, which, name, addr):
+    """A phase of workload `name` run by the client program against the
+    server at `addr`: what it said it sent, {answered, rows, sent}."""
+    p = subprocess.run([client, which, name, addr], capture_output=True, text=True, timeout=IO_TIMEOUT)
+    m = re.search(rf"^{which}: {re.escape(name)} answered=(\d+) rows=(\d+) sent=(\d+)$", p.stdout, re.M)
+    if p.returncode != 0 or not m:
+        raise RuntimeError(f"{name}: `{which}` exited {p.returncode}\n{p.stdout[-1500:]}\n{p.stderr[-3000:]}")
+    return dict(zip(("answered", "rows", "sent"), map(int, m.groups())))
+
+
+def io_one_run(server, client, name, requests, scratch, keep=None):
+    """Runs I/O workload `name` once against `server`, the server alone
+    under `strace -f`: the setup over one connection, the size it left the
+    file at, the run over the next, then the driver's own request over a
+    third, which ends what is counted, and the server's stdin closed for
+    its one shutdown. What the server did to files in between
+    (`io_counts`) beside what the client sent. With `keep`, the trace is
+    copied there."""
+    data_dir = tempfile.mkdtemp(prefix=f"{name}.", dir=scratch)
+    trace = data_dir + ".strace"
+    cmd = [
+        "strace", "-f", "-qq", "-y", "-s", "0", "--seccomp-bpf", "-o", trace,
+        "-e", "trace=" + ",".join("?" + c for c in IO_CALLS),
+        "--", server, "--file", os.path.join(data_dir, "io.fennec"), *IO_SERVER,
+    ]
+    # The server's stderr -- its log and its `listening on` line -- is this
+    # pipe, so no line of its log is a write to a file.
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    said, listening = [], threading.Event()
+    addr = []
+
+    def read_stderr():
+        for line in proc.stderr:
+            said.append(line)
+            m = re.search(r"listening on: http://(\S+)", line)
+            if m and not addr:
+                addr.append(m.group(1))
+                listening.set()
+        listening.set()
+
+    reader = threading.Thread(target=read_stderr, daemon=True)
+    reader.start()
+    try:
+        if not listening.wait(IO_TIMEOUT) or not addr:
+            raise RuntimeError(f"{name}: the server never said where it listens:\n{''.join(said)[-3000:]}")
+        setup = phase(client, "io-setup", name, addr[0])
+        file_before = os.path.getsize(os.path.join(data_dir, "io.fennec"))
+        run = phase(client, "io", name, addr[0])
+        if run["answered"] != requests:
+            raise RuntimeError(f"{name}: {run['answered']} requests answered of {requests}")
+        # The third connection: taken once the run is answered, it ends
+        # what is counted, before the shutdown's own sync.
+        host, port = addr[0].rsplit(":", 1)
+        conn = http.client.HTTPConnection(host, int(port), timeout=IO_TIMEOUT)
+        conn.request("GET", "/_health")
+        status = conn.getresponse()
+        status.read()
+        conn.close()
+        if status.status != 200:
+            raise RuntimeError(f"{name}: GET /_health answered {status.status}")
+    finally:
+        # The one shutdown, whatever happened: the server exits on its own,
+        # strace with it.
+        proc.stdin.close()
+        try:
+            proc.wait(IO_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        reader.join(10)
+    try:
+        if proc.returncode != 0:
+            raise RuntimeError(f"{name}: the server exited {proc.returncode}:\n{''.join(said)[-3000:]}")
+        with open(trace, encoding="utf-8", errors="replace") as f:
+            counts, taken = io_counts(f, data_dir)
+        if taken != 3:
+            raise RuntimeError(f"{name}: the trace shows {taken} connections taken, where a run makes 3")
+        if keep:
+            os.makedirs(keep, exist_ok=True)
+            shutil.copyfile(trace, os.path.join(keep, f"{name}.strace"))
+    finally:
+        shutil.rmtree(data_dir, ignore_errors=True)
+        if os.path.exists(trace):
+            os.unlink(trace)
+    return {**run, "setup_sent": setup["sent"], "file_before": file_before, **counts}
+
+
+def measure_io(base_server, head_server, client, runs, jobs, scratch, log=print, only=None, traces=None):
+    """Every I/O workload of the client program run `runs` times against
+    each side's server, `jobs` at a time, each round of every workload and
+    side before the next: results of `"metric": "io"`. The client is one
+    program -- this tree's -- for both sides, so each is sent the same
+    requests, byte for byte, and only the servers differ. A run the head
+    fails is the gate's failure; one the base fails keeps no base run and
+    says why (`base_error`), the judgement holding it to nothing only where
+    the base's own program had no such workload. With `traces`, each
+    side's last run of each workload keeps its trace there."""
+    work = {"head": head_server, "base": base_server}
+    names = [(n, k) for n, k in listed_io(client) if not only or n in only]
+    if not names:
+        raise RuntimeError(f"{client} lists no I/O workload (--list-io)")
+    results = {"metric": "io", "tool": "strace", "runs": runs, "workloads": {}}
+    failed = {}
+    for name, n in names:
+        results["workloads"][name] = {"requests": n, "base": [], "head": []}
+        if not base_server:
+            failed[("base", name)] = f"{name}: the base's fennec-server did not build"
+    tasks = [
+        (side, name, n)
+        for _ in range(runs)
+        for name, n in names
+        for side in ("base", "head")
+        if work[side] and (side, name) not in failed
+    ]
+    done = 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+        futures = {
+            pool.submit(
+                io_one_run, work[side], client, name, n, scratch,
+                os.path.join(traces, side) if traces else None,
+            ): (side, name)
+            for side, name, n in tasks
+        }
+        for fut in concurrent.futures.as_completed(futures):
+            side, name = futures[fut]
+            try:
+                results["workloads"][name][side].append(fut.result())
+            except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+                failed.setdefault((side, name), str(e))
+            done += 1
+            if done % 8 == 0 or done == len(tasks):
+                log(f"  {done}/{len(tasks)} I/O runs")
+    heads = [msg for (side, _), msg in sorted(failed.items()) if side == "head"]
+    if heads:
+        raise RuntimeError("an I/O workload failed against this tree's server:\n" + "\n".join(heads))
+    for (_, name), msg in failed.items():
+        results["workloads"][name]["base"] = []
+        results["workloads"][name]["base_error"] = msg[-600:]
+    return results
+
+
+def io_measure(args):
+    if not tracing():
+        return 0
+    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+    scratch = tempfile.mkdtemp(prefix="perf-gate-io-")
+    try:
+        results = measure_io(
+            args.base_server, args.head_server, args.client, args.runs, args.jobs, scratch,
+            only=args.only.split(",") if args.only else None, traces=args.traces,
+        )
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    with open(args.out, "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=1)
+        f.write("\n")
+    print(f"results: {args.out}")
+    return 0
+
+
 # ------------------------------------------------------------------ building
 
 
@@ -937,6 +1538,104 @@ def run(args):
     return check(ns)
 
 
+def build_server(tree, target, target_dir, cargo, log):
+    """Builds fennec-server in `tree` into `target_dir` -- the gate
+    program's, in the same profile and environment, so the crates both
+    reach are built once: its path, or None where it does not build."""
+    cmd = [cargo, "build", "--locked", "--release", "-p", "fennec-server", "--bin", "fennec-server"]
+    if target:
+        cmd += ["--target", target]
+    env = dict(os.environ, CARGO_TARGET_DIR=target_dir, CARGO_PROFILE_RELEASE_STRIP="false")
+    p = subprocess.run(cmd, cwd=tree, env=env, capture_output=True, text=True)
+    if p.returncode != 0:
+        log(f"fennec-server did not build in {tree}:\n{p.stderr[-4000:]}")
+        return None
+    return os.path.join(target_dir, *([target] if target else []), "release", "fennec-server")
+
+
+def tree_at(ref, where):
+    """A worktree of `ref` at `where`: the one `run --keep` left there where
+    it is at that commit -- its builds' sources untouched, so cargo builds
+    nothing of them again -- else made anew. Its commit, and whether it was
+    made here."""
+    sha = git("rev-parse", "--verify", f"{ref}^{{commit}}")
+    if os.path.isdir(where):
+        at = subprocess.run(["git", "rev-parse", "HEAD"], cwd=where, capture_output=True, text=True)
+        if at.returncode == 0 and at.stdout.strip() == sha:
+            return sha, False
+    worktree(ref, where)
+    shutil.copyfile(os.path.join(ROOT, PROGRAM), os.path.join(where, PROGRAM))
+    return sha, True
+
+
+def io(args):
+    """`make perf-gate-io`: this tree's fennec-server -- or HEAD's, a replay
+    -- and BASE's, built beside the gate program in `run`'s trees and target
+    directories, sent the I/O workloads by this tree's gate program and
+    counted under strace, then judged."""
+    if not tracing():
+        return 0
+    work = os.path.abspath(args.work)
+    os.makedirs(work, exist_ok=True)
+    log = lambda m: print(m, flush=True)
+    base_tree = os.path.join(work, "base")
+    sha, _ = tree_at(args.base, base_tree)
+    head_tree = ROOT
+    if args.head:
+        head_tree = os.path.join(work, "head")
+        tree_at(args.head, head_tree)
+    try:
+        log(f"building fennec-server in {head_tree} and at {args.base} ({sha[:10]}), side by side")
+        targets = {"head": os.path.join(work, "head-target"), "base": os.path.join(work, "base-target")}
+        def head_side():
+            # The client after it: this tree's gate program, which `run`
+            # built, and cargo finds built.
+            server = build_server(head_tree, args.target, targets["head"], args.cargo, log)
+            return server, build(head_tree, args.target, targets["head"], args.cargo, log)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            head_f = pool.submit(head_side)
+            base_f = pool.submit(build_server, base_tree, args.target, targets["base"], args.cargo, log)
+            (head_server, client), base_server = head_f.result(), base_f.result()
+        if head_server is None or client is None:
+            log(f"I/O replay {args.base} -> {args.head or 'this tree'}: fennec-server or the gate program "
+                "does not build at the head")
+            return 1
+        log(f"counting {args.runs} runs a side of each I/O workload, {args.jobs} at a time")
+        scratch = tempfile.mkdtemp(prefix="scratch-io-", dir=work)
+        try:
+            results = measure_io(base_server, head_server, client, args.runs, args.jobs, scratch, log)
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+        results["base"] = sha
+        out = args.out or os.path.join(work, "io.json")
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump(results, f, indent=1)
+            f.write("\n")
+        log(f"results: {out}")
+    finally:
+        if not args.keep:
+            for tree in {base_tree, head_tree} - {ROOT}:
+                subprocess.run(["git", "worktree", "remove", "--force", tree], cwd=ROOT, capture_output=True)
+    if args.no_check:
+        return 0
+    base_copy = os.path.join(work, "base_perf_gate.py")
+    accepted_base = None
+    text = show(sha, CHECKER)
+    if text:
+        with open(base_copy, "w", encoding="utf-8") as f:
+            f.write(text)
+        accepted_base = base_copy
+    base_program = os.path.join(work, "base_gate.rs")
+    with open(base_program, "w", encoding="utf-8") as f:
+        f.write(show(sha, PROGRAM))
+    ns = argparse.Namespace(
+        results=out, accepted_from=os.path.abspath(__file__), accepted_base=accepted_base,
+        base_program=base_program, summary=args.summary,
+    )
+    return check(ns)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="command", required=True)
@@ -964,6 +1663,29 @@ def main(argv=None):
     m.add_argument("--only", help="these workloads alone, a comma between: a look at one")
     m.add_argument("--head-leak", type=int, help="the heap-shift control: the head's runs leak this many bytes first")
 
+    i = sub.add_parser("io", help="build this tree's fennec-server and BASE's, run the I/O workloads under strace, judge")
+    i.add_argument("--base", default="origin/main", help="the git ref held to (origin/main)")
+    i.add_argument("--head", help="a git ref held to it in place of this tree: a replay of two commits")
+    i.add_argument("--target", help="the build's target triple (CI: x86_64-unknown-linux-musl)")
+    i.add_argument("--cargo", default=os.environ.get("CARGO", "cargo"))
+    i.add_argument("--runs", type=int, default=IO_RUNS)
+    i.add_argument("--jobs", type=int, default=min(4, os.cpu_count() or 1))
+    i.add_argument("--work", default=os.path.join(ROOT, "target", "perf-gate"), help="scratch: `run`'s trees and builds")
+    i.add_argument("--out", help="the results file (WORK/io.json)")
+    i.add_argument("--keep", action="store_true", help="keep the base's worktree")
+    i.add_argument("--no-check", action="store_true", help="count only: CI judges with the base's checker")
+    i.add_argument("--summary", help="append the judgement's table to this file (a step summary)")
+
+    im = sub.add_parser("io-measure", help="run the I/O workloads against two built servers under strace")
+    im.add_argument("--base-server", help="the base's fennec-server (none: this tree's alone)")
+    im.add_argument("--head-server", required=True)
+    im.add_argument("--client", required=True, help="the gate program that sends the workloads")
+    im.add_argument("--runs", type=int, default=IO_RUNS)
+    im.add_argument("--jobs", type=int, default=min(4, os.cpu_count() or 1))
+    im.add_argument("--out", required=True)
+    im.add_argument("--only", help="these workloads alone, a comma between")
+    im.add_argument("--traces", help="keep each side's last trace of each workload here")
+
     c = sub.add_parser("check", help="judge a results file")
     c.add_argument("results")
     c.add_argument("--accepted-from", help="the checker whose PERF_ACCEPTED is the pull request's (this one)")
@@ -984,7 +1706,10 @@ def main(argv=None):
 
     args = ap.parse_args(argv)
     try:
-        commands = {"run": run, "measure": measure, "check": check, "reaches": reach, "edits": edits}
+        commands = {
+            "run": run, "measure": measure, "io": io, "io-measure": io_measure, "check": check,
+            "reaches": reach, "edits": edits,
+        }
         return commands[args.command](args)
     except (ValueError, RuntimeError, subprocess.CalledProcessError) as e:
         print(f"perf_gate: {e}", file=sys.stderr)

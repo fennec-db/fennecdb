@@ -1,0 +1,40 @@
+3038  write(3</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec.lock>, ""..., 19) = 19
+3038  write(4</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec>, ""..., 8) = 8
+3038  write(2<pipe:[75080]>, ""..., 65) = 65
+3038  write(2<pipe:[75080]>, ""..., 98) = 98
+3044  write(2<pipe:[75080]>, ""..., 66) = 66
+3044  accept4(5<socket:[70606]>, {sa_family=AF_INET, sin_port=htons(48844), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC) = 6<socket:[72489]>
+3044  accept4(5<socket:[70606]> <unfinished ...>
+3048  write(4</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec>, ""..., 24) = 24
+3048  fdatasync(4</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec>) = 0
+3048  pwrite64(8</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec.sync>, ""..., 266240, 0) = 266240
+3048  fsync(8</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec.sync>) = 0
+3048  fsync(9</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z>) = 0
+3048  writev(6<socket:[72489]>, [...], 2) = 220
+3048  write(4</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec>, ""..., 2099884) = 2099884
+3048  fdatasync(4</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec>) = 0
+3048  writev(6<socket:[72489]>, [...], 2) = 150239
+3048  write(4</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec>, ""..., 2099884) = 2099884
+3048  fdatasync(4</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec>) = 0
+3048  writev(6<socket:[72489]>, [...], 2) = 150239
+3044  <... accept4 resumed>, {sa_family=AF_INET, sin_port=htons(48860), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC) = 7<socket:[72490]>
+3044  accept4(5<socket:[70606]> <unfinished ...>
+3053  write(9</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec.beside>, ""..., 1048401) = 1048401
+3053  write(9</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec.beside>, ""..., 1048530) = 1048530
+3053  write(9</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec.beside>, ""..., 43050) = 43050
+3053  fdatasync(9</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec.beside>) = 0
+3053  fdatasync(9</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec.beside>) = 0
+3053  write(9</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec.beside>, ""..., 8) = 8
+3053  write(9</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec.beside>, ""..., 8) = 8
+3053  fdatasync(9</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec.beside>) = 0
+3053  fdatasync(4</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec>) = 0
+3053  fsync(8</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z>) = 0
+3053  renameat(AT_FDCWD</>, "/tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec.beside", AT_FDCWD</>, "/tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec") = 0
+3053  fsync(8</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z>) = 0
+3053  writev(7<socket:[72490]>, [...], 2) = 242
+3044  <... accept4 resumed>, {sa_family=AF_INET, sin_port=htons(48868), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC) = 6<socket:[75825]>
+3044  accept4(5<socket:[70606]> <unfinished ...>
+3054  writev(6<socket:[75825]>, [...], 2) = 153
+3042  write(2<pipe:[75080]>, ""..., 28) = 28
+3038  write(2<pipe:[75080]>, ""..., 34) = 34
+3044  <... accept4 resumed> <unfinished ...>) = ?
