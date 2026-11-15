@@ -196,11 +196,12 @@ change leaves the old entries until they age out, so for a while the
 repository holds both, up to 7.4 GiB with main's 3.36 GiB: under the 10 GB.
 
 Which `ci.yml` jobs are required checks is a repository setting (classic
-branch protection on main, not the merge queue's ruleset). All of them are,
-but two: `size (browser module)`, which only runs on a pull request and so
-would never report in the merge queue, and `perf (instructions)`, which no
-merge requires until the gate's holdout has passed
-([benchmarks.md](benchmarks.md#the-gate)). A job skipped by an `if:` reports success
+branch protection on main, not the merge queue's ruleset). All of them are
+but `size (browser module)`, which only runs on a pull request and so would
+never report in the merge queue, and a job is left out until it has passed
+on main: `perf (instructions)` until the gate's holdout has
+([benchmarks.md](benchmarks.md#the-gate)), a new job until the merge group
+that brought it has. A job skipped by an `if:` reports success
 and can be required (the Rosetta job is one, skipped on a pull request); a
 whole workflow skipped by a path or branch filter reports nothing, its checks
 stay pending, and a required check of one blocks a merge it should not, so
@@ -208,9 +209,12 @@ stay pending, and a required check of one blocks a merge it should not, so
 `push` has a path filter, which no required check is read from). GitHub's
 "Troubleshooting required status checks" says both. `size (browser module)`
 is left out because a required check that never reports in the merge queue
-holds every group. A new job needs adding to the list unless it is one of
-those, and a renamed one adding under its new name before the old is taken
-out: a required check no job reports holds every group too. With every job
+holds every group. The list is kept by hand, the setting being no file: a
+new job is added once its first group is green, and a required job that is
+renamed is taken out before the pull request renaming it is queued and
+added under its new name once that has landed, since a required check no
+job reports holds every group too, the old name in the renaming group and
+the new one in every other. With every job
 required, a merge group lands when its last job ends and a red job drops
 it, a flaky one's too, so the queue builds two groups at a time and waits
 180 minutes for a group's checks (the ruleset's `max_entries_to_build` and
