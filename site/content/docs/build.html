@@ -12,9 +12,10 @@ packages.</p>
 <h2 id="clone">Clone and build</h2>
 
 <p>You need Rust from <a href="https://rustup.rs">rustup</a> and
-<code>make</code>; the repository's <code>rust-toolchain.toml</code> picks the
-stable channel and asks for the wasm32 target. Node runs the JS tests and
-Python 3 serves the console and builds this site.</p>
+<code>make</code>; the repository's <code>rust-toolchain.toml</code> names the
+exact Rust release CI tests with and the releases are built with, and asks for
+the wasm32 target: rustup installs both at the first build. Node runs the JS
+tests and Python 3 serves the console and builds this site.</p>
 
 <ol class="steps-doc">
   <li>

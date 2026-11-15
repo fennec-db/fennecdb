@@ -6,7 +6,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 
 ## Files
 
-- [crates.md](crates.md) -- zero dependencies, limits that error rather than truncate, and the build profiles
+- [crates.md](crates.md) -- zero dependencies, limits that error rather than truncate, the build profiles and the pinned toolchain
 - [storage.md](storage.md) -- the mapped file, the handover of writes to it, a block's spills, compaction and the file format
 - [engine.md](engine.md) -- the single writer, a block's documents built beside the readers, long reads pinned, and a block as one record
 - [durability.md](durability.md) -- a storage error stopping writes, buffered writes written behind the lock, the sync log, the power cuts that hold it on Linux -- `--sync always`, `--sync 250`'s window and a node with its standby -- and the one shutdown
@@ -205,3 +205,4 @@ A proposal holds no invariant until it is built, and is listed apart:
 157. [`make chaos` breaks a region by seed, one fault at a time, and holds its history to an oracle](integrations.md#the-chaos-drill) (added after the move, under *Integrations and deploy*)
 158. [A pull request is held to its base in instructions and heap bytes an op](benchmarks.md#the-gate) (added after the move, under *Benchmarks*)
 162. [A request is read in time, and an answer written in time](http.md#slow-clients) (added after the move, under *The HTTP server*)
+163. [The compiler CI tests with is the one that ships](crates.md#toolchain) (added after the move, under *The crates*)
