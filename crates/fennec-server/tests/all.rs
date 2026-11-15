@@ -4,6 +4,7 @@
 //! The files apart (Cargo.toml) read the process's own counts.
 
 mod calls;
+mod compat;
 mod crash;
 mod follow;
 mod hooks;

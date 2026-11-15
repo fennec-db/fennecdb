@@ -4,27 +4,29 @@ the answers it gave over them, which every later build opens and answers
 alike -- 1.x opens every file written from v0.2.0 on
 (docs/design/compatibility.md). The set lives in
 crates/fennec-core/tests/compat/v<version>/, read by `compat::` in
-fennec-core's, fennec-http's and fennec's tests and by
+fennec-core's, fennec-http's, fennec's and fennec-server's tests and by
 web/fennec.compat.test.js.
 
     python3 tools/compat_fixtures.py build v0.2.0 <bin-dir>
         the release's binaries, built from its tag alone: `git archive` of
-        the tag into a scratch directory, `cargo build --release` of
+        the tag into a scratch directory, `cargo build --release --locked` of
         fennec-server and fennec, the tag's own `make wasm`, and
         tools/compat/writer.rs built as an example of the tag's fennec-core;
         the binaries and the tag's web/ copied into <bin-dir> and the scratch
         directory, its target/ with it, deleted
     python3 tools/compat_fixtures.py write <bin-dir> <set-dir>
-        the set, written by those binaries (macOS or Linux)
+        the set, written by those binaries (macOS or Linux), its files'
+        sums last in SHA256SUMS, which `make version` holds the set to
     make compat-fixtures V=0.2.0
         both, into crates/fennec-core/tests/compat/v0.2.0/
 
-What each file holds, and what of it cannot be the same twice (a history's
-id, a seal's nonces, a scheduled slot's time), is in the set's README.md,
-which `write` writes. The statements below and tools/compat/*.fennecql are
-the inputs: a release that writes something new -- a record kind, a type
-tag, an index -- adds the statements that write it here before its set is
-written.
+What each file holds, what the writer lowers to make it at a few
+kilobytes, what of it cannot be the same twice (a history's id, a seal's
+nonces, a scheduled slot's time) and what no file holds, and why, is in
+the set's README.md, which `write` writes. The statements below and
+tools/compat/*.fennecql are the inputs: a release that writes something
+new -- a record kind, a shape inside one, a type tag, an index -- adds the
+statements that write it here before its set is written.
 """
 
 import hashlib
@@ -50,27 +52,38 @@ CARGO = os.path.expanduser("~/.cargo/bin/cargo") if os.path.exists(os.path.expan
 TOKEN = "compat-token"
 REPLICATION = "compat-replication"
 HOOK_SECRET = "the fixture set's webhook secret"
+# A kept Idempotency-Key and a taken event's key outlive every build that
+# opens the set: kept for the defaults (a day, a week), a later build's
+# reads would find them gone, as the release's own would by then. So the
+# server keeps them for 95 years (`--idempotency-ttl`, the hook's `keep`),
+# and every build reads them as the release did when it wrote them.
+IDEMPOTENCY_TTL = "3000000000"
+HOOK_LINE = "github github {secret} keep 36500d"
+IDEMPOTENCY_KEY = "compat-idempotency-key"
+IDEMPOTENT = 'put orders {ref: "o-4", status: "open", total: 70}'
+CONSUMER = "compat"
 
 # Before the compact: what the image holds, every type and index among it.
 PHASE_A = [
     "create collection kinds (b bool, i int @hash, f float @sorted, t text @text, by bytes, ts timestamp @sorted, "
     "v vector<4>, vi vector<4> @hnsw(cosine, m=8), vh vector<4, f16>, l [int], sp sparse<8> @inverted, j json, "
-    "g geo @geo, tr text collate tr @sorted, un text collate und, email text nocase @unique, tag text @hash @text, "
-    "word text @text(chars), acc text @text(accents), exp timestamp @ttl(1d), a int, z int, @sorted(a, z), @unique(a, i))",
+    "g geo @geo, tr text collate tr @sorted, un text collate und @sorted, email text nocase @unique, "
+    "tag text @hash @text, word text @text(chars), acc text @text(accents), exp timestamp @ttl(1d), a int, z int, "
+    "old text, @sorted(a, z), @unique(a, i))",
     'put kinds {b: true, i: 1, f: 1.5, t: "the quick brown fox", by: [0, 159, 255], ts: "2026-01-01T00:00:00Z", '
     'v: [1, 0, 0, 0], vi: [1, 0, 0, 0], vh: [0.5, 0.25, 0, 1], l: [3, 1, 2], sp: "{1:0.5,6:2}/8", '
     'j: {kind: "a", n: 1, deep: {x: [1, "two", null, true]}}, g: [13.4, 52.5], tr: "ılık", un: "Émile", '
     'email: "Alice@Example.com", tag: "red fox", word: "東京タワー", acc: "café crème", exp: "2099-01-01T00:00:00Z", '
-    "a: 1, z: 10}",
+    'a: 1, z: 10, old: "dropped later"}',
     'put kinds {b: false, i: 2, f: -2.25, t: "lazy dogs sleep", by: "text as bytes", ts: 1767225600000, '
     'v: [0, 1, 0, 0], vi: [0, 1, 0, 0], vh: [0, 1, 0, 0], l: [], sp: "{2:1}/8", j: [1, 2.5, "x"], '
     'g: [2.35, 48.86], tr: "Istanbul", un: "zoe", email: "bob@example.com", tag: "blue whale", word: "京都", '
     'acc: "cafe", exp: "2099-06-01T00:00:00Z", a: 1, z: 20}',
-    "put kinds {i: 3}",
+    'put kinds {i: 3, un: "Ångström"}',
     # Expired before it was written: every read leaves it out (`@ttl`).
     'put kinds {i: 6, t: "expired fox", exp: "2000-01-01T00:00:00Z", a: 6, z: 6}',
     'put kinds {b: true, i: 9007199254740993, f: 0.1, t: "a fox again", vi: [0, 0, 1, 0], '
-    'j: {kind: "b", big: 9007199254740993}, a: 2, z: 1}',
+    'j: {kind: "b", big: 9007199254740993}, un: "eclair", a: 2, z: 1}',
     "create collection orders (ref text @unique, status text, total int)",
     "create collection audit (ref text @hash, what text)",
     "create collection ticks (k text @unique)",
@@ -82,13 +95,15 @@ PHASE_A = [
     'put orders [{ref: "o-1", status: "open", total: 2000}, {ref: "o-2", status: "open", total: 500}]',
 ]
 
-# After it: the log's records, each kind a write takes.
+# After it: the log's records, each kind a write takes, and every change a
+# field record names: added, renamed, dropped, its expiry moved.
 PHASE_B = [
     "create collection extra (k text @hash, n int)",
     "create index on kinds (j.kind) @hash",
     "alter collection kinds add field note text",
     "alter collection kinds rename field note to remark",
-    "alter collection kinds drop field un",
+    "alter collection kinds drop field old",
+    "alter collection kinds alter field exp @ttl(2d)",
     "drop collection gone",
     'put kinds {b: false, i: 5, f: 2.5, t: "brown bears", ts: "2026-03-01T12:00:00Z", vi: [0, 0, 0, 1], '
     'remark: "after the alter", a: 3, z: 3}',
@@ -104,36 +119,92 @@ BATCH = [
     'put orders {ref: "o-3", status: "open", total: 50}',
 ]
 
+# A block holding every schema change a block takes beside writes -- a
+# collection made and dropped, an index added, a field added, a statement
+# defined -- which a version before 10.4 refused as corrupt.
+SCHEMA_BATCH = [
+    "create collection blocked (n int, s text)",
+    'put blocked {n: 1, s: "in a block"}',
+    "create index on blocked (n) @hash",
+    "alter collection blocked add field m int",
+    'put blocked {n: 2, s: "after its field", m: 2}',
+    "create statement blocked_n($n int) as get blocked select n, s, m where n = $n",
+    "create collection blocked_gone (n int)",
+    "drop collection blocked_gone",
+]
+
 SCHEDULED = "create statement tick every 1m as insert ticks {k: 'tick'} if absent"
 HOOKED = (
     "create statement gh_issue($n int from event.issue.number, $a text from event.action) "
     "on hook github as insert issues {n: $n, action: $a}"
 )
 HOOK_EVENT = b'{"action":"opened","issue":{"number":7,"title":"a fixture"}}'
+# The migration `/_schema/apply` runs once and records in `_migrations`.
+MIGRATION = 'put extra {k: "migrated", n: 2}'
 
 # The shell's file: what an app's own process writes, each `-c` an open and
-# a close.
+# a close -- among them a field's expiry set, as the shell writes it.
 SHELL = [
     "create collection notes (n int @hash, body text @text, at timestamp @sorted)",
     'put notes [{n: 1, body: "first note", at: "2026-02-01T00:00:00Z"}, {n: 2, body: "second", at: 1769990400000}]',
     'set notes {body: "second, edited"} where n = 2',
     'put notes {n: 3, body: "third"}',
     "del notes where n = 1",
+    "alter collection notes alter field at @ttl(36500d)",
 ]
 
+# The checkpoint's graphs: every metric, precision and quantization, a row
+# whose id takes 8 bytes, rows sharing a vector (aliases) and tombstones
+# carrying their vectors in each arena -- f32, f16, int8, and a bit index's
+# codes, which it takes only past 2 048 vectors (`BIT_TRAIN`), so `coded`
+# holds 2 100 of 4 dimensions.
 GRAPH = [
     "create collection vecs (n int @hash, c vector<8> @hnsw(cosine, m=8), l vector<8> @hnsw(l2, m=8), "
     "d vector<8> @hnsw(dot, m=8), q vector<8> @hnsw(cosine, m=8, quant=int8), "
-    "bits vector<8> @hnsw(cosine, m=8, quant=bit), h vector<8, f16> @hnsw(cosine, m=8))",
+    "qh vector<8, f16> @hnsw(l2, m=8, quant=int8), bits vector<8> @hnsw(cosine, m=8, quant=bit), "
+    "h vector<8, f16> @hnsw(cosine, m=8))",
+    "create collection coded (n int @hash, b vector<4> @hnsw(cosine, m=4, quant=bit), "
+    "bh vector<4, f16> @hnsw(cosine, m=4, quant=bit))",
 ]
+VEC_FIELDS = ["c", "l", "d", "q", "qh", "bits", "h"]
+VECS = 40
+ALIASES = 4
+BIG_ID = 5_000_000_000
+CODED = 2100
 
 
 def die(msg):
     sys.exit(f"compat_fixtures: {msg}")
 
 
-def vec(k, salt):
-    return "[" + ", ".join(f"{(((k * 7 + i * 13 + salt) % 17) / 17 - 0.5):.4f}" for i in range(8)) + "]"
+def unit(seed, dim):
+    """`dim` numbers of 4 decimals in [-0.5, 0.5), from `seed` alone: a
+    vector no other seed gives (`check_unique`), and one an f16 holds apart
+    from the others."""
+    x = (seed * 2654435761 + 12345) & 0xFFFFFFFF
+    out = []
+    for _ in range(dim):
+        x = (x * 1103515245 + 12345) & 0x7FFFFFFF
+        out.append(round((x % 10000) / 10000 - 0.5, 4))
+    return out
+
+
+def lit(v):
+    return "[" + ", ".join(f"{x:.4f}" for x in v) + "]"
+
+
+def direction(v):
+    n = sum(x * x for x in v) ** 0.5
+    return tuple(round(x / n, 3) for x in v)
+
+
+def check_unique(vectors, what):
+    seen = set()
+    for v in vectors:
+        d = direction(v)
+        if d in seen:
+            die(f"{what}: two vectors of one direction, which would alias")
+        seen.add(d)
 
 
 class Server:
@@ -166,7 +237,7 @@ class Server:
 
     def ask(self, method, path, body=b"", headers=None, token=TOKEN):
         host, port = self.addr.rsplit(":", 1)
-        c = http.client.HTTPConnection(host, int(port), timeout=60)
+        c = http.client.HTTPConnection(host, int(port), timeout=120)
         h = dict(headers or {})
         if token:
             h["Authorization"] = f"Bearer {token}"
@@ -220,20 +291,50 @@ def run(*cmd, **kw):
     return r.stdout
 
 
+def signed(event):
+    return "sha256=" + hmac.new(HOOK_SECRET.encode(), event, hashlib.sha256).hexdigest()
+
+
+def hook_request():
+    return {
+        "method": "POST",
+        "path": "/_hooks/github",
+        "headers": {"Content-Type": "application/json", "X-Hub-Signature-256": signed(HOOK_EVENT), "X-GitHub-Event": "issues"},
+        "body": HOOK_EVENT.decode(),
+        "token": False,
+    }
+
+
+def idempotent_request():
+    return {
+        "method": "POST",
+        "path": "/query",
+        "headers": {"Content-Type": "application/json", "Idempotency-Key": IDEMPOTENCY_KEY},
+        "body": json.dumps({"query": IDEMPOTENT}),
+        "token": True,
+    }
+
+
+def send(s, req):
+    return s.ask(req["method"], req["path"], req["body"].encode(), req["headers"], token=TOKEN if req["token"] else None)
+
+
+def serve_args(file, hooks):
+    return ["--file", str(file), "--http-token", TOKEN, "--replication-token", REPLICATION, "--no-checkpoint",
+            "--hooks", str(hooks), "--auth-delay", "0", "--idempotency-ttl", IDEMPOTENCY_TTL]
+
+
 def write_server(bins, work, out):
-    """server.fennec, its sealed archive and its sealed backup."""
+    """server.fennec, its sealed archive and backup, a replica's file of it
+    and that replica promoted, and the answers its own server gave over
+    HTTP once started again on it."""
     secret = work / "github.secret"
     secret.write_text(HOOK_SECRET)
     hooks = work / "hooks"
-    hooks.write_text(f"github github {secret}\n")
+    hooks.write_text(HOOK_LINE.format(secret=secret) + "\n")
     key = out / "key"
     run(bins / "fennec", "key", key)
-    s = Server(
-        str(bins / "fennec-server"),
-        ["--file", str(out / "server.fennec"), "--http-token", TOKEN, "--replication-token", REPLICATION,
-         "--no-checkpoint", "--hooks", str(hooks), "--auth-delay", "0"],
-        work / "server.log",
-    )
+    s = Server(str(bins / "fennec-server"), serve_args(out / "server.fennec", hooks), work / "server.log")
     archiver = None
     try:
         for q in PHASE_A:
@@ -252,6 +353,7 @@ def write_server(bins, work, out):
         for q in PHASE_B:
             s.query(q)
         s.batch(BATCH)
+        s.batch(SCHEMA_BATCH)
         s.query(SCHEDULED)
         # The scheduler runs a slot once, at its time: the slot's mark (op 5)
         # and its write land then, and the statement is dropped after (op 2)
@@ -259,14 +361,31 @@ def write_server(bins, work, out):
         wait_for("the scheduled statement's first slot", lambda: '"tick"' in s.query("get ticks"), 150)
         s.query("drop statement tick")
         s.query(HOOKED)
-        sig = "sha256=" + hmac.new(HOOK_SECRET.encode(), HOOK_EVENT, hashlib.sha256).hexdigest()
-        status, body = s.ask(
-            "POST", "/_hooks/github", HOOK_EVENT,
-            {"Content-Type": "application/json", "X-Hub-Signature-256": sig, "X-GitHub-Event": "issues"},
-            token=None,
-        )
+        status, body = send(s, hook_request())
         if status // 100 != 2:
             die(f"the hook's event: {status} {body}")
+        # The server's own collections: a write kept by its key
+        # (`_idempotency`), a consumer of the changes and where it stands
+        # (`_consumers`), and a migration run once (`_migrations`).
+        status, body = send(s, idempotent_request())
+        if status != 200:
+            die(f"the keyed write: {status} {body}")
+        status, body = s.ask("POST", f"/_changes/consumers/{CONSUMER}", b"")
+        if status // 100 != 2:
+            die(f"the consumer: {status} {body}")
+        s.query('put extra {k: "after the consumer", n: 3}')
+        status, body = s.ask("PATCH", f"/_changes/consumers/{CONSUMER}", json.dumps({"since": s.seq}).encode(),
+                             {"Content-Type": "application/json"})
+        if status != 200:
+            die(f"the consumer's commit: {status} {body}")
+        status, described = s.ask("GET", "/_schema")
+        if status != 200:
+            die(f"/_schema: {status} {described}")
+        description = json.loads(described)
+        description["migrations"] = [MIGRATION]
+        status, body = s.ask("POST", "/_schema/apply", json.dumps(description).encode(), {"Content-Type": "application/json"})
+        if status != 200 or '"applied":true' not in body.replace(" ", ""):
+            die(f"/_schema/apply: {status} {body}")
         s.query("get kinds count")
         last = s.seq
 
@@ -280,25 +399,102 @@ def write_server(bins, work, out):
         archiver.wait(60)
         archiver = None
         run(bins / "fennec", "backup", primary, out / "backup.sealed", "--token", REPLICATION, "--key-file", key)
+        write_replica(bins, work, out, primary, last)
     finally:
         if archiver and archiver.poll() is None:
             archiver.kill()
             archiver.wait()
         s.stop()
+    # Started again on its file, as a later build is: what the release's
+    # own server answers then is what that build's is held to over HTTP.
+    s = Server(str(bins / "fennec-server"), serve_args(out / "server.fennec", hooks), work / "server-again.log")
+    try:
+        queries = []
+        for q in statements(COMPAT / "server.fennecql"):
+            queries.append(list(s.ask("POST", "/query", json.dumps({"query": q}).encode(), {"Content-Type": "application/json"})))
+        description["migrations"] = [MIGRATION]
+        requests = [
+            # Sent again with its key: answered as it was, written once.
+            idempotent_request(),
+            # Sent again: taken once by its key, answered as taken.
+            hook_request(),
+            {"method": "GET", "path": "/_changes/consumers", "headers": {}, "body": "", "token": True},
+            {"method": "GET", "path": "/_schema", "headers": {}, "body": "", "token": True},
+            # The migration recorded: none left to run.
+            {"method": "POST", "path": "/_schema/plan", "headers": {"Content-Type": "application/json"},
+             "body": json.dumps(description), "token": True},
+        ]
+        for r in requests:
+            r["status"], r["answer"] = send(s, r)
+    finally:
+        s.stop()
+    serve = {
+        "args": ["--http-token", TOKEN, "--replication-token", REPLICATION, "--no-checkpoint", "--auth-delay", "0",
+                 "--idempotency-ttl", IDEMPOTENCY_TTL],
+        "hooks": HOOK_LINE,
+        "secret": HOOK_SECRET,
+        "token": TOKEN,
+    }
+    (out / "server.http.json").write_text(
+        json.dumps({"serve": serve, "queries": queries, "requests": requests}, indent=1, ensure_ascii=False) + "\n"
+    )
+
+
+def write_replica(bins, work, out, primary, last):
+    """replica.fennec: a replica's file, following its primary to change
+    `last`; promoted.fennec: that file promoted, its history forked twice."""
+    r = Server(
+        str(bins / "fennec-server"),
+        ["--file", str(out / "replica.fennec"), "--replica-of", primary, "--replication-token", REPLICATION,
+         "--http-token", TOKEN, "--no-checkpoint", "--auth-delay", "0"],
+        work / "replica.log",
+    )
+    try:
+        def at():
+            status, body = r.ask("GET", "/_replication/status", token=REPLICATION)
+            return status == 200 and json.loads(body).get("seq", 0) >= last
+
+        wait_for(f"the replica at change {last}", at, 60)
+    finally:
+        r.stop()
+    shutil.copyfile(out / "replica.fennec", out / "promoted.fennec")
+    p = Server(
+        str(bins / "fennec-server"),
+        ["--file", str(out / "promoted.fennec"), "--promote", "--http-token", TOKEN, "--no-checkpoint",
+         "--auth-delay", "0"],
+        work / "promoted.log",
+    )
+    try:
+        p.query('put extra {k: "promoted", n: 4}')
+    finally:
+        p.stop()
 
 
 def write_graph(bins, work, out):
     """graph.fennec: the graphs a server's shutdown writes in its checkpoint."""
+    rows = []
+    for k in range(VECS + ALIASES):
+        src = k if k < VECS else k - VECS
+        rows.append("{n: %d, %s}" % (k, ", ".join(f"{f}: {lit(unit(src * 16 + i, 8))}" for i, f in enumerate(VEC_FIELDS))))
+    for i, f in enumerate(VEC_FIELDS):
+        check_unique([unit(k * 16 + i, 8) for k in range(VECS)] + [unit(BIG_ID + i, 8)], f"vecs.{f}")
+    big = "{id: %d, n: 99, %s}" % (BIG_ID, ", ".join(f"{f}: {lit(unit(BIG_ID + i, 8))}" for i, f in enumerate(VEC_FIELDS)))
+    check_unique([unit(100_000 + k, 4) for k in range(CODED)], "coded.b")
+    coded = ", ".join(
+        "{n: %d, b: %s, bh: %s}" % (k, lit(unit(100_000 + k, 4)), lit(unit(200_000 + k, 4))) for k in range(CODED)
+    )
     s = Server(str(bins / "fennec-server"), ["--file", str(out / "graph.fennec"), "--http-token", TOKEN], work / "graph.log")
     try:
         for q in GRAPH:
             s.query(q)
-        rows = ", ".join(
-            f"{{n: {k}, c: {vec(k, 0)}, l: {vec(k, 1)}, d: {vec(k, 2)}, q: {vec(k, 3)}, bits: {vec(k, 4)}, h: {vec(k, 5)}}}"
-            for k in range(40)
-        )
-        s.query(f"put vecs [{rows}]")
-        s.query("del vecs where n = 7")
+        s.query(f"put vecs [{', '.join(rows)}]")
+        s.query(f"put vecs {big}")
+        s.query(f"put coded [{coded}]")
+        # Rows of a vector of their own: their nodes stay, tombstones that
+        # carry their vectors. One sharing its vector: its node lives on.
+        s.query("del vecs where n in [7, 11, 19]")
+        s.query(f"del vecs where n = {VECS + 1}")
+        s.query("del coded where n in [5, 500, 1500]")
     finally:
         s.stop()
     if "checkpoint written" not in (work / "graph.log").read_text():
@@ -311,47 +507,39 @@ def write_shell(bins, out):
         run(bins / "fennec", out / "shell.fennec", "-c", q)
 
 
-def readme(out, bins, versions):
+def write_page(bins, work, out):
+    """The page's stores, the replica's sync among them: a server of the
+    release's own for it to sync with."""
+    s = Server(str(bins / "fennec-server"), ["--file", str(work / "sync.fennec"), "--http-token", TOKEN],
+               work / "sync.log")
+    try:
+        s.query("create collection tasks (title text @hash, done bool)")
+        s.query('put tasks [{title: "seeded", done: false}, {title: "seeded too", done: true}]')
+        run("node", COMPAT / "web.mjs", bins / "web", out, COMPAT / "page.fennecql", f"http://{s.addr}", TOKEN)
+    finally:
+        s.stop()
+
+
+def statements(path):
+    return [l for l in Path(path).read_text().splitlines() if l.strip() and not l.startswith("--")]
+
+
+def sums(out):
+    """SHA256SUMS: every file of the set by its sum, as `sha256sum -c`
+    reads it -- what `make version` holds the set to."""
+    lines = []
+    for p in sorted(out.rglob("*")):
+        if p.is_file() and p.name != "SHA256SUMS":
+            lines.append(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(out).as_posix()}")
+    (out / "SHA256SUMS").write_text("\n".join(lines) + "\n")
+
+
+def readme(out, versions):
     names = sorted(p.name for p in out.iterdir())
-    text = f"""# The fixture set of {versions['server']}
-
-Written by `tools/compat_fixtures.py write` with the release's own binaries,
-built from its tag by `tools/compat_fixtures.py build` ({versions['rustc']},
-node {versions['node']}): `{versions['server']}`, `{versions['cli']}`, the tag's
-`web/fennec.js` and the module its `make wasm` built, and
-`tools/compat/writer.rs` built as an example of the tag's fennec-core for
-what the binaries cannot write at a few kilobytes. Every later build opens
-each file and answers each statement alike: `compat::` in fennec-core's,
-fennec-http's and fennec's tests, and `web/fennec.compat.test.js`.
-
-| File | Written by | Holds |
-| --- | --- | --- |
-| `server.fennec` | fennec-server (`--replication-token`, `--no-checkpoint`, `--hooks`) | an image (`compact`) and the log after it: record kinds 1 to 9, 12 and 13 -- the history, a block, fields added, renamed and dropped, a collection dropped -- every type tag and every index kind but a quantized graph's, and a statement record of every op: a named statement replaced, a write-bound one, a scheduled one (its slot's mark, then its drop) and a webhook consumer with the event it took |
-| `shell.fennec` | the `fennec` shell, a `-c` an open and a close | a file an app's own process keeps |
-| `graph.fennec` | fennec-server's shutdown | the checkpoint: an image whose graphs (version 9) are every metric and quantization |
-| `kept.fennec` | writer.rs `kept` (`save_graphs`) | a graph kept in the file's tail (version 10), writes after it, and the close's mark that the file was synced (kind 14) |
-| `spill.fennec` | writer.rs `spill` (`set_spill`) | a block that spilled (kind 10) and landed (kind 11), and kind 14 |
-| `synclog.fennec`, `synclog.fennec.sync` | writer.rs `synclog` (`keep_sync_log`) | a file cut back to its last fsync and the sync log holding the rest: the machine went down. The log is its fixed 260 KB, zeros past its entries, as written |
-| `backup.sealed` | `fennec backup --key-file key` | a sealed backup of `server.fennec`'s server |
-| `archive/` | `fennec archive --key-file key` | a sealed archive: a base image and the segments after it |
-| `key` | `fennec key` | the seal's key, the fixture's own |
-| `page-idb.json`, `page-idb-sealed.json` | web client `persist` (`{{cryptoKey}}`: `PAGE_KEY` in `tools/compat/web.mjs`) | IndexedDB's records, an image and its chunks, bytes in base64 |
-| `page-opfs.fennec` | web client `openFile` | the OPFS file |
-
-Beside each, `<name>.fennecql` holds the statements and `<name>.answers`
-the release's answers, a line each as `json::response_to_string` writes
-them (the file opened read-only by writer.rs `answers`; a sealed file's or
-an archive's restored first by the release's `fennec restore`), and
-`<name>.web` the page's (`JSON.stringify` of `run`), read back by a page
-opened again.
-
-Not the same twice, so written once: the history's id (drawn at random
-when `--replication-token` forks it, and at each restore), a seal's and
-AES-GCM's nonces and a sealed page's generation, the scheduled slot's time
-and its mark, the hook's arrival, the archive's file names and times.
-
-Files: {', '.join(names)}.
-"""
+    text = (COMPAT / "README.template.md").read_text()
+    for k, v in versions.items():
+        text = text.replace("{" + k + "}", v)
+    text = text.replace("{files}", ", ".join(names + ["SHA256SUMS"]))
     (out / "README.md").write_text(text)
 
 
@@ -367,21 +555,23 @@ def write(bins, out):
         write_server(bins, work, stage)
         write_graph(bins, work, stage)
         write_shell(bins, stage)
+        for what in ("kept", "waiting", "spill", "synclog", "torn-tail", "torn-mark"):
+            run(bins / "compat_writer", what, stage / f"{what}.fennec")
+        write_page(bins, work, stage)
         # The lock files the binaries leave beside what they wrote are no
         # part of a database.
         for lock in stage.glob("*.lock"):
             lock.unlink()
-        for what in ("kept", "spill", "synclog"):
-            run(bins / "compat_writer", what, stage / f"{what}.fennec")
-        run("node", COMPAT / "web.mjs", bins / "web", stage, COMPAT / "page.fennecql")
         # The answers, each file read as it lies -- the sync log beside the
         # file it names, its inode -- a sealed one restored first.
-        lists = {"server": "server", "shell": "shell", "graph": "graph", "kept": "kept", "spill": "spill", "synclog": "synclog",
-                 "backup": "server", "archive": "server", "page-opfs": "page", "page-idb": "page",
-                 "page-idb-sealed": "page"}
+        lists = {"server": "server", "replica": "replica", "promoted": "replica", "shell": "shell", "graph": "graph",
+                 "kept": "kept", "waiting": "waiting", "spill": "spill", "synclog": "synclog", "torn-tail": "torn",
+                 "torn-mark": "torn", "backup": "server", "archive": "server", "page-opfs": "page",
+                 "page-idb": "page", "page-idb-sealed": "page"}
         for name, src in lists.items():
             shutil.copyfile(COMPAT / f"{src}.fennecql", stage / f"{name}.fennecql")
-        for name in ("server", "shell", "graph", "kept", "spill", "synclog", "page-opfs"):
+        for name in ("server", "replica", "promoted", "shell", "graph", "kept", "waiting", "spill", "synclog",
+                     "torn-tail", "torn-mark", "page-opfs"):
             run(bins / "compat_writer", "answers", stage / f"{name}.fennec", stage / f"{name}.fennecql",
                 stage / f"{name}.answers")
         for name, src in (("backup", stage / "backup.sealed"), ("archive", stage / "archive")):
@@ -394,13 +584,15 @@ def write(bins, out):
             "rustc": os.environ.get("FENNEC_COMPAT_RUSTC") or (bins / "rustc-version").read_text().strip(),
             "node": run("node", "--version").strip(),
         }
-        readme(stage, bins, versions)
+        readme(stage, versions)
+        sums(stage)
         out.mkdir(parents=True, exist_ok=True)
         for p in stage.iterdir():
             shutil.move(str(p), out / p.name)
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    print(f"{out}: {', '.join(sorted(p.name for p in out.iterdir()))}")
+    size = sum(p.stat().st_size for p in out.rglob("*") if p.is_file())
+    print(f"{out}: {len(list(out.rglob('*')))} files, {size} bytes")
 
 
 def build(tag, bins):
@@ -420,9 +612,11 @@ def build(tag, bins):
         # rust-toolchain.toml picks it: Homebrew's has no wasm32.
         rustc = str(Path(CARGO).with_name("rustc")) if os.path.isabs(CARGO) else "rustc"
         rustc = subprocess.run([rustc, "--version"], cwd=src, capture_output=True, text=True, env=env).stdout.strip()
+        # `--locked`: the tag's Cargo.lock as it was released, never one
+        # resolved again today.
         for cmd in (
-            [CARGO, "build", "--release", "-p", "fennec-server", "-p", "fennec-cli"],
-            [CARGO, "build", "--release", "-p", "fennec-core", "--example", "compat_writer"],
+            [CARGO, "build", "--release", "--locked", "-p", "fennec-server", "-p", "fennec-cli"],
+            [CARGO, "build", "--release", "--locked", "-p", "fennec-core", "--example", "compat_writer"],
             ["make", "wasm"],
         ):
             subprocess.run(cmd, cwd=src, env=env, check=True)

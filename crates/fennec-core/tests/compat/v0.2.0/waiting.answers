@@ -1,0 +1,7 @@
+{"kind":"schemas","collections":[{"name":"wait","fields":[{"name":"n","type":"int","index":"hash"},{"name":"v","type":"vector<4>","index":"hnsw(cosine, m=8)"},{"name":"q","type":"vector<4>","index":"hnsw(l2, m=8, quant=int8)"}]}]}
+{"kind":"rows","result":{"columns":["count"],"rows":[{"count":30}]}}
+{"kind":"rows","result":{"columns":["n"],"rows":[{"n":1,"_score":0.8631382},{"n":19,"_score":0.7596562},{"n":14,"_score":0.7105557}]}}
+{"kind":"rows","result":{"columns":["n"],"rows":[{"n":1,"_score":0.8631382},{"n":19,"_score":0.7596562},{"n":14,"_score":0.7105557}]}}
+{"kind":"rows","result":{"columns":["n"],"rows":[{"n":9,"_score":0.27898726},{"n":24,"_score":0.42253086},{"n":3,"_score":0.45015827}]}}
+{"kind":"rows","result":{"columns":["n"],"rows":[{"n":9,"_score":0.27898726},{"n":24,"_score":0.42253086},{"n":3,"_score":0.45015827}]}}
+{"kind":"rows","result":{"columns":["id","n","v","q"],"rows":[{"id":19,"n":18,"v":[0.0508,-0.0843,-0.2662,-0.4069],"q":[0.464,-0.2631,0.0398,0.0255]},{"id":20,"n":19,"v":[0.3209,0.1646,0.4351,0.39],"q":[-0.2659,-0.0142,-0.2589,-0.1776]},{"id":21,"n":20,"v":[-0.409,0.4135,0.1364,0.1869],"q":[0.0042,0.2347,0.4424,-0.0159]},{"id":22,"n":21,"v":[0.2259,-0.3376,-0.1623,0.3486],"q":[-0.3609,0.4836,0.1437,-0.219]}]}}

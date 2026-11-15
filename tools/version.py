@@ -8,8 +8,10 @@ the image the README pulls -- site/build.py holds the README to the
 workspace, and packages.yml refuses a release whose packages say another
 number. Cargo.lock follows at the next build."""
 
+import hashlib
 import pathlib
 import re
+import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -25,20 +27,72 @@ def sub(path, pattern, repl):
     p.write_text(text, encoding="utf-8")
 
 
-def missing_set(root, current, new):
+def tagged(root, version):
+    """Whether `version` was released: its tag is in this repository. A
+    set is written from its release's tag alone (tools/compat_fixtures.py
+    build), so a version set but never tagged has none to ask for."""
+    r = subprocess.run(["git", "-C", str(root), "rev-parse", "-q", "--verify", f"refs/tags/v{version}"],
+                       capture_output=True, text=True)
+    return r.returncode == 0
+
+
+def set_problems(set_dir):
+    """What keeps `set_dir` from being the set its release wrote: a file
+    missing, changed or not listed in its SHA256SUMS, or no SHA256SUMS --
+    which `tools/compat_fixtures.py write` writes last, every file by its
+    sum. Empty for a whole set."""
+    sums = set_dir / "SHA256SUMS"
+    if not sums.is_file():
+        return [f"{sums}: missing (tools/compat_fixtures.py write writes it last)"]
+    listed = {}
+    for line in sums.read_text(encoding="utf-8").splitlines():
+        digest, _, name = line.partition("  ")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest) or not name:
+            return [f"{sums}: a line not `<sha256>  <path>`: {line!r}"]
+        listed[name] = digest
+    problems = []
+    held = {p.relative_to(set_dir).as_posix() for p in set_dir.rglob("*") if p.is_file()} - {"SHA256SUMS"}
+    for name in sorted(held - listed.keys()):
+        problems.append(f"{set_dir / name}: in no line of SHA256SUMS")
+    for name, digest in sorted(listed.items()):
+        p = set_dir / name
+        if not p.is_file():
+            problems.append(f"{p}: missing")
+        elif hashlib.sha256(p.read_bytes()).hexdigest() != digest:
+            problems.append(f"{p}: not the bytes its release wrote")
+    return problems
+
+
+def missing_set(root, current, new, released=tagged):
     """Why the release after `current` cannot be cut yet, or None: from
-    v0.2.0 on, a release's fixture set -- the files its own binaries wrote,
-    which every later build's tests open (tools/compat_fixtures.py) --
-    exists before the version moves past it. Setting the version a release
-    already has asks for nothing."""
+    v0.2.0 on, a released version's fixture set -- the files its own
+    binaries wrote, which every later build's tests open
+    (tools/compat_fixtures.py) -- is in the tree, every file the bytes
+    SHA256SUMS names, before the version moves past it. Setting the version
+    a release already has asks for nothing, nor does moving on from a
+    version that was never tagged: its set would be built from its tag."""
     m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", current)
     if current == new or not m or tuple(map(int, m.groups())) < (0, 2, 0):
         return None
-    if (root / "crates" / "fennec-core" / "tests" / "compat" / f"v{current}" / "README.md").is_file():
+    if not released(root, current):
         return None
-    return (f"v{current} has no fixture set (crates/fennec-core/tests/compat/v{current}/): write it from "
-            f"its tag with `make compat-fixtures V={current}` and land it before the release after it "
-            "(RELEASING.md, step 6)")
+    set_dir = root / "crates" / "fennec-core" / "tests" / "compat" / f"v{current}"
+    if not set_dir.is_dir():
+        return (f"v{current} has no fixture set (crates/fennec-core/tests/compat/v{current}/): write it from "
+                f"its tag with `make compat-fixtures V={current}` and land it before the release after it "
+                "(RELEASING.md, step 6)")
+    problems = set_problems(set_dir)
+    if problems:
+        return f"v{current}'s fixture set is not the one its release wrote:\n  " + "\n  ".join(problems)
+    return None
+
+
+def refuse_without_set(root, new):
+    """Stops the move to `new` while the release it leaves has no whole
+    fixture set ([`missing_set`])."""
+    why = missing_set(root, current_version(root), new)
+    if why:
+        sys.exit(why)
 
 
 def current_version(root):
@@ -52,9 +106,7 @@ def main():
     if len(sys.argv) != 2 or not re.fullmatch(r"\d+\.\d+\.\d+", sys.argv[1]):
         sys.exit("usage: version.py X.Y.Z")
     v = sys.argv[1]
-    why = missing_set(ROOT, current_version(ROOT), v)
-    if why:
-        sys.exit(why)
+    refuse_without_set(ROOT, v)
     sub("Cargo.toml", r'^version = "[^"]+"', f'version = "{v}"')
     for crate in ("core", "ql", "abi", "http", "server", "wire", "import", "tls"):
         sub("Cargo.toml", rf'^(fennec-{crate} = \{{ version = )"[^"]+"', rf'\g<1>"{v}"')

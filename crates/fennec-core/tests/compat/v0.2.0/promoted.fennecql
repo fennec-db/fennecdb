@@ -1,0 +1,21 @@
+-- The statements every later build answers over replica.fennec, a
+-- replica's file following server.fennec's server, and promoted.fennec,
+-- that file promoted: a newer replica opens an older one's file.
+collections
+describe kinds
+get kinds order i
+get kinds select i, v, vi, vh, sp order i
+get kinds where email = "ALICE@EXAMPLE.COM" select i
+get kinds match t "quick fox" select i
+get kinds order un select i, un
+get kinds near vi [1, 0, 0, 0] limit 2 select i
+get kinds near g [13, 52] limit 1 select i
+get kinds count
+get extra order n
+get orders order ref
+get blocked order n
+get _idempotency select status, body
+get _consumers select name, since
+get _migrations select n, text
+statements
+call order_by_ref {r: "o-1"}

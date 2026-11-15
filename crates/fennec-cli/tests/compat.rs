@@ -3,13 +3,16 @@
 //! release wrote verifies, its sealed archive verifies and restores with
 //! its key, its sealed backup restores, and each restored database answers
 //! as the release's own restore of it did -- then is written, compacted,
-//! opened again and answers alike. fennec-core's `compat::` holds the files
-//! themselves to their answers, fennec-http's the archive's library.
+//! opened again and answers alike, and `fennec verify` holds every file
+//! after that too; a file the release wrote torn, as a crash leaves one, is
+//! refused as it lies, naming its damage. fennec-core's `compat::` holds
+//! the files themselves to their answers, fennec-http's the archive's
+//! library, fennec-server's the server's.
 
 #[path = "../../fennec-core/tests/compat/answers.rs"]
 mod answers;
 
-use answers::{copied, set_name, sets, written_and_compacted, Scratch};
+use answers::{copied, set_name, sets, torn, written_and_compacted, Scratch};
 use std::path::Path;
 use std::process::Command;
 
@@ -49,19 +52,39 @@ fn fennec_verifies_and_restores_every_release_s_files() {
         let key = set.join("key");
         let key_flag = Path::new("--key-file");
 
-        // Every database file, the sync log's writes put back first.
+        // Every database file, the sync log's writes put back first: a
+        // file the release wrote torn, as a crash leaves one, refused naming
+        // its damage. Then each as this build wrote into it and compacted
+        // it, verified whole.
         let mut verified = 0;
         for e in std::fs::read_dir(&set).unwrap() {
             let file = e.unwrap().file_name().to_string_lossy().into_owned();
             let Some(stem) = file.strip_suffix(".fennec") else {
                 continue;
             };
+            if cfg!(windows) && set.join(format!("{stem}.fennec.sync")).exists() {
+                continue;
+            }
             let dir = scratch.0.join(stem);
             std::fs::create_dir_all(&dir).unwrap();
             let path = copied(&set, stem, &dir);
             let (code, out) = fennec(&[Path::new("verify"), &path]);
-            assert_eq!(code, 0, "{name}/{file}: {out}");
-            assert!(out.contains("records, each whole"), "{name}/{file}: {out}");
+            match torn(stem) {
+                false => {
+                    assert_eq!(code, 0, "{name}/{file}: {out}");
+                    assert!(out.contains("records, each whole"), "{name}/{file}: {out}");
+                }
+                true => {
+                    assert_ne!(code, 0, "{name}/{file}, torn, verified: {out}");
+                    assert!(
+                        out.contains("runs past the end") || out.contains("fails its checksum"),
+                        "{name}/{file}: {out}"
+                    );
+                }
+            }
+            found.extend(written_and_compacted(&path, &set, stem));
+            let (code, out) = fennec(&[Path::new("verify"), &path]);
+            assert_eq!(code, 0, "{name}/{file} written and compacted: {out}");
             verified += 1;
         }
         assert!(verified > 0, "{name}: no database file");
@@ -76,6 +99,8 @@ fn fennec_verifies_and_restores_every_release_s_files() {
         let (code, out) = fennec(&[Path::new("restore"), &arch, &restored, key_flag, &key]);
         assert_eq!(code, 0, "{name}/archive: {out}");
         found.extend(written_and_compacted(&restored, &set, "archive"));
+        let (code, out) = fennec(&[Path::new("verify"), &restored]);
+        assert_eq!(code, 0, "{name}/archive written and compacted: {out}");
 
         // The sealed backup: no key, no database.
         let restored = scratch.0.join("backup.fennec");
@@ -85,6 +110,8 @@ fn fennec_verifies_and_restores_every_release_s_files() {
         let (code, out) = fennec(&[Path::new("restore"), &sealed, &restored, key_flag, &key]);
         assert_eq!(code, 0, "{name}/backup.sealed: {out}");
         found.extend(written_and_compacted(&restored, &set, "backup"));
+        let (code, out) = fennec(&[Path::new("verify"), &restored]);
+        assert_eq!(code, 0, "{name}/backup written and compacted: {out}");
     }
     assert!(
         found.is_empty(),

@@ -22,3 +22,16 @@ get notes match body "cafe" select n
 get notes match body "naive" select n
 get filler count
 get filler where n = 29 select n, body
+get kinds match t "quik" fuzzy select i
+get kinds match t "fo" prefix select i
+get kinds match t "fox" near v [1, 0, 0, 0] fuse limit 2 select i
+get kinds match t "fox" rerank v [0, 0, 1, 0] limit 2 select i
+get kinds select i, highlight(t) match t "fox"
+get kinds select i match t "fox" facet tag
+get kinds select approx_count_distinct(a) as n
+get kinds select i order i lookup notes on n = i select body order body
+get tasks order title
+get _sync_shapes select collection, cursor, seeded
+get _sync_queue
+get _sync_temps
+get _migrations select n, text

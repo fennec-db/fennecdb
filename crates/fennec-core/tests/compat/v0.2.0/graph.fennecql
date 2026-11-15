@@ -1,7 +1,10 @@
 -- The statements every later build answers over graph.fennec: its
--- checkpoint's graphs, every metric and quantization.
+-- checkpoint's graphs, every metric, precision and quantization, aliases,
+-- tombstones, an 8-byte id and a bit index's codes.
 describe vecs
+describe coded
 get vecs count
+get coded count
 get vecs near c [0.5, -0.5, 0.25, 0, 0.1, -0.2, 0.3, 0.4] limit 3 select n
 get vecs near c [0.5, -0.5, 0.25, 0, 0.1, -0.2, 0.3, 0.4] exact limit 3 select n
 get vecs near l [0.5, -0.5, 0.25, 0, 0.1, -0.2, 0.3, 0.4] limit 3 select n
@@ -9,7 +12,17 @@ get vecs near l [0.5, -0.5, 0.25, 0, 0.1, -0.2, 0.3, 0.4] exact limit 3 select n
 get vecs near d [0.5, -0.5, 0.25, 0, 0.1, -0.2, 0.3, 0.4] limit 3 select n
 get vecs near d [0.5, -0.5, 0.25, 0, 0.1, -0.2, 0.3, 0.4] exact limit 3 select n
 get vecs near q [0.5, -0.5, 0.25, 0, 0.1, -0.2, 0.3, 0.4] limit 3 select n
+get vecs near qh [0.5, -0.5, 0.25, 0, 0.1, -0.2, 0.3, 0.4] limit 3 select n
+get vecs near qh [0.5, -0.5, 0.25, 0, 0.1, -0.2, 0.3, 0.4] exact limit 3 select n
 get vecs near bits [0.5, -0.5, 0.25, 0, 0.1, -0.2, 0.3, 0.4] limit 3 select n
 get vecs near h [0.5, -0.5, 0.25, 0, 0.1, -0.2, 0.3, 0.4] limit 3 select n
 get vecs near h [0.5, -0.5, 0.25, 0, 0.1, -0.2, 0.3, 0.4] exact limit 3 select n
 get vecs where n < 4 order n select n, c, h
+get vecs where n >= 40 order n select id, n
+get vecs where id = 5000000000 select id, n, q
+get vecs where n in [7, 11, 19, 41] select n
+get coded near b [0.3, -0.1, 0.25, 0.4] limit 5 select n
+get coded near b [0.3, -0.1, 0.25, 0.4] exact limit 5 select n
+get coded near bh [0.3, -0.1, 0.25, 0.4] limit 5 select n
+get coded near bh [0.3, -0.1, 0.25, 0.4] exact limit 5 select n
+get coded where n in [4, 5, 6, 2099] order n

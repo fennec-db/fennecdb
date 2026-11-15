@@ -2,15 +2,18 @@
 // what that release's web client -- its web/fennec.js and the module its
 // own `make wasm` built -- keeps in IndexedDB (`persist`: an image and the
 // journal's chunks, in the clear and sealed with a `cryptoKey`) and in an
-// OPFS file (`openFile`), and the answers its page gave to a list of
-// statements over each, read back as a page opened again reads them.
+// OPFS file (`openFile`), a replica's sync state and a migration among it,
+// and the answers its page gave to a list of statements over each, read
+// back as a page opened again reads them.
 //
-//   node tools/compat/web.mjs <the release's web dir> <out dir> <statements>
+//   node tools/compat/web.mjs <the release's web dir> <out dir> <statements> <sync url> <token>
 //
 // Node has neither store, so the stores below stand in for them: the part
 // of each API the client uses, holding what it is given as it is given.
 // web/fennec.compat.test.js hands the same records to HEAD's client
-// through them.
+// through them, the IndexedDB stand-in holding only the database, version
+// and store the release's page made: a client that names another is
+// refused, as a browser's would come back empty.
 
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -29,17 +32,34 @@ export class KeyRange {
   }
 }
 
-/** IndexedDB's one store, keys kept sorted as the real one keeps them. */
-export function fakeIndexedDB(records = new Map()) {
+const refused = (name, message) => Object.assign(new Error(message), { name });
+
+/**
+ * IndexedDB's databases, each its version and stores, keys kept sorted as
+ * the real one keeps them. Empty, it takes what a page makes -- a database
+ * opened at a version, its stores made in `onupgradeneeded` -- as the
+ * release's page wrote into it. Given `held`, the database the release's
+ * page left (`{name, version, store, records}`), it holds that alone: a
+ * database of another name or version, or a store of another name, is
+ * refused, never made.
+ */
+export function fakeIndexedDB(held = null) {
+  const dbs = new Map();
+  if (held) dbs.set(held.name, { version: held.version, stores: new Map([[held.store, held.records]]) });
   const request = (fn) => {
     const req = {};
     queueMicrotask(() => {
-      req.result = fn();
-      req.onsuccess?.();
+      try {
+        req.result = fn();
+        req.onsuccess?.();
+      } catch (e) {
+        req.error = e;
+        req.onerror?.();
+      }
     });
     return req;
   };
-  const store = {
+  const storeOf = (records) => ({
     put: (value, key) => records.set(key, value),
     delete(range) {
       for (const k of [...records.keys()]) if (range.has(k)) records.delete(k);
@@ -52,20 +72,54 @@ export function fakeIndexedDB(records = new Map()) {
           .sort()
           .map((k) => records.get(k)),
       ),
-  };
-  const db = {
-    transaction() {
-      const tx = { objectStore: () => store };
+  });
+  const handle = (d, upgrading) => ({
+    get objectStoreNames() {
+      return { contains: (s) => d.stores.has(s) };
+    },
+    createObjectStore(s) {
+      if (!upgrading) throw refused('InvalidStateError', `createObjectStore(${s}) outside an upgrade`);
+      if (d.stores.has(s)) throw refused('ConstraintError', `the store ${s} exists`);
+      d.stores.set(s, new Map());
+    },
+    transaction(names) {
+      const scope = [names].flat();
+      for (const s of scope) {
+        if (!d.stores.has(s)) throw refused('NotFoundError', `no store ${s}: the release's page made ${[...d.stores.keys()]}`);
+      }
+      const tx = {
+        objectStore(s) {
+          if (!scope.includes(s)) throw refused('NotFoundError', `${s} is not in the transaction's scope`);
+          return storeOf(d.stores.get(s));
+        },
+      };
       setImmediate(() => tx.oncomplete?.());
       return tx;
     },
-  };
+    close() {},
+  });
   return {
-    records,
-    open() {
+    dbs,
+    open(name, version) {
       const req = {};
       queueMicrotask(() => {
-        req.result = db;
+        let d = dbs.get(name);
+        if (held && (!d || version !== d.version)) {
+          req.error = refused(
+            'VersionError',
+            d ? `${name} is at version ${d.version}, not ${version}` : `no database ${name}: the release's page made ${held.name}`,
+          );
+          req.onerror?.();
+          return;
+        }
+        if (!d || version > d.version) {
+          d ??= { version, stores: new Map() };
+          d.version = version;
+          dbs.set(name, d);
+          req.result = handle(d, true);
+          req.onupgradeneeded?.();
+        }
+        req.result = handle(d, false);
         req.onsuccess?.();
       });
       return req;
@@ -119,7 +173,7 @@ export function fakeDir(files = new Map()) {
 const b64 = (bytes) => Buffer.from(bytes).toString('base64');
 const unb64 = (s) => new Uint8Array(Buffer.from(s, 'base64'));
 
-/** IndexedDB's records as JSON: bytes in base64, a sealed record's parts each. */
+/** A store's records as JSON: bytes in base64, a sealed record's parts each. */
 export function dumpRecords(records) {
   return [...records.keys()].sort().map((key) => {
     const v = records.get(key);
@@ -136,6 +190,11 @@ export function loadRecords(list) {
       r.bytes != null ? unb64(r.bytes) : { ...(r.gen != null ? { gen: r.gen } : {}), iv: unb64(r.iv), data: unb64(r.data) },
     ]),
   );
+}
+
+/** A `page-idb*.json` file read: the database it names, as `fakeIndexedDB` holds one. */
+export function heldDatabase(json) {
+  return { name: json.database, version: json.version, store: json.store, records: loadRecords(json.records) };
 }
 
 /** The raw key a sealed page's records are sealed with: the fixture's own, never a secret. */
@@ -206,7 +265,28 @@ async function page(web, wasm) {
   return db;
 }
 
-async function main([web, out, statementsFile]) {
+/**
+ * The page's database after its first part: a migration applied by the
+ * declared schema (`_migrations`), and a replica of the server's `tasks`
+ * seeded, then a write made offline -- queued, never sent, an optimistic
+ * row under a temporary id (`_sync_shapes`, `_sync_queue`, `_sync_temps`).
+ */
+async function declaredAndSynced(web, db, url, token) {
+  const { sync } = await import(pathToFileURL(join(web, 'fennec.js')).href);
+  // The module reads a description as its FennecQL text.
+  const description = db.describe('fennecql');
+  const plan = db.checkSchema({ ...description, migrations: ['put notes {n: 9, body: "migrated"}'] }, 'apply');
+  if (!plan.applied) throw new Error(`the migration was not applied: ${JSON.stringify(plan)}`);
+  const replica = await sync({ url, token, local: db, shapes: [{ collection: 'tasks' }], leader: false });
+  await replica.ready();
+  replica.setOnline(false);
+  replica.from('tasks').insert({ title: 'written offline', done: false }).catch(() => {});
+  await new Promise((r) => setImmediate(r));
+  if (!db.run('get _sync_queue').rows?.length) throw new Error('the offline write was not queued');
+  replica.close();
+}
+
+async function main([web, out, statementsFile, url, token]) {
   const wasm = await readFile(join(web, 'fennec.wasm'));
   const reads = statements(await readFile(statementsFile, 'utf8'));
   const { persist, restore, openFile } = await import(pathToFileURL(join(web, 'fennec.js')).href);
@@ -221,17 +301,23 @@ async function main([web, out, statementsFile]) {
     ['page-idb-sealed', { cryptoKey: key }],
   ]) {
     const db = await page(web, wasm);
-    for (const part of WRITES) {
+    for (const [i, part] of WRITES.entries()) {
       for (const q of part) db.run(q);
+      if (i === 1) await declaredAndSynced(web, db, url, token);
       await persist(db, name, opts);
     }
     db.close();
   }
-  const records = dumpRecords(idb.records);
+  if (idb.dbs.size !== 1) throw new Error(`the page made ${idb.dbs.size} databases, not one`);
+  const [[database, made]] = [...idb.dbs];
+  if (made.stores.size !== 1) throw new Error(`the page made ${made.stores.size} stores, not one`);
+  const [[store, records]] = [...made.stores];
+  const dumped = dumpRecords(records);
   for (const name of ['page-idb', 'page-idb-sealed']) {
-    const mine = records.filter((r) => r.key === name || r.key.startsWith(`${name}#`));
+    const mine = dumped.filter((r) => r.key === name || r.key.startsWith(`${name}#`));
     if (mine.length < 3) throw new Error(`${name}: ${mine.length} records, not an image and its chunks`);
-    await writeFile(join(out, `${name}.json`), JSON.stringify({ records: mine }, null, 1) + '\n');
+    const json = { database, version: made.version, store, records: mine };
+    await writeFile(join(out, `${name}.json`), JSON.stringify(json, null, 1) + '\n');
     const back = await page(web, wasm);
     if (!(await restore(back, name, name.endsWith('sealed') ? { cryptoKey: key } : {}))) throw new Error(`${name}: nothing restored`);
     await writeFile(join(out, `${name}.web`), answers(back, reads));
@@ -242,7 +328,10 @@ async function main([web, out, statementsFile]) {
   const dir = fakeDir();
   const db = await page(web, wasm);
   const file = await openFile(db, 'page.fennec', { dir });
-  for (const part of WRITES) for (const q of part) await db.query(q);
+  for (const [i, part] of WRITES.entries()) {
+    for (const q of part) await db.query(q);
+    if (i === 1) await declaredAndSynced(web, db, url, token);
+  }
   file.close();
   db.close();
   const bytes = dir.files.get('page.fennec').bytes;

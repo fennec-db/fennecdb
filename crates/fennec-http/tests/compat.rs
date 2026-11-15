@@ -3,7 +3,8 @@
 //! and `fennec archive --key-file`): each opens with its key in this
 //! build, the archive verified as `fennec verify` reads it, and the
 //! database each restores to answers as the release's own restore of it
-//! did -- then is written, compacted, opened again and answers alike.
+//! did -- then is written into, compacted, opened again and answers
+//! alike, every record held to its sum once more.
 //! Seals by their own magic, never this build's constant: a seal of a
 //! later version beside the release's changes nothing here.
 
