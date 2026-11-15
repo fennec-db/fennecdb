@@ -147,7 +147,11 @@ def shown(surface):
 #
 #   {"surface": "fennec.d.ts", "symbol": "Query.where", "change": "member changed",
 #    "before": "0123456789ab", "after": "ba9876543210", "release": "2.0", "reason": "takes a Where only: pass { ... } instead of the builder"}
-BREAKS = []
+BREAKS = [
+    {"surface": "fennec.d.ts", "symbol": "SyncOptions.tokenProvider", "change": "member changed",
+     "before": "aee71b963ff0", "after": "5baac1f64052", "release": "1.0",
+     "reason": "#621 (sync-token-expired): the provider is handed the refusal it answers, (refusal: TokenRefusal) => string | Promise<string> -- the code the server named, whether the refused request carried a token, the asks in a row -- so a replica refreshes at an expiry and signs out at a session ended. A provider taking no argument still type-checks and is called as before: a caller changes nothing"},
+]
 
 
 # ------------------------------------------------------------ comments

@@ -356,6 +356,9 @@
     "completed": [
      "completed?: number"
     ],
+    "errorCode": [
+     "errorCode?: 'token_expired' | (string & {})"
+    ],
     "history": [
      "history?: string"
     ],
@@ -1193,6 +1196,9 @@
     "error": [
      "error: string | null"
     ],
+    "errorCode": [
+     "errorCode: NonNullable<FennecError['errorCode']> | null"
+    ],
     "leader": [
      "leader: boolean"
     ],
@@ -1204,6 +1210,9 @@
     ],
     "seeded": [
      "seeded: boolean"
+    ],
+    "token": [
+     "token: TokenWait | null"
     ]
    }
   },
@@ -1368,7 +1377,7 @@
      "token?: string"
     ],
     "tokenProvider": [
-     "tokenProvider?: () => string | Promise<string>"
+     "tokenProvider?: (refusal: TokenRefusal) => string | Promise<string>"
     ],
     "url": [
      "url: string"
@@ -1407,6 +1416,36 @@
    "declarations": [
     "type Timestamp = string & {readonly __fennec: 'timestamp'}"
    ]
+  },
+  "TokenRefusal": {
+   "kind": "interface",
+   "head": "interface TokenRefusal",
+   "members": {
+    "attempt": [
+     "readonly attempt: number"
+    ],
+    "errorCode": [
+     "readonly errorCode: 'token_expired' | (string & {}) | null"
+    ],
+    "expired": [
+     "readonly expired: boolean"
+    ],
+    "hadToken": [
+     "readonly hadToken: boolean"
+    ]
+   }
+  },
+  "TokenWait": {
+   "kind": "interface",
+   "head": "interface TokenWait",
+   "members": {
+    "refusal": [
+     "readonly refusal: TokenRefusal"
+    ],
+    "stage": [
+     "readonly stage: 'delayed' | 'asked' | 'failed'"
+    ]
+   }
   },
   "TypedCall": {
    "kind": "type",
