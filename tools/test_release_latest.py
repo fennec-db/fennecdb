@@ -341,9 +341,13 @@ class ReleaseLatest(unittest.TestCase):
 
     def test_a_tag_that_is_no_release_fails(self):
         self.given(["v1.0.0"], latest="v1.0.0")
-        for tag in ("vfoo", "v1.0", "1.0.0", "v1.0.0-", "v1.0.0+build"):
+        # A candidate is vX.Y.Z-rc.N alone, N from 1: the form release.yml's
+        # jobs take (tools/test_release_verify.py's TagForm).
+        for tag in ("vfoo", "v1.0", "1.0.0", "v1.0.0-", "v1.0.0+build", "v1.0.0-1", "v1.0.0-beta.1", "v1.0.0-rc.0",
+                    "v1.0.0-rc.01", "v1.0.0-rc"):
             with self.subTest(tag=tag):
-                self.assertFails(self.run_it("github", tag), f"{tag} is no release's tag", "v1.0.0")
+                self.assertFails(self.run_it("github", tag), f"{tag} is no release's tag: vX.Y.Z, or vX.Y.Z-rc.N for"
+                                 " a candidate, N from 1", "v1.0.0")
                 got = self.run_it("npm-tag", tag)
                 self.assertEqual((got.returncode, got.stdout), (1, ""))
 

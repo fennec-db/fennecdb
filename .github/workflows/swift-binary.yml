@@ -5,10 +5,11 @@ run-name: Swift binary for v${{ inputs.version }}
 # SwiftPM fetches the package by its tag, and Package.swift at that tag has
 # to name the zip by URL and checksum already: the zip cannot be built
 # after the tag and its checksum still be in it. So this builds the zip from
-# main, keeps it as this run's artifact, and opens a pull request writing
-# its checksum into Package.swift (integrations/swift/set-binary.sh). Once
-# that is merged, the merge is tagged, and release.yml attaches this very
-# zip -- found by its run, held to the checksum the tag's manifest names.
+# main (from release/X.Y for a patch), keeps it as this run's artifact, and
+# opens a pull request writing its checksum into Package.swift
+# (integrations/swift/set-binary.sh). Once that is merged, the merge is
+# tagged, and release.yml attaches this very zip -- found by its run, held
+# to the checksum the tag's manifest names.
 # RELEASING.md has the order.
 #
 # The build and the pull request are two jobs: the build runs the crates'
@@ -24,7 +25,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'The version about to be tagged, X.Y.Z (make version has written it)'
+        description: 'The version about to be tagged, X.Y.Z or X.Y.Z-rc.N (make version has written it); run on main for an X.Y.0, on release/X.Y for a patch'
         required: true
 
 permissions:
@@ -42,10 +43,19 @@ jobs:
     env:
       VERSION: ${{ inputs.version }}
     steps:
-      - name: The version is a release's
+      # The one branch tools/release-verify.sh takes this run's attestation
+      # from: main for an X.Y.0 and its candidates, release/X.Y for a patch
+      # and its. Held here, before the build, as well as where it attests.
+      - name: The version is a release's, and the run is on its branch
         run: |
-          re='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
-          [[ $VERSION =~ $re ]] || { echo "::error::the version asked for is no release's: X.Y.Z, or X.Y.Z-<pre-release>"; exit 1; }
+          re='^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$'
+          [[ $VERSION =~ $re ]] || { echo "::error::the version asked for is no release's: X.Y.Z, or X.Y.Z-rc.N for a candidate, N from 1"; exit 1; }
+          core=${VERSION%%-*}
+          if [ "${core##*.}" -eq 0 ]; then want=main; else want="release/${core%.*}"; fi
+          if [ "$GITHUB_REF_TYPE" != branch ] || [ "$GITHUB_REF_NAME" != "$want" ]; then
+            echo "::error::v$VERSION's XCFramework is built on $want, the one branch RELEASING.md's step 6 takes its attestation from (main for an X.Y.0 and its candidates, release/X.Y for a patch): gh workflow run swift-binary.yml --ref $want -f version=$VERSION"
+            exit 1
+          fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -128,13 +138,18 @@ jobs:
       REF_TYPE: ${{ github.ref_type }}
     steps:
       # A run started on a tag has no branch to merge into, and its files
-      # would be attested as built at the tag: it stops before either.
-      - name: The version is a release's, and the run is on a branch
+      # would be attested as built at the tag; one on another branch than
+      # its version's would be attested where step 6 does not look (main
+      # for an X.Y.0 and its candidates, release/X.Y for a patch): it stops
+      # before either.
+      - name: The version is a release's, and the run is on its branch
         run: |
-          re='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
-          [[ $VERSION =~ $re ]] || { echo "::error::the version asked for is no release's: X.Y.Z, or X.Y.Z-<pre-release>"; exit 1; }
-          if [ "$REF_TYPE" != branch ]; then
-            echo "::error::swift-binary.yml ran on a $REF_TYPE: start it on the branch the release is cut from (main, or release/1.N)"
+          re='^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$'
+          [[ $VERSION =~ $re ]] || { echo "::error::the version asked for is no release's: X.Y.Z, or X.Y.Z-rc.N for a candidate, N from 1"; exit 1; }
+          core=${VERSION%%-*}
+          if [ "${core##*.}" -eq 0 ]; then want=main; else want="release/${core%.*}"; fi
+          if [ "$REF_TYPE" != branch ] || [ "$BASE" != "$want" ]; then
+            echo "::error::v$VERSION's XCFramework is built on $want, the one branch RELEASING.md's step 6 takes its attestation from (main for an X.Y.0 and its candidates, release/X.Y for a patch): gh workflow run swift-binary.yml --ref $want -f version=$VERSION"
             exit 1
           fi
 
@@ -151,9 +166,8 @@ jobs:
           subject-path: ${{ runner.temp }}/xcframework/*
 
       # Against the branch the run was started on, which both jobs checked
-      # out: main for a release, release/1.N for a patch to an older minor
-      # (RELEASING.md, A security release), whose Package.swift is that
-      # branch's. The branch's name reaches gh in the environment, never
+      # out: main for an X.Y.0, release/X.Y for a patch (RELEASING.md, A
+      # release, step 2), whose Package.swift is that branch's. The branch's name reaches gh in the environment, never
       # spliced into the script.
       - name: Open the pull request naming its checksum
         env:

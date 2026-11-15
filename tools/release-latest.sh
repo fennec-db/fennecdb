@@ -5,7 +5,8 @@
 #   tools/release-latest.sh github TAG
 #   tools/release-latest.sh npm-tag TAG
 #
-# TAG is the release's (vX.Y.Z, or vX.Y.Z-<pre-release> for a candidate).
+# TAG is the release's: vX.Y.Z, or vX.Y.Z-rc.N for a candidate, N from 1,
+# the one form release.yml's jobs take (tools/test_release_verify.py).
 # `github` holds GitHub's Latest, which site/install.sh and site/install.ps1
 # read (`releases/latest/download/`), on the newest published X.Y.Z release,
 # whatever TAG it was run for: GitHub makes every release it publishes
@@ -87,12 +88,17 @@ said() {
     tr '\n' ' ' <"$err"
 }
 
-# Whether $1 is X.Y.Z alone, or X.Y.Z and a pre-release.
+# Whether $1 is X.Y.Z alone, or X.Y.Z and a candidate's -rc.N. grep
+# matches line by line: a value of two lines, each a version, is none.
+nl='
+'
 release_version() {
+    case $1 in *"$nl"*) return 1 ;; esac
     printf '%s\n' "$1" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+'
 }
 pre_version() {
-    printf '%s\n' "$1" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.]+'
+    case $1 in *"$nl"*) return 1 ;; esac
+    printf '%s\n' "$1" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+-rc\.[1-9][0-9]*'
 }
 
 # The published releases' versions, X.Y.Z alone, ascending, into
@@ -116,7 +122,7 @@ prereleases() {
         fails "the release list could not be read: $(said)"
     fi
     newest_pre=$(printf '%s\nv%s\n' "$tags" "$1" |
-        sed -n 's/^v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\(-[0-9A-Za-z.][0-9A-Za-z.]*\)\{0,1\}\)$/\1/p' |
+        sed -n 's/^v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\(-rc\.[1-9][0-9]*\)\{0,1\}\)$/\1/p' |
         awk '{ i = index($0, "-"); print (i ? substr($0, 1, i - 1) ".0." substr($0, i + 1) : $0 ".1") " " $0 }' |
         sort -V | tail -n 1 | cut -d' ' -f2)
 }
@@ -185,7 +191,7 @@ hold() {
 }
 
 if [ "$tag" = "$version" ] || { ! release_version "$version" && ! pre_version "$version"; }; then
-    fails "$tag is no release's tag: vX.Y.Z, or vX.Y.Z-<pre-release> for a candidate"
+    fails "$tag is no release's tag: vX.Y.Z, or vX.Y.Z-rc.N for a candidate, N from 1"
 fi
 
 if [ "$mode" = npm-tag ]; then

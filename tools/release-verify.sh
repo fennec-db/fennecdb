@@ -5,7 +5,9 @@
 #   tools/release-verify.sh TAG
 #   tools/release-verify.sh --assets TAG
 #
-# TAG is vX.Y.Z, or vX.Y.Z-<pre-release> for a candidate. The release's
+# TAG is vX.Y.Z, or vX.Y.Z-rc.N for a candidate, N from 1: the one form
+# release.yml's and swift-binary.yml's jobs take in their first step,
+# tools/test_release_verify.py holding them to it. The release's
 # assets are exactly those `release.yml` and `desktop.yml` attach (`--assets`
 # prints them, the workflow that attested each first): `release.yml`'s 17 --
 # its own 14 and swift-binary.yml's three XCFramework files -- and
@@ -13,15 +15,25 @@
 # the release is published. A candidate has no app files: desktop.yml takes
 # X.Y.Z alone (`release is a tag such as v0.2.0`), so its 18 are all. A
 # candidate is a pre-release, which GitHub makes no Latest, and an X.Y.Z is
-# none; Latest is an X.Y.Z. SHA256SUMS lists every asset but itself and the
-# XCFramework's `.checksum`, each with its sum. Each other asset verifies
-# with `gh attestation verify` as built by the workflow that made it, at the
-# ref its run was on, on GitHub's runners:
+# none; Latest is an X.Y.Z. SHA256SUMS is what binds a file to its name in
+# this release, which a file's attestation does not (it names the bytes):
+# release.yml's `publish` writes it and attests it in the tag's own run,
+# and desktop.yml's attach jobs append the app's lines after the publish,
+# every line before them kept byte for byte. So its lines before the app's
+# must verify as release.yml's at refs/tags/TAG before a sum is read from
+# them; then it lists every asset but itself and the XCFramework's
+# `.checksum`, each with its sum, the app's by lines no run attested, each
+# app file held by its own attestation. Each asset verifies with `gh
+# attestation verify` as built by the workflow that made it, at the one ref
+# its run may have been on, on GitHub's runners:
 #
 #   release.yml        refs/tags/TAG       the tag's own run (its push, or a
 #                                          dispatch at the tag)
-#   swift-binary.yml   refs/heads/main, or refs/heads/release/X.Y for a patch
-#                      cut from that branch: built before the tag
+#   swift-binary.yml   refs/heads/main for an X.Y.0 and its candidates, and
+#                      refs/heads/release/X.Y for a patch (Z above 0) and
+#                      its: built before the tag. Never both: a `release/*`
+#                      branch is pushed by a writer, and its run of an
+#                      edited swift-binary.yml attests what it is given.
 #   desktop.yml        refs/heads/main     dispatched from main alone
 #
 # and so does the image, each of `<version>` (the list), `<version>-amd64`
@@ -34,8 +46,8 @@
 # package published without provenance -- and each of PyPI's files has PEP
 # 740 attestations whose publisher is packages.yml of this repository.
 #
-# One line an asset, and the first thing missing or wrong ends it, non-zero.
-# gh logged in, npm, curl and jq; REPO and IMAGE name another repository and
+# One line an asset, and the first thing missing or wrong ends it, non-zero,
+# its last lines naming every check it did not make. gh logged in, npm, curl and jq; REPO and IMAGE name another repository and
 # image (tests). POSIX sh, under dash as the other release scripts: a
 # command whose failure matters runs in a substitution of its own, never at
 # a pipeline's head.
@@ -58,8 +70,38 @@ version=${tag#v}
 repo=${REPO:-fennec-db/fennecdb}
 image=${IMAGE:-ghcr.io/fennec-db/fennec-server}
 
+# Every check, in the order they are made: each, as it begins, takes
+# itself and those before it off `left`, and a failure names what is left,
+# then `pending`, what the check under way had not reached.
+left="the release's state
+GitHub's Latest
+the asset list
+SHA256SUMS's attestation
+SHA256SUMS's sums
+each asset's attestation
+the image's three tags
+npm's provenance
+npm audit signatures
+PyPI's attestations"
+pending=
+# The words after $1 among the rest, comma-separated: what a loop had not
+# reached.
+after() {
+    w=$1
+    shift
+    printf '%s\n' "$@" | awk -v w="$w" 'f { printf "%s%s", s, $0; s = ", " } $0 == w { f = 1 }'
+}
+doing() {
+    left=$(printf '%s\n' "$left" | awk -v c="$1" 'f; $0 == c { f = 1 }')
+    pending=
+}
+
 fails() {
     echo "FAIL $*" >&2
+    {
+        [ -z "$pending" ] || echo "not checked: $pending"
+        [ -z "$left" ] || printf '%s\n' "$left" | sed 's/^/not checked: /'
+    } >&2
     exit 1
 }
 
@@ -67,17 +109,29 @@ ok() {
     echo "ok   $*"
 }
 
-printf '%s\n' "$tag" | grep -Eqx 'v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?' ||
-    fails "$tag is no release's tag: vX.Y.Z, or vX.Y.Z-<pre-release> for a candidate"
+# grep matches line by line: a tag of two lines, each a release's, is none.
+nl='
+'
+case $tag in
+    *"$nl"*) false ;;
+    *) printf '%s\n' "$tag" | grep -Eqx 'v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?' ;;
+esac || fails "$tag is no release's tag: vX.Y.Z, or vX.Y.Z-rc.N for a candidate, N from 1"
 case $version in
     *-*) candidate=yes ;;
     *) candidate=no ;;
 esac
 core=${version%%-*}
+# The one ref swift-binary.yml's run may be on: main for an X.Y.0 and its
+# candidates, release/X.Y for a patch and its.
+if [ "${core##*.}" -eq 0 ]; then
+    swift_ref=refs/heads/main
+else
+    swift_ref=refs/heads/release/${core%.*}
+fi
 
 # The assets of TAG, each after the workflow whose run attests it:
 # `release`, `swift` (swift-binary.yml's, before the tag), `desktop`, or
-# `sums` for SHA256SUMS, which none does. $1 is `yes` where the app's are
+# `sums` for SHA256SUMS, whose lines before the app's release.yml attests. $1 is `yes` where the app's are
 # among them. tools/test_release_verify.py holds this list to the
 # workflows and to the scripts that name the files.
 assets() {
@@ -128,6 +182,7 @@ sha256() {
 }
 
 # The release: published or a draft, a pre-release or not, its assets.
+doing "the release's state"
 release=$(gh release view "$tag" -R "$repo" --json isDraft,isPrerelease,assets 2>"$err") ||
     fails "$tag: the release could not be read: $(said)"
 draft=$(printf '%s' "$release" | jq -r .isDraft)
@@ -148,6 +203,7 @@ else
     ok "$tag is a published release"
 fi
 
+doing "GitHub's Latest"
 if [ "$draft" = false ]; then
     if ! latest=$(gh api "repos/$repo/releases/latest" --jq .tag_name 2>"$err"); then
         fails "GitHub's Latest could not be read: $(said)"
@@ -158,6 +214,7 @@ if [ "$draft" = false ]; then
 fi
 
 # Exactly the assets the workflows attach: none missing, none beside them.
+doing "the asset list"
 assets "$app" >"$work/want"
 cut -d' ' -f2 "$work/want" | sort >"$work/want-names"
 printf '%s' "$release" | jq -r '.assets[].name' | sort >"$work/have-names"
@@ -174,8 +231,28 @@ while read -r kind name; do
     [ -f "$work/assets/$name" ] || fails "$name: not downloaded"
 done <"$work/want"
 
-# SHA256SUMS: every asset but itself and the .checksum, once, by its sum.
+# gh attestation verify of $1 as built by workflow $2 at ref $3.
+verified() {
+    gh attestation verify "$1" -R "$repo" --signer-workflow "$repo/.github/workflows/$2" --source-ref "$3" \
+        --deny-self-hosted-runners >/dev/null 2>"$err"
+}
+
+# SHA256SUMS's lines before the app's: the file release.yml's `publish`
+# wrote and attested in the tag's own run, byte for byte (head -n keeps
+# them as they are), before a sum is read from it. The app's lines come
+# after all of them, as desktop.yml appends them.
+doing "SHA256SUMS's attestation"
 sums=$work/assets/SHA256SUMS
+late=$(awk '{ f = $2; sub(/^\*/, "", f) } f ~ /^fennec-studio-/ { app = 1; next } app { print f }' "$sums")
+[ -z "$late" ] || fails "SHA256SUMS lists $(echo $late | sed 's/ /, /g') after the app's lines, which desktop.yml appends to release.yml's: no run wrote it there"
+own=$(awk '{ f = $2; sub(/^\*/, "", f) } f ~ /^fennec-studio-/ { exit } { n++ } END { print n + 0 }' "$sums")
+head -n "$own" "$sums" >"$work/sums-release"
+verified "$work/sums-release" release.yml "refs/tags/$tag" ||
+    fails "SHA256SUMS: its $own lines before the app's are no file release.yml attested at refs/tags/$tag, so no sum in it is read: $(said)"
+ok "SHA256SUMS: release.yml at refs/tags/$tag, its $own lines before the app's"
+
+# SHA256SUMS: every asset but itself and the .checksum, once, by its sum.
+doing "SHA256SUMS's sums"
 listed=0
 while read -r kind name; do
     case $name in SHA256SUMS | *.checksum) continue ;; esac
@@ -188,38 +265,36 @@ done <"$work/want"
 [ "$(grep -c . "$sums")" -eq "$listed" ] || fails "SHA256SUMS has $(grep -c . "$sums") lines for $listed assets"
 ok "SHA256SUMS lists $listed assets, each by its sum"
 
-# gh attestation verify of $1 as built by workflow $2 at ref $3.
-verified() {
-    gh attestation verify "$1" -R "$repo" --signer-workflow "$repo/.github/workflows/$2" --source-ref "$3" \
-        --deny-self-hosted-runners >/dev/null 2>"$err"
-}
-
+doing "each asset's attestation"
 while read -r kind name; do
     file=$work/assets/$name
     case $kind in
         sums) continue ;;
-        release) workflow=release.yml refs="refs/tags/$tag" ;;
-        swift) workflow=swift-binary.yml refs="refs/heads/main refs/heads/release/${core%.*}" ;;
-        desktop) workflow=desktop.yml refs=refs/heads/main ;;
+        release) workflow=release.yml ref="refs/tags/$tag" ;;
+        swift) workflow=swift-binary.yml ref=$swift_ref ;;
+        desktop) workflow=desktop.yml ref=refs/heads/main ;;
     esac
-    found=
-    for ref in $refs; do
-        if verified "$file" "$workflow" "$ref"; then
-            found=$ref
-            break
-        fi
-    done
-    [ -n "$found" ] || fails "$name: no attestation by $workflow at $(echo $refs | sed 's/ / or /'): $(said)"
-    ok "$name: $workflow at $found"
+    if ! verified "$file" "$workflow" "$ref"; then
+        pending="the attestations of $(awk -v n="$name" 'f && $1 != "sums" { printf "%s%s", s, $2; s = ", " } $2 == n { f = 1 }' "$work/want")"
+        [ "$pending" != "the attestations of " ] || pending=
+        fails "$name: no attestation by $workflow at $ref: $(said)"
+    fi
+    ok "$name: $workflow at $ref"
 done <"$work/want"
 
 # The image, by the digest ghcr.io serves for each tag, which the verified
 # statement must name.
+doing "the image's three tags"
 path=${image#*/}
 host=${image%%/"$path"}
 token=$(curl -fsS "https://$host/token?scope=repository:$path:pull" 2>"$err" | jq -r '.token // empty') || true
 [ -n "$token" ] || fails "$host gave no token to read $path: $(said)"
 for ref in "$version" "$version-amd64" "$version-arm64"; do
+    case $ref in
+        *-amd64) pending="$image:$version-arm64" ;;
+        *-arm64) pending= ;;
+        *) pending="$image:$version-amd64, $image:$version-arm64" ;;
+    esac
     headers=$(curl -fsSI -H "Authorization: Bearer $token" \
         -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json' \
         "https://$host/v2/$path/manifests/$ref" 2>"$err") || fails "$image:$ref is not on the registry: $(said)"
@@ -234,6 +309,7 @@ for ref in "$version" "$version-amd64" "$version-arm64"; do
     ok "$image:$ref $digest: release.yml at refs/tags/$tag"
 done
 
+pending=
 if [ "$draft" = true ]; then
     ok "$tag, a draft: verified as far as a draft goes; run this again once it is published and the app attached"
     exit 0
@@ -242,7 +318,11 @@ fi
 # npm: each package's SLSA provenance, naming packages.yml of this
 # repository; then the registry's signatures and the attestations, which
 # `npm audit signatures` checks where a package has them.
-for pkg in @fennecdb/web @fennecdb/react @fennecdb/cloudflare @fennecdb/langchain; do
+doing "npm's provenance"
+pkgs="@fennecdb/web @fennecdb/react @fennecdb/cloudflare @fennecdb/langchain"
+for pkg in $pkgs; do
+    pending=$(after "$pkg" $pkgs)
+    [ -z "$pending" ] || pending="npm's provenance of $pending"
     att=$(npm view "$pkg@$version" dist.attestations --json 2>"$err") || fails "npm $pkg@$version could not be read: $(said)"
     url=$(printf '%s' "${att:-null}" | jq -r 'if type == "object" and .provenance.predicateType == "https://slsa.dev/provenance/v1" then .url // empty else empty end')
     [ -n "$url" ] || fails "npm $pkg@$version carries no SLSA provenance (dist.attestations is [$(echo $att)]): published without --provenance, or not by packages.yml"
@@ -256,6 +336,8 @@ for pkg in @fennecdb/web @fennecdb/react @fennecdb/cloudflare @fennecdb/langchai
     esac
     ok "npm $pkg@$version: SLSA provenance, packages.yml at ${from##* }"
 done
+pending=
+doing "npm audit signatures"
 mkdir "$work/npm"
 (
     cd "$work/npm"
@@ -267,21 +349,16 @@ mkdir "$work/npm"
 ok "npm audit signatures: the four packages' registry signatures and attestations"
 
 # PyPI: PEP 440 spells a candidate X.Y.ZrcN.
+doing "PyPI's attestations"
 case $version in
-    *-*)
-        pre=${version#*-}
-        case $pre in
-            rc.*) pyversion=${core}rc${pre#rc.} ;;
-            alpha.* | a.*) pyversion=${core}a${pre#*.} ;;
-            beta.* | b.*) pyversion=${core}b${pre#*.} ;;
-            *) fails "$version: no PEP 440 spelling for its pre-release part" ;;
-        esac
-        ;;
+    *-rc.*) pyversion=${core}rc${version#*-rc.} ;;
     *) pyversion=$version ;;
 esac
 files=$(curl -fsS "https://pypi.org/pypi/fennecdb/$pyversion/json" 2>"$err" | jq -r '.urls[].filename') || true
 [ -n "$files" ] || fails "PyPI holds no files of fennecdb $pyversion: $(said)"
 for f in $files; do
+    pending=$(after "$f" $files)
+    [ -z "$pending" ] || pending="PyPI's attestations of $pending"
     prov=$(curl -fsS "https://pypi.org/integrity/fennecdb/$pyversion/$f/provenance" 2>"$err") ||
         fails "PyPI's $f has no attestation (uploaded with PYPI_API_TOKEN, which makes none?): $(said)"
     printf '%s' "$prov" | jq -e --arg repo "$repo" '[.attestation_bundles[].publisher

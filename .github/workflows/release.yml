@@ -25,7 +25,10 @@ on:
 # in a name -- reaches every job as TAG, through `env:`, and the job's first
 # step holds it to a release's form before anything uses it, a checkout
 # among them: it is never spliced into a script, where it would run as the
-# job (tools/workflow_check.py refuses that).
+# job (tools/workflow_check.py refuses that). The form is one: vX.Y.Z, or
+# vX.Y.Z-rc.N for a candidate, N from 1, as swift-binary.yml's jobs and
+# tools/release-verify.sh and release-latest.sh take it
+# (tools/test_release_verify.py holds each to it).
 permissions:
   contents: read
 
@@ -68,8 +71,8 @@ jobs:
     steps:
       - name: The tag is a release's
         run: |
-          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
-          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-<pre-release>"; exit 1; }
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$'
+          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-rc.N for a candidate, N from 1"; exit 1; }
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -205,8 +208,8 @@ jobs:
     steps:
       - name: The tag is a release's
         run: |
-          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
-          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-<pre-release>"; exit 1; }
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$'
+          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-rc.N for a candidate, N from 1"; exit 1; }
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -274,8 +277,8 @@ jobs:
     steps:
       - name: The tag is a release's
         run: |
-          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
-          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-<pre-release>"; exit 1; }
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$'
+          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-rc.N for a candidate, N from 1"; exit 1; }
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -325,8 +328,8 @@ jobs:
     steps:
       - name: The tag is a release's
         run: |
-          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
-          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-<pre-release>"; exit 1; }
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$'
+          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-rc.N for a candidate, N from 1"; exit 1; }
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -379,8 +382,8 @@ jobs:
     steps:
       - name: The tag is a release's
         run: |
-          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
-          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-<pre-release>"; exit 1; }
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$'
+          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-rc.N for a candidate, N from 1"; exit 1; }
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -447,8 +450,8 @@ jobs:
     steps:
       - name: The tag is a release's
         run: |
-          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
-          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-<pre-release>"; exit 1; }
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$'
+          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-rc.N for a candidate, N from 1"; exit 1; }
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -513,8 +516,8 @@ jobs:
     steps:
       - name: The tag is a release's
         run: |
-          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
-          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-<pre-release>"; exit 1; }
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$'
+          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-rc.N for a candidate, N from 1"; exit 1; }
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -582,8 +585,8 @@ jobs:
     steps:
       - name: The tag is a release's
         run: |
-          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
-          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-<pre-release>"; exit 1; }
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$'
+          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-rc.N for a candidate, N from 1"; exit 1; }
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -664,8 +667,8 @@ jobs:
     steps:
       - name: The tag is a release's
         run: |
-          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
-          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-<pre-release>"; exit 1; }
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$'
+          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-rc.N for a candidate, N from 1"; exit 1; }
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -746,8 +749,8 @@ jobs:
     steps:
       - name: The tag is a release's
         run: |
-          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
-          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-<pre-release>"; exit 1; }
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$'
+          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-rc.N for a candidate, N from 1"; exit 1; }
 
       - name: Log in to ghcr.io
         env:
@@ -875,8 +878,8 @@ jobs:
     steps:
       - name: The tag is a release's
         run: |
-          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
-          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-<pre-release>"; exit 1; }
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$'
+          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-rc.N for a candidate, N from 1"; exit 1; }
 
       # This workflow's own commit's, as `image`'s check is: a dispatch for a
       # tag from before the script has none.
@@ -916,8 +919,8 @@ jobs:
     steps:
       - name: The tag is a release's
         run: |
-          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
-          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-<pre-release>"; exit 1; }
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$'
+          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-rc.N for a candidate, N from 1"; exit 1; }
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -961,10 +964,9 @@ jobs:
       # --signer-workflow <repo>/.github/workflows/release.yml --source-ref
       # refs/tags/<tag>` proves which workflow, run and commit made it,
       # where SHA256SUMS, fetched from the same place, proves only that the
-      # file is the one listed. Before the checksums, so that dist/ holds
-      # the attached files alone: SHA256SUMS is not attested, as desktop.yml
-      # appends the app's lines to it after the publish. Before the draft,
-      # so that no file goes out unattested.
+      # file is the one listed. Before the checksums, which are attested on
+      # their own below. Before the draft, so that no file goes out
+      # unattested.
       - name: Attest the build provenance of every file
         if: steps.own.outputs.attest == 'true'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -979,6 +981,20 @@ jobs:
           cd dist
           sha256sum *.tar.gz *.zip *.aar *.deb *.rpm > SHA256SUMS
           cat SHA256SUMS
+
+      # SHA256SUMS is what ties each file to its name in this release (the
+      # XCFramework's two zips among them): a file's attestation names its
+      # bytes, so two files of this run swapped under each other's names
+      # would each verify. Attested as this run's, before the draft;
+      # desktop.yml's attach jobs append the app's lines after the publish,
+      # every line before them kept byte for byte, and RELEASING.md's step 6
+      # (tools/release-verify.sh) verifies the lines before the app's as
+      # this file before it reads a sum from it.
+      - name: Attest the build provenance of SHA256SUMS
+        if: steps.own.outputs.attest == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/SHA256SUMS
 
       # A Go module in a subdirectory is fetched by a tag naming its
       # directory: `go get github.com/fennec-db/fennecdb/integrations/go@vX.Y.Z`

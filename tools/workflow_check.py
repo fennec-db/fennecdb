@@ -17,7 +17,10 @@ file, line and job:
   tag, with its reason. A local action (`./...`) is this commit's own; a
   `docker://` image is pinned by its digest.
 - Every workflow says `permissions:` at its top, so a job that names none
-  gets those and not whatever the repository's default is that day.
+  gets those and not whatever the repository's default is that day; where
+  it does not, each job that names none either runs with that default
+  token (write, on a repository whose default is write) and is a finding
+  of its own, by its file and its name.
 - A job holding any write -- its own `permissions:`, or the workflow's
   where it names none; `id-token: write` is one -- runs only what this
   check lists, each entry with the reason it builds nothing. A build runs
@@ -54,6 +57,15 @@ file, line and job:
   `v1$(curl ...|sh)` -- git takes `$`, `(`, `;`, `|` and a backquote in a
   name -- runs as the job, with its token. Such a value reaches a script
   through `env:`, read as `"$NAME"`, or an action through `with:`.
+  `actions/github-script`'s `script:` is held as a `run:` is: GitHub
+  pastes into it the same way, and it runs as JavaScript. A local action
+  (`uses: ./...`) is refused in any job, as its steps are not read here.
+  Not seen (none is in the tree, and each wants reading a value's way
+  through the workflow, not one script): a `matrix` built from a chosen
+  value (`fromJSON(inputs.targets)`), whose `${{ matrix.* }}` in a script
+  is then that value; a chosen value carried through a step's or a job's
+  outputs into a script (`${{ steps.x.outputs.tag }}`); and a remote
+  action's own scripts, which run under the pin.
 
 An entry of a list that nothing needs is a finding too, since it would let
 off whatever next took its name: a job let off that no longer needs it,
@@ -1483,13 +1495,32 @@ def chosen(expression):
     return found
 
 
+# An action whose input is a script GitHub pastes expressions into as it
+# does a `run:`'s: `actions/github-script`'s `script:`, JavaScript.
+SCRIPT_INPUTS = {"actions/github-script": "script"}
+
+
+def scripts(step):
+    """A step's script text: its `run:`, or the script an action in
+    SCRIPT_INPUTS takes as an input."""
+    if isinstance(step.get("run"), Scalar):
+        return step["run"]
+    uses_, with_ = step.get("uses"), step.get("with")
+    if isinstance(uses_, Scalar) and isinstance(with_, Mapping):
+        key = SCRIPT_INPUTS.get(str(uses_).strip().partition("@")[0].lower())
+        if key and isinstance(with_.get(key), Scalar):
+            return with_[key]
+    return None
+
+
 def spliced(job):
-    """Each expression of a step's `run:` script naming values CHOSEN
-    lists: (line, expression, names), once a step."""
+    """Each expression of a step's `run:` script, or an action's script in
+    SCRIPT_INPUTS, naming values CHOSEN lists: (line, expression, names),
+    once a step."""
     found = []
     for step in steps(job):
-        run = step.get("run")
-        if not isinstance(run, Scalar):
+        run = scripts(step)
+        if run is None:
             continue
         for expression in EXPRESSION.findall(run):
             names = chosen(expression)
@@ -1544,6 +1575,12 @@ def check_text(text, name, seen=None):
             findings.append(f"{where}: not a mapping")
             continue
 
+        if "permissions" not in doc and "permissions" not in job:
+            findings.append(f"{where} declares no `permissions:`, nor does its workflow at its top: it runs"
+                            " with the repository's default token, write where that is the default, a"
+                            " setting no pull request shows; declare the least it needs, `contents: read`"
+                            " unless it attaches to a release, attests or publishes")
+
         uses = [job["uses"]] if isinstance(job.get("uses"), Scalar) else []
         uses += [s["uses"] for s in steps(job) if isinstance(s.get("uses"), Scalar)]
         for u in uses:
@@ -1567,13 +1604,22 @@ def check_text(text, name, seen=None):
                                 + (f", or list it in {unlisted.group(1)} with its reason, if it builds"
                                    " nothing" if unlisted else ""))
 
+        # A local action's steps are not read, so what they splice is not
+        # seen: refused here in any job (in one holding a write, the third
+        # rule's finding says so already).
+        for step in steps(job) if not held else []:
+            local = step.get("uses")
+            if isinstance(local, Scalar) and str(local).strip().startswith("./"):
+                findings.append(f"{name}:{local.line}: job `{job_id}` uses the local action `{str(local).strip()}`,"
+                                " whose steps this check does not read for a value chosen outside the workflow"
+                                " spliced into a script: put its steps in the workflow, where they are read")
         for line, expression, values in spliced(job):
-            findings.append(f"{name}:{line}: job `{job_id}` splices `${{{{ {expression} }}}}` into a `run:`"
+            findings.append(f"{name}:{line}: job `{job_id}` splices `${{{{ {expression} }}}}` into a"
                             " script: " + "; ".join(f"{v} is {CHOSEN[v]}" for v in values)
                             + ", and GitHub pastes it into the script's text before its shell reads it,"
                             " so a `$(...)`, a `;` or a backquote in it runs as this job: hand it to the"
-                            ' step through `env:` and read it as "$NAME", held to the form it must have'
-                            " before its first use")
+                            ' step through `env:` and read it as "$NAME" (`process.env.NAME` in'
+                            " `actions/github-script`), held to the form it must have before its first use")
 
         read_ = secrets_read(job)
         if str(job.get("secrets", "")).strip() == "inherit":

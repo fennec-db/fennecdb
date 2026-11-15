@@ -163,12 +163,18 @@ class Pins(unittest.TestCase):
         """)), [])
 
     def test_a_local_action_needs_no_pin(self):
-        self.assertEqual(findings(workflow("""
+        # This commit's own: no pin. The fifth rule refuses it, its steps
+        # unread (Chosen).
+        self.assertIsNone(wc.pinned(wc.Scalar("./.github/actions/setup", 1)))
+        got = findings(workflow("""
             a:
               runs-on: ubuntu-latest
               steps:
                 - uses: ./.github/actions/setup
-        """)), [])
+        """))
+        self.assertEqual(len(got), 1, got)
+        self.assertIn("uses the local action", got[0])
+        self.assertNotIn("pin", got[0])
 
     def test_a_reusable_workflow_is_held_too(self):
         got = findings(workflow("""
@@ -218,6 +224,25 @@ class Permissions(unittest.TestCase):
         got = findings(workflow(self.JOB, top=""))
         self.assertEqual(len(got), 1, got)
         self.assertIn("t.yml:1: no `permissions:` at the top", got[0])
+
+    def test_a_job_with_an_undeclared_token_is_named(self):
+        # No `permissions:` at the top nor in the job: it runs with the
+        # repository's default, write on one whose default is write
+        # (train-d's release.yml `wasm` and `android` had the top's write).
+        # A job declaring its own is not named; the workflow still is.
+        got = findings(workflow(self.JOB + """
+        b:
+          runs-on: ubuntu-latest
+          steps:
+            - run: ./gradlew assemble
+        c:
+          uses: ./.github/workflows/called.yml
+        """, top=""))
+        self.assertEqual(len(got), 3, got)
+        self.assertIn("t.yml:1: no `permissions:` at the top", got[0])
+        self.assertIn("t.yml:11: job `b` declares no `permissions:`, nor does its workflow at its top", got[1])
+        self.assertIn("t.yml:15: job `c` declares no `permissions:`", got[2])
+        self.assertIn("`contents: read` unless it attaches to a release, attests or publishes", got[1])
 
     def test_a_workflow_with_them_passes(self):
         self.assertEqual(findings(workflow(self.JOB)), [])
@@ -466,7 +491,11 @@ class WritesAndBuilds(unittest.TestCase):
         uses = "./.github/actions/setup"
         self.assertOff(self.job("contents: write", "echo hi", uses=uses),
                        "the local action `./.github/actions/setup`, whose steps this check does not read")
-        self.assertEqual(self.job("contents: read", "echo hi", uses=uses), [])
+        # Beside a read it is the fifth rule's alone (Chosen), not this one's.
+        got = self.job("contents: read", "echo hi", uses=uses)
+        self.assertEqual(len(got), 1, got)
+        self.assertNotIn("write", got[0])
+        self.assertIn("for a value chosen outside the workflow spliced into a script", got[0])
 
     def test_a_job_that_reads_may_build(self):
         self.assertEqual(self.job("contents: read", "cargo build\nmake wasm\ndocker build ."), [])
@@ -781,6 +810,56 @@ class Chosen(unittest.TestCase):
                 - run: gh release upload "${{ github.ref_name }}" dist/*
         """))
         self.assertEqual([f.split(":", 2)[2].split(" splices")[0] for f in got], [" job `a`", " job `b`"])
+
+    def test_github_scripts_script_is_held_as_a_run_is(self):
+        # GitHub pastes into `script:` as into `run:`, and it runs as
+        # JavaScript; another action's input of that name, and `script:`
+        # through `env:`, are not scripts it pastes into.
+        def job(uses, script):
+            return findings(workflow(f"""
+                a:
+                  runs-on: ubuntu-latest
+                  steps:
+                    - uses: {uses}
+                      env:
+                        TAG: ${{{{ github.ref_name }}}}
+                      with:
+                        script: |
+                          {script}
+            """))
+
+        for uses in ("actions/github-script@PIN # v8.0.0", "Actions/GitHub-Script@PIN # v8.0.0"):
+            with self.subTest(uses=uses):
+                got = job(uses, "core.info('${{ github.event.release.tag_name }}')")
+                self.assertEqual(len(got), 1, got)
+                self.assertIn("job `a` splices `${{ github.event.release.tag_name }}` into a script", got[0])
+                self.assertIn("process.env.NAME", got[0])
+        self.assertEqual(job("actions/github-script@PIN # v8.0.0", "core.info(process.env.TAG)"), [])
+        self.assertEqual(job("someone/other-action@PIN # v1.0.0", "${{ inputs.tag }}"), [])
+
+    def test_a_local_action_is_refused_in_any_job(self):
+        # Its steps would splice unseen; a job that reads alone too.
+        got = findings(workflow("""
+            a:
+              runs-on: ubuntu-latest
+              permissions:
+                contents: read
+              steps:
+                - uses: ./.github/actions/build
+                  with:
+                    tag: ${{ github.ref_name }}
+        """))
+        self.assertEqual(len(got), 1, got)
+        self.assertIn("job `a` uses the local action `./.github/actions/build`, whose steps this check does"
+                      " not read", got[0])
+        # A reusable workflow of this repository is a file of .github/workflows,
+        # read as every workflow is.
+        self.assertEqual(findings(workflow("""
+            a:
+              uses: ./.github/workflows/called.yml
+              with:
+                tag: ${{ github.ref_name }}
+        """)), [])
 
 
 class Stale(unittest.TestCase):
