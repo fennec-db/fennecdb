@@ -820,7 +820,10 @@ for that hook: on a file's server, a line of its hooks file names it; on a
 tenant node, the tenant's set holds it. It is asked as the listing is
 written, so a <code>PUT</code> or <code>DELETE</code> through the router
 changes it while the tenant is open. <code>false</code> is no secret held,
-and the hook's events are answered 401; <code>null</code> is a statement that
+and the hook's events are answered 401, or a tenant's hook kept from 0.2.0
+with <code>key delivery</code>, its verified events answered 409 until it
+is set again (<a href="/docs/webhooks#key-delivery-kept">Webhooks</a>);
+<code>null</code> is a statement that
 takes no hook. The shell and the native library take no event, and say
 <code>false</code> for a statement that takes a hook.</p>
 

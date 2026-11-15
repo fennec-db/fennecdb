@@ -382,7 +382,11 @@ files sealed before stay open under their key -- splices of them with it
 -- until a new key (`fennec key`) begins a new archive. The same notes say
 that a tenant's `github` hook 0.2.0 saved with `key delivery` is kept, its
 events answered 409 until it is set again with `key body`, its other hooks
-armed. `make upgrade-check` drives the archive's case: CK_BASE's `fennec
+armed, and that a single server started with `--hooks` whose file has a
+`github` line saying `key delivery` refuses to start on the release (exit
+2, ``<hooks file>: hooks file line N: `key delivery` is refused: ...``): that
+line's `key delivery` is taken out, or made `key body`, before the server
+is restarted on it. `make upgrade-check` drives the archive's case: CK_BASE's `fennec
 restore` and `fennec verify` refuse a backup and an archive this tree
 sealed, which this tree's read.
 

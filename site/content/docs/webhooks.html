@@ -162,7 +162,13 @@ their events. That hook's events are refused: one whose signature
 verifies is answered <code>409</code>, saying to set the hook again with
 <code>key body</code>, and runs nothing; a forged one is the
 <code>401</code> any forged event is. The node logs each such hook as it
-starts, and its listing says <code>"key":"delivery"</code>. Set it again
+starts, and again as its tenant opens where a statement takes it. Its
+set's listing, <code>GET
+/_shard/tenants/&lt;tenant&gt;/hooks</code>, says
+<code>"key":"delivery"</code>, the secret being held; <code>statements</code>,
+<code>describe statement</code> and <code>/_schema</code> list each
+statement taking it <code>"armed":false</code>, as its events are not
+taken, and fennec studio <i>not armed</i>. Set it again
 with the same secret and <code>key body</code>, or no <code>key</code>,
 and redeliver from GitHub's log what was refused meanwhile:</p>
 
@@ -282,9 +288,11 @@ written out. Without the router, a node's own <code>PUT
 body, with the node's admin token, refused (409) while the tenant is
 frozen for a move.</p>
 
-<p>A tenant's set belongs to its file. It goes with the file at a delete,
-and a create, a follow or a restore of the tenant puts away a set left
-beside the place, so a set never arms a later tenant of the name. A <a
+<p>A tenant's set belongs to its file. Its <code>&lt;tenant&gt;.hooks</code>
+goes with the file at a delete, and a create, a follow or a restore of the
+tenant puts away a set left beside the place, so a set never arms a later
+tenant of the name. A set the node has set aside (<a href="#set-aside">below</a>)
+is not its set and stays. A <a
 href="/docs/replication">restore</a> brings the statements back and no secret:
 the tenant's hooks are answered 401 until their secrets are set again —
 one put in place under a running node too, whose set in memory the
@@ -299,6 +307,25 @@ it needs Full Control of the folder (a folder's Modify does not let a file
 the folder's rules do not reach be deleted) or the node's account, and is
 refused otherwise, where on Linux and macOS the folder's write permission
 is enough.</p>
+
+<p id="set-aside">A set the node cannot read as it starts is set aside,
+never removed: the router keeps no copy of a secret, so the file may hold
+the only one. That is a <code>&lt;tenant&gt;.hooks</code> cut short or
+changed by hand, one a later version wrote, met after a downgrade, and one
+whose tenant's file the node could not look at for another reason than
+its not being there — a directory on its way the node may not search, an
+I/O error. Only a tenant's file that is not there makes its set one to put
+away. The node renames the set to <code>&lt;tenant&gt;.hooks.unread</code>
+(<code>.unread.2</code> and on where one is there), never writing over one,
+and logs where (<code>tenant `acme`'s hook secrets ...: set aside as
+.../acme.hooks.unread, which nothing reads</code>); the tenant's hooks are
+answered 401 until they are set again, and a <code>PUT</code> writes a set
+of its own beside it. The file holds the secrets, mode <code>0600</code> as
+the set's (on Windows the same ACL). Nothing reads it, so it arms nothing,
+and nothing of fennecdb removes it: it stays through a delete of the
+tenant and a create of one of its name, and on the node a move takes the
+tenant off, where it is not carried. Read the secrets from it, set the
+hooks again through the router, and remove it by hand.</p>
 
 <p>An event is verified against the secrets in the node's memory before its
 tenant is looked up, so a forged one opens no tenant. A verified one is
@@ -482,13 +509,17 @@ or a secret.</p>
 <p>Where each hook stands is in the listings, to the server's token alone.
 <code>statements</code> and <code>describe statement</code> give a webhook
 consumer two columns after <code>held</code>: <code>hook</code>, the hook it
-takes, and <code>armed</code>, whether this server holds a secret for it —
-a line of the hooks file naming it, or on a tenant node the tenant's set,
-asked as the listing is written, so a <code>PUT</code> or <code>DELETE</code>
-through the router changes it while the tenant is open. <code>false</code>
-means the hook's events are answered 401, whoever sends them: the hooks file
-does not name the hook, or the tenant's secrets were never set (a restore
-brings none back). <code>null</code> is a statement that takes no hook. The
+takes, and <code>armed</code>, whether this server takes its events: it
+holds a secret for it — a line of the hooks file naming it, or on a tenant
+node the tenant's set — asked as the listing is written, so a
+<code>PUT</code> or <code>DELETE</code> through the router changes it while
+the tenant is open. <code>false</code> means the hook's events are answered
+401, whoever sends them: the hooks file does not name the hook, or the
+tenant's secrets were never set (a restore brings none back). It is
+<code>false</code> too for a tenant's hook kept from 0.2.0 with <code>key
+delivery</code> (<a href="#key-delivery-kept">above</a>), whose secret is
+held but whose verified events are answered 409 until it is set again.
+<code>null</code> is a statement that takes no hook. The
 shell and the native library take no event, and say <code>false</code> for
 one that does. A
 scoped token's <code>statements</code> is 403 as before.</p>
@@ -543,7 +574,8 @@ lacks its hook secrets, which a failover onto that copy would turn into
 <p><a href="/docs/studio#schema">fennec studio</a> lists each webhook
 consumer among the named statements by its hook, <code>on hook stripe</code>,
 <i>armed</i> or <i>not armed</i> — the second a hook whose every event is
-answered 401 until its secret is set. Its <b>Test event</b> opens the event
+answered 401 until its secret is set, or a tenant's hook kept with
+<code>key delivery</code>, refused until it is set again. Its <b>Test event</b> opens the event
 as JSON, begun from the paths the statement's parameters read and the values
 its condition compares, and runs the call below in the query editor; its
 definition opens as <code>create or replace statement ...</code>. Its editor
