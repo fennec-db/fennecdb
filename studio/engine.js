@@ -221,7 +221,8 @@ export class Engine {
 
   /**
    * A shape's rows, then each change to them, as a server's subscription
-   * sends them (`GET /<c>/changes`): `{type: 'seed', seq, rows}`, then
+   * sends them (`GET /<c>/changes`): `{type: 'seed', seq, rows, part, more}`
+   * -- the whole shape at once, part 0 with no more after it -- then
    * `{type: 'change', seq, puts, dels, schema}`. The page's live query
    * (`Fennec.live`) runs the shape again after every write to the
    * collection -- the change ring says which -- and what differs from the
@@ -252,7 +253,7 @@ export class Engine {
         if (held === null) {
           held = now;
           fields = names;
-          post({ type: 'seed', seq, rows });
+          post({ type: 'seed', seq, rows, part: 0, more: false });
           return;
         }
         const puts = rows.filter((r) => held.get(r.id) !== now.get(r.id));

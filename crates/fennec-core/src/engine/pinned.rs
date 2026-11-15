@@ -253,6 +253,16 @@ impl Database {
         self.pinned_within(&names, Some((collection, &written.ids)))
     }
 
+    /// The rows `ids` names of `collection`, pinned as they stand: a seed
+    /// the lock answered -- an index's answer, a pin the ring passed --
+    /// read beside the writers a page at a time rather than whole under the
+    /// lock (`sse::seed`). It holds 12 bytes a row of the id index, as a
+    /// pin of the collection does, but of those rows alone; `None` past the
+    /// pins' budget.
+    pub fn pin_rows(&self, collection: &str, ids: &[DocId]) -> Option<Pinned> {
+        self.pinned_within(&[], Some((collection, ids)))
+    }
+
     /// `names` pinned where the budget holds their id indexes, and the rows
     /// `beside` names of another collection, where a `get` reads none of it.
     fn pinned_within(&self, names: &[&str], beside: Option<(&str, &[DocId])>) -> Option<Pinned> {
