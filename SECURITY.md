@@ -13,36 +13,70 @@ Useful in a report: the version or commit, the surface (wire protocol, HTTP,
 file format, parser, WASM), and the smallest input that triggers it. If it
 needs a crafted file or packet, attach it rather than describing it.
 
-This is a small project. Expect an acknowledgement within a few days rather
-than within hours, and no bounty.
+This is a small project, with no bounty. A report is acknowledged within 3
+working days; the fix and its release follow at the pace the bug allows, and
+you are told where it stands.
 
 ## Supported versions
 
-The latest release and `main`. Older tags get no backported fixes.
+**Today fennecdb is 0.x, an alpha.** A vulnerability found in a 0.x release
+gets no security advisory, no CVE and no patch release. The fix lands on
+`main` and ships in the next release, and the pull request that fixes it
+says which releases had the bug. Run the latest release, or `main`; an older
+0.x tag is not fixed.
+
+**From 1.0.0** the latest 1.x minor gets security fixes, and the previous
+minor for 6 months after the next one ships. A `release/1.N` branch is cut
+when a backport needs one. A fix there is released as a patch version,
+published as a GitHub security advisory with a CVE where the bug warrants
+one, and noted in the release; the steps are in
+[RELEASING.md](RELEASING.md#a-security-release). A 1.x release only grows what the
+[compatibility contract](docs/design/compatibility.md) freezes, so an upgrade
+within 1.x is safe, replicas first; a fix that has to touch a protocol or a
+file format names in its advisory the SDKs that must move with it.
 
 ## Where the risk actually is
 
-fennecdb takes **no external crates** in the shipped crates — own codec, own
-JSON, own HNSW, own SHA-256/HMAC/PBKDF2, RSA and P-256 verification and
-ChaCha20-Poly1305, and the client half of SCRAM `fennec import` signs in to
-PostgreSQL with. That removes the upstream CVE surface entirely and puts all
-of it in this repository instead. The crypto in
-`crates/fennec-http/src/crypto.rs` and `crates/fennec-wire/src/client.rs` is
-exactly the code that most deserves a second pair of eyes. Each primitive is
-held to its RFC's vectors and, where Project Wycheproof has a file for it, to
-every case of that file: ChaCha20-Poly1305, RSA PKCS#1 v1.5 with SHA-256 at
-2048 to 4096 bits, ECDSA P-256, HMAC-SHA-256 and PBKDF2-HMAC-SHA-256
+fennecdb takes **no external crates** in its shipped crates but one:
+`fennec-tls` (rustls, ring and webpki-roots), behind a `tls` feature, which
+the server, the router, the shell and `fennec import` use for HTTPS and for
+PostgreSQL over TLS. Its tree is pinned by name and version, and
+`tools/deps_check.py` in CI fails a crate that comes in, moves or takes a
+feature unreviewed; `fennec-core`, `fennec-ql`, `fennec-abi`,
+`fennec-wasm` and `fennec-ffi`, and so the browser module, reach none of it
+([docs/design/crates.md](docs/design/crates.md#tls-the-one-exception)).
+The packages' own dependencies (npm, Go, NuGet, Kotlin, Dart) are audited
+for known advisories by `audit.yml`. For everything else the code is
+ours: own codec, own JSON, own HNSW, own gzip over a deflate of our own,
+and the cryptography below. That removes the upstream CVE surface for all
+but TLS and puts all of it in this repository instead.
+
+The primitives we wrote are SHA-256, HMAC-SHA-256, PBKDF2-HMAC-SHA-256,
+ChaCha20-Poly1305, RSA PKCS#1 v1.5 verification with SHA-256, ECDSA P-256
+verification (ES256) and the client half of SCRAM-SHA-256 that
+`fennec import` signs in to PostgreSQL with. They are in
+`crates/fennec-http/src/crypto.rs` (ES256 in `crypto/p256.rs`) and
+`crates/fennec-wire/src/client.rs`, and are exactly the code that most
+deserves a second pair of eyes. Each primitive is held to its RFC's vectors
+and, where Project Wycheproof has a file for it, to every case of that file:
+ChaCha20-Poly1305, RSA PKCS#1 v1.5 with SHA-256 at 2048 to 4096 bits, ECDSA
+P-256, HMAC-SHA-256 and PBKDF2-HMAC-SHA-256
 ([docs/design/conventions.md](docs/design/conventions.md#secrets-compared)).
-Vectors are no proof: a bug they miss is as welcome a report as any.
+Vectors are no proof: a bug they miss is as welcome a report as any. What a
+browser page seals with `cryptoKey` is WebCrypto's AES-GCM, not ours.
 
 In scope, and worth reporting:
 
 - Memory unsafety, panics or unbounded allocation reachable from input that
-  crosses a trust boundary: the HTTP/JSON surface, the FennecQL parser, the
-  on-disk file format, the SQLite and PostgreSQL readers of `fennec import`,
-  and the WASM boundary.
+  crosses a trust boundary: the HTTP/JSON surface and the MCP endpoint, the
+  FennecQL parser, the on-disk file format and an archive's or a sealed
+  file's, a replica's sync and replication streams, a webhook's event, the
+  router and the global entry, the SQLite and PostgreSQL readers of
+  `fennec import`, the native library's C ABI and the WASM boundary.
 - Anything that authenticates when it should not, or that lets a client skip
-  authentication: the bearer token, a JWT and the policy it is held to.
+  authentication: the bearer token, a JWT and the policy it is held to, a
+  webhook's signature, a tenant's binding, a scoped token reading a field or
+  a row its rules withhold, or reaching a collection of the server's own.
 - A non-constant-time comparison on a secret. Every token, mark, MAC and
   signature is compared in constant time on purpose, by `crypto::ct_eq` alone,
   and CI refuses `==` on one by its name (`tools/secret_eq_check.py`); a
@@ -55,6 +89,27 @@ In scope, and worth reporting:
   expected to reject a damaged or hostile file, not to be exploited by it.
 - Query text reaching an identifier or a value without validation, from any
   client surface.
+- An integrity break in a sealed file: a frame that opens in a file it was
+  not sealed into (a version 2 file binds each frame to its file, its place
+  and whether it is the last), or one changed byte that still opens.
+
+Where each surface's rules are kept, and held by tests: the HTTP server,
+replication and webhooks in
+[`crates/fennec-http/CLAUDE.md`](crates/fennec-http/CLAUDE.md), tokens,
+policies and tenant binding in
+[`crates/fennec-http/src/access/CLAUDE.md`](crates/fennec-http/src/access/CLAUDE.md),
+the file format and the engine in
+[`crates/fennec-core/CLAUDE.md`](crates/fennec-core/CLAUDE.md), the router
+in [`crates/fennec-shard/CLAUDE.md`](crates/fennec-shard/CLAUDE.md), the sync
+and the native library in
+[`crates/fennec-abi/CLAUDE.md`](crates/fennec-abi/CLAUDE.md) and
+[`crates/fennec-ffi/CLAUDE.md`](crates/fennec-ffi/CLAUDE.md), the PostgreSQL
+and SQLite readers in
+[`crates/fennec-import/CLAUDE.md`](crates/fennec-import/CLAUDE.md), the
+browser client in [`web/CLAUDE.md`](web/CLAUDE.md). The desktop app (beta)
+is a window on a studio that a `fennec-server` serves
+([`integrations/CLAUDE.md`](integrations/CLAUDE.md)); what it shows is the
+server's to decide, as in a browser.
 
 Most of the parsers named above are fuzzed — an HTTP request, JSON,
 FennecQL, the file format's codec, a `.fennec` file's open, mapped as a
@@ -68,13 +123,25 @@ the input again on a maintainer's machine.
 
 ## What is documented behaviour, not a vulnerability
 
-These are deliberate, and README explains each one:
+These are deliberate, and the [docs](https://fennecdb.com/docs/limits) explain
+each one:
 
-- **There is no TLS.** `fennec-server` speaks plain HTTP: a token and the data
-  flow in the clear. On an open network it belongs behind a TLS terminator
-  (nginx, Caddy, stunnel).
+- **TLS is off until a certificate is given.** `fennec-server` and
+  `fennec-shard` speak plain HTTP unless `--tls-cert` and `--tls-key` are
+  passed, which make a listener HTTPS alone; without them a token and the data
+  flow in the clear, so on an open network give a certificate or put a TLS
+  terminator (nginx, Caddy, stunnel) in front. What they dial themselves --
+  a primary, a node, an OTLP collector, `fennec backup` -- is dialed over TLS
+  when its URL says `https://`, against Mozilla's roots or `--tls-ca`'s, and
+  no client certificates are asked or presented
+  ([server docs](https://fennecdb.com/docs/server#tls)).
 - **`--insecure` does what it says.** Binding to a non-loopback address without
-  authentication is refused unless that flag is passed deliberately.
+  authentication is refused unless that flag is passed deliberately. A server
+  that asks for no token answers only under this machine's name
+  (`localhost` or an IP address, else 403) and, to a page in a browser, only
+  from its own origin or the one `--http-cors` names, so a page whose DNS
+  name was pointed at 127.0.0.1 reads nothing; to reach it by another name,
+  give it a token.
 - **A short token is taken on loopback alone.** Past loopback `fennec-server`
   and `fennec-shard` refuse at the start a token shorter than 32 bytes --
   `--http-token`, `--admin-token`, `--replication-token`, the router's
@@ -100,6 +167,14 @@ These are deliberate, and README explains each one:
   since a sender's secret is the sender's to make. A GitHub secret is the
   operator's to choose: a short one is guessed offline from one event it
   signed.
+- **An empty token is no token.** A variable set empty is unset, and an
+  empty token flag, JWT secret file or key file is refused at the start, so
+  an unset variable in a deployment cannot be read as a token of no length.
+- **An expired token is told so, and that is all.** The answer is 401 with
+  the code `token_expired`; the server keeps no list of revoked tokens, so
+  signing out a token before its `exp` is the issuer's to do.
+- **`explain` is the server token's.** A scoped token's `explain` is refused
+  (403): a plan counts rows before the token's rules hold them.
 - **A token on the command line shows up in `ps`.** `FENNEC_HTTP_TOKEN`,
   `FENNEC_JWT_SECRET`, `--jwt-secret-file` and `FENNEC_REPLICATION_TOKEN` exist
   for that reason.
@@ -164,6 +239,11 @@ These are deliberate, and README explains each one:
   A batch of reads alone holds the read lock: writers wait for it as for
   any read, readers go on beside it.
   An import that stops halfway cannot be rolled back.
+- **A sealed file from 0.1.7 to 0.2.0 is not bound to its file.** Its tags
+  cover a frame's place alone, so a frame of another such file under the
+  same key, at the same place, opens in it. Such a file still opens and a
+  segment of one goes on as one; every file begun now binds its frames to its
+  own. A key that sealed a file of that version should be changed.
 - **Nothing in memory is encrypted, and the live file is plain on disk.** The
   indexes (a text index's terms, a hash index's keys, vectors), the documents
   written since the last handover to the file (16 MB, 65 536 records or
@@ -182,6 +262,11 @@ These are deliberate, and README explains each one:
   would be passed, until the next request opens it again. An authenticated
   client can ask for work that costs memory; `--max-memory` is the bound, and
   `make memory` is how you calibrate it.
+- **A PostgreSQL connection is protected as its `sslmode` says.** Only
+  `verify-full` keeps out someone standing in for the server; `prefer` goes
+  on in plain text where the server, or whoever stands in for it, refuses
+  TLS, `require` checks nothing without a CA file, and `verify-ca` checks the
+  chain but not the host's name ([import docs](https://fennecdb.com/docs/import#tls)).
 - **`md5` authentication is not supported** by `fennec import` and
   `--follow` when they sign in to PostgreSQL. SCRAM-SHA-256 or cleartext.
 - **A GitHub webhook event carries no signed time,** so after its hook's

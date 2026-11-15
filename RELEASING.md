@@ -457,7 +457,66 @@ every tag. Before a 1.x tag, check:
    measured cost where one was raised.
 
 The previous minor gets security fixes for six months after the next
-minor's release; a `release/1.N` branch is cut when a backport needs one.
+minor's release; a `release/1.N` branch is cut when a backport needs one
+([A security release](#a-security-release)).
+
+## A security release
+
+The policy a reporter reads is [SECURITY.md](SECURITY.md#supported-versions).
+Until 1.0.0 there is no such release: a 0.x bug is fixed on `main` and ships
+in the next release, with no advisory, no CVE and no patch release, and the
+pull request names the releases that had it. From 1.0.0, a report of a bug in
+a supported release (the latest 1.x minor, and the previous one for 6 months
+after the next ships) goes this way. The owner does each step that needs a
+tag, a setting or a secret.
+
+1. **Acknowledge within 3 working days.** Reports arrive through private
+   vulnerability reporting
+   (<https://github.com/fennec-db/fennecdb/security/advisories/new>). Answer
+   in the report, say who looks at it, and reproduce it before anything
+   else: from the reporter's input, on the latest 1.x and on the previous
+   minor.
+2. **Open a draft advisory** from the report (`Security`, `Advisories`),
+   naming the affected versions and the first fixed one, and, if the fix
+   needs a branch to work on, **a temporary private fork** from it. Nothing
+   of the fix is public until step 6: not in a pull request, an issue, a
+   commit pushed to a public branch or a CI log. Do not assume the fork runs
+   the repository's workflows; run the tests the fix touches by hand.
+3. **Request a CVE** from the advisory (GitHub is the CNA) once the bug is
+   confirmed and the affected range known.
+4. **Fix on the oldest supported branch and carry it forward.** Cut
+   `release/1.N` from the latest `v1.N.*` tag if the branch does not exist
+   (`git branch release/1.N v1.N.M`), put the fix there, then in the latest
+   minor and `main`. The fix keeps [the contract](docs/design/compatibility.md):
+   it only grows what it freezes. Where it cannot -- a protocol or a file
+   format -- the advisory names the SDKs and replicas that must move (the
+   table above says which package carries which part), and replicas
+   upgrade before primaries, as for any release.
+5. **Build and publish the patch from its branch.** `make version V=1.N.P`
+   and the change reviewed on `release/1.N` (or in the private fork), as in
+   [A release](#a-release), step 2 too if the Swift binary changed; the
+   owner tags the branch's commit (`git tag v1.N.P <commit>`, then `git push
+   origin v1.N.P`) and `release.yml` drafts the release. A tag already
+   pushed is built again by `gh workflow run release.yml --ref release/1.N
+   -f tag=v1.N.P`. Read the draft, publish it, and `packages.yml` follows,
+   as in steps 4 and 5 there: every channel of the table above -- PyPI,
+   npm, NuGet, Maven Central, pub.dev, Homebrew, the `.deb` and `.rpm`, the
+   image on ghcr.io, the Go module's tag, the Swift package's tag and zip,
+   the install scripts (which read the latest release) and the desktop
+   app -- gets the patch; check each by installing it. A supported minor
+   that is not the latest gets its patch the same way, from its own branch,
+   and the Homebrew formula and the install scripts keep naming the newest
+   release (the tap is never moved back).
+6. **Disclose.** Publish the advisory (with the CVE) the same hour the
+   release is published, and put it in the release's notes with the first
+   fixed version of each supported minor. Merge the private fork's changes
+   into the public branches where the fix was made there. Credit the
+   reporter if they agree, and close the report.
+
+This procedure is written and not yet run. Its rehearsal -- a draft
+advisory, a private fork, and a patch built from a release branch through
+`release.yml`'s dispatch to the draft release -- is owed before 1.0.0, and
+its elapsed time goes in the roadmap's log.
 
 ## Once: the desktop app's signing Environment
 

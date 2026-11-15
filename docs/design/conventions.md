@@ -639,3 +639,28 @@ binary; their tests take 2.5 s of a core in `cargo test`'s build on an
 Apple M1, 1.6 s of the clock beside each other: PBKDF2's 58 cases of 4 096
 rounds and one of 80 000 are 1.6 s, the RSA files 0.8, the AEAD's and
 HMAC's 0.01.
+
+## Security policy
+
+`SECURITY.md` is what a reporter and an operator act on, so it is held to
+the tree by `tools/security_md_check.py`, in CI's fmt job beside
+`tools/secret_eq_check.py` (its fixtures: `tools/test_security_md_check.py`).
+It fails on a `--flag` the file names that no argument parser of
+fennec-server, fennec-shard or fennec-cli reads (`"--flag" =>`), a path or a
+link's anchor it names that is not in the repository, a primitive of its
+list of in-tree cryptography whose function is gone (or one the file stopped
+naming), a missing "Supported versions" section or acknowledgement in working
+days, and a missing "A security release" section in `RELEASING.md`. It
+also searches `SECURITY.md`, `crates/*/src` and `site/content/docs` for
+phrases once true and since false -- `no TLS` first, which fennec-tls made
+untrue and which a comment, a help text and a page went on saying -- outside `ALLOWED`: the messages a build made without
+the `tls` feature gives, each an entry with its reason, an entry that finds
+nothing refused. It prints how many things it checked (321 when written) and
+fails on zero.
+
+The policy itself: 0.x has no advisories, CVEs or patch releases, a fix
+lands on `main` and the pull request says which releases had the bug; from
+1.0.0 the latest 1.x minor and the previous one for 6 months after the next
+ships, a `release/1.N` branch cut when a backport needs one, a report
+acknowledged within 3 working days. The steps are `RELEASING.md`'s "A
+security release", written and not yet rehearsed.
