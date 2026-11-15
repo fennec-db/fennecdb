@@ -26,10 +26,23 @@ fn pg() -> Client {
 }
 
 /// A table of `rows` rows, with no slot or publication left from before:
-/// the follower names both `fennec_<collection>`.
+/// the follower names both `fennec_<collection>`. A slot left by a run that
+/// ended in a panic -- its server killed, its walsender holding the slot
+/// until it reads that -- is dropped once the server has let it go:
+/// `DROP_REPLICATION_SLOT ... WAIT`, the server's own wait, bounded by the
+/// client's wait for an answer.
 fn table(c: &mut Client, t: &str, rows: u64) {
+    let left = c
+        .query(&format!(
+            "select 1 from pg_replication_slots where slot_name = 'fennec_{t}'"
+        ))
+        .unwrap();
+    if !left.rows.is_empty() {
+        let q = format!("DROP_REPLICATION_SLOT fennec_{t} WAIT");
+        let mut r = Client::connect_replication(&Url::parse(&source_text()).unwrap()).unwrap();
+        r.query(&q).unwrap_or_else(|e| panic!("{q}: {e}"));
+    }
     for q in [
-        format!("select pg_drop_replication_slot('fennec_{t}') from pg_replication_slots where slot_name = 'fennec_{t}'"),
         format!("drop publication if exists fennec_{t}"),
         format!("drop table if exists {t}"),
         format!("create table {t} (id bigint primary key, title text)"),

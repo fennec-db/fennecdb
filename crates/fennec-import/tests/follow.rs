@@ -32,9 +32,39 @@ fn url() -> Url {
     Url::parse(&s).expect("invalid FENNEC_TEST_PG_URL")
 }
 
+/// The test server's URL, in another of its databases.
+fn url_in(database: &str) -> Url {
+    let mut u = url();
+    u.database = database.to_string();
+    u
+}
+
 fn sql(q: &str) {
-    let mut c = Client::connect(&url()).expect("could not connect (make pgvector-up?)");
+    sql_at(&url(), q);
+}
+
+fn sql_at(u: &Url, q: &str) {
+    let mut c = Client::connect(u).expect("could not connect (make pgvector-up?)");
     c.query(q).unwrap_or_else(|e| panic!("{q}: {e}"));
+}
+
+/// Drops a slot left from an earlier run, once the server has let it go:
+/// a run that ended in a panic left its follower streaming until its
+/// process exited, and its walsender holds the slot until it reads that.
+/// `DROP_REPLICATION_SLOT ... WAIT` is the server's own wait for the slot
+/// to be released, bounded by the client's wait for an answer.
+fn forget_slot(u: &Url, name: &str) {
+    let mut c = Client::connect(u).unwrap();
+    let left = c
+        .query(&format!(
+            "select 1 from pg_replication_slots where slot_name = '{name}'"
+        ))
+        .unwrap();
+    if !left.rows.is_empty() {
+        let q = format!("DROP_REPLICATION_SLOT {name} WAIT");
+        let mut r = Client::connect_replication(u).unwrap();
+        r.query(&q).unwrap_or_else(|e| panic!("{q}: {e}"));
+    }
 }
 
 /// A table of `rows` rows with a key, a title, a number, tags and a vector
@@ -44,8 +74,8 @@ fn table(name: &str, rows: usize) {
     let _ = Client::connect(&url())
         .unwrap()
         .query("create extension if not exists vector");
+    forget_slot(&url(), name);
     for q in [
-        format!("select pg_drop_replication_slot('{name}') from pg_replication_slots where slot_name = '{name}'"),
         format!("drop publication if exists {name}"),
         format!("drop table if exists {name}"),
         format!(
@@ -70,6 +100,11 @@ struct Follower {
 
 impl Follower {
     fn start(name: &str, db: Arc<RwLock<Database>>) -> Follower {
+        Follower::start_at(url(), name, db)
+    }
+
+    /// A follower of `name` in the database `u` names.
+    fn start_at(u: Url, name: &str, db: Arc<RwLock<Database>>) -> Follower {
         let stop = Arc::new(AtomicBool::new(false));
         let events = Arc::new(Mutex::new(Vec::new()));
         let (s, e, d, name) = (
@@ -85,7 +120,7 @@ impl Follower {
             };
             let opts = Options::new(name.clone());
             let mut report = |ev: Event| e.lock().unwrap().push(format!("{ev:?}"));
-            follow::run(&url(), &name, &d, &opts, &follow, &s, &mut report)
+            follow::run(&u, &name, &d, &opts, &follow, &s, &mut report)
         });
         Follower {
             db,
@@ -104,6 +139,15 @@ impl Follower {
         self.thread.take().unwrap().join().unwrap().unwrap();
         let events = self.events.lock().unwrap().clone();
         events
+    }
+}
+
+/// A test that panics stops its follower too, which then ends its stream
+/// and lets its slot go, rather than streaming on beside the other tests
+/// until the process exits.
+impl Drop for Follower {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
     }
 }
 
@@ -215,10 +259,17 @@ fn converge(db: &RwLock<Database>, name: &str) {
 /// slot stayed taken until the walsender read the close, which under load
 /// came after this drop.
 fn drop_slot(name: &str) {
-    sql(&format!(
-        "select pg_drop_replication_slot('{name}') from pg_replication_slots where slot_name = '{name}'"
-    ));
-    sql(&format!("drop publication if exists {name}"));
+    drop_slot_at(&url(), name);
+}
+
+fn drop_slot_at(u: &Url, name: &str) {
+    sql_at(
+        u,
+        &format!(
+            "select pg_drop_replication_slot('{name}') from pg_replication_slots where slot_name = '{name}'"
+        ),
+    );
+    sql_at(u, &format!("drop publication if exists {name}"));
 }
 
 #[test]
@@ -315,8 +366,7 @@ fn a_stopped_follower_resumes_without_a_copy() {
 }
 
 /// Whether the server still has the slot taken by a connection.
-fn slot_active(name: &str) -> bool {
-    let mut c = Client::connect(&url()).unwrap();
+fn slot_active(c: &mut Client, name: &str) -> bool {
     let r = c
         .query(&format!(
             "select active from pg_replication_slots where slot_name = '{name}'"
@@ -325,33 +375,103 @@ fn slot_active(name: &str) -> bool {
     r.rows.first().and_then(|row| row[0].as_deref()) == Some("t")
 }
 
+/// Waits until `f` has `what` among its events.
+fn sees(f: &Follower, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !f.saw(what) {
+        assert!(
+            Instant::now() < deadline,
+            "no {what}: {:?}",
+            f.events.lock().unwrap()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Waits until the walsender holding `slot` has read the log up to `lsn`.
+fn decoded_up_to(c: &mut Client, slot: &str, lsn: &str) {
+    let q = format!(
+        "select r.sent_lsn >= '{lsn}'::pg_lsn from pg_stat_replication r \
+         join pg_replication_slots s on s.active_pid = r.pid where s.slot_name = '{slot}'"
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while first_cell(&c.query(&q).unwrap()).as_deref() != Some("t") {
+        assert!(Instant::now() < deadline, "{slot} never read up to {lsn}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn first_cell(r: &fennec_wire::client::QueryResult) -> Option<String> {
+    r.rows.first()?.first()?.clone()
+}
+
 /// A follower that stops has let its slot go when it returns, even while
-/// the server is busy decoding a transaction -- here a million rows of a
-/// table it does not follow, which the slot decodes all the same. Closing
-/// the connection left the slot taken until the walsender next read its
+/// the server is busy decoding a transaction -- here 200 000 rows of a
+/// table it does not follow, which its slot decodes all the same, the stop
+/// made once the walsender has read up to their commit. Closing the
+/// connection left the slot taken until the walsender next read its
 /// socket, after that transaction: a slot dropped then was refused as
 /// "active for PID", and a follower started again met its own slot taken.
+///
+/// In a database of its own: every slot reads the whole server's log, but
+/// one of another database passes over these rows at a glance (30 ms for
+/// half a million), where one of the same database decodes them as this
+/// one does (550 ms). A million rows beside the other tests held their
+/// followers' convergence past its bound on a runner whose walsenders were
+/// off the CPU most of the time. The rows go to disk as they are decoded
+/// (`logical_decoding_work_mem` at its least, this database's alone),
+/// which makes their commit long enough to decode to outlast the
+/// follower's notice of its stop (`IDLE_WAIT`, 200 ms) with fewer of them:
+/// held in memory, 300 000 were through before it and the test passed
+/// without the fix 8 times in 8; spilled, 200 000 failed it 8 times in 8.
+/// The database is kept between runs: dropping it forces a checkpoint the
+/// tests beside it would wait on.
 #[test]
 #[ignore]
 fn a_stopped_follower_lets_its_slot_go() {
     let t = "fennec_follow_release";
     let bulk = format!("{t}_bulk");
-    table(t, 10);
-    sql(&format!("drop table if exists {bulk}"));
-    sql(&format!("create table {bulk} (id bigint, s text)"));
-    let db = Arc::new(RwLock::new(Database::new()));
-    let f = Follower::start(t, Arc::clone(&db));
-    converge(&db, t);
+    let mut c = Client::connect(&url()).unwrap();
+    let known = c
+        .query(&format!("select 1 from pg_database where datname = '{t}'"))
+        .unwrap();
+    if known.rows.is_empty() {
+        sql(&format!("create database {t}"));
+    }
     sql(&format!(
-        "insert into {bulk} select g, 'x' from generate_series(1, 1000000) g"
+        "alter database {t} set logical_decoding_work_mem = '64kB'"
     ));
+    let at = url_in(t);
+    forget_slot(&at, t);
+    for q in [
+        format!("drop publication if exists {t}"),
+        format!("drop table if exists {t}, {bulk}"),
+        format!("create table {t} (id bigint primary key, title text)"),
+        format!("insert into {t} select g, 'row ' || g from generate_series(1, 10) g"),
+        format!("create table {bulk} (id int)"),
+    ] {
+        sql_at(&at, &q);
+    }
+    let f = Follower::start_at(at.clone(), t, Arc::new(RwLock::new(Database::new())));
+    sees(&f, "Streaming");
+    let written = Client::connect(&at)
+        .unwrap()
+        .query(&format!(
+            "begin; insert into {bulk} select g from generate_series(1, 200000) g; \
+             select pg_current_wal_insert_lsn()::text; commit"
+        ))
+        .unwrap();
+    // Asked over a connection already open, so the stop comes as early in
+    // the commit's decoding as it can, and the slot is looked at as soon as
+    // the follower returns.
+    decoded_up_to(&mut c, t, &first_cell(&written).unwrap());
     f.stop();
     assert!(
-        !slot_active(t),
+        !slot_active(&mut c, t),
         "the stopped follower's slot is still taken"
     );
-    sql(&format!("drop table {bulk}"));
-    drop_slot(t);
+    sql_at(&at, &format!("drop table {t}, {bulk}"));
+    drop_slot_at(&at, t);
 }
 
 #[test]
