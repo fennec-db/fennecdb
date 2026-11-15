@@ -541,8 +541,8 @@ class ReleaseVerify(unittest.TestCase):
         self.assertFails(got, "SHA256SUMS: its 16 lines before the app's are no file release.yml attested at"
                          " refs/tags/v1.0.0, so no sum in it is read", "HTTP 404")
         self.assertEqual(self.not_checked(got), [
-            "SHA256SUMS's sums", "each asset's attestation", "the image's three tags", "npm's provenance",
-            "npm audit signatures", "PyPI's attestations"])
+            "SHA256SUMS's sums", "each .checksum", "each asset's attestation", "the image's three tags",
+            "npm's provenance", "npm audit signatures", "PyPI's attestations"])
         # Attested by another workflow, or at another ref.
         for workflow, ref in (("desktop.yml", "refs/heads/main"), ("release.yml", "refs/heads/main")):
             with self.subTest(workflow=workflow, ref=ref):
