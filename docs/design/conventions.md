@@ -172,7 +172,9 @@ either job; it is not cached, nor is the pub cache (25 to 30 MiB). The Go
 cache is 436 MiB, the npm one 93 MiB, `desktop.yml`'s Hutch caches 68 to 98
 MiB a system (435 MiB in all) and Gradle's 2.1 GiB (setup-gradle's entries:
 dependencies 1090, transforms 656, wrapper zips 179, the distribution 130
-MiB).
+MiB, measured with `cache-read-only: false` on the job as it was before the
+wrapper above: the Gradle User Home it keeps now is of that order, not
+measured).
 
 *The set main will hold*, measured on a test branch that saved as main does
 (run 43665618926): about 1.0 GiB of cargo entries, 0.44 GiB Go, 0.09 GiB npm,
