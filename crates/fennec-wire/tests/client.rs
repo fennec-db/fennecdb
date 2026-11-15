@@ -7,13 +7,16 @@
 //! `src/client.rs`'s `scram_rfc7677_exchange`), a server asking SCRAM for
 //! more rounds than the client runs, a cleartext password, and the
 //! answers the client reads: rows, an error, a COPY stream whose `CopyData`
-//! frames do not align with its lines. A live PostgreSQL is
-//! `make import-test`'s.
+//! frames do not align with its lines, a replication stream's end. A live
+//! PostgreSQL is `make import-test`'s.
 
 use fennec_http::crypto::*;
-use fennec_wire::client::{Client, SslMode, Url, SCRAM_MAX_ITERATIONS};
+use fennec_wire::client::{Client, SslMode, Url, Wal, WalStream, SCRAM_MAX_ITERATIONS};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant};
 
 // ------------------------------------------------------------- framing
 
@@ -497,4 +500,281 @@ fn trailing_row_without_newline_is_kept() {
 fn empty_copy_stream_yields_nothing() {
     let port = copy_server(vec![]);
     assert!(lines(port).is_empty());
+}
+
+// ----------------------------------------------------------- replication
+
+/// What the stand-in walsender does once the client sent its `CopyDone`.
+#[derive(Clone, Copy, PartialEq)]
+enum Then {
+    /// Lets the slot go -- `released`, set before anything goes out, as
+    /// the walsender's `ReplicationSlotRelease` comes before its
+    /// `CommandComplete` -- and answers as PostgreSQL does: a change it
+    /// still had on its way, its own `CopyDone`, `CommandComplete`,
+    /// `ReadyForQuery`.
+    Answers,
+    /// Answers nothing, as a walsender decoding a transaction does not.
+    Decodes,
+    /// Goes on sending changes, as one sending a large transaction does.
+    Sends,
+    /// Sends a whole change and the first bytes of another in one write,
+    /// then nothing more: the rest of a message, and bytes already
+    /// buffered, are what the client waits on.
+    Stalls,
+}
+
+/// A stand-in walsender's port, and what it saw of the client's end of the
+/// stream.
+struct Walsender {
+    port: u16,
+    released: Arc<AtomicBool>,
+    /// A message once the client's `CopyDone` came.
+    asked: mpsc::Receiver<()>,
+    /// Whether the client then ended the connection: `Terminate`, or, as
+    /// the stand-in goes on sending, a write refused.
+    terminated: mpsc::Receiver<bool>,
+}
+
+/// A stand-in walsender: it starts a stream and sends a keepalive, reads up
+/// to the client's `CopyDone`, then does as `then` says.
+fn walsender(then: Then) -> Walsender {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let released = Arc::new(AtomicBool::new(false));
+    let (told, terminated) = mpsc::channel();
+    let (ask, asked) = mpsc::channel();
+    let slot = Arc::clone(&released);
+    std::thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        let mut len = [0u8; 4];
+        s.read_exact(&mut len).unwrap();
+        let mut startup = vec![0u8; i32::from_be_bytes(len) as usize - 4];
+        s.read_exact(&mut startup).unwrap();
+        let mut out = framed(b'R', &0i32.to_be_bytes());
+        out.extend_from_slice(&framed(b'Z', b"I"));
+        s.write_all(&out).unwrap();
+
+        let Some((b'Q', q)) = read_msg(&mut s) else {
+            panic!("no START_REPLICATION");
+        };
+        assert!(String::from_utf8_lossy(&q).starts_with("START_REPLICATION SLOT"));
+        let mut out = framed(b'W', &[0, 0, 0]);
+        let mut k = vec![b'k'];
+        k.extend_from_slice(&7u64.to_be_bytes());
+        k.extend_from_slice(&0i64.to_be_bytes());
+        k.push(0);
+        out.extend_from_slice(&framed(b'd', &k));
+        s.write_all(&out).unwrap();
+
+        // Feedback, if any, then the CopyDone.
+        while let Some((tag, _)) = read_msg(&mut s) {
+            if tag == b'c' {
+                break;
+            }
+        }
+        let _ = ask.send(());
+        let mut w = vec![b'w'];
+        w.extend_from_slice(&[0u8; 24]);
+        w.extend_from_slice(b"B");
+        let change = framed(b'd', &w);
+        match then {
+            Then::Answers => {
+                slot.store(true, Ordering::SeqCst);
+                let mut out = change;
+                out.extend_from_slice(&framed(b'c', b""));
+                out.extend_from_slice(&framed(b'C', b"COPY 0\0"));
+                out.extend_from_slice(&framed(b'Z', b"I"));
+                s.write_all(&out).unwrap();
+            }
+            Then::Decodes => {}
+            Then::Sends => {
+                while s.write_all(&change).is_ok() {}
+                return told.send(true).unwrap();
+            }
+            Then::Stalls => {
+                let mut out = change;
+                out.push(b'd');
+                out.extend_from_slice(&1004i32.to_be_bytes());
+                out.extend_from_slice(&[b'w'; 10]);
+                s.write_all(&out).unwrap();
+            }
+        }
+        let ended = read_msg(&mut s);
+        told.send(ended.is_some_and(|(tag, _)| tag == b'X'))
+            .unwrap();
+    });
+    Walsender {
+        port,
+        released,
+        asked,
+        terminated,
+    }
+}
+
+/// A stream started against [`walsender`], its keepalive read.
+fn streaming(then: Then) -> (WalStream, Walsender) {
+    let w = walsender(then);
+    let c = Client::connect_replication(&url(w.port, None)).unwrap();
+    let mut wal = c.start_replication("fennec_docs", "fennec_docs").unwrap();
+    let first = wal.next(Duration::from_secs(30)).unwrap();
+    assert_eq!(
+        first,
+        Some(Wal::Keepalive {
+            end: 7,
+            reply: false
+        })
+    );
+    (wal, w)
+}
+
+/// Ending a stream waits for the server's answer, which it sends only
+/// once the slot is free: a follower that stops returns with its slot let
+/// go, never with the server still holding it for a connection it has not
+/// read the end of. What the server still sent of the stream is dropped.
+#[test]
+fn ending_a_stream_waits_for_the_server_to_let_the_slot_go() {
+    let (wal, w) = streaming(Then::Answers);
+    wal.end(Duration::from_secs(30), &AtomicBool::new(false))
+        .unwrap();
+    assert!(
+        w.released.load(Ordering::SeqCst),
+        "the stream ended before the server let the slot go"
+    );
+    assert!(w.terminated.recv().unwrap(), "no Terminate after the end");
+}
+
+/// A server that does not answer -- a walsender decoding a transaction
+/// reads nothing until it is through -- one that goes on sending, and one
+/// that stops in the middle of a message, its first bytes and a whole one
+/// before them already read in, are waited for no longer than asked: every
+/// read is held to what is left of the wait, where the rest of a message
+/// waited out the socket's own timeout, 30 s. The connection is then
+/// closed as before.
+#[test]
+fn ending_a_stream_is_bounded() {
+    for then in [Then::Decodes, Then::Sends, Then::Stalls] {
+        let (wal, w) = streaming(then);
+        let wait = Duration::from_millis(200);
+        let began = Instant::now();
+        let e = wal
+            .end(wait, &AtomicBool::new(false))
+            .unwrap_err()
+            .to_string();
+        assert!(began.elapsed() >= wait, "{:?}", began.elapsed());
+        assert!(
+            e.contains("did not end the replication stream within"),
+            "{e}"
+        );
+        assert!(w.terminated.recv().unwrap(), "the connection was not ended");
+    }
+}
+
+/// The caller's second stop ends the wait while the server still says
+/// nothing -- and in the middle of a message -- and the connection is
+/// closed.
+#[test]
+fn ending_a_stream_stops_waiting_once_cut() {
+    for then in [Then::Decodes, Then::Stalls] {
+        let (wal, w) = streaming(then);
+        let cut = Arc::new(AtomicBool::new(false));
+        let cutter = {
+            let cut = Arc::clone(&cut);
+            std::thread::spawn(move || {
+                w.asked.recv().unwrap();
+                cut.store(true, Ordering::SeqCst);
+            })
+        };
+        let e = wal
+            .end(Duration::from_secs(60), &cut)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("cut short"), "{e}");
+        cutter.join().unwrap();
+        assert!(w.terminated.recv().unwrap(), "the connection was not ended");
+    }
+}
+
+/// SIGUSR1 sent to one thread, its handler doing nothing, installed as the
+/// shell installs its own (`signal`, `SA_RESTART`): Linux restarts no
+/// `recv` on a socket with a timeout all the same (signal(7)) -- and every
+/// socket of the client's has one -- and fails it with `EINTR`; macOS
+/// restarts it, and `siginterrupt` gives it Linux's way there. A
+/// process-directed SIGINT or SIGTERM lands so on the thread that runs
+/// `fennec import --follow`'s follower, its main one. libc's calls are
+/// declared here, as the crates declare what they take of it, to add no
+/// dependency.
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+pub mod interrupt {
+    use std::os::unix::thread::RawPthread;
+
+    #[cfg(target_os = "linux")]
+    const SIGUSR1: i32 = 10;
+    #[cfg(target_vendor = "apple")]
+    const SIGUSR1: i32 = 30;
+
+    extern "C" {
+        fn signal(sig: i32, handler: usize) -> usize;
+        #[cfg(target_vendor = "apple")]
+        fn siginterrupt(sig: i32, flag: i32) -> i32;
+        fn pthread_kill(thread: RawPthread, sig: i32) -> i32;
+    }
+
+    extern "C" fn nothing(_sig: i32) {}
+
+    /// SIGUSR1 handled, by nothing, and on macOS restarting nothing it
+    /// cuts.
+    pub fn arm() {
+        static ARMED: std::sync::Once = std::sync::Once::new();
+        ARMED.call_once(|| unsafe {
+            signal(SIGUSR1, nothing as *const () as usize);
+            #[cfg(target_vendor = "apple")]
+            siginterrupt(SIGUSR1, 1);
+        });
+    }
+
+    /// SIGUSR1 to `thread`, a thread not yet joined.
+    pub fn send(thread: RawPthread) {
+        unsafe { pthread_kill(thread, SIGUSR1) };
+    }
+}
+
+/// A signal is neither a failure of the end's wait nor a new start of it:
+/// signals every 2 ms through the end of a stream -- the server answering,
+/// silent, or stopped in the middle of a message -- and the end comes out
+/// as it would without them, a silent server's when its wait is out. A
+/// wait begun again at each signal would outlast them all, 10 s.
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+#[test]
+fn a_signal_neither_fails_nor_lengthens_the_end_of_a_stream() {
+    use std::os::unix::thread::JoinHandleExt;
+    interrupt::arm();
+    for then in [Then::Answers, Then::Decodes, Then::Stalls] {
+        let (wal, w) = streaming(then);
+        let wait = Duration::from_millis(500);
+        let began = Instant::now();
+        let ender = std::thread::spawn(move || {
+            wal.end(wait, &AtomicBool::new(false))
+                .map_err(|e| e.to_string())
+        });
+        let until = Instant::now() + Duration::from_secs(10);
+        while !ender.is_finished() && Instant::now() < until {
+            interrupt::send(ender.as_pthread_t());
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let ended = ender.join().unwrap();
+        let took = began.elapsed();
+        if then == Then::Answers {
+            assert_eq!(ended, Ok(()));
+            assert!(w.released.load(Ordering::SeqCst));
+        } else {
+            let e = ended.unwrap_err();
+            assert!(
+                e.contains("did not end the replication stream within"),
+                "{e}"
+            );
+            assert!(took >= wait, "{took:?}");
+            assert!(took < Duration::from_secs(5), "{took:?}");
+        }
+        assert!(w.terminated.recv().unwrap(), "the connection was not ended");
+    }
 }
