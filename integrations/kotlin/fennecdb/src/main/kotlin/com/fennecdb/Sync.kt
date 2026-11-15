@@ -45,9 +45,15 @@ data class SyncStatus(
     val state: State,
     /** Writes the server has not answered. */
     val pending: Int,
-    /** The last error: a connection's until it is back, a refused write's until the next. */
+    /**
+     * The last error: a connection's until it is back, a refused write's until the next -- the
+     * token's while one is wanted, whatever else failed since (a stream that ended, as streams end
+     * offline).
+     */
     val error: Failure?,
     val shapes: List<ShapeState>,
+    /** The token the sync waits on, null while it waits on none: nothing is sent meanwhile. */
+    val token: TokenWait? = null,
 ) {
     enum class State {
         /** Every shape's stream is open and seeded. */
@@ -63,9 +69,16 @@ data class SyncStatus(
     /**
      * An error, and its HTTP status (0: the network, or the replica). [quota] is the tenant's quota the
      * server named, null for none: a stream refused by the quota of `streams` leaves the replica OFFLINE
-     * as the network does, and this tells the two apart.
+     * as the network does, and this tells the two apart. [errorCode] is the code a 401 the sync waits on
+     * for a token named (the server's body's `code`, [TokenRefusal.errorCode]), null for none:
+     * "token_expired" where the token's `exp` passed.
      */
-    data class Failure @JvmOverloads constructor(val message: String, val status: Int, val quota: String? = null)
+    data class Failure @JvmOverloads constructor(
+        val message: String,
+        val status: Int,
+        val quota: String? = null,
+        val errorCode: String? = null,
+    )
 
     data class ShapeState(val collection: String, val cursor: Long, val seeded: Boolean, val connected: Boolean)
 
@@ -82,13 +95,104 @@ data class SyncStatus(
                 else -> State.CATCHING_UP
             },
             v.int("pending") ?: 0,
-            v.row("error")?.let { Failure(it.string("message") ?: "", it.int("status") ?: 0, it.string("quota")) },
+            v.row("error")?.let {
+                Failure(it.string("message") ?: "", it.int("status") ?: 0, it.string("quota"), it.string("code"))
+            },
             (v.list("shapes") ?: emptyList()).map {
                 val s = it as Row
                 ShapeState(s.string("collection") ?: "", s.long("cursor") ?: 0, s.bool("seeded") == true, s.bool("connected") == true)
             },
+            v.row("token")?.let { t ->
+                val stage = when (t.string("stage")) {
+                    "delayed" -> TokenWait.Stage.DELAYED
+                    "asked" -> TokenWait.Stage.ASKED
+                    "failed" -> TokenWait.Stage.FAILED
+                    else -> return@let null
+                }
+                TokenWait(stage, TokenRefusal(t.string("code"), t.bool("had_token") ?: true, t.int("attempt") ?: 1))
+            },
         )
     }
+}
+
+/**
+ * Why a replica asks its `tokenProvider` for a token: the server answered
+ * 401, and nothing is sent until one is handed over.
+ *
+ * Ask the issuer for a fresh token at every one, whatever the code --
+ * forcing a refresh at [expired], where a cached token is the one refused --
+ * and the sync goes on where it stopped. A 401 alone is never a sign-out:
+ * the server keeps no list of revoked tokens, so only the issuer knows a
+ * session ended; sign out where it refuses to issue one. A replica belongs
+ * to one account: its file's path names the account, and it is never opened
+ * for another. Signing out keeps it, for that account's next sign-in to send
+ * its `pending` writes.
+ *
+ * A plain class, not a data class: what a later server says can be added to
+ * it without a `copy` or a `componentN` whose shape callers compiled against.
+ */
+class TokenRefusal @JvmOverloads constructor(
+    /**
+     * The code the server named beside its words (its body's `code`), null
+     * for none: "token_expired" where the token's `exp` passed. A later
+     * server may name others; a 401 naming none is no sign-out by itself.
+     */
+    val errorCode: String? = null,
+    /** Whether the refused request carried a token: false for one sent before any was handed over. */
+    val hadToken: Boolean = true,
+    /**
+     * How many times in a row the provider is asked since the server last
+     * took the token held: 1, then 2 and on where the token handed over at
+     * the last ask was refused too -- asked after 1 s doubling to 60 s, since
+     * one minted again at once is refused for what minting does not change
+     * (a key the server has not fetched yet, an `nbf` its clock has not
+     * reached). An expiry starts it at 1 again. No reason to sign out.
+     */
+    val attempt: Int = 1,
+) {
+    /** The token's `exp` passed ([errorCode] is "token_expired"): refresh it, and the sync goes on. */
+    val expired: Boolean get() = errorCode == TOKEN_EXPIRED
+
+    override fun equals(other: Any?) =
+        other is TokenRefusal && other.errorCode == errorCode && other.hadToken == hadToken && other.attempt == attempt
+
+    override fun hashCode() = (errorCode.hashCode() * 31 + hadToken.hashCode()) * 31 + attempt
+
+    override fun toString() = "TokenRefusal(errorCode=$errorCode, hadToken=$hadToken, attempt=$attempt)"
+
+    companion object {
+        /** The code fennec-server tells a token past its `exp` by. */
+        const val TOKEN_EXPIRED = "token_expired"
+    }
+}
+
+/**
+ * A token a replica waits on, as its status says it ([SyncStatus.token]):
+ * for an app that hands its tokens over with `setToken` -- which acts at
+ * [Stage.ASKED] -- and for one that shows where its provider stands. A
+ * plain class, as [TokenRefusal] is.
+ */
+class TokenWait(
+    val stage: Stage,
+    /** What the provider was handed -- or, [Stage.DELAYED], will be. */
+    val refusal: TokenRefusal,
+) {
+    enum class Stage {
+        /** The token handed over was refused too: the provider is asked after a wait, 1 s doubling to 60 s. */
+        DELAYED,
+
+        /** The provider is asked -- with none, the app is -- and no token has come. */
+        ASKED,
+
+        /** The provider threw or handed over none: `resume()` or `setOnline(true)` asks it again. */
+        FAILED,
+    }
+
+    override fun equals(other: Any?) = other is TokenWait && other.stage == stage && other.refusal == refusal
+
+    override fun hashCode() = stage.hashCode() * 31 + refusal.hashCode()
+
+    override fun toString() = "TokenWait(stage=$stage, refusal=$refusal)"
 }
 
 /**
@@ -125,7 +229,20 @@ data class Refusal @JvmOverloads constructor(
  * The requests and the change stream are `HttpURLConnection`'s, the JDK's
  * and Android's own, with the system's TLS: Android refuses cleartext HTTP
  * by default, and a server is reached through TLS in front of it.
- * [tokenProvider] is asked for a fresh token when the server answers 401.
+ * [tokenProvider] is asked for a token when the server answers 401, handed
+ * why ([TokenRefusal]): it asks the issuer for a fresh one at every 401,
+ * and throws where it gets none -- the issuer out of reach, or refusing,
+ * where the app signs out; nothing is sent until a token is handed over.
+ * A provider that threw, or handed over an empty token, is named by the
+ * status (`token` FAILED, the error "the token provider failed: ...") and
+ * asked again at `resume()` or `setOnline(true)`; it is called once at a
+ * time. Nothing bounds its time, since it may wait on a sign-in, so it must
+ * return: time out its own requests to the issuer and throw. One that never
+ * returns holds the sync, `token` ASKED, until the app hands a token over
+ * itself (`setToken`). [path] is one account's: a replica is never opened
+ * for another. A lambda asking
+ * nothing, `{ refresh() }`, still takes; a reference to a function of none,
+ * `::refresh`, no longer does: `{ refresh() }` for it.
  */
 suspend fun Fennec.Companion.sync(
     url: String,
@@ -133,7 +250,7 @@ suspend fun Fennec.Companion.sync(
     shapes: List<Shape>,
     path: String,
     flags: Int = 0,
-    tokenProvider: (suspend () -> String)? = null,
+    tokenProvider: (suspend (TokenRefusal) -> String)? = null,
 ): Fennec = withContext(Dispatchers.IO) {
     val db = Fennec.open(path, flags)
     try {
@@ -168,7 +285,7 @@ class Replica internal constructor(
     private val db: Fennec,
     url: String,
     @Volatile private var token: String?,
-    private val provider: (suspend () -> String)?,
+    private val provider: (suspend (TokenRefusal) -> String)?,
 ) {
     private val url = url.trimEnd('/')
     private val handle = db.handle
@@ -180,6 +297,9 @@ class Replica internal constructor(
     private val refused = MutableSharedFlow<Refusal>(extraBufferCapacity = 64)
 
     @Volatile private var stopped = false
+
+    /** The provider is at work, on the queue's word: one call is out at a time. */
+    private var providing = false
 
     /** The status now and at every change; `status.value` never waits. */
     val status: StateFlow<SyncStatus> = current.asStateFlow()
@@ -207,7 +327,11 @@ class Replica internal constructor(
         }
     }
 
-    /** A fresh token, for the requests and streams from here on. */
+    /**
+     * A fresh token, for the requests and streams from here on: what a `401` stopped goes on, whatever
+     * the status's `token` says -- a provider that never returned among them, called no second time
+     * meanwhile.
+     */
     fun setToken(token: String) {
         this.token = token
         signal(mapOf("token" to token))
@@ -216,11 +340,17 @@ class Replica internal constructor(
     /**
      * The network as the platform sees it (`ConnectivityManager`): offline
      * closes the streams and sends nothing; online comes back at once, the
-     * backoff forgotten.
+     * backoff forgotten, and asks the provider again for a token it did not
+     * hand over -- it threw, its issuer out of reach -- but not while it is
+     * still at work, nor before the wait the server's refusal of the last
+     * one began.
      */
     fun setOnline(online: Boolean) = signal(mapOf("online" to online))
 
-    /** What an app calls in `onStart`: the streams a stop cut are opened again at once, from their cursors. */
+    /**
+     * What an app calls in `onStart`: the streams a stop cut are opened again at once, from their
+     * cursors, and a provider that failed is asked for a token again.
+     */
     fun resume() = setOnline(true)
 
     /** The server itself, for what the replica does not hold. */
@@ -274,10 +404,22 @@ class Replica internal constructor(
                 "stream" -> stream(id, r)
                 "cancel" -> connections.remove(id)?.let { c -> Thread { c.disconnect() }.start() }
                 "wait" -> queue.schedule({ feed(KIND_TIMER, id) }, r.long("ms") ?: 0, TimeUnit.MILLISECONDS)
-                "token" -> provider?.let { p ->
+                // Why the core asks: the code the 401 named, whether the
+                // refused request carried a token, and the asks in a row.
+                // One call out at a time: asked again while at work -- the
+                // app's own `setToken` went on and was refused meanwhile --
+                // a provider would mint twice for one refusal, and the
+                // second token, coming late, end the wait the first one's
+                // refusal began. Its answer answers this ask too.
+                "token" -> provider?.takeIf { !providing }?.let { p ->
+                    providing = true
+                    val refusal = TokenRefusal(r.string("code"), r.bool("had_token") ?: true, r.int("attempt") ?: 1)
                     Thread {
-                        runCatching { kotlinx.coroutines.runBlocking { p() } }.getOrNull()?.let { setToken(it) }
-                    }.start()
+                        val got = runCatching { kotlinx.coroutines.runBlocking { p(refusal) } }
+                        val token = got.getOrNull()?.takeIf { it.isNotEmpty() }
+                        val why = got.exceptionOrNull()?.let { it.message ?: it.toString() } ?: "it handed over no token"
+                        provided(token, why)
+                    }.apply { isDaemon = true }.start()
                 }
                 "changed" -> db.lives.touch()
                 "refused" -> refused.tryEmit(
@@ -288,6 +430,21 @@ class Replica internal constructor(
                 )
                 "status" -> reload()
             }
+        }
+    }
+
+    /**
+     * The provider's answer: its token handed over, or the engine told none
+     * came and why (`{"token_failed":..}`), which the status's error says --
+     * `resume()` asks again. On the queue with the call's end, so an ask the
+     * engine makes before the answer reaches it is this call's.
+     */
+    private fun provided(token: String?, why: String) {
+        if (token != null) this.token = token
+        val bytes = Json.write(if (token != null) mapOf("token" to token) else mapOf("token_failed" to why)).encodeToByteArray()
+        later {
+            providing = false
+            feed(KIND_SIGNAL, 0, bytes = bytes)
         }
     }
 

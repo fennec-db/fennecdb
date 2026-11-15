@@ -677,6 +677,19 @@ impl Response {
         Response::json(status, body)
     }
 
+    /// A refusal with the code a client tells it by beside its words,
+    /// `{"error":..,"code":..}`: the words are a person's to read and may be
+    /// put otherwise, the code is what a program branches on
+    /// (`access::refusal_code`).
+    pub fn coded(status: u16, message: &str, code: &str) -> Response {
+        let mut body = String::from("{\"error\":");
+        fennec_core::json::escape_into(&mut body, message);
+        body.push_str(",\"code\":");
+        fennec_core::json::escape_into(&mut body, code);
+        body.push('}');
+        Response::json(status, body)
+    }
+
     /// A refusal to come back from in `secs` seconds: `Retry-After`, and
     /// `{"error", "retry_after"}` with the same seconds, as a quota's 429
     /// says it ([`crate::quota::refusal`]). The body too, since that is

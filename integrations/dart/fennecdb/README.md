@@ -69,11 +69,49 @@ as a `?`'s parameter.
 final db = await Fennec.openSynced(
   url: 'https://api.example.com', token: jwt,
   shapes: [Shape('todos', where: {'owner': me}, key: 'key')],
-  path: '${dir.path}/todos.fennec',
-  tokenProvider: refreshToken,
+  path: '${dir.path}/${account.id}.fennec', // one account's replica
+  // A fresh token at every 401, whatever the code: it throws where the
+  // issuer refuses -- the session ended, and the app signs out there.
+  tokenProvider: (refusal) => refreshToken(force: refusal.expired),
 );
 await db.replica!.ready();
 ```
+
+A `401` asks `tokenProvider` for a token, handed a `TokenRefusal`: the
+code the server named (`errorCode`, `token_expired` where the token's `exp`
+passed), `expired`, whether the refused request carried a token
+(`hadToken`) and the asks in a row since the server last took the token
+held (`attempt`). The provider asks the issuer for a fresh token at every
+one: a 401 alone is never a sign-out, since the server keeps no list of
+revoked tokens -- the app signs out where the issuer refuses to issue one.
+Where the token handed over is refused too (`attempt` past 1: a key the
+server has not fetched yet, an `nbf` its clock has not reached), the sync
+asks again after 1 s doubling to 60 s; an expiry of the token the server
+took last, or of the first handed over since, starts the count at 1 again.
+A provider that fails, or hands over an empty token, leaves the sync
+waiting, `replica.status.token` reading `TokenStage.failed` and its error
+"the token provider failed: …", and is asked again at `resume()` or
+`setOnline(true)` -- never while it is still at work: it is called once at
+a time. Nothing bounds its time, since it may wait on a sign-in, so it
+must complete: time out its own requests to the issuer and fail. One that
+never completes holds the sync, `token` reading `TokenStage.asked`, until
+the app hands a token over itself with `setToken`. A file is one account's
+-- its path names the account, and it is never opened for another -- and
+signing out keeps it, for that account's next sign-in to send its
+`pending` writes.
+
+While a token is wanted `replica.status.token` says so: its `stage`
+(`delayed` while the wait before the next ask runs, `asked`, `failed`) and
+the `TokenRefusal` its `refusal`, the error the token's whatever else
+failed since -- a stream that ended, as streams end offline. An app that
+hands its tokens over with `setToken` rather than a provider does so at
+`asked`. A `FennecRemote` refusal names its body's code as
+`FennecException.errorCode`.
+
+**Changed before 1.0** (CHANGELOG.md): `tokenProvider` takes the
+`TokenRefusal`, and a function of no argument is no longer taken -- Dart
+has no overloading to keep the old form beside it. Write
+`(_) => refreshToken()` where the provider reads none of it.
 
 The same `Fennec`: reads and live queries are the file's, a write to a
 shape's collection shows at once and is sent -- queued in the file while

@@ -12,6 +12,9 @@
         /// A tenant node's quota of rows a tenant, its tasks in tenant
         /// `acme`; nil for a server over a file.
         private let tenantRows: Int?
+        /// The token a server over a file asks for (`--http-token`), nil
+        /// for none.
+        private let token: String?
         private(set) var port = 0
         private var daemon: Daemon?
 
@@ -22,9 +25,10 @@
         /// A server over a file of its own, holding `tasks` -- or, given
         /// `tenantRows`, a tenant node (`--dir`) holding each tenant to that
         /// many rows, `tasks` in its tenant `acme`, which `url` names.
-        init(_ name: String, tenantRows: Int? = nil) async throws {
+        init(_ name: String, tenantRows: Int? = nil, token: String? = nil) async throws {
             file = try scratch("server-\(name)")
             self.tenantRows = tenantRows
+            self.token = token
             try await start(port: 0)
             if tenantRows != nil {
                 var req = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/_admin/tenants/acme")!)
@@ -48,7 +52,8 @@
                 Server.binary,
                 ["--http", "127.0.0.1:\(port)", "--sync", "always"]
                     + (tenantRows.map { ["--dir", file, "--admin-token", "adm", "--tenant-max-rows", "\($0)"] }
-                        ?? ["--file", file]))
+                        ?? ["--file", file])
+                    + (token.map { ["--http-token", $0] } ?? []))
             daemon = d
             self.port = d.port
         }
@@ -73,7 +78,7 @@
         /// A statement on the server.
         @discardableResult
         func run(_ text: String) async throws -> Answer {
-            try await Fennec.connect(url: url).run(text, params: [])
+            try await Fennec.connect(url: url, token: token).run(text, params: [])
         }
     }
 
