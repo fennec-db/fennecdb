@@ -1482,18 +1482,30 @@ class FennecFile {
     return readAt(this.#main, this.#size);
   }
 
-  /** Flushes and lets the file go: the database is kept in it no longer. */
+  /**
+   * Flushes and lets the file go: the database is kept in it no longer.
+   * The file is let go of whatever throws: after the module stopped (a
+   * trap) the flush and the journal's call each throw, and handles left
+   * open refused the reopen the error asks for (`openFile` in the same
+   * worker: "open elsewhere").
+   */
   close() {
     try {
       this.flush();
     } finally {
       kept.delete(this.#fennec);
-      this.#fennec.journal(false);
-      this.#main.close();
-      this.#aside.close();
       const names = holding.get(this.#where);
       names?.delete(this.#name);
       if (names?.size === 0) holding.delete(this.#where);
+      try {
+        this.#fennec.journal(false);
+      } finally {
+        try {
+          this.#main.close();
+        } finally {
+          this.#aside.close();
+        }
+      }
     }
   }
 

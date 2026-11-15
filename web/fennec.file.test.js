@@ -512,6 +512,51 @@ test('close lets the file go and stops keeping the writes', { skip }, async () =
   assert.deepEqual(again.rows('get docs'), []);
 });
 
+/** `Fennec.open` over the module's exports as `wrap` makes them. */
+async function openWrapped(wrap) {
+  const instantiate = WebAssembly.instantiate;
+  WebAssembly.instantiate = async (...args) => {
+    const { module, instance } = await instantiate(...args);
+    return { module, instance: { exports: wrap(instance.exports) } };
+  };
+  try {
+    return await open();
+  } finally {
+    WebAssembly.instantiate = instantiate;
+  }
+}
+
+// After a trap every call into the module throws, the flush of `close` and
+// its journal's call among them: the handles were let go of after both,
+// and stayed open -- the reopen the error asks for, in the same worker,
+// refused as "open elsewhere".
+test('a file is let go of when the module stopped, and opens again', { skip }, async () => {
+  const dir = fakeDir();
+  let trap = false;
+  const db = await openWrapped((x) => {
+    const query = (...a) => {
+      const out = x.fennec_query(...a);
+      if (trap) throw new WebAssembly.RuntimeError('unreachable');
+      return out;
+    };
+    return { ...x, fennec_query: Object.defineProperty(query, 'length', { value: x.fennec_query.length }) };
+  });
+  const file = await openFile(db, 't.fennec', { dir });
+  db.run('create collection docs (title text)');
+  db.run('put docs {title: "a"}');
+  trap = true;
+  const stopped = (e) => e instanceof FennecError && e.message === 'the module stopped (unreachable): nothing more runs on its databases; open the database again';
+  assert.throws(() => db.run('put docs {title: "b"}'), stopped);
+  assert.throws(() => file.close(), stopped);
+  assert.equal(dir.files.get('t.fennec').open, false, 'the file let go of');
+  assert.equal(dir.files.get('t.fennec~').open, false, 'the copy beside it let go of');
+  // Opened again in this worker, as the error says: what was flushed
+  // before the trap, and not the statement it stopped.
+  const again = await open();
+  await openFile(again, 't.fennec', { dir });
+  assert.deepEqual(titles(again), ['a']);
+});
+
 /** `dir` as the main thread sees it: no synchronous access. */
 function noSync(dir) {
   return {
