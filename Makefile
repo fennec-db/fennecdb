@@ -1331,7 +1331,9 @@ scale-bench:
 ## YCSB_ARGS, e.g. "--records 100000 --systems fennec,sqlite --workloads AC
 ## --threads 1,16 --runs 3". --systems server-docker runs the server in a
 ## container too, from `docker build -t fennecdb-ycsb .`.
-## crates/fennec-bench/ycsb/run-redis.sh is the Redis comparison's run.
+## crates/fennec-bench/ycsb/run-redis.sh is the Redis comparison's run;
+## run-larger-than-memory.sh and run-soak.sh beside it run `ycsb` and the
+## server in containers under a memory limit (docs/design/benchmarks.md).
 ycsb:
 	$(CARGO) build --release -p fennec-server -p fennec-bench --bin fennec-server --bin ycsb
 	./target/release/ycsb $(YCSB_ARGS)

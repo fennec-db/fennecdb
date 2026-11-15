@@ -28,17 +28,61 @@ pub struct Http {
 impl Http {
     pub fn connect(addr: &str) -> Http {
         let w = TcpStream::connect(addr).unwrap();
+        Http::over(w).unwrap()
+    }
+
+    /// A connection that may fail, each read and write of it bounded by
+    /// `within`: a client that outlives the server it asks -- a soak's,
+    /// across a `kill -9` -- counts what failed rather than ending.
+    pub fn try_connect(addr: &str, within: Duration) -> std::io::Result<Http> {
+        let to = addr
+            .parse()
+            .map_err(|_| std::io::Error::other(format!("not an address: {addr}")))?;
+        let w = TcpStream::connect_timeout(&to, within)?;
+        w.set_read_timeout(Some(within))?;
+        w.set_write_timeout(Some(within))?;
+        Http::over(w)
+    }
+
+    fn over(w: TcpStream) -> std::io::Result<Http> {
         // A request goes out in one write, and waiting for an ACK to send
         // the next one would be Nagle's 40 ms, not the server's time.
-        w.set_nodelay(true).unwrap();
-        let r = BufReader::with_capacity(1 << 16, w.try_clone().unwrap());
-        Http {
+        w.set_nodelay(true)?;
+        let r = BufReader::with_capacity(1 << 16, w.try_clone()?);
+        Ok(Http {
             w,
             r,
             head: Vec::with_capacity(256),
             body: Vec::new(),
             line: String::new(),
-        }
+        })
+    }
+
+    /// [`Http::request`] that hands back what failed -- the connection
+    /// refused, cut or timed out -- instead of ending the bench.
+    pub fn try_request(
+        &mut self,
+        method: &str,
+        path: &str,
+        content_type: &str,
+        body: &[u8],
+    ) -> std::io::Result<(u16, &[u8])> {
+        self.head.clear();
+        write!(
+            self.head,
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )?;
+        self.head.extend_from_slice(body);
+        self.w.write_all(&self.head)?;
+        let status = self.try_read_answer()?;
+        Ok((status, &self.body))
+    }
+
+    /// `POST /query` of `text` with `params`, as [`Http::try_request`].
+    pub fn try_query(&mut self, text: &str, params: &str) -> std::io::Result<(u16, &[u8])> {
+        let body = format!("{{\"query\":{},\"params\":[{params}]}}", json_string(text));
+        self.try_request("POST", "/query", "application/json", body.as_bytes())
     }
 
     /// Sends one request and reads the whole answer: its status and body.
@@ -164,20 +208,33 @@ impl Http {
     /// The status line, the headers, and a body of `Content-Length` bytes or
     /// in chunks, into `self.body`.
     fn read_answer(&mut self) -> u16 {
+        match self.try_read_answer() {
+            Ok(status) => status,
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    fn try_read_answer(&mut self) -> std::io::Result<u16> {
         let mut status = 0u16;
         let mut len = 0usize;
         let mut chunked = false;
+        let bad = |what: String| std::io::Error::new(std::io::ErrorKind::InvalidData, what);
         loop {
             self.line.clear();
-            let n = self.r.read_line(&mut self.line).unwrap();
-            assert!(n > 0, "the server closed the connection");
+            let n = self.r.read_line(&mut self.line)?;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "the server closed the connection",
+                ));
+            }
             let l = self.line.trim_end();
             if status == 0 {
                 status = l
                     .split_whitespace()
                     .nth(1)
                     .and_then(|s| s.parse().ok())
-                    .unwrap_or_else(|| panic!("not an HTTP status line: {l}"));
+                    .ok_or_else(|| bad(format!("not an HTTP status line: {l}")))?;
                 continue;
             }
             if l.is_empty() {
@@ -188,7 +245,7 @@ impl Http {
             };
             let v = v.trim();
             if k.eq_ignore_ascii_case("content-length") {
-                len = v.parse().unwrap();
+                len = v.parse().map_err(|_| bad(format!("Content-Length: {v}")))?;
             } else if k.eq_ignore_ascii_case("transfer-encoding") {
                 chunked = v.eq_ignore_ascii_case("chunked");
             }
@@ -196,20 +253,21 @@ impl Http {
         self.body.clear();
         if !chunked {
             self.body.resize(len, 0);
-            self.r.read_exact(&mut self.body).unwrap();
-            return status;
+            self.r.read_exact(&mut self.body)?;
+            return Ok(status);
         }
         loop {
             self.line.clear();
-            self.r.read_line(&mut self.line).unwrap();
-            let size = usize::from_str_radix(self.line.trim_end(), 16).unwrap();
+            self.r.read_line(&mut self.line)?;
+            let size = usize::from_str_radix(self.line.trim_end(), 16)
+                .map_err(|_| bad(format!("a chunk's size: {}", self.line.trim_end())))?;
             let at = self.body.len();
             self.body.resize(at + size, 0);
-            self.r.read_exact(&mut self.body[at..]).unwrap();
+            self.r.read_exact(&mut self.body[at..])?;
             self.line.clear();
-            self.r.read_line(&mut self.line).unwrap();
+            self.r.read_line(&mut self.line)?;
             if size == 0 {
-                return status;
+                return Ok(status);
             }
         }
     }

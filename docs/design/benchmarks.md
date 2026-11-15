@@ -1,6 +1,6 @@
 # Benchmarks
 
-The long form of the invariants [crates/fennec-bench/CLAUDE.md](../../crates/fennec-bench/CLAUDE.md) lists under *Benchmarks*: what `make scale-bench` and `make ycsb` measure and how, and [the gate](#the-gate) every pull request's instruction counts are held to. The first two sections are paragraphs moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists. [Instruction counts](#instruction-counts) holds no invariant of the code: it is how two builds' counts are read on macOS, which `tools/instr/` runs.
+The long form of the invariants [crates/fennec-bench/CLAUDE.md](../../crates/fennec-bench/CLAUDE.md) lists under *Benchmarks*: what `make scale-bench` and `make ycsb` measure and how, the two regimes `ycsb` runs in a container under a memory limit -- [data larger than memory](#data-larger-than-memory) and [the soak](#the-soak) -- and [the gate](#the-gate) every pull request's instruction counts are held to. The first two sections are paragraphs moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists. [Instruction counts](#instruction-counts) holds no invariant of the code: it is how two builds' counts are read on macOS, which `tools/instr/` runs.
 
 ## scale-bench
 
@@ -148,6 +148,174 @@ and MongoDB's `r` runs and the `rd` attempt sized beside the cells: the
 server in Docker leads the other three in every cell but buffered C and
 F at one client, 3.07 k against PostgreSQL's 3.14 k and 2.07 k against
 2.09 k, and Redis in every one.
+
+A cell can run open loop (`--rate <ops/s>`): each thread keeps a schedule
+of send times, an operation every `threads / rate` seconds, the threads'
+schedules staggered, and an operation's time runs from when it was due,
+not from when it went out, so a stall counts the wait of every operation
+queued behind it -- coordinated omission, which a closed loop hides by
+slowing its clients down with the server. `seed.rs` measures its writes
+so. A test holds it: one 200 ms stall in a second at 1 000 a second puts
+the p99 at the stall open loop and leaves it at nothing closed
+(`open_loop_counts_the_wait_behind_a_stall`). The closed loop stays the
+default and the published grid's.
+
+`ycsb` builds without the rivals' crates (`--no-default-features --bin
+ycsb`, the `rivals` feature off): fennecdb in process and fennec-server
+alone, from the workspace's own crates, which is what lets
+`ycsb/linux-tools.sh` build it for Linux in `rust:1.99.1-alpine` offline,
+from the host's registry index, for the two regimes below that run it in a
+container.
+
+## Data larger than memory
+
+`ycsb/run-larger-than-memory.sh` runs YCSB's B, C and E over live data at
+least twice the memory the system may use -- 4 000 000 records of 1 KB,
+4.4 GB, under `--memory 2g` by default -- durable and buffered, three runs
+a cell, every answer held to what was written (`--verify`). Two systems,
+in turns: `server-docker`, fennec-server in a container started with
+`--memory` and `--memory-swap` the same (a page the limit pushes out is
+read again from the file, never swapped; the server's own memory past it
+is an OOM kill, not a slow cell), and fennecdb in process, `ycsb` itself
+run in a container under the same limit. The file is mapped and there is
+no buffer pool: the kernel keeps what fits of it, the rest is read again
+from the disk at a major fault, and the derived indexes are on the heap
+beside it. What was measured before was a file past the page cache only
+through its dead bytes (`compact-bench`'s `docker run --memory 2g`, and
+YCSB's files growing between compacts); here the live records alone are
+twice the memory.
+
+Each cell's line carries, beside YCSB's figures, its cgroup looked at each
+second through the measured window -- by a shell in the server's process
+namespace for `server-docker` (`Watch`: one process the run long, where a
+`docker run` a look took a quarter of a one-client server's reads), by
+`ycsb` reading its own for the process in a container (`Cgroup::own`):
+`majflt_s`, the major faults a second over the window, and `majflt_s_max`
+in its worst second; `cg_peak`, the most the cgroup was charged, page
+cache and all; `anon_peak`, the most of it anonymous -- the heap, the
+indexes and, in process, the verify logs; `file_mean`, its files' pages on
+average, the mapped database's among them; `limit` and `live`, the live
+records' bytes (`fennec_data_bytes`, or the engine's stats in process).
+`failed` and `oom` are on every line under `--memory`: a cell whose
+clients panicked -- a refused request, the server gone -- is a line with
+`failed 1`, and `oom 1` where Docker says the kernel killed it for its
+memory; a system that failed is a failed line for each cell it would have
+run; and a process the kernel killed whole, which can write nothing, has
+its cells written failed by `ycsb fill` from the script. No cell asked for
+is ever a missing line. `mismatches` and `undecided` are the cell's
+verdict. `ycsb report` takes them as it takes the rest: a failed run counts
+in no median and is counted apart.
+
+In process, the verify logs are the measured process's own memory, under
+the limit: `--verify-max` (half the limit, from the script) ends a cell's
+measured window once the logs reach it, so they never push the engine's
+pages out past what the limit already does, nor the process past it. The
+line's `seconds` says how long the window ran; its rate is over those
+seconds. The server's logs are `ycsb`'s on the host, outside the
+container, and its cells run their full length.
+
+The lines go to `results/ycsb_larger.tsv`, family `ycsb_larger`, a file of
+its own rather than a column of `ycsb.tsv`: its cells are named as the
+published grid's (`server-docker:durable:B:16`), and both `ycsb report`
+and `site/build.py` take the median of every run of a `(family, cell,
+metric)` -- a memory-bound run there would join the medians of the runs
+that had the page cache to themselves.
+
+At the same size, `ycsb heap` measures the heap a row of each index kind
+holds, from the server's own `memory_bytes` (`fennec_memory_bytes`): a
+collection of as many rows -- a 16-letter token for `@hash`, an integer for
+`@sorted`, eight words of a 10 000-word vocabulary drawn zipfian for
+`@text`, a `vector<32>` for `@hnsw(cosine)` -- each index made by `create
+index`, measured once no vector waits to be linked
+(`fennec_vectors_unlinked`), and dropped before the next, in the same
+container under the same limit: `server-docker:heap:<kind>`, with
+`bytes`, `bytes_row`, `build_s`, `rows` and `live`, failed where the
+server was killed building it.
+
+Not measured: a machine with a disk slower than this Mac's SSD behind
+Docker's VM (a major fault here is the VM's block device on APFS), a
+Linux host's page cache without a VM between, workloads A, D and F, and
+data larger than memory under the vector index's own arena, which is heap
+and has to fit (`An open copies a graph's vectors into the arena`): the
+heap figures say how much it takes.
+
+## The soak
+
+`ycsb/run-soak.sh <sync>` runs `ycsb soak` (`src/soak.rs`, a module of
+`ycsb` rather than a program of its own: its records, keys, histograms and
+checker are YCSB's): fennec-server in a container whose `--memory` (512 MB
+by default) is under its file's size (1 000 000 records, 1.1 GB live), a
+second container following it as a replica, for 8 hours a run. First the
+peak the mix reaches as fast as it is answered, four minutes; then the
+soak open loop at 50% and at 80% of it, a run each. The mix, over 32
+connections: 40% read and 40% update of YCSB's records (A, its scrambled
+zipfian), 3% insert of new keys and 3% delete of the oldest inserted, 2%
+read of an inserted key, 4% insert into `sessions`, whose `seen
+timestamp @ttl(60s)` expires them, and 2% read of one (one past its time
+must be gone, one well inside it there), 2% `match` on a `@text` body, 2%
+`near` on a `vector<16> @hnsw(cosine)`, 2% update of a doc; beside it 64
+subscriptions to `GET /usertable/changes`, a range of 64 keys each, held
+open and read; `compact usertable` every 20 minutes; every 120 a backup
+over the replication stream (`fennec backup` into an archive), restored
+(`fennec restore`) and verified; and every 30 the server killed
+(`docker kill --signal KILL`), its file held to its checksums (`fennec
+verify`, from `ycsb/linux-tools.sh`'s build) before it starts again.
+
+Every read and write is held to what was written as the run goes
+(`Checker`): `check`'s rule -- a read answers, field by field, the value of
+a write that could have been the last before it or one beside it, and a
+record's being there or not likewise -- run each minute over the reads
+that ended before the earliest operation still in flight, each field's
+register letting go of the writes no later read can be answered from. A
+kill makes it looser, never wrong: a write not answered may or may not
+have landed, and under `--sync 250` one answered in the 2 s before the
+kill may have been lost (the syncer's 250 ms and its fsync, with room), so
+either value holds until a write after the restart ends. A register keeps
+those writes until then: nothing settles inside that window. Under
+`--sync always` an answered write is on disk, and only one in flight is
+uncertain.
+
+A minute's line, `results/soak.tsv`, family `soak`, cell
+`<sync>:<fraction>:m<minute>`, appended as the minute ends so that a run
+cut short keeps what it measured: `ops` and `ops_s` against `rate`; `p50`,
+`p99`, `p999` and `max` in microseconds, each operation timed from when it
+was due; `p99_hour`, the p99 of the 60 minutes to then; `errors` --
+refusals, and connections lost outside a kill's window -- and `down`,
+operations that met a restart; `mismatches`, the checker's and the
+sessions'; `file`, the database file's length alone, read through
+`/proc/1/root` (never the image a compact writes beside it), and `live`,
+`fennec_data_bytes` over every collection; `compactions` so far, the
+server's own (`fennec_auto_compactions_total`, carried across restarts)
+and the run's; `rss_anon`, the server's `RssAnon` -- its heap, never the
+mapped file's pages -- beside `memory_bytes`, `cg_anon`, `cg_file` and
+`cg_current` from its cgroup; `majflt`, the server's major faults in the
+minute; `threads` and `fds`; `lag`, the change sequence the replica trails
+by; `events` and `streams`, the subscriptions'; `sessions`, the rows
+`@ttl` has not swept; `kill`, `verify`, `verify_failed`, `backup`,
+`backup_failed`, `compact` and `compact_failed`, the run's own doings in
+the minute (each done after a minute's line, so its cost shows in the
+next); and `load1` and `load5`, the host's load average: the machine is
+shared, and a minute it was busy shows. `<sync>:<fraction>:end` closes a
+finished run: totals, the primary's and the replica's files verified after
+both stopped as a supervisor stops them, and whether the replica, caught
+up, holds the primary's documents (`replica_differs`).
+
+`ycsb soak report soak.tsv [<run>]` judges a run by the item's exit
+criterion, a line each with the minutes that broke it: 8 hours and an end
+line; the last hour's p99 at most 1.25 times the first's (`p99_hour` at
+minute 60 against the last minute's); the file at most 2.2 times the live
+bytes every minute; `rss_anon` grown less than 5% after the first hour
+(against minute 60's); threads and descriptors within 2 of their medians;
+no error, no mismatch; every verify clean, at each restart, each backup
+and the end. It lists the minutes the host's load was 4 or more beside the
+verdicts, and exits 1 unless every line passed. A run shorter than the
+criteria's hours still gets every verdict, `FAIL` where an hour is
+missing.
+
+Not measured: the servers outside Docker's VM (the soak's kill, cgroup and
+`/proc` looks are Linux containers'), a primary under a failover (P5's),
+and a load the machine shares: the minutes it did are flagged, not taken
+out.
 
 ## Instruction counts
 
