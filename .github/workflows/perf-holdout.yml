@@ -1,0 +1,297 @@
+# The perf gate's holdout (docs/design/benchmarks.md#the-gate): the fifteen
+# most recent first-parent pairs of main touching crates/ before the gate,
+# none of which the calibration that set its rule used, each replayed as the
+# job judges a pull request -- this tree's program built on both sides,
+# every workload's figure and heap bytes held to +1%, the workloads held to
+# the program's own list -- and the heap-shift control on x86_64 musl: one
+# build against itself, its runs leaking 4 KiB, 64 KiB and 1 MiB before the
+# setup. Beside them, the calibration's nine pairs again: it judged them
+# with the allocator priced by its call lines, which the self costs
+# replaced, so its six merged changes must still pass and its three
+# regressions still fail.
+#
+# Each pair says what it must do (`expect`): `pass`, no workload failing,
+# or the workloads that fail and by what -- instructions, bytes or both,
+# two joined by `+` -- each a cost its change was shown to have, function
+# by function in the two sides' profiles, or the regression it stands for;
+# the job is as expected only when exactly those fail, one more or one
+# fewer failing it, and a workload failing for no metric -- dropped,
+# unrun -- never is. A metric marked `?` may fail or not
+# (`http-scoped-get:bytes+instructions?`), for a judged figure its own
+# runs put within their spread of the bar: none is, in the two runs below.
+# Every judged figure within 0.2 points of the bar, failing or passing,
+# came out the same in both, its runs the same to the instruction or the
+# byte on both sides but `core-put`'s, 0.014% apart at the most and 0.195
+# points over the bar; each is said beside its pair. A pair whose base
+# predates what a workload's setup asks for names it (`cannot_run`) with
+# the words of the base's error, 16 characters at the least, and is judged
+# on the workloads both sides run: one so named that the base runs, or
+# does not for another reason, or this tree runs fewer than five times,
+# fails the job, as does any other the base does not run. The first run
+# (43682293646, main at 8743f0d9) expected every merged pair to pass and
+# failed five: the expectations below are what their profiles showed
+# (docs/design/benchmarks.md, *The holdout*). The second (43686447758,
+# this workflow on its branch) held every pair and the control as
+# expected. The gate stays a check no merge requires until this workflow,
+# on main, has a green run.
+#
+# Run by hand at a quiet hour, never on a push: by dispatch once this file
+# is on main, or before by the `perf-holdout` label on the pull request
+# that carries it.
+name: perf holdout
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+    paths:
+      - .github/workflows/perf-holdout.yml
+
+permissions:
+  contents: read
+
+# Every build uses the toolchain main pins: these commits' own
+# rust-toolchain.toml says `stable`, which two parallel builds would install
+# at once and fail renaming a component file. It is installed once, below,
+# before any build starts.
+env:
+  RUSTUP_TOOLCHAIN: 1.99.1
+
+jobs:
+  pair:
+    name: holdout (${{ matrix.name }})
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'perf-holdout'
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The holdout: merged, none of them the calibration's.
+          - { name: "#592", slug: "592", base: 10f653a2, head: 378f4a81, expect: pass }
+          # A read by an id or a `@hash` bucket compares its index's name
+          # (`candidates_held`) and collects its `and`'s terms apart
+          # (`Filter::without`, inlined: a 32-byte vector): +326 to +426
+          # instructions an op outside the allocator, and an allocation
+          # more, its cost to win back. `core-filter-limit`'s bytes +1.012%
+          # in both runs, every run the same to the byte.
+          - name: "#593"
+            slug: "593"
+            base: b7a92e30
+            head: 8bc349b9
+            expect: "core-filter-limit:both core-get-id:both http-get-row:both http-patch:both http-scoped-get:both"
+          # Every record carries a CRC32C: summed as a write or a compaction
+          # writes it, the longer records growing the buffers, and checked
+          # as an open reads it -- SSE4.2's `crc32`, as on a user's x86_64.
+          # In both runs `core-put` +1.196% and +1.197%, its runs 0.014%
+          # apart at the most; `http-put` +1.131% and `http-patch`'s
+          # instructions +0.891%, passing, the same to the instruction.
+          - name: "#568"
+            slug: "568"
+            base: 0bbc77a5
+            head: cebfbeaa
+            expect: "core-insert:both core-put:both file-compact:instructions file-open:instructions http-patch:bytes http-put:instructions"
+          - { name: "#559", slug: "559", base: 58ed72d5, head: 16f6eca9, expect: pass }
+          - { name: "#556", slug: "556", base: 6ebadaf8, head: debef146, expect: pass }
+          # Every scoped request charged to its caller's `--request-rate`
+          # (`rate::admitted`, inlined into `authenticate`): +652 to +696
+          # instructions an op outside the allocator, nothing allocated.
+          - name: "#554"
+            slug: "554"
+            base: fa6afcc4
+            head: 19e2e5d9
+            expect: "http-scoped-get:instructions http-scoped-insert:instructions http-scoped-set:instructions"
+          - { name: "#540", slug: "540", base: 6c136be0, head: 31cf9040, expect: pass }
+          - { name: "#541", slug: "541", base: b361a668, head: 6c136be0, expect: pass }
+          - { name: "#537", slug: "537", base: de23ce27, head: 66f3e8eb, expect: pass }
+          - { name: "#538", slug: "538", base: 94b794ef, head: 147dd137, expect: pass }
+          - { name: "#464", slug: "464", base: b1d94163, head: 94b794ef, expect: pass }
+          - { name: "#529", slug: "529", base: edd13565, head: 088bc30f, expect: pass }
+          - { name: "#526", slug: "526", base: abcf1296, head: 15a85666, expect: pass }
+          - { name: "#522", slug: "522", base: ca4666a2, head: 39e4ba08, expect: pass }
+          - { name: "#520", slug: "520", base: a86fea55, head: ca4666a2, expect: pass }
+          # The calibration's pairs, rechecked under self costs.
+          - { name: "recheck #531", slug: "c531", base: 088bc30f, head: de59fdd1, expect: pass }
+          # A batch's lines held as `Query`s, then moved into a vector of
+          # exactly their number: 71 bytes a put more, 4 calls fewer.
+          - name: "recheck #524"
+            slug: "c524"
+            base: a96bd554
+            head: c736b5c0
+            expect: "http-batch:bytes"
+          - { name: "recheck #506", slug: "c506", base: edb629d2, head: bc7636b2, expect: pass }
+          - { name: "recheck #513", slug: "c513", base: fb93539e, head: 61fe4261, expect: pass }
+          - { name: "recheck #542", slug: "c542", base: 4a157cdd, head: 1dee77aa, expect: pass }
+          # The scoped writes' policy grants `wake`, which #474 brought: its
+          # base refuses the policy, and runs neither (its error's words).
+          - name: "recheck #474"
+            slug: "c474"
+            base: d45afa21
+            head: e3d58955
+            expect: pass
+            cannot_run: "http-scoped-insert,http-scoped-set=`wake` is none of read"
+          - { name: "recheck regression #511 undone", slug: "r511", base: 82319b7f, head: 9da6411e, expect: "core-json-page:instructions" }
+          # `http-get-row` +1.119% and `http-scoped-get` +0.898%, passing,
+          # in both runs, the same to the instruction.
+          - name: "recheck regression #542 first head"
+            slug: "r542"
+            base: de23ce27
+            head: 0e05fe22
+            expect: "http-get-row:instructions http-patch:instructions"
+          # `http-scoped-get` +1.115% and bytes +1.087% in both runs, its
+          # runs as judged the same to the instruction: the 0.29% its table
+          # shows is the plain count's, the allocator's cost a call by the
+          # heap's layout (178.7 or 180.0), which the judged figure prices
+          # at the base's (178.1 or 178.5 a run, pooled); with 53 calls an
+          # op on both sides, only 231 a call would put it at +1%.
+          - name: "recheck regression #474 first head"
+            slug: "r474"
+            base: e1d6a47c
+            head: 41f293a9
+            expect: "http-scoped-get:both http-scoped-insert:both http-scoped-set:both"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install the pinned toolchain, the musl target, valgrind and musl-gcc
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal --target x86_64-unknown-linux-musl
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends valgrind musl-tools
+
+      # Both commits predate the program, which runs the same on both
+      # sides: every workload of its list is the base's too, but those the
+      # pair names as its base's cannot-run, by the words of the base's
+      # error -- a base run that crashed fails here rather than passing as
+      # new. The pair's words reach the shell as variables, never as its
+      # text: the base's error is quoted with backticks.
+      - name: Replay the pair with this tree's program, and judge it
+        env:
+          PAIR: "${{ matrix.name }} (`${{ matrix.base }}` → `${{ matrix.head }}`)"
+          EXPECT: ${{ matrix.expect }}
+          CANNOT_RUN: ${{ matrix.cannot_run }}
+        run: |
+          W="$RUNNER_TEMP/perf"
+          start=$(date +%s)
+          python3 tools/perf_gate.py run --base "${{ matrix.base }}" --head "${{ matrix.head }}" \
+            --target x86_64-unknown-linux-musl --work "$W" --out "$W/results.json" --no-check
+          echo "replayed in $(( $(date +%s) - start )) s"
+          verdict="as expected"
+          python3 tools/perf_gate.py check "$W/results.json" --base-program crates/fennec-http/examples/gate.rs \
+            --expect "$EXPECT" --cannot-run "$CANNOT_RUN" --summary "$GITHUB_STEP_SUMMARY" || verdict="NOT as expected"
+          python3 - "$W/results.json" "$verdict" > "$W/profiles/row.md" <<'EOF'
+          import importlib.util, json, os, sys
+          spec = importlib.util.spec_from_file_location("perf_gate", "tools/perf_gate.py")
+          gate = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(gate)
+          pair, expect, verdict = os.environ["PAIR"], os.environ["EXPECT"], sys.argv[2]
+          try:
+              with open("crates/fennec-http/examples/gate.rs", encoding="utf-8") as f:
+                  names = gate.workload_names(f.read())
+              with open(sys.argv[1], encoding="utf-8") as f:
+                  rows, _ = gate.judge(json.load(f), [], base_names=names,
+                                       cannot_run=gate.cannot_run_of(os.environ["CANNOT_RUN"]))
+              wanted = gate.expected_said(gate.expected_of(expect))
+          except ValueError as e:
+              print(f"| {pair} | {expect} | refused: {e} | {verdict} | - | - |")
+              sys.exit()
+          found = gate.failures_said(gate.failing(rows))
+          fig = max((r for r in rows if r[4] is not None), key=lambda r: r[4], default=None)
+          mem = max((r for r in rows if r[7]), key=lambda r: r[7]["delta"], default=None)
+          said = lambda r, d: f"`{r[0]}` {d * 100:+.2f}%" if r else "-"
+          print(f"| {pair} | {wanted} | {found} | {verdict} | {said(fig, fig and fig[4])} | {said(mem, mem and mem[7]['delta'])} |")
+          EOF
+          cp "$W/results.json" "$W/profiles/"
+          test "$verdict" = "as expected"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: perf-holdout-${{ matrix.slug }}
+          path: ${{ runner.temp }}/perf/profiles/
+          retention-days: 14
+
+  control:
+    name: holdout (heap-shift control)
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'perf-holdout'
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned toolchain, the musl target, valgrind and musl-gcc
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal --target x86_64-unknown-linux-musl
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends valgrind musl-tools
+
+      # One build, as the gate builds a side; the base's runs as they are,
+      # this tree's after a leak that moves every later block in musl's
+      # groups. The figure with the allocator priced and the bytes must not
+      # move: the plain count may.
+      - name: The build held to itself over three heap layouts
+        run: |
+          W="$RUNNER_TEMP/perf"
+          mkdir -p "$W/profiles"
+          CARGO_PROFILE_RELEASE_STRIP=false cargo build --locked --release -p fennec-http --example gate \
+            --features fennec-abi/sync --target x86_64-unknown-linux-musl
+          bin=target/x86_64-unknown-linux-musl/release/examples/gate
+          verdict="as expected" failed=none
+          for k in 4096 65536 1048576; do
+            python3 tools/perf_gate.py measure --base-bin "$bin" --head-bin "$bin" --head-leak "$k" \
+              --out "$W/profiles/leak-$k.json"
+            python3 tools/perf_gate.py check "$W/profiles/leak-$k.json" --base-program crates/fennec-http/examples/gate.rs \
+              --expect pass --summary "$GITHUB_STEP_SUMMARY" || { verdict="NOT as expected"; failed="some: its tables"; }
+          done
+          echo "| the heap-shift control (4 KiB, 64 KiB, 1 MiB) | none | $failed | $verdict | - | - |" > "$W/profiles/row.md"
+          test "$verdict" = "as expected"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: perf-holdout-control
+          path: ${{ runner.temp }}/perf/profiles/
+          retention-days: 14
+
+  verdicts:
+    name: holdout (verdicts)
+    needs: [pair, control]
+    if: always() && (github.event_name == 'workflow_dispatch' || github.event.label.name == 'perf-holdout')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: perf-holdout-*
+          path: ${{ runner.temp }}/holdout
+
+      # One row a pair: the workloads it was to fail and by what, those that
+      # did, and its widest deltas; each pair's table is on its own job's
+      # page, its profiles and results in its artifact.
+      - name: Every pair and the control as expected
+        env:
+          PAIRS: ${{ needs.pair.result }}
+          CONTROL: ${{ needs.control.result }}
+        run: |
+          {
+            echo "### The perf gate's holdout"
+            echo
+            echo "| pair (base → head) | to fail | failed | verdict | widest figure delta | widest bytes delta |"
+            echo "|---|---|---|---|---:|---:|"
+            for slug in 592 593 568 559 556 554 540 541 537 538 464 529 526 522 520 \
+                c531 c524 c506 c513 c542 c474 r511 r542 r474 control; do
+              cat "$RUNNER_TEMP/holdout/perf-holdout-$slug/row.md" 2>/dev/null \
+                || echo "| $slug | - | - | no verdict: the job did not finish | - | - |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+          test "$PAIRS" = success && test "$CONTROL" = success

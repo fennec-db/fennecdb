@@ -1,0 +1,209 @@
+{
+ "fennec_build_info": {
+  "labels": [
+   "version"
+  ],
+  "type": "gauge"
+ },
+ "fennec_replica_behind": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_replica_connected": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_replica_images_total": {
+  "labels": [],
+  "type": "counter"
+ },
+ "fennec_replica_last_contact_seconds": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_replica_reconnects_total": {
+  "labels": [],
+  "type": "counter"
+ },
+ "fennec_replicas": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_router_auto_failovers_total": {
+  "labels": [
+   "outcome"
+  ],
+  "type": "counter"
+ },
+ "fennec_router_client_timeouts_total": {
+  "labels": [
+   "reason"
+  ],
+  "type": "counter"
+ },
+ "fennec_router_connections": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_router_connections_refused_total": {
+  "labels": [
+   "reason"
+  ],
+  "type": "counter"
+ },
+ "fennec_router_cut_requests_total": {
+  "labels": [
+   "outcome"
+  ],
+  "type": "counter"
+ },
+ "fennec_router_entry_clients_total": {
+  "labels": [
+   "outcome"
+  ],
+  "type": "counter"
+ },
+ "fennec_router_fanout_duration_seconds": {
+  "labels": [],
+  "type": "histogram"
+ },
+ "fennec_router_fanout_tenants_total": {
+  "labels": [
+   "outcome"
+  ],
+  "type": "counter"
+ },
+ "fennec_router_fanouts_total": {
+  "labels": [
+   "outcome"
+  ],
+  "type": "counter"
+ },
+ "fennec_router_files_left": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_router_following": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_router_lease_age_seconds": {
+  "labels": [
+   "node",
+   "region"
+  ],
+  "type": "gauge"
+ },
+ "fennec_router_move_duration_seconds": {
+  "labels": [],
+  "type": "histogram"
+ },
+ "fennec_router_moves_total": {
+  "labels": [
+   "outcome"
+  ],
+  "type": "counter"
+ },
+ "fennec_router_node_failed_over": {
+  "labels": [
+   "node",
+   "region"
+  ],
+  "type": "gauge"
+ },
+ "fennec_router_nodes": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_router_read_replicas_given_up": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_router_refused_total": {
+  "labels": [],
+  "type": "counter"
+ },
+ "fennec_router_replica_reads_total": {
+  "labels": [
+   "outcome"
+  ],
+  "type": "counter"
+ },
+ "fennec_router_replicas": {
+  "labels": [
+   "node",
+   "region"
+  ],
+  "type": "gauge"
+ },
+ "fennec_router_request_duration_seconds": {
+  "labels": [
+   "route"
+  ],
+  "type": "histogram"
+ },
+ "fennec_router_requests_total": {
+  "labels": [
+   "code",
+   "route"
+  ],
+  "type": "counter"
+ },
+ "fennec_router_same_zone_copies": {
+  "labels": [
+   "region"
+  ],
+  "type": "gauge"
+ },
+ "fennec_router_tenants": {
+  "labels": [
+   "node",
+   "region"
+  ],
+  "type": "gauge"
+ },
+ "fennec_router_tenants_hooks_behind": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_router_tenants_moving": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_router_tenants_unreplicated": {
+  "labels": [
+   "region"
+  ],
+  "type": "gauge"
+ },
+ "fennec_router_tls_handshakes_failed_total": {
+  "labels": [
+   "reason"
+  ],
+  "type": "counter"
+ },
+ "fennec_router_upstream_duration_seconds": {
+  "labels": [],
+  "type": "histogram"
+ },
+ "fennec_router_upstream_errors_total": {
+  "labels": [
+   "node"
+  ],
+  "type": "counter"
+ },
+ "fennec_start_time_seconds": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_trace_spans_dropped_total": {
+  "labels": [
+   "reason"
+  ],
+  "type": "counter"
+ },
+ "fennec_trace_spans_exported_total": {
+  "labels": [],
+  "type": "counter"
+ }
+}

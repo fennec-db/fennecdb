@@ -478,7 +478,7 @@ fn decode_at(buf: &[u8], pos: &mut usize, depth: usize) -> Result<Value> {
             let (word, _) = take(buf, pos, 8)?.as_chunks::<8>();
             Ok(Value::Float(f64::from_le_bytes(word[0])))
         }
-        TAG_GEO => Ok(geo_value(geo_at(take(buf, pos, 16)?))),
+        TAG_GEO => decode_point(buf, pos, depth),
         TAG_TEXT => {
             let n = get_uvarint(buf, pos)? as usize;
             let raw = take(buf, pos, n)?;
@@ -514,12 +514,14 @@ fn decode_at(buf: &[u8], pos: &mut usize, depth: usize) -> Result<Value> {
         TAG_LIST => decode_list(buf, pos, depth),
         TAG_OBJECT => decode_object(buf, pos, depth),
         TAG_SPARSE => {
-            let dim = get_uvarint(buf, pos)? as u32;
+            // The dimension and each step are `u32`s as written, read whole
+            // or refused: `as u32` read a dimension of 2^32 + 16 as 16.
+            let dim = get_within(buf, pos, u32::MAX as u64)? as u32;
             let n = get_uvarint(buf, pos)? as usize;
             let mut entries = Vec::with_capacity(n.min(1 << 16));
             let mut at = 0u32;
             for _ in 0..n {
-                at = at.wrapping_add(get_uvarint(buf, pos)? as u32);
+                at = at.wrapping_add(get_within(buf, pos, u32::MAX as u64)? as u32);
                 // Within its dimension, where every write and
                 // `sparse::parse` put an entry: past it the bytes are
                 // damage, and pgvector's form of one at the last `u32`
@@ -554,6 +556,21 @@ fn decode_list(buf: &[u8], pos: &mut usize, depth: usize) -> Result<Value> {
         items.push(decode_at(buf, pos, depth + 1)?);
     }
     Ok(Value::List(items))
+}
+
+/// A point, its tag read, `depth` lists and objects down: read as the list
+/// `[lon, lat]` it is ([`geo_value`]), so one level more, held to
+/// [`MAX_DEPTH`] as a list is. Counted as none, a point 64 lists down read
+/// as a value 65 levels deep, whose own bytes written back were refused
+/// (the fuzzer's `codec` target); a write puts a point only as a field's
+/// whole value, a level down (`DataType::depth`). A function of its own
+/// for the reason [`decode_at`] hands the depth on untested.
+#[inline(never)]
+fn decode_point(buf: &[u8], pos: &mut usize, depth: usize) -> Result<Value> {
+    if depth >= MAX_DEPTH {
+        return Err(too_deep());
+    }
+    Ok(geo_value(geo_at(take(buf, pos, 16)?)))
 }
 
 /// An object's members, its tag read, as [`decode_list`] reads a list's.
@@ -630,7 +647,11 @@ fn skip<const FIELD: bool>(buf: &[u8], pos: &mut usize, depth: usize) -> Result<
             take(buf, pos, 8)?;
             Ok(())
         }
+        // A level, as the decoder reads it (`decode_point`).
         TAG_GEO => {
+            if depth >= MAX_DEPTH {
+                return Err(too_deep());
+            }
             take(buf, pos, 16)?;
             Ok(())
         }
@@ -1102,6 +1123,72 @@ mod tests {
         assert_eq!(decode_type(&lists(MAX_DEPTH), &mut 0).unwrap(), ty);
         for n in [MAX_DEPTH + 1, 100_000] {
             assert!(deep(decode_type(&lists(n), &mut 0).map(|_| Value::Null)));
+        }
+    }
+
+    /// A point reads as the list `[lon, lat]` it is, a level down, held to
+    /// the limit as a list is. Counted as none, 64 lists around one read as
+    /// a value 65 levels deep, whose own bytes written back were refused:
+    /// the fuzzer's `codec` target found it (its input is the target's seed
+    /// `point-64-lists-down`). 63 lists down it reads, is skipped to its
+    /// end, and is written back as the list it reads as.
+    #[test]
+    fn a_point_is_a_level_as_the_list_it_reads_as() {
+        let around = |lists: usize| {
+            let mut b = Vec::new();
+            for _ in 0..lists {
+                b.extend_from_slice(&[TAG_LIST, 1]);
+            }
+            b.push(TAG_GEO);
+            b.extend_from_slice(&13.4f64.to_le_bytes());
+            b.extend_from_slice(&52.5f64.to_le_bytes());
+            b
+        };
+        let deep = |e: Result<()>| matches!(&e, Err(Error::Corrupt(m)) if m == "a value nests more than 64 levels deep");
+        let past = around(MAX_DEPTH);
+        assert!(deep(decode_value(&past, &mut 0).map(|_| ())));
+        assert!(deep(skip_value(&past, &mut 0)));
+        assert!(deep(skip_field(&past, &mut 0)));
+        let mut point = geo_value((13.4, 52.5));
+        for lists in 0..MAX_DEPTH {
+            let bytes = around(lists);
+            let v = decode_value(&bytes, &mut 0).unwrap();
+            assert_eq!(v, point, "{lists}");
+            let mut back = Vec::new();
+            encode_value(&mut back, &v);
+            assert_eq!(decode_value(&back, &mut 0).unwrap(), v, "{lists}");
+            let mut p = 0;
+            skip_value(&bytes, &mut p).unwrap();
+            assert_eq!(p, bytes.len());
+            point = Value::List(vec![point]);
+        }
+    }
+
+    /// A sparse vector's dimension and each step between its indexes are
+    /// `u32`s as written, read whole or refused: `as u32` read a dimension
+    /// of 2^32 + 16 as 16, and a step of 2^32 + 3 as 3.
+    #[test]
+    fn a_sparse_vectors_numbers_past_u32_are_refused() {
+        let sparse = |dim: u64, step: u64| {
+            let mut b = vec![TAG_SPARSE];
+            put_uvarint(&mut b, dim);
+            put_uvarint(&mut b, 1);
+            put_uvarint(&mut b, step);
+            b.extend_from_slice(&1.5f32.to_le_bytes());
+            b
+        };
+        assert_eq!(
+            decode_value(&sparse(u32::MAX as u64, 3), &mut 0).unwrap(),
+            Value::Sparse(u32::MAX, vec![(3, 1.5)])
+        );
+        for (dim, step) in [((1 << 32) + 16, 3), (16, (1 << 32) + 3), (u64::MAX, 3)] {
+            assert!(
+                matches!(
+                    decode_value(&sparse(dim, step), &mut 0),
+                    Err(Error::Corrupt(_))
+                ),
+                "{dim} {step}"
+            );
         }
     }
 

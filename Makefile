@@ -24,10 +24,10 @@ SCHEMA ?= 1
 STUDIO_SERVER ?=
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js upgrade-check openapi-lint openapi-check openapi-golden sync-scenarios-check fennecql-corpus fuzz fuzz-smoke fuzz-toolchain fuzz-seeds sanitize builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-desktop studio-desktop-dist studio-desktop-test studio-highlight statements-bench gzip-bench replay-bench hook-bench instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench lists-bench stress-test
+.PHONY: all test test-js upgrade-check openapi-lint openapi-check openapi-golden api-check api-golden sync-scenarios-check float-test fennecql-corpus fuzz fuzz-smoke fuzz-toolchain fuzz-seeds sanitize builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test browser-test studio-desktop studio-desktop-dist studio-desktop-test studio-highlight statements-bench gzip-bench replay-bench hook-bench perf-gate instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench lists-bench stress-test
 	python-test go-test dotnet-test languages-test examples-test recipes-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench entry-bench \
 	compare beir import-test follow-bench \
-	pgvector-up pgvector-down pgvector-tls docker docker-run docker-compact docker-down grafana-check deploy-check drill chaos memory clean \
+	pgvector-up pgvector-down pgvector-tls docker docker-run docker-compact docker-down grafana-check slow-client-check deploy-check drill chaos memory clean \
 	site site-serve site-deploy packaging-test
 
 all: test wasm
@@ -95,6 +95,21 @@ test-js:
 ## what passed to target/sync-scenarios/, and a skip fails here
 sync-scenarios-check:
 	node integrations/sync-scenarios-check.mjs
+
+## The three float tests `make test` leaves out (#[ignore]), on every core:
+## every f32 written as std's `{}` writes it and 10^8 random f64s so
+## (num.rs; FENNEC_FLOATS=n for another count), every f32 read back through
+## an f64 (json.rs) -- the hand-written formatter and reader held to the
+## standard library's, which a toolchain can move. A toolchain bump carries
+## them (docs/design/crates.md#toolchain); float-tests.yml runs them weekly.
+## The three are listed first: one renamed would otherwise pass unrun.
+float_tests := num::tests::every_f32_is_written_as_display_writes_it \
+	num::tests::many_f64s_are_written_as_display_writes_them \
+	json::tests::every_f32_reads_back_through_an_f64
+float-test:
+	@n=$$($(CARGO) test -q -p fennec-core --release --lib -- --ignored --exact --list $(float_tests) | grep -c ': test$$'); \
+	if [ "$$n" != 3 ]; then echo "float-test: $$n of the three tests found: renamed? (Makefile)" >&2; exit 1; fi
+	$(CARGO) test -p fennec-core --release --lib -- --ignored --exact $(float_tests)
 
 ## integrations/builder-golden.json written again from the JS builder's
 ## answers: the text and parameters the Python, Go and .NET builders are
@@ -223,6 +238,42 @@ openapi-golden:
 	$(CARGO) test -p fennec-server --test all openapi::
 	python3 tools/openapi_compat.py --write
 
+## fennec.h's prototypes and macros, web/fennec.d.ts's and web/client.d.ts's
+## exports, the flags and exit codes of fennec, fennec-server and fennec-shard
+## and the metrics the server and the router serve, held to the baselines in
+## integrations/api-golden/ (frozen at the 1.0 tag): a removed or changed one
+## fails unless tools/api_compat.py's BREAKS names it, and every dump is held
+## to BASE's (origin/main). The three files' dumps must be what the sources
+## dump to; the CLI's and the metrics' what the binaries give, which their
+## crates' tests/api_golden.rs hold under `cargo test` (make test), not here.
+## `make api-golden` after an addition. First the checker's own tests, then
+## BASE's checker over the same sources, as CI's `test` job runs it
+## (docs/design/compatibility.md)
+api-check:
+	python3 tools/test_api_compat.py
+	python3 tools/api_compat.py
+	@base='$(or $(BASE),origin/main)'; \
+	if git cat-file -e "$$base:tools/api_compat.py" 2>/dev/null; then \
+	  mkdir -p target/tmp && git show "$$base:tools/api_compat.py" > target/tmp/api_compat_base.py && \
+	  python3 -I target/tmp/api_compat_base.py --root '$(CURDIR)' --base-ref "$$base" \
+	    --breaks-from tools/api_compat.py; \
+	else echo "$$base has no tools/api_compat.py yet: no base pass"; fi
+
+## integrations/api-golden/ written again: fennec.h's and the JS types' dumps
+## from the sources, the CLI's and the metrics' from the binaries themselves,
+## which the tests/api_golden.rs of fennec-shard, fennec-server and fennec-cli
+## write into target/api-golden (the router's first: the server's test holds
+## every metric name the sources declare to both dumps); refused where a dump
+## breaks what the baseline holds and BREAKS names it not. After every change
+## of a surface. Frozen at the 1.0 tag: tools/api_compat.py --freeze 1.0
+## (RELEASING.md)
+api-golden:
+	@rm -rf target/api-golden && mkdir -p target/api-golden
+	FENNEC_API_GOLDEN='$(CURDIR)/target/api-golden' $(CARGO) test -p fennec-shard --test all api_golden::
+	FENNEC_API_GOLDEN='$(CURDIR)/target/api-golden' $(CARGO) test -p fennec-server --test all api_golden::
+	FENNEC_API_GOLDEN='$(CURDIR)/target/api-golden' $(CARGO) test -p fennec-cli --test api_golden
+	python3 tools/api_compat.py --write --built target/api-golden
+
 ## web/fennec.d.ts held to web/fennec.js -- every export and method declared --
 ## and to what a caller writes, under tsc --strict; then the docs' examples
 types-check:
@@ -330,6 +381,20 @@ else
 	  $(if $(ONLY),--only '$(ONLY)') $(if $(OUT),--out '$(OUT)')
 endif
 
+## This tree against BASE's (origin/main) in instructions and heap bytes an
+## op under callgrind: what CI's `perf (instructions)` job holds every pull
+## request to. Each workload of crates/fennec-http/examples/gate.rs, the one
+## program built on both sides, RUNS (5) times a build, JOBS at a time;
+## a median 1% or more above the base's, in instructions or bytes, fails
+## unless the pull request adds a PERF_ACCEPTED entry (tools/perf_gate.py). HEAD=<ref> replays two
+## commits; TARGET=x86_64-unknown-linux-musl builds as CI does. Linux with
+## valgrind: on macOS, in Docker. Scratch in target/perf-gate, BASE's
+## worktree kept with KEEP=1 (docs/design/benchmarks.md#the-gate)
+perf-gate:
+	python3 tools/perf_gate.py run --cargo '$(CARGO)' --base '$(or $(BASE),origin/main)' \
+	  $(if $(HEAD),--head '$(HEAD)') $(if $(TARGET),--target '$(TARGET)') --runs $(or $(RUNS),5) \
+	  $(if $(JOBS),--jobs $(JOBS)) $(if $(KEEP),--keep)
+
 ## This tree's build against BASE's (origin/main) in instructions an op, on
 ## macOS: the allocator there takes paths a binary's identity picks, moving a
 ## request by hundreds of instructions with the code unchanged, so each build
@@ -344,7 +409,10 @@ endif
 ## MODES=get,row,patch,patch-row,if-match: a row by id read and written
 ## over REST, by a filter and by its path, and under `If-Match`;
 ## MODES=scoped,token,get: that read under a scoped token, one of 1 000
-## subjects in turn, under the server's token and under none);
+## subjects in turn, under the server's token and under none;
+## EXAMPLE=served MODES=file,node,put,pipelined: a request through a served
+## connection, read off a socket and answered on it, of a file's server and
+## a tenant node, a row written by its path, 16 requests written at once);
 ## TRACE=fennec_http::handle also counts one call (HIT, the 30th) by
 ## function under lldb, the program's own code apart from the allocator's.
 ## UUIDS=0 for plain pairs. Each run once the 1-minute load is under QUIET
@@ -392,13 +460,21 @@ size-report:
 	@python3 crates/fennec-wasm/size_report.py $(BASE) $(if $(WHY),--why '$(WHY)') $(if $(BIN),--bin $(BIN)) $(if $(FEATURES),--features '$(if $(filter none,$(FEATURES)),,$(FEATURES))')
 
 ## Every FennecQL text the repository holds -- the docs' blocks and inline
-## code, the golden files, the sources' strings -- parsed by this tree and by
-## BASE's, both `parse` and `parse_exact` (tools/fennecql_corpus.py, the
-## example crates/fennec-ql/examples/corpus.rs): fails where a text that
-## parsed reads as another tree or is refused, the rule a grammar change
-## keeps (docs/design/fennecql.md). make fennecql-corpus BASE=origin/main
+## code, the golden files, the sources' strings, the hand-written list --
+## this tree's and BASE's, read by both trees with `parse`, `parse_exact`
+## and `stored_definition`, a statement a named statement may hold by its
+## canonical digest (tools/fennecql_corpus.py, the example
+## crates/fennec-ql/examples/corpus.rs): fails where a text that parsed
+## reads as another statement, is refused or panics, printing what changed
+## (docs/design/fennecql.md#the-corpus). BASE=v0.2.0 holds this tree to the
+## texts frozen at the tag, as its own parser read them
+## (integrations/fennecql-corpus/v0.2.0.jsonl), BASE=frozen to every frozen
+## corpus; FREEZE=<tag> adds a tag's from its tree and the earlier frozen
+## corpora's texts, never replacing one. A failure writes every entry to
+## paste beside the builds. CI runs BASE=origin/main and BASE=frozen.
+## make fennecql-corpus BASE=origin/main
 fennecql-corpus:
-	@python3 tools/fennecql_corpus.py $(or $(BASE),origin/main)
+	@python3 tools/fennecql_corpus.py $(if $(FREEZE),--freeze $(FREEZE),$(if $(filter frozen,$(BASE)),--frozen,$(or $(BASE),origin/main)))
 
 # The fuzzer's nightly, a date: AddressSanitizer is a nightly flag, and only
 # the fuzz targets, the sanitized tests (`make sanitize`) and the jobs
@@ -406,13 +482,16 @@ fennecql-corpus:
 # forward in a pull request of its own.
 FUZZ_NIGHTLY ?= nightly-2026-11-01
 FUZZ_SECONDS ?=
-# Flags for each run, CI's: `--private --corpus none` (a finding says its
-# recipe alone), the weekly run's `--seed`.
+# Flags for each run, CI's: `--corpus none`, and the weekly run's
+# `--private` (a finding says its recipe alone) and `--seed`.
 FUZZ_FLAGS ?=
 ASAN ?= 0
 FUZZ_HOST = $(shell $(CARGO) -vV | sed -n 's/^host: //p')
 # AddressSanitizer, and LLVM's coverage counters on every edge, which the
 # fuzzer reads to keep the inputs reaching new ones (crates/fennec-fuzz/src/cover.rs).
+# std's hash keys are fixed by the binary's own `getrandom` on Linux, which
+# std references weakly, so it binds at the static link: no flag of ours
+# (crates/fennec-fuzz/src/main.rs).
 FUZZ_RUSTFLAGS = -Zsanitizer=address -Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=3 -Cllvm-args=-sanitizer-coverage-inline-8bit-counters
 FUZZ_BIN = $(if $(filter 1,$(ASAN)),target/$(FUZZ_HOST)/fuzz/fennec-fuzz,target/fuzz/fennec-fuzz)
 
@@ -432,13 +511,18 @@ else
 endif
 	@if [ -z "$(TARGET)" ]; then $(FUZZ_BIN) list; else $(FUZZ_BIN) run $(TARGET) $(if $(FUZZ_SECONDS),--seconds $(FUZZ_SECONDS)) $(FUZZ_FLAGS); fi
 
-## Every target of the fuzzer for FUZZ_SECONDS (30) under AddressSanitizer,
-## guided by coverage: CI's fuzz-smoke job. SMOKE_ASAN=0 runs a plain build
+## Every target of the fuzzer for a count of runs its own (`--smoke`, about
+## 30 s each on CI) under AddressSanitizer, guided by coverage, from the
+## repository's seeds alone: CI's fuzz-smoke job. A count, never a time: a
+## commit's smoke hands each the same inputs on any machine of a platform,
+## and ends on the same line; six minutes of CPU time end one failing,
+## named. FUZZ_SECONDS=N runs each that long instead; SMOKE_ASAN=0 a plain
+## build
 SMOKE_ASAN ?= 1
 fuzz-smoke:
 	@$(MAKE) --no-print-directory fuzz ASAN=$(SMOKE_ASAN)
 	@bin=$(if $(filter 1,$(SMOKE_ASAN)),target/$(FUZZ_HOST)/fuzz/fennec-fuzz,target/fuzz/fennec-fuzz); \
-	for t in $$($$bin names); do $$bin run $$t --seconds $(or $(FUZZ_SECONDS),30) $(FUZZ_FLAGS) || exit 1; done
+	for t in $$($$bin names); do $$bin run $$t $(if $(FUZZ_SECONDS),--seconds $(FUZZ_SECONDS),--smoke) --corpus none $(FUZZ_FLAGS) || exit 1; done
 
 ## The tests of fennec-ffi, fennec-abi and fennec-core -- the C ABI an
 ## app's pointers and lengths reach, the file's mapping, the kernels, the
@@ -484,6 +568,17 @@ packages: wasm
 ## One version wherever a release reads it: make version V=0.1.5
 version:
 	@python3 tools/version.py $(or $(V),$(error V=<version> is required))
+
+## A page's database kept in real browsers (web/browser/run.mjs): persist,
+## restore and openFile against the engine's own IndexedDB, WebCrypto and
+## origin private file system, the page reloaded in the middle of a
+## persist's transaction and at each step of a file's flush, a quota
+## passed. BROWSERS="chrome firefox safari" (Chrome alone by default):
+## Chrome and Firefox through puppeteer-core (CHROME_PATH, FIREFOX_PATH),
+## Safari through safaridriver once `sudo safaridriver --enable` allowed it
+browser-test: wasm
+	@if [ "$(BROWSERS)" != safari ]; then cd web/browser && npm ci --no-audit --no-fund --loglevel=error; fi
+	node web/browser/run.mjs $(or $(BROWSERS),chrome)
 
 ## What keeping a database costs a page: IndexedDB (persist) against an
 ## OPFS file (openFile), 32 MB, in a worker of headless Chrome --
@@ -730,9 +825,11 @@ load-bench:
 	$(CARGO) run --release -p fennec-bench --bin load
 
 ## When size comes first: no import, abort instead of panic unwinding.
+## TARGET=x86_64-unknown-linux-musl builds it as CI's build job does, which
+## holds its size to tools/size-budgets.json.
 small:
-	@$(CARGO) build --profile cli -p fennec-cli --no-default-features
-	@echo "target/cli/fennec  $$(wc -c < target/cli/fennec) bytes"
+	@$(CARGO) build --profile cli -p fennec-cli --no-default-features $(if $(TARGET),--target $(TARGET))
+	@f="$${CARGO_TARGET_DIR:-target}/$(if $(TARGET),$(TARGET)/)cli/fennec"; echo "$$f  $$(wc -c < "$$f") bytes"
 
 ## Scale measurement (clustered embedding distribution). --uniform gives
 ## the pathological case.
@@ -952,8 +1049,12 @@ pgvector-up:
 	  sleep 1; done
 	@echo "postgres://postgres:fennec@127.0.0.1:55432/fennecbench"
 
+## Removes the server with its data: the image keeps PostgreSQL's data
+## directory in an anonymous volume, which `--rm` removes with a container
+## that exits, not with one `docker rm` takes running -- without `-v` one
+## was left behind at every up and down, five of them 2.7 GB on one machine.
 pgvector-down:
-	-docker rm -f fennecbench-pg
+	-docker rm -f -v fennecbench-pg
 
 ## TLS on in the server `make pgvector-up` started (PG=<container> another),
 ## with fennec-wire's test certificates -- a CA of their own, `localhost` --
@@ -979,10 +1080,11 @@ pgvector-tls:
 docker:
 	docker build -t fennecdb .
 
-## Starts the container: make docker-run TOKEN=secret
+## Starts the container: make docker-run TOKEN=<32 bytes or more>, such as
+## openssl rand -hex 32 makes: the server listens on 0.0.0.0 inside it.
 ## The memory limit must be at least 3x the data file (compact peak).
 docker-run: docker
-	@test -n "$(TOKEN)" || (echo "token required: make docker-run TOKEN=secret"; exit 1)
+	@test -n "$(TOKEN)" || (echo 'token required, 32 bytes or more: make docker-run TOKEN=$$(openssl rand -hex 32)'; exit 1)
 	docker run -d --name fennecdb --restart unless-stopped \
 	  -p 127.0.0.1:8080:8080 -v fennecdata:/data \
 	  -e FENNEC_HTTP_TOKEN=$(TOKEN) --memory 1g --memory-swap 1g fennecdb
@@ -991,12 +1093,27 @@ docker-run: docker
 ## Compacts the running container's file: what deletes and rewrites left
 ## dead goes, and every graph holding tombstones is built again.
 docker-compact:
-	@test -n "$(TOKEN)" || (echo "token required: make docker-compact TOKEN=secret"; exit 1)
+	@test -n "$(TOKEN)" || (echo "token required: make docker-compact TOKEN=<the container's token>"; exit 1)
 	curl -fsS -H 'Authorization: Bearer $(TOKEN)' -d '{"query": "compact"}' \
 	  http://127.0.0.1:8080/query
 
 docker-down:
 	-docker rm -f fennecdb
+
+## Slow clients against a release fennec-server, bounded and on loopback:
+## 2 x MAX (50) clients for SECS (300) trickling a head, a body, or asking
+## answers and reading none, each cut at its bound (--header-timeout,
+## --write-timeout) and coming back, a refusal waiting its Retry-After,
+## beside one client asking a request every 50 ms on a kept-alive
+## connection, which must see no failure and a p99 under 1 s
+## (tools/slow_client_check.py; docs/design/http.md#slow-clients). The
+## server ends with the script (--exit-on-stdin-close), which is killed on
+## the way out. Run it on a quiet machine: the p99 is a time
+slow-client-check:
+	$(CARGO) build --release -p fennec-server
+	@python3 tools/slow_client_check.py --server target/release/fennec-server \
+	  --max $(or $(MAX),50) --secs $(or $(SECS),300) & pid=$$!; \
+	  trap 'kill $$pid 2>/dev/null' EXIT INT TERM; wait $$pid
 
 ## The "fennecdb data" Grafana dashboards end to end (Docker): monitoring/'s
 ## compose with fennec-server and Grafana's fennecdb-datasource built from this
@@ -1007,14 +1124,15 @@ docker-down:
 ## Grafana's /api/ds/query, through the Infinity data source and through the
 ## plugin, and held to fennec-server's own answer, the plugin's alert rule
 ## evaluated; then down with its volumes, whatever happened
-GRAFANA_CHECK = FENNEC_HTTP_TOKEN=grafana-check FENNEC_METRICS_TOKEN=grafana-check-scrape \
+GRAFANA_CHECK = FENNEC_HTTP_TOKEN=grafana-check-data-token-of-32-bytes \
+	FENNEC_METRICS_TOKEN=grafana-check-scrape-token-of-32-bytes \
 	FENNEC_JWT_SECRET=grafana-check-secret-of-32-bytes-at-least \
 	FENNEC_PORT=0 GRAFANA_PORT=0 PROMETHEUS_PORT=0 \
 	docker compose -p fennec-grafana-check-$$$$ -f monitoring/docker-compose.yml
 grafana-check:
 	@$(GRAFANA_CHECK) up -d --build && \
 	  GRAFANA_URL=http://$$($(GRAFANA_CHECK) port grafana 3000) \
-	  FENNEC_URL=http://$$($(GRAFANA_CHECK) port fennecdb 8080) FENNEC_HTTP_TOKEN=grafana-check \
+	  FENNEC_URL=http://$$($(GRAFANA_CHECK) port fennecdb 8080) FENNEC_HTTP_TOKEN=grafana-check-data-token-of-32-bytes \
 	    sh -c 'node monitoring/grafana/check.mjs && node monitoring/grafana/check-plugin.mjs'; \
 	  status=$$?; \
 	  if [ $$status -ne 0 ]; then $(GRAFANA_CHECK) logs --no-color --tail 60; fi; \
@@ -1336,7 +1454,9 @@ packaging-test:
 ## built before them stop in words at this tree's first record, and this
 ## tree's replica follows a primary from before and its server opens that
 ## primary's file; the cases above run CK_BASE's binaries in this tree's
-## place, a binary from before stopping at the checksum first.
+## place, a binary from before stopping at the checksum first. Then a sealed
+## frame bound to its file: CK_BASE's `fennec restore` and `verify` refuse a
+## backup and an archive this tree sealed, which this tree's read.
 ## Builds BASE -- 12d6f8db^, the last main before the kind, unless given --
 ## OP3_BASE -- b73ce4ca, the last before op 3 -- OP4_BASE -- cd907d6c, the
 ## last before op 4 -- OP6_BASE -- 6fb28002, the last before op 6 -- and

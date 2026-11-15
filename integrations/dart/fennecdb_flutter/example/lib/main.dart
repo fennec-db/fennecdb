@@ -2,7 +2,8 @@
 // is a live query, run again after each write, and the writes are the
 // builder's. The Dart tab of site/content/docs/mobile.html, as it is
 // written there. The platform projects come from `flutter create .` here;
-// CI makes them and builds the app for Android and the iOS simulator.
+// CI makes them and builds the app for Android, and for the iOS simulator
+// and macOS on the plugin packed as pub.dev gets it.
 import 'package:fennecdb_flutter/fennecdb_flutter.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:path_provider/path_provider.dart';

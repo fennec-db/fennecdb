@@ -1407,6 +1407,20 @@ impl Rec<'_> {
     }
 }
 
+/// A record naming a collection id no create gives: one past `u32`, which
+/// `as u32` read as its low bits -- another collection's id -- or the last
+/// `u32`, past which the next id has nowhere to go
+/// ([`Database::create_collection`] gives every id below it). Taken, an
+/// open's and a replica's `cid + 1` overflowed (the fuzzer's `image`
+/// target).
+#[cold]
+#[inline(never)]
+fn unmade_collection(cid: u64) -> Error {
+    Error::Corrupt(format!(
+        "a record names collection {cid}, an id no create gives"
+    ))
+}
+
 /// The record at `*pos` -- `[kind][collection][length][body]`, its claim
 /// and sum after the body where its kind's high bit says, or the counter's
 /// fixed-width head -- and `*pos` moved past it: the one place a head is
@@ -1430,7 +1444,10 @@ fn record_at<'a>(bytes: &'a [u8], pos: &mut usize) -> Result<Rec<'a>> {
         });
     }
     let mut p = at + 1;
-    let cid = get_uvarint(bytes, &mut p)? as u32;
+    let cid = match get_uvarint(bytes, &mut p)? {
+        c if c < u32::MAX as u64 => c as u32,
+        c => return Err(unmade_collection(c)),
+    };
     let len = get_uvarint(bytes, &mut p)? as usize;
     let all = bytes
         .get(p..p.saturating_add(len))
@@ -1889,6 +1906,13 @@ impl Block {
 /// Zeros from a head to the end are a torn tail too, when [`zero_tail`]
 /// says they start there; any other zero head is refused. Judged only once
 /// a head reads as no kind: a walk's known records pay nothing.
+///
+/// A head naming a collection no create gives ([`unmade_collection`]) is
+/// refused here too, once its length fits, so that a walk
+/// [`Walk::stopping`] judges it as a head no record reads from: stale
+/// bytes past the durable point read as one (`0a ff ff ff ff 0f 05`), and
+/// refused by [`record_at`] after this said whole, an open refused what a
+/// version before cut. One cut short is a torn tail whatever it names.
 fn whole_record(bytes: &[u8], at: usize, edge: usize) -> Result<bool> {
     let kind = bytes[at];
     if !known(kind) {
@@ -1899,16 +1923,23 @@ fn whole_record(bytes: &[u8], at: usize, edge: usize) -> Result<bool> {
         };
     }
     let mut pos = at + 1;
-    let mut len = 0;
     // The collection's id, then the body's length.
-    for _ in 0..2 {
-        len = match get_uvarint(bytes, &mut pos) {
+    let mut head = [0u64; 2];
+    for v in &mut head {
+        *v = match get_uvarint(bytes, &mut pos) {
             Ok(v) => v,
             Err(_) if pos >= bytes.len() => return Ok(false),
             Err(e) => return Err(e),
         };
     }
-    Ok(len <= (bytes.len() - pos) as u64)
+    let [cid, len] = head;
+    if len > (bytes.len() - pos) as u64 {
+        return Ok(false);
+    }
+    if cid >= u32::MAX as u64 {
+        return Err(unmade_collection(cid));
+    }
+    Ok(true)
 }
 
 /// Whether `byte`, a record's first, is a kind this version reads with a
@@ -1992,7 +2023,9 @@ fn head_at(bytes: &[u8], at: usize, any: bool) -> Head {
         kind,
         REC_BLOCK | REC_SPILL | REC_LAND | REC_HISTORY | REC_STATEMENT | REC_SYNCED
     );
-    if cid > u32::MAX as u64
+    // An id no create gives, the last `u32` among them, as the walk reads
+    // it ([`whole_record`]).
+    if cid >= u32::MAX as u64
         || (none && cid != 0)
         || len < trailer
         || (kind == REC_SYNCED && len != trailer)
@@ -10160,6 +10193,91 @@ impl Database {
             .find_map(|f| f.index.ttl().map(|ttl| (f.name.as_str(), ttl)))
     }
 
+    /// Where a write finds a row of a collection with `schema` past its
+    /// time: the `@ttl` field's position, and now less the ttl, at or
+    /// before which the field puts a row past it. `None` for a collection
+    /// whose rows do not expire, and without a clock -- the browser module
+    /// handed none -- where no row is past its time for a write.
+    fn expiry_in(&self, schema: &Schema) -> Option<(usize, i64)> {
+        let (at, ttl) = schema
+            .fields
+            .iter()
+            .enumerate()
+            .find_map(|(i, f)| f.index.ttl().map(|ttl| (i, ttl)))?;
+        let now = self.now().ok()?;
+        Some((at, now.saturating_sub(ttl.min(i64::MAX as u64) as i64)))
+    }
+
+    /// Lets go of each row past its time (`@ttl`) at `cut`
+    /// ([`Self::expiry_in`]) holding one of `doc`'s `@unique` values: out of
+    /// every read, such a row is out of a write's way, and its value with
+    /// it. A `put` asks before its clash, a `set` and an upsert's `else
+    /// set` once they meet one: held, a lock taken and left to expire
+    /// stayed held until the sweeper came by, up to a minute later, and a
+    /// `set` taking its value was refused, naming a row no read shows
+    /// (`tests/model.rs`). The row `doc` writes is never among them
+    /// (`unique_holders`): a reaper's `set` of a row past its time sets
+    /// it, one write. `waiting`: a `put`'s documents whose vectors wait for
+    /// its batch, and whether a preparation keeps them
+    /// ([`Self::link_written`]).
+    fn let_go_expired(
+        &mut self,
+        collection: &str,
+        schema: &Schema,
+        doc: &Document,
+        cut: (usize, i64),
+        hooks: &[Arc<dyn crate::plugin::Hook>],
+        waiting: Option<(&mut Vec<Document>, bool)>,
+    ) -> Result<()> {
+        let c = &self.collections[collection];
+        let mut gone = Vec::new();
+        for (_, other) in c.unique_holders(doc)? {
+            if expired(c, other, cut)? {
+                gone.push(other);
+            }
+        }
+        // A row the same `put` wrote has its vector waiting in the batch,
+        // not in the graph: the batch is linked first, so the row takes its
+        // vector out with it as any row does. Left waiting, it was linked
+        // as the statement ended, for a row gone -- answered by `near`, and
+        // by `exact`, once the id held a row again -- where a replica's
+        // apply, linking its batch before a frame naming an id it holds
+        // (`VectorBatch`), had none (`tests/model.rs`). Asked of every
+        // document a `put` writes into a collection keeping `@unique` and
+        // `@ttl`, so a row going and the graph are asked before the batch's
+        // first document is read: the order `put_with` measured the cheaper
+        // where a document writes over a row.
+        if let Some((written, prepared)) = waiting {
+            let ours = |w: &Document| gone.iter().any(|&d| c.store.wrote_after(w.id, d));
+            if !gone.is_empty() && !c.vectors.is_empty() && written.first().is_some_and(ours) {
+                self.link_written(collection, written, prepared);
+            }
+        }
+        for other in gone {
+            self.erase(collection, schema, (other, false), hooks)?;
+        }
+        Ok(())
+    }
+
+    /// The vectors of the documents a `put` wrote so far linked now, ahead
+    /// of its end ([`Self::index_written`]), and the documents let go of --
+    /// or kept by the preparation they came from, `prepared` -- as at its
+    /// end: a document is about to write over one of their rows, take one
+    /// out, or set a row as an upsert. Out of line: a `put` comes here only
+    /// where a document meets a row an earlier one wrote, or upserts.
+    #[cold]
+    #[inline(never)]
+    fn link_written(&mut self, collection: &str, written: &mut Vec<Document>, prepared: bool) {
+        self.index_written(collection, written);
+        #[cfg(not(target_arch = "wasm32"))]
+        match prepared {
+            true => self.preparation.spend(written),
+            false => written.clear(),
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = prepared;
+    }
+
     /// The test a row of `collection` passes while it lives, at the time a
     /// read is answered (`@ttl`): `not (field <= now - ttl)`, so a row whose
     /// field is null -- which has no time to expire from -- lives, and none
@@ -10271,7 +10389,15 @@ impl Database {
             }
             return Err(Error::Exists(format!("collection `{}`", schema.name)));
         }
+        // Every id below the last `u32`, which an open refuses
+        // (`unmade_collection`): reached only from a file naming an id near
+        // it, where `+= 1` overflowed, or wrapped to 0 in a release build.
         let cid = self.next_coll_id;
+        if cid == u32::MAX {
+            return Err(Error::Query(
+                "no collection id is left in this file: it gave every one".into(),
+            ));
+        }
         self.next_coll_id += 1;
         let name = schema.name.clone();
         self.wal(REC_CREATE, cid, &schema.encode())?;
@@ -10629,6 +10755,11 @@ impl Database {
     fn document_of(schema: &Schema, members: &[(String, Value)]) -> Result<Document> {
         let mut doc = Document::default();
         for (k, v) in members {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(held) = held_member(schema, k, v) {
+                doc.set(k, held);
+                continue;
+            }
             doc_field(schema, &mut doc, k, v.clone())?;
         }
         doc_done(schema, doc)
@@ -10770,39 +10901,38 @@ impl Database {
         // `insert` and left to expire stayed held until the sweeper came
         // by, up to a minute later.
         let unique = schema.has_unique();
-        // Without a clock -- the browser module handed none -- no row is
-        // past its time for a write, as before. A write waking a binding
-        // asks too: a `put` over an expired row makes one, as every read
-        // saw it gone, and a binding is told what every read saw.
-        let expiry = match (insert || unique || wake)
-            .then(|| self.ttl_of(collection))
-            .flatten()
-        {
-            Some((f, ttl)) => self.now().ok().map(|now| {
-                let cut = now.saturating_sub(ttl.min(i64::MAX as u64) as i64);
-                (schema.field_pos(f).unwrap_or(0), cut)
-            }),
-            None => None,
+        // A write waking a binding asks too: a `put` over an expired row
+        // makes one, as every read saw it gone, and a binding is told what
+        // every read saw.
+        let expiry = match insert || unique || wake {
+            true => self.expiry_in(&schema),
+            false => None,
         };
 
         let mut n = 0usize;
+        // The documents written, whose vectors wait to be linked as a batch
+        // ([`Self::index_written`]). A row whose record lies at or past the
+        // first one's is one of theirs ([`Store::wrote_after`]): a write
+        // over it or taking it out links them first ([`Self::link_written`]).
+        // Asked of that first document's record, a `put` holds nothing more
+        // across its documents: a lone `put` over REST is 4 instructions of
+        // the program's own more than before any batch was linked first,
+        // and a `put` of 100 documents writing over rows 685, where the
+        // store's mark held from the batch's start -- seven words -- and
+        // whether the collection keeps a graph made them 10 and 983.
         let mut written: Vec<Document> = Vec::with_capacity(built.len());
+        #[cfg(not(target_arch = "wasm32"))]
+        let prepared = ready.is_some();
+        #[cfg(target_arch = "wasm32")]
+        let prepared = false;
         for (i, mut doc) in built.into_iter().enumerate() {
             #[cfg(target_arch = "wasm32")]
             let _ = i;
             if let (Some(cut), true) = (expiry, unique) {
-                let c = &self.collections[collection];
-                let mut gone = Vec::new();
-                for (_, other) in c.unique_holders(&doc)? {
-                    if expired(c, other, cut)? {
-                        gone.push(other);
-                    }
-                }
-                for other in gone {
-                    self.erase(collection, &schema, (other, false), hooks)?;
-                }
+                let waiting = Some((&mut written, prepared));
+                self.let_go_expired(collection, &schema, &doc, cut, hooks, waiting)?;
             }
-            let c = self.collections.get_mut(collection).unwrap();
+            let mut c = self.collections.get_mut(collection).unwrap();
             let mark = c.store.mark();
             // The row an upsert sets rather than the document written.
             let mut held = None;
@@ -10907,6 +11037,23 @@ impl Database {
                 if held.is_none() {
                     // Drop the old index entries when overwriting.
                     if let Some(old) = &old {
+                        // A row this statement wrote has its vector waiting
+                        // in `written`, not in the graph: the batch is
+                        // linked first, as an upsert links it below and a
+                        // replica's apply does an id met twice, so the old
+                        // vector leaves the graph here. Left waiting, it
+                        // was linked as the statement ended, over a row
+                        // holding another vector or none, and `near` found
+                        // it (`tests/model.rs`). Two looks at the offset
+                        // index a row written over, and only beside a graph
+                        // and a batch, the graph asked first: reading the
+                        // batch's first document first cost a `put` of 100
+                        // documents writing over rows 195 instructions more.
+                        let ours = |w: &Document| c.store.wrote_after(w.id, doc.id);
+                        if !c.vectors.is_empty() && written.first().is_some_and(ours) {
+                            self.link_written(collection, &mut written, prepared);
+                            c = self.collections.get_mut(collection).unwrap();
+                        }
                         c.unindex_doc(old, Some(&doc));
                     }
                     #[cfg(not(target_arch = "wasm32"))]
@@ -10973,12 +11120,7 @@ impl Database {
                 continue;
             };
             if !written.is_empty() {
-                self.index_written(collection, &mut written);
-                #[cfg(not(target_arch = "wasm32"))]
-                match ready {
-                    Some(_) => self.preparation.spend(&mut written),
-                    None => written.clear(),
-                }
+                self.link_written(collection, &mut written, prepared);
             }
             if self.set_row(
                 collection,
@@ -12177,7 +12319,7 @@ impl Database {
                 ))
             })
         })?;
-        let qv = near_vector(eval(&near.vector, &mut NoRow, ctx)?)?;
+        let qv = near_vector(eval(&near.vector, &mut NoRow, ctx)?, &near.field)?;
         if qv.len() != ix.dim {
             return Err(Error::Type(format!(
                 "the query vector must have {} dimensions, got {}",
@@ -12250,7 +12392,7 @@ impl Database {
         ctx: &EvalCtx,
     ) -> Result<Vec<(DocId, f32)>> {
         use crate::schema::Quant;
-        let qv = near_vector(eval(&near.vector, &mut NoRow, ctx)?)?;
+        let qv = near_vector(eval(&near.vector, &mut NoRow, ctx)?, &near.field)?;
         if qv.len() != dim {
             return Err(Error::Type(format!(
                 "the query vector must have {dim} dimensions, got {}",
@@ -12763,7 +12905,7 @@ impl Database {
             IndexKind::Vector(spec) => spec.metric,
             _ => Metric::Cosine,
         };
-        let qv = near_vector(eval(&rr.vector, &mut NoRow, ctx)?)?;
+        let qv = near_vector(eval(&rr.vector, &mut NoRow, ctx)?, &rr.field)?;
         if qv.len() != dim {
             return Err(Error::Type(format!(
                 "the rerank vector must have {dim} dimensions, got {}",
@@ -14533,8 +14675,26 @@ impl Database {
             h.before_overwrite(schema, &old, &doc)?;
         }
         // An update makes a duplicate as a put does: `set email = "a"`
-        // over two documents is refused at the second.
-        c.unique_clash(&doc)?;
+        // over two documents is refused at the second. A value rows past
+        // their time hold is let go of with them, as a `put`'s is
+        // ([`Self::let_go_expired`]), asked once a clash is found: a `set`
+        // meeting none pays nothing for it -- asked of every statement, it
+        // was 29 instructions of a set by id over REST.
+        let c = match c.unique_clash(&doc) {
+            Err(Error::Duplicate(why)) => match self.expiry_in(schema) {
+                // A `set` indexes its vector as it writes: nothing waits.
+                // In an upsert, `None` is right only because its `put`
+                // links the batch before it calls here.
+                Some(cut) => {
+                    self.let_go_expired(collection, schema, &doc, cut, hooks, None)?;
+                    let c = self.collections.get_mut(collection).unwrap();
+                    c.unique_clash(&doc)?;
+                    c
+                }
+                None => return Err(Error::Duplicate(why)),
+            },
+            r => r.map(|_| c)?,
+        };
         // Remembered before the row leaves the indexes ([`Block::remember`]).
         if let Some(b) = &mut self.block {
             b.remember(cid, id, c.store.loc(id), c.store.mark());
@@ -15834,7 +15994,31 @@ fn build_docs(
     for pairs in docs {
         let mut doc = Document::default();
         for (k, e) in pairs {
-            doc_field(schema, &mut doc, k, eval(e, &mut NoRow, ctx)?)?;
+            // A literal's or a parameter's value read where it is, as `eval`
+            // reads it, without its call: a vector a vector field takes is
+            // copied into the document with its test in the copy
+            // (`held_member`), where `eval` cloned it and `coerce` read it
+            // again. Natively: the browser module keeps the one way.
+            #[cfg(not(target_arch = "wasm32"))]
+            let given = match e {
+                Expr::Lit(v) => Some(v),
+                Expr::Param(i) => ctx.params.get(*i),
+                _ => None,
+            };
+            #[cfg(not(target_arch = "wasm32"))]
+            let v = match given {
+                Some(v) => match held_member(schema, k, v) {
+                    Some(held) => {
+                        doc.set(k, held);
+                        continue;
+                    }
+                    None => v.clone(),
+                },
+                None => eval(e, &mut NoRow, ctx)?,
+            };
+            #[cfg(target_arch = "wasm32")]
+            let v = eval(e, &mut NoRow, ctx)?;
+            doc_field(schema, &mut doc, k, v)?;
         }
         built.push(doc_done(schema, doc)?);
     }
@@ -15846,6 +16030,31 @@ fn build_docs(
         }
     }
     Ok(())
+}
+
+/// The value `set_field` makes of `v` for the field `k`, where `v` is a
+/// vector a vector field of its length takes and each of its components is
+/// one the field holds: copied, its components tested in the copy
+/// (`value::held_copy`). A 768-dim vector's copy and test so are 425
+/// instructions on aarch64, where the clone's `memmove` alone was 590, and
+/// 978 on x86-64, where the test alone was 6 150
+/// (docs/design/crates.md#limits, *What it costs*). `None` for any other --
+/// another kind of value, a field of another type or length, `id` and a
+/// path (no field is named either), a component the field does not hold --
+/// which `set_field` makes, or refuses naming the element, as it makes
+/// every value.
+#[cfg(not(target_arch = "wasm32"))]
+#[inline]
+fn held_member(schema: &Schema, k: &str, v: &Value) -> Option<Value> {
+    let Value::Vector(src) = v else {
+        return None;
+    };
+    match schema.field(k)?.ty {
+        DataType::Vector(dim, prec) if dim == src.len() => {
+            crate::value::held_copy(src, prec).map(Value::Vector)
+        }
+        _ => None,
+    }
 }
 
 /// A document being put with every field it was not given `null`, or
@@ -18417,22 +18626,62 @@ fn order_rows(flat: &[Value], n: usize, count: usize, keys: &[OrderKey], k: usiz
     idx
 }
 
-/// The query vector of `near`. Three forms are accepted, none of them
+/// The query vector of `near` or `rerank` over `field`, each component a
+/// number an `f32` holds, as a vector field takes one
+/// ([`crate::value::held`]): `1e39`, read as an `f32`'s infinity, or a
+/// `NaN` handed over as bits, made every distance an infinity or a `NaN`,
+/// which ranked the rows as their bits fell. A vector a row holds is
+/// measured as it is (`near` ranks the rows of a file an earlier build
+/// wrote one into).
+fn near_vector(v: Value, field: &str) -> Result<Vec<f32>> {
+    let v = near_floats(v)?;
+    match crate::value::held(&v, VecPrec::F32) {
+        true => Ok(v),
+        false => Err(query_unheld(&v, field)),
+    }
+}
+
+/// [`crate::value::unheld`]'s refusal of a query vector, its field named:
+/// "the query vector for `embed`, element 3: a vector's component is ...".
+/// Out of line, on the refusal alone.
+#[cold]
+#[inline(never)]
+fn query_unheld(v: &[f32], field: &str) -> Error {
+    match crate::value::unheld(v, VecPrec::F32) {
+        Error::Type(m) => Error::Type(crate::declared::cat(&[
+            "the query vector for `",
+            field,
+            "`, ",
+            &m,
+        ])),
+        e => e,
+    }
+}
+
+/// The query vector's `f32`s. Three forms are accepted, none of them
 /// silently mangled.
 ///
 /// The text form (`near embed '[1,2,3]'`) is pgvector's notation, and a
 /// string is what most clients send. On the parameter path the same
 /// value was already parsed into a list; on the literal path it stayed
 /// `text` and raised a type error.
-fn near_vector(v: Value) -> Result<Vec<f32>> {
+fn near_floats(v: Value) -> Result<Vec<f32>> {
     let items = match v {
         Value::Vector(v) => return Ok(v),
         Value::List(items) => items,
-        Value::Text(s) => match crate::json::parse(s.trim()) {
+        // Untrimmed: the reader steps over the spaces `trim` would, and a
+        // refusal's byte is then the text's as written.
+        Value::Text(s) => match crate::json::parse(&s) {
             // The JSON parser already reduces a numeric array to a vector;
             // a mixed array comes back as a list and is checked below.
             Ok(Value::Vector(v)) => return Ok(v),
             Ok(Value::List(items)) => items,
+            // A number past a float's range, named in the range's words as
+            // every reader names one (`num::past_range`), never "unparseable
+            // text": the text is a vector's, one of its numbers no float.
+            Err(Error::Query(m)) if crate::num::past_range(&m) => {
+                return Err(Error::Type(format!("the near vector: {m}")))
+            }
             _ => {
                 return Err(Error::Type(format!(
                     "near expects a vector, unparseable text: {s}"

@@ -34,6 +34,8 @@ import {
   type Sparse,
   type Statements,
   type Timestamp,
+  type TokenRefusal,
+  type TokenWait,
   type TypedCall,
   type TypedFrom,
   type Vector,
@@ -400,11 +402,64 @@ export async function remote() {
 
   const replica = await sync<Schema>({ url: 'http://127.0.0.1:8080', shapes: [{ collection: 'articles' }] });
   await replica.from('articles').where('year', 2024).rows();
+  // Handed why it is asked: a fresh token from the issuer at every 401,
+  // forced at an expiry; a provider asking nothing, as before, still takes.
+  const refresh = async (force: boolean) => (force ? 'forced' : 'fresh');
+  await sync<Schema>({
+    url: 'http://127.0.0.1:8080',
+    token: 'first',
+    shapes: [{ collection: 'articles' }],
+    persist: 'articles:user-1',
+    tokenProvider: async ({ expired, hadToken, attempt, errorCode }) => {
+      expect<boolean>(expired);
+      expect<boolean>(hadToken);
+      expect<number>(attempt);
+      expect<string | null>(errorCode);
+      return refresh(expired);
+    },
+  });
+  await sync<Schema>({ url: 'http://127.0.0.1:8080', shapes: [{ collection: 'articles' }], tokenProvider: () => 'fresh' });
+  const asked = (r: TokenRefusal) => (r.errorCode === 'token_expired' ? 'refreshed' : 'fresh');
+  await sync<Schema>({ url: 'http://127.0.0.1:8080', shapes: [{ collection: 'articles' }], tokenProvider: asked });
+  // @ts-expect-error -- a provider is handed a TokenRefusal, never a boolean
+  void sync<Schema>({ url: 'http://127.0.0.1:8080', shapes: [{ collection: 'articles' }], tokenProvider: (expired: boolean) => String(expired) });
+  // @ts-expect-error -- nor a token's text
+  void sync<Schema>({ url: 'http://127.0.0.1:8080', shapes: [{ collection: 'articles' }], tokenProvider: (t: string) => t });
+  void sync<Schema>({
+    url: 'http://127.0.0.1:8080',
+    shapes: [{ collection: 'articles' }],
+    tokenProvider: (r) => {
+      // @ts-expect-error -- read-only: what the server said is not the provider's to change
+      r.attempt = 1;
+      return 'fresh';
+    },
+  });
+  const code: string | null = replica.status()[0].errorCode;
+  expect<string | null>(code);
+  // The token the sync waits on: where its ask stands, and the refusal the
+  // provider was handed -- for an app that hands its tokens over with
+  // `setToken`, which it does at `asked`.
+  const waiting: TokenWait | null = replica.status()[0].token;
+  if (waiting?.stage === 'asked') replica.setToken(asked(waiting.refusal));
+  if (waiting && waiting.refusal.attempt > 1) expect<boolean>(waiting.refusal.hadToken);
+  const stage: 'delayed' | 'asked' | 'failed' | undefined = waiting?.stage;
+  expect<'delayed' | 'asked' | 'failed' | undefined>(stage);
+  // @ts-expect-error -- a stage the status never says
+  if (waiting?.stage === 'waiting') expect<never>(waiting);
+  // @ts-expect-error -- read-only, as the provider's is
+  if (waiting) waiting.stage = 'asked';
+  // @ts-expect-error -- read-only, as the provider's is
+  if (waiting) waiting.refusal.attempt = 1;
+  // @ts-expect-error -- the refusal is the token's, no member of the status's own
+  void replica.status()[0].tokenRefusal;
+  // @ts-expect-error -- the status's code is `errorCode`, as every SDK names the server's
+  void replica.status()[0].code;
 
   try {
     await http.rows('get nothing');
   } catch (e) {
     if (e instanceof FennecError) expect<string>(e.message);
+    if (e instanceof FennecError && e.status === 401 && e.errorCode === 'token_expired') expect<string>(e.errorCode);
   }
 
   // Live queries over the server: a builder query knows what it reads, a

@@ -19,10 +19,11 @@ dev_dependencies:
     sdk: flutter
 
 # An FFI plugin: no platform channel, the Dart side calls the library
-# itself. Each platform's project only carries the library -- the
-# dynamic XCFramework (FennecFFI.framework) on iOS and macOS, a .so for each ABI on Android -- which
-# prepare.sh puts there from the builds of integrations/swift and
-# integrations/kotlin.
+# itself. Each platform's project only carries its own library -- the
+# dynamic XCFramework's FennecFFI.framework for the device and the
+# simulator on iOS, libfennec_ffi.dylib on macOS, a .so for each ABI on
+# Android -- which prepare.sh puts there from the builds of
+# integrations/swift and integrations/kotlin.
 flutter:
   plugin:
     platforms:

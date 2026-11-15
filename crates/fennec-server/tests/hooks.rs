@@ -54,8 +54,7 @@ fn file(tag: &str, name: &str, text: &[u8]) -> String {
     path.to_str().unwrap().to_string()
 }
 
-/// A hooks file naming `stripe`, `stripe_test`, `github` (keyed by its
-/// body), `delivered` (GitHub's, keyed by its delivery) and `standard`,
+/// A hooks file naming `stripe`, `stripe_test`, `github` and `standard`,
 /// each secret in a file of its own, and the lines `more` beside them.
 fn hooks_file(tag: &str, more: &str) -> String {
     let stripe = file(tag, "stripe.whsec", STRIPE_SECRET.as_bytes());
@@ -78,7 +77,6 @@ fn hooks_file(tag: &str, more: &str) -> String {
              stripe       stripe    {stripe}   tolerance 5m\n\
              stripe_test  stripe    {test}\n\
              github       github    {github}\n\
-             delivered    github    {github}   key delivery\n\
              standard     standard  {standard}\n\
              {more}"
         )
@@ -446,61 +444,57 @@ fn two_events_for_one_intent_and_two_statements_for_one_event() {
     assert_eq!(column(&ledger, "what"), ["booked", "receipt", "receipt"]);
 }
 
-/// GitHub's key: under `key body` a delivery sent again under another
-/// `X-GitHub-Delivery` is answered from its key, and two dispatches of one
-/// payload are one event; under `key delivery` the two dispatches are
-/// taken twice, and a redelivery under its GUID answered from it.
+/// GitHub's key is its body's digest, which its signature covers, never
+/// `X-GitHub-Delivery`, which it does not: a delivery sent again under
+/// another GUID -- a captured one, or a payload dispatched twice, which
+/// nothing signed tells apart -- is answered from its key and runs once,
+/// as it is with no GUID or under another `X-GitHub-Event`. `key delivery`
+/// is refused at the start (`a_hooks_file_is_refused_at_the_start`).
 /// `hook.event` is `X-GitHub-Event`.
 #[test]
-fn github_keys_its_events_by_body_or_by_delivery() {
+fn a_github_event_replayed_under_a_new_delivery_runs_once() {
     let (server, _) = serve("github", &[]);
     let mut http = server.http().with_token(ROOT);
-    http.run("create collection pushes (via text, kind text, sha text)");
-    for hook in ["github", "delivered"] {
-        http.run(&format!(
-            "create statement {hook}_push($kind text from hook.event, $sha text from \
-             event.sha) on hook {hook} where hook.event = 'push' as insert pushes {{via: \
-             '{hook}', kind: $kind, sha: $sha}}"
-        ));
-    }
+    http.run("create collection pushes (kind text, sha text)");
+    http.run(
+        "create statement github_push($kind text from hook.event, $sha text from event.sha) \
+         on hook github where hook.event = 'push' or hook.event = 'issues' as insert pushes \
+         {kind: $kind, sha: $sha}",
+    );
     let body = r#"{"ref":"refs/heads/main","sha":"abc123"}"#;
     let sig = format!(
         "sha256={}",
         hex(&hmac_sha256(GITHUB_SECRET.as_bytes(), body.as_bytes()))
     );
-    let deliver = |hook: &str, guid: &str| {
-        send(
-            &server,
-            hook,
-            &[
-                ("X-Hub-Signature-256", &sig),
-                ("X-GitHub-Event", "push"),
-                ("X-GitHub-Delivery", guid),
-            ],
-            body,
-        )
+    let deliver = |event: &str, guid: Option<&str>| {
+        let mut headers = vec![
+            ("X-Hub-Signature-256", sig.as_str()),
+            ("X-GitHub-Event", event),
+        ];
+        headers.extend(guid.map(|g| ("X-GitHub-Delivery", g)));
+        send(&server, "github", &headers, body)
     };
     let digest = hex(&sha256(body.as_bytes()));
-    let a = deliver("github", "guid-1");
+    let a = deliver("push", Some("guid-1"));
     assert_eq!(a.status, 200, "{}", a.body);
     assert_eq!(a.body, format!(r#"{{"event":"{digest}","taken":1}}"#));
-    let b = deliver("github", "guid-2");
-    assert_eq!(
-        (b.status, b.header("Idempotent-Replayed")),
-        (200, Some("true"))
-    );
-    let c = deliver("delivered", "guid-1");
-    assert_eq!(c.body, r#"{"event":"guid-1","taken":1}"#);
-    let d = deliver("delivered", "guid-2");
-    assert_eq!(d.body, r#"{"event":"guid-2","taken":1}"#);
-    let e = deliver("delivered", "guid-2");
-    assert_eq!(e.header("Idempotent-Replayed"), Some("true"));
-    let rows = http.run("get pushes select via, kind order via");
-    assert_eq!(column(&rows, "via"), ["delivered", "delivered", "github"]);
-    assert_eq!(column(&rows, "kind"), ["push", "push", "push"]);
-    let missing = send(&server, "delivered", &[("X-Hub-Signature-256", &sig)], body);
-    assert_eq!(missing.status, 400, "{}", missing.body);
-    assert!(missing.body.contains("X-GitHub-Delivery"));
+    for (event, guid) in [
+        ("push", Some("guid-2")),
+        ("push", Some("guid-1")),
+        ("issues", Some("guid-3")),
+        ("push", None),
+    ] {
+        let again = deliver(event, guid);
+        assert_eq!(
+            (again.status, again.header("Idempotent-Replayed")),
+            (200, Some("true")),
+            "{event} {guid:?}: {}",
+            again.body
+        );
+        assert_eq!(again.body, a.body, "answered as the first taking was");
+    }
+    let rows = http.run("get pushes select kind, sha");
+    assert_eq!(column(&rows, "kind"), ["push"]);
 }
 
 /// A Standard Webhooks sender's event, keyed by its `webhook-id`, with
@@ -700,7 +694,11 @@ fn a_hooks_file_is_refused_at_the_start() {
             format!("a stripe {secret}\na stripe {secret}"),
             "named twice",
         ),
-        (format!("a stripe {secret} key delivery"), "`github` hook's"),
+        (format!("a stripe {secret} key body"), "`github` hook's"),
+        (
+            format!("a github {secret} key delivery"),
+            "does not sign X-GitHub-Delivery",
+        ),
         (
             format!("a stripe {secret} tolerance 1h keep 2h"),
             "1d at least",
@@ -1315,4 +1313,107 @@ fn what_watches_a_hook_lists_counts_logs_and_describes_it() {
     }
     assert!(slow[0].contains(r#"],1]]]"#), "{}", slow[0]);
     assert!(slow[1].contains(r#"],0]]]"#), "{}", slow[1]);
+}
+
+/// A hook's secret shorter than 32 bytes -- GitHub's, which a person
+/// chooses; Stripe's test fixtures here -- is taken, and warned of: at the
+/// start where `--http` is past loopback, naming the hook and never the
+/// secret, a `standard` one of 24 bytes of key, 38 as its sender shows it,
+/// not named; on loopback once a request comes through a proxy, beside a
+/// short token.
+#[test]
+fn a_short_secret_is_warned_of_and_taken() {
+    const PAST: &str = "is shorter than 32 bytes, and --http is past loopback";
+    let path = tmp("short-secret", "data.fennec");
+    let hooks = hooks_file("short-secret", "");
+    let long = "t".repeat(32);
+    // Past loopback, here an address of the documentation's no machine
+    // holds: the start goes on past the warning to its listener, which the
+    // system refuses -- or binds, unreached, where it binds addresses it
+    // does not hold.
+    let args = [
+        "--file",
+        path.to_str().unwrap(),
+        "--hooks",
+        &hooks,
+        "--http",
+        "192.0.2.1:0",
+        "--http-token",
+        &long,
+    ];
+    let log = match try_start(&args) {
+        Ok(server) => server.log.lock().unwrap().clone(),
+        Err(log) => log,
+    };
+    for hook in ["stripe", "stripe_test", "github"] {
+        assert!(
+            log.contains(&format!("warning: hook `{hook}`'s secret {PAST}")),
+            "{hook}: {log}"
+        );
+    }
+    assert!(!log.contains("hook `standard`'s secret"), "{log}");
+    assert!(!log.contains(GITHUB_SECRET), "a secret in the log: {log}");
+
+    // On loopback, nothing said at the start; a request through a proxy
+    // names the short ones, the server's token among them.
+    let (mut server, _) = serve("short-secret-proxied", &[]);
+    let mut http = server.http().with_token(ROOT);
+    let through = http.ask_with("GET", "/_schema", "", &[("X-Forwarded-For", "203.0.113.9")]);
+    assert_eq!(through.status, 200, "{}", through.body);
+    ask_to_stop(&mut server.child);
+    let (_, log) = server
+        .exited(Duration::from_secs(30))
+        .expect("the server went on");
+    assert!(!log.contains(PAST), "{log}");
+    let line = (log.lines())
+        .find(|l| l.contains("warning: a request came through a proxy"))
+        .unwrap_or_else(|| panic!("{log}"));
+    assert!(
+        line.contains("--http-token (FENNEC_HTTP_TOKEN), hook `stripe`'s secret")
+            && line.contains("hook `github`'s secret are shorter than 32 bytes")
+            && !line.contains("`standard`"),
+        "{line}"
+    );
+}
+
+/// A tenant's secret shorter than 32 bytes, set through the node's `PUT`
+/// of one hook or of its whole set (a router copying it onto a copy), is
+/// taken and said in the node's log, naming the tenant and the hook and
+/// never the secret; one of 32 bytes is not.
+#[test]
+fn a_tenants_short_secret_is_said_as_it_is_set() {
+    let dir = tmp("short-tenant-secret", "node");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut server = start(&["--dir", dir.to_str().unwrap(), "--admin-token", "adm"]);
+    let mut admin = server.http().with_token("adm");
+    assert_eq!(admin.ask("PUT", "/_admin/tenants/acme", "").status, 201);
+    let hook = |secret: &str| format!(r#"{{"scheme":"github","secrets":["{secret}"]}}"#);
+    let long = "g".repeat(32);
+    for (name, secret) in [("chosen", GITHUB_SECRET), ("made", long.as_str())] {
+        let set = admin.ask(
+            "PUT",
+            &format!("/_admin/tenants/acme/hooks/{name}"),
+            &hook(secret),
+        );
+        assert_eq!(set.status, 200, "{name}: {}", set.body);
+    }
+    let whole = format!(
+        r#"{{"version":"00000000000000a1","hooks":{{"copied":{{"scheme":"github","secrets":["{GITHUB_SECRET}"],"set":1}}}}}}"#
+    );
+    let set = admin.ask("PUT", "/_admin/tenants/acme/hook-secrets", &whole);
+    assert_eq!(set.status, 200, "{}", set.body);
+    ask_to_stop(&mut server.child);
+    let (_, log) = server
+        .exited(Duration::from_secs(30))
+        .expect("the server went on");
+    for name in ["chosen", "copied"] {
+        assert!(
+            log.contains(&format!(
+                "warning: tenant `acme`'s hook `{name}` was set with a secret shorter than 32 bytes"
+            )),
+            "{name}: {log}"
+        );
+    }
+    assert!(!log.contains("hook `made` was set"), "{log}");
+    assert!(!log.contains(GITHUB_SECRET), "a secret in the log: {log}");
 }

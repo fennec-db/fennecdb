@@ -24,6 +24,10 @@ fennec-tls = { workspace = true, optional = true }
 [dev-dependencies]
 # The tests' clients of an HTTPS listener.
 fennec-tls.workspace = true
+# The perf gate's `sync-apply` (examples/gate.rs): a replica's sync, which
+# only the native library builds otherwise. tools/perf_gate.py asks for it
+# on the command line too, for a base whose manifest predates this line.
+fennec-abi = { workspace = true, features = ["sync"] }
 
 [features]
 # `timing`: where a request's time goes, phase by phase, at `GET /_timing`
@@ -37,9 +41,11 @@ tls = ["dep:fennec-tls"]
 # `test-clock`: a test build's clock (`src/test_clock.rs`): every tenant open
 # on a node answers `now()` and its `@ttl` reads at the system's time shifted
 # by what the file `FENNEC_TEST_CLOCK` names holds, which `make chaos` jumps
-# a node's wall clock with. Never a release's: only deploy/Dockerfile's
-# `chaos` stage names it, and fennec-server built with it says so in its
-# version. Off, none of it is compiled.
+# a node's wall clock with; and the scheduler's fault
+# (`FENNEC_TEST_SCHEDULER_PANIC`, `schedule::test_fault`), which ends its
+# thread for fennec-server's `scheduled` test. Never a release's: only
+# deploy/Dockerfile's `chaos` stage builds a binary with it, and fennec-server
+# built with it says so in its version. Off, none of it is compiled.
 test-clock = []
 
 [[test]]
@@ -66,8 +72,8 @@ path = "tests/quotas.rs"
 name = "join_lists"
 path = "tests/join_lists.rs"
 
-# Apart: the count of connections refused as they were taken is the
-# process's own.
+# Apart: the counts of connections refused as they were taken, and of
+# those ended for a client too slow, are the process's own.
 [[test]]
 name = "refused_counts"
 path = "tests/refused_counts.rs"

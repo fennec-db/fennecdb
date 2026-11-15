@@ -1,6 +1,6 @@
 # Conventions
 
-The long form of the test and docs conventions [CLAUDE.md](../../CLAUDE.md) lists under *Conventions*: where tests live and which run alone, a test that fails on one run, Chrome's launch, the clock, ports, what a change a user meets owes the docs, the fuzzing of every parser of untrusted bytes, why each `unsafe` block is sound and the sanitized tests that hold it, and how a secret is compared and a primitive held to its vectors. They hold no invariant of the code, so [README.md](README.md#the-original-order) does not number them. Each section below is a bullet moved word for word from CLAUDE.md, which keeps its rule in a sentence or two; those on test binaries, fuzzing, unsafe code and secrets are now kept by [crates/CLAUDE.md](../../crates/CLAUDE.md).
+The long form of the test and docs conventions [CLAUDE.md](../../CLAUDE.md) lists under *Conventions*: where tests live and which run alone, a test that fails on one run, a browser's launch and a page's reload, the clock, ports, what a change a user meets owes the docs, the fuzzing of every parser of untrusted bytes, why each `unsafe` block is sound and the sanitized tests that hold it, and how a secret is compared and a primitive held to its vectors. They hold no invariant of the code, so [README.md](README.md#the-original-order) does not number them. Each section below is a bullet moved word for word from CLAUDE.md, which keeps its rule in a sentence or two; those on test binaries, fuzzing, unsafe code and secrets are now kept by [crates/CLAUDE.md](../../crates/CLAUDE.md).
 
 ## Test binaries
 
@@ -15,7 +15,19 @@ server answers 503 to whichever test asked), and so are `fennec-http`'s
 refusal is the process's, so the other tests' servers ask with none
 (`audit::set_delay(0)` in their helpers). Measurement programs are each
 crate's `examples/` and `fennec-bench`'s binaries, wired to `make` targets,
-not to CI.
+not to CI -- but for the perf gate's workloads
+(`crates/fennec-http/examples/gate.rs`), which CI counts in instructions on
+every pull request ([benchmarks.md](benchmarks.md#the-gate)).
+An example that is a check rather than a measurement runs in
+CI: fennec-ql's `corpus`, which `make fennecql-corpus` builds in this tree
+and in main's from an archive of it, run by the test job's two steps on
+the ubuntu runner -- against main, and against every corpus frozen at a
+tag (`integrations/fennecql-corpus/`) -- its reader held by
+`tools/test_fennecql_corpus.py` in the fmt job and in the test job's
+ubuntu leg, before the steps ([fennecql.md](fennecql.md#the-corpus)). It is an example, not a test,
+because it is built in two trees, BASE's taking this tree's file as it
+stands; its own tests (`test = true`), which only this tree builds, run
+with fennec-ql's.
 
 ## Skips
 
@@ -120,27 +132,98 @@ days, the 10 GB limit). Jobs gated on the event: `test (macos x86_64,
 Rosetta)` runs on everything but a pull request, so on the schedule, and `size
 (browser module)` only on a pull request.
 
+**Every cache is restored by every run and saved by a run on main alone, and
+what main saves is small.** A cache saved on a pull request's ref is read by
+no other run, so each pull request that missed a key saved a private copy and
+pushed main's entries out of the 10 GB: at 01:15Z on 2026-11-15 the repository
+held 49 entries, 11.31 GiB (pull-request refs 35 entries, 7.18 GiB; main 12,
+3.36 GiB; merge groups 0.24 GiB), and main's Gradle entry was gone within
+about 1.5 hours, so 6 of the Android job's 50 runs restored it. Now the 21
+cargo steps and the Unicode table are `actions/cache/restore` with a
+`restore-keys` fallback (a pull request that moves `Cargo.lock` restores the
+last entry) and an `actions/cache/save` step at the job's end under
+`github.ref == 'refs/heads/main'`, keyed by the restore step's
+`cache-primary-key` and skipped on an exact hit. `setup-node`'s and
+`setup-go`'s `cache` and `subosito/flutter-action`'s save from any ref and
+have no read-only switch, so the Grafana job's npm (`~/.npm`) and Go
+(`~/go/pkg/mod`, `~/.cache/go-build`) caches are the same restore and save
+pair over the paths the actions used, and the Flutter caches are gone.
+`setup-gradle` writes only on main by its own default (`cache-read-only`).
+`desktop.yml`'s Cargo and Hutch caches and `site.yml`'s are the same pair
+(`site-lighthouse.yml`, which runs on pull requests alone, restores only).
+`desktop.yml` and `site.yml` run on main by their own paths filters, the
+caches' inputs among them, and `desktop.yml` gained a schedule, Monday and
+Thursday at 05:41 UTC, so that an entry evicted or unused for 7 days is saved
+again. The cargo keys moved to a `v2-` prefix so that no run restores the
+unpruned entries through `restore-keys`.
+
+*What main keeps of `target/`.* A checkout's files carry new times, so cargo
+builds the workspace's crates again whatever `target/` holds; what a restored
+`target/` saves is the crates from outside the workspace, and the workspace's
+test binaries and debug info were most of every entry.
+`tools/ci_prune_target.sh` runs on main just before a save and keeps only the
+units whose dep-info (`deps/*.d`) names a file under the registry or a git
+checkout, with their build scripts and fingerprints. Measured on a local build
+of the fennec-server and fennec-import tests: 822 MiB to 59 MiB, and the next
+build compiled only the workspace's own crates, none of rustls, ring or libc
+(mtimes are kept, as the cache's tar keeps them; a copy that does not keep
+them makes cargo rebuild everything). An entry is now 0 to 47 MiB, but for the
+clippy job's 373 MiB (it checks the Windows target too), against 15 to 801 MiB
+before (`ubuntu-latest-cargo` 801, `ubuntu-24.04-arm` 643, `macos-latest` 522,
+`clippy` 440 MiB). Four of the 21 are 0 MiB because fennec-core and the C
+library have no crate from outside the workspace: they were 15 to 31 MiB of
+workspace objects. Nor did the cache save time in those jobs: a hit and a
+miss of `windows (http)` took 242 and 241 s, of `test (ubuntu-latest)` 962 and
+940 s (runs 43648331326, 43644153745, 43638860592), because the workspace is
+what takes the time.
+
+*Flutter, Go and the rest.* The SDK's entry was 2.0 GiB on macOS and 1.6 GiB
+on Linux, and restoring it saved 28 s (35 s against 63 s) on macOS and 16 s
+(13 s against 29 s) on Linux of a download (run 43663494522), under 3% of
+either job; it is not cached, nor is the pub cache (25 to 30 MiB). The Go
+cache is 436 MiB, the npm one 93 MiB, `desktop.yml`'s Hutch caches 68 to 98
+MiB a system (435 MiB in all) and Gradle's 2.1 GiB (setup-gradle's entries:
+dependencies 1090, transforms 656, wrapper zips 179, the distribution 130
+MiB, measured with `cache-read-only: false` on the job as it was before the
+wrapper above: the Gradle User Home it keeps now is of that order, not
+measured).
+
+*The set main will hold*, measured on a test branch that saved as main does
+(run 43665618926): about 1.0 GiB of cargo entries, 0.44 GiB Go, 0.09 GiB npm,
+0.43 GiB Hutch and 2.1 GiB Gradle, about 4.1 GiB in some 40 entries, against
+about 11 GiB projected for the same keys unpruned with the Flutter SDKs. A key
+change leaves the old entries until they age out, so for a while the
+repository holds both, up to 7.4 GiB with main's 3.36 GiB: under the 10 GB.
+
 Which `ci.yml` jobs are required checks is a repository setting (classic
-branch protection on main, not the merge queue's ruleset). Three are, read
-on 2026-11-15 (`gh api
-repos/fennec-db/fennecdb/branches/main/protection/required_status_checks`):
-`test (ubuntu-latest)`, `test (macos-latest)` and `build (release + cli
-profile)`; a pull request merges past any other job red. A job skipped by
-an `if:` reports success and can be required, as can one whose steps skip
-(`sanitize`, below); a whole workflow skipped by a path or branch filter
-reports nothing, its checks stay pending, and a required check of one
-blocks a merge it should not, so `ci.yml`'s `pull_request` and
-`merge_group` triggers take no filter (its `push` has a path filter, which
-no required check is read from). GitHub's "Troubleshooting required status
-checks" says both. `size (browser module)`, which only runs on a pull
-request, must never be required: a check that never reports in the merge
-queue holds every group. Nor is `sanitize` ([below](#sanitizers)): its
-verdict rests on a dated nightly and a sanitizer's runtime, which a runner
-image can break with no change of ours -- a kernel laying out more of the
-address space at random than the sanitizer's shadow memory leaves room for
-has done so to ASan before -- and a merge queue held by that holds every
-change. A red `sanitize` is read and fixed in a change of its own, and a
-release waits for a green one (RELEASING.md).
+branch protection on main, not the merge queue's ruleset). All of them are,
+but three: `size (browser module)`, which only runs on a pull request and so
+would never report in the merge queue; `perf (instructions)`, which no
+merge requires until the gate's holdout has passed
+([benchmarks.md](benchmarks.md#the-gate)); and `sanitize`
+([below](#sanitizers)), whose verdict rests on a dated nightly and a
+sanitizer's runtime, which a runner image can break with no change of ours
+-- a kernel laying out more of the address space at random than the
+sanitizer's shadow memory leaves room for has done so to ASan before -- and
+a merge queue held by that holds every change. A red `sanitize` is read and
+fixed in a change of its own, and a release waits for a green one
+(RELEASING.md). A job skipped by an `if:` reports success
+and can be required (the Rosetta job is one, skipped on a pull request); a
+whole workflow skipped by a path or branch filter reports nothing, its checks
+stay pending, and a required check of one blocks a merge it should not, so
+`ci.yml`'s `pull_request` and `merge_group` triggers take no filter (its
+`push` has a path filter, which no required check is read from). GitHub's
+"Troubleshooting required status checks" says both. `size (browser module)`
+is left out because a required check that never reports in the merge queue
+holds every group. A new job needs adding to the list unless it is one of
+those, and a renamed one adding under its new name before the old is taken
+out: a required check no job reports holds every group too. With every job
+required, a merge group lands when its last job ends and a red job drops
+it, a flaky one's too, so the queue builds two groups at a time and waits
+180 minutes for a group's checks (the ruleset's `max_entries_to_build` and
+`check_response_timeout_minutes`): the account runs 20 jobs at once, a run
+is about 35, and a group timed out at 60 behind other pull requests' runs
+(#605 and #645 on 2026-11-14).
 
 The mobile jobs upload build products nothing downloads
 (`fennecdb-android`, `fennecdb-xcframework`) with `continue-on-error`: an
@@ -170,13 +253,26 @@ A step after the builds, `What Gradle fetched`, names each distribution
 unpacked and each plugin fetched, and counts the artifacts written after the
 restore, so a run's log says whether the cache served it.
 
-## Chrome
+## Browsers
 
-A step that launches Chrome reads Chrome's own files first, or a cold
+A step that launches a browser reads its own files first, or a cold
 runner's disk spends 5 to 20 s of the launcher's wait (`waiting for
-dynamic debugging port`): the studio's harness (`warm`) and
-`examples/{shop,analytics}/scripts/warm-chrome.mjs` do; a longer wait only
-moves the bound.
+dynamic debugging port`): the studio's harness (`warm`),
+`examples/{shop,analytics}/scripts/warm-chrome.mjs` and
+`web/browser/run.mjs` (Chrome's and Firefox's, `warm`) do; a longer wait
+only moves the bound.
+
+A test of what a page keeps across a reload (`web/browser/`) has the page
+run its suite itself, its state kept between loads by the server that
+opened it: a reload is the page's own `location.reload()`, and the one
+suite runs under puppeteer and under safaridriver alike. It holds what it
+reloads in the middle of until the page is gone -- a persist's transaction
+by a read after a read, a worker's flush by keeping the worker busy, which
+every engine ends with its page (one waiting on `Atomics.wait` Safari did
+not) -- never catching it with a timer. A test a
+browser cannot run is skipped by name in `run.mjs`'s `SKIPS`, with why --
+Safari's quota tests, no driver setting its quota -- and any other skip
+fails the run, as does a listed one that ran.
 
 A `waitForFunction` predicate returns `null` for what is not on the page
 yet and never throws. Puppeteer starts the page's poller with `void
@@ -218,9 +314,11 @@ its own (`CREATE_NEW_PROCESS_GROUP`), on the console it shares with them
 -- and kills one with `SIGKILL`, on Windows `TerminateProcess`
 (fennec-server's `support::Server::signal`). Only a site
 whose address is needed before it binds -- a Next.js build renders it, the
-database's CORS names it -- takes a port the system picks, held by a
+database's CORS names it -- or a program that takes its port on its
+command line and names none it chose -- safaridriver, whose `-p 0` is a
+default port of its own -- takes a port the system picks, held by a
 stand-in listener until the moment it starts (`examples/shop`,
-`examples/dispatch`'s `ci.sh`).
+`examples/dispatch`'s `ci.sh`, `web/browser/run.mjs`).
 
 An address a test means nothing to listen on is `127.0.0.1:1`, which no
 system hands out, never a port picked and let go of: Linux hands a free
@@ -305,7 +403,9 @@ AddressSanitizer's report end in `abort` -- ASan told so by
 `__asan_default_options` -- whose handler writes the input from where the
 run left it with nothing but system calls. A run past `--timeout-ms`
 (30 s of wall time: at 10 s a machine at a load of 40 took a 2.5 s input
-for a hang) is written by a watchdog thread, an allocation past
+for a hang) is written the same way by the handler of a timer the run
+sets (`setitimer`, `SIGALRM`) -- a watchdog thread beside the runs ran
+code the coverage counts, below -- an allocation past
 `--max-alloc-mb` (2 GiB) aborts before it is made: a length read off the
 input and allocated before it met the input. A run is on a thread of a
 server's connection's stack, 8 MiB (`RUN_STACK`), so what overflows here
@@ -320,7 +420,7 @@ took, so a seed, the start and the runs kept make the same inputs again, on
 another machine and in a build that counts no coverage; the fuzzer's own
 edges are taken as seen by a mutator of their own, which draws nothing from
 the run's. Whatever ends a run -- a panic, an abort's handler, the
-watchdog -- says its recipe (`guard::say_recipe`, with system calls alone):
+timer's -- says its recipe (`guard::say_recipe`, with system calls alone):
 the target, the run, the input's length and FNV hash, and the command that
 makes it again, `fennec-fuzz reproduce <target> --seed N --start HASH
 [--corpus DIR] --run N --fnv HASH --kept RUNS`, the start's fingerprint
@@ -330,10 +430,51 @@ in base 36. `reproduce` checks both hashes, writes the input and runs it as
 and made into its input, an abort's from its handler in a child process,
 a run's input following the runs kept before it, and every target's start
 the same bytes in two processes -- the `image` target's seeds are files
-the engine writes, which must hold no clock, path or hash map's order.
-Coverage itself is not reproducible -- a hash map's random keys, threads,
-the platform's own code -- which is why the corpus's growth is written
-down rather than taken again.
+the engine writes, which must hold no clock, path or hash map's order --
+and a run past its timeout, from the timer's handler.
+
+*What a run reaches is the same in every process of a platform*, so a
+count of runs from a seed keeps the same inputs wherever it runs, and
+`make fuzz-smoke` -- each target for a count of its own (`Target::smoke`,
+`--smoke`), from the repository's seeds alone (`--corpus none`) -- ends
+each target on the same line on every runner: the runs, the seed, the
+corpus's size and fingerprint, the edges (the time on the line before).
+Four things made one process keep an input another did not, found by
+running a target twice for the same count and comparing those lines --
+`codec` kept 597 inputs in one process and 601 in the next over 20 000
+runs, `image` 1 052 and 1 040 over 15 000, its seeds alone reaching 13 298
+edges in one and 13 301 in the other. std's hash maps were keyed at random
+in each process, and a map's probes are code the counters count: the
+binary takes std's call for keys (`CCRandomGenerateBytes` on Apple's
+systems; `getrandom` on Linux, which std calls through its `weak!` macro,
+a symbol of `extern_weak` linkage that the static link binds to the
+binary's own) and hands back the same bytes each time, and a run
+says where it could not (`guard::KEYS_FIXED`); with keys drawn at random
+`codec` stayed the same and `image` did not. The engine's tasks cut in
+shares over threads -- an image's index of its frames, a graph's lists,
+its copies table, a batch's links -- bumped the same counters unlocked,
+losing counts as the scheduler had it: the fuzzer holds them to the
+thread that asked (`fennec_core::one_thread`, each share the same work
+either way, [hnsw.md](hnsw.md#parallel-linking)), which `image` needed
+with the keys fixed. A watchdog thread woke beside the runs, its code
+counted in whichever run was in flight: a timer now. And progress was said
+every five seconds, a clock's comparison counted in the next run: where a
+count bounds the run it is said by the count. The platform's own code
+differs -- a commit's smoke is the same on every Linux runner and on
+every Mac, not on both -- and the counts were set from CI's runner, about
+30 s each under ASan. Nor does a target read the wall clock: the `image`
+target's databases read a fixed time as now (`set_clock`), where a
+`@ttl` collection's read asked the system's for its cutoff, a row alive
+in one run and expired in a later one. A count still needs a bound in
+time, or a commit slowing every run ends at the job's timeout naming no
+target: `--smoke` caps each target at six minutes of CPU time
+(`SMOKE_CAP`, twelve times its 30 s on CI and three times the most a Mac
+under ASan spent, `http`'s 110 s; six targets just under it end inside
+the job's 45 minutes with the build), by a timer of the process's CPU
+time (`ITIMER_PROF`) set once, whose handler says the target and the run
+it reached and exits 4. A bound, never a pass; CPU time, which a machine
+others load lengthens less than the clock (`http` 375 s by the clock and
+110 s of CPU at a load of 70 to 200, 150 s and 104 s near 15).
 
 *A finding is a regression test in its own crate*, the input's bytes or
 the file made by hand, failing before the fix. The pull request that added
@@ -367,23 +508,67 @@ dropped with no word: refused, as the apply refuses it
 run the open a server runs, mapped: it does now, where the index an image
 writes of its frames took `u64::MAX` as an id, its next id overflowing
 (`store::tests`). Ten minutes of `image` with the mapped open under ASan
-(95 089 runs) and three of `codec` (181 725) found nothing more. One is
-left for a decision: JSON's reader takes a number past a double's range,
+(95 089 runs) and three of `codec` (181 725) found nothing more. One was
+left for a decision: JSON's reader took a number past a double's range,
 `1e400`, as infinity, which its writer writes as `null` -- no crash, and
-the `json` target holds its round trip to finite values until that is
-decided.
+the `json` target held its round trip to finite values until it was
+decided. It is refused now, naming it
+([vector-search.md](vector-search.md#numbers-in)), and the round trip
+holds every value read.
 
-*CI* runs each target for 30 s under ASan on every pull request and push
-(ci.yml's `fuzz-smoke`, `make fuzz-smoke`) and for 30 minutes each on
-Sundays (`fuzz.yml`). The repository is public, and so are a job's log and
-its artifacts for 90 days, while SECURITY.md asks a finding be reported
-privately: so a job keeps no input and no corpus, and says no message and
-no backtrace (`--private`; ASan's report goes into a file of the runner's,
-`ASAN_OPTIONS=log_path`), only the recipe and the commit, from which a
-maintainer makes the input again on a machine of their own. The first
-version kept a finding's input and backtrace as the job's artifact, and
-carried the weekly corpus from week to week in the Actions cache: inputs
-no maintainer holds, which no recipe could make again. Each week starts
+CI's smoke was red from the day the fuzzer landed, red or green by its
+runner's speed as 30 s reached a finding or not: three runs on two
+commits failed, a fourth passed. It had found a point 64 lists down read
+as a value 65 levels deep (`codec`,
+[crates.md](crates.md#how-deep-a-value-nests)), and a record naming
+collection `u32::MAX`, whose `cid + 1` overflowed in the open and in a
+replica's apply (`image`, `tests/damage.rs`): a record's collection is now
+one a create gives, below the last `u32`, or the record is damage --
+one past `u32` among them, which `as u32` had read as another
+collection's -- and a create in a file that gave the last id is refused.
+Its review found the first version of that refusal where a record's head
+is read (`record_at`), past the walk's judgment of a head: stale bytes
+past the durable point reading as one (`0a ff ff ff ff 0f 05 hello`, and
+checked as kind 3) refused the open a version before cut. The walk judges
+the id where it judges a head (`whole_record`, `head_at`), so such a head
+is damage, cut past the durable point and refused before it
+(`persist::stale_bytes_past_the_durable_point_are_judged_as_damage`); and
+the other refusals the fix added -- a point's level, a stored vector's
+count -- an open meets only in a record its walk kept, a torn one cut
+before a byte of its documents is read
+(`persist::a_torn_tail_is_cut_before_its_documents_are_read`), a sparse
+vector's numbers in no open at all.
+Making the smoke reproducible found one more, a stored vector's count
+multiplied unchecked where an open restoring a graph reads the
+documents' vectors (`store::tests`), and a sparse vector's dimension went
+the way of the collection's id (`codec::tests`). Each finding's input is a
+seed of its target since (`crates/fennec-fuzz/seeds/<target>/`), every run
+handing it over again. Ten minutes each of `codec` and `image` under ASan
+and three of every other target, a round a seed, found nothing more: two
+rounds with the first two fixed (`codec` 1 807 846 and 1 143 649 runs,
+`image` 641 173 and 347 255), then with every fix, going on from their
+corpus (`codec` 1 408 861, `image` 342 251) and from the seeds alone
+(542 458 and 134 768, on a machine others held at a load of 20 to 100).
+Two runs of `make fuzz-smoke` in a row, one at a load near 100 and one
+near 20, ended each target on the same line.
+
+*CI* runs each target for its count of runs under ASan on every pull
+request and push (ci.yml's `fuzz-smoke`, `make fuzz-smoke`), about 30 s
+each on its runner, and for 30 minutes each on Sundays (`fuzz.yml`), by
+the clock and from a seed of each week's own (the run's number), to look
+where the smoke does not. The repository is public, and so are a job's
+log and its artifacts for 90 days, while SECURITY.md asks a finding be
+reported privately. The smoke's inputs are its commit's, which anyone
+makes again with `make fuzz-smoke`: it says a panic's message and where
+it was raised, and ASan's report, and keeps no input and no corpus. The
+weekly run's are its week's: it keeps no input and no corpus, and says no
+message and no backtrace (`--private`; ASan's report goes into a file of
+the runner's, `ASAN_OPTIONS=log_path`), only the recipe and the commit,
+from which a maintainer makes the input again on a machine of their own.
+The first version kept a finding's input and backtrace as the job's
+artifact, and carried the weekly corpus from week to week in the Actions
+cache: inputs no maintainer holds, which no recipe could make again. And
+it gave the smoke 30 s, so its inputs were its runner's. Each week starts
 from the repository's seeds instead, its seed the run's number, so each
 week's mutations are its own. Not yet fuzzed, after 1.0: a sealed archive's
 and a backup's frames (`seal.rs`), an archive's segments, PostgreSQL's
@@ -561,6 +746,42 @@ test job the same binaries, unsanitized, take 3.5 minutes (60 s and 146
 s), so the job, the nightly's install and the build with it, is bounded at
 30 minutes and expected within 15.
 
+## Coverage
+
+`.github/workflows/coverage.yml` runs weekly (Wednesday 03:41 UTC) and by
+hand (`gh workflow run coverage.yml`), never on a pull request or a push. It
+builds the workspace with `-C instrument-coverage` (the `llvm-tools-preview`
+rustup component, not a crate: the workspace takes no dependency), runs
+`make test`'s three Rust invocations, merges the counters with
+`llvm-profdata` and exports them with `llvm-cov export`;
+`tools/coverage_report.py` writes the tables, published as the
+`coverage-report` artifact for 90 days (`coverage.md`,
+`coverage-summary.json`) and in the run's summary: lines, regions and
+functions per crate, and a second table, *Trust boundaries*, for the modules
+that parse bytes from outside the process. It leaves out the doctests
+(rustdoc's coverage is a nightly flag), the JS and browser tests, and the
+PostgreSQL arm's `#[ignore]` tests, which need services the job lacks, so a
+module those tests alone reach shows less than it has.
+
+*The figure is information, not a gate.* No threshold is applied anywhere,
+by the tool or the workflow: a percentage measures how much code ran, not
+whether its behaviour is right, and a bar such as 85% would be arbitrary and
+steer toward tests that execute lines without asserting anything. What
+guards the boundary modules is their fuzz targets ([Fuzzing](#fuzzing)); the
+report shows where a target or a test reaches little. Miri is a separate
+item; the sanitized tests are [above](#sanitizers).
+
+*The boundary list is data at the top of `tools/coverage_report.py`*
+(`BOUNDARIES`): each module with one line saying what untrusted bytes it
+reads. The engine's load path is `store.rs` (`replay`, `replay_mapped`,
+`adopt_index`) and `fs.rs` (`open`, `open_with`), each a file row with a row
+beneath it for those functions' regions and the number that ran (the export
+gives a function's regions, not its lines). A listed path that is gone fails
+the tool, so a rename cannot drop a row; `python3 -I tools/coverage_report.py
+--check-paths` checks it, and `tools/test_coverage_report.py` (CI's fmt job)
+holds the tables' numbers. A new parser of untrusted bytes is listed there
+beside its fuzz target.
+
 ## Secrets compared
 
 A token, a mark, a MAC, a signature or a password is compared by
@@ -726,3 +947,168 @@ binary; their tests take 2.5 s of a core in `cargo test`'s build on an
 Apple M1, 1.6 s of the clock beside each other: PBKDF2's 58 cases of 4 096
 rounds and one of 80 000 are 1.6 s, the RSA files 0.8, the AEAD's and
 HMAC's 0.01.
+
+## API baselines
+
+`fennec.h`, `web/fennec.d.ts`, `web/client.d.ts`, the flags and exit codes of
+`fennec`, `fennec-server` and `fennec-shard`, and the metrics the server and
+the router serve are held to the dumps in `integrations/api-golden/` by
+`tools/api_compat.py` (`make api-check`; CI's `test` job runs it as a step,
+this checkout's copy and main's, BREAKS read from the pull request's as
+data, as `tools/openapi_compat.py`'s are; the fmt job runs the checker's own
+tests). The dumps always are what the sources dump to: a dump that is not
+fails, saying `make api-golden`, so an addition is committed with its dump
+and a later pull request cannot remove it unseen. The pull request's dumps are compared with main's, dump against
+dump: every entry of main's is in the pull request's, unless a `BREAKS`
+entry names that difference, which also catches a dump edited smaller by
+hand. An entry names one change: the surface, the symbol, the kind of
+change and the digests of the declaration before and after (the failure
+prints the entry to paste), so it approves no other change of that symbol.
+What 1.0 changes is the rule for `BREAKS`: `integrations/api-golden/frozen.json`
+says `null` until `python3 tools/api_compat.py --freeze 1.0` (once, at the
+tag; it needs the dumps current and no entry for a release not made), and
+until then an entry's release is `"1.0"`; after it, a break is a major
+version above the frozen one, and `make version` refuses 1.0.0 or later while
+the baselines are not frozen. The header is read
+as macros (one under an `#if` carries its condition) and prototypes (return
+type, each parameter's type and name, in order; whitespace and comments do
+not count). The `.d.ts` files are read by
+the checker's own scanner, not by `tsc`, so the check needs no `npm ci` and
+runs as plain Python: every export is a record, a class's, interface's,
+enum's or namespace's members are grouped by name, and a declaration is
+compared as written, so any change to one -- narrowed parameter, widened
+return, optional member made required, overload dropped or reordered --
+fails, and a harmless widening is named in `BREAKS` too. Overloads are held
+in the order written, since the first that fits is the one resolved; one
+added anywhere passes. What the scanner does not know it refuses with exit 2,
+never skips: `export { a as b }`, `export * from`, `export default`, a
+namespace sharing a name with a function or class, and in `fennec.h` a
+`typedef`, `struct`, `union` or `enum`, a function-like macro and a
+prototype under an `#if`. A change that needs one of them teaches the
+scanner in a pull request of its own first, because main's copy of the
+checker judges the next pull request and would refuse the form. It cannot see a type's meaning through the names it uses,
+a non-exported helper's body, or a new required member of an interface a
+caller implements, an overload added in front of another; `make types-check` holds that the declarations still
+compile and match `web/fennec.js`. The SDKs' dumps need outside tools
+(Kotlin's binary-compatibility-validator, swift-api-digester, .NET's
+PublicApiAnalyzers, `apidiff`) and come in 1.0.x.
+
+The CLI's and the metrics' dumps (`cli-<binary>.json`,
+`metrics-<binary>.json`) are the binaries' own, made by each binary's
+crate's `tests/api_golden.rs` (fennec-server's `tests/api_dump.rs` holds
+how, for the three) and held there byte for byte under `cargo test`, which
+`make test` runs in every leg of the required `test` job; the checker reads
+them and never makes them, and `make api-golden` has the tests write them
+into `target/api-golden` (`FENNEC_API_GOLDEN`) for `--write --built` to
+judge and copy. A command's flags are the dash-led words of its `--help`
+that its parser takes, each asked of the binary: `<flag> --help <no such
+flag>` is refused naming the flag where the parser does not know it,
+prints the help and exits 0 for a switch, and is refused at the unknown
+flag where the flag took `--help` for its value -- so a probe never runs
+the binary, and a flag's arity is the parser's, not the help's words.
+That holds because every binary and subcommand reads its whole command
+line, refusing a flag it does not read or a value missing, before it
+makes, opens, reads or locks anything a flag names: the router opened
+`--audit`'s file as the flag was read, so its probe left a file named
+`--help`, and the router, the backup family and `fennec mcp` read
+`--tls-ca`'s. The shell's subcommands go further: every refusal of the
+line -- the arguments, a flag the command needs, a URL, a token not given,
+a sealed backup's key -- comes before a file a flag names (`--tls-ca`'s,
+`--key-file`'s) is read or a lock is taken, held by fennec-cli's
+`every_refusal_comes_before_a_file_a_flag_names` beside an unreadable
+`--tls-ca` or `--key-file`; only whether the file a backup or a restore
+writes is there already (2 without `--force`) is asked under its lock, so
+nothing makes it between the asking and the rename. The router reads its
+CAs and opens its audit log before it starts tracing, as fennec-server
+does. Each probe runs in an empty directory of its own, which it
+must leave empty, and its answer must carry no system error (`(os
+error`, a file named `--help` read). A command reads, and its help names,
+its own flags alone: `fennec key`, `verify` and `prune` shared `backup`'s
+parser and help, so each took and ignored the family's eleven flags and
+the dump froze them. The subcommands are those the helps name (`fennec
+import ...`), found from help to help. A literal in the crate's sources
+that is a flag's whole spelling and no help shows fails the test, so no
+flag is taken unseen by the dump; `fennec-server`'s `--follow-<option>`
+flags, made at run time from fennec-import's `args::OPTIONS` where no scan
+sees them, are held to that list instead, each a flag of the server's help
+and dump taking a value, as `fennec import`'s are. Removing a flag, or
+turning a switch into a flag taking a value or the reverse, is a break;
+the words of its help line are not held, so a value read in other units is
+not seen. The exit codes are each binary's `exit::Code` (`src/exit.rs`)
+with its meaning: every exit goes through `exit::now` or a subcommand
+returning a `Code`, and the test refuses any other way out of the process
+in the crate's sources, read as tokens with comments and literals aside
+-- `std::process::exit` or `abort` by any path (spaced out, `r#exit`), a
+`use` taking either in under any name, or `process`'s every name (`*`), or
+the module under another (`process as p`, `{self as p}`), an `ExitCode`,
+the binary's `main()` returning a value (an `Err` exits 1 with no `Code`),
+each seeded in fennec-cli's `every_way_out_but_exit_now_is_refused` -- and
+a variant `Code::ALL` leaves out. Its lexer is the literal scan's
+(`api_dump::not_code`): every comment, string and char form Rust has, a
+nested `/* */` and a raw byte or C string (`br#"..."#`, `cr"..."`) among
+them, which it once read as a plain string, an exit after one unseen. The scheduler hands the server a failure
+(`fn()`), never a number, so no code is decided outside it, and
+fennec-server's `a_scheduler_s_failure_ends_the_server_with_1` holds that
+stop to 1, a file's server and a node's, through a test build's fault
+(`FENNEC_TEST_SCHEDULER_PANIC`) behind the `test-clock` feature, which
+`tools/release_features_check.py` and release.yml's `+test-clock` check
+hold out of a release: no failure a release can meet ends that thread on
+demand. Behind `debug_assertions` it was live in every debug server
+(`cargo run`, the web tests'), and `cargo test --release` waited for it in
+vain; built without the feature a server reads no such variable
+(`a_build_without_test_clock_has_no_scheduler_fault`), and CI's `test` job
+runs the test built with it, by name. A code means what the code
+does: 2 is a line refused before anything ran, 1 the work failing -- `fennec
+types` exits 1 for a file it cannot read or parse and an `-o` it cannot
+write, as the shell does for a file it cannot open, `fennec key` 1 when
+the system gives it no randomness, as for a key it cannot write, `verify`, `prune` and
+`restore --tenants` 1 for a root they cannot read, as for one archive, and
+the router 2 for a lock file it cannot make, as for a directory it cannot open, keeping 1 for
+a lock another holds. A code removed or its meaning reworded is a break;
+one added grows the dump. The metrics are the
+families the binaries' scrapes show, each with its type and every label a
+sample carries (a histogram's `le` aside), over configurations that between
+them show every family: a file's primary with `--hooks`, `--mcp`, a
+schedule and `--replication-token`, its replica once in contact, and a
+`--dir` node replicating; a router with `--replicas` and `--auto-failover`
+over a node in a region taking leases and a node it cannot reach, and its
+standby. A family with no sample fails the test, its labels unknown, and
+the server's test holds every `fennec_` literal of fennec-http's,
+fennec-server's and fennec-shard's sources to a dump (`fennec_router_` the
+router's, every other the server's), refusing a name built at run time:
+a family a configuration does not show, or a new one, fails there. A
+metric removed or renamed, its type changed or a label of it removed is a
+break; a metric or a label added passes, a selector naming the labels it
+had still matching.
+
+## Security policy
+
+`SECURITY.md` is what a reporter and an operator act on, so it is held to
+the tree by `tools/security_md_check.py`, in CI's fmt job beside
+`tools/secret_eq_check.py` (its fixtures: `tools/test_security_md_check.py`).
+It fails on a `--flag` the file names that the argument parser of the binary
+it says it of does not read (`"--flag" =>` in fennec-server's, fennec-shard's
+or fennec-cli's sources, outside comments and the `#[cfg(test)] mod`; any of
+the three where no binary is named near the flag), a path or a
+link's anchor it names that is not in the repository, a primitive of its
+list of in-tree cryptography whose function is gone (or one the file stopped
+naming), a missing "Supported versions" section or acknowledgement in working
+days, and a missing "A security release" section in `RELEASING.md`. It
+also searches `SECURITY.md`, `crates/*/src` and `site/content/docs` for
+phrases once true and since false -- `no TLS` first, which fennec-tls made
+untrue and which a comment, a help text and a page went on saying -- outside `ALLOWED`: the messages a build made without
+the `tls` feature gives, each an entry with its reason, an entry that finds
+nothing refused. It prints how many things it checked of each kind (332 when
+written: 26 flags, 47 paths and anchors, 7 primitives, 249 files searched,
+3 promises) and fails when any one kind is zero, not only the total: the
+files searched alone would let a file stripped of every flag, path and link
+pass. Each primitive's needle is its own declaration (`pub fn sha256(`), so a
+test function of a like name does not hold it. What a line scan cannot tell
+is in the tool's header.
+
+The policy itself: 0.x has no advisories, CVEs or patch releases, a fix
+lands on `main` and the pull request says which releases had the bug; from
+1.0.0 the latest 1.x minor and the previous one for 6 months after the next
+ships, a `release/1.N` branch cut when a backport needs one, a report
+acknowledged within 3 working days. The steps are `RELEASING.md`'s "A
+security release", written and not yet rehearsed.

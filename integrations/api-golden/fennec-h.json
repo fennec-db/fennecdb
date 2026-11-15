@@ -1,0 +1,363 @@
+{
+ "macros": {
+  "FENNEC_OK": "0",
+  "FENNEC_TYPE": "1",
+  "FENNEC_NOT_FOUND": "2",
+  "FENNEC_EXISTS": "3",
+  "FENNEC_DUPLICATE": "4",
+  "FENNEC_CORRUPT": "5",
+  "FENNEC_QUERY": "6",
+  "FENNEC_IO": "7",
+  "FENNEC_PLUGIN": "8",
+  "FENNEC_READ_ONLY": "9",
+  "FENNEC_DENIED": "10",
+  "FENNEC_PANIC": "11",
+  "FENNEC_MISUSE": "12",
+  "FENNEC_LOCKED": "13",
+  "FENNEC_UNMET": "14",
+  "FENNEC_QUOTA": "15",
+  "FENNEC_OPEN_NO_SYNC": "1",
+  "FENNEC_OPEN_IN_MEMORY": "2",
+  "FENNEC_OPEN_NO_AUTO_COMPACT": "4",
+  "FENNEC_VECTOR_EXACT": "0x80000000u",
+  "FENNEC_SCHEMA_PLAN": "0",
+  "FENNEC_SCHEMA_APPLY": "1",
+  "FENNEC_SCHEMA_FOLLOW": "2",
+  "FENNEC_SCHEMA_DESCRIBE": "3",
+  "FENNEC_SYNC_POLL": "0",
+  "FENNEC_SYNC_RESPONSE": "1",
+  "FENNEC_SYNC_OPENED": "2",
+  "FENNEC_SYNC_BYTES": "3",
+  "FENNEC_SYNC_CLOSED": "4",
+  "FENNEC_SYNC_TIMER": "5",
+  "FENNEC_SYNC_SIGNAL": "6"
+ },
+ "functions": {
+  "fennec_version": {
+   "returns": "const char*",
+   "params": []
+  },
+  "fennec_open": {
+   "returns": "int32_t",
+   "params": [
+    {
+     "type": "const uint8_t*",
+     "name": "path"
+    },
+    {
+     "type": "size_t",
+     "name": "path_len"
+    },
+    {
+     "type": "uint32_t",
+     "name": "flags"
+    },
+    {
+     "type": "uint64_t*",
+     "name": "handle"
+    },
+    {
+     "type": "char**",
+     "name": "out"
+    },
+    {
+     "type": "size_t*",
+     "name": "out_len"
+    }
+   ]
+  },
+  "fennec_open_memory": {
+   "returns": "int32_t",
+   "params": [
+    {
+     "type": "uint64_t*",
+     "name": "handle"
+    },
+    {
+     "type": "char**",
+     "name": "out"
+    },
+    {
+     "type": "size_t*",
+     "name": "out_len"
+    }
+   ]
+  },
+  "fennec_close": {
+   "returns": "int32_t",
+   "params": [
+    {
+     "type": "uint64_t",
+     "name": "handle"
+    },
+    {
+     "type": "char**",
+     "name": "out"
+    },
+    {
+     "type": "size_t*",
+     "name": "out_len"
+    }
+   ]
+  },
+  "fennec_query": {
+   "returns": "int32_t",
+   "params": [
+    {
+     "type": "uint64_t",
+     "name": "handle"
+    },
+    {
+     "type": "const uint8_t*",
+     "name": "text"
+    },
+    {
+     "type": "size_t",
+     "name": "text_len"
+    },
+    {
+     "type": "const uint8_t*",
+     "name": "params"
+    },
+    {
+     "type": "size_t",
+     "name": "params_len"
+    },
+    {
+     "type": "const uint8_t*",
+     "name": "vectors"
+    },
+    {
+     "type": "size_t",
+     "name": "vectors_len"
+    },
+    {
+     "type": "char**",
+     "name": "out"
+    },
+    {
+     "type": "size_t*",
+     "name": "out_len"
+    }
+   ]
+  },
+  "fennec_changes": {
+   "returns": "int32_t",
+   "params": [
+    {
+     "type": "uint64_t",
+     "name": "handle"
+    },
+    {
+     "type": "uint64_t",
+     "name": "since"
+    },
+    {
+     "type": "char**",
+     "name": "out"
+    },
+    {
+     "type": "size_t*",
+     "name": "out_len"
+    }
+   ]
+  },
+  "fennec_schema": {
+   "returns": "int32_t",
+   "params": [
+    {
+     "type": "uint64_t",
+     "name": "handle"
+    },
+    {
+     "type": "const uint8_t*",
+     "name": "text"
+    },
+    {
+     "type": "size_t",
+     "name": "text_len"
+    },
+    {
+     "type": "uint32_t",
+     "name": "mode"
+    },
+    {
+     "type": "char**",
+     "name": "out"
+    },
+    {
+     "type": "size_t*",
+     "name": "out_len"
+    }
+   ]
+  },
+  "fennec_sync": {
+   "returns": "int32_t",
+   "params": [
+    {
+     "type": "uint64_t",
+     "name": "handle"
+    },
+    {
+     "type": "char**",
+     "name": "out"
+    },
+    {
+     "type": "size_t*",
+     "name": "out_len"
+    }
+   ]
+  },
+  "fennec_flush": {
+   "returns": "int32_t",
+   "params": [
+    {
+     "type": "uint64_t",
+     "name": "handle"
+    },
+    {
+     "type": "char**",
+     "name": "out"
+    },
+    {
+     "type": "size_t*",
+     "name": "out_len"
+    }
+   ]
+  },
+  "fennec_checkpoint": {
+   "returns": "int32_t",
+   "params": [
+    {
+     "type": "uint64_t",
+     "name": "handle"
+    },
+    {
+     "type": "char**",
+     "name": "out"
+    },
+    {
+     "type": "size_t*",
+     "name": "out_len"
+    }
+   ]
+  },
+  "fennec_warm": {
+   "returns": "int32_t",
+   "params": [
+    {
+     "type": "uint64_t",
+     "name": "handle"
+    },
+    {
+     "type": "const uint8_t*",
+     "name": "only"
+    },
+    {
+     "type": "size_t",
+     "name": "only_len"
+    },
+    {
+     "type": "char**",
+     "name": "out"
+    },
+    {
+     "type": "size_t*",
+     "name": "out_len"
+    }
+   ]
+  },
+  "fennec_sync_start": {
+   "returns": "int32_t",
+   "params": [
+    {
+     "type": "uint64_t",
+     "name": "handle"
+    },
+    {
+     "type": "const uint8_t*",
+     "name": "config"
+    },
+    {
+     "type": "size_t",
+     "name": "config_len"
+    },
+    {
+     "type": "char**",
+     "name": "out"
+    },
+    {
+     "type": "size_t*",
+     "name": "out_len"
+    }
+   ]
+  },
+  "fennec_sync_feed": {
+   "returns": "int32_t",
+   "params": [
+    {
+     "type": "uint64_t",
+     "name": "handle"
+    },
+    {
+     "type": "uint32_t",
+     "name": "kind"
+    },
+    {
+     "type": "uint64_t",
+     "name": "id"
+    },
+    {
+     "type": "int32_t",
+     "name": "status"
+    },
+    {
+     "type": "uint64_t",
+     "name": "seq"
+    },
+    {
+     "type": "const uint8_t*",
+     "name": "bytes"
+    },
+    {
+     "type": "size_t",
+     "name": "len"
+    },
+    {
+     "type": "char**",
+     "name": "out"
+    },
+    {
+     "type": "size_t*",
+     "name": "out_len"
+    }
+   ]
+  },
+  "fennec_sync_status": {
+   "returns": "int32_t",
+   "params": [
+    {
+     "type": "uint64_t",
+     "name": "handle"
+    },
+    {
+     "type": "char**",
+     "name": "out"
+    },
+    {
+     "type": "size_t*",
+     "name": "out_len"
+    }
+   ]
+  },
+  "fennec_free_string": {
+   "returns": "void",
+   "params": [
+    {
+     "type": "char*",
+     "name": "s"
+    }
+   ]
+  }
+ }
+}

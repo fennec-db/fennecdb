@@ -22,7 +22,7 @@ network: <code>--tls-cert</code> and <code>--tls-key</code> (<a href="/docs/serv
 <div class="tbl">
 <table>
 <tbody>
-<tr><td><code>--http-token &lt;value&gt;</code></td><td>every request needs <code>Authorization: Bearer &lt;value&gt;</code>, compared in constant time</td></tr>
+<tr><td><code>--http-token &lt;value&gt;</code></td><td>every request needs <code>Authorization: Bearer &lt;value&gt;</code>, compared in constant time; 32 bytes at least where the server listens past loopback (<a href="/docs/server#token-length">Security</a>)</td></tr>
 <tr><td><code>--http-cors &lt;origin&gt;</code></td><td>sets <code>Access-Control-Allow-Origin</code>; without it no CORS header is sent at all. A browser&rsquo;s preflight (<code>OPTIONS</code>) from that origin, or any with <code>*</code>, is answered 204 before a token is asked for -- the browser sends none with it -- on a single database and under <code>/t/&lt;tenant&gt;/</code>. Every answer exposes <code>Fennec-Seq</code>, <code>X-Request-Id</code>, <code>Retry-After</code> and a deprecated route's <code>Deprecation</code>, <code>Sunset</code> and <code>Link</code> (<a href="/docs/http-reference#compatibility">Compatibility</a>), and lets <code>Idempotency-Key</code> in. Through <code>fennec-shard</code>, give the router the flag: it answers the preflight itself and puts its headers on its own answers and in place of the node's (<a href="/docs/sharding-reference#cors">Tenants and sharding</a>)</td></tr>
 <tr><td><code>--tls-cert &lt;pem&gt;</code>, <code>--tls-key &lt;pem&gt;</code></td><td>the endpoint speaks HTTPS alone, with this certificate chain and private key; a plain HTTP request is answered 400, naming <code>https://</code>. Both or neither</td></tr>
 <tr><td><code>--tls-ca &lt;pem&gt;</code></td><td>not the endpoint's: the CAs the <code>https://</code> URLs this server dials are held to (a primary, an OTLP collector), in place of Mozilla's roots (<a href="/docs/server#dialing-https">Dialing HTTPS</a>)</td></tr>
@@ -81,7 +81,12 @@ collide with a field named <code>all</code>.</p>
 <p>Limits are shared with <code>fennec-server</code> (<code>--max-connections</code>,
 <code>--idle-timeout</code>: a connection silent that long between requests is
 closed with nothing written, and one that went silent part way through a
-request is answered 408); the body ceiling is 64 MiB and the header block
+request is answered 408; <code>--header-timeout</code>: a request not come
+within 10 s of its first byte and a second more for each KiB that came --
+slower than 1 KiB a second, head and body alike -- is answered 408 too;
+<code>--write-timeout</code>: a write of an
+answer waits 30 s at most for its client to take any of it, a client reading
+nothing let go within twice that); the body ceiling is 64 MiB and the header block
 64 KiB. A body may come <code>Transfer-Encoding: chunked</code>, held to the
 same ceiling chunk by chunk (<a href="/docs/http-reference#bodies">Request
 bodies</a>). A field whose name matches a clause name
@@ -753,11 +758,12 @@ messages   read,insert  where room in (get members select room where user = $jwt
     subscription is checked when it opens, and
     ended at its token's <code>exp</code> with
     <code>event: error</code> and
-    <code>{"error":"the token has expired","status":401}</code>: the
-    client takes it as a refused request, fetches a fresh token and opens
-    the stream again (<code>FennecHttp.live</code>, <code>subscribe</code>,
-    the sync layer, Go's <code>*Error</code> and .NET's
-    <code>Event.Status</code>). Without it a stream outlived its token, and
+    <code>{"error":"the token has expired","status":401,"code":"token_expired"}</code>:
+    the client takes it as a request refused for its token's expiry --
+    whose 401 names the same code, which no other refusal does -- fetches
+    a fresh token and opens the stream again (<code>FennecHttp.live</code>,
+    <code>subscribe</code>, the sync layer, Go's <code>*Error</code> and
+    .NET's <code>Event.Status</code>). Without it a stream outlived its token, and
     a member taken off a team heard the team until the client went away.
     No other request is held open past its token, nor before it: a read,
     a subscription or a <code>/_changes</code> page sent with

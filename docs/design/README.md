@@ -6,7 +6,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 
 ## Files
 
-- [crates.md](crates.md) -- zero dependencies, limits that error rather than truncate, and the build profiles
+- [crates.md](crates.md) -- zero dependencies, limits that error rather than truncate, the build profiles and the pinned toolchain
 - [storage.md](storage.md) -- the mapped file, the handover of writes to it, a block's spills, compaction and the file format
 - [engine.md](engine.md) -- the single writer, a block's documents built beside the readers, long reads pinned, and a block as one record
 - [durability.md](durability.md) -- a storage error stopping writes, buffered writes written behind the lock, the sync log, the power cuts that hold it on Linux -- `--sync always`, `--sync 250`'s window and a node with its standby -- and the one shutdown
@@ -16,9 +16,9 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [read-replicas.md](read-replicas.md) -- a tenant's read replicas in other regions, the reads marked for them, and reading one's own writes across a failover
 - [access.md](access.md) -- scoped tokens, field lists, rules reading another collection, the server's own collections, a token bound to its tenant, whom a token is for, and empty tokens
 - [quotas.md](quotas.md) -- a tenant's quotas, how the sync meets them, a scoped caller's request rate, and the wait every 503 names
-- [http.md](http.md) -- the studio, MCP, open servers, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, row tags and conditional writes, compressed answers, connections no thread is made for, chunked bodies, TLS served and HTTPS dialed, the OpenAPI document and its compatibility
+- [http.md](http.md) -- the studio, MCP, open servers, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, row tags and conditional writes, compressed answers, connections no thread is made for, chunked bodies, TLS served, slow clients and HTTPS dialed, the OpenAPI document and its compatibility
 - [hnsw.md](hnsw.md) -- the graph as derived data, its records, its restore and open, its linking, and vectors written again
-- [benchmarks.md](benchmarks.md) -- what `make scale-bench` and `make ycsb` measure and how, and how two builds' instruction counts are read on macOS
+- [benchmarks.md](benchmarks.md) -- what `make scale-bench` and `make ycsb` measure and how, how two builds' instruction counts are read on macOS, the gate every pull request's instructions and heap bytes are held to, its workloads and the claims they stand for, and how the binaries a release ships are measured and held to their budgets
 - [writes.md](writes.md) -- `insert` and `put`, arithmetic in `set`, `require`, upserts, picked writes, an `order` by expression and `returning`
 - [fennecql.md](fennecql.md) -- SQL's spellings, its joins, subqueries and schema, parameters for counts, inner `get`s, `alter`, json paths, the shell's reading and declared schemas
 - [waits.md](waits.md) -- `Fennec-Wait`, the writes that wake held ones, the bids that settle a row, and the leader's looks
@@ -126,7 +126,7 @@ A proposal holds no invariant until it is built, and is listed apart:
 79. [The browser module holds one copy of a generic where it can](browser-module.md#one-copy-of-a-generic)
 80. [The core lost what it held twice or for one use](browser-module.md#size-cuts)
 81. [A vector goes out as its `f32`s](vector-search.md#vectors-out)
-82. [A number is read three ways, each exact](vector-search.md#numbers-in)
+82. [A number is read four ways, each exact, or refused past an `f64`'s range](vector-search.md#numbers-in)
 83. [A vector parameter goes into the module as `f32`s](vector-search.md#vector-parameters)
 84. [A quantized index holds codes, and `near` orders by the documents' vectors](vector-search.md#quantized-indexes)
 85. [A bit code is a residual's signs, from a centre the index learned](vector-search.md#bit-codes)
@@ -203,3 +203,6 @@ A proposal holds no invariant until it is built, and is listed apart:
 155. [An answer past `--http-gzip` goes as gzip where its client takes it, never one carrying a tag](http.md#compressed-answers) (added after the move, under *The HTTP server*)
 156. [A server that asks for no token answers only under this machine's name, and a page only of its own origin or `--http-cors`'s](http.md#open-servers) (added after the move, under *Access*)
 157. [`make chaos` breaks a region by seed, one fault at a time, and holds its history to an oracle](integrations.md#the-chaos-drill) (added after the move, under *Integrations and deploy*)
+158. [A pull request is held to its base in instructions and heap bytes an op](benchmarks.md#the-gate) (added after the move, under *Benchmarks*)
+162. [A request is read in time, and an answer written in time](http.md#slow-clients) (added after the move, under *The HTTP server*)
+163. [The compiler CI tests with is the one that ships](crates.md#toolchain) (added after the move, under *The crates*)

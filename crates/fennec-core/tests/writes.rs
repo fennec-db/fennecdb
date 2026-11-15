@@ -371,6 +371,77 @@ fn an_insert_takes_the_place_of_a_row_past_its_time() {
     );
 }
 
+/// A `set` takes a `@unique` value a row past its time holds, as an
+/// `insert` does: the row goes with it. It was refused, naming a row no
+/// read shows, until the sweeper came by (`tests/model.rs` found it). An
+/// upsert's `else set` too; and a `set` refused after the row went puts it
+/// back with the rest of its block.
+#[test]
+fn a_set_takes_a_unique_value_a_row_past_its_time_held() {
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection locks (name text @unique, owner text, at timestamp @ttl(30s))",
+    )
+    .unwrap();
+    db.set_clock(Some(1_000_000));
+    run(
+        &mut db,
+        "put locks [{id: 1, name: \"job\", owner: \"a\", at: 1000000}, {id: 2, name: \"other\", owner: \"b\"}]",
+    )
+    .unwrap();
+    db.set_clock(Some(1_030_000));
+    let expired = |db: &Database| one(db, "get locks where expired() count");
+    assert_eq!(expired(&db), Value::Int(1));
+    // Refused for its `require` after the row past its time went: both
+    // are put back.
+    let take = "set locks {name: \"job\"} where owner = \"b\"";
+    assert!(matches!(
+        run(&mut db, &format!("{take} require 2")),
+        Err(Error::Unmet(_))
+    ));
+    assert_eq!(expired(&db), Value::Int(1));
+    assert_eq!(affected(run(&mut db, take)), 1);
+    assert_eq!(expired(&db), Value::Int(0));
+    assert_eq!(
+        one(&db, "get locks select owner where name = \"job\""),
+        Value::Text("b".into())
+    );
+    // An upsert setting the row it found to a value a row past its time
+    // holds: the same.
+    run(
+        &mut db,
+        "put locks {id: 3, name: \"late\", owner: \"c\", at: 1000000}",
+    )
+    .unwrap();
+    assert_eq!(expired(&db), Value::Int(1));
+    let upsert = "put locks {name: \"job\", owner: \"d\"} if absent else set {name: \"late\"}";
+    assert_eq!(affected(run(&mut db, upsert)), 1);
+    assert_eq!(expired(&db), Value::Int(0));
+    assert_eq!(
+        one(&db, "get locks select id where name = \"late\""),
+        Value::Int(2)
+    );
+    // A reaper's `set` of a row past its time keeps its value: the row is
+    // set, one write, never let go of and made again.
+    run(
+        &mut db,
+        "put locks {id: 4, name: \"gone\", owner: \"e\", at: 1000000}",
+    )
+    .unwrap();
+    let seq = db.change_seq();
+    let reap = "set locks {owner: \"z\"} where expired() and id = 4";
+    assert_eq!(affected(run(&mut db, reap)), 1);
+    assert_eq!(db.change_seq(), seq + 1);
+    assert_eq!(
+        one(
+            &db,
+            "get locks select owner where expired() and name = \"gone\""
+        ),
+        Value::Text("z".into())
+    );
+}
+
 /// N threads race for one lock: exactly one wins, and once its time is
 /// past, another takes it.
 #[test]

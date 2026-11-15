@@ -52,6 +52,7 @@ mod match_filter;
 mod mcp_docs;
 mod memory;
 mod mixed_numbers;
+mod model;
 mod nan;
 mod read_calls;
 // Its fold is held to Python's by the fold's own functions, which a build
@@ -85,6 +86,7 @@ mod two_indexes;
 mod unique;
 mod unwinding;
 mod upsert;
+mod vector_range;
 mod wakes;
 mod windows;
 mod within;

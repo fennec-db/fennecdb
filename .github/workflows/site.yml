@@ -40,15 +40,16 @@ jobs:
       - name: Install the pinned toolchain
         run: rustup show
 
-      - uses: actions/cache@v4
+      - id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: site-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: site-cargo-
+          key: v2-site-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-site-cargo-
 
       # build.py minifies the JS and CSS through esbuild when it finds it on
       # PATH and ships the readable source when it does not, so this step is
@@ -118,3 +119,22 @@ jobs:
           wranglerVersion: "4.135.0"
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Prune target/ to the crates from outside the workspace
+        if: steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: sh tools/ci_prune_target.sh
+
+      # This workflow runs on main (a push or a dispatch of main's) and its
+      # entry is what site-lighthouse.yml restores on a pull request; a
+      # dispatch from another branch saves nothing, as in ci.yml.
+      - name: Save the cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}

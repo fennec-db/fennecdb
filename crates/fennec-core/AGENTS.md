@@ -168,6 +168,11 @@ an aggregate or `expired()` in one.
 builder, held to the golden file, and the sync refuses one a replica
 cannot answer (`PICKED`), as a scenario holds.
 
+**[A write form or an index kind the engine gains is drawn in
+`tests/model.rs`.](../../docs/design/engine.md#the-model)** Held to the
+model, an index to the scan's twin; a divergence is fixed with a test of
+its own, never by drawing less.
+
 ### Indexes
 
 **[`@unique` is a `@hash` that asks its bucket before a
@@ -316,14 +321,19 @@ shortest text reading back as it (`json::num32_into`), but for
 `json::TIE`.
 
 **[A number is read exactly.](../../docs/design/vector-search.md#numbers-in)**
-`num::parse_f64` reads one, and natively `num::clinger` a list of numbers
-alone into `f32`s. An `[int]`, `[float]` or `[timestamp]` keeps a list as
-written, as a json field does (`DataType::keeps_numbers`): a vector of
-whole `f32`s short of 2^24 is the integers written, no quick read making
-one of a list hiding a rounding (`value::quick_vector`), and any other is
-read again where `Database::exactly` names it. A filter compares a vector
-field with a list of numbers by its `f32`s (`value::compared_vector`). A
-stored statement runs its text as written, held to its quick read's digest
+`num::read_f64` reads one, its digits never shifted (`num::near`,
+`num::exact`), and natively `num::clinger` a list of numbers alone into
+`f32`s. One past an `f64`'s range (`1e400`, `1e-400`) is refused naming
+it by every reader, a text's reader passing the range's words on
+(`num::past_range`), never an infinity or 0, but in a stored definition's
+text (`fennec_ql::stored_definition`). An `[int]`, `[float]` or
+`[timestamp]` keeps a list as written, as a json field does
+(`DataType::keeps_numbers`): a vector of whole `f32`s short of 2^24 is
+the integers written, no quick read making one of a list hiding a
+rounding (`value::quick_vector`), and any other is read again where
+`Database::exactly` names it. A filter compares a vector field with a
+list of numbers by its `f32`s (`value::compared_vector`). A stored
+statement runs its text as written, held to its quick read's digest
 (`fennec_ql::stored_definition`).
 
 **[A vector parameter goes into the module as

@@ -31,6 +31,7 @@
 //! over once its lease has certainly lapsed ([`lease`]).
 
 pub mod directory;
+pub mod exit;
 pub mod fanout;
 pub mod lease;
 pub mod metrics;
@@ -40,14 +41,14 @@ pub mod upstream;
 
 use directory::{Directory, Node, State};
 use fennec_core::prelude::*;
-use fennec_http::conn::Conn;
+use fennec_http::conn::{Conn, Paced};
 use fennec_http::crypto::ct_eq;
 use fennec_http::http::{self, Method, Request, Response};
 use fennec_http::replication::{self, Replication};
 use metrics::Route;
 use std::collections::HashSet;
 use std::io::{BufReader, Write};
-use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -63,6 +64,17 @@ pub struct Config {
     pub max_connections: usize,
     pub max_body: usize,
     pub idle_timeout: Option<Duration>,
+    /// `--header-timeout`: a client's request read in time as a node reads
+    /// one ([`fennec_http::conn::Paced`]): within it of its first byte and
+    /// a second more for every [`fennec_http::conn::MIN_RATE`] bytes that
+    /// came. `None`: no bound but the idle timeout's on each read.
+    pub header_timeout: Option<Duration>,
+    /// `--write-timeout`: the longest one write to a client -- an answer,
+    /// a relayed stream -- waits for it to take any of it: the write that
+    /// filled the socket's buffers returns what went in, the next, taking
+    /// nothing, fails and ends the connection, within twice this.
+    /// `None`: for ever.
+    pub write_timeout: Option<Duration>,
     /// Connect and read bound when talking to a node.
     pub upstream_timeout: Duration,
     /// Whether a tenant created on a node in no pair gets a replica of its
@@ -140,7 +152,8 @@ pub struct Config {
     pub entry_token: Option<String>,
     /// HTTPS alone from clients (`--tls-cert`, `--tls-key`), each
     /// handshake on its connection's thread ([`fennec_http::conn`]); `None`,
-    /// plain HTTP. To the nodes the router speaks plain HTTP still.
+    /// plain HTTP. To the nodes it speaks what their address says: `https://`
+    /// is dialed over TLS (`upstream`, `fennec_http::dial::tls_of`).
     pub tls: Option<Arc<fennec_http::conn::Tls>>,
 }
 
@@ -153,6 +166,8 @@ impl Default for Config {
             max_connections: 1000,
             max_body: 64 << 20,
             idle_timeout: Some(Duration::from_secs(60)),
+            header_timeout: Some(fennec_http::conn::HEADER_TIMEOUT),
+            write_timeout: Some(fennec_http::conn::WRITE_TIMEOUT),
             upstream_timeout: Duration::from_secs(60),
             replicas: false,
             auto_failover: None,
@@ -748,21 +763,25 @@ impl Router {
     /// Opens the listener. As with the nodes, a non-loopback address needs
     /// a token: `/_shard/` can move and delete every tenant.
     pub fn bind(&self) -> std::io::Result<TcpListener> {
-        let remote = match self.cfg.addr.to_socket_addrs() {
-            Ok(mut it) => it.any(|a| !a.ip().is_loopback()),
-            Err(_) => false,
-        };
-        if remote && self.cfg.token.is_none() && !self.cfg.insecure {
+        self.bind_on(&fennec_http::Listen::look_up(&self.cfg.addr))
+    }
+
+    /// [`Router::bind`] on `listen`, its name looked up once: judged of the
+    /// addresses it is bound on, never of a second lookup's. The binary
+    /// looks `--listen` up as it starts, its tokens' lengths judged by the
+    /// same lookup (`fennec_http::short_token`).
+    pub fn bind_on(&self, listen: &fennec_http::Listen) -> std::io::Result<TcpListener> {
+        if listen.binds_past_loopback() && self.cfg.token.is_none() && !self.cfg.insecure {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 format!(
                     "{} is not a loopback address and there is no --token: \
                      /_shard/ would let anyone move and delete tenants",
-                    self.cfg.addr
+                    listen.given()
                 ),
             ));
         }
-        TcpListener::bind(&self.cfg.addr)
+        listen.bind()
     }
 
     pub fn serve_on(self: &Arc<Router>, listener: TcpListener) -> std::io::Result<()> {
@@ -1815,13 +1834,20 @@ impl Router {
         // unwinding too, as a node's.
         let _slot = slot;
         let _ = conn.set_read_timeout(self.cfg.idle_timeout);
+        // Once a connection, as a node's: a write the client takes nothing
+        // of for this long returns what went in, the next fails, and the
+        // connection ends.
+        let _ = conn.set_write_timeout(self.cfg.write_timeout);
         let peer = conn.peer_addr().ok();
         fennec_http::audit::connection(if conn.is_tls() { "https" } else { "http" }, peer);
         fennec_http::trace::connection(conn.local_addr().ok(), peer);
         let mut out = &conn;
         let _open = metrics::Connection::open();
-        let mut reader = BufReader::new(&conn);
+        // Each request read in time, as a node reads one.
+        let paced = Paced::new(&conn, self.cfg.idle_timeout, self.cfg.header_timeout);
+        let mut reader = BufReader::new(paced);
         loop {
+            reader.get_mut().waiting();
             let req = match http::read_request(&mut reader, self.cfg.max_body) {
                 Ok(Some(r)) => r,
                 Ok(None) => return,
@@ -1843,6 +1869,9 @@ impl Router {
             // The client's id, or one made here, which the node is sent
             // (`Pool::send`) and answers with.
             fennec_http::request_id::begin_request(&req);
+            // A proxy in front of a router on loopback holding a token
+            // shorter than 32 bytes: warned of once (a load and a branch).
+            fennec_http::proxied(&req);
             let arrived = Instant::now();
             // The client another router relayed this for, believed from a
             // router holding the same `--token` alone ([`region`]): it

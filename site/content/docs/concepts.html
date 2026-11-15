@@ -270,7 +270,9 @@ rather than per comparison: 22.6 s down to 12.4 s.</p>
 about 3 GB as <code>f32</code> and about 1.5 GB as <code>f16</code>. In
 WASM32's 4 GB address space that is the difference between fitting and not.
 Embedding model output sits comfortably inside the f16 range (±65 504, roughly
-three decimal digits) and the measured recall loss is 0.3 points.</p>
+three decimal digits) and the measured recall loss is 0.3 points. A component
+rounding past it, 65 520 or more either side, is refused naming the field and
+the element, where it was stored as the <code>f16</code>'s infinity.</p>
 </details>
 
 <h2 id="quantized-indexes">Quantized indexes</h2>
@@ -676,8 +678,8 @@ should live.</p>
 <thead><tr><th>Target</th><th>What you get</th><th>Size</th></tr></thead>
 <tbody>
 <tr><td>Browser</td><td>WebAssembly module plus a dependency-free ES client</td><td class="n">345 KB gzip<br><small>the wasm module</small></td></tr>
-<tr><td>Command line</td><td>The <code>fennec</code> shell, <code>fennec import</code>, <code>fennec types</code>, <code>fennec backup</code> and <code>restore</code></td><td class="n">2091–4355 KB</td></tr>
-<tr><td>Server</td><td><code>fennec-server</code>: HTTP, replication and tenants in one process</td><td class="n">7.18 MB image</td></tr>
+<tr><td>Command line</td><td>The <code>fennec</code> shell, <code>fennec import</code>, <code>fennec types</code>, <code>fennec backup</code> and <code>restore</code></td><td class="n">2883–4743 KB<br><small>x86-64 Linux</small></td></tr>
+<tr><td>Server</td><td><code>fennec-server</code>: HTTP, replication and tenants in one process</td><td class="n">8.19 MB image<br><small>amd64</small></td></tr>
 <tr><td>Embedded</td><td><code>fennec-core</code> as a Rust library</td><td class="n">zero dependencies</td></tr>
 </tbody>
 </table>

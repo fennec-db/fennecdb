@@ -1,6 +1,6 @@
 # Integrations and deploy
 
-The long form of the invariants [integrations/CLAUDE.md](../../integrations/CLAUDE.md), [deploy/CLAUDE.md](../../deploy/CLAUDE.md), [tools/CLAUDE.md](../../tools/CLAUDE.md) and [crates/fennec-server/CLAUDE.md](../../crates/fennec-server/CLAUDE.md) list under *Integrations and deploy*: `integrations/`, the Grafana data source, the desktop app, the `deploy/` kit, the install channels and the image's user. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [integrations/CLAUDE.md](../../integrations/CLAUDE.md), [deploy/CLAUDE.md](../../deploy/CLAUDE.md), [tools/CLAUDE.md](../../tools/CLAUDE.md) and [crates/fennec-server/CLAUDE.md](../../crates/fennec-server/CLAUDE.md) list under *Integrations and deploy*: `integrations/`, the Grafana data source, the desktop app, the `deploy/` kit, the install channels, the Flutter plugin's archive and the image's user. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Integrations
 
@@ -997,6 +997,44 @@ has.
   none came back in those runs; a failed check keeps the window's every step
   now, and a page that loaded says where its load's time went (`nav`, its
   first state report).
+- **The tail, caught with its steps.** In the last 100 runs of `desktop.yml`
+  (13 to 15 November) two Windows jobs timed out waiting for a studio: `serve`
+  on arm64 (job 132399673325, before the steps were kept) and `orphan` on x64
+  (job 132701210526), the first with its steps kept (two Linux arm64 ones came
+  before `loadAgainIfDropped`). `orphan` opens two files at once. Each window, a
+  browser of its own, asked for its studio 0.5 and 0.9 s after the launch. Each
+  page's Navigation Timing put its request 25.5 and 25.3 s after its navigation
+  began, with no time spent connecting (the socket was already there) and the
+  server's answer in the same millisecond. Both committed 26.1 and 26.2 s in,
+  and the page's own files then took 4 s to its `dom-ready`, where the loops'
+  99th percentile is 0.7 s. The check had waited 30 s for both studios loaded.
+  So the windows did load, late, and the whole browser was slow rather than
+  one load dropped. A Windows counterpart of `loadAgainIfDropped` would have
+  no event to hear, and a load again would wait in the same cold browser.
+
+  In 384 more windows on the two runners (runs 43680100667 and 43681265858,
+  one window opened and closed at a time, two at once every fifth round), the
+  first request left 1.1 to 1.5 s after the navigation began at the median,
+  2.2 to 3.4 s for two windows at once, and up to 9.7 s on x64. The slow ones
+  came three in a row with their pages' files slow too: a runner slow for a
+  while, which every cold browser starting then waits out. The time is local
+  work. With every outbound connection of `msedgewebview2.exe` blocked by the
+  firewall in every other round, the medians were the same (1 404 against
+  1 483 ms on x64, 1 136 against 1 141 on arm64), and the only names WebView2
+  resolved were `wpad` and `config.edge.skype.com`. Where in the browser's
+  start the time goes is not known: no argument reached the runners' elevated
+  app's WebView2 to find out, neither a network log nor `--no-proxy-server`,
+  through the variable or through its registry override
+  (`HKLM\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments`,
+  43680100667: Electrobun's switches alone).
+
+  What a check can change is what it waits for. `orphan` tests the kill, the
+  servers' end and the files freed, and waited for both pages. It now waits
+  for each window's studio to be asked for and allowed (`waitWindow`), by
+  which time the window's browser runs. Only a check that tests a page waits
+  for its load. Rejected: a longer wait (a check bounds what must happen, and
+  the page did load) and a load again on a timer. Left open: the checks that
+  test a page meet the same tail.
 
 Desktop integration (phase 3 of #578). A `.fennec` opens from Explorer and a
 file manager, the app registers itself for that, the menus' keys, the last
@@ -2232,3 +2270,70 @@ So a hand-over gives the user a directory and the database in it, and nothing of
 **Checked in Docker** (the image built from the change, Docker Desktop 29.2's Linux VM, arm64), each run's logs, `/proc/1/status` read from a container sharing the server's PID namespace, and `/data` listed after it. An empty volume under `volume-nocopy=true`: `handed /data to 65534:65534`, `running as 65534:65534, started as root (FENNEC_USER)`, `/_health` 200; the process's ids 65534 four times over, no supplementary group, `CapPrm` and `CapEff` 0; `data.fennec`, its `.lock` and `.sync` 65534's; `docker exec` of `--ping` (0), `--version` and a second server over the file (refused by the lock, 1), none leaving a file of root's; stopped (0) and started again on the volume, a row written before read back, nothing handed over. A root-owned subdirectory of a volume bind-mounted at `/data` (`volume-subpath`, `volume-nocopy`), holding the `data.fennec` and `.lock` a server run as root had left (`FENNEC_USER=` empty, as a derived image with `USER 0:0` ran): `handed /data and 2 of its files to 65534:65534`, and served. A host directory through Docker Desktop's file sharing: the directory handed over, and the files the server then made shown as root's, which that sharing does with every file a container makes. `docker run --user 1000:1000` on a volume 1000 owns: served as 1000, nothing handed over, no line said. A volume holding `notes.txt`: the warning naming it, then the open's `Permission denied` (1), the volume as it was. `--cap-drop ALL` as root: `could not become 65534:65534 (setgroups: Operation not permitted ...)`, 2. `--dir /data/n1` on an empty root-owned volume: `/data` handed over, the node made `n1`, and a tenant made through `/_admin` wrote its files as 65534 (`acme.fennec`, `.lock`, `acme.instance`, `schedules.hint`). `docker run --user 65534:65534` on a root-owned volume: `Permission denied`, as the image of 0.2.0 did.
 
 **Size.** The static `fennec-server` of the image grew by 22 276 bytes of sections (6 974 465 to 6 996 741; `.text` 20 112 of it), its file by one 64 KiB page on arm64, which aligns its segments so; nothing else is built with it, the browser module and the native library included. It buys the image starting on every platform's volume with no derived image, and serving as 65534 where the workarounds served as root. A start told no user, or not as root, asks its effective ids and nothing more; nothing after the start is changed.
+
+## Flutter plugin
+
+**The Flutter plugin ships each platform's library once, and no symbolic
+link.** pub keeps no link: it packs the file a link points at, so whatever
+reaches a binary through one goes out as another copy of it. Through 0.2.0,
+`prepare.sh` copied the whole dynamic XCFramework -- the iOS device's and
+the simulator's frameworks, and macOS's -- under `ios/` and again under
+`macos/`, and a macOS framework is versioned, its binary in `Versions/A`
+reached through `Versions/Current` and the top level. The archive pub.dev
+served held that 6.36 MB binary six times and each iOS one twice: 34 514 079
+bytes packed, 65 705 431 unpacked (main's, packed the same way on
+2026-11-13: 34 580 807 and 65 718 131). An app was no larger, since
+CocoaPods embeds one platform's slice, but nothing built a macOS app from
+what pub had made of the links.
+
+Now each platform's directory holds its own library alone: `ios/` the
+XCFramework's two iOS slices, its Info.plist written again to list only
+them (by awk, since `packages.yml` runs `prepare.sh` on Linux), `macos/` a
+plain `libfennec_ffi.dylib`, arm64 and x86_64, `android/` the `.so` of each
+ABI: 13 111 191 bytes packed and 24 596 463 unpacked, each Mach-O once
+(main's libraries, this layout, 2026-11-13). The ceilings
+`tools/flutter_archive_check.py` holds the archive to, 14 MB packed and 26
+MB unpacked, are the 1.0 plan's: the libraries once, with room for them to
+grow by about the 5% the plan gives a native library.
+
+macOS takes a dylib, the owner's choice over a framework: a framework
+without versions is iOS's layout, which code signing on macOS refuses.
+`build-xcframework.sh --dynamic` makes it from the macOS framework's
+binary, its install name rewritten to `@rpath/libfennec_ffi.dylib` and
+signed again ad hoc, rather than linking the library twice, and the
+release's `FennecFFIDynamic.xcframework.zip` holds it beside the
+XCFramework: 11 234 051 bytes where it was 7 991 814. The XCFramework
+keeps all three frameworks, macOS's included: vulpes embeds that one in
+its apps itself. Nor could the dylib go inside it: `xcodebuild
+-create-xcframework` stops at "an xcframework cannot contain both
+frameworks and libraries" (Xcode 26.3). The pod vendors the dylib
+(`vendored_libraries`): CocoaPods embeds a vendored dynamic library in the
+app's `Frameworks` with the script that embeds a framework, and signs it.
+Dart opens it by name, `DynamicLibrary.open('libfennec_ffi.dylib')`, which
+dyld looks up through the executable's `LC_RPATH`, Flutter's Runner's
+being `@executable_path/../Frameworks`: a bundle of that shape found the
+dylib, and a database opened, written and read through it, whether its
+executable linked the dylib or not, and without the rpath found nothing
+(macOS 26.1).
+
+The macOS slices are built for macOS 11, the lowest aarch64-apple-darwin
+builds for, where they said 12 (vulpes, an app on the library alone, asked
+for 11), and the iOS ones for iOS 15; the pods and `Package.swift` declare
+the same, and the check refuses a slice built for a newer system than its
+pod's `s.platform`, which is what CocoaPods holds an app to.
+
+CI's `flutter-plugin` job runs after the Android and Apple jobs, whose
+artifacts are a release's libraries: the AAR's `.so`s are built by the NDK
+on Linux, the XCFramework and the dylib on macOS. It takes them as
+`packages.yml` takes them from a release, runs `prepare.sh`, copies the
+plugin out of the repository -- pub lists a package inside a repository by
+the version control's own listing, and the libraries `prepare.sh` copies
+are ignored there, so a copy under `target/` packed to nothing -- and packs
+it with pub itself: `flutter pub publish --to-archive` writes the archive a
+publish would upload, and `--skip-validation` leaves the version of
+`fennecdb` it names unresolved, which before a release is on no registry.
+The example in that archive is then built on the plugin beside it, for
+macOS -- the release build both architectures, then its integration test,
+which opens a file through the dylib the app embeds -- and for the iOS
+simulator. Before this job the iOS app was built from `prepare.sh`'s output
+in the repository, as the Android one still is, and no macOS app at all.

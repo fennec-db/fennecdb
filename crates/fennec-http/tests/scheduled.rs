@@ -567,7 +567,7 @@ fn a_promoted_copy_runs_its_due_slot_at_once() {
         ],
     );
     db.write().unwrap().follow(Vec::new()).unwrap();
-    schedule::watch("a promoted copy", &db, false, |_| {}).unwrap();
+    schedule::watch("a promoted copy", &db, false, || {}).unwrap();
     let t = Instant::now();
     while schedule::looks(&db) == 0 {
         assert!(t.elapsed() < Duration::from_secs(20), "never looked");
@@ -862,7 +862,7 @@ fn a_schedule_is_defined_where_a_scheduler_runs_it_by_the_server_s_token() {
     let (status, body) = node.send(ROOT, "/batch", &batch, "");
     assert_eq!(status, 400, "{body}");
     assert_eq!(number(&db, "get holds count"), 0);
-    schedule::watch("a test's database", &db, false, |_| {}).unwrap();
+    schedule::watch("a test's database", &db, false, || {}).unwrap();
     let (status, body) = node.query(&node.scoped(), yearly);
     assert_eq!(status, 403, "{body}");
     let (status, body) = node.query(ROOT, yearly);
@@ -1316,7 +1316,7 @@ fn a_held_claim_is_answered_by_a_run_s_write_never_by_its_mark() {
 fn a_server_holding_no_schedule_makes_no_look() {
     fennec_ql::install();
     let db = Arc::new(RwLock::new(Database::new()));
-    schedule::watch("idle", &db, false, |_| {}).unwrap();
+    schedule::watch("idle", &db, false, || {}).unwrap();
     let node = serve(&db);
     for q in [
         HOLDS,

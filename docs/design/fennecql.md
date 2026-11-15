@@ -1,6 +1,6 @@
 # FennecQL and schemas
 
-The long form of the invariants [crates/fennec-ql/CLAUDE.md](../../crates/fennec-ql/CLAUDE.md) lists under *FennecQL and schemas*: SQL's spellings, parameters for counts, inner `get`s, `alter`, json paths, the shell's reading and declared schemas. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-ql/CLAUDE.md](../../crates/fennec-ql/CLAUDE.md) lists under *FennecQL and schemas*: SQL's spellings, parameters for counts, inner `get`s, `alter`, json paths, the shell's reading, declared schemas and the corpus that holds every text to the reading it had. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## SQL spellings
 
@@ -1012,3 +1012,260 @@ golden file and read a row into it), the tables as code (`--schema`) and the sch
 (`--fennecql`); `integrations/types-golden/` holds each for one schema, with the
 named statements of [named-statements.md](named-statements.md#what-is-built) typed
 beside its collections (slice 6).
+
+## The corpus
+
+**No text that parsed reads as another statement, held in CI by canonical
+digest.** `make fennecql-corpus` (`tools/fennecql_corpus.py`, the example
+`crates/fennec-ql/examples/corpus.rs`) harvests every FennecQL text the
+repository tracks -- the docs' blocks and inline code, the golden files and
+the sync's scenarios, the string literals of every SDK's sources and the
+crates', and a list written by hand (below) -- and reads each with
+`parse`, `parse_exact` and `stored_definition`, the reading whose digest an
+open holds a stored record to: for a text `parse` reads as one definition,
+and for one `parse` refuses, which the stored reader may still read as an
+open reads a definition stored before the refusal. Each statement read is
+a word: one a named statement's body may hold (`get`, `put`, `insert`,
+`set`, `del` and SQL's spellings of them) the digest of a definition whose
+body it is alone, an `explain` its `get`'s, a definition its own
+`Definition::digest` and whether it replaces, any other statement -- a
+schema change, a listing, `call` -- a hash of its form (below). CI's test
+job runs it on every pull request and merge group against `origin/main`,
+reading both trees' texts with both trees' builds, and on every run against
+every corpus frozen at a tag. A text read otherwise, refused where it
+parsed, or one the parser panics on fails it, each printed with what
+changed and the `ACCEPTED` entry that would let it through; one that parses
+now and was refused, or is refused in other words, is told. The step
+against main also fails where a corpus frozen in main is changed or gone
+in this checkout (below).
+
+*Why the digest.* The check compared the trees' `Debug` forms. Against
+main that held, a field added in the same change kept out of `Debug` by
+hand where it held nothing (`Field`'s `beside`, `TextIndexSpec`'s
+`accents`, a definition's `after`, `schedule` and `hook`); against a tag
+months old, every field added since would differ in every text whose node
+has it. `Definition::canonical` writes a field only where it holds
+something, under a tag never reused, so a field added that a text does not
+use writes nothing and the text's digest is as it was. Checked in the
+code: each field goes through a writer that writes nothing for its empty
+value (`text`, `opt_text`, `flag`, `num`, `opt_num`, `list`, `names`,
+`opt_names`, `opt_count`, `offset`, `opt_expr`, `require`), those written
+whole being required ones (a parameter's or a claim's type, `near`'s
+vector); an
+operator is a byte of its own (`cmp_byte`, `arith_byte`), never its
+variant's place; a literal and a type are the file's own encodings, and
+the digest is `hll::hash`, which every stored record holds. The claim's other half
+did not hold everywhere: `Param`, `Claim`, `Require`, `Schedule`, `Cron`,
+`Webhook`, `Place`, a flat row's columns and a join's names were read field
+by field, so a field added to one of them and not written would have left
+a statement using it at the digest of one that does not -- run by an open
+as another tree, unmarked, and invisible to any corpus. Each is now taken
+apart whole, as `Select`, `Lookup`, `Pick` and the rest were, so the
+compiler refuses a field added until it is written or named as left out
+(`replace: _`). No byte moved: this tree reads every text of the frozen
+corpus to v0.2.0's digest.
+
+*Statements no definition holds* -- schema changes, listings, `call`;
+2 062 of the frozen texts' statements -- have no canonical tree: no record
+keeps their text, and a schema is kept in the file's own encoding. Their
+word hashes (FNV-1a) a form held to the canonical form's rule: the pretty
+`Debug` (`{:#?}`, a field a line), each line that is a struct's named field
+holding an empty value left out -- `name: ` and then exactly `None,`,
+`false,`, `0,`, `[],`, `"",` or `{},` (`EMPTY`, `empty_field` in the
+example) -- and a struct left with no field closed as its name, so a unit
+variant given a field that holds nothing reads as it did. A positional
+value keeps its line: `Some(0)` is not `Some()`. So does a map's entry,
+whatever its key prints as: a struct opens with `Name {`, a map with `{`
+(`opens_struct`), and a map's `Text: None,` is what it holds -- dropped as
+a field's line, `{Text: None}`, `{Vector: None}` and a map of both hashed
+alike (`a_maps_entries_keep_their_lines_whatever_they_hold`). No tree
+holds a map today, so no word moved: v0.2.0 frozen again with the change
+gave the committed file's sha256. Hashing the plain `Debug`, a `temporary:
+bool` added to `Statement::CreateCollection` moved 1 274 texts against main
+and 1 248 against the frozen corpus; with the form it moves none, nor does
+an `Option` added to `named::Call`, while `drop collection if exists` read
+without its `if exists` fails each text holding it. What the form cannot
+see: a value going from one empty shape to another (`0` to `None`, a
+field's type changed under it), a field taken away that held an empty
+value, and a field added whose type writes something where it holds
+nothing (an enum whose unused variant is `Hash`, a custom `Debug`): that
+one moves every text of its node and fails the step against main in the
+pull request adding it, which then writes its `Debug` only where it holds
+something, as `Field` and `TextIndexSpec` do. A canonical form of their own
+was weighed and left: the example is copied into BASE's tree and built
+there, so it calls only what both trees export, and a writer of its own,
+compiled against two trees, could take a node apart only with `..`,
+passing over every field added -- what the digest is there to see.
+
+*The frozen corpora.* `integrations/fennecql-corpus/v0.2.0.jsonl` holds the
+texts v0.2.0's tree held and the hand-written list's, as v0.2.0's own
+parser read them. `make fennecql-corpus FREEZE=v0.2.0` writes the tag's
+tree from `git archive` into a temporary directory, harvests it, adds the
+list, copies this tree's example in and builds the tag's fennec-ql with it
+-- the crates were already `fennec-*` at the tag, and the example calls
+only what v0.2.0 exports: `parse`, `parse_exact`, `parse_one`,
+`stored_definition`, `Definition::digest` and `GRAMMAR_EPOCH` -- with
+`CARGO_NET_OFFLINE=true` set by the tool (`build_env`): nothing downloaded.
+Of the 12 314 texts read (the tag's 12 114, and 200 of the list's 232 the
+tag's tree did not hold) 8 845 are kept, 26 535 readings: a harvested text
+one reading of which parsed, and every text of the list, refused or not; a
+refusal as `err` alone, its words free to change; `parse_exact`'s and the
+stored reading written only where `parse` does not make them (306 and
+none); 1.35 MB. Its first line names the tag, its commit, the epoch, 4, and
+the counts. A frozen corpus is added and never replaced: `--freeze` refuses
+a file that exists, but with `--replace`, which is for a file that has not
+landed (v0.2.0's was written again in its own pull request, once the
+review changed the `d` words, twice to the same sha256, and once more
+when the list gained the texts the parser refuses by name, each earlier
+line as it was). A tag's own reading is the one thing no later tree can
+produce, and a tree reading otherwise would write its own reading into it.
+Nor may a pull request edit or delete one by hand: the step against main
+compares each `.jsonl` main holds under `integrations/fennecql-corpus/`
+with this checkout's, by git's object id, and fails naming each one
+changed or removed (`frozen_changed`); one added is free, as is the list.
+CI runs every frozen corpus (`BASE=frozen`) with this tree's build alone,
+so the tag is never fetched but to print a failure's forms. A major
+version's first tag adds its own beside the last one's, never in its
+place: a text a later tree no longer holds -- nine of v0.2.0's already --
+is held to the reading its release gave it. And a freeze reads, with the
+tag's code, the texts of every corpus frozen at an earlier tag beside its
+tree's and the list's (`earlier_corpora`, by version, a release candidate
+before its release; `freeze_texts`), so such a text is held from then on
+to the later release's reading too -- under 1.x's rules, not 0.x's alone;
+the head line's `earlier` counts what each added. A later tag's corpus is
+never read: its texts were read by a later grammar.
+
+*The hand-written list.* The repository's texts are what its docs and
+tests happened to write: at v0.2.0, three `collections`, three `create
+unique index`, two `statements`, one `explain select`, no `alter table` or
+`drop table`. `integrations/fennecql-corpus/kinds.txt` holds, a text a
+line, at least five of every kind of statement fennec-ql reads, of every
+SQL spelling of one and of every SQL word it refuses naming what to write
+(`REQUIRED_KINDS`; `test_the_list_holds_five_of_every_kind`), and two at
+least of each path by which the parser refuses another statement by name,
+naming what to write (`REFUSED_KINDS`;
+`test_the_list_holds_two_of_every_refusal_by_name`): `create function`,
+`create procedure`, `create or replace` of a routine and of anything but a
+statement, `create trigger`, `create extension`, `create temp`,
+`temporary` or `unlogged`, `drop function`, `drop procedure`, `drop
+trigger`, a leading `join` (`inner`, `left`, `right`, `full`, `cross`) and
+a name then `join`, `alter collection`'s `alter`, `modify`, `set`,
+`change` or `retype`, an `alter field` to any index but `@ttl` or
+`@sorted`, any other change, and `explain` of what is no `get` -- the
+statement-level refusals of `Parser::statement`, `create`, `drop`, `alter`
+and `explain`; a clause's refusals inside a statement read are not kinds.
+232 texts. A kind is a text's first statement's leading words (`kind`),
+and the report counts the texts by kind. The step against main reads the
+list with both trees; a freeze reads it with the tag's code and keeps
+every line, a refusal too, so a text a later release reads that the tag
+refused is told and free. A line added reaches a frozen corpus at the next
+tag's freeze -- or, as the refusals by name did, its own pull request's
+freeze of a corpus that has not landed.
+
+*What lets a change through.* An entry of `ACCEPTED` in the tool, as
+`tools/openapi_compat.py`'s `BREAKS`, names one change: the text, both
+readings -- `base` and `head`, each `[parse, parse_exact,
+stored_definition]` with a refusal's words written `err` -- the pull
+request and why. It lets that change alone through: a later change of the
+same text fails again, and an entry matching no difference approves
+nothing (the report counts them; one may stay as the history of a change).
+A failure prints, for each failing text up to 20, its entry ready to paste
+and what each reading reads otherwise: the statements' forms' differing
+lines, 12 at most a reading (the example run as `corpus forms`, BASE's
+build too -- for a frozen corpus the tag's, built from its commit where
+this clone has it or can fetch it), a refusal's words, a panic. Where the
+forms are alike and a word moved, what moved is the canonical encoding.
+Every failing text's entry, those past the 20 too, goes to
+`accepted-<BASE>.txt` beside the builds, a line each ready to paste, and
+the failure names the file (`entries_path`): a change of precedence failed
+56 texts, three rounds of pasting 20.
+
+Against a 0.x BASE -- a 0.x tag's frozen corpus, or main while its version
+is below 1.0 (`major`, a 1.0 release candidate being 1.x) -- an entry alone
+lets through a statement no definition holds read otherwise and a text
+refused now whose stored reading holds: 0.x promised nothing. Where a
+digest moves -- a `c`, `e` or `s` word read otherwise, word by word, so a
+text's `call` read otherwise beside its `get` read alike moves none; or a
+definition's stored reading changed or refused, what an open marks broken
+-- and where a text a 1.x BASE read is refused at all, the entry passes
+only with `GRAMMAR_EPOCH` raised past BASE's and named in it: a major
+version, whose comment in `named.rs` names the texts as epochs 2 to 4 did
+([compatibility.md](compatibility.md#the-grammar-epoch)). A panic passes
+under no entry.
+
+Against a 1.x BASE a statement no definition holds read otherwise -- a `d`
+word moved -- passes with the epoch raised so, or with the entry's
+`same_meaning`: why the statement means what it meant. The `d` word hashes
+a representation, which moves where the tree changed shape and the meaning
+did not -- a field renamed -- as where the meaning changed: `drop
+collection if exists t` read without its `if exists`, against a main whose
+`Cargo.toml` said 1.0.0, passed with its six entries pasted before this
+rule, where the contract says a 1.x text is read alike. Nothing in a hash tells the two
+apart, so the entry says which, in a field of its own, never the free
+`why`: one that says nothing is refused before anything runs
+(`entry_errors`), and the summary prints every claim whole, under *The
+same meaning, as each entry says*, for the review to judge
+(`test_a_statement_read_otherwise_against_a_1x_base_needs_the_epoch_or_its_meaning_kept`,
+`test_every_claim_of_the_same_meaning_is_in_the_summary`). The entry a
+failure prints against a 1.x BASE holds an empty `same_meaning`, to be
+said or dropped for the epoch. A claim lets no digest move and no refusal
+through. Under 1.x the epoch stays 4, so no 1.x refuses a text a 1.x
+release read or moves a digest of v0.2.0's, and a 1.x statement reads
+otherwise only where its entry says, in words a reviewer read, that it
+means what it meant. Nothing yet ties a raised epoch to a major version's
+number: a guard in `tools/version.py` follows once both changes have
+landed.
+
+*What runs, and what it costs.* Each tree's fennec-ql is built unoptimised
+-- `release`'s LTO and single codegen unit took minutes a tree -- with
+debug information, overflow checks and debug assertions off, so a text
+reads as the shipped parser reads it, on a stack of 256 MiB (the depth
+test's 512 levels outgrew 8 MiB of a debug build), with this tree's pinned
+compiler (`RUSTUP_TOOLCHAIN`: v0.2.0's `rust-toolchain.toml` said
+`stable`) and offline. A base commit's tree is built into a target of its
+own, `base-<commit>`, the others removed: a tree unpacked from `git
+archive` keeps its commit's file times and, a workspace's members being
+hashed by their path within it, sits where the last tree sat in cargo's
+eyes, so built into one target after a newer tree it was taken as built,
+the old reading answered in a tenth of a second
+(`test_two_base_trees_are_each_built`). This checkout's own tree was stale
+the same way: two checkouts sharing one `$FENNECQL_CORPUS_TARGET` and its
+`head`, the second checked out before the first built, the second was
+taken as built, and a change failing 6 texts with a target of its own
+passed. It is built into `head-<key>`, the key a hash of the checkout's
+absolute path (`head_target`;
+`test_two_checkouts_sharing_a_target_are_each_built`): no other checkout
+shares it, and a checkout's own edits are newer than its build, as cargo
+needs. Another checkout's `head-` is left alone, being perhaps mid-build.
+The trees are unpacked under the builds' root, `trees/<role>-<pid>`, never
+the system's temporary directory: a run killed before it removed its own
+-- a SIGKILL -- leaves it for the next run, which removes those whose
+process is gone and no live run's (`unpacked`, `clear_leftovers`). Each
+build is some 154 MB, under `target/fennecql-corpus/` or
+`$FENNECQL_CORPUS_TARGET`: CI's is the runner's temp, since the test job's
+cache saves `target/` and two builds were 306 MB of it. The tool's own
+tests run in the fmt job and in the test job's ubuntu leg, before the two
+steps whose reading and judging they hold: the fmt job is no required
+check. Here, at a load of 3 to 4 on 8 cores, a tree built in 7 to 10 s,
+the step against main took 24 s from nothing built and 12 s with this
+tree's build made, and the frozen step 0.8 s; the first CI runs give the
+runner's figure.
+
+*Today.* Against v0.2.0's frozen corpus: 8 845 texts, 26 535 readings,
+every one alike. Against main (9d00cffd): 12 607 texts, this tree's and
+main's, 37 821 readings, none read otherwise, refused or panicking; 4 told
+as parsing now and 4 as refused in other words -- dimensions past their
+range that main, newer than this tree's base, refuses. Probes, each made
+in a copy of this tree: a `temporary: bool` on
+`Statement::CreateCollection` and an `Option` on `named::Call` read alike
+against both; `drop collection` with its `if exists` ignored fails 6 texts
+against each -- and against a main whose `Cargo.toml` says 1.0.0, its six
+entries as printed are refused before anything runs (an empty
+`same_meaning`), pasted without `same_meaning` are held, and with one pass,
+the six claims printed; an `and` whose right operand binds an `or` fails 56
+against each, 20 on the screen and all 56 in `accepted-<BASE>.txt`;
+#632's head, which refuses numbers past a float's range, fails 16 texts
+against main -- its base and today's -- the 4 definitions among them
+keeping their stored reading, and passes both steps with the 16 entries
+its failure printed; `>=`'s byte in `cmp_byte` moved from 5 to 6 failed the
+frozen step with 370 texts.

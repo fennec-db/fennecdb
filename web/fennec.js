@@ -60,6 +60,9 @@ const dec = new TextDecoder();
 const untouched = new WeakMap();
 const replaceable = (f) => untouched.get(f) === f.changeSeq;
 
+/** The databases `close` let go of, which `persist`, `restore` and `openFile` refuse (`alive`). */
+const closed = new WeakSet();
+
 /** A `compact`, which `batch` cannot put back: a batch holding one runs each statement on its own. */
 const COMPACT = /^(?:\s|--[^\n]*|#[^\n]*)*compact\b/i;
 
@@ -805,6 +808,7 @@ export class Fennec {
   }
 
   close() {
+    closed.add(this);
     this.#lives?.clear();
     this.#wasm.fennec_close(this.#handle);
   }
@@ -931,30 +935,41 @@ const LITTLE = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
 
 /**
  * The parameters that are vectors, apart from the rest, as `f32`s: a
- * typed array or an array of finite numbers, which the module reads as a
- * vector either way. Each goes over as its place among the parameters and
- * its length, then its values, and the JSON holds `null` where it goes.
- * Written out as text and read back, a page of 200 768-dim vectors spent
- * most of its time on the digits, both sides of the call. A `-0` goes over
- * as `0`, as JSON writes it, so either way stores the same vector. Those
- * at `asJson` stay in the JSON: a json field keeps a list's numbers as
- * written, which the module asks for by their places. One each of whose
- * numbers an `f32` holds exactly -- a `Float32Array`, an int short of 2^24,
- * `0.5`, not `0.1` -- goes marked exact, its place's top bit set, and an
- * `[int]` or a `[float]` takes it as it came (`fennec_abi::EXACT`).
+ * typed array, whatever numbers it holds, or an array of finite numbers,
+ * which the module reads as a vector either way. Each goes over as its
+ * place among the parameters and its length, then its values, and the JSON
+ * holds `null` where it goes. Written out as text and read back, a page of
+ * 200 768-dim vectors spent most of its time on the digits, both sides of
+ * the call. A `-0` goes over as `0`, as JSON writes it, so either way
+ * stores the same vector. Those at `asJson` stay in the JSON: a json field
+ * keeps a list's numbers as written, which the module asks for by their
+ * places. One each of whose numbers is a finite one an `f32` holds exactly
+ * -- a `Float32Array`'s, an int short of 2^24, `0.5`, not `0.1` -- goes
+ * marked exact, its place's top bit set, and an `[int]` or a `[float]`
+ * takes it as it came (`fennec_abi::EXACT`).
  */
 function vectorsApart(params, asJson = null) {
   const found = [];
   let size = 0;
   params.forEach((p, i) => {
     if (asJson?.includes(i)) return;
-    const list = Array.isArray(p) || (ArrayBuffer.isView(p) && !(p instanceof DataView)) ? p : null;
+    const typed = !Array.isArray(p);
+    const list = !typed || (ArrayBuffer.isView(p) && !(p instanceof DataView)) ? p : null;
     if (!LITTLE || !list || list.length === 0) return;
-    // A `Float32Array`'s numbers pass as they are.
+    // A typed array's numbers pass as they are, a NaN or an infinity among
+    // them, as a native binding hands its `f32`s: the module refuses a
+    // vector holding one where a vector field or `near` takes it, naming the
+    // element -- in the JSON a NaN was `null` and the array an object, which
+    // no vector field takes. An array's NaN or infinity keeps it in the
+    // JSON, `null` there as a server is sent it. A number past an `f32`'s
+    // range, `1e39`, goes over as the `f32`'s infinity, which the module
+    // refuses so too, as a server reading its digits does; none of these
+    // is exact, so a list of numbers asks for it as JSON, as written.
     let exact = true;
     for (let k = 0; k < list.length; k++) {
-      if (typeof list[k] !== 'number' || !Number.isFinite(list[k])) return;
-      if (exact && Math.fround(list[k]) !== list[k]) exact = false;
+      const x = list[k];
+      if (typeof x !== 'number' || (!typed && !Number.isFinite(x))) return;
+      if (exact && !(Math.fround(x) === x && Number.isFinite(x))) exact = false;
     }
     found.push(exact ? -1 - i : i);
     size += 8 + 4 * list.length;
@@ -1020,31 +1035,172 @@ async function unseal(ck, key, gen, n, rec) {
 const isSealed = (rec) => rec != null && rec.data != null && rec.iv != null;
 const chunkRange = (key) => IDBKeyRange.bound(`${key}#`, `${key}#\uffff`);
 
+/**
+ * The connection every call shares, opened by the first and kept: a call
+ * opening its own and closing it took 8 to 10 ms once the page had sat
+ * idle 3 s, in Chrome and Firefox alike, and Firefox 0.6 to 2.4 ms more
+ * back to back (web/browser/). It lets go when a delete or an upgrade of
+ * the database asks -- left open, connections held both up -- or the
+ * browser closes it, and the next call opens another.
+ */
+let shared = null;
 function idb() {
-  return new Promise((res, rej) => {
-    const req = indexedDB.open(DB_NAME, 1);
-    req.onupgradeneeded = () => req.result.createObjectStore(STORE);
-    req.onsuccess = () => res(req.result);
-    req.onerror = () => rej(req.error);
-  });
+  const factory = indexedDB;
+  if (shared?.factory !== factory) {
+    const entry = { factory, db: null };
+    const drop = () => {
+      if (shared === entry) shared = null;
+    };
+    entry.opening = new Promise((res, rej) => {
+      const req = factory.open(DB_NAME, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+      req.onsuccess = () => {
+        const db = (entry.db = req.result);
+        db.onversionchange = () => {
+          db.close();
+          drop();
+        };
+        db.onclose = drop;
+        res(db);
+      };
+      req.onerror = () => {
+        drop();
+        rej(req.error);
+      };
+    });
+    shared = entry;
+  }
+  return shared.opening;
+}
+
+/** Thrown by `inStore` asked to write over a connection that has ended. */
+const ENDED = new FennecError('the connection the image was stored over has ended');
+
+/**
+ * `ask`'s requests of the store in a transaction of `mode`, done: then what
+ * the function `ask` returned gives, or the transaction's error. `ask` is
+ * handed the store and the connection. Past the quota Chrome aborts at the
+ * commit (`abort` alone), and Firefox fails the request before the
+ * transaction holds its error -- and then refused the connection's next
+ * transactions and requests (InvalidStateError), no `close` said: the
+ * connection a transaction failed on is let go, and a call a closed one
+ * refuses is asked again of another (web/browser/). With `on`, over that
+ * connection alone: once it has ended, nothing is asked and `ENDED` thrown.
+ */
+async function inStore(mode, ask, on = null) {
+  for (let again = false; ; again = true) {
+    const db = await idb();
+    if (on && db !== on) throw ENDED;
+    const forget = () => {
+      if (shared?.db === db) shared = null;
+      db.close();
+    };
+    let tx = null;
+    let value;
+    try {
+      tx = db.transaction(STORE, mode);
+      value = ask(tx.objectStore(STORE), db);
+    } catch (e) {
+      // Nothing of it lands: some of its requests may have been made.
+      try {
+        tx?.abort();
+      } catch {}
+      forget();
+      if (again || e?.name !== 'InvalidStateError') throw e;
+      continue;
+    }
+    return new Promise((res, rej) => {
+      const fail = (e) => {
+        forget();
+        rej(e ?? new FennecError('IndexedDB aborted the transaction'));
+      };
+      tx.oncomplete = () => res(value?.());
+      tx.onerror = (e) => fail(e?.target?.error ?? tx.error);
+      tx.onabort = () => fail(tx.error);
+    });
+  }
+}
+
+/**
+ * Per database, the last of its `persist`, `restore` and `openFile` calls.
+ * Each reads where the one before left the database -- the next chunk's
+ * number, the image's connection, the file it is kept in -- and moves it on
+ * only once its own write has landed: two at once read the same number, and
+ * the second chunk was stored over the first, its writes lost.
+ */
+const turns = new WeakMap();
+
+/** Per database, the last `restore` called while it is out: `{prev, loaded, failed}`, `prev` the one out at its call. */
+const restoring = new WeakMap();
+
+/**
+ * `run()` once every call before it on `fennec` has settled, refused or
+ * not: at once when none is out. A `persist` or `openFile` (`call`) made
+ * while a `restore` was out is refused when that restore was: the database
+ * is not the one it waited for -- emptied, maybe, for an image that never
+ * loaded -- and stored, it replaced the record the restore could not read.
+ * A later restore that loaded its record answers for those before it; one
+ * that found none leaves the database as they left it.
+ */
+function inTurn(fennec, run, call) {
+  const behind = call && restoring.get(fennec);
+  const go = () => {
+    for (let r = behind; r && !r.loaded; r = r.prev) {
+      if (r.failed) throw new FennecError(`${call} refused: the restore it waited for failed (${r.failed.message})`, { cause: r.failed });
+    }
+    return run();
+  };
+  const out = turns.get(fennec)?.then(go) ?? go();
+  const done = out.then(free, free);
+  function free() {
+    if (turns.get(fennec) === done) turns.delete(fennec);
+  }
+  turns.set(fennec, done);
+  return out;
 }
 
 /**
  * Writes the database into IndexedDB under `key`: the image the first time,
  * then only the writes since the last call, as a chunk. Returns the bytes
  * written. With `{cryptoKey}` (AES-GCM) each is sealed before it is stored.
+ * Called while another is out, it stores what was written by its turn.
  */
 export async function persist(fennec, key = 'default', opts = {}) {
+  return inTurn(fennec, () => persistNow(fennec, key, opts), 'persist');
+}
+
+/**
+ * Refuses a database `close` let go of, whose image is empty: stored, it
+ * replaced the record and its chunks. A call that had not run by the
+ * close meets it, a retry, and one that awaited before it touches the database.
+ */
+function alive(fennec, call) {
+  if (closed.has(fennec)) throw new FennecError(`${call} refused: the database was closed`);
+}
+
+/** `image`, never an empty one -- a closed database's -- which stored would replace a record with nothing. */
+function filled(image) {
+  if (image?.length === 0) throw new FennecError('an empty image is never stored');
+  return image;
+}
+
+async function persistNow(fennec, key, opts) {
+  alive(fennec, 'persist');
   if (kept.has(fennec)) throw new FennecError('the database is kept in a file (openFile): persist would take the writes it appends');
   const ck = opts.cryptoKey ?? null;
-  const db = await idb();
   let s = stored.get(fennec);
   let image = null;
   let chunk = null;
-  if (s?.key !== key || s.ck !== ck) {
+  // A chunk follows its image only over the connection that stored the
+  // image (`s.db`), open since: one that ended may have ended with the
+  // store -- a delete of the database asks it to let go first
+  // (`versionchange`), the browser clearing the site's data closes it
+  // (`close`, or its requests refused) -- and chunks stored after would
+  // restore nothing. Then an image, even with nothing written since.
+  if (s?.key !== key || s.ck !== ck || s.db !== shared?.db) {
     fennec.journal();
     image = fennec.snapshot();
-    s = { key, ck, gen: null, next: 1, image: 0, chunks: 0 };
+    s = { key, ck, db: null, gen: null, next: 1, image: 0, chunks: 0 };
     stored.set(fennec, s);
   } else {
     const { replace, bytes } = fennec.drain();
@@ -1054,50 +1210,48 @@ export async function persist(fennec, key = 'default', opts = {}) {
     else chunk = bytes;
   }
   const gen = image && ck ? [...crypto.getRandomValues(new Uint8Array(8))].map((b) => b.toString(16).padStart(2, '0')).join('') : s.gen;
+  let on = null;
   try {
+    filled(image);
     const rec = !ck ? (image ?? chunk) : image ? await seal(ck, key, gen, 0, image) : await seal(ck, key, gen, s.next, chunk);
-    await new Promise((res, rej) => {
-      const tx = db.transaction(STORE, 'readwrite');
-      const os = tx.objectStore(STORE);
+    // The connection may end while the record is sealed or the call waits
+    // its turn: a chunk is stored over the image's alone.
+    const ask = (os, db) => {
+      on = db;
       if (image) {
         os.put(rec, key);
         os.delete(chunkRange(key));
       } else {
         os.put(rec, chunkKey(key, s.next));
       }
-      tx.oncomplete = res;
-      tx.onerror = () => rej(tx.error);
-      tx.onabort = () => rej(tx.error);
-    });
+    };
+    await inStore('readwrite', ask, image ? null : s.db);
   } catch (e) {
-    // The drained writes are nowhere now; the next call stores an image.
+    // The drained writes are nowhere now; the next call stores an image --
+    // this one, where the image's connection had ended.
     stored.delete(fennec);
+    // In this call's turn still: `persist` would wait for this very call.
+    // It stores an image, which a database closed meanwhile has not.
+    if (e === ENDED) return persistNow(fennec, key, opts);
     throw e;
   }
-  if (image) Object.assign(s, { gen, next: 1, image: image.length, chunks: 0 });
+  if (image) Object.assign(s, { db: on, gen, next: 1, image: image.length, chunks: 0 });
   else Object.assign(s, { next: s.next + 1, chunks: s.chunks + chunk.length });
   return (image ?? chunk).length;
 }
 
 /** Free-form state (cursors): next to the image, under a separate key. */
 export async function putState(key, value) {
-  const db = await idb();
-  await new Promise((res, rej) => {
-    const tx = db.transaction(STORE, 'readwrite');
-    tx.objectStore(STORE).put(value, key);
-    tx.oncomplete = res;
-    tx.onerror = () => rej(tx.error);
+  await inStore('readwrite', (os) => {
+    os.put(value, key);
   });
 }
 
 /** Reads back what `putState` wrote; `undefined` when absent. */
 export async function getState(key) {
-  const db = await idb();
-  return new Promise((res, rej) => {
-    const tx = db.transaction(STORE, 'readonly');
-    const req = tx.objectStore(STORE).get(key);
-    req.onsuccess = () => res(req.result);
-    req.onerror = () => rej(req.error);
+  return inStore('readonly', (os) => {
+    const req = os.get(key);
+    return () => req.result;
   });
 }
 
@@ -1108,15 +1262,34 @@ export async function getState(key) {
  * refuses a record stored in the clear.
  */
 export async function restore(fennec, key = 'default', opts = {}) {
+  const r = { prev: restoring.get(fennec) };
+  restoring.set(fennec, r);
+  // Noted inside the turn: before the next call's begins.
+  const out = inTurn(fennec, async () => {
+    try {
+      return (r.loaded = await restoreNow(fennec, key, opts));
+    } catch (e) {
+      throw (r.failed = e);
+    }
+  });
+  // Out until the promise its caller holds settles: let go of beside the
+  // turn, before the caller's own handlers, whose calls run. Let go of as
+  // its work ended, jobs earlier, a call made between ran as one made once
+  // the failure was seen.
+  const answered = () => restoring.get(fennec) === r && restoring.delete(fennec);
+  out.then(answered, answered);
+  return out;
+}
+
+async function restoreNow(fennec, key, opts) {
+  alive(fennec, 'restore');
   const ck = opts.cryptoKey ?? null;
-  const db = await idb();
-  let [image, chunks] = await new Promise((res, rej) => {
-    const tx = db.transaction(STORE, 'readonly');
-    const os = tx.objectStore(STORE);
+  let on = null;
+  let [image, chunks] = await inStore('readonly', (os, db) => {
+    on = db;
     const img = os.get(key);
     const ch = os.getAll(chunkRange(key));
-    tx.oncomplete = () => res([img.result, ch.result]);
-    tx.onerror = () => rej(tx.error);
+    return () => [img.result, ch.result];
   });
   if (!image) return false;
   if (isSealed(image) !== !!ck) {
@@ -1142,13 +1315,28 @@ export async function restore(fennec, key = 'default', opts = {}) {
       at += c.length;
     }
   }
+  // Closed while the record was read: `emptied` would open it again.
+  alive(fennec, 'restore');
+  // A load that fails may leave another database -- `emptied`, no journal
+  // on it, or emptied by the module for collation data it lacks, the
+  // journal holding writes of the one gone -- and `persist` drained that
+  // journal after the image of the one gone: nothing, or writes of a
+  // database no longer there. The next stores an image.
+  stored.delete(fennec);
   if (replaceable(fennec)) emptied(fennec);
-  await fennec.loadAsync(bytes);
-  fennec.journal();
-  stored.set(fennec, { key, ck, gen, next: chunks.length + 1, image: image.length, chunks: bytes.length - image.length });
-  // The database the code declared its schema for is this one now: checked
-  // again, what it adds journaled with the rest.
-  await checked(fennec, declared.get(fennec), 'apply');
+  try {
+    await fennec.loadAsync(bytes);
+    fennec.journal();
+    // Its chunks follow over the connection it was read over, as `persist`'s.
+    stored.set(fennec, { key, ck, db: on, gen, next: chunks.length + 1, image: image.length, chunks: bytes.length - image.length });
+    // The database the code declared its schema for is this one now: checked
+    // again, what it adds journaled with the rest.
+    await checked(fennec, declared.get(fennec), 'apply');
+  } finally {
+    // Closed while collation data was fetched or the schema checked: the
+    // load called the record corrupt, the check the handle not found.
+    alive(fennec, 'restore');
+  }
   return true;
 }
 
@@ -1189,7 +1377,8 @@ function imageEnd(head) {
 function writeAt(h, bytes, at) {
   for (let done = 0; done < bytes.length; ) {
     const n = h.write(bytes.subarray(done), { at: at + done });
-    if (!(n > 0)) throw new FennecError('the file took none of a write');
+    // Firefox's answer past the quota, where Chrome throws (web/browser/).
+    if (!(n > 0)) throw new FennecError('the file took none of a write: the origin is out of room, or its file system failed');
     done += n;
   }
 }
@@ -1215,18 +1404,30 @@ function refused(name, e) {
   return new FennecError(`${name} refused a write (${e?.message ?? e}); it holds what was written before, and the database has to be opened from it again`, { cause: e });
 }
 
+/**
+ * How long `openFile` waits for a file held elsewhere: a page loaded again
+ * finds its file held until the page before's worker has ended, which
+ * Chrome puts off 2 s for a busy one (web/browser/).
+ */
+const HELD_MS = 3000;
+/** The files this worker keeps, by directory (`null`: the origin's): asked for again, refused at once. */
+const holding = new Map();
+
 /** A database kept in a file of the origin private file system (`openFile`). */
 class FennecFile {
-  #fennec; #main; #aside; #name; #size; #image;
+  #fennec; #main; #aside; #name; #size; #image; #where;
   #failed = null;
 
-  constructor(fennec, name, main, aside, size, image) {
+  constructor(fennec, name, main, aside, size, image, where) {
     this.#fennec = fennec;
     this.#name = name;
     this.#main = main;
     this.#aside = aside;
     this.#size = size;
     this.#image = image;
+    this.#where = where;
+    if (!holding.has(where)) holding.set(where, new Set());
+    holding.get(where).add(name);
   }
 
   /** The file's name in its directory. */
@@ -1280,6 +1481,9 @@ class FennecFile {
       this.#fennec.journal(false);
       this.#main.close();
       this.#aside.close();
+      const names = holding.get(this.#where);
+      names?.delete(this.#name);
+      if (names?.size === 0) holding.delete(this.#where);
     }
   }
 
@@ -1295,17 +1499,30 @@ class FennecFile {
   }
 }
 
-/** Synchronous access to `name` in `dir`, which is created if absent. */
-async function syncAccess(dir, name) {
+/**
+ * Synchronous access to `name` in `dir`, created if absent; held
+ * elsewhere, asked for again for `HELD_MS` -- held by this worker
+ * (`ours`), refused at once.
+ */
+async function syncAccess(dir, name, ours) {
   const fh = await dir.getFileHandle(name, { create: true });
   if (typeof fh.createSyncAccessHandle !== 'function') {
     throw new FennecError('openFile needs a dedicated worker: the file system hands out synchronous access nowhere else');
   }
-  try {
-    return await fh.createSyncAccessHandle();
-  } catch (e) {
-    if (e?.name !== 'NoModificationAllowedError') throw e;
-    throw new FennecError(`${name} is open elsewhere (another worker or tab): one database at a time writes a file`, { cause: e });
+  const until = Date.now() + HELD_MS;
+  for (;;) {
+    try {
+      return await fh.createSyncAccessHandle();
+    } catch (e) {
+      // Safari names a held file InvalidStateError, where the standard
+      // (and Chrome and Firefox) say NoModificationAllowedError.
+      if (e?.name !== 'NoModificationAllowedError' && e?.name !== 'InvalidStateError') throw e;
+      if (ours || Date.now() >= until) {
+        throw new FennecError(`${name} is open elsewhere (another worker or tab): one database at a time writes a file`, { cause: e });
+      }
+      // Nothing tells when a handle is let go: asked again.
+      await new Promise((r) => setTimeout(r, 50));
+    }
   }
 }
 
@@ -1341,7 +1558,7 @@ function loads(fennec, bytes) {
  * Only in a dedicated worker, the one place the file system hands out the
  * synchronous access this needs; and one worker at a time, since a second
  * opener is refused -- as a second process over a server's file would
- * corrupt it.
+ * corrupt it. A file held elsewhere is waited for 3 s first.
  *
  * @param {Fennec} fennec
  * @param {string} name  the file's name in `opts.dir`
@@ -1350,14 +1567,26 @@ function loads(fennec, bytes) {
  * @returns {Promise<FennecFile>}
  */
 export async function openFile(fennec, name = 'default.fennec', opts = {}) {
+  return inTurn(fennec, () => openFileNow(fennec, name, opts), 'openFile');
+}
+
+async function openFileNow(fennec, name, opts) {
+  alive(fennec, 'openFile');
   if (kept.has(fennec)) throw new FennecError('the database is already kept in a file');
   if (stored.has(fennec)) throw new FennecError('persist keeps this database in IndexedDB: a file would take the writes it stores');
   const dir = opts.dir ?? (await globalThis.navigator?.storage?.getDirectory?.());
   if (!dir) throw new FennecError('openFile needs the origin private file system (navigator.storage.getDirectory)');
-  const main = await syncAccess(dir, name);
+  const where = opts.dir ?? null;
+  const ours = holding.get(where)?.has(name) ?? false;
+  const main = await syncAccess(dir, name, ours);
   let aside = null;
+  // Closed while the file was asked for, its handles are let go of below,
+  // and closed while collation data was fetched or the schema checked: the
+  // load called the file corrupt, the check the handle not found.
+  const live = () => alive(fennec, 'openFile');
   try {
-    aside = await syncAccess(dir, `${name}~`);
+    aside = await syncAccess(dir, `${name}~`, ours);
+    live();
     const beside = aside.getSize();
     if (beside > 0) {
       // A rewrite stopped: its copy was flushed before the file was
@@ -1373,7 +1602,7 @@ export async function openFile(fennec, name = 'default.fennec', opts = {}) {
     let image;
     if (size === 0) {
       fennec.journal();
-      const snap = fennec.snapshot();
+      const snap = filled(fennec.snapshot());
       overwrite(main, snap);
       size = snap.length;
       image = imageEnd(snap);
@@ -1382,7 +1611,7 @@ export async function openFile(fennec, name = 'default.fennec', opts = {}) {
       if (replaceable(fennec)) emptied(fennec);
       if (fennec.schemas().length) throw new FennecError(`${name} holds a database: open it into one that holds nothing`);
       const bytes = readAt(main, size);
-      const took = await fennec.loadAsync(bytes);
+      const took = await fennec.loadAsync(bytes).finally(live);
       // A last record a crash cut short: appended after, the next write
       // would be read back as the rest of it.
       if (took < size) {
@@ -1393,13 +1622,15 @@ export async function openFile(fennec, name = 'default.fennec', opts = {}) {
       image = imageEnd(bytes);
       fennec.journal();
     }
-    const file = new FennecFile(fennec, name, main, aside, size, Math.max(image, 0));
+    const file = new FennecFile(fennec, name, main, aside, size, Math.max(image, 0), where);
     kept.set(fennec, file);
-    // Refused, the file is let go of, as it was found.
-    await checked(fennec, opts.schema ? opts : declared.get(fennec), 'apply').catch((e) => {
+    // Refused, or the database closed meanwhile, the file is let go of.
+    try {
+      await checked(fennec, opts.schema ? opts : declared.get(fennec), 'apply').finally(live);
+    } catch (e) {
       file.close();
       throw e;
-    });
+    }
     return file;
   } catch (e) {
     main.close();
@@ -1615,6 +1846,15 @@ const apartIn = (schema) => !!schema?.fields.some((f) => APART.test(f.type));
 const NO_SEQ = Number.MAX_SAFE_INTEGER;
 /** The longest a server's `retry_after` is waited: `setTimeout` fires at once past 2^31 ms. */
 const RETRY_AFTER_MAX_MS = 3_600_000;
+/**
+ * The code fennec-server tells a token past its `exp` by, on a request's
+ * 401 and on the `error` event ending a stream at the `exp`: an app
+ * refreshes the token silently at it. A 401 naming no code may be cured by
+ * a fresh token too -- a key rotation, a token not valid yet, an older
+ * server's expiry, none sent -- so it never means "sign out" by itself.
+ * The native core's `TOKEN_EXPIRED`.
+ */
+const TOKEN_EXPIRED = 'token_expired';
 
 /**
  * What an answer says beyond its words -- the tenant's quota and its wait,
@@ -1630,7 +1870,7 @@ function said(body) {
   } catch {
     /* not JSON: nothing said */
   }
-  const { quota, retry_after: s, retry_after_ms: ms, reason } = b ?? {};
+  const { quota, retry_after: s, retry_after_ms: ms, reason, code } = b ?? {};
   // The wait itself where the server says it, whole seconds otherwise.
   const wait = typeof ms === 'number' && ms > 0 ? ms : typeof s === 'number' && s > 0 ? s * 1000 : 0;
   return {
@@ -1638,6 +1878,10 @@ function said(body) {
     retryMs: Math.min(Math.floor(wait), RETRY_AFTER_MAX_MS),
     // What a `require n else '<reason>'` the server found unmet said.
     reason: typeof reason === 'string' && reason ? reason : null,
+    // The code the server tells the refusal by, read from the body alone,
+    // never its words, and passed on as it came: `TOKEN_EXPIRED`, or a
+    // later server's.
+    code: typeof code === 'string' && code ? code : null,
   };
 }
 
@@ -1694,15 +1938,47 @@ class SyncQuery extends Query {
  * one at a time and in order, each under an `Idempotency-Key` it keeps until
  * the server answers; no answer, a 408, a 429 or a 5xx is tried again with
  * backoff -- or after the `retry_after` a quota's 429 or a move's 503 names,
- * where longer -- a 401 asks for a token, and a 507 naming a tenant's quota
- * and any other 4xx are a refusal, put back. Moving this layer onto that
- * core instead was measured at +21 KB brotli.
+ * where longer -- a 401 asks the `tokenProvider` for a token, handed a
+ * `TokenRefusal` (`errorCode`, `expired`, `hadToken`, `attempt`), after a
+ * wait of 1 s doubling to 60 s where the one handed over was refused too,
+ * and a 507 naming a tenant's quota and any other 4xx are a refusal, put
+ * back. Moving this layer onto that core instead was measured at +21 KB
+ * brotli.
  */
 export class FennecSync {
   #local;
   #remote;
   #url;
   #token;
+  /**
+   * Bumped at each other token handed over: what a request carried is this
+   * number (`#carried`), so a 401 to one sent before is told from a refusal
+   * of the token held now.
+   */
+  #tokenGen = 0;
+  /** How many times in a row a token was asked for since the server last took the one held. */
+  #tokenAsks = 0;
+  /** The token last refused for its expiry (`#carried`): refused for its expiry again, it was handed back as it was. */
+  #expiredGen = null;
+  /**
+   * The token the server last took (`#answered`), and the first one handed
+   * over since, which it has not: an expiry of either starts the count over
+   * (`#wantToken`).
+   */
+  #taken = null;
+  #untaken = null;
+  /**
+   * The `TokenRefusal` the sync waits on a token for, while it does, and
+   * where its ask stands: `delayed` (the wait before it runs), `asked` (the
+   * provider asked, no answer yet) or `failed` (it threw, or handed over
+   * none, `#tokenWhy` saying why), as the native core's `Stage` -- the
+   * status's `token`.
+   */
+  #want = null;
+  #stage = null;
+  #tokenWhy = '';
+  /** The provider is at work: one call is out at a time. */
+  #providing = false;
   #fetch;
   #shapes = new Map();
   #lives;
@@ -1753,6 +2029,8 @@ export class FennecSync {
     this.#local = local;
     this.#url = String(opts.url).replace(/\/+$/, '');
     this.#token = opts.token ?? null;
+    // The token started with is the first one handed over.
+    this.#untaken = this.#token ? 0 : null;
     this.#fetch = opts.fetch ?? globalThis.fetch;
     if (typeof this.#fetch !== 'function') {
       throw new FennecError('fetch not found: pass one via opts.fetch');
@@ -1811,29 +2089,64 @@ export class FennecSync {
     return this.#queue.length ? new Promise((r) => this.#pushed.push(r)) : Promise.resolve();
   }
 
-  /** Shape state: `{collection, cursor, seeded, connected, pending, error, leader}`. */
+  /** Shape state: `{collection, cursor, seeded, connected, pending, error, quota, errorCode, token, leader}`. */
   status() {
+    // While a token is wanted the error is the token's too, both said here
+    // from where its ask stands and never kept as a fault, as the native
+    // core's status says them: kept as one, a fault set after it -- a
+    // stream's end, as streams end offline, where providers fail -- was
+    // written over it, and an app handing its tokens over by the status
+    // missed the ask while nothing was sent.
+    const token = this.#paused && this.#want ? Object.freeze({ stage: this.#stage, refusal: this.#want }) : null;
+    const fault = token ? { message: this.#tokenMessage(), quota: null, code: this.#want.errorCode } : this.#fault;
     return [...this.#shapes.values()].map((s) => ({
       collection: s.collection,
       cursor: s.cursor,
       seeded: s.seeded,
       connected: s.connected,
       pending: this.#queue.length,
-      error: this.#fault?.message ?? (s.error ? String(s.error.message ?? s.error) : null),
+      error: fault?.message ?? (s.error ? String(s.error.message ?? s.error) : null),
       // The tenant's quota the error names: a stream over the `streams`
       // quota is not connected, as one the network dropped is not.
-      quota: this.#fault?.quota ?? null,
+      quota: fault?.quota ?? null,
+      // The code a 401 the sync waits on for a token named: `token_expired`
+      // once the token's `exp` passed, null for none.
+      errorCode: fault?.code ?? null,
+      // The token the sync waits on, null while it waits on none: where its
+      // ask stands and the `TokenRefusal` it says or, delayed, will say.
+      token,
       leader: this.#leader,
     }));
   }
 
   /** A new token: the requests from here on carry it, and what a 401 stopped goes on. */
   setToken(token) {
-    this.#token = token || null;
-    this.#remote = new FennecHttp(this.#url, { token: this.#token, fetch: this.#fetch });
-    if (this.#paused) {
+    // Another token than the one held: a 401 to what was sent with that one
+    // is no longer a refusal of the token held. The same one handed over
+    // again keeps its number, and is asked about again where refused again.
+    const again = (token || null) === this.#token;
+    if (!again) {
+      this.#tokenGen++;
+      this.#token = token || null;
+      this.#remote = new FennecHttp(this.#url, { token: this.#token, fetch: this.#fetch });
+      if (this.#untaken === null) this.#untaken = this.#carried();
+    }
+    // The token just refused, handed over again while the wait before the
+    // next ask runs -- an app handing back its cached one at the status's
+    // errorCode -- is the token the wait is for: it stands, or every wait
+    // is skipped.
+    if (this.#paused && !(again && this.#stage === 'delayed')) {
       this.#paused = false;
       this.#fault = null;
+      // Another token handed over before the wait for a second ask ran
+      // out: it is what the ask would have brought.
+      this.#want = null;
+      this.#stage = null;
+      for (const w of this.#waits) {
+        if (w.what !== 'token') continue;
+        clearTimeout(w.t);
+        this.#waits.delete(w);
+      }
     }
     this.#kick();
   }
@@ -1842,7 +2155,10 @@ export class FennecSync {
    * The network is gone (`false`): the streams end and writes wait. Back
    * (`true`): what waited goes at once, the backoff forgotten -- but not a
    * server's `retry_after`, since the network says nothing of a tenant's
-   * quota. A page has it from `online` and `offline` on its own.
+   * quota, nor the wait before a token is asked for again -- and the
+   * `tokenProvider` is asked again where it threw or handed over none, never
+   * while it is still at work. A page has it from `online` and `offline` on
+   * its own.
    */
   setOnline(on) {
     if (!on) {
@@ -1866,6 +2182,10 @@ export class FennecSync {
     this.#schemaWaiting = held('schema');
     // A write the server said to hold back lets the streams open, as its 429 did.
     this.#flushing = this.#queue.length > 0 && !this.#sendWaiting;
+    // A provider that threw -- its issuer out of reach with the network --
+    // handed over nothing, and the sync would wait for good. Not while it is
+    // still at work, called a second time for one refusal.
+    if (this.#paused && this.#stage === 'failed') this.#ask();
     this.#kick();
   }
 
@@ -2274,15 +2594,132 @@ export class FennecSync {
     if (this.#fault?.connection) this.#fault = null;
   }
 
-  #wantToken() {
+  /** The token a request sent now carries: the number of the one handed over last, null for none. */
+  #carried() {
+    return this.#token ? this.#tokenGen : null;
+  }
+
+  /**
+   * The server answered a request, or a stream's head, that carried
+   * `carried` with `status`. A 2xx to the token held is the server taking
+   * it, and the next ask is a first one again; nothing else is -- a 408, a
+   * 429 or a 5xx may come before a token is read (the connection ceiling's
+   * 503, a router's while a tenant moves).
+   */
+  #answered(status, carried) {
+    if (status >= 200 && status < 300 && carried === this.#carried()) {
+      this.#tokenAsks = 0;
+      this.#taken = carried;
+      this.#untaken = null;
+    }
+  }
+
+  /**
+   * A 401 to a request, or a stream, that carried `carried`. Sent before a
+   * token handed over since -- or none -- it goes again with that one, the
+   * provider asked nothing: the refusal is of a token no longer held, and
+   * counted, it would make the next ask wait for a refusal that crossed
+   * the handover. Returns whether a token is wanted.
+   */
+  #tokenRefused(code, carried) {
+    if (carried !== this.#carried()) return false;
+    this.#wantToken(code, carried);
+    return true;
+  }
+
+  /**
+   * Nothing is sent until a token is handed over, and the `tokenProvider`
+   * is asked for one (`#ask`) -- at once the first time in a row, after 1 s
+   * doubling to 60 s where the token handed over at the last ask was
+   * refused too: one minted again at once is refused for what minting does
+   * not change, and a provider that hands one over at every ask would loop
+   * at the network's speed. An expiry of a token that was good is no such
+   * refusal, and starts the count again: of the token the server took
+   * last, which ran out in use, and of the first handed over since, which
+   * may have run out before it was sent -- a page offline. Any other token
+   * refused for its expiry was minted expired, as every one is where the
+   * server's clock runs ahead of the issuer's by a token's lifetime, and
+   * asked for again at once each would cost an issuer's call a round trip:
+   * it counts, as does the token already refused for its expiry, handed
+   * back as it was. Asked already, a second 401 -- a stream's at the `exp`
+   * beside a write's -- asks nothing more.
+   */
+  #wantToken(code, carried) {
     if (this.#paused) return;
     this.#paused = true;
-    this.#setFault('the server refused the token (401): a fresh one is wanted', 401, true);
-    if (this.#tokenProvider) {
-      Promise.resolve()
-        .then(() => this.#tokenProvider())
-        .then((t) => t && !this.#closed && this.setToken(t), (e) => this.#onError?.(e));
-    }
+    const expired = code === TOKEN_EXPIRED && carried !== null;
+    if (expired && carried !== this.#expiredGen && (carried === this.#taken || carried === this.#untaken)) {
+      this.#tokenAsks = 1;
+    } else this.#tokenAsks++;
+    if (expired) this.#expiredGen = carried;
+    const attempt = this.#tokenAsks;
+    this.#want = Object.freeze({ errorCode: code, expired: code === TOKEN_EXPIRED, hadToken: carried !== null, attempt });
+    this.#stage = 'delayed';
+    if (attempt === 1) return this.#ask();
+    // A floor, as a server's word is: kept when the network comes back.
+    this.#wait('token', 0, Math.min(1000 * 2 ** Math.min(attempt - 2, 6), 60000), () => this.#ask());
+  }
+
+  /**
+   * Hands the `tokenProvider` the `TokenRefusal` wanted: the code the 401
+   * named (`errorCode`, `token_expired` where the token's `exp` passed),
+   * whether that is an expiry (`expired`), whether the refused request
+   * carried a token (`hadToken`), and how many times in a row it is asked
+   * since the server last took the token held (`attempt`). `status()`'s
+   * `token` says the same, asked, for an app that hands its tokens over
+   * with `setToken`.
+   */
+  #ask() {
+    const refusal = this.#want;
+    if (!refusal || this.#closed) return;
+    this.#stage = 'asked';
+    // One call out at a time: called again while at work -- the app's own
+    // `setToken` went on and was refused meanwhile -- a provider would mint
+    // twice for one refusal, and the second token, coming late, end the
+    // wait the first one's refusal began. Its answer answers this ask too.
+    // Nothing bounds the call, which may wait on a sign-in: one that never
+    // returns is called no second time, and the app's own `setToken` gets
+    // the sync going.
+    if (!this.#tokenProvider || this.#providing) return;
+    this.#providing = true;
+    Promise.resolve()
+      .then(() => this.#tokenProvider(refusal))
+      .then(
+        (t) => {
+          this.#providing = false;
+          if (this.#closed) return;
+          if (t) this.setToken(t);
+          else this.#tokenFailed('it handed over no token');
+        },
+        (e) => {
+          this.#providing = false;
+          // The status first: an `onError` that throws leaves it said.
+          if (!this.#closed) this.#tokenFailed(String(e?.message ?? e));
+          this.#onError?.(e);
+        },
+      );
+  }
+
+  /**
+   * The provider threw, or handed over none: the status's `token` says so,
+   * `failed` beside the refusal it was handed, its error why, and
+   * `setOnline(true)` asks again, as the native core does at
+   * `{"token_failed":..}`. One answering an ask the sync no longer waits on
+   * says nothing of the token wanted now.
+   */
+  #tokenFailed(why) {
+    if (!this.#paused || this.#stage !== 'asked') return;
+    this.#stage = 'failed';
+    this.#tokenWhy = why;
+  }
+
+  /** The status's error while a token is wanted, by where its ask stands (the core's `Want::message`). */
+  #tokenMessage() {
+    const r = this.#want;
+    if (this.#stage === 'delayed') return 'the token handed over was refused too (401): another is asked for after a wait';
+    if (this.#stage === 'failed') return this.#tokenWhy ? `the token provider failed: ${this.#tokenWhy}` : 'the token provider failed';
+    if (r.expired) return 'the token expired (401): a fresh one is wanted';
+    return r.hadToken ? 'the server refused the token (401): a fresh one is wanted' : 'the server wants a token (401): none was sent';
   }
 
   /**
@@ -2293,10 +2730,13 @@ export class FennecSync {
   async #schemas() {
     if (this.#schemaBusy || this.#schemaWaiting || this.#paused) return;
     this.#schemaBusy = true;
+    const carried = this.#carried();
     const [status, , body] = await this.#call('GET', '/collections', null, {});
     this.#schemaBusy = false;
     if (this.#closed) return;
-    if (status === 401) return this.#wantToken();
+    this.#answered(status, carried);
+    // Refused for a token since replaced, it is asked again with that one.
+    if (status === 401) return this.#tokenRefused(said(body).code, carried) || this.#kick();
     try {
       if (status < 200 || status > 299) throw new FennecError(`could not read the server's collections: ${why(status, body)}`);
       await this.#make(JSON.parse(body));
@@ -2383,16 +2823,20 @@ export class FennecSync {
     if (!op) return;
     this.#sending = true;
     const type = op.path === '/batch' ? 'application/x-ndjson' : 'application/json';
+    const carried = this.#carried();
     const [status, seq, body] = await this.#call('POST', op.path, op.body, { 'content-type': type, 'idempotency-key': op.key });
     this.#sending = false;
     if (this.#closed) return;
+    this.#answered(status, carried);
     const s = status >= 200 && status < 300 ? null : said(body);
     if (!s) {
       this.#sendAttempt = 0;
       this.#clearConnectionFault();
       this.#landed(op, seq);
     } else if (status === 401) {
-      this.#wantToken();
+      // Kept either way; refused for a token since replaced, it goes again
+      // with that one as the kick below pumps.
+      this.#tokenRefused(s.code, carried);
     } else if (status === 507 && s.quota) {
       // A tenant past its quota of bytes or rows: waiting makes no room,
       // deleting does, and a write that only deletes always lands. Held,
@@ -2864,12 +3308,20 @@ export class FennecSync {
     // names -- a 429 of the `streams` quota is waited out by its
     // `retry_after`, since asked again sooner it is only refused again.
     let refusal = { status: 0, quota: null, retryMs: 0 };
+    const carried = this.#carried();
     try {
       const res = await this.#fetch(this.#streamUrl(s), { headers: this.#headers(), signal: ctl.signal });
       if (s.stream !== ctl) return;
+      this.#answered(res.status, carried);
       if (res.status === 401) {
+        // Read for its code -- a token past its `exp` is refused at the open
+        // too -- before the stream is cancelled: the abort throws the body
+        // away, and a fetch read after it is told nothing.
+        const text = await res.text().catch(() => '');
+        if (s.stream !== ctl) return;
         this.#cancel(s);
-        return this.#wantToken();
+        // Opened with a token since replaced, it opens again with that one.
+        return this.#tokenRefused(said(text).code, carried) || this.#kick();
       }
       if (!res.ok || !res.body) {
         const text = await res.text().catch(() => '');
@@ -2882,11 +3334,13 @@ export class FennecSync {
       this.#clearConnectionFault();
       for await (const ev of sseEvents(res)) {
         if (s.stream !== ctl) return;
-        // The server ends a stream at its token's `exp` with a 401: a
-        // fresh token is wanted before it opens again, as for a request.
+        // The server ends a stream at its token's `exp` with a 401 and
+        // `token_expired`: a fresh token is wanted before it opens again,
+        // as for a request. One opened with a token since replaced opens
+        // again with that one, the provider asked nothing.
         if (ev.name === 'error' && /"status":\s*401\b/.test(ev.data)) {
           this.#cancel(s);
-          return this.#wantToken();
+          return this.#tokenRefused(said(ev.data).code, carried) || this.#kick();
         }
         await this.#onEvent(s, ev);
       }
@@ -2899,6 +3353,10 @@ export class FennecSync {
     if (s.stream !== ctl) return;
     this.#cancel(s);
     this.#setFault(`the subscription to \`${s.collection}\` ended: ${reason}`, refusal.status, true, refusal.quota);
+    // Waiting for a token, nothing is sent: the token opens it again, as it
+    // does the stream a 401 ended, and a backoff begun now would hold it
+    // back past the token (the native core's `retry_stream`).
+    if (this.#paused) return;
     s.waiting = true;
     this.#wait(s, s.attempt++, refusal.retryMs, () => {
       s.waiting = false;
@@ -3102,7 +3560,9 @@ function normalizeShape(raw, url) {
  *              a compiled module, `./fennec.wasm` unless given.
  * - `token`    `Authorization: Bearer`; `tokenProvider` an async function
  *              asked for a new one when the server answers 401
- * - `persist`  IndexedDB key: the replica, its cursors and its unsent writes
+ * - `persist`  IndexedDB key: the replica, its cursors and its unsent writes,
+ *              one account's -- the key names it, and a replica is never
+ *              opened for another
  * - `cryptoKey` an AES-GCM `CryptoKey` the image and its chunks are sealed
  *              with (`persist`)
  * - `onRefused` told of each write the server refused, which was put back

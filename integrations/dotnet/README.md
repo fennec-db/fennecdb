@@ -59,8 +59,9 @@ await docs.Lookup("reviews", on: "article_id", limit: 3, order: [new("created", 
   `Reason`, which tells one guard's refusal from another's where `At` moves with every statement added in front; a
   read's `Require(1, reason: "no such account")` says its own. A tenant's quota names itself, `Quota`: `"bytes"` and `"rows"` answer 507 (`storage_full`), and room is made by deleting;
   `"streams"`, `"requests"`, `"writes"` and `"write_bytes"` answer 429 (`too_many`) with `RetryAfter`, the wait the
-  server asks for, as a tenant being moved or failed over answers its writes 503 (`unavailable`). Every call takes a
-  `CancellationToken`.
+  server asks for, as a tenant being moved or failed over answers its writes 503 (`unavailable`). The body's `code` is `ErrorCode`
+  (`"token_expired"` on a 401 for a token past its `exp`, which a fresh token cures; `null` otherwise), a subscription's
+  error `Event` carrying it too. Every call takes a `CancellationToken`.
 - A `float[]` or `ReadOnlyMemory<float>` goes out as the decimals that read back as each float, so a vector round-trips to the bit.
 
 - `Facet(field, ranges: [0, 25, 50])` counts by ranges of numbers, each value `[from, to]`; `disjunctive: true`

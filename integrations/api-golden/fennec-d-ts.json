@@ -1,0 +1,1653 @@
+{
+ "exports": {
+  "Aggregate": {
+   "kind": "type",
+   "declarations": [
+    "type Aggregate<F extends Fields> = | 'count(*)' | `count(distinct ${keyof F & string})` | `${'sum' | 'avg' | 'min' | 'max' | 'first' | 'last'}(${keyof F & string})`"
+   ]
+  },
+  "Batch": {
+   "kind": "interface",
+   "head": "interface Batch<S extends AnySchema<S> = Schema, Rel extends Relations = {}>",
+   "members": {
+    "from": [
+     "from<T extends TableRef>(table: T): Query<T['$fields'], Row<T['$fields']>, [], Rel, T['$name']>",
+     "from<K extends keyof S & string>(name: K): Query<S[K], Row<S[K]>, [], Rel, K>"
+    ]
+   }
+  },
+  "BatchItem": {
+   "kind": "type",
+   "declarations": [
+    "type BatchItem = | {rows: Record<string, unknown>[]; facets?: Facets} | {affected: number} | {message: string}"
+   ]
+  },
+  "BatchResult": {
+   "kind": "interface",
+   "head": "interface BatchResult",
+   "members": {
+    "replayed": [
+     "replayed: boolean"
+    ],
+    "results": [
+     "results: BatchItem[]"
+    ],
+    "seq": [
+     "seq: number | null"
+    ]
+   }
+  },
+  "BatchStatement": {
+   "kind": "type",
+   "declarations": [
+    "type BatchStatement = | Query<any, any, any, any, any, any> | Call | string | readonly [sql: string, params?: unknown[]]"
+   ]
+  },
+  "Bytes": {
+   "kind": "type",
+   "declarations": [
+    "type Bytes = number[] & {readonly __fennec: 'bytes'}"
+   ]
+  },
+  "Call": {
+   "kind": "class",
+   "head": "class Call",
+   "members": {
+    "constructor": [
+     "constructor(name: string, args?: Record<string, unknown> | null, opts?: CallClaims)"
+    ],
+    "name": [
+     "readonly name: string"
+    ],
+    "toCall": [
+     "toCall(): [sql: string, params: unknown[]]"
+    ]
+   }
+  },
+  "CallAnswer": {
+   "kind": "type",
+   "declarations": [
+    "type CallAnswer<R = Record<string, unknown>> = | {rows: R[]; seq?: number | null; replayed?: boolean} | {kind: 'affected'; count: number; seq: number | null; replayed: boolean}"
+   ]
+  },
+  "CallClaims": {
+   "kind": "interface",
+   "head": "interface CallClaims",
+   "members": {
+    "claims": [
+     "claims?: Record<string, unknown> | null"
+    ]
+   }
+  },
+  "CallOptions": {
+   "kind": "interface",
+   "head": "interface CallOptions extends CallClaims",
+   "members": {
+    "idempotencyKey": [
+     "idempotencyKey?: string"
+    ],
+    "read": [
+     "read?: boolean"
+    ],
+    "signal": [
+     "signal?: AbortSignal"
+    ],
+    "wait": [
+     "wait?: number"
+    ]
+   }
+  },
+  "Collation": {
+   "kind": "type",
+   "declarations": [
+    "type Collation = 'und' | 'tr'"
+   ]
+  },
+  "CollationSource": {
+   "kind": "type",
+   "declarations": [
+    "type CollationSource = | string | URL | ((name: string) => BufferSource | Response | Promise<BufferSource | Response>)"
+   ]
+  },
+  "CollectionDescription": {
+   "kind": "interface",
+   "head": "interface CollectionDescription",
+   "members": {
+    "fields": [
+     "fields: FieldDescription[]"
+    ],
+    "indexes": [
+     "indexes?: CompositeDescription[]"
+    ],
+    "name": [
+     "name: string"
+    ]
+   }
+  },
+  "CompositeDescription": {
+   "kind": "interface",
+   "head": "interface CompositeDescription",
+   "members": {
+    "keys": [
+     "keys: {field: string; desc?: true}[]"
+    ],
+    "kind": [
+     "kind: 'sorted' | 'unique'"
+    ]
+   }
+  },
+  "Computed": {
+   "kind": "interface",
+   "head": "interface Computed",
+   "members": {
+    "[computed]": [
+     "readonly [computed]: true"
+    ]
+   }
+  },
+  "Cond": {
+   "kind": "interface",
+   "head": "interface Cond<F extends Fields = Fields>",
+   "members": {
+    "[cond]": [
+     "readonly [cond]: (f: F) => void"
+    ]
+   }
+  },
+  "DistanceSpec": {
+   "kind": "interface",
+   "head": "interface DistanceSpec",
+   "members": {
+    "'!='": [
+     "'!='?: number"
+    ],
+    "'<'": [
+     "'<'?: number"
+    ],
+    "'<='": [
+     "'<='?: number"
+    ],
+    "'='": [
+     "'='?: number"
+    ],
+    "'>'": [
+     "'>'?: number"
+    ],
+    "'>='": [
+     "'>='?: number"
+    ],
+    "eq": [
+     "eq?: number"
+    ],
+    "from": [
+     "from: Point | Param<Point>"
+    ],
+    "ge": [
+     "ge?: number"
+    ],
+    "gt": [
+     "gt?: number"
+    ],
+    "gte": [
+     "gte?: number"
+    ],
+    "le": [
+     "le?: number"
+    ],
+    "lt": [
+     "lt?: number"
+    ],
+    "lte": [
+     "lte?: number"
+    ],
+    "ne": [
+     "ne?: number"
+    ]
+   }
+  },
+  "Exec": {
+   "kind": "type",
+   "declarations": [
+    "type Exec = (sql: string, params: unknown[], held?: {wait?: number; signal?: AbortSignal}) => unknown"
+   ]
+  },
+  "Expression": {
+   "kind": "interface",
+   "head": "interface Expression extends Computed",
+   "members": {
+    "as": [
+     "as<N extends string>(name: N): Named<N>"
+    ]
+   }
+  },
+  "FacetCount": {
+   "kind": "interface",
+   "head": "interface FacetCount<V = unknown>",
+   "members": {
+    "count": [
+     "count: number"
+    ],
+    "value": [
+     "value: V | null"
+    ]
+   }
+  },
+  "FacetValue": {
+   "kind": "type",
+   "declarations": [
+    "type FacetValue<T> = NonNullable<T> extends readonly (infer E)[] ? E : NonNullable<T>"
+   ]
+  },
+  "Facets": {
+   "kind": "type",
+   "declarations": [
+    "type Facets = Record<string, FacetCount[]>"
+   ]
+  },
+  "Fennec": {
+   "kind": "class",
+   "head": "class Fennec<S extends AnySchema<S> = Schema, Rel extends Relations = {}>",
+   "members": {
+    "batch": [
+     "batch(statements: readonly BatchStatement[]): Promise<BatchResult>"
+    ],
+    "call": [
+     "call(name: string, args?: Record<string, unknown> | null, opts?: CallClaims): Promise<any>"
+    ],
+    "changeSeq": [
+     "readonly changeSeq: number"
+    ],
+    "changes": [
+     "changes(since?: number): {seq: number; horizon: number; collections: string[] | null}"
+    ],
+    "checkSchema": [
+     "checkSchema(description: SchemaDescription | string, mode?: 'plan' | 'apply'): SchemaOutcome"
+    ],
+    "close": [
+     "close(): void"
+    ],
+    "collation": [
+     "collation(...names: string[]): Promise<boolean>"
+    ],
+    "connect": [
+     "static connect<T extends Tables, R extends Relations = {}>(url: string, opts: HttpOptions & SchemaOptions<T, R> & {migrate?: boolean}): Promise<FennecHttp<SchemaOf<T>, R>>",
+     "static connect<S extends AnySchema<S> = Schema>(url: string, opts: HttpOptions & SchemaText & {migrate?: boolean}): Promise<FennecHttp<S>>",
+     "static connect<S extends AnySchema<S> = Schema>(url: string, opts?: HttpOptions): FennecHttp<S>"
+    ],
+    "describe": [
+     "describe(): SchemaDescription & {collections: CollectionDescription[]}",
+     "describe(as: 'fennecql'): {format: 1; fennecql: string}"
+    ],
+    "drain": [
+     "drain(): {replace: boolean; bytes: Uint8Array}"
+    ],
+    "from": [
+     "from<T extends TableRef>(table: T): Query<T['$fields'], Row<T['$fields']>, [], Rel, T['$name']>",
+     "from<K extends keyof S & string>(name: K): Query<S[K], Row<S[K]>, [], Rel, K>"
+    ],
+    "journal": [
+     "journal(on?: boolean): void"
+    ],
+    "live": [
+     "live<F extends Fields, P, L extends readonly string[], R2 extends Relations, A extends string, Fa extends Facets>(query: Query<F, P, L, R2, A, Fa>, cb: (rows: Rows<P, Fa>) => void, opts?: LiveOptions): () => void",
+     "live(query: string | [sql: string, params: unknown[]], cb: (rows: any[]) => void, opts?: LiveOptions): () => void"
+    ],
+    "load": [
+     "load(bytes: Uint8Array): number"
+    ],
+    "loadAsync": [
+     "loadAsync(bytes: Uint8Array): Promise<number>"
+    ],
+    "loadParts": [
+     "loadParts(length: number, parts: () => Iterable<Uint8Array | ArrayBuffer> | AsyncIterable<Uint8Array | ArrayBuffer>): Promise<number>"
+    ],
+    "now": [
+     "now: () => number"
+    ],
+    "onError": [
+     "onError: ((e: unknown) => void) | null"
+    ],
+    "open": [
+     "static open<T extends Tables, R extends Relations = {}>(src: string | BufferSource | WebAssembly.Module | undefined, opts: {collation?: CollationSource} & SchemaOptions<T, R>): Promise<Fennec<SchemaOf<T>, R>>",
+     "static open<S extends AnySchema<S> = Schema>(src?: string | BufferSource | WebAssembly.Module, opts?: {collation?: CollationSource} & Partial<SchemaText>): Promise<Fennec<S>>"
+    ],
+    "query": [
+     "query(sql: string, params?: unknown[]): Promise<any>"
+    ],
+    "rows": [
+     "rows(sql: string, params?: unknown[]): any[]"
+    ],
+    "run": [
+     "run(sql: string, params?: unknown[]): any"
+    ],
+    "schemas": [
+     "schemas(): SchemaInfo[]"
+    ],
+    "setChangeCapacity": [
+     "setChangeCapacity(n: number): void"
+    ],
+    "snapshot": [
+     "snapshot(): Uint8Array"
+    ],
+    "snapshotChunks": [
+     "snapshotChunks(): Generator<Uint8Array>"
+    ],
+    "stats": [
+     "stats(): unknown"
+    ],
+    "version": [
+     "readonly version: string"
+    ]
+   }
+  },
+  "FennecError": {
+   "kind": "class",
+   "head": "class FennecError extends Error",
+   "members": {
+    "at": [
+     "at?: number"
+    ],
+    "binding": [
+     "binding?: string"
+    ],
+    "collation": [
+     "collation?: string[]"
+    ],
+    "completed": [
+     "completed?: number"
+    ],
+    "errorCode": [
+     "errorCode?: 'token_expired' | (string & {})"
+    ],
+    "history": [
+     "history?: string"
+    ],
+    "outcome": [
+     "outcome?: 'unknown'"
+    ],
+    "query": [
+     "query?: string"
+    ],
+    "quota": [
+     "quota?: 'bytes' | 'rows' | 'streams' | 'held' | 'requests' | 'writes' | 'write_bytes'"
+    ],
+    "ran": [
+     "ran?: number"
+    ],
+    "reason": [
+     "reason?: string"
+    ],
+    "retryAfter": [
+     "retryAfter?: number"
+    ],
+    "seq": [
+     "seq?: number"
+    ],
+    "status": [
+     "status?: number"
+    ]
+   }
+  },
+  "FennecFile": {
+   "kind": "interface",
+   "head": "interface FennecFile",
+   "members": {
+    "bytes": [
+     "bytes(): Uint8Array"
+    ],
+    "close": [
+     "close(): void"
+    ],
+    "flush": [
+     "flush(): number"
+    ],
+    "name": [
+     "readonly name: string"
+    ],
+    "size": [
+     "readonly size: number"
+    ]
+   }
+  },
+  "FennecHttp": {
+   "kind": "class",
+   "head": "class FennecHttp<S extends AnySchema<S> = Schema, Rel extends Relations = {}>",
+   "members": {
+    "batch": [
+     "batch(statements: readonly BatchStatement[], opts?: RunOptions): Promise<BatchResult>"
+    ],
+    "call": [
+     "call(name: string, args?: Record<string, unknown> | null, opts?: CallOptions): Promise<any>"
+    ],
+    "checkSchema": [
+     "checkSchema(description: SchemaDescription | string, mode?: 'follow' | 'plan' | 'apply'): Promise<SchemaOutcome>"
+    ],
+    "constructor": [
+     "constructor(url: string, opts?: HttpOptions)"
+    ],
+    "from": [
+     "from<T extends TableRef>(table: T): Query<T['$fields'], Row<T['$fields']>, [], Rel, T['$name']>",
+     "from<K extends keyof S & string>(name: K): Query<S[K], Row<S[K]>, [], Rel, K>"
+    ],
+    "live": [
+     "live<F extends Fields, P, L extends readonly string[], R2 extends Relations, A extends string, Fa extends Facets>(query: Query<F, P, L, R2, A, Fa>, cb: (rows: Rows<P, Fa>) => void, opts?: LiveOptions): () => void",
+     "live(query: string | [sql: string, params: unknown[]], cb: (rows: any[]) => void, opts: LiveOptions & ({collections: string[]} | {poll: number})): () => void"
+    ],
+    "onError": [
+     "onError: ((e: unknown) => void) | null"
+    ],
+    "rows": [
+     "rows(sql: string, params?: unknown[]): Promise<any[]>"
+    ],
+    "run": [
+     "run(sql: string, params?: unknown[], opts?: RunOptions): Promise<any>"
+    ],
+    "schemas": [
+     "schemas(): Promise<{collections?: SchemaInfo[]} | SchemaInfo[]>"
+    ],
+    "seq": [
+     "readonly seq: number | null"
+    ],
+    "statements": [
+     "statements(): Promise<NamedStatement[]>"
+    ],
+    "subscribe": [
+     "subscribe<K extends keyof S & string>(collection: K, shape: ShapeFilter | null | undefined, onEvent: (ev: ShapeEvent<Row<S[K]>>) => void, opts?: SubscribeOptions): () => void"
+    ],
+    "withIdempotencyKey": [
+     "withIdempotencyKey(key: string): FennecHttp<S, Rel>"
+    ]
+   }
+  },
+  "FennecSync": {
+   "kind": "class",
+   "head": "class FennecSync<S extends AnySchema<S> = Schema, Rel extends Relations = {}>",
+   "members": {
+    "batch": [
+     "batch(fn: (t: Batch<S, Rel>) => Promise<void>): Promise<number>"
+    ],
+    "close": [
+     "close(): void"
+    ],
+    "flush": [
+     "flush(): Promise<void>"
+    ],
+    "from": [
+     "from<T extends TableRef>(table: T): Query<T['$fields'], Row<T['$fields']>, [], Rel, T['$name']>",
+     "from<K extends keyof S & string>(name: K): Query<S[K], Row<S[K]>, [], Rel, K>"
+    ],
+    "live": [
+     "live<F extends Fields, P, L extends readonly string[], R2 extends Relations, A extends string, Fa extends Facets>(query: Query<F, P, L, R2, A, Fa>, cb: (rows: Rows<P, Fa>) => void, opts?: LiveOptions): () => void",
+     "live(query: string | [sql: string, params: unknown[]], cb: (rows: any[]) => void, opts?: LiveOptions): () => void"
+    ],
+    "local": [
+     "readonly local: Fennec<S, Rel>"
+    ],
+    "pushed": [
+     "pushed(): Promise<void>"
+    ],
+    "ready": [
+     "ready(): Promise<void>"
+    ],
+    "remote": [
+     "readonly remote: FennecHttp<S, Rel>"
+    ],
+    "setOnline": [
+     "setOnline(online: boolean): void"
+    ],
+    "setToken": [
+     "setToken(token: string): void"
+    ],
+    "status": [
+     "status(): ShapeStatus[]"
+    ]
+   }
+  },
+  "FieldDescription": {
+   "kind": "interface",
+   "head": "interface FieldDescription",
+   "members": {
+    "also": [
+     "also?: IndexDescription"
+    ],
+    "collate": [
+     "collate?: Collation"
+    ],
+    "index": [
+     "index?: IndexDescription"
+    ],
+    "name": [
+     "name: string"
+    ],
+    "nocase": [
+     "nocase?: true"
+    ],
+    "paths": [
+     "paths?: {path: string; index: IndexDescription}[]"
+    ],
+    "required": [
+     "required?: true"
+    ],
+    "type": [
+     "type: string"
+    ]
+   }
+  },
+  "Fields": {
+   "kind": "type",
+   "declarations": [
+    "type Fields = Record<string, unknown>"
+   ]
+  },
+  "HeldSlot": {
+   "kind": "interface",
+   "head": "interface HeldSlot",
+   "members": {
+    "since": [
+     "since: Timestamp"
+    ],
+    "slot": [
+     "slot: Timestamp"
+    ],
+    "status": [
+     "status: number"
+    ]
+   }
+  },
+  "HttpOptions": {
+   "kind": "interface",
+   "head": "interface HttpOptions",
+   "members": {
+    "fetch": [
+     "fetch?: typeof globalThis.fetch"
+    ],
+    "reads": [
+     "reads?: 'home' | 'nearest'"
+    ],
+    "retry": [
+     "retry?: false | RetryOptions"
+    ],
+    "timeout": [
+     "timeout?: number"
+    ],
+    "token": [
+     "token?: string"
+    ]
+   }
+  },
+  "IndexDescription": {
+   "kind": "type",
+   "declarations": [
+    "type IndexDescription = | {kind: 'hash' | 'unique' | 'sorted' | 'inverted'} | {kind: 'ttl'; ms: number} | {kind: 'text'; k1?: number; b?: number; prefix?: number; prefix_min?: number; chars?: boolean; accents?: boolean} | {kind: 'hnsw'; metric?: 'cosine' | 'l2' | 'dot'; m?: number; ef_construction?: number; ef_search?: number; quant?: 'none' | 'int8' | 'bit'}"
+   ]
+  },
+  "Insert": {
+   "kind": "type",
+   "declarations": [
+    "type Insert<F extends Fields> = {[K in keyof Row<F>]?: Writable<Row<F>[K]> | null | Computed}"
+   ]
+  },
+  "InsertOptions": {
+   "kind": "interface",
+   "head": "interface InsertOptions extends UpsertOptions",
+   "members": {
+    "ifAbsent": [
+     "ifAbsent?: boolean"
+    ]
+   }
+  },
+  "InsertRow": {
+   "kind": "type",
+   "declarations": [
+    "type InsertRow<F extends Fields> = {id?: number} & {[K in RequiredKeys<F>]: Writable<F[K]> | Computed} & {[K in Exclude<keyof F, RequiredKeys<F>>]?: Writable<F[K]> | null | Computed}"
+   ]
+  },
+  "Interval": {
+   "kind": "type",
+   "declarations": [
+    "type Interval = `${number}${'ms' | 's' | 'm' | 'h' | 'd' | 'w' | 'mo' | 'y'}`"
+   ]
+  },
+  "Json": {
+   "kind": "type",
+   "declarations": [
+    "type Json = null | boolean | number | string | Json[] | {[key: string]: Json}"
+   ]
+  },
+  "JsonPath": {
+   "kind": "type",
+   "declarations": [
+    "type JsonPath<F extends Fields> = {[K in keyof F & string]: {[key: string]: Json} extends NonNullable<F[K]> ? `${K}.${string}` : never}[keyof F & string]"
+   ]
+  },
+  "LastRun": {
+   "kind": "interface",
+   "head": "interface LastRun",
+   "members": {
+    "outcome": [
+     "outcome: 'ran' | 'refused'"
+    ],
+    "reason": [
+     "reason: string | null"
+    ],
+    "skipped": [
+     "skipped: number"
+    ],
+    "slot": [
+     "slot: Timestamp"
+    ],
+    "status": [
+     "status: number | null"
+    ]
+   }
+  },
+  "LiveOptions": {
+   "kind": "interface",
+   "head": "interface LiveOptions",
+   "members": {
+    "collections": [
+     "collections?: string[]"
+    ],
+    "onError": [
+     "onError?: (e: unknown) => void"
+    ],
+    "params": [
+     "params?: unknown[]"
+    ],
+    "poll": [
+     "poll?: number"
+    ]
+   }
+  },
+  "LookupOptions": {
+   "kind": "interface",
+   "head": "interface LookupOptions<C extends Fields = Fields>",
+   "members": {
+    "group": [
+     "group?: string | Expression | (string | Expression)[]"
+    ],
+    "limit": [
+     "limit?: number"
+    ],
+    "offset": [
+     "offset?: number"
+    ],
+    "on": [
+     "on: ChildKey<C> | ChildKey<C>[]"
+    ],
+    "order": [
+     "order?: | ChildKey<C> | Array<| ChildKey<C> | Aggregate<C> | [ChildKey<C> | Aggregate<C>, ('asc' | 'desc')?, {collate?: Collation}?]>"
+    ],
+    "parentKey": [
+     "parentKey?: string | string[]"
+    ],
+    "required": [
+     "required?: boolean"
+    ],
+    "select": [
+     "select?: LookupItem<C> | LookupItem<C>[]"
+    ],
+    "where": [
+     "where?: Where<C> | Cond<C>"
+    ]
+   }
+  },
+  "Mark": {
+   "kind": "type",
+   "declarations": [
+    "type Mark = [start: number, end: number]"
+   ]
+  },
+  "Migration": {
+   "kind": "type",
+   "declarations": [
+    "type Migration = string | {rebuild: {collection: string; field: string}}"
+   ]
+  },
+  "Named": {
+   "kind": "interface",
+   "head": "interface Named<N extends string> extends Expression",
+   "members": {
+    "[named]": [
+     "readonly [named]: N"
+    ]
+   }
+  },
+  "NamedStatement": {
+   "kind": "interface",
+   "head": "interface NamedStatement",
+   "members": {
+    "after": [
+     "after: [collection: string, events: string] | null"
+    ],
+    "armed": [
+     "armed: boolean | null"
+    ],
+    "broken": [
+     "broken: string | null"
+    ],
+    "comment": [
+     "comment: string | null"
+    ],
+    "held": [
+     "held: HeldSlot | null"
+    ],
+    "hook": [
+     "hook: string | null"
+    ],
+    "last": [
+     "last: LastRun | null"
+    ],
+    "name": [
+     "name: string"
+    ],
+    "next": [
+     "next: Timestamp | null"
+    ],
+    "schedule": [
+     "schedule: string | null"
+    ],
+    "signature": [
+     "signature: string | null"
+    ],
+    "version": [
+     "version: [number, number]"
+    ],
+    "writes": [
+     "writes: boolean | null"
+    ]
+   }
+  },
+  "Op": {
+   "kind": "type",
+   "declarations": [
+    "type Op = | '=' | '!=' | '<' | '<=' | '>' | '>=' | '~' | 'has' | 'in' | 'eq' | 'ne' | 'neq' | 'lt' | 'lte' | 'le' | 'gt' | 'gte' | 'ge' | 'like' | 'contains'"
+   ]
+  },
+  "Param": {
+   "kind": "class",
+   "head": "class Param<T = unknown>",
+   "members": {
+    "constructor": [
+     "private constructor(value: T)"
+    ],
+    "value": [
+     "readonly value: T"
+    ]
+   }
+  },
+  "PersistOptions": {
+   "kind": "interface",
+   "head": "interface PersistOptions",
+   "members": {
+    "cryptoKey": [
+     "cryptoKey?: CryptoKey | null"
+    ]
+   }
+  },
+  "Point": {
+   "kind": "type",
+   "declarations": [
+    "type Point = [lon: number, lat: number]"
+   ]
+  },
+  "Query": {
+   "kind": "class",
+   "head": "class Query<F extends Fields = Fields, P = Row<F>, L extends readonly string[] = [], Rel extends Relations = {}, At extends string = string, Fa extends Facets = {}>",
+   "members": {
+    "bind": [
+     "bind(exec: Exec | {run(sql: string, params: unknown[]): unknown}): Query<F, P, L, Rel, At, Fa>"
+    ],
+    "collection": [
+     "readonly collection: string"
+    ],
+    "context": [
+     "readonly context: unknown"
+    ],
+    "count": [
+     "count(): Promise<number>"
+    ],
+    "delete": [
+     "delete(opts: WriteOptions & {returning: true | readonly ['*']}): Promise<Row<F>[]>",
+     "delete<K extends keyof Row<F> & string>(opts: WriteOptions & {returning: readonly K[]}): Promise<Pick<Row<F>, K>[]>",
+     "delete(opts?: WriteOptions): Promise<number>"
+    ],
+    "explain": [
+     "explain(): Promise<string[]>"
+    ],
+    "facet": [
+     "facet<K extends (keyof Row<F> & string) | JsonPath<F>>(field: K, opts: {ranges: readonly number[]; disjunctive?: boolean}): Query<F, P, L, Rel, At, Fa & {[N in K]: FacetCount<[number, number]>[]}>",
+     "facet<K extends keyof Row<F> & string>(field: K, opts?: {top?: number; disjunctive?: boolean}): Query<F, P, L, Rel, At, Fa & {[N in K]: FacetCount<FacetValue<Row<F>[K]>>[]}>",
+     "facet<K extends JsonPath<F>>(field: K, opts?: {top?: number; disjunctive?: boolean}): Query<F, P, L, Rel, At, Fa & {[N in K]: FacetCount<Json>[]}>"
+    ],
+    "first": [
+     "first(): Promise<P | null>"
+    ],
+    "fuse": [
+     "fuse(opts?: {k?: number; candidates?: number}): Query<F, P, L, Rel, At, Fa>"
+    ],
+    "group": [
+     "group(...keys: (string | Expression | (string | Expression)[])[]): Query<F, P, L, Rel, At, Fa>"
+    ],
+    "highlight": [
+     "highlight<K extends TextKey<F>>(field: K): Query<F, P & {[N in `highlight(${K})`]: Mark[] | null}, L, Rel, At, Fa>",
+     "highlight<K extends TextKey<F>>(field: K, opts: {pre: string; post: string}): Query<F, P & {[N in `highlight(${K})`]: string | null}, L, Rel, At, Fa>"
+    ],
+    "insert": [
+     "insert(docs: InsertRow<F> | InsertRow<F>[], opts: InsertOptions & {returning: true | readonly ['*']}): Promise<Row<F>[]>",
+     "insert<K extends keyof Row<F> & string>(docs: InsertRow<F> | InsertRow<F>[], opts: InsertOptions & {returning: readonly K[]}): Promise<Pick<Row<F>, K>[]>",
+     "insert(docs: InsertRow<F> | InsertRow<F>[], opts?: InsertOptions): Promise<number>"
+    ],
+    "insertNew": [
+     "insertNew(docs: InsertRow<F> | InsertRow<F>[], opts: UpsertOptions & {returning: true | readonly ['*']}): Promise<Row<F>[]>",
+     "insertNew<K extends keyof Row<F> & string>(docs: InsertRow<F> | InsertRow<F>[], opts: UpsertOptions & {returning: readonly K[]}): Promise<Pick<Row<F>, K>[]>",
+     "insertNew(docs: InsertRow<F> | InsertRow<F>[], opts?: UpsertOptions): Promise<number>"
+    ],
+    "limit": [
+     "limit(n: number): Query<F, P, L, Rel, At, Fa>"
+    ],
+    "lookup": [
+     "lookup<M extends string, C extends Fields = Fields>(name: M, opts: LookupOptions<Hold<C>>): Query<F, Attach<P, L, M, C>, [...L, M], Rel, M, Fa>",
+     "lookup<K extends keyof RelationsAt<Rel, At> & string>(name: K, opts?: Omit<LookupOptions<Hold<RelTarget<Rel, At, K>['$fields']>>, 'on' | 'parentKey'>): Query<F, Attach<P, L, RelTarget<Rel, At, K>['$name'], RelTarget<Rel, At, K>['$fields']>, [...L, RelTarget<Rel, At, K>['$name']], Rel, RelTarget<Rel, At, K>['$name'], Fa>",
+     "lookup<T extends TableRef>(table: T, opts: LookupOptions<Hold<T['$fields']>>): Query<F, Attach<P, L, T['$name'], T['$fields']>, [...L, T['$name']], Rel, T['$name'], Fa>"
+    ],
+    "match": [
+     "match(field: TextKey<F>, query: string, opts?: {fuzzy?: boolean | 0 | 1 | 2; prefix?: boolean}): Query<F, P & {_score?: number}, L, Rel, At, Fa>"
+    ],
+    "near": [
+     "near(field: VectorKey<F>, vector: number[] | Float32Array | string, opts?: {ef?: number; exact?: boolean}): Query<F, P & {_score: number}, L, Rel, At, Fa>"
+    ],
+    "offset": [
+     "offset(n: number): Query<F, P, L, Rel, At, Fa>"
+    ],
+    "orWhere": [
+     "orWhere(cond: Where<F> | Cond<F>): Query<F, P, L, Rel, At, Fa>",
+     "orWhere<K extends keyof Row<F> & string>(field: K, value: Writable<Row<F>[K]> | null | Spec<Row<F>[K]>): Query<F, P, L, Rel, At, Fa>",
+     "orWhere<K extends keyof Row<F> & string>(field: K, op: Op, value: unknown): Query<F, P, L, Rel, At, Fa>"
+    ],
+    "order": [
+     "order(field: (keyof Row<F> & string) | Aggregate<F> | JsonPath<F> | Expression, dir?: 'asc' | 'desc', opts?: {collate?: Collation}): Query<F, P, L, Rel, At, Fa>"
+    ],
+    "picks": [
+     "readonly picks: boolean"
+    ],
+    "plain": [
+     "plain(): Query<F, P, L, Rel, At, Fa>"
+    ],
+    "reads": [
+     "readonly reads: string[] | null"
+    ],
+    "require": [
+     "require(n: number, opts?: {reason?: string}): Query<F, P, L, Rel, At, Fa>"
+    ],
+    "rerank": [
+     "rerank(field: VectorKey<F>, vector: number[] | Float32Array, opts?: {candidates?: number}): Query<F, P & {_score: number}, L, Rel, At, Fa>"
+    ],
+    "rows": [
+     "rows(): Promise<Rows<P, Fa>>"
+    ],
+    "run": [
+     "run(): Promise<{columns: string[]; rows: P[]; facets?: Fa}>"
+    ],
+    "select": [
+     "select<K extends keyof Row<F> & string>(...cols: (K | K[])[]): Query<F, Pick<Row<F>, K>, L, Rel, At, Fa>",
+     "select<K extends keyof Row<F> & string, A extends Aggregate<F>>(...cols: (K | A)[]): Query<F, Pick<Row<F>, K> & {[N in A]: number | string | null}, L, Rel, At, Fa>",
+     "select<K extends keyof Row<F> & string, A extends Aggregate<F>, N extends string>(...cols: (K | A | Named<N> | Expression)[]): Query<F, Pick<Row<F>, K> & {[X in A]: number | string | null} & {[X in N]: Json}, L, Rel, At, Fa>",
+     "select(): Query<F, Row<F>, L, Rel, At, Fa>",
+     "select<C extends (keyof Row<F> & string) | JsonPath<F>>(...cols: C[]): Query<F, {[N in C]: N extends keyof Row<F> ? Row<F>[N] : Json}, L, Rel, At, Fa>"
+    ],
+    "snippet": [
+     "snippet<K extends TextKey<F>>(field: K, words: number, opts?: {ellipsis?: string}): Query<F, P & {[N in `snippet(${K})`]: Snippet | null}, L, Rel, At, Fa>",
+     "snippet<K extends TextKey<F>>(field: K, words: number, opts: {ellipsis?: string; pre: string; post: string}): Query<F, P & {[N in `snippet(${K})`]: string | null}, L, Rel, At, Fa>"
+    ],
+    "toDelete": [
+     "toDelete(opts?: WriteOptions): [sql: string, params: unknown[]]"
+    ],
+    "toFennecQL": [
+     "toFennecQL(): [sql: string, params: unknown[]]"
+    ],
+    "toInsert": [
+     "toInsert(docs: InsertRow<F> | InsertRow<F>[], opts?: InsertOptions): [sql: string, params: unknown[]]"
+    ],
+    "toInsertNew": [
+     "toInsertNew(docs: InsertRow<F> | InsertRow<F>[], opts?: UpsertOptions): [sql: string, params: unknown[]]"
+    ],
+    "toUpdate": [
+     "toUpdate(patch: Insert<F>, opts?: WriteOptions): [sql: string, params: unknown[]]"
+    ],
+    "toUpsert": [
+     "toUpsert(docs: InsertRow<F> | InsertRow<F>[], patch: Insert<F>, opts?: UpsertOptions): [sql: string, params: unknown[]]"
+    ],
+    "update": [
+     "update(patch: Insert<F>, opts: WriteOptions & {returning: true | readonly ['*']}): Promise<Row<F>[]>",
+     "update<K extends keyof Row<F> & string>(patch: Insert<F>, opts: WriteOptions & {returning: readonly K[]}): Promise<Pick<Row<F>, K>[]>",
+     "update(patch: Insert<F>, opts?: WriteOptions): Promise<number>"
+    ],
+    "upsert": [
+     "upsert(docs: InsertRow<F> | InsertRow<F>[], patch: Insert<F>, opts: UpsertOptions & {returning: true | readonly ['*']}): Promise<Row<F>[]>",
+     "upsert<K extends keyof Row<F> & string>(docs: InsertRow<F> | InsertRow<F>[], patch: Insert<F>, opts: UpsertOptions & {returning: readonly K[]}): Promise<Pick<Row<F>, K>[]>",
+     "upsert(docs: InsertRow<F> | InsertRow<F>[], patch: Insert<F>, opts?: UpsertOptions): Promise<number>"
+    ],
+    "where": [
+     "where(cond: Where<F> | Cond<F>): Query<F, P, L, Rel, At, Fa>",
+     "where<K extends keyof Row<F> & string>(field: K, value: Writable<Row<F>[K]> | null | Spec<Row<F>[K]>): Query<F, P, L, Rel, At, Fa>",
+     "where<K extends keyof Row<F> & string>(field: K, op: 'in', values: Writable<Row<F>[K]>[]): Query<F, P, L, Rel, At, Fa>",
+     "where<K extends keyof Row<F> & string>(field: K, op: 'has', value: Elem<Row<F>[K]>): Query<F, P, L, Rel, At, Fa>",
+     "where<K extends keyof Row<F> & string>(field: K, op: Op, value: Writable<Row<F>[K]> | null): Query<F, P, L, Rel, At, Fa>",
+     "where(field: JsonPath<F>, value: Json | Spec<Json>): Query<F, P, L, Rel, At, Fa>",
+     "where(field: JsonPath<F>, op: 'in', values: Json[]): Query<F, P, L, Rel, At, Fa>",
+     "where(field: JsonPath<F>, op: Op, value: Json): Query<F, P, L, Rel, At, Fa>"
+    ]
+   }
+  },
+  "RelationRef": {
+   "kind": "interface",
+   "head": "interface RelationRef<T extends TableRef = TableRef>",
+   "members": {
+    "$target": [
+     "readonly $target: T"
+    ]
+   }
+  },
+  "Relations": {
+   "kind": "type",
+   "declarations": [
+    "type Relations = Record<string, Record<string, RelationRef>>"
+   ]
+  },
+  "RequireOptions": {
+   "kind": "interface",
+   "head": "interface RequireOptions",
+   "members": {
+    "reason": [
+     "reason?: string"
+    ],
+    "require": [
+     "require?: number"
+    ]
+   }
+  },
+  "RetryOptions": {
+   "kind": "interface",
+   "head": "interface RetryOptions",
+   "members": {
+    "attempts": [
+     "attempts?: number"
+    ],
+    "maxWait": [
+     "maxWait?: number"
+    ]
+   }
+  },
+  "Row": {
+   "kind": "type",
+   "declarations": [
+    "type Row<F extends Fields> = F & {id: number}"
+   ]
+  },
+  "Rows": {
+   "kind": "type",
+   "declarations": [
+    "type Rows<P, Fa> = {} extends Fa ? P[] & {facets?: Facets} : P[] & {facets: Fa}"
+   ]
+  },
+  "RunOptions": {
+   "kind": "interface",
+   "head": "interface RunOptions extends WriteOptions",
+   "members": {
+    "read": [
+     "read?: boolean"
+    ]
+   }
+  },
+  "Schema": {
+   "kind": "type",
+   "declarations": [
+    "type Schema = Record<string, Fields>"
+   ]
+  },
+  "SchemaDescription": {
+   "kind": "interface",
+   "head": "interface SchemaDescription",
+   "members": {
+    "collections": [
+     "collections?: CollectionDescription[]"
+    ],
+    "fennecql": [
+     "fennecql?: string"
+    ],
+    "format": [
+     "format: 1"
+    ],
+    "migrations": [
+     "migrations?: readonly Migration[]"
+    ]
+   }
+  },
+  "SchemaInfo": {
+   "kind": "interface",
+   "head": "interface SchemaInfo",
+   "members": {
+    "fields": [
+     "fields: {name: string; type: string; index?: string; also?: string}[]"
+    ],
+    "name": [
+     "name: string"
+    ]
+   }
+  },
+  "SchemaOf": {
+   "kind": "type",
+   "declarations": [
+    "type SchemaOf<T extends Tables> = Typed<{[K in keyof T as T[K]['$name']]: T[K]['$fields']}>"
+   ]
+  },
+  "SchemaOptions": {
+   "kind": "interface",
+   "head": "interface SchemaOptions<T extends Tables = Tables, R extends Relations = Relations>",
+   "members": {
+    "migrations": [
+     "migrations?: readonly Migration[]"
+    ],
+    "relations": [
+     "relations?: R"
+    ],
+    "schema": [
+     "schema: T"
+    ]
+   }
+  },
+  "SchemaOutcome": {
+   "kind": "interface",
+   "head": "interface SchemaOutcome",
+   "members": {
+    "applied": [
+     "applied: boolean"
+    ],
+    "kind": [
+     "kind: 'schema'"
+    ],
+    "migrations": [
+     "migrations: number[]"
+    ],
+    "ran": [
+     "ran: boolean"
+    ],
+    "refusals": [
+     "refusals: SchemaRefusal[]"
+    ],
+    "statements": [
+     "statements: string[]"
+    ]
+   }
+  },
+  "SchemaRefusal": {
+   "kind": "interface",
+   "head": "interface SchemaRefusal",
+   "members": {
+    "collection": [
+     "collection: string"
+    ],
+    "field": [
+     "field: string | null"
+    ],
+    "fix": [
+     "fix: string"
+    ],
+    "kind": [
+     "kind: | 'field_not_declared' | 'type_changed' | 'required_changed' | 'required_added' | 'collate_changed' | 'nocase_changed' | 'index_changed' | 'index_removed' | 'collection_missing' | 'field_missing' | 'index_missing'"
+    ],
+    "message": [
+     "message: string"
+    ]
+   }
+  },
+  "SchemaText": {
+   "kind": "interface",
+   "head": "interface SchemaText",
+   "members": {
+    "migrations": [
+     "migrations?: readonly Migration[]"
+    ],
+    "schema": [
+     "schema: string"
+    ]
+   }
+  },
+  "Shape": {
+   "kind": "interface",
+   "head": "interface Shape<F extends Fields = Fields>",
+   "members": {
+    "collection": [
+     "collection: string | TableRef"
+    ],
+    "key": [
+     "key?: keyof F & string"
+    ],
+    "select": [
+     "select?: (keyof Row<F> & string)[]"
+    ],
+    "where": [
+     "where?: Where<F>"
+    ]
+   }
+  },
+  "ShapeChange": {
+   "kind": "interface",
+   "head": "interface ShapeChange<R = Row<Fields>>",
+   "members": {
+    "dels": [
+     "dels: number[]"
+    ],
+    "puts": [
+     "puts: R[]"
+    ],
+    "schema": [
+     "schema: boolean"
+    ],
+    "seq": [
+     "seq: number"
+    ],
+    "type": [
+     "type: 'change'"
+    ]
+   }
+  },
+  "ShapeEvent": {
+   "kind": "type",
+   "declarations": [
+    "type ShapeEvent<R = Row<Fields>> = ShapeSeed<R> | ShapeChange<R>"
+   ]
+  },
+  "ShapeFilter": {
+   "kind": "type",
+   "declarations": [
+    "type ShapeFilter = {select?: string | readonly string[]; where?: string} & {[field: string]: string | readonly string[] | undefined}"
+   ]
+  },
+  "ShapeSeed": {
+   "kind": "interface",
+   "head": "interface ShapeSeed<R = Row<Fields>>",
+   "members": {
+    "rows": [
+     "rows: R[]"
+    ],
+    "seq": [
+     "seq: number"
+    ],
+    "type": [
+     "type: 'seed'"
+    ]
+   }
+  },
+  "ShapeStatus": {
+   "kind": "interface",
+   "head": "interface ShapeStatus",
+   "members": {
+    "collection": [
+     "collection: string"
+    ],
+    "connected": [
+     "connected: boolean"
+    ],
+    "cursor": [
+     "cursor: number"
+    ],
+    "error": [
+     "error: string | null"
+    ],
+    "errorCode": [
+     "errorCode: NonNullable<FennecError['errorCode']> | null"
+    ],
+    "leader": [
+     "leader: boolean"
+    ],
+    "pending": [
+     "pending: number"
+    ],
+    "quota": [
+     "quota: NonNullable<FennecError['quota']> | null"
+    ],
+    "seeded": [
+     "seeded: boolean"
+    ],
+    "token": [
+     "token: TokenWait | null"
+    ]
+   }
+  },
+  "Snippet": {
+   "kind": "interface",
+   "head": "interface Snippet",
+   "members": {
+    "marks": [
+     "marks: Mark[]"
+    ],
+    "text": [
+     "text: string"
+    ]
+   }
+  },
+  "Sparse": {
+   "kind": "type",
+   "declarations": [
+    "type Sparse = string & {readonly __fennec: 'sparse'}"
+   ]
+  },
+  "Spec": {
+   "kind": "interface",
+   "head": "interface Spec<T>",
+   "members": {
+    "'!='": [
+     "'!='?: Writable<T> | null"
+    ],
+    "'<'": [
+     "'<'?: Writable<T>"
+    ],
+    "'<='": [
+     "'<='?: Writable<T>"
+    ],
+    "'='": [
+     "'='?: Writable<T> | null"
+    ],
+    "'>'": [
+     "'>'?: Writable<T>"
+    ],
+    "'>='": [
+     "'>='?: Writable<T>"
+    ],
+    "'~'": [
+     "'~'?: string"
+    ],
+    "contains": [
+     "contains?: string"
+    ],
+    "distance": [
+     "distance?: NonNullable<T> extends Point ? DistanceSpec : never"
+    ],
+    "eq": [
+     "eq?: Writable<T> | null"
+    ],
+    "ge": [
+     "ge?: Writable<T>"
+    ],
+    "gt": [
+     "gt?: Writable<T>"
+    ],
+    "gte": [
+     "gte?: Writable<T>"
+    ],
+    "has": [
+     "has?: Elem<T>"
+    ],
+    "in": [
+     "in?: Writable<T>[] | Query<any, any, any, any, any, any>"
+    ],
+    "le": [
+     "le?: Writable<T>"
+    ],
+    "like": [
+     "like?: string"
+    ],
+    "lt": [
+     "lt?: Writable<T>"
+    ],
+    "lte": [
+     "lte?: Writable<T>"
+    ],
+    "ne": [
+     "ne?: Writable<T> | null"
+    ],
+    "neq": [
+     "neq?: Writable<T> | null"
+    ],
+    "not": [
+     "not?: Writable<T> | null | Spec<T>"
+    ],
+    "within": [
+     "within?: NonNullable<T> extends Point ? [number, number, number, number] : never"
+    ]
+   }
+  },
+  "SseEvent": {
+   "kind": "interface",
+   "head": "interface SseEvent",
+   "members": {
+    "data": [
+     "data: string"
+    ],
+    "name": [
+     "name: string"
+    ]
+   }
+  },
+  "Statements": {
+   "kind": "type",
+   "declarations": [
+    "type Statements = {[name: string]: {args: object; row: unknown}}"
+   ]
+  },
+  "SubscribeOptions": {
+   "kind": "interface",
+   "head": "interface SubscribeOptions",
+   "members": {
+    "onError": [
+     "onError?: (e: unknown) => void"
+    ],
+    "onState": [
+     "onState?: (state: 'open' | 'retry') => void"
+    ]
+   }
+  },
+  "SyncOptions": {
+   "kind": "interface",
+   "head": "interface SyncOptions<S extends AnySchema<S> = Schema>",
+   "members": {
+    "collation": [
+     "collation?: CollationSource"
+    ],
+    "cryptoKey": [
+     "cryptoKey?: CryptoKey | null"
+    ],
+    "fetch": [
+     "fetch?: typeof globalThis.fetch"
+    ],
+    "leader": [
+     "leader?: 'auto' | false"
+    ],
+    "local": [
+     "local?: Fennec<S>"
+    ],
+    "locks": [
+     "locks?: {request(name: string, opts: unknown, fn: () => unknown): Promise<unknown>}"
+    ],
+    "onError": [
+     "onError?: (e: unknown) => void"
+    ],
+    "onRefused": [
+     "onRefused?: (e: FennecError & {status: number; query: string}) => void"
+    ],
+    "persist": [
+     "persist?: string"
+    ],
+    "shapes": [
+     "shapes: Shape<any>[]"
+    ],
+    "token": [
+     "token?: string"
+    ],
+    "tokenProvider": [
+     "tokenProvider?: (refusal: TokenRefusal) => string | Promise<string>"
+    ],
+    "url": [
+     "url: string"
+    ],
+    "wasm": [
+     "wasm?: string | BufferSource | WebAssembly.Module"
+    ]
+   }
+  },
+  "TableRef": {
+   "kind": "interface",
+   "head": "interface TableRef<N extends string = string, F extends Fields = Fields>",
+   "members": {
+    "$fields": [
+     "readonly $fields: F"
+    ],
+    "$name": [
+     "readonly $name: N"
+    ]
+   }
+  },
+  "Tables": {
+   "kind": "type",
+   "declarations": [
+    "type Tables = Record<string, TableRef>"
+   ]
+  },
+  "TextKey": {
+   "kind": "type",
+   "declarations": [
+    "type TextKey<F extends Fields> = {[K in keyof F]: NonNullable<F[K]> extends string ? K : never}[keyof F] & string"
+   ]
+  },
+  "Timestamp": {
+   "kind": "type",
+   "declarations": [
+    "type Timestamp = string & {readonly __fennec: 'timestamp'}"
+   ]
+  },
+  "TokenRefusal": {
+   "kind": "interface",
+   "head": "interface TokenRefusal",
+   "members": {
+    "attempt": [
+     "readonly attempt: number"
+    ],
+    "errorCode": [
+     "readonly errorCode: 'token_expired' | (string & {}) | null"
+    ],
+    "expired": [
+     "readonly expired: boolean"
+    ],
+    "hadToken": [
+     "readonly hadToken: boolean"
+    ]
+   }
+  },
+  "TokenWait": {
+   "kind": "interface",
+   "head": "interface TokenWait",
+   "members": {
+    "refusal": [
+     "readonly refusal: TokenRefusal"
+    ],
+    "stage": [
+     "readonly stage: 'delayed' | 'asked' | 'failed'"
+    ]
+   }
+  },
+  "TypedCall": {
+   "kind": "type",
+   "declarations": [
+    "type TypedCall<T extends Statements> = <K extends keyof T & string>(name: K, ...rest: {} extends T[K]['args'] ? [args?: T[K]['args'] | null, opts?: CallOptions] : [args: T[K]['args'], opts?: CallOptions]) => Promise<CallAnswer<T[K]['row']>>"
+   ]
+  },
+  "TypedFrom": {
+   "kind": "type",
+   "declarations": [
+    "type TypedFrom<S extends AnySchema<S>> = <K extends keyof S & string>(name: K) => Query<S[K]>"
+   ]
+  },
+  "UpsertOptions": {
+   "kind": "interface",
+   "head": "interface UpsertOptions extends RequireOptions",
+   "members": {
+    "returning": [
+     "returning?: true | readonly string[]"
+    ]
+   }
+  },
+  "Vector": {
+   "kind": "type",
+   "declarations": [
+    "type Vector = number[] & {readonly __fennec: 'vector'}"
+   ]
+  },
+  "VectorKey": {
+   "kind": "type",
+   "declarations": [
+    "type VectorKey<F extends Fields> = {[K in keyof F]: NonNullable<F[K]> extends Vector | Sparse | Point ? K : never}[keyof F] & string"
+   ]
+  },
+  "Where": {
+   "kind": "type",
+   "declarations": [
+    "type Where<F extends Fields> = {[K in keyof Row<F>]?: Writable<Row<F>[K]> | null | Spec<Row<F>[K]>}"
+   ]
+  },
+  "Writable": {
+   "kind": "type",
+   "declarations": [
+    "type Writable<T> = Plain<T> | Param<Plain<T>>"
+   ]
+  },
+  "WriteOptions": {
+   "kind": "interface",
+   "head": "interface WriteOptions + interface WriteOptions extends RequireOptions",
+   "members": {
+    "all": [
+     "all?: boolean"
+    ],
+    "idempotencyKey": [
+     "idempotencyKey?: string"
+    ],
+    "returning": [
+     "returning?: true | readonly string[]"
+    ],
+    "signal": [
+     "signal?: AbortSignal"
+    ],
+    "wait": [
+     "wait?: number"
+    ]
+   }
+  },
+  "and": {
+   "kind": "function",
+   "declarations": [
+    "function and<F extends Fields = Fields>(...conds: (Where<Hold<F>> | Cond<Hold<F>>)[]): Cond<F>"
+   ]
+  },
+  "bucket": {
+   "kind": "function",
+   "declarations": [
+    "function bucket(field: string, interval: Interval, zone?: string): Expression"
+   ]
+  },
+  "call": {
+   "kind": "function",
+   "declarations": [
+    "function call(name: string, args?: Record<string, unknown> | null, opts?: CallClaims): Call"
+   ]
+  },
+  "connect": {
+   "kind": "function",
+   "declarations": [
+    "function connect<T extends Tables, R extends Relations = {}>(url: string, opts: HttpOptions & SchemaOptions<T, R> & {migrate?: boolean}): Promise<FennecHttp<SchemaOf<T>, R>>",
+    "function connect<S extends AnySchema<S> = Schema>(url: string, opts: HttpOptions & SchemaText & {migrate?: boolean}): Promise<FennecHttp<S>>",
+    "function connect<S extends AnySchema<S> = Schema>(url: string, opts?: HttpOptions): FennecHttp<S>"
+   ]
+  },
+  "countDistinct": {
+   "kind": "function",
+   "declarations": [
+    "function countDistinct(field: string): Expression"
+   ]
+  },
+  "distance": {
+   "kind": "function",
+   "declarations": [
+    "function distance(field: string, point: Point | Param<Point>): Expression"
+   ]
+  },
+  "expr": {
+   "kind": "function",
+   "declarations": [
+    "function expr(sql: string, ...params: unknown[]): Expression"
+   ]
+  },
+  "first": {
+   "kind": "function",
+   "declarations": [
+    "function first(field: string, by?: string): Expression"
+   ]
+  },
+  "from": {
+   "kind": "function",
+   "declarations": [
+    "function from<F extends Fields = Fields>(name: string): Query<F>",
+    "function from<T extends TableRef>(table: T): Query<T['$fields'], Row<T['$fields']>, [], {}, T['$name']>"
+   ]
+  },
+  "getState": {
+   "kind": "function",
+   "declarations": [
+    "function getState(key: string): Promise<unknown>"
+   ]
+  },
+  "inc": {
+   "kind": "function",
+   "declarations": [
+    "function inc(by?: number): Computed"
+   ]
+  },
+  "last": {
+   "kind": "function",
+   "declarations": [
+    "function last(field: string, by?: string): Expression"
+   ]
+  },
+  "not": {
+   "kind": "function",
+   "declarations": [
+    "function not<F extends Fields = Fields>(cond: Where<Hold<F>> | Cond<Hold<F>>): Cond<F>"
+   ]
+  },
+  "openFile": {
+   "kind": "function",
+   "declarations": [
+    "function openFile(fennec: Fennec<any, any>, name?: string, opts?: {dir?: DirectoryHandle} & (Partial<SchemaOptions> | Partial<SchemaText>)): Promise<FennecFile>"
+   ]
+  },
+  "or": {
+   "kind": "function",
+   "declarations": [
+    "function or<F extends Fields = Fields>(...conds: (Where<Hold<F>> | Cond<Hold<F>>)[]): Cond<F>"
+   ]
+  },
+  "param": {
+   "kind": "function",
+   "declarations": [
+    "function param<T>(value: T): Param<T>"
+   ]
+  },
+  "persist": {
+   "kind": "function",
+   "declarations": [
+    "function persist(fennec: Fennec<any, any>, key?: string, opts?: PersistOptions): Promise<number>"
+   ]
+  },
+  "putState": {
+   "kind": "function",
+   "declarations": [
+    "function putState(key: string, value: unknown): Promise<void>"
+   ]
+  },
+  "raw": {
+   "kind": "function",
+   "declarations": [
+    "function raw<F extends Fields = Fields>(sql: string, ...params: unknown[]): Cond<F>"
+   ]
+  },
+  "restore": {
+   "kind": "function",
+   "declarations": [
+    "function restore(fennec: Fennec<any, any>, key?: string, opts?: PersistOptions): Promise<boolean>"
+   ]
+  },
+  "sseEvents": {
+   "kind": "function",
+   "declarations": [
+    "function sseEvents(res: Response): AsyncGenerator<SseEvent, void, unknown>"
+   ]
+  },
+  "sync": {
+   "kind": "function",
+   "declarations": [
+    "function sync<T extends Tables, R extends Relations = {}>(opts: SyncOptions<any> & SchemaOptions<T, R>): Promise<FennecSync<SchemaOf<T>, R>>",
+    "function sync<S extends AnySchema<S> = Schema>(opts: SyncOptions<S> & Partial<SchemaText>): Promise<FennecSync<S>>"
+   ]
+  }
+ }
+}

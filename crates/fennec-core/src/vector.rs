@@ -736,7 +736,7 @@ impl Read<'_> {
         let shares: Vec<Mutex<&mut [u32]>> =
             l0.chunks_mut(LIST_SHARE * m0).map(Mutex::new).collect();
         let upper = Mutex::new((upper, Cursor { bytes, pos }));
-        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let threads = crate::threads();
         let mut states = vec![(); threads.min(shares.len() + 1)];
         // The levels above first: theirs is the longest task.
         let ended = spread(shares.len() + 1, &mut states, |_, i| {
@@ -3313,7 +3313,7 @@ impl Same {
     /// The cores to spread over, as `VectorIndex::threads` counts them: a
     /// build without the graph has none of its own.
     fn threads() -> usize {
-        std::thread::available_parallelism().map_or(1, |n| n.get())
+        crate::threads()
     }
 
     /// Made from the top half of every live node's hash, in node order.
@@ -4220,9 +4220,7 @@ impl VectorIndex {
     #[cfg(not(target_family = "wasm"))]
     #[inline]
     fn threads() -> usize {
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
+        crate::threads()
     }
 
     /// Computes the candidates of `pending` against the graph as it stands,

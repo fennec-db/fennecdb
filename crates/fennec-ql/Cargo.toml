@@ -35,3 +35,9 @@ statements = ["fennec-core/statements"]
 [[test]]
 name = "all"
 path = "tests/all.rs"
+
+# A check, not a measurement (tools/fennecql_corpus.py): its own tests --
+# the stored reading, the forms its `d` words hash -- run with the crate's.
+[[example]]
+name = "corpus"
+test = true

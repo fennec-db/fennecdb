@@ -34,8 +34,10 @@ nothing reaches a registry before the notes have had a read.
    it from main, tests it on macOS and an iOS simulator, keeps it as its
    artifact and opens a pull request writing its checksum into
    `Package.swift` (`integrations/swift/set-binary.sh`). It keeps the
-   Flutter plugin's `FennecFFIDynamic.xcframework.zip` beside it, built from
-   the same commit and named by nothing. Merge it.
+   `FennecFFIDynamic.xcframework.zip` beside it -- the frameworks, and
+   macOS's binary again as a plain `libfennec_ffi.dylib`, which the Flutter
+   plugin's macOS pod vendors -- built from the same commit and named by
+   nothing. Merge it.
 3. Tag what was merged and push the tag:
    `git tag vX.Y.Z origin/main && git push origin vX.Y.Z`.
    `release.yml` builds the binaries for Linux and macOS, the Windows zips
@@ -53,7 +55,11 @@ nothing reaches a registry before the notes have had a read.
    for each ABI inside) and the multi-arch image on ghcr.io, takes the
    XCFramework zips step 2's run kept -- the static one held to the checksum the tag's
    `Package.swift` names, and stopping the release where none matches --
-   and drafts the release with all of them and their checksums. It also
+   and drafts the release with all of them and their checksums, its notes
+   opening with the compiler: each `binaries` job holds its `rustc -V` to
+   the release `rust-toolchain.toml` names and, on Linux, to the one the
+   image's build stage resolves, and a difference stops the release before
+   the draft ([A toolchain bump](#a-toolchain-bump)). It also
    makes a `.deb` and an `.rpm` for amd64 and arm64 from the musl tarballs
    (`tools/linux-packages.sh`, `packaging/nfpm.yaml`), each architecture on a
    runner of its own, installs them in a Debian and a Fedora container and
@@ -380,6 +386,26 @@ what follows the last colon -- not a host name, refused by the resolver
 node. A record of the directory carries the address alone, so no
 field of it is read another way.
 
+**A sealed frame bound to its file moves a sealed archive at once.** From
+the release that binds it (`docs/design/replication.md#sealed-archives`),
+an archiver restarted on it seals its next image and segment, and `fennec
+backup --key-file` a backup, as version 2 (`FENECSL\x02`, a file id under
+every frame's tag), which a `fennec restore` or `fennec verify` from 0.2.0
+or earlier refuses (`not a sealed file`, `not sealed, where the archive
+is`): its notes say, under their upgrade heading, to upgrade `fennec`
+wherever an archive is restored or verified before any archiver, and that
+files sealed before stay open under their key -- splices of them with it
+-- until a new key (`fennec key`) begins a new archive. The same notes say
+that a tenant's `github` hook 0.2.0 saved with `key delivery` is kept, its
+events answered 409 until it is set again with `key body`, its other hooks
+armed, and that a single server started with `--hooks` whose file has a
+`github` line saying `key delivery` refuses to start on the release (exit
+2, ``<hooks file>: hooks file line N: `key delivery` is refused: ...``): that
+line's `key delivery` is taken out, or made `key body`, before the server
+is restarted on it. `make upgrade-check` drives the archive's case: CK_BASE's `fennec
+restore` and `fennec verify` refuse a backup and an archive this tree
+sealed, which this tree's read.
+
 | Package | From | What it holds |
 | --- | --- | --- |
 | `fennecdb` on PyPI | `integrations/python` | the HTTP client and the LangChain and LlamaIndex stores; the standard library alone |
@@ -415,13 +441,34 @@ every tag. Before a 1.x tag, check:
    `make sync-scenarios-check` pass. `openapi-check` asserts the API only
    grew; the golden targets rewrite their files, so `git diff` must show no
    changed or removed line in them, only added ones.
-2. `make fennecql-corpus` (by hand: no workflow runs it until T6) finds no text reading as another tree, and
-   `GRAMMAR_EPOCH` (`crates/fennec-core/src/named.rs`) is still 4.
-3. `fennec.h`'s prototypes, `web/fennec.d.ts`, `web/client.d.ts`, each
-   SDK's public names, the CLI flags and exit codes, and `/_metrics` names
-   only gained entries. Where a dump is not built yet (T5 of the 1.0 plan,
-   which also dumps the CLI usage text, exit codes and metric names)
-   diff them by hand against the previous tag.
+2. `make fennecql-corpus BASE=<the previous 1.x tag>` finds no text
+   reading as another statement or refused: against a 1.x base an
+   `ACCEPTED` entry lets a refusal through only with the grammar epoch
+   raised, as a moved digest, and a statement no definition holds read
+   otherwise only with the epoch or its `same_meaning` -- read every claim
+   the summary prints, each a statement said to mean what it meant (CI
+   runs it against main, and `BASE=frozen` against every frozen corpus, on
+   every pull request). A major version's first tag is frozen with
+   `FREEZE=<tag>`, its file added beside the others in
+   `integrations/fennecql-corpus/` -- a frozen corpus is added, never
+   replaced or removed, which the step against main holds, and a freeze
+   reads the earlier corpora's texts too, so a text deleted since is still
+   held to its release's reading and to the tag's -- and `GRAMMAR_EPOCH`
+   (`crates/fennec-core/src/named.rs`) is still 4.
+3. `make api-check` is green and `make api-golden` leaves no diff:
+   `fennec.h`'s prototypes and macros, `web/fennec.d.ts` and
+   `web/client.d.ts`, the flags and exit codes of `fennec`, `fennec-server`
+   and `fennec-shard`, and the `/_metrics` names, types and labels of the
+   server and the router only gained entries against
+   `integrations/api-golden/` (the CLI's and the metrics' dumps are held to
+   the binaries by `make test`). The SDKs' public names have no dump yet
+   (they come in 1.0.x, needing outside tools): diff them by hand against
+   the previous tag. **Before the 1.0 tag, once:** `python3 tools/api_compat.py --freeze 1.0`
+   on the commit to be tagged, committed (it writes
+   `integrations/api-golden/frozen.json`, and needs the dumps current and no
+   `BREAKS` entry for a release not made yet). `make version V=1.0.0` or
+   later refuses until it has been run; from then a break needs a major
+   version above 1.0 in its `BREAKS` entry.
 4. HEAD opens every file written from v0.2.0 on (`tests/language.fennec`,
    `tests/statements.fennec`; T2 adds each release's own), and
    `make upgrade-check` (by hand, kind 13 alone; CI check: T3) passes: an older replica stops by name on a record
@@ -433,7 +480,133 @@ every tag. Before a 1.x tag, check:
    measured cost where one was raised.
 
 The previous minor gets security fixes for six months after the next
-minor's release; a `release/1.N` branch is cut when a backport needs one.
+minor's release; a `release/1.N` branch is cut when a backport needs one
+([A security release](#a-security-release)).
+
+## A security release
+
+The policy a reporter reads is [SECURITY.md](SECURITY.md#supported-versions).
+Until 1.0.0 there is no such release: a 0.x bug is fixed on `main` and ships
+in the next release, with no advisory, no CVE and no patch release, and the
+pull request names the releases that had it; a report is still acknowledged
+within 3 working days, and its reporter told where the fix stands. From 1.0.0, a report of a bug in
+a supported release (the latest 1.x minor, and the previous one for 6 months
+after the next ships) goes this way. The owner does each step that needs a
+tag, a setting or a secret.
+
+1. **Acknowledge within 3 working days.** Reports arrive through private
+   vulnerability reporting
+   (<https://github.com/fennec-db/fennecdb/security/advisories/new>). Answer
+   in the report, say who looks at it, and reproduce it before anything
+   else: from the reporter's input, on the latest 1.x and on the previous
+   minor.
+2. **Open a draft advisory** from the report (`Security`, `Advisories`),
+   naming the affected versions and the first fixed one, and, if the fix
+   needs a branch to work on, **a temporary private fork** from it. Until
+   step 5 pushes it, the fix is in the fork alone: prepare it and have it
+   reviewed there, with no pull request, issue or commit on the public
+   repository. Do not assume the fork runs the repository's workflows; run
+   the tests the fix touches by hand. The fix becomes public at step 5, at
+   the push to `release/1.N`: the swift-binary run is on a public branch and
+   opens a public pull request, the tag publishes the commit, and
+   `release.yml`'s logs are public. So keep what follows the push short:
+   the push, swift-binary, the tag, the publish and the advisory (step 6)
+   back to back, with everything else ready beforehand.
+3. **Request a CVE** from the advisory (GitHub is the CNA) once the bug is
+   confirmed and the affected range known.
+4. **Fix on the oldest supported branch and carry it forward.** Cut
+   `release/1.N` from the latest `v1.N.*` tag if the branch does not exist
+   (`git branch release/1.N v1.N.M`), put the fix there, then in the latest
+   minor and `main`. The fix keeps [the contract](docs/design/compatibility.md):
+   it only grows what it freezes. Where it cannot -- a protocol or a file
+   format -- the advisory names the SDKs and replicas that must move (the
+   table above says which package carries which part), and replicas
+   upgrade before primaries, as for any release.
+5. **Build and publish the patch from its branch.** `make version V=1.N.P`
+   and the change reviewed in the private fork, then pushed to
+   `release/1.N`, and from here the fix is public. Then, as in
+   [A release](#a-release): step 2, always, since `release.yml` stops a tag
+   whose `Package.swift` `release` is not the tag's version and wants a
+   swift-binary run for it, and `make version` moves `release` but not the
+   checksum: `gh workflow run swift-binary.yml --ref release/1.N -f
+   version=1.N.P`. Its pull request is opened with no `--base`, so it
+   targets `main`: retarget it, `gh pr edit <n> --base release/1.N`, and
+   merge it there (the workflow is not changed for this). Then the owner
+   tags the branch's commit (`git tag v1.N.P <commit>`, then `git push
+   origin v1.N.P`) and `release.yml` drafts the release. A tag already
+   pushed is built again by `gh workflow run release.yml --ref release/1.N
+   -f tag=v1.N.P`. The power-cut checks of step 3 are read the same way,
+   with `--ref release/1.N` where they say `--ref main`. Read the draft,
+   publish it, and `packages.yml` follows, as in steps 4 and 5 there: every
+   channel of the table above -- PyPI, npm, NuGet, Maven Central, pub.dev,
+   Homebrew, the `.deb` and `.rpm`, the image on ghcr.io, the Go module's
+   tag, the Swift package's tag and zip, the install scripts (which read
+   the latest release) and the desktop app -- gets the patch; check each by
+   installing it.
+
+   **A minor that is not the newest must not be published yet.** The
+   pipeline has pointers that mean "the newest", and only one is guarded:
+   the Homebrew tap is never moved back (`packages.yml`'s `homebrew` job
+   skips a release older than the formula). The others would move to the
+   backport: a published release becomes GitHub's Latest, which
+   `site/install.sh` and `site/install.ps1` read; `release.yml` tags the
+   image `:latest` on every run; `packages.yml`'s `npm publish` has no
+   `--tag`, so npm's `latest` moves. Where a hand step exists today it is
+   `gh release edit v1.N.P --latest=false` (publish with `--draft=false
+   --latest=false`); the image's `:latest` and npm's dist-tag
+   (`npm dist-tag add <pkg>@<newest> latest`) have none in the workflows.
+   **Owed before the first backport to a non-newest minor:** `release.yml`
+   and `packages.yml` keep the image's `:latest`, npm's `latest` and the
+   GitHub Latest on the newest release, and swift-binary opens its pull
+   request against the branch it ran on. Tracked apart from this file; until
+   it lands, the previous minor's fix waits, or is released with those three
+   put back by hand at once. A patch to the newest minor has none of this.
+6. **Disclose.** Publish the advisory (with the CVE) the same hour the
+   release is published, as step 2 says, and put it in the release's notes with the first
+   fixed version of each supported minor. Merge the private fork's changes
+   into the public branches where the fix was made there. Credit the
+   reporter if they agree, and close the report.
+
+This procedure is written and not yet run. Its rehearsal -- a draft
+advisory, a private fork, and a patch built from a release branch through
+`release.yml`'s dispatch to the draft release -- is owed before 1.0.0, and
+its elapsed time goes in the roadmap's log.
+## A toolchain bump
+
+The compiler is part of what a release ships, and it moves only by a pull
+request of its own ([docs/design/crates.md](docs/design/crates.md#toolchain)).
+`rust-toolchain.toml` names an exact release, never `stable`, which moved
+under main's CI on 2026-11-12 with no change of ours: 1.100.0's Unicode
+tables failed fennec-core's case tests on every pull request. A bump is
+deliberate, not each stable release -- one taken for what it brings, a fix,
+a lint, a measured speed or size -- and its pull request changes nothing
+else but what the new compiler needs:
+
+1. `rust-toolchain.toml`'s `channel`, the `FROM rust:` of `Dockerfile` and
+   `deploy/Dockerfile` and the Kotlin harnesses' image
+   (`integrations/kotlin/run-tests.sh`, `examples/kotlin-android/run-smoke.sh`),
+   each tag with the index digest `docker buildx imagetools inspect
+   rust:X.Y.Z-alpine` (`-slim-bookworm`) names; `python3
+   tools/toolchain_check.py` passes.
+2. What the compiler breaks, fixed in the same pull request -- a lint, a
+   table held to the standard library's (fennec-core's case tables) --
+   never a test held back.
+3. In its body, against main:
+   - `make wasm-sizes`, before and after: what each feature adds to the
+     module and what leaving it out saves;
+   - the size report: CI's size job measures the module against the base,
+     each built by its own `rust-toolchain.toml` and named in the summary,
+     and `make size-report BIN=fennec-server` and `BIN=fennec`, run on main
+     and on the branch, the binaries' code by crate; a size the docs quote
+     that moved is written again, which `site/build.py` asks for under CI;
+   - `make instr-compare`: the instructions a request costs, read over
+     re-signed copies ([docs/design/benchmarks.md](docs/design/benchmarks.md#instruction-counts));
+   - `make float-test`, which `float-tests.yml` also runs on the pull
+     request: fennec-core's own float formatting and reading held to the
+     new standard library's over every `f32` and 10^8 random `f64`s.
+
+A tag's `release.yml` holds its binaries' `rustc -V` to the file's release
+and the image's to theirs, and the draft's notes name it.
 
 ## Once: the desktop app's signing Environment
 

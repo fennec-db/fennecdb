@@ -444,7 +444,8 @@ public final class FennecRemote: @unchecked Sendable {
     /// the statement bound to the write that refused it,
     /// and where a tenant's quota refused it the quota and how
     /// many seconds to wait -- to the millisecond where the body says it
-    /// (`retry_after_ms`), else `Retry-After`, or the same in the body.
+    /// (`retry_after_ms`), else `Retry-After`, or the same in the body --
+    /// and the code the server named (`errorCode`, a text not empty alone).
     static func refused(_ status: Int, _ v: Value?, retryAfter: String?) -> FennecError {
         let quota = v?["quota"]?.string
         let wait = waitOf(v, header: retryAfter)
@@ -453,7 +454,7 @@ public final class FennecRemote: @unchecked Sendable {
             message: v?["error"]?.string ?? "HTTP \(status)",
             status: status, at: v?["at"]?.int, completed: v?["completed"]?.int,
             quota: quota, retryAfter: wait, reason: v?["reason"]?.string,
-            binding: v?["binding"]?.string)
+            binding: v?["binding"]?.string, errorCode: v?["code"]?.string.flatMap { $0.isEmpty ? nil : $0 })
     }
 
     /// An HTTP status as the error kind the engine would have said; the

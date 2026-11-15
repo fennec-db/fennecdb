@@ -1,0 +1,53 @@
+{
+ "commands": {
+  "fennec-shard": {
+   "--audit": "value",
+   "--auth-delay": "value",
+   "--auto-failover": "value",
+   "--default-region": "value",
+   "--directory": "value",
+   "--entry-token": "value",
+   "--fanout-concurrency": "value",
+   "--fanout-max-bytes": "value",
+   "--fanout-max-rows": "value",
+   "--fanout-timeout": "value",
+   "--global": "value",
+   "--global-directory": "value",
+   "--header-timeout": "value",
+   "--help": "switch",
+   "--http-cors": "value",
+   "--insecure": "switch",
+   "--listen": "value",
+   "--max-body": "value",
+   "--max-connections": "value",
+   "--near": "value",
+   "--otlp-endpoint": "value",
+   "--otlp-header": "value",
+   "--promote": "switch",
+   "--region": "value",
+   "--replica-of": "value",
+   "--replica-timeout": "value",
+   "--replicas": "switch",
+   "--replication-buffer": "value",
+   "--replication-token": "value",
+   "--studio": "switch",
+   "--tls-ca": "value",
+   "--tls-cert": "value",
+   "--tls-key": "value",
+   "--token": "value",
+   "--trace-sample": "value",
+   "--upstream-timeout": "value",
+   "--version": "switch",
+   "--write-timeout": "value",
+   "-V": "switch",
+   "-d": "value",
+   "-h": "switch",
+   "-l": "value"
+  }
+ },
+ "exit codes": {
+  "0": "--help or --version printed; a router serving runs until it is stopped, and a signal ends it by the system's default, with no code of its own",
+  "1": "the directory or its global copy is another process's (its lock is held), or the listener failed while serving",
+  "2": "refused at the start: a flag, its value or what they configure, the directory or its global copy, or its lock file, that could not be opened, made or read, the address that could not be had, or a thread the start could not make"
+ }
+}
