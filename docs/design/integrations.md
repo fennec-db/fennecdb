@@ -1,6 +1,6 @@
 # Integrations and deploy
 
-The long form of the invariants [integrations/CLAUDE.md](../../integrations/CLAUDE.md), [deploy/CLAUDE.md](../../deploy/CLAUDE.md) and [tools/CLAUDE.md](../../tools/CLAUDE.md) list under *Integrations and deploy*: `integrations/`, the Grafana data source, the desktop app, the `deploy/` kit and the install channels. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [integrations/CLAUDE.md](../../integrations/CLAUDE.md), [deploy/CLAUDE.md](../../deploy/CLAUDE.md), [tools/CLAUDE.md](../../tools/CLAUDE.md) and [crates/fennec-server/CLAUDE.md](../../crates/fennec-server/CLAUDE.md) list under *Integrations and deploy*: `integrations/`, the Grafana data source, the desktop app, the `deploy/` kit, the install channels and the image's user. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Integrations
 
@@ -187,6 +187,46 @@ from a case can be held to it.
   can render (222, leaving out those with a `$date` or a `$f32` value) was
   rendered in all seven languages and run through each SDK. Each sent its
   case's text and parameters.
+
+## Audit of the published packages' dependencies
+
+The `audit` workflow (`.github/workflows/audit.yml`) reads what `packages.yml`
+publishes for known advisories. It is not a job of `ci.yml` and not a
+merge-queue check: an advisory with no fix yet would block every unrelated
+change, so it runs on a pull request that touches a manifest, a lockfile, the
+workflow or `tools/osv_check.py`, weekly (Monday, where a new advisory is
+found and read) and by hand.
+
+- `npm audit --omit=dev` for `@fennecdb/web`, `react`, `cloudflare` and
+  `langchain` (web has no lockfile and no dependency; its audit is of the one
+  npm resolves in a copy). Its JSON is read by `osv_check.py --npm-audit`,
+  failing on high and critical advisories not in the ignore list.
+- `govulncheck` (v1.9.0, `-format json`, on the newest Go: `go 1.22` in
+  `go.mod` is the oldest a user may build with, and a standard-library fix is
+  theirs to take). The Go module has no `require`, so what it audits is the
+  standard library; a called vulnerability fails.
+- `dotnet list package --vulnerable --include-transitive` for `FennecDb`. It
+  exits 0 whatever it finds, so `--nuget` reads its text: it fails on a
+  vulnerable package, on NU1900 (the advisory data could not be fetched) and on
+  a project that did not print "has no vulnerable packages".
+- `tools/osv_check.py` for Kotlin and Dart: api.osv.dev about the Maven
+  coordinates the Gradle files pin and the newest version a Dart constraint
+  admits (as no lockfile of a library is kept, `pubspec.lock` is ignored, the
+  newest version the constraint admits is what is audited; a caret on 0.x
+  follows pub, `^0.3` is `>=0.3.0 <0.4.0`). A Gradle dependency line not read
+  into a coordinate, or a version that is a variable, fails rather than goes
+  unaudited; HTTP calls are retried three times. A binary scanner with a
+  pinned checksum would add a download for two dependencies.
+- PyPI's package has no runtime dependencies, so nothing is audited there.
+- Test-only dependencies are not shipped and not audited; Dependabot reads
+  them.
+
+`tools/audit-ignore.json` is the one ignore list: each entry has an advisory
+id (GHSA, OSV, GO or CVE), the package, a reason and an expiry date, and
+every tool above reads it (npm, govulncheck, NuGet and OSV alike). An entry
+past its expiry, or missing a field, fails the run, so an ignore is a dated
+decision to revisit. It starts empty. `tools/test_osv_check.py` holds the
+parsing and the list's rules.
 
 ## Grafana
 
@@ -544,7 +584,25 @@ outlive the app by a moment, and `run.mjs` waits for what it killed to be gone
 before the next check removes that folder. A check that cannot pass on a system
 until a later phase is skipped there by name, its reason and phase in
 `run.mjs`'s list and the run's SKIP lines; a unit test likewise, its reason
-beside it in `node --test`'s output (`test/platform.ts`).
+beside it in `node --test`'s output (`test/platform.ts`). On Windows the unit
+tests ask the system through the app's own calls (win32.ts), run by the Bun
+the app runs on, the one `hutch-pin.json` pins (`test/win32-read.ts`): a
+process's command line (`argvOf`, which holds a server's argv to no token)
+by `processCommandLine` (NtQueryInformationProcess, as Task Manager reads
+one), and a file's owner and DACL (`ownerAlone`, which holds a key file to
+its user alone) by `pipeSddl`, as `pages.mjs` reads the pipe's: a protected
+DACL of one entry, every right (FA) to this user. They asked PowerShell 7
+before, WMI and `Get-Acl`, and `pwsh` itself crashed on the arm64 runner
+about once in 600 to 1000 starts, "Fatal error. Internal CLR error.
+(0x80131506)" and exit 0xC0000005, or a SynchronizationLockException in
+Monitor.Exit, the process it was asked about alive (job 132046665510). Not
+from the startup profile every `pwsh` rewrites as `node --test` runs test
+files side by side: with `DOTNET_MultiCoreJitNoProfileGather=1`, which keeps
+any from writing it, 3 and 6 of 3000 starts crashed, 7 and 3 without (jobs
+132452559288, 132452559492). The app's reader under its Bun read a command
+line 9000 times there in three jobs, four at once, with no failure, 41 s a
+3000 where `pwsh` took 470 s (job 132462525107). Nothing the unit tests run
+starts a .NET runtime.
 
 The process and security layer (phase 2 of #578, nothing shipped). What
 macOS gave the app for nothing is made on Windows and Linux, and every phase 2
@@ -1146,7 +1204,44 @@ window and the app's words are each system's, and the app has its icon there.
   asks each WWAHost window to close then, ends a WWAHost still running 15 s
   on, and closes the Start menu, in front, by Escape; the check looks along
   the whole visible title bar for a point that is the window's; `run.mjs`
-  says when another program's window is in front.) Nothing
+  says when another program's window is in front. The same runner's
+  provisioner, `provjobd.exe` in its user's temporary folder, started
+  before the job, runs `wsl -u root -e ls` every 30 s for as long as the
+  runner lives, and WSL is not installed there: the system's `wsl.exe`,
+  with no console, opens `wsl.exe --update --confirm --prompt-before-exit`
+  in a console of its own, a window asking for a key to install WSL that
+  gives up 60 s on, one at a time, so a new one every 90 s, on an idle
+  runner as during the checks (runs 43594225601 and 43594228435, every
+  process start audited with its command line). Each comes over the
+  window in front and takes the keyboard, whichever host its console has:
+  Windows began hosting consoles in Windows Terminal a few minutes into
+  the checks (on the idle runner it never did), and pinning conhost for
+  the job (`HKCU\Console\%%Startup`) was tried and does not keep one
+  behind. With a window of another process put in front by a click on its
+  title bar, as `menu` puts the app's, a console a background process
+  opened came over it 7 times of 7 hosted by conhost and 10 of 10 by
+  Windows Terminal, and each of the runner's own prompts took the
+  foreground (run 43605593298); three runs with conhost pinned passed only
+  because no prompt opened while the app was in front (runs 43599997221,
+  43600003350, 43600009843). `run.mjs` found one in front after
+  `finder` or `menu` in 37 of 72 arm64 runs from 2026-11-12 on, on the
+  runner images 20261101.203.1 (27 of 55) and 20261112.217.1 (10 of 17)
+  alike, so no image update brought it; and three times `menu`'s click
+  into its main window's page, or the chord after it, found one opened
+  seconds before over the page (jobs 131999721552, 132400115646,
+  132425554981). It cannot be put right in a job (`wsl --update` says WSL
+  is not installed, and the feature wants a restart), and a prompt closed
+  is opened again by the next poll, so closing it before each check, as
+  `clearDimming` closes a picker, would leave one to open during `menu`.
+  `desktop.yml` pauses the poll for the rest of the job (NtSuspendProcess,
+  as Process Explorer's Suspend; resumed by the job's last step), lets a
+  poll it had started end, and closes the prompt still open as a person
+  closes it (WM_CLOSE to its console's or Windows Terminal's window, a
+  cancel). No key is sent to it: a key installs WSL. Paused so, three arm64
+  runs passed every check, `menu` among them, no prompt starting from the
+  pause to the job's end where one would every 90 s, and gave the poll back
+  (runs 43607163544, 43607170305, 43607177163, every process start
+  audited).) Nothing
   else of the check's own brings a window forward or moves its focus: no Alt (the first version pressed and let
   go of one before a SetForegroundWindow, which can put the menu bar of a
   window in front by then in menu mode, where keys go), no activation, and no keys
@@ -1735,6 +1830,55 @@ the drill fails it prints the last 300 lines of every router's and node's
 log (`DRILL_LOG_LINES`), since the cleanup takes the containers and CI
 leaves nothing else to read. CI's `deploy` job runs both checks.
 
+The restore point is the writers paused, a moment noted a second and a
+half after and a second and a half before they resume. The tenant
+restored to it holds rows 1..c, where K is the last row the writer had
+acknowledged by the moment and K <= c <= K+1 (`judge_restore`,
+`drill/test_drill.py`, which `make drill` runs first). Every row
+acknowledged by then must be there, and a row sent after the moment must
+not, so nothing past K+1 can be: the writer sends row K+2 only once K+1
+is answered. Row K+1 is allowed only where it was sent before the moment
+and one of its tries may have run, that is, has the outcome `unknown`:
+not answered (the writer's 5 s timeout, a reset) or answered a 5xx but a
+503. Such a row may have landed then while the writer gave up on it, and
+the writer's own rule is that a row sent again after an answer that never
+came writes the same row. A 4xx, a 503 or no connection made did not run,
+as chaos.py's clients judge a try, so those tries allow no K+1. More than
+that is a row written after the moment (a restore keeping what came after
+its time) or a refusal of a write that ran; fewer is an acknowledged write
+the archive lacks or timed after the moment.
+
+The check first stood as equality with the writer's count, and CI's run
+43627518610 failed it: 397 rows against 396 acknowledged. Its writers had
+stalled with no fault yet injected: the pause took 3.6 s where it takes
+0.1 s (the poll interval of `until` in `deploy/drill/drill.py`, the
+granularity of its wait for every writer to pause) in each of the job's
+78 other runs among CI's last 150, and 718 writes were answered in the 2 s
+before it against a median of 1 191. eu-t1's row 397 landed while its
+writer waited for an answer it gave up on. A restore keeping a write from
+after its moment is ruled out by the code: a record's time is its node's
+clock as the record enters the feed under the write lock
+(`replication::Feed::push`), the archive keeps it (`archive::take`) and
+`--to` stops at the first record after the moment
+(`archive::assemble_into`), the node's clock being the runner's. An
+answer held past the writer's timeout just before the moment reproduced
+the mismatch every time, with no stall: 201 rows against 200. Ten runs
+here (Docker's 8 CPUs, nothing else running) saw no stall: pauses of
+8-14 ms, gaps before them of 17-36 ms, no row unanswered, each restore
+equal to its count. The restore point now says how long the pause took
+and which writer was last, the longest gap between acknowledged writes
+before it, and each row not acknowledged by then with its tries (sent and
+ended, from the moment, and what came), and a failed restore says them
+and whether eu-a's archive was of the tenant's primary or its replica, so
+the next failure says which it was. A replica's node
+times each write as it applies it, a little after its primary appended
+it (its follower passes over the times the primary sent, and its own feed
+stamps the record), so a restore from a replica's archive can hold fewer
+rows than its primary had by the moment where the replica was more than
+the margin behind -- against the reference's word that `--to` goes by
+the primary's time, a gap left for a change of its own; the drill fails
+it, never loosened.
+
 ### The chaos drill
 
 **`make chaos` breaks a region by seed, one fault at a time, and holds its
@@ -2059,3 +2203,32 @@ The Windows zip and `site/install.ps1` are [windows.md](windows.md#6-a-windows-r
 The C library for Linux is the native library's channel for a program that is not Swift, Kotlin or Dart -- vulpes' GTK apps first among them -- where a release had carried only Apple's XCFramework and Android's AAR and the JVM's jar said to bring the library. `release.yml`'s `linux-ffi` job builds `crates/fennec-ffi` in the `ffi` profile on each architecture's runner (`ubuntu-24.04`, `ubuntu-24.04-arm`, `contents: read`, no stored credentials) with `tools/linux-ffi.sh`, and tars it as `fennec-ffi-v<version>-<target>.tar.gz` for `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`: the binaries' tarballs' pattern, the part named as the crate is, the target the Rust triple whose `gnu` says glibc where theirs say musl. The folder is a prefix -- `include/fennec.h`, `lib/libfennec_ffi.so`, `lib/libfennec_ffi.a`, `lib/pkgconfig/` -- so it is unpacked anywhere or into `/usr/local`, and its two `.pc` files name the folder from where they are (`${pcfiledir}`): `fennec-ffi` links the shared library, `fennec-ffi-static` the archive by its path and the system libraries rustc names for a static library (`--print native-static-libs`, read from an empty crate's build, since cargo prints nothing for a library it did not build again and fennec-ffi takes no dependency of its own), because pkg-config has no way to ask for the archive beside a shared library of the same name. Each library is built alone, as `make ffi` builds one. The shared library's SONAME is its name, so a program records `libfennec_ffi.so` whether it was linked with `-l` or by the file's path, as CMake links an imported library; it carries the `jni` feature's functions, so the JVM on Linux loads the same file. The archive takes none -- only a JVM loads them, from a shared library -- and is stripped of its debug sections, the standard library's, which the profile's `strip` does not reach in a file it does not link. The libraries are built against the runner's glibc and run on an older one: what fixes the baseline is the newest symbol version they ask for, which is `GLIBC_2.34` -- the threads' symbols moved into libc in 2.34 and took that version, so any build on a newer glibc asks for it -- and `tools/linux-ffi-check.sh` fails a library asking for a newer one rather than let the runner's image move the baseline. The check is the release's gate, as `linux-packages-check.sh` is the packages': the tarball's files and nothing else, its header the repository's, the shared library's machine and SONAME, its `NEEDED` held to glibc's libraries and `libgcc_s`, its exports the header's functions and `FennecNative.kt`'s JNI functions and nothing else, the archive defining the header's functions, each `.pc` file's version; then the header compiled as C++, and `tools/linux-ffi-check.c` compiled as C99 with every warning an error and linked to each library by the pkg-config lines the docs give, run on the runner and in `almalinux:9`, whose glibc is 2.34 (the container's glibc is held to it, so an image moving on fails the check rather than weaken it): the library's version, a file opened, a row written with parameters and read back, a second open refused (`FENNEC_LOCKED`), a statement that does not parse refused with its JSON, the row there after a close and an open, and a sync started on a database in memory and driven with no network, as `fennec-ffi`'s own tests drive it. CI's `linux (C library)` job runs both scripts on every change, so a tag meets no step of it CI has not run, and keeps the tarballs as the run's artifacts. Its two tarballs are in `SHA256SUMS` with the rest (`publish` globs `*.tar.gz`), and the names the installers read are held apart from theirs: `install.sh` and `install.ps1` look for `fennec-v<version>-`, which `fennec-ffi-v` is not.
 
 The packages are nfpm's (`packaging/nfpm.yaml`): one description makes both formats on a runner of either architecture with no dpkg or rpmbuild, where `rpmbuild` would have wanted a spec, a build root per architecture and its strip and requires scripts turned off for a prebuilt static binary. nfpm itself is the release binary `tools/install-nfpm.sh` pins by checksum (copied from the release's `checksums.txt`), shared by `release.yml` and CI. The deb's version carries nfpm's `release: 1` as its Debian revision (`0.1.11-1`, in the file's name too), `version_schema: semver` turns a pre-release's `-rc1` into `~rc1` in the package's version (`0.2.0~rc1-1`, an rpm's `0.2.0~rc1`; the file's name keeps the `-`), which sorts before `0.2.0` as a pre-release must, and `tools/linux-packages-check.sh` holds both packages to that form and to the ordering (`dpkg --compare-versions`, `rpm.vercmp`). `SOURCE_DATE_EPOCH` fixes the files' times: the same tarballs gave the same `.deb`, byte for byte, from nfpm on a Mac and on Linux, but the `.rpm` records the build host's name, so two machines' rpms differ by that and by nothing else. The files are `/usr/bin/fennec`, `/usr/bin/fennec-server` and the licence where each distribution looks. Each architecture is packed on a runner of its own (with `contents: read` and no stored credentials), and `tools/linux-packages-check.sh` installs the packages in `debian:12-slim` and `fedora:42` of that architecture, asserts their metadata and that they depend on nothing -- every assertion printing what it found and what it wanted -- runs both binaries, removes the package and checks the files are gone, before the artifact is kept: a package that does not install stops the release. CI's `packaging` job does the same with the latest release's tarball and again with it named as a pre-release. The job's checkout is the workflow's own commit and not a dispatched tag, which may be from before the packaging files. There is no apt or yum repository, only files on the release.
+
+## The image's user
+
+**Started as root, a server becomes its user before it touches a file** (`fennec-server`'s `user`, [crates/fennec-server/CLAUDE.md](../../crates/fennec-server/CLAUDE.md); added after the move). The image ran as `USER 65534:65534`, with a `/data` made 65534's at build time, and that reached only a Docker named volume, which Docker fills from the image's directory, ownership and all. A volume a platform makes -- a Fly volume, a Render disk, a Railway volume, a bind mount, Docker's own under `volume-nocopy=true` -- is an empty file system whose root is root's, and the server could not make its lock file there: `docker run --rm --mount type=volume,dst=/data,volume-nocopy=true -e FENNEC_HTTP_TOKEN=t ghcr.io/fennec-db/fennec-server:0.2.0` exited at once with `could not open /data/data.fennec: its lock file: Permission denied (os error 13)`. Each platform had its own way around it in the docs -- a derived image with `USER 0:0` on Render (which then served as root and left a root-owned file a later non-root start could not open), `RAILWAY_RUN_UID=0` on Railway, `fsGroup` on Kubernetes, a hope that Fly chowns the mount to the image's user. The postgres, redis and mongo images solve it in an entrypoint script that starts as root, chowns the data directory and `exec`s the database through `gosu` or `su-exec`; a scratch image has no shell to run one, so the binary does the same between reading its arguments and opening anything. The image sets no `USER` and sets `ENV FENNEC_USER=65534:65534` -- a variable, not a flag in `CMD`, so it holds when a deployment writes its own command, as the Fly `Dockerfile` on the cloud page does -- and `--user <uid>:<gid>` names one over it, as `--http-token` stands over `FENNEC_HTTP_TOKEN`; set empty, the variable is unset.
+
+**Where.** `main` reads the arguments and then, before anything else of the start, asks `user::wanted` whom to become and runs `user::start_as`: the hand-over, then the drop. Before any file is opened, so that every file the server makes is the user's and every file it reads is read as the user will read it again. The arguments' loop had opened two kinds itself: `--audit`'s log, made there, which would have been root's, and the files read where their flag stood -- `--jwt-secret-file`, `--policy` and `--tls-ca`'s CAs -- read as root: a file only root may read would have worked at the start and failed later, as `--jwt-keys`, read after the loop and again as it changes, would at its first rotation had its first read been root's. Each is now kept as a path in the loop and opened after the drop (`--jwt-secret` and `--jwt-secret-file` still the later one of the two given); `--hooks` and its secrets, the TLS certificate and key, the keys file and `<file>.lock` were opened after the loop already. And before any thread: the kernel keeps credentials a thread, and only libc's `setuid` carries them to threads already there, so a thread made before the drop is one that might keep root; none is, tracing's among them, started after it. `--ping` -- the image's `HEALTHCHECK`, run as root in the container every 10 s -- and `--mint-token` drop root the same way and hand nothing over: a probe that walked the volume every 10 s would be a cost for nothing, and neither makes a file. `--help` and `--version` print and end inside the loop, having opened nothing. Any other process an operator starts in the container (`docker exec`) is `fennec-server` too, the only binary in the image, under the same variable.
+
+**The drop.** `become_user` calls libc's `setgroups(0, NULL)`, `setgid` and `setuid`, declared in `extern "C"` as `durability`'s `signal` is (no dependency: std links libc), in that order -- each step needs the root the next gives up -- and then checks that the real, effective and saved ids are the user's alone (`getuid`, `geteuid`, `getgid`, `getegid`), that no supplementary group stayed (Linux; Apple's `getgroups` answers the effective group as one), and that `setuid(0)` fails, and `setgid(0)` where the group is not 0. A call that succeeds there means the process is root again, and the start ends. The kernel clears the permitted and effective capabilities as the uids leave 0, so the server keeps none. Any failure ends the start with 2 and says what it needs: a container that dropped `SETUID` and `SETGID` (Kubernetes' `drop: ["ALL"]` with no `runAsUser`) cannot drop root, and is never let run as root instead. A uid of 0 is refused as a value (it would drop nothing), as is 2^32 - 1, which `setuid` and `chown` read as "leave it", and names: the image holds no `/etc/passwd` to look one up in.
+
+**Not started as root.** Only root becomes anyone, so a server started as another user -- `docker run --user 1000:1000`, a pod's `runAsUser`, systemd's `User=` -- passes the variable over unread, whatever it says: the image sets it in every container, and those keep working as they did, the volume theirs to own. A `--user` flag is refused there unless it names the user and group the process is already: a flag that cannot be done is never let go by in silence. On Windows the flag is refused and the variable passed over; a service runs as the account it is given.
+
+**The hand-over** (`user::plan`, `user::hand_over`). The directory the server writes in -- `--file`'s, `--dir` itself, or, where a node's directory is not made yet, the one it will be made in -- and the entries in it that are the database's, each where its owner is not the user. Where nothing is to change -- every start after the first, a named volume Docker filled from the image, a pod whose `fsGroup` made the volume 65534's -- nothing is asked, and nothing is said. Otherwise the directory must be:
+
+- not `/`, and reached through no symbolic link or `..`: `canonicalize` gives back the path as named. A link among the directory's ancestors is one a server running as the user may have planted, in a directory a hand-over gave it, and would lead the next start's hand-over anywhere.
+- a volume of its own: not on the file system `/` is on. An image's directory and a host's were given their owner by whoever built them, which a hand-over must not undo; a volume a platform made has an owner no one chose. A container's `/` is its image's overlay, so a named volume, a `volume-nocopy` one and a bind mount are each another device, and so is a directory inside one (`--file /data/db/x.fennec`). Rejected: reading `/proc/self/mountinfo` for a mount point, which is Linux's alone and would refuse that subdirectory.
+- no one's to share: neither writable by others nor sticky (`mode & 0o1002`), as `/tmp` and `/dev/shm` are, where a hand-over would give the user other people's files to delete.
+- holding nothing but the database's files and a `lost+found` directory (a fresh ext4 volume's, left root's). The database's are regular files of one name each -- never a link, a directory, a device or a file whose other name is elsewhere -- named `<file>` or `<file>.<suffix>` beside a file (`fs::beside`: `.lock`, `.sync`, a compaction's or an import's file before its rename), `<tenant>.<anything>` in a node's directory (a tenant's name is `[a-z0-9_-]`, `tenants::shaped`; loose on purpose, since a node keeps many -- `.fennec` and what is beside it, `.follows`, `.quota`, `.hooks`, `.instance`, `.tmp`, `.restoring`, their `.writing` -- and more will come; the scheduler's `schedules.hint` has that shape too), and `--audit`'s log where it is in the directory.
+
+So a hand-over gives the user a directory and the database in it, and nothing of anyone else's: a `--file` pointed at `/etc`, a home, `/tmp` or a project's checkout is refused, and so is a link or a hard link planted among the files. A refusal is said -- `warning: <dir> is not handed to <user>: <why>` -- and the start goes on as the user, whose open then says whether it can write there: a directory the group may write in, or an ACL, may let it. The drop is never skipped for it. What was handed over is said too (`handed /data to 65534:65534`, `... and 2 of its files`).
+
+**Through descriptors.** Each entry is opened read-only (a directory too), `fstat`ed, and changed with `fchown` only if its device and inode are the ones `plan` saw with `lstat`, and a file is still a regular file of one name: an entry swapped for a link or for a name of another file between the look and the change is refused, never followed. `lchown` alone would not do: it follows no link, but changes a hard link's other file. The open is `O_NOFOLLOW | O_NONBLOCK` (`sys::AS_FOUND`): the first open followed a link put in an entry's place and only then found the inode another's, so root had opened whatever the link named -- a FIFO, whose open waits for a writer and held the start, or a device -- before refusing it; only a process writing the volume beside the start could plant one, and a container's start has none, but a pod's sidecar sharing the volume is such a process. With the flags a link is refused by the open itself (`ELOOP`) and a FIFO swapped in directly opens at once and fails the inode's check. Their numbers are each target's own, Linux's `O_NOFOLLOW` differing by processor, and std exposes none without a dependency: they are written for Linux and Android on x86-64 and aarch64 and for Apple's systems, read from each one's libc, and are 0 elsewhere, where the inode's check stands alone. The owner and the group change together, and only where the owner is not the user already: an entry the user owns keeps its group, which an operator may have chosen for a backup reader. No mode is changed. The directory goes last, so a start that stopped half-way is seen by its files at the next start, which does the rest. The look is one `lstat` an entry, made only by a start as root.
+
+**Rejected.** Keeping `USER 65534` and a workaround per platform: what it was, and each workaround ran as root or asked for a derived image. A shell and `su-exec` in the image: what a scratch image is for not holding. File capabilities on the binary (`CAP_CHOWN`, run as 65534): they need `allowPrivilegeEscalation` on Kubernetes and an image tool keeping extended attributes, and the server would keep a capability while it serves. An init container: Kubernetes' alone, where `fsGroup` does it already. A recursive `chown` of the directory, as postgres's entrypoint does: neither a file nor a node keeps a subdirectory, and a walk is a walk into whatever was mounted there. Serving as root: a connection's bug would be root's.
+
+**Kubernetes.** The image's user is root, so `runAsNonRoot: true` needs `runAsUser` beside it, or the kubelet refuses the pod (the image names no user, which is root); the cloud page's StatefulSet has both, with `fsGroup`, and runs as 65534 from the start, every capability dropped. A pod naming neither starts the server as root, which hands the volume over and drops root, and needs `CHOWN`, `SETUID` and `SETGID` for it.
+
+**Checked in Docker** (the image built from the change, Docker Desktop 29.2's Linux VM, arm64), each run's logs, `/proc/1/status` read from a container sharing the server's PID namespace, and `/data` listed after it. An empty volume under `volume-nocopy=true`: `handed /data to 65534:65534`, `running as 65534:65534, started as root (FENNEC_USER)`, `/_health` 200; the process's ids 65534 four times over, no supplementary group, `CapPrm` and `CapEff` 0; `data.fennec`, its `.lock` and `.sync` 65534's; `docker exec` of `--ping` (0), `--version` and a second server over the file (refused by the lock, 1), none leaving a file of root's; stopped (0) and started again on the volume, a row written before read back, nothing handed over. A root-owned subdirectory of a volume bind-mounted at `/data` (`volume-subpath`, `volume-nocopy`), holding the `data.fennec` and `.lock` a server run as root had left (`FENNEC_USER=` empty, as a derived image with `USER 0:0` ran): `handed /data and 2 of its files to 65534:65534`, and served. A host directory through Docker Desktop's file sharing: the directory handed over, and the files the server then made shown as root's, which that sharing does with every file a container makes. `docker run --user 1000:1000` on a volume 1000 owns: served as 1000, nothing handed over, no line said. A volume holding `notes.txt`: the warning naming it, then the open's `Permission denied` (1), the volume as it was. `--cap-drop ALL` as root: `could not become 65534:65534 (setgroups: Operation not permitted ...)`, 2. `--dir /data/n1` on an empty root-owned volume: `/data` handed over, the node made `n1`, and a tenant made through `/_admin` wrote its files as 65534 (`acme.fennec`, `.lock`, `acme.instance`, `schedules.hint`). `docker run --user 65534:65534` on a root-owned volume: `Permission denied`, as the image of 0.2.0 did.
+
+**Size.** The static `fennec-server` of the image grew by 22 276 bytes of sections (6 974 465 to 6 996 741; `.text` 20 112 of it), its file by one 64 KiB page on arm64, which aligns its segments so; nothing else is built with it, the browser module and the native library included. It buys the image starting on every platform's volume with no derived image, and serving as 65534 where the workarounds served as root. A start told no user, or not as root, asks its effective ids and nothing more; nothing after the start is changed.

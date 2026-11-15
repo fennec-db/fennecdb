@@ -22,7 +22,9 @@ id -- 1, 2, 3, ... -- through its region's routers, the next one only once
 the one before was answered, so what a tenant acknowledged is exactly 1..K.
 Then, in turn:
 
-    restore point   the writers paused, a moment noted, the writers resumed
+    restore point   the writers paused, a moment noted, the writers resumed: how
+                    long the pause took and the longest gap between
+                    acknowledged writes before it said, a stall being one
     partition       the global routers cut off the network: both regions write on
     node kill       the us node holding the most primaries cut off the network
                     and then killed (`docker kill`), as a machine lost: no FIN
@@ -40,7 +42,10 @@ Then, in turn:
                     standby
     verify          every acknowledged write read back from each tenant's primary
                     and from its replica; one tenant restored from the archive to
-                    the restore point, holding exactly what was acknowledged by then
+                    the restore point, holding exactly what was acknowledged by
+                    then -- and the row after it only where that row was sent
+                    before and its answer never came, or was a 5xx but a 503: a
+                    write that landed then whose answer the writer did not get
 
 No port is fixed: the routers and nodes publish on ports Docker picks, on
 the host's loopback, and this driver reads them back. Every container,
@@ -255,9 +260,20 @@ class Writer(threading.Thread):
     """Puts rows 1, 2, 3, ... into one tenant through its region's routers,
     the next only once the one before was answered 2xx: a put by id, so a
     write sent again after an answer that never came writes the same row.
-    A router that cannot be reached is passed over for the next, as the
-    global entry passes one over; any other refusal is waited out and the
-    same row sent again."""
+    A router that cannot be reached, or that took a request and gave no
+    answer, is passed over for the next, as the global entry passes one
+    over; any other refusal is waited out and the same row sent again.
+
+    Every try not answered 2xx is kept with its row and its outcome, as
+    chaos.py's clients judge one: `fail` for what cannot have run -- no
+    connection made, a 4xx, a 503 (every 503 says nothing landed) -- and
+    `unknown` for what may have: sent and not answered, or any other
+    status. A row whose try was `unknown` may be in the database before the
+    writer counts it, which the restore point's check allows."""
+
+    # Past the routers' upstream timeout at the drill's default lease (4 s),
+    # so a request a router gives up on is its 502 there, not this timeout.
+    TIMEOUT = 5
 
     def __init__(self, tenant, routers):
         super().__init__(daemon=True)
@@ -266,62 +282,83 @@ class Writer(threading.Thread):
         self.at = 0
         self.lock = threading.Lock()
         self.acked = []          # (row, monotonic time it was answered)
-        self.refusals = []       # (monotonic time, what)
+        self.refusals = []       # (sent, ended, row, outcome, what): every try not answered 2xx
         self.stop = threading.Event()
         self.pause = threading.Event()
         self.idle = threading.Event()
+        self.began_at = None     # when it started writing
+        self.idled_at = None     # when it last went idle at a pause
         self.conn = None
 
     def connect(self):
         host, port = addr(self.routers[self.at], 8090).rsplit(":", 1)
-        self.conn = http.client.HTTPConnection(host, int(port), timeout=5)
+        self.conn = http.client.HTTPConnection(host, int(port), timeout=self.TIMEOUT)
+        # Made here, so a connection refused is told from a request sent.
+        self.conn.connect()
+
+    def drop(self):
+        if self.conn is not None:
+            self.conn.close()
+        self.conn = None
 
     def put(self, k):
+        """("ok", None), or ("fail" | "unknown", what): see the class."""
         if self.conn is None:
             try:
                 self.connect()
             except (Failed, OSError, subprocess.SubprocessError) as e:
-                # Its container being made again: no port to ask yet.
+                # Its container being made again, no port to ask yet, or
+                # nothing listening there: the next router.
+                self.drop()
                 self.at = (self.at + 1) % len(self.routers)
-                return False, f"no address: {e}"[:120]
+                return "fail", f"no connection: {type(e).__name__} {e}"[:120]
         body = json.dumps({"query": "put events {id: $1, n: $1}", "params": [k]})
         try:
             self.conn.request("POST", f"/t/{self.tenant}/query", body=body, headers={
                 "Authorization": f"Bearer {DATA}", "Content-Type": "application/json"})
+        except (OSError, http.client.HTTPException) as e:
+            # Some of it may have gone: what the router read of it may run.
+            self.drop()
+            self.at = (self.at + 1) % len(self.routers)
+            return "unknown", f"sending: {type(e).__name__}"
+        try:
             r = self.conn.getresponse()
             text = r.read().decode("utf-8", "replace")
             if r.getheader("Connection", "").lower() == "close":
-                self.conn.close()
-                self.conn = None
-            if 200 <= r.status < 300:
-                return True, None
-            return False, f"{r.status} {text[:120]}"
+                self.drop()
         except (OSError, http.client.HTTPException) as e:
-            # Not reached, or no answer: the next router, as the entry goes
-            # on to one -- the row is sent again either way.
-            self.conn = None
-            refused = isinstance(e, ConnectionRefusedError)
+            # No answer: the next router, as the entry goes on to one -- the
+            # row is sent again either way.
+            self.drop()
             self.at = (self.at + 1) % len(self.routers)
-            return False, f"{type(e).__name__}{' (refused)' if refused else ''}"
+            return "unknown", f"no answer: {type(e).__name__}"
+        if 200 <= r.status < 300:
+            return "ok", None
+        if r.status == 503 or 400 <= r.status < 500:
+            return "fail", f"{r.status} {text[:120]}"
+        return "unknown", f"{r.status} {text[:120]}"
 
     def run(self):
         k = 1
         gap = 1.0 / RATE if RATE > 0 else 0
+        self.began_at = time.monotonic()
         while not self.stop.is_set():
             if self.pause.is_set():
+                self.idled_at = time.monotonic()
                 self.idle.set()
                 while self.pause.is_set() and not self.stop.is_set():
                     time.sleep(0.01)
                 self.idle.clear()
                 continue
             began = time.monotonic()
-            ok, why = self.put(k)
+            outcome, why = self.put(k)
+            ok = outcome == "ok"
             now = time.monotonic()
             with self.lock:
                 if ok:
                     self.acked.append((k, now))
                 else:
-                    self.refusals.append((now, why))
+                    self.refusals.append((began, now, k, outcome, why))
             if ok:
                 k += 1
                 rest = gap - (now - began)
@@ -487,19 +524,51 @@ def placement(region, t, router=None):
 
 
 def restore_point(writers, results):
-    """Writers paused, so the acknowledged writes are exactly those before
-    the moment noted and nothing is in flight; the moment is a second past
-    the last answer and a second before the next request, the clocks of
-    this machine and Docker's not trusted closer than that."""
+    """Writers paused, so none has a request out at the moment noted: a
+    tenant's acknowledged writes are 1..K, and the one row besides them that
+    may be in the database by then is K+1, where the writer sent it before
+    the pause and its answer never came or was a 5xx but a 503 -- it landed,
+    and the writer gave up on it (its own timeout, or the router's 502).
+    Each such row is kept with its tries, for the restore's check. The
+    moment is a second and a half past the last request and a second and a
+    half before the next, the clocks of this machine and Docker's not
+    trusted closer than that.
+
+    How long the pause took, and the longest gap between acknowledged
+    writes of any tenant before it, are noted and said: a pause holds only
+    for a request in flight, so a long one is a writer held up, which is
+    what leaves a row unanswered at the moment."""
+    asked = time.monotonic()
     pause_all(writers)
+    paused = max(w.idled_at for w in writers)
+    held_by = max(writers, key=lambda w: w.idled_at).tenant
     time.sleep(1.5)
+    mono = time.monotonic()
     moment = datetime.now(timezone.utc)
-    acked = {w.tenant: w.last() for w in writers}
+    acked, unanswered = {}, {}
+    for w in writers:
+        rows, tries = w.snapshot()
+        k = rows[-1][0] if rows else 0
+        acked[w.tenant] = k
+        mine = [[round(sent - mono, 3), round(ended - mono, 3), outcome, what]
+                for sent, ended, row, outcome, what in tries if row == k + 1]
+        if mine:
+            unanswered[w.tenant] = {"row": k + 1, "tries": mine}
     time.sleep(1.5)
     resume_all(writers)
     stamp = moment.strftime("%Y-%m-%dT%H:%M:%S.") + f"{moment.microsecond // 1000:03d}Z"
-    results["restore_point"] = {"at": stamp, "acked": acked}
-    say(f"restore point {stamp}: {sum(acked.values())} writes acknowledged by then")
+    gaps = {w.tenant: longest_gap(w, w.began_at, asked) for w in writers}
+    worst = max(gaps, key=gaps.get)
+    results["restore_point"] = {
+        "at": stamp, "acked": acked, "unanswered": unanswered,
+        "pause_ms": round((paused - asked) * 1000), "pause_held_by": held_by,
+        "longest_write_gap_before_ms": round(gaps[worst] * 1000), "longest_write_gap_tenant": worst,
+    }
+    say(f"restore point {stamp}: {sum(acked.values())} writes acknowledged by then; the writers "
+        f"paused in {(paused - asked) * 1000:.0f} ms ({held_by} last), the longest gap between "
+        f"acknowledged writes before it {gaps[worst] * 1000:.0f} ms ({worst})")
+    for t, u in unanswered.items():
+        say(f"  {t}: row {u['row']} not acknowledged by then: " + describe_tries(u["tries"]))
 
 
 def partition(writers, results):
@@ -718,7 +787,9 @@ def verify(writers, tenants, results):
         lost_total += lost
         acked_total += k
         per[t] = {"acked": k, "found": found, "lost": lost, "primary": p["node"],
-                  "replica": copy, "replica_found": copy_found, "refused": len(refusals)}
+                  "replica": copy, "replica_found": copy_found,
+                  "refused": sum(1 for r in refusals if r[3] == "fail"),
+                  "unanswered": sum(1 for r in refusals if r[3] == "unknown")}
     results["verify"] = {"acked": acked_total, "found": acked_total - lost_total,
                          "lost": lost_total, "tenants": per}
     say(f"verify: {acked_total} writes acknowledged, {acked_total - lost_total} found on the "
@@ -726,13 +797,48 @@ def verify(writers, tenants, results):
     check(lost_total == 0, f"{lost_total} acknowledged writes lost: {per}")
 
 
+def describe_tries(tries):
+    """A row's tries, each `[sent, ended, outcome, what]` in seconds from
+    the moment, as a failure or the restore point says them."""
+    return "; ".join(f"sent {s:+.2f} s, {outcome} {e:+.2f} s ({what})" for s, e, outcome, what in tries)
+
+
+def judge_restore(t, restored, k, tries):
+    """Why `t` restored to the restore point is not what its writer allows,
+    or None. `restored` is the file's `(count, min id, max id)`, `k` the
+    last row acknowledged by the moment, `tries` row k+1's tries before it
+    (`[sent, ended, outcome, what]`, seconds from the moment).
+
+    The file holds rows 1..c, every row acknowledged by then (c >= k) and no
+    row sent after (c <= k+1, row k+2 never sent before k+1 was answered),
+    and c == k+1 only where a try of row k+1 may have run -- `unknown`: sent
+    and not answered, or a 5xx but a 503. More is a row written after the
+    moment -- a restore keeping what came after its time -- or a refusal
+    (`fail`) of a write that ran; fewer, an acknowledged write the archive
+    lacks or timed after the moment."""
+    c, lo, hi = restored
+    may = any(outcome == "unknown" for _, _, outcome, _ in tries)
+    prefix = c == 0 or (lo == 1 and hi == c)
+    if prefix and k <= c <= (k + 1 if may else k):
+        return None
+    held = f"{c} rows {lo}..{hi}" if c else "no row"
+    allowed = f"1..{k}" + (f" or 1..{k + 1}" if may else "")
+    seen = (f"row {k + 1} before the moment: {describe_tries(tries)}" if tries
+            else f"row {k + 1} was not sent before the moment")
+    return f"the restore of {t} holds {held}, not {allowed}; {seen}"
+
+
 def restore(results):
-    """One eu tenant from eu-a's archive, to the restore point: exactly the
-    rows acknowledged by then. eu-a holds every eu tenant's primary or
-    replica, and an archive of a replica is the primary's writes."""
+    """One eu tenant from eu-a's archive, to the restore point: the rows
+    acknowledged by then, and the one row after them only where it was
+    sent before the moment and not answered (`judge_restore`). eu-a holds
+    every eu tenant's primary or replica, and an archive of a replica is
+    the primary's writes, each timed as eu-a landed it."""
     point = results["restore_point"]
     t = "eu-t1"
     k = point["acked"][t]
+    pending = point["unanswered"].get(t)
+    tries = pending["tries"] if pending else []
     out = docker("run", "--rm", "--label", LABEL, "-v", f"{RUN}-archive:/archive", IMAGE, "sh", "-c",
                  f"fennec verify --tenants /archive/eu-a >/dev/null && "
                  f"fennec restore --tenants /archive/eu-a /tmp/restored --to {point['at']} >/dev/null && "
@@ -740,12 +846,19 @@ def restore(results):
                  timeout=300)
     # The shell's table: a header, a rule, then `c lo hi`.
     line = [l for l in out.splitlines() if l.strip() and l.split()[0].isdigit()][0]
-    c, lo, hi = (int(x) for x in line.split()[:3])
+    c, lo, hi = ((int(x) if x.isdigit() else None) for x in line.split()[:3])
+    # Which copy eu-a's archive followed: its times are when eu-a landed
+    # each write, a replica's a little after its primary's.
+    held = results.get("verify", {}).get("tenants", {}).get(t, {})
+    copy = "primary" if held.get("primary") == "eu-a" else "replica" if held.get("replica") == "eu-a" else "?"
     results["restore"] = {"tenant": t, "to": point["at"], "acked_by_then": k,
-                          "restored": c, "min": lo, "max": hi}
-    say(f"restore: {t} from eu-a's archive to {point['at']}: {c} rows, ids {lo}..{hi}, "
-        f"against {k} acknowledged by then")
-    check(c == k and lo == 1 and hi == k, f"the restore of {t} holds {c} rows {lo}..{hi}, not 1..{k}")
+                          "unanswered_row": pending["row"] if pending else None,
+                          "restored": c, "min": lo, "max": hi, "eu_a_holds": copy}
+    say(f"restore: {t} from eu-a's archive (its {copy}) to {point['at']}: {c} rows, ids {lo}..{hi}, "
+        f"against {k} acknowledged by then"
+        + (f", row {k + 1} sent and not acknowledged" if pending else ""))
+    why = judge_restore(t, (c, lo, hi), k, tries)
+    check(why is None, f"{why}; eu-a's archive is of its {copy}")
 
 
 # -------------------------------------------------------------------- main
@@ -828,6 +941,11 @@ def logs():
 def summary(results, ok):
     print()
     print(f"== drill {results['run']}: {'PASSED' if ok else 'FAILED'} ==")
+    if "restore_point" in results:
+        p = results["restore_point"]
+        print(f"restore point                  writers paused in {p['pause_ms']} ms ({p['pause_held_by']} last), "
+              f"longest write gap before it {p['longest_write_gap_before_ms']} ms ({p['longest_write_gap_tenant']})"
+              + "".join(f"; {t} row {u['row']} unanswered" for t, u in p["unanswered"].items()))
     if "partition" in results:
         p = results["partition"]
         print(f"global routers cut off {p['seconds']} s     longest write gap {p['longest_write_gap_ms']} ms")
@@ -851,7 +969,8 @@ def summary(results, ok):
         print(f"writes acknowledged {v['acked']}   found {v['found']}   lost {v['lost']}")
     if "restore" in results:
         r = results["restore"]
-        print(f"restore of {r['tenant']} to {r['to']}   {r['restored']} rows, {r['acked_by_then']} acknowledged by then")
+        print(f"restore of {r['tenant']} to {r['to']}   {r['restored']} rows, {r['acked_by_then']} acknowledged by then"
+              + (f", row {r['unanswered_row']} sent and not answered" if r["unanswered_row"] else ""))
     if "failed" in results:
         print(f"failed: {results['failed']}")
 

@@ -120,11 +120,23 @@ takes that shape. A number a statement or a declared schema writes -- a
 dimension, a beam, `fuse k`, a count -- is read as written or refused
 naming its range (`Parser::int_in`, within `u32`), never clamped nor cut
 to a 32-bit `usize`; a list's elements too, each read as written and
-refused naming the field and the element.
+refused naming the field and the element. A schema read off the bytes is
+held to the same ranges, `Error::Corrupt` past them (`Schema::decode`), by
+the one test every schema a write makes meets (`schema::out_of_range`), a
+list's dimension too: no read refuses what a write took.
 
 **[Profiles differ on purpose.](docs/design/crates.md#profiles)**
 `fennec-cli` takes `cli` (`panic = abort`), `fennec-server` `release`: a
 connection's panic unwinds alone.
+
+**[A 1.x change only grows a frozen surface.](docs/design/compatibility.md)**
+The file format, FennecQL, the HTTP API and its OpenAPI document,
+`fennec.h`, the JS types, each SDK's public API, the sync protocol, CLI
+flags and exit codes, `/_metrics` names and release asset names are added
+to, never changed or removed; a new record kind or tag takes the next
+number, `GRAMMAR_EPOCH` stays 4, and a break is a major version. Replicas
+upgrade before primaries. A change names the check that holds its surface,
+or the plan item that adds it, in the design file's table.
 
 ### The engine's lock and blocks
 
@@ -199,12 +211,9 @@ Covers `crates/fennec-core/`; the browser module's rules bind `crates/fennec-was
 
 *Storage*
 - No buffer pool of its own, and the file is mapped.
-- Writes are handed over to the mapped file.
 - A block past 16 MB spills into the file before it lands.
-- A lone `create index` or `compact` runs beside the database
-- A file compacts itself once half of it is dead
-- A file is compacted before it outgrows the page cache
 - File format
+- A value read off the bytes nests no deeper than JSON's limit.
 
 *Durability*
 - Buffered writes are written behind the lock
@@ -299,6 +308,12 @@ Covers `crates/fennec-core/src/engine/`.
 *The engine's lock and blocks*
 - A block's documents are built beside the readers
 - A long read is pinned, and read with no lock held
+
+*Storage*
+- Writes are handed over to the mapped file.
+- A lone `create index` or `compact` runs beside the database
+- A file compacts itself once half of it is dead
+- A file is compacted before it outgrows the page cache
 
 ### `crates/fennec-core/src/text/CLAUDE.md`
 
@@ -395,12 +410,18 @@ Covers `crates/fennec-server/`.
 *Durability*
 - Every way a server stops is the one shutdown.
 
+*Integrations and deploy*
+- Started as root, a server becomes its user before it touches a file.
+
 ### `crates/fennec-import/CLAUDE.md`
 
 Covers `crates/fennec-import/` and `crates/fennec-wire/`; the mirror is `crates/fennec-server/src/mirror.rs`.
 
 *Replication and archives*
 - `--follow` confirms nothing that is not on disk.
+
+*Imports*
+- A SQLite file's lengths are held to the file before anything is allocated, and its walk reaches a page once.
 
 ### `crates/fennec-shard/CLAUDE.md`
 
@@ -534,6 +555,11 @@ Covers `crates/fennec-bench/`.
   `listening on: http://<address>` stderr line, a router told its nodes by
   the addresses they said; only a site needing its address before it binds
   takes a system-picked port, held by a stand-in listener till then.
+- [Every parser of untrusted bytes is fuzzed](docs/design/conventions.md#fuzzing)
+  by `crates/fennec-fuzz`, the repository's own mutator under ASan (`make
+  fuzz` lists the targets; CI's `fuzz-smoke` runs each 30 s, `fuzz.yml`
+  weekly): a new parser owes its target and `fuzz.yml`'s matrix line, a
+  finding a regression test in its own crate.
 - [A secret is compared by `crypto::ct_eq` alone](docs/design/conventions.md#secrets-compared)
   -- a token, a mark, a MAC, a signature, a proof, a password -- never by
   `==` or `!=`, which leave at the first byte that differs:
