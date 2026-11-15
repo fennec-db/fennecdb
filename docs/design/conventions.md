@@ -401,6 +401,42 @@ sync's messages through the native library and the browser module, and
 IndexedDB's chunks; nor is each target held to a count of runs since its
 code last changed.
 
+## Coverage
+
+`.github/workflows/coverage.yml` runs weekly (Wednesday 03:41 UTC) and by
+hand (`gh workflow run coverage.yml`), never on a pull request or a push. It
+builds the workspace with `-C instrument-coverage` (the `llvm-tools-preview`
+rustup component, not a crate: the workspace takes no dependency), runs
+`make test`'s three Rust invocations, merges the counters with
+`llvm-profdata` and exports them with `llvm-cov export`;
+`tools/coverage_report.py` writes the tables, published as the
+`coverage-report` artifact for 90 days (`coverage.md`,
+`coverage-summary.json`) and in the run's summary: lines, regions and
+functions per crate, and a second table, *Trust boundaries*, for the modules
+that parse bytes from outside the process. It leaves out the doctests
+(rustdoc's coverage is a nightly flag), the JS and browser tests, and the
+PostgreSQL arm's `#[ignore]` tests, which need services the job lacks, so a
+module those tests alone reach shows less than it has.
+
+*The figure is information, not a gate.* No threshold is applied anywhere,
+by the tool or the workflow: a percentage measures how much code ran, not
+whether its behaviour is right, and a bar such as 85% would be arbitrary and
+steer toward tests that execute lines without asserting anything. What
+guards the boundary modules is their fuzz targets ([Fuzzing](#fuzzing)); the
+report shows where a target or a test reaches little. Miri and the
+sanitizers are separate items.
+
+*The boundary list is data at the top of `tools/coverage_report.py`*
+(`BOUNDARIES`): each module with one line saying what untrusted bytes it
+reads. The engine's load path is `store.rs` (`replay`, `replay_mapped`,
+`adopt_index`) and `fs.rs` (`open`, `open_with`), each a file row with a row
+beneath it for those functions' regions and the number that ran (the export
+gives a function's regions, not its lines). A listed path that is gone fails
+the tool, so a rename cannot drop a row; `python3 -I tools/coverage_report.py
+--check-paths` checks it, and `tools/test_coverage_report.py` (CI's fmt job)
+holds the tables' numbers. A new parser of untrusted bytes is listed there
+beside its fuzz target.
+
 ## Secrets compared
 
 A token, a mark, a MAC, a signature or a password is compared by
