@@ -113,7 +113,7 @@ fn walk_archive(dir: &Path, label: &str, key: &Key, seen: &mut Seen) {
         let plain = match sealed {
             true => {
                 walk::seal_frames(bytes, &file);
-                let (plain, end, frames) =
+                let (plain, end, frames, _) =
                     seal::open_appended(key, bytes).unwrap_or_else(|e| panic!("{file}: {e}"));
                 assert_eq!(end, bytes.len(), "{file}: a frame cut short");
                 assert!(frames > 1, "{file}: {frames} frames");
