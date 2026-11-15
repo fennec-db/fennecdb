@@ -76,13 +76,16 @@ pub const HOOK_EVENTS: &str = "_hook_events";
 pub const SYNC_SHAPES: &str = "_sync_shapes";
 pub const SYNC_QUEUE: &str = "_sync_queue";
 pub const SYNC_TEMPS: &str = "_sync_temps";
+/// The parts of a seed sent in parts, held aside until its last lands
+/// them in one block (`fennec_abi::sync`).
+pub const SYNC_SEED: &str = "_sync_seed";
 
 /// The collections the database's own code makes, writes and reads, named
 /// once here for every crate that keeps one. Every name starting with `_`
 /// is the database's ([`own`]), these and any added later, so a surface
 /// holding them out asks [`own`] and never this list: it is what the tests
 /// walk and the docs name, and a new one goes here beside its constant.
-pub const OWN: [&str; 8] = [
+pub const OWN: [&str; 9] = [
     MIGRATIONS,
     IDEMPOTENCY,
     CONSUMERS,
@@ -91,6 +94,7 @@ pub const OWN: [&str; 8] = [
     SYNC_SHAPES,
     SYNC_QUEUE,
     SYNC_TEMPS,
+    SYNC_SEED,
 ];
 
 /// A description read: the collections declared, and the migrations.

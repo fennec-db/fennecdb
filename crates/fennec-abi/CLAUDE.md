@@ -34,3 +34,12 @@ has none of it.
 file.](../../docs/design/native-and-sync.md#sync-scenarios)** A behaviour of
 either changes in `integrations/sync-scenarios.json` first;
 `make sync-scenarios-check` fails unless both ran every scenario.
+
+**[A seed's parts wait in the replica's file and land in one
+block.](../../docs/design/native-and-sync.md#seeds-in-parts)** Each part
+but the last is a row of `_sync_seed`, kept in a block of its own as it
+came (`Sync::seed`); the last lands them all, a part's documents in memory
+at a time, with the cursor in one block (`Sync::land`), which spills past
+16 MB. A part out of turn ends the stream; a drop's parts are deleted at
+the next event (`Sync::sweep`), an open's at the start: nothing reads a
+shape half seeded, and nothing of one is left behind.

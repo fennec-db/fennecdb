@@ -91,6 +91,34 @@ pub mod prelude {
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Whether a task cut in shares runs them on the thread that asked
+/// ([`one_thread`]).
+#[cfg(not(target_family = "wasm"))]
+static ONE_THREAD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The threads a task cut in shares spreads them over -- an image's index
+/// of its frames, a graph's lists, its copies table, a batch's links --
+/// the machine's cores, or one where [`one_thread`] asked: each share is
+/// the same work either way (`vector::spread`). Read once a task.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) fn threads() -> usize {
+    if ONE_THREAD.load(std::sync::atomic::Ordering::Relaxed) {
+        return 1;
+    }
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
+/// Every task cut in shares from here on runs them on the thread that
+/// asked: the fuzzer's process (`crates/fennec-fuzz`), whose coverage
+/// counters are bumped unlocked, so that threads beside one another made
+/// what a run counted -- and so the inputs after it -- their scheduler's
+/// (docs/design/conventions.md#fuzzing).
+#[doc(hidden)]
+#[cfg(not(target_family = "wasm"))]
+pub fn one_thread() {
+    ONE_THREAD.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Whether this build has every feature a build may go without
 /// (`Cargo.toml`'s `full`): where the checks for one it lacks fold away,
 /// so that they cost the full browser module nothing.

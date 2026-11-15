@@ -1,8 +1,18 @@
 # AGENTS.md
 
-The install channels' and the workflows' invariants, for `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/windows-zip.sh`, `tools/windows-zip-check.ps1`, `tools/install-ps1-check.ps1`, `tools/linux-ffi.sh`, `tools/linux-ffi-check.sh`, `tools/image-check.sh`, `tools/image-latest.sh`, `tools/release-latest.sh`, `tools/release-verify.sh`, `site/install.sh`, `site/install.ps1`, the release workflows (`release.yml`, `packages.yml`, `swift-binary.yml` and `desktop.yml`'s attach jobs), and every workflow in `.github/workflows/` with `tools/workflow_check.py`, `tools/install-flutter.sh` and `.github/dependabot.yml`. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
+The install channels', the toolchain's and the workflows' invariants, for `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/windows-zip.sh`, `tools/windows-zip-check.ps1`, `tools/install-ps1-check.ps1`, `tools/linux-ffi.sh`, `tools/linux-ffi-check.sh`, `tools/toolchain_check.py`, `rust-toolchain.toml`, `tools/image-check.sh`, `tools/image-latest.sh`, `tools/release-latest.sh`, `tools/release-verify.sh`, `site/install.sh`, `site/install.ps1`, the release workflows (`release.yml`, `packages.yml`, `swift-binary.yml` and `desktop.yml`'s attach jobs), and every workflow in `.github/workflows/` with `tools/workflow_check.py`, `tools/install-flutter.sh` and `.github/dependabot.yml`; the toolchain's rule binds every Dockerfile and script naming a rust image too. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
 
 ## Invariants
+
+### The crates
+
+**[The compiler CI tests with is the one that ships.](../docs/design/crates.md#toolchain)**
+`rust-toolchain.toml` names an exact release, never `stable`; every rust
+image a Dockerfile or script names is that release by digest, the file
+kept in the build (`tools/toolchain_check.py`, the fmt job), and
+`release.yml` stops where a binary's `rustc -V` differs from it or the
+image's. A bump is a pull request of its own carrying `make wasm-sizes`,
+the size report, `make instr-compare` and `make float-test`.
 
 ### Integrations and deploy
 

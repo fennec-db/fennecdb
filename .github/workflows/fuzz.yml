@@ -2,7 +2,9 @@ name: fuzz
 
 # Each target of the fuzzer for half an hour a week, built with
 # AddressSanitizer and LLVM's coverage counters: the long run beside ci.yml's
-# `fuzz-smoke`, which gives each 30 s on every pull request
+# `fuzz-smoke`, which gives each a count of runs of its own on every pull
+# request, the same inputs for the same commit; this one goes by the clock,
+# from a seed of each week's own, to look where the smoke never does
 # (docs/design/conventions.md#fuzzing). The matrix names every target
 # `fennec-fuzz names` lists, held to it by crates/fennec-fuzz's tests.
 #

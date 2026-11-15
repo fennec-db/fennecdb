@@ -358,7 +358,7 @@ class Run {
       case 'seed':
       case 'change': {
         const data = { seq: st.seq ?? 0 };
-        for (const k of ['rows', 'puts', 'dels', 'schema']) if (k in st) data[k] = st[k];
+        for (const k of ['part', 'rows', 'puts', 'dels', 'schema', 'more']) if (k in st) data[k] = st[k];
         this.event(st.shape ?? 0, st.do, data);
         break;
       }

@@ -59,8 +59,11 @@ class Manifests(unittest.TestCase):
         self.assertEqual(len(check.manifest_problems(SERVER, dev)), 1)
 
 
+# deploy/Dockerfile's stages as the check reads them, by name. The build
+# stage's base is no part of that, and a rust image named here would be one
+# more script for tools/toolchain_check.py to hold to the pinned release.
 CHAOS = """\
-FROM rust:1.99.1-alpine AS build
+FROM toolchain AS build
 RUN tools/image-cargo.sh /built --release -p fennec-server
 FROM alpine AS kit
 COPY --from=build /built/ /usr/local/bin/

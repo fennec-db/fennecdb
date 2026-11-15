@@ -556,9 +556,10 @@ async function boardView(slug, ctx, teamKey) {
     { team: `eq.${team.key}` },
     (ev) => {
       if (ev.type === 'seed') {
-        tasks.clear();
+        // A long seed comes in parts: the first replaces, each after adds.
+        if (!ev.part) tasks.clear();
         for (const r of ev.rows) tasks.set(r.id, r);
-        draw();
+        if (!ev.more) draw();
       } else {
         const changed = [];
         for (const r of ev.puts) {
@@ -680,8 +681,9 @@ async function openTask(slug, ctx, id, people, nameOf) {
     { task: `eq.${id}` },
     (ev) => {
       if (ev.type === 'seed') {
-        comments.clear();
+        if (!ev.part) comments.clear();
         for (const r of ev.rows) comments.set(r.id, r);
+        if (ev.more) return;
       } else {
         for (const r of ev.puts) comments.set(r.id, r);
         for (const d of ev.dels) comments.delete(d);

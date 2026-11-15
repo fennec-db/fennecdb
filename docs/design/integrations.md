@@ -997,6 +997,44 @@ has.
   none came back in those runs; a failed check keeps the window's every step
   now, and a page that loaded says where its load's time went (`nav`, its
   first state report).
+- **The tail, caught with its steps.** In the last 100 runs of `desktop.yml`
+  (13 to 15 November) two Windows jobs timed out waiting for a studio: `serve`
+  on arm64 (job 132399673325, before the steps were kept) and `orphan` on x64
+  (job 132701210526), the first with its steps kept (two Linux arm64 ones came
+  before `loadAgainIfDropped`). `orphan` opens two files at once. Each window, a
+  browser of its own, asked for its studio 0.5 and 0.9 s after the launch. Each
+  page's Navigation Timing put its request 25.5 and 25.3 s after its navigation
+  began, with no time spent connecting (the socket was already there) and the
+  server's answer in the same millisecond. Both committed 26.1 and 26.2 s in,
+  and the page's own files then took 4 s to its `dom-ready`, where the loops'
+  99th percentile is 0.7 s. The check had waited 30 s for both studios loaded.
+  So the windows did load, late, and the whole browser was slow rather than
+  one load dropped. A Windows counterpart of `loadAgainIfDropped` would have
+  no event to hear, and a load again would wait in the same cold browser.
+
+  In 384 more windows on the two runners (runs 43680100667 and 43681265858,
+  one window opened and closed at a time, two at once every fifth round), the
+  first request left 1.1 to 1.5 s after the navigation began at the median,
+  2.2 to 3.4 s for two windows at once, and up to 9.7 s on x64. The slow ones
+  came three in a row with their pages' files slow too: a runner slow for a
+  while, which every cold browser starting then waits out. The time is local
+  work. With every outbound connection of `msedgewebview2.exe` blocked by the
+  firewall in every other round, the medians were the same (1 404 against
+  1 483 ms on x64, 1 136 against 1 141 on arm64), and the only names WebView2
+  resolved were `wpad` and `config.edge.skype.com`. Where in the browser's
+  start the time goes is not known: no argument reached the runners' elevated
+  app's WebView2 to find out, neither a network log nor `--no-proxy-server`,
+  through the variable or through its registry override
+  (`HKLM\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments`,
+  43680100667: Electrobun's switches alone).
+
+  What a check can change is what it waits for. `orphan` tests the kill, the
+  servers' end and the files freed, and waited for both pages. It now waits
+  for each window's studio to be asked for and allowed (`waitWindow`), by
+  which time the window's browser runs. Only a check that tests a page waits
+  for its load. Rejected: a longer wait (a check bounds what must happen, and
+  the page did load) and a load again on a timer. Left open: the checks that
+  test a page meet the same tail.
 
 Desktop integration (phase 3 of #578). A `.fennec` opens from Explorer and a
 file manager, the app registers itself for that, the menus' keys, the last

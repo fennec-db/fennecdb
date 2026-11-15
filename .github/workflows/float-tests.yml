@@ -1,0 +1,51 @@
+# The three float tests `make test` leaves out (#[ignore]), each held to the
+# standard library: every f32 written as `{}` writes it and 10^8 random f64s
+# so (crates/fennec-core/src/num.rs), every f32 read back through an f64
+# (crates/fennec-core/src/json.rs) -- the formatter and reader fennec-core
+# writes instead of std's, which a toolchain can move
+# (docs/design/crates.md#toolchain).
+#
+# Minutes of every core, so not on every pull request and not a required
+# check: weekly, by hand, and on a pull request changing the toolchain or the
+# code they hold -- a toolchain bump among them, which carries them
+# (RELEASING.md).
+name: float tests
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '41 5 * * 1'
+  pull_request:
+    paths:
+      - 'rust-toolchain.toml'
+      - 'crates/fennec-core/src/num.rs'
+      - 'crates/fennec-core/src/json.rs'
+      - '.github/workflows/float-tests.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: float-tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  float:
+    name: float tests (every f32, 10^8 f64s)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned toolchain
+        run: |
+          rustup show
+          rustc -V
+
+      - name: The three float tests
+        run: make float-test

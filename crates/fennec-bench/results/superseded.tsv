@@ -38,3 +38,5 @@ ycsb	r3	pg	measured on other days than the servers beside it: runs rx1-rx3 measu
 ycsb	r1	mongo	measured on other days than the servers beside it: runs rx1-rx3 measure every server on one day
 ycsb	r2	mongo	measured on other days than the servers beside it: runs rx1-rx3 measure every server on one day
 ycsb	r3	mongo	measured on other days than the servers beside it: runs rx1-rx3 measure every server on one day
+size	hand	fennec-server	the image as a hand figure: tools/size-budgets.json, which CI's build job measures, holds it since #648
+size	hand	fennec-binaries	the binaries as hand figures: tools/size-budgets.json, which CI's build job measures, holds them since #648

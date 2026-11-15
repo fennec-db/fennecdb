@@ -982,7 +982,11 @@ fn a_head_lost_before_vectors_is_judged_by_the_records_after_them() {
 /// stray 6 read as a counter moved the image's end, and a 4 was refused by
 /// the walk that looks for each index's last graph before the load, its
 /// field read as a name ("varint ended early", "invalid utf8": 2 or 3 of
-/// 300 random stale tails in review).
+/// 300 random stale tails in review). A head naming collection `u32::MAX`,
+/// an id no create gives -- plain, or checked of kind 3 -- reads as no
+/// record too: refused where its head was read past the walk's judgment of
+/// it, it refused the open a version before had cut (the fuzz fix's
+/// review).
 #[cfg(feature = "std-fs")]
 #[test]
 fn stale_bytes_past_the_durable_point_are_judged_as_damage() {
@@ -998,14 +1002,19 @@ fn stale_bytes_past_the_durable_point_are_judged_as_damage() {
         good
     };
     let (last, _) = *heads(&good).last().unwrap();
-    let stale: [&[u8]; 5] = [
-        b"\n\0\x05hello",
-        b"\t\0\x03abc",
-        &[6; 17],
-        b"\x04\0\x05\xff\xff\xff\xff\xff",
-        b"\x04\x01\x03\x02\xc3\x28",
+    // Each tail, and whether it reads as no record's head -- the counter's
+    // away from the front, a collection no create gives -- rather than a
+    // plain record after checked ones.
+    let stale: [(&[u8], bool); 7] = [
+        (b"\n\0\x05hello", false),
+        (b"\t\0\x03abc", false),
+        (&[6; 17], true),
+        (b"\x04\0\x05\xff\xff\xff\xff\xff", false),
+        (b"\x04\x01\x03\x02\xc3\x28", false),
+        (b"\n\xff\xff\xff\xff\x0f\x05hello", true),
+        (b"\x83\xff\xff\xff\xff\x0f\x05hello", true),
     ];
-    for bytes in stale {
+    for (bytes, no_record) in stale {
         let mut bad = good.clone();
         bad.extend_from_slice(bytes);
         for way in ["mapped", "in-memory"] {
@@ -1034,14 +1043,87 @@ fn stale_bytes_past_the_durable_point_are_judged_as_damage() {
         let claiming = fennec_core::engine::record_claiming(3, cid, body, at as u64, at as u64);
         bad.extend_from_slice(&claiming);
         let x = good.len();
-        let says = match bytes[0] {
-            6 => format!(
+        let says = match no_record {
+            true => format!(
                 "no whole record starts at {x}, and the whole record at {at} says the file \
                  was durable past it"
             ),
-            _ => format!("the record at {x} carries no checksum, after records that do"),
+            false => format!("the record at {x} carries no checksum, after records that do"),
         };
         refused_every_way(&path, &bad, &says);
+    }
+    cleanup(dir, path);
+}
+
+/// A torn tail is cut before a byte of its documents is read. What the
+/// fuzz fix refuses in a document an open reads -- a point 64 lists down
+/// (`codec::decode_point`, met skipping the fields before a vector), a
+/// stored vector's count past its bytes (`Store::read_vector_into`), both
+/// read where the open restores an `@hnsw` graph and takes the writes
+/// after it -- in the last record, past the durable point and failing its
+/// sum, is cut with the rest of that record, the rows before it kept; only
+/// summed whole does that record refuse the open, naming what it holds.
+/// A sparse vector's numbers (`codec::decode_at`) no open reads at all.
+#[cfg(feature = "std-fs")]
+#[test]
+fn a_torn_tail_is_cut_before_its_documents_are_read() {
+    let (dir, path) = tmp_path("torn-docs");
+    // 63 lists around a text of 17 bytes: `[TAG_TEXT, 17, ..17]`, the 19
+    // bytes `[TAG_LIST, 1, TAG_GEO, ..16]` take, 64 lists around a point.
+    let mut deep = String::from("'abcdefghijklmnopq'");
+    for _ in 0..63 {
+        deep = format!("[{deep}]");
+    }
+    let (good, last) = {
+        let mut db = fennec_core::fs::open(&path).expect("open");
+        run(&mut db, "create collection v (m json, e vector<4> @hnsw)");
+        run(&mut db, "put v {m: 1, e: [1, 2, 3, 4]}");
+        // An image holding the graph, which the open restores, reading the
+        // vectors of the documents written after it (`read_vector_into`;
+        // building the graph anew, it decodes them).
+        run(&mut db, "compact v");
+        let last = written(&mut db, &path).len();
+        run(
+            &mut db,
+            &format!("put v {{m: {deep}, e: [0.5, 0.25, 1, 2]}}"),
+        );
+        let good = written(&mut db, &path);
+        drop(db);
+        (good, last)
+    };
+    let find = |what: &[u8]| {
+        last + good[last..]
+            .windows(what.len())
+            .position(|w| w == what)
+            .unwrap_or_else(|| panic!("{what:?} in the last record"))
+    };
+    let text = find(b"abcdefghijklmnopq") - 2;
+    let mut point = vec![7, 1, 15];
+    point.extend_from_slice(&13.4f64.to_le_bytes());
+    point.extend_from_slice(&52.5f64.to_le_bytes());
+    let vector = find(&[6, 4, 0, 0, 0, 0x3f]) + 1;
+    // A count of 2^62 over the count's byte and the first two `f32`s.
+    let count = [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x40];
+    for (at, bytes, says) in [
+        (text, &point[..], "a value nests more than 64 levels deep"),
+        (vector, &count[..], "vector outside the segment"),
+    ] {
+        let mut bad = good.clone();
+        bad[at..at + bytes.len()].copy_from_slice(bytes);
+        for way in ["mapped", "in-memory"] {
+            std::fs::write(&path, &bad).unwrap();
+            let mut db = match way {
+                "mapped" => fennec_core::fs::open(&path),
+                _ => fennec_core::fs::open_in_memory(&path),
+            }
+            .unwrap_or_else(|e| panic!("{says}, {way}: {e}"));
+            assert_eq!(ids(&mut db, "v"), vec![1], "{says}, {way}");
+            assert_eq!(db.cut_on_open().map(|c| c.at), Some(last as u64));
+            drop(db);
+            assert_eq!(std::fs::read(&path).unwrap(), good[..last], "{says}, {way}");
+        }
+        assert!(fennec_core::engine::resum(&mut bad, at));
+        refused_every_way(&path, &bad, says);
     }
     cleanup(dir, path);
 }

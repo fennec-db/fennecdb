@@ -353,7 +353,10 @@ database goes the same way with an exit code (`stop_with`): the HTTP
 listener's `serve_on` ending (1), `--follow`'s mirror stopping (1) -- which
 exited the process from its own thread and so cut short a shutdown already
 under way, whose `before_shutdown` was waiting for it, the sync among what
-was cut -- and a thread the start cannot make (2, as it exited before).
+was cut -- the scheduler's thread ending, a file's or a node's, on a panic
+outside any run (1, `stop_failed`: fennec-http hands it a failure, the
+server the code; `a_scheduler_s_failure_ends_the_server_with_1`) and a
+thread the start cannot make (2, as it exited before).
 The mirror stores its code (`exit_with`), then tells that wait it has
 stopped, so the wait is not its `STOP_WAIT` and the exit cannot come before
 the code, and only then asks for the shutdown. Nothing waits before the
