@@ -19,7 +19,23 @@ lines skipped, or above the statement it is -- itself, or a `let`,
 `static` or `const` it is the value of -- attributes included. An unsafe
 operation in an `unsafe fn` is in a block of its own, which rustc's deny
 holds on every build for every target, so its comment is a block's.
-CI's fmt job runs it, `tools/test_lints_check.py` first."""
+
+Where its reading and clippy's differ (clippy 1.99, each case run through
+both): it is stricter in one place and agrees in two that once differed.
+- A comment above a statement is a block's only where the block is the
+  statement, or the whole value of a `let`, `static` or `const`; clippy
+  also takes it for a block deeper in the statement on a later line -- an
+  argument of a call, a term of a sum, `let x = 1\n + unsafe { .. }`.
+  Stricter, so nothing clippy refuses passes here; such a comment goes on
+  the line above the block.
+- A block on the line its function's body opens on, `fn f() -> u8 {
+  unsafe { .. } }`, has no line above it in the body: clippy refuses a
+  comment above the `fn`, and so does this (`body_open`).
+- A code fence in the comment ends nothing: clippy reads past it to the
+  `SAFETY:` above, and so does this, which once stopped there.
+
+CI's fmt job runs it through `tools/test_lints_check.py`, whose last case
+is this over the repository's files."""
 
 import pathlib
 import re
@@ -159,6 +175,28 @@ def statement_start(code, pos):
     return 0
 
 
+# The head of a function before its body's brace: what clippy reads a
+# block's comment within.
+FN_HEAD = re.compile(r"\bfn\s+[A-Za-z0-9_]+[^;{}]*$")
+
+
+def body_open(code, pos):
+    """Where the body of the function holding the code at `pos` opens, its
+    `{`, or None outside one: closures and blocks in it are looked through,
+    as clippy looks through them to the function's body."""
+    depth = 0
+    for k in range(pos - 1, -1, -1):
+        c = code[k]
+        if c == "}":
+            depth += 1
+        elif c == "{":
+            if depth:
+                depth -= 1
+            elif FN_HEAD.search(code, max(0, k - 4096), k):
+                return k
+    return None
+
+
 def documented(code, comments, line_starts, anchor):
     """Whether the lines just above the one `anchor` is on, blank ones
     skipped, are comments, one of them saying SAFETY: -- clippy's reading."""
@@ -171,8 +209,6 @@ def documented(code, comments, line_starts, anchor):
         text = comments[a:b]
         if not text.strip():
             continue
-        if text.strip().lstrip("/").strip().startswith("```"):
-            return False
         if SAFETY.search(text):
             found = True
             break
@@ -229,7 +265,12 @@ def findings(src):
             bare = bare.strip()
             if bare == "" or INITIALIZER.match(bare):
                 anchors.append(attributes_before(code, start))
-        if not any(documented(code, comments, line_starts, a) for a in anchors):
+        # A block on the line its function's body opens on has no line
+        # above it inside the body, which is where clippy reads a comment:
+        # one above the `fn` is not its.
+        body = body_open(code, m.start()) if what.endswith("block") else None
+        same_line = body is not None and line_of(line_starts, body) == line_of(line_starts, m.start())
+        if same_line or not any(documented(code, comments, line_starts, a) for a in anchors):
             out.append((line_of(line_starts, m.start()) + 1, what))
     return out, count
 

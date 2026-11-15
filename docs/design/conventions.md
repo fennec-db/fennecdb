@@ -598,20 +598,28 @@ Two checks hold it, each where the other cannot reach. Clippy's
 not, a new crate too -- so every clippy run CI makes refuses a site without
 one in the code it compiles: the workspace's, wasm32's and each feature
 set's, part of Windows', the JNI functions' and `test-clock`'s. That is
-x86_64 Linux, wasm32 and Windows' check; about 48 of the 255 sites, a
-review counted, compile in none of them -- aarch64's NEON kernels, prefetch and CRC instructions,
-Apple's system calls (the page cache's `F_NOCACHE`, `vm_statistics64`,
-`rusage_info_v4`, the lease's clock), the macOS-only examples, Windows'
-TLS and tests. So `tools/lints_check.py`, in CI's fmt job, also reads every
-`.rs` file the repository holds, whatever its `cfg`, comments, strings and
-characters masked, and refuses an `unsafe` block or `unsafe impl` with no
-comment saying `SAFETY:` where clippy reads one: on the lines just above it,
-blank lines skipped, or above the statement it is -- itself, or a `let`,
-`static` or `const` whose value it is -- attributes included. It is a
-reader of text, never a compiler, and so reads only where the comment is,
-never whether it is true; `tools/test_lints_check.py` holds it to a case
-of each kind it refuses and each place it reads a comment from, and to
-the repository's own files.
+x86_64 Linux, wasm32 and Windows' check. The scanner below counts 362
+`unsafe` blocks and impls in the repository's 478 `.rs` files (2026-11-15,
+after the 79 blocks `unsafe_op_in_unsafe_fn` added and the merges after
+them), and a review found about 48 of them, when they were 255, compiled
+in none of those runs -- aarch64's NEON kernels, prefetch and CRC
+instructions, Apple's system calls (the page cache's `F_NOCACHE`,
+`vm_statistics64`, `rusage_info_v4`, the lease's clock), the macOS-only
+examples, Windows' TLS and tests. So `tools/lints_check.py`, in CI's fmt
+job, also reads every `.rs` file the repository holds, whatever its `cfg`,
+comments, strings and characters masked, and refuses an `unsafe` block or
+`unsafe impl` with no comment saying `SAFETY:` where clippy reads one: on
+the lines just above it, blank lines skipped, or above the statement it is
+-- itself, or a `let`, `static` or `const` whose value it is -- attributes
+included, and never above the `fn` of a body the block opens the line of.
+It is a reader of text, never a compiler, and so reads only where the
+comment is, never whether it is true. Where it and clippy differ, its
+header says, each case run through both: it is stricter only for a block
+deeper in a statement on a later line -- an argument of a call, a term of
+a sum -- whose comment above the statement clippy takes and it does not.
+`tools/test_lints_check.py` holds it to a case of each kind it refuses and
+each place it reads a comment from, and, its last case, to the
+repository's own files, which is how CI's fmt job runs it.
 
 An unsafe operation in an `unsafe fn` goes in a block of its own, which
 says why it is sound like any other: rustc's `unsafe_op_in_unsafe_fn`,

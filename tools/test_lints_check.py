@@ -62,6 +62,13 @@ class Refused(unittest.TestCase):
         src = "fn f() {\n    // SAFETY: nothing.\n    let x = 1\n        + unsafe { h() };\n}\n"
         self.assertEqual(len(refused(src)), 1)
 
+    def test_a_block_on_its_function_s_first_line(self):
+        # Clippy reads a comment inside the body, above the block's line.
+        src = "static mut P: u8 = 0;\n// SAFETY: one thread.\nfn f() -> u8 { unsafe { P } }\n"
+        self.assertEqual(refused(src), [(3, "an `unsafe` block")])
+        src = "// SAFETY: none.\nfn f() -> u8 { let x = unsafe { g() }; x }\n"
+        self.assertEqual(refused(src), [(2, "an `unsafe` block")])
+
     def test_each_block_needs_its_own(self):
         src = "fn f() {\n    // SAFETY: the first.\n    unsafe { a() };\n    unsafe { b() };\n}\n"
         self.assertEqual(refused(src), [(4, "an `unsafe` block")])
@@ -97,6 +104,17 @@ class Passed(unittest.TestCase):
             "        // SAFETY: none.\n        false => unsafe { g() },\n    };\n"
             "    h(\n        // SAFETY: none.\n        unsafe { g() },\n    );\n}\n"
         )
+        self.assertEqual(refused(src), [])
+
+    def test_a_block_on_a_later_line_of_its_function(self):
+        src = (
+            "fn f(o: &std::sync::Once, b: bool) -> u8 {\n    // SAFETY: none.\n    o.call_once(|| unsafe { g() });\n"
+            "    // SAFETY: none.\n    if b { unsafe { h() } } else { 0 }\n}\n"
+        )
+        self.assertEqual(refused(src), [])
+
+    def test_a_code_fence_in_the_comment(self):
+        src = "fn f(p: *const u8) -> u8 {\n    // SAFETY: `p` is valid, as\n    // ```\n    // let x = 1;\n    // ```\n    // says.\n    unsafe { *p }\n}\n"
         self.assertEqual(refused(src), [])
 
     def test_a_block_comment_and_any_case(self):
