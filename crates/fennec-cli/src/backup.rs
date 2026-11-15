@@ -436,6 +436,11 @@ pub fn main(command: &str, args: &[String]) -> Code {
         return match archive(dir).and_then(|a| a.verify()) {
             Ok(v) => {
                 println!("{dir}: {} images, {} segments", v.images, v.segments);
+                // A tenant's line read as one database's says whose it is:
+                // only `--tenants` holds it to its directory's name.
+                if let Some(t) = &v.tenant {
+                    println!("  sealed as tenant `{t}`'s archive");
+                }
                 println!(
                     "  restores changes {} to {}, from {} to {}",
                     v.first,
@@ -628,11 +633,19 @@ fn every_tenant(
             let iso = |t: u64| fennec_core::time::format_iso(t as i64);
             let mut failed = 0;
             for line in &lines {
-                let (name, dir) = (&line.label, &line.dir);
-                let arch = Archive::with_key(dir, key.cloned());
-                let gone = node_archive::gone_at(dir).map_or(String::new(), |t| {
-                    format!(", gone from the node {}", iso(t))
-                });
+                let name = &line.label;
+                // Held to its tenant: another tenant's files in its place
+                // are refused by name (`Line::archive`).
+                let arch = line.archive(key);
+                // A presence that does not read fails the line's verify,
+                // which reads it, and says why.
+                let gone = arch
+                    .as_ref()
+                    .ok()
+                    .and_then(|a| node_archive::gone_at(a).ok().flatten())
+                    .map_or(String::new(), |t| {
+                        format!(", gone from the node {}", iso(t))
+                    });
                 match keep {
                     None => match arch.and_then(|a| a.verify()) {
                         Ok(v) => println!(

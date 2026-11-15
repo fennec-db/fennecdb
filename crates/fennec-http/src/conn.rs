@@ -136,9 +136,10 @@ fn warn_if_open(key: &str) {
 
 /// Who besides its owner a key file of `mode`, owned by `uid`, is open
 /// to, by PostgreSQL's rule for its own key: no one, or its group where
-/// root owns it and the group may only read it.
-#[cfg(any(test, all(feature = "tls", unix)))]
-fn open_to(mode: u32, uid: u32) -> Option<&'static str> {
+/// root owns it and the group may only read it. A seal's key file is held
+/// to the same rule (`seal::open_key`).
+#[cfg(any(test, unix))]
+pub(crate) fn open_to(mode: u32, uid: u32) -> Option<&'static str> {
     if mode & 0o007 != 0 {
         Some("every user")
     } else if mode & 0o070 != 0 && !(uid == 0 && mode & 0o070 == 0o040) {

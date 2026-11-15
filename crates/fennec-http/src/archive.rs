@@ -29,9 +29,18 @@
 //! it was writing, as it cut a record short before. An archive is sealed or
 //! it is not: a file of the other kind in it is refused, rather than a key
 //! given for nothing or a sealed file read as garbage.
+//!
+//! A sealed file says what it is under its tags (`seal::Binding`): its
+//! role, the archive's id -- made as the archive began -- and its tenant,
+//! a segment's first change, an image's change and time, and when the
+//! archive took its first image. Every read holds a file to its name and to
+//! the archive's other files (`Archive::learned`): a segment renamed into
+//! another's place, a file of another archive or tenant, an image where a
+//! backup is asked for, is refused by name. The plain `began` is held to
+//! what the images say, and a tenant's `presence` is sealed.
 
 use crate::replication::{fresh_id, Message, Upstream};
-use crate::seal::{self, Key};
+use crate::seal::{self, Binding, Frames, Key, Role};
 use fennec_core::codec::get_uvarint;
 use fennec_core::history::History;
 use std::fs::{self, File, OpenOptions};
@@ -95,6 +104,9 @@ pub struct Verified {
     /// to a moment inside them. An archiver that fell behind the primary's
     /// feed was sent an image and left one; a segment gone leaves one too.
     pub gaps: Vec<(u64, u64)>,
+    /// The tenant whose line its sealed files say it is, where they name
+    /// one: a line read as one database's says whose it is.
+    pub tenant: Option<String>,
 }
 
 pub struct Archive {
@@ -120,6 +132,13 @@ pub struct Archive {
     /// and every file in it along.
     made: AtomicU64,
     parent: Arc<Parent>,
+    /// The tenant whose line of history this is under a node's root, which
+    /// every sealed file in it names; `None` for one database's archive, or
+    /// a line read as one, whose sealed files need only agree.
+    tenant: Option<String>,
+    /// What its sealed files say it is ([`Self::learned`]), once read or
+    /// made.
+    identity: Mutex<Option<Identity>>,
 }
 
 /// The directory archives are made in, synced once for every one made in
@@ -182,6 +201,45 @@ fn mixed(path: &Path, sealed: bool) -> io::Error {
         ),
         false => format!("{}: not sealed, where the archive is", path.display()),
     })
+}
+
+/// What an archive's sealed files are bound to beside their roles and
+/// numbers: the archive's id and its tenant, read from the files or made as
+/// the first is sealed, and when it took its first image, as its images
+/// say.
+#[derive(Clone, Debug)]
+struct Identity {
+    archive: [u8; 16],
+    tenant: String,
+    began: Option<u64>,
+}
+
+/// Whose archive files of `tenant` are, in words.
+fn whose(tenant: &str) -> String {
+    match tenant {
+        "" => "one database's".into(),
+        t => format!("tenant `{t}`'s"),
+    }
+}
+
+/// An archive's id as a refusal names it.
+fn hex(id: &[u8; 16]) -> String {
+    id.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// `(seq, time)` of a base image named `name`.
+fn image_name(name: &str) -> Option<(u64, u64)> {
+    let rest = name.strip_prefix("image-")?.strip_suffix(".fennec")?;
+    let (seq, time) = rest.split_once('-')?;
+    Some((seq.parse().ok()?, time.parse().ok()?))
+}
+
+/// The first change of a segment named `name`.
+fn segment_name(name: &str) -> Option<u64> {
+    name.strip_prefix("writes-")?
+        .strip_suffix(".log")?
+        .parse()
+        .ok()
 }
 
 /// A write's record, whole, from the front of `bytes`: its length, or
@@ -374,11 +432,10 @@ struct Segment {
     durable: usize,
     dirty: bool,
     synced: Instant,
-    /// Sealed: the key, the file its frames are bound to -- an older
-    /// archiver's segment goes on in its own version -- the next frame's
-    /// index and the writes waiting to be sealed as one frame of whole
-    /// records.
-    sealed: Option<(Key, seal::FileId, u64, Vec<u8>)>,
+    /// Sealed: what its next frame is sealed with -- always this version's:
+    /// an older archiver's segment is gone on in by none -- and the writes
+    /// waiting to be sealed, whole records in each frame.
+    sealed: Option<(Frames, Vec<u8>)>,
 }
 
 impl Segment {
@@ -389,31 +446,54 @@ impl Segment {
         Ok(self.file.as_mut().expect("opened above"))
     }
 
-    fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+    /// `bytes` appended, sealed in frames of `frame` bytes at most --
+    /// [`seal::FRAME`], or a test's edge of one: a frame holds whole
+    /// records, and a record longer
+    /// than one goes in frames of its own, beginning one. A frame's length
+    /// is a `u32`, and a batch was sealed as one frame whatever its size: a
+    /// record of 4 GiB, which the feed sends alone, wrote a length wrapped.
+    fn write_by(&mut self, bytes: &[u8], frame: usize) -> io::Result<()> {
         self.len += bytes.len();
         self.dirty = true;
-        match &mut self.sealed {
-            Some((_, _, _, pending)) => {
-                pending.extend_from_slice(bytes);
-                Ok(())
-            }
-            None => self.file()?.write_all(bytes),
+        let Some((_, pending)) = &mut self.sealed else {
+            return self.file()?.write_all(bytes);
+        };
+        if !pending.is_empty() && pending.len() + bytes.len() > frame {
+            self.flush_by(frame)?;
         }
+        if let Some((_, pending)) = &mut self.sealed {
+            pending.extend_from_slice(bytes);
+            if pending.len() > frame {
+                self.flush_by(frame)?;
+            }
+        }
+        Ok(())
     }
 
     /// Seals what waits as a frame, and writes it.
     fn flush(&mut self) -> io::Result<()> {
-        let Some((key, file, index, pending)) = &mut self.sealed else {
+        self.flush_by(seal::FRAME)
+    }
+
+    /// [`Self::flush`] in frames of `frame` bytes at most: more only where
+    /// one record is longer. Sealed on a copy of what the next frame is
+    /// sealed with, so a seal refused part way leaves it as it was.
+    fn flush_by(&mut self, frame: usize) -> io::Result<()> {
+        let Some((frames, pending)) = &mut self.sealed else {
             return Ok(());
         };
         if pending.is_empty() {
             return Ok(());
         }
-        let mut frame = Vec::with_capacity(pending.len() + 32);
-        seal::seal_frame(key, file, *index, false, pending, &mut frame)?;
-        *index += 1;
+        let frame = frame.clamp(1, seal::FRAME);
+        let mut out = Vec::with_capacity(pending.len() + pending.len() / frame * 32 + 32);
+        let mut next = frames.clone();
+        for chunk in pending.chunks(frame) {
+            next.seal(false, chunk, &mut out)?;
+        }
+        *frames = next;
         pending.clear();
-        self.file()?.write_all(&frame)
+        self.file()?.write_all(&out)
     }
 
     fn sync(&mut self) -> io::Result<()> {
@@ -510,10 +590,12 @@ impl Writer {
 }
 
 /// A segment's writes, and for a sealed one where its last whole frame
-/// ends, how many frames it holds and the file they are bound to.
+/// ends and what the frame after it is sealed with: none where it is not
+/// gone on in -- cut inside its head, or of a version before this one,
+/// which a segment of this version follows.
 struct Read {
     plain: Vec<u8>,
-    sealed: Option<(usize, u64, seal::FileId)>,
+    sealed: Option<(usize, Option<Frames>)>,
     /// The file's own length.
     len: usize,
 }
@@ -525,14 +607,23 @@ impl Archive {
 
     /// An archive whose files are sealed with `key`, or plain without one.
     pub fn with_key(dir: impl AsRef<Path>, key: Option<Key>) -> io::Result<Archive> {
-        Archive::in_parent(dir, key, &Arc::default())
+        Archive::in_parent(dir, key, None, &Arc::default())
     }
 
-    /// [`Self::with_key`] in a directory whose sync it shares with the
-    /// other archives made in it ([`Parent`]): a node's tenants in its root.
+    /// [`Self::with_key`] of tenant `tenant`'s line under a node's root:
+    /// every sealed file in it must name the tenant, so another tenant's
+    /// files put in its place are refused rather than restored as its own.
+    pub fn of_tenant(dir: impl AsRef<Path>, key: Option<Key>, tenant: &str) -> io::Result<Archive> {
+        Archive::in_parent(dir, key, Some(tenant), &Arc::default())
+    }
+
+    /// [`Self::with_key`], of `tenant`'s line where it is one, in a
+    /// directory whose sync it shares with the other archives made in it
+    /// ([`Parent`]): a node's tenants in its root.
     pub(crate) fn in_parent(
         dir: impl AsRef<Path>,
         key: Option<Key>,
+        tenant: Option<&str>,
         parent: &Arc<Parent>,
     ) -> io::Result<Archive> {
         let made = !dir.as_ref().is_dir();
@@ -545,7 +636,215 @@ impl Archive {
             scratch: Mutex::new(Vec::new()),
             made: AtomicU64::new(if made { parent.made() } else { 0 }),
             parent: Arc::clone(parent),
+            tenant: tenant.map(str::to_string),
+            identity: Mutex::new(None),
         })
+    }
+
+    /// What this archive's sealed files say it is: its id, its tenant and
+    /// when it began, read from their heads ([`seal::bound_in`]) once and
+    /// kept. Refused where two disagree -- two archives' files in one
+    /// directory, two tenants', two first images -- or where they name
+    /// another tenant than the one this is the line of. Nothing vouches for
+    /// a head until its file is opened, so each file read is held to this
+    /// once its frames open ([`Self::held`]): a head changed to agree opens
+    /// nothing. `None` where no file is sealed in this version: a plain
+    /// archive, one sealed before, or one not begun.
+    fn learned(&self) -> io::Result<Option<Identity>> {
+        let mut held = self.identity.lock().unwrap_or_else(|e| e.into_inner());
+        if held.is_none() {
+            *held = self.scan()?;
+        }
+        Ok(held.clone())
+    }
+
+    /// [`Self::learned`]'s reading of the files' heads.
+    fn scan(&self) -> io::Result<Option<Identity>> {
+        if self.key.is_none() {
+            return Ok(None);
+        }
+        let mut names = Vec::new();
+        for e in fs::read_dir(&self.dir)? {
+            let name = e?.file_name().to_string_lossy().into_owned();
+            let kept = matches!(name.as_str(), "history" | "presence");
+            if kept || image_name(&name).is_some() || segment_name(&name).is_some() {
+                names.push(name);
+            }
+        }
+        names.sort_unstable();
+        let mut found: Option<(Identity, PathBuf)> = None;
+        let mut began: Option<(u64, PathBuf)> = None;
+        for name in names {
+            let path = self.dir.join(&name);
+            let mut head = Vec::with_capacity(seal::HEAD_MAX);
+            match File::open(&path) {
+                Ok(f) => f.take(seal::HEAD_MAX as u64).read_to_end(&mut head)?,
+                // Let go of meanwhile, by `prune` or a round.
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
+            };
+            let Some(b) = seal::bound_in(&head) else {
+                continue;
+            };
+            let two = |what: &str, p: &Path| {
+                corrupt(format!(
+                    "{} and {}: {what} -- files put among the archive's that are not its own",
+                    p.display(),
+                    path.display()
+                ))
+            };
+            if b.role == Role::Image {
+                match &began {
+                    Some((t, p)) if *t != b.began => {
+                        return Err(two(
+                            &format!("images of archives begun at {t} and {}", b.began),
+                            p,
+                        ))
+                    }
+                    Some(_) => {}
+                    None => began = Some((b.began, path.clone())),
+                }
+            }
+            match &found {
+                Some((id, p)) if id.archive != b.archive => {
+                    return Err(two(
+                        &format!(
+                            "files of two archives, {} and {}",
+                            hex(&id.archive),
+                            hex(&b.archive)
+                        ),
+                        p,
+                    ))
+                }
+                Some((id, p)) if id.tenant != b.tenant => {
+                    return Err(two(
+                        &format!("{} and {} files", whose(&id.tenant), whose(&b.tenant)),
+                        p,
+                    ))
+                }
+                Some(_) => {}
+                None => {
+                    let id = Identity {
+                        archive: b.archive,
+                        tenant: b.tenant,
+                        began: None,
+                    };
+                    found = Some((id, path.clone()));
+                }
+            }
+        }
+        let Some((mut id, path)) = found else {
+            return Ok(None);
+        };
+        if let Some(t) = self.tenant.as_deref().filter(|t| *t != id.tenant) {
+            return Err(corrupt(format!(
+                "{}: {} file, in the archive of tenant `{t}`",
+                path.display(),
+                whose(&id.tenant)
+            )));
+        }
+        id.began = began.map(|b| b.0);
+        Ok(Some(id))
+    }
+
+    /// What a file of `role` sealed into this archive now is bound to: the
+    /// archive's id and tenant -- made as its first sealed file is, the id
+    /// from the system's randomness -- and `change` and `time` as its name
+    /// says them; an image, when the archive took its first image: what
+    /// its images say, or else the plain `began`, its oldest image's time,
+    /// or this image's own.
+    fn binding(&self, role: Role, change: u64, time: u64) -> io::Result<Binding> {
+        let id = match self.learned()? {
+            Some(id) => id,
+            None => {
+                let mut held = self.identity.lock().unwrap_or_else(|e| e.into_inner());
+                if held.is_none() {
+                    let archive = crate::crypto::system_random(16)
+                        .and_then(|b| b.try_into().ok())
+                        .ok_or_else(|| {
+                            io::Error::other("no randomness from the system for an archive's id")
+                        })?;
+                    *held = Some(Identity {
+                        archive,
+                        tenant: self.tenant.clone().unwrap_or_default(),
+                        began: None,
+                    });
+                }
+                held.clone().expect("made above")
+            }
+        };
+        let began = match (role, id.began) {
+            (Role::Image, Some(b)) => b,
+            (Role::Image, None) => self.began_unsealed()?.unwrap_or(time),
+            _ => 0,
+        };
+        Ok(Binding {
+            role,
+            archive: id.archive,
+            change,
+            time,
+            began,
+            tenant: id.tenant,
+        })
+    }
+
+    /// `path`, opened, held to what it is read as: its role, the archive
+    /// and tenant the others name ([`Self::learned`]), and the numbers its
+    /// name says -- a segment's first change, an image's change and time --
+    /// each refused by name where it says another. A file sealed before
+    /// this version (`bound` none) says nothing, and is read as it was.
+    fn held(
+        &self,
+        path: &Path,
+        bound: Option<&Binding>,
+        role: Role,
+        change: u64,
+        time: u64,
+    ) -> io::Result<()> {
+        let Some(b) = bound else {
+            return Ok(());
+        };
+        let refused = |what: String| Err(corrupt(format!("{}: {what}", path.display())));
+        if b.role != role {
+            return refused(format!(
+                "sealed as {}, read as {}",
+                b.role.name(),
+                role.name()
+            ));
+        }
+        let Some(id) = self.learned()? else {
+            return refused("sealed for an archive, and gone from it as it was read".into());
+        };
+        if b.archive != id.archive {
+            return refused(format!(
+                "a file of archive {}, among archive {}'s",
+                hex(&b.archive),
+                hex(&id.archive)
+            ));
+        }
+        if b.tenant != id.tenant {
+            return refused(format!(
+                "{} file, among {}",
+                whose(&b.tenant),
+                whose(&id.tenant)
+            ));
+        }
+        match role {
+            Role::Segment if b.change != change => refused(format!(
+                "its writes begin at change {}, where its name says {change}",
+                b.change
+            )),
+            Role::Image if (b.change, b.time) != (change, time) => refused(format!(
+                "an image of change {} taken at {}, where its name says change {change} at {time}",
+                b.change, b.time
+            )),
+            Role::Image if id.began.is_some_and(|t| t != b.began) => refused(format!(
+                "an image of an archive begun at {}, where the others' began at {}",
+                b.began,
+                id.began.unwrap_or(0)
+            )),
+            _ => Ok(()),
+        }
     }
 
     /// Makes every file made, renamed in or removed in the archive's
@@ -565,39 +864,54 @@ impl Archive {
         Ok(())
     }
 
-    /// A file of the kind this archive is, as it was written.
-    fn read_whole(&self, path: &Path) -> io::Result<Vec<u8>> {
+    /// A file of the kind this archive is, as it was written: sealed, held
+    /// to `role` and the numbers its name says ([`Self::held`]).
+    fn read_whole(&self, path: &Path, role: Role, change: u64, time: u64) -> io::Result<Vec<u8>> {
         let bytes = fs::read(path)?;
         match (seal::is_sealed(&bytes), &self.key) {
-            (true, Some(key)) => seal::open_whole(key, &bytes)
-                .map_err(|e| corrupt(format!("{}: {e}", path.display()))),
+            (true, Some(key)) => {
+                let (plain, bound) = seal::open_whole(key, &bytes)
+                    .map_err(|e| corrupt(format!("{}: {e}", path.display())))?;
+                self.held(path, bound.as_ref(), role, change, time)?;
+                Ok(plain)
+            }
             (false, None) => Ok(bytes),
             (sealed, _) => Err(mixed(path, sealed)),
         }
     }
 
-    fn read_segment(&self, path: &Path) -> io::Result<Read> {
+    /// The segment at `path`, whose name says its writes begin at `first`.
+    fn read_segment(&self, path: &Path, first: u64) -> io::Result<Read> {
         let bytes = fs::read(path)?;
         let len = bytes.len();
-        // Sealed, cut inside the seal's magic or the file's id as it was
-        // made: no frame, and no write (`entries`), so nothing goes on in
-        // it -- `position` removes it, and the id it is given is never
-        // sealed under. Past the id, a head frame cut short opens as no
-        // frame as well.
+        // Sealed, cut inside the seal's magic, the file's id or what it is
+        // as it was made: no frame, and no write (`entries`), so nothing
+        // goes on in it -- `position` removes it, and the id it is given is
+        // never sealed under. Past the head, a first frame cut short opens
+        // as no frame as well.
         if self.key.is_some() && seal::cut_in_head(&bytes) {
             return Ok(Read {
                 plain: Vec::new(),
-                sealed: Some((0, 0, seal::FileId::V1)),
+                sealed: Some((0, None)),
                 len,
             });
         }
         match (seal::is_sealed(&bytes), &self.key) {
             (true, Some(key)) => {
-                let (plain, end, frames, file) = seal::open_appended(key, &bytes)
+                let o = seal::open_appended(key, &bytes)
                     .map_err(|e| corrupt(format!("{}: {e}", path.display())))?;
+                // A head no frame opened after vouches for nothing, and holds
+                // no write: a segment cut as it was made, read as empty.
+                if o.next.index() > 0 {
+                    self.held(path, o.binding.as_ref(), Role::Segment, first, 0)?;
+                }
+                // Gone on in only in this version: frames of two versions
+                // in one file would open as neither, and an older one's
+                // frames are bound to nothing the readers hold them to.
+                let next = (o.next.version() == 3).then_some(o.next);
                 Ok(Read {
-                    plain,
-                    sealed: Some((end, frames, file)),
+                    plain: o.plain,
+                    sealed: Some((o.end, next)),
                     len,
                 })
             }
@@ -610,21 +924,26 @@ impl Archive {
         }
     }
 
+    /// Where a sealed segment's whole frames end once cut to hold `plain`
+    /// bytes, and what the frame after is sealed with there: a record longer
+    /// than a frame goes in frames of its own, and a crash between them
+    /// leaves it cut short after whole frames, which is cut off where it
+    /// began, a frame's end. Refused where no frame ends there.
+    fn cut_back(&self, path: &Path, plain: usize) -> io::Result<(usize, Option<Frames>)> {
+        let Some(key) = &self.key else {
+            return Err(corrupt(format!("{}: sealed, and no key", path.display())));
+        };
+        let o = seal::open_appended_to(key, &fs::read(path)?, plain)
+            .map_err(|e| corrupt(format!("{}: {e}", path.display())))?;
+        Ok((o.end, (o.next.version() == 3).then_some(o.next)))
+    }
+
     /// `(seq, time)` of each base image, oldest first.
     fn images(&self) -> io::Result<Vec<(u64, u64)>> {
         let mut out = Vec::new();
         for e in fs::read_dir(&self.dir)? {
-            let name = e?.file_name().to_string_lossy().into_owned();
-            let Some(rest) = name
-                .strip_prefix("image-")
-                .and_then(|r| r.strip_suffix(".fennec"))
-            else {
-                continue;
-            };
-            if let Some((seq, time)) = rest.split_once('-') {
-                if let (Ok(seq), Ok(time)) = (seq.parse(), time.parse()) {
-                    out.push((seq, time));
-                }
+            if let Some(image) = image_name(&e?.file_name().to_string_lossy()) {
+                out.push(image);
             }
         }
         out.sort_unstable();
@@ -635,12 +954,7 @@ impl Archive {
     fn segments(&self) -> io::Result<Vec<u64>> {
         let mut out = Vec::new();
         for e in fs::read_dir(&self.dir)? {
-            let name = e?.file_name().to_string_lossy().into_owned();
-            if let Some(first) = name
-                .strip_prefix("writes-")
-                .and_then(|r| r.strip_suffix(".log"))
-                .and_then(|r| r.parse().ok())
-            {
+            if let Some(first) = segment_name(&e?.file_name().to_string_lossy()) {
                 out.push(first);
             }
         }
@@ -660,14 +974,19 @@ impl Archive {
     /// fsynced, then renamed over ([`renamed`]), the directory not synced:
     /// what depends on the name syncs it first ([`Self::sync_dir`]): an
     /// fsync more a tenant made a node's first pass 44% longer (`keep_began`).
-    fn put(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    /// Sealed, it is bound as a file of `role` with the numbers its name
+    /// says ([`Self::binding`]).
+    fn put(&self, path: &Path, role: Role, change: u64, time: u64, bytes: &[u8]) -> io::Result<()> {
         // Sealed before the side file is made, as `backup` seals: a seal the
         // system's randomness refused left an empty `.tmp` a try, never
         // removed.
         let sealed;
+        let mut began = None;
         let bytes = match &self.key {
             Some(key) => {
-                sealed = seal::seal_whole(key, bytes)?;
+                let binding = self.binding(role, change, time)?;
+                began = (role == Role::Image).then_some(binding.began);
+                sealed = seal::seal_whole(key, &binding, bytes)?;
                 &sealed[..]
             }
             None => bytes,
@@ -676,7 +995,15 @@ impl Archive {
         let mut f = File::create(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?;
-        renamed(&f, &tmp, path)
+        renamed(&f, &tmp, path)?;
+        // Every image after says the archive began then, as this one did.
+        if let Some(t) = began {
+            let mut held = self.identity.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(id) = held.as_mut() {
+                id.began.get_or_insert(t);
+            }
+        }
+        Ok(())
     }
 
     /// When its oldest image was taken, ms since the epoch: nothing before
@@ -689,12 +1016,106 @@ impl Archive {
     /// image's time, or once `prune` has let that go, what it wrote in
     /// `began` before it did -- so a moment before the oldest image kept is
     /// told from one before the archive began.
+    ///
+    /// Sealed, the archive's images say it ([`seal::Binding::began`]), and
+    /// a plain `began` saying otherwise is refused by name: edited, it
+    /// chose which of a tenant's lines a restore to a moment read, or
+    /// passed the tenant over as not yet archived.
     pub fn began(&self) -> io::Result<Option<u64>> {
+        let path = self.dir.join("began");
+        let plain = match fs::read_to_string(&path) {
+            Ok(t) => Some(t),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        if let Some(began) = self.learned()?.and_then(|id| id.began) {
+            if let Some(t) = plain.filter(|t| t.trim().parse::<u64>().ok() != Some(began)) {
+                return Err(corrupt(format!(
+                    "{}: says {:?}, where the archive's sealed images say it began at {began}",
+                    path.display(),
+                    t.trim()
+                )));
+            }
+            return Ok(Some(began));
+        }
+        match plain {
+            Some(t) => Ok(t.trim().parse().ok()),
+            None => self.first_image_time(),
+        }
+    }
+
+    /// [`Self::began`] as the plain file and the images' names say it: what
+    /// the first image sealed in this version is told, in an archive begun
+    /// before it.
+    fn began_unsealed(&self) -> io::Result<Option<u64>> {
         match fs::read_to_string(self.dir.join("began")) {
             Ok(t) => Ok(t.trim().parse().ok()),
             Err(e) if e.kind() == io::ErrorKind::NotFound => self.first_image_time(),
             Err(e) => Err(e),
         }
+    }
+
+    /// What the node said of the tenant whose line this is, oldest first:
+    /// gone (`true`) or back, and when, ms since the epoch -- `presence`, a
+    /// line each, sealed as the archive's other files are: in a plain
+    /// archive an operator may edit it by hand; sealed, only through the
+    /// key, and one of another tenant's line is refused.
+    pub fn presence(&self) -> io::Result<Vec<(bool, u64)>> {
+        let Some((text, _)) = self.presence_text()? else {
+            return Ok(Vec::new());
+        };
+        Ok(String::from_utf8_lossy(&text)
+            .lines()
+            .filter_map(|l| {
+                let (what, at) = l.trim().split_once(' ')?;
+                Some((what == "gone", at.parse().ok()?))
+            })
+            .collect())
+    }
+
+    /// `presence` as it is stored, and whether plain where the archive is
+    /// sealed: written so by an archiver before this version, which
+    /// sealed it nowhere. Taken so only while no file of the line is sealed
+    /// in this version -- an archive no archiver of it touched -- which an
+    /// archiver's start seals ([`Self::seal_presence`]) before it writes
+    /// one: after, a plain one is refused, or editing it by hand would mark
+    /// a tenant gone or back unheard.
+    fn presence_text(&self) -> io::Result<Option<(Vec<u8>, bool)>> {
+        let path = self.dir.join("presence");
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        if self.key.is_some() && !seal::is_sealed(&bytes) && self.learned()?.is_none() {
+            return Ok(Some((bytes, true)));
+        }
+        Ok(Some((self.read_whole(&path, Role::Presence, 0, 0)?, false)))
+    }
+
+    /// A `presence` an archiver before this version left plain in a sealed
+    /// archive, sealed: an archiver's start does it to every line it keeps,
+    /// before it seals anything else there ([`Self::presence_text`]).
+    pub(crate) fn seal_presence(&self) -> io::Result<()> {
+        if let Some((text, true)) = self.presence_text()? {
+            self.put(&self.dir.join("presence"), Role::Presence, 0, 0, &text)?;
+            self.sync_dir()?;
+        }
+        Ok(())
+    }
+
+    /// Notes the node said the tenant was gone, or back, at `at` -- the
+    /// node's time, as its writes' are -- durable once it returns: lost in
+    /// a crash, a deleted tenant came back at a restore. A `presence` that
+    /// does not read is refused, never written over.
+    pub(crate) fn note(&self, gone: bool, at: u64) -> io::Result<()> {
+        let path = self.dir.join("presence");
+        let mut text = self.presence_text()?.map(|t| t.0).unwrap_or_default();
+        text.extend_from_slice(format!("{} {at}\n", if gone { "gone" } else { "back" }).as_bytes());
+        self.put(&path, Role::Presence, 0, 0, &text)?;
+        // The rename durable too. On Windows the renamed file is flushed
+        // by `put` as well as the directory here.
+        self.sync_dir()
     }
 
     /// Writes `began` from the oldest image, unless it is there: before
@@ -718,7 +1139,8 @@ impl Archive {
     /// Adds a base image of the database at change `seq`. Taking one now and
     /// then keeps a restore from replaying every write since the first.
     pub fn add_image(&self, seq: u64, image: &[u8]) -> io::Result<()> {
-        self.put(&self.image_path(seq, now_ms()), image)
+        let time = now_ms();
+        self.put(&self.image_path(seq, time), Role::Image, seq, time, image)
     }
 
     /// The last change the archive holds, the history it is on, the
@@ -726,7 +1148,7 @@ impl Archive {
     /// left one, cut off -- and the latest time the last segment holding a
     /// write archived one at.
     fn position(&self) -> io::Result<(u64, History, Option<Segment>, u64)> {
-        let history = match self.read_whole(&self.dir.join("history")) {
+        let history = match self.read_whole(&self.dir.join("history"), Role::History, 0, 0) {
             Ok(b) => History::decode(&b).map_err(|e| corrupt(e.to_string()))?,
             Err(e) if e.kind() == io::ErrorKind::NotFound => History::default(),
             Err(e) => return Err(e),
@@ -737,7 +1159,7 @@ impl Archive {
         let mut latest = 0;
         for &first in self.segments()?.iter().rev() {
             let path = self.segment_path(first);
-            let read = self.read_segment(&path)?;
+            let read = self.read_segment(&path, first)?;
             // Damage in the segment going on is cut whatever follows it: the
             // writes after it are taken again from the primary.
             let (list, end) = entries(&read.plain, Damage::Cut)?;
@@ -760,18 +1182,16 @@ impl Archive {
             if last >= at {
                 at = last;
                 // Plain, a record cut short is cut off; sealed, a frame is,
-                // and a frame holds whole records.
-                let cut = match read.sealed {
-                    Some(_) if end < read.plain.len() => {
-                        return Err(corrupt(format!(
-                            "{}: a record cut short inside a whole frame",
-                            path.display()
-                        )))
-                    }
-                    Some((whole, ..)) => whole,
-                    None => end,
+                // and a frame holds whole records -- but for a record longer
+                // than a frame, cut after some of its own, which is cut off
+                // where it began.
+                let sealed = read.sealed.is_some();
+                let (cut, next) = match read.sealed {
+                    Some(_) if end < read.plain.len() => self.cut_back(&path, end)?,
+                    Some((whole, next)) => (whole, next),
+                    None => (end, None),
                 };
-                if read.sealed.is_none() && cut < read.plain.len() {
+                if !sealed && cut < read.plain.len() {
                     crate::log!(
                         "{}: cut {} bytes at {cut}, a torn tail; the writes after it are taken \
                          again from the primary",
@@ -782,6 +1202,18 @@ impl Archive {
                 let mut file = OpenOptions::new().write(true).open(&path)?;
                 file.set_len(cut as u64)?;
                 file.seek(io::SeekFrom::End(0))?;
+                if self.key.is_some() && next.is_none() {
+                    // Sealed in a version before this one: no write goes on
+                    // in it -- its frames are bound to nothing a reader holds
+                    // them to -- and the next begins a segment of this
+                    // version after it. Its cut durable first: brought back
+                    // by a crash, a tail cut short with a segment after it is
+                    // what `verify` refuses.
+                    if cut < read.len {
+                        file.sync_data()?;
+                    }
+                    break;
+                }
                 open = Some(Segment {
                     path,
                     file: Some(file),
@@ -795,11 +1227,7 @@ impl Archive {
                     durable: 0,
                     dirty: false,
                     synced: Instant::now(),
-                    sealed: self
-                        .key
-                        .clone()
-                        .zip(read.sealed)
-                        .map(|(k, (_, frames, file))| (k, file, frames, Vec::new())),
+                    sealed: next.map(|frames| (frames, Vec::new())),
                 });
             }
             break;
@@ -972,7 +1400,8 @@ impl Archive {
                 // it follows, and `prune`, reading image times as in order,
                 // took it for the base of a window those writes are in,
                 // letting go of the image a restore inside it starts from.
-                self.put(&self.image_path(seq, now_ms().max(w.latest)), bytes)?;
+                let time = now_ms().max(w.latest);
+                self.put(&self.image_path(seq, time), Role::Image, seq, time, bytes)?;
                 if let Some(s) = &mut w.segment {
                     s.sync()?;
                 }
@@ -1001,7 +1430,13 @@ impl Archive {
             if image.is_some() && had {
                 self.sync_dir()?;
             }
-            self.put(&self.dir.join("history"), &theirs.encode())?;
+            self.put(
+                &self.dir.join("history"),
+                Role::History,
+                0,
+                0,
+                &theirs.encode(),
+            )?;
             // With no image, the writes after it go on in the open segment:
             // the history durable before any of them, or a crash left a new
             // lineage's writes under the old one's, which the primary's
@@ -1055,7 +1490,8 @@ impl Archive {
             None => fennec_core::fs::open_read_only(&path),
             Some(_) => {
                 let mut db = fennec_core::engine::Database::new();
-                db.load(&self.read_whole(&path)?).map(|_| db)
+                db.load(&self.read_whole(&path, Role::Image, seq, time)?)
+                    .map(|_| db)
             }
         };
         let db = opened.map_err(|e| corrupt(format!("{}: {e}", path.display())))?;
@@ -1076,7 +1512,7 @@ impl Archive {
             lineage,
             following: true,
         };
-        self.put(&self.dir.join("history"), &h.encode())?;
+        self.put(&self.dir.join("history"), Role::History, 0, 0, &h.encode())?;
         // Durable before the writes after it, which go on in the open
         // segment, as a hello's with no image (a promotion is rare).
         self.sync_dir()?;
@@ -1092,6 +1528,19 @@ impl Archive {
         first: u64,
         times: &[u64],
         records: &[u8],
+    ) -> io::Result<()> {
+        self.take_by(w, first, times, records, seal::FRAME)
+    }
+
+    /// [`Self::take`], a sealed segment's frames `frame` bytes at most: a
+    /// test drives a frame's edge with a small one.
+    fn take_by(
+        &self,
+        w: &mut Writer,
+        first: u64,
+        times: &[u64],
+        records: &[u8],
+        frame: usize,
     ) -> io::Result<()> {
         if first != w.at + 1 {
             return Err(io::Error::other(format!(
@@ -1128,21 +1577,24 @@ impl Archive {
                     }
                     let path = self.segment_path(seq);
                     // Sealed, the log's magic is a frame of its own after
-                    // the seal's head, so a segment the archiver made and
-                    // died in reads as an empty one; sealed before the file
-                    // is made, so a refused seal leaves none.
+                    // the seal's head -- which binds the segment to its
+                    // first change, its archive and its tenant -- so a
+                    // segment the archiver made and died in reads as an
+                    // empty one; sealed before the file is made, so a
+                    // refused seal leaves none.
                     let head = match &self.key {
                         Some(key) => {
                             let mut head = Vec::new();
-                            let id = seal::FileId::begin(&mut head)?;
-                            seal::seal_frame(key, &id, 0, false, LOG_MAGIC, &mut head)?;
-                            Some((head, key.clone(), id))
+                            let binding = self.binding(Role::Segment, seq, 0)?;
+                            let mut frames = seal::begin(key, &binding, &mut head)?;
+                            frames.seal(false, LOG_MAGIC, &mut head)?;
+                            Some((head, frames))
                         }
                         None => None,
                     };
                     let mut file = File::create(&path)?;
                     file.write_all(head.as_ref().map_or(&LOG_MAGIC[..], |h| &h.0))?;
-                    let sealed = head.map(|(_, key, id)| (key, id, 1, Vec::new()));
+                    let sealed = head.map(|(_, frames)| (frames, Vec::new()));
                     // The directory synced before the segment's first write:
                     // its name then lasts as long as its writes do, where an
                     // fsync of the file alone left a segment written for an
@@ -1189,7 +1641,7 @@ impl Archive {
             // where ending the stream had the same record sent again, and
             // archived no tenant of the node.
             .map_err(|e| corrupt(format!("the primary's write {seq}: {e}")))?;
-            s.write(&entry)?;
+            s.write_by(&entry, frame)?;
             s.next += n;
             pos += len;
             w.at = seq + n - 1;
@@ -1199,7 +1651,7 @@ impl Archive {
         self.fresh.store(true, Ordering::SeqCst);
         if let Some(s) = &mut w.segment {
             // The batch's writes a frame, whole records in it.
-            s.flush()?;
+            s.flush_by(frame)?;
             if s.synced.elapsed() >= SYNC_EVERY {
                 s.sync()?;
             }
@@ -1250,7 +1702,7 @@ impl Archive {
     /// before, and read from the last alone `consolidate` let a round go by.
     fn last_write(&self) -> io::Result<Option<(u64, u64)>> {
         for &first in self.segments()?.iter().rev() {
-            let bytes = self.read_segment(&self.segment_path(first))?.plain;
+            let bytes = self.read_segment(&self.segment_path(first), first)?.plain;
             let (list, _) = entries(&bytes, Damage::Judge)?;
             let writes: u64 = list.iter().map(|e| e.3).sum();
             if let Some(e) = list.last() {
@@ -1340,7 +1792,7 @@ impl Archive {
         // it lets go of what the image replaces, the next segment (`roll`)
         // before its first write. Lost alone, the segments it was taken from
         // are still there, and the next round takes it again.
-        self.put(&self.image_path(seq, time), &bytes)?;
+        self.put(&self.image_path(seq, time), Role::Image, seq, time, &bytes)?;
         self.roll.store(true, Ordering::SeqCst);
         Ok(Some(seq))
     }
@@ -1351,7 +1803,7 @@ impl Archive {
         let Some(&first) = segments.iter().rev().find(|&&f| f <= seq) else {
             return Ok(None);
         };
-        let bytes = self.read_segment(&self.segment_path(first))?.plain;
+        let bytes = self.read_segment(&self.segment_path(first), first)?.plain;
         let (list, _) = entries(&bytes, Damage::Judge)?;
         let mut at = first;
         for &(time, _, _, n) in &list {
@@ -1452,13 +1904,31 @@ impl Archive {
     /// only the last segment may end in a record cut short or hold no
     /// write, and a restore to the end opens. A backup no restore can be
     /// made from is not one, and this is how to know before it is needed.
+    /// Sealed, every file is of this archive and its tenant, and is what
+    /// its name says (`Archive::learned`, `Archive::held`): its history and
+    /// a tenant's presence are opened too.
     pub fn verify(&self) -> io::Result<Verified> {
+        let tenant = self
+            .learned()?
+            .map(|id| id.tenant)
+            .filter(|t| !t.is_empty());
         let images = self.images()?;
         let Some(&(first, from)) = images.first() else {
             return Err(corrupt(
                 "no image: a restore has nothing to start from".into(),
             ));
         };
+        for (name, role) in [("history", Role::History), ("presence", Role::Presence)] {
+            let path = self.dir.join(name);
+            match self.read_whole(&path, role, 0, 0) {
+                Ok(b) if role == Role::History => {
+                    History::decode(&b).map_err(|e| corrupt(format!("{}: {e}", path.display())))?;
+                }
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
         // Every record of each image held to its checksum, which an open
         // does not ask of an image's: written whole and renamed into
         // place, it is read as a whole file is, here alone -- a stretch at
@@ -1468,7 +1938,12 @@ impl Archive {
             let path = self.image_path(seq, time);
             let checked = match &self.key {
                 None => fennec_core::engine::check_reader(&mut fs::File::open(&path)?),
-                Some(_) => fennec_core::engine::check_records(&self.read_whole(&path)?),
+                Some(_) => fennec_core::engine::check_records(&self.read_whole(
+                    &path,
+                    Role::Image,
+                    seq,
+                    time,
+                )?),
             };
             checked.map_err(|e| corrupt(format!("{}: {e}", path.display())))?;
         }
@@ -1477,7 +1952,7 @@ impl Archive {
         let mut gaps = Vec::new();
         for (k, &start) in segments.iter().enumerate() {
             let path = self.segment_path(start);
-            let read = self.read_segment(&path)?;
+            let read = self.read_segment(&path, start)?;
             let (list, end) = entries(&read.plain, Damage::Judge)
                 .map_err(|e| corrupt(format!("{}: {e}", path.display())))?;
             // Only the last may hold no write, caught as it was made: one
@@ -1489,15 +1964,11 @@ impl Archive {
                     path.display(),
                 )));
             }
-            // Cut short: a record, plain, or a frame, sealed.
+            // Cut short: a record, plain, or a frame, sealed -- or a record
+            // longer than a frame after some of its own.
             let cut = match read.sealed {
-                Some(_) if end < read.plain.len() => {
-                    return Err(corrupt(format!(
-                        "{}: a record cut short inside a whole frame",
-                        path.display()
-                    )))
-                }
-                Some((whole, ..)) => read.len - whole,
+                Some(_) if end < read.plain.len() => read.len - self.cut_back(&path, end)?.0,
+                Some((whole, _)) => read.len - whole,
                 None => read.plain.len() - end,
             };
             if cut > 0 {
@@ -1555,6 +2026,7 @@ impl Archive {
             to,
             torn,
             gaps,
+            tenant,
         })
     }
 
@@ -1585,7 +2057,7 @@ impl Archive {
         let mut inside: Option<u64> = None;
         let mut past = false;
         for &first in &segments {
-            let bytes = self.read_segment(&self.segment_path(first))?.plain;
+            let bytes = self.read_segment(&self.segment_path(first), first)?.plain;
             let (list, _) = entries(&bytes, Damage::Judge)?;
             let mut seq = first - 1;
             for &(time, _, _, n) in &list {
@@ -1644,7 +2116,12 @@ impl Archive {
                     .create(true)
                     .truncate(true)
                     .open(tmp)?;
-                f.write_all(&self.read_whole(&self.image_path(image, taken))?)?;
+                f.write_all(&self.read_whole(
+                    &self.image_path(image, taken),
+                    Role::Image,
+                    image,
+                    taken,
+                )?)?;
                 f
             }
         };
@@ -1654,7 +2131,7 @@ impl Archive {
             if want > stop || next <= want || first > stop {
                 continue;
             }
-            let bytes = self.read_segment(&self.segment_path(first))?.plain;
+            let bytes = self.read_segment(&self.segment_path(first), first)?.plain;
             let (list, _) = entries(&bytes, Damage::Judge)?;
             let mut seq = first;
             for &(_, start, end, n) in &list {
@@ -1832,7 +2309,7 @@ pub fn backup(upstream: &Upstream, out: &Path, key: Option<&Key>) -> io::Result<
         let id = crate::replication::fork_id(&history, fresh_id());
         bytes.extend_from_slice(&history.forked(id, seq).record());
         if let Some(key) = key {
-            bytes = seal::seal_whole(key, &bytes)?;
+            bytes = seal::seal_whole(key, &Binding::backup(), &bytes)?;
         }
         let tmp = out.with_extension("tmp");
         let mut f = File::create(&tmp)?;
@@ -1848,13 +2325,22 @@ pub fn backup(upstream: &Upstream, out: &Path, key: Option<&Key>) -> io::Result<
 }
 
 /// A backup file sealed with `key` (`backup` with a key), opened into
-/// `out`: the database file it holds.
+/// `out`: the database file it holds. A file sealed as another -- an
+/// archive's image, whose history goes on as its primary's and is no
+/// database of its own -- is refused by what it is.
 pub fn unseal(sealed: &Path, key: &Key, out: &Path) -> io::Result<u64> {
     // A file through a link is the one it leads to, as a restore's.
     let given = out;
     let out = &fennec_core::fs::resolved(out);
-    let bytes = seal::open_whole(key, &fs::read(sealed)?)
+    let (bytes, bound) = seal::open_whole(key, &fs::read(sealed)?)
         .map_err(|e| corrupt(format!("{}: {e}", sealed.display())))?;
+    if let Some(b) = bound.filter(|b| b.role != Role::Backup) {
+        return Err(corrupt(format!(
+            "{}: sealed as {}, not a backup: restore an archive from its directory",
+            sealed.display(),
+            b.role.name()
+        )));
+    }
     let tmp = out.with_extension("tmp");
     fs::write(&tmp, &bytes)?;
     // Opened to check it whole, as a restore checks its file.
@@ -1957,12 +2443,12 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let parent = Arc::default();
-        let a = Archive::in_parent(root.join("a"), None, &parent).unwrap();
-        let b = Archive::in_parent(root.join("b"), None, &parent).unwrap();
+        let a = Archive::in_parent(root.join("a"), None, None, &parent).unwrap();
+        let b = Archive::in_parent(root.join("b"), None, None, &parent).unwrap();
         a.sync_dir().unwrap();
         assert_eq!(*parent.synced.lock().unwrap(), 2, "a's sync covers b");
         assert_eq!(b.made.load(Ordering::SeqCst), 2);
-        let c = Archive::in_parent(root.join("c"), None, &parent).unwrap();
+        let c = Archive::in_parent(root.join("c"), None, None, &parent).unwrap();
         // b's own sync finds the parent synced since b was made, and syncs
         // only its own directory; c's syncs the parent again.
         b.sync_dir().unwrap();
@@ -1971,7 +2457,7 @@ mod tests {
         c.sync_dir().unwrap();
         assert_eq!(*parent.synced.lock().unwrap(), 3);
         // An archive whose directory was there makes nothing to sync.
-        let again = Archive::in_parent(root.join("a"), None, &parent).unwrap();
+        let again = Archive::in_parent(root.join("a"), None, None, &parent).unwrap();
         assert_eq!(again.made.load(Ordering::SeqCst), 0);
         let _ = fs::remove_dir_all(&root);
     }
@@ -2076,7 +2562,7 @@ mod tests {
     /// Every record the archive's segments hold carries a checksum.
     fn all_checked(a: &Archive) {
         for first in a.segments().unwrap() {
-            let bytes = a.read_segment(&a.segment_path(first)).unwrap().plain;
+            let bytes = a.read_segment(&a.segment_path(first), first).unwrap().plain;
             let (list, end) = entries(&bytes, Damage::Judge).unwrap();
             assert_eq!(end, bytes.len());
             for (_, start, end, _) in list {
@@ -2084,6 +2570,79 @@ mod tests {
                 assert!(matches!(says, Some((true, _))), "{first}: {start}");
             }
         }
+    }
+
+    /// The plaintext lengths of a sealed file's frames, past a head naming
+    /// no tenant.
+    fn frame_lens(bytes: &[u8]) -> Vec<usize> {
+        let (mut at, mut out) = (seal::START, Vec::new());
+        while at + 4 <= bytes.len() {
+            let len = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+            out.push(len);
+            at += 4 + 12 + len + 16;
+        }
+        out
+    }
+
+    /// A batch of writes is sealed a frame at a time, [`seal::FRAME`] bytes
+    /// at the most -- driven here at 256 -- each holding whole records, a
+    /// record longer than a frame going in frames of its own. A crash
+    /// between those leaves it cut short after whole frames: a verify
+    /// counts it as the last segment's torn tail, and the archiver going on
+    /// cuts it where it began and is sent it again. A batch was one frame
+    /// whatever its size, its length a `u32` cast without a look.
+    #[test]
+    fn a_batch_goes_out_in_frames_of_whole_records() {
+        let dir = std::env::temp_dir().join(format!("fennec-archive-frames-{}", fresh_id()));
+        fs::create_dir_all(&dir).unwrap();
+        let key = Key::from_hex(&"ab".repeat(32)).unwrap();
+        let a = Archive::with_key(dir.join("archive"), Some(key.clone())).unwrap();
+        let mut p = Source::new();
+        p.run("create collection notes (t text)");
+        a.add_image(p.db.change_seq(), &p.image(false)).unwrap();
+        let mut w = a.writer().unwrap();
+        let small: Vec<Vec<u8>> = (0..8)
+            .map(|i| p.run(&format!("put notes {{t: \"{i}\"}}")))
+            .collect();
+        let times = vec![now_ms(); small.len()];
+        let at = w.at + 1;
+        a.take_by(&mut w, at, &times, &small.concat(), 256).unwrap();
+        let path = a.segment_path(a.segments().unwrap()[0]);
+        let before = fs::metadata(&path).unwrap().len() as usize;
+        let big = p.run(&format!("put notes {{t: \"{}\"}}", "x".repeat(700)));
+        let at = w.at + 1;
+        a.take_by(&mut w, at, &[now_ms()], &big, 256).unwrap();
+        w.park().unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let lens = frame_lens(&bytes);
+        // The log's magic, the small batch in frames of whole records, the
+        // long record alone in three.
+        assert_eq!(lens[0], LOG_MAGIC.len());
+        assert!(lens.iter().all(|&l| l <= 256), "{lens:?}");
+        assert!(lens.len() > 4, "the small batch in more than one: {lens:?}");
+        let opened = seal::open_appended(&key, &bytes).unwrap();
+        let (list, end) = entries(&opened.plain, Damage::Judge).unwrap();
+        assert_eq!((list.len(), end), (9, opened.plain.len()));
+        let (_, start, stop, _) = list[8];
+        let tail: usize = lens[lens.len() - 3..].iter().sum();
+        assert_eq!(tail, 8 + stop - start, "the long record alone: {lens:?}");
+        assert_eq!(restored_rows(&a, &dir, Target::End), (10, 9));
+
+        // Cut after the long record's first frame, as a crash between its
+        // frames leaves it: torn, and cut where it began.
+        let cut = before + 16 + 256 + 16;
+        fs::write(&path, &bytes[..cut]).unwrap();
+        let v = a.verify().unwrap();
+        assert_eq!((v.last, v.torn), (9, cut - before));
+        let mut w = a.writer().unwrap();
+        assert_eq!(w.at, 9);
+        assert_eq!(fs::metadata(&path).unwrap().len() as usize, before);
+        a.take_by(&mut w, 10, &[now_ms()], &big, 256).unwrap();
+        w.park().unwrap();
+        let v = a.verify().unwrap();
+        assert_eq!((v.last, v.torn), (10, 0));
+        assert_eq!(restored_rows(&a, &dir, Target::End), (10, 9));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// An archiver of this version following a primary from before
@@ -2353,7 +2912,7 @@ mod tests {
     fn times(a: &Archive) -> Vec<u64> {
         let mut out = Vec::new();
         for first in a.segments().unwrap() {
-            let bytes = a.read_segment(&a.segment_path(first)).unwrap().plain;
+            let bytes = a.read_segment(&a.segment_path(first), first).unwrap().plain;
             let (list, _) = entries(&bytes, Damage::Judge).unwrap();
             out.extend(list.iter().map(|e| e.0));
         }

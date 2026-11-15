@@ -148,6 +148,14 @@ fn archived(arch: &Path, seq: u64) {
     });
 }
 
+/// When the node said the tenant archived, plain, in `dir` was gone.
+fn gone(dir: &Path) -> Option<u64> {
+    if !dir.is_dir() {
+        return None;
+    }
+    node_archive::gone_at(&Archive::new(dir).unwrap()).unwrap()
+}
+
 fn images(arch: &Path) -> usize {
     std::fs::read_dir(arch)
         .unwrap()
@@ -385,7 +393,7 @@ fn a_deleted_tenant_is_no_longer_followed_and_its_archive_is_kept() {
     drop(doomed);
     n.tenants.delete("doomed").unwrap();
     until("the archive was not told the tenant is gone", || {
-        node_archive::gone_at(&root.join("doomed")).is_some()
+        gone(&root.join("doomed")).is_some()
     });
     // The others go on.
     exec(&keep, "put notes {title: \"still here\", n: 50}");
@@ -410,7 +418,7 @@ fn a_deleted_tenant_is_no_longer_followed_and_its_archive_is_kept() {
     assert!(!out.join("doomed.fennec").exists());
     assert!(out.join("keep.fennec").exists());
     // To a moment before the delete, it is one of them.
-    let before = node_archive::gone_at(&root.join("doomed")).unwrap() - 1;
+    let before = gone(&root.join("doomed")).unwrap() - 1;
     let out = d.join("restored-before");
     let done = node_archive::restore_all(&root, &out, Target::Time(before), None).unwrap();
     assert!(
@@ -460,7 +468,7 @@ fn a_tenant_made_again_under_its_name_begins_a_new_archive() {
         ),
         new_rows
     );
-    assert!(node_archive::gone_at(&root.join("e")).is_none());
+    assert!(gone(&root.join("e")).is_none());
     // An archive moved aside is no tenant's of the root.
     let names: Vec<String> = node_archive::tenant_dirs(&root)
         .unwrap()
@@ -493,7 +501,7 @@ fn a_tenant_moved_between_nodes_goes_on_in_each_nodes_archive() {
     };
     r#move(&na, &nb);
     until("node a's archive was not told the tenant left", || {
-        node_archive::gone_at(&root_a.join("m")).is_some()
+        gone(&root_a.join("m")).is_some()
     });
     let t = nb.tenants.get("m").unwrap();
     for i in 0..5 {
@@ -512,7 +520,7 @@ fn a_tenant_moved_between_nodes_goes_on_in_each_nodes_archive() {
     // written: a write landing first is in that image, and the
     // archive then has no segment after the gap to show it (macOS CI).
     until("node a's archive still says the tenant is gone", || {
-        node_archive::gone_at(&root_a.join("m")).is_none()
+        gone(&root_a.join("m")).is_none()
     });
     let t = na.tenants.get("m").unwrap();
     exec(&t, "put notes {title: \"back on a\", n: 300}");
@@ -520,7 +528,7 @@ fn a_tenant_moved_between_nodes_goes_on_in_each_nodes_archive() {
     let end = rows(&t.db.read().unwrap(), "get notes");
     drop(t);
     until("node b's archive was not told the tenant left", || {
-        node_archive::gone_at(&root_b.join("m")).is_some()
+        gone(&root_b.join("m")).is_some()
     });
     aa.finish();
     ab.finish();
@@ -1001,7 +1009,7 @@ fn a_tenant_deleted_while_the_stream_is_busy_is_gone_from_the_delete() {
     let after = a_moment();
     release(&gate);
     until("the archive was not told `e` went", || {
-        node_archive::gone_at(&root.join("e")).is_some()
+        gone(&root.join("e")).is_some()
     });
     a.finish();
     let (r, _) = restored_rows(&root, &d.join("out"), Target::Time(after), "e");
@@ -1033,7 +1041,7 @@ fn a_line_moved_aside_while_the_archiver_was_away_is_noted_gone() {
     until("the old line was not moved aside", || aside().is_some());
     archived(&root.join("e"), 0);
     a.finish();
-    assert!(node_archive::gone_at(&aside().unwrap().dir).is_some());
+    assert!(gone(&aside().unwrap().dir).is_some());
 }
 
 /// A tenant made again after a delete, then gone by other means -- its file
@@ -1072,10 +1080,10 @@ fn a_tenant_gone_by_hand_is_not_given_an_earlier_delete() {
     std::fs::remove_file(d.join("node").join("e.fennec")).unwrap();
     // Seen at the stream's next reading of the directory.
     until("the archive was not told `e` went", || {
-        node_archive::gone_at(&root.join("e")).is_some()
+        gone(&root.join("e")).is_some()
     });
     a.finish();
-    let at = node_archive::gone_at(&root.join("e")).unwrap();
+    let at = gone(&root.join("e")).unwrap();
     assert!(
         at >= remade,
         "gone at {at}, before the second life was made at {remade}: the delete's"
@@ -1358,7 +1366,7 @@ fn a_tenant_away_on_another_node_is_left_out_of_its_time_away() {
     };
     r#move(&na, &nb);
     until("node a's archive was not told the tenant left", || {
-        node_archive::gone_at(&root_a.join("m")).is_some()
+        gone(&root_a.join("m")).is_some()
     });
     let t = nb.tenants.get("m").unwrap();
     exec(&t, "put notes {title: \"on b\", n: 200}");
@@ -1367,10 +1375,10 @@ fn a_tenant_away_on_another_node_is_left_out_of_its_time_away() {
     let away = a_moment();
     r#move(&nb, &na);
     until("node a's archive did not take the tenant back", || {
-        node_archive::gone_at(&root_a.join("m")).is_none()
+        gone(&root_a.join("m")).is_none()
     });
     until("node b's archive was not told the tenant left", || {
-        node_archive::gone_at(&root_b.join("m")).is_some()
+        gone(&root_b.join("m")).is_some()
     });
     aa.finish();
     ab.finish();
@@ -1410,4 +1418,173 @@ fn a_moment_let_go_of_is_refused() {
     // Before the archive began, the tenant was not archived: passed over.
     let (r, _) = restored_rows(&root, &d.join("before"), Target::Time(1), "x");
     assert!(matches!(r, Restoring::NotYet), "{r:?}");
+}
+
+/// An archiver of every tenant, sealing with `key`.
+fn sealed_archiver(root: &Path, url: &str, key: &fennec_http::seal::Key) -> Archiver {
+    let stop = Arc::new(AtomicBool::new(false));
+    let (flag, root, url, key) = (
+        Arc::clone(&stop),
+        root.to_path_buf(),
+        url.to_string(),
+        key.clone(),
+    );
+    let done = std::thread::spawn(move || {
+        let upstream = node_archive::node_upstream(&url, REPL.into()).unwrap();
+        NodeArchive::new(&root, Some(key))?.follow(&upstream, &flag, &|_| {})
+    });
+    Archiver { stop, done }
+}
+
+/// Waits until a restore of the sealed `arch` to the end reaches `seq`.
+fn sealed_reached(arch: &Path, key: &fennec_http::seal::Key, seq: u64) {
+    let probe = arch.with_extension("probe");
+    until(&format!("{} did not reach {seq}", arch.display()), || {
+        arch.is_dir()
+            && Archive::with_key(arch, Some(key.clone()))
+                .and_then(|a| a.restore(&probe, Target::End))
+                .is_ok_and(|r| r.seq >= seq)
+    });
+}
+
+/// `from`'s files, copied into `to` made anew.
+fn copied_over(from: &Path, to: &Path) {
+    let _ = std::fs::remove_dir_all(to);
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap() {
+        let e = e.unwrap();
+        std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
+    }
+}
+
+/// 1.0's review: every tenant of a node is sealed with one key, and a
+/// sealed file was bound to nothing but itself, so tenant `xeno`'s
+/// directory copied over `acme`'s restored xeno's rows into acme's file --
+/// which acme's tokens then read -- and a line of xeno's put where one of
+/// acme's moved aside goes was taken for acme's. Each sealed file names its
+/// tenant under its tags: either is refused, by name, and acme's own files
+/// put back restore.
+#[test]
+fn a_tenants_archive_copied_over_anothers_is_refused() {
+    use fennec_http::seal::Key;
+    let key = Key::from_hex(&"ab".repeat(32)).unwrap();
+    let d = scratch("copied-over");
+    let n = node(&d.join("node"), None);
+    let acme = made(&n, "acme", 3);
+    let xeno = made(&n, "xeno", 5);
+    let root = d.join("root");
+    let a = sealed_archiver(&root, &n.url, &key);
+    sealed_reached(&root.join("acme"), &key, seq(&acme));
+    sealed_reached(&root.join("xeno"), &key, seq(&xeno));
+    a.finish();
+    let acme_rows = rows(&acme.db.read().unwrap(), "get notes");
+
+    let kept = d.join("acme-kept");
+    std::fs::rename(root.join("acme"), &kept).unwrap();
+    copied_over(&root.join("xeno"), &root.join("acme"));
+    let over = d.join("over");
+    let done = node_archive::restore_all(&root, &over, Target::End, Some(&key)).unwrap();
+    match &done[0] {
+        (t, Restoring::Failed(e)) if t == "acme" => assert!(
+            e.contains("tenant `xeno`'s file, in the archive of tenant `acme`"),
+            "{e}"
+        ),
+        other => panic!("xeno's archive in acme's place: {other:?}"),
+    }
+    assert!(
+        matches!(&done[1], (t, Restoring::Restored(..)) if t == "xeno"),
+        "{done:?}"
+    );
+    assert!(!over.join("acme.fennec").exists());
+
+    // As a line of acme's moved aside, beside acme's own put back: a
+    // restore to a moment reads every line's start, and refuses it.
+    std::fs::remove_dir_all(root.join("acme")).unwrap();
+    std::fs::rename(&kept, root.join("acme")).unwrap();
+    copied_over(&root.join("xeno"), &root.join("acme.00000000000000ff"));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let done =
+        node_archive::restore_all(&root, &d.join("aside"), Target::Time(now), Some(&key)).unwrap();
+    match &done[0] {
+        (t, Restoring::Failed(e)) if t == "acme" => assert!(
+            e.contains("acme.00000000000000ff") && e.contains("tenant `xeno`'s"),
+            "{e}"
+        ),
+        other => panic!("xeno's line beside acme's: {other:?}"),
+    }
+    std::fs::remove_dir_all(root.join("acme.00000000000000ff")).unwrap();
+    let own = d.join("own");
+    let done = node_archive::restore_all(&root, &own, Target::End, Some(&key)).unwrap();
+    assert!(
+        matches!(&done[0], (t, Restoring::Restored(..)) if t == "acme"),
+        "{done:?}"
+    );
+    let db = fennec_core::fs::open(own.join("acme.fennec")).unwrap();
+    assert_eq!(rows(&db, "get notes"), acme_rows);
+}
+
+/// The plain files that chose what a restore of every tenant read: a
+/// tenant's `presence`, which a line written by hand marked gone, and
+/// `began`, which an edit made later than a moment so the tenant was
+/// passed over as not yet archived. Sealed, the presence is sealed too and
+/// a plain one is refused, and `began` is held to what the images say --
+/// its edit refused, its loss nothing, the images saying it still.
+#[test]
+fn presence_and_began_edited_are_refused() {
+    use fennec_http::seal::Key;
+    let key = Key::from_hex(&"ab".repeat(32)).unwrap();
+    let d = scratch("plain-files");
+    let n = node(&d.join("node"), None);
+    let acme = made(&n, "acme", 3);
+    let root = d.join("root");
+    let a = sealed_archiver(&root, &n.url, &key);
+    sealed_reached(&root.join("acme"), &key, seq(&acme));
+    a.finish();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let all = |out: &str, to: Target| {
+        node_archive::restore_all(&root, &d.join(out), to, Some(&key)).unwrap()
+    };
+
+    std::fs::write(root.join("acme/presence"), "gone 1\n").unwrap();
+    match &all("gone", Target::End)[0].1 {
+        Restoring::Failed(e) => assert!(e.contains("not sealed, where the archive is"), "{e}"),
+        other => panic!("a plain presence in a sealed archive: {other:?}"),
+    }
+    std::fs::remove_file(root.join("acme/presence")).unwrap();
+
+    std::fs::write(root.join("acme/began"), format!("{}\n", now + 86_400_000)).unwrap();
+    match &all("began", Target::Time(now))[0].1 {
+        Restoring::Failed(e) => assert!(e.contains("sealed images say it began at"), "{e}"),
+        other => panic!("began edited: {other:?}"),
+    }
+    std::fs::remove_file(root.join("acme/began")).unwrap();
+    assert!(
+        matches!(
+            &all("restored", Target::Time(now))[0].1,
+            Restoring::Restored(..)
+        ),
+        "with no began, the images say when it began"
+    );
+
+    // A presence an archiver before this version left plain, in a line it
+    // sealed nothing of in this version, reads as it did, and the next
+    // archiver's start seals it before anything else.
+    let olden = root.join("olden");
+    std::fs::create_dir_all(&olden).unwrap();
+    std::fs::write(olden.join("presence"), "gone 5\n").unwrap();
+    let of_olden = |out: &str| {
+        let done = all(out, Target::End);
+        done.into_iter().find(|(t, _)| t == "olden").unwrap().1
+    };
+    assert!(matches!(of_olden("olden-plain"), Restoring::Gone(5)));
+    drop(NodeArchive::new(&root, Some(key.clone())).unwrap());
+    let stored = std::fs::read(olden.join("presence")).unwrap();
+    assert!(fennec_http::seal::is_sealed(&stored));
+    assert!(matches!(of_olden("olden-sealed"), Restoring::Gone(5)));
 }
