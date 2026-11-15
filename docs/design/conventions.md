@@ -436,7 +436,13 @@ the release's for macOS, Linux on ARM and Windows, the mobile jobs', a
 developer's -- and the scanner holds that block's comment whatever builds
 it. Turned on on 2026-11-15, it moved the C ABIs' raw reads and writes --
 fennec-wasm's exports, fennec-ffi's and every JNI function -- into blocks,
-each with its comment; the binaries' code was byte for byte what it was.
+79 of them, each with its comment. `fennec-server`'s `__TEXT` and the
+browser module's code section stayed byte for byte what they were; the
+native library's code kept its size and its instructions, but for the
+registers two functions take -- `fennec_schema` and `fennec_sync_feed`,
+whose answer closures are bound before their `call` now, which a block
+around a closure passed inline would cover whole -- one value kept on the
+stack there rather than in a register, a load a call.
 
 When the lint was turned on (2026-11-15) the crates held 236 `unsafe`
 blocks and impls, 127 of them commented -- most of the rest in tests,
