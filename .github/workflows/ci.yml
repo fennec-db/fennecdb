@@ -103,6 +103,10 @@ jobs:
           test -f "$f" || { mkdir -p "$(dirname "$f")" && curl -fsSL --retry 3 -o "$f" https://www.unicode.org/Public/17.0.0/ucd/UnicodeData.txt; }
           python3 crates/fennec-core/tools/fold/gen.py --check "$f"
 
+      # Also a step of the `test` job (see there): on 2026-11-15, before
+      # this job was a required check, a pull request green on its own took
+      # crates/fennec-core/CLAUDE.md past 24 000 bytes once merged with main,
+      # through the queue with this job red. Here for the quick answer.
       - name: Each AGENTS.md is its CLAUDE.md under its own title; the root under 32 000 bytes, an area file under 24 000, each rule in one file and the root's index
         run: python3 tools/agents_md.py --check
 
@@ -128,6 +132,14 @@ jobs:
         run: |
           python3 tools/secret_eq_check.py --self-test
           python3 tools/secret_eq_check.py
+
+      # docs/design/conventions.md#security-policy: SECURITY.md names flags,
+      # paths and primitives, and says nothing of TLS or the crates that the
+      # tree has since made untrue; a file or a comment that does is found.
+      - name: SECURITY.md's flags, paths and primitives are the tree's, and no stale claim is left
+        run: |
+          python3 tools/test_security_md_check.py
+          python3 tools/security_md_check.py
 
       # docs/design/integrations.md#the-chaos-drill: `test-clock` moves a
       # tenant node's clock by a file, for `make chaos` alone. No crate's
@@ -166,6 +178,13 @@ jobs:
       - name: tools/openapi_compat.py finds every break and passes every addition
         run: python3 tools/test_openapi_compat.py
 
+      # docs/design/compatibility.md: fennec.h, the JS types, the CLI and
+      # the metrics only grow. Here only the checker's own tests, a break
+      # seeded into each surface for the quick answer; the check over the
+      # sources is a step of the `test` job below, beside the REST API's.
+      - name: tools/api_compat.py finds every break and passes every addition
+        run: python3 tools/test_api_compat.py
+
       # docs/design/fennecql.md#the-corpus: what the test job's corpus steps
       # harvest from each kind of file and the hand-written list, how a
       # reading is judged against another's -- word by word, a panic failing
@@ -175,7 +194,7 @@ jobs:
       # otherwise with it or its `same_meaning` -- what a failure prints, the
       # frozen corpora kept as main holds them, and trees of a few lines
       # built in turn, each answering its own reading. The test job runs it
-      # too, beside the steps it holds: this job is no required check.
+      # too, beside the steps it holds.
       - name: tools/fennecql_corpus.py harvests, judges and lets through only what it must
         run: python3 tools/test_fennecql_corpus.py
 
@@ -186,6 +205,13 @@ jobs:
       # behind -- is held here on every one.
       - name: The power cut's check fails a late sync, a loss past the window, a cut between writes and a standby far behind
         run: python3 -B .github/power-cut/test_client.py
+
+      # docs/design/conventions.md#coverage: the weekly report's tables over
+      # a hand-made export -- a crate's and a boundary's figures, a
+      # registry's file left out, a listed path that is gone failing the
+      # tool -- and the committed list's paths existing.
+      - name: tools/coverage_report.py's tables, and its boundary list's paths
+        run: python3 tools/test_coverage_report.py
 
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.unicode-cache.outputs.cache-hit != 'true'
@@ -396,6 +422,32 @@ jobs:
             echo "main has no tools/openapi_compat.py yet: no base pass"
           fi
 
+      # docs/design/compatibility.md: fennec.h, the JS types, the CLI and
+      # the metrics only grow. `make api-check`: the checker's tests, then
+      # the sources held to integrations/api-golden/ -- which must be what
+      # they dump to -- by this checkout's checker, and the baselines to
+      # main's by main's copy (BREAKS read from this one as data, as the
+      # REST API's is), so neither a baseline edited by hand nor a checker
+      # changed to see less lets a break through. The CLI's and the
+      # metrics' dumps are held to the binaries by `make test` above (each
+      # binary's crate's tests/api_golden.rs, on Linux and macOS).
+      - name: The C header, the JS types, the CLI and the metrics only grow
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          make api-check BASE=FETCH_HEAD
+
+      # Run twice on purpose: fmt has it for the quick answer, this job
+      # since fmt was not a required check. On 2026-11-15 a pull request
+      # green on its own would have taken crates/fennec-core/CLAUDE.md past
+      # its 24 000 bytes once merged with main; it landed through the queue
+      # with fmt red and every later run's fmt was red too. The queue builds
+      # every required job on the merged result, fmt among them now
+      # (docs/design/conventions.md: every job but two).
+      - name: Each AGENTS.md is its CLAUDE.md, and no file is past its size
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 tools/agents_md.py --check
+
       # The corpus tool's own tests (the fmt job's step), in a required
       # check beside the two steps whose reading and judging they hold.
       - name: tools/fennecql_corpus.py harvests, judges and lets through only what it must
@@ -459,6 +511,18 @@ jobs:
         run: |
           cargo test -p fennec-http --features test-clock --lib -- --exact \
             tenants::tests::a_tenant_busy_as_its_clock_shift_ends_takes_the_systems_clock_back \
+            | tee /dev/stderr | grep -q 'test result: ok. 1 passed'
+
+      # The scheduler's stop ends fennec-server with 1, held on a real server
+      # through the scheduler's fault (`FENNEC_TEST_SCHEDULER_PANIC`), which
+      # is a test build's, behind `test-clock` with its clock: a debug build
+      # without it -- `cargo run`'s, the web tests' -- reads no such
+      # variable. Built with the feature here, the test named whole.
+      - name: A scheduler's failure ends the server with 1
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo test -p fennec-server --features test-clock --test all -- --exact \
+            scheduled::a_scheduler_s_failure_ends_the_server_with_1 \
             | tee /dev/stderr | grep -q 'test result: ok. 1 passed'
 
       # fennec studio (`--studio`) in the runner's Chrome against the debug
@@ -1356,9 +1420,8 @@ jobs:
         run: node web/browser/run.mjs chrome firefox
 
   # Safari on macOS through safaridriver, which the runner allows once
-  # `--enable`d. On every run, a pull request's too: no browsers job is a
-  # required check, so a Safari failure seen only in the merge queue would
-  # not stop the merge, and a pull request's own run is where it is read.
+  # `--enable`d. On every run, a pull request's too: its own run is where a
+  # Safari failure is read, before a merge group is spent on it.
   # It costs one of the 5 macOS slots (CI's bottleneck) for 30 s a run (run
   # 43631233253 on #650, 18 s of it the suite). Bounded by the rule above
   # from that run -- twice 30 s is 1 minute, plus 2 minutes 2.5 -- and 20
@@ -2097,17 +2160,23 @@ jobs:
 
   # docs/design/conventions.md#fuzzing: every parser of untrusted bytes --
   # an HTTP request, JSON, FennecQL, the codec, a .fennec file's open and a
-  # replica's apply, a SQLite file -- fuzzed for 30 s each, built with
-  # AddressSanitizer and LLVM's coverage counters on the Makefile's dated
-  # nightly (a nightly only here and in fuzz.yml). The test job runs the same
-  # targets over their seeds in a plain build; fuzz.yml gives each half an
-  # hour a week. It runs on main's pushes too, whose logs and artifacts
-  # anyone reads: a finding keeps no input and says no backtrace, only the
-  # recipe `fennec-fuzz reproduce` makes its input again from (fuzz.yml).
+  # replica's apply, a SQLite file -- fuzzed for a count of runs each (about
+  # 30 s of this runner), built with AddressSanitizer and LLVM's coverage
+  # counters on the Makefile's dated nightly (a nightly only here and in
+  # fuzz.yml). A count, not a time: the same commit hands each target the
+  # same inputs on any runner, so the job passes or fails by the commit,
+  # never by the runner's speed, and anyone makes a finding again with
+  # `make fuzz-smoke` -- which is why it says a panic's message and an
+  # ASan report here, where fuzz.yml's runs, each week's own, say only the
+  # recipe. The test job runs the same targets over their seeds in a plain
+  # build; fuzz.yml gives each half an hour a week. Each target is capped
+  # at six minutes of CPU time (`SMOKE_CAP`), so a commit slowing every run
+  # ends at a named target's cap before this timeout: six just under it
+  # are 36 minutes, and the build a minute and a half.
   fuzz-smoke:
-    name: fuzz-smoke (each target 30 s under ASan)
+    name: fuzz-smoke (each target a count of runs under ASan)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:
@@ -2118,18 +2187,16 @@ jobs:
       - name: Install the fuzzer's nightly, pinned to a date
         run: make fuzz-toolchain
 
-      - name: Each target for 30 s under AddressSanitizer
-        env:
-          ASAN_OPTIONS: log_path=${{ runner.temp }}/asan
-        run: make fuzz-smoke FUZZ_SECONDS=30 FUZZ_FLAGS="--private --corpus none"
+      - name: Each target for its count of runs under AddressSanitizer
+        run: make fuzz-smoke
 
       - name: Say how to make what it found again
         if: failure()
         run: |
-          echo "fennec-fuzz found something at $GITHUB_SHA. Its input is kept nowhere: check out"
-          echo "$GITHUB_SHA, run 'make fuzz-seeds' and 'make fuzz ASAN=1', then the line"
-          echo "'fennec-fuzz reproduce ...' above with target/<host>/fuzz/fennec-fuzz"
-          echo "(docs/design/conventions.md#fuzzing)."
+          echo "fennec-fuzz found something at $GITHUB_SHA: 'make fuzz-smoke' on that commit"
+          echo "makes the same inputs, and the line 'fennec-fuzz reproduce ...' above, run"
+          echo "with target/<host>/fuzz/fennec-fuzz after 'make fuzz ASAN=1', makes the one"
+          echo "that ended it (docs/design/conventions.md#fuzzing)."
 
   # The native library an app links (crates/fennec-ffi) on Android and the
   # JVM, and its Kotlin, Dart and Flutter bindings: the Kotlin library's

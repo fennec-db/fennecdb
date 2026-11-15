@@ -1,0 +1,128 @@
+name: coverage
+
+# The figure of how much of the code `cargo test` runs, a week at a time,
+# published as information and never as a gate (docs/design/conventions.md
+# #coverage): per crate, and apart for the modules that parse bytes from
+# outside the process (tools/coverage_report.py's BOUNDARIES). It runs on
+# a schedule and by hand, never on a pull request or a push: the account runs
+# 20 jobs at once and a pull request pays nothing for it.
+#
+# Wednesday 03:41 UTC, minute 41 off the top of the hour that GitHub delays
+# or drops: the other schedules are chaos (Saturday 02:23), fuzz (Sunday
+# 03:23), the power cuts and the audit (Monday 04:23 to 05:17) and ci.yml's
+# twice a day (04:17, 16:17), and this one shares no day with a weekly one.
+#
+# By hand: `gh workflow run coverage.yml`, its report under the run's
+# artifacts and its summary.
+on:
+  schedule:
+    - cron: '41 3 * * 3'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  coverage:
+    name: coverage (cargo test, instrumented)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      # rustc's own source-based coverage: every crate, build scripts and
+      # the server binary the sync tests start included, writes its counters
+      # into this directory when it exits. A target directory of its own, as
+      # no other job's build is instrumented.
+      RUSTFLAGS: -Cinstrument-coverage
+      CARGO_TARGET_DIR: target/coverage
+      LLVM_PROFILE_FILE: ${{ github.workspace }}/target/coverage-profraw/%p-%m.profraw
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # rust-toolchain.toml's exact release; llvm-tools-preview is a rustup
+      # component (llvm-profdata, llvm-cov), not a crate: the workspace takes
+      # no dependency for it.
+      - name: Install the pinned toolchain and its LLVM tools
+        run: |
+          rustup show
+          rustup component add llvm-tools-preview
+
+      # make test's Rust steps (rust-1, rust-3, rust-4), as it runs them.
+      # Left out: the doctests (rust-2: rustdoc's coverage is a nightly flag
+      # and nightly is for the scheduled sanitizer jobs alone), the JS and
+      # browser tests, the studio's Chrome test, the sync-scenario runners
+      # (all need web/fennec.wasm or node) and the PostgreSQL arm's
+      # `#[ignore]` tests (a service container ci.yml's `postgres` job
+      # starts). fennec-bench is out as in make test. A failed test does not
+      # stop the report: the counters of the tests that ran are what it
+      # reads, and the job fails after it.
+      - name: Test, instrumented
+        id: test
+        run: |
+          set +e
+          failed=0
+          cargo test --workspace --exclude fennec-bench --lib --bins --tests --no-fail-fast || failed=1
+          cargo test -p fennec-core --no-default-features --features std-fs,language --lib --test features --no-fail-fast || failed=1
+          cargo test -p fennec-core --no-default-features --features std-fs --lib --test features --no-fail-fast || failed=1
+          echo "failed=$failed" >> "$GITHUB_OUTPUT"
+
+      # The binaries llvm-cov reads the counters against: each run's
+      # `--no-run` names the same ones cargo just built, nothing built again.
+      # The test binaries and, with them, the binaries the tests start
+      # (`fennec-server`, `fennec`, `fennec-shard`): a server a test runs
+      # writes its own counters, and a binary's own modules are counted by
+      # its symbols alone, which the test harness built of the same sources
+      # does not share.
+      - name: Merge the counters and export them
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p target/coverage-report
+          sysroot=$(rustc --print sysroot)
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          llvm="$sysroot/lib/rustlib/$host/bin"
+          {
+            cargo test --workspace --exclude fennec-bench --lib --bins --tests --no-run --message-format=json
+            cargo test -p fennec-core --no-default-features --features std-fs,language --lib --test features --no-run --message-format=json
+            cargo test -p fennec-core --no-default-features --features std-fs --lib --test features --no-run --message-format=json
+          } | jq -r 'select(.reason == "compiler-artifact" and .executable != null) | .executable' | sort -u > target/coverage-report/binaries.txt
+          wc -l target/coverage-report/binaries.txt
+          "$llvm/llvm-profdata" merge -sparse -o target/coverage-report/merged.profdata target/coverage-profraw/*.profraw
+          objects=()
+          while read -r bin; do objects+=("-object=$bin"); done < target/coverage-report/binaries.txt
+          # The registry's and the toolchain's sources, and the tests' own
+          # files, are not the crates' code (tools/coverage_report.py
+          # leaves them out too, should this regex miss one).
+          "$llvm/llvm-cov" export --format=text \
+            -instr-profile=target/coverage-report/merged.profdata \
+            --ignore-filename-regex='(/\.cargo/|/rustc/|/(tests|examples|benches)/)' \
+            "${objects[@]}" > target/coverage-report/export.json
+
+      - name: Write the report
+        if: ${{ !cancelled() }}
+        run: |
+          python3 -I tools/coverage_report.py target/coverage-report/export.json \
+            --markdown target/coverage-report/coverage.md \
+            --summary target/coverage-report/coverage-summary.json
+          cat target/coverage-report/coverage.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
+        with:
+          name: coverage-report
+          path: |
+            target/coverage-report/coverage.md
+            target/coverage-report/coverage-summary.json
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Fail if a test failed
+        if: ${{ steps.test.outputs.failed == '1' }}
+        run: |
+          echo "a test failed: the report above is of the tests that ran"
+          exit 1

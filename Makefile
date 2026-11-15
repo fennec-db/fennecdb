@@ -24,7 +24,7 @@ SCHEMA ?= 1
 STUDIO_SERVER ?=
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js upgrade-check openapi-lint openapi-check openapi-golden sync-scenarios-check fennecql-corpus fuzz fuzz-smoke fuzz-toolchain fuzz-seeds builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test browser-test studio-desktop studio-desktop-dist studio-desktop-test studio-highlight statements-bench gzip-bench replay-bench hook-bench perf-gate instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench lists-bench stress-test
+.PHONY: all test test-js upgrade-check openapi-lint openapi-check openapi-golden api-check api-golden sync-scenarios-check fennecql-corpus fuzz fuzz-smoke fuzz-toolchain fuzz-seeds builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test browser-test studio-desktop studio-desktop-dist studio-desktop-test studio-highlight statements-bench gzip-bench replay-bench hook-bench perf-gate instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench lists-bench stress-test
 	python-test go-test dotnet-test languages-test examples-test recipes-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench entry-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down pgvector-tls docker docker-run docker-compact docker-down grafana-check deploy-check drill chaos memory clean \
@@ -222,6 +222,42 @@ openapi-check:
 openapi-golden:
 	$(CARGO) test -p fennec-server --test all openapi::
 	python3 tools/openapi_compat.py --write
+
+## fennec.h's prototypes and macros, web/fennec.d.ts's and web/client.d.ts's
+## exports, the flags and exit codes of fennec, fennec-server and fennec-shard
+## and the metrics the server and the router serve, held to the baselines in
+## integrations/api-golden/ (frozen at the 1.0 tag): a removed or changed one
+## fails unless tools/api_compat.py's BREAKS names it, and every dump is held
+## to BASE's (origin/main). The three files' dumps must be what the sources
+## dump to; the CLI's and the metrics' what the binaries give, which their
+## crates' tests/api_golden.rs hold under `cargo test` (make test), not here.
+## `make api-golden` after an addition. First the checker's own tests, then
+## BASE's checker over the same sources, as CI's `test` job runs it
+## (docs/design/compatibility.md)
+api-check:
+	python3 tools/test_api_compat.py
+	python3 tools/api_compat.py
+	@base='$(or $(BASE),origin/main)'; \
+	if git cat-file -e "$$base:tools/api_compat.py" 2>/dev/null; then \
+	  mkdir -p target/tmp && git show "$$base:tools/api_compat.py" > target/tmp/api_compat_base.py && \
+	  python3 -I target/tmp/api_compat_base.py --root '$(CURDIR)' --base-ref "$$base" \
+	    --breaks-from tools/api_compat.py; \
+	else echo "$$base has no tools/api_compat.py yet: no base pass"; fi
+
+## integrations/api-golden/ written again: fennec.h's and the JS types' dumps
+## from the sources, the CLI's and the metrics' from the binaries themselves,
+## which the tests/api_golden.rs of fennec-shard, fennec-server and fennec-cli
+## write into target/api-golden (the router's first: the server's test holds
+## every metric name the sources declare to both dumps); refused where a dump
+## breaks what the baseline holds and BREAKS names it not. After every change
+## of a surface. Frozen at the 1.0 tag: tools/api_compat.py --freeze 1.0
+## (RELEASING.md)
+api-golden:
+	@rm -rf target/api-golden && mkdir -p target/api-golden
+	FENNEC_API_GOLDEN='$(CURDIR)/target/api-golden' $(CARGO) test -p fennec-shard --test all api_golden::
+	FENNEC_API_GOLDEN='$(CURDIR)/target/api-golden' $(CARGO) test -p fennec-server --test all api_golden::
+	FENNEC_API_GOLDEN='$(CURDIR)/target/api-golden' $(CARGO) test -p fennec-cli --test api_golden
+	python3 tools/api_compat.py --write --built target/api-golden
 
 ## web/fennec.d.ts held to web/fennec.js -- every export and method declared --
 ## and to what a caller writes, under tsc --strict; then the docs' examples
@@ -430,13 +466,16 @@ fennecql-corpus:
 # fuzz.yml). Moved forward in a pull request of its own.
 FUZZ_NIGHTLY ?= nightly-2026-11-01
 FUZZ_SECONDS ?=
-# Flags for each run, CI's: `--private --corpus none` (a finding says its
-# recipe alone), the weekly run's `--seed`.
+# Flags for each run, CI's: `--corpus none`, and the weekly run's
+# `--private` (a finding says its recipe alone) and `--seed`.
 FUZZ_FLAGS ?=
 ASAN ?= 0
 FUZZ_HOST = $(shell $(CARGO) -vV | sed -n 's/^host: //p')
 # AddressSanitizer, and LLVM's coverage counters on every edge, which the
 # fuzzer reads to keep the inputs reaching new ones (crates/fennec-fuzz/src/cover.rs).
+# std's hash keys are fixed by the binary's own `getrandom` on Linux, which
+# std references weakly, so it binds at the static link: no flag of ours
+# (crates/fennec-fuzz/src/main.rs).
 FUZZ_RUSTFLAGS = -Zsanitizer=address -Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=3 -Cllvm-args=-sanitizer-coverage-inline-8bit-counters
 FUZZ_BIN = $(if $(filter 1,$(ASAN)),target/$(FUZZ_HOST)/fuzz/fennec-fuzz,target/fuzz/fennec-fuzz)
 
@@ -456,13 +495,18 @@ else
 endif
 	@if [ -z "$(TARGET)" ]; then $(FUZZ_BIN) list; else $(FUZZ_BIN) run $(TARGET) $(if $(FUZZ_SECONDS),--seconds $(FUZZ_SECONDS)) $(FUZZ_FLAGS); fi
 
-## Every target of the fuzzer for FUZZ_SECONDS (30) under AddressSanitizer,
-## guided by coverage: CI's fuzz-smoke job. SMOKE_ASAN=0 runs a plain build
+## Every target of the fuzzer for a count of runs its own (`--smoke`, about
+## 30 s each on CI) under AddressSanitizer, guided by coverage, from the
+## repository's seeds alone: CI's fuzz-smoke job. A count, never a time: a
+## commit's smoke hands each the same inputs on any machine of a platform,
+## and ends on the same line; six minutes of CPU time end one failing,
+## named. FUZZ_SECONDS=N runs each that long instead; SMOKE_ASAN=0 a plain
+## build
 SMOKE_ASAN ?= 1
 fuzz-smoke:
 	@$(MAKE) --no-print-directory fuzz ASAN=$(SMOKE_ASAN)
 	@bin=$(if $(filter 1,$(SMOKE_ASAN)),target/$(FUZZ_HOST)/fuzz/fennec-fuzz,target/fuzz/fennec-fuzz); \
-	for t in $$($$bin names); do $$bin run $$t --seconds $(or $(FUZZ_SECONDS),30) $(FUZZ_FLAGS) || exit 1; done
+	for t in $$($$bin names); do $$bin run $$t $(if $(FUZZ_SECONDS),--seconds $(FUZZ_SECONDS),--smoke) --corpus none $(FUZZ_FLAGS) || exit 1; done
 
 ## FUZZ_NIGHTLY, the one nightly the fuzzer is built with
 fuzz-toolchain:

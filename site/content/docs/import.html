@@ -137,7 +137,7 @@ file is there, when it checks the chain as <code>verify-ca</code>. They keep
 the rows from someone listening on the path, not from someone standing in
 for the server, who would read them, and the password's proof too; and
 <code>prefer</code> goes on in plain text where the server, or whoever stands
-in for it, says it takes no TLS. Only <code>verify-full</code> keeps that
+in for it, refuses TLS. Only <code>verify-full</code> keeps that
 out: it is the mode to use across a network, and on any you do not own.</p>
 
 <p>Without <code>sslrootcert</code>, libpq's own CA file,
