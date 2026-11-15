@@ -10,9 +10,11 @@
 # rig's (under `--sync 250` only if no acknowledged write was left for a
 # sync to cover either). Two of the cuts also lose the disk's volatile
 # cache: the disk rebuilt as of the last flush the guest asked for (QEMU's
-# blklogwrites, replay.py), checked the same way. Four guests, a matrix entry each:
+# blklogwrites, replay.py), checked the same way. Seven guests, a matrix entry each:
 #
-#   - `--sync always` on ext4, and on XFS: every acknowledged write there;
+#   - `--sync always` on ext4 in each of its three data modes -- ordered,
+#     as mkfs.ext4 makes it, writeback and journal -- and on XFS: every
+#     acknowledged write there;
 #   - `--sync 250`, the default, on ext4: every write `/_changes` handed
 #     over as on disk there, an acknowledged write gone only if it was
 #     answered within 250 ms and two syncs' own time of the cut, a fixed
@@ -24,7 +26,10 @@
 #     acknowledged write there when the node reopens, the standby near the
 #     node's tip and holding nothing the node lost -- the acknowledged
 #     writes it lacked, what a promotion would have lost, counted -- and
-#     the same rows once it follows again.
+#     the same rows once it follows again;
+#   - that node under `--sync 250`, its tenants synced by its own pass
+#     (`Tenants::sync_dirty`), not a file's syncer: each tenant held to
+#     the `--sync 250` guest's check, and the standby to the node's.
 #
 # .github/linux-power-cut/ holds the guest's side, .github/power-cut/ the
 # host's files both systems' rigs run.
@@ -102,17 +107,25 @@ jobs:
       matrix:
         # `fs` is the data disk's file system: ext4 as mkfs.ext4 makes it
         # (data=ordered), and XFS as mkfs.xfs does -- each journals its
-        # metadata alone and orders a file's data its own way. `mode` is
-        # what the guest serves (vm.sh): one file under `--sync always`, one
-        # under `--sync 250`, or a `--dir` node with a standby. No arm64
+        # metadata alone and orders a file's data its own way. `mount` is
+        # its mount options where it is not mounted as made: ext4's other
+        # two data modes, `data=writeback`, which journals the metadata and
+        # orders no data before it -- a file's length may reach the disk
+        # before its bytes -- and `data=journal`, which journals the data
+        # too. `mode` is what the guest serves (vm.sh): one file under
+        # `--sync always`, one under `--sync 250`, or a `--dir` node with a
+        # standby under either. No arm64
         # entry: a ubuntu-24.04-arm runner is a Hyper-V guest whose kernel
         # has no KVM ("HYP mode not available", run 43438990710;
         # docs/design/durability.md).
         include:
           - { id: ext4, name: ext4, fs: ext4, mode: always }
+          - { id: ext4-writeback, name: 'ext4, data=writeback', fs: ext4, mode: always, mount: data=writeback }
+          - { id: ext4-journal, name: 'ext4, data=journal', fs: ext4, mode: always, mount: data=journal }
           - { id: xfs, name: xfs, fs: xfs, mode: always }
           - { id: sync-250, name: 'ext4, --sync 250', fs: ext4, mode: sync250 }
           - { id: dir, name: 'ext4, a --dir node and its standby', fs: ext4, mode: dir }
+          - { id: dir-sync-250, name: 'ext4, --sync 250, a --dir node and its standby', fs: ext4, mode: dir250 }
     timeout-minutes: 60
     permissions:
       contents: read
@@ -127,6 +140,7 @@ jobs:
       IMAGE_SHA256: 04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94
       SEED: ${{ github.run_id }}-${{ github.run_attempt }}
       FS: ${{ matrix.fs }}
+      MOUNT_OPTIONS: ${{ matrix.mount }}
       MODE: ${{ matrix.mode }}
     steps:
       - uses: actions/checkout@v7
