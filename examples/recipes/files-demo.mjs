@@ -37,7 +37,9 @@ const stored = async (what, res) => {
   if (res.ok) return res;
   throw new Error(`${what}: the store answered ${res.status}\n${await res.text()}\n-- the store's last log lines:\n${storeLog()}`);
 };
-atExit(() => container && execFileSync('docker', ['rm', '-f', container], { stdio: 'ignore' }));
+// With `-v`: the image declares /data a volume, and a container removed without
+// it leaves that volume behind, a store's whole data dir, on every run.
+atExit(() => container && execFileSync('docker', ['rm', '-f', '-v', container], { stdio: 'ignore' }));
 
 // Pinned: a store that changes under a recipe is a recipe that fails for another reason.
 const SEAWEEDFS = 'chrislusf/seaweedfs:4.50';

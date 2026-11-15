@@ -58,7 +58,8 @@ reads a replica of it as the cut left it (DIR/replica-N-<name>.json), and
 replica holds nothing the primary lost, and was near the tip when the
 primary went (`STANDBY_LAG`), the acknowledged writes it lacked counted:
 what a promotion at the cut would have lost -- then waits for the replica
-to reach the primary and finds the two the same.
+to reach the primary and finds the two the same. With `--sync-ms` too, a
+node under `--sync <ms>`: each tenant held to its window as a file is.
 
     python3 test_client.py   # the check's own tests, Check.window's among them
 """
@@ -142,9 +143,12 @@ GAP_CEILING = 1.0
 # replication.rs). So a standby keeping up lacks at a cut only what the
 # guest's sockets held when it went, and one lacking a write answered a
 # second before the cut is one the node had stopped waiting for. Its lag is
-# how long before the cut the oldest acknowledged write it lacked was
-# answered. Run 43438990710's standby was 0 to 51 changes behind the node
-# as it came back, the 40 of a spill in flight at the cut among them.
+# how long before the cut the oldest acknowledged write it lacked was on
+# the node's disk: answered, under `--sync always`; handed over by a
+# `/_changes` page under `--sync <ms>`, where nothing waits for the streams
+# and a write is sent once a sync covered it (`Check.standby_near`). Run
+# 43438990710's standby was 0 to 51 changes behind the node as it came
+# back, the 40 of a spill in flight at the cut among them.
 STANDBY_LAG = 1.0
 # How long a replica is waited for to reach the primary after a check: four
 # waits of `Fennec-Wait`'s 30 s, the most a read may wait.
@@ -1049,11 +1053,15 @@ class Check:
     def standby_near(self, held, back):
         """The standby against the node's tip at the cut: the acknowledged
         writes above the change it held -- what a promotion at the cut
-        would have lost, every one answered as durable -- counted, and how
-        long before the cut the oldest of them was answered held to
-        `STANDBY_LAG`. The cuts before this one's left it at the node's
-        change (`replica_after`), so only this cut's writes can be above
-        it."""
+        would have lost -- counted, and how long before the cut the oldest
+        of them was on the node's disk held to `STANDBY_LAG`. The cuts
+        before this one's left it at the node's change (`replica_after`),
+        so only this cut's writes can be above it. Under `--sync always` a
+        write is on disk when it is answered; under `--sync <ms>` it is
+        answered first and sent once a sync covered it, so a write is on
+        disk from the first `/_changes` page reaching it, and one no page
+        had reached at the cut was sent to no standby -- the cut may take it
+        from the node too, which `window` holds to its bound."""
         a = self.args
         writes = [e for q, e in self.acked.items() if self.sent[q]["op"] != "k"]
         acked = [(e["t"], e["seq"]) for e in writes if e.get("seq") is not None]
@@ -1061,20 +1069,31 @@ class Check:
             self.rig(f"the node answered none of cut {a.cut}'s {len(writes)} writes with its change (`Fennec-Seq`): nothing to hold the standby to")
         above = sorted(x for x in acked if x[1] > held)
         tip = max((s for _, s in acked), default=held)
-        lag = self.cut_at - above[0][0] if above and self.cut_at is not None else 0.0
+        if self.sync:
+            nexts = [p["next"] for p in self.pages]
+            on_disk = [self.pages[k]["at"] for k in (bisect.bisect_left(nexts, s) for _, s in above) if k < len(nexts)]
+        else:
+            on_disk = [t for t, _ in above]
+        lag = max(0.0, self.cut_at - min(on_disk)) if on_disk and self.cut_at is not None else 0.0
+        if not above:
+            what = "no acknowledged write above it: a promotion at the cut would have lost none"
+        elif self.sync:
+            what = f"{len(above)} acknowledged writes above it, {len(on_disk)} of them on the node's disk" + (
+                f", the oldest from {lag * 1000:.0f} ms before the cut" if on_disk else ""
+            ) + ": what a promotion at the cut would have lost"
+        else:
+            what = (
+                f"{len(above)} acknowledged writes above it, the oldest answered {lag * 1000:.0f} ms before the cut: "
+                "what a promotion at the cut would have lost"
+            )
         print(
             f"STANDBY cut {a.cut} {a.label}{' ' + a.prefix if a.prefix else ''}: held change {held}, "
             f"{max(0, tip - held)} behind the last acknowledged ({tip}) and {max(0, back - held)} behind the node as it came back ({back}); "
-            + (
-                f"{len(above)} acknowledged writes above it, the oldest answered {lag * 1000:.0f} ms before the cut: "
-                "what a promotion at the cut would have lost"
-                if above
-                else "no acknowledged write above it: a promotion at the cut would have lost none"
-            )
+            + what
         )
         if lag > STANDBY_LAG:
             self.rig(
-                f"the standby lacked a write the node acknowledged {lag * 1000:.0f} ms before cut {a.cut}, "
+                f"the standby lacked a write the node acknowledged and had on disk {lag * 1000:.0f} ms before cut {a.cut}, "
                 f"past {STANDBY_LAG * 1000:.0f} ms: so far behind, it held nothing of the node's last {lag:.1f} s to it"
             )
 
