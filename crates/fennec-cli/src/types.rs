@@ -20,6 +20,7 @@
 //! wrote, a count: no row type, and the file says so. A broken statement of
 //! a database is named in a comment and typed no further.
 
+use crate::exit::Code;
 use fennec_core::prelude::*;
 use fennec_core::schema::{Quant, TextIndexSpec, VectorIndexSpec};
 use fennec_core::value::VecPrec;
@@ -52,7 +53,7 @@ usage: fennec types <file.fennec | schema.fennecql> [-o <out>] [--name <name>]
   other languages).
 ";
 
-pub fn main(args: &[String]) -> i32 {
+pub fn main(args: &[String]) -> Code {
     let mut path: Option<&str> = None;
     let mut out: Option<&str> = None;
     let mut name = "FennecSchema";
@@ -67,7 +68,7 @@ pub fn main(args: &[String]) -> i32 {
         match args[i].as_str() {
             "-h" | "--help" => {
                 println!("{USAGE}");
-                return 0;
+                return Code::Ok;
             }
             "--schema" => tables = true,
             "--fennecql" => fennecql = true,
@@ -113,7 +114,7 @@ pub fn main(args: &[String]) -> i32 {
 
     let Some(path) = path else {
         eprintln!("{USAGE}");
-        return 2;
+        return Code::Refused;
     };
 
     let file = match read(path) {
@@ -146,7 +147,7 @@ pub fn main(args: &[String]) -> i32 {
         },
         None => print!("{src}"),
     }
-    0
+    Code::Ok
 }
 
 /// What `fennec types` reads of a file: its collections, and its named
@@ -376,9 +377,9 @@ fn render_fennecql(path: &str, schemas: &[Schema]) -> String {
     )
 }
 
-fn fail(msg: &str) -> i32 {
+fn fail(msg: &str) -> Code {
     eprintln!("{msg}");
-    2
+    Code::Refused
 }
 
 /// Produces the `.d.ts` body from the schema and its named statements.

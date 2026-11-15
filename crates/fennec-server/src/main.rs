@@ -9,6 +9,7 @@ use fennec_core::prelude::*;
 use fennec_http::replication::{self, Follower, Replication};
 use fennec_http::tenants::{Refused, Tenants};
 use fennec_server::durability::{self, SyncPolicy};
+use fennec_server::exit::{self, Code};
 use std::io::{IsTerminal, Read, Write};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -380,7 +381,7 @@ terminator such as nginx or Caddy. What it dials -- a primary, a collector
 
 fn fail(msg: &str) -> ! {
     fennec_http::log!("{msg}");
-    std::process::exit(2);
+    exit::now(Code::Refused);
 }
 
 /// A token or a key from the environment: set and empty is unset, as a
@@ -472,7 +473,7 @@ fn health_over_tls(_: &str) -> std::io::Result<String> {
 /// Health check: `GET /_health` on the HTTP listener, which answers with no
 /// token and takes no lock -- during a long `compact` a probe that queried
 /// would wait too, and a healthy server would look dead.
-fn health_check(addr: &str) -> i32 {
+fn health_check(addr: &str) -> Code {
     // A server listening on every address answers on loopback as well.
     let addr = match addr.rsplit_once(':') {
         Some(("0.0.0.0" | "", port)) => format!("127.0.0.1:{port}"),
@@ -494,15 +495,15 @@ fn health_check(addr: &str) -> i32 {
         Ok(out)
     })();
     match asked {
-        Ok(out) if out.starts_with("HTTP/1.1 200") => 0,
+        Ok(out) if out.starts_with("HTTP/1.1 200") => Code::Ok,
         Ok(out) => {
             let line = out.lines().next().unwrap_or("no answer");
             fennec_http::log!("ping failed: {line}");
-            1
+            Code::Failed
         }
         Err(e) => {
             fennec_http::log!("ping failed: {e}");
-            1
+            Code::Failed
         }
     }
 }
@@ -1012,7 +1013,7 @@ fn main() {
     // checks a `FENNEC_JWT_SECRET` with no `--policy` on the probe's command
     // line failed it (2), and the container never turned healthy.
     if ping {
-        std::process::exit(health_check(&http_cfg.addr));
+        exit::now(health_check(&http_cfg.addr));
     }
 
     // The files the flags name, opened as the user the server runs as: the
@@ -1339,7 +1340,7 @@ fn main() {
                 _ => String::new(),
             };
             fennec_http::log!("could not open {path}: {e}{who}");
-            std::process::exit(1);
+            exit::now(Code::Failed);
         })
     });
     let mut feed = None;
@@ -1371,7 +1372,7 @@ fn main() {
                 }
                 Err(e) => {
                     fennec_http::log!("could not open {path}: {e}");
-                    std::process::exit(1);
+                    exit::now(Code::Failed);
                 }
             }
         }
@@ -1404,7 +1405,7 @@ fn main() {
         Ok(l) => l,
         Err(e) => {
             fennec_http::log!("could not open the HTTP endpoint: {e}");
-            std::process::exit(1);
+            exit::now(Code::Failed);
         }
     };
 
@@ -1412,7 +1413,7 @@ fn main() {
         if let Err(e) = db.install_plugin(&fennec_server::mirror::GuardPlugin(m.opts.into.clone()))
         {
             fennec_http::log!("could not load the plugin: {e}");
-            std::process::exit(1);
+            exit::now(Code::Failed);
         }
     }
 
@@ -1426,7 +1427,7 @@ fn main() {
             promote,
         ) {
             fennec_http::log!("{e}");
-            std::process::exit(1);
+            exit::now(Code::Failed);
         }
     }
 
@@ -1530,7 +1531,7 @@ fn main() {
                 what,
                 &shared,
                 sync == SyncPolicy::Always,
-                durability::stop_with,
+                durability::stop_failed,
             )?;
         }
 
@@ -1551,7 +1552,7 @@ fn main() {
             .spawn(move || {
                 if let Err(e) = http_server.serve_on(listener) {
                     fennec_http::log!("HTTP server error: {e}");
-                    durability::stop_with(1);
+                    durability::stop_with(Code::Failed);
                 }
             })
             .map_err(|e| format!("could not start the HTTP thread: {e}"))?;
@@ -1572,7 +1573,7 @@ fn main() {
     // 2, as these exited before they went through the shutdown.
     if let Err(e) = started {
         fennec_http::log!("{e}");
-        durability::stop_with(2);
+        durability::stop_with(Code::Refused);
     }
 
     durability::run_syncer(shared, sync, checkpoint);
@@ -1683,7 +1684,7 @@ fn serve_dir(
         // After `with_tenants` gave each tenant its `--call-max-rows`, and
         // before the endpoint takes a request.
         if let Some(s) = &scheduler {
-            s.start(durability::stop_with)?;
+            s.start(durability::stop_failed)?;
         }
         // A test build's clock, moved by a file (`make chaos`), its thread
         // started with the node's as the scheduler's is.
@@ -1696,7 +1697,7 @@ fn serve_dir(
             .spawn(move || {
                 if let Err(e) = http_server.serve_on(listener) {
                     fennec_http::log!("HTTP server error: {e}");
-                    durability::stop_with(1);
+                    durability::stop_with(Code::Failed);
                 }
             })
             .map_err(|e| format!("could not start the HTTP thread: {e}"))?;
@@ -1708,7 +1709,7 @@ fn serve_dir(
     // 2, as these exited before they went through the shutdown.
     if let Err(e) = started {
         fennec_http::log!("{e}");
-        durability::stop_with(2);
+        durability::stop_with(Code::Refused);
     }
 
     let tick = sync.tick();
@@ -1738,7 +1739,7 @@ fn serve_dir(
             }
             let open = tenants.shutdown_with(durability::checkpoints());
             fennec_http::log!("\nshutting down: {open} open tenant(s) synced");
-            std::process::exit(durability::exit_code());
+            exit::now(durability::exit_code());
         }
         if matches!(sync, SyncPolicy::Interval(_)) {
             tenants.sync_dirty();

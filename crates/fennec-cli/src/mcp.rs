@@ -12,6 +12,7 @@
 //! token comes from the environment, `FENNEC_TOKEN`, never from argv, which
 //! `ps` shows.
 
+use crate::exit::Code;
 use fennec_http::mcp;
 use std::io;
 use std::sync::{Arc, RwLock};
@@ -43,7 +44,7 @@ answer a line on stdout, logs on stderr.
 Claude Code: claude mcp add fennecdb -- fennec mcp --file notes.fennec --memory memories
 ";
 
-pub fn main(args: &[String]) -> i32 {
+pub fn main(args: &[String]) -> Code {
     let mut file: Option<String> = None;
     let mut url: Option<String> = None;
     let mut read_only = false;
@@ -65,7 +66,7 @@ pub fn main(args: &[String]) -> i32 {
         let ok = match flag {
             "-h" | "--help" => {
                 print!("{USAGE}");
-                return 0;
+                return Code::Ok;
             }
             "--file" => value().map(|v| file = Some(v)).is_some(),
             "--url" => value().map(|v| url = Some(v)).is_some(),
@@ -74,7 +75,7 @@ pub fn main(args: &[String]) -> i32 {
                     Ok(()) => true,
                     Err(e) => {
                         eprintln!("fennec mcp: {e}");
-                        return 2;
+                        return Code::Refused;
                     }
                 },
                 None => false,
@@ -109,12 +110,12 @@ pub fn main(args: &[String]) -> i32 {
             }
             other => {
                 eprintln!("fennec mcp: unknown option `{other}`\n\n{USAGE}");
-                return 2;
+                return Code::Refused;
             }
         };
         if !ok {
             eprintln!("fennec mcp: {flag} expects a value\n\n{USAGE}");
-            return 2;
+            return Code::Refused;
         }
         i += 1;
     }
@@ -126,7 +127,7 @@ pub fn main(args: &[String]) -> i32 {
             && m.chars().all(|c| c.is_alphanumeric() || c == '_');
         if !ok {
             eprintln!("fennec mcp: --memory names a collection, and `{m}` is not a name");
-            return 2;
+            return Code::Refused;
         }
     }
     match (file, url) {
@@ -136,21 +137,21 @@ pub fn main(args: &[String]) -> i32 {
                 eprintln!(
                     "fennec mcp: {f} is the server's to set (fennec-server --mcp ...): over --url the tools are its own"
                 );
-                return 2;
+                return Code::Refused;
             }
             remote(&url, &token_env)
         }
         _ => {
             eprintln!("fennec mcp: give --file or --url\n\n{USAGE}");
-            2
+            Code::Refused
         }
     }
 }
 
-fn local(path: &str, read_only: bool, opts: mcp::Options) -> i32 {
+fn local(path: &str, read_only: bool, opts: mcp::Options) -> Code {
     if read_only && opts.write {
         eprintln!("fennec mcp: --write and --read-only: pick one");
-        return 2;
+        return Code::Refused;
     }
     let lock = match read_only {
         true => None,
@@ -158,7 +159,7 @@ fn local(path: &str, read_only: bool, opts: mcp::Options) -> i32 {
             Ok(l) => Some(l),
             Err(why) => {
                 eprintln!("fennec mcp: {why}");
-                return 1;
+                return Code::Failed;
             }
         },
     };
@@ -170,7 +171,7 @@ fn local(path: &str, read_only: bool, opts: mcp::Options) -> i32 {
         Ok(db) => Arc::new(RwLock::new(db)),
         Err(e) => {
             eprintln!("fennec mcp: could not open {path}: {e}");
-            return 1;
+            return Code::Failed;
         }
     };
     let cfg = fennec_http::Config {
@@ -195,17 +196,17 @@ fn local(path: &str, read_only: bool, opts: mcp::Options) -> i32 {
     );
     let served = mcp::serve_lines(&ctx, io::stdin().lock(), io::stdout().lock());
     let mut code = match served {
-        Ok(()) => 0,
+        Ok(()) => Code::Ok,
         Err(e) => {
             eprintln!("fennec mcp: {e}");
-            1
+            Code::Failed
         }
     };
     if !read_only {
         let mut g = db.write().unwrap_or_else(|e| e.into_inner());
         if let Err(e) = g.sync() {
             eprintln!("fennec mcp: could not push the writes to disk: {e}");
-            code = 1;
+            code = Code::Failed;
         }
     }
     // The database before the lock: its drop still writes the file -- what
@@ -218,13 +219,13 @@ fn local(path: &str, read_only: bool, opts: mcp::Options) -> i32 {
     code
 }
 
-fn remote(url: &str, token_env: &str) -> i32 {
+fn remote(url: &str, token_env: &str) -> Code {
     let token = std::env::var(token_env).ok().filter(|t| !t.is_empty());
     let up = match mcp::bridge::Upstream::parse(url, token) {
         Ok(up) => up,
         Err(e) => {
             eprintln!("fennec mcp: {e}");
-            return 2;
+            return Code::Refused;
         }
     };
     eprintln!(
@@ -237,10 +238,10 @@ fn remote(url: &str, token_env: &str) -> i32 {
         }
     );
     match mcp::bridge::bridge(&up, io::stdin().lock(), io::stdout().lock()) {
-        Ok(()) => 0,
+        Ok(()) => Code::Ok,
         Err(e) => {
             eprintln!("fennec mcp: {e}");
-            1
+            Code::Failed
         }
     }
 }

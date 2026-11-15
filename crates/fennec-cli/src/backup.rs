@@ -3,6 +3,7 @@
 //! stood at a moment. They speak the replication stream, so the server needs
 //! `--replication-token`.
 
+use crate::exit::{self, Code};
 use crate::stop::{on_signals, STOP};
 use fennec_http::archive::{self, Archive, Target};
 use fennec_http::node_archive::{self, NodeArchive};
@@ -125,12 +126,12 @@ fn write_private(path: &str, text: &str) -> std::io::Result<()> {
 
 fn fail(msg: &str) -> ! {
     eprintln!("{msg}");
-    std::process::exit(2);
+    exit::now(Code::Refused);
 }
 
 /// Runs `fennec backup|archive|restore ...`; the return value is the process
 /// exit code.
-pub fn main(command: &str, args: &[String]) -> i32 {
+pub fn main(command: &str, args: &[String]) -> Code {
     let mut positional = Vec::new();
     // Set and empty is unset, as an environment file leaves a line it does
     // not use: the primary's ask for its token is then said here.
@@ -192,7 +193,7 @@ pub fn main(command: &str, args: &[String]) -> i32 {
             }
             "-h" | "--help" => {
                 println!("{USAGE}");
-                return 0;
+                return Code::Ok;
             }
             other if other.starts_with('-') => fail(&format!("unknown option: {other}\n{USAGE}")),
             other => positional.push(other.to_string()),
@@ -221,11 +222,11 @@ pub fn main(command: &str, args: &[String]) -> i32 {
         return match write_private(path, &format!("{hex}\n")) {
             Ok(()) => {
                 println!("{path}: a new key; keep it apart from the archive");
-                0
+                Code::Ok
             }
             Err(e) => {
                 eprintln!("fennec key: {path}: {e}");
-                1
+                Code::Failed
             }
         };
     }
@@ -276,11 +277,11 @@ pub fn main(command: &str, args: &[String]) -> i32 {
             return match checked {
                 Ok(n) => {
                     println!("{dir}: {n} records, each whole by its checksum or carrying none");
-                    0
+                    Code::Ok
                 }
                 Err(e) => {
                     eprintln!("fennec verify: {dir}: {e}");
-                    1
+                    Code::Failed
                 }
             };
         }
@@ -303,11 +304,11 @@ pub fn main(command: &str, args: &[String]) -> i32 {
                 if v.torn > 0 {
                     println!("  the last segment ends in a record cut short ({} bytes), which a restore passes over", v.torn);
                 }
-                0
+                Code::Ok
             }
             Err(e) => {
                 eprintln!("fennec verify: {dir}: {e}");
-                1
+                Code::Failed
             }
         };
     }
@@ -324,11 +325,11 @@ pub fn main(command: &str, args: &[String]) -> i32 {
         return match archive(dir).and_then(|a| a.prune(keep.as_millis() as u64, now)) {
             Ok((images, segments)) => {
                 println!("{dir}: let go of {images} images and {segments} segments");
-                0
+                Code::Ok
             }
             Err(e) => {
                 eprintln!("fennec prune: {e}");
-                1
+                Code::Failed
             }
         };
     }
@@ -359,7 +360,7 @@ pub fn main(command: &str, args: &[String]) -> i32 {
     .map(|out| {
         crate::held::take(out, crate::held::Way::Copy).unwrap_or_else(|why| {
             eprintln!("fennec {command}: {why}");
-            std::process::exit(1);
+            exit::now(Code::Failed);
         })
     });
     // Asked under the lock, so nothing makes the file between the asking
@@ -422,10 +423,10 @@ pub fn main(command: &str, args: &[String]) -> i32 {
         _ => unreachable!("dispatched by main"),
     };
     match result {
-        Ok(()) => 0,
+        Ok(()) => Code::Ok,
         Err(e) => {
             eprintln!("fennec {command}: {e}");
-            1
+            Code::Failed
         }
     }
 }
@@ -438,7 +439,7 @@ fn every_tenant(
     key: Option<&Key>,
     (target, every, keep): (Target, Duration, Option<Duration>),
     token: Option<String>,
-) -> i32 {
+) -> Code {
     match command {
         "archive" => {
             let [node, root] = positional else {
@@ -469,10 +470,10 @@ fn every_tenant(
                 })
             });
             match result {
-                Ok(()) => 0,
+                Ok(()) => Code::Ok,
                 Err(e) => {
                     eprintln!("fennec archive: {e}");
-                    1
+                    Code::Failed
                 }
             }
         }
@@ -535,7 +536,10 @@ fn every_tenant(
                 tenants.len(),
                 lines.len()
             );
-            (failed > 0) as i32
+            match failed {
+                0 => Code::Ok,
+                _ => Code::Failed,
+            }
         }
         "restore" => {
             let [root, out] = positional else {
@@ -581,7 +585,10 @@ fn every_tenant(
                 }
             }
             println!("{out}: {restored} tenants restored, {passed} passed over, {failed} failed");
-            (failed > 0) as i32
+            match failed {
+                0 => Code::Ok,
+                _ => Code::Failed,
+            }
         }
         _ => fail(&format!("`fennec {command}` takes no --tenants\n{USAGE}")),
     }

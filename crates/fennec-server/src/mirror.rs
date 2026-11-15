@@ -117,7 +117,7 @@ pub fn start(m: Mirror, db: Arc<RwLock<Database>>) -> std::io::Result<()> {
                 fennec_http::log!("follow: the mirror of {} stopped: {e}", m.table);
                 // The code before the wait is let go: a shutdown already
                 // waiting on this thread exits as soon as it is.
-                crate::durability::exit_with(1);
+                crate::durability::exit_with(crate::exit::Code::Failed);
             }
             // Stopped either way: the shutdown's wait for this thread, below,
             // ends here rather than at `STOP_WAIT`.

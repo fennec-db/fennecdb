@@ -370,14 +370,15 @@ fn entry(db: &Arc<RwLock<Database>>, what: &str, durable: bool) -> Arc<Watched> 
 /// process's scheduler where none runs yet -- an `Err` where its thread
 /// cannot be made, for the server to stop on (`stop_with`), never to serve
 /// with its schedules unrun. `durable` is `--sync always`; `stop` is the
-/// server's one shutdown, which the scheduler's thread asks for should it
-/// end (`stop_with`). Called after both listeners are bound, since a first
-/// look may run a missed slot.
+/// server's one shutdown on a failure, which the scheduler's thread asks
+/// for should it end (`stop_failed`: the server decides the exit code, not
+/// this crate). Called after both listeners are bound, since a first look
+/// may run a missed slot.
 pub fn watch(
     what: &str,
     db: &Arc<RwLock<Database>>,
     durable: bool,
-    stop: fn(i32),
+    stop: fn(),
 ) -> std::result::Result<(), String> {
     start(stop)?;
     let w = entry(db, what, durable);
@@ -438,7 +439,7 @@ fn tell_unrun(what: &str, why: &str, n: usize) {
     }
 }
 
-fn start(stop: fn(i32)) -> std::result::Result<(), String> {
+fn start(stop: fn()) -> std::result::Result<(), String> {
     let mut started = lock(&STARTED);
     if *started {
         return Ok(());
@@ -456,14 +457,14 @@ fn start(stop: fn(i32)) -> std::result::Result<(), String> {
 /// sync -- or the loop's end stops the server through its one shutdown
 /// (`stop`), never a thread gone and the server serving with no schedule
 /// run.
-fn scheduler(stop: fn(i32)) {
+fn scheduler(stop: fn()) {
     let ended = std::panic::catch_unwind(looking);
     let words = match &ended {
         Ok(()) => "its loop ended".to_string(),
         Err(p) => panic_words(p.as_ref()),
     };
     crate::log!("the scheduler stopped ({words}): the server stops with it");
-    stop(1);
+    stop();
 }
 
 fn looking() {
@@ -1038,14 +1039,13 @@ fn tell_ahead(w: &Ctx<'_>, name: &str, mark: i64, now: i64, waits: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicI32;
 
     /// Makes the next look panic, outside any run.
     pub(super) static PANIC: AtomicBool = AtomicBool::new(false);
-    static STOPPED: AtomicI32 = AtomicI32::new(0);
+    static STOPPED: AtomicBool = AtomicBool::new(false);
 
-    fn stop(code: i32) {
-        STOPPED.store(code, Ordering::SeqCst);
+    fn stop() {
+        STOPPED.store(true, Ordering::SeqCst);
     }
 
     /// A panic outside a run -- here a look's -- ends the scheduler's
@@ -1067,11 +1067,10 @@ mod tests {
         // Holding a schedule, the database is looked at once given.
         watch("a test's database", &db, false, stop).unwrap();
         let t = std::time::Instant::now();
-        while STOPPED.load(Ordering::SeqCst) == 0 {
+        while !STOPPED.load(Ordering::SeqCst) {
             assert!(t.elapsed() < Duration::from_secs(20), "never stopped");
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert_eq!(STOPPED.load(Ordering::SeqCst), 1);
         assert!(!PANIC.load(Ordering::SeqCst), "the look panicked");
     }
 }

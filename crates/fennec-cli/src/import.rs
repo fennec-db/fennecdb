@@ -1,6 +1,7 @@
 //! `fennec import` -- builds a collection from a SQLite file or a PostgreSQL
 //! server.
 
+use crate::exit::{self, Code};
 use crate::stop;
 use fennec_core::prelude::*;
 use fennec_import::follow::{self, lsn_text, Event, Follow};
@@ -69,11 +70,11 @@ example
 
 fn fail(msg: &str) -> ! {
     eprintln!("{msg}");
-    std::process::exit(2);
+    exit::now(Code::Refused);
 }
 
 /// Runs `fennec import ...`; the return value is the process exit code.
-pub fn main(args: &[String]) -> i32 {
+pub fn main(args: &[String]) -> Code {
     let mut source: Option<String> = None;
     let mut table: Option<String> = None;
     let mut into: Option<String> = None;
@@ -116,7 +117,7 @@ pub fn main(args: &[String]) -> i32 {
             "--publication" => publication = Some(next(&mut i, "--publication")),
             "-h" | "--help" => {
                 println!("{USAGE}");
-                return 0;
+                return Code::Ok;
             }
             other if !other.starts_with('-') => {
                 if source.is_some() {
@@ -134,7 +135,7 @@ pub fn main(args: &[String]) -> i32 {
 
     let Some(source) = source else {
         eprintln!("no source was given.{USAGE}");
-        return 2;
+        return Code::Refused;
     };
     let Some(table) = table else {
         fail("--table is required");
@@ -176,16 +177,16 @@ pub fn main(args: &[String]) -> i32 {
             Ok(l) => Some(l),
             Err(why) => {
                 eprintln!("error: {why}");
-                return 1;
+                return Code::Failed;
             }
         },
     };
     if let (Some(f), false) = (&follow, dry_run) {
         return match run_follow(&source, &table, &target, &opts, f) {
-            Ok(()) => 0,
+            Ok(()) => Code::Ok,
             Err(e) => {
                 eprintln!("error: {e}");
-                1
+                Code::Failed
             }
         };
     }
@@ -207,11 +208,11 @@ pub fn main(args: &[String]) -> i32 {
                     f.slot, f.publication
                 );
             }
-            0
+            Code::Ok
         }
         Err(e) => {
             eprintln!("error: {e}");
-            1
+            Code::Failed
         }
     }
 }

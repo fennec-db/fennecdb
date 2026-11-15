@@ -12,6 +12,7 @@
 use fennec_http::crypto::ct_eq;
 use fennec_http::replication::{self, Follower, Replication};
 use fennec_shard::directory::Directory;
+use fennec_shard::exit::{self, Code};
 use fennec_shard::{Config, Router};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -172,7 +173,7 @@ is unset.
 
 fn fail(msg: &str) -> ! {
     fennec_http::log!("{msg}");
-    std::process::exit(2);
+    exit::now(Code::Refused);
 }
 
 /// `<path>.lock` (`fennec_abi::lock`) for as long as the router runs, taken
@@ -190,7 +191,7 @@ fn hold_file(path: &str, what: &str) -> fennec_abi::lock::FileLock {
             _ => String::new(),
         };
         fennec_http::log!("could not open {what} {path}: {e}{who}");
-        std::process::exit(1);
+        exit::now(Code::Failed);
     })
 }
 
@@ -595,6 +596,6 @@ fn main() {
     }
     if let Err(e) = router.serve_on(listener) {
         fennec_http::log!("router error: {e}");
-        std::process::exit(1);
+        exit::now(Code::Failed);
     }
 }

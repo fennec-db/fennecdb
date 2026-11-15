@@ -11,6 +11,7 @@
 //!   beside the database ([`stop_with`]): every way a server stops sets
 //!   one flag, and the syncer that sees it is the only thing that exits.
 
+use crate::exit::{self, Code};
 use fennec_core::prelude::*;
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -21,8 +22,9 @@ use std::time::{Duration, Instant};
 /// atomic; the syncer thread sees it and performs the final `sync`.
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
-/// The code the shutdown exits with: 0, or the first [`stop_with`] gave.
-static EXIT_CODE: AtomicI32 = AtomicI32::new(0);
+/// The code the shutdown exits with: [`Code::Ok`], or the first
+/// [`stop_with`] gave.
+static EXIT_CODE: AtomicI32 = AtomicI32::new(Code::Ok as i32);
 
 /// How often a syncer looks at the shutdown flag, whatever its interval.
 /// Sleeping the whole interval first, `--sync 5000` exited 5 s after its
@@ -139,16 +141,24 @@ pub fn request_shutdown() {
 /// `code`, the first given. Exiting where it failed would cut short a
 /// shutdown already under way, its sync among what was cut, and skip the
 /// sync of one that was not.
-pub fn stop_with(code: i32) {
+pub fn stop_with(code: Code) {
     exit_with(code);
     request_shutdown();
+}
+
+/// [`stop_with`] a failure, for what `fennec_http` runs beside the
+/// database and hands a way to stop the server -- the scheduler, a file's
+/// and a node's: their end is [`Code::Failed`], decided here, not there.
+pub fn stop_failed() {
+    stop_with(Code::Failed);
 }
 
 /// The exit code alone, for a thread a shutdown may already be waiting on:
 /// it stores the code before it lets the wait go, and only then asks for
 /// the shutdown, so the exit cannot come before the code (`mirror`).
-pub fn exit_with(code: i32) {
-    let _ = EXIT_CODE.compare_exchange(0, code, Ordering::SeqCst, Ordering::SeqCst);
+pub fn exit_with(code: Code) {
+    let ok = Code::Ok as i32;
+    let _ = EXIT_CODE.compare_exchange(ok, code as i32, Ordering::SeqCst, Ordering::SeqCst);
 }
 
 /// Whether the server got as far as serving: its HTTP thread started.
@@ -182,12 +192,13 @@ pub fn served() -> bool {
 /// at each try too. The graphs `link::keep` appends as they change keep the
 /// next open's linking short without one.
 pub fn checkpoints() -> bool {
-    served() && exit_code() == 0
+    served() && exit_code() == Code::Ok
 }
 
-/// The code the shutdown exits with: 0 unless [`stop_with`] gave another.
-pub fn exit_code() -> i32 {
-    EXIT_CODE.load(Ordering::SeqCst)
+/// The code the shutdown exits with: [`Code::Ok`] unless [`stop_with`]
+/// gave another.
+pub fn exit_code() -> Code {
+    Code::of(EXIT_CODE.load(Ordering::SeqCst)).unwrap_or(Code::Failed)
 }
 
 /// `--exit-on-stdin-close`: a thread that reads stdin until it ends -- the
@@ -380,7 +391,7 @@ fn shutdown(db: &RwLock<Database>, checkpoint: bool) -> ! {
     // did and the exit, holding the lock, never runs: every clean stop left
     // the log beside the file (Linux, `synclog.rs`).
     g.close_log();
-    std::process::exit(exit_code());
+    exit::now(exit_code());
 }
 
 // Below the code a Unix build compiles, so its lines -- a panic's location

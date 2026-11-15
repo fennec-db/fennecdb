@@ -16,6 +16,7 @@
 
 #[cfg(feature = "backup")]
 mod backup;
+mod exit;
 mod held;
 #[cfg(feature = "import")]
 mod import;
@@ -26,6 +27,7 @@ mod mcp;
 mod stop;
 mod types;
 
+use exit::Code;
 use fennec_core::prelude::*;
 use fennec_ql::{Reading, Refusal, Rest};
 use std::io::{self, BufRead, IsTerminal, Write};
@@ -168,41 +170,41 @@ fn main() {
     // The subcommand has to be caught before the positional path: the arm
     // below treats anything not starting with a dash as a file path.
     if args.first().is_some_and(|a| a == "types") {
-        std::process::exit(types::main(&args[1..]));
+        exit::now(types::main(&args[1..]));
     }
 
     if let Some(command @ ("backup" | "archive" | "restore" | "prune" | "verify" | "key")) =
         args.first().map(String::as_str)
     {
         #[cfg(feature = "backup")]
-        std::process::exit(backup::main(command, &args[1..]));
+        exit::now(backup::main(command, &args[1..]));
         #[cfg(not(feature = "backup"))]
         {
             eprintln!("this binary was built without `{command}`: its `backup` feature is off");
             eprintln!("rebuild it: cargo build --release -p fennec-cli --features backup");
-            std::process::exit(2);
+            exit::now(Code::Refused);
         }
     }
 
     if args.first().is_some_and(|a| a == "mcp") {
         #[cfg(feature = "mcp")]
-        std::process::exit(mcp::main(&args[1..]));
+        exit::now(mcp::main(&args[1..]));
         #[cfg(not(feature = "mcp"))]
         {
             eprintln!("this binary was built without `mcp`: its `mcp` feature is off");
             eprintln!("rebuild it: cargo build --release -p fennec-cli --features mcp");
-            std::process::exit(2);
+            exit::now(Code::Refused);
         }
     }
 
     if args.first().is_some_and(|a| a == "import") {
         #[cfg(feature = "import")]
-        std::process::exit(import::main(&args[1..]));
+        exit::now(import::main(&args[1..]));
         #[cfg(not(feature = "import"))]
         {
             eprintln!("this binary was built with `--no-default-features`, without import support");
             eprintln!("rebuild it: cargo build --release -p fennec-cli --features import");
-            std::process::exit(2);
+            exit::now(Code::Refused);
         }
     }
 
@@ -234,7 +236,7 @@ fn main() {
             other if !other.starts_with('-') => path = Some(other.to_string()),
             other => {
                 eprintln!("unknown option: {other}");
-                std::process::exit(2);
+                exit::now(Code::Refused);
             }
         }
         i += 1;
@@ -242,7 +244,7 @@ fn main() {
 
     if read_only && path.is_none() {
         eprintln!("--read-only reads a file: name it (fennec --read-only data.fennec)");
-        std::process::exit(2);
+        exit::now(Code::Refused);
     }
     // Taken before the open, and let go after the database is (declared
     // before it, dropped after it). Opened beside a server, the shell's
@@ -255,7 +257,7 @@ fn main() {
             Ok(l) => Some(l),
             Err(why) => {
                 eprintln!("{why}");
-                std::process::exit(1);
+                exit::now(Code::Failed);
             }
         },
         _ => None,
@@ -270,7 +272,7 @@ fn main() {
                 Ok(db) => db,
                 Err(e) => {
                     eprintln!("could not open {p}: {e}");
-                    std::process::exit(1);
+                    exit::now(Code::Failed);
                 }
             }
         }
@@ -281,20 +283,23 @@ fn main() {
     }
 
     if let Some(cmd) = command {
-        let mut code = if run(&mut db, &cmd) { 0 } else { 1 };
+        let mut code = match run(&mut db, &cmd) {
+            true => Code::Ok,
+            false => Code::Failed,
+        };
         // A one-shot write that never reached the disk must not exit 0: the
         // caller's script would go on believing it. Read-only, there is
         // nothing to push, and no sync is asked of the file.
         let pushed = if read_only { Ok(()) } else { db.sync() };
         if let Err(e) = pushed {
             eprintln!("could not push the writes to disk: {e}");
-            code = 1;
+            code = Code::Failed;
         }
         // Closed before the exit, which drops nothing: the close removes
         // the sync log the sync began (Linux, `synclog.rs`), which every
         // `-c` that wrote left beside the file, 260 KB.
         drop(db);
-        std::process::exit(code);
+        exit::now(code);
     }
 
     let stdin = io::stdin();
@@ -356,7 +361,7 @@ fn main() {
     let pushed = if read_only { Ok(()) } else { db.sync() };
     if let Err(e) = pushed {
         eprintln!("could not push the writes to disk: {e}");
-        std::process::exit(1);
+        exit::now(Code::Failed);
     }
 }
 
