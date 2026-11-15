@@ -1,26 +1,38 @@
-3000  write(3</tmp/perf-gate-io-0_b8e9bu/io-spill.kg34x97g/io.fennec.lock>, ""..., 19) = 19
-3000  write(4</tmp/perf-gate-io-0_b8e9bu/io-spill.kg34x97g/io.fennec>, ""..., 8) = 8
-3000  write(2<pipe:[75044]>, ""..., 63) = 63
-3000  write(2<pipe:[75044]>, ""..., 96) = 96
-3006  write(2<pipe:[75044]>, ""..., 66) = 66
-3006  accept4(5<socket:[74141]>, {sa_family=AF_INET, sin_port=htons(53670), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC) = 6<socket:[75794]>
-3006  accept4(5<socket:[74141]> <unfinished ...>
-3010  write(4</tmp/perf-gate-io-0_b8e9bu/io-spill.kg34x97g/io.fennec>, ""..., 24) = 24
-3010  fdatasync(4</tmp/perf-gate-io-0_b8e9bu/io-spill.kg34x97g/io.fennec>) = 0
-3010  pwrite64(8</tmp/perf-gate-io-0_b8e9bu/io-spill.kg34x97g/io.fennec.sync>, ""..., 266240, 0) = 266240
-3010  fsync(8</tmp/perf-gate-io-0_b8e9bu/io-spill.kg34x97g/io.fennec.sync>) = 0
-3010  fsync(9</tmp/perf-gate-io-0_b8e9bu/io-spill.kg34x97g>) = 0
-3010  writev(6<socket:[75794]>, [...], 2) = 220
-3006  <... accept4 resumed>, {sa_family=AF_INET, sin_port=htons(53674), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC) = 7<socket:[74145]>
-3006  accept4(5<socket:[74141]> <unfinished ...>
-3012  write(4</tmp/perf-gate-io-0_b8e9bu/io-spill.kg34x97g/io.fennec>, ""..., 16785520) = 16785520
-3012  write(4</tmp/perf-gate-io-0_b8e9bu/io-spill.kg34x97g/io.fennec>, ""..., 1234392) = 1234392
-3012  fdatasync(4</tmp/perf-gate-io-0_b8e9bu/io-spill.kg34x97g/io.fennec>) = 0
-3012  writev(7<socket:[74145]>, [...], 2) = 30236
-3006  <... accept4 resumed>, {sa_family=AF_INET, sin_port=htons(53684), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC) = 6<socket:[73322]>
-3006  accept4(5<socket:[74141]> <unfinished ...>
-3016  writev(6<socket:[73322]>, [...], 2) = 153
-3004  write(2<pipe:[75044]>, ""..., 28) = 28
-3000  write(2<pipe:[75044]>, ""..., 34) = 34
-3000  fdatasync(4</tmp/perf-gate-io-0_b8e9bu/io-spill.kg34x97g/io.fennec>) = 0
-3006  <... accept4 resumed> <unfinished ...>) = ?
+405   openat(AT_FDCWD</>, "/tmp/perf-gate-io-h4eyelf4/io-spill.6m2lguym/io.fennec.lock", O_RDWR|O_CREAT|O_LARGEFILE|O_CLOEXEC, 0666) = 3</tmp/perf-gate-io-h4eyelf4/io-spill.6m2lguym/io.fennec.lock>
+405   fcntl(3</tmp/perf-gate-io-h4eyelf4/io-spill.6m2lguym/io.fennec.lock>, F_SETFD, FD_CLOEXEC) = 0
+405   fcntl(3</tmp/perf-gate-io-h4eyelf4/io-spill.6m2lguym/io.fennec.lock>, F_SETLK, {l_type=F_WRLCK, l_whence=SEEK_SET, l_start=0, l_len=0}) = 0
+405   write(3</tmp/perf-gate-io-h4eyelf4/io-spill.6m2lguym/io.fennec.lock>, ""..., 18) = 18
+405   ftruncate(3</tmp/perf-gate-io-h4eyelf4/io-spill.6m2lguym/io.fennec.lock>, 18) = 0
+405   openat(AT_FDCWD</>, "/tmp/perf-gate-io-h4eyelf4/io-spill.6m2lguym/io.fennec", O_RDWR|O_CREAT|O_LARGEFILE|O_CLOEXEC, 0666) = 4</tmp/perf-gate-io-h4eyelf4/io-spill.6m2lguym/io.fennec>
+405   fcntl(4</tmp/perf-gate-io-h4eyelf4/io-spill.6m2lguym/io.fennec>, F_SETFD, FD_CLOEXEC) = 0
+405   unlinkat(AT_FDCWD</>, "/tmp/perf-gate-io-h4eyelf4/io-spill.6m2lguym/io.fennec.sync", 0) = -1 ENOENT (No such file or directory)
+405   write(4</tmp/perf-gate-io-h4eyelf4/io-spill.6m2lguym/io.fennec>, ""..., 8) = 8
+405   write(2<pipe:[108285]>, ""..., 63) = 63
+405   write(2<pipe:[108285]>, ""..., 96) = 96
+416   write(2<pipe:[108285]>, ""..., 66) = 66
+416   accept4(5<socket:[108291]>, {sa_family=AF_INET, sin_port=htons(38400), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC) = 6<socket:[110002]>
+416   accept4(5<socket:[108291]> <unfinished ...>
+425   write(4</tmp/perf-gate-io-h4eyelf4/io-spill.6m2lguym/io.fennec>, ""..., 24) = 24
+425   fdatasync(4</tmp/perf-gate-io-h4eyelf4/io-spill.6m2lguym/io.fennec>) = 0
+425   openat(AT_FDCWD</>, "/tmp/perf-gate-io-h4eyelf4/io-spill.6m2lguym/io.fennec.sync", O_RDWR|O_CREAT|O_LARGEFILE|O_CLOEXEC, 0666) = 8</tmp/perf-gate-io-h4eyelf4/io-spill.6m2lguym/io.fennec.sync>
+425   fcntl(8</tmp/perf-gate-io-h4eyelf4/io-spill.6m2lguym/io.fennec.sync>, F_SETFD, FD_CLOEXEC) = 0
+425   pwrite64(8</tmp/perf-gate-io-h4eyelf4/io-spill.6m2lguym/io.fennec.sync>, ""..., 266240, 0) = 266240
+425   fsync(8</tmp/perf-gate-io-h4eyelf4/io-spill.6m2lguym/io.fennec.sync>) = 0
+425   openat(AT_FDCWD</>, "/tmp/perf-gate-io-h4eyelf4/io-spill.6m2lguym", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = 9</tmp/perf-gate-io-h4eyelf4/io-spill.6m2lguym>
+425   fcntl(9</tmp/perf-gate-io-h4eyelf4/io-spill.6m2lguym>, F_SETFD, FD_CLOEXEC) = 0
+425   fsync(9</tmp/perf-gate-io-h4eyelf4/io-spill.6m2lguym>) = 0
+425   writev(6<socket:[110002]>, [...], 2) = 220
+416   <... accept4 resumed>, {sa_family=AF_INET, sin_port=htons(38404), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC) = 7<socket:[113143]>
+416   accept4(5<socket:[108291]> <unfinished ...>
+428   write(4</tmp/perf-gate-io-h4eyelf4/io-spill.6m2lguym/io.fennec>, ""..., 16785520) = 16785520
+428   write(4</tmp/perf-gate-io-h4eyelf4/io-spill.6m2lguym/io.fennec>, ""..., 1234392) = 1234392
+428   fdatasync(4</tmp/perf-gate-io-h4eyelf4/io-spill.6m2lguym/io.fennec>) = 0
+428   writev(7<socket:[113143]>, [...], 2) = 30236
+416   <... accept4 resumed>, {sa_family=AF_INET, sin_port=htons(38408), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC) = 6<socket:[106419]>
+416   accept4(5<socket:[108291]> <unfinished ...>
+465   writev(6<socket:[106419]>, [...], 2) = 153
+413   write(2<pipe:[108285]>, ""..., 28) = 28
+405   write(2<pipe:[108285]>, ""..., 34) = 34
+405   fdatasync(4</tmp/perf-gate-io-h4eyelf4/io-spill.6m2lguym/io.fennec>) = 0
+405   unlinkat(AT_FDCWD</>, "/tmp/perf-gate-io-h4eyelf4/io-spill.6m2lguym/io.fennec.sync", 0) = 0
+416   <... accept4 resumed> <unfinished ...>) = ?

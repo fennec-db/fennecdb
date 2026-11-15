@@ -565,30 +565,38 @@ class Strace(unittest.TestCase):
         self.assertEqual(counted(counts), {})
 
     def test_a_servers_compact_is_counted_between_its_second_and_third_connection(self):
-        # fennec-server under `perf_gate.py io`, workload io-compact: the
-        # open's lock file and magic, the setup's batches, the log made, and
-        # after the third connection the shutdown's fdatasync, all outside;
-        # inside, the image written beside (5 writes, 3 fdatasyncs), the old
-        # file synced, the directory synced around the rename. The answers'
-        # writev to sockets and the log lines to the stderr pipe, all
-        # interleaved from five threads, are no file's.
-        d = "/tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z"
+        # fennec-server under `perf_gate.py io-measure`, workload io-compact:
+        # the open's lock file made and truncated, the database made and its
+        # magic written, a log left over unlinked (ENOENT), the setup's
+        # batches, the log made, all outside; inside, the side file made and
+        # truncated (O_CREAT|O_TRUNC), the image written into it (5 writes, 3
+        # fdatasyncs, two of them back to back), the old file synced, the log
+        # unlinked, the directory synced around the rename, the new file
+        # opened again (no flag that makes or cuts it); /proc's and /sys'
+        # opens no file's. The answers' writev to sockets, the fcntls and the
+        # log lines to the stderr pipe, interleaved from five threads, are no
+        # file's either.
+        d = "/tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt"
         counts, taken = gate.io_counts(trace("io-compact.strace"), d)
         self.assertEqual(taken, 3)
-        self.assertEqual(counted(counts), {"fsyncs": 6, "renames": 1, "writes": 5, "written": 2_139_997})
-        self.assertEqual(counted(counts["files"]["io.fennec.beside"]),
-                         {"writes": 5, "written": 2_139_997, "fsyncs": 3, "fsync_calls": {"fdatasync": 3}})
+        self.assertEqual(counted(counts), {"fsyncs": 6, "renames": 1, "writes": 5, "written": 2_139_997,
+                                           "creates": 1, "truncates": 1, "unlinks": 1})
+        self.assertEqual(counted(counts["files"]["io.fennec.beside"]), {
+            "writes": 5, "written": 2_139_997, "fsyncs": 3, "fsync_calls": {"fdatasync": 3},
+            "creates": 1, "truncates": 1,
+        })
         self.assertEqual(counted(counts["files"]["io.fennec"]),
                          {"fsyncs": 1, "renames": 1, "fsync_calls": {"fdatasync": 1}})
+        self.assertEqual(counted(counts["files"]["io.fennec.sync"]), {"unlinks": 1})
         self.assertEqual(counts["files"]["."]["fsync_calls"], {"fsync": 2})
 
     def test_a_servers_spill_is_two_writes_and_one_fsync(self):
         # io-spill: the spill record and the land written straight into the
         # file, and one fdatasync of it; the setup's log, made at its first
-        # sync, and the shutdown's fdatasync after the third connection,
-        # outside, and the process's exit inside an accept4 (`= ?`), which
-        # takes no connection.
-        d = "/tmp/perf-gate-io-0_b8e9bu/io-spill.kg34x97g"
+        # sync, and the shutdown's fdatasync and the log's unlink after the
+        # third connection, outside, and the process's exit inside an accept4
+        # (`= ?`), which takes no connection.
+        d = "/tmp/perf-gate-io-h4eyelf4/io-spill.6m2lguym"
         counts, taken = gate.io_counts(trace("io-spill.strace"), d)
         self.assertEqual(taken, 3)
         self.assertEqual(counted(counts), {"fsyncs": 1, "writes": 2, "written": 16_785_520 + 1_234_392})

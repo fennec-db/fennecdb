@@ -1,40 +1,66 @@
-3038  write(3</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec.lock>, ""..., 19) = 19
-3038  write(4</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec>, ""..., 8) = 8
-3038  write(2<pipe:[75080]>, ""..., 65) = 65
-3038  write(2<pipe:[75080]>, ""..., 98) = 98
-3044  write(2<pipe:[75080]>, ""..., 66) = 66
-3044  accept4(5<socket:[70606]>, {sa_family=AF_INET, sin_port=htons(48844), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC) = 6<socket:[72489]>
-3044  accept4(5<socket:[70606]> <unfinished ...>
-3048  write(4</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec>, ""..., 24) = 24
-3048  fdatasync(4</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec>) = 0
-3048  pwrite64(8</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec.sync>, ""..., 266240, 0) = 266240
-3048  fsync(8</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec.sync>) = 0
-3048  fsync(9</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z>) = 0
-3048  writev(6<socket:[72489]>, [...], 2) = 220
-3048  write(4</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec>, ""..., 2099884) = 2099884
-3048  fdatasync(4</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec>) = 0
-3048  writev(6<socket:[72489]>, [...], 2) = 150239
-3048  write(4</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec>, ""..., 2099884) = 2099884
-3048  fdatasync(4</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec>) = 0
-3048  writev(6<socket:[72489]>, [...], 2) = 150239
-3044  <... accept4 resumed>, {sa_family=AF_INET, sin_port=htons(48860), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC) = 7<socket:[72490]>
-3044  accept4(5<socket:[70606]> <unfinished ...>
-3053  write(9</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec.beside>, ""..., 1048401) = 1048401
-3053  write(9</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec.beside>, ""..., 1048530) = 1048530
-3053  write(9</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec.beside>, ""..., 43050) = 43050
-3053  fdatasync(9</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec.beside>) = 0
-3053  fdatasync(9</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec.beside>) = 0
-3053  write(9</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec.beside>, ""..., 8) = 8
-3053  write(9</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec.beside>, ""..., 8) = 8
-3053  fdatasync(9</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec.beside>) = 0
-3053  fdatasync(4</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec>) = 0
-3053  fsync(8</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z>) = 0
-3053  renameat(AT_FDCWD</>, "/tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec.beside", AT_FDCWD</>, "/tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z/io.fennec") = 0
-3053  fsync(8</tmp/perf-gate-io-0_b8e9bu/io-compact.ji10qz3z>) = 0
-3053  writev(7<socket:[72490]>, [...], 2) = 242
-3044  <... accept4 resumed>, {sa_family=AF_INET, sin_port=htons(48868), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC) = 6<socket:[75825]>
-3044  accept4(5<socket:[70606]> <unfinished ...>
-3054  writev(6<socket:[75825]>, [...], 2) = 153
-3042  write(2<pipe:[75080]>, ""..., 28) = 28
-3038  write(2<pipe:[75080]>, ""..., 34) = 34
-3044  <... accept4 resumed> <unfinished ...>) = ?
+443   openat(AT_FDCWD</>, "/tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec.lock", O_RDWR|O_CREAT|O_LARGEFILE|O_CLOEXEC, 0666) = 3</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec.lock>
+443   fcntl(3</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec.lock>, F_SETFD, FD_CLOEXEC) = 0
+443   fcntl(3</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec.lock>, F_SETLK, {l_type=F_WRLCK, l_whence=SEEK_SET, l_start=0, l_len=0}) = 0
+443   write(3</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec.lock>, ""..., 18) = 18
+443   ftruncate(3</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec.lock>, 18) = 0
+443   openat(AT_FDCWD</>, "/tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec", O_RDWR|O_CREAT|O_LARGEFILE|O_CLOEXEC, 0666) = 4</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec>
+443   fcntl(4</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec>, F_SETFD, FD_CLOEXEC) = 0
+443   unlinkat(AT_FDCWD</>, "/tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec.sync", 0) = -1 ENOENT (No such file or directory)
+443   write(4</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec>, ""..., 8) = 8
+443   write(2<pipe:[108336]>, ""..., 65) = 65
+443   write(2<pipe:[108336]>, ""..., 98) = 98
+455   write(2<pipe:[108336]>, ""..., 66) = 66
+455   accept4(5<socket:[110978]>, {sa_family=AF_INET, sin_port=htons(51252), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC) = 6<socket:[110980]>
+455   accept4(5<socket:[110978]> <unfinished ...>
+463   write(4</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec>, ""..., 24) = 24
+463   fdatasync(4</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec>) = 0
+463   openat(AT_FDCWD</>, "/tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec.sync", O_RDWR|O_CREAT|O_LARGEFILE|O_CLOEXEC, 0666) = 8</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec.sync>
+463   fcntl(8</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec.sync>, F_SETFD, FD_CLOEXEC) = 0
+463   pwrite64(8</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec.sync>, ""..., 266240, 0) = 266240
+463   fsync(8</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec.sync>) = 0
+463   openat(AT_FDCWD</>, "/tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = 9</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt>
+463   fcntl(9</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt>, F_SETFD, FD_CLOEXEC) = 0
+463   fsync(9</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt>) = 0
+463   writev(6<socket:[110980]>, [...], 2) = 220
+463   write(4</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec>, ""..., 2099884) = 2099884
+463   fdatasync(4</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec>) = 0
+463   writev(6<socket:[110980]>, [...], 2) = 150239
+463   write(4</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec>, ""..., 2099884) = 2099884
+463   fdatasync(4</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec>) = 0
+463   writev(6<socket:[110980]>, [...], 2) = 150239
+455   <... accept4 resumed>, {sa_family=AF_INET, sin_port=htons(51264), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC) = 7<socket:[113172]>
+455   accept4(5<socket:[110978]> <unfinished ...>
+469   openat(AT_FDCWD</>, "/tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec.beside", O_RDWR|O_CREAT|O_TRUNC|O_LARGEFILE|O_CLOEXEC, 0666) = 9</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec.beside>
+469   fcntl(9</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec.beside>, F_SETFD, FD_CLOEXEC) = 0
+469   openat(AT_FDCWD</>, "/proc/meminfo", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = 10</proc/meminfo>
+469   fcntl(10</proc/meminfo>, F_SETFD, FD_CLOEXEC) = 0
+469   openat(AT_FDCWD</>, "/proc/self/cgroup", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = 10</proc/443/cgroup>
+469   fcntl(10</proc/443/cgroup>, F_SETFD, FD_CLOEXEC) = 0
+469   openat(AT_FDCWD</>, "/sys/fs/cgroup/memory.max", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = 10</sys/fs/cgroup/memory.max>
+469   fcntl(10</sys/fs/cgroup/memory.max>, F_SETFD, FD_CLOEXEC) = 0
+469   write(9</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec.beside>, ""..., 1048401) = 1048401
+469   write(9</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec.beside>, ""..., 1048530) = 1048530
+469   write(9</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec.beside>, ""..., 43050) = 43050
+469   fdatasync(9</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec.beside>) = 0
+469   fdatasync(9</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec.beside>) = 0
+469   write(9</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec.beside>, ""..., 8) = 8
+469   write(9</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec.beside>, ""..., 8) = 8
+469   fdatasync(9</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec.beside>) = 0
+469   fdatasync(4</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec>) = 0
+469   unlinkat(AT_FDCWD</>, "/tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec.sync", 0) = 0
+469   openat(AT_FDCWD</>, "/tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = 8</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt>
+469   fcntl(8</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt>, F_SETFD, FD_CLOEXEC) = 0
+469   fsync(8</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt>) = 0
+469   renameat(AT_FDCWD</>, "/tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec.beside", AT_FDCWD</>, "/tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec") = 0
+469   openat(AT_FDCWD</>, "/tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = 8</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt>
+469   fcntl(8</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt>, F_SETFD, FD_CLOEXEC) = 0
+469   fsync(8</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt>) = 0
+469   openat(AT_FDCWD</>, "/tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec", O_RDWR|O_LARGEFILE|O_CLOEXEC) = 8</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec>
+469   fcntl(8</tmp/perf-gate-io-h4eyelf4/io-compact.5h0obolt/io.fennec>, F_SETFD, FD_CLOEXEC) = 0
+469   writev(7<socket:[113172]>, [...], 2) = 242
+455   <... accept4 resumed>, {sa_family=AF_INET, sin_port=htons(51268), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC) = 6<socket:[113176]>
+455   accept4(5<socket:[110978]> <unfinished ...>
+472   writev(6<socket:[113176]>, [...], 2) = 153
+452   write(2<pipe:[108336]>, ""..., 28) = 28
+443   write(2<pipe:[108336]>, ""..., 34) = 34
+455   <... accept4 resumed> <unfinished ...>) = ?
