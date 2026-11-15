@@ -255,8 +255,9 @@ this tree's program dropped it, and when the base's build did not run it
 neither is held to nothing. Only a workload new to the program that the
 base cannot run is held to nothing, and the summary says so. Making `perf
 (instructions)` a required check is a setting of the branch's protection,
-beside `test (ubuntu-latest)`, `test (macos-latest)` and `build (release +
-cli profile)`, made once the holdout below has passed.
+beside `ci.yml`'s other jobs
+([conventions.md](conventions.md#reruns)), made once the
+holdout below has passed.
 
 *Judged by the rule it would replace.* Both jobs run the base's copy of
 the checker. The count job writes it under `tools/`, so it reads the

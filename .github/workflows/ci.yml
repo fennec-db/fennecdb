@@ -175,7 +175,7 @@ jobs:
       # otherwise with it or its `same_meaning` -- what a failure prints, the
       # frozen corpora kept as main holds them, and trees of a few lines
       # built in turn, each answering its own reading. The test job runs it
-      # too, beside the steps it holds: this job is no required check.
+      # too, beside the steps it holds.
       - name: tools/fennecql_corpus.py harvests, judges and lets through only what it must
         run: python3 tools/test_fennecql_corpus.py
 
@@ -1363,9 +1363,8 @@ jobs:
         run: node web/browser/run.mjs chrome firefox
 
   # Safari on macOS through safaridriver, which the runner allows once
-  # `--enable`d. On every run, a pull request's too: no browsers job is a
-  # required check, so a Safari failure seen only in the merge queue would
-  # not stop the merge, and a pull request's own run is where it is read.
+  # `--enable`d. On every run, a pull request's too: its own run is where a
+  # Safari failure is read, before a merge group is spent on it.
   # It costs one of the 5 macOS slots (CI's bottleneck) for 30 s a run (run
   # 43631233253 on #650, 18 s of it the suite). Bounded by the rule above
   # from that run -- twice 30 s is 1 minute, plus 2 minutes 2.5 -- and 20
