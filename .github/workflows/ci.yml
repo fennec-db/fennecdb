@@ -113,9 +113,9 @@ jobs:
       - name: tools/openapi_compat.py finds every break and passes every addition
         run: python3 tools/test_openapi_compat.py
 
-      # docs/design/compatibility.md: fennec.h and the JS types only grow.
-      # Here only the checker's own tests, a break seeded into each surface
-      # for the quick answer; the check over the sources is a step of the
+      # docs/design/compatibility.md: fennec.h, the JS types, the CLI and
+      # the metrics only grow. Here only the checker's own tests, a break
+      # seeded into each surface for the quick answer; the check over the sources is a step of the
       # `test` job below, which is a required check (a step of this job
       # would not stop a merge: fmt is not one).
       - name: tools/api_compat.py finds every break and passes every addition
@@ -312,15 +312,18 @@ jobs:
             echo "main has no tools/openapi_compat.py yet: no base pass"
           fi
 
-      # docs/design/compatibility.md: fennec.h and the JS types only grow.
-      # `make api-check`: the checker's tests, then the sources held to
-      # integrations/api-golden/ -- which must be what they dump to -- by
-      # this checkout's checker, and the baselines to main's by main's copy
-      # (BREAKS read from this one as data, as the REST API's is), so
-      # neither a baseline edited by hand nor a checker changed to see less
-      # lets a break through. A step of this job, not of fmt: this one is a
-      # required check, and a failure there does not stop the merge queue.
-      - name: fennec.h and the JS types only grow
+      # docs/design/compatibility.md: fennec.h, the JS types, the CLI and
+      # the metrics only grow. `make api-check`: the checker's tests, then
+      # the sources held to integrations/api-golden/ -- which must be what
+      # they dump to -- by this checkout's checker, and the baselines to
+      # main's by main's copy (BREAKS read from this one as data, as the
+      # REST API's is), so neither a baseline edited by hand nor a checker
+      # changed to see less lets a break through. The CLI's and the
+      # metrics' dumps are held to the binaries by `make test` above (each
+      # binary's crate's tests/api_golden.rs, on Linux and macOS). A step of
+      # this job, not of fmt: this one is a required check, and a failure
+      # there does not stop the merge queue.
+      - name: The C header, the JS types, the CLI and the metrics only grow
         if: matrix.os == 'ubuntu-latest'
         run: |
           git fetch --no-tags --depth=1 origin main

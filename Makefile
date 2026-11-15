@@ -223,13 +223,17 @@ openapi-golden:
 	$(CARGO) test -p fennec-server --test all openapi::
 	python3 tools/openapi_compat.py --write
 
-## fennec.h's prototypes and macros and web/fennec.d.ts's and web/client.d.ts's
-## exports held to the baselines in integrations/api-golden/ (frozen at the 1.0
-## tag): a removed or changed one fails unless tools/api_compat.py's BREAKS
-## names it; the dumps must be what the sources dump to (`make api-golden`
-## after an addition), and are held to BASE's (origin/main); first the
-## checker's own tests, then BASE's checker over the same sources, as CI's
-## `test` job runs it (docs/design/compatibility.md)
+## fennec.h's prototypes and macros, web/fennec.d.ts's and web/client.d.ts's
+## exports, the flags and exit codes of fennec, fennec-server and fennec-shard
+## and the metrics the server and the router serve, held to the baselines in
+## integrations/api-golden/ (frozen at the 1.0 tag): a removed or changed one
+## fails unless tools/api_compat.py's BREAKS names it, and every dump is held
+## to BASE's (origin/main). The three files' dumps must be what the sources
+## dump to; the CLI's and the metrics' what the binaries give, which their
+## crates' tests/api_golden.rs hold under `cargo test` (make test), not here.
+## `make api-golden` after an addition. First the checker's own tests, then
+## BASE's checker over the same sources, as CI's `test` job runs it
+## (docs/design/compatibility.md)
 api-check:
 	python3 tools/test_api_compat.py
 	python3 tools/api_compat.py
@@ -240,12 +244,20 @@ api-check:
 	    --breaks-from tools/api_compat.py; \
 	else echo "$$base has no tools/api_compat.py yet: no base pass"; fi
 
-## integrations/api-golden/ written again from the sources, refused where
-## they break what it holds and BREAKS names not; after every change of
-## either surface. Frozen at the 1.0 tag: tools/api_compat.py --freeze 1.0
+## integrations/api-golden/ written again: fennec.h's and the JS types' dumps
+## from the sources, the CLI's and the metrics' from the binaries themselves,
+## which the tests/api_golden.rs of fennec-shard, fennec-server and fennec-cli
+## write into target/api-golden (the router's first: the server's test holds
+## every metric name the sources declare to both dumps); refused where a dump
+## breaks what the baseline holds and BREAKS names it not. After every change
+## of a surface. Frozen at the 1.0 tag: tools/api_compat.py --freeze 1.0
 ## (RELEASING.md)
 api-golden:
-	python3 tools/api_compat.py --write
+	@rm -rf target/api-golden && mkdir -p target/api-golden
+	FENNEC_API_GOLDEN='$(CURDIR)/target/api-golden' $(CARGO) test -p fennec-shard --test all api_golden::
+	FENNEC_API_GOLDEN='$(CURDIR)/target/api-golden' $(CARGO) test -p fennec-server --test all api_golden::
+	FENNEC_API_GOLDEN='$(CURDIR)/target/api-golden' $(CARGO) test -p fennec-cli --test api_golden
+	python3 tools/api_compat.py --write --built target/api-golden
 
 ## web/fennec.d.ts held to web/fennec.js -- every export and method declared --
 ## and to what a caller writes, under tsc --strict; then the docs' examples

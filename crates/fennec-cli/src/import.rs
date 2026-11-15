@@ -27,9 +27,9 @@ source
                                        network, use verify-full
 
 options
-  --table <name>          source table (required)
+  -t, --table <name>      source table (required)
   --into <name>           target collection (default: the --table value)
-  --file <path>           target fennec file (default: <into>.fennec)
+  -f, --file <path>       target fennec file (default: <into>.fennec)
   --vector <field>:<N>    take a bytes or array field as vector<N>
   --index <field>@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8|bit)
   --index <field>@hash    builds the index once the load finishes
@@ -43,7 +43,7 @@ options
   --limit <N>             at most N rows
   --batch <N>             put batch size (default 2000)
   --sample <N>            sqlite: rows scanned for untyped columns (1000)
-  --dry-run               print the plan, write nothing
+  -n, --dry-run           print the plan, write nothing
   --count                 with --dry-run: also count how many rows will be
                           read. It means a full scan, hence optional.
 

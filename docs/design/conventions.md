@@ -307,14 +307,15 @@ with a NOTICE as `tests/es256/` has its own.
 
 ## API baselines
 
-`fennec.h`, `web/fennec.d.ts` and `web/client.d.ts` are held to the dumps in
-`integrations/api-golden/` by `tools/api_compat.py` (`make api-check`; CI's
-`test` job runs it as a step, this checkout's copy and main's, BREAKS read
-from the pull request's as data, as `tools/openapi_compat.py`'s are; the
-fmt job runs the checker's own tests). The dumps always are what the
-sources dump to: a dump that is not fails, saying `make api-golden`, so an
-addition is committed with its dump and a later pull request cannot remove
-it unseen. The pull request's dumps are compared with main's, dump against
+`fennec.h`, `web/fennec.d.ts`, `web/client.d.ts`, the flags and exit codes of
+`fennec`, `fennec-server` and `fennec-shard`, and the metrics the server and
+the router serve are held to the dumps in `integrations/api-golden/` by
+`tools/api_compat.py` (`make api-check`; CI's `test` job runs it as a step,
+this checkout's copy and main's, BREAKS read from the pull request's as
+data, as `tools/openapi_compat.py`'s are; the fmt job runs the checker's own
+tests). The dumps always are what the sources dump to: a dump that is not
+fails, saying `make api-golden`, so an addition is committed with its dump
+and a later pull request cannot remove it unseen. The pull request's dumps are compared with main's, dump against
 dump: every entry of main's is in the pull request's, unless a `BREAKS`
 entry names that difference, which also catches a dump edited smaller by
 hand. An entry names one change: the surface, the symbol, the kind of
@@ -348,3 +349,43 @@ caller implements, an overload added in front of another; `make types-check` hol
 compile and match `web/fennec.js`. The SDKs' dumps need outside tools
 (Kotlin's binary-compatibility-validator, swift-api-digester, .NET's
 PublicApiAnalyzers, `apidiff`) and come in 1.0.x.
+
+The CLI's and the metrics' dumps (`cli-<binary>.json`,
+`metrics-<binary>.json`) are the binaries' own, made by each binary's
+crate's `tests/api_golden.rs` (fennec-server's `tests/api_dump.rs` holds
+how, for the three) and held there byte for byte under `cargo test`, which
+`make test` runs in every leg of the required `test` job; the checker reads
+them and never makes them, and `make api-golden` has the tests write them
+into `target/api-golden` (`FENNEC_API_GOLDEN`) for `--write --built` to
+judge and copy. A command's flags are the dash-led words of its `--help`
+that its parser takes, each asked of the binary: `<flag> --help <no such
+flag>` is refused naming the flag where the parser does not know it,
+prints the help and exits 0 for a switch, and is refused at the unknown
+flag where the flag took `--help` for its value -- so a probe never runs
+the binary, and a flag's arity is the parser's, not the help's words. The
+subcommands are those the helps name (`fennec import ...`), found from help
+to help. A literal in the crate's sources that is a flag's whole spelling
+and no help shows fails the test, so no flag is taken unseen by the dump.
+Removing a flag, or turning a switch into a flag taking a value or the
+reverse, is a break; the words of its help line are not held, so a value
+read in other units is not seen. The exit codes are each binary's
+`exit::Code` (`src/exit.rs`) with its meaning: every exit goes through
+`exit::now` or a subcommand returning a `Code` -- the test refuses a
+`process::exit` anywhere else in the crate and a variant `Code::ALL` leaves
+out -- and the scheduler hands the server a failure (`fn()`), never a
+number, so no code is decided outside it. A code removed or its meaning
+reworded is a break; one added grows the dump. The metrics are the
+families the binaries' scrapes show, each with its type and every label a
+sample carries (a histogram's `le` aside), over configurations that between
+them show every family: a file's primary with `--hooks`, `--mcp`, a
+schedule and `--replication-token`, its replica once in contact, and a
+`--dir` node replicating; a router with `--replicas` and `--auto-failover`
+over a node in a region taking leases and a node it cannot reach, and its
+standby. A family with no sample fails the test, its labels unknown, and
+the server's test holds every `fennec_` literal of fennec-http's,
+fennec-server's and fennec-shard's sources to a dump (`fennec_router_` the
+router's, every other the server's), refusing a name built at run time:
+a family a configuration does not show, or a new one, fails there. A
+metric removed or renamed, its type changed or a label of it removed is a
+break; a metric or a label added passes, a selector naming the labels it
+had still matching.

@@ -46,7 +46,7 @@ fn opened_read_only() -> bool {
 const READ_ONLY_REFUSAL: &str = "opened --read-only, the shell writes nothing: write over \
      HTTP to the server that has the file open, or open it without --read-only once nothing has";
 
-const USAGE: &str = r#"usage: fennec [file.fennec] [-c "<query>"]
+const USAGE: &str = r#"usage: fennec [file.fennec] [-c, --command "<query>"]
        fennec --read-only <file.fennec> the file as it stood at the open, beside
                                         a server writing it: no lock, no write
        fennec -V, --version             prints `fennec <version>` and exits

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""tools/api_compat.py: a break seeded into each of the three surfaces
-(fennec.h, fennec.d.ts, client.d.ts) fails the checker, every kind of break
-it reads is found, what only grows and what only moves whitespace or
-comments passes, BREAKS lets one through, a baseline written again past a
-break is caught by the base branch's; then the committed baselines
-themselves.
+"""tools/api_compat.py: a break seeded into each of the five surfaces
+(fennec.h, fennec.d.ts, client.d.ts, the CLI, the metrics) fails the
+checker, every kind of break it reads is found, what only grows and what
+only moves whitespace or comments passes, BREAKS lets one through, a
+baseline written again past a break is caught by the base branch's; then
+the committed baselines themselves.
 
     python3 tools/test_api_compat.py
 """
@@ -72,12 +72,62 @@ export type { Row, Opts } from './fennec.js';
 """
 
 
-def dumps(header=HEADER, types=TYPES, client=CLIENT):
+# The binaries' surfaces, as their crates' tests dump them.
+CLI = {
+    "fennec": {
+        "commands": {
+            "fennec": {"--help": "switch", "--read-only": "switch", "-c": "value"},
+            "fennec import": {"--dry-run": "switch", "--table": "value"},
+        },
+        "exit codes": {"0": "it did what it was asked", "1": "it failed", "2": "a flag was refused"},
+    },
+    "fennec-server": {
+        "commands": {"fennec-server": {"--file": "value", "--studio": "switch"}},
+        "exit codes": {"0": "stopped as asked", "1": "a failure", "2": "refused at the start"},
+    },
+    "fennec-shard": {
+        "commands": {"fennec-shard": {"--listen": "value"}},
+        "exit codes": {"0": "stopped as asked", "1": "a failure", "2": "refused at the start"},
+    },
+}
+METRICS = {
+    "fennec-server": {
+        "fennec_documents": {"type": "gauge", "labels": ["collection"]},
+        "fennec_statement_duration_seconds": {"type": "histogram", "labels": ["kind"]},
+        "fennec_statements_total": {"type": "counter", "labels": ["kind"]},
+    },
+    "fennec-shard": {
+        "fennec_router_nodes": {"type": "gauge", "labels": []},
+        "fennec_router_tenants": {"type": "gauge", "labels": ["node", "region"]},
+    },
+}
+
+
+def dumps(header=HEADER, types=TYPES, client=CLIENT, cli=None, metrics=None):
     return {
         "fennec.h": compat.dump("fennec.h", header),
         "fennec.d.ts": compat.dump("fennec.d.ts", types),
         "client.d.ts": compat.dump("client.d.ts", client),
+        "cli": json.loads(json.dumps(CLI if cli is None else cli)),
+        "metrics": json.loads(json.dumps(METRICS if metrics is None else metrics)),
     }
+
+
+def changed(doc, edit):
+    """A deep copy of `doc` that `edit` changed."""
+    doc = json.loads(json.dumps(doc))
+    edit(doc)
+    return doc
+
+
+def put_dumps(directory, cli=CLI, metrics=METRICS):
+    """The binaries' dumps written into `directory` as their tests write them."""
+    os.makedirs(directory, exist_ok=True)
+    for surface, doc in (("cli", cli), ("metrics", metrics)):
+        for binary, name in compat.baseline_files(surface):
+            if binary in doc:
+                with open(os.path.join(directory, name), "w", encoding="utf-8") as f:
+                    f.write(compat.written(doc[binary]))
 
 
 def entry_for(old, new, surface, release="1.0", reason="on purpose", pick=0):
@@ -264,6 +314,231 @@ class Client(unittest.TestCase):
         self.assertEqual(failures(self.base, dumps(client=c)), [])
 
 
+class Cli(unittest.TestCase):
+    """The flags and exit codes of `fennec`, `fennec-server` and
+    `fennec-shard`: a flag removed or reread, a command or a code removed, a
+    code's meaning changed each fail; anything added passes."""
+
+    def broken(self, edit):
+        return failures(dumps(), dumps(cli=changed(CLI, edit)))
+
+    def test_a_flag_removed(self):
+        def edit(d):
+            del d["fennec-server"]["commands"]["fennec-server"]["--studio"]
+
+        self.assertEqual(self.broken(edit), [("cli", "fennec-server --studio", "flag removed")])
+
+    def test_a_flag_reread(self):
+        for flag, to in (("-c", "switch"), ("--read-only", "value")):
+            def edit(d):
+                d["fennec"]["commands"]["fennec"][flag] = to
+
+            self.assertEqual(self.broken(edit), [("cli", f"fennec {flag}", "flag reread")], flag)
+
+    def test_a_command_removed(self):
+        def edit(d):
+            del d["fennec"]["commands"]["fennec import"]
+
+        self.assertEqual(self.broken(edit), [("cli", "fennec import", "command removed")])
+
+    def test_an_exit_code_removed_or_given_another_meaning(self):
+        def gone(d):
+            del d["fennec"]["exit codes"]["2"]
+
+        def reread(d):
+            d["fennec-shard"]["exit codes"]["1"] = "the directory could not be opened"
+
+        self.assertEqual(self.broken(gone), [("cli", "fennec exit 2", "exit code removed")])
+        self.assertEqual(self.broken(reread), [("cli", "fennec-shard exit 1", "exit code meaning changed")])
+
+    def test_a_binary_gone(self):
+        self.assertEqual(self.broken(lambda d: d.pop("fennec-shard")), [("cli", "fennec-shard", "binary removed")])
+
+    def test_additions_pass(self):
+        def grow(d):
+            d["fennec"]["commands"]["fennec"]["--quiet"] = "switch"
+            d["fennec"]["commands"]["fennec types"] = {"--lang": "value"}
+            d["fennec-server"]["exit codes"]["3"] = "a new way to end"
+
+        self.assertEqual(self.broken(grow), [])
+        added = compat.additions("cli", CLI, changed(CLI, grow))
+        self.assertEqual(sorted(added), ["fennec --quiet", "fennec types --lang", "fennec-server exit 3"])
+
+
+class Metrics(unittest.TestCase):
+    """The metrics the server and the router serve: one removed or renamed,
+    its type changed or a label removed fail; a metric or a label added
+    passes."""
+
+    def broken(self, edit):
+        return failures(dumps(), dumps(metrics=changed(METRICS, edit)))
+
+    def test_a_metric_removed_or_renamed(self):
+        def gone(d):
+            del d["fennec-server"]["fennec_documents"]
+
+        def renamed(d):
+            d["fennec-server"]["fennec_docs"] = d["fennec-server"].pop("fennec_documents")
+
+        for edit in (gone, renamed):
+            self.assertEqual(self.broken(edit), [("metrics", "fennec-server fennec_documents", "metric removed")])
+
+    def test_a_type_changed(self):
+        def edit(d):
+            d["fennec-server"]["fennec_statements_total"]["type"] = "gauge"
+
+        self.assertEqual(self.broken(edit), [("metrics", "fennec-server fennec_statements_total", "metric type changed")])
+
+    def test_a_label_removed_or_renamed(self):
+        def gone(d):
+            d["fennec-shard"]["fennec_router_tenants"]["labels"] = ["node"]
+
+        def renamed(d):
+            d["fennec-shard"]["fennec_router_tenants"]["labels"] = ["node", "zone"]
+
+        for edit in (gone, renamed):
+            self.assertEqual(self.broken(edit), [("metrics", "fennec-shard fennec_router_tenants", "label removed")])
+
+    def test_a_binary_gone(self):
+        self.assertEqual(self.broken(lambda d: d.pop("fennec-shard")), [("metrics", "fennec-shard", "binary removed")])
+
+    def test_a_metric_or_a_label_added_passes(self):
+        def grow(d):
+            d["fennec-server"]["fennec_new_total"] = {"type": "counter", "labels": []}
+            d["fennec-server"]["fennec_documents"]["labels"] = ["collection", "tenant"]
+
+        self.assertEqual(self.broken(grow), [])
+        self.assertEqual(compat.additions("metrics", METRICS, changed(METRICS, grow)), ["fennec-server fennec_new_total"])
+
+    def test_a_dump_of_another_shape_is_refused(self):
+        for doc in (
+            {"x": {"type": "gauge"}},
+            {"x": {"type": "meter", "labels": []}},
+            {"bad name": {"type": "gauge", "labels": []}},
+        ):
+            with self.assertRaises(ValueError):
+                compat.shaped("metrics", doc, "here")
+        for doc in (
+            {"commands": {}, "exit codes": {"0": "ok"}},
+            {"commands": {"fennec": {"--x": "maybe"}}, "exit codes": {"0": "ok"}},
+            {"commands": {"fennec": {"x": "switch"}}, "exit codes": {"0": "ok"}},
+            {"commands": {"fennec": {}}, "exit codes": {"zero": "ok"}},
+        ):
+            with self.assertRaises(ValueError):
+                compat.shaped("cli", doc, "here")
+
+
+class Built(unittest.TestCase):
+    """The binaries' dumps through the whole run: `make api-golden` hands
+    them over (`--built`), a stale baseline fails until written again, a
+    break is refused unless BREAKS names it, and main's holds them too."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="api-compat-built-")
+        self.addCleanup(shutil.rmtree, self.dir)
+        for surface, rel in compat.SOURCES.items():
+            os.makedirs(os.path.dirname(os.path.join(self.dir, rel)), exist_ok=True)
+            with open(os.path.join(self.dir, rel), "w") as f:
+                f.write({"fennec.h": HEADER, "fennec.d.ts": TYPES, "client.d.ts": CLIENT}[surface])
+        self.golden = os.path.join(self.dir, compat.BASELINE)
+        self.staged = os.path.join(self.dir, "target", "api-golden")
+        put_dumps(self.golden)
+        self.assertEqual(self.run_main("--write")[0], 0)
+
+    def run_main(self, *args):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            code = compat.main(["--root", self.dir, *args])
+        return code, buf.getvalue()
+
+    def stage(self, cli=CLI, metrics=METRICS):
+        shutil.rmtree(self.staged, ignore_errors=True)
+        put_dumps(self.staged, cli, metrics)
+
+    def test_an_addition_is_stale_until_written_again(self):
+        grown_cli = changed(CLI, lambda d: d["fennec"]["commands"]["fennec"].update({"--quiet": "switch"}))
+        grown_metrics = changed(METRICS, lambda d: d["fennec-shard"].update({"fennec_router_x": {"type": "gauge", "labels": []}}))
+        for cli, metrics, surface in ((grown_cli, METRICS, "cli"), (CLI, grown_metrics, "metrics")):
+            with self.subTest(surface):
+                self.stage(cli, metrics)
+                code, out = self.run_main("--built", self.staged)
+                self.assertEqual(code, 1, out)
+                self.assertIn(f"{surface}: integrations/api-golden/{surface}-*.json is not what the binaries give: run `make api-golden`", out)
+                code, out = self.run_main("--write", "--built", self.staged)
+                self.assertEqual(code, 0, out)
+                self.assertEqual(self.run_main("--built", self.staged)[0], 0)
+                self.assertEqual(self.run_main()[0], 0)
+                for _, name in compat.baseline_files(surface):
+                    with open(os.path.join(self.golden, name), "rb") as a, open(os.path.join(self.staged, name), "rb") as b:
+                        self.assertEqual(a.read(), b.read(), name)  # copied as written
+                self.stage()
+                put_dumps(self.golden)
+
+    def test_a_seeded_break_of_each_is_refused_unless_breaks_names_it(self):
+        def edit_cli(d):
+            del d["fennec"]["commands"]["fennec import"]["--dry-run"]
+
+        def edit_metrics(d):
+            d["fennec-server"]["fennec_documents"]["type"] = "counter"
+
+        for surface, cli, metrics in (
+            ("cli", changed(CLI, edit_cli), METRICS),
+            ("metrics", CLI, changed(METRICS, edit_metrics)),
+        ):
+            with self.subTest(surface):
+                self.stage(cli, metrics)
+                code, out = self.run_main("--write", "--built", self.staged)
+                self.assertEqual(code, 1, out)
+                self.assertIn(f"BREAKING: {surface}:", out)
+                self.assertEqual(self.run_main()[0], 0)  # left as they were
+                code, out = self.run_main("--built", self.staged)
+                self.assertEqual(code, 1, out)
+                self.assertIn(f"BREAKING against the committed baseline (integrations/api-golden/{surface}-*.json)", out)
+                entry = entry_for(dumps(), dumps(cli=cli, metrics=metrics), surface)
+                path = os.path.join(self.dir, "breaks.py")
+                with open(path, "w") as f:
+                    f.write(f"BREAKS = [{entry!r}]\n")
+                code, out = self.run_main("--write", "--built", self.staged, "--breaks-from", path)
+                self.assertEqual(code, 0, out)
+                self.assertEqual(self.run_main("--breaks-from", path)[0], 0)
+                put_dumps(self.golden)
+
+    def test_a_dump_smaller_than_mains_fails_the_base_pass(self):
+        def git(*a):
+            subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=self.dir, check=True, capture_output=True)
+
+        git("init", "-q")
+        git("add", ".")
+        git("commit", "-q", "-m", "base")
+        # Edited by hand, or written by a test made to see less: the
+        # committed dumps hold, main's do not.
+        put_dumps(self.golden, changed(CLI, lambda d: d["fennec-shard"]["exit codes"].pop("2")), METRICS)
+        self.assertEqual(self.run_main()[0], 0)
+        code, out = self.run_main("--base-ref", "HEAD")
+        self.assertEqual(code, 1, out)
+        self.assertIn("cli: fennec-shard exit 2: exit code removed", out)
+        self.assertIn("written again past this break", out)
+
+    def test_a_file_missing_or_of_another_shape(self):
+        self.stage()
+        os.remove(os.path.join(self.staged, "metrics-fennec-shard.json"))
+        code, out = self.run_main("--write", "--built", self.staged)
+        self.assertEqual(code, 2, out)
+        self.assertIn("metrics-fennec-shard.json", out)
+        os.remove(os.path.join(self.golden, "cli-fennec.json"))
+        code, out = self.run_main()
+        self.assertEqual(code, 1, out)
+        self.assertIn("cli: integrations/api-golden/cli-*.json is missing: run `make api-golden`", out)
+        with open(os.path.join(self.golden, "cli-fennec.json"), "w") as f:
+            f.write('{"commands": {"fennec": {"--x": 1}}, "exit codes": {}}\n')
+        self.assertEqual(self.run_main()[0], 2)
+
+    def test_write_without_built_leaves_them(self):
+        code, out = self.run_main("--write")
+        self.assertEqual(code, 0, out)
+        self.assertIn("cli: left as it is", out)
+
+
 class Gate(unittest.TestCase):
     """The whole run: a checkout of its own, a baseline, a source broken."""
 
@@ -275,6 +550,7 @@ class Gate(unittest.TestCase):
         self.put("fennec.h", HEADER)
         self.put("fennec.d.ts", TYPES)
         self.put("client.d.ts", CLIENT)
+        put_dumps(os.path.join(self.dir, compat.BASELINE))
         self.run_main("--write")
 
     def put(self, surface, text):
@@ -504,6 +780,7 @@ class Releases(unittest.TestCase):
             with open(os.path.join(self.dir, rel), "w") as f:
                 f.write({"fennec.h": HEADER, "fennec.d.ts": TYPES, "client.d.ts": CLIENT}[surface])
         shutil.copy(os.path.join(HERE, "api_compat.py"), os.path.join(self.dir, "api_compat.py"))
+        put_dumps(os.path.join(self.dir, compat.BASELINE))
         self.run_main("--write")
 
     def run_main(self, *args):
@@ -692,7 +969,7 @@ class Workflow(unittest.TestCase):
         self.assertTrue([s for s in self.steps(self.job("fmt")) if self.AGENTS in s.get("run", "")])
 
     def test_a_missing_step_a_soft_one_a_wider_if_and_no_fetch_each_fail(self):
-        step = re.search(r"      - name: fennec.h and the JS types only grow\n.*?make api-check BASE=FETCH_HEAD\n", self.ci, re.S).group(0)
+        step = re.search(r"      - name: The C header, the JS types, the CLI and the metrics only grow\n.*?make api-check BASE=FETCH_HEAD\n", self.ci, re.S).group(0)
         deleted = self.ci.replace(step, "")
         self.assertIn("`make api-check`", deleted)  # its comment stays
         self.assertIn("0 steps", self.verdict(deleted, self.API, True))
@@ -709,6 +986,24 @@ class Workflow(unittest.TestCase):
         self.assertEqual(self.verdict(soft, self.AGENTS, False), "continue-on-error")
         wide = self.ci.replace(astep, astep.replace(f"        if: {self.UBUNTU}\n", ""))
         self.assertTrue(self.verdict(wide, self.AGENTS, False).startswith("if:"))
+
+    def test_the_binaries_dumps_are_held_by_make_test(self):
+        """The CLI's and the metrics' dumps are held to the binaries by each
+        binary's crate's tests/api_golden.rs, which `make test` runs in
+        every leg of the required `test` job (Linux and macOS)."""
+        crates = os.path.join(HERE, "..", "crates")
+        for crate in ("fennec-server", "fennec-shard"):
+            with open(os.path.join(crates, crate, "tests", "all.rs"), encoding="utf-8") as f:
+                self.assertRegex(f.read(), r"(?m)^mod api_golden;$", crate)
+        self.assertTrue(os.path.exists(os.path.join(crates, "fennec-cli", "tests", "api_golden.rs")))
+        with open(os.path.join(crates, "fennec-cli", "Cargo.toml"), encoding="utf-8") as f:
+            self.assertNotIn("autotests = false", f.read())
+        found = [s for s in self.steps(self.job("test")) if s.get("run") == "make test"]
+        self.assertEqual(len(found), 1)
+        self.assertFalse({"if", "continue-on-error"} & set(found[0]), found[0])
+        self.assertIn("os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]", self.job("test"))
+        with open(os.path.join(HERE, "..", "Makefile"), encoding="utf-8") as f:
+            self.assertRegex(f.read(), r"(?m)^test:\n(?:\t.*\n)*?\t.*\$\(CARGO\) test --workspace [^\n]*--tests\n")
 
 
 class Committed(unittest.TestCase):

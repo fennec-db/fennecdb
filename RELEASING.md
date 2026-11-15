@@ -407,12 +407,15 @@ every tag. Before a 1.x tag, check:
    changed or removed line in them, only added ones.
 2. `make fennecql-corpus` (by hand: no workflow runs it until T6) finds no text reading as another tree, and
    `GRAMMAR_EPOCH` (`crates/fennec-core/src/named.rs`) is still 4.
-3. `make api-check` is green: `fennec.h`'s prototypes and macros,
-   `web/fennec.d.ts` and `web/client.d.ts` only gained entries against
-   `integrations/api-golden/`. The SDKs' public names, the CLI flags and
-   exit codes, and `/_metrics` names have no dump yet (the SDKs' come in
-   1.0.x, needing outside tools): diff them by hand against the previous
-   tag. **Before the 1.0 tag, once:** `python3 tools/api_compat.py --freeze 1.0`
+3. `make api-check` is green and `make api-golden` leaves no diff:
+   `fennec.h`'s prototypes and macros, `web/fennec.d.ts` and
+   `web/client.d.ts`, the flags and exit codes of `fennec`, `fennec-server`
+   and `fennec-shard`, and the `/_metrics` names, types and labels of the
+   server and the router only gained entries against
+   `integrations/api-golden/` (the CLI's and the metrics' dumps are held to
+   the binaries by `make test`). The SDKs' public names have no dump yet
+   (they come in 1.0.x, needing outside tools): diff them by hand against
+   the previous tag. **Before the 1.0 tag, once:** `python3 tools/api_compat.py --freeze 1.0`
    on the commit to be tagged, committed (it writes
    `integrations/api-golden/frozen.json`, and needs the dumps current and no
    `BREAKS` entry for a release not made yet). `make version V=1.0.0` or

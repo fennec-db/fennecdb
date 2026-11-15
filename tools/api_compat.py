@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""The C header and the JS types only grow (docs/design/compatibility.md).
+"""The C header, the JS types, the CLI and the metrics only grow
+(docs/design/compatibility.md).
 
 `crates/fennec-ffi/include/fennec.h`, `web/fennec.d.ts` and
-`web/client.d.ts` are read into dumps and held to the baselines committed in
-integrations/api-golden/. An addition passes. What a caller could have
-relied on fails unless BREAKS names it:
+`web/client.d.ts` are read into dumps here; the flags and exit codes of
+`fennec`, `fennec-server` and `fennec-shard`, and the metrics the server and
+the router serve, are dumped by those binaries' own crates' tests
+(`tests/api_golden.rs`, under `cargo test`), from the binaries themselves.
+Each dump is held to its baseline committed in integrations/api-golden/. An
+addition passes. What a caller could have relied on fails unless BREAKS
+names it:
 
   * fennec.h: a function removed, its return type, a parameter's type or
     name, or the number or order of its parameters changed; a macro
@@ -29,6 +34,18 @@ relied on fails unless BREAKS names it:
     does).
   * client.d.ts: a name it re-exports no longer exported, or a value
     (`export {..}`) become a type (`export type {..}`).
+  * cli (cli-<binary>.json): a binary's dump gone, a command removed (a
+    subcommand of `fennec`), a flag removed or reread -- a switch now
+    taking a value, or the reverse -- and an exit code removed or given
+    another meaning. A flag is a dash-led word of a command's `--help` its
+    parser takes, a switch or taking a value as the parser reads it; the
+    words of its help line are not held, so a value read in other units
+    (`<s>` become milliseconds) is not seen. An exit code's meaning is the
+    text its binary's `src/exit.rs` gives it, held as written.
+  * metrics (metrics-<binary>.json): a metric removed (a rename is one
+    removed and one added), its type changed, or a label of it removed. A
+    label added passes, as a metric does: a selector naming the labels it
+    had still matches.
 
   * order: a declaration's overloads, and a member's, are held in the order
     written, since the first that fits is the one a caller resolves; one
@@ -41,9 +58,11 @@ what changed, the declaration before and after as digests (printed ready to
 paste), the release it goes out in and why. An entry names one change, not
 a kind of change: another change to the same symbol is a break of its own.
 The baselines are dumps of the sources, always: a dump that is not what the
-sources dump to fails, naming `make api-golden`, and a pull request's
-dumps are held to main's, every entry of main's in the pull request's
-unless a BREAKS entry names that difference. What 1.0 changes is the rule
+sources dump to fails, naming `make api-golden` -- here for the three
+files, in the binaries' crates' tests for the CLI and the metrics, which
+this checker reads and never makes -- and a pull request's dumps are held
+to main's, every entry of main's in the pull request's unless a BREAKS
+entry names that difference. What 1.0 changes is the rule
 for BREAKS: until `--freeze 1.0` (integrations/api-golden/frozen.json) an
 entry's release is "1.0", the changes made on the way there; after it, a
 major version above the frozen one, and `make version` refuses 1.0.0 or
@@ -60,7 +79,8 @@ request of its own first: main's copy of the checker judges the next one,
 and would refuse the form.
 
     python3 tools/api_compat.py                       # the committed baselines
-    python3 tools/api_compat.py --write               # make api-golden: the baselines again
+    python3 tools/api_compat.py --write --built DIR   # make api-golden: the baselines again,
+                                                      # the CLI's and the metrics' from DIR
     python3 tools/api_compat.py --freeze 1.0          # the 1.0 tag's, once (RELEASING.md)
     python3 -I main_copy.py --root . --base-ref FETCH_HEAD \\
         --breaks-from tools/api_compat.py             # CI: main's checker
@@ -88,12 +108,32 @@ SOURCES = {
     "fennec.d.ts": os.path.join("web", "fennec.d.ts"),
     "client.d.ts": os.path.join("web", "client.d.ts"),
 }
-SURFACES = tuple(SOURCES)
+# The surfaces the binaries' crates' tests dump, a file a binary
+# (`<surface>-<binary>.json`): this checker holds them to main's, and
+# `make api-golden` copies them in from where the tests wrote them (`--built`).
+BINARIES = {
+    "cli": ("fennec", "fennec-server", "fennec-shard"),
+    "metrics": ("fennec-server", "fennec-shard"),
+}
+SURFACES = tuple(SOURCES) + tuple(BINARIES)
 FROZEN = "frozen.json"
 
 
 def baseline_name(surface):
     return surface.replace(".", "-") + ".json"
+
+
+def baseline_files(surface):
+    """(binary, file name) of each file a surface's baseline is: one with no
+    binary for a source dumped here, one a binary for the others."""
+    if surface in BINARIES:
+        return [(b, f"{surface}-{b}.json") for b in BINARIES[surface]]
+    return [(None, baseline_name(surface))]
+
+
+def shown(surface):
+    """The baseline's path as a message names it."""
+    return f"{BASELINE}/" + (f"{surface}-*.json" if surface in BINARIES else baseline_name(surface))
 
 
 # Every break made on purpose, in the order they went out: never removed, so
@@ -553,12 +593,74 @@ def client_breaks(old, new):
     return out
 
 
+SWITCH, VALUE = "switch", "value"
+
+
+def cli_breaks(old, new):
+    """The CLI dumps, {binary: {"commands": {command line: {flag: "switch"
+    | "value"}}, "exit codes": {code: meaning}}}."""
+    out = []
+    for binary, o in old.items():
+        n = new.get(binary)
+        if n is None:
+            out.append((binary, "binary removed", " ".join(sorted(o["commands"])), ""))
+            continue
+        for command, flags in o["commands"].items():
+            got = n["commands"].get(command)
+            if got is None:
+                out.append((command, "command removed", " ".join(sorted(flags)), ""))
+                continue
+            for flag, takes in flags.items():
+                if flag not in got:
+                    out.append((f"{command} {flag}", "flag removed", takes, ""))
+                elif got[flag] != takes:
+                    out.append((f"{command} {flag}", "flag reread", takes, got[flag]))
+        for code, means in o["exit codes"].items():
+            got = n["exit codes"].get(code)
+            if got is None:
+                out.append((f"{binary} exit {code}", "exit code removed", means, ""))
+            elif got != means:
+                out.append((f"{binary} exit {code}", "exit code meaning changed", means, got))
+    return out
+
+
+def metric_text(m):
+    return f"{m['type']} {{{','.join(m['labels'])}}}"
+
+
+def metric_breaks(old, new):
+    """The metrics dumps, {binary: {name: {"type", "labels"}}}: a label each
+    removed is a break of its own."""
+    out = []
+    for binary, o in old.items():
+        n = new.get(binary)
+        if n is None:
+            out.append((binary, "binary removed", " ".join(sorted(o)), ""))
+            continue
+        for name, m in o.items():
+            g = n.get(name)
+            at = f"{binary} {name}"
+            if g is None:
+                out.append((at, "metric removed", metric_text(m), ""))
+                continue
+            if g["type"] != m["type"]:
+                out.append((at, "metric type changed", m["type"], g["type"]))
+            for label in m["labels"]:
+                if label not in g["labels"]:
+                    out.append((at, "label removed", label, ""))
+    return out
+
+
 def breaks(surface, old, new):
     """(symbol, change, before, after) for each way `new` breaks `old`."""
     if surface == "fennec.h":
         return header_breaks(old, new)
     if surface == "fennec.d.ts":
         return declaration_breaks(old, new)
+    if surface == "cli":
+        return cli_breaks(old, new)
+    if surface == "metrics":
+        return metric_breaks(old, new)
     return client_breaks(old, new)
 
 
@@ -568,7 +670,59 @@ def additions(surface, old, new):
         return [k for k in new["macros"] if k not in old["macros"]] + [
             k for k in new["functions"] if k not in old["functions"]
         ]
+    if surface == "cli":
+        added = []
+        for binary, n in new.items():
+            o = old.get(binary, {"commands": {}, "exit codes": {}})
+            for command, flags in n["commands"].items():
+                had = o["commands"].get(command, {})
+                added += [f"{command} {f}" for f in flags if f not in had]
+            added += [f"{binary} exit {c}" for c in n["exit codes"] if c not in o["exit codes"]]
+        return added
+    if surface == "metrics":
+        return [f"{b} {k}" for b, n in new.items() for k in n if k not in old.get(b, {})]
     return [k for k in new["exports"] if k not in old["exports"]]
+
+
+def shaped(surface, doc, where):
+    """`doc`, read from `where`, if it is a dump of the binaries' surface it
+    claims to be; ValueError naming what is not. Main's checker reads a pull
+    request's dumps, so a dump of another shape is refused, never misread."""
+    def text(v):
+        return isinstance(v, str)
+
+    def bad(what):
+        raise ValueError(f"{where}: {what}")
+
+    if not isinstance(doc, dict):
+        bad("not an object")
+    if surface == "cli":
+        if set(doc) != {"commands", "exit codes"}:
+            bad('expected the keys "commands" and "exit codes"')
+        if not isinstance(doc["commands"], dict) or not doc["commands"]:
+            bad("no commands")
+        for command, flags in doc["commands"].items():
+            if not isinstance(flags, dict) or not all(
+                text(f) and f.startswith("-") and v in (SWITCH, VALUE) for f, v in flags.items()
+            ):
+                bad(f'{command!r}: each flag is "switch" or "value"')
+        codes = doc["exit codes"]
+        if not isinstance(codes, dict) or not codes or not all(
+            re.fullmatch(r"\d+", c) and text(m) and m for c, m in codes.items()
+        ):
+            bad("each exit code is a number with a meaning")
+    else:
+        for name, m in doc.items():
+            if not (
+                re.fullmatch(r"[a-zA-Z_:][a-zA-Z0-9_:]*", name)
+                and isinstance(m, dict)
+                and set(m) == {"type", "labels"}
+                and m["type"] in ("counter", "gauge", "histogram", "summary", "untyped")
+                and isinstance(m["labels"], list)
+                and all(text(x) for x in m["labels"])
+            ):
+                bad(f'{name!r}: expected {{"type": counter|gauge|histogram|summary|untyped, "labels": [..]}}')
+    return doc
 
 
 def major(release):
@@ -666,6 +820,34 @@ def at_ref(ref, path, root):
     return json.loads(p.stdout) if p.returncode == 0 else None
 
 
+def read_dumps(directory, surface):
+    """The dump of a surface the binaries' tests write, from `directory`
+    (the committed baselines, or where `make api-golden`'s tests wrote
+    theirs): {binary: dump}, or None with a file of it missing; and the
+    names of the files missing."""
+    doc, missing = {}, []
+    for binary, name in baseline_files(surface):
+        path = os.path.join(directory, name)
+        if os.path.exists(path):
+            doc[binary] = shaped(surface, read_json(path), path)
+        else:
+            missing.append(name)
+    return (None if missing else doc), missing
+
+
+def base_dump(ref, surface, root):
+    """`surface`'s baseline at `ref`, or None where it has none: of the
+    binaries' surfaces, each binary's file it holds."""
+    if surface not in BINARIES:
+        return at_ref(ref, f"{BASELINE}/{baseline_name(surface)}", root)
+    doc = {}
+    for binary, name in baseline_files(surface):
+        got = at_ref(ref, f"{BASELINE}/{name}", root)
+        if got is not None:
+            doc[binary] = shaped(surface, got, f"{ref}:{BASELINE}/{name}")
+    return doc or None
+
+
 def read_frozen(baseline_dir):
     """The release the baselines were frozen at ("1.0"), or None before."""
     path = os.path.join(baseline_dir, FROZEN)
@@ -679,11 +861,14 @@ def read_frozen(baseline_dir):
     return doc["frozen"]
 
 
+
 def check(built, baseline, base=None, allowed=BREAKS, out=print, frozen=None, base_frozen=None):
     """Holds each built dump to its baseline -- equal, the baseline being a
     dump of the sources -- and the baseline to `base`'s where given
     (surface -> dump, or None): dump against dump. Returns the number of
-    failures, said."""
+    failures, said. A surface the binaries' tests dump is built only where
+    `make api-golden` handed their dumps over (`--built`); otherwise its
+    baseline is its own built dump, which those tests hold to the binaries."""
     failures = 0
     for line in well_formed(allowed, frozen):
         out(line)
@@ -693,7 +878,7 @@ def check(built, baseline, base=None, allowed=BREAKS, out=print, frozen=None, ba
         failures += 1
     for surface in SURFACES:
         new = built[surface]
-        name = baseline_name(surface)
+        name = shown(surface)
         against = [("the committed baseline", baseline.get(surface), new)]
         if base is not None:
             against.append(("the base branch's baseline", base.get(surface), baseline.get(surface)))
@@ -701,7 +886,7 @@ def check(built, baseline, base=None, allowed=BREAKS, out=print, frozen=None, ba
         for what, old, now in against:
             if old is None or now is None:
                 if what == "the committed baseline":
-                    out(f"{surface}: integrations/api-golden/{name} is missing: run `make api-golden`")
+                    out(f"{surface}: {name} is missing: run `make api-golden`")
                     failures += 1
                 else:
                     out(f"{surface}: no baseline in {what}: nothing to hold it to")
@@ -719,19 +904,17 @@ def check(built, baseline, base=None, allowed=BREAKS, out=print, frozen=None, ba
                     continue
                 told.add((symbol, change, detail))
                 failures += 1
-                head = f"BREAKING against {what} (integrations/api-golden/{name})"
+                head = f"BREAKING against {what} ({name})"
                 if what != "the committed baseline":
                     head += (
                         ": the committed baseline was written again past this break, or edited by hand; a "
                         "break on purpose is named in BREAKS, never by writing the baseline alone"
                     )
                 out(f"{head}\n  {surface}: {symbol}: {change} ({detail})\n    {why}")
-        if baseline.get(surface) is not None and baseline[surface] != new:
+        if baseline.get(surface) is not None and new is not None and baseline[surface] != new:
             failures += 1
-            out(
-                f"{surface}: integrations/api-golden/{name} is not what {SOURCES[surface]} dumps to: "
-                "run `make api-golden` and commit it"
-            )
+            source = f"{SOURCES[surface]} dumps to" if surface in SOURCES else "the binaries give"
+            out(f"{surface}: {name} is not what {source}: run `make api-golden` and commit it")
     return failures
 
 
@@ -746,7 +929,9 @@ def freeze(version, built, baseline, allowed, baseline_dir, frozen, out=print):
     if version != takes:
         wrong.append(f"{version!r}: a freeze at this point takes {takes!r} alone")
     for surface in SURFACES:
-        if baseline[surface] != built[surface]:
+        if baseline[surface] is None:
+            wrong.append(f"{surface}: {shown(surface)} is missing: run `make api-golden` first")
+        elif baseline[surface] != built[surface]:
             wrong.append(f"{surface}: the baseline is not what the sources dump to: run `make api-golden` first")
     for i, e in enumerate(allowed):
         if isinstance(e, dict) and isinstance(e.get("release"), str) and re.fullmatch(r"\d+\.\d+", e["release"]):
@@ -771,6 +956,12 @@ def main(argv=None):
         "--breaks-from",
         help="BREAKS read as data from this checker, not this one's own (CI: main's copy run with the "
         "pull request's breaks)",
+    )
+    ap.add_argument(
+        "--built",
+        metavar="DIR",
+        help="the CLI's and the metrics' dumps as the binaries' tests wrote them under FENNEC_API_GOLDEN=DIR "
+        "(make api-golden): held to the baselines, and with --write copied over them",
     )
     ap.add_argument("--write", action="store_true", help="write the baselines again, refusing a break BREAKS names not")
     ap.add_argument("--freeze", metavar="VERSION", help="freeze the baselines at VERSION (1.0), once: the tag's step")
@@ -808,9 +999,28 @@ def main(argv=None):
             print(f"{rel}: {e}", file=sys.stderr)
             return 2
     baseline = {}
-    for surface in SURFACES:
-        path = os.path.join(baseline_dir, baseline_name(surface))
-        baseline[surface] = read_json(path) if os.path.exists(path) else None
+    try:
+        for surface in SURFACES:
+            if surface in BINARIES:
+                baseline[surface] = read_dumps(baseline_dir, surface)[0]
+                continue
+            path = os.path.join(baseline_dir, baseline_name(surface))
+            baseline[surface] = read_json(path) if os.path.exists(path) else None
+        for surface in BINARIES:
+            if a.built is None:
+                built[surface] = baseline[surface]
+                continue
+            built[surface], missing = read_dumps(os.path.abspath(a.built), surface)
+            if missing:
+                print(
+                    f"--built {a.built} holds no {', '.join(missing)}: the binaries' tests write them under "
+                    "FENNEC_API_GOLDEN (make api-golden)",
+                    file=sys.stderr,
+                )
+                return 2
+    except (OSError, ValueError) as e:
+        print(e, file=sys.stderr)
+        return 2
     if a.freeze:
         return freeze(a.freeze, built, baseline, allowed, baseline_dir, frozen)
     if a.write:
@@ -819,7 +1029,7 @@ def main(argv=None):
             failed += 1
             print(line)
         for surface in SURFACES:
-            if baseline[surface] is not None:
+            if baseline[surface] is not None and built[surface] is not None:
                 for symbol, change, detail, why in judge(surface, baseline[surface], built[surface], allowed, frozen)[1]:
                     failed += 1
                     print(f"BREAKING: {surface}: {symbol}: {change} ({detail})\n    {why}")
@@ -827,10 +1037,22 @@ def main(argv=None):
             print(f"{failed} failure(s): the baselines are left as they were")
             return 1
         os.makedirs(baseline_dir, exist_ok=True)
-        for surface in SURFACES:
+        for surface in SOURCES:
             with open(os.path.join(baseline_dir, baseline_name(surface)), "w", encoding="utf-8") as f:
                 f.write(written(built[surface]))
             print(f"wrote {BASELINE}/{baseline_name(surface)}")
+        for surface in BINARIES:
+            if a.built is None:
+                print(f"{surface}: left as it is: its dumps are the binaries' tests' to write (make api-golden)")
+                continue
+            # Copied as the tests wrote them, byte for byte: those tests hold
+            # the committed file to their own text.
+            for _, name in baseline_files(surface):
+                with open(os.path.join(a.built, name), "rb") as f:
+                    data = f.read()
+                with open(os.path.join(baseline_dir, name), "wb") as f:
+                    f.write(data)
+                print(f"wrote {BASELINE}/{name}")
         if not os.path.exists(os.path.join(baseline_dir, FROZEN)):
             with open(os.path.join(baseline_dir, FROZEN), "w", encoding="utf-8") as f:
                 f.write(written({"frozen": None}))
@@ -843,7 +1065,11 @@ def main(argv=None):
         if known.returncode != 0:
             print(f"--base-ref {a.base_ref} names no commit (fetch it first)", file=sys.stderr)
             return 2
-        base = {s: at_ref(a.base_ref, f"{BASELINE}/{baseline_name(s)}", root) for s in SURFACES}
+        try:
+            base = {s: base_dump(a.base_ref, s, root) for s in SURFACES}
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            return 2
         got = at_ref(a.base_ref, f"{BASELINE}/{FROZEN}", root)
         base_frozen = got.get("frozen") if isinstance(got, dict) else None
     failures = check(built, baseline, base, allowed, frozen=frozen, base_frozen=base_frozen)
@@ -854,7 +1080,8 @@ def main(argv=None):
     if base is not None:
         n = sum(len(additions(s, base[s], baseline[s])) for s in SURFACES if base[s] is not None)
         grew = f"; {n} added since the base branch's"
-    print(f"fennec.h and the JS types only grow: the baselines are what the sources dump to{grew}")
+    held = "" if a.built else " (the CLI's and the metrics' held to the binaries by their crates' tests)"
+    print(f"fennec.h, the JS types, the CLI and the metrics only grow: the baselines are what the sources dump to{held}{grew}")
     return 0
 
 
