@@ -372,6 +372,26 @@ what follows the last colon -- not a host name, refused by the resolver
 node. A record of the directory carries the address alone, so no
 field of it is read another way.
 
+**A sealed frame bound to its file moves a sealed archive at once.** From
+the release that binds it (`docs/design/replication.md#sealed-archives`),
+an archiver restarted on it seals its next image and segment, and `fennec
+backup --key-file` a backup, as version 2 (`FENECSL\x02`, a file id under
+every frame's tag), which a `fennec restore` or `fennec verify` from 0.2.0
+or earlier refuses (`not a sealed file`, `not sealed, where the archive
+is`): its notes say, under their upgrade heading, to upgrade `fennec`
+wherever an archive is restored or verified before any archiver, and that
+files sealed before stay open under their key -- splices of them with it
+-- until a new key (`fennec key`) begins a new archive. The same notes say
+that a tenant's `github` hook 0.2.0 saved with `key delivery` is kept, its
+events answered 409 until it is set again with `key body`, its other hooks
+armed, and that a single server started with `--hooks` whose file has a
+`github` line saying `key delivery` refuses to start on the release (exit
+2, ``<hooks file>: hooks file line N: `key delivery` is refused: ...``): that
+line's `key delivery` is taken out, or made `key body`, before the server
+is restarted on it. `make upgrade-check` drives the archive's case: CK_BASE's `fennec
+restore` and `fennec verify` refuse a backup and an archive this tree
+sealed, which this tree's read.
+
 | Package | From | What it holds |
 | --- | --- | --- |
 | `fennecdb` on PyPI | `integrations/python` | the HTTP client and the LangChain and LlamaIndex stores; the standard library alone |

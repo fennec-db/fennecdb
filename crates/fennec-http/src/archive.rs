@@ -374,9 +374,11 @@ struct Segment {
     durable: usize,
     dirty: bool,
     synced: Instant,
-    /// Sealed: the key, the next frame's index and the writes waiting to be
-    /// sealed as one frame of whole records.
-    sealed: Option<(Key, u64, Vec<u8>)>,
+    /// Sealed: the key, the file its frames are bound to -- an older
+    /// archiver's segment goes on in its own version -- the next frame's
+    /// index and the writes waiting to be sealed as one frame of whole
+    /// records.
+    sealed: Option<(Key, seal::FileId, u64, Vec<u8>)>,
 }
 
 impl Segment {
@@ -391,7 +393,7 @@ impl Segment {
         self.len += bytes.len();
         self.dirty = true;
         match &mut self.sealed {
-            Some((_, _, pending)) => {
+            Some((_, _, _, pending)) => {
                 pending.extend_from_slice(bytes);
                 Ok(())
             }
@@ -401,14 +403,14 @@ impl Segment {
 
     /// Seals what waits as a frame, and writes it.
     fn flush(&mut self) -> io::Result<()> {
-        let Some((key, index, pending)) = &mut self.sealed else {
+        let Some((key, file, index, pending)) = &mut self.sealed else {
             return Ok(());
         };
         if pending.is_empty() {
             return Ok(());
         }
         let mut frame = Vec::with_capacity(pending.len() + 32);
-        seal::seal_frame(key, *index, false, pending, &mut frame)?;
+        seal::seal_frame(key, file, *index, false, pending, &mut frame)?;
         *index += 1;
         pending.clear();
         self.file()?.write_all(&frame)
@@ -508,10 +510,10 @@ impl Writer {
 }
 
 /// A segment's writes, and for a sealed one where its last whole frame
-/// ends and how many frames it holds.
+/// ends, how many frames it holds and the file they are bound to.
 struct Read {
     plain: Vec<u8>,
-    sealed: Option<(usize, u64)>,
+    sealed: Option<(usize, u64, seal::FileId)>,
     /// The file's own length.
     len: usize,
 }
@@ -577,23 +579,25 @@ impl Archive {
     fn read_segment(&self, path: &Path) -> io::Result<Read> {
         let bytes = fs::read(path)?;
         let len = bytes.len();
-        // Sealed, cut inside the seal's magic as it was made: no frame, and
-        // no write (`entries`). Past the magic, a head frame cut short opens
-        // as no frame as well.
-        if self.key.is_some() && seal::MAGIC.starts_with(&bytes) && len < seal::MAGIC.len() {
+        // Sealed, cut inside the seal's magic or the file's id as it was
+        // made: no frame, and no write (`entries`), so nothing goes on in
+        // it -- `position` removes it, and the id it is given is never
+        // sealed under. Past the id, a head frame cut short opens as no
+        // frame as well.
+        if self.key.is_some() && seal::cut_in_head(&bytes) {
             return Ok(Read {
                 plain: Vec::new(),
-                sealed: Some((0, 0)),
+                sealed: Some((0, 0, seal::FileId::V1)),
                 len,
             });
         }
         match (seal::is_sealed(&bytes), &self.key) {
             (true, Some(key)) => {
-                let (plain, end, frames) = seal::open_appended(key, &bytes)
+                let (plain, end, frames, file) = seal::open_appended(key, &bytes)
                     .map_err(|e| corrupt(format!("{}: {e}", path.display())))?;
                 Ok(Read {
                     plain,
-                    sealed: Some((end, frames)),
+                    sealed: Some((end, frames, file)),
                     len,
                 })
             }
@@ -764,7 +768,7 @@ impl Archive {
                             path.display()
                         )))
                     }
-                    Some((whole, _)) => whole,
+                    Some((whole, ..)) => whole,
                     None => end,
                 };
                 if read.sealed.is_none() && cut < read.plain.len() {
@@ -795,7 +799,7 @@ impl Archive {
                         .key
                         .clone()
                         .zip(read.sealed)
-                        .map(|(k, (_, frames))| (k, frames, Vec::new())),
+                        .map(|(k, (_, frames, file))| (k, file, frames, Vec::new())),
                 });
             }
             break;
@@ -1123,21 +1127,22 @@ impl Archive {
                         s.park()?;
                     }
                     let path = self.segment_path(seq);
-                    // Sealed, the magic is a frame of its own, so a segment
-                    // the archiver made and died in reads as an empty one;
-                    // sealed before the file is made, so a refused seal
-                    // leaves none.
+                    // Sealed, the log's magic is a frame of its own after
+                    // the seal's head, so a segment the archiver made and
+                    // died in reads as an empty one; sealed before the file
+                    // is made, so a refused seal leaves none.
                     let head = match &self.key {
                         Some(key) => {
-                            let mut head = seal::MAGIC.to_vec();
-                            seal::seal_frame(key, 0, false, LOG_MAGIC, &mut head)?;
-                            Some(head)
+                            let mut head = Vec::new();
+                            let id = seal::FileId::begin(&mut head)?;
+                            seal::seal_frame(key, &id, 0, false, LOG_MAGIC, &mut head)?;
+                            Some((head, key.clone(), id))
                         }
                         None => None,
                     };
                     let mut file = File::create(&path)?;
-                    file.write_all(head.as_deref().unwrap_or(LOG_MAGIC))?;
-                    let sealed = self.key.as_ref().map(|key| (key.clone(), 1, Vec::new()));
+                    file.write_all(head.as_ref().map_or(&LOG_MAGIC[..], |h| &h.0))?;
+                    let sealed = head.map(|(_, key, id)| (key, id, 1, Vec::new()));
                     // The directory synced before the segment's first write:
                     // its name then lasts as long as its writes do, where an
                     // fsync of the file alone left a segment written for an
@@ -1492,7 +1497,7 @@ impl Archive {
                         path.display()
                     )))
                 }
-                Some((whole, _)) => read.len - whole,
+                Some((whole, ..)) => read.len - whole,
                 None => read.plain.len() - end,
             };
             if cut > 0 {

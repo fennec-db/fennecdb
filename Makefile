@@ -1351,7 +1351,9 @@ packaging-test:
 ## built before them stop in words at this tree's first record, and this
 ## tree's replica follows a primary from before and its server opens that
 ## primary's file; the cases above run CK_BASE's binaries in this tree's
-## place, a binary from before stopping at the checksum first.
+## place, a binary from before stopping at the checksum first. Then a sealed
+## frame bound to its file: CK_BASE's `fennec restore` and `verify` refuse a
+## backup and an archive this tree sealed, which this tree's read.
 ## Builds BASE -- 12d6f8db^, the last main before the kind, unless given --
 ## OP3_BASE -- b73ce4ca, the last before op 3 -- OP4_BASE -- cd907d6c, the
 ## last before op 4 -- OP6_BASE -- 6fb28002, the last before op 6 -- and

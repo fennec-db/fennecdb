@@ -200,7 +200,9 @@ module keeps it as the record's tail (`Timing`), reading none of it. The
 event's values reach a body through its typed parameters alone
 (`named::event_at`, no cast, a key of digits a list's place; 400 where one
 is missing or mistyped), its condition -- the event and literals alone --
-picking the events it takes. An event's statements run in name order in
+picking the events it takes. Its key is a value its signature covers,
+never an unsigned header (fennec-http's rule): a captured event sent again
+is answered from it while it is kept. An event's statements run in name order in
 one block with its key's row in `_hook_events` (`<hook>`, `U+001F`, the
 key; its own `until`, `@ttl(1ms)`), under one `--call-max-rows`, `now()`
 one instant (`Clocked`): `Database::take_event`, or `judge_event` beside

@@ -703,10 +703,11 @@ fennec restore today.sealed today.fennec --key-file /secrets/archive.key</pre>
 disk encryption. With a key every file of an archive — its images, its
 segments, its history — and a backup file are sealed: encrypted and
 authenticated with ChaCha20-Poly1305 (RFC 8439), a random nonce a frame,
-each frame's place in the file and whether it is the last under its tag.
-A byte changed, a frame moved or dropped, a file cut short where it was
-sealed whole, or the wrong key, and the file is refused — never read as
-something else. A segment is sealed a frame for each batch of writes the
+and under each frame's tag the file's own random id, the frame's place in
+it and whether it is the last. A byte changed, a frame moved or dropped, a
+frame taken from another file sealed with the same key, a file cut short
+where it was sealed whole, or the wrong key, and the file is refused —
+never read as something else. A segment is sealed a frame for each batch of writes the
 primary sends, so a crash cuts off at most the frame being written, as it
 cut a record short before.</p>
 
@@ -716,6 +717,27 @@ and opening run at about 400 MB/s on one core, where writing the archive
 waits on the network and the disk. The database file itself stays plain:
 it is mapped and read where it lies, which encryption would take away —
 encrypt the disk it is on (LUKS, FileVault, an encrypted cloud volume).</p>
+
+<p>Files sealed by 0.2.0 and earlier still open, and an archive they began
+goes on. Their frames are bound to their places alone, so a frame of
+another such file sealed with the same key could be put in one unnoticed;
+files sealed now are bound to themselves. Because the older files still
+open, that stays true of every key that ever sealed one: whoever holds two
+of them can build a third from their frames and put it where a file sealed
+with that key is read, beside an archive or a backup sealed now. Pruning
+the older files does not end it, and neither does restoring a backup and
+sealing it again with the same key: copies of the older files may be
+anywhere. To be rid of it, make a new key (<code>fennec key</code>), seal
+with it from then on, and begin a new archive with it, in a directory or
+bucket path of its own; read the older archive and backups with the old
+key for as long as you keep them.</p>
+
+<p>A binary from 0.2.0 or earlier refuses a file sealed now (<code>not a
+sealed file</code>, <code>not sealed, where the archive is</code>), and an
+upgraded archiver seals its next image and segment so at once: upgrade
+what reads an archive — <code>fennec restore</code>, <code>fennec
+verify</code>, the hosts a restore drill runs on — before what writes
+it.</p>
 </details>
 
 <h2>Endpoints</h2>

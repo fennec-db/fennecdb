@@ -45,8 +45,13 @@ fn scratch(tag: &str) -> PathBuf {
 /// A node of tenants, its admin token `adm`, every refusal waiting
 /// nothing; replicating its tenants where `replicated`.
 fn node(tag: &str, replicated: bool) -> Node {
+    serve(scratch(tag), replicated)
+}
+
+/// A node as [`node`] makes one, over `dir`: started again over the
+/// directory a node shut down left.
+fn serve(dir: PathBuf, replicated: bool) -> Node {
     fennec_http::audit::set_delay(0);
-    let dir = scratch(tag);
     let mut tenants = Tenants::new(&dir).expect("dir");
     if replicated {
         tenants = tenants.with_replication(Replicated {
@@ -177,12 +182,53 @@ fn event(port: u16, path: &str, secret: &str, id: &str, order: &str) -> Res {
     )
 }
 
+/// `body`, signed as GitHub signs a delivery under `secret`, sent to
+/// `path` as a `push` under one `X-GitHub-Delivery`.
+fn github(port: u16, path: &str, secret: &str, body: &str) -> Res {
+    let mac = hmac_sha256(secret.as_bytes(), body.as_bytes());
+    let hex: String = mac.iter().map(|b| format!("{b:02x}")).collect();
+    let sig = format!("sha256={hex}");
+    call(
+        port,
+        "POST",
+        path,
+        &[
+            ("Content-Type", "application/json"),
+            ("X-Hub-Signature-256", &sig),
+            ("X-GitHub-Event", "push"),
+            ("X-GitHub-Delivery", "72d3162e-cc78-11e3-81ab-4c9367dc0958"),
+        ],
+        body.as_bytes(),
+    )
+}
+
 fn status_of(port: u16, tenant: &str) -> String {
     query(port, tenant, "get orders select status where ref = 'o-1'").body
 }
 
 fn is_open(n: &Node, tenant: &str) -> bool {
     (n.tenants.stats().open.iter()).any(|(name, _, _)| name == tenant)
+}
+
+/// What `tenant`'s `statements`, `describe statement` and `GET /_schema`
+/// each say of `statement`'s `armed`, the last field of its entry: `None`
+/// where one does not list it or says neither.
+fn armed_in(port: u16, tenant: &str, statement: &str) -> [Option<bool>; 3] {
+    let of = |body: &str| {
+        let at = body.find(&format!(r#""name":"{statement}""#))?;
+        let rest = &body[at..];
+        let value = &rest[rest.find(r#""armed":"#)? + r#""armed":"#.len()..];
+        match () {
+            _ if value.starts_with("true") => Some(true),
+            _ if value.starts_with("false") => Some(false),
+            _ => None,
+        }
+    };
+    [
+        of(&query(port, tenant, "statements").body),
+        of(&query(port, tenant, &format!("describe statement {statement}")).body),
+        of(&call(port, "GET", &format!("/t/{tenant}/_schema"), &[], b"").body),
+    ]
 }
 
 /// Each tenant's events verify by its own secrets alone: one tenant's
@@ -348,8 +394,12 @@ fn a_tenants_secrets_are_set_listed_and_exported_by_its_admin_alone() {
             "tolerance",
         ),
         (
-            r#"{"scheme":"stripe","secrets":["whsec_x"],"key":"delivery"}"#,
+            r#"{"scheme":"stripe","secrets":["whsec_x"],"key":"body"}"#,
             "github",
+        ),
+        (
+            r#"{"scheme":"github","secrets":["x"],"key":"delivery"}"#,
+            "does not sign X-GitHub-Delivery",
         ),
         (r#"{"scheme":"nosuch","secrets":["whsec_x"]}"#, "scheme"),
         (
@@ -376,7 +426,7 @@ fn a_tenants_secrets_are_set_listed_and_exported_by_its_admin_alone() {
         n.port,
         "PUT",
         "/_admin/tenants/acme/hooks/pushes",
-        &format!(r#"{{"scheme":"github","secrets":["{SECRET}"],"key":"delivery"}}"#),
+        &format!(r#"{{"scheme":"github","secrets":["{SECRET}"],"key":"body"}}"#),
     );
     assert_eq!(made.status, 200, "{}", made.body);
     assert_eq!(set_secret(n.port, "acme", "whsec_acme").status, 200);
@@ -384,7 +434,7 @@ fn a_tenants_secrets_are_set_listed_and_exported_by_its_admin_alone() {
     assert_eq!(listing.status, 200);
     for part in [
         r#""name":"pushes""#,
-        r#""key":"delivery""#,
+        r#""key":"body""#,
         r#""name":"stripe""#,
     ] {
         assert!(listing.body.contains(part), "{part}: {}", listing.body);
@@ -865,4 +915,271 @@ fn a_set_is_bounded_and_a_frozen_tenants_takes_no_change() {
     assert_eq!(r.status, 200, "{}", r.body);
     let r = admin(n.port, "DELETE", "/_admin/tenants/acme/hooks/h1", "");
     assert_eq!(r.status, 200, "{}", r.body);
+}
+
+/// A set 0.2.0 saved with a `github` hook keyed `key delivery` -- which a
+/// hook's `PUT` and a hooks file refuse now -- still reads as the node
+/// starts again: every secret kept, its other hook armed, the export
+/// writing `delivery` back so a copy and a move carry it, and each event of
+/// that hook that verifies refused (409) naming `key body`, a forged one
+/// the one 401 any forged event is, until one `PUT` with `key body` sets it
+/// again -- listed not armed meanwhile, which a listing that asked only
+/// whether the set named it said it was. The first cut of the refusal read
+/// the set as one that does not read and removed the sidecar, the tenant's
+/// every secret with it.
+#[test]
+fn a_set_saved_with_key_delivery_survives_a_restart_its_hook_refused_until_set_again() {
+    let n = node("delivery", false);
+    tenant(n.port, "acme");
+    for q in [
+        "create collection pushes (sha text)",
+        "create statement pushed($sha text from event.sha) on hook pushes as insert pushes \
+         {sha: $sha}",
+    ] {
+        let r = query(n.port, "acme", q);
+        assert_eq!(r.status, 200, "{q}: {}", r.body);
+    }
+    const GH: &str = "a word its user chose";
+    let pushes = |port: u16, key: &str| {
+        admin(
+            port,
+            "PUT",
+            "/_admin/tenants/acme/hooks/pushes",
+            &format!(r#"{{"scheme":"github","secrets":["{GH}"],"key":"{key}"}}"#),
+        )
+    };
+    assert_eq!(set_secret(n.port, "acme", "whsec_acme").status, 200);
+    assert_eq!(pushes(n.port, "body").status, 200);
+    let held = n.tenants.hooks().version("acme");
+    assert!(held.is_some());
+    // The sidecar as 0.2.0 wrote it for `key delivery`, in the layout it
+    // shares with this one, the node stopped: its tenant closed, so the
+    // node started again over the directory opens it.
+    assert_eq!(n.tenants.close_idle(Duration::ZERO), 1);
+    n.tenants.shutdown();
+    let sidecar = n.dir.join("acme.hooks");
+    let text = std::fs::read_to_string(&sidecar).unwrap();
+    assert_eq!(text.matches(r#""key":"body""#).count(), 1);
+    let saved = text.replace(r#""key":"body""#, r#""key":"delivery""#);
+    std::fs::write(&sidecar, &saved).unwrap();
+
+    let again = serve(n.dir.clone(), false);
+    assert_eq!(
+        again.tenants.hooks().version("acme"),
+        held,
+        "read, not put away"
+    );
+    assert_eq!(std::fs::read_to_string(&sidecar).unwrap(), saved);
+    let export = admin(again.port, "GET", "/_admin/tenants/acme/hook-secrets", "");
+    assert_eq!(export.status, 200, "{}", export.body);
+    for part in ["whsec_acme", GH, r#""key":"delivery""#] {
+        assert!(export.body.contains(part), "{part} not exported");
+    }
+    let listing = admin(again.port, "GET", "/_admin/tenants/acme/hooks", "");
+    assert!(
+        listing.body.contains(r#""key":"delivery""#),
+        "{}",
+        listing.body
+    );
+
+    // Its other hook is armed.
+    let taken = event(
+        again.port,
+        "/t/acme/_hooks/stripe",
+        "whsec_acme",
+        "evt_1",
+        "o-1",
+    );
+    assert_eq!(taken.status, 200, "{}", taken.body);
+    // The `delivery` hook's verified event: refused naming `key body`,
+    // nothing run; a forged one is the 401 of a hook that is not there.
+    let push = r#"{"sha":"abc123"}"#;
+    let refused = github(again.port, "/t/acme/_hooks/pushes", GH, push);
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert!(refused.body.contains("key body"), "{}", refused.body);
+    assert!(!refused.body.contains(GH), "{}", refused.body);
+    let forged = github(again.port, "/t/acme/_hooks/pushes", "a guess", push);
+    let nosuch = github(again.port, "/t/acme/_hooks/nosuch", GH, push);
+    assert_eq!(nosuch.status, 401, "{}", nosuch.body);
+    assert_eq!((forged.status, &forged.body), (401, &nosuch.body));
+    let count = |port: u16| query(port, "acme", "get pushes count").body;
+    assert!(count(again.port).contains(r#""count":0"#));
+    // Its listings say so: a hook whose events are refused is not armed,
+    // whatever secret its set holds; its other hook is.
+    assert_eq!(armed_in(again.port, "acme", "pushed"), [Some(false); 3]);
+    assert_eq!(armed_in(again.port, "acme", "paid"), [Some(true); 3]);
+
+    // A change of its other hook keeps it as it was kept.
+    assert_eq!(set_secret(again.port, "acme", "whsec_acme").status, 200);
+    let text = std::fs::read_to_string(&sidecar).unwrap();
+    assert!(text.contains(r#""key":"delivery""#) && text.contains(GH));
+    // `key delivery` is refused at a hook's `PUT` still; `key body` sets
+    // it again, its events taken.
+    let r = pushes(again.port, "delivery");
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert!(
+        r.body.contains("does not sign X-GitHub-Delivery"),
+        "{}",
+        r.body
+    );
+    // Not armed, but held: its `DELETE` takes it away as any hook's does.
+    let gone = admin(
+        again.port,
+        "DELETE",
+        "/_admin/tenants/acme/hooks/pushes",
+        "",
+    );
+    assert_eq!(gone.status, 200, "{}", gone.body);
+    let text = std::fs::read_to_string(&sidecar).unwrap();
+    assert!(!text.contains(GH) && text.contains("whsec_acme"));
+    assert_eq!(pushes(again.port, "body").status, 200);
+    assert_eq!(armed_in(again.port, "acme", "pushed"), [Some(true); 3]);
+    let taken = github(again.port, "/t/acme/_hooks/pushes", GH, push);
+    assert_eq!(taken.status, 200, "{}", taken.body);
+    assert!(count(again.port).contains(r#""count":1"#));
+    let text = std::fs::read_to_string(&sidecar).unwrap();
+    assert!(!text.contains("delivery") && text.contains("whsec_acme"));
+}
+
+/// A sidecar that does not read -- cut short by hand, of a later layout --
+/// is set aside as the node starts, under a name nothing reads, never
+/// removed nor written over: it may hold the only copy of a secret, which
+/// no router keeps. Its hooks answer 401 until set again, a `PUT` writing a
+/// set of its own beside it; one naming another file is put away, as
+/// `a_set_left_behind_never_arms_a_later_tenant_of_the_name` holds.
+#[test]
+fn a_sidecar_that_does_not_read_is_set_aside_never_removed() {
+    let n = node("unread", false);
+    tenant(n.port, "acme");
+    assert_eq!(set_secret(n.port, "acme", "whsec_acme").status, 200);
+    n.tenants.close_idle(Duration::ZERO);
+    n.tenants.shutdown();
+    let sidecar = n.dir.join("acme.hooks");
+    let text = std::fs::read_to_string(&sidecar).unwrap();
+    let set = text.find("\n{").unwrap() + 1;
+    let cut = text[..set + (text.len() - set) / 2].to_string();
+    std::fs::write(&sidecar, &cut).unwrap();
+
+    let again = serve(n.dir.clone(), false);
+    assert_eq!(again.tenants.hooks().version("acme"), None);
+    assert!(!sidecar.exists(), "not read as the tenant's");
+    let aside = n.dir.join("acme.hooks.unread");
+    assert_eq!(
+        std::fs::read_to_string(&aside).unwrap(),
+        cut,
+        "set aside whole"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&aside).unwrap();
+        assert_eq!(mode.permissions().mode() & 0o777, 0o600);
+    }
+    let refused = event(
+        again.port,
+        "/t/acme/_hooks/stripe",
+        "whsec_acme",
+        "evt_1",
+        "o-1",
+    );
+    assert_eq!(refused.status, 401, "{}", refused.body);
+    // Set again: a set of its own, the one set aside untouched.
+    assert_eq!(set_secret(again.port, "acme", "whsec_again").status, 200);
+    assert_eq!(std::fs::read_to_string(&aside).unwrap(), cut);
+
+    // One of a later layout: set aside under the next free name.
+    again.tenants.close_idle(Duration::ZERO);
+    again.tenants.shutdown();
+    let later = std::fs::read_to_string(&sidecar)
+        .unwrap()
+        .replacen("1 ", "2 ", 1);
+    std::fs::write(&sidecar, &later).unwrap();
+    let third = serve(n.dir.clone(), false);
+    assert_eq!(third.tenants.hooks().version("acme"), None);
+    assert!(!sidecar.exists());
+    assert_eq!(
+        std::fs::read_to_string(&aside).unwrap(),
+        cut,
+        "never written over"
+    );
+    let next = n.dir.join("acme.hooks.unread.2");
+    assert_eq!(std::fs::read_to_string(next).unwrap(), later);
+}
+
+/// Only a tenant's file that is not there puts its sidecar away: one the
+/// node cannot look at as it starts -- a directory on its way it may not
+/// search, a file where a directory should be -- says nothing of whose the
+/// set is, and an error that passes may leave the tenant's file as it was.
+/// So the sidecar is set aside, as one that does not read is, never
+/// removed, and put back by hand it arms the tenant again. Both errors are
+/// made through a link standing in for the tenant's file, its directory
+/// read as the sidecar is; the first is passed over where the process
+/// searches the directory anyway, as root does.
+#[cfg(unix)]
+#[test]
+fn a_tenants_file_the_node_cannot_look_at_sets_its_sidecar_aside() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let n = node("unseen", false);
+    tenant(n.port, "acme");
+    assert_eq!(set_secret(n.port, "acme", "whsec_acme").status, 200);
+    n.tenants.close_idle(Duration::ZERO);
+    n.tenants.shutdown();
+    let (file, sidecar) = (n.dir.join("acme.fennec"), n.dir.join("acme.hooks"));
+    let text = std::fs::read_to_string(&sidecar).unwrap();
+    // The file moved, which keeps its device, inode and birth: the sidecar
+    // still names it, wherever the link leads.
+    let held = n.dir.join("held");
+    std::fs::create_dir(&held).unwrap();
+    std::fs::rename(&file, held.join("acme.fennec")).unwrap();
+    let plain = n.dir.join("plain");
+    std::fs::write(&plain, b"a file, not a directory").unwrap();
+    let mode = |m: u32| std::fs::set_permissions(&held, std::fs::Permissions::from_mode(m));
+
+    // Each node started is kept: a node's drop removes the directory.
+    let mut started = Vec::new();
+    for (to, why) in [
+        (held.join("acme.fennec"), "a directory it may not search"),
+        (
+            plain.join("acme.fennec"),
+            "a file where a directory should be",
+        ),
+    ] {
+        symlink(&to, &file).unwrap();
+        mode(0o000).unwrap();
+        let unseen = std::fs::metadata(&file);
+        let node = unseen.is_err().then(|| serve(n.dir.clone(), false));
+        mode(0o755).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        let Some(node) = node else {
+            continue;
+        };
+        let kind = unseen.unwrap_err().kind();
+        assert_ne!(kind, std::io::ErrorKind::NotFound, "{why}");
+        assert_eq!(node.tenants.hooks().version("acme"), None, "{why}");
+        assert!(!sidecar.exists(), "{why}: left where a PUT writes over it");
+        node.tenants.shutdown();
+        started.push(node);
+        let unread = match started.len() {
+            1 => n.dir.join("acme.hooks.unread"),
+            k => n.dir.join(format!("acme.hooks.unread.{k}")),
+        };
+        let kept = std::fs::read_to_string(&unread).ok();
+        assert_eq!(kept.as_deref(), Some(&*text), "{why}: not set aside whole");
+        std::fs::write(&sidecar, &text).unwrap();
+    }
+    assert!(!started.is_empty(), "no error was made");
+
+    // The file back where it was, the sidecar put back by hand: the
+    // tenant's secret arms it again.
+    std::fs::rename(held.join("acme.fennec"), &file).unwrap();
+    let back = serve(n.dir.clone(), false);
+    assert!(back.tenants.hooks().version("acme").is_some());
+    let taken = event(
+        back.port,
+        "/t/acme/_hooks/stripe",
+        "whsec_acme",
+        "evt_1",
+        "o-1",
+    );
+    assert_eq!(taken.status, 200, "{}", taken.body);
 }
