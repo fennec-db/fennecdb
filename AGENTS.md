@@ -121,7 +121,10 @@ takes that shape. A number a statement or a declared schema writes -- a
 dimension, a beam, `fuse k`, a count -- is read as written or refused
 naming its range (`Parser::int_in`, within `u32`), never clamped nor cut
 to a 32-bit `usize`; a list's elements too, each read as written and
-refused naming the field and the element.
+refused naming the field and the element. A schema read off the bytes is
+held to the same ranges, `Error::Corrupt` past them (`Schema::decode`), by
+the one test every schema a write makes meets (`schema::out_of_range`), a
+list's dimension too: no read refuses what a write took.
 
 **[Profiles differ on purpose.](docs/design/crates.md#profiles)**
 `fennec-cli` takes `cli` (`panic = abort`), `fennec-server` `release`: a
@@ -209,12 +212,9 @@ Covers `crates/fennec-core/`; the browser module's rules bind `crates/fennec-was
 
 *Storage*
 - No buffer pool of its own, and the file is mapped.
-- Writes are handed over to the mapped file.
 - A block past 16 MB spills into the file before it lands.
-- A lone `create index` or `compact` runs beside the database
-- A file compacts itself once half of it is dead
-- A file is compacted before it outgrows the page cache
 - File format
+- A value read off the bytes nests no deeper than JSON's limit.
 
 *Durability*
 - Buffered writes are written behind the lock
@@ -308,6 +308,12 @@ Covers `crates/fennec-core/src/engine/`.
 *The engine's lock and blocks*
 - A block's documents are built beside the readers
 - A long read is pinned, and read with no lock held
+
+*Storage*
+- Writes are handed over to the mapped file.
+- A lone `create index` or `compact` runs beside the database
+- A file compacts itself once half of it is dead
+- A file is compacted before it outgrows the page cache
 
 ### `crates/fennec-core/src/text/CLAUDE.md`
 
@@ -413,6 +419,9 @@ Covers `crates/fennec-import/` and `crates/fennec-wire/`; the mirror is `crates/
 
 *Replication and archives*
 - `--follow` confirms nothing that is not on disk.
+
+*Imports*
+- A SQLite file's lengths are held to the file before anything is allocated, and its walk reaches a page once.
 
 ### `crates/fennec-shard/CLAUDE.md`
 
@@ -548,14 +557,22 @@ Covers `crates/fennec-bench/`; its gate rule binds `tools/perf_gate.py`, `crates
   `listening on: http://<address>` stderr line, a router told its nodes by
   the addresses they said; only a site needing its address before it binds
   takes a system-picked port, held by a stand-in listener till then.
+- [Every parser of untrusted bytes is fuzzed](docs/design/conventions.md#fuzzing)
+  by `crates/fennec-fuzz`, the repository's own mutator under ASan (`make
+  fuzz` lists the targets; CI's `fuzz-smoke` runs each 30 s, `fuzz.yml`
+  weekly): a new parser owes its target and `fuzz.yml`'s matrix line, a
+  finding a regression test in its own crate.
 - [A secret is compared by `crypto::ct_eq` alone](docs/design/conventions.md#secrets-compared)
   -- a token, a mark, a MAC, a signature, a proof, a password -- never by
   `==` or `!=`, which leave at the first byte that differs:
   `tools/secret_eq_check.py` (CI's fmt job) refuses one on an operand so
   named in `crates/*/src` outside tests, each operand read whole, a name
   that is no secret allowed with why and how many times. A primitive we
-  write is held to its RFC's vectors, every one, and where a key meets its
-  block to another implementation's, each test's count of cases held.
+  write is held to its RFC's vectors, every one, to every case of Project
+  Wycheproof's file for it where there is one (committed unchanged, an
+  `acceptable` case to the answer chosen for its kind), and where a key
+  meets its block to another implementation's, each test's count of cases
+  held.
 - [A change a user meets](docs/design/conventions.md#docs-a-change-owes)
   says so in the same pull request: its page under `site/content/docs/`,
   README's feature table and the links beside it, the home page and docs

@@ -51,12 +51,14 @@ the query run every time): the change counter's tag, and a 304 answered
 unrun, told it when anyone wrote to what it reads. The algorithm is the key's,
 never the token's: `--jwt-keys` reads a JWKS file, `oct` keys for HS256 and
 `RSA` keys (2048 bits up, `crypto::RsaKey`, 64-bit limbs: 166 us a check in
-32-bit ones, 38 now) for an identity provider's RS256 and `EC` keys on
-P-256 for its ES256 (below), a `kid` picking the key; an RSA modulus taken
-for an HS256 secret would sign anything. The file is read again as it
-changes, looked at once a second, which is the rotation. A verified token
-is kept by its text (`verified`, 16 shards of 256, emptied when the keys
-change, `exp` asked each time): 0.27 us against 2.9 for HS256.
+32-bit ones, 38 now; held to every case of Wycheproof's 2048-, 3072- and
+4096-bit files, `tests/wycheproof.rs`) for an identity provider's RS256
+and `EC` keys on P-256 for its ES256 (below), a `kid` picking the key; an
+RSA modulus taken for an HS256 secret would sign anything. The file is
+read again as it changes, looked at once a second, which is the rotation.
+A verified token is kept by its text (`verified`, 16 shards of 256,
+emptied when the keys change, `exp` asked each time): 0.27 us against 2.9
+for HS256.
 A token naming no `exp` is refused (`Demands::require_exp`,
 `--jwt-require-exp off` takes it), and `--jwt-max-age` bounds how far ahead
 one may lie; `mint` stamps an hour on claims naming none. Grants are
