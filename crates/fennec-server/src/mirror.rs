@@ -198,7 +198,7 @@ impl Drop for Ending {
         // and the follower returned an error before anything of it waited
         // (`follow::run`).
         if failed {
-            crate::durability::exit_with(1);
+            crate::durability::exit_with(crate::exit::Code::Failed);
         }
         match &self.ended {
             Some(Ok(())) => {}
@@ -306,13 +306,13 @@ mod tests {
     /// that stores an exit code or asks for a shutdown, both the process's.
     #[test]
     fn a_follower_that_panics_stops_the_server_with_its_code() {
-        assert_eq!(crate::durability::exit_code(), 0);
+        assert_eq!(crate::durability::exit_code(), crate::exit::Code::Ok);
         let wait = spawn("items".into(), |_, _| panic!("a follower's bug")).unwrap();
         let began = Instant::now();
         wait(began);
         // Ended by the thread's end, not by `STOP_WAIT`.
         assert!(began.elapsed() < STOP_WAIT, "{:?}", began.elapsed());
-        assert_eq!(crate::durability::exit_code(), 1);
+        assert_eq!(crate::durability::exit_code(), crate::exit::Code::Failed);
         let until = Instant::now() + Duration::from_secs(10);
         while !crate::durability::shutdown_requested() {
             assert!(Instant::now() < until, "no shutdown asked for");

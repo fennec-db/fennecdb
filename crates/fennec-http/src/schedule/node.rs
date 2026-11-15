@@ -318,7 +318,7 @@ impl Node {
     /// its schedules unrun. `stop` is the one shutdown, which the thread
     /// asks for should it end. Called after the listener is bound, since a
     /// first look may run a missed slot.
-    pub fn start(self: &Arc<Self>, stop: fn(i32)) -> std::result::Result<(), String> {
+    pub fn start(self: &Arc<Self>, stop: fn()) -> std::result::Result<(), String> {
         let me = Arc::clone(self);
         std::thread::Builder::new()
             .name("fennec-schedule".into())
@@ -329,7 +329,7 @@ impl Node {
                     Err(p) => panic_words(p.as_ref()),
                 };
                 crate::log!("the scheduler stopped ({words}): the node stops with it");
-                stop(1);
+                stop();
             })
             .map(|_| ())
             .map_err(|e| format!("could not start the scheduler: {e}"))
@@ -350,7 +350,12 @@ impl Node {
                 return;
             };
             match due {
-                Some((name, st)) => self.look_caught(&tenants, &name, st, now_ms(), true, None),
+                Some((name, st)) => {
+                    // Outside the look's own catch: the node's thread ends.
+                    #[cfg(feature = "test-clock")]
+                    super::test_fault();
+                    self.look_caught(&tenants, &name, st, now_ms(), true, None)
+                }
                 None => {
                     if let Err(e) = self.write_hint() {
                         crate::log!("could not write the schedule hint: {e}");
@@ -1011,13 +1016,12 @@ pub(crate) fn closing(db: &Database, synced: bool) -> Closing {
 mod tests {
     //! A look's panic, held to its tenant; one outside any look, the node's.
     use super::*;
-    use std::sync::atomic::AtomicI32;
 
     /// The tenants whose look panics, and the directories whose hint's
     /// write does.
     static PANIC_AT: Mutex<Vec<String>> = Mutex::new(Vec::new());
-    /// What the node's one shutdown was asked with.
-    static STOPPED: AtomicI32 = AtomicI32::new(0);
+    /// Whether the node's one shutdown was asked for.
+    static STOPPED: AtomicBool = AtomicBool::new(false);
 
     pub(super) fn panic_at(what: &str) {
         let hit = lock(&PANIC_AT).iter().any(|p| p == what);
@@ -1026,8 +1030,8 @@ mod tests {
         }
     }
 
-    fn stop(code: i32) {
-        STOPPED.store(code, Ordering::SeqCst);
+    fn stop() {
+        STOPPED.store(true, Ordering::SeqCst);
     }
 
     fn scratch(tag: &str) -> PathBuf {
@@ -1124,7 +1128,7 @@ mod tests {
         assert!(!node.learning());
         lock(&PANIC_AT).extend(["qa".into(), dir.to_string_lossy().into_owned()]);
         node.start(stop).unwrap();
-        until("the node stopped", || STOPPED.load(Ordering::SeqCst) == 1);
+        until("the node stopped", || STOPPED.load(Ordering::SeqCst));
         lock(&PANIC_AT).clear();
         assert_eq!(node.panics(), 1, "qa's look");
         assert_eq!(ticks(&tenants, "qb"), 1, "qb ran past qa's panic");
@@ -1133,7 +1137,7 @@ mod tests {
     }
 
     /// The node's one shutdown, for a test whose thread outlives it.
-    fn ignored(_: i32) {}
+    fn ignored() {}
 
     /// An image holding `tick`, due now.
     fn image() -> Vec<u8> {

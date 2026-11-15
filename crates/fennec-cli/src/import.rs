@@ -1,6 +1,7 @@
 //! `fennec import` -- builds a collection from a SQLite file or a PostgreSQL
 //! server.
 
+use crate::exit::{self, Code};
 use crate::stop;
 use fennec_core::prelude::*;
 use fennec_import::follow::{self, lsn_text, Event, Follow};
@@ -26,9 +27,9 @@ source
                                        network, use verify-full
 
 options
-  --table <name>          source table (required)
+  -t, --table <name>      source table (required)
   --into <name>           target collection (default: the --table value)
-  --file <path>           target fennec file (default: <into>.fennec)
+  -f, --file <path>       target fennec file (default: <into>.fennec)
   --vector <field>:<N>    take a bytes or array field as vector<N>
   --index <field>@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8|bit)
   --index <field>@hash    builds the index once the load finishes
@@ -42,7 +43,7 @@ options
   --limit <N>             at most N rows
   --batch <N>             put batch size (default 2000)
   --sample <N>            sqlite: rows scanned for untyped columns (1000)
-  --dry-run               print the plan, write nothing
+  -n, --dry-run           print the plan, write nothing
   --count                 with --dry-run: also count how many rows will be
                           read. It means a full scan, hence optional.
 
@@ -69,11 +70,11 @@ example
 
 fn fail(msg: &str) -> ! {
     eprintln!("{msg}");
-    std::process::exit(2);
+    exit::now(Code::Refused);
 }
 
 /// Runs `fennec import ...`; the return value is the process exit code.
-pub fn main(args: &[String]) -> i32 {
+pub fn main(args: &[String]) -> Code {
     let mut source: Option<String> = None;
     let mut table: Option<String> = None;
     let mut into: Option<String> = None;
@@ -100,7 +101,9 @@ pub fn main(args: &[String]) -> i32 {
             "--table" | "-t" => table = Some(next(&mut i, "--table")),
             "--into" => into = Some(next(&mut i, "--into")),
             "--file" | "-f" => file = Some(next(&mut i, "--file")),
-            flag @ ("--where" | "--vector" | "--index" | "--cast" | "--id" | "--batch") => {
+            // fennec-import's list, which fennec-server takes as
+            // `--follow-<name>`: the dump test holds each to this help.
+            flag if args::OPTIONS.contains(&flag) => {
                 let v = next(&mut i, flag);
                 if let Some(Err(e)) = args::option(&mut opts, flag, &v) {
                     fail(&e);
@@ -116,7 +119,7 @@ pub fn main(args: &[String]) -> i32 {
             "--publication" => publication = Some(next(&mut i, "--publication")),
             "-h" | "--help" => {
                 println!("{USAGE}");
-                return 0;
+                return Code::Ok;
             }
             other if !other.starts_with('-') => {
                 if source.is_some() {
@@ -134,7 +137,7 @@ pub fn main(args: &[String]) -> i32 {
 
     let Some(source) = source else {
         eprintln!("no source was given.{USAGE}");
-        return 2;
+        return Code::Refused;
     };
     let Some(table) = table else {
         fail("--table is required");
@@ -176,16 +179,16 @@ pub fn main(args: &[String]) -> i32 {
             Ok(l) => Some(l),
             Err(why) => {
                 eprintln!("error: {why}");
-                return 1;
+                return Code::Failed;
             }
         },
     };
     if let (Some(f), false) = (&follow, dry_run) {
         return match run_follow(&source, &table, &target, &opts, f) {
-            Ok(()) => 0,
+            Ok(()) => Code::Ok,
             Err(e) => {
                 eprintln!("error: {e}");
-                1
+                Code::Failed
             }
         };
     }
@@ -207,11 +210,11 @@ pub fn main(args: &[String]) -> i32 {
                     f.slot, f.publication
                 );
             }
-            0
+            Code::Ok
         }
         Err(e) => {
             eprintln!("error: {e}");
-            1
+            Code::Failed
         }
     }
 }

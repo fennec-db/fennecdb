@@ -103,6 +103,10 @@ jobs:
           test -f "$f" || { mkdir -p "$(dirname "$f")" && curl -fsSL --retry 3 -o "$f" https://www.unicode.org/Public/17.0.0/ucd/UnicodeData.txt; }
           python3 crates/fennec-core/tools/fold/gen.py --check "$f"
 
+      # Also a step of the `test` job (see there): on 2026-11-15, before
+      # this job was a required check, a pull request green on its own took
+      # crates/fennec-core/CLAUDE.md past 24 000 bytes once merged with main,
+      # through the queue with this job red. Here for the quick answer.
       - name: Each AGENTS.md is its CLAUDE.md under its own title; the root under 32 000 bytes, an area file under 24 000, each rule in one file and the root's index
         run: python3 tools/agents_md.py --check
 
@@ -173,6 +177,13 @@ jobs:
       # through, and holds BREAKS and the committed baseline.
       - name: tools/openapi_compat.py finds every break and passes every addition
         run: python3 tools/test_openapi_compat.py
+
+      # docs/design/compatibility.md: fennec.h, the JS types, the CLI and
+      # the metrics only grow. Here only the checker's own tests, a break
+      # seeded into each surface for the quick answer; the check over the
+      # sources is a step of the `test` job below, beside the REST API's.
+      - name: tools/api_compat.py finds every break and passes every addition
+        run: python3 tools/test_api_compat.py
 
       # docs/design/fennecql.md#the-corpus: what the test job's corpus steps
       # harvest from each kind of file and the hand-written list, how a
@@ -411,6 +422,32 @@ jobs:
             echo "main has no tools/openapi_compat.py yet: no base pass"
           fi
 
+      # docs/design/compatibility.md: fennec.h, the JS types, the CLI and
+      # the metrics only grow. `make api-check`: the checker's tests, then
+      # the sources held to integrations/api-golden/ -- which must be what
+      # they dump to -- by this checkout's checker, and the baselines to
+      # main's by main's copy (BREAKS read from this one as data, as the
+      # REST API's is), so neither a baseline edited by hand nor a checker
+      # changed to see less lets a break through. The CLI's and the
+      # metrics' dumps are held to the binaries by `make test` above (each
+      # binary's crate's tests/api_golden.rs, on Linux and macOS).
+      - name: The C header, the JS types, the CLI and the metrics only grow
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          make api-check BASE=FETCH_HEAD
+
+      # Run twice on purpose: fmt has it for the quick answer, this job
+      # since fmt was not a required check. On 2026-11-15 a pull request
+      # green on its own would have taken crates/fennec-core/CLAUDE.md past
+      # its 24 000 bytes once merged with main; it landed through the queue
+      # with fmt red and every later run's fmt was red too. The queue builds
+      # every required job on the merged result, fmt among them now
+      # (docs/design/conventions.md: every job but two).
+      - name: Each AGENTS.md is its CLAUDE.md, and no file is past its size
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 tools/agents_md.py --check
+
       # The corpus tool's own tests (the fmt job's step), in a required
       # check beside the two steps whose reading and judging they hold.
       - name: tools/fennecql_corpus.py harvests, judges and lets through only what it must
@@ -474,6 +511,18 @@ jobs:
         run: |
           cargo test -p fennec-http --features test-clock --lib -- --exact \
             tenants::tests::a_tenant_busy_as_its_clock_shift_ends_takes_the_systems_clock_back \
+            | tee /dev/stderr | grep -q 'test result: ok. 1 passed'
+
+      # The scheduler's stop ends fennec-server with 1, held on a real server
+      # through the scheduler's fault (`FENNEC_TEST_SCHEDULER_PANIC`), which
+      # is a test build's, behind `test-clock` with its clock: a debug build
+      # without it -- `cargo run`'s, the web tests' -- reads no such
+      # variable. Built with the feature here, the test named whole.
+      - name: A scheduler's failure ends the server with 1
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo test -p fennec-server --features test-clock --test all -- --exact \
+            scheduled::a_scheduler_s_failure_ends_the_server_with_1 \
             | tee /dev/stderr | grep -q 'test result: ok. 1 passed'
 
       # fennec studio (`--studio`) in the runner's Chrome against the debug

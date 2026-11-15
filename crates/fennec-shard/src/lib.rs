@@ -31,6 +31,7 @@
 //! over once its lease has certainly lapsed ([`lease`]).
 
 pub mod directory;
+pub mod exit;
 pub mod fanout;
 pub mod lease;
 pub mod metrics;

@@ -154,7 +154,8 @@ for Enter like a typed one.</p>
 <h2 id="more">What else the program does</h2>
 
 <p>The same <code>fennec</code> is the tool for a file or a server beyond the
-prompt. <code>fennec --help</code> lists each with its flags.</p>
+prompt. <code>fennec --help</code> lists each, and <code>fennec &lt;command&gt;
+--help</code> the flags that command reads.</p>
 
 <ul>
   <li><b><code>fennec import</code></b> copies a SQLite file or a PostgreSQL
@@ -162,10 +163,29 @@ prompt. <code>fennec --help</code> lists each with its flags.</p>
     up to date: <a href="import.html">Import</a>.</li>
   <li><b><code>fennec backup</code>, <code>archive</code>, <code>restore</code>,
     <code>prune</code> and <code>verify</code></b> take a running server whole,
-    keep its writes and rebuild it as it stood at a moment: <a
+    keep its writes and rebuild it as it stood at a moment, and <b><code>fennec
+    key</code></b> makes the key that seals them: <a
     href="replication.html">Replication</a>.</li>
   <li><b><code>fennec types</code></b> writes TypeScript, Python, Go, C#, Swift, Kotlin or Dart types
     for its collections and named statements, from a database file: <a href="javascript.html#typescript">TypeScript</a>.</li>
   <li><b><code>fennec mcp</code></b> serves a file, or a server, to an agent
     over stdio: <a href="mcp.html">Agents and MCP</a>.</li>
 </ul>
+
+<p id="exit-codes">Each command reads its own flags alone: one it does not
+read — another command's among them — is refused, as is a flag missing its
+value; and every refusal of the line — an argument missing, a flag the
+command needs, a malformed URL, a token not given — comes before anything a
+flag names (<code>--tls-ca</code>'s CAs, <code>--key-file</code>'s key) is
+opened, read or made. Its exit code says
+how it ended: <code>0</code> when it did what it was asked (or printed
+<code>--help</code> or <code>--version</code>); <code>1</code> when its work
+failed — a statement of <code>-c</code>, a file that cannot be opened or
+synced or whose lock another holds, an import, a backup, an archive or a
+restore, a <code>verify</code> finding what cannot be restored, a key
+<code>fennec key</code> cannot make (the system giving it no randomness) or
+write, the file <code>fennec types</code> reads or the one it writes;
+<code>2</code> when the
+line was refused before anything ran — a flag, a value or an argument, a file
+it would write over without <code>--force</code>, or a subcommand this build
+was made without.</p>
