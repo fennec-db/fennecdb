@@ -30,7 +30,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [lookup-and-aggregates.md](lookup-and-aggregates.md) -- `lookup`, `required`, keys of several fields, folded levels, select-list expressions, HyperLogLog and time zones
 - [native-and-sync.md](native-and-sync.md) -- `fennec-ffi`, the sans-IO sync core, the scenario file both sync runners are held to and a seed's parts kept in the replica's file
 - [router.md](router.md) -- the router's CORS, its pooled connections, the cuts a failover makes, the leading router's and its followers', and queries across tenants
-- [integrations.md](integrations.md) -- `integrations/`, the Grafana data source, the desktop app, the `deploy/` kit and its chaos drill, the install channels (Homebrew, `install.sh`, `.deb` and `.rpm`), and the image's user: a server started as root hands its volume over and drops root before it touches a file
+- [integrations.md](integrations.md) -- `integrations/`, the Grafana data source, the desktop app, the `deploy/` kit and its chaos drill, the install channels (Homebrew, `install.sh`, `.deb` and `.rpm`), the image's user: a server started as root hands its volume over and drops root before it touches a file, and the workflows' pinned actions, permissions and secrets
 
 The conventions hold no invariant of the code, and are listed apart:
 
@@ -209,3 +209,4 @@ A proposal holds no invariant until it is built, and is listed apart:
 161. [A seed in parts lands in one task](js-client.md#seeds-in-parts) (added after the move, under *The JS client and Cloudflare*)
 162. [A request is read in time, and an answer written in time](http.md#slow-clients) (added after the move, under *The HTTP server*)
 163. [The compiler CI tests with is the one that ships](crates.md#toolchain) (added after the move, under *The crates*)
+164. [A workflow runs actions pinned by commit, and a job that writes builds nothing](integrations.md#workflows) (added after the move, under *Integrations and deploy*)
