@@ -251,7 +251,9 @@ That was measured, not promised: a write answered as durable is on the
 primary's disk and in its socket to each replica, and a power cut can take the
 socket before it sends, where a killed process's kernel still delivers it.
 Once the node was back, the standby held the same rows again within 3.4 s of
-being asked.</p>
+being asked. Under <code>--sync 250</code>, where a primary sends a write once a
+sync covered it, the standby held every write the node had on disk at every
+cut of two runs: what it lacked, the cut took from the node too.</p>
 
 <div class="tbl">
 <table>
