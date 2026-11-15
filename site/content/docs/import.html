@@ -91,8 +91,17 @@ untyped columns are resolved from the first 1000 rows.</p>
 <p><b>PostgreSQL.</b> It connects to the live server and streams
 <code>COPY ... TO STDOUT</code> — no <code>psql</code>, no
 <code>pg_dump</code>. Authentication is SCRAM-SHA-256, hand-written in
-<code>fennec-wire</code>'s client over <code>fennec-http</code>'s own crypto;
-TLS is <a href="https://github.com/rustls/rustls">rustls</a>'s, with ring,
+<code>fennec-wire</code>'s client over <code>fennec-http</code>'s own crypto
+and held to RFC 7677's example exchange byte for byte. It runs at most
+4 194 304 iterations, 1 024 times PostgreSQL's default of 4 096 and room
+above a hardened setting near a million — seconds of a core: a server
+asking for more — its <code>scram_iterations</code> set past it, or someone
+standing in for it — is refused by name rather than run, as the most a
+count can ask, four billion rounds, would hold the import well over half an
+hour before it signed in. To come under it, set the role's password again
+with a lower <code>scram_iterations</code>
+(<code>SET scram_iterations = 4096;</code> then <code>\password</code> in
+<code>psql</code>). TLS is <a href="https://github.com/rustls/rustls">rustls</a>'s, with ring,
 behind <code>fennec-tls</code>, the one shipped crate that takes
 dependencies. pgvector's
 <code>vector</code>, <code>halfvec</code> and <code>sparsevec</code> columns

@@ -376,6 +376,10 @@ fn shutdown(db: &RwLock<Database>, checkpoint: bool) -> ! {
             }
         }
     }
+    // The file synced and its sync log removed, which the database's drop
+    // did and the exit, holding the lock, never runs: every clean stop left
+    // the log beside the file (Linux, `synclog.rs`).
+    g.close_log();
     std::process::exit(exit_code());
 }
 

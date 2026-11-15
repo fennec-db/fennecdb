@@ -31,9 +31,10 @@ run it from under System Settings → Privacy & Security → Developer Tools
 missing), and start the terminal again.
 
 **Build with one toolchain.** The Makefile takes rustup's `cargo`, which reads
-`rust-toolchain.toml`; a Homebrew `cargo` earlier in `PATH` is another
-compiler, and each switch between the two rebuilds everything -- and on macOS
-has every binary checked again.
+`rust-toolchain.toml` -- the exact release CI tests with and the images build
+with, never `stable` -- and installs it on first use; a Homebrew `cargo`
+earlier in `PATH` is another compiler, and each switch between the two
+rebuilds everything -- and on macOS has every binary checked again.
 
 Narrower runs:
 
@@ -45,7 +46,10 @@ node --test web/fennec.test.js
 ```
 
 `cargo test -p fennec-import --test all pg:: -- --ignored` needs a live PostgreSQL;
-`make import-test` starts one in Docker and tears it down afterwards.
+`make import-test` starts one in Docker and tears it down afterwards. CI's
+`postgres (import and --follow)` job runs the same tests against the same
+server on every pull request, and fails unless every one of them ran and
+passed.
 
 ## The rules a change must not break
 

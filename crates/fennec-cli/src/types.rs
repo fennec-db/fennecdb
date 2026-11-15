@@ -1118,7 +1118,15 @@ mod tests {
                 )
             })
         };
-        if let Ok((true, _)) = ok(std::process::Command::new("python3").arg("--version")) {
+        // GitHub's ubuntu and macos images both ship python3, so under CI its
+        // absence fails; swiftc, dart and gofmt are not installed by the test
+        // job and stay uncounted (docs/design/conventions.md#skips).
+        let python = ok(std::process::Command::new("python3").arg("--version"));
+        assert!(
+            matches!(python, Ok((true, _))) || std::env::var_os("CI").is_none_or(|v| v.is_empty()),
+            "python3 not found under CI: the generated Python would be unchecked"
+        );
+        if let Ok((true, _)) = python {
             let r = ok(std::process::Command::new("python3")
                 .args(["-c", "import ast,sys; ast.parse(open(sys.argv[1]).read())"])
                 .arg(dir.join("fennec_schema.py")));

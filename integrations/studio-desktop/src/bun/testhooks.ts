@@ -109,7 +109,12 @@ export function pagePreload(origin: string): string {
 		`var loaded=!signin&&/\\d/.test(side);`,
 		`var sig=signin+"/"+loaded+"/"+side+"/"+document.title;`,
 		`if(sig!==last||n===1){last=sig;`,
-		`window.__electrobunSendToHost&&window.__electrobunSendToHost({type:"state",n:n,at:Date.now(),signin:signin,loaded:loaded,side:side,title:document.title,text:txt.slice(0,300)});}`,
+		// The first report says where the document's own load spent its time (Navigation
+		// Timing, ms after `origin`, the navigation's start as the epoch counts it): a load
+		// that took long is told by its phase, the engine's start of it or the request's.
+		`var e=n===1&&performance.getEntriesByType?performance.getEntriesByType("navigation")[0]:null;`,
+		`var nav=e?{origin:Math.round(performance.timeOrigin),fetch:Math.round(e.fetchStart),connect:Math.round(e.connectStart),connected:Math.round(e.connectEnd),request:Math.round(e.requestStart),response:Math.round(e.responseStart),done:Math.round(e.responseEnd)}:undefined;`,
+		`window.__electrobunSendToHost&&window.__electrobunSendToHost({type:"state",n:n,at:Date.now(),signin:signin,loaded:loaded,side:side,title:document.title,text:txt.slice(0,300),nav:nav});}`,
 		`if(n>1200)clearInterval(t);},100);})();`,
 	].join("");
 }
@@ -117,7 +122,10 @@ export function pagePreload(origin: string): string {
 /** Every navigation a window is asked to make, and what was decided: the rules a window is held to are checked by these. */
 function watchNavigation(view: BrowserView, key: string) {
 	// The commit too: a page that never loads is told apart from one that loaded and never drew.
-	for (const name of ["will-navigate", "did-commit-navigation", "did-navigate", "new-window-open"]) {
+	// And the document's own `load` (the preload's dom-ready, every system): a page that committed
+	// and never finished loading is told apart from one that loaded. (Electrobun 2.0.4 maps its
+	// load-started, load-committed and load-finished to no event the main process can hear.)
+	for (const name of ["will-navigate", "did-commit-navigation", "did-navigate", "dom-ready", "new-window-open"]) {
 		(view as any).on(name, (e: any) => report(name, { key, data: JSON.stringify(e?.data ?? e).slice(0, 200) }));
 	}
 }
@@ -378,7 +386,13 @@ export async function boot(): Promise<boolean> {
 			const fresh = text.slice(offset);
 			const end = fresh.lastIndexOf("\n") + 1;
 			offset += end;
-			for (const line of fresh.slice(0, end).split("\n").filter(Boolean)) await run(JSON.parse(line));
+			for (const line of fresh.slice(0, end).split("\n").filter(Boolean)) {
+				const c = JSON.parse(line);
+				// A command that threw is reported with what it said: unreported, its check
+				// waited out its bound for an answer that could not come, and printed none of it
+				// (`serve-token` on Linux arm64, where the credential store refused once).
+				await run(c).catch((e: Error) => report("cmd-failed", { cmd: c.cmd, message: e?.message ?? String(e) }));
+			}
 		}, 150);
 	}
 	report("ready");

@@ -76,6 +76,7 @@ test("under --sync off a server is given no replication token, which it would re
 test("a file another server holds is AlreadyOpen, and nothing of the second is left running", { skip }, async () => {
 	const file = await database("held");
 	const holder = await start(windowPlan(file, "250"), randomToken());
+	// Its message is the server's own words, which the Servers list keeps (messages.ts `startFailure`).
 	await assert.rejects(start(windowPlan(file, "250"), randomToken()), (e) => e instanceof AlreadyOpen && /open already/.test(e.message));
 	await holder.stop();
 });
@@ -100,7 +101,8 @@ test("a served database: the port asked for, on the network's address, its metri
 	assert.equal(await status(`${s.local}/_whoami`, token), 200, "the data endpoint answers with its token");
 
 	// The same port again, on 127.0.0.1: macOS would let it bind beside 0.0.0.0, and take loopback from the first.
-	await assert.rejects(start(servePlan(await database("other"), "250", { ...DEFAULT_SETTINGS, port }), randomToken()), (e) => e instanceof PortTaken && e.port === port, "the same port again: taken");
+	// Found before a server was started: nothing of it is the server's words.
+	await assert.rejects(start(servePlan(await database("other"), "250", { ...DEFAULT_SETTINGS, port }), randomToken()), (e) => e instanceof PortTaken && e.port === port && e.said === null, "the same port again: taken");
 	assert.equal(await s.stop(), 0);
 });
 
@@ -108,7 +110,7 @@ test("a port another program answers on at 127.0.0.1 is taken, though 0.0.0.0 wo
 	const other = createServer((c) => c.end());
 	const port = await new Promise<number>((resolve) => other.listen(0, "127.0.0.1", () => resolve((other.address() as { port: number }).port)));
 	try {
-		await assert.rejects(start(servePlan(await database("beside"), "250", { ...DEFAULT_SETTINGS, port, reach: "lan" }), randomToken()), (e) => e instanceof PortTaken, "the token would have gone to the other program");
+		await assert.rejects(start(servePlan(await database("beside"), "250", { ...DEFAULT_SETTINGS, port, reach: "lan" }), randomToken()), (e) => e instanceof PortTaken && e.said === null, "the token would have gone to the other program");
 	} finally {
 		other.close();
 	}
@@ -177,6 +179,32 @@ test("a server whose metrics never say where they are is not started: a failure 
 	const lines = ["fennec-http 0.0.0 listening on: http://127.0.0.1:5558  [token]"];
 	await assert.rejects(
 		startServer(writes(lines), "fennec-server", plan, randomToken(), process.env, 50),
-		(e) => e instanceof StartFailed && /listens on http:\/\/127\.0\.0\.1:5558 but did not say where its metrics are/.test(e.message),
+		// The app's finding: the server wrote nothing of it.
+		(e) => e instanceof StartFailed && /listens on http:\/\/127\.0\.0\.1:5558 but did not say where its metrics are/.test(e.message) && e.said === null,
 	);
+});
+
+/** A spawn whose child writes `lines` and exits with `code`, as a server that could not start does. */
+const failsWith =
+	(lines: string[], code: number): Spawn =>
+	(): Child => ({
+		pid: 0,
+		stdin: null,
+		stdout: (async function* () {})(),
+		stderr: (async function* () {
+			for (const l of lines) yield new TextEncoder().encode(`${l}\n`);
+		})(),
+		exited: Promise.resolve(code),
+		exitCode: code,
+		kill: () => {},
+		endStdin: () => {},
+	});
+
+test("a server that could not start leaves its own words on the error, which the Servers list keeps", async () => {
+	const plan = windowPlan("/nowhere.fennec", "250");
+	const inUse = ["opened: /nowhere.fennec", "could not open the HTTP endpoint: Address already in use (os error 48)"];
+	await assert.rejects(startServer(failsWith(inUse, 1), "fennec-server", plan, randomToken()), (e) => e instanceof PortTaken && e.said === inUse.join("\n"));
+	await assert.rejects(startServer(failsWith(["could not open /nowhere.fennec: corrupt"], 1), "fennec-server", plan, randomToken()), (e) => e instanceof StartFailed && e.exit === 1 && e.said === "could not open /nowhere.fennec: corrupt");
+	// Nothing written: the message is the app's, and nothing is the server's.
+	await assert.rejects(startServer(failsWith([], 1), "fennec-server", plan, randomToken()), (e) => e instanceof StartFailed && e.said === null && /exited/.test(e.message));
 });

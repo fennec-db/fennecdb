@@ -8,7 +8,7 @@ in step.
 ```kotlin
 // build.gradle.kts
 implementation("com.fennecdb:fennecdb-android:0.1.7") // Android: the AAR, the library for each ABI inside
-implementation("com.fennecdb:fennecdb:0.1.7")         // the JVM: bring libfennec_ffi for the platform
+implementation("com.fennecdb:fennecdb:0.1.7")         // the JVM: bring libfennec_ffi for the platform (Linux: the release's fennec-ffi tarball)
 ```
 
 ```kotlin

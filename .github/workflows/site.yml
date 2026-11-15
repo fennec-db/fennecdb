@@ -36,7 +36,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # rust-toolchain.toml pins stable and asks for wasm32-unknown-unknown.
+      # rust-toolchain.toml pins an exact release and asks for wasm32-unknown-unknown.
       - name: Install the pinned toolchain
         run: rustup show
 

@@ -126,6 +126,15 @@ refused naming the field and the element.
 `fennec-cli` takes `cli` (`panic = abort`), `fennec-server` `release`: a
 connection's panic unwinds alone.
 
+**[A 1.x change only grows a frozen surface.](docs/design/compatibility.md)**
+The file format, FennecQL, the HTTP API and its OpenAPI document,
+`fennec.h`, the JS types, each SDK's public API, the sync protocol, CLI
+flags and exit codes, `/_metrics` names and release asset names are added
+to, never changed or removed; a new record kind or tag takes the next
+number, `GRAMMAR_EPOCH` stays 4, and a break is a major version. Replicas
+upgrade before primaries. A change names the check that holds its surface,
+or the plan item that adds it, in the design file's table.
+
 ### The engine's lock and blocks
 
 **[Single writer, and readers beside it.](docs/design/engine.md#single-writer)**
@@ -394,6 +403,9 @@ Covers `crates/fennec-server/`.
 *Durability*
 - Every way a server stops is the one shutdown.
 
+*Integrations and deploy*
+- Started as root, a server becomes its user before it touches a file.
+
 ### `crates/fennec-import/CLAUDE.md`
 
 Covers `crates/fennec-import/` and `crates/fennec-wire/`; the mirror is `crates/fennec-server/src/mirror.rs`.
@@ -477,10 +489,11 @@ Covers `deploy/`.
 
 *Integrations and deploy*
 - `deploy/` is the regions' kit, held to the binaries by two checks.
+- `make chaos` breaks a region by seed, one fault at a time, and holds its history to an oracle.
 
 ### `tools/CLAUDE.md`
 
-Covers `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/windows-zip.sh`, `tools/windows-zip-check.ps1`, `tools/install-ps1-check.ps1`, `site/install.sh`, `site/install.ps1` and `.github/workflows/`'s `release.yml` and `packages.yml`.
+Covers `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/windows-zip.sh`, `tools/windows-zip-check.ps1`, `tools/install-ps1-check.ps1`, `tools/linux-ffi.sh`, `tools/linux-ffi-check.sh`, `site/install.sh`, `site/install.ps1` and `.github/workflows/`'s `release.yml` and `packages.yml`.
 
 *Integrations and deploy*
 - A release is installed from its own files, each checked before it is used.
@@ -532,6 +545,14 @@ Covers `crates/fennec-bench/`.
   `listening on: http://<address>` stderr line, a router told its nodes by
   the addresses they said; only a site needing its address before it binds
   takes a system-picked port, held by a stand-in listener till then.
+- [A secret is compared by `crypto::ct_eq` alone](docs/design/conventions.md#secrets-compared)
+  -- a token, a mark, a MAC, a signature, a proof, a password -- never by
+  `==` or `!=`, which leave at the first byte that differs:
+  `tools/secret_eq_check.py` (CI's fmt job) refuses one on an operand so
+  named in `crates/*/src` outside tests, each operand read whole, a name
+  that is no secret allowed with why and how many times. A primitive we
+  write is held to its RFC's vectors, every one, and where a key meets its
+  block to another implementation's, each test's count of cases held.
 - [A change a user meets](docs/design/conventions.md#docs-a-change-owes)
   says so in the same pull request: its page under `site/content/docs/`,
   README's feature table and the links beside it, the home page and docs

@@ -9,6 +9,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Utils } from "electrobun/main";
+import type { StartFailure } from "../shared/rpc.ts";
 import { DEFAULT_SYNC, isSync, settingsFrom, type ServeSettings, type Sync } from "./serving.ts";
 
 export type StoredConnection = { id: string; name: string; url: string; tenant: string | null };
@@ -22,8 +23,13 @@ export type StoredDatabase = {
 	sync: Sync;
 	/** Set once it was served: the Servers list shows it, stopped or running, and Start uses these. */
 	serve?: ServeSettings;
-	/** When its served server last stopped, on which port, and why. */
-	lastRan?: { at: number; port: number | null; why: string };
+	/**
+	 * When its served server last stopped, on which port, and why; `failed`
+	 * when its last start did not get that far, kept so the Servers list still
+	 * says why after a relaunch (what the server wrote holds no token: that is in
+	 * its environment, which it never prints).
+	 */
+	lastRan?: { at: number; port: number | null; why: string; failed?: StartFailure };
 	/** What its server said last time one ran: shown while none does. */
 	seen?: { collections: number; rows: number; fileBytes: number; reclaimable: number; at: number; first?: string };
 	/** Where its backups go, sealed with the key file named, and the last one taken. */
@@ -40,7 +46,11 @@ function database(v: any): StoredDatabase | null {
 	if (!v || typeof v.path !== "string" || typeof v.id !== "string") return null;
 	const d: StoredDatabase = { path: v.path, id: v.id, sync: isSync(v.sync) ? v.sync : DEFAULT_SYNC };
 	if (v.serve) d.serve = settingsFrom(v.serve);
-	if (v.lastRan && typeof v.lastRan.at === "number") d.lastRan = { at: v.lastRan.at, port: typeof v.lastRan.port === "number" ? v.lastRan.port : null, why: String(v.lastRan.why ?? "") };
+	if (v.lastRan && typeof v.lastRan.at === "number") {
+		d.lastRan = { at: v.lastRan.at, port: typeof v.lastRan.port === "number" ? v.lastRan.port : null, why: String(v.lastRan.why ?? "") };
+		const f = v.lastRan.failed;
+		if (f && typeof f.reason === "string") d.lastRan.failed = { reason: f.reason, said: typeof f.said === "string" ? f.said : null, port: typeof f.port === "number" ? f.port : null };
+	}
 	if (v.seen && typeof v.seen.at === "number") d.seen = v.seen;
 	if (v.archive && typeof v.archive.dir === "string") d.archive = { ...v.archive, keyFile: typeof v.archive.keyFile === "string" ? v.archive.keyFile : null };
 	return d;

@@ -1,6 +1,6 @@
 # AGENTS.md
 
-The install channels' invariant, for `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/windows-zip.sh`, `tools/windows-zip-check.ps1`, `tools/install-ps1-check.ps1`, `site/install.sh`, `site/install.ps1` and the release workflows. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
+The install channels' invariant, for `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/windows-zip.sh`, `tools/windows-zip-check.ps1`, `tools/install-ps1-check.ps1`, `tools/linux-ffi.sh`, `tools/linux-ffi-check.sh`, `site/install.sh`, `site/install.ps1` and the release workflows. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
 
 ## Invariants
 
@@ -34,7 +34,11 @@ nothing (`site/test_install.sh`, `site/test_install.ps1`). A package is installe
 and the Windows zip through `install.ps1` on the runner that built it,
 before it is kept (`tools/linux-packages-check.sh`,
 `tools/windows-zip-check.ps1`, which CI's `windows (release zip)` runs on
-every change); a new channel names what it installs by its checksum. A
+every change), and the C library for Linux linked into a C program, shared
+and static, run on its runner and on the oldest glibc its docs name, its
+exports and glibc symbols held (`tools/linux-ffi-check.sh`, CI's `linux (C
+library)` on every change); a new channel names what it installs by its
+checksum. A
 release job that builds runs with `contents: read` and a checkout keeping no
-token (`binaries`, `windows`, `linux-packages`): the crates' build scripts
+token (`binaries`, `windows`, `linux-ffi`, `linux-packages`): the crates' build scripts
 run there, and only the jobs that publish write.

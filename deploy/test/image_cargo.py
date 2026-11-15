@@ -9,8 +9,8 @@ First, both Dockerfiles build their binaries through the script and copy
 them from /built: either put back to a plain `cargo build` passed the rest.
 Then a workspace of a library, read through include_bytes! from a file
 outside itself as fennec-http reads the studio's, and two binaries using it
-is built in rust:alpine by the script, its /work a volume of the test's own
-as the Dockerfiles' is a cache mount:
+is built in the Dockerfile's rust image by the script, its /work a volume
+of the test's own as the Dockerfiles' is a cache mount:
 
 - a tree whose every file is older than the last build, one of them
   changed, builds the change: with target/ alone in the cache, as the
@@ -46,8 +46,12 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SCRIPT = os.path.join(ROOT, "tools", "image-cargo.sh")
-# The build stage's own first layers, so the layer is shared with it.
-BASE = "FROM rust:alpine\nRUN apk add --no-cache musl-dev rsync\n"
+# The build stage's own first layers, so the layer is shared with it: its
+# rust image as the Dockerfile names it, the release rust-toolchain.toml
+# pins, by digest (tools/toolchain_check.py).
+with open(os.path.join(ROOT, "Dockerfile")) as f:
+    BASE = "%s\nRUN apk add --no-cache musl-dev rsync\n" % next(
+        l.split(" AS ")[0] for l in f.read().splitlines() if l.startswith("FROM rust:"))
 # Its own names, so two runs at once remove only their own.
 IMAGE = f"fennec-image-cargo-test-{os.getpid()}"
 VOLUME = IMAGE

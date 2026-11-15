@@ -23,7 +23,9 @@
 //! only to the file it was written beside -- not to one renamed into its
 //! place. Applied once, its header is wiped; whatever renames a file into
 //! a database's place removes the log first (`fs::forget_sync_log`), and a
-//! clean close removes it once the file is synced.
+//! clean close removes it once the file is synced: the drop, or where the
+//! process exits holding the database and drops nothing -- a server's
+//! shutdown -- `Database::close_log`.
 //!
 //! On macOS `F_FULLFSYNC` flushes the drive whatever was written, 3.9 ms
 //! either way, so the log is used only where it pays (`ENABLED`).
