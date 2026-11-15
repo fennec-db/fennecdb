@@ -117,7 +117,24 @@ LISTED = "integrations/fennecql-corpus/kinds.txt"
 #   {"text": "drop collection if exists t", "base": ["ok d...", "ok d...", "-"],
 #    "head": ["ok d...", "ok d...", "-"], "pr": "#700", "why": "...",
 #    "same_meaning": "`if_exists` renamed `exists`: the tree's field, read as before"}
-ACCEPTED = []
+ACCEPTED = [
+    {"text": "put t {fs: [1e-400]}", "base": ["ok c4051d1fedcec68ee", "ok c05485bf748ced6ad", "-"], "head": ["err", "err", "-"], "pr": "#632", "why": "a number past a float's range, read before as an infinity or as 0: refused now naming the range"},
+    {"text": "create statement big() as get t where x < 1e400 and y > -1e-400 select id", "base": ["ok s5aefe2bf1e46f4cf", "ok s5aefe2bf1e46f4cf", "ok s5aefe2bf1e46f4cf"], "head": ["err", "err", "ok s5aefe2bf1e46f4cf"], "pr": "#632", "why": "a number past a float's range, read before as an infinity or as 0: refused now naming the range; the stored definition reads as it did"},
+    {"text": "create statement big() as get t where x < 1e400 select id", "base": ["ok s11545a8501530bd3", "ok s11545a8501530bd3", "ok s11545a8501530bd3"], "head": ["err", "err", "ok s11545a8501530bd3"], "pr": "#632", "why": "a number past a float's range, read before as an infinity or as 0: refused now naming the range; the stored definition reads as it did"},
+    {"text": "create statement lists() public as insert t {xs: [1e-400, 1], ys: [2.5e999], z: -1e400}", "base": ["ok s67068334dc466c11", "ok s258f2c1294ef4ba2", "ok s67068334dc466c11"], "head": ["err", "err", "ok s67068334dc466c11"], "pr": "#632", "why": "a number past a float's range, read before as an infinity or as 0: refused now naming the range; the stored definition reads as it did"},
+    {"text": "create statement q() as SELECT id FROM t ORDER BY v <#> '[1, 1e400]' LIMIT 2", "base": ["ok se3ae2fdcbd41a508", "ok se3ae2fdcbd41a508", "ok se3ae2fdcbd41a508"], "head": ["err", "err", "ok se3ae2fdcbd41a508"], "pr": "#632", "why": "a number past a float's range, read before as an infinity or as 0: refused now naming the range; the stored definition reads as it did"},
+    {"text": "get t where x < 1e400", "base": ["ok cad014cb9665d33d1", "ok cad014cb9665d33d1", "-"], "head": ["err", "err", "-"], "pr": "#632", "why": "a number past a float's range, read before as an infinity or as 0: refused now naming the range"},
+    {"text": "get t where x > -1e-400", "base": ["ok cc90141440e5b81dd", "ok cc90141440e5b81dd", "-"], "head": ["err", "err", "-"], "pr": "#632", "why": "a number past a float's range, read before as an infinity or as 0: refused now naming the range"},
+    {"text": "put t {x: 2.5E+999}", "base": ["ok ca33cbe334e2c93d8", "ok ca33cbe334e2c93d8", "-"], "head": ["err", "err", "-"], "pr": "#632", "why": "a number past a float's range, read before as an infinity or as 0: refused now naming the range"},
+    {"text": "put t {v: [0.5, 1e-999]}", "base": ["ok c0675610c35906d9c", "ok ce100a99b0dc7929e", "-"], "head": ["err", "err", "-"], "pr": "#632", "why": "a number past a float's range, read before as an infinity or as 0: refused now naming the range"},
+    {"text": "get t near v [1, -1.8e308] limit 1", "base": ["ok c8ed5902faadf6532", "ok c44cb45bedaa3bc32", "-"], "head": ["err", "err", "-"], "pr": "#632", "why": "a number past a float's range, read before as an infinity or as 0: refused now naming the range"},
+    {"text": "get t where x in [1, 1_0e400]", "base": ["ok c69d969548c1b9be4", "ok c69d969548c1b9be4", "-"], "head": ["err", "err", "-"], "pr": "#632", "why": "a number past a float's range, read before as an infinity or as 0: refused now naming the range"},
+    {"text": "SELECT id FROM t ORDER BY v <#> '[1, 1e400]' LIMIT 2", "base": ["ok c37a5377a8c3da0a3", "ok c37a5377a8c3da0a3", "-"], "head": ["err", "err", "-"], "pr": "#632", "why": "a number past a float's range, read before as an infinity or as 0: refused now naming the range"},
+    {"text": "put t {x: 1e400}", "base": ["ok ca33cbe334e2c93d8", "ok ca33cbe334e2c93d8", "-"], "head": ["err", "err", "-"], "pr": "#632", "why": "a number past a float's range, read before as an infinity or as 0: refused now naming the range"},
+    {"text": "put t {x: -1e-400}", "base": ["ok c54855b06b0f291ae", "ok c54855b06b0f291ae", "-"], "head": ["err", "err", "-"], "pr": "#632", "why": "a number past a float's range, read before as an infinity or as 0: refused now naming the range"},
+    {"text": "put t {xs: [0.5, 2e999]}", "base": ["ok cb849c38c41074a00", "ok cf71828d404f330a1", "-"], "head": ["err", "err", "-"], "pr": "#632", "why": "a number past a float's range, read before as an infinity or as 0: refused now naming the range"},
+    {"text": "get t where x > 1e309", "base": ["ok c0b69f2627a9549bc", "ok c0b69f2627a9549bc", "-"], "head": ["err", "err", "-"], "pr": "#632", "why": "a number past a float's range, read before as an infinity or as 0: refused now naming the range"},
+]
 
 # The words a statement begins with: FennecQL's, SQL's that it reads, and
 # those that are refused naming what to write. A text whose first word is
