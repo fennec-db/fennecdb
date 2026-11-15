@@ -35,6 +35,12 @@
   ],
   "type": "counter"
  },
+ "fennec_router_client_timeouts_total": {
+  "labels": [
+   "reason"
+  ],
+  "type": "counter"
+ },
  "fennec_router_connections": {
   "labels": [],
   "type": "gauge"

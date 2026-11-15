@@ -1,8 +1,18 @@
 # AGENTS.md
 
-The install channels' invariant, for `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/windows-zip.sh`, `tools/windows-zip-check.ps1`, `tools/install-ps1-check.ps1`, `tools/linux-ffi.sh`, `tools/linux-ffi-check.sh`, `site/install.sh`, `site/install.ps1` and the release workflows. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
+The install channels' and the toolchain's invariants, for `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/windows-zip.sh`, `tools/windows-zip-check.ps1`, `tools/install-ps1-check.ps1`, `tools/linux-ffi.sh`, `tools/linux-ffi-check.sh`, `tools/toolchain_check.py`, `rust-toolchain.toml`, `site/install.sh`, `site/install.ps1` and the release workflows; the toolchain's rule binds every Dockerfile and script naming a rust image too. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
 
 ## Invariants
+
+### The crates
+
+**[The compiler CI tests with is the one that ships.](../docs/design/crates.md#toolchain)**
+`rust-toolchain.toml` names an exact release, never `stable`; every rust
+image a Dockerfile or script names is that release by digest, the file
+kept in the build (`tools/toolchain_check.py`, the fmt job), and
+`release.yml` stops where a binary's `rustc -V` differs from it or the
+image's. A bump is a pull request of its own carrying `make wasm-sizes`,
+the size report, `make instr-compare` and `make float-test`.
 
 ### Integrations and deploy
 

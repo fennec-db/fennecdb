@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-The benchmarks' invariants, for code in `crates/fennec-bench/`, and the perf gate's, for `tools/perf_gate.py`, `crates/fennec-http/examples/gate.rs`, CI's `perf (count)` and `perf (instructions)` jobs and `.github/workflows/perf-holdout.yml`. The rules every change meets, and where every other area's are, are in the root's [CLAUDE.md](../../CLAUDE.md).
+The benchmarks' invariants, for code in `crates/fennec-bench/`, and the perf gate's, for `tools/perf_gate.py`, `crates/fennec-http/examples/gate.rs`, CI's `perf (count)` and `perf (instructions)` jobs and `.github/workflows/perf-holdout.yml`; the binary budgets' rule binds `tools/size_budgets.py` and CI's build job too. The rules every change meets, and where every other area's are, are in the root's [CLAUDE.md](../../CLAUDE.md).
 
 ## Invariants
 
@@ -46,3 +46,10 @@ table: a hot path a page quotes gets one.
 differing by under ~500 a request are read over re-signed copies'
 UUIDs or a trace (`make instr-compare`), never from plain pairs: on
 macOS the allocator draws its path from a binary's identity.
+
+**[A binary a release ships is held to its budget](../../docs/design/benchmarks.md#binary-sizes)**
+(`tools/size-budgets.json`) by the required build job, built as
+`release.yml` builds it (x86_64 musl): one past its budget, or 1% under
+it or off its `measured`, fails, and the pull request writes the figures
+the job prints and says what the bytes buy; the docs quote `measured`,
+held within 1% by `site/build.py`.

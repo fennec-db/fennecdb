@@ -23,6 +23,7 @@
    "--follow-table": "value",
    "--follow-vector": "value",
    "--follow-where": "value",
+   "--header-timeout": "value",
    "--help": "switch",
    "--hooks": "value",
    "--http": "value",
@@ -88,6 +89,7 @@
    "--user": "value",
    "--version": "switch",
    "--warm": "value",
+   "--write-timeout": "value",
    "-V": "switch",
    "-f": "value",
    "-h": "switch"
