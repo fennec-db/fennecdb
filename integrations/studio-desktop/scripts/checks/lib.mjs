@@ -355,6 +355,24 @@ export async function waitStudio(key, after = 0, ms = 30000) {
 }
 
 /**
+ * The studio window `key` made and its page asked for, in a report after the
+ * `after`th: its view's navigation to the studio, allowed (`will-navigate`).
+ * By then the window's engine runs (on Windows a WebView2 browser of its own,
+ * whose first NavigationStarting this is) and its page's load is still to
+ * come. What a check waits for when it needs the window and its processes
+ * there but tests nothing of its page, which `waitStudio` waits for: on
+ * Windows each studio window is a cold browser in a store of its own, whose
+ * first request left 1.1 to 1.5 s after the navigation began (2.2 to 3.4 s
+ * with two windows opening at once) in the loops of runs 43680100667 and
+ * 43681265858, up to 9.7 s on x64, and 25.5 s in job 132701210526, where
+ * `orphan` waited for both its windows' studios and timed out with both
+ * committed (docs/design/integrations.md#studio-desktop).
+ */
+export async function waitWindow(key, after = 0, ms = 30000) {
+  return waitFor((l, i) => i >= after && l.what === 'will-navigate' && l.key === key && /allowed[^,}]*true/.test(l.data ?? ''), ms, `the studio asked for in ${key}`);
+}
+
+/**
  * The blank view Electrobun made for the studio window `key` (`own-view`, the
  * last one for `key` before the `before`th report: that window's): kept on
  * macOS, removed on Windows and Linux (src/bun/windows.ts). On macOS a removal
