@@ -142,7 +142,7 @@ class Notes(FennecClient db)
         {
             await foreach (var ev in db.SubscribeAsync("notes", [new("done", "eq.false")], timeout.Token))
             {
-                if (ev.Type == "seed") await AddAsync("Call mom", "Ask about the weekend.", ["home"]);
+                if (ev.Type == "seed" && !ev.More) await AddAsync("Call mom", "Ask about the weekend.", ["home"]);
                 if (ev.Type == "change" && ev.Puts.Any(p => p.GetProperty("title").GetString() == "Call mom"))
                 {
                     seen = true;
