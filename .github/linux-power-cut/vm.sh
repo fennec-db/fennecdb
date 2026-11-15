@@ -497,8 +497,12 @@ lock_held() {
 # identity (`<t>.instance`) and `schedules.hint`, written again by rename
 # from `schedules.hint.writing`.
 kept_names() {
+    local t
     if [ -n "$IS_NODE" ]; then
-        echo 'lost\+found|n|n/schedules\.hint(\.writing)?|n/(a|b)\.instance|n/(a|b)\.fennec|n/(a|b)\.fennec\.(lock|sync|beside|compacting)'
+        # Every tenant's, by name: run 43702806628's first cut of four
+        # tenants failed as the rig's on `c`'s and `d`'s files.
+        t=$(IFS='|'; echo "${TENANTS[*]}")
+        echo "lost\\+found|n|n/schedules\\.hint(\\.writing)?|n/($t)\\.instance|n/($t)\\.fennec|n/($t)\\.fennec\\.(lock|sync|beside|compacting)"
     else
         echo 'lost\+found|t\.fennec|t\.fennec\.(lock|sync|beside|compacting)'
     fi
