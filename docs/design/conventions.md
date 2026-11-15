@@ -140,6 +140,28 @@ upload that fails on GitHub's side does not fail a job whose tests passed
 (#590 and #591 lost merge-queue runs to one). The test-report uploads run
 only when a step failed, and no step retries a test.
 
+The Android job's Gradle takes what it can from setup-gradle's cache of the
+Gradle User Home, which only main's runs write: the plugins and
+dependencies, and the distributions its wrappers unpacked -- 8.10.2 for the
+Kotlin builds, through a wrapper the job writes with the runner's own Gradle
+(offline, the download held to Gradle's published sum), and 9.5.0 for the
+app `flutter create` makes. setup-gradle's `gradle-version: 8.10.2` had kept
+that distribution under a key of its own beside the entry, and asked
+services.gradle.org for its list of versions every run: of the job's 50
+runs on 2026-11-14, the 6 that restored main's Gradle User Home each
+downloaded 8.10.2 again. Its six failures on a fetch from 2026-11-08 to
+11-11 -- the Kotlin plugin from the plugin portal, and five times Gradle
+9.3.1 for the Flutter app from GitHub's releases, a 504 -- were each in a
+run that restored nothing, which is most runs: an entry written for a pull
+request or a merge group is read by no other run, and main's was gone within
+about an hour and a half, so each of main's four runs that day began
+empty. The repository's caches then stood at 10.3 GB against GitHub's 10,
+7 GB of it in two merge groups' entries, 3.6 GB of that the Flutter SDK for
+Linux and for macOS, which both mobile jobs cache on every ref that misses.
+A step after the builds, `What Gradle fetched`, names each distribution
+unpacked and each plugin fetched, and counts the artifacts written after the
+restore, so a run's log says whether the cache served it.
+
 ## Chrome
 
 A step that launches Chrome reads Chrome's own files first, or a cold

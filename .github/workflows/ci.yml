@@ -1458,7 +1458,29 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v6
         with:
-          gradle-version: '8.10.2'
+          gradle-version: wrapper
+
+      # Gradle 8.10.2 for the Kotlin builds through a wrapper: its
+      # distribution is then kept in the Gradle User Home's cache entry, as
+      # the Flutter app's 9.5.0 is, and comes back with it. setup-gradle's
+      # own `gradle-version` kept 8.10.2 under a key of its own and asked
+      # services.gradle.org for its list of versions every run: the 6 of 50
+      # runs on 2026-11-14 that restored main's Gradle User Home each
+      # downloaded 8.10.2 again (docs/design/conventions.md#reruns). The
+      # runner's Gradle writes the wrapper offline, and the wrapper holds
+      # the download to Gradle's published sum.
+      - name: Gradle 8.10.2 through a wrapper
+        run: |
+          set -eu
+          touch "$RUNNER_TEMP/gradle-home-restored"
+          w="$RUNNER_TEMP/gradle-8.10.2"
+          mkdir -p "$w/bin"
+          cd "$w"
+          : > settings.gradle
+          gradle --no-daemon -q wrapper --gradle-version 8.10.2 --no-validate-url \
+            --gradle-distribution-sha256-sum 31c55713e40233a8303827ceb42ca48a47267a0ad4bab9177123121e71524c26
+          ln -s "$w/gradlew" "$w/bin/gradle"
+          echo "$w/bin" >> "$GITHUB_PATH"
 
       # Linux with Gradle: run-tests.sh builds the library and the server
       # the sync tests start here and runs JUnit on the runner, no
@@ -1546,6 +1568,20 @@ jobs:
             integrations/kotlin/fennecdb/build/test-results/
           retention-days: 7
           if-no-files-found: ignore
+
+      # What the Gradle builds fetched rather than found in the restored
+      # Gradle User Home: what was written into it after the restore -- a
+      # distribution's marker once its wrapper unpacked it (the zip is
+      # deleted then), a plugin's marker, any artifact. A run that restored
+      # main's entry names nothing here.
+      - name: What Gradle fetched
+        if: ${{ !cancelled() }}
+        run: |
+          m="$RUNNER_TEMP/gradle-home-restored"
+          test -f "$m" || exit 0
+          find "$GRADLE_USER_HOME/wrapper/dists" -name '*.zip.ok' -newer "$m" 2>/dev/null | sed 's|.*/\(.*\)\.zip\.ok$|Gradle distribution installed: \1|'
+          find "$GRADLE_USER_HOME/caches/modules-2/files-2.1" -name '*.gradle.plugin-*.pom' -newer "$m" 2>/dev/null | sed 's|.*/|Plugin downloaded: |'
+          echo "Artifacts downloaded: $(find "$GRADLE_USER_HOME/caches/modules-2/files-2.1" -type f -newer "$m" 2>/dev/null | wc -l)"
 
   # The same on Apple's platforms: every slice of the XCFramework, the Swift
   # package's tests on macOS and on an iOS simulator, the library's size
