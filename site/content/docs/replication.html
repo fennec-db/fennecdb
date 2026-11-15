@@ -712,11 +712,23 @@ encrypt the disk it is on (LUKS, FileVault, an encrypted cloud volume).</p>
 <p>Files sealed by 0.2.0 and earlier still open, and an archive they began
 goes on. Their frames are bound to their places alone, so a frame of
 another such file sealed with the same key could be put in one unnoticed;
-files sealed now are bound to themselves. An archive's older images and
-segments leave as it prunes them; to bind an older backup, restore it and
-back it up again. A binary from 0.2.0 or earlier refuses a file sealed now
-(<code>not a sealed file</code>, <code>not sealed, where the archive
-is</code>): upgrade what reads an archive before what writes it.</p>
+files sealed now are bound to themselves. Because the older files still
+open, that stays true of every key that ever sealed one: whoever holds two
+of them can build a third from their frames and put it where a file sealed
+with that key is read, beside an archive or a backup sealed now. Pruning
+the older files does not end it, and neither does restoring a backup and
+sealing it again with the same key: copies of the older files may be
+anywhere. To be rid of it, make a new key (<code>fennec key</code>), seal
+with it from then on, and begin a new archive with it, in a directory or
+bucket path of its own; read the older archive and backups with the old
+key for as long as you keep them.</p>
+
+<p>A binary from 0.2.0 or earlier refuses a file sealed now (<code>not a
+sealed file</code>, <code>not sealed, where the archive is</code>), and an
+upgraded archiver seals its next image and segment so at once: upgrade
+what reads an archive — <code>fennec restore</code>, <code>fennec
+verify</code>, the hosts a restore drill runs on — before what writes
+it.</p>
 </details>
 
 <h2>Endpoints</h2>

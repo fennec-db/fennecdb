@@ -661,8 +661,18 @@ archive and a backup 0.2.0 sealed, held by
 goes on in version 1 frames, `FileId::V1` read back from it: frames of two
 versions in one file would open as neither. Nothing new is begun as
 version 1: images and segments taken after the upgrade are version 2
-beside the older files, which leave as `prune` lets them go; an older
-backup is bound by restoring it and backing it up again. A version past 2
+beside the older files, which leave as `prune` lets them go. Since a
+version 1 file still opens under its key, the binding holds only for a key
+that never sealed one: whoever holds two version 1 files sealed under a
+key builds a third from their frames and puts it wherever a file sealed
+under that key is read, a version 2 archive's or a backup's place among
+them. Neither pruning the older files nor restoring a backup and sealing it
+again under the same key ends that -- the older files are wherever they
+were copied -- so the way out is a new key (`fennec key`) sealing
+everything from then on and a new archive begun under it, the older files
+read with the old key while they are kept. A switch refusing version 1
+files is not built: under it every archive and backup 0.2.0 sealed would
+be unreadable, and it is left for a later decision. A version past 2
 is refused by its number (`sealed as version 3, which this binary does not
 open`), never read as a plain file: `is_sealed` reads the magic's first
 seven bytes. A binary from before the id took the magic's whole eight

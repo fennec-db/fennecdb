@@ -899,6 +899,32 @@ records say; one refused names the damaged record and the
 whole one after it that says the file was synced past it -- restore that
 tenant from its archive or a replica, and keep the file for a look.
 
+**A sealed archive's next file is bound to itself, which older readers
+refuse.** From the release that binds a sealed frame to its file, an
+archiver restarted on it seals its next image and segment, and `fennec
+backup --key-file` its backup, with a file id (`FENECSL\x02`), and a
+`fennec restore` or `fennec verify` from 0.2.0 or earlier refuses such a
+file (`not a sealed file`, `<image>: not sealed, where the archive is`).
+The files sealed before still open in the new release, and a segment an
+older archiver began goes on as it was. So `fennec` is upgraded on every
+machine that restores or verifies -- an operator's, the weekly restore's --
+with step 1, before any archiver is restarted on the new release. The older files still open under their key, and whoever
+holds two of them can build a third from their frames: to be rid of that,
+make a new key (`fennec key`), point every archiver and backup at it, and
+begin a new archive under it, keeping the old key to read the older one
+(Archives and restores; the site's replication page, *How archives and
+backups are sealed*).
+
+**A tenant's `github` hook set with `key delivery` is kept, its events
+refused.** From the release that refuses `key delivery`, a set a node kept
+from 0.2.0 still reads -- every secret kept, the tenant's other hooks
+armed -- and the node logs each such hook as it starts (its line says the
+hook "was set with `key delivery`"); that hook's verified events are
+answered 409 naming `key body` until it is set again (`PUT
+/_shard/tenants/<t>/hooks/<h>` with its secret and `"key":"body"`, or no
+`key`). Then redeliver from GitHub's delivery log what was refused
+meanwhile.
+
 What a mix of versions tolerates is said release by release in the
 changelog; the docs hold these today: nothing records an `https://` node
 address until every router (each region's, each standby) and every node is
