@@ -536,7 +536,7 @@ Covers `crates/fennec-bench/`; its gate rule binds `tools/perf_gate.py`, `crates
 *Benchmarks*
 - `make scale-bench` holds fennec-server to pgvector, each over its own protocol.
 - `make ycsb` is fennecdb as a general database.
-- A pull request is held to its base in instructions and heap bytes an op.
+- A pull request is held to its base in instructions and heap bytes an op, and in I/O to the call.
 - Two builds' instruction counts
 
 ## Conventions

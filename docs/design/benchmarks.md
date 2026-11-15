@@ -230,8 +230,10 @@ untouched, the figures and a trace's deltas.
 ## The gate
 
 **A pull request is held to its base in instructions and heap bytes an
-op.** CI runs the gate as two jobs, on every pull request and in the merge
-queue. `perf (count)` builds `crates/fennec-http/examples/gate.rs` twice --
+op, and in I/O to the call.** CI runs the gate as two jobs, on every pull
+request and in the merge queue; the I/O a durable write, a `/batch`, a
+spill and a compact make is counted and judged in the same two (*The I/O*,
+below). `perf (count)` builds `crates/fennec-http/examples/gate.rs` twice --
 at the merge's first parent, which is a pull request's base branch or the
 commit a merge group queues onto, and in the change -- and counts each of
 its workloads under valgrind's callgrind, five runs a side, each run
@@ -559,24 +561,168 @@ figure measures; a hot path a page quotes gets one.
 | `file-compact` | a file of 10 000 rows each written twice, compacted | [compaction](storage.md#compaction) (`make compact-bench`) |
 | `sync-apply` | a replica's sync applying a change of 100 rows over the 1 000 it holds, into a file | rows in changes of 100 cost the replica what a put does ([mobile.html](../../site/content/docs/mobile.html#sync), `make sync-bench`) |
 
+*The I/O.* Callgrind counts no system call: a change that doubled a
+durable write's fsyncs, broke a `/batch` into a block a statement, or made
+a compaction write more passed the count above. So the count job goes on,
+over the same two trees and target directories -- its `run` keeps them
+(`--keep`), and `perf_gate.py io` builds fennec-server in each beside the
+gate program, the crates both reach built once -- to run each of
+`gate.rs`'s `IO_WORKLOADS` against each side's server, three runs a side,
+and the judge holds them to the base's by the same checker, the same
+`PERF_ACCEPTED` and the same rule for a workload the base had (`check` on a
+results file of `"metric": "io"`):
+
+| workload | its requests | what it stands for |
+|---|---|---|
+| `io-put` | 500 puts of a row of a 530-byte text, each answered before the next | a durable write: its fsync, of the [sync log](durability.md#the-sync-log), the log filling some 450 puts in and the file synced in its place |
+| `io-batch` | a `/batch` of 1 000 puts of a 16-byte text, one block of some 24 KB | a block is one fsync however many writes it holds: the group commit |
+| `io-spill` | a `/batch` of 2 000 rows of a 9 000-byte text, some 18 MB | a block past 16 MB [spilling into the file](storage.md#spills) before it lands |
+| `io-compact` | `compact` of a file of 10 000 rows each written twice | [compaction](storage.md#compaction): the live half written anew and renamed over |
+
+The server runs under `--sync always` -- every answer waits for its
+fsync, so nothing is left for a clock to sync -- with `--auto-compact
+off`, whose look comes every 5 s by the clock, and `--exit-on-stdin-close`,
+so the run's end, or its driver's death, is the one shutdown and no server
+outlives it. `gate.rs` is only the client, never traced: `strace -f -y -s 0
+--seccomp-bpf` runs the server alone, stopping it at the calls asked for
+and no others. The setup goes over one connection, the run's requests over
+a second, and the driver's own `GET /_health` over a third once the run is
+answered; what is counted is what any thread of the server did between its
+taking the second connection and its taking the third (`accept4`, traced
+for that), so the start-up and the setup before, and the shutdown's sync
+after, are not. Counted, each to the call: the fsync family's calls on
+files (`fsync`, `fdatasync`, `sync_file_range`, `syncfs`, and `msync`,
+which names no descriptor), renames (`rename`, `renameat`, `renameat2`),
+the calls writing to a file (`write`, `pwrite64`, `writev`, `pwritev`,
+`pwritev2`, `copy_file_range`, `sendfile`) and the bytes they returned, and
+the calls of those that failed (`failed`, their bytes none). A descriptor
+is a file where `-y` names it by a path outside `/dev`, `/proc` and `/sys`:
+an answer written to a socket is no file's, nor the server's log, its
+stderr, which is the driver's pipe, nor its stdout, `/dev/null`. The table
+gives fsyncs an answer, bytes written a byte the client sent and a byte of
+the file the setup left beside the counts, and each file's share by its
+name in the data directory: the database, its `.sync` log, the file a
+compact writes, the directory.
+
+*Exact, so held to the call.* Nothing a workload sends, or the server
+writes between those connections, is sized by a clock or a draw. The ids,
+values and texts are fixed, and so is the `Host`: `localhost`, not the port
+the system picked, whose digits would have moved the bytes sent. Where the
+engine writes a time or a draw into a file it moves no count. The sync
+log's generation, begun from the clock in nanoseconds where the log is new
+(`SyncLog::open`), goes into its header and every entry as eight bytes
+whatever it reads, and so does each entry's hash of it; `<file>.lock`
+holds the process's id in digits, which a run's number moves, but is
+written at the open, before the counted stretch. A record's claim --
+where a completed fsync left the file -- is the same place every run when
+every write is answered before the next; the idempotency keys' rows, a
+`@ttl` read and `now()` are no workload's. So the counts repeat to the
+call, and are judged so: every run of a side must count the same, or the
+job fails naming the count that moved, and any count of this tree's that
+is not the base's fails, up or down -- fewer fsyncs a durable write is
+durability lost -- unless the pull request adds a `PERF_ACCEPTED` entry
+naming the workload and the count
+(`"metric": "fsyncs"`, `"renames"`, `"writes"`, `"written"` or `"failed"`)
+and how far it may move, and which way: a signed share of the base's count
+or a signed number (`"+100%"`, `"+1"`, `"-50%"`). No threshold: a count
+that holds to the call has no draw to stand above. The entries are the
+instructions' -- added by the pull request, never let through by the
+base's, read as data -- and so is the rule for a workload: one the base's
+own `gate.rs` lists that this tree dropped, or the base's server did not
+run, fails; one new to the program that the base cannot run is held to
+nothing. The pull request that brought the I/O counts is counted and
+judged by its own checker, the base's having no `io` (`io --help` tells
+the jobs which); the base's server answers every request the workloads
+send, so all four are compared from that first run on, as the gate's own
+first run compared every workload its base ran.
+
+*The counts, held to themselves.* One build's server against itself, 20
+runs a side -- 40 runs of each workload, in Docker on an M1 (aarch64 musl,
+strace 6.19), four at a time while the machine around it ran a load of 20
+to 70 -- counted each workload the same to the call and the byte, every
+run one line of counts. Those counts:
+
+| workload | answered | fsyncs | an answer | renames | write calls | bytes written | a byte sent | a byte of the file before |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `io-put` | 500 | 500: 499 of the log, 1 of the file | 1.00 | 0 | 1 001 | 565 166 | 1.64 | - |
+| `io-batch` | 1 | 1, of the log | 1.00 | 0 | 3 | 47 862 | 0.60 | - |
+| `io-spill` | 1 | 1, of the file | 1.00 | 0 | 2 | 18 019 912 | 0.99 | - |
+| `io-compact` | 1 | 6 | 6.00 | 1 | 5 | 2 139 997 | - | 0.51 of 4 199 800 |
+
+A durable put is one fsync, and its record's bytes written twice -- into
+the file and into the log beside it, 550 and 581 bytes a put, the log's
+price for the journal commit it saves ([durability.md](durability.md#the-sync-log))
+-- until the log fills, some 450 puts in: that put syncs the file in its
+place, and the next writes the log's header for a new generation. A
+`/batch` of 1 000 is one block and one fsync of the log, its 23 883 bytes
+written to the file and again to the log. The spill writes its 16.8 MB
+spill record and 1.2 MB land straight into the file and syncs it once,
+never the log, which takes no entry past 64 KB. The compact writes the
+live half anew, 0.51 of the file, and syncs six times: the new file three,
+the old one once -- the log may hold what it lacks, and goes, durably,
+before the rename -- and the directory twice, after the log's removal and
+after the rename. One of the six syncs nothing: the image synced, the
+first catch-up round (`maintenance.rs`) finds no write made meanwhile --
+there is one writer, waiting on the compact -- and syncs the side file
+again, an `fdatasync` with nothing written since. Dropping it is a change
+of its own; the gate would read it as `io-compact`'s fsyncs 6 → 5, let
+through by an entry of `"-1"`.
+
+*One fsync more fails.* A build with one `fdatasync` more a durable write
+(`FileSink`'s sync, a patch never committed) against its base, three runs
+a side: `io-put` 500 → 1 000 fsyncs, `io-batch` 1 → 2, `io-spill` 1 → 2,
+every run of a side alike, and `io-compact`'s six as they were, its
+rewrite syncing as before. The checker failed the three; let them through
+with an entry each that the pull request added (`"metric": "fsyncs",
+"most": "+100%"`); and failed them again with the same entries the base
+held.
+
+*Its time.* The runs are short: in Docker on the M1, started at a
+1-minute load of 3.98 (4.21 after), a run of `io-put` took 1.1 s, of the
+others 0.3 to 0.5 s, and the step's 24 -- four workloads, three runs a
+side, four at a time -- 2.5 s (10 s while the machine ran a load of 20).
+What the step pays is the two servers' build. On a hosted runner
+`build (release + cli profile)` built fennec-server in 73 s, 53 of them its
+own crate and the link, full LTO into one codegen unit; neither tree's
+gate program built that, nor fennec-http with its `studio` and `tls`
+features, fennec-wire or fennec-import, some 7 s before it, while
+fennec-core, fennec-ql, fennec-abi and fennec-tls are the gate program's,
+built once. The two sides' links run side by side, each on a thread of
+its own. So the step adds an estimated 70 to 85 s a pull request -- an
+estimate from those timings and the runs here, not a run of the job.
+The workloads are sized for it: 1 000 puts of a 200-byte text, the first
+version's, paid twice the fsyncs and never filled the log, and 20 000 rows
+of 1 000 bytes, a block of about the spill's size, ten times the
+statements to parse and answer.
+
 *What it does not catch.* Instructions, not cycles: a cache miss, a
 branch mispredicted, memory's bandwidth and a system call's time cost
 nothing here, and a change that trades instructions for any of them
-passes. No system call is counted: a change that doubles a durable write's
-fsyncs, or a compaction's bytes written, passes it -- those counts, fsyncs
-and bytes written a durable write, a `/batch`, a spill and a compact,
-under `strace -f -c`, are to be another `metric` of the same results file,
-over the same two builds and the same checker, the job's step after this
-one's. Every workload runs on one thread, so what threads cost -- a lock's
-contention, connections side by side, a batch's vectors linked in parallel
--- is not counted. One target: x86_64 musl's code, not aarch64's NEON
-kernels, macOS's or Windows' builds, nor the browser module's (wasm32,
-whose size `make wasm-sizes` and the size job hold). No workload writes
-vectors in its loop -- the graph each `near` reads is linked in its setup,
-uncounted -- and none applies a primary's records as a server's replica
-does ([replication.md](replication.md#replication)); `sync-apply` is a
-sync replica's apply alone. A change on those paths is measured by hand:
-`make instr-compare`, `make sweep`, `make replica-bench`.
+passes. The I/O is counted in calls and bytes, not in time: an fsync
+slower on one file system than another, a write that waits for the disk,
+the kernel writing back a mapped file's pages, and reads -- the file is
+mapped, and a read is a page fault no call shows -- are not counted; nor
+is anything the clock runs, `--sync <ms>`'s syncer and the write behind the
+lock outside `--sync always` among them
+([durability.md](durability.md#writes-behind-the-lock)), nor a server's
+open and shutdown. Every workload runs on one thread -- an I/O workload
+one connection, a request in flight -- so what threads cost -- a lock's
+contention, connections side by side and the fsync their writes share, a
+batch's vectors linked in parallel -- is not counted. One target: x86_64
+musl's code on Linux, not aarch64's NEON kernels, macOS's or Windows'
+builds -- nor their I/O: macOS keeps no sync log and flushes the drive by
+`F_FULLFSYNC`, Windows flushes the renamed file and its directory
+([windows.md](windows.md#3-durability-on-ntfs)) -- nor the browser
+module's (wasm32, whose size `make wasm-sizes` and the size job hold). No
+workload writes vectors in its loop -- the graph each `near` reads is
+linked in its setup, uncounted, and no I/O workload has a vector, so a
+graph appended to the file (`link::keep`) or a shutdown's checkpoint is no
+count -- and none applies a primary's records as a server's replica does
+([replication.md](replication.md#replication)), nor counts what a
+replica's apply or a primary's feed writes and syncs; `sync-apply` is a
+sync replica's apply alone, in instructions. A change on those paths is
+measured by hand: `make instr-compare`, `make sweep`, `make replica-bench`,
+`make roundtrip-bench` with `--strace` in `RT_ARGS`.
 
 *Rejected.* A glibc build: it ships nowhere, and its allocator is not
 musl's. `--toggle-collect` on the loop's function, valgrind's other way to

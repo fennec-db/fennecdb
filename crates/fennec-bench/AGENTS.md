@@ -18,7 +18,7 @@ value), appended to, never rewritten (a replaced run named in
 a figure no run has measured is a `hand` run on `hand-measured`, its commit
 the one that first wrote it.
 
-**[A pull request is held to its base in instructions and heap bytes an op.](../../docs/design/benchmarks.md#the-gate)**
+**[A pull request is held to its base in instructions and heap bytes an op, and in I/O to the call.](../../docs/design/benchmarks.md#the-gate)**
 CI's `perf (count)` counts each workload of
 `crates/fennec-http/examples/gate.rs` under callgrind in the base's static
 musl build and the pull request's -- one program, five runs a side, each
@@ -40,7 +40,14 @@ integration's, `web/`'s, `studio/`'s, `deploy/`'s or Markdown. A workload
 runs in process on one thread from a fixed seed, only its loop counted, the
 same count run after run but for a draw well inside the threshold (the base
 against itself, 0.1% at most), and stands for a claim in the design file's
-table: a hot path a page quotes gets one.
+table: a hot path a page quotes gets one. An I/O workload (`IO_WORKLOADS`)
+is sent by `gate.rs` to each side's `fennec-server` under `--sync always`,
+the server alone under `strace -f`, counted from its taking the workload's
+connection to the driver's next: the fsync family's calls, renames, the
+calls writing to files and their bytes, never a socket's or a pipe's.
+Nothing it sends or the server writes then is sized by a clock or a draw,
+so every run of a side counts the same to the call, and a count that is
+not the base's, up or down, fails unless an entry names it.
 
 **[Two builds' instruction counts](../../docs/design/benchmarks.md#instruction-counts)**
 differing by under ~500 a request are read over re-signed copies'
