@@ -28,9 +28,7 @@ def sub(path, pattern, repl):
 
 
 def tagged(root, version):
-    """Whether `version` was released: its tag is in this repository. A
-    set is written from its release's tag alone (tools/compat_fixtures.py
-    build), so a version set but never tagged has none to ask for."""
+    """Whether `version` was released: its tag is in this repository."""
     r = subprocess.run(["git", "-C", str(root), "rev-parse", "-q", "--verify", f"refs/tags/v{version}"],
                        capture_output=True, text=True)
     return r.returncode == 0
@@ -67,15 +65,19 @@ def missing_set(root, current, new, released=tagged):
     """Why the release after `current` cannot be cut yet, or None: from
     v0.2.0 on, a released version's fixture set -- the files its own
     binaries wrote, which every later build's tests open
-    (tools/compat_fixtures.py) -- is in the tree, every file the bytes
-    SHA256SUMS names, before the version moves past it. Setting the version
-    a release already has asks for nothing, nor does moving on from a
-    version that was never tagged: its set would be built from its tag."""
+    (tools/compat_fixtures.py) -- is in the working tree, every file the
+    bytes SHA256SUMS names, before the version moves past it. Setting the
+    version a release already has asks for nothing. A version whose tag
+    this clone lacks is refused too, never taken for one never released:
+    `make version` is a release step, run in a full clone, and a clone
+    without the tags would let every release through."""
     m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", current)
     if current == new or not m or tuple(map(int, m.groups())) < (0, 2, 0):
         return None
     if not released(root, current):
-        return None
+        return (f"v{current}, the version this tree holds, has no tag in this clone (refs/tags/v{current}): "
+                "fetch the tags (`git fetch --tags`) and run it again -- `make version` is a release step, run "
+                "in a full clone, and a released version's fixture set is asked for by its tag")
     set_dir = root / "crates" / "fennec-core" / "tests" / "compat" / f"v{current}"
     if not set_dir.is_dir():
         return (f"v{current} has no fixture set (crates/fennec-core/tests/compat/v{current}/): write it from "
@@ -85,6 +87,32 @@ def missing_set(root, current, new, released=tagged):
     if problems:
         return f"v{current}'s fixture set is not the one its release wrote:\n  " + "\n  ".join(problems)
     return None
+
+
+WALK = pathlib.Path("crates") / "fennec-core" / "tests" / "compat" / "walk.rs"
+
+
+def named_sets(root):
+    """The releases whose sets the tree holds, by `RELEASES` in the
+    compat tests' walk: each line a set its tests open."""
+    return re.findall(r'^\s*set: "(v\d+\.\d+\.\d+)",', (root / WALK).read_text(encoding="utf-8"), flags=re.M)
+
+
+def named_sets_problems(root):
+    """What keeps the tree from holding every set it names: v0.2.0's --
+    1.x opens every file written from v0.2.0 on -- and each `RELEASES`
+    line's, whole as its release wrote it. Empty where each is."""
+    named = named_sets(root)
+    problems = []
+    if "v0.2.0" not in named:
+        problems.append(f"{WALK}: RELEASES has no v0.2.0 line, and 1.x opens every file written from v0.2.0 on")
+    for name in sorted(set(named) | {"v0.2.0"}):
+        set_dir = root / "crates" / "fennec-core" / "tests" / "compat" / name
+        if not set_dir.is_dir():
+            problems.append(f"{set_dir}: missing, and RELEASES names it")
+        else:
+            problems.extend(set_problems(set_dir))
+    return problems
 
 
 def refuse_without_set(root, new):

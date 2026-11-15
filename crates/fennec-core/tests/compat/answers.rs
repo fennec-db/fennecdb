@@ -23,7 +23,11 @@ pub const ACCEPTED: &[(&str, &str, &str, &str)] = &[];
 
 /// Every set, oldest first: those under `FENNEC_COMPAT_SETS` where it names
 /// a directory -- a set `tools/compat_fixtures.py write` has just written,
-/// held to every test before it lands -- and the tree's otherwise.
+/// held to every test before it lands -- and the tree's otherwise. A
+/// directory of sets holds sets alone, each `v<major>.<minor>.<patch>/`
+/// with its README and sums: pointed at a set itself, or at a directory
+/// holding none, every test fails rather than pass over nothing or read
+/// `archive/` as a release's set.
 pub fn sets() -> Vec<PathBuf> {
     let root =
         std::env::var_os("FENNEC_COMPAT_SETS").map_or_else(|| PathBuf::from(SETS), PathBuf::from);
@@ -32,18 +36,49 @@ pub fn sets() -> Vec<PathBuf> {
         .map(|e| e.unwrap().path())
         .filter(|p| p.is_dir())
         .collect();
-    v.sort();
+    v.sort_by_key(|p| version_of(&set_name(p)));
     assert!(!v.is_empty(), "no fixture set under {}", root.display());
+    for p in &v {
+        let name = set_name(p);
+        assert!(
+            version_of(&name) != (0, 0, 0),
+            "{}: {name} is no set (`v<version>/`): FENNEC_COMPAT_SETS names the directory \
+             holding the sets, never a set itself",
+            root.display()
+        );
+        for must in ["README.md", "SHA256SUMS"] {
+            assert!(
+                p.join(must).is_file(),
+                "{}: no {must}, which `tools/compat_fixtures.py write` writes",
+                p.display()
+            );
+        }
+    }
     v
+}
+
+/// `v1.2.3`'s numbers, or zeros where the name is no version.
+pub fn version_of(name: &str) -> (u32, u32, u32) {
+    let n: Vec<u32> = name
+        .strip_prefix('v')
+        .unwrap_or("")
+        .split('.')
+        .map_while(|x| x.parse().ok())
+        .collect();
+    match n[..] {
+        [a, b, c] if name == format!("v{a}.{b}.{c}") => (a, b, c),
+        _ => (0, 0, 0),
+    }
 }
 
 pub fn set_name(set: &Path) -> String {
     set.file_name().unwrap().to_string_lossy().into_owned()
 }
 
-/// Whether the release wrote `name` torn, as a crash leaves a file
-/// (`torn-*.fennec`): `fennec verify` refuses it as it lies, and an open
-/// cuts the damage off.
+/// Whether the release wrote `name` torn (`torn-*.fennec`), as a crash
+/// leaves a file, or a disk that flipped a bit where it was synced:
+/// `fennec verify` refuses it as it lies, and an open cuts a torn end off,
+/// reading below the durable point unchecked.
 pub fn torn(name: &str) -> bool {
     name.starts_with("torn")
 }
@@ -86,14 +121,25 @@ pub fn verified(path: &Path, name: &str, torn: bool) {
     }
 }
 
+/// The fewest statements a file of a set is asked: a list cut short or
+/// emptied would hold the file to nothing.
+pub const MIN_STATEMENTS: usize = 4;
+
 /// The statements of `<name>.fennecql`, a line each.
 pub fn statements(set: &Path, name: &str) -> Vec<String> {
-    std::fs::read_to_string(set.join(format!("{name}.fennecql")))
+    let v: Vec<String> = std::fs::read_to_string(set.join(format!("{name}.fennecql")))
         .unwrap()
         .lines()
         .filter(|l| !l.trim().is_empty() && !l.starts_with("--"))
         .map(str::to_string)
-        .collect()
+        .collect();
+    assert!(
+        v.len() >= MIN_STATEMENTS,
+        "{}/{name}.fennecql: {} statements",
+        set.display(),
+        v.len()
+    );
+    v
 }
 
 /// This build's answer to `text`, as the writer wrote its release's:
@@ -395,11 +441,15 @@ pub fn take_out(db: &mut Database, w: &Written) {
 
 /// The file at `path`, a release's `name`, held to its answers: opened to
 /// write and answering as the release did; this build's rows of every type
-/// written into it, read back and found through every index, opened
-/// again, compacted and opened again; then taken out, and the release's
-/// answers held again, compacted and opened once more; the file verified
-/// at the end. A replica's file takes no write of its own, and is held to
-/// that. The differences.
+/// written into it, read back and found through every index, and again
+/// once opened anew -- the release's records and this build's after them,
+/// as a server upgraded in place reads its file; then taken out, the
+/// release's answers held again, compacted -- this build rewriting the
+/// release's rows -- and opened once more, answering alike; the file
+/// verified at the end. A replica's file takes no write of its own, and is
+/// held to that. Three opens and one compact: each close and compact is an
+/// fsync, `F_FULLFSYNC` on macOS, most of what a file costs here. The
+/// differences.
 pub fn written_and_compacted(path: &Path, set: &Path, name: &str) -> Vec<String> {
     let open = |when: &str| {
         fennec_core::fs::open(path).unwrap_or_else(|e| panic!("{name}: an open {when}: {e}"))
@@ -427,20 +477,29 @@ pub fn written_and_compacted(path: &Path, set: &Path, name: &str) -> Vec<String>
         drop(db);
         db = open("after the writes");
         found.extend(read_back(&db, &w, name, "written, opened again"));
-        run(&mut db, "compact");
-        drop(db);
-        db = open("after the compact");
-        found.extend(read_back(&db, &w, name, "written, compacted, opened again"));
         take_out(&mut db, &w);
         found.extend(differences(&db, set, name, "written and taken out"));
     }
     run(&mut db, "compact");
     drop(db);
-    let db = open("after the last compact");
+    let db = open("after the compact");
     found.extend(differences(&db, set, name, "compacted, opened again"));
     drop(db);
     verified(path, name, false);
     found
+}
+
+/// The file at `path` with this build's rows of every type written into
+/// it and compacted, its answers not asked: what a tool's own check of the
+/// file after this build wrote it reads (`fennec verify` in fennec's
+/// `compat::`), fennec-core's `compat::` holding the answers. A replica's
+/// file only compacted.
+pub fn written_then_compacted(path: &Path, name: &str) {
+    let mut db = fennec_core::fs::open(path).unwrap_or_else(|e| panic!("{name}: {e}"));
+    if !db.history().following {
+        write_after(&mut db);
+    }
+    run(&mut db, "compact");
 }
 
 /// The sync log's header names the file it was written beside by its

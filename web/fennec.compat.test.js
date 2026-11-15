@@ -26,7 +26,20 @@ const skip = !wasm && 'no web/fennec.wasm (make wasm)';
 const SETS = process.env.FENNEC_COMPAT_SETS
   ? pathToFileURL(`${process.env.FENNEC_COMPAT_SETS.replace(/\/*$/, '')}/`)
   : new URL('../crates/fennec-core/tests/compat/', import.meta.url);
-const sets = (await readdir(SETS, { withFileTypes: true })).filter((d) => d.isDirectory()).map((d) => d.name).sort();
+const dirs = (await readdir(SETS, { withFileTypes: true })).filter((d) => d.isDirectory()).map((d) => d.name).sort();
+/**
+ * The sets, each `v<version>/` with its README and sums, at least one: as
+ * the Rust tests' `sets`, an empty directory or one set itself (its
+ * `archive/` no set) fails rather than pass over nothing.
+ */
+async function everySet() {
+  assert.ok(dirs.length > 0, `no fixture set under ${SETS.pathname}`);
+  for (const d of dirs) {
+    assert.match(d, /^v\d+\.\d+\.\d+$/, `${SETS.pathname}: ${d} is no set: FENNEC_COMPAT_SETS names the directory holding the sets`);
+    for (const must of ['README.md', 'SHA256SUMS']) await readFile(new URL(`${d}/${must}`, SETS));
+  }
+  return dirs;
+}
 const { Fennec, persist, restore, openFile } = await import('./fennec.js');
 
 async function page() {
@@ -41,6 +54,8 @@ const read = (set, file) => readFile(new URL(`${set}/${file}`, SETS), 'utf8');
 /** Each statement whose answer is not the release's page's, with both. */
 async function differences(db, set, name, when) {
   const reads = statements(await read(set, `${name}.fennecql`));
+  // As the Rust tests' `MIN_STATEMENTS`: a list cut short holds the store to nothing.
+  assert.ok(reads.length >= 4, `${set}/${name}.fennecql: ${reads.length} statements`);
   const theirs = (await read(set, `${name}.web`)).split('\n').filter(Boolean);
   const ours = answers(db, reads).split('\n').filter(Boolean);
   assert.equal(ours.length, theirs.length, `${set}/${name}: a statement an answer`);
@@ -170,7 +185,7 @@ function takeOut(db, w) {
 
 test('a release\'s IndexedDB image and chunks restore and answer as its page did', { skip }, async () => {
   const found = [];
-  for (const set of sets) {
+  for (const set of await everySet()) {
     const stores = (await readdir(new URL(`${set}/`, SETS))).filter((f) => /^page-idb.*\.json$/.test(f));
     assert.ok(stores.length > 0, `${set}: no IndexedDB store`);
     for (const file of stores) {
@@ -215,7 +230,7 @@ test('a release\'s IndexedDB image and chunks restore and answer as its page did
 });
 
 test('a release\'s IndexedDB records are found only where its page put them', { skip }, async () => {
-  for (const set of sets) {
+  for (const set of await everySet()) {
     const held = heldDatabase(JSON.parse(await read(set, 'page-idb.json')));
     // A client naming another database, version or store finds nothing
     // here, as a browser holding the release's records would give it none.
@@ -237,7 +252,7 @@ test('a release\'s IndexedDB records are found only where its page put them', { 
 
 test('a release\'s OPFS file opens and answers as its page did', { skip }, async () => {
   const found = [];
-  for (const set of sets) {
+  for (const set of await everySet()) {
     const bytes = new Uint8Array(await readFile(new URL(`${set}/page-opfs.fennec`, SETS)));
     const dir = fakeDir(new Map([['page.fennec', { bytes, open: false }]]));
     const opened = async () => {
