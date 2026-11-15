@@ -7,9 +7,10 @@
 # real server, reads near a tenant's read replica.
 #
 # Where Gradle and Java are on the machine and it runs Linux (CI), both run
-# here. Otherwise both run in containers -- rust:1-slim-bookworm builds the
-# library and the server for the container's Linux and gradle:8-jdk17 runs
-# the tests -- with Cargo's and Gradle's caches in volumes of their own.
+# here. Otherwise both run in containers -- the rust image of the release
+# rust-toolchain.toml names, by digest, builds the library and the server
+# for the container's Linux and gradle:8-jdk17 runs the tests -- with
+# Cargo's and Gradle's caches in volumes of their own.
 set -eu
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 GOLDEN=integrations/builder-golden.json
@@ -28,12 +29,13 @@ command -v docker >/dev/null 2>&1 || { echo "kotlin-test: needs Docker, or Linux
 
 # A target directory of its own: the host's target/ holds this machine's
 # builds, and a Linux build in it would make Cargo build each again. The
-# image's own toolchain, by name: rust-toolchain.toml's release and its
-# wasm32 target are not this image's, and rustup installed them each run.
+# image is the release rust-toolchain.toml names (tools/toolchain_check.py
+# holds the two alike), and its own toolchain is taken by name: under the
+# file, rustup added the wasm32 target it asks for, at every run.
 docker run --rm -v "$ROOT":/src -w /src \
   -v fennec-cargo-registry:/usr/local/cargo/registry \
   -e CARGO_TARGET_DIR=/src/target/linux-docker \
-  rust:1-slim-bookworm \
+  rust:1.99.1-slim-bookworm@sha256:f2c004e3d2d8b547e8cf7ffbc29205385f4e71d23e53e4e383065db5e9f822cd \
   sh -c 'export RUSTUP_TOOLCHAIN=$(ls /usr/local/rustup/toolchains | head -1) &&
     cargo rustc -q -p fennec-ffi --lib --features jni --profile ffi --crate-type cdylib &&
     cargo build -q -p fennec-server -p fennec-shard'

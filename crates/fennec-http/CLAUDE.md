@@ -222,6 +222,15 @@ ceiling raised for every request and refused after the read.
 ceiling](../../docs/design/http.md#chunked-bodies)** (`read_onto`); a framing
 read two ways is refused (`chunked_framing`, `end_refused`).
 
+**[A seed goes in parts, read a page at a time.](../../docs/design/http.md#seeds-in-parts)**
+Past `SEED_PART` bytes of rows a seed is several `seed` events of one
+`seq` (`part` past the first, `more` before the last), each page read on
+a pin with no lock held (`sse::send_seed`) -- the shape's own, or the rows
+the lock's answer names (`Database::pin_rows`) -- so no stream holds a
+seed whole; one read again after parts of it went out is sent from its
+start, its first part without `part`, which a client takes as the seed
+begun anew.
+
 **[A plain `get` is written as JSON from the stored
 documents.](../../docs/design/http.md#json-from-stored-rows)**
 `Database::query_json` must match `query` through `json::rows_array_into`
@@ -271,6 +280,25 @@ its socket closes, on every way out, a panic's unwinding too -- never by a
 line after the connection's work, which a panic skips; so is every count
 taken around a connection or a held request (`waits::Answering`, a
 `waits::Ticket` leaving its group).
+
+**[A request is read in time, and an answer written in
+time.](../../docs/design/http.md#slow-clients)** A served connection's
+requests, the router's too, are read through `conn::Paced`, told each
+(`waiting`): the wait for a request's first byte is the idle timeout's;
+from that byte -- over TLS its first record's first part -- the request,
+head and body alike, has `--header-timeout` and a second more for every
+`conn::MIN_RATE` bytes that came, else 408 and `end_refused`; a record in
+parts is held to the same bound, its bytes earning as they come
+(`fennec_tls::TlsStream::read_by`). The clock is read and a timeout set by
+a read past a request's first alone: a request one read takes whole (the
+`BufReader`'s 8 KiB), or in the buffer already, pays nothing; a bound past
+what `Instant` can name is none, never a panic. `--write-timeout` is set
+once a connection; a stream setting its own ends the connection after,
+and a handler that sets the read timeout and serves on puts the idle
+timeout back first (`node_stream`): `Paced` takes it to stand. A cut and a
+write timed out are counted by their bound (`conn::Timeout`) in the
+thread's shard, before a 408 is written. A new reader of a served
+connection goes through `Paced`, never a bare `BufReader` over the `Conn`.
 
 **[`--tls-cert` and `--tls-key` make a listener HTTPS
 alone](../../docs/design/http.md#tls)**, `--metrics` too, each handshake on its

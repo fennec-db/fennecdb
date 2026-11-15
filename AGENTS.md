@@ -366,7 +366,7 @@ Covers `crates/fennec-ql/` and the shell in `crates/fennec-cli/`; its rules bind
 
 ### `crates/fennec-http/CLAUDE.md`
 
-Covers `crates/fennec-http/`, access aside (below); an open server's rule binds fennec-shard's router (`cors::foreign`, `cors::vouched`), replication fennec-core's `wal` and `changes_in`, held writes its wakes (`changes.rs`).
+Covers `crates/fennec-http/`, access aside (below); an open server's rule binds fennec-shard's router (`cors::foreign`, `cors::vouched`), a request read in time the router's clients and fennec-tls's reads (`conn::Paced`, `read_by`), replication fennec-core's `wal` and `changes_in`, held writes its wakes (`changes.rs`).
 
 *Replication and archives*
 - Replication ships only what is on disk, by the change counter.
@@ -394,10 +394,12 @@ Covers `crates/fennec-http/`, access aside (below); an open server's rule binds 
 - A text's lists are read as written at once from its second request.
 - A body is held to the ceiling its head earns.
 - A chunked body grows as it comes, held to the ceiling
+- A seed goes in parts, read a page at a time.
 - A plain `get` is written as JSON from the stored documents.
 - A row's tag is its JSON as its reader is shown it, and a write's preconditions are judged under the lock that writes it.
 - An answer past `--http-gzip` goes as gzip where its client takes it, never one carrying a tag.
 - A connection no thread can be made for is answered 503.
+- A request is read in time, and an answer written in time.
 - `--tls-cert` and `--tls-key` make a listener HTTPS alone
 - Every HTTP dial takes HTTPS by its URL.
 - The OpenAPI document is held to the routes.
@@ -484,6 +486,7 @@ Covers `crates/fennec-abi/`; the scenario file is `integrations/sync-scenarios.j
 *The native library and sync*
 - A replica's sync is a state machine; the network is the binding's.
 - Both sync runners are held to one scenario file.
+- A seed's parts wait in the replica's file and land in one block.
 
 ### `crates/fennec-ffi/CLAUDE.md`
 
@@ -501,6 +504,7 @@ Covers `web/`; its retry rule binds Python's clients (`integrations/python/`), G
 - A Durable Object keeps a database as a file would.
 - An object's alarm keeps its database.
 - A live query learns what changed from the change ring.
+- A seed in parts lands in one task.
 - A page's IndexedDB calls share one connection, and let it go when asked.
 - A number from 2^53 on goes out as every digit.
 - A client sends a request again only where it cannot have run or may run twice, and bounds every request in time.
@@ -532,20 +536,24 @@ Covers `deploy/`.
 
 ### `tools/CLAUDE.md`
 
-Covers `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/windows-zip.sh`, `tools/windows-zip-check.ps1`, `tools/install-ps1-check.ps1`, `tools/linux-ffi.sh`, `tools/linux-ffi-check.sh`, `site/install.sh`, `site/install.ps1` and `.github/workflows/`'s `release.yml` and `packages.yml`.
+Covers `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/windows-zip.sh`, `tools/windows-zip-check.ps1`, `tools/install-ps1-check.ps1`, `tools/linux-ffi.sh`, `tools/linux-ffi-check.sh`, `tools/toolchain_check.py`, `rust-toolchain.toml`, `site/install.sh`, `site/install.ps1` and `.github/workflows/`'s `release.yml` and `packages.yml`.
+
+*The crates*
+- The compiler CI tests with is the one that ships.
 
 *Integrations and deploy*
 - A release is installed from its own files, each checked before it is used.
 
 ### `crates/fennec-bench/CLAUDE.md`
 
-Covers `crates/fennec-bench/`; its gate rule binds `tools/perf_gate.py`, `crates/fennec-http/examples/gate.rs`, CI's `perf (count)` and `perf (instructions)` jobs and `.github/workflows/perf-holdout.yml` too.
+Covers `crates/fennec-bench/`; its rules bind `tools/perf_gate.py`, `crates/fennec-http/examples/gate.rs`, CI's `perf (count)` and `perf (instructions)` jobs, `.github/workflows/perf-holdout.yml`, `tools/size_budgets.py` and CI's build job too.
 
 *Benchmarks*
 - `make scale-bench` holds fennec-server to pgvector, each over its own protocol.
 - `make ycsb` is fennecdb as a general database.
 - A pull request is held to its base in instructions and heap bytes an op.
 - Two builds' instruction counts
+- A binary a release ships is held to its budget
 
 ## Conventions
 

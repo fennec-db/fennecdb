@@ -493,6 +493,9 @@ pub fn counters(out: &mut Text) {
     );
     fennec_http::metrics::connections_refused(out, "fennec_router_connections_refused_total");
     fennec_http::metrics::handshakes_failed(out, "fennec_router_tls_handshakes_failed_total");
+    // Its clients' requests read through `fennec_http::conn::Paced`, and
+    // its answers written through a `Conn`, counted as a node's.
+    fennec_http::metrics::client_timeouts(out, "fennec_router_client_timeouts_total");
     // The exporter's, when the router traces (`--otlp-endpoint`).
     fennec_http::trace::metrics(out);
 }

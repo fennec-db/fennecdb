@@ -20,7 +20,7 @@ check -- fennec-ql's `corpus` -- runs in CI's test job.
 
 **[Every parser of untrusted bytes is fuzzed](../docs/design/conventions.md#fuzzing)**
 by `crates/fennec-fuzz`, the repository's own mutator under ASan (`make
-fuzz` lists the targets; CI's `fuzz-smoke` runs each 30 s, `fuzz.yml`
+fuzz` lists the targets; CI's `fuzz-smoke` runs each by count, `fuzz.yml`
 weekly): a new parser owes its target and `fuzz.yml`'s matrix line, a
 finding a regression test in its own crate.
 

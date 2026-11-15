@@ -299,6 +299,79 @@ fn a_frame_putting_an_id_no_write_gives_is_refused_where_a_file_is_opened_and_ap
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// A record names its collection by an id a create gives: one below the
+/// last `u32`. One past `u32` was read as its low bits -- another
+/// collection's id -- and the last `u32` had an open's and a replica's
+/// `cid + 1` overflow, a panic (the fuzzer's `image` target, whose inputs
+/// are its seeds `collection-id-u32-max-*`): each is damage, refused where
+/// a file is opened, read into memory and mapped, and where a replica
+/// applies it. A file whose create took the id below the last opens, and
+/// its next create is refused rather than given the last, which no open
+/// would read; the file goes on taking writes.
+#[test]
+fn a_record_naming_a_collection_no_create_gives_is_refused_where_a_file_is_opened_and_applied() {
+    const REC_CREATE: u8 = 1;
+    let (create, cid) = made("create collection d (n int)", "put d {n: 1}");
+    let schema = create
+        .iter()
+        .find_map(|r| fennec_core::engine::record_body(r, REC_CREATE))
+        .expect("the create's record")
+        .to_vec();
+    // A head as a version before sums wrote it, its id as wide as asked.
+    let plain = |kind: u8, cid: u64, body: &[u8]| {
+        let mut r = vec![kind];
+        put_uvarint(&mut r, cid);
+        put_uvarint(&mut r, body.len() as u64);
+        r.extend_from_slice(body);
+        r
+    };
+    let mut n = Vec::new();
+    fennec_core::codec::encode_value(&mut n, &Value::Int(1));
+    let dir = std::env::temp_dir().join(format!("fennecdb-damage-cids-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for bad in [u32::MAX as u64, (1 << 32) + cid as u64, u64::MAX] {
+        let refused = |r: Result<()>| match r {
+            Err(Error::Corrupt(m)) => {
+                assert_eq!(
+                    m,
+                    format!("a record names collection {bad}, an id no create gives")
+                )
+            }
+            other => panic!("{bad}: {other:?}"),
+        };
+        let records = vec![plain(REC_CREATE, bad, &schema)];
+        refused(Database::new().load(&file(&records)).map(|_| ()));
+        let path = dir.join(format!("{bad}.fennec"));
+        std::fs::write(&path, file(&records)).unwrap();
+        refused(fennec_core::fs::open(&path).map(|_| ()));
+        let mut replica = Database::new();
+        refused(replica.apply(&records[0]).map(|_| ()));
+        assert!(replica.collection_names().is_empty());
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    let last = u32::MAX - 1;
+    let records = vec![
+        fennec_core::engine::record(REC_CREATE, last, &schema),
+        put_record(last, 1, &n),
+    ];
+    let rows = |db: &Database| query(db, "get d").unwrap().rows().unwrap().rows.len();
+    let mut db = Database::new();
+    db.load(&file(&records)).unwrap();
+    let mut replica = Database::new();
+    replica.apply(&records.concat()).unwrap();
+    for db in [&db, &replica] {
+        assert_eq!(rows(db), 1);
+    }
+    let refused = db.execute(&fennec_ql::parse_one("create collection e (n int)").unwrap());
+    assert!(
+        matches!(&refused, Err(Error::Query(m)) if m.starts_with("no collection id is left")),
+        "{refused:?}"
+    );
+    exec(&mut db, "put d {n: 2}");
+    assert_eq!(rows(&db), 2);
+}
+
 /// A schema read off the bytes holds its numbers to the ranges the
 /// language reads them in (`Parser::int_in`): an `@hnsw` whose `m` is past
 /// 32 767, or a dimension past 10^9 or of none, is damage, refused naming

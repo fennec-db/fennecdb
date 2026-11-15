@@ -21,6 +21,12 @@
   "labels": [],
   "type": "gauge"
  },
+ "fennec_client_timeouts_total": {
+  "labels": [
+   "reason"
+  ],
+  "type": "counter"
+ },
  "fennec_connections": {
   "labels": [],
   "type": "gauge"
