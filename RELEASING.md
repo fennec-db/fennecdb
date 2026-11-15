@@ -408,12 +408,16 @@ every tag. Before a 1.x tag, check:
 2. `make fennecql-corpus BASE=<the previous 1.x tag>` finds no text
    reading as another statement or refused: against a 1.x base an
    `ACCEPTED` entry lets a refusal through only with the grammar epoch
-   raised, as a moved digest (CI runs it against main, and `BASE=frozen`
-   against every frozen corpus, on every pull request). A major version's
-   first tag is frozen with `FREEZE=<tag>`, its file added beside the
-   others in `integrations/fennecql-corpus/` -- a frozen corpus is added,
-   never replaced or removed, so a text deleted since is still held to its
-   release's reading -- and `GRAMMAR_EPOCH`
+   raised, as a moved digest, and a statement no definition holds read
+   otherwise only with the epoch or its `same_meaning` -- read every claim
+   the summary prints, each a statement said to mean what it meant (CI
+   runs it against main, and `BASE=frozen` against every frozen corpus, on
+   every pull request). A major version's first tag is frozen with
+   `FREEZE=<tag>`, its file added beside the others in
+   `integrations/fennecql-corpus/` -- a frozen corpus is added, never
+   replaced or removed, which the step against main holds, and a freeze
+   reads the earlier corpora's texts too, so a text deleted since is still
+   held to its release's reading and to the tag's -- and `GRAMMAR_EPOCH`
    (`crates/fennec-core/src/named.rs`) is still 4.
 3. `fennec.h`'s prototypes, `web/fennec.d.ts`, `web/client.d.ts`, each
    SDK's public names, the CLI flags and exit codes, and `/_metrics` names
