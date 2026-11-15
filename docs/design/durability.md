@@ -379,7 +379,14 @@ the follower began stopping then, at the same flag, beside the waits
 before it. Counted from its own start, with `--follow` and tracing the
 waits came to 9.7 s with `LOOK`, 0.3 s of docker's 10 left for the final
 sync; now it begins 5.2 s after the signal at most
-(`the_wait_for_the_follower_counts_from_the_shutdowns_start`). A SIGKILL
+(`the_wait_for_the_follower_counts_from_the_shutdowns_start`). That is
+`LOOK` and `STOP_WAIT` alone: the final sync waits besides for the write
+lock -- a long statement, or the follower's own batch put where its wait
+ran out inside one -- on Windows, past a close, a logoff or the system's
+shutdown, for `sync_first`'s two fsyncs where they and the graces outlast
+`STOP_WAIT`, and, where the syncer was inside a periodic fsync when the
+signal came, for that fsync, the shutdown beginning only once it is
+through. A SIGKILL
 past the waits cuts the final sync and the checkpoint: what `--sync` left
 unsynced, and the graph's image, which the next open links again. A shutdown writes a
 checkpoint only once the HTTP thread started (`serving`, unless a stop was
