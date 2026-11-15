@@ -79,7 +79,7 @@ isolate a database), sends a vector as its `f32` bytes and a json field's
 has live queries as `Lives` has them, the looks of a burst gathered a frame
 (16 ms) and taken once no write is under way. The libraries are built alone
 (`cargo rustc --crate-type cdylib`): beside the staticlib and rlib, LTO left
-the shared one 4% larger. 3.03 MB stripped on aarch64-apple-darwin, 3.50 on
+the shared one 4% larger. 3.07 MB stripped on aarch64-apple-darwin, 3.52 on
 x86_64 Linux with JNI (CI's figures, `integrations/ffi-sizes.md`, held by
 `site/build.py`), the sync (below) 165 and 198 KB of them, measured by hand
 when the libraries were 1.68 and 1.88 MB; a buffered put of a 128-dim vector 4.6 us against
@@ -88,12 +88,24 @@ against 151.4 (`make ffi-bench`). The XCFramework is assembled by hand
 (`build-xcframework.sh`), so the Command Line Tools build every slice; a
 release's zip is built before its tag (`swift-binary.yml`), since the tag's
 `Package.swift` must name its checksum. Swift links a static library; the
-Flutter plugin vendors a dynamic `FennecFFI.xcframework` (`--dynamic`,
-`FennecFFI.framework` a slice, install name `@rpath/FennecFFI.framework/...`)
-and Dart opens `FennecFFI.framework/FennecFFI`: a static one kept whole with
-`-force_load` had the Runner link a file CocoaPods' "Copy XCFrameworks"
-phase makes with no order declared against it, and `flutter build ios`
-failed on it. Linux's is a release's tarball for x86_64 and aarch64 with
+Flutter plugin vendors shared ones (`--dynamic`): on iOS a
+`FennecFFI.xcframework` of `FennecFFI.framework`s (install name
+`@rpath/FennecFFI.framework/FennecFFI`), which Dart opens as
+`FennecFFI.framework/FennecFFI`, and on macOS that XCFramework's macOS
+framework binary as a plain `libfennec_ffi.dylib` beside it, which Dart
+opens by name
+([integrations.md](integrations.md#flutter-plugin)): a static one kept
+whole with `-force_load` had the Runner link a file CocoaPods' "Copy
+XCFrameworks" phase makes with no order declared against it, and `flutter
+build ios` failed on it. Every slice is built for iOS 15 and macOS 11 on,
+macOS 11 the lowest aarch64-apple-darwin builds for: an app on the library
+alone, through `fennec.h`, asked for macOS 11, where the slices said 12.
+`Package.swift` and the pods declare the same. The package had declared
+macOS 12 for `URLSession`'s async `data(for:)`, which the SDK back-deploys
+to 10.15 (an `@_alwaysEmitIntoClient` overload in Foundation's interface,
+the macOS 26.2 SDK's among them): its sources and tests typecheck at macOS
+11 as they are.
+Linux's is a release's tarball for x86_64 and aarch64 with
 glibc, the shared library with the JNI functions, the static one without,
 `fennec.h` and two pkg-config files, held to glibc 2.34 and run there before
 it is kept ([integrations.md](integrations.md#install-channels)); the JVM's

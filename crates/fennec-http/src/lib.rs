@@ -135,7 +135,8 @@ pub struct Config {
     /// may have left behind -- the new primary's may hold a statement this
     /// copy answers 404 for. Never set on a server's own configuration.
     pub come_back: bool,
-    /// Since there is no TLS, binding outside loopback without auth is refused.
+    /// Binding outside loopback without auth is refused: the data would be open
+    /// to the network, over TLS or not.
     pub insecure: bool,
     /// Ceiling on concurrent connections (0 = unlimited). Every connection is
     /// a thread.
@@ -437,16 +438,18 @@ impl Server {
     }
 
     /// Opens the listener. A non-loopback address is not accepted without a
-    /// token unless `--insecure` is given ([`exposed`]).
+    /// token unless `--insecure` is given ([`exposed`]), judged of the
+    /// addresses it is bound on, its name looked up once ([`Listen`]).
     pub fn bind(&self) -> std::io::Result<TcpListener> {
         let metrics = matches!(self.backend, Backend::Metrics { .. });
-        if let Some(refused) = exposed(&self.cfg, metrics) {
+        let listen = Listen::look_up(&self.cfg.addr);
+        if let Some(refused) = exposed(&self.cfg, metrics, &listen) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 refused,
             ));
         }
-        TcpListener::bind(&self.cfg.addr)
+        listen.bind()
     }
 
     pub fn serve(&self) -> std::io::Result<()> {
@@ -765,30 +768,192 @@ fn visible(who: &Who, resp: Response2) -> Response2 {
 
 type Response2 = fennec_core::query::Response;
 
-/// Why an endpoint at `cfg.addr` is refused, or `None`: an address that is
+/// Why an endpoint on `listen` is refused, or `None`: an address that is
 /// not loopback takes a token (`/_metrics` alone, `metrics`, the admin
 /// token too) unless `--insecure` is given. A question of the flags alone,
 /// which `fennec-server` asks with them, before it opens anything, and
-/// [`Server::bind`] again.
-pub fn exposed(cfg: &Config, metrics: bool) -> Option<String> {
+/// [`Server::bind`] again -- of the addresses the listener is bound on,
+/// looked up once ([`Listen`]).
+pub fn exposed(cfg: &Config, metrics: bool, listen: &Listen) -> Option<String> {
     // An empty token is no token: a config not yet settled may hold one.
     let set = |t: &Option<String>| t.as_deref().is_some_and(|t| !t.is_empty());
     let guarded = set(&cfg.token) || cfg.access.is_some() || metrics && set(&cfg.admin_token);
-    (is_remote(&cfg.addr) && !guarded && !cfg.insecure).then(|| {
+    (listen.binds_past_loopback() && !guarded && !cfg.insecure).then(|| {
         format!(
             "{} is not a loopback address and there is no token.\n\
              The HTTP endpoint does not speak TLS; listening without a\n\
              token on an open network exposes the whole database to\n\
              everyone. Pass `--http-token` (or --insecure if deliberate).",
-            cfg.addr
+            listen.given
         )
     })
 }
 
-fn is_remote(addr: &str) -> bool {
-    match addr.to_socket_addrs() {
-        Ok(mut it) => it.any(|a| !a.ip().is_loopback()),
-        Err(_) => false,
+/// A listener's address as its flag gave it, looked up once: whether it is
+/// past loopback is judged from the addresses that lookup answered, and the
+/// listener is bound on those same addresses ([`Listen::bind`]). Judged
+/// from the flag's text and bound by it again, a name was looked up twice,
+/// the second answer the one bound -- and a lookup that failed at the
+/// judgment was taken for loopback.
+pub struct Listen {
+    given: String,
+    looked: std::io::Result<Vec<std::net::SocketAddr>>,
+}
+
+impl Listen {
+    /// `given`, `host:port` with a name or an address, looked up.
+    pub fn look_up(given: &str) -> Listen {
+        Listen {
+            given: given.to_string(),
+            looked: given.to_socket_addrs().map(Iterator::collect),
+        }
+    }
+
+    /// The address as its flag gave it.
+    pub fn given(&self) -> &str {
+        &self.given
+    }
+
+    /// Whether a listener here may be reached past loopback, judged as the
+    /// worst it might bind: an address the lookup answered that is not
+    /// loopback, or a lookup that answered none or failed -- a name this
+    /// machine could not look up is never taken for loopback.
+    pub fn past_loopback(&self) -> bool {
+        self.looked.as_ref().map_or(true, |addrs| {
+            addrs.is_empty() || addrs.iter().any(|a| !a.ip().is_loopback())
+        })
+    }
+
+    /// Whether what [`Listen::bind`] binds holds an address past loopback:
+    /// a lookup that answered none or failed binds nothing, its error the
+    /// bind's, and so exposes nothing.
+    pub fn binds_past_loopback(&self) -> bool {
+        (self.looked.as_ref()).is_ok_and(|addrs| addrs.iter().any(|a| !a.ip().is_loopback()))
+    }
+
+    /// The listener, on the addresses judged, each tried in turn as a
+    /// name's are; the lookup's own error where it failed.
+    pub fn bind(&self) -> std::io::Result<TcpListener> {
+        match &self.looked {
+            Ok(addrs) => TcpListener::bind(&addrs[..]),
+            Err(e) => Err(std::io::Error::new(e.kind(), e.to_string())),
+        }
+    }
+}
+
+/// The fewest bytes a token taken past loopback may hold, as many as an
+/// HS256 secret's (`access`). A refused guess waits ([`audit`]), but only
+/// by its address, and past loopback the guesses come from every address a
+/// client holds: 32 random bytes are beyond any number of them, a word is
+/// not. On loopback any length is taken -- `make server TOKEN=secret` --
+/// and a short one is warned of once a request comes through a proxy or a
+/// router ([`kept_short`]), which takes the listener past this machine.
+pub const TOKEN_MIN: usize = 32;
+
+/// Whether a token or a secret of `len` bytes is shorter than
+/// [`TOKEN_MIN`]: an empty one is none, refused apart.
+pub fn too_short(len: usize) -> bool {
+    len > 0 && len < TOKEN_MIN
+}
+
+/// Why `token`, given as `flag`, is refused, or `None`: shorter than
+/// [`TOKEN_MIN`] bytes where a listener taking it, on one of `on`, may be
+/// reached past loopback ([`Listen::past_loopback`]) -- a name that could
+/// not be looked up among them, so the question fails closed, the refusal
+/// saying first that it was not. A question of the flags alone, which
+/// `fennec-server` and `fennec-shard` ask of every token flag before they
+/// open anything; no token, an empty one -- refused apart, as no token --
+/// and any token on loopback alone pass.
+pub fn short_token(flag: &str, token: Option<&str>, on: &[&Listen]) -> Option<String> {
+    token.filter(|t| too_short(t.len()))?;
+    let listen = on.iter().find(|l| l.past_loopback())?;
+    let given = &listen.given;
+    let refused = format!(
+        "{flag} is shorter than {TOKEN_MIN} bytes, the least a token taken past loopback \
+         (on {given}) may be: a shorter one can be guessed. Make one with `openssl rand -hex 32`"
+    );
+    // A name not looked up is what went wrong -- a typo, a resolver not
+    // answering yet -- and the length is refused only for it: said after
+    // the length, the refusal read as the length's alone.
+    let why = match &listen.looked {
+        Err(e) => e.to_string(),
+        Ok(addrs) if addrs.is_empty() => "no address".to_string(),
+        Ok(_) => return Some(refused),
+    };
+    Some(format!(
+        "could not look up {given} ({why}), and a name not looked up is judged past \
+         loopback: {refused}"
+    ))
+}
+
+/// Set at the start where a token or a hook's secret shorter than
+/// [`TOKEN_MIN`] was taken on loopback ([`kept_short`]), and let go by the
+/// one warning it gives ([`proxied`]): a server whose tokens are all long
+/// enough pays a load and a branch a request, never a look at its headers.
+static SHORT_KEPT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// What [`SHORT_KEPT`]'s warning names, written once at the start.
+static SHORT_NAMES: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// The headers a proxy or a router names its client, or the name it was
+/// reached by, in: RFC 7239's and the two every proxy sends of its own, the
+/// router's [`cors::FORWARDED_HOST`] among them.
+const PROXIES: [&str; 3] = ["Forwarded", "X-Forwarded-For", cors::FORWARDED_HOST];
+
+/// `names` -- each a flag beside its variable, or a hook's secret -- were
+/// taken shorter than [`TOKEN_MIN`] bytes, every listener taking them on
+/// loopback: `fennec-server` and `fennec-shard` say so once, at the start,
+/// and the first request after that comes through a proxy or a router warns
+/// of them ([`proxied`]). Behind a TLS proxy, or a router relaying to nodes
+/// on 127.0.0.1, the listener the length was judged by is reached from past
+/// this machine -- behind a proxy a guess is counted by the proxy's
+/// address besides, which any client's good token clears. Warned, never
+/// refused: nothing in a request tells a proxy from a client sending the
+/// header itself.
+pub fn kept_short(names: &[String]) {
+    if let Some(listed) = listed(names) {
+        if SHORT_NAMES.set(listed).is_ok() {
+            SHORT_KEPT.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// `names` as the warning's subject, its verb with it: `a is`, `a and b
+/// are`, `a, b and c are`; `None` for no name.
+fn listed(names: &[String]) -> Option<String> {
+    let (last, before) = names.split_last()?;
+    Some(match before {
+        [] => format!("{last} is"),
+        _ => format!("{} and {last} are", before.join(", ")),
+    })
+}
+
+/// Warns, once, where [`kept_short`] named a token or a secret and `req`
+/// came through a proxy or a router: it carries `Forwarded`,
+/// `X-Forwarded-For` or `X-Forwarded-Host`. Asked by every request of a
+/// server and a router as it begins: a relaxed load and a branch, its look
+/// at the headers out of line, until the warning lets the flag go.
+#[inline]
+pub fn proxied(req: &Request) {
+    if SHORT_KEPT.load(std::sync::atomic::Ordering::Relaxed) {
+        warn_proxied(req);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn warn_proxied(req: &Request) {
+    let found = (req.headers.iter())
+        .find_map(|(k, _)| PROXIES.into_iter().find(|p| k.eq_ignore_ascii_case(p)));
+    let Some(header) = found else {
+        return;
+    };
+    if SHORT_KEPT.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        let names = SHORT_NAMES.get().map_or("a token", String::as_str);
+        log!(
+            "warning: a request came through a proxy or a router (it carries {header}), and \
+             {names} shorter than {TOKEN_MIN} bytes, taken because the listener is on loopback: \
+             through it a guess comes from past this machine, as on a listener past loopback, \
+             which takes {TOKEN_MIN} bytes at least. Make one with `openssl rand -hex 32`"
+        );
     }
 }
 
@@ -821,6 +986,40 @@ fn open_refusal(cfg: &Config, backend: &Backend, req: &Request) -> Option<Respon
     .map(|why| Response::error(403, &why))
 }
 
+/// Why a request was not read whole: its head or its framing refused
+/// (`http::read_head`, `Head::body`), or the request refused from its
+/// head, its body unread ([`body_ceiling`]) -- boxed, a refusal's path
+/// alone, so a read's `Result` stays the size of a `BadRequest`.
+enum Unread {
+    Bad(http::BadRequest),
+    Refused(Box<(Request, Response)>),
+}
+
+/// The most of its body a request's head earns a read of, judged before a
+/// byte of the body is read: `max_body`, but on a tenant node an image's
+/// import, `PUT /_admin/tenants/<t>/file`, carrying the admin token, which
+/// reads to `max_import`. The import carrying another token or none is
+/// refused here, with the 401 its route answers, its body never read.
+/// Before, a node with an admin token read every request to `max_import`,
+/// 1 GiB, from any peer, and refused a data request past `max_body` only
+/// once it had it whole: a body bounded by the bandwidth an unauthenticated
+/// peer would spend, where SECURITY.md promises one bounded by `max_body`
+/// before it is read.
+#[inline]
+fn body_ceiling(
+    cfg: &Config,
+    imports: bool,
+    req: &Request,
+) -> std::result::Result<usize, Response> {
+    match cfg.admin_token.as_deref() {
+        Some(token) if imports && admin::is_import(req) => match admin::carries(req, token) {
+            true => Ok(cfg.max_body.max(cfg.max_import)),
+            false => Err(admin::refused()),
+        },
+        _ => Ok(cfg.max_body),
+    }
+}
+
 /// A single connection: reads consecutive requests on a keep-alive
 /// connection, holding its `slot` under `--max-connections` until it ends.
 fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cfg: &Config) {
@@ -848,15 +1047,9 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
     // the database's clients.
     let _open = (!matches!(backend, Backend::Metrics { .. })).then(metrics::Connection::open);
 
-    // The body is read before the path is looked at, so in tenant mode the
-    // reading ceiling is the larger of the two and a data request over
-    // `max_body` is refused afterwards.
-    let tenant_mode = matches!(backend, Backend::Tenants(_));
-    let ceiling = if tenant_mode && cfg.admin_token.is_some() {
-        cfg.max_body.max(cfg.max_import)
-    } else {
-        cfg.max_body
-    };
+    // A body's ceiling is its head's ([`body_ceiling`]): only a tenant
+    // node takes an image's import past `max_body`.
+    let imports = matches!(backend, Backend::Tenants(_));
 
     loop {
         // With the `timing` feature the clock starts once the request's
@@ -867,19 +1060,51 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
             let _ = reader.fill_buf();
             timing::begin();
         }
-        let mut req = match http::read_request(&mut reader, ceiling) {
+        // The head first, then the body to the ceiling the head earns:
+        // a refusal of either leaves what the client still sends unread.
+        let read = http::read_head(&mut reader)
+            .map_err(Unread::Bad)
+            .and_then(|head| {
+                let Some(head) = head else { return Ok(None) };
+                match body_ceiling(cfg, imports, head.request()) {
+                    Ok(ceiling) => head
+                        .body(&mut reader, ceiling)
+                        .map(Some)
+                        .map_err(Unread::Bad),
+                    Err(refused) => Err(Unread::Refused(Box::new((head.unread(), refused)))),
+                }
+            });
+        let mut req = match read {
             Ok(Some(req)) => req,
             Ok(None) => return,
-            Err(http::BadRequest(status, msg)) => {
-                // A request that could not be read has an id all the same:
-                // its answer is what a client reports.
-                request_id::begin(None);
+            Err(unread) => {
+                let resp = match unread {
+                    // A request that could not be read has an id all the
+                    // same: its answer is what a client reports.
+                    Unread::Bad(http::BadRequest(status, msg)) => {
+                        request_id::begin(None);
+                        Response::error(status, &msg)
+                    }
+                    // Refused for its token: logged and waited out as
+                    // every such refusal is, by its router's client where
+                    // the router forwarded it, and a trace as one refused
+                    // once its body was read was -- its span holding the
+                    // wait, as `route_tenant`'s refusals' do.
+                    Unread::Refused(refused) => {
+                        let (req, refused) = *refused;
+                        request_id::begin_request(&req);
+                        if cfg.router_mark.is_some() {
+                            audit::request(&req, cfg.router_mark.as_deref());
+                        }
+                        trace::begin(&req);
+                        audit::http(&req, refused.status, peer);
+                        trace::end(refused.status);
+                        refused
+                    }
+                };
                 // Its body, if any, is unread: ended as a refused
                 // connection is, the answer read before the close.
-                if cors(Response::error(status, &msg), cfg)
-                    .write(&mut out, false, false)
-                    .is_ok()
-                {
+                if cors(resp, cfg).write(&mut out, false, false).is_ok() {
                     drop(reader);
                     conn.end_refused();
                 }
@@ -888,6 +1113,7 @@ fn serve_connection(stream: TcpStream, slot: accept::Slot, backend: &Backend, cf
         };
         request_id::begin_request(&req);
         metrics::begin_request();
+        proxied(&req);
         if cfg.router_mark.is_some() {
             audit::request(&req, cfg.router_mark.as_deref());
         }
@@ -1816,16 +2042,8 @@ fn route_tenant(
     if segs.as_slice() == ["_whoami"] {
         return Err(whoami(cfg, req, "tenants", None, None));
     }
-    if req.body.len() > cfg.max_body {
-        return Err(Response::error(
-            413,
-            &format!(
-                "the body is {} bytes, the ceiling is {}",
-                req.body.len(),
-                cfg.max_body
-            ),
-        ));
-    }
+    // No body past `max_body` comes this far: an image's import, the one
+    // read past it, is `/_admin/`'s, answered above ([`body_ceiling`]).
     let name = match segs.as_slice() {
         ["t", name, ..] => name.to_string(),
         _ => {
@@ -3388,16 +3606,8 @@ pub(crate) fn with_id_note<S: std::borrow::Borrow<Schema>>(schemas: &[S]) -> Str
 }
 
 pub(crate) fn admin_query(t: &tenants::Tenant, cfg: &Config, req: &Request) -> Response {
-    if req.body.len() > cfg.max_body {
-        return Response::error(
-            413,
-            &format!(
-                "the body is {} bytes, the ceiling is {}",
-                req.body.len(),
-                cfg.max_body
-            ),
-        );
-    }
+    // Its body was held to `max_body` as it was read: no route but an
+    // image's import reads past it ([`body_ceiling`]).
     let started = std::time::Instant::now();
     let resp = {
         // Held against a freeze as any request of the tenant's is: a move
@@ -5295,9 +5505,123 @@ mod tests {
 
     #[test]
     fn loopback_addresses_are_local() {
-        assert!(!is_remote("127.0.0.1:8080"));
-        assert!(!is_remote("localhost:8080"));
-        assert!(is_remote("0.0.0.0:8080"));
+        for local in ["127.0.0.1:8080", "localhost:8080", "[::1]:8080"] {
+            let on = Listen::look_up(local);
+            assert!(!on.past_loopback() && !on.binds_past_loopback(), "{local}");
+        }
+        for open in ["0.0.0.0:8080", "[::]:8080", "192.0.2.1:8080"] {
+            let on = Listen::look_up(open);
+            assert!(on.past_loopback() && on.binds_past_loopback(), "{open}");
+        }
+    }
+
+    /// A token one byte short of the minimum is refused wherever a listener
+    /// taking it binds past loopback, naming the flag, the minimum and the
+    /// address; the minimum is taken, and so is any token on loopback alone.
+    /// An empty token is refused apart, as none, and no token is no question.
+    #[test]
+    fn a_token_past_loopback_is_32_bytes_at_least() {
+        let short = "s".repeat(TOKEN_MIN - 1);
+        let long = "s".repeat(TOKEN_MIN);
+        let on = |addrs: &[&str]| addrs.iter().map(|a| Listen::look_up(a)).collect::<Vec<_>>();
+        for addrs in [
+            &["0.0.0.0:8080"][..],
+            &["[::]:8080"],
+            &["192.0.2.1:8080"],
+            &["127.0.0.1:8080", "0.0.0.0:9464"],
+        ] {
+            let listens = on(addrs);
+            let listens: Vec<&Listen> = listens.iter().collect();
+            let why = short_token("--http-token", Some(&short), &listens)
+                .unwrap_or_else(|| panic!("{addrs:?} took a short token"));
+            assert!(
+                why.starts_with("--http-token is shorter than 32 bytes"),
+                "{why}"
+            );
+            assert!(why.contains(addrs.last().unwrap()), "{why}");
+            assert_eq!(short_token("--http-token", Some(&long), &listens), None);
+        }
+        for addrs in [&["127.0.0.1:8080"][..], &["[::1]:8080", "localhost:9464"]] {
+            let listens = on(addrs);
+            let listens: Vec<&Listen> = listens.iter().collect();
+            assert_eq!(short_token("--http-token", Some("secret"), &listens), None);
+        }
+        let open = Listen::look_up("0.0.0.0:8080");
+        assert_eq!(short_token("--http-token", Some(""), &[&open]), None);
+        assert_eq!(short_token("--http-token", None, &[&open]), None);
+    }
+
+    /// A name that could not be looked up is judged past loopback, so a
+    /// short token on it is refused, the refusal saying first that the name
+    /// was not looked up -- `localhost` with a port that is no number fails
+    /// before any resolver is asked -- and binds nothing: no listener, the
+    /// lookup's error, so no token is asked for there.
+    #[test]
+    fn a_name_not_looked_up_is_judged_past_loopback() {
+        let on = Listen::look_up("localhost:http-port");
+        assert!(on.past_loopback());
+        assert!(!on.binds_past_loopback());
+        let why = short_token("--http-token", Some("secret"), &[&on])
+            .expect("a short token on a name not looked up was taken");
+        assert!(
+            why.starts_with("could not look up localhost:http-port (")
+                && why.contains("judged past loopback: --http-token is shorter than 32 bytes"),
+            "{why}"
+        );
+        assert!(on.bind().is_err());
+        let open = Config {
+            addr: on.given().to_string(),
+            ..Config::default()
+        };
+        assert_eq!(exposed(&open, false, &on), None);
+        // A lookup that answered no address is judged past loopback too.
+        let none = Listen {
+            given: "nowhere:8080".into(),
+            looked: Ok(Vec::new()),
+        };
+        assert!(none.past_loopback() && !none.binds_past_loopback());
+        let why = short_token("--http-token", Some("secret"), &[&none]).unwrap();
+        assert!(
+            why.starts_with("could not look up nowhere:8080 (no address)"),
+            "{why}"
+        );
+    }
+
+    /// The listener is bound on the addresses the lookup answered and was
+    /// judged by, never on its name looked up again: a name whose second
+    /// lookup would fail binds where its first answered.
+    #[test]
+    fn the_address_bound_is_the_one_judged() {
+        let judged = Listen {
+            given: "localhost:http-port".into(),
+            looked: Ok(vec!["127.0.0.1:0".parse().unwrap()]),
+        };
+        assert!(!judged.past_loopback());
+        let bound = judged.bind().expect("bound on the looked-up address");
+        assert_eq!(
+            bound.local_addr().unwrap().ip(),
+            "127.0.0.1".parse::<std::net::IpAddr>().unwrap()
+        );
+        let looked = Listen::look_up("localhost:0");
+        let bound = looked.bind().unwrap().local_addr().unwrap();
+        let ips: Vec<_> = looked
+            .looked
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|a| a.ip())
+            .collect();
+        assert!(ips.contains(&bound.ip()), "{bound} not among {ips:?}");
+    }
+
+    /// The warning's subject names every token kept short, its verb agreeing.
+    #[test]
+    fn the_tokens_kept_short_are_listed() {
+        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(listed(&[]), None);
+        assert_eq!(listed(&names(&["a"])).unwrap(), "a is");
+        assert_eq!(listed(&names(&["a", "b"])).unwrap(), "a and b are");
+        assert_eq!(listed(&names(&["a", "b", "c"])).unwrap(), "a, b and c are");
     }
 
     /// The look `handle` asks before its two token-less routes says yes to

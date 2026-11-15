@@ -14,7 +14,11 @@ what a field holds, how it compares and which indexes it takes:
 64 bits, -9223372036854775808 to 9223372036854775807, and takes a float
 where it is whole (<code>20.0</code>); a value its type refuses is a type
 error naming the field, and a number past an int's range is one too, never
-clamped to its end. An int and a float compare by their true values,
+clamped to its end. A <code>float</code> is a 64-bit double, a number read
+as the nearest one, and a number past its range — <code>1e400</code>, past
+±1.7976931348623157×10<sup>308</sup>, or <code>1e-400</code>, nearer 0
+than 5×10<sup>-324</sup> — is refused naming it, never read as an infinity
+or 0 (<a href="limits.html#fixed-limits">limits</a>). An int and a float compare by their true values,
 wherever two numbers are compared — <code>where</code>, every index,
 <code>lookup</code>, <code>order</code>, <code>min</code> and
 <code>max</code>: the float 1152921504606846976.0 (2<sup>60</sup>) equals
@@ -33,12 +37,14 @@ whatever its bits, and is greater than every other number,
 <code>max</code>, <code>group</code>, <code>count(distinct …)</code>,
 <code>facet</code>, every index and <code>lookup</code>; so <code>x &gt; 5</code>
 takes the <code>NaN</code> rows, and a <code>@unique</code> field holds one
-<code>NaN</code>. A list or a vector holding one is one value so too, and
-one holding <code>-0.0</code> the value holding <code>0.0</code>:
+<code>NaN</code>. A list holding one is one value so too — and a vector an
+earlier version stored with one, which no write takes now
+(<a href="limits.html#fixed-limits">limits</a>) — and one holding
+<code>-0.0</code> the value holding <code>0.0</code>:
 <code>[NaN, 1]</code> of any bits is one key of a <code>[float]</code>
 field's <code>@hash</code> and <code>@unique</code>, one group and one
 distinct value. JSON writes one as <code>null</code>, as it does an
-infinity; one reaches a field through the native APIs and the Rust crate,
+infinity; one reaches a float field through the native APIs and the Rust crate,
 an import of PostgreSQL's (<a href="import.html#vector-columns">never
 into a vector</a>) or a SQLite text reading <code>NaN</code> into a float
 column (SQLite stores a <code>NaN</code> itself as <code>NULL</code>), or

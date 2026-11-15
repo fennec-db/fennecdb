@@ -695,6 +695,44 @@ fn a_binding_s_text_in_a_callable_record_is_marked_broken() {
     );
 }
 
+/// A definition stored before a number past a float's range was refused --
+/// `1e400` an infinity then, `-1e-400` 0 -- opens unbroken under the epoch
+/// it was stored with, its digest the one main's parser gave its text, and
+/// runs as it did; a definition holding one now is refused at its `create`.
+#[test]
+fn a_definition_stored_with_a_float_past_the_range_runs_as_it_did() {
+    let tap = Tap::default();
+    let mut db = tap.database();
+    run(&mut db, "create collection t (x float, y float)").unwrap();
+    run(
+        &mut db,
+        "put t [{id: 1, x: 5, y: 1}, {id: 2, x: 1e308, y: -1}]",
+    )
+    .unwrap();
+    let text = "create statement big() as get t where x < 1e400 and y > -1e-400 select id";
+    let e = fennec_ql::parse_one(text).unwrap_err().to_string();
+    assert!(e.contains("number `1e400` is past a float's range"), "{e}");
+    let mut file = db.snapshot();
+    let mut body = vec![1u8];
+    put_uvarint(&mut body, 0);
+    put_uvarint(&mut body, db.change_seq() + 1);
+    put_uvarint(&mut body, GRAMMAR_EPOCH as u64);
+    // As main's parser took it, `1e400` an infinity.
+    body.extend_from_slice(&0x5aef_e2bf_1e46_f4cfu64.to_le_bytes());
+    encode_str(&mut body, "big");
+    put_uvarint(&mut body, 1);
+    encode_str(&mut body, "t");
+    encode_str(&mut body, text);
+    file.extend_from_slice(&fennec_core::engine::record(13, 0, &body));
+    let mut db = opened(&file);
+    let s = db.statements().get("big").unwrap();
+    assert!(s.broken.is_none() && s.tree.is_some(), "{:?}", s.broken);
+    let call = fennec_ql::parse_one("call big").unwrap();
+    let rows = db.execute(&call).unwrap();
+    let ids: Vec<_> = rows.rows().unwrap().rows.iter().map(|r| r.id).collect();
+    assert_eq!(ids, [1]);
+}
+
 /// No record this build writes holds a schedule (op 4 is F3's slice 2): a
 /// definition's record whose text reads as one, its digest and all, is
 /// marked broken, never loaded as a statement a call runs.

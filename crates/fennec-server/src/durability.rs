@@ -250,14 +250,18 @@ pub fn shutdown_flag() -> &'static AtomicBool {
 /// (`Fennec-Wait`) to be written.
 pub const HELD_GRACE: Duration = Duration::from_secs(2);
 
-/// What runs before the shutdown's sync and checkpoint.
-type Before = Box<dyn FnOnce() + Send>;
+/// What runs before the shutdown's sync and checkpoint, given the moment
+/// the shutdown began.
+type Before = Box<dyn FnOnce(Instant) + Send>;
 static BEFORE_SHUTDOWN: std::sync::Mutex<Vec<Before>> = std::sync::Mutex::new(Vec::new());
 
 /// Runs `f` once a shutdown signal has arrived, before the final sync and
 /// checkpoint: the follower's thread is waited for there, so that the
-/// checkpoint holds what it applied last.
-pub fn before_shutdown(f: impl FnOnce() + Send + 'static) {
+/// checkpoint holds what it applied last. It is given the moment the
+/// shutdown began, so that a wait for what began stopping then -- the
+/// follower, which looks at the same flag -- counts from there rather than
+/// after the waits before it.
+pub fn before_shutdown(f: impl FnOnce(Instant) + Send + 'static) {
     BEFORE_SHUTDOWN
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -316,6 +320,7 @@ pub fn run_syncer(db: Arc<RwLock<Database>>, policy: SyncPolicy, checkpoint: boo
 /// meant a write accepted between `sync` and `exit` could look successful to
 /// the client and never reach the disk; the window was small but silent.
 fn shutdown(db: &RwLock<Database>, checkpoint: bool) -> ! {
+    let began = Instant::now();
     // On Windows, where a close, a user's logoff or the system's shutdown
     // ends the process 5 s after, what was acknowledged is synced before
     // each wait below (`windows::sync_first`, docs/design/windows.md, 4).
@@ -333,7 +338,7 @@ fn shutdown(db: &RwLock<Database>, checkpoint: bool) -> ! {
     #[cfg(windows)]
     windows::sync_first(db);
     for f in before {
-        f();
+        f(began);
     }
     let mut g = write_lock(db);
     let dirty = g.is_dirty();

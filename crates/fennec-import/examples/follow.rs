@@ -110,7 +110,8 @@ fn main() {
                         .push((Instant::now(), format!("{e:?}")));
                 }
             };
-            follow::run(&url(), T, &db, &opts, &f, &stop, &mut report).unwrap();
+            let cut = AtomicBool::new(false);
+            follow::run(&url(), T, &db, &opts, &f, &stop, &cut, &mut report).unwrap();
         })
     };
     let streaming = |events: &Mutex<Vec<(Instant, String)>>| {

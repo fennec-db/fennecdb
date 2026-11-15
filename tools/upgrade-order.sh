@@ -38,7 +38,10 @@
 # any kind or op a case below is about: each case runs the binaries of
 # CK_BASE, the last main before the checksums (PRE_BIN_DIR, where set, holds
 # them), where it ran this tree's, and the last case holds CK_BASE's to this
-# tree's, following its primary and refusing its file. Every server listens
+# tree's, following its primary and refusing its file. Then a sealed frame
+# bound to its file: CK_BASE's `fennec restore` and `fennec verify` refuse a
+# backup and an archive this tree sealed (version 2) in words, writing no
+# file, and this tree's read them. Every server listens
 # on port 0, found by its `listening on:` line; everything it started is
 # killed and every path it made removed on its way out.
 
@@ -990,4 +993,58 @@ query "$PN" "put notes {title: 'summed'}" | grep -q '"error"' &&
     fail "this tree's server took no write on the old primary's file"
 count_is "$PN" 7 || fail "this tree's server lost a write of the old primary's file"
 echo "new replica:  followed the old primary, its file whole; this tree's server opened the old file and wrote to it"
+
+# A sealed frame bound to its file (docs/design/replication.md#sealed-archives):
+# a backup and an archive this tree sealed are version 2, a file id under
+# every frame's tag, which CK_BASE's `fennec restore` and `fennec verify`
+# refuse in words, never reading one as a plain file nor writing the file
+# asked for, and which this tree's read.
+"$NEW/fennec-server" --file "$WORK/sb.fennec" --http 127.0.0.1:0 \
+    --http-token t --replication-token r 2>"$WORK/sb.log" &
+SB_PID=$!
+PIDS+=($SB_PID)
+SB=$(address "$WORK/sb.log")
+query "$SB" "create collection notes (title text)" >/dev/null
+query "$SB" "put notes {title: 'sealed'}" >/dev/null
+"$NEW/fennec" key "$WORK/seal.key" >"$WORK/seal-key.log" 2>&1 ||
+    fail "this tree's \`fennec key\` made no key: $(cat "$WORK/seal-key.log")"
+"$NEW/fennec" backup "$SB" "$WORK/sb.sealed" --token r --key-file "$WORK/seal.key" \
+    >"$WORK/sb-backup.log" 2>&1 ||
+    fail "this tree's sealed backup failed: $(cat "$WORK/sb-backup.log")"
+"$NEW/fennec" archive "$SB" "$WORK/archives" --token r --key-file "$WORK/seal.key" \
+    --image-every 1s 2>"$WORK/archivers.log" &
+ARCHIVERS=$!
+PIDS+=($ARCHIVERS)
+said "$WORK/archivers.log" "image at change" ||
+    fail "this tree's sealed archiver took no image: $(tail -3 "$WORK/archivers.log")"
+kill "$ARCHIVERS" 2>/dev/null || true
+wait "$ARCHIVERS" 2>/dev/null || true
+[ "$(head -c 8 "$WORK/sb.sealed" | od -An -c | tr -d ' ')" = 'FENECSL002' ] ||
+    fail "this tree's sealed backup is no version 2 file"
+for what in sb.sealed archives; do
+    if "$PRE/fennec" restore "$WORK/$what" "$WORK/old-$what.fennec" --key-file "$WORK/seal.key" \
+        >"$WORK/old-restore-$what.log" 2>&1; then
+        fail "the old \`fennec restore\` read this tree's sealed $what"
+    fi
+    grep -Eq 'not (a )?sealed' "$WORK/old-restore-$what.log" ||
+        fail "the old \`fennec restore\` said nothing of a seal: $(cat "$WORK/old-restore-$what.log")"
+    [ -e "$WORK/old-$what.fennec" ] && fail "the old \`fennec restore\` wrote a file from $what"
+    TMPDIR="$WORK" "$NEW/fennec" restore "$WORK/$what" "$WORK/new-$what.fennec" \
+        --key-file "$WORK/seal.key" >"$WORK/new-restore-$what.log" 2>&1 ||
+        fail "this tree's restore refused its sealed $what: $(cat "$WORK/new-restore-$what.log")"
+done
+echo "old restore:  $(grep -Em1 'not (a )?sealed' "$WORK/old-restore-sb.sealed.log")"
+if "$PRE/fennec" verify "$WORK/archives" --key-file "$WORK/seal.key" \
+    >"$WORK/old-verify-sealed.log" 2>&1; then
+    fail "the old \`fennec verify\` read this tree's sealed archive"
+fi
+grep -q 'not sealed, where the archive is' "$WORK/old-verify-sealed.log" ||
+    fail "the old \`fennec verify\` said nothing of a seal: $(cat "$WORK/old-verify-sealed.log")"
+echo "old verify:   $(grep -m1 'not sealed' "$WORK/old-verify-sealed.log")"
+TMPDIR="$WORK" "$NEW/fennec" verify "$WORK/archives" --key-file "$WORK/seal.key" \
+    >"$WORK/new-verify-sealed.log" 2>&1 ||
+    fail "this tree's verify refused its sealed archive: $(cat "$WORK/new-verify-sealed.log")"
+kill "$SB_PID" 2>/dev/null || true
+wait "$SB_PID" 2>/dev/null || true
+echo "new sealed:   a backup and an archive bound to their files, read here, refused by the old binary"
 echo "ok: a binary from before follows this tree's primary, and stops in words at its file"

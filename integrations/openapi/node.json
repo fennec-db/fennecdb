@@ -2,8 +2,8 @@
  "openapi": "3.1.0",
  "info": {
   "title": "fennecdb: a tenant node",
-  "version": "1",
-  "description": "A tenant node's REST API (fennec-server --dir): each tenant's routes below /t/{tenant}, the node's own at the root, /_admin/ with --admin-token. A request takes `Authorization: Bearer` with the server's token (--http-token) or a scoped JSON Web Token (--jwt-secret, --jwt-keys), held to the --policy rules; a server started with neither takes requests with no token. Every answer carries X-Request-Id; a refusal is {\"error\": \"...\"} under a status that says what to do about it, and a 429 or a 503 says when to come back in Retry-After and its body's retry_after: a scoped token's caller past --request-rate is answered 429 on every route, before anything of the request runs. A route marked x-fennec-flag is served under those flags. A GET answering HEAD lists a head operation beside it, and every path answers a CORS preflight under --http-cors.",
+  "version": "2",
+  "description": "A tenant node's REST API (fennec-server --dir): each tenant's routes below /t/{tenant}, the node's own at the root, /_admin/ with --admin-token. A body past 64 MiB is refused 413, by its Content-Length before a byte of it is read, chunked at the chunk that would pass it; the one read past it is an image's import, PUT /_admin/tenants/{tenant}/file, to 1 GiB where its head carries the admin token, refused 401 from its head, its body unread, where it carries another token or none. A request takes `Authorization: Bearer` with the server's token (--http-token) or a scoped JSON Web Token (--jwt-secret, --jwt-keys), held to the --policy rules; a server started with neither takes requests with no token. Every answer carries X-Request-Id; a refusal is {\"error\": \"...\"} under a status that says what to do about it, and a 429 or a 503 says when to come back in Retry-After and its body's retry_after: a scoped token's caller past --request-rate is answered 429 on every route, before anything of the request runs. A route marked x-fennec-flag is served under those flags. A GET answering HEAD lists a head operation beside it, and every path answers a CORS preflight under --http-cors.",
   "license": {
    "name": "Apache-2.0",
    "identifier": "Apache-2.0"
@@ -4600,7 +4600,7 @@
    "GitHubDelivery": {
     "name": "X-GitHub-Delivery",
     "in": "header",
-    "description": "A GitHub event's key, where its hook says key delivery.",
+    "description": "Logged beside a GitHub event's key, never its key: GitHub does not sign it.",
     "schema": {
      "type": "string"
     }
@@ -4894,10 +4894,9 @@
       ],
       "enum": [
        "body",
-       "delivery",
        null
       ],
-      "description": "A github hook's: its events keyed by their body or by X-GitHub-Delivery."
+      "description": "A github hook's: its events keyed by their body, which its signature covers (delivery, which it does not, is refused)."
      },
      "max_body": {
       "type": [
@@ -4970,7 +4969,8 @@
           "body",
           "delivery",
           null
-         ]
+         ],
+         "description": "A github hook's: body; delivery, 0.2.0's, kept as a set saved with it is, every event of its hook that verifies refused (409) until it is set again with body."
         },
         "max_body": {
          "type": [
