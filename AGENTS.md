@@ -143,11 +143,8 @@ The file format, FennecQL, the HTTP API and its OpenAPI document,
 `fennec.h`, the JS types, each SDK's public API, the sync protocol, CLI
 flags and exit codes, `/_metrics` names and release asset names are added
 to, never changed or removed; a new record kind or tag takes the next
-number, `GRAMMAR_EPOCH` stays 4, and a break is a major version. Every
-reader of a file or a stream -- replica, standby, archiver, router, node,
-`fennec` -- upgrades before any primary; one a release back beside a newer
-one works or stops in words naming what it does not know, never reading
-wrong (`make compat-check`, `compat.yml`). A change names the check that
+number, `GRAMMAR_EPOCH` stays 4, and a break is a major version. Replicas
+upgrade before primaries (`compat.yml`). A change names the check that
 holds its surface, or the plan item that adds it, in the design file's
 table.
 

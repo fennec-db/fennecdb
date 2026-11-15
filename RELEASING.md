@@ -100,11 +100,14 @@ nothing reaches a registry before the notes have had a read.
    green on the release commit: the commit's `fennec-server`, `fennec` and
    `fennec-shard` beside the last published release's -- its own Linux
    tarball, checked against its `SHA256SUMS` by `site/install.sh`, and its
-   router built from its tag, since no release ships one -- driven through
-   replication both ways, archives and backups plain and sealed, a router
-   over nodes of the other release and a node at `https://`, a `github`
-   hook kept with `key delivery`, and a rolling upgrade of a router and a
-   node pair under durable writes, no acknowledged write lost (`make
+   router built from its tag's sources with the tag's `Cargo.lock`
+   (`--locked`) by this tree's toolchain, a debug build, since no release
+   ships one -- driven through replication both ways, archives and backups
+   plain and sealed, the values 0.2.0 wrote that 1.x does not read whole, a
+   router over nodes of the other release and a node at `https://`, a
+   `github` hook kept with `key delivery`, and a rolling upgrade of a router
+   and a node pair under durable writes, every acknowledged write read back
+   from both nodes and none the router said it did not send landed (`make
    compat-check`, `docs/design/compatibility.md#the-compatibility-matrix`).
    The tag's push runs it on the tag; read it before the draft is published
    (step 4): `gh run list --workflow compat.yml --commit <sha>`, or run it
@@ -203,15 +206,46 @@ is removed no sooner than its sunset, in a release whose notes say so.
 binary that reads a file or a stream -- a replica, a standby, an archiver,
 a router, a node, the `fennec` that verifies and restores -- runs the new
 release before any primary does. A binary one release back beside a newer
-one either works or stops in words naming what it does not know -- a
-record kind, a type tag, a version -- and never reads a record as another;
-a newer reader over an older writer always works. The order below and
+one either works or stops in words, and never reads a record as another;
+where it names the record kind, the type tag or the version it does not
+know, it names it, and where it knew of no other it cannot: 0.2.0's
+`fennec` refuses a version 2 sealed file as "not a sealed file", naming
+nothing, so the notes of the release that made version 2 name it. A newer
+reader reads what an older writer wrote, but for four values and types
+0.2.0 took that no write makes any more
+(`docs/design/compatibility.md#what-1x-does-not-read-of-020s-files`,
+and *The first 1.x release's notes* below). The order below and
 `deploy/RUNBOOK.md`'s *Upgrading with no downtime* keep it, and the notes
 of a release that moves a format say which reader stops where it is not
-kept. `compat.yml` (`make compat-check`) drives it with the last published
-release's own binaries, weekly and on every release tag; `make
-upgrade-check` drives the cases below against the commits before a kind,
-an op or the checksums. More than one release back is not driven.
+kept. Three things that order cannot say alone:
+
+- **A node pair: the standby's node first.** Between two nodes' restarts,
+  wait until the standby holds what the primary does: on the primary's
+  node `/t/<tenant>/_replication/status` (the replication token) lists the
+  standby's stream with `sent` equal to `durable`, or the standby's own
+  says `"connected": true` and `"behind": 0` -- for a file's replica, the
+  metrics `fennec_replica_connected` 1 and `fennec_replica_behind` 0. Not
+  the alert `FennecTenantsWithoutReplica`, which fires only for a tenant
+  with no copy at all, after 15 minutes. Restarting the primary's node in
+  place costs that node's tenants their writes for the restart -- the
+  router answers each "the request was not sent" (503, `Fennec-Unsent`),
+  safe to send again -- since automatic failover is off unless the router
+  runs with `--auto-failover`.
+- **A node holding both primaries and replicas** -- a `--dir` node holding
+  its own tenants and another node's standbys -- cannot be a reader
+  upgraded before every primary. In such a fleet nothing uses a feature
+  that moves the format until every node runs the release.
+- **"Upgrade every router" means building it.** No release publishes
+  `fennec-shard` yet (`release.yml` packs `fennec` and `fennec-server`):
+  each router is built from the release's tag (`cargo build --release
+  --locked -p fennec-shard`), and `compat.yml`'s old router is that tag's
+  code, built by this tree's toolchain.
+
+`compat.yml` (`make compat-check`) drives the order with the last
+published release's server and `fennec` and its tag's router, weekly and
+on every release tag; `make upgrade-check` drives the cases below against
+the commits before a kind, an op or the checksums. More than one release
+back is not driven.
 
 **A release whose first use moves the format says so in its notes.** The
 first release with named statements is one: installing it changes nothing
@@ -496,13 +530,14 @@ every tag. Before a 1.x tag, check:
    later refuses until it has been run; from then a break needs a major
    version above 1.0 in its `BREAKS` entry.
 4. HEAD opens every file written from v0.2.0 on (`tests/language.fennec`,
-   `tests/statements.fennec`; T2 adds each release's own), and
+   `tests/statements.fennec`; T2 adds each release's own) but for the four
+   exceptions *The first 1.x release's notes* name, and
    `compat.yml` is green on the release commit: `make compat-check`'s
-   matrix against the previous release's own binaries (*Two releases beside
-   each other*, under A release) -- a replica, an archiver, `fennec`, a
-   router and a node of either release beside the other's, each working or
-   stopping in words, never reading wrong, and a rolling upgrade under
-   writes losing no acknowledged one. `make upgrade-check` (by hand) still
+   matrix against the previous release's server and `fennec` and its
+   tag's router (*Two releases beside each other*, under A release) -- a
+   replica, an archiver, `fennec`, a router and a node of either release
+   beside the other's, each working or stopping in words, never reading
+   wrong, and a rolling upgrade under writes losing no acknowledged one. `make upgrade-check` (by hand) still
    passes against the commits before kind 13, its ops and the checksums:
    an older replica stops by name on a record kind or tag it does not
    know. The notes name any feature whose first use moves the file format,
@@ -511,6 +546,34 @@ every tag. Before a 1.x tag, check:
 6. The size ceilings hold against the 1.0 baseline (the browser module
    +3.5%, native libraries and binaries +5%), and the notes state the
    measured cost where one was raised.
+
+**The first 1.x release's notes.** "1.x opens every file written from
+v0.2.0 on" has four exceptions, all values or types 0.2.0 took that no
+write makes any more
+(`docs/design/compatibility.md#what-1x-does-not-read-of-020s-files`),
+and the first 1.x release's notes name them under their upgrade heading:
+
+1. A `[[json]]` field's row nested past 64 levels: the file opens and
+   every other collection reads, but any statement that decodes that row
+   fails whole (`a value nests more than 64 levels deep`) -- `count`, a read
+   by another row's id and the fields stored before the deep one still
+   answer; a `del` or a `set` of the row is refused; `alter ... drop` of
+   the field is taken but does not help, and an index built over a later
+   field stays refused in the same words. Backups, images and a compact
+   without dropped fields carry the row unchanged; a replica takes it in an
+   image, holds it and refuses its reads alike, and connects again, 100 ms
+   to 5 s apart, while a write touching it cannot be applied. On 1.x alone
+   the way out is to read out the readable rows, drop the collection and
+   make it again.
+2. A type nested past 64 lists,
+3. a point's type under 64 lists, and
+4. a schema's number past its range (`m` past 32 767, a `vector<N>` past
+   10^9 or of 0, a list of such vectors): the whole file is refused at the
+   open, and only v0.2.0 can rewrite it.
+
+The advice they give: rewrite such values with v0.2.0 before upgrading,
+and do not drop a field of a collection holding such a row and compact it
+on 1.x. `compat.yml` drives the first two with v0.2.0's own binaries.
 
 The previous minor gets security fixes for six months after the next
 minor's release; a `release/1.N` branch is cut when a backport needs one

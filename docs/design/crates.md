@@ -508,6 +508,11 @@ where it is read. And a field whose type nests more than 64 lists, which
 no version bounded: its schema's type is read past the limit
 (`decode_type`), and the file is refused at the open. No write makes
 either now (`Schema::new`), and no test file of the repository's holds one.
+The 1.x contract names both, a point's type under 64 lists and a schema's
+number past its range beside them, as the exceptions to "1.x opens every
+file written from v0.2.0 on", with what each still answers and the advice
+the first 1.x release's notes give ([compatibility.md](compatibility.md#what-1x-does-not-read-of-020s-files));
+`compat.yml` has 0.2.0's own server write the first two (a3, a3b).
 
 *A point is a level, as its type is.* A point's bytes (`TAG_GEO`) read as
 the list `[lon, lat]`, which `DataType::depth` counts as a level, but the
