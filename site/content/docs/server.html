@@ -756,6 +756,11 @@ docker run -d --name fennecdb -v fennecdata:/data \
 <p>The image's command is <code>--http 0.0.0.0:8080 --file
 /data/data.fennec --sync 250</code>.</p>
 
+<p>A name without a tag pulls <code>latest</code>, the newest published
+release: it moves once a release is published, never to a release candidate
+or back to an older version. Name <code>:{{version}}</code> where a deploy
+must not change under you.</p>
+
 <ul>
   <li><b>Set a token of 32 bytes or more.</b> Without one, or with a shorter
     one, it refuses to listen beyond localhost, which a container's
@@ -774,7 +779,7 @@ docker run -d --name fennecdb -v fennecdata:/data \
 <p>The <code>Dockerfile</code> is two-stage: a static musl build copied into
 <code>scratch</code>. TLS's crates and roots are compiled in, and the binary runs its own
 health check (<code>--ping</code>), so the runtime image holds nothing but the
-binary — no shell, no package manager, no libc. The image is <b>8.19 MB</b> on
+binary — no shell, no package manager, no libc. The image is <b>8.29 MB</b> on
 amd64, that binary's bytes as CI measures them on every change, and smaller on
 arm64 — since no target is written in, both come out of the same file.
 <code>make docker</code> builds it, and

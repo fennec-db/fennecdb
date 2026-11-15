@@ -137,6 +137,8 @@ refusal naming both annotations (`IndexKind::word`) 393, and a
 normalising `add_index` in `Schema::new` 91.
 
 
+## Hash buckets
+
 **A `@hash` bucket holds its ids ascending, in runs** (`engine/bucket.rs`).
 A bucket was a `Vec` in the order its ids came, and a row left it by
 `retain`, a walk of the whole bucket: with a field of a few values -- a

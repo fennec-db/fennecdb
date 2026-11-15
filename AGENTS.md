@@ -144,8 +144,9 @@ The file format, FennecQL, the HTTP API and its OpenAPI document,
 flags and exit codes, `/_metrics` names and release asset names are added
 to, never changed or removed; a new record kind or tag takes the next
 number, `GRAMMAR_EPOCH` stays 4, and a break is a major version. Replicas
-upgrade before primaries. A change names the check that holds its surface,
-or the plan item that adds it, in the design file's table.
+upgrade before primaries (`compat.yml`). A change names the check that
+holds its surface, or the plan item that adds it, in the design file's
+table.
 
 ### The engine's lock and blocks
 
@@ -532,13 +533,14 @@ Covers `deploy/`.
 
 ### `tools/CLAUDE.md`
 
-Covers `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/windows-zip.sh`, `tools/windows-zip-check.ps1`, `tools/install-ps1-check.ps1`, `tools/linux-ffi.sh`, `tools/linux-ffi-check.sh`, `tools/toolchain_check.py`, `rust-toolchain.toml`, `site/install.sh`, `site/install.ps1` and `.github/workflows/`'s `release.yml` and `packages.yml`.
+Covers the install channels' and release scripts in `tools/` and `site/` and every workflow, each file named in its first paragraph.
 
 *The crates*
 - The compiler CI tests with is the one that ships.
 
 *Integrations and deploy*
 - A release is installed from its own files, each checked before it is used.
+- A workflow runs actions pinned by commit, and a job that writes builds nothing.
 
 ### `crates/fennec-bench/CLAUDE.md`
 

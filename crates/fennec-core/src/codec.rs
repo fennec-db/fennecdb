@@ -562,9 +562,13 @@ fn decode_list(buf: &[u8], pos: &mut usize, depth: usize) -> Result<Value> {
 /// `[lon, lat]` it is ([`geo_value`]), so one level more, held to
 /// [`MAX_DEPTH`] as a list is. Counted as none, a point 64 lists down read
 /// as a value 65 levels deep, whose own bytes written back were refused
-/// (the fuzzer's `codec` target); a write puts a point only as a field's
-/// whole value, a level down (`DataType::depth`). A function of its own
-/// for the reason [`decode_at`] hands the depth on untested.
+/// (the fuzzer's `codec` target). A write puts these bytes only as a
+/// `geo` field's whole value ([`encode_value_as`]; a `[geo]` field's
+/// points go as the lists of two floats they read as), and every field's
+/// type counts the point as its level (`DataType::depth`, held by
+/// `Schema::new` and by [`decode_type`]), so no value a write made is
+/// refused here. A function of its own for the reason [`decode_at`] hands
+/// the depth on untested.
 #[inline(never)]
 fn decode_point(buf: &[u8], pos: &mut usize, depth: usize) -> Result<Value> {
     if depth >= MAX_DEPTH {
@@ -823,7 +827,10 @@ pub fn decode_type(buf: &[u8], pos: &mut usize) -> Result<DataType> {
 
 /// [`decode_type`] inside `lists` lists, held to [`MAX_DEPTH`] of them:
 /// no field is declared deeper (`Schema::new`), and a schema of 100 000
-/// nested lists recursed as deep, then dropped its boxes as deep.
+/// nested lists recursed as deep, then dropped its boxes as deep. A point
+/// is a level more, as `DataType::depth` counts it and a value of it reads
+/// ([`decode_point`]): 64 lists around one, which no field is declared
+/// as, were taken, and every value of the field refused at each read.
 fn type_at(buf: &[u8], pos: &mut usize, lists: usize) -> Result<DataType> {
     let tag = *buf
         .get(*pos)
@@ -842,6 +849,7 @@ fn type_at(buf: &[u8], pos: &mut usize, lists: usize) -> Result<DataType> {
         TAG_LIST => DataType::List(Box::new(type_at(buf, pos, lists + 1)?)),
         TAG_SPARSE => DataType::Sparse(get_usize(buf, pos)?),
         TAG_JSON => DataType::Json,
+        TAG_GEO if lists >= MAX_DEPTH => return Err(too_deep()),
         TAG_GEO => DataType::Geo,
         other => return Err(Error::Corrupt(format!("unknown type tag {other}"))),
     })
@@ -1162,6 +1170,20 @@ mod tests {
             assert_eq!(p, bytes.len());
             point = Value::List(vec![point]);
         }
+        // A field's type alike: 63 lists around a point are a type of 64
+        // levels, which `Schema::new` takes; 64 lists, one of 65, which it
+        // refuses, and which a file's schema is refused for -- read, its
+        // every value was refused at each read, the open having taken it
+        // (the fuzz fix's second review).
+        let typed = |lists: usize| {
+            let mut b = vec![TAG_LIST; lists];
+            b.push(TAG_GEO);
+            b
+        };
+        let ty = (1..MAX_DEPTH).fold(DataType::Geo, |t, _| DataType::List(Box::new(t)));
+        assert_eq!(ty.depth(), MAX_DEPTH);
+        assert_eq!(decode_type(&typed(MAX_DEPTH - 1), &mut 0).unwrap(), ty);
+        assert!(deep(decode_type(&typed(MAX_DEPTH), &mut 0).map(|_| ())));
     }
 
     /// A sparse vector's dimension and each step between its indexes are

@@ -471,7 +471,14 @@ the job's 45 minutes with the build), by a timer of the process's CPU
 time (`ITIMER_PROF`) set once, whose handler says the target and the run
 it reached and exits 4. A bound, never a pass; CPU time, which a machine
 others load lengthens less than the clock (`http` 375 s by the clock and
-110 s of CPU at a load of 70 to 200, 150 s and 104 s near 15).
+110 s of CPU at a load of 70 to 200, 150 s and 104 s near 15). Two tests
+hold it: a child past a cap of 300 ms ends so, and `--smoke` -- the flag
+`make fuzz-smoke` passes, read by `run_options` in the library rather
+than the binary -- gives each target its count and arms the timer, read
+off it by a run (`guard::cap_left`). The timers are stopped as `fuzz`
+returns or unwinds (a guard's drop): a fuzzer whose own thread panicked
+skipped the line after the join that stopped the cap, and a test binary
+went on under it.
 
 *A finding is a regression test in its own crate*, the input's bytes or
 the file made by hand, failing before the fix. The pull request that added

@@ -1268,6 +1268,17 @@ same three to the byte; 0.2.0's tarball to them moved `fennec` 4 096
 bytes and `fennec-server` 12 288, an ELF file's segments being laid out by
 4 KB pages, so a figure moves a page at a time or not at all.
 
+The check's first run on the tree that landed it (#672, 2026-11-15) failed
+all three, against figures a day old: `fennec` 4 893 456 bytes (+36 864,
++0.76%), `fennec-server` 8 292 944 (+106 528, +1.30%) and `make small`
+2 968 064 (+16 384, +0.56%). In that day 25 pull requests had landed on
+main, three of them trains of ten, eight and six branches, none held to a
+budget main did not have yet: each had been measured by its own author on
+macOS, where a Mach-O file grows a 16 KB page at a time and most of them
+read +0. The file was written again from that run. A percent in a day,
+with no pull request in which anybody saw it, is what the check is for:
+from that landing the job holds each one to what main measures.
+
 Rejected: a budget of the measurement itself, which would stop every pull
 request that adds a byte and make any two in the merge queue that each
 write one conflict; a ceiling 5% above it, the 1.0 plan's for after 1.0,
