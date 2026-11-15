@@ -881,48 +881,84 @@ struct Bucket {
     at: Instant,
 }
 
-/// Callers past this are forgotten all at once, which forgives each once
-/// rather than let the map grow with every subject a token names.
+/// Callers the map holds at most: past it, the one called longest ago goes
+/// as a new one comes ([`room_for_one`]), never every count -- cleared whole
+/// there, a client calling as that many subjects forgave each one, its own
+/// spent bucket among them.
 const CALLERS: usize = 4096;
 
 static BUCKETS: Mutex<Option<std::collections::HashMap<String, Bucket>>> = Mutex::new(None);
 
 /// Whether the caller may make one more call now, or in how many
-/// milliseconds it may. A caller is a scoped token's subject, or for the
-/// server's own token -- which every unscoped client shares -- the address
-/// it calls from: one agent in a loop is held back, not every agent on the
-/// server's token with it.
+/// milliseconds it may.
 fn admitted(ctx: &Ctx) -> std::result::Result<(), u64> {
+    admitted_at(ctx, Instant::now())
+}
+
+/// [`admitted`] at `now`. A caller is a scoped token's issuer and subject,
+/// or for the server's own token -- which every unscoped client shares --
+/// the address it calls from, each in the database it calls: one agent in
+/// a loop is held back, not every agent on the server's token with it.
+/// Keyed by `sub` alone, one subject shared a bucket across every tenant
+/// of a node, and another issuer's user of the same `sub` spent it.
+fn admitted_at(ctx: &Ctx, now: Instant) -> std::result::Result<(), u64> {
     let rate = ctx.opts.calls_per_sec;
     if rate == 0 {
         return Ok(());
     }
+    // The database by its address, as the process holds it: a tenant
+    // closed and another opened in its place shares no spent bucket past a
+    // second, a bucket holding a second's calls.
+    let db = Arc::as_ptr(ctx.db) as usize;
     let key = match ctx.who {
         Who::Full => match crate::audit::client_ip() {
-            Some(ip) => format!("@{ip}"),
-            None => String::new(),
+            Some(ip) => format!("{db:x}@{ip}"),
+            None => format!("{db:x}"),
         },
-        Who::Scoped(s) => format!("sub:{}", s.subject().unwrap_or("")),
+        // The issuer by its length: a `sub` cannot be read as its end.
+        Who::Scoped(s) => {
+            let iss = s.issuer().unwrap_or("");
+            let sub = s.subject().unwrap_or("");
+            format!("{db:x}:{}:{iss}{sub}", iss.len())
+        }
     };
     let key = key.as_str();
     let rate = rate as f64;
-    let now = Instant::now();
     let mut held = BUCKETS.lock().unwrap_or_else(|e| e.into_inner());
     let map = held.get_or_insert_with(Default::default);
     if map.len() >= CALLERS && !map.contains_key(key) {
-        map.clear();
+        room_for_one(map, rate, now);
     }
     let b = map.entry(key.to_string()).or_insert(Bucket {
         tokens: rate,
         at: now,
     });
-    b.tokens = (b.tokens + now.duration_since(b.at).as_secs_f64() * rate).min(rate);
+    b.tokens = (b.tokens + now.saturating_duration_since(b.at).as_secs_f64() * rate).min(rate);
     b.at = now;
     if b.tokens >= 1.0 {
         b.tokens -= 1.0;
         return Ok(());
     }
     Err(((1.0 - b.tokens) / rate * 1000.0).ceil() as u64)
+}
+
+/// Room in a full map for one more caller: every bucket full again by
+/// `now` goes -- one as a caller new to the map would get, so forgetting it
+/// forgives nothing -- and where none is, the one called longest ago. A
+/// scan of the map, only as a caller new to a full one comes: a tool call
+/// is a model's turn.
+#[cold]
+fn room_for_one(map: &mut std::collections::HashMap<String, Bucket>, rate: f64, now: Instant) {
+    let full =
+        |b: &Bucket| b.tokens + now.saturating_duration_since(b.at).as_secs_f64() * rate >= rate;
+    map.retain(|_, b| !full(b));
+    if map.len() < CALLERS {
+        return;
+    }
+    let oldest = map.iter().min_by_key(|(_, b)| b.at).map(|(k, _)| k.clone());
+    if let Some(k) = oldest {
+        map.remove(&k);
+    }
 }
 
 // ------------------------------------------------------------ counts
@@ -1038,5 +1074,77 @@ mod tests {
         );
         assert_eq!(decoded(&enc).as_deref(), Some("Hello, 世界"));
         assert_eq!(decoded("=?base64?***?="), None);
+    }
+
+    /// A caller's calls are counted by its issuer, its subject and the
+    /// database it calls: keyed by `sub` alone, one subject shared a
+    /// bucket across every tenant of a node, and another issuer's user of
+    /// the same `sub` spent it. A full map lets the count used longest ago
+    /// go, never every count: cleared whole, a client sending as many
+    /// subjects forgave each one -- its own spent bucket among them.
+    #[test]
+    fn a_callers_rate_is_its_own_in_each_database_and_a_full_map_forgives_no_one() {
+        let access = crate::access::Access::new(
+            b"a secret of more than thirty-two bytes, as HS256 wants",
+            "* read\n",
+        )
+        .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let scoped = |claims: &str| {
+            let token = access.mint(claims).unwrap();
+            Who::Scoped(Arc::new(access.scope(&token, now).unwrap()))
+        };
+        let opts = Options {
+            calls_per_sec: 1,
+            ..Options::default()
+        };
+        let cfg = Config::default();
+        let one = Arc::new(RwLock::new(Database::new()));
+        let two = Arc::new(RwLock::new(Database::new()));
+        // Each call a nanosecond after the one before: an order for the
+        // map's oldest, and a refill of no bucket (one call a second).
+        let start = Instant::now();
+        let tick = std::cell::Cell::new(0u64);
+        let call = |db: &Arc<RwLock<Database>>, who: &Who| {
+            let ctx = Ctx {
+                db,
+                cfg: &cfg,
+                who,
+                opts: &opts,
+                run: Run::local(),
+            };
+            tick.set(tick.get() + 1);
+            admitted_at(&ctx, start + std::time::Duration::from_nanos(tick.get())).is_ok()
+        };
+        let vera = scoped(r#"{"sub":"vera-rate"}"#);
+        assert!(call(&one, &vera));
+        assert!(!call(&one, &vera), "a second's worth spent");
+        assert!(call(&two, &vera), "another database is counted apart");
+        let other = scoped(r#"{"sub":"vera-rate","iss":"https://other.example/"}"#);
+        assert!(
+            call(&one, &other),
+            "another issuer's subject is counted apart"
+        );
+
+        // A map full of spent buckets, and one more caller: the one used
+        // longest ago goes, and the others stay spent.
+        let many: Vec<Who> = (0..CALLERS)
+            .map(|i| scoped(&format!(r#"{{"sub":"rate-{i}"}}"#)))
+            .collect();
+        let third = Arc::new(RwLock::new(Database::new()));
+        for who in &many {
+            assert!(call(&third, who));
+        }
+        let late = scoped(r#"{"sub":"late"}"#);
+        assert!(call(&third, &late));
+        for held in [&many[1], &many[CALLERS / 2], &many[CALLERS - 1]] {
+            assert!(
+                !call(&third, held),
+                "a full map forgave a caller it still held"
+            );
+        }
     }
 }
