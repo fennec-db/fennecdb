@@ -19,6 +19,13 @@ on:
 # there, and what they make reaches a job that writes only as an artifact.
 # tools/workflow_check.py holds every workflow to that, a job that writes
 # running only what it lists (docs/design/integrations.md#workflows).
+#
+# The tag -- a dispatch's input, or the pushed tag's name, each chosen by
+# whoever starts the run, and git takes `$`, `(`, `;`, `|` and a backquote
+# in a name -- reaches every job as TAG, through `env:`, and the job's first
+# step holds it to a release's form before anything uses it, a checkout
+# among them: it is never spliced into a script, where it would run as the
+# job (tools/workflow_check.py refuses that).
 permissions:
   contents: read
 
@@ -52,8 +59,15 @@ jobs:
           - name: macos
             os: macos-latest
             targets: aarch64-apple-darwin x86_64-apple-darwin
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
     steps:
+      - name: The tag is a release's
+        run: |
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-<pre-release>"; exit 1; }
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
@@ -74,12 +88,7 @@ jobs:
       - name: Build
         run: |
           set -eu
-          if [ "${{ github.event_name }}" = workflow_dispatch ]; then
-            tag="${{ github.event.inputs.tag }}"
-          else
-            tag="$GITHUB_REF_NAME"
-          fi
-          version="${tag#v}"
+          version="${TAG#v}"
           mkdir -p dist
           for t in ${{ matrix.targets }}; do
             # `fennec` takes the cli profile (panic = abort): a single process
@@ -158,6 +167,11 @@ jobs:
     env:
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
+      - name: The tag is a release's
+        run: |
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-<pre-release>"; exit 1; }
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
@@ -222,6 +236,11 @@ jobs:
     env:
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
+      - name: The tag is a release's
+        run: |
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-<pre-release>"; exit 1; }
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
@@ -265,7 +284,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
+      - name: The tag is a release's
+        run: |
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-<pre-release>"; exit 1; }
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
@@ -277,12 +303,7 @@ jobs:
       - name: Build
         run: |
           set -eu
-          if [ "${{ github.event_name }}" = workflow_dispatch ]; then
-            tag="${{ github.event.inputs.tag }}"
-          else
-            tag="$GITHUB_REF_NAME"
-          fi
-          version="${tag#v}"
+          version="${TAG#v}"
           make wasm
           mkdir -p dist "fennec-web-v${version}"
           # What a page actually needs: the module, with every index, the
@@ -317,7 +338,14 @@ jobs:
     permissions:
       contents: read
       actions: read
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
+      - name: The tag is a release's
+        run: |
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-<pre-release>"; exit 1; }
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
@@ -328,8 +356,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          tag="${{ github.event.inputs.tag || github.ref_name }}"
-          version="${tag#v}"
+          version="${TAG#v}"
           release=$(sed -n 's/^let release = "\(.*\)"/\1/p' Package.swift)
           want=$(sed -n 's/^let checksum = "\(.*\)"/\1/p' Package.swift)
           if [ "$release" != "$version" ]; then
@@ -379,7 +406,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
+      - name: The tag is a release's
+        run: |
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-<pre-release>"; exit 1; }
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
@@ -441,6 +475,11 @@ jobs:
     env:
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
+      - name: The tag is a release's
+        run: |
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-<pre-release>"; exit 1; }
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -505,6 +544,11 @@ jobs:
       IMAGE: ghcr.io/${{ github.repository_owner }}/fennec-server
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
+      - name: The tag is a release's
+        run: |
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-<pre-release>"; exit 1; }
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
@@ -582,6 +626,11 @@ jobs:
       IMAGE: ghcr.io/${{ github.repository_owner }}/fennec-server
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
+      - name: The tag is a release's
+        run: |
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-<pre-release>"; exit 1; }
+
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: image-*
@@ -659,6 +708,11 @@ jobs:
       IMAGE: ghcr.io/${{ github.repository_owner }}/fennec-server
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
+      - name: The tag is a release's
+        run: |
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-<pre-release>"; exit 1; }
+
       - name: Log in to ghcr.io
         env:
           TOKEN: ${{ github.token }}
@@ -694,22 +748,62 @@ jobs:
           fi
           echo "$IMAGE:$version: a Docker manifest list of linux/amd64 $amd and linux/arm64 $arm"
           list=$(digest "$IMAGE:$version")
-          printf '%s' "$list" | grep -Eq '^sha256:[0-9a-f]{64}$' || { echo "::error::$IMAGE:$version's digest reads [$list]"; exit 1; }
+          for d in "$list" "$amd" "$arm"; do
+            printf '%s' "$d" | grep -Eq '^sha256:[0-9a-f]{64}$' || { echo "::error::a digest of $IMAGE:$version reads [$d]"; exit 1; }
+          done
           echo "digest=$list" >> "$GITHUB_OUTPUT"
+          echo "amd64=$amd" >> "$GITHUB_OUTPUT"
+          echo "arm64=$arm" >> "$GITHUB_OUTPUT"
+          # An attestation names this run's ref and commit as the source it
+          # was built from: true of the tag's own run alone, whose images
+          # `image` built from the commit it ran at (their revision label).
+          # A dispatch from a branch builds the tag's tree under the
+          # branch's name and head, and its images go out unattested
+          # (RELEASING.md, step 6 fails on them).
+          own=true
+          [ "$GITHUB_REF" = "refs/tags/$TAG" ] || own=false
+          for arch in amd64 arm64; do
+            rev=$(docker buildx imagetools inspect --format '{{json .Image}}' "$IMAGE:$version-$arch" | jq -r '.config.Labels["org.opencontainers.image.revision"] // empty')
+            [ "$rev" = "$GITHUB_SHA" ] || own=false
+          done
+          if [ "$own" = true ]; then
+            echo "attest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::this run is on $GITHUB_REF at $GITHUB_SHA, not $TAG's own run: the image is not attested, since an attestation would name this ref and commit as its source (RELEASING.md, step 3: a rebuild is dispatched at the tag)"
+          fi
 
       # docs/design/integrations.md#provenance: the list attested by its
-      # digest, which names each architecture's manifest by its own, so
-      # `gh attestation verify oci://<image>:<version>` holds both images;
-      # `latest`, a copy of the list, has its digest. Pushed to ghcr.io
-      # beside the image as well (`push-to-registry`, with the login above),
-      # where a registry's own tools look; the list itself is not changed.
-      # No storage record: it wants `artifact-metadata: write`, and nothing
-      # here reads one.
-      - name: Attest the image's build provenance
+      # digest, and each architecture's manifest by its own, so `gh
+      # attestation verify oci://<image>:<version>` and
+      # `oci://<image>:<version>-amd64` (or `-arm64`) each verify; `latest`,
+      # a copy of the list, has the list's digest. Pushed to ghcr.io beside
+      # the image as well (`push-to-registry`, with the login above), where a
+      # registry's own tools look; no manifest is changed. No storage record:
+      # it wants `artifact-metadata: write`, and nothing here reads one.
+      - name: Attest the image's build provenance (the list)
+        if: steps.list.outputs.attest == 'true'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.list.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attest the image's build provenance (amd64)
+        if: steps.list.outputs.attest == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.list.outputs.amd64 }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attest the image's build provenance (arm64)
+        if: steps.list.outputs.attest == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.list.outputs.arm64 }}
           push-to-registry: true
           create-storage-record: false
 
@@ -743,6 +837,11 @@ jobs:
       IMAGE: ghcr.io/${{ github.repository_owner }}/fennec-server
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
+      - name: The tag is a release's
+        run: |
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-<pre-release>"; exit 1; }
+
       # This workflow's own commit's, as `image`'s check is: a dispatch for a
       # tag from before the script has none.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -765,9 +864,9 @@ jobs:
   # The one job writing to the repository: the release and its assets, and
   # the Go module's tag, pushed with the checkout's token. It builds nothing:
   # what it attaches is the artifacts of the jobs above, which read alone.
-  # Each file it attaches carries a build provenance attestation, made here
-  # before the release is drafted: `id-token` asks Sigstore for the run's
-  # signing certificate, `attestations` stores what it signed.
+  # Each file this run built carries a build provenance attestation, made
+  # here before the release is drafted: `id-token` asks Sigstore for the
+  # run's signing certificate, `attestations` stores what it signed.
   publish:
     name: publish the release
     needs: [binaries, windows, linux-ffi, wasm, apple, android, linux-packages]
@@ -776,7 +875,14 @@ jobs:
       contents: write
       id-token: write
       attestations: write
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
+      - name: The tag is a release's
+        run: |
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+          [[ $TAG =~ $re ]] || { echo "::error::the tag asked for is no release's: vX.Y.Z, or vX.Y.Z-<pre-release>"; exit 1; }
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
@@ -787,19 +893,50 @@ jobs:
           pattern: dist-*
           merge-multiple: true
 
+      # An attestation names this run's ref and commit as the source the
+      # files were built from, which is true of the tag's own run alone: the
+      # push of the tag, or a dispatch at it (`--ref vX.Y.Z`). A dispatch
+      # from a branch (`--ref main`, `release/1.N`) builds the tag's tree
+      # under the branch's name and head commit, and an attestation would
+      # say the files came from there: its files go out unattested, and
+      # RELEASING.md's step 6 fails on them.
+      - name: Whether this run is the tag's own
+        id: own
+        run: |
+          if [ "$GITHUB_REF" = "refs/tags/$TAG" ] && [ "$(git rev-parse HEAD)" = "$GITHUB_SHA" ]; then
+            echo "attest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::this run is on $GITHUB_REF at $GITHUB_SHA, not $TAG's own run: its files are attached unattested, since an attestation would name this ref and commit as their source (RELEASING.md, step 3: a rebuild is dispatched at the tag)"
+          fi
+
+      # The XCFramework's three files were built before the tag by
+      # swift-binary.yml and attested there, as that run's build
+      # (`pull-request`); attested here they would be said to be this run's.
+      # Set aside while the rest is attested.
+      - name: The XCFramework's files set aside
+        run: |
+          mkdir swift
+          mv dist/FennecFFI.xcframework.zip dist/FennecFFI.xcframework.zip.checksum dist/FennecFFIDynamic.xcframework.zip swift/
+
       # docs/design/integrations.md#provenance: every file the release
-      # gets, by its SHA-256, signed as this run's build (SLSA provenance,
-      # Sigstore's public instance, stored by GitHub's attestations API):
-      # `gh attestation verify <file> -R <repo>` proves which workflow, run
-      # and commit made it, where SHA256SUMS, fetched from the same place,
-      # proves only that the file is the one listed. Before the checksums,
-      # so that dist/ holds the attached files alone: SHA256SUMS is not
-      # attested, as desktop.yml appends the app's lines to it after the
-      # publish. Before the draft, so that no file goes out unattested.
+      # gets from this run, by its SHA-256, signed as this run's build (SLSA
+      # provenance, Sigstore's public instance, stored by GitHub's
+      # attestations API): `gh attestation verify <file> -R <repo>
+      # --signer-workflow <repo>/.github/workflows/release.yml --source-ref
+      # refs/tags/<tag>` proves which workflow, run and commit made it,
+      # where SHA256SUMS, fetched from the same place, proves only that the
+      # file is the one listed. Before the checksums, so that dist/ holds
+      # the attached files alone: SHA256SUMS is not attested, as desktop.yml
+      # appends the app's lines to it after the publish. Before the draft,
+      # so that no file goes out unattested.
       - name: Attest the build provenance of every file
+        if: steps.own.outputs.attest == 'true'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/*
+
+      - name: The XCFramework's files back beside the rest
+        run: mv swift/FennecFFI.xcframework.zip swift/FennecFFI.xcframework.zip.checksum swift/FennecFFIDynamic.xcframework.zip dist/
 
       - name: Checksums
         run: |
@@ -818,8 +955,7 @@ jobs:
       - name: Tag the Go module
         run: |
           set -eu
-          tag="${{ github.event.inputs.tag || github.ref_name }}"
-          gotag="integrations/go/$tag"
+          gotag="integrations/go/$TAG"
           if git ls-remote --exit-code --tags origin "refs/tags/$gotag" >/dev/null; then
             echo "$gotag is there already"
           else
@@ -832,9 +968,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          tag=$TAG
           # Drafted, not published: the notes get a read before the release
           # goes out. `gh release edit --draft=false` publishes it.
+          #
+          # A candidate (vX.Y.Z-rc.N, a pre-release part after the X.Y.Z) is
+          # drafted as a pre-release: GitHub makes every release it publishes
+          # Latest unless it is one, and install.sh and install.ps1 install
+          # Latest (`releases/latest/download/`), so a candidate published as
+          # a release would go to everyone who installs.
+          prerelease=false
+          case $tag in *-*) prerelease=true ;; esac
           #
           # Re-running a release has to work -- a job retried after a runner
           # failure, or the release dispatched again for its tag once a fix
@@ -852,6 +996,7 @@ jobs:
           # asset of.
           if gh release view "$tag" >/dev/null 2>&1; then
             if [ "$(gh release view "$tag" --json isDraft -q .isDraft)" = true ]; then
+              gh release edit "$tag" --prerelease="$prerelease"
               gh release upload "$tag" dist/* --clobber
             else
               have=$(gh release view "$tag" --json assets -q '.assets[].name')
@@ -868,6 +1013,7 @@ jobs:
           else
             gh release create "$tag" dist/* \
               --draft \
+              --prerelease="$prerelease" \
               --title "$tag" \
               --generate-notes
           fi

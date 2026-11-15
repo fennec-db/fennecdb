@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tools/workflow_check.py: a failing workflow for each of its four rules,
+"""tools/workflow_check.py: a failing workflow for each of its five rules,
 the look-alikes each rule must let through, the lists' entries nothing
 needs, the reader of the YAML the workflows are written in, and then the
 repository's own workflows, which pass.
@@ -648,8 +648,10 @@ class Secrets(unittest.TestCase):
               runs-on: ubuntu-latest
               steps:
                 - run: python3 -c 'import secrets, sys; sys.stdout.write(secrets.token_urlsafe(32))'
-                - run: echo "${{ inputs.secrets }} ${{ env.secrets_dir }}"
+                - run: echo "$A $B"
                   env:
+                    A: ${{ inputs.secrets }}
+                    B: ${{ env.secrets_dir }}
                     NOTE: secrets.NOT_AN_EXPRESSION
         """)), [])
 
@@ -698,6 +700,87 @@ class Secrets(unittest.TestCase):
         self.assertEqual(len(got), 1, got)
         self.assertIn("REPOSITORY_SECRETS lets it off, and it reads no stored secret outside an"
                       " environment: take it out", got[0])
+
+
+class Chosen(unittest.TestCase):
+    """A value a person outside the workflow chooses, spliced into a `run:`
+    script: a finding in any job, a reading one's too; through `env:` or
+    `with:`, none."""
+
+    def splices(self, expression, where="run"):
+        e = "${{ " + expression + " }}"
+        steps = {
+            "run": ["- run: |", "    set -eu", f'    tag="{e}"', '    echo "$tag"'],
+            "comment": ["- run: |", f"    # the tag, {e}, is pasted here too", "    echo hi"],
+            "env": ['- run: echo "$TAG"', "  env:", f"    TAG: {e}"],
+            "with": ["- uses: actions/checkout@PIN # v7.0.1", "  with:", f"    ref: {e}",
+                     "    persist-credentials: false"],
+            "name": [f"- name: build {e}", f"  if: ${{{{ {expression} != '' }}}}", "  run: echo hi"],
+        }[where]
+        job = ["build:", "  runs-on: ubuntu-latest", "  env:", f"    JOB: {e}", "  steps:"]
+        return findings(workflow("\n".join(job + ["    " + s for s in steps])))
+
+    def test_each_form_is_refused(self):
+        cases = (
+            ("inputs.tag", "inputs"),
+            ("github.event.inputs.tag", "github.event"),
+            ("github.event.inputs.tag || github.ref_name", "github.ref_name"),
+            ("github.ref_name", "github.ref_name"),
+            ("github.ref", "github.ref"),
+            ("github.head_ref", "github.head_ref"),
+            ("github.base_ref", "github.base_ref"),
+            ("github.event.release.tag_name", "github.event"),
+            ("github.event.release.name", "github.event"),
+            ("github.event.pull_request.title", "github.event"),
+            ("github.event.head_commit.message", "github.event"),
+            ("github.workflow_ref", "github.workflow_ref"),
+            ("github['ref_name']", "github.ref_name"),
+            ('github [ "event" ] . inputs . tag', "github.event"),
+            ("toJSON(github.event)", "github.event"),
+            ("toJSON(github)", "github"),
+            ("toJSON(inputs)", "inputs"),
+            ("format('v{0}', inputs.version)", "inputs"),
+            ("env.TAG", "env"),
+        )
+        for expression, name in cases:
+            for where in ("run", "comment"):
+                with self.subTest(expression=expression, where=where):
+                    got = self.splices(expression, where)
+                    self.assertEqual(len(got), 1, got)
+                    self.assertIn("job `build` splices", got[0])
+                    self.assertIn(f"{name} is {wc.CHOSEN[name]}", got[0])
+                    self.assertIn("through `env:`", got[0])
+
+    def test_through_env_or_with_or_outside_a_script_passes(self):
+        for where in ("env", "with", "name"):
+            for expression in ("inputs.tag", "github.event.inputs.tag || github.ref_name", "github.head_ref"):
+                with self.subTest(expression=expression, where=where):
+                    self.assertEqual(self.splices(expression, where), [])
+
+    def test_the_workflows_own_and_githubs_own_values_pass(self):
+        for expression in ("github.event_name", "github.ref_type", "github.repository", "github.run_id",
+                           "github.server_url", "github.repository_owner", "matrix.target", "vars.NAME",
+                           "steps.sum.outputs.checksum", "needs.build.outputs.checksum", "runner.temp",
+                           "github.token", "hashFiles('Cargo.lock')", "'inputs.tag'"):
+            with self.subTest(expression=expression):
+                self.assertEqual(self.splices(expression, "run"), [])
+
+    def test_a_job_that_reads_alone_is_held_too(self):
+        got = findings(workflow("""
+            a:
+              runs-on: ubuntu-latest
+              permissions:
+                contents: read
+              steps:
+                - run: make "${{ inputs.target }}"
+            b:
+              runs-on: ubuntu-latest
+              permissions:
+                contents: write
+              steps:
+                - run: gh release upload "${{ github.ref_name }}" dist/*
+        """))
+        self.assertEqual([f.split(":", 2)[2].split(" splices")[0] for f in got], [" job `a`", " job `b`"])
 
 
 class Stale(unittest.TestCase):

@@ -3,7 +3,7 @@
 that is not ours: `python3 tools/workflow_check.py [file ...]`, every file of
 .github/workflows/ by default. CI's fmt job runs it.
 
-docs/design/integrations.md#workflows. Four rules, each finding naming its
+docs/design/integrations.md#workflows. Five rules, each finding naming its
 file, line and job:
 
 - Every `uses:` names a 40-hex commit, with the tag it was taken from in a
@@ -47,6 +47,13 @@ file, line and job:
   at a workflow's top level reaches every job and is refused there.
   `secrets.GITHUB_TOKEN` is the job's own token, bounded by its
   `permissions:`. REPOSITORY_SECRETS lists a job let off, with its reason.
+- No `run:` script holds an expression naming a value a person outside the
+  workflow chooses (CHOSEN: an input, the event's payload, a branch's or a
+  tag's name), in any job: GitHub pastes `${{ }}` into the script's text
+  before its shell reads it, comments and all, so a tag named
+  `v1$(curl ...|sh)` -- git takes `$`, `(`, `;`, `|` and a backquote in a
+  name -- runs as the job, with its token. Such a value reaches a script
+  through `env:`, read as `"$NAME"`, or an action through `with:`.
 
 An entry of a list that nothing needs is a finding too, since it would let
 off whatever next took its name: a job let off that no longer needs it,
@@ -1180,7 +1187,8 @@ def npm_use(name, args):
 
 
 def git_use(name, args):
-    why = uses(("config",), ("checkout",), ("commit",), ("push",), ("tag",), ("ls-remote",))(name, args)
+    why = uses(("config",), ("checkout",), ("commit",), ("push",), ("tag",), ("ls-remote",),
+               ("rev-parse",))(name, args)
     if why is None and args[0] == "config" and args[1:2] not in (["user.name"], ["user.email"]):
         why = (f"`git config {' '.join(args[1:2])}`: git's configuration names the programs it starts"
                " (hooks, filters, aliases), and only the committer is set here")
@@ -1222,7 +1230,7 @@ WRITE_COMMANDS = {
            " which write through GitHub's API and run nothing of the repository's; an extension, or"
            " any other command, is refused", uses(("release",), ("pr",))),
     "git": ("the repository's history alone -- config of the committer, checkout, commit, push, tag,"
-            " ls-remote -- which runs no code of the commit's: a program git starts is named by its"
+            " ls-remote, rev-parse -- which runs no code of the commit's: a program git starts is named by its"
             " configuration, which nothing but the committer is set in (`-c` before the command is"
             " refused too)", git_use),
     "docker": ("the registry's side alone: log in, load the file `docker save` wrote, push, read what"
@@ -1430,6 +1438,67 @@ def secrets_read(node):
     return found
 
 
+# Values a person outside the workflow chooses, by the name an expression
+# reads them by, each with who chooses it. Spliced into a `run:` script they
+# are text of the script, read by its shell: through `env:` they are a
+# variable's value. `env` is here too, as a step's environment is often one
+# of these, and spliced it is pasted whatever it holds. `github.event_name`,
+# `github.ref_type`, `github.repository`, `github.run_id`, `matrix`, `vars`,
+# `steps` and `needs` are the workflow's, the repository's or GitHub's own.
+CHOSEN = {
+    "inputs": "a dispatch's or a calling workflow's input, typed by whoever starts the run",
+    "github.event": "the event's payload -- a release's, a tag's or a branch's name, a pull request's,"
+    " an issue's or a commit's title and text -- written by whoever made it",
+    "github.ref": "the branch or the tag the run is on, named by whoever pushed it",
+    "github.ref_name": "the branch or the tag the run is on, named by whoever pushed it",
+    "github.head_ref": "a pull request's branch, named by its author, a fork's among them",
+    "github.base_ref": "a pull request's base branch",
+    "github.workflow_ref": "the workflow's path and the branch or tag it runs at",
+    "github": "the whole context (`toJSON(github)`), the event's payload and the ref's name among it",
+    "env": "a step's environment, which holds what a job took from an input or the ref's name: read it"
+    " as `$NAME`",
+}
+# Names CHOSEN holds for themselves alone, not for what is under them:
+# `github.event_name` is no part of the payload.
+WHOLE = {"github"}
+# `github['ref_name']` is `github.ref_name`; `toJSON(github.event)` names
+# the event; `'inputs.tag'`, a string, names nothing.
+INDEX_FORM = re.compile(r"""\s*\[\s*(['"])([^'"]*)\1\s*\]""")
+DOT = re.compile(r"\s*\.\s*")
+STRING = re.compile(r"'(?:[^']|'')*'")
+
+
+def chosen(expression):
+    """The names in CHOSEN an expression reads, the most specific a place."""
+    text = STRING.sub("''", DOT.sub(".", INDEX_FORM.sub(lambda m: "." + m.group(2), expression)))
+    found = []
+    for m in re.finditer(r"(?<![\w.])[A-Za-z_][\w-]*(?:\.[A-Za-z_*][\w-]*)*", text):
+        parts = m.group(0).split(".")
+        for n in range(len(parts), 0, -1):
+            name = ".".join(parts[:n])
+            if name in CHOSEN and (name not in WHOLE or n == len(parts)):
+                if name not in found:
+                    found.append(name)
+                break
+    return found
+
+
+def spliced(job):
+    """Each expression of a step's `run:` script naming values CHOSEN
+    lists: (line, expression, names), once a step."""
+    found = []
+    for step in steps(job):
+        run = step.get("run")
+        if not isinstance(run, Scalar):
+            continue
+        for expression in EXPRESSION.findall(run):
+            names = chosen(expression)
+            entry = (run.line, " ".join(expression.split()), names)
+            if names and entry not in found:
+                found.append(entry)
+    return found
+
+
 class Seen:
     """What the workflows read so far needed of the lists: the actions let
     off a pin naming their major alone, and the scripts a job that writes
@@ -1497,6 +1566,14 @@ def check_text(text, name, seen=None):
                                 " what it made to this one as an artifact"
                                 + (f", or list it in {unlisted.group(1)} with its reason, if it builds"
                                    " nothing" if unlisted else ""))
+
+        for line, expression, values in spliced(job):
+            findings.append(f"{name}:{line}: job `{job_id}` splices `${{{{ {expression} }}}}` into a `run:`"
+                            " script: " + "; ".join(f"{v} is {CHOSEN[v]}" for v in values)
+                            + ", and GitHub pastes it into the script's text before its shell reads it,"
+                            " so a `$(...)`, a `;` or a backquote in it runs as this job: hand it to the"
+                            ' step through `env:` and read it as "$NAME", held to the form it must have'
+                            " before its first use")
 
         read_ = secrets_read(job)
         if str(job.get("secrets", "")).strip() == "inherit":
@@ -1580,7 +1657,8 @@ def main():
     let_off = sum(1 for listed in (REPOSITORY_SECRETS, WRITE_AND_BUILD) for f, _ in listed if f in names)
     print(f"workflow_check: {len(paths)} workflows, every action pinned by its commit, every"
           " workflow's permissions said, every job that writes running only what is listed, every"
-          " secret read under an environment"
+          " secret read under an environment, no value chosen outside the workflow spliced into a"
+          " script"
           + (f" ({let_off} let off by name, each with its reason)" if let_off else ""))
 
 

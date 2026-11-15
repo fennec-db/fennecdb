@@ -13,8 +13,13 @@ run-name: Swift binary for v${{ inputs.version }}
 #
 # The build and the pull request are two jobs: the build runs the crates'
 # build scripts, SwiftPM and the tests with a token that reads alone and a
-# checkout keeping none, and hands the zip's checksum to the job that holds
-# the writes, which builds nothing (tools/workflow_check.py).
+# checkout keeping none, and hands the zips and the checksum to the job that
+# holds the writes, which builds nothing (tools/workflow_check.py) and
+# attests the three files as this run's build, from the branch and commit
+# it ran at: release.yml attaches them and does not attest them again
+# (docs/design/integrations.md#provenance). The version, typed by whoever
+# starts the run, reaches each job as VERSION, through `env:`, held to a
+# version's form before anything uses it, never spliced into a script.
 on:
   workflow_dispatch:
     inputs:
@@ -34,7 +39,14 @@ jobs:
     runs-on: macos-latest
     outputs:
       checksum: ${{ steps.sum.outputs.checksum }}
+    env:
+      VERSION: ${{ inputs.version }}
     steps:
+      - name: The version is a release's
+        run: |
+          re='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+          [[ $VERSION =~ $re ]] || { echo "::error::the version asked for is no release's: X.Y.Z, or X.Y.Z-<pre-release>"; exit 1; }
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -43,8 +55,8 @@ jobs:
         run: |
           set -eu
           have=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          if [ "$have" != "${{ inputs.version }}" ]; then
-            echo "::error::Cargo.toml says $have: run make version V=${{ inputs.version }} first"
+          if [ "$have" != "$VERSION" ]; then
+            echo "::error::Cargo.toml says $have: run make version V=$VERSION first"
             exit 1
           fi
 
@@ -96,6 +108,11 @@ jobs:
   # commit the build was made from (this run's). The checksum reaches the
   # script in the environment, never spliced into it, and set-binary.sh
   # takes 64 hex digits alone; the checkout keeps its token for the push.
+  # Before it, the three files the build kept are attested as this run's
+  # build: the statement names this workflow, the branch the run is on and
+  # its commit, which the build checked out (`--source-ref
+  # refs/heads/main`, or `release/1.N`, verifies them; RELEASING.md, step
+  # 6).
   pull-request:
     name: pull request for v${{ inputs.version }}
     needs: build
@@ -103,28 +120,47 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ inputs.version }}
+      BASE: ${{ github.ref_name }}
+      REF_TYPE: ${{ github.ref_type }}
     steps:
+      # A run started on a tag has no branch to merge into, and its files
+      # would be attested as built at the tag: it stops before either.
+      - name: The version is a release's, and the run is on a branch
+        run: |
+          re='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+          [[ $VERSION =~ $re ]] || { echo "::error::the version asked for is no release's: X.Y.Z, or X.Y.Z-<pre-release>"; exit 1; }
+          if [ "$REF_TYPE" != branch ]; then
+            echo "::error::swift-binary.yml ran on a $REF_TYPE: start it on the branch the release is cut from (main, or release/1.N)"
+            exit 1
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: xcframework-v${{ inputs.version }}
+          path: ${{ runner.temp }}/xcframework
+
+      - name: Attest the XCFramework's build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/xcframework/*
 
       # Against the branch the run was started on, which both jobs checked
       # out: main for a release, release/1.N for a patch to an older minor
       # (RELEASING.md, A security release), whose Package.swift is that
       # branch's. The branch's name reaches gh in the environment, never
-      # spliced into the script; a run started on a tag has no branch to
-      # merge into, and stops.
+      # spliced into the script.
       - name: Open the pull request naming its checksum
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
           SUM: ${{ needs.build.outputs.checksum }}
-          BASE: ${{ github.ref_name }}
-          REF_TYPE: ${{ github.ref_type }}
         run: |
           set -eu
-          if [ "$REF_TYPE" != branch ]; then
-            echo "::error::swift-binary.yml ran on the $REF_TYPE $BASE: start it on the branch the release is cut from (main, or release/1.N)"
-            exit 1
-          fi
           v="$VERSION"
           integrations/swift/set-binary.sh "$v" "$SUM"
           branch="swift-binary-v$v"

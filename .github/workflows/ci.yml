@@ -181,8 +181,9 @@ jobs:
 
       # docs/design/integrations.md#workflows: every action pinned by its
       # commit, every workflow's permissions said, a job that writes running
-      # only what the check lists, every secret read under an environment;
-      # and the checker held to a failing workflow of each kind.
+      # only what the check lists, every secret read under an environment,
+      # no value chosen outside the workflow spliced into a script; and the
+      # checker held to a failing workflow of each kind.
       - name: Every workflow's actions pinned, its jobs' writes kept from its builds and its secrets in environments
         run: |
           python3 tools/workflow_check.py
@@ -195,9 +196,17 @@ jobs:
         run: python3 tools/test_image_latest.py
 
       # packages.yml's hold of GitHub's Latest and its npm dist-tag, against
-      # a stand-in for gh: a patch to an older minor moves neither back.
+      # a stand-in for gh: a patch to an older minor moves neither back, and
+      # a release candidate takes neither.
       - name: tools/release-latest.sh keeps GitHub's Latest and npm's latest on the newest release
         run: python3 tools/test_release_latest.py
+
+      # RELEASING.md's step 6, against stand-ins for gh, npm and curl: every
+      # asset there and no other, each attested by the workflow and at the
+      # ref that built it, the image by its digest, npm's and PyPI's
+      # provenance; and its list of assets held to the workflows.
+      - name: tools/release-verify.sh fails a release whose files or provenance are not the workflows'
+        run: python3 tools/test_release_verify.py
 
       # docs/design/fennecql.md#the-corpus: what the test job's corpus steps
       # harvest from each kind of file and the hand-written list, how a
@@ -2038,7 +2047,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: shellcheck
-        run: shellcheck --shell=sh site/install.sh site/test_install.sh tools/install-nfpm.sh tools/install-flutter.sh tools/linux-packages.sh tools/linux-packages-check.sh tools/windows-zip.sh tools/linux-ffi.sh tools/linux-ffi-check.sh tools/image-check.sh tools/image-latest.sh tools/release-latest.sh
+        run: shellcheck --shell=sh site/install.sh site/test_install.sh tools/install-nfpm.sh tools/install-flutter.sh tools/linux-packages.sh tools/linux-packages-check.sh tools/windows-zip.sh tools/linux-ffi.sh tools/linux-ffi-check.sh tools/image-check.sh tools/image-latest.sh tools/release-latest.sh tools/release-verify.sh
 
       - name: The installer, its checksum and its refusals
         run: sh site/test_install.sh

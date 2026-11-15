@@ -13,9 +13,10 @@ name: packages
 # the image's `latest` tag on ghcr.io (`image-latest`, which release.yml's
 # own `image-latest` stands in for where this runs before the image is
 # there) and GitHub's Latest (`github-latest`), each kept on the newest
-# published release, never moved back by a patch to an older minor; npm's
-# `latest` is that release's alone, an older minor's patch going out under
-# `release-<major>.<minor>` (tools/release-latest.sh). A registry keeps what it is given, so
+# published release, never moved back by a patch to an older minor nor
+# taken by a release candidate; npm's `latest` is that release's alone, an
+# older minor's patch going out under `release-<major>.<minor>`, and `next`
+# the newest pre-release's (tools/release-latest.sh). A registry keeps what it is given, so
 # nothing goes to one before every package has been built, installed and
 # used (integrations/packages.sh). Each registry takes a token when its
 # secret is set -- NPM_TOKEN, PYPI_API_TOKEN -- and this workflow's OIDC
@@ -133,9 +134,12 @@ jobs:
 
       # `latest`, which `npm install` takes, for the newest published
       # release alone: a patch to an older minor goes out under
-      # `release-<major>.<minor>` and a pre-release under `next`
-      # (tools/release-latest.sh), so neither moves it back. npm's trusted
-      # publishing moves no dist-tag after the publish, so it is named here.
+      # `release-<major>.<minor>`, and a pre-release under `next` where it is
+      # the newest pre-release and `next-<major>.<minor>` where it is not
+      # (tools/release-latest.sh), so neither pointer moves back. npm's
+      # trusted publishing moves no dist-tag after the publish, so it is
+      # named here. A package's first publish ever is `latest` whatever
+      # `--tag` says: the registry gives a package with none that version.
       - name: Publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -626,8 +630,10 @@ jobs:
   # pull a release candidate), and never any version but the newest
   # published release's (`sort -V` over the release list and this tag): a
   # dispatch for an old tag, or two releases published close together and
-  # finished out of order, must not move it back. It copies a list ghcr.io
-  # holds already -- `imagetools create` from one list writes those bytes
+  # finished out of order, must not move it back; a 404 for this release's
+  # own tag is the API a moment behind the publish that started the run,
+  # read again a bounded number of times, then a failure, never taken for a
+  # draft. It copies a list ghcr.io holds already -- `imagetools create` from one list writes those bytes
   # under the new tag -- and holds `latest` to that list's digest after.
   # Nothing is built or run, and no secret is read: the job's own token,
   # `packages: write`. On ubuntu-24.04, the Docker release.yml's image jobs
@@ -673,14 +679,17 @@ jobs:
 
   # GitHub's Latest, which site/install.sh and site/install.ps1 read
   # (`releases/latest/download/SHA256SUMS`), held on the newest published
-  # release: GitHub makes every release Latest as it is published, whatever
-  # its version, unless it is published with `--latest=false`
-  # (RELEASING.md), so a patch to an older minor published without it took
-  # Latest, and every install with it. tools/release-latest.sh puts it back,
-  # by version (`sort -V` over the published releases and this tag, as
-  # image-latest does): never for a draft or a pre-release, which GitHub
-  # makes no Latest, and nothing written where Latest is the newest
-  # already. One run a version at a time; two versions' runs may meet, and
+  # X.Y.Z release: GitHub makes every release Latest as it is published,
+  # whatever its version, unless it is published with `--latest=false` or
+  # as a pre-release (RELEASING.md), so a patch to an older minor, or a
+  # candidate, published without it took Latest, and every install with
+  # it. tools/release-latest.sh puts it back, by version (`sort -V` over the
+  # published X.Y.Z releases and this tag where it is one, as image-latest
+  # does), whatever release was published -- a candidate's run holds Latest
+  # on the newest release too -- and writes nothing where Latest is there
+  # already. A 404 for this release's own tag is the API a moment behind
+  # its publish here: read again, a bounded number of times, then a
+  # failure. One run a version at a time; two versions' runs may meet, and
   # the script reads the list again after a move and leaves Latest on the
   # newer. It builds nothing and reads no secret: the job's own token,
   # `contents: write`, which `gh release edit --latest` wants.
