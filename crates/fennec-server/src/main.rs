@@ -141,7 +141,8 @@ usage: fennec-server [options]
                             image sets to 65534:65534; started as anyone
                             else, the variable is passed over. Unix only
       --insecure            allow listening without a token on a non-loopback
-                            address
+                            address, and, with no token, answering a router
+                            that listens on one
       --tls-cert <pem>      serve HTTPS alone, with this certificate chain
       --tls-key <pem>       (the server's first, then its intermediates) and
                             its private key, both or neither. --metrics
