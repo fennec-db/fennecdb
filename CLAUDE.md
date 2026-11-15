@@ -539,13 +539,14 @@ Covers `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/wind
 
 ### `crates/fennec-bench/CLAUDE.md`
 
-Covers `crates/fennec-bench/`; its gate rule binds `tools/perf_gate.py`, `crates/fennec-http/examples/gate.rs`, CI's `perf (count)` and `perf (instructions)` jobs and `.github/workflows/perf-holdout.yml` too.
+Covers `crates/fennec-bench/`; its rules bind `tools/perf_gate.py`, `crates/fennec-http/examples/gate.rs`, CI's `perf (count)` and `perf (instructions)` jobs, `.github/workflows/perf-holdout.yml`, `tools/size_budgets.py` and CI's build job too.
 
 *Benchmarks*
 - `make scale-bench` holds fennec-server to pgvector, each over its own protocol.
 - `make ycsb` is fennecdb as a general database.
 - A pull request is held to its base in instructions and heap bytes an op.
 - Two builds' instruction counts
+- A binary a release ships is held to its budget
 
 ## Conventions
 
