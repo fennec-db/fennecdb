@@ -208,6 +208,12 @@ fn local(path: &str, read_only: bool, opts: mcp::Options) -> i32 {
             code = 1;
         }
     }
+    // The database before the lock: its drop still writes the file -- what
+    // is pending, the fsync and the sync log's removal (Linux, `synclog.rs`),
+    // the synced mark -- and let go after the lock, a server or another
+    // `fennec` taking it meanwhile opened the file under those writes. The
+    // session holds the one `Arc`: nothing it ran kept a clone.
+    drop(db);
     drop(lock);
     code
 }

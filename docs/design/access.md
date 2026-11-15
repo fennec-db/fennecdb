@@ -184,6 +184,42 @@ over the server token's was +2.2-4.4 us a `set`, +2.5-4.4 a row and
 +2.5-4.7 a page on main, +2.2-4.6, +2.5-3.9 and +2.7-4.8 with it (six
 runs each in turns, the machine loaded: the spread is the load's).
 
+**A rule is its `where`** (`rule`). A policy line's filter is parsed as
+the statement `get _ where <filter>` would be, and the rule kept its
+`where` alone: a clause after it -- `limit`, `order`, `match`, a list,
+`group ... having` -- parsed and was dropped, so `posts read where a = 1
+match body "x"` granted every row of `a = 1`, wider than written, and an
+inner `get` in a `having` there read a collection no check at startup saw,
+`_users` among them. Since #623 anything after the `where` but the role is
+refused at startup, naming the line
+(`an_inner_get_inside_a_value_is_refused_at_startup`): the select parsed
+must be `get _` and its filter, nothing else set.
+
+**A subject is a string** (`Access::scope`, `Scope::sub_not_text`). RFC
+7519 makes `sub` a StringOrURI, and a text that is not empty alone names a
+token's subject: the owner of its Idempotency-Keys (`idempotent::key`),
+whom `--request-rate` and `--call-rate` count (`rate::keyed`, beside its
+issuer), whose MCP calls `--mcp-calls-per-sec` counts, and `/_whoami`'s
+`sub`. A number is not made one by its digits: `42`, `42.0` and `4.2e1`
+are one number and three texts, and an issuer writing ids past 2^53 as JSON
+numbers -- JavaScript's -- hands two accounts one, so keys and counts kept
+by a number's text would part one user or join two. A token whose `sub` is
+a number, a bool, a list or an object is taken as before, and names no
+subject: its rules read the claim as it holds it (`owner = $jwt.sub` is
+`owner = 42`, matching no owner stored as the text `"42"`), it is counted
+with every token of its issuer naming none, and its Idempotency-Key is
+refused (400). That refusal said what a token with no `sub` at all is
+told, "needs a token with a subject (`sub`)", and sent vulpes, whose
+tokens carried its numeric account ids in `sub`, looking for a claim its
+tokens had; it now names the claim and says it must be a string, with a
+numeric id's spelling, `"42"` (`idempotent::SUB_NOT_TEXT`). The claims are
+asked on that refusal alone, so a request pays nothing for it. Refusing
+such a token (401) was not taken: its rules bind the number and serve it
+today wherever nothing needs a subject, and turning it away would refuse
+working apps for a claim's spelling. vulpes now mints the account as its
+decimal text in `sub` and the number in a claim of its own (`user`), which
+its rules compare with the number fields.
+
 **An ordered comparison against a claim holds the other side to the
 claim's kind** (`kind_held`, `claims_held`). Values of two kinds order by
 kind (`cmp_value`'s type rank), every bool below every number and every
@@ -217,7 +253,28 @@ policy has an inner `get` gets beside the others at `scope`. Bound only for
 a place standing alone, `posts read where author not in (get bans select
 author)` under `bans read where severity >= $jwt.min` shrank its list by
 the ban of a `"high"` severity and read that author's post, which main held
-out. A comparison is held only where it is a condition, under `and`, `or`
+out. Counting the `not`s holds only where nothing else negates the
+`get`, so a rule's inner `get` stands under `and`, `or` and `not` alone
+(`inner_gets`): a value has no `not` to count, and `messages read where
+(room in (get bans select room)) = false` -- a deny list spelled without
+one -- bound `bans read where sev >= $jwt.min` as an allow list's, the ban
+of `"high"` left its list, and a token whose `min` is 3 read that room's
+messages, `[three, two]` where `not (room in (get bans select room))`
+answers `[three]` (`!= true`, `coalesce(...) = false` and `case when ...
+then false else true end` alike; v0.2.0, the first release binding by the
+`not`s -- v0.1.11 and v0.1.12 bound a rule one way wherever it stood). An
+inner `get` anywhere else -- a comparison, `is null`, an `in`'s list or
+left side, arithmetic, a call's argument, a `case` -- is refused at
+startup, naming the line, and so is one anywhere in an inner `get` but its
+`where`, which no list is answered from: the engine answers a `where`'s
+alone, and one in `having` or a computed column failed every statement of
+its token (`eval`, 400), its collection read by no check at startup. A
+deny list is written `not (... in (get ...))`
+(`an_inner_get_inside_a_value_is_refused_at_startup`). Reading `= false`
+and `!= true` as a `not` was the other way, not taken: a value has no
+polarity in general -- `case`, `coalesce`, a comparison with a field -- and
+a rule read two ways is one more way for them to part. A comparison is
+held only where it is a condition, under `and`, `or`
 and `not`, so one used as a value -- `(level <= $jwt.c) = false`, a
 `case`'s condition -- is refused at startup, and so is a claim inside a call
 or arithmetic, whose result's kind no rule can know until it runs:
@@ -581,7 +638,10 @@ RLS gives a policy's subquery none of a table no policy grants -- refused
 as missing, it would fail every read of `positions`). Rules reading each
 other's collections at any depth and whatever their roles, a `*` rule
 reading one, `new.` or `expired()` inside one, are refused at startup
-(`ring`). Under the lock that runs a statement, the rules of the
+(`ring`), and so is an inner `get` standing anywhere but under `and`, `or`
+and `not`, or in an inner `get` anywhere but its `where` (`inner_gets`;
+*An ordered comparison against a claim* above). Under the lock that runs
+a statement, the rules of the
 collections it reads or writes (`statement_reads`) are answered as the
 `in` lists they are (`bound`, through lib.rs's `scoped_under` and
 `run_bound`): the statement then holds lists the engine reads as any, and
@@ -604,9 +664,117 @@ there wakes it. A `/batch` answers them for each line (a claim, then the
 read the claim opened, one round trip), a read loop and a read batch again
 for each lock they take, the MCP tools as `/query`. The list is held to
 `MAX_CLAIM_VALUES` and refused past it, never cut (`listed`: the inner
-`get` read up to 1 002 rows, and grouped by its field for its distinct
-values only when it fills them -- grouped every time, a `set` under such
-a rule took 4.5 -> 5.1 us). A scoped stream of a collection whose rules reach out
+`get` read up to 1 002 rows, and read again only where that bound, not the
+`get`'s own `limit`, stopped the read -- a plain one, one field and no
+page, grouped by its field for its distinct values (grouped every time, a
+`set` under such a rule took 4.5 -> 5.1 us); one that pages or computes
+its column as far as the engine reads a statement's own inner `get` of
+that kind, `MAX_SUBQUERY_VALUES` rows, refused past them as the engine
+refuses one, and refused without reading on where the rows read already
+hold more values than the bound; one that groups read once, to
+`MAX_SUBQUERY_VALUES` groups, both bounds asked of that one answer, its
+values first). Before #623 every form but the plain one was its first
+1 002 rows: under `limit 5000`, `offset 1`, `group
+room, n` or `select lower(room) as r`, 1 003 memberships of one room and
+then one of another were a list of the first room, and the token was shown
+nothing of the second -- closed, and wrong -- and 2 003 rows of 1 001 rooms
+a list of one rather than a refusal (`tests/reach.rs`,
+`a_rule_s_list_is_not_cut_at_its_first_rows`). Negated, the same cut
+failed open: a deny list, `not (room in (get bans select room where user =
+$jwt.sub limit 5000))` (or the same `in` `= false`, since refused at
+startup), read as 1 003 bans of
+one room's alone held out that room, and the token read the messages of a
+second room it had banned (`a_deny_list_is_not_cut_open`, `[three, two]`
+where its rule admits `[three]`); `hold` binds an inner `get`'s rules for
+the `not`s it stands under, not the length of its list. A plain `get`'s
+re-read was grouped by its field whatever the field, and a group is the
+values its key finds equal: a `nocase` field's key is its case fold, so
+`R2` and `r2` were one group, which kept the first row's spelling, where
+`in` compares by the collation of the field on its left. Under `not (room
+in (get bans select room where user = $jwt.sub))`, `bans.room` `nocase`
+and `messages.room`
+not, 1 003 bans of `R2` beside one of `r2` held out the room `R2` alone,
+and the token read `r2`'s messages
+(`a_deny_list_over_a_folded_field_keeps_every_spelling`, `[lower, three]`
+where the rule admits `[three]`; a Turkish fold, `nocase collate tr`,
+joined `KIR` and `kır` alike). A json field's key takes a number as the
+number it is, `[1.0]` and `[1]` one group, where `in` reads a list of ints
+from 0 to 255 beside bytes as the bytes it writes and a list of floats as
+none: a deny list of both over a `bytes` field held out neither once read
+again (`a_deny_list_of_json_values_keeps_each_as_written`). Such a field
+-- `nocase`, json, or a path into one -- is now read again row by row, as
+a `get` that pages or computes its column is, its values told apart by
+their encodings (`grouped_whole`, asked of the schema on a re-read alone);
+every other field holds one kind, whose group is the values `=` finds
+equal, and is grouped as before -- `collate und` and `collate tr` alone
+fold nothing, their equality the bytes'. Read so, a `nocase` list over
+more than 100 000 rows is refused where grouped it was answered, and costs
+more: counted around `Scope::bound` (`proc_pid_rusage`, a scratch program,
+medians of nine), a `nocase` list of one room over 1 003 rows went 3.21 M
+-> 4.37 M instructions a statement, and over 100 000 rows 110.8 M -> 204.5
+M, the price of a list kept whole. A ranking answers its best rows,
+`MAX_MATCH_ROWS` or `MAX_NEAR_ROWS` where it names no `limit`, not every
+row its filter holds: under `not (room in (get bans select room where user
+= $jwt.sub match reason "spam"))`, 10 001 bans were their top 10 000, and
+the token read the room of the one ranked last. `match` with no `order` or
+aggregate, loose or not, `near`, `fuse` and `rerank` in a rule's inner
+`get` are refused where the policy is read (`inner_gets`, `ranking`),
+naming its line, so a server holding one stops at its start rather than
+serve a page as a set; `match` beside an `order` or an aggregate is a
+filter, every row it scores above zero, with no ceiling (`matched_rows`),
+and stays
+(`a_ranking_in_a_rule_s_inner_get_is_refused_at_startup` reads 10 001
+bans so, whole). What a re-read costs a statement, counted the same way:
+read row by row it stops at `MAX_SUBQUERY_VALUES` rows, 204.4 M
+instructions (11.2 ms here) over 100 000 rows of one room, against 4.38 M
+over 1 003, and a plain field's grouped re-read folds every row of its
+filter with no bound of rows at all, 110.6 M over 100 000 rows, some 1 100
+a row. A `group` form stops at 100 000 groups, which bound the groups and
+not the rows folded into them, and is read once: a grouped read folds
+every row of its filter and works out every group before its page is cut
+(`aggregate`: `selected_ids`, `fold`, `rows`, then `page`), so the first
+read #623 made of it, to 1 002 groups, cost nearly what its re-read to
+100 001 did. Read once, 100 000 groups of a row each cost 0.60 G
+instructions where read twice they cost 1.14 G, 1 004 groups 6.4 M where
+14.8 M, and 100 001 groups, refused, 0.60 G where 1.13 G (this branch
+built before and after the change, medians of nine, two runs each, the
+load at 24 to 57; that pair read the 100 000 rows row by row in 224 M).
+One refusal costs more: a list whose first 1 002 groups already held more
+than 1 000 values was refused after the first read, its other groups
+never sorted nor made rows, and over 100 000 groups of a room each it
+costs 0.61 G where it cost 0.54 G, a list refused on every statement of
+its token either way. None of these figures is the most a list can cost:
+a `group` form and a plain list read grouped are bounded in groups or
+values, not in the rows they read, so a filter of a million rows folds a
+million, and a re-read row by row with `order` sorts every row of its
+filter before it takes its 100 001, unless an ordered index on that field
+walks it to its page (`walk_order`). The bound is on values, not on the
+rows a filter holds: a token whose rule's filter holds many rows pays for
+them in every statement, and is served better by a narrower filter or the
+membership kept in the rows. The refusal names the rule,
+by its collection and its filter as the policy writes it -- which
+`/_whoami` shows the token too -- beside the inner `get` and the bound
+(`past_bound`), where it named the inner collection alone; `distinct`
+stops at the first value past the bound, since kept in order each of 100
+000 values read again shifted the ones before. Under the policy bench's
+`reach` side it costs the call answering a rule's lists,
+`Scope::bound_over`, +37 of its own 11 681 instructions (one call traced in
+each build, `tools/instr/trace.py`; the allocator's 55 mallocs and 42 frees
+the same in both, its paths the binary's draw). The bound stays a list
+claim's 1 000, not a statement's 100 000: a statement's own `in (get ...)`
+is a cost its sender takes on for it, where a rule's list is made before
+every statement of its token -- each line of a `/batch`, each look of a
+stream after a write to what it reads -- and tested against every row the
+statement reads and every document it writes. Counted in instructions
+(`proc_pid_rusage` around `Scope::bound` in a scratch program, the load
+standing at 30 to 40, which a count does not see), a rule's list of 2
+values cost a statement 32 114, of 100 values 296 067 and of 1 000
+2 842 625 -- some 2 800 a value -- and the engine's own inner `get` of
+1 000, 10 000 and 100 000 values cost its statement 3.8 M, 38.0 M and
+391.3 M, which a rule held to that bound would add to every statement of
+its token. Past 1 000 the membership belongs in the rows -- a collection a
+room, a tenant -- or in a statement's own `in (get ...)`. A scoped stream
+of a collection whose rules reach out
 (`sse::Reach`) binds them again under a look's lock where a collection
 they read was written since its change, where a row of one reached its
 `@ttl` since they were answered -- the stream wakes for it, as for a row

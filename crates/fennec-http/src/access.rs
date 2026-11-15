@@ -141,9 +141,12 @@
 //! statement, since the one before may have changed what it reads. A rule
 //! naming the fields it shows may read another collection as any other.
 //! Its list is held to [`MAX_CLAIM_VALUES`], as a
-//! list claim is, and refused past it rather than cut. Rules that read each
+//! list claim is, and refused past it rather than cut, every value its rows
+//! hold in it as `in` tells them apart ([`listed`]). Rules that read each
 //! other's collections, at any depth and whatever their roles, are refused
-//! at startup: none of them could be answered first. A scoped subscription
+//! at startup: none of them could be answered first. So is an inner `get`
+//! that ranks its rows ([`ranking`]), whose answer is a page of the best of
+//! them rather than every row its filter holds. A scoped subscription
 //! whose rules read another collection is bound again when that collection
 //! is written, its rows entering and leaving as the answer moves (`sse`).
 //!
@@ -187,7 +190,7 @@
 use crate::crypto::{b64url_decode, b64url_encode, ct_eq, hmac_sha256, P256Key, RsaKey};
 use fennec_core::named::Definition;
 use fennec_core::prelude::*;
-use fennec_core::query::{eval, truthy, CmpOp, EvalCtx, Pick, RowAccess};
+use fennec_core::query::{eval, truthy, CmpOp, EvalCtx, Pick, RowAccess, MAX_SUBQUERY_VALUES};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -1395,6 +1398,25 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
         let Statement::Select(mut sel) = stmt else {
             unreachable!("a get parses as a select")
         };
+        // A rule is its `where`. A clause after it -- `limit`, `order`,
+        // `match`, a list, `group ... having` -- parsed and was dropped, so
+        // `posts read where a = 1 match body "x"` granted every row of `a =
+        // 1`, and an inner `get` in a `having` there read a collection no
+        // check here saw, `_users` among them.
+        let filter = sel.filter.take();
+        if sel
+            != (Select {
+                collection: "_".into(),
+                ..Select::default()
+            })
+        {
+            return Err(
+                "a rule's filter is its `where` alone: nothing follows it but \
+                        `for <role>`"
+                    .into(),
+            );
+        }
+        sel.filter = filter;
         if let Some(f) = &mut sel.filter {
             any_as_in(f);
             claims_held(f, true, &claims)?;
@@ -1404,7 +1426,7 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
         // ([`Scope::bound`]): a document being written is tested on its
         // own (`admits`), where no query runs.
         if let Some(f) = &sel.filter {
-            inner_gets(f, &mut reads)?;
+            inner_gets(f, true, &mut reads)?;
         }
         // Tested against a document on its own as well, where nothing
         // answers it; what a token may reap is the `expired` grant's.
@@ -1758,15 +1780,61 @@ fn role_of(rest: &str) -> std::result::Result<(&str, Option<String>), String> {
 /// `limit` or a `near` it would make every token's list another statement.
 /// `new.` there would read the inner collection's own field of that name,
 /// not the row a write leaves, and `expired()` its rows past their time,
-/// which are the `expired` grant's: both refused.
-fn inner_gets(e: &Expr, out: &mut Vec<String>) -> std::result::Result<(), String> {
+/// which are the `expired` grant's: both refused. So is a ranking
+/// ([`ranking`]): a page of the best rows, never the set the filter holds.
+/// An inner `get` stands as a condition -- under `and`, `or` and `not`
+/// alone from the top of its filter (`cond`) -- and inside another in its
+/// `where` alone ([`holds_get`]), the one place a list is answered from.
+fn inner_gets(e: &Expr, cond: bool, out: &mut Vec<String>) -> std::result::Result<(), String> {
     if let Expr::InSelect(_, sel) = e {
+        // [`bind_held`] and [`hold`] bind an inner `get`'s rules -- the read
+        // rules of what it reads, an ordered comparison with a claim among
+        // them -- for the `not`s it stands under, and a list under none as
+        // an allow list's: under `bans read where sev >= $jwt.min`, a ban
+        // of `"high"` is held out of an allow list and kept in a deny list.
+        // Spelled `(room in (get bans ...)) = false`, a deny list stood
+        // under no `not`, its list held that ban out, and the token read
+        // the room's messages, which `not (room in (get bans ...))` holds
+        // out. Inside a value -- `= false`, `!= true`, `case`, `coalesce`,
+        // a comparison with a field -- there is no `not` to count, so one
+        // is refused where the policy is read.
+        if !cond {
+            return Err(format!(
+                "a rule's `in (get {} ...)` stands inside a value: an inner `get` stands under \
+                 `and`, `or` and `not` alone, whose `not`s say how the rules of what it reads \
+                 are bound -- write a deny list `not (... in (get ...))`",
+                sel.collection
+            ));
+        }
         sel.check_subquery()
             .map_err(|e| format!("the filter: {e}"))?;
+        // With no `limit`, a ranking answers its best `MAX_MATCH_ROWS` or
+        // `MAX_NEAR_ROWS`, and a list cut there holds out less than its
+        // filter names: under `not (room in (get bans select room where user
+        // = $jwt.sub match reason "spam"))`, 10 001 bans were the top
+        // 10 000, and the token read the room of the one ranked last.
+        // Refused where the policy is read, a server holding such a rule
+        // stops at its start, not at the 10 001st row.
+        if let Some(clause) = ranking(sel) {
+            return Err(format!(
+                "a rule's `in (get {} ...)` ranks its rows by {clause}: a ranking is a page of \
+                 its best rows, not every row its filter holds, and a list cut there holds out \
+                 less than it names where the rule negates it -- `match` beside an `order` or \
+                 an aggregate is a filter, every row it scores above zero",
+                sel.collection
+            ));
+        }
         let mut rest = (**sel).clone();
         let filter = rest.filter.take();
         if rest.max_param() > 0 {
             return Err("a rule's inner `get` takes `$jwt.<claim>` in its `where` alone".into());
+        }
+        if holds_get(&rest) {
+            return Err(format!(
+                "a rule's `in (get {} ...)` holds an inner `get` outside its `where`: a list is \
+                 answered from a `where` alone, before the statement runs",
+                sel.collection
+            ));
         }
         if let Some(f) = &filter {
             if f.asks_expired() {
@@ -1779,19 +1847,64 @@ fn inner_gets(e: &Expr, out: &mut Vec<String>) -> std::result::Result<(), String
                     sel.collection
                 ));
             }
-            inner_gets(f, out)?;
+            inner_gets(f, true, out)?;
         }
         if !out.contains(&sel.collection) {
             out.push(sel.collection.clone());
         }
     }
+    // An `and`, an `or` and a `not` stand where they are; anything else --
+    // a comparison, an `in`'s list or left side, `is null`, arithmetic, a
+    // call, `case` -- reads its operands as values.
+    let cond = cond && matches!(e, Expr::And(..) | Expr::Or(..) | Expr::Not(_));
     let mut r = Ok(());
     e.each_child(&mut |c| {
         if r.is_ok() {
-            r = inner_gets(c, out);
+            r = inner_gets(c, cond, out);
         }
     });
     r
+}
+
+/// Whether an `in (get ...)` stands in `sel` outside its `where` -- an
+/// item of its list, a group key, `having`, an `order` key, a ranking's
+/// text or vector, a mark's argument. The engine answers one in a `where`
+/// alone, before the query runs, and refuses one it meets row by row
+/// (`eval`); a rule's list is answered ([`answer`]) and held to the
+/// token's rules ([`hold`]) from its `where` alone too. Let through, a
+/// list whose `having` read another collection failed every statement of
+/// its token (400), and what it read was out of the checks at startup, the
+/// ring's and the server's own collections'.
+fn holds_get(sel: &Select) -> bool {
+    let items = (sel.aggregate.iter().chain(&sel.computed)).map(|c| &c.expr);
+    let sorts = sel.order.iter().filter_map(|s| s.expr.as_ref());
+    let ranks = (sel.near.iter().map(|n| &n.vector))
+        .chain(sel.matcher.iter().map(|m| &m.query))
+        .chain(sel.rerank.iter().map(|r| &r.vector));
+    let marks = sel.marks.iter().flat_map(|m| &m.args);
+    (items.chain(&sel.group).chain(&sel.having))
+        .chain(sorts)
+        .chain(ranks)
+        .chain(marks)
+        .any(Expr::has_subquery)
+}
+
+/// The clause by which `sel` ranks its rows -- its answer a page of the
+/// best of them, at most a ranking's ceiling, rather than every row its
+/// filter holds -- or `None`: `fuse`, `rerank`, `near`, and `match` but
+/// beside `order` or an aggregate (`Select::match_ranks`), loose or not.
+fn ranking(sel: &Select) -> Option<&'static str> {
+    if sel.fuse.is_some() {
+        Some("`fuse`")
+    } else if sel.rerank.is_some() {
+        Some("`rerank`")
+    } else if sel.near.is_some() {
+        Some("`near`")
+    } else if sel.match_ranks() {
+        Some("`match`")
+    } else {
+        None
+    }
 }
 
 /// The first ring of rules reading each other's collections through their
@@ -2002,7 +2115,10 @@ fn bind(e: &Expr, values: &[Value]) -> Expr {
 /// rows with no `level` that `not (level > $jwt.c)` admitted on main, and
 /// the server token's `not (level > 5)` admits.
 /// An inner `get`'s filter stands where its `in` does: under `not ... in`,
-/// a row of another kind is in its list and so held out.
+/// a row of another kind is in its list and so held out. The `not`s are
+/// all that negate it: a rule's inner `get` stands under `and`, `or` and
+/// `not` alone ([`inner_gets`]), where `(... in (get ...)) = false` was a
+/// deny list bound as an allow list.
 fn bind_held(e: &Expr, values: &[Value], pass: bool) -> Expr {
     let b = |x: &Expr| Box::new(bind_held(x, values, pass));
     match e {
@@ -2220,7 +2336,10 @@ fn granted(rules: &[Bound], collection: &str, op: u8) -> Option<Option<Expr>> {
 /// standing alone, and the list held out fewer rows: `author not in (get
 /// bans select author)` under `bans read where severity >= $jwt.min` read
 /// a post by an author banned with a `"high"` severity, which main held
-/// out. Bound for the `not`, the list keeps such a row.
+/// out. Bound for the `not`, the list keeps such a row. Counting the `not`s
+/// is enough because a rule's inner `get` stands under `and`, `or` and
+/// `not` alone ([`inner_gets`]): inside a value, `(author in (get bans
+/// ...)) = false`, the same list was held as an allow list's.
 fn hold(pos: &[Bound], neg: &[Bound], e: &mut Expr, pass: bool) {
     match e {
         Expr::Not(x) => hold(pos, neg, x, !pass),
@@ -2243,40 +2362,52 @@ fn hold(pos: &[Bound], neg: &[Bound], e: &mut Expr, pass: bool) {
 /// the engine answers a statement's own -- but held to
 /// [`MAX_CLAIM_VALUES`], a list claim's bound, since a rule's list is made
 /// before every statement its token sends, and refused past it rather than
-/// cut, which would hide rows the rule grants.
-fn answer(db: &Database, e: &mut Expr) -> Result<()> {
+/// cut, which would hide rows the rule grants. `rule` is the rule whose
+/// filter `e` is, which a refusal names.
+fn answer(db: &Database, e: &mut Expr, rule: &Bound) -> Result<()> {
     e.each_subquery_mut(&mut |x| {
         let Expr::InSelect(lhs, sel) = std::mem::replace(x, Expr::Lit(Value::Null)) else {
             unreachable!("each_subquery_mut hands an `in (get ...)`")
         };
         let mut sel = *sel;
         if let Some(f) = &mut sel.filter {
-            answer(db, f)?;
+            answer(db, f, rule)?;
         }
-        *x = Expr::In(lhs, listed(db, sel)?);
+        *x = Expr::In(lhs, listed(db, sel, rule)?);
         Ok(())
     })
 }
 
 /// The values an inner `get` with no inner `get` left lists, at most
-/// [`MAX_CLAIM_VALUES`] of them. A plain one -- one field, no page, no
-/// ranking -- is read up to the rows that could still be under the bound,
-/// and only one that fills them read again grouped by its field, its rows
-/// then its distinct values: a customer's few orders are a bucket's read,
-/// where grouping every list took a `set` under such a rule 4.5 -> 5.1 us
-/// (`make policy-bench`).
-fn listed(db: &Database, sel: Select) -> Result<Vec<Expr>> {
+/// [`MAX_CLAIM_VALUES`] of them, each counted once however many rows hold
+/// it. One that groups is read once, as far as the engine reads a
+/// statement's own inner `get` that groups, [`MAX_SUBQUERY_VALUES`]
+/// groups, and refused past them. Any other is read up to the rows that
+/// could still be under the bound, and read again only where the bound,
+/// not its own `limit`, stopped that read: a plain one -- one field, no
+/// page -- grouped by its field where a group is one value as `in` tells
+/// values apart ([`grouped_whole`]), its rows then its distinct values (a
+/// customer's few orders are a bucket's read, where grouping every list
+/// took a `set` under such a rule 4.5 -> 5.1 us, `make policy-bench`),
+/// every row of its filter folded; any other -- one that pages or computes
+/// its column, or a plain `nocase` or json field -- as far as the engine
+/// reads a statement's own inner `get` that pages or computes its column,
+/// [`MAX_SUBQUERY_VALUES`] rows, and refused past them. Its first rows
+/// alone were its list: 1 003 memberships of one room, then one of another,
+/// were a list of the first under `limit 5000`, and a token was shown none
+/// of the rows the rule granted it in the second. A ranking, a page rather
+/// than a set, is refused where the policy is read ([`inner_gets`]).
+fn listed(db: &Database, sel: Select, rule: &Bound) -> Result<Vec<Expr>> {
     // Two past the bound tell that the list is past it: one may be a null.
     let past = MAX_CLAIM_VALUES + 2;
+    debug_assert!(ranking(&sel).is_none(), "a rule's inner `get` ranks");
     let mut stmt = Statement::Select(sel);
     let Statement::Select(sel) = &mut stmt else {
         unreachable!("made a select")
     };
-    // A `match` beside `order` or an aggregate is a filter, read as a
-    // `where` is (`Select::match_ranks`).
-    let ranked = sel.near.is_some() || sel.match_ranks();
-    let plain = !ranked
-        && sel.aggregate.is_empty()
+    // A `match` here stands beside `order` or an aggregate: a filter, read
+    // as a `where` is (`Select::match_ranks`).
+    let plain = sel.aggregate.is_empty()
         && sel.group.is_empty()
         && sel.computed.is_empty()
         && sel.limit.is_none()
@@ -2285,41 +2416,152 @@ fn listed(db: &Database, sel: Select) -> Result<Vec<Expr>> {
         Some(p) if plain && p.len() == 1 => Some(p[0].clone()),
         _ => None,
     };
-    if !ranked && (sel.aggregate.is_empty() || !sel.group.is_empty()) {
-        sel.limit = Some(Count::N(sel.limit.map_or(past, |l| l.at(&[]).min(past))));
+    let groups = !sel.group.is_empty();
+    // The rows the `get` asks for, `None` for every one: a rule's names no
+    // parameter there (`inner_gets`). An aggregate without `group` answers
+    // one row.
+    let asked = sel.limit.map(|l| l.at(&[]));
+    let paged = sel.aggregate.is_empty() || groups;
+    // A grouped read folds every row of its filter and works out every
+    // group before its page is cut (`aggregate`), so a first read to 1 002
+    // groups cost nearly what one to 100 001 does: read again past it,
+    // 100 000 groups of a row each took 1.14 G instructions, where read
+    // once they take 0.60 G. It is read once, to where a statement's own
+    // would stop.
+    let first = match groups {
+        true => MAX_SUBQUERY_VALUES + 1,
+        false => past,
+    };
+    if paged {
+        sel.limit = Some(Count::N(asked.map_or(first, |l| l.min(first))));
     }
-    let mut rows = rows_of(db, &stmt)?;
-    if let (Some(column), true) = (column, rows.len() >= past) {
+    let rows = rows_of(db, &stmt)?;
+    let read = rows.len();
+    // The bound stopped the read, not the `get`: the rows after may hold
+    // values these do not.
+    let stopped = !groups && paged && read >= past && asked.is_none_or(|l| l > past);
+    let items = if groups {
+        // Its values asked first: a list past both bounds is told it holds
+        // too many values, which selecting its field alone -- what the
+        // groups' refusal advises -- would leave as many.
+        match distinct(rows) {
+            Some(_) if read > MAX_SUBQUERY_VALUES => {
+                let why = format!(
+                    "makes more than {MAX_SUBQUERY_VALUES} groups, where a statement's own inner \
+                     `get` that groups stops too, and is refused rather than cut -- narrow it, \
+                     or select its field alone, whose values count once however many rows hold \
+                     them"
+                );
+                return Err(past_bound(rule, &stmt, &why));
+            }
+            items => items,
+        }
+    } else if !stopped {
+        distinct(rows)
+    } else {
         let Statement::Select(sel) = &mut stmt else {
             unreachable!("made a select")
         };
-        sel.aggregate = vec![
-            Column {
-                expr: Expr::Field(column.clone()),
-                name: column.clone(),
+        let field = column.is_some();
+        match column.filter(|c| grouped_whole(db, &sel.collection, c)) {
+            Some(column) => {
+                sel.aggregate = vec![
+                    Column {
+                        expr: Expr::Field(column.clone()),
+                        name: column.clone(),
+                    },
+                    Column {
+                        expr: Expr::Call("count".into(), Vec::new()),
+                        name: "n".into(),
+                    },
+                ];
+                sel.project = None;
+                sel.group = vec![Expr::Field(column)];
+                // An `in` list has no order.
+                sel.order.clear();
+                distinct(rows_of(db, &stmt)?)
+            }
+            // Past the bound among the rows read, it is refused without
+            // reading on; else read again, as far as a statement's would be.
+            None => match distinct(rows) {
+                None => None,
+                Some(_) => {
+                    let bound = MAX_SUBQUERY_VALUES + 1;
+                    sel.limit = Some(Count::N(asked.map_or(bound, |l| l.min(bound))));
+                    let rows = rows_of(db, &stmt)?;
+                    if rows.len() > MAX_SUBQUERY_VALUES {
+                        let why = match field {
+                            true => format!(
+                                "reads more than {MAX_SUBQUERY_VALUES} rows: its field is \
+                                 `nocase` or json, whose groups would join values `in` tells \
+                                 apart, so its rows are read one by one, as far as a statement's \
+                                 own inner `get` that pages or computes its column is, and it is \
+                                 refused rather than cut -- narrow it"
+                            ),
+                            false => format!(
+                                "reads more than {MAX_SUBQUERY_VALUES} rows, where a statement's \
+                                 own inner `get` that pages or computes its column stops too, and \
+                                 is refused rather than cut -- narrow it, or select its field \
+                                 alone, whose values count once however many rows hold them"
+                            ),
+                        };
+                        return Err(past_bound(rule, &stmt, &why));
+                    }
+                    distinct(rows)
+                }
             },
-            Column {
-                expr: Expr::Call("count".into(), Vec::new()),
-                name: "n".into(),
-            },
-        ];
-        sel.project = None;
-        sel.group = vec![Expr::Field(column)];
-        // An `in` list has no order.
-        sel.order.clear();
-        rows = rows_of(db, &stmt)?;
-    }
-    distinct(rows).ok_or_else(|| {
-        let Statement::Select(sel) = &stmt else {
-            unreachable!("made a select")
-        };
-        Error::Query(format!(
-            "a rule's `in (get {} ...)` lists more than {MAX_CLAIM_VALUES} values: a policy's \
-             list is held to that many, as a list claim is, and refused past it rather than cut \
-             -- narrow the inner `get`, or keep the membership in the rows themselves",
-            sel.collection
-        ))
+        }
+    };
+    items.ok_or_else(|| {
+        past_bound(
+            rule,
+            &stmt,
+            &format!(
+                "lists more than {MAX_CLAIM_VALUES} values, a policy's bound as a list claim's, \
+                 and is refused rather than cut -- narrow the inner `get`, or keep the membership \
+                 in the rows themselves"
+            ),
+        )
     })
+}
+
+/// Whether a group by `column` of `collection` is one value as `in` tells
+/// values apart, so that the groups are the list ([`listed`]). A group is
+/// the values its key finds equal, and a `nocase` field's key is its case
+/// fold -- `R2` and `r2` one group, which keeps the first row's spelling --
+/// where `in` compares by the collation of the field on its left: a deny
+/// list over a `nocase` `room` held out the case-sensitive rows of `R2` and
+/// not those of `r2`, which the token had banned too, and read them. A json
+/// field's key, or a path's into one, takes a number as the number it is,
+/// `[1.0]` and `[1]` one group, where `in` reads a list of ints from 0 to
+/// 255 beside bytes as the bytes it writes and a list of floats as none.
+/// Every other field holds one kind, whose group is the values `=` finds
+/// equal, and a collation alone folds nothing, its equality the bytes'.
+/// Asked only where a list is read again, never of one its first read
+/// answers.
+fn grouped_whole(db: &Database, collection: &str, column: &str) -> bool {
+    column == "id"
+        || db.collection(collection).is_ok_and(|c| {
+            c.schema
+                .field(column)
+                .is_some_and(|f| !f.nocase && !matches!(f.ty, DataType::Json))
+        })
+}
+
+/// The refusal of `rule`'s list from `stmt`, its inner `get`, past a
+/// bound, `why` the rest of it: it names the rule by its collection and
+/// its filter as the policy writes it, which `/_whoami` shows its token
+/// too, and the inner `get`.
+fn past_bound(rule: &Bound, stmt: &Statement, why: &str) -> Error {
+    let Statement::Select(sel) = stmt else {
+        unreachable!("made a select")
+    };
+    Error::Query(format!(
+        "the rule on `{}` where {}: its `in (get {} ...)` {why}",
+        rule.collection.as_deref().unwrap_or("*"),
+        rule.text.as_deref().unwrap_or_default(),
+        sel.collection
+    ))
 }
 
 fn rows_of(db: &Database, stmt: &Statement) -> Result<Vec<Row>> {
@@ -2330,10 +2572,13 @@ fn rows_of(db: &Database, stmt: &Statement) -> Result<Vec<Row>> {
 }
 
 /// The first column's distinct values of `rows`, nulls left out; `None`
-/// past [`MAX_CLAIM_VALUES`].
+/// past [`MAX_CLAIM_VALUES`], told as soon as one passes it: the rows of a
+/// `get` read again run to [`MAX_SUBQUERY_VALUES`], and kept in order
+/// every value of those was another shift of the ones before.
 fn distinct(rows: Vec<Row>) -> Option<Vec<Expr>> {
-    let mut items: Vec<Expr> = Vec::with_capacity(rows.len());
-    let mut keys: Vec<Vec<u8>> = Vec::with_capacity(rows.len());
+    let room = rows.len().min(MAX_CLAIM_VALUES + 1);
+    let mut items: Vec<Expr> = Vec::with_capacity(room);
+    let mut keys: Vec<Vec<u8>> = Vec::with_capacity(room);
     let mut key = Vec::new();
     for row in rows {
         let Some(v) = row.values.into_iter().next().filter(|v| !v.is_null()) else {
@@ -2348,8 +2593,11 @@ fn distinct(rows: Vec<Row>) -> Option<Vec<Expr>> {
             Err(at) => keys.insert(at, key.clone()),
         }
         items.push(Expr::Lit(v));
+        if items.len() > MAX_CLAIM_VALUES {
+            return None;
+        }
     }
-    (items.len() <= MAX_CLAIM_VALUES).then_some(items)
+    Some(items)
 }
 
 /// The collections `stmt` reads or writes, each `lookup` level's and each
@@ -2479,6 +2727,17 @@ impl Scope {
     /// The `sub` claim, when the token has one.
     pub fn subject(&self) -> Option<&str> {
         self.subject.as_deref()
+    }
+
+    /// Whether the token holds a `sub` that is no text -- a number, a bool,
+    /// a list or an object -- which names no subject ([`Self::subject`]):
+    /// RFC 7519 makes `sub` a StringOrURI. A refusal needing a subject says
+    /// so, since "no subject" sent a token holding `"sub": 42` looking for
+    /// a claim it had. The token is taken as before, its rules reading the
+    /// claim as it holds it.
+    pub fn sub_not_text(&self) -> bool {
+        let sub = self.roles.0.iter().find(|(k, _)| k == "sub");
+        sub.is_some_and(|(_, v)| !matches!(v, Value::Text(_) | Value::Null))
     }
 
     /// Whether a `call` line grants the token's roles the statement `name`:
@@ -2809,7 +3068,7 @@ impl Scope {
             }
             let mut filter = r.filter.clone();
             if let Some(f) = &mut filter {
-                answer(db, f)?;
+                answer(db, f, r)?;
             }
             // What a transition asks of the row before is its filter's,
             // read off the answer rather than answered again.

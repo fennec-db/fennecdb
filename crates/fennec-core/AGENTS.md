@@ -71,7 +71,10 @@ graph's: rebuilds).
 (Linux and Android, `synclog.rs`). Whatever renames a file into a
 database's place removes the log first, durably (`fs::forget_sync_log`),
 and syncs the directory after (`fs::sync_dir`, which on Windows flushes
-the renamed file, then its directory).
+the renamed file, then its directory). A clean close removes it once the
+file is synced, and begins none after: what exits holding a database it
+never drops -- a server's shutdown -- asks for it (`Database::close_log`),
+and a sink around a file's passes it on.
 
 ### The HNSW graph
 
