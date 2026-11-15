@@ -205,6 +205,15 @@ file that holds it. Each entry names a file, the directories it covers and
 its rules' titles by section; `tools/agents_md.py --check` holds the index
 to the files.
 
+### `crates/CLAUDE.md`
+
+Covers `crates/`.
+
+*Conventions*
+- Unit tests live inline
+- Every parser of untrusted bytes is fuzzed
+- A secret is compared by `crypto::ct_eq` alone
+
 ### `crates/fennec-core/CLAUDE.md`
 
 Covers `crates/fennec-core/`; the browser module's rules bind `crates/fennec-wasm/` and `web/` too, the file format's fennec-http's archive segments (`archive.rs`).
@@ -514,21 +523,13 @@ Covers `crates/fennec-bench/`.
 *Benchmarks*
 - `make scale-bench` holds fennec-server to pgvector, each over its own protocol.
 - `make ycsb` is fennecdb as a general database.
+- Two builds' instruction counts
 
 ## Conventions
 
 - `Error` (`fennec-core/src/error.rs`) is the single error type,
   allocation-free, no `Box`; `fennec-http` maps it onto HTTP statuses
   (`api::status_of`).
-- [Unit tests live inline](docs/design/conventions.md#test-binaries)
-  (`#[cfg(test)] mod tests`); cross-crate and protocol tests in
-  `crates/*/tests/`, a file each, one binary a crate through `tests/all.rs`
-  (`autotests = false`: a new file needs its `mod` line). A test reading the
-  process's own counts (`/_metrics`, the statements'), one whose servers
-  hold many threads and one opening the audit log (`tests/audit.rs`,
-  `tests/refusals.rs`) are each a `[[test]]` of its own, the other tests'
-  servers asking with no refusal wait (`audit::set_delay(0)`). Measurement
-  programs (`examples/`, `fennec-bench`) are wired to `make`, not CI.
 - [A test that fails and passes on a rerun](docs/design/conventions.md#reruns)
   is a bug, the test's or the code's: reproduce it in a loop under load
   (`docker run --cpus=3` beside busy loops is GitHub's runner) and fix it,
@@ -545,28 +546,11 @@ Covers `crates/fennec-bench/`.
   asserts the event, the count or the order (`audit::would_wait`,
   `Router::grants_waiting`, `Router::round_grants`). A timeout given a
   test's servers or clients bounds every request they make.
-- [Two builds' instruction counts](docs/design/benchmarks.md#instruction-counts)
-  differing by under ~500 a request are read over re-signed copies'
-  UUIDs or a trace (`make instr-compare`), never from plain pairs: on
-  macOS the allocator draws its path from a binary's identity.
 - [A server a test or a harness starts](docs/design/conventions.md#ports)
   listens on port 0, never a fixed or found-free port, found by its
   `listening on: http://<address>` stderr line, a router told its nodes by
   the addresses they said; only a site needing its address before it binds
   takes a system-picked port, held by a stand-in listener till then.
-- [Every parser of untrusted bytes is fuzzed](docs/design/conventions.md#fuzzing)
-  by `crates/fennec-fuzz`, the repository's own mutator under ASan (`make
-  fuzz` lists the targets; CI's `fuzz-smoke` runs each 30 s, `fuzz.yml`
-  weekly): a new parser owes its target and `fuzz.yml`'s matrix line, a
-  finding a regression test in its own crate.
-- [A secret is compared by `crypto::ct_eq` alone](docs/design/conventions.md#secrets-compared)
-  -- a token, a mark, a MAC, a signature, a proof, a password -- never by
-  `==` or `!=`, which leave at the first byte that differs:
-  `tools/secret_eq_check.py` (CI's fmt job) refuses one on an operand so
-  named in `crates/*/src` outside tests, each operand read whole, a name
-  that is no secret allowed with why and how many times. A primitive we
-  write is held to its RFC's vectors, every one, and where a key meets its
-  block to another implementation's, each test's count of cases held.
 - [A change a user meets](docs/design/conventions.md#docs-a-change-owes)
   says so in the same pull request: its page under `site/content/docs/`,
   README's feature table and the links beside it, the home page and docs

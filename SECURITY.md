@@ -23,12 +23,17 @@ The latest release and `main`. Older tags get no backported fixes.
 ## Where the risk actually is
 
 fennecdb takes **no external crates** in the shipped crates — own codec, own
-JSON, own HNSW, own SHA-256/HMAC/PBKDF2, RSA verification and
+JSON, own HNSW, own SHA-256/HMAC/PBKDF2, RSA and P-256 verification and
 ChaCha20-Poly1305, and the client half of SCRAM `fennec import` signs in to
 PostgreSQL with. That removes the upstream CVE surface entirely and puts all
 of it in this repository instead. The crypto in
 `crates/fennec-http/src/crypto.rs` and `crates/fennec-wire/src/client.rs` is
-exactly the code that most deserves a second pair of eyes.
+exactly the code that most deserves a second pair of eyes. Each primitive is
+held to its RFC's vectors and, where Project Wycheproof has a file for it, to
+every case of that file: ChaCha20-Poly1305, RSA PKCS#1 v1.5 with SHA-256 at
+2048 to 4096 bits, ECDSA P-256, HMAC-SHA-256 and PBKDF2-HMAC-SHA-256
+([docs/design/conventions.md](docs/design/conventions.md#secrets-compared)).
+Vectors are no proof: a bug they miss is as welcome a report as any.
 
 In scope, and worth reporting:
 

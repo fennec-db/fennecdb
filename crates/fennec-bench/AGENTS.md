@@ -13,3 +13,8 @@ Sides run in turns after idle minutes; a hot run's figure is not one.
 `--verify` checks every answer; `ycsb/results.tsv` is appended to, never
 rewritten (a replaced run named in `ycsb/superseded.tsv`), and
 `site/build.py` holds every YCSB figure on the site to its median there.
+
+**[Two builds' instruction counts](../../docs/design/benchmarks.md#instruction-counts)**
+differing by under ~500 a request are read over re-signed copies'
+UUIDs or a trace (`make instr-compare`), never from plain pairs: on
+macOS the allocator draws its path from a binary's identity.

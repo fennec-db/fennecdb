@@ -42,3 +42,4 @@ mod tenant_hooks;
 mod tls;
 mod token_first;
 mod waits;
+mod wycheproof;
