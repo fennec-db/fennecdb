@@ -208,10 +208,15 @@ export class Fennec {
     return out;
   }
 
-  /** Copies a string, or bytes, into WASM memory. */
+  /**
+   * Copies a string, or bytes, into WASM memory. Never at 0, the null the
+   * module answers when it has no room: written there, the bytes went over
+   * the bottom of its stack.
+   */
   #write(data) {
     const bytes = typeof data === 'string' ? enc.encode(data) : data;
     const ptr = this.#wasm.fennec_alloc(bytes.length || 1);
+    if (!ptr) throw new FennecError(`no room in the module for ${bytes.length} bytes`);
     new Uint8Array(this.#wasm.memory.buffer).set(bytes, ptr);
     return [ptr, bytes.length];
   }
@@ -345,8 +350,7 @@ export class Fennec {
     });
     const got = await Promise.all(want.map((name) => this.#chunk(name)));
     got.forEach((bytes, k) => {
-      const ptr = this.#wasm.fennec_alloc(bytes.length || 1);
-      new Uint8Array(this.#wasm.memory.buffer).set(bytes, ptr);
+      const [ptr] = this.#write(bytes);
       let at;
       try {
         at = this.#wasm.fennec_add_chunk(ptr, bytes.length);
