@@ -29,9 +29,10 @@
 #            QEMU left, served first, would send the standby writes the
 #            rebuilt one never had.
 #   dir250   that node and its standby under `--sync 250`: its tenants
-#            synced by the node's own pass (`Tenants::sync_dirty`), not a
-#            file's syncer, each held to sync250's check, and the standby
-#            to dir's -- the node sends a write once a sync covered it.
+#            synced each on a thread of the node's (`Tenants::sync_each`),
+#            not by a file's syncer, each held to sync250's check, and the
+#            standby to dir's -- the node sends a write once a sync covered
+#            it.
 #
 # $MOUNT_OPTIONS, when given, are the data disk's mount options, at every
 # mount: ext4's `data=writeback` or `data=journal` in place of the
@@ -88,9 +89,23 @@ case ",$MOUNT_OPTIONS," in *,data=journal,*) JOURNALED=1 ;; esac
 # and it makes about half as many again as the first -- so that the node's
 # syncs and the standby's streams carry two files' writes at once. Under
 # `--sync <ms>` the first's load is those three too (client.py's
-# OPS_SYNCED), and the node's pass syncs two tenants of a like load.
+# OPS_SYNCED), and the node syncs tenants of a like load. $NODE_TENANTS is
+# how many, 2 to 8, two unless named: every one past the first takes the
+# second's load. The dir250 guest runs four, where a pass syncing each in
+# turn grew a tenant's window with the count (docs/design/durability.md,
+# *A node's syncs*).
+NODE_TENANTS=${NODE_TENANTS:-2}
+case $NODE_TENANTS in
+    [2-8]) ;;
+    *) echo "NODE_TENANTS is 2 to 8, not $NODE_TENANTS" >&2; exit 2 ;;
+esac
 TENANTS=("")
-[ -n "$IS_NODE" ] && TENANTS=(a b)
+if [ -n "$IS_NODE" ]; then
+    TENANTS=()
+    for t in a b c d e f g h; do
+        [ "${#TENANTS[@]}" -lt "$NODE_TENANTS" ] && TENANTS+=("$t")
+    done
+fi
 NODE=/d/n
 # The client's arguments for the mode: `--sync 250`'s window, held.
 MODE_ARGS=()
