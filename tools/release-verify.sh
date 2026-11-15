@@ -78,6 +78,7 @@ GitHub's Latest
 the asset list
 SHA256SUMS's attestation
 SHA256SUMS's sums
+each .checksum
 each asset's attestation
 the image's three tags
 npm's provenance

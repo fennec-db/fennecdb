@@ -607,7 +607,7 @@ class ReleaseVerify(unittest.TestCase):
             "npm's provenance of @fennecdb/cloudflare, @fennecdb/langchain", "npm audit signatures",
             "PyPI's attestations"])
         got = self.run_it("vfoo")
-        self.assertEqual(len(self.not_checked(got)), 10)
+        self.assertEqual(len(self.not_checked(got)), 11)
         # The last check's last file leaves nothing.
         self.given("v1.0.0")
         (self.state / "http" / key("https://pypi.org/integrity/fennecdb/1.0.0/fennecdb-1.0.0.tar.gz/provenance")
@@ -832,8 +832,9 @@ class Assets(unittest.TestCase):
 
     def test_a_candidate_has_no_app(self):
         # desktop.yml and attach.sh take X.Y.Z alone.
-        for path in (".github/workflows/desktop.yml", "integrations/studio-desktop/scripts/attach.sh"):
-            self.assertIn("'^v?[0-9]+\\.[0-9]+\\.[0-9]+$'", self.text(path))
+        for path, form in ((".github/workflows/desktop.yml", "'^v?[0-9]+\\.[0-9]+\\.[0-9]+$'"),
+                           ("integrations/studio-desktop/scripts/attach.sh", "'v?[0-9]+\\.[0-9]+\\.[0-9]+'")):
+            self.assertIn(form, self.text(path))
         self.assertEqual(self.listed("v1.0.0-rc.1"), self.built("1.0.0-rc.1"))
         self.assertEqual(len(self.listed("v1.0.0-rc.1")), 18)
 
