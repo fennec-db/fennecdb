@@ -798,7 +798,11 @@ no `CopyDone`, the slot left held, no warning -- and `run` printed "stream
 Interrupted system call (os error 4); again in 500.0ms" before it saw the
 stop. macOS restarts the call, so no run here showed it; a reviewer gave
 the sockets Linux's behaviour with `siginterrupt` and signalled the
-follower's thread, and it failed 3 times in 3. `Conn::readable`, the one
+follower's thread, and it failed 3 times in 3; on Linux itself (musl in a
+container, the handler installed with `SA_RESTART` as the shell's is, no
+`siginterrupt`) `a_signal_is_no_failure_of_the_stream` failed 3 times in 3
+with the fix's `Interrupted` arm turned off and passed 3 times in 3 with
+it. `Conn::readable`, the one
 wait under the idle peek, the end's reads and TLS's, now goes on after an
 interruption for what is left of its wait, never failing and never
 starting the wait again. Every other call of the client's: `connect` is
