@@ -171,5 +171,21 @@
             #expect((once as? FennecError)?.status == 503)
             #expect(off.seen.count == 1)
         }
+
+        /// The code the server named is the error's `errorCode` -- never
+        /// `code`, the library's kind -- and a refusal naming none has
+        /// none; neither is sent again.
+        @Test func aRefusalNamesTheServersCode() async throws {
+            let s = try Stub(
+                .answer(401, #"{"error":"the token has expired","code":"token_expired"}"#),
+                .answer(401, #"{"error":"invalid or missing token"}"#))
+            defer { s.close() }
+            let db = Fennec.connect(url: s.url, token: "t")
+            let e = await failure { try await db.from("docs").rows() } as? FennecError
+            #expect(e?.status == 401 && e?.code == .denied && e?.errorCode == "token_expired")
+            let none = await failure { try await db.from("docs").rows() } as? FennecError
+            #expect(none?.status == 401 && none?.errorCode == nil)
+            #expect(s.seen.count == 2)
+        }
     }
 #endif
