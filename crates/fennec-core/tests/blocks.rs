@@ -88,6 +88,15 @@ fn block(db: &mut Database, sqls: &[&str]) -> std::result::Result<usize, (usize,
     db.execute_block(&stmts).map(|out| out.len())
 }
 
+/// Runs `sql` as a block of one whose documents were built beside the
+/// readers ([`Database::prepare`]), as a server's `/batch` builds them.
+fn prepared(db: &mut Database, sql: &str) -> std::result::Result<usize, (usize, Error)> {
+    let parsed = stmt(sql);
+    let stmts = [(&parsed, &[][..])];
+    let mut p = db.prepare(&stmts);
+    db.execute_prepared(&stmts, &mut p).map(|out| out.len())
+}
+
 fn vector(seed: u64) -> String {
     let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     let v: Vec<String> = (0..8)
@@ -763,4 +772,193 @@ fn a_block_put_back_leaves_no_vector_waiting() {
     db.commit().unwrap();
     assert_eq!(db.unlinked(), 0);
     assert_eq!(nearest(&db, 5_050, false)[0], 5_050);
+}
+
+/// A `put` writing a row twice -- an id it names twice, or one it hands out
+/// and then names -- leaves the graph holding the vector the row ended
+/// with, or none. A statement's vectors wait for the batch linked as it
+/// ends: the second document took the row out of a graph the first's
+/// vector was not in yet, and the batch then linked that vector over a row
+/// holding another or none, which `near` answered -- `exact` too, reading
+/// the graph's vectors -- until the file was opened again
+/// (`tests/model.rs` found it). In a block that defers, the same.
+#[test]
+fn a_row_a_put_writes_twice_holds_its_last_vector_or_none() {
+    for defers in [false, true] {
+        let mut db = Database::new();
+        exec(
+            &mut db,
+            "create collection d (v vector<3> @hnsw(cosine), g int)",
+            &[],
+        );
+        if defers {
+            db.begin().unwrap();
+        }
+        for sql in [
+            // The second document holds no vector.
+            "put d [{id: 1, v: [1, 1, 0]}, {id: 1, g: 1}]",
+            // Id 2 handed out, then named.
+            "put d [{v: [0, 0, 1]}, {id: 2, g: 2}]",
+            // The second's vector stays.
+            "put d [{id: 3, v: [1, 0, 0]}, {id: 3, v: [0, 1, 0]}]",
+        ] {
+            exec(&mut db, sql, &[]);
+        }
+        if defers {
+            db.commit().unwrap();
+        }
+        // Refused once both are written, a row new or held is put back
+        // whole, the vector it held or none: a lone statement by itself,
+        // one in a block by the block's rollback.
+        for sql in [
+            "put d [{id: 4, v: [1, 1, 0]}, {id: 4, v: [0, 0, 1]}] require 3",
+            "put d [{id: 3, v: [1, 1, 0]}, {id: 3, g: 3}] require 3",
+        ] {
+            if defers {
+                db.begin().unwrap();
+            }
+            let refused = db.execute_with(&stmt(sql), &[]);
+            assert!(
+                matches!(refused, Err(Error::Unmet(_))),
+                "{sql}: {refused:?}"
+            );
+            if defers {
+                db.rollback();
+            }
+        }
+        for (q, want) in [
+            ("[0, 1, 0]", 1.0),
+            ("[1, 1, 0]", std::f32::consts::FRAC_1_SQRT_2),
+            ("[0, 0, 1]", 0.0),
+        ] {
+            for way in ["", " exact"] {
+                let sql = format!("get d select id near v {q}{way}");
+                let hits: Vec<(u64, Option<f32>)> = db
+                    .query(&stmt(&sql), &[])
+                    .unwrap()
+                    .rows()
+                    .unwrap()
+                    .rows
+                    .iter()
+                    .map(|r| (r.id, r.score))
+                    .collect();
+                let held = matches!(hits.as_slice(), [(3, Some(s))] if (s - want).abs() < 1e-6);
+                assert!(held, "defers {defers}: {sql}: {hits:?}");
+            }
+        }
+    }
+}
+
+/// A `put` letting go of a row past its time (`@ttl`) that holds a
+/// `@unique` value it writes -- a row the same `put` wrote, its vector
+/// waiting for the batch -- leaves no vector of that row in the graph.
+/// Waiting, the vector was linked as the statement ended, for a row gone:
+/// once the id held a row again, `near` and `exact` answered it by a vector
+/// it never held, where a replica, which links its batch before a frame
+/// naming an id in it, held none (`tests/model.rs` drew it once `t` held a
+/// vector). Every form of `put` meets it, lone, in a block, in one that
+/// defers and in one its documents were built for beside the readers, as
+/// a `/batch` builds them; one refused once the batch was linked is put
+/// back whole.
+/// A `set` and a `del` letting go of such a row in a later statement of a
+/// block that defers take out the node it waits in, as they always did.
+#[test]
+fn a_row_a_put_lets_go_of_takes_its_waiting_vector_with_it() {
+    const NOW: i64 = 1_700_000_000_000;
+    let old = NOW - 100_000;
+    let made = "create collection t (k int @unique, at timestamp @ttl(10s), \
+                v vector<3> @hnsw(cosine))";
+    let first = format!("{{id: 1, k: 7, at: {old}, v: [1, 0, 0]}}");
+    let forms = [
+        format!("put t [{first}, {{id: 2, k: 7}}]"),
+        format!("insert t [{first}, {{id: 2, k: 7}}]"),
+        format!("put t [{first}, {{id: 2, k: 7}}] if absent"),
+        format!("put t [{first}, {{id: 2, k: 7}}] if absent else set {{k: 9}}"),
+        // The row handed its id, not naming it.
+        format!("put t [{{k: 7, at: {old}, v: [1, 0, 0]}}, {{k: 7}}]"),
+    ];
+    // The near answers, through the graph and exactly.
+    let near = |db: &Database| -> Vec<Rows> {
+        ["", " exact"]
+            .iter()
+            .map(|way| rows(db, &format!("get t select id near v [1, 0, 0]{way}"), &[]))
+            .collect()
+    };
+    let none: Vec<Rows> = vec![Vec::new(), Vec::new()];
+    for form in &forms {
+        for how in ["lone", "block", "begin", "prepared"] {
+            let file = Tap::default();
+            let mut db = file.database();
+            db.set_clock(Some(NOW));
+            exec(&mut db, made, &[]);
+            // Refused once the batch was linked and row 1 let go of, the
+            // statement is put back whole: no row, and no vector of one.
+            let refused = format!("{form} require 3");
+            if how == "begin" {
+                db.begin().unwrap();
+            }
+            let out = match how {
+                "block" => block(&mut db, &[refused.as_str()]).map_err(|(_, e)| e),
+                "prepared" => prepared(&mut db, &refused).map_err(|(_, e)| e),
+                _ => db.execute_with(&stmt(&refused), &[]).map(|_| 0),
+            };
+            assert!(
+                matches!(out, Err(Error::Unmet(_))),
+                "{how}: {refused}: {out:?}"
+            );
+            if how == "begin" {
+                db.rollback();
+            }
+            assert_eq!(rows(&db, "get t", &[]), Vec::new(), "{how}: {refused}");
+            // Row 1 written again without a vector: a node the put-back
+            // left live is then found, where over no rows `near` answers
+            // none whatever the graph holds. Taken back, so the form below
+            // starts from an empty collection whose next id is 1.
+            db.begin().unwrap();
+            exec(&mut db, "put t {id: 1, k: 8}", &[]);
+            assert_eq!(near(&db), none, "{how}: {refused}");
+            db.rollback();
+            match how {
+                "lone" => exec(&mut db, form, &[]),
+                "block" => drop(block(&mut db, &[form.as_str()]).unwrap()),
+                "prepared" => drop(prepared(&mut db, form).unwrap()),
+                _ => {
+                    db.begin().unwrap();
+                    exec(&mut db, form, &[]);
+                    db.commit().unwrap();
+                }
+            }
+            assert_eq!(rows(&db, "get t where expired()", &[]), Vec::new());
+            let ids: Vec<u64> = rows(&db, "get t where k = 7", &[])
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            assert_eq!(ids, [2], "{how}: {form}: row 1 went, row 2 took k 7");
+            // Row 1 again, holding no vector.
+            exec(&mut db, "put t {id: 1, k: 8}", &[]);
+            assert_eq!(near(&db), none, "{how}: {form}");
+            let mut replica = Tap::default().database();
+            replica.follow(vec![(7, 0)]).unwrap();
+            for (_, record) in file.since(0) {
+                replica.apply(&record).unwrap();
+            }
+            assert_eq!(near(&replica), none, "{how}: {form}: the replica");
+        }
+    }
+    // A later statement of a block that defers: the vector waits in a node
+    // placed for it, which the row takes out as it goes.
+    for later in [
+        "set t {k: 7} where id = 2",
+        "del t where expired() order id limit 1",
+    ] {
+        let mut db = Database::new();
+        db.set_clock(Some(NOW));
+        exec(&mut db, made, &[]);
+        db.begin().unwrap();
+        exec(&mut db, &format!("put t [{first}, {{id: 2, k: 5}}]"), &[]);
+        exec(&mut db, later, &[]);
+        db.commit().unwrap();
+        exec(&mut db, "put t {id: 1, k: 8}", &[]);
+        assert_eq!(near(&db), none, "{later}");
+    }
 }

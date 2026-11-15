@@ -135,7 +135,8 @@ pub struct Config {
     /// may have left behind -- the new primary's may hold a statement this
     /// copy answers 404 for. Never set on a server's own configuration.
     pub come_back: bool,
-    /// Since there is no TLS, binding outside loopback without auth is refused.
+    /// Binding outside loopback without auth is refused: the data would be open
+    /// to the network, over TLS or not.
     pub insecure: bool,
     /// Ceiling on concurrent connections (0 = unlimited). Every connection is
     /// a thread.

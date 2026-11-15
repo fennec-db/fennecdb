@@ -703,10 +703,10 @@ and counted (`fennec_trace_spans_dropped_total{reason}`), so a request never
 waits on the collector, and a thread posts it every second or at 512 spans
 as OTLP/HTTP JSON written with `json::escape_into` and a client of a page,
 the connection kept alive, a post bounded by `OTEL_EXPORTER_OTLP_TIMEOUT`.
-fennecdb speaks no TLS, so an `https://` endpoint and a `grpc` protocol are
-refused at the start: the endpoint is a collector on loopback -- the
-OpenTelemetry Collector, the Datadog Agent's OTLP receiver -- forwarding
-over TLS. Off, each hook is one relaxed load: in `make requests-bench`,
+An `https://` endpoint is dialed over TLS (`dial::tls_of`) and a `grpc`
+protocol is refused at the start: the endpoint may as well be a collector on
+loopback -- the OpenTelemetry Collector, the Datadog Agent's OTLP receiver --
+forwarding over TLS. Off, each hook is one relaxed load: in `make requests-bench`,
 six runs in turns against main, one client's p50 stayed 0.022, 0.034, 0.059
 and 0.022 ms (main 0.022, 0.033, 0.059, 0.021) and eight clients' medians
 inside the runs' spread; on at 100% to a sink on loopback 0.022, 0.034,

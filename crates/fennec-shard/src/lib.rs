@@ -140,7 +140,8 @@ pub struct Config {
     pub entry_token: Option<String>,
     /// HTTPS alone from clients (`--tls-cert`, `--tls-key`), each
     /// handshake on its connection's thread ([`fennec_http::conn`]); `None`,
-    /// plain HTTP. To the nodes the router speaks plain HTTP still.
+    /// plain HTTP. To the nodes it speaks what their address says: `https://`
+    /// is dialed over TLS (`upstream`, `fennec_http::dial::tls_of`).
     pub tls: Option<Arc<fennec_http::conn::Tls>>,
 }
 

@@ -27,6 +27,48 @@ core already rendered and applied `insert` (`render_put`'s `insert`);
 `integrations/sync-scenarios.json` holds both runners to it with the
 write `insert_new`.
 
+A `put` writing one row twice -- an id it names twice, or one it hands out
+and then names -- leaves the row the last document's, its vector or none;
+and a `put` letting go of a row past its time that it wrote itself -- a
+later document taking the `@unique` value an earlier one wrote with a
+time already past ([below](#arithmetic-in-set)) -- leaves no vector of
+the row. A statement's vectors wait for the batch linked as it ends
+(`index_written`), so the second document took the row out of a graph the
+first one's vector was not in yet, and the batch then linked that vector
+over a row holding another or none, or for a row gone: `near`, `exact`
+too, found the row by a vector it no longer held -- the one let go of
+once its id held a row again -- until the file was opened again, where a
+replica, whose apply links its batch before a frame naming an id in it
+(`VectorBatch`), held none. Where a document writes over a row, or lets
+go of one, whose record lies at or past the batch's first document's
+(`Store::wrote_after`), the batch is linked first (`link_written`), as an
+upsert's is; the row's vector then leaves the graph as any row's does. A
+`set`, a `del` and a statement a write wakes meet no batch: a `set` links
+its vector as it writes, and a block that defers places each vector in a
+node as its `put` ends, which a row taken out or written over takes with
+it. Asked of the batch's first document's record, the test holds nothing
+across a `put`'s documents, and costs two looks at the offset index a row
+written over or let go of, only beside a graph and a batch. A lone `put`
+over REST is 4 instructions of the program's own more than before
+either fix, 544 to 548 in `Database::put`, and a `put` of 100 documents
+writing over rows 685 more, 6.85 a document, 28 911 to 29 632 (an lldb
+trace of one call, `tools/instr/trace.py`: the 30th of
+`fennec_http::handle` in `replays put`, of `Database::put` in
+`replays batch`); a set by id 2 fewer, 248 to 246 in `set_row` (the 30th
+PATCH of `rows patch`). The graph is asked before the batch's first
+document is read, which a collection holding none answers at once: read
+first, it cost the 100 documents 880. The first form, the store's mark
+held from the batch's start -- seven words -- and whether the collection
+keeps a graph read beside it, cost a lone `put` 10 and the 100 documents
+983, and forms before it more: the mark held for every collection 22,
+the graph looked up again by the collection's name 68 (`tests/model.rs`
+found the first bug, a review the second, which the model found too once
+it held each graph's count to its rows; `tests/blocks.rs`,
+`a_row_a_put_writes_twice_holds_its_last_vector_or_none` and
+`a_row_a_put_lets_go_of_takes_its_waiting_vector_with_it`, every form of
+`put`, lone, in a block, in one that defers and in one prepared as
+`/batch` prepares it, held to a replica).
+
 ## Arithmetic in set
 
 **A `set` reads the row it writes, and every write says what it did.**
@@ -71,7 +113,16 @@ without a 409 that aborts a `/batch` or an exception to catch. A row past
 its `@ttl` is out of a write's way as of every read: an insert naming its
 id writes over it, and a `@unique` value it holds is let go of with it, the
 row deleted in the same statement (`expired`, `erase`); left to the
-sweeper, a lock that expired stayed held up to a minute. The builders
+sweeper, a lock that expired stayed held up to a minute. A `set` and an
+upsert's `else set` taking such a value let go of the row as a `put`
+does, once `@unique` finds the clash, and ask again (`set_row`,
+`let_go_expired`): until they did, the `set` was refused as a duplicate,
+naming a row no read shows (`tests/model.rs` found it; `tests/writes.rs`,
+`a_set_takes_a_unique_value_a_row_past_its_time_held`). Asked only at a
+clash, a `set` meeting none pays nothing -- a set by id over REST is 2
+instructions of the program's own fewer, 248 to 246 in `set_row` (an lldb
+trace of one call, `tools/instr/trace.py`) -- where asked of every
+statement, the expiry cost it 29. The builders
 render `inc(n)` as `f: coalesce(f, 0) + $k` and `expr(text, ...)` with its
 `?`s bound, every SDK to the golden file. The browser module grew
 7.9 KB, 2.7 KB brotli: the parser's arithmetic, the binding, `if

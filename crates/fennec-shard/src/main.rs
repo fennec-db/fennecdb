@@ -113,8 +113,9 @@ usage: fennec-shard [options]
       --otlp-endpoint <url> send OpenTelemetry traces, OTLP over HTTP as JSON,
                             to this collector: http://localhost:4318 (the
                             OpenTelemetry Collector, the Datadog Agent's OTLP
-                            receiver). No TLS: a collector on this host or
-                            network forwards over TLS. Also read from
+                            receiver), or https:// to dial one over TLS.
+                            A collector on this host or network may forward
+                            over TLS instead. Also read from
                             OTEL_EXPORTER_OTLP_TRACES_ENDPOINT and
                             OTEL_EXPORTER_OTLP_ENDPOINT. Off by default
       --otlp-header <k=v>   a header on every post, such as an API key;

@@ -18,6 +18,16 @@ crate's `examples/` and `fennec-bench`'s binaries, wired to `make` targets,
 not to CI -- but for the perf gate's workloads
 (`crates/fennec-http/examples/gate.rs`), which CI counts in instructions on
 every pull request ([benchmarks.md](benchmarks.md#the-gate)).
+An example that is a check rather than a measurement runs in
+CI: fennec-ql's `corpus`, which `make fennecql-corpus` builds in this tree
+and in main's from an archive of it, run by the test job's two steps on
+the ubuntu runner -- against main, and against every corpus frozen at a
+tag (`integrations/fennecql-corpus/`) -- its reader held by
+`tools/test_fennecql_corpus.py` in the fmt job and in the test job's
+ubuntu leg, before the steps ([fennecql.md](fennecql.md#the-corpus)). It is an example, not a test,
+because it is built in two trees, BASE's taking this tree's file as it
+stands; its own tests (`test = true`), which only this tree builds, run
+with fennec-ql's.
 
 ## Skips
 
@@ -122,10 +132,75 @@ days, the 10 GB limit). Jobs gated on the event: `test (macos x86_64,
 Rosetta)` runs on everything but a pull request, so on the schedule, and `size
 (browser module)` only on a pull request.
 
+**Every cache is restored by every run and saved by a run on main alone, and
+what main saves is small.** A cache saved on a pull request's ref is read by
+no other run, so each pull request that missed a key saved a private copy and
+pushed main's entries out of the 10 GB: at 01:15Z on 2026-11-15 the repository
+held 49 entries, 11.31 GiB (pull-request refs 35 entries, 7.18 GiB; main 12,
+3.36 GiB; merge groups 0.24 GiB), and main's Gradle entry was gone within
+about 1.5 hours, so 6 of the Android job's 50 runs restored it. Now the 21
+cargo steps and the Unicode table are `actions/cache/restore` with a
+`restore-keys` fallback (a pull request that moves `Cargo.lock` restores the
+last entry) and an `actions/cache/save` step at the job's end under
+`github.ref == 'refs/heads/main'`, keyed by the restore step's
+`cache-primary-key` and skipped on an exact hit. `setup-node`'s and
+`setup-go`'s `cache` and `subosito/flutter-action`'s save from any ref and
+have no read-only switch, so the Grafana job's npm (`~/.npm`) and Go
+(`~/go/pkg/mod`, `~/.cache/go-build`) caches are the same restore and save
+pair over the paths the actions used, and the Flutter caches are gone.
+`setup-gradle` writes only on main by its own default (`cache-read-only`).
+`desktop.yml`'s Cargo and Hutch caches and `site.yml`'s are the same pair
+(`site-lighthouse.yml`, which runs on pull requests alone, restores only).
+`desktop.yml` and `site.yml` run on main by their own paths filters, the
+caches' inputs among them, and `desktop.yml` gained a schedule, Monday and
+Thursday at 05:41 UTC, so that an entry evicted or unused for 7 days is saved
+again. The cargo keys moved to a `v2-` prefix so that no run restores the
+unpruned entries through `restore-keys`.
+
+*What main keeps of `target/`.* A checkout's files carry new times, so cargo
+builds the workspace's crates again whatever `target/` holds; what a restored
+`target/` saves is the crates from outside the workspace, and the workspace's
+test binaries and debug info were most of every entry.
+`tools/ci_prune_target.sh` runs on main just before a save and keeps only the
+units whose dep-info (`deps/*.d`) names a file under the registry or a git
+checkout, with their build scripts and fingerprints. Measured on a local build
+of the fennec-server and fennec-import tests: 822 MiB to 59 MiB, and the next
+build compiled only the workspace's own crates, none of rustls, ring or libc
+(mtimes are kept, as the cache's tar keeps them; a copy that does not keep
+them makes cargo rebuild everything). An entry is now 0 to 47 MiB, but for the
+clippy job's 373 MiB (it checks the Windows target too), against 15 to 801 MiB
+before (`ubuntu-latest-cargo` 801, `ubuntu-24.04-arm` 643, `macos-latest` 522,
+`clippy` 440 MiB). Four of the 21 are 0 MiB because fennec-core and the C
+library have no crate from outside the workspace: they were 15 to 31 MiB of
+workspace objects. Nor did the cache save time in those jobs: a hit and a
+miss of `windows (http)` took 242 and 241 s, of `test (ubuntu-latest)` 962 and
+940 s (runs 43648331326, 43644153745, 43638860592), because the workspace is
+what takes the time.
+
+*Flutter, Go and the rest.* The SDK's entry was 2.0 GiB on macOS and 1.6 GiB
+on Linux, and restoring it saved 28 s (35 s against 63 s) on macOS and 16 s
+(13 s against 29 s) on Linux of a download (run 43663494522), under 3% of
+either job; it is not cached, nor is the pub cache (25 to 30 MiB). The Go
+cache is 436 MiB, the npm one 93 MiB, `desktop.yml`'s Hutch caches 68 to 98
+MiB a system (435 MiB in all) and Gradle's 2.1 GiB (setup-gradle's entries:
+dependencies 1090, transforms 656, wrapper zips 179, the distribution 130
+MiB, measured with `cache-read-only: false` on the job as it was before the
+wrapper above: the Gradle User Home it keeps now is of that order, not
+measured).
+
+*The set main will hold*, measured on a test branch that saved as main does
+(run 43665618926): about 1.0 GiB of cargo entries, 0.44 GiB Go, 0.09 GiB npm,
+0.43 GiB Hutch and 2.1 GiB Gradle, about 4.1 GiB in some 40 entries, against
+about 11 GiB projected for the same keys unpruned with the Flutter SDKs. A key
+change leaves the old entries until they age out, so for a while the
+repository holds both, up to 7.4 GiB with main's 3.36 GiB: under the 10 GB.
+
 Which `ci.yml` jobs are required checks is a repository setting (classic
 branch protection on main, not the merge queue's ruleset). All of them are,
-but `size (browser module)`, which only runs on a pull request and so would
-never report in the merge queue. A job skipped by an `if:` reports success
+but two: `size (browser module)`, which only runs on a pull request and so
+would never report in the merge queue, and `perf (instructions)`, which no
+merge requires until the gate's holdout has passed
+([benchmarks.md](benchmarks.md#the-gate)). A job skipped by an `if:` reports success
 and can be required (the Rosetta job is one, skipped on a pull request); a
 whole workflow skipped by a path or branch filter reports nothing, its checks
 stay pending, and a required check of one blocks a merge it should not, so
@@ -134,7 +209,14 @@ stay pending, and a required check of one blocks a merge it should not, so
 "Troubleshooting required status checks" says both. `size (browser module)`
 is left out because a required check that never reports in the merge queue
 holds every group. A new job needs adding to the list unless it is one of
-those.
+those, and a renamed one adding under its new name before the old is taken
+out: a required check no job reports holds every group too. With every job
+required, a merge group lands when its last job ends and a red job drops
+it, a flaky one's too, so the queue builds two groups at a time and waits
+180 minutes for a group's checks (the ruleset's `max_entries_to_build` and
+`check_response_timeout_minutes`): the account runs 20 jobs at once, a run
+is about 35, and a group timed out at 60 behind other pull requests' runs
+(#605 and #645 on 2026-11-14).
 
 The mobile jobs upload build products nothing downloads
 (`fennecdb-android`, `fennecdb-xcframework`) with `continue-on-error`: an
@@ -401,6 +483,42 @@ sync's messages through the native library and the browser module, and
 IndexedDB's chunks; nor is each target held to a count of runs since its
 code last changed.
 
+## Coverage
+
+`.github/workflows/coverage.yml` runs weekly (Wednesday 03:41 UTC) and by
+hand (`gh workflow run coverage.yml`), never on a pull request or a push. It
+builds the workspace with `-C instrument-coverage` (the `llvm-tools-preview`
+rustup component, not a crate: the workspace takes no dependency), runs
+`make test`'s three Rust invocations, merges the counters with
+`llvm-profdata` and exports them with `llvm-cov export`;
+`tools/coverage_report.py` writes the tables, published as the
+`coverage-report` artifact for 90 days (`coverage.md`,
+`coverage-summary.json`) and in the run's summary: lines, regions and
+functions per crate, and a second table, *Trust boundaries*, for the modules
+that parse bytes from outside the process. It leaves out the doctests
+(rustdoc's coverage is a nightly flag), the JS and browser tests, and the
+PostgreSQL arm's `#[ignore]` tests, which need services the job lacks, so a
+module those tests alone reach shows less than it has.
+
+*The figure is information, not a gate.* No threshold is applied anywhere,
+by the tool or the workflow: a percentage measures how much code ran, not
+whether its behaviour is right, and a bar such as 85% would be arbitrary and
+steer toward tests that execute lines without asserting anything. What
+guards the boundary modules is their fuzz targets ([Fuzzing](#fuzzing)); the
+report shows where a target or a test reaches little. Miri and the
+sanitizers are separate items.
+
+*The boundary list is data at the top of `tools/coverage_report.py`*
+(`BOUNDARIES`): each module with one line saying what untrusted bytes it
+reads. The engine's load path is `store.rs` (`replay`, `replay_mapped`,
+`adopt_index`) and `fs.rs` (`open`, `open_with`), each a file row with a row
+beneath it for those functions' regions and the number that ran (the export
+gives a function's regions, not its lines). A listed path that is gone fails
+the tool, so a rename cannot drop a row; `python3 -I tools/coverage_report.py
+--check-paths` checks it, and `tools/test_coverage_report.py` (CI's fmt job)
+holds the tables' numbers. A new parser of untrusted bytes is listed there
+beside its fuzz target.
+
 ## Secrets compared
 
 A token, a mark, a MAC, a signature or a password is compared by
@@ -566,3 +684,35 @@ binary; their tests take 2.5 s of a core in `cargo test`'s build on an
 Apple M1, 1.6 s of the clock beside each other: PBKDF2's 58 cases of 4 096
 rounds and one of 80 000 are 1.6 s, the RSA files 0.8, the AEAD's and
 HMAC's 0.01.
+
+## Security policy
+
+`SECURITY.md` is what a reporter and an operator act on, so it is held to
+the tree by `tools/security_md_check.py`, in CI's fmt job beside
+`tools/secret_eq_check.py` (its fixtures: `tools/test_security_md_check.py`).
+It fails on a `--flag` the file names that the argument parser of the binary
+it says it of does not read (`"--flag" =>` in fennec-server's, fennec-shard's
+or fennec-cli's sources, outside comments and the `#[cfg(test)] mod`; any of
+the three where no binary is named near the flag), a path or a
+link's anchor it names that is not in the repository, a primitive of its
+list of in-tree cryptography whose function is gone (or one the file stopped
+naming), a missing "Supported versions" section or acknowledgement in working
+days, and a missing "A security release" section in `RELEASING.md`. It
+also searches `SECURITY.md`, `crates/*/src` and `site/content/docs` for
+phrases once true and since false -- `no TLS` first, which fennec-tls made
+untrue and which a comment, a help text and a page went on saying -- outside `ALLOWED`: the messages a build made without
+the `tls` feature gives, each an entry with its reason, an entry that finds
+nothing refused. It prints how many things it checked of each kind (332 when
+written: 26 flags, 47 paths and anchors, 7 primitives, 249 files searched,
+3 promises) and fails when any one kind is zero, not only the total: the
+files searched alone would let a file stripped of every flag, path and link
+pass. Each primitive's needle is its own declaration (`pub fn sha256(`), so a
+test function of a like name does not hold it. What a line scan cannot tell
+is in the tool's header.
+
+The policy itself: 0.x has no advisories, CVEs or patch releases, a fix
+lands on `main` and the pull request says which releases had the bug; from
+1.0.0 the latest 1.x minor and the previous one for 6 months after the next
+ships, a `release/1.N` branch cut when a backport needs one, a report
+acknowledged within 3 working days. The steps are `RELEASING.md`'s "A
+security release", written and not yet rehearsed.

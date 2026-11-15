@@ -645,3 +645,9 @@ for pull requests touching the site. Measured, every page scores 100 in all
 four categories. Accessibility, best practices and SEO are held at 100,
 the same on every run; performance and the timings, measured on a shared
 runner, a little under. A floor is raised, never lowered to pass.
+
+Each page also has a byte budget: `total-byte-weight` and the script and
+stylesheet transfer sizes, 10% above what Lighthouse measured, as the
+local server sends them (brotli, the edge's encoding), so the same on every
+run. A page that grows past one fails the audit by name; measure it again
+and raise the budget in the same pull request, saying why the page grew.

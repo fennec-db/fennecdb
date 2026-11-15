@@ -1,7 +1,8 @@
 //! The client's TLS against a stand-in that takes PostgreSQL's `SSLRequest`:
 //! each `sslmode`, a server's `S`, `N` or error, a handshake cut short, and a
 //! certificate refused before the startup message -- user, database and
-//! all -- is sent. A live PostgreSQL with `ssl = on` is `make import-test`'s.
+//! all -- is sent, and a replication stream's end held to its wait. A live
+//! PostgreSQL with `ssl = on` is `make import-test`'s.
 //!
 //! A dial that checks a certificate and names no CA file reads libpq's
 //! `~/.postgresql/root.crt`, the machine's: such a dial is made only in a
@@ -19,6 +20,7 @@ use fennec_wire::proto::SSL_REQUEST;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -485,4 +487,72 @@ fn libpqs_root_file_is_read_where_none_is_named() {
         dial("127.0.0.1", &format!("sslmode=require&sslrootcert={named}")),
         tls()
     );
+}
+
+/// One message, its tag and body, or `None` at the end of the connection.
+fn message(s: &mut impl Read) -> Option<(u8, Vec<u8>)> {
+    let mut head = [0u8; 5];
+    s.read_exact(&mut head).ok()?;
+    let len = i32::from_be_bytes([head[1], head[2], head[3], head[4]]) as usize - 4;
+    let mut body = vec![0u8; len];
+    s.read_exact(&mut body).ok()?;
+    Some((head[0], body))
+}
+
+/// Over TLS a read in the middle of a message is held to the wait for the
+/// stream's end as well: a stand-in walsender that answers the client's
+/// `CopyDone` with the first bytes of a message and then nothing is waited
+/// for no longer than asked, where rustls's read of the rest waited out the
+/// socket's own timeout, 30 s. The connection is then closed.
+#[test]
+fn ending_a_stream_over_tls_is_bounded() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server =
+        fennec_tls::Server::from_pem_files(&cert("server.pem"), &cert("server.key")).unwrap();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        let mut request = [0u8; 8];
+        s.read_exact(&mut request).unwrap();
+        s.write_all(b"S").unwrap();
+        let mut t = server.accept(s).unwrap();
+        assert!(startup(&mut t));
+        let mut out = framed(b'R', &0i32.to_be_bytes());
+        out.extend_from_slice(&framed(b'Z', b"I"));
+        t.write_all(&out).unwrap();
+        t.flush().unwrap();
+        // START_REPLICATION, then up to the CopyDone.
+        while let Some((tag, _)) = message(&mut t) {
+            match tag {
+                b'Q' => {
+                    t.write_all(&framed(b'W', &[0, 0, 0])).unwrap();
+                    t.flush().unwrap();
+                }
+                b'c' => break,
+                _ => {}
+            }
+        }
+        let mut out = vec![b'd'];
+        out.extend_from_slice(&1004i32.to_be_bytes());
+        out.extend_from_slice(&[b'w'; 10]);
+        t.write_all(&out).unwrap();
+        t.flush().unwrap();
+        tx.send(message(&mut t).map(|(tag, _)| tag)).unwrap();
+    });
+    let u = url("localhost", port, SslMode::VerifyFull, Some("ca.pem"));
+    let wal = Client::connect_replication(&u)
+        .unwrap()
+        .start_replication("fennec_docs", "fennec_docs")
+        .unwrap();
+    let e = wal
+        .end(Duration::from_millis(200), &AtomicBool::new(false))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("did not end the replication stream within"),
+        "{e}"
+    );
+    assert_eq!(rx.recv().unwrap(), Some(b'X'), "no Terminate after the end");
 }

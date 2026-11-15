@@ -365,7 +365,7 @@ holds its integrations to, against a real fennecdb.</p>
 <tr><td>Python client</td><td>the query builder against every case of <code>integrations/builder-golden.json</code>, sync and async, and its queries' answers against the same statements sent as text</td><td><code>make python-test</code></td></tr>
 <tr><td>Swift</td><td>the engine through the library -- <code>near</code> with exact scores, rows decoded, a json field's list as written, every kind of error, a file opened again and refused a second open, many tasks at once -- the query builder against every case of the golden file and its answers against the statements as text, live queries as a stream and as observables, a burst of writes running each once; on macOS, and in CI on an iOS simulator</td><td><code>make swift-test</code></td></tr>
 <tr><td>Kotlin</td><td>the same with JUnit on the JVM, the library built for Linux with its JNI functions; the AAR built with the NDK in CI</td><td><code>make kotlin-test</code> (Docker)</td></tr>
-<tr><td>Dart and Flutter</td><td>the same with <code>dart test</code>, and the Flutter plugin's test and its example built for Android and the iOS simulator in CI</td><td><code>make dart-test</code></td></tr>
+<tr><td>Dart and Flutter</td><td>the same with <code>dart test</code>, and the Flutter plugin's test; in CI its example built for Android, and for macOS and the iOS simulator from the plugin packed as a release publishes it, held to its size and to each platform's library once, the macOS app opening a file through the library it embeds</td><td><code>make dart-test</code></td></tr>
 </tbody>
 </table>
 </div>

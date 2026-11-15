@@ -4,6 +4,9 @@ pkg/
 # A file only a build with every feature can write, which the builds
 # without them open (crates/fennec-core/tests/language_file.rs).
 !crates/fennec-core/tests/language.fennec
+# An archive 0.2.0 sealed, which every later binary opens
+# (crates/fennec-http/tests/archive.rs, `a_v1_sealed_archive_still_opens`).
+!crates/fennec-http/tests/sealed-v1/archive/*.fennec
 .DS_Store
 node_modules/
 web/fennec-schema.d.ts
@@ -36,8 +39,9 @@ integrations/dart/**/.dart_tool/
 integrations/dart/**/pubspec.lock
 integrations/dart/**/.flutter-plugins*
 integrations/dart/fennecdb_flutter/ios/Frameworks/
-integrations/dart/fennecdb_flutter/macos/Frameworks/
+integrations/dart/fennecdb_flutter/macos/Libraries/
 integrations/dart/fennecdb_flutter/android/src/main/jniLibs/
 integrations/dart/fennecdb_flutter/example/*
 !integrations/dart/fennecdb_flutter/example/lib/
+!integrations/dart/fennecdb_flutter/example/integration_test/
 !integrations/dart/fennecdb_flutter/example/pubspec.yaml
