@@ -168,6 +168,7 @@ fn trial(dir: &Path, sync: &str, run: Duration) -> (usize, usize, usize) {
         })
     };
     std::thread::sleep(run);
+    // SAFETY: a process id and a signal's number: no memory is passed.
     #[cfg(unix)]
     unsafe {
         kill(primary.child.id() as i32, 9)
@@ -201,6 +202,7 @@ fn trial(dir: &Path, sync: &str, run: Duration) -> (usize, usize, usize) {
     let lost = acked.iter().filter(|n| !held.contains(n)).count();
     let unanswered = held.len() + lost - acked.len();
     let mut replica = replica;
+    // SAFETY: as for the primary's.
     #[cfg(unix)]
     unsafe {
         kill(replica.child.id() as i32, 15)

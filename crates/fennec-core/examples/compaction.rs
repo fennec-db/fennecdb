@@ -172,6 +172,9 @@ fn faults() -> (u64, u64) {
         rest: [0; 14],
     };
     // RUSAGE_SELF.
+    // SAFETY: the struct is a whole `struct rusage` of 64-bit Linux and macOS
+    // -- two `timeval`s of two words, then fourteen longs -- writable, and the
+    // call keeps no pointer to it.
     unsafe { getrusage(0, &mut r) };
     (r.rest[5] as u64, r.rest[4] as u64)
 }

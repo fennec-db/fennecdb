@@ -354,12 +354,17 @@ unsafe fn call(
     };
     if out.is_null() {
         if !ptr.is_null() {
+            // SAFETY: `ptr` is `CString::into_raw`'s, just above, given to
+            // no one: the caller asked for no answer.
             drop(CString::from_raw(ptr));
         }
     } else {
+        // SAFETY: `out` is not null, so valid to write one pointer, as this
+        // function's contract and fennec.h's (*Pointers and lengths*) say.
         *out = ptr;
     }
     if !out_len.is_null() {
+        // SAFETY: as for `out`.
         *out_len = len;
     }
     code
@@ -376,6 +381,11 @@ unsafe fn text<'a>(ptr: *const u8, len: usize, what: &str) -> Result<&'a str, Fa
             _ => Err(misuse(&format!("{what} is null"))),
         };
     }
+    // SAFETY: not null, so valid to read for `len` bytes through the call,
+    // as this function's contract and fennec.h's (*Pointers and lengths*)
+    // say -- which also bounds `len` by the caller's buffer, below
+    // `isize::MAX`. The `&str` is the call's alone: each caller hands it
+    // straight to a function whose signature ties it to that call.
     std::str::from_utf8(std::slice::from_raw_parts(ptr, len))
         .map_err(|_| misuse(&format!("{what} is not UTF-8")))
 }
@@ -387,6 +397,7 @@ unsafe fn text<'a>(ptr: *const u8, len: usize, what: &str) -> Result<&'a str, Fa
 unsafe fn bytes<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
     match ptr.is_null() || len == 0 {
         true => &[],
+        // SAFETY: as in [`text`].
         false => std::slice::from_raw_parts(ptr, len),
     }
 }
@@ -422,6 +433,8 @@ pub unsafe extern "C" fn fennec_open(
         if path.is_empty() || handle.is_null() {
             return Err(misuse("fennec_open needs a path and a handle to write"));
         }
+        // SAFETY: not null, so valid to write a `u64`, as the contract and
+        // fennec.h's say.
         *handle = open_wrapped(path, flags, Box::new(Ok))?;
         Ok(None)
     })
@@ -471,6 +484,8 @@ pub unsafe extern "C" fn fennec_open_memory(
         // had each statement it defined marked broken ("its text did not
         // read"), and every call of it refused.
         fennec_ql::install();
+        // SAFETY: not null, so valid to write a `u64`, as the contract and
+        // fennec.h's say.
         *handle = keep(Database::new(), false, None);
         Ok(None)
     })
@@ -1119,6 +1134,8 @@ pub unsafe extern "C" fn fennec_sync_status(
 #[no_mangle]
 pub unsafe extern "C" fn fennec_free_string(s: *mut c_char) {
     if !s.is_null() {
+        // SAFETY: as the contract says, `s` is text a call wrote through its
+        // out pointer -- `CString::into_raw`'s, in `call` -- freed once.
         drop(CString::from_raw(s));
     }
 }
@@ -1152,12 +1169,15 @@ mod tests {
     #[test]
     fn a_panic_stops_at_the_boundary() {
         let (mut out, mut len) = (std::ptr::null_mut(), 0);
+        // SAFETY: both out pointers are locals', alive across the call.
         let code = unsafe { call(&mut out, &mut len, || panic!("a bug")) };
         assert_eq!(code, FENNEC_PANIC);
+        // SAFETY: `call` wrote a NUL-ended `CString` into `out`.
         let text = unsafe { std::ffi::CStr::from_ptr(out) }
             .to_str()
             .unwrap()
             .to_string();
+        // SAFETY: the text `call` wrote, freed once.
         unsafe { fennec_free_string(out) };
         assert_eq!(
             text,

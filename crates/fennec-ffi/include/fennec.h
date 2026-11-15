@@ -13,6 +13,16 @@
  * error to tell, it writes NUL-terminated UTF-8 JSON through `out` and its
  * length through `out_len` (either may be NULL); the caller frees it with
  * fennec_free_string. An error is {"kind":"error","message":"..."}.
+ *
+ * Pointers and lengths: text or bytes go in as a pointer and a length (a
+ * path, a text, its params, its vectors, a description, the indexes, a
+ * config, an event's bytes), read where they lie during the call and never
+ * kept after it. Each pointer is valid to read for its length, or NULL with
+ * a length of 0 for none; a NULL with a length is refused where text goes
+ * (FENNEC_MISUSE) and read as none for vectors and an event's bytes. Text
+ * is UTF-8, and needs no NUL. `handle` is NULL (refused) or valid to write
+ * a uint64_t; `out` and `out_len` are NULL or valid to write their one
+ * value. Text a call wrote is freed once, by fennec_free_string alone.
  */
 #ifndef FENNEC_H
 #define FENNEC_H

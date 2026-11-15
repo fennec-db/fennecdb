@@ -963,9 +963,13 @@ pub struct Mapping {
 #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
 const ROOM: usize = 1 << 30;
 
-// The pages are read-only and shared by nothing but readers.
+// SAFETY: a `Mapping` owns its pages, which no other value points at, and
+// `munmap` lets them go from whichever thread drops it.
 #[cfg(all(unix, target_pointer_width = "64"))]
 unsafe impl Send for Mapping {}
+// SAFETY: through `&Mapping` the pages are only read -- they are mapped
+// `PROT_READ` and nothing writes through `ptr` -- and the length a reader
+// takes is an atomic (`cover`).
 #[cfg(all(unix, target_pointer_width = "64"))]
 unsafe impl Sync for Mapping {}
 
@@ -1004,6 +1008,10 @@ impl Mapping {
         use std::os::fd::AsRawFd;
         const PROT_READ: i32 = 1;
         const MAP_SHARED: i32 = 1;
+        // SAFETY: no address is asked for, so the system picks one that
+        // overlaps nothing of the process's; the descriptor is `file`'s,
+        // open across the call (the mapping keeps the file's pages after
+        // it, not the descriptor). A failure is `MAP_FAILED`, checked below.
         let ptr = unsafe {
             mmap(
                 std::ptr::null_mut(),
@@ -1056,6 +1064,9 @@ pub fn touch(m: &crate::store::Base) {
     for from in (0..bytes.len()).step_by(TOUCH_STEP) {
         let to = (from + TOUCH_STEP).min(bytes.len());
         // Advice: a refusal leaves the reads below to fault the pages in.
+        // SAFETY: `from` is inside `bytes`, so the pointer is in bounds, and
+        // `to - from` bytes from it are `bytes`' own. `MADV_WILLNEED` reads
+        // pages ahead and changes no byte of them.
         unsafe {
             madvise(
                 bytes.as_ptr().add(from) as *mut u8,
@@ -1065,6 +1076,8 @@ pub fn touch(m: &crate::store::Base) {
         };
         for at in (from..to).step_by(4096) {
             // Volatile, or the compiler drops reads whose result is unused.
+            // SAFETY: `at < to <= bytes.len()`: a byte of `bytes`, which `m`
+            // keeps mapped across the call.
             sum ^= unsafe { std::ptr::read_volatile(bytes.as_ptr().add(at)) };
         }
     }
@@ -1075,6 +1088,17 @@ pub fn touch(m: &crate::store::Base) {
 impl AsRef<[u8]> for Mapping {
     fn as_ref(&self) -> &[u8] {
         let len = self.len.load(std::sync::atomic::Ordering::Relaxed);
+        // SAFETY: `ptr` starts a mapping of `reserved` bytes, live until
+        // `drop` and so for as long as `&self`; `len <= reserved` (`cover`
+        // takes no more) and is never past what the file holds -- a mapping
+        // is made and `cover`ed with the file's length after its writes --
+        // so no byte of the slice is a page past the file's end, which
+        // would fault. Those bytes do not change while the slice lives: the
+        // file is never written in place or cut while mapped (above),
+        // appends landing past `len` and a rewrite renaming a new file over
+        // it; another process doing either is what the `<file>.lock` every
+        // opener of a file to write holds keeps out (root CLAUDE.md,
+        // *Single writer*).
         unsafe { std::slice::from_raw_parts(self.ptr, len) }
     }
 }
@@ -1082,6 +1106,8 @@ impl AsRef<[u8]> for Mapping {
 #[cfg(all(unix, target_pointer_width = "64"))]
 impl Drop for Mapping {
     fn drop(&mut self) {
+        // SAFETY: `ptr` and `reserved` are what `mmap` made, unmapped once,
+        // here; a slice of it borrows `self`, so none outlives the drop.
         unsafe { munmap(self.ptr, self.reserved) };
     }
 }
@@ -1174,6 +1200,8 @@ impl SideFile {
             use std::os::fd::AsRawFd;
             const F_NOCACHE: i32 = 48;
             // Advice: refused, the file is written through the cache.
+            // SAFETY: the descriptor is the image's, open across the call;
+            // `F_NOCACHE` takes an `int` and touches no memory of ours.
             unsafe { fcntl(self.out.w.get_ref().as_raw_fd(), F_NOCACHE, 1i32) };
         }
     }
@@ -1188,6 +1216,8 @@ impl SideFile {
             use std::os::fd::AsRawFd;
             const POSIX_FADV_DONTNEED: i32 = 4;
             // The pages are on disk now, and dropping them is advice too.
+            // SAFETY: the descriptor is the image's, open across the call;
+            // the advice is about the file's cached pages, none of ours.
             unsafe { posix_fadvise(self.out.w.get_ref().as_raw_fd(), 0, 0, POSIX_FADV_DONTNEED) };
             self.dropped = self.out.at;
         }

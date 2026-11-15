@@ -111,6 +111,10 @@ fn major_faults() -> Option<u64> {
         times: [0; 4],
         counts: [0; 14],
     };
+    // SAFETY: `r` is a whole `struct rusage` as both systems lay it out
+    // (above: `timeval`s of two longs on 64 and 32 bits alike), writable
+    // and as long as what the call writes into it; nothing else is passed
+    // and the call keeps no pointer.
     (unsafe { getrusage(RUSAGE_SELF, &mut r) } == 0).then_some(r.counts[5] as u64)
 }
 
@@ -178,12 +182,16 @@ mod imp {
     /// to the process's right that nothing gives back.
     fn host() -> u32 {
         static HOST: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        // SAFETY: the call takes nothing and reads no memory of ours.
         *HOST.get_or_init(|| unsafe { mach_host_self() })
     }
 
     pub fn room() -> Option<u64> {
         let mut memsize = 0u64;
         let mut len = std::mem::size_of::<u64>();
+        // SAFETY: the name is a C string literal, NUL-ended; `old` is
+        // `memsize`, the `u64` `hw.memsize` is, and `old_len` says its 8
+        // bytes, so the call writes no further; no new value is set.
         let r = unsafe {
             sysctlbyname(
                 c"hw.memsize".as_ptr().cast(),
@@ -197,11 +205,16 @@ mod imp {
             return None;
         }
         let mut page = 0usize;
+        // SAFETY: `page` is the `vm_size_t` (a `usize`) the call writes.
         if unsafe { host_page_size(host(), &mut page) } != 0 || page == 0 {
             return None;
         }
         let mut s = VmStatistics64::default();
         let mut count = (std::mem::size_of::<VmStatistics64>() / 4) as u32;
+        // SAFETY: `s` is writable and 8-aligned, as `vm_statistics64` is
+        // declared; `count` says its length in the 4-byte units the call
+        // counts in (`HOST_VM_INFO64_COUNT`, 38, for these 152 bytes), and
+        // the call writes no more than `count` of them.
         let r = unsafe {
             host_statistics64(
                 host(),

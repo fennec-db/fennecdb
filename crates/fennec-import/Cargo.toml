@@ -10,6 +10,9 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 # No external dependencies. The SQLite file format is read by hand; the
 # PostgreSQL wire protocol is spoken through fennec-wire's client.

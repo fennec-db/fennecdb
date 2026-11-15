@@ -31,6 +31,7 @@ pub const SIGTERM: i32 = 15;
 /// Asks `child` to stop as a supervisor does: `SIGTERM`, on Windows
 /// Ctrl+Break to its process group, which [`own_group`] made.
 pub fn ask_to_stop(child: &mut Child) {
+    // SAFETY: a process id and a signal's number: no memory is passed.
     #[cfg(unix)]
     unsafe {
         kill(child.id() as i32, SIGTERM);
@@ -274,6 +275,7 @@ impl Server {
     /// everything it logged. On Windows `SIGTERM` is Ctrl+Break to the
     /// server's process group and `SIGKILL` is `TerminateProcess`, a crash.
     pub fn signal(mut self, sig: i32) -> (i32, String) {
+        // SAFETY: a process id and a signal's number: no memory is passed.
         #[cfg(unix)]
         unsafe {
             kill(self.child.id() as i32, sig)

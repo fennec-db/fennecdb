@@ -107,6 +107,13 @@ jobs:
       - name: Only fennec-tls and fennec-bench take dependencies from outside the workspace
         run: python3 tools/deps_check.py
 
+      # docs/design/conventions.md#unsafe-code: every unsafe block says why
+      # it is sound, clippy's undocumented_unsafe_blocks denied in the root
+      # Cargo.toml's [workspace.lints], which a crate takes only by naming
+      # it: each does, a new one too.
+      - name: Every crate takes the workspace's lints, unsafe code documented among them
+        run: python3 tools/lints_check.py
+
       # The compiler CI tests with is the one that ships: rust-toolchain.toml
       # names an exact release, and every Dockerfile's rust image is that
       # release, by digest, the toolchain file kept in the build; the images

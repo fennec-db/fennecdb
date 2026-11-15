@@ -26,6 +26,16 @@ readme = "README.md"
 keywords = ["database", "vector", "embedded", "wasm", "http"]
 categories = ["database", "database-implementations", "wasm"]
 
+# Every `unsafe` block and `unsafe impl` says why it is sound, in a `//
+# SAFETY:` comment above it: what the caller or the code around it
+# guarantees, by name -- for the C ABIs the contract fennec.h and their
+# `# Safety` sections write. Denied here, so every clippy run CI makes, on
+# every target, refuses one without (docs/design/conventions.md#unsafe-code);
+# each crate takes this table by `[lints] workspace = true`, which
+# tools/lints_check.py holds every member of the workspace to.
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+
 # The internal crates carry a version as well as a path: cargo refuses to
 # publish a dependency that has only a path, and keeping them here means a
 # release bumps one number instead of seven.
