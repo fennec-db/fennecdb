@@ -930,6 +930,25 @@ pass. Each primitive's needle is its own declaration (`pub fn sha256(`), so a
 test function of a like name does not hold it. What a line scan cannot tell
 is in the tool's header.
 
+The same program holds the threat model,
+[security.md](security.md#the-boundaries), and SECURITY.md's decision on an
+outside audit -- "no outside audit has been made", linked to
+[its section](security.md#an-outside-audit), a sentence claiming one
+refused. It reads the table of boundaries row by row: an enforcing item,
+`path::item`, defined at its path outside the test module (a method's
+type defined or implemented there); a cited test a test at its path that
+CI builds and runs -- a Rust `#[test]`, never `#[ignore]`d, its file a
+`mod` of `tests/all.rs` or a `[[test]]`, a JS `test(` by its title, a
+Python or shell test by its name; each row a test or the words "no test";
+15 rows at the least, the plan's G2; every link read from `docs/design/`.
+It runs in the one step it ran in, a sibling program buying nothing but a
+second line in CI: the threat model's paths, anchors and flags are read
+by SECURITY.md's own functions. When the table was written it counted 825
+things (41 boundaries, 141 enforcing items, 107 cited tests, 175 of the
+threat model's paths and anchors, 18 of its flags, 4 promises), and named
+the 9 rows saying "no test" on a line of their own, as it does on every
+run: what no test proves is listed, never passed over.
+
 The policy itself: 0.x has no advisories, CVEs or patch releases, a fix
 lands on `main` and the pull request says which releases had the bug; from
 1.0.0 the latest 1.x minor and the previous one for 6 months after the next

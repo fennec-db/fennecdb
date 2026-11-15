@@ -28,6 +28,52 @@ Today none. Flags `--http-token` and --tls-ca. See `tools/a.py`,
 Own SHA-256 and HMAC-SHA-256 and PBKDF2-HMAC-SHA-256 and ChaCha20-Poly1305
 and RSA PKCS#1 v1.5 verification and ECDSA P-256 verification and
 SCRAM-SHA-256.
+
+No outside audit has been made ([the decision](docs/design/security.md#an-outside-audit)).
+"""
+
+
+def row(i, enforced="`crates/fennec-http/src/guard.rs::Guard::check`",
+        proved="`crates/fennec-http/tests/guard.rs::a_guard_refuses`", link=None):
+    return f"| {i} | [Boundary {i}](#{link or f'boundary-{i}'}) | a peer | {enforced} | {proved} |\n"
+
+
+def threat(rows=None, extra=""):
+    """A threat model of 15 rows, `rows` (a dict by number) changing some."""
+    rows = rows or {}
+    table = "| # | Boundary | Attacker | Enforced by | Proved by |\n|---|---|---|---|---|\n"
+    table += "".join(rows.get(i, row(i)) for i in range(1, 16))
+    sections = "".join(f"\n### Boundary {i}\n\nText.\n" for i in range(1, 16))
+    return ("# Security\n\n## The boundaries\n\n" + table + sections
+            + "\n## An outside audit\n\nfennec-server's `--http-token`, "
+            "[the policy](../../SECURITY.md#supported-versions).\n" + extra)
+
+
+GUARD = """pub struct Guard;
+impl Guard {
+    pub fn check(&self) {}
+}
+pub fn refuse() {}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn inline_one() {}
+    fn only_in_tests() {}
+}
+"""
+
+GUARD_TESTS = """#[test]
+fn a_guard_refuses() {}
+
+#[test]
+// A comment between.
+#[should_panic]
+fn a_guard_panics() {}
+
+#[test]
+#[ignore]
+fn an_ignored_one() {}
 """
 
 CRYPTO = ("pub fn sha256(a) pub fn hmac_sha256(a) pub fn pbkdf2_sha256(a) "
@@ -44,6 +90,14 @@ FILES = {
     "crates/fennec-http/src/crypto.rs": CRYPTO,
     "crates/fennec-http/src/crypto/p256.rs": "pub fn verify_sha256(\n",
     "crates/fennec-wire/src/client.rs": "    fn scram(&mut self, p: &str) {}\n",
+    "docs/design/security.md": threat(),
+    "crates/fennec-http/Cargo.toml": "[package]\nautotests = false\n",
+    "crates/fennec-http/src/guard.rs": GUARD,
+    "crates/fennec-http/tests/all.rs": "mod guard;\n",
+    "crates/fennec-http/tests/guard.rs": GUARD_TESTS,
+    "crates/fennec-http/tests/loose.rs": "#[test]\nfn never_built() {}\n",
+    "web/x.test.js": "test('a page is refused', () => {});\nfunction helper() {}\n",
+    "web/x.js": "export async function persist(db) {}\nclass Box {\n  async #seal(b) {\n  }\n}\n",
 }
 
 
@@ -78,6 +132,31 @@ class Holds(unittest.TestCase):
         problems, counts = run()
         self.assertEqual(problems, [])
         self.assertTrue(all(n > 0 for n in counts.values()), counts)
+        self.assertEqual(counts["boundaries"], 15)
+        self.assertEqual(counts["enforcing items"], 15)
+        self.assertEqual(counts["cited tests"], 15)
+
+    def test_every_kind_of_item_and_test_is_read(self):
+        # A method by its type, a function, a test module's test, a test
+        # with attributes and a comment before its `fn`, a JS test by its
+        # title, and a script's function and private method.
+        rows = {
+            2: row(2, "`crates/fennec-http/src/guard.rs::refuse`",
+                   "`crates/fennec-http/src/guard.rs::inline_one`"),
+            3: row(3, "`crates/fennec-http/src/guard.rs::Guard`",
+                   "`crates/fennec-http/tests/guard.rs::a_guard_panics`"),
+            4: row(4, "`web/x.js::persist` and `web/x.js::seal`", "`web/x.test.js::a page is refused`"),
+        }
+        problems, counts = run(**{"docs/design/security.md": threat(rows)})
+        self.assertEqual(problems, [])
+        self.assertEqual(counts["enforcing items"], 16)
+
+    def test_a_row_saying_no_test_passes_and_is_named(self):
+        notes = []
+        with Tree(**{"docs/design/security.md": threat({5: row(5, proved="no test: a finding")})}) as root:
+            problems, _ = check.run(root, (), notes)
+        self.assertEqual(problems, [])
+        self.assertEqual(notes, ["Boundary 5"])
 
 
 class Refused(unittest.TestCase):
@@ -154,6 +233,84 @@ class Refused(unittest.TestCase):
         self.wrong("Supported versions", **{"SECURITY.md": GOOD.replace("## Supported versions", "## Old")})
         self.wrong("acknowledgement", **{"SECURITY.md": GOOD.replace("3 working days", "a few days")})
         self.wrong("A security release", **{"RELEASING.md": ""})
+
+    def test_the_audit_decision_missing_or_reversed(self):
+        self.wrong("no outside audit has been made",
+                   **{"SECURITY.md": GOOD.replace("No outside audit has been made", "Audits")})
+        self.wrong("does not link docs/design/security.md#an-outside-audit",
+                   **{"SECURITY.md": GOOD.replace("#an-outside-audit", "")})
+        self.wrong("never the reverse", **{"SECURITY.md": GOOD + "\nThe code has been audited.\n"})
+        self.wrong("never the reverse", **{"SECURITY.md": GOOD + "\nIt was audited by a firm.\n"})
+
+
+class ThreatModel(unittest.TestCase):
+    """docs/design/security.md's table held to the tree."""
+
+    def wrong(self, text, rows=None, extra="", **changes):
+        changes.setdefault("docs/design/security.md", threat(rows, extra))
+        problems, _ = run(**changes)
+        self.assertTrue(any(text in p for p in problems), problems)
+
+    def test_a_renamed_function(self):
+        self.wrong("no item `Guard::check` in crates/fennec-http/src/guard.rs",
+                   **{"crates/fennec-http/src/guard.rs": GUARD.replace("fn check(", "fn verify(")})
+
+    def test_a_function_left_only_in_the_test_module(self):
+        self.wrong("(outside its test module)",
+                   {1: row(1, "`crates/fennec-http/src/guard.rs::only_in_tests`")})
+
+    def test_a_method_of_a_type_the_file_does_not_have(self):
+        self.wrong("defines no `Other`", {1: row(1, "`crates/fennec-http/src/guard.rs::Other::check`")})
+
+    def test_a_file_that_is_gone(self):
+        self.wrong("crates/fennec-http/src/gone.rs is not in the repository",
+                   {1: row(1, "`crates/fennec-http/src/gone.rs::check`")})
+
+    def test_a_deleted_test(self):
+        self.wrong("no test `a_guard_refuses` in crates/fennec-http/tests/guard.rs",
+                   **{"crates/fennec-http/tests/guard.rs": GUARD_TESTS.replace("a_guard_refuses", "other")})
+
+    def test_a_function_that_is_no_test(self):
+        # A plain function of the cited name is not a test.
+        self.wrong("no test `a_guard_refuses`",
+                   **{"crates/fennec-http/tests/guard.rs": "fn a_guard_refuses() {}\n"})
+
+    def test_an_ignored_test(self):
+        self.wrong("#[ignore]d test", {1: row(1, proved="`crates/fennec-http/tests/guard.rs::an_ignored_one`")})
+
+    def test_a_test_in_a_file_nothing_builds(self):
+        self.wrong("is not built", {1: row(1, proved="`crates/fennec-http/tests/loose.rs::never_built`")})
+
+    def test_a_js_test_renamed(self):
+        self.wrong("no test `a page is refused` in web/x.test.js",
+                   {1: row(1, proved="`web/x.test.js::a page is refused`")},
+                   **{"web/x.test.js": "test('a page is let in', () => {});\n"})
+
+    def test_a_js_helper_is_no_test_where_the_file_has_tests(self):
+        self.wrong("no test `helper`", {1: row(1, proved="`web/x.test.js::helper`")})
+
+    def test_a_row_without_a_test(self):
+        self.wrong("cites no test and does not say \"no test\"", {7: row(7, proved="see the docs")})
+
+    def test_a_row_without_an_enforcing_item(self):
+        self.wrong("names no enforcing item", {7: row(7, enforced="the server")})
+
+    def test_a_row_linking_no_section(self):
+        self.wrong("links no section of the file", {3: row(3, link="nowhere")})
+
+    def test_fewer_rows_than_the_plan_asks(self):
+        short = "\n".join(line for line in threat().splitlines() if not line.startswith("| 15 "))
+        self.wrong("14 boundaries, fewer than 15", **{"docs/design/security.md": short})
+
+    def test_no_table(self):
+        self.wrong("has no table of boundaries", **{"docs/design/security.md": "# Security\n"})
+
+    def test_a_link_read_from_its_folder(self):
+        self.wrong("has no `gone`", extra="[x](../../SECURITY.md#gone)\n")
+        self.wrong("names access.md, which is not in the repository", extra="[x](access.md)\n")
+
+    def test_a_flag_no_parser_reads(self):
+        self.wrong("docs/design/security.md names --gone", extra="fennec-server's --gone.\n")
 
 
 class Allowed(unittest.TestCase):
