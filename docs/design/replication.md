@@ -611,12 +611,12 @@ database holds already 247.8-252.7.
 **An archive and a backup can be sealed** (`seal.rs`, `fennec key`,
 `--key-file`). A copy in a bucket is out of reach of the disk's
 encryption, so with a key every archive file and a backup file is
-ChaCha20-Poly1305 (`crypto.rs`, RFC 8439's vectors and 2 000 random cases
-against node:crypto): ChaCha20 over AES-GCM because it has no secret-indexed
-tables in software, Poly1305 in 26-bit limbs. Frames carry a random
-nonce, and their file's id, place and last-ness in the AAD (below); an
-image and the history are sealed whole (`open_whole` refuses a file cut
-short), a segment a frame for
+ChaCha20-Poly1305 (`crypto.rs`, RFC 8439's vectors, every case of
+Wycheproof's, and 2 000 random cases against node:crypto): ChaCha20 over
+AES-GCM because it has no secret-indexed tables in software, Poly1305 in
+26-bit limbs. Frames carry a random nonce, and their file's id, place and
+last-ness in the AAD (below); an image and the history are sealed whole
+(`open_whole` refuses a file cut short), a segment a frame for
 each batch of writes, whole records in each, so a crash cuts off a frame as
 it cut a record (`open_appended`, the segment's `sealed` state). A file of
 the other kind than the archive is refused. About 400 MB/s either way on
