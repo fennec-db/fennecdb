@@ -12,6 +12,7 @@
 //! token comes from the environment, `FENNEC_TOKEN`, never from argv, which
 //! `ps` shows.
 
+use crate::exit::Code;
 use fennec_http::mcp;
 use std::io;
 use std::sync::{Arc, RwLock};
@@ -43,7 +44,7 @@ answer a line on stdout, logs on stderr.
 Claude Code: claude mcp add fennecdb -- fennec mcp --file notes.fennec --memory memories
 ";
 
-pub fn main(args: &[String]) -> i32 {
+pub fn main(args: &[String]) -> Code {
     let mut file: Option<String> = None;
     let mut url: Option<String> = None;
     let mut read_only = false;
@@ -55,6 +56,9 @@ pub fn main(args: &[String]) -> i32 {
         ..mcp::Options::default()
     };
     let mut local_flag: Option<&str> = None;
+    // Read once the line is: as it was read, `--tls-ca --help <no such
+    // flag>` read a file named `--help` before the flag after it was refused.
+    let mut tls_ca: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         let flag = args[i].as_str();
@@ -65,20 +69,11 @@ pub fn main(args: &[String]) -> i32 {
         let ok = match flag {
             "-h" | "--help" => {
                 print!("{USAGE}");
-                return 0;
+                return Code::Ok;
             }
             "--file" => value().map(|v| file = Some(v)).is_some(),
             "--url" => value().map(|v| url = Some(v)).is_some(),
-            "--tls-ca" => match value() {
-                Some(v) => match fennec_http::dial::trust_ca(&v) {
-                    Ok(()) => true,
-                    Err(e) => {
-                        eprintln!("fennec mcp: {e}");
-                        return 2;
-                    }
-                },
-                None => false,
-            },
+            "--tls-ca" => value().map(|v| tls_ca = Some(v)).is_some(),
             "--token-env" => value().map(|v| token_env = v).is_some(),
             "--read-only" => {
                 read_only = true;
@@ -109,12 +104,12 @@ pub fn main(args: &[String]) -> i32 {
             }
             other => {
                 eprintln!("fennec mcp: unknown option `{other}`\n\n{USAGE}");
-                return 2;
+                return Code::Refused;
             }
         };
         if !ok {
             eprintln!("fennec mcp: {flag} expects a value\n\n{USAGE}");
-            return 2;
+            return Code::Refused;
         }
         i += 1;
     }
@@ -126,39 +121,68 @@ pub fn main(args: &[String]) -> i32 {
             && m.chars().all(|c| c.is_alphanumeric() || c == '_');
         if !ok {
             eprintln!("fennec mcp: --memory names a collection, and `{m}` is not a name");
-            return 2;
+            return Code::Refused;
         }
     }
-    match (file, url) {
-        (Some(path), None) => local(&path, read_only, opts),
+    // Every refusal of the line before `--tls-ca`'s file is read: one
+    // of `--file` and `--url`, the flags each takes, the URL.
+    let session = match (file, url) {
+        (Some(path), None) => {
+            if read_only && opts.write {
+                eprintln!("fennec mcp: --write and --read-only: pick one");
+                return Code::Refused;
+            }
+            Session::File(path)
+        }
         (None, Some(url)) => {
             if let Some(f) = local_flag {
                 eprintln!(
                     "fennec mcp: {f} is the server's to set (fennec-server --mcp ...): over --url the tools are its own"
                 );
-                return 2;
+                return Code::Refused;
             }
-            remote(&url, &token_env)
+            let token = std::env::var(&token_env).ok().filter(|t| !t.is_empty());
+            match mcp::bridge::Upstream::parse(&url, token) {
+                Ok(up) => Session::Server(url, up),
+                Err(e) => {
+                    eprintln!("fennec mcp: {e}");
+                    return Code::Refused;
+                }
+            }
         }
         _ => {
             eprintln!("fennec mcp: give --file or --url\n\n{USAGE}");
-            2
+            return Code::Refused;
         }
+    };
+    if let Some(pem) = &tls_ca {
+        if let Err(e) = fennec_http::dial::trust_ca(pem) {
+            eprintln!("fennec mcp: {e}");
+            return Code::Refused;
+        }
+    }
+    match session {
+        Session::File(path) => local(&path, read_only, opts),
+        Session::Server(url, up) => remote(&url, &up),
     }
 }
 
-fn local(path: &str, read_only: bool, opts: mcp::Options) -> i32 {
-    if read_only && opts.write {
-        eprintln!("fennec mcp: --write and --read-only: pick one");
-        return 2;
-    }
+/// What a session is over, its line read and not refused.
+enum Session {
+    /// A database file, held by the session.
+    File(String),
+    /// A server's endpoint, as given and as parsed.
+    Server(String, mcp::bridge::Upstream),
+}
+
+fn local(path: &str, read_only: bool, opts: mcp::Options) -> Code {
     let lock = match read_only {
         true => None,
         false => match crate::held::take(path, crate::held::Way::Mcp) {
             Ok(l) => Some(l),
             Err(why) => {
                 eprintln!("fennec mcp: {why}");
-                return 1;
+                return Code::Failed;
             }
         },
     };
@@ -170,7 +194,7 @@ fn local(path: &str, read_only: bool, opts: mcp::Options) -> i32 {
         Ok(db) => Arc::new(RwLock::new(db)),
         Err(e) => {
             eprintln!("fennec mcp: could not open {path}: {e}");
-            return 1;
+            return Code::Failed;
         }
     };
     let cfg = fennec_http::Config {
@@ -195,17 +219,17 @@ fn local(path: &str, read_only: bool, opts: mcp::Options) -> i32 {
     );
     let served = mcp::serve_lines(&ctx, io::stdin().lock(), io::stdout().lock());
     let mut code = match served {
-        Ok(()) => 0,
+        Ok(()) => Code::Ok,
         Err(e) => {
             eprintln!("fennec mcp: {e}");
-            1
+            Code::Failed
         }
     };
     if !read_only {
         let mut g = db.write().unwrap_or_else(|e| e.into_inner());
         if let Err(e) = g.sync() {
             eprintln!("fennec mcp: could not push the writes to disk: {e}");
-            code = 1;
+            code = Code::Failed;
         }
     }
     // The database before the lock: its drop still writes the file -- what
@@ -218,15 +242,7 @@ fn local(path: &str, read_only: bool, opts: mcp::Options) -> i32 {
     code
 }
 
-fn remote(url: &str, token_env: &str) -> i32 {
-    let token = std::env::var(token_env).ok().filter(|t| !t.is_empty());
-    let up = match mcp::bridge::Upstream::parse(url, token) {
-        Ok(up) => up,
-        Err(e) => {
-            eprintln!("fennec mcp: {e}");
-            return 2;
-        }
-    };
+fn remote(url: &str, up: &mcp::bridge::Upstream) -> Code {
     eprintln!(
         "fennec mcp {}: {url}{}, over stdio",
         fennec_core::VERSION,
@@ -236,11 +252,11 @@ fn remote(url: &str, token_env: &str) -> i32 {
             " with no token"
         }
     );
-    match mcp::bridge::bridge(&up, io::stdin().lock(), io::stdout().lock()) {
-        Ok(()) => 0,
+    match mcp::bridge::bridge(up, io::stdin().lock(), io::stdout().lock()) {
+        Ok(()) => Code::Ok,
         Err(e) => {
             eprintln!("fennec mcp: {e}");
-            1
+            Code::Failed
         }
     }
 }

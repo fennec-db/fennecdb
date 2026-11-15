@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-fennec-http's access -- scoped tokens and their rules, field lists, the server's own collections, tenant binding and whom a token is for -- for code in `crates/fennec-http/src/access.rs` and `crates/fennec-http/src/access/`, which binds fennec-core's hooks (`plugin::Hook`, `Check`), its `Filter` -- the order it tests an `and`'s terms in -- and its own collections' names (`declared::OWN`) too; the rest of fennec-http's rules are in [its CLAUDE.md](../../CLAUDE.md), the rules every change meets in the root's [CLAUDE.md](../../../../CLAUDE.md).
+fennec-http's access -- scoped tokens and their rules, field lists, the server's own collections, tenant binding, whom a token is for and its expiry -- for code in `crates/fennec-http/src/access.rs` and `crates/fennec-http/src/access/`, which binds fennec-core's hooks (`plugin::Hook`, `Check`), its `Filter` -- the order it tests an `and`'s terms in -- and its own collections' names (`declared::OWN`) too, and how a replica's sync reads a 401 (`fennec_abi::sync`, `web/fennec.js`); the rest of fennec-http's rules are in [its CLAUDE.md](../../CLAUDE.md), the rules every change meets in the root's [CLAUDE.md](../../../../CLAUDE.md).
 
 ## Invariants
 
@@ -107,8 +107,50 @@ where not a word (`claim_name`): a path into a nested object, or an
 unquoted name running into `-` or `:`, is refused at startup, never read; a
 role is the word after the last `for` or a quoted name (`role_of`).
 
+**[A token past its `exp` is told so by a code, and no other refusal
+is.](../../../../docs/design/access.md#expired-tokens)** A request whose
+token's `exp` passed is answered 401 `{"error":"the token has
+expired","code":"token_expired"}` (`refusal_code`, in `authenticate`), and
+a stream ended at the `exp` says the same (`sse::EXPIRED`); the `exp` is
+asked after the signature and whom the token is for (`Access::verify`), so
+the code is told only of a token this server took until then. A client
+reads the code alone, never the words, and no 401 is a sign-out: the
+server keeps no list of revoked tokens, so an app asks its issuer at every
+one and signs out where the issuer refuses. So a replica's sync hands its
+provider the code, whether the refused request carried a token and the
+asks in a row since the server took the token held -- a 2xx or a stream
+opened, never a 408, 429 or 5xx (`TokenRefusal`, the token action's
+`code`, `had_token`, `attempt`) -- asks once while it waits, after 1 s
+doubling to 60 s where the token handed over was refused too, a wait the
+same token handed over again does not end (an expiry starting at 1 only
+for the token the server took last or the first handed over since, never
+for one already refused for its expiry), one ask out at a time -- a
+binding calls its provider once at a time, bounding none, and answers with
+the token or `{"token_failed":..}`, which the status's `token` tells in
+every SDK (its stage, said from the ask: no fault set since hides it) --
+again at `{"online":true}` only after that, nothing once stopped, and
+sends a request refused for a token since replaced again, unasked
+(`fennec_abi::sync`, `web/fennec.js`, held by the scenario file); a
+replica is one account's, its key or path naming it; every SDK names the
+code `errorCode`.
+
 **[An empty token is no token.](../../../../docs/design/access.md#empty-tokens)**
 A variable set empty is unset (`env_secret`, fennec-shard's `env`); a token
 flag, a JWT secret's file or a key file given empty is refused at the
 start; a library constructor takes an empty token as none
 (`Config::settled`).
+
+**[A token taken past loopback is 32 bytes at least.](../../../../docs/design/access.md#short-tokens)**
+`fennec-server` and `fennec-shard` refuse at the start, before anything is
+opened, a token shorter than `TOKEN_MIN` where a listener taking it binds
+past loopback (`fennec_http::short_token`), naming the flag, its variable
+and the minimum: `--http-token` and `--admin-token` on `--http` and
+`--metrics`, `--replication-token` on `--http`, the router's `--token`,
+`--entry-token` and `--replication-token` on `--listen`. A new token flag
+joins those lists. Loopback is judged of the addresses the listener is
+bound on, its name looked up once (`fennec_http::Listen`), never bound by
+its text again, and a name not looked up is past loopback. On loopback any
+length is taken (`make server TOKEN=secret`), one shorter warned of once,
+at the first request a proxy or a router sent (`kept_short`, `proxied`: a
+load and a branch a request, nothing refused), as is a hook's secret
+shorter (`Hook::short`); `--insecure` waives nothing.

@@ -832,10 +832,20 @@ fn lit(raw: &str, ty: &DataType, name: &str) -> Result<Value> {
         // it has no spelling for infinity -- which makes the query string
         // agree with the JSON body, where `inf` was never a number either.
         // It also keeps `core`'s 12 KB table of powers of five out of every
-        // binary that links this crate, `fennec-server` included.
-        DataType::Float => {
-            Value::Float(fennec_core::num::parse_f64(raw).ok_or_else(|| bad("a number"))?)
-        }
+        // binary that links this crate, `fennec-server` included. A number
+        // past a float's range is refused naming the range, as the body's is.
+        DataType::Float => match fennec_core::num::read_f64(raw) {
+            Ok(x) => Value::Float(x),
+            Err(why) => match why.range() {
+                Some(range) => {
+                    return Err(Error::Query(format!(
+                        "`{name}`: number `{}` {range}",
+                        fennec_core::num::shown(raw)
+                    )))
+                }
+                None => return Err(bad("a number")),
+            },
+        },
         DataType::Text => Value::Text(raw.to_string()),
         DataType::Bytes => Value::Bytes(raw.as_bytes().to_vec()),
         // Both ISO-8601 and epoch milliseconds are accepted.

@@ -119,7 +119,9 @@ a token: a router or a node refuses an address past loopback without one.
 
 ## Tokens
 
-Every token is made with `openssl rand -hex 32` and lives in an
+Every token is made with `openssl rand -hex 32` -- a node and a router
+listening past loopback refuse at the start a token shorter than 32 bytes,
+the env files' `change-me` examples among them -- and lives in an
 environment file, `/etc/fennecdb/*.env`, mode 0600, owned by root. systemd
 reads it as root before the process starts, so no service's user can read
 the file, and no token is on a command line (`ps` shows every process's
@@ -899,6 +901,39 @@ records say; one refused names the damaged record and the
 whole one after it that says the file was synced past it -- restore that
 tenant from its archive or a replica, and keep the file for a look.
 
+**A sealed archive's next file is bound to itself, which older readers
+refuse.** From the release that binds a sealed frame to its file, an
+archiver restarted on it seals its next image and segment, and `fennec
+backup --key-file` its backup, with a file id (`FENECSL\x02`), and a
+`fennec restore` or `fennec verify` from 0.2.0 or earlier refuses such a
+file (`not a sealed file`, `<image>: not sealed, where the archive is`).
+The files sealed before still open in the new release, and a segment an
+older archiver began goes on as it was. So `fennec` is upgraded on every
+machine that restores or verifies -- an operator's, the weekly restore's --
+with step 1, before any archiver is restarted on the new release. The older files still open under their key, and whoever
+holds two of them can build a third from their frames: to be rid of that,
+make a new key (`fennec key`), point every archiver and backup at it, and
+begin a new archive under it, keeping the old key to read the older one
+(Archives and restores; the site's replication page, *How archives and
+backups are sealed*).
+
+**A tenant's `github` hook set with `key delivery` is kept, its events
+refused.** From the release that refuses `key delivery`, a set a node kept
+from 0.2.0 still reads -- every secret kept, the tenant's other hooks
+armed -- and the node logs each such hook as it starts (its line says the
+hook "was set with `key delivery`"); that hook's verified events are
+answered 409 naming `key body` until it is set again (`PUT
+/_shard/tenants/<t>/hooks/<h>` with its secret and `"key":"body"`, or no
+`key`). Then redeliver from GitHub's delivery log what was refused
+meanwhile. Its listings say `"armed":false` for each statement taking it
+until then. A single server started with `--hooks` reads no kept set: a
+hooks file line `<name> github <secret file> key delivery` stops it at the
+start on the new release (exit 2, ``<hooks file>: hooks file line N: `key
+delivery` is refused: ...``). Take `key delivery` out of that line, or make
+it `key body`, before restarting the server on the release; its events are
+keyed by their body from then on, so one taken before under its delivery id
+is taken once more if GitHub redelivers it.
+
 What a mix of versions tolerates is said release by release in the
 changelog; the docs hold these today: nothing records an `https://` node
 address until every router (each region's, each standby) and every node is
@@ -1062,6 +1097,21 @@ account alone, and another account is refused it -- and the command with it
 file the folder's rules do not reach), where on Linux the directory's write
 permission is enough.
 
+**A tenant's hook secrets set aside**: a node that cannot read a tenant's
+`<t>.hooks` as it starts -- cut short or changed by hand, written by a later
+release and met after a downgrade, or its tenant's file not looked at for
+another reason than its not being there (a directory the node may not
+search, an I/O error) -- renames it `<t>.hooks.unread` (`.unread.2` and on,
+never over one) and logs ``tenant `<t>`'s hook secrets ...: set aside as
+<path>, which nothing reads``; the tenant's hooks are answered 401 until set
+again. Only a tenant's file that is not there makes its set one to put away.
+The file holds the secrets, mode 0600 (on Windows an ACL granting the node's
+account alone). Nothing reads or removes it: it stays through a delete and a
+re-creation of the tenant, and on the source node of a move, which does not
+carry it. Read the secrets from it, set the hooks again through the router
+(`PUT /_shard/tenants/<t>/hooks/<h>`), then remove it by hand; `ls
+"$FENNEC_DIR"/*.hooks.unread*` finds every one.
+
 **The weekly restore**, from the bucket and on a machine of no role, as a
 disaster would have it -- the archiver's own disk proves nothing about the
 bucket:
@@ -1179,7 +1229,8 @@ it short and says what it costs.
 - `FennecRouterRefusals`, `FennecNodeRefusals`: more than one refused token a
   second -- a client with a stale token, or someone guessing. The audit log
   (`/var/log/fennecdb/<role>/audit.log`) names the address; each refusal
-  waits, longer for each one more from the same address.
+  waits, longer for each one more from the same address (an IPv6 one's
+  /64).
 
 ## The entry token
 

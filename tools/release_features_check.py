@@ -4,8 +4,11 @@ tools/release_features_check.py`, CI's fmt job.
 
 `test-clock` (crates/fennec-http/src/test_clock.rs) lets a file move a
 tenant node's clock, for `make chaos`, which Docker cannot do for one
-container. A release carrying it would let anyone who can write a file on
-the machine move every tenant's `now()` and `@ttl`. It is held out three
+container, and lets `FENNEC_TEST_SCHEDULER_PANIC` end the scheduler's
+thread, for fennec-server's `scheduled` test. A release carrying it would
+let anyone who can write a file on the machine move every tenant's `now()`
+and `@ttl`, and anyone who sets the server's environment stop it at its
+first schedule due. It is held out three
 ways here, and two more at release time (release.yml: the image's and every
 tarball's `fennec-server --version` say the version alone, never
 `+test-clock`):

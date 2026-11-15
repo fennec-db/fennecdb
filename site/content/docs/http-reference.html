@@ -318,7 +318,10 @@ is: the float 2<sup>60</sup> is <code>1152921504606846976</code>, not
 int — an int and a float compare by their true values — so a number read
 from an answer and sent back as a parameter finds the row it came from. A
 client sending a whole number of 2<sup>53</sup> or more writes every digit
-of it the same way.</p>
+of it the same way. A number a request sends past a float's range —
+<code>1e400</code>, <code>1e-400</code> — is refused (400), naming it and
+the byte it starts at, never read as an infinity or 0 (<a
+href="limits.html#fixed-limits">limits</a>).</p>
 
 <p>A <code>"match"</code> makes it hybrid: BM25 over the collection's
 <code>@text</code> field ranks the same request, and the two rankings are
@@ -733,7 +736,11 @@ go on, since they are the way out. The rule and why it is there are under
 <h2 id="statuses">Refusals and their statuses</h2>
 
 <p>A refusal is a status and <code>{"error": "..."}</code>. The status says
-what to do about it; a <code>/batch</code> that stopped adds where
+what to do about it; a token past its <code>exp</code> adds the code a
+program tells it by, <code>"code": "token_expired"</code>, beside the words,
+which are a person's (<a href="/docs/auth#expiry">Expiry</a>; a later server
+may name other codes, and every SDK's error carries it as its
+<a href="/docs/languages#error-code"><code>errorCode</code></a>); a <code>/batch</code> that stopped adds where
 (<code>at</code>) and what stayed applied (<code>completed</code>), a
 <code>require</code> that said why gives the words (<code>reason</code>, the
 statement's own, on a lone statement and a <code>/batch</code> alike), a
@@ -760,7 +767,7 @@ SDK's error carries the rest; the outcome and its position are the Go,
 <thead><tr><th>Status</th><th>Means</th><th>What to do</th></tr></thead>
 <tbody>
 <tr><td class="n">400</td><td>a statement that does not parse or run, a bad parameter; a body framed two ways (<a href="#bodies">Request bodies</a>); <code>If-Match</code> or <code>If-None-Match</code> off a row's route (<a href="#conditional">Writing over the row you read</a>)</td><td>fix the request</td></tr>
-<tr><td class="n">401</td><td>no token, or a wrong one</td><td>send the right token</td></tr>
+<tr><td class="n">401</td><td>no token, or a wrong one; <code>"code": "token_expired"</code> where its <code>exp</code> passed</td><td>a fresh token from its issuer, at a 401 naming no code too; one minted again and refused the same waits for what minting does not change -- a key the server has not fetched yet, an <code>nbf</code> its clock has not reached (<a href="/docs/auth#expiry">Expiry</a>)</td></tr>
 <tr><td class="n">403</td><td>outside the token's rules — a row, a field, a change no transition names, a <code>returning</code> row it may not read, the write put back whole, a <code>PUT /&lt;name&gt;/&lt;id&gt;</code> — a write to a replica or a read-only server, or one marked <code>Fennec-Read</code></td><td>write where it is taken</td></tr>
 <tr><td class="n">404</td><td>a collection, field or tenant that is not there</td><td></td></tr>
 <tr><td class="n">409</td><td>an id or a <code>@unique</code> value taken, a collection that exists; a <code>/batch</code> holding a <code>compact</code> that <code>--call-rate</code> stopped after statements of it landed — never a 429 or 503 then, which say nothing ran</td><td>a lost race for a value; for the batch, send the statements from <code>at</code> on, alone</td></tr>
@@ -789,6 +796,11 @@ HTTP/1.1 503 Service Unavailable
 Retry-After: 1
 
 {"error":"the tenant is being moved; retry shortly","retry_after":1}
+
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer
+
+{"error":"the token has expired","code":"token_expired"}
 
 HTTP/1.1 412 Precondition Failed
 
@@ -1051,6 +1063,11 @@ all, one JSON object a line, from any write the server still keeps.</p>
   <li><code>op</code> is <code>put</code>, <code>del</code>,
   <code>create</code>, <code>alter</code> or <code>drop</code>; a put
   carries the document as it was written, as JSON writes a row.</li>
+  <li><code>at</code> is when the write was appended, in milliseconds since
+  the epoch. On a replica, and a replica of one, it is when the primary
+  appended it, by the primary's clock; a promoted replica times its own
+  writes by its own clock, which may be behind. Order by
+  <code>seq</code>.</li>
   <li>It needs <code>--http-token</code> or no token at all: a scoped
   token's filter could not hold back the deletion of a row it never saw,
   and is refused (403).</li>

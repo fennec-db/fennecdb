@@ -1,7 +1,7 @@
 /// fennecdb in a Flutter app: the `fennecdb` package, its native library
-/// bundled by this plugin for iOS and macOS (`FennecFFI.framework`, a
-/// dynamic framework CocoaPods embeds in the app) and Android
-/// (`libfennec_ffi.so` for each ABI).
+/// bundled by this plugin for iOS (`FennecFFI.framework`, a dynamic
+/// framework CocoaPods embeds in the app), macOS (`libfennec_ffi.dylib`,
+/// embedded the same way) and Android (`libfennec_ffi.so` for each ABI).
 ///
 /// ```dart
 /// final dir = await getApplicationDocumentsDirectory();   // path_provider

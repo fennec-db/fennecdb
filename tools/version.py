@@ -128,6 +128,16 @@ def current_version(root):
     if not m:
         sys.exit("Cargo.toml: no workspace version")
     return m.group(1)
+def guard(v, root=ROOT):
+    """A 1.0.0 or later release needs the API baselines frozen
+    (integrations/api-golden/frozen.json): until then a break is named for
+    "1.0" and the baselines are only today's dumps. The checker says which
+    command freezes them (docs/design/conventions.md#api-baselines)."""
+    if int(v.split(".")[0]) < 1:
+        return
+    r = subprocess.run([sys.executable, str(root / "tools" / "api_compat.py"), "--root", str(root), "--require-frozen"])
+    if r.returncode != 0:
+        sys.exit(f"version {v} refused: freeze the API baselines first")
 
 
 def main():
@@ -135,6 +145,7 @@ def main():
         sys.exit("usage: version.py X.Y.Z")
     v = sys.argv[1]
     refuse_without_set(ROOT, v)
+    guard(v)
     sub("Cargo.toml", r'^version = "[^"]+"', f'version = "{v}"')
     for crate in ("core", "ql", "abi", "http", "server", "wire", "import", "tls"):
         sub("Cargo.toml", rf'^(fennec-{crate} = \{{ version = )"[^"]+"', rf'\g<1>"{v}"')
@@ -186,14 +197,20 @@ def main():
 def changelogs(v):
     """pub.dev shows a package's CHANGELOG.md and warns at the upload when it
     names no entry for the version: 0.1.8 to 0.1.11 went up with only
-    0.1.7's. Each release's entry points at its notes, written once."""
+    0.1.7's. Each release's entry points at its notes, written once. What a
+    change a user must act on wrote under `## Unreleased` as it landed -- a
+    break before 1.0 -- becomes the release's entry, its notes' link first:
+    an entry put above it would have left it under the release it came
+    before."""
     for package in ("fennecdb", "fennecdb_flutter"):
         p = ROOT / f"integrations/dart/{package}/CHANGELOG.md"
         text = p.read_text(encoding="utf-8")
         if re.search(rf"^## {re.escape(v)}$", text, flags=re.M):
             continue
         entry = f"## {v}\n\nThe release notes: https://github.com/fennec-db/fennecdb/releases/tag/v{v}\n\n"
-        text, n = re.subn(r"^(# Changelog\n\n)", lambda m: m.group(1) + entry, text, count=1, flags=re.M)
+        text, n = re.subn(r"^## Unreleased\n\n", lambda m: entry, text, count=1, flags=re.M)
+        if n == 0:
+            text, n = re.subn(r"^(# Changelog\n\n)", lambda m: m.group(1) + entry, text, count=1, flags=re.M)
         if n != 1:
             sys.exit(f"{p}: no '# Changelog' heading")
         p.write_text(text, encoding="utf-8")

@@ -1,6 +1,6 @@
 # Replication and archives
 
-The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md) and [crates/fennec-import/CLAUDE.md](../../crates/fennec-import/CLAUDE.md) list under *Replication and archives*: replication, a node's tenants archived over one stream, `/_changes`, `Fennec-After`, sealed archives and `--follow`. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-http/CLAUDE.md](../../crates/fennec-http/CLAUDE.md) and [crates/fennec-import/CLAUDE.md](../../crates/fennec-import/CLAUDE.md) list under *Replication and archives*: replication, a write's time on a copy and in an archive, a node's tenants archived over one stream, `/_changes`, `Fennec-After`, sealed archives and `--follow`. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## Replication
 
@@ -88,7 +88,7 @@ not after the machine dies. Lag is 0.04 ms p50 under `--sync always`
 writes 254 a second against 246; ten failovers under `always` lost no
 acknowledged write. An archive (`fennec archive`,
 `fennec-http/src/archive.rs`) is the same stream written to files, each write
-with the time the primary appended it; `fennec restore` is an image plus the
+with the time the primary appended it -- an archive of a copy too, [below](#a-writes-time); `fennec restore` is an image plus the
 archived writes up to a time or a change, forked -- a fennecdb file is exactly
 that, so a restore is a concatenation checked by opening it. An archive
 takes images of its own end (`Archive::consolidate`, `--image-every`, an
@@ -203,6 +203,119 @@ macOS arm64, release). The image's buffer is
 grown by the record alone: a `Vec` grown its own way took twice a large
 image's size.
 
+## A write's time
+
+**A copy keeps the time its primary appended each write at, and an
+archive's times run in order.** A primary's feed stamps each record with
+its clock as the `Tee` hands it over (`Feed::push`), and its stream sends
+the times beside the records (`W`: the first write, a count, a time for
+each record, the records). The follower took the times off the stream and
+dropped them (`Message::Writes { first, records, .. }`), and applied the
+records, which its own sink's `Tee` stamped with the copy's clock as each
+landed: a copy's feed timed every write at the moment the copy applied it,
+a replication lag after its primary appended it, and so did everything
+read from that feed -- a copy of the copy, the copy's `/_changes` (`at`)
+and an archive cut from it: a `--dir` node's `archive --tenants` covers
+the tenants the node holds as a copy, and `fennec archive` may be pointed
+at a replica. A restore to a moment from such an archive left out writes
+the primary had appended, and answered, before that moment, where the docs
+promise every one. It was found root-causing a failed failover drill, and
+was there from the first release with replication: v0.1.5 to v0.2.0.
+
+The follower now hands the times to its feed after `Database::apply`
+(`Feed::sent_times`), under the write lock and before its flush, which is
+what makes a record it applied durable, so sendable: no record is sent
+before its time is its primary's (a debug assertion holds it). The records
+the apply landed are the ring's newest, one entry a record -- a block that
+spilled and landed (`land`) is sent as the one record it would have been
+(`landed_block`) and applied as one. Where the apply says how many landed
+(its `Ok(n)`: every record of the message) they are paired from the last
+back, which leaves them right where a ring smaller than one message let go
+of the first of them as later ones came in (only `--replication-buffer 0`
+or `1` can be). An apply refused part way lands a prefix, the records after the
+refused one put back and never handed to the sink, and says nothing: its
+records are paired from the first on, where the ring still holds the first,
+and otherwise -- under `--replication-buffer 0` or `1` alone, the one
+place the rule's "nothing is sent with the copy's own clock" does not
+reach -- keep the copy's time until the image the follower connects
+again for starts the feed over (`Feed::start`), as any image (`force_image`)
+does; the writes after an image take their times as any. A copy of a copy
+sends its feed's times, its primary's, so a chain carries the first
+primary's times to its end; a promoted copy has no follower, and its own
+writes take its own clock from the promotion on.
+
+Rejected: handing the times to the feed before the apply, `push` taking
+the next one -- right from the first moment, no window to reason about --
+since `push` is a primary's write path, and would look at a list there on
+every write. Rejected too: counting the message's records' writes to match
+them to the ring by number (`writes_in` a record, as `push` counts them),
+which also matches a refused apply's prefix whatever the ring let go of: a
+third caller of `writes_in` had the release build's LTO stop inlining it
+into `Feed::push`, read off the binary -- 358 instructions and a call
+where `main` inlines it in 519 -- a call more on every write a primary
+makes. As built, `Feed::push` and each of the `Tee`'s sink methods are the
+same instructions as on `main`, addresses aside, every `Feed` and `Tee`
+function but the new one (`fennec-server` built with `-C strip=none`,
+`objdump` of each symbol, macOS arm64). Nothing in the source says LTO
+inlines `writes_in` into `push`, so a change near it -- another caller of
+`writes_in` above all -- owes the same look: `objdump -d --demangle` of
+`fennec-server` built `--release` with `RUSTFLAGS="-C strip=none"`, no
+call to `writes_in` inside `Feed::push`.
+
+*An archive's times run in order.* With a copy's writes carrying its
+primary's times, an archive that follows a copy through its promotion is
+timed by two clocks, the old primary's to the fork and the copy's after it,
+and a copy whose clock is behind sends writes timed before the ones before
+them, as a clock set back does on one machine. A restore to a moment stops
+at the first write timed after it, a prefix either way, but `prune` and a
+restore to a moment before every write kept read the images' times -- a
+consolidated image is timed by its last write (`time_of`) -- as in order:
+`prune` took the newest image timed by its cutoff for the base and let go
+of the images before it, one of which a restore to a moment inside `--keep`
+started from, and that restore answered change 8 after the prune against 3
+before it (`archive::tests`' `an_archives_times_run_in_order_across_a_clock_behind`).
+Now `Archive::take` archives no write at a time before the latest it
+archived (`Writer::latest`, read back from the last segment as the archive
+is opened to be written, so an archiver started again goes on from it): a
+restore to a moment cuts where it cut, the first write past the moment
+being the same, and every time an archive holds runs in order. Rejected:
+keeping the feed's times in order instead (the latest in `push`), on a
+primary's write path, and lost with the process: a copy promoted after a
+restart had no time of its primary's to hold to, where an archive keeps its
+latest on disk. The image a hello brings is timed by the archiver's clock
+as it takes it, and no earlier than the latest write the archive holds
+(`Archive::hello`, `Writer::latest`): by that clock alone, behind the
+writes', it was dated before writes it follows, and a `prune` whose cutoff
+fell between the two took it for the base and let go of the image a
+restore inside `--keep` started from, which then found none to start from
+(`a_hellos_image_is_not_dated_before_the_writes_the_archive_holds`).
+A stored time is so the time the write was appended or, where the clock
+stepped back, the latest one stored before it, which `verify` and a
+restore report. The cost: a clock that ran ahead by some time holds
+pruning back that long, since every later write and image is stored at
+that time until real time passes it, and `prune` keeps the images timed
+after its cutoff. A copy's `/_changes`
+hands over each write's `at` as its feed holds it -- its primary's, then,
+promoted, its own, which may be behind -- a reading of a clock, as on a
+primary; a consumer orders by `seq`.
+
+`tests/replication.rs`' `a_replica_and_an_archive_of_it_keep_the_times_its_primary_appended_at`
+holds a replica back while its primary writes -- a statement's writes and a
+block that spilled and landed -- until the clock is past every time the
+primary appended them at, then lets it apply them: the replica's
+`/_changes`, a replica's of it and a restore to the moment the primary
+appended the last of them, from an archive cut from the replica, each
+hold the primary's times, again after an image the primary sends it
+(buffer 64 KiB), and promoted the replica times its own write by its
+clock. On `main` it fails at its first comparison, every time the
+replica's. `replication::tests`' `a_followers_feed_holds_the_times_its_primary_sent`
+and `a_followers_records_the_ring_kept_take_their_own_times` hold a
+whole message, a refused one's prefix and a ring that let go of a
+message's first records. The cost: `fennec-server`'s `__text` 1 024 bytes
+more (4 819 520 to 4 820 544, 16 bytes on the file; macOS arm64, release);
+a copy's apply walks the records it landed in its ring once more, under the
+lock it holds anyway, and an archiver compares a time a write.
+
 ## A node's archive
 
 **A node's tenants are archived over one stream** (`fennec archive
@@ -294,7 +407,8 @@ or moved to a node whose archiver takes it up from its image on the same
 history -- keeps its archive, and `presence` notes `gone <ms>`, then `back
 <ms>` if it returns: a restore to a moment it was away leaves it out, as one
 deleted, where forgetting the time away gave the copy from before it left.
-The times are the node's clock, as its writes' are: `G` carries when this
+The times are the node's clock, as its own writes' are (a tenant it holds
+as a copy has its primary's, [above](#a-writes-time)): `G` carries when this
 process deleted the tenant (`Tenants::departed`, the last 65 536, kept only
 on a node that replicates its tenants and noted once the file is gone: noted
 before it, a removal refused had the archive read the tenant gone and back
@@ -611,18 +725,100 @@ database holds already 247.8-252.7.
 **An archive and a backup can be sealed** (`seal.rs`, `fennec key`,
 `--key-file`). A copy in a bucket is out of reach of the disk's
 encryption, so with a key every archive file and a backup file is
-ChaCha20-Poly1305 (`crypto.rs`, RFC 8439's vectors and 2 000 random cases
-against node:crypto): ChaCha20 over AES-GCM because it has no secret-indexed
-tables in software, Poly1305 in 26-bit limbs. Frames carry a random nonce
-and their place and last-ness in the AAD; an image and the history are
-sealed whole (`open_whole` refuses a file cut short), a segment a frame for
+ChaCha20-Poly1305 (`crypto.rs`, RFC 8439's vectors, every case of
+Wycheproof's, and 2 000 random cases against node:crypto): ChaCha20 over
+AES-GCM because it has no secret-indexed tables in software, Poly1305 in
+26-bit limbs. Frames carry a random nonce, and their file's id, place and
+last-ness in the AAD (below); an image and the history are sealed whole
+(`open_whole` refuses a file cut short), a segment a frame for
 each batch of writes, whole records in each, so a crash cuts off a frame as
-it cut a record (`open_appended`, the segment's `sealed` state). A file of
+it cut a record (`open_appended`, the segment's `sealed` state). A frame's
+length is under no tag: changed, the bytes then read as its tag are not it
+and the frame is refused, unless the length now runs past the segment's
+end, which is a frame cut short there and nothing tells from a crash's --
+a verify then counts the bytes from it on as torn, as it would in a
+segment whoever can write the archive had cut
+(`a_bit_changed_is_refused_unless_a_length_then_runs_past_the_end` walks
+every bit of a file; the archive's own test changed its segment's middle
+byte, wherever the run's flushes had put it, and failed the run that put a
+length there). A file of
 the other kind than the archive is refused. About 400 MB/s either way on
 one core. The live file stays plain -- mapped and read in place -- for the
 disk to encrypt. A checksum a record was measured and not taken: hardware
 CRC32C was 45 ns of an 840 ns put at 530 bytes, 357 at 3 KB, under the write
 lock, and the browser has no hardware CRC.
+
+**A frame is bound to its file** (`FENECSL\x02`, `seal::FileId`). A file
+sealed now begins with the magic and its id, 16 bytes of the system's
+randomness -- refused without it, as a nonce is -- and every frame's AAD
+is `[id 16][index u64][last u8]`, 25 bytes. Until 1.0's security review
+the AAD was the place and last-ness alone, version 1
+(`FENECSL\x01`, every release from 0.1.7 to 0.2.0): two files sealed under
+one key -- two images of an archive, two segments, last week's backup and
+today's -- each held frames at places the other's frames of those places
+would open in, so a frame of one put in the other at its place opened, and
+the file read as whole with another's megabyte or batch of writes in it,
+every tag good. Every segment's frames sit at small indexes and every
+image's from 0, so anyone able to write to the bucket, holding no key,
+could splice them. With the id a frame opens only in the file it was sealed
+into, and an id changed, cut short or dropped -- the magic set back to
+version 1's to match -- opens nothing: Poly1305 takes the AAD's length in,
+so a 25-byte AAD's tag never stands for a 9-byte one (`seal::tests`,
+`a_frame_from_another_file_does_not_open`). What it does not cover: a whole
+file put in another's place -- an older image under a newer one's name, one
+backup for another -- opens, a whole file as it was sealed; an archive's
+names, the change numbers its records carry and its history hold it to its
+order, and a backup is the database it holds.
+
+*Rejected*: a key a file derived from the id (HKDF), which binds no better
+for a second primitive to hold to its vectors; the file's name or path in
+the AAD, which a sync tool's copy, a renamed backup or a node archive's
+directory moved would break where a sealed file opens wherever it is
+copied; a tag over the whole file, which an appended segment cannot keep
+without writing it again; an id counted by the archive, which two
+archivers or two backups under one key would share.
+
+*Older files.* A version 1 file opens as it did (`tests/sealed-v1/`, an
+archive and a backup 0.2.0 sealed, held by
+`a_v1_sealed_archive_still_opens`), and a segment an older archiver began
+goes on in version 1 frames, `FileId::V1` read back from it: frames of two
+versions in one file would open as neither. Nothing new is begun as
+version 1: images and segments taken after the upgrade are version 2
+beside the older files, which leave as `prune` lets them go. Since a
+version 1 file still opens under its key, the binding holds only for a key
+that never sealed one: whoever holds two version 1 files sealed under a
+key builds a third from their frames and puts it wherever a file sealed
+under that key is read, a version 2 archive's or a backup's place among
+them. Neither pruning the older files nor restoring a backup and sealing it
+again under the same key ends that -- the older files are wherever they
+were copied -- so the way out is a new key (`fennec key`) sealing
+everything from then on and a new archive begun under it, the older files
+read with the old key while they are kept. A switch refusing version 1
+files is not built: under it every archive and backup 0.2.0 sealed would
+be unreadable, and it is left for a later decision. A version past 2
+is refused by its number (`sealed as version 3, which this binary does not
+open`), never read as a plain file: `is_sealed` reads the magic's first
+seven bytes. A binary from before the id took the magic's whole eight
+bytes, so a version 2 file is no sealed file to it, and it refuses one:
+`fennec restore today.sealed out.fennec --key-file k` says `today.sealed:
+not a sealed file`, `fennec verify` or `restore` of an archive `<image>:
+not sealed, where the archive is`, and without a key an image does not
+open as a database (`corrupt: invalid fennecdb signature`), the file asked
+for never made. The binaries reading an archive are upgraded before the one
+writing it.
+
+*Cost*: one Poly1305 block more a frame -- the AAD padded to 32 bytes
+where it was 16 -- and 16 bytes a file, some 13 000 instructions a
+64 MB file sealed and opened. Measured, that took 3 970.2 and 3 970.1
+million instructions before, 3 974.3 and 3 970.4 million after
+(`/usr/bin/time -l`, six rounds less one, two runs of each): the 0.01 to
+0.1% between them is the runs' own spread, a build's whole runs differing
+by up to 34 million between two tries. Timed on a quiet M1 before the
+change, 164 ms to seal and 165 to open at the median, about 410 MB/s; the
+machine was not quiet again while this was measured (a load of 8 to 10),
+where both builds took 244 to 282 ms alike, so the instructions stand for
+the time. fennec-server's code grew by 3.2 KB: the head read, the AAD
+built and a version named.
 
 **A frame's nonce is the system's randomness, never a fallback**
 (`crypto::system_random`), and so is every key and nonce fennecdb makes:
@@ -709,6 +905,197 @@ before the pg wire went gave 3.7 and 3.7 the same day); a server killed
 while the table was written to held every row 370 ms after it started
 again. The
 follower adds 178 KB to `fennec-server`.
+
+*A follower that stops lets its slot go before it returns -- within a
+bound, and on a clean stop alone.* It ends the stream as the protocol ends
+one (`WalStream::end`): `CopyDone`, then the server's messages read up to
+its `ReadyForQuery`, what it still sends of the stream dropped unapplied
+and so unconfirmed. The walsender calls `ReplicationSlotRelease` before its
+`CommandComplete`, so the slot is free once the answer is in. The follower
+used to send `Terminate` and close, which left the slot held until the
+walsender next read its socket -- which it does not while it decodes a
+transaction, any table's, published or not: a slot streaming from far
+behind, or one whose walsender was busy with another table's bulk load,
+stayed held for as long as that took. A drop of the slot just after --
+what the follower's own note says to do to stop for good -- was refused,
+`55006`, "active for PID", and a follower started again at once met its
+own slot taken and waited out a retry. CI's `postgres` job met it in 2 of
+its first 9 runs (`a_copy_cut_short_is_made_again`, whose second follower
+stopped while its walsender decoded the other tests' writes since the
+slot's last confirm); beside two busy loops in PostgreSQL's 3-CPU
+container the suite failed on it first at run 27, once in 109. Every
+release since `--follow` came has the bug: v0.1.5 and v0.1.6 (`fenec
+import --follow`, and the server's as `fenec-pg --follow`) through
+v0.2.0 (`fennec-server --follow` from v0.1.7) drop the stream with a
+`Terminate` alone. It loses nothing; it is fixed on main.
+
+*The bound.* `follow::END_WAIT` is 3 s, and every read of the wait is held
+to what is left of it (`client::Until`): before a read that would go to
+the socket, the socket is waited on for the rest (a peek, or rustls taking
+whole records in), so the rest of a message begun, and bytes already
+buffered, no longer wait out the socket's own 30 s timeout a read -- the
+first form of the end looked at its deadline before each message only. The
+`CopyDone`'s write is held to it too, its socket's write timeout set to
+what is left before each try, and the `Terminate` of the close after it is
+sent only where the socket takes it at once (`Client::drop`, non-blocking):
+at a full send buffer -- a server reading nothing -- the drop's waited a
+whole wait more, twice the bound, and on a failure it waited with no bound
+at all, before `fennec-server` could store its exit code; the close tells
+the server as much once it reads. 3 s and
+not 10 because a stop has to have one bound it keeps: `fennec-server`'s
+shutdown waits `STOP_WAIT`, 5 s, for its follower to settle and end its
+stream, so at 10 s the shutdown cut off any wait past its own 5 s, the
+stream closed by the exit, and the follower's bound never held there; at
+3 s the settle's fsync has 2 s before it, which `mirror.rs` asserts at
+compile time (`END_WAIT` + 1 s < `STOP_WAIT`). `STOP_WAIT` counts from the
+shutdown's start, as the follower's stop does -- it looks at the same
+flag, within its 200 ms `IDLE_WAIT` -- not from its own: the shutdown's
+waits before its final sync run one after another, `HELD_GRACE` 2 s,
+`END_GRACE` 0.5 s, the traces' flush 2 s where tracing is on, then the
+follower's, and counted from its own start that came after theirs: with
+`--follow` and tracing the waits came to 9.7 s with the syncer's `LOOK`,
+0.3 s of docker's default 10 s before its SIGKILL left for the final sync
+(the first form of this text said 7.5 s, leaving the traces out). Counted
+from the shutdown's start the final sync begins 5.2 s after the signal at
+most, the rest of the 10 s left to it and the checkpoint, whose cutting
+off costs the graph's image, never a write (the repository's
+`docker-compose.yml` gives 30 s). `deploy/` runs no `--follow` unit: its servers are `--dir`
+nodes (`TimeoutStopSec=120s`), which `--follow` refuses, and its routers
+are `fennec-shard`. `fennec import --follow` keeps this bound and no other:
+before the wait the rest of a transaction is applied and its fsync made,
+and after it the checkpoint rewrites the whole file, none bounded by a
+time, so a large transaction or file outlasts docker's 10 s. A SIGKILL
+among them loses nothing confirmed -- the follower confirms only what is on
+disk, and the checkpoint is a side file renamed into place -- and leaves
+the slot to be let go when the walsender next reads. What 3 s waits for:
+200 000 rows of a table the slot does not publish, decoded through disk,
+held a stop 0.2 s, a million in memory 0.5 to 2 s on a loaded machine; a
+longer transaction is not waited for. Past the bound, or once cut, the
+follower closes the connection and says so in one line (`Event::SlotHeld`,
+the shell's `warning`, the server's `follow:` log line): the slot still
+held, which PostgreSQL releases when its walsender next reads the
+connection, a drop meeting `55006` until then, which a follower started
+again waits out (`retryable`). Where the wait ended otherwise -- the
+connection closed or failed, or the server answered with an error
+(`client::Unended::Failed`) -- the line says the slot *may* still be held:
+a walsender that exits or fails lets it go, a proxy's close or a network's
+failure need not have reached it. The shell's second ctrl-c (`stop::AGAIN`)
+ends the wait within 50 ms (`client::CUT_LOOK`), the steps before it -- the
+rest of a transaction being applied, the settle's fsync -- and the
+checkpoint after it still run.
+
+*A signal is no failure.* Linux never restarts a `recv` on a socket with a
+timeout, `SA_RESTART` or not (signal(7)), and every socket of the wire
+client's has one; `fennec import --follow` runs its follower on the main
+thread, where a SIGINT or SIGTERM sent to the process lands, and an idle
+follower spends nearly all its time in the 200 ms peek of `WalStream::next`.
+That peek returned `EINTR` as an error, the stream was taken for broken --
+no `CopyDone`, the slot left held, no warning -- and `run` printed "stream
+Interrupted system call (os error 4); again in 500.0ms" before it saw the
+stop. macOS restarts the call, so no run here showed it; a reviewer gave
+the sockets Linux's behaviour with `siginterrupt` and signalled the
+follower's thread, and it failed 3 times in 3; on Linux itself (musl in a
+container, the handler installed with `SA_RESTART` as the shell's is, no
+`siginterrupt`) `a_signal_is_no_failure_of_the_stream` failed 3 times in 3
+with the fix's `Interrupted` arm turned off and passed 3 times in 3 with
+it. `Conn::readable`, the one
+wait under the idle peek, the end's reads and TLS's, now goes on after an
+interruption for what is left of its wait, never failing and never
+starting the wait again. Every other call of the client's: `connect` is
+std's, which asks again on `EINTR`; every read of a message is `read_exact`
+and every write `write_all`, which ask again; a TLS flush asks again
+(`Conn::flush`); the end's write and reads go through `Until`, which goes
+on for what is left; the drop's `Terminate` is non-blocking and so never
+interrupted; the TLS handshake is rustls's `complete_io`, which asks a
+read again, its sends restarted by the kernel (the handlers are installed
+with `SA_RESTART` and the dial sets no send timeout); the SCRAM nonce's
+`getrandom` asks again. The client accepts nothing. Beside it, nothing on
+the stop's path takes a signal for a failure: std's `sync_data` and
+`sync_all` ask `fsync` again, `thread::sleep` sleeps out what is left, the
+checkpoint's file writes are `write_all` and its rename is not
+interrupted, and the lock is taken with `F_SETLK`, which never waits.
+
+*A failure waits for nothing.* The first form ended the stream when the
+follower stopped on what it read too (a dropped column, a storage error),
+up to 10 s, before `run` returned -- and `fennec-server` stores its exit
+code (`exit_with(1)`) only when the follower returns. A shutdown already
+waiting on the follower (a SIGTERM while the walsender decoded a large
+transaction and the final settle's fsync failed; or a SIGTERM in the
+10 s after a failure) ran out of its `STOP_WAIT` first and exited 0, with
+a checkpoint (`checkpoints`), and with no SIGTERM the server served a
+mirror that had stopped moving for those 10 s more. Now only a clean stop
+ends the stream so; a failure closes it (its `Terminate` sent only where
+the socket takes it at once) and returns at once, and the mirror stores
+its code before its log line and before it lets the shutdown's wait go.
+A panic of the follower's thread goes the same way: `fennec-server`'s
+release profile unwinds, and the thread's end let the shutdown's wait go
+and nothing more, so the server served a mirror that no longer moved and
+exited 0 at its next shutdown, with a checkpoint; the mirror's guard
+(`mirror::Ending`), dropped on an unwind too, stores the code first. On an
+error of the connection's the stream is not ended either: the connection
+is what broke. A follower killed outright cannot end its stream; one
+started meanwhile meets `55006` and retries until the server notices the
+connection gone.
+
+*The tests.* Against stand-ins, every run and every time: fennec-import's
+`a_stopped_follower_returns_once_its_slot_is_let_go` (applied, confirmed,
+`CopyDone` -- never a `Terminate` alone -- and back only after the
+server's answer), `a_follower_that_fails_returns_before_it_waits` (no
+`CopyDone`, an answer that never comes not waited for: 3 s in that test
+without the fix), `a_second_stop_ends_the_wait_and_says_what_holds_the_slot`,
+`a_stream_the_server_closed_says_the_slot_may_be_held` ("still held"
+before the wording) and `a_signal_is_no_failure_of_the_stream` (SIGUSR1 to
+the follower's thread every 5 ms, its calls made to fail with `EINTR` as
+Linux's do, from its first confirm through the stop: the stream failed
+3 times in 3 with the peek's `EINTR` returned); fennec-wire's
+`ending_a_stream_is_bounded` (silent, still sending, and stopped in the
+middle of a message with a whole one buffered before it -- 30 s a read
+without the bound) and its TLS twin,
+`a_signal_neither_fails_nor_lengthens_the_end_of_a_stream` (signals every
+2 ms through the end; it passed before too, `read_exact` asking the
+interrupted read again against the same deadline, and holds what `Until`
+now does itself), and, over a server that reads nothing with both buffers
+full, `a_full_send_buffer_holds_the_end_no_longer_than_its_wait` and
+`a_drop_never_waits_for_the_server` (both failed before: the end took
+twice its wait, and the drop waited until macOS made room some 5 s later);
+fennec-server's
+`a_follower_that_fails_stops_the_server_with_its_code_before_it_waits`
+(a stand-in PostgreSQL whose walsender sends a change the follower cannot
+read and never answers a `CopyDone`, SIGTERM sent as the follower ends
+its stream: exit 1, no `CopyDone`; with the first form, exit 0),
+`a_stopped_server_lets_its_slot_go_before_it_exits` (its log read to the
+process's end, the shutdown's own line in it, before it is held to having
+no "held at the stop", which the line saying the slot is held and the one
+saying it may be both say), and the mirror's
+`a_follower_that_panics_stops_the_server_with_its_code` (exit code 0
+without the guard) and
+`the_wait_for_the_follower_counts_from_the_shutdowns_start` (5 s counted
+from its own start, under 3 allowed). Against PostgreSQL,
+`a_stopped_follower_lets_its_slot_go` stops a follower once its walsender
+has read up to the commit of 200 000 rows of a table the slot does not
+publish, decoded through disk (`logical_decoding_work_mem` at its least),
+and looks at the slot as the follower returns. It is the end-to-end check,
+not the guard: the walsender is busy 159 to 198 ms after that commit and
+the follower notices its stop at a random point of its 200 ms
+`IDLE_WAIT`, so without the end it passed 5 to 20 % of runs on the
+review's Mac, more on faster hardware. With the end the suite passed 153
+times in 153 under load. The test has a database of its own: every slot
+reads the whole server's log, but one of another database passes over
+these rows at a glance (30 ms for half a million) where one of the same
+database decodes them (550 ms) -- its first form, a million rows beside
+the other tests, held their convergence past its 20 s on a runner whose
+walsenders were off the CPU six tenths of the time. `follow::` takes 3.28
+to 3.66 s, 3.44 at the median, over 30 runs in a row on a shared Mac (load
+average 2.2 to 6.1), where main's took 3.5 to 3.6; the new test 0.9 s
+alone. The tests drop each slot right after its follower stopped, and
+cut only their own slot's walsender, by `pg_replication_slots.active_pid`:
+by `application_name`, `a_broken_stream_loses_nothing` cut every follow
+test's stream running beside it; their leading drop of a slot left by an
+earlier run is `DROP_REPLICATION_SLOT ... WAIT`, the server's own wait.
+fennec-server's `a_server_stopped_or_killed_goes_on_without_losing_a_row`
+finds the slot free after a SIGTERM, but its walsender is idle and the
+look comes 100 ms after the exit, so it holds only that the stop leaves no
+stream open.
 
 TLS to the source (`sslmode`, `fennec_wire::client::SslMode`) is asked
 for as libpq asks: an `SSLRequest` before the startup message, so the
