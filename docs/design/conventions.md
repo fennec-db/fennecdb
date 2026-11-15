@@ -93,12 +93,18 @@ passed again with the same files is a flake and counts, whatever its cause.
 The 1.0 plan's budget is none without a fixing commit.
 
 Which `ci.yml` jobs are required checks is a repository setting (classic
-branch protection on main, not the merge queue's ruleset). All of them are,
-but `size (browser module)`, which only runs on a pull request and so would
-never report in the merge queue. A job given a path filter or an `if:` that
-skips it on some events cannot be required for the same reason: a skipped
-required check blocks a merge it should not. A new job that is neither
-needs adding to the list.
+branch protection on main, not the merge queue's ruleset). As of
+2026-11-15 three are: `test (ubuntu-latest)`, `test (macos-latest)` and
+`build (release + cli profile)`; the others, `fmt` among them, are not, and
+the merge queue lands a group whose job that is not required is red. A check
+that must stop a merge is therefore a step of one of those three (the API
+check and the size check of the `CLAUDE.md` files are in `test`, the second
+also in `fmt` for the quick answer). A job given a path filter or an `if:`
+that skips it on some events cannot be required for the same reason: a
+skipped required check blocks a merge it should not (`size (browser
+module)` only runs on a pull request, so it never reports in the queue). A
+new job whose result must stop a merge needs adding to the setting, which
+is the owner's.
 
 The mobile jobs upload build products nothing downloads
 (`fennecdb-android`, `fennecdb-xcframework`) with `continue-on-error`: an
@@ -298,3 +304,47 @@ stood in the old test as "case 3". Wycheproof's ChaCha20-Poly1305, RSA
 PKCS#1 v1.5 SHA-256 (2048, 3072 and 4096 bits, its e = 3 forgeries among
 them), HMAC-SHA-256 and PBKDF2-HMAC-SHA-256 files are to follow, vendored
 with a NOTICE as `tests/es256/` has its own.
+
+## API baselines
+
+`fennec.h`, `web/fennec.d.ts` and `web/client.d.ts` are held to the dumps in
+`integrations/api-golden/` by `tools/api_compat.py` (`make api-check`; CI's
+`test` job runs it as a step, this checkout's copy and main's, BREAKS read
+from the pull request's as data, as `tools/openapi_compat.py`'s are; the
+fmt job runs the checker's own tests). The dumps always are what the
+sources dump to: a dump that is not fails, saying `make api-golden`, so an
+addition is committed with its dump and a later pull request cannot remove
+it unseen. The pull request's dumps are compared with main's, dump against
+dump: every entry of main's is in the pull request's, unless a `BREAKS`
+entry names that difference, which also catches a dump edited smaller by
+hand. An entry names one change: the surface, the symbol, the kind of
+change and the digests of the declaration before and after (the failure
+prints the entry to paste), so it approves no other change of that symbol.
+What 1.0 changes is the rule for `BREAKS`: `integrations/api-golden/frozen.json`
+says `null` until `python3 tools/api_compat.py --freeze 1.0` (once, at the
+tag; it needs the dumps current and no entry for a release not made), and
+until then an entry's release is `"1.0"`; after it, a break is a major
+version above the frozen one, and `make version` refuses 1.0.0 or later while
+the baselines are not frozen. The header is read
+as macros (one under an `#if` carries its condition) and prototypes (return
+type, each parameter's type and name, in order; whitespace and comments do
+not count). The `.d.ts` files are read by
+the checker's own scanner, not by `tsc`, so the check needs no `npm ci` and
+runs as plain Python: every export is a record, a class's, interface's,
+enum's or namespace's members are grouped by name, and a declaration is
+compared as written, so any change to one -- narrowed parameter, widened
+return, optional member made required, overload dropped or reordered --
+fails, and a harmless widening is named in `BREAKS` too. Overloads are held
+in the order written, since the first that fits is the one resolved; one
+added anywhere passes. What the scanner does not know it refuses with exit 2,
+never skips: `export { a as b }`, `export * from`, `export default`, a
+namespace sharing a name with a function or class, and in `fennec.h` a
+`typedef`, `struct`, `union` or `enum`, a function-like macro and a
+prototype under an `#if`. A change that needs one of them teaches the
+scanner in a pull request of its own first, because main's copy of the
+checker judges the next pull request and would refuse the form. It cannot see a type's meaning through the names it uses,
+a non-exported helper's body, or a new required member of an interface a
+caller implements, an overload added in front of another; `make types-check` holds that the declarations still
+compile and match `web/fennec.js`. The SDKs' dumps need outside tools
+(Kotlin's binary-compatibility-validator, swift-api-digester, .NET's
+PublicApiAnalyzers, `apidiff`) and come in 1.0.x.

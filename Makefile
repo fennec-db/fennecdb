@@ -24,7 +24,7 @@ SCHEMA ?= 1
 STUDIO_SERVER ?=
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js upgrade-check openapi-lint openapi-check openapi-golden sync-scenarios-check fennecql-corpus builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-desktop studio-desktop-dist studio-desktop-test studio-highlight statements-bench gzip-bench replay-bench hook-bench instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench lists-bench stress-test
+.PHONY: all test test-js upgrade-check openapi-lint openapi-check openapi-golden api-check api-golden sync-scenarios-check fennecql-corpus builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-desktop studio-desktop-dist studio-desktop-test studio-highlight statements-bench gzip-bench replay-bench hook-bench instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench lists-bench stress-test
 	python-test go-test dotnet-test languages-test examples-test recipes-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench entry-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down pgvector-tls docker docker-run docker-compact docker-down grafana-check deploy-check drill chaos memory clean \
@@ -222,6 +222,30 @@ openapi-check:
 openapi-golden:
 	$(CARGO) test -p fennec-server --test all openapi::
 	python3 tools/openapi_compat.py --write
+
+## fennec.h's prototypes and macros and web/fennec.d.ts's and web/client.d.ts's
+## exports held to the baselines in integrations/api-golden/ (frozen at the 1.0
+## tag): a removed or changed one fails unless tools/api_compat.py's BREAKS
+## names it; the dumps must be what the sources dump to (`make api-golden`
+## after an addition), and are held to BASE's (origin/main); first the
+## checker's own tests, then BASE's checker over the same sources, as CI's
+## `test` job runs it (docs/design/compatibility.md)
+api-check:
+	python3 tools/test_api_compat.py
+	python3 tools/api_compat.py
+	@base='$(or $(BASE),origin/main)'; \
+	if git cat-file -e "$$base:tools/api_compat.py" 2>/dev/null; then \
+	  mkdir -p target/tmp && git show "$$base:tools/api_compat.py" > target/tmp/api_compat_base.py && \
+	  python3 -I target/tmp/api_compat_base.py --root '$(CURDIR)' --base-ref "$$base" \
+	    --breaks-from tools/api_compat.py; \
+	else echo "$$base has no tools/api_compat.py yet: no base pass"; fi
+
+## integrations/api-golden/ written again from the sources, refused where
+## they break what it holds and BREAKS names not; after every change of
+## either surface. Frozen at the 1.0 tag: tools/api_compat.py --freeze 1.0
+## (RELEASING.md)
+api-golden:
+	python3 tools/api_compat.py --write
 
 ## web/fennec.d.ts held to web/fennec.js -- every export and method declared --
 ## and to what a caller writes, under tsc --strict; then the docs' examples

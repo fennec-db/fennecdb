@@ -407,11 +407,17 @@ every tag. Before a 1.x tag, check:
    changed or removed line in them, only added ones.
 2. `make fennecql-corpus` (by hand: no workflow runs it until T6) finds no text reading as another tree, and
    `GRAMMAR_EPOCH` (`crates/fennec-core/src/named.rs`) is still 4.
-3. `fennec.h`'s prototypes, `web/fennec.d.ts`, `web/client.d.ts`, each
-   SDK's public names, the CLI flags and exit codes, and `/_metrics` names
-   only gained entries. Where a dump is not built yet (T5 of the 1.0 plan,
-   which also dumps the CLI usage text, exit codes and metric names)
-   diff them by hand against the previous tag.
+3. `make api-check` is green: `fennec.h`'s prototypes and macros,
+   `web/fennec.d.ts` and `web/client.d.ts` only gained entries against
+   `integrations/api-golden/`. The SDKs' public names, the CLI flags and
+   exit codes, and `/_metrics` names have no dump yet (the SDKs' come in
+   1.0.x, needing outside tools): diff them by hand against the previous
+   tag. **Before the 1.0 tag, once:** `python3 tools/api_compat.py --freeze 1.0`
+   on the commit to be tagged, committed (it writes
+   `integrations/api-golden/frozen.json`, and needs the dumps current and no
+   `BREAKS` entry for a release not made yet). `make version V=1.0.0` or
+   later refuses until it has been run; from then a break needs a major
+   version above 1.0 in its `BREAKS` entry.
 4. HEAD opens every file written from v0.2.0 on (`tests/language.fennec`,
    `tests/statements.fennec`; T2 adds each release's own), and
    `make upgrade-check` (by hand, kind 13 alone; CI check: T3) passes: an older replica stops by name on a record

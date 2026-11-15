@@ -58,6 +58,11 @@ jobs:
           test -f "$f" || { mkdir -p "$(dirname "$f")" && curl -fsSL --retry 3 -o "$f" https://www.unicode.org/Public/17.0.0/ucd/UnicodeData.txt; }
           python3 crates/fennec-core/tools/fold/gen.py --check "$f"
 
+      # Also a step of the required `test` job, which is what stops a merge:
+      # on 2026-11-15 a pull request green on its own took
+      # crates/fennec-core/CLAUDE.md past 24 000 bytes once merged with main,
+      # through the queue with this job red (see there). Here for the quick
+      # answer.
       - name: Each AGENTS.md is its CLAUDE.md under its own title; the root under 32 000 bytes, an area file under 24 000, each rule in one file and the root's index
         run: python3 tools/agents_md.py --check
 
@@ -107,6 +112,14 @@ jobs:
       # through, and holds BREAKS and the committed baseline.
       - name: tools/openapi_compat.py finds every break and passes every addition
         run: python3 tools/test_openapi_compat.py
+
+      # docs/design/compatibility.md: fennec.h and the JS types only grow.
+      # Here only the checker's own tests, a break seeded into each surface
+      # for the quick answer; the check over the sources is a step of the
+      # `test` job below, which is a required check (a step of this job
+      # would not stop a merge: fmt is not one).
+      - name: tools/api_compat.py finds every break and passes every addition
+        run: python3 tools/test_api_compat.py
 
       # docs/design/durability.md#a-power-cut: the power cuts run by hand,
       # weekly and on a push to main, never on a pull request; what their
@@ -298,6 +311,30 @@ jobs:
           else
             echo "main has no tools/openapi_compat.py yet: no base pass"
           fi
+
+      # docs/design/compatibility.md: fennec.h and the JS types only grow.
+      # `make api-check`: the checker's tests, then the sources held to
+      # integrations/api-golden/ -- which must be what they dump to -- by
+      # this checkout's checker, and the baselines to main's by main's copy
+      # (BREAKS read from this one as data, as the REST API's is), so
+      # neither a baseline edited by hand nor a checker changed to see less
+      # lets a break through. A step of this job, not of fmt: this one is a
+      # required check, and a failure there does not stop the merge queue.
+      - name: fennec.h and the JS types only grow
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          make api-check BASE=FETCH_HEAD
+
+      # Run twice on purpose: fmt has it for the quick answer, this job
+      # because it is required. On 2026-11-15 a pull request green on its
+      # own would have taken crates/fennec-core/CLAUDE.md past its 24 000
+      # bytes once merged with main; it landed through the queue with fmt
+      # red and every later run's fmt was red too. The queue builds this job
+      # on the merged result, and only a required check stops it.
+      - name: Each AGENTS.md is its CLAUDE.md, and no file is past its size
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 tools/agents_md.py --check
 
       # A node measures its lease on the boot clock (fennec-http's
       # `lease::Moment`), which counts the time a machine was suspended. No

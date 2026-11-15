@@ -10,6 +10,7 @@ number. Cargo.lock follows at the next build."""
 
 import pathlib
 import re
+import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -25,10 +26,23 @@ def sub(path, pattern, repl):
     p.write_text(text, encoding="utf-8")
 
 
+def guard(v, root=ROOT):
+    """A 1.0.0 or later release needs the API baselines frozen
+    (integrations/api-golden/frozen.json): until then a break is named for
+    "1.0" and the baselines are only today's dumps. The checker says which
+    command freezes them (docs/design/conventions.md#api-baselines)."""
+    if int(v.split(".")[0]) < 1:
+        return
+    r = subprocess.run([sys.executable, str(root / "tools" / "api_compat.py"), "--root", str(root), "--require-frozen"])
+    if r.returncode != 0:
+        sys.exit(f"version {v} refused: freeze the API baselines first")
+
+
 def main():
     if len(sys.argv) != 2 or not re.fullmatch(r"\d+\.\d+\.\d+", sys.argv[1]):
         sys.exit("usage: version.py X.Y.Z")
     v = sys.argv[1]
+    guard(v)
     sub("Cargo.toml", r'^version = "[^"]+"', f'version = "{v}"')
     for crate in ("core", "ql", "abi", "http", "server", "wire", "import", "tls"):
         sub("Cargo.toml", rf'^(fennec-{crate} = \{{ version = )"[^"]+"', rf'\g<1>"{v}"')
