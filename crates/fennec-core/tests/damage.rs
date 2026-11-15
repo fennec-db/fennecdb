@@ -464,3 +464,61 @@ fn a_schema_past_the_languages_ranges_is_refused_where_a_file_is_opened_and_appl
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// A point is a level of its field's type, as it is of the value it reads
+/// as: 64 lists around one are a type 65 levels deep, which `Schema::new`
+/// refuses and a file declaring it is refused for, read into memory,
+/// mapped and applied by a replica. Read off the bytes as it was, the
+/// schema opened, and every row's point was then refused at each read
+/// (the fuzz fix's second review). 63 lists down -- the most a write makes
+/// -- a file opens and its row reads back. A version before bounded no
+/// type's depth, so such a field one made is refused at the open as
+/// damage: fennecdb is alpha.
+#[test]
+fn a_point_past_the_depth_a_type_nests_is_refused_where_a_file_is_opened_and_applied() {
+    let around = |lists: usize| (0..lists).fold(DataType::Geo, |t, _| DataType::List(Box::new(t)));
+    let brackets = |n: usize, inner: &str| format!("{}{inner}{}", "[".repeat(n), "]".repeat(n));
+    let sink = Records::default();
+    let mut db = Database::with_sink(Box::new(sink.clone()));
+    exec(
+        &mut db,
+        &format!("create collection g (p {})", brackets(63, "geo")),
+    );
+    // Parsed for the database, whose field reads the point's numbers as
+    // written.
+    let put = format!("put g {{p: {}}}", brackets(64, "13.4, 52.5"));
+    db.execute(&fennec_ql::parse_one_for(&db, &put).unwrap())
+        .unwrap();
+    let mut back = Database::new();
+    back.load(&file(&sink.0.lock().unwrap())).unwrap();
+    let written = query(&db, "get g").unwrap();
+    assert_eq!(query(&back, "get g").unwrap(), written);
+
+    match Schema::new("g", vec![Field::new("p", around(64))]) {
+        Err(Error::Type(m)) => assert_eq!(
+            m,
+            "`p`: a type nests at most 64 levels, a list one and a point one"
+        ),
+        other => panic!("written: {:?}", other.map(|_| ())),
+    }
+    // Made as no `create` makes it, as a crafted file or a version before
+    // holds it: a create takes the schema it is handed.
+    let sink = Records::default();
+    let mut db = Database::with_sink(Box::new(sink.clone()));
+    let mut schema = Schema::new("g", vec![Field::new("n", DataType::Int)]).unwrap();
+    schema.fields.push(Field::new("p", around(64)));
+    db.execute(&Statement::CreateCollection {
+        schema,
+        if_not_exists: false,
+    })
+    .unwrap();
+    let records = sink.0.lock().unwrap().clone();
+    deep_refusal(Database::new().load(&file(&records)));
+    let dir = std::env::temp_dir().join(format!("fennecdb-damage-point-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("deep.fennec");
+    std::fs::write(&path, file(&records)).unwrap();
+    deep_refusal(fennec_core::fs::open(&path).map(|_| ()));
+    deep_refusal(Database::new().apply(&records.concat()).map(|_| ()));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

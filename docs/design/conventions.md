@@ -196,18 +196,18 @@ change leaves the old entries until they age out, so for a while the
 repository holds both, up to 7.4 GiB with main's 3.36 GiB: under the 10 GB.
 
 Which `ci.yml` jobs are required checks is a repository setting (classic
-branch protection on main, not the merge queue's ruleset). All of them are,
-but three: `size (browser module)`, which only runs on a pull request and so
-would never report in the merge queue; `perf (instructions)`, which no
-merge requires until the gate's holdout has passed
-([benchmarks.md](benchmarks.md#the-gate)); and `sanitize`
-([below](#sanitizers)), whose verdict rests on a dated nightly and a
-sanitizer's runtime, which a runner image can break with no change of ours
--- a kernel laying out more of the address space at random than the
-sanitizer's shadow memory leaves room for has done so to ASan before -- and
-a merge queue held by that holds every change. A red `sanitize` is read and
-fixed in a change of its own, and a release waits for a green one
-(RELEASING.md). A job skipped by an `if:` reports success
+branch protection on main, not the merge queue's ruleset). All of them are
+but `size (browser module)`, which only runs on a pull request and so would
+never report in the merge queue, and `sanitize` ([below](#sanitizers)),
+whose verdict rests on a dated nightly and a sanitizer's runtime, which a
+runner image can break with no change of ours -- a kernel laying out more of
+the address space at random than the sanitizer's shadow memory leaves room
+for has done so to ASan before -- and a merge queue held by that holds every
+change (a red `sanitize` is read and fixed in a change of its own, and a
+release waits for a green one: RELEASING.md); and a job is left out until it
+has passed on main: `perf (instructions)` until the gate's holdout has
+([benchmarks.md](benchmarks.md#the-gate)), a new job until the merge group
+that brought it has. A job skipped by an `if:` reports success
 and can be required (the Rosetta job is one, skipped on a pull request); a
 whole workflow skipped by a path or branch filter reports nothing, its checks
 stay pending, and a required check of one blocks a merge it should not, so
@@ -215,9 +215,12 @@ stay pending, and a required check of one blocks a merge it should not, so
 `push` has a path filter, which no required check is read from). GitHub's
 "Troubleshooting required status checks" says both. `size (browser module)`
 is left out because a required check that never reports in the merge queue
-holds every group. A new job needs adding to the list unless it is one of
-those, and a renamed one adding under its new name before the old is taken
-out: a required check no job reports holds every group too. With every job
+holds every group. The list is kept by hand, the setting being no file: a
+new job is added once its first group is green, and a required job that is
+renamed is taken out before the pull request renaming it is queued and
+added under its new name once that has landed, since a required check no
+job reports holds every group too, the old name in the renaming group and
+the new one in every other. With every job
 required, a merge group lands when its last job ends and a red job drops
 it, a flaky one's too, so the queue builds two groups at a time and waits
 180 minutes for a group's checks (the ruleset's `max_entries_to_build` and
@@ -474,7 +477,14 @@ the job's 45 minutes with the build), by a timer of the process's CPU
 time (`ITIMER_PROF`) set once, whose handler says the target and the run
 it reached and exits 4. A bound, never a pass; CPU time, which a machine
 others load lengthens less than the clock (`http` 375 s by the clock and
-110 s of CPU at a load of 70 to 200, 150 s and 104 s near 15).
+110 s of CPU at a load of 70 to 200, 150 s and 104 s near 15). Two tests
+hold it: a child past a cap of 300 ms ends so, and `--smoke` -- the flag
+`make fuzz-smoke` passes, read by `run_options` in the library rather
+than the binary -- gives each target its count and arms the timer, read
+off it by a run (`guard::cap_left`). The timers are stopped as `fuzz`
+returns or unwinds (a guard's drop): a fuzzer whose own thread panicked
+skipped the line after the join that stopped the cap, and a test binary
+went on under it.
 
 *A finding is a regression test in its own crate*, the input's bytes or
 the file made by hand, failing before the fix. The pull request that added

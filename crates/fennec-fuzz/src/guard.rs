@@ -409,6 +409,13 @@ pub fn cap(cpu: Option<Duration>, runs: u64) {
     sys::set_cpu_timer(ms.saturating_mul(1000));
 }
 
+/// What is left of the cap of CPU time [`cap`] set, read off its timer
+/// rather than what was asked of it: zero once stopped, or where nothing
+/// set it. What a test of the smoke's cap, and of its stop, reads.
+pub fn cap_left() -> Duration {
+    sys::cpu_timer_left()
+}
+
 /// The run is over, its timer stopped.
 pub fn disarm() {
     sys::set_timer(0);
@@ -450,6 +457,7 @@ mod sys {
     extern "C" {
         fn signal(sig: c_int, handler: usize) -> usize;
         fn setitimer(which: c_int, new: *const Itimerval, old: *mut Itimerval) -> c_int;
+        fn getitimer(which: c_int, value: *mut Itimerval) -> c_int;
         fn creat(path: *const c_char, mode: c_uint) -> c_int;
         fn write(fd: c_int, buf: *const c_void, n: usize) -> isize;
         fn close(fd: c_int) -> c_int;
@@ -613,6 +621,21 @@ mod sys {
         set(ITIMER_PROF, us);
     }
 
+    /// What the CPU-time timer has left to go off in: zero where stopped.
+    pub fn cpu_timer_left() -> std::time::Duration {
+        let none = || Timeval { sec: 0, usec: 0 };
+        let mut timer = Itimerval {
+            interval: none(),
+            value: none(),
+        };
+        // SAFETY: a timer of the C layout, written by the call.
+        unsafe {
+            getitimer(ITIMER_PROF, &mut timer);
+        }
+        std::time::Duration::from_secs(timer.value.sec.max(0) as u64)
+            + std::time::Duration::from_micros(timer.value.usec.max(0) as u64)
+    }
+
     fn set(which: c_int, us: u64) {
         let value = Timeval {
             sec: (us / 1_000_000).min(i64::MAX as u64) as i64,
@@ -642,6 +665,10 @@ mod sys {
     pub fn on_cap() {}
 
     pub fn set_cpu_timer(_: u64) {}
+
+    pub fn cpu_timer_left() -> std::time::Duration {
+        std::time::Duration::ZERO
+    }
 
     pub fn say(bytes: &[u8]) {
         use std::io::Write;
