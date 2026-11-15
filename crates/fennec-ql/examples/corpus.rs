@@ -19,8 +19,8 @@
 //!   holds its text to -- `r` after it for `create or replace`, which the
 //!   digest leaves out;
 //! - `d`: any other statement -- a schema change, a listing, `call` -- a
-//!   hash of its [`form`]: its pretty `Debug`, a named field holding an
-//!   empty value left out, as the canonical form leaves one out.
+//!   hash of its [`form`]: its pretty `Debug`, a struct's named field
+//!   holding an empty value left out, as the canonical form leaves one out.
 //!
 //! Run as `corpus forms`, each line holds the statements' forms instead of
 //! their words, for the tool to print what changed in a text that failed.
@@ -63,7 +63,8 @@ const EMPTY: [&str; 6] = ["None,", "false,", "0,", "[],", "\"\",", "{},"];
 
 /// Whether `line` of a pretty `Debug` is a named field holding an empty
 /// value: `name: None,` and the rest of [`EMPTY`]. A positional one -- a
-/// tuple's `0,` -- keeps its line, its place being what it means.
+/// tuple's `0,` -- keeps its line, its place being what it means; [`form`]
+/// asks only of a struct's lines, a map's entry printing alike.
 fn empty_field(line: &str) -> bool {
     let Some((name, value)) = line.trim_start().split_once(": ") else {
         return false;
@@ -74,32 +75,52 @@ fn empty_field(line: &str) -> bool {
     ident && EMPTY.contains(&value)
 }
 
-/// `x`'s pretty `Debug`, each named field holding an empty value left out
-/// ([`empty_field`]), and a struct whose every field was left out closed
-/// as its name alone -- `Collections {` and its `}` as `Collections` -- so a
-/// unit variant given a field that holds nothing reads as it did. What a
-/// `d` word hashes and a failure prints.
+/// Whether a line of a pretty `Debug` that opens a block opens a struct's
+/// fields -- `Name {`, `field: Name {` -- rather than a map's entries --
+/// `{`, `field: {` -- or a list's or a tuple's. A map's key may print as a
+/// name (`Text: None,` in a `BTreeMap<Kind, Option<_>>`), and its entry is
+/// what the map holds, never a field left out.
+fn opens_struct(line: &str) -> bool {
+    line.trim_start()
+        .strip_suffix(" {")
+        .is_some_and(|name| name.ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_'))
+}
+
+/// `x`'s pretty `Debug`, each named field of a struct holding an empty
+/// value left out ([`empty_field`]), and a struct whose every field was
+/// left out closed as its name alone -- `Collections {` and its `}` as
+/// `Collections` -- so a unit variant given a field that holds nothing
+/// reads as it did. A map's entries, a list's items and a tuple's places
+/// keep their lines. What a `d` word hashes and a failure prints.
 fn form(x: &impl Debug) -> String {
     let pretty = format!("{x:#?}");
     let mut out: Vec<String> = Vec::new();
+    // The blocks open about the line, each whether it is a struct's.
+    let mut open: Vec<bool> = Vec::new();
     for line in pretty.lines() {
-        if empty_field(line) {
+        if open.last() == Some(&true) && empty_field(line) {
             continue;
         }
-        let close = line.trim_start();
-        if close == "}" || close == "}," {
-            let indent = &line[..line.len() - close.len()];
-            if let Some(open) = out.last_mut() {
-                if open.ends_with(" {") && open.len() - open.trim_start().len() == indent.len() {
-                    open.truncate(open.len() - 2);
-                    if close == "}," {
-                        open.push(',');
+        let t = line.trim_start();
+        if t.starts_with(['}', ']', ')']) {
+            let fields = open.pop() == Some(true);
+            let indent = line.len() - t.len();
+            if let Some(last) = out.last_mut() {
+                let opened_here =
+                    last.ends_with(" {") && last.len() - last.trim_start().len() == indent;
+                if fields && opened_here && (t == "}" || t == "},") {
+                    last.truncate(last.len() - 2);
+                    if t == "}," {
+                        last.push(',');
                     }
                     continue;
                 }
             }
         }
         out.push(line.to_string());
+        if t.ends_with(['{', '[', '(']) {
+            open.push(opens_struct(t));
+        }
     }
     out.join("\n")
 }
@@ -458,6 +479,66 @@ mod tests {
         ] {
             assert!(!empty_field(line), "{line}");
         }
+    }
+
+    /// A map's entries are what it holds, never fields: a key printed as a
+    /// name holding an empty value keeps its line, so `{Text: None}`,
+    /// `{Vector: None}` and a map of both are three forms -- while the
+    /// struct holding the map, and a struct a map holds, leave their own
+    /// empty fields out.
+    #[test]
+    fn a_maps_entries_keep_their_lines_whatever_they_hold() {
+        use std::collections::BTreeMap;
+        #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+        enum Kind {
+            Text,
+            Vector,
+        }
+        #[allow(dead_code)]
+        #[derive(Debug)]
+        struct Spec {
+            weight: Option<u32>,
+            at: u32,
+        }
+        #[allow(dead_code)]
+        #[derive(Debug)]
+        struct Holder {
+            kinds: BTreeMap<Kind, Option<u32>>,
+            note: Option<u32>,
+        }
+        let text = form(&BTreeMap::from([(Kind::Text, None::<u32>)]));
+        let vector = form(&BTreeMap::from([(Kind::Vector, None::<u32>)]));
+        let both = form(&BTreeMap::from([
+            (Kind::Text, None::<u32>),
+            (Kind::Vector, None),
+        ]));
+        assert_ne!(text, vector);
+        assert_ne!(text, both);
+        assert_ne!(vector, both);
+        assert!(text.contains("    Text: None,"), "{text}");
+        let held = form(&Holder {
+            kinds: BTreeMap::from([(Kind::Text, None)]),
+            note: None,
+        });
+        assert!(held.contains("Text: None,"), "{held}");
+        assert!(!held.contains("note"), "{held}");
+        let empty = form(&Holder {
+            kinds: BTreeMap::new(),
+            note: None,
+        });
+        assert_eq!(empty, "Holder");
+        let spec = form(&BTreeMap::from([(
+            Kind::Vector,
+            Spec {
+                weight: None,
+                at: 3,
+            },
+        )]));
+        assert!(!spec.contains("weight"), "{spec}");
+        assert!(
+            spec.contains("Vector: Spec {") && spec.contains("at: 3,"),
+            "{spec}"
+        );
     }
 
     /// The `d` word of a schema statement holds what it says: `if exists`
