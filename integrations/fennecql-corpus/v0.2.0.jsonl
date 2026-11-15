@@ -1,4 +1,4 @@
-{"tag": "v0.2.0", "commit": "e5d5424ec78999bb26a45bea80d13fd476729281", "epoch": 4, "texts": 12273, "kept": 8804, "listed": 191, "written": "python3 tools/fennecql_corpus.py --freeze v0.2.0: the tag's tree's texts and integrations/fennecql-corpus/kinds.txt's, each read by the tag's fennec-ql with this tree's corpus example; a harvested text every reading refused is left out"}
+{"tag": "v0.2.0", "commit": "e5d5424ec78999bb26a45bea80d13fd476729281", "epoch": 4, "texts": 12314, "kept": 8845, "listed": 232, "written": "python3 tools/fennecql_corpus.py --freeze v0.2.0: the tag's tree's texts and integrations/fennecql-corpus/kinds.txt's, each read by the tag's fennec-ql with this tree's corpus example; a harvested text every reading refused is left out"}
 {"text": "create collection docs (w text, c int, b int, p text)", "from": ".github/windows-power-cut/client.py", "parse": "ok d66ed704710f01182"}
 {"text": "create collection churn (v int, p text)", "from": ".github/windows-power-cut/client.py", "parse": "ok da16fff0fd3b21661"}
 {"text": "create collection spill (v int, p text)", "from": ".github/windows-power-cut/client.py", "parse": "ok da94942a2091b81e5"}
@@ -8803,3 +8803,44 @@
 {"text": "ROLLBACK WORK", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
 {"text": "rollback;", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
 {"text": "ROLLBACK TO SAVEPOINT a", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "create function total(a int) returns int as 'select 1' language sql", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "CREATE FUNCTION add_one(i integer) RETURNS integer AS 'select i + 1' LANGUAGE SQL", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "create procedure pay(amount int) language sql as 'insert into payments values (amount)'", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "CREATE PROCEDURE archive_notes() LANGUAGE SQL AS 'DELETE FROM notes'", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "create or replace function total(a int) returns int as 'select 1' language sql", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "CREATE OR REPLACE PROCEDURE pay(amount int) AS 'INSERT INTO payments VALUES (amount)'", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "create or replace view recent as select * from notes", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "CREATE OR REPLACE TABLE notes (id int)", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "create trigger audit after insert on notes for each row execute function log_note()", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "CREATE TRIGGER stamp BEFORE UPDATE ON users FOR EACH ROW EXECUTE PROCEDURE touch()", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "create extension vector", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "CREATE EXTENSION IF NOT EXISTS pg_trgm", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "create temp table scratch (id int)", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "CREATE TEMPORARY TABLE scratch (id int, body text)", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "CREATE UNLOGGED TABLE events (id bigint)", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "drop function total", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "DROP FUNCTION IF EXISTS add_one(integer)", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "drop procedure pay", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "DROP PROCEDURE archive_notes", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "drop trigger audit on notes", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "DROP TRIGGER IF EXISTS stamp ON users", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "join orders on orders.user_id = users.id", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "JOIN orders USING (user_id)", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "inner join orders on orders.user_id = users.id", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "LEFT JOIN orders ON orders.user_id = users.id", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "right outer join orders on orders.user_id = users.id", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "FULL JOIN orders ON orders.user_id = users.id", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "cross join orders", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "users join orders on orders.user_id = users.id", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "u JOIN orders o ON o.user_id = u.id", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "alter collection users modify age text", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "ALTER COLLECTION users ALTER COLUMN age TYPE text", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "alter collection users set age text", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "alter collection users change age years int", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "alter collection users retype age text", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "alter collection sessions alter field seen @hash", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "alter collection sessions alter seen @unique", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "alter collection users owner to admin", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "ALTER COLLECTION users DISABLE TRIGGER ALL", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "explain put notes {a: 1}", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}
+{"text": "EXPLAIN DELETE FROM notes WHERE id = 1", "from": "integrations/fennecql-corpus/kinds.txt", "parse": "err"}

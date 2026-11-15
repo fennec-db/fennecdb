@@ -2,7 +2,9 @@
 # (docs/design/fennecql.md#the-corpus): at least five of every kind of
 # statement fennec-ql reads, of every SQL spelling of one and of every SQL
 # word it refuses naming what to write (tools/fennecql_corpus.py's
-# REQUIRED_KINDS) -- the kinds the repository's own texts hold few of.
+# REQUIRED_KINDS) -- the kinds the repository's own texts hold few of --
+# and two at least of every other statement fennec-ql's parser refuses by
+# name, each path of its refusal (REFUSED_KINDS).
 #
 # A text a line; a line beginning with `#` is a comment. The corpus step
 # against main reads every line with both trees; `--freeze <tag>` reads
@@ -264,3 +266,68 @@ rollback
 ROLLBACK WORK
 rollback;
 ROLLBACK TO SAVEPOINT a
+
+# SQL's routines: refused, naming `create statement` (`ROUTINE`)
+create function total(a int) returns int as 'select 1' language sql
+CREATE FUNCTION add_one(i integer) RETURNS integer AS 'select i + 1' LANGUAGE SQL
+create procedure pay(amount int) language sql as 'insert into payments values (amount)'
+CREATE PROCEDURE archive_notes() LANGUAGE SQL AS 'DELETE FROM notes'
+create or replace function total(a int) returns int as 'select 1' language sql
+CREATE OR REPLACE PROCEDURE pay(amount int) AS 'INSERT INTO payments VALUES (amount)'
+
+# `create or replace` of anything but a statement: refused, naming `create or replace statement`
+create or replace view recent as select * from notes
+CREATE OR REPLACE TABLE notes (id int)
+
+# create trigger: refused, naming a statement bound to a collection's writes (`TRIGGER`)
+create trigger audit after insert on notes for each row execute function log_note()
+CREATE TRIGGER stamp BEFORE UPDATE ON users FOR EACH ROW EXECUTE PROCEDURE touch()
+
+# create extension: refused, vectors and full text being fennecdb's own
+create extension vector
+CREATE EXTENSION IF NOT EXISTS pg_trgm
+
+# create temp, temporary or unlogged table: refused, naming `create table`
+create temp table scratch (id int)
+CREATE TEMPORARY TABLE scratch (id int, body text)
+CREATE UNLOGGED TABLE events (id bigint)
+
+# drop function, procedure or trigger: refused, naming `drop statement`
+drop function total
+DROP FUNCTION IF EXISTS add_one(integer)
+drop procedure pay
+DROP PROCEDURE archive_notes
+drop trigger audit on notes
+DROP TRIGGER IF EXISTS stamp ON users
+
+# a leading join: refused, naming the `get ... lookup` or the SELECT to write (`JOIN`)
+join orders on orders.user_id = users.id
+JOIN orders USING (user_id)
+inner join orders on orders.user_id = users.id
+LEFT JOIN orders ON orders.user_id = users.id
+right outer join orders on orders.user_id = users.id
+FULL JOIN orders ON orders.user_id = users.id
+cross join orders
+
+# a name, then join: refused as a join is
+users join orders on orders.user_id = users.id
+u JOIN orders o ON o.user_id = u.id
+
+# alter collection's alter, modify, set, change or retype: refused, a type changed in place
+alter collection users modify age text
+ALTER COLLECTION users ALTER COLUMN age TYPE text
+alter collection users set age text
+alter collection users change age years int
+alter collection users retype age text
+
+# alter field to an index but @ttl or @sorted: refused, naming `create index`
+alter collection sessions alter field seen @hash
+alter collection sessions alter seen @unique
+
+# alter collection with another change: refused, naming add, drop or rename field
+alter collection users owner to admin
+ALTER COLLECTION users DISABLE TRIGGER ALL
+
+# explain of what is no get: refused, naming `get` or `select`
+explain put notes {a: 1}
+EXPLAIN DELETE FROM notes WHERE id = 1

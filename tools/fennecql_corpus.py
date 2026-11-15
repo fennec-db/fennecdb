@@ -24,7 +24,7 @@ The texts are harvested from the files git tracks:
   their comments that does;
 - each line of `integrations/fennecql-corpus/kinds.txt`, written by hand,
   at least five texts of every kind of statement and every SQL spelling the
-  parser reads.
+  parser reads, and two of every SQL word it refuses by name.
 
 A block is a text whole, and each of its lines that begins a statement a
 text of its own. Each text is read by fennec-ql's `corpus` example with
@@ -32,19 +32,22 @@ text of its own. Each text is read by fennec-ql's `corpus` example with
 each statement written as a word: a statement a named statement may hold,
 and a definition, as its canonical tree's digest (`Definition::digest`);
 any other as a hash of its form, its pretty `Debug` with every named field
-holding an empty value left out. Either way a field added since BASE that
-a text does not use moves nothing.
+of a struct holding an empty value left out. Either way a field added
+since BASE that a text does not use moves nothing.
 
-BASE is a git ref -- its tree built from `git archive` in a temporary
-directory with this tree's example copied in, both trees' texts read -- or
-the name of a corpus frozen at a tag (`integrations/fennecql-corpus/
-<tag>.jsonl`): the texts the tag's tree held and the list's, as the tag's
-own parser read them, written once by `--freeze <tag>` and never replaced.
-`frozen` is every one of them. The report counts the texts, by kind, those
-whose reading changed and those refused now that parsed -- which must be
-none but those ACCEPTED names -- those the parser panics on, those that
-parse now and were refused, and those refused in other words; and for each
-failing text what changed, and its ACCEPTED entry ready to paste.
+BASE is a git ref -- its tree built from `git archive` with this tree's
+example copied in, both trees' texts read, and every corpus frozen in it
+held to be in this checkout as it is there -- or the name of a corpus
+frozen at a tag (`integrations/fennecql-corpus/<tag>.jsonl`): the texts the
+tag's tree held, the list's and those of the corpora frozen before it, as
+the tag's own parser read them, written once by `--freeze <tag>` and never
+replaced. `frozen` is every one of them. The report counts the texts, by
+kind, those whose reading changed and those refused now that parsed --
+which must be none but those ACCEPTED names -- those the parser panics on,
+those that parse now and were refused, and those refused in other words,
+and prints every `same_meaning` an entry claims; and for each failing text
+what changed, and its ACCEPTED entry ready to paste, every one of them
+written to a file beside the builds.
 
     python3 tools/fennecql_corpus.py origin/main       # against a tree
     python3 tools/fennecql_corpus.py v0.2.0            # against the corpus frozen at it
@@ -53,12 +56,15 @@ failing text what changed, and its ACCEPTED entry ready to paste.
     python3 tools/fennecql_corpus.py --list            # the texts, as JSON lines
 
 The builds go under `target/fennecql-corpus/`, or `$FENNECQL_CORPUS_TARGET`
-(CI's, outside the directory its cache saves): this checkout's `head`, a
-base commit's `base-<commit>`, a tag's `freeze-<commit>`.
+(CI's, outside the directory its cache saves): this checkout's
+`head-<its path's hash>`, a base commit's `base-<commit>`, a tag's
+`freeze-<commit>`; the trees unpacked, `trees/<role>-<pid>`; a failure's
+entries, `accepted-<BASE>.txt`.
 """
 
 import collections
 import difflib
+import hashlib
 import html
 import io
 import json
@@ -68,7 +74,6 @@ import shutil
 import subprocess
 import sys
 import tarfile
-import tempfile
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 HOME_CARGO = os.path.expanduser("~/.cargo/bin/cargo")
@@ -96,9 +101,22 @@ LISTED = "integrations/fennecql-corpus/kinds.txt"
 # a 0.x BASE -- a 0.x tag's frozen corpus, or main before 1.0 -- a refusal
 # whose stored reading holds needs no epoch: 0.x promised nothing.
 #
+# A statement no definition holds read otherwise against a 1.x BASE -- a
+# `d` word moved -- is either: the word hashes a tree's form, which moves
+# where the tree changed shape and the meaning did not (a field renamed) as
+# where the meaning changed (`drop collection if exists t` read without its
+# `if exists`), and nothing here tells the two apart. So it passes with the
+# epoch raised, as a moved digest does, or with `same_meaning`: why the
+# statement means what it meant, a claim of its own -- never `why` -- which
+# the summary prints, every one, for a reviewer to read. An empty one is
+# refused (`entry_errors`). Against a 0.x BASE an entry alone is enough.
+#
 #   {"text": "get t where x < 1e400", "base": ["ok c...", "ok c...", "-"],
 #    "head": ["err", "err", "-"], "pr": "#632",
 #    "why": "an infinity, which JSON writes as null: refused now"}
+#   {"text": "drop collection if exists t", "base": ["ok d...", "ok d...", "-"],
+#    "head": ["ok d...", "ok d...", "-"], "pr": "#700", "why": "...",
+#    "same_meaning": "`if_exists` renamed `exists`: the tree's field, read as before"}
 ACCEPTED = []
 
 # The words a statement begins with: FennecQL's, SQL's that it reads, and
@@ -132,6 +150,30 @@ REQUIRED_KINDS = (
     "select", "insert into", "update", "delete from", "explain select",
     "create table", "alter table", "drop table", "call (sql)", "truncate",
     "begin", "start transaction", "commit", "rollback",
+)
+
+# The other statements fennec-ql's parser refuses by name, naming what to
+# write (`Parser::statement`, `create`, `drop`, `alter`, `explain`): the
+# hand-written list holds two texts at least of each path of a refusal,
+# where a kind read has many paths to hold. Matched from a text's start.
+REFUSED_KINDS = (
+    ("create function", r"create\s+function\b"),
+    ("create procedure", r"create\s+procedure\b"),
+    ("create or replace function", r"create\s+or\s+replace\s+(function|procedure)\b"),
+    ("create or replace, no statement", r"create\s+or\s+replace\s+(?!statement\b|function\b|procedure\b)\w"),
+    ("create trigger", r"create\s+trigger\b"),
+    ("create extension", r"create\s+extension\b"),
+    ("create temp table", r"create\s+(temp|temporary|unlogged)\b"),
+    ("drop function", r"drop\s+function\b"),
+    ("drop procedure", r"drop\s+procedure\b"),
+    ("drop trigger", r"drop\s+trigger\b"),
+    ("a leading join", r"(join|inner|left|right|full|cross)\b"),
+    ("a name, then join", r"(?!(join|inner|left|right|full|cross|outer)\b)[A-Za-z_]\w*\s+join\b"),
+    ("alter ... modify", r"alter\s+collection\s+\S+\s+(alter|modify|set|change|retype)\s+(?!(field\s+)?\S+\s*@)"),
+    ("alter field @other", r"alter\s+collection\s+\S+\s+alter\s+(field\s+)?\S+\s*@(?!ttl\b|sorted\b)"),
+    ("alter collection, another change",
+     r"alter\s+collection\s+\S+\s+(?!(add|drop|rename|alter|modify|set|change|retype)\b)\w"),
+    ("explain, no get", r"explain\s+(?!get\b|select\b)\w"),
 )
 
 SOURCES = {
@@ -390,11 +432,56 @@ def extract(ref, into, paths=None, repo=ROOT):
         tar.extractall(into, filter="data")
 
 
+def unpacked(root, role):
+    """A directory under the builds' root to unpack a tree into,
+    `trees/<role>-<pid>`, empty: a run killed before it removed its own
+    leaves it for the next run's `clear_leftovers`, where one in the
+    system's temporary directory stayed for good."""
+    path = os.path.join(root, "trees", f"{role}-{os.getpid()}")
+    shutil.rmtree(path, ignore_errors=True)
+    os.makedirs(path)
+    return path
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def clear_leftovers(root):
+    """The trees runs that are gone left under the builds' root, removed;
+    a live run's -- another checkout's, sharing the root -- kept."""
+    d = os.path.join(root, "trees")
+    for name in os.listdir(d) if os.path.isdir(d) else []:
+        m = re.fullmatch(r"[a-z]+-(\d+)", name)
+        if m and not alive(int(m.group(1))):
+            shutil.rmtree(os.path.join(d, name), ignore_errors=True)
+
+
 def targets():
     """Where the builds go: `$FENNECQL_CORPUS_TARGET` -- CI's, outside
     the `target/` its cache saves, where two builds were 306 MB more of
     it -- or this checkout's `target/fennecql-corpus`."""
     return os.environ.get("FENNECQL_CORPUS_TARGET") or os.path.join(ROOT, "target", "fennecql-corpus")
+
+
+def head_target(root, checkout=ROOT):
+    """The target a checkout's own tree is built into: `head-<key>`, the
+    key a hash of the checkout's absolute path, so no other checkout
+    shares it. Two checkouts sharing one `$FENNECQL_CORPUS_TARGET` and one
+    `head`, the second written before the first was built, the second was
+    taken as built -- cargo's freshness is by file time and by paths within
+    the workspace, alike in both -- and a change failing 6 texts passed
+    (`test_two_checkouts_sharing_a_target_are_each_built`). One checkout's
+    own changes are newer than its build, as cargo needs. Another
+    checkout's is left alone: it may be building now."""
+    where = os.path.realpath(os.path.abspath(checkout))
+    return os.path.join(root, "head-" + hashlib.sha256(where.encode()).hexdigest()[:12])
 
 
 def target_for(root, role, commit):
@@ -551,6 +638,44 @@ def read_frozen(path):
     return head, texts, rows
 
 
+def version_key(name):
+    """A tag's place among releases -- `v0.2.0` before `v0.10.0`, a
+    release candidate before its release -- or None for a name that is no
+    version."""
+    m = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?", name)
+    if not m:
+        return None
+    pre = m.group(4)
+    ids = tuple((0, int(x), "") if x.isdigit() else (1, 0, x) for x in pre.split(".")) if pre else ()
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)), 0 if pre else 1, ids)
+
+
+def earlier_corpora(tag, root=ROOT):
+    """The corpora frozen at tags before `tag`, oldest first: a later
+    tag's would hold texts read by a later grammar, which the tag's reading
+    of them would then hold back."""
+    mine = version_key(tag)
+    named = [(version_key(n), n) for n in frozen_names(root)]
+    return [n for k, n in sorted(x for x in named if x[0] is not None) if mine is not None and k < mine]
+
+
+def freeze_texts(tree_texts, listed, earlier, root=ROOT):
+    """What a freeze reads: the tag's tree's texts, the hand-written list's,
+    and the texts each earlier frozen corpus holds that neither does -- the
+    texts deleted since, held from now on to the tag's reading too, not to
+    an older release's alone. With how many each earlier one added."""
+    texts = merged(tree_texts, listed)
+    seen = {t["text"] for t in texts}
+    added = {}
+    for name in earlier:
+        _, held, _ = read_frozen(frozen_path(name, root))
+        new = [t for t in held if t["text"] not in seen]
+        seen.update(t["text"] for t in new)
+        texts += new
+        added[name] = len(new)
+    return texts, added
+
+
 def may_write(path, replace):
     """A frozen corpus is added, never replaced: once landed, its tag's
     reading is the one thing no later tree can give again."""
@@ -559,19 +684,22 @@ def may_write(path, replace):
                  "(--replace only before it lands)")
 
 
-def freeze(tag, replace=False):
-    """The texts `tag`'s tree holds, and the hand-written list's, read by
-    `tag`'s own parser, written as the corpus frozen at it."""
-    path = frozen_path(tag)
+def freeze(tag, replace=False, into=None):
+    """The texts `tag`'s tree holds, the hand-written list's and those of
+    the corpora frozen before it, read by `tag`'s own parser, written as
+    the corpus frozen at it -- or into `into`, to see a freeze give a
+    committed file again."""
+    path = into or frozen_path(tag)
     may_write(path, replace)
     commit = commit_of(tag)
-    scratch = tempfile.mkdtemp(prefix="fennec-corpus-freeze-")
+    target_root = targets()
+    scratch = unpacked(target_root, "freeze")
     try:
         tree = os.path.join(scratch, "tree")
         extract(commit, tree)
         listed = harvest(ROOT, [LISTED])
-        texts = merged(harvest(tree, tracked(commit)), listed)
-        exe = build(tree, target_for(targets(), "freeze", commit))
+        texts, earlier = freeze_texts(harvest(tree, tracked(commit)), listed, earlier_corpora(tag))
+        exe = build(tree, target_for(target_root, "freeze", commit))
         epoch, rows = run(exe, texts)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
@@ -581,6 +709,10 @@ def freeze(tag, replace=False):
             "written": f"python3 tools/fennecql_corpus.py --freeze {tag}: the tag's tree's texts "
                        f"and {LISTED}'s, each read by the tag's fennec-ql with this tree's corpus "
                        "example; a harvested text every reading refused is left out"}
+    if earlier:
+        # The texts each earlier corpus added that the tag's tree and the
+        # list did not hold: v0.2.0's, the first, has none to name.
+        head["earlier"] = earlier
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         for line in [head] + kept:
@@ -646,19 +778,54 @@ def entry_key(text, base_row, head_row):
     return (text, tuple(norm(r) for r in base_row), tuple(norm(r) for r in head_row))
 
 
-def entry_for(text, head_row, base_row):
-    """The ACCEPTED entry naming this change, ready to paste."""
-    return {"text": text, "base": [norm(r) for r in base_row], "head": [norm(r) for r in head_row],
-            "pr": "#", "why": ""}
+def claim(entry):
+    """An entry's `same_meaning`, where it says something."""
+    said = entry.get("same_meaning")
+    return said.strip() if isinstance(said, str) and said.strip() else None
+
+
+def entry_errors(accepted):
+    """What is wrong with entries of ACCEPTED, refused before anything
+    runs: a `same_meaning` that says nothing claims nothing."""
+    return [f"an ACCEPTED entry's same_meaning says nothing: {json.dumps(a['text'], ensure_ascii=False)[:120]} "
+            "-- say why the statement means what it meant, or raise GRAMMAR_EPOCH and name it (`epoch`)"
+            for a in accepted if "same_meaning" in a and not claim(a)]
+
+
+def needs(head_row, base_row, base_major):
+    """What lets a change of a text through beside its entry: `epoch` --
+    `GRAMMAR_EPOCH` raised past BASE's, where a digest moved or a text a
+    1.x BASE read is refused -- `meaning` -- the epoch, or `same_meaning`,
+    where a 1.x BASE's statement no definition holds is read otherwise --
+    or None, the entry alone."""
+    verdicts = [judge(x, y) for x, y in zip(head_row, base_row)]
+    if moves_digest(head_row, base_row) or (base_major >= 1 and "refused" in verdicts):
+        return "epoch"
+    if base_major >= 1 and "changed" in verdicts:
+        return "meaning"
+    return None
+
+
+def entry_for(text, head_row, base_row, base_major=0):
+    """The ACCEPTED entry naming this change, ready to paste: against a 1.x
+    BASE, a statement read otherwise asks for its `same_meaning`, which an
+    entry may hold only where it says something."""
+    entry = {"text": text, "base": [norm(r) for r in base_row], "head": [norm(r) for r in head_row],
+             "pr": "#", "why": ""}
+    if needs(head_row, base_row, base_major) == "meaning":
+        entry["same_meaning"] = ""
+    return entry
 
 
 def compare(texts, head_rows, base_rows, head_epoch, base_epoch, accepted=(), base_major=0):
     """Each text's readings against BASE's, grouped, each as (text, head's
     row, BASE's): `changed`, `refused` and `panics` fail the check unless
     an entry of `accepted` names the change, `parses` and `reworded` are
-    told; `unmatched` holds the entries naming no change here."""
+    told; `unmatched` holds the entries naming no change here, and
+    `claimed` (text, claim) every accepted entry's `same_meaning`."""
     entries = {entry_key(a["text"], a["base"], a["head"]): a for a in accepted}
-    groups = {k: [] for k in ("changed", "refused", "panics", "parses", "reworded", "accepted", "held")}
+    groups = {k: [] for k in ("changed", "refused", "panics", "parses", "reworded", "accepted", "held",
+                              "claimed")}
     used = set()
     same = 0
     for t, h, b in zip(texts, head_rows, base_rows):
@@ -673,10 +840,14 @@ def compare(texts, head_rows, base_rows, head_epoch, base_epoch, accepted=(), ba
                 used.add(key)
                 # A refusal of what a 1.x release read is a break of the
                 # contract (compatibility.md): a major version, as a
-                # digest moved is.
-                needs_epoch = moves_digest(h, b) or (base_major >= 1 and "refused" in verdicts)
-                if not needs_epoch or (head_epoch > base_epoch and entry.get("epoch") == head_epoch):
+                # digest moved is; a 1.x statement read otherwise is one
+                # unless its meaning is said to be the same.
+                need = needs(h, b, base_major)
+                raised = head_epoch > base_epoch and entry.get("epoch") == head_epoch
+                if need is None or raised or (need == "meaning" and claim(entry)):
                     groups["accepted"].append((t, h, b))
+                    if claim(entry):
+                        groups["claimed"].append((t, claim(entry)))
                     continue
                 groups["held"].append((t, h, b))
             groups["changed" if "changed" in verdicts else "refused"].append((t, h, b))
@@ -707,6 +878,9 @@ def report(base_name, how, texts, same, groups, out=sys.stdout):
     print(f"- refused now, parsed before: {len(groups['refused'])}", file=out)
     print(f"- the parser panics: {len(groups['panics'])}", file=out)
     print(f"- accepted (ACCEPTED): {len(groups['accepted'])}", file=out)
+    if groups["claimed"]:
+        print(f"- of them saying the meaning is the same (`same_meaning`): {len(groups['claimed'])}",
+              file=out)
     print(f"- parse now, refused before: {len(groups['parses'])}", file=out)
     print(f"- refused in other words: {len(groups['reworded'])}", file=out)
     if groups["unmatched"]:
@@ -715,7 +889,8 @@ def report(base_name, how, texts, same, groups, out=sys.stdout):
     titles = (("changed", "Read otherwise"), ("refused", "Refused now, parsed before"),
               ("panics", "The parser panics"),
               ("held", "In ACCEPTED, but a digest moved, or a text a 1.x release read is refused, "
-                       "with no grammar epoch raised past BASE's"),
+                       "with no grammar epoch raised past BASE's -- or a 1.x release's statement read "
+                       "otherwise with neither the epoch raised nor its `same_meaning` said"),
               ("accepted", "Accepted"), ("parses", "Parse now, refused before"),
               ("reworded", "Refused in other words"))
     for key, title in titles:
@@ -723,6 +898,12 @@ def report(base_name, how, texts, same, groups, out=sys.stdout):
             print(f"\n### {title}\n", file=out)
             for t, _, _ in groups[key]:
                 print(f"- `{t['from']}`: {json.dumps(t['text'], ensure_ascii=False)[:200]}", file=out)
+    # Every claim whole: what a reviewer of the change reads and judges.
+    if groups["claimed"]:
+        print("\n### The same meaning, as each entry says\n", file=out)
+        for t, said in groups["claimed"]:
+            print(f"- `{t['from']}`: {json.dumps(t['text'], ensure_ascii=False)[:200]}", file=out)
+            print(f"    same_meaning: {said}", file=out)
 
 
 def differing(was, now, limit=SHOWN_LINES):
@@ -734,18 +915,33 @@ def differing(was, now, limit=SHOWN_LINES):
     return lines
 
 
-def explain(fails, head_forms, base_forms, why_no_base=None, out=sys.stdout):
+def entries_path(target_root, base_name):
+    """Where a failure against `base_name` writes every failing text's
+    entry: beside the builds, named by the base."""
+    return os.path.join(target_root, "accepted-" + re.sub(r"[^A-Za-z0-9._-]+", "-", base_name) + ".txt")
+
+
+def explain(fails, head_forms, base_forms, why_no_base=None, out=sys.stdout, entries_to=None, base_major=0):
     """For each failing text, at most `SHOWN_TEXTS`: its entry ready to
     paste, and per reading what changed -- the lines of the statements'
     forms that differ, a refusal's words, a panic. `head_forms` and
     `base_forms` are the texts' `forms` readings (BASE's None where its
-    build cannot be had, `why_no_base` saying why)."""
+    build cannot be had, `why_no_base` saying why). Every failing text's
+    entry, those past the screen's too, is written to `entries_to`, a line
+    each, ready to paste."""
     print("\n### What changed\n", file=out)
     print("Each failing text, its ACCEPTED entry -- were the change made on purpose -- "
           "and what each reading reads otherwise.\n", file=out)
+    if entries_to:
+        os.makedirs(os.path.dirname(entries_to) or ".", exist_ok=True)
+        with open(entries_to, "w", encoding="utf-8") as f:
+            for t, h, b in fails:
+                f.write(f"    {json.dumps(entry_for(t['text'], h, b, base_major), ensure_ascii=False)},\n")
+        print(f"The entries of every one of the {len(fails)} failing texts, ready to paste: {entries_to}\n",
+              file=out)
     for n, (t, h, b) in enumerate(fails[:SHOWN_TEXTS]):
         print(f"- `{t['from']}`: {json.dumps(t['text'], ensure_ascii=False)[:200]}", file=out)
-        print(f"    {json.dumps(entry_for(t['text'], h, b), ensure_ascii=False)},", file=out)
+        print(f"    {json.dumps(entry_for(t['text'], h, b, base_major), ensure_ascii=False)},", file=out)
         for i, name in enumerate(READINGS):
             verdict = judge(h[i], b[i])
             if verdict in ("same", "parses", "reworded"):
@@ -790,7 +986,7 @@ def tag_exe(head_info, target_root):
             have = False
     if not have:
         return None, f"{head_info['tag']}'s commit {commit[:12]} is not in this clone"
-    scratch = tempfile.mkdtemp(prefix="fennec-corpus-tag-")
+    scratch = unpacked(target_root, "tag")
     try:
         tree = os.path.join(scratch, "tree")
         extract(commit, tree)
@@ -799,21 +995,26 @@ def tag_exe(head_info, target_root):
         shutil.rmtree(scratch, ignore_errors=True)
 
 
-def judged(base_name, how, texts, head, base, base_major, head_exe, base_exe, accepted=None):
+def judged(base_name, how, texts, head, base, base_major, head_exe, base_exe, accepted=None,
+           target_root=None):
     """`texts` read by both, reported; whether they fail. `base_exe` is
     BASE's build, or a function giving (build, why not) where it is built
-    only to show a failure."""
+    only to show a failure. A failure's entries go beside the builds."""
     (head_epoch, head_rows), (base_epoch, base_rows) = head, base
     same, groups = compare(texts, head_rows, base_rows, head_epoch, base_epoch,
                            ACCEPTED if accepted is None else accepted, base_major)
     report(base_name, how, texts, same, groups)
     fails = failing(groups)
+    entries = entries_path(target_root or targets(), base_name)
     if fails:
         shown = [t for t, _, _ in fails[:SHOWN_TEXTS]]
         _, head_forms = run(head_exe, shown, forms=True)
         exe, why = base_exe() if callable(base_exe) else (base_exe, None)
         base_forms = run(exe, shown, forms=True)[1] if exe else None
-        explain(fails, head_forms, base_forms, why)
+        explain(fails, head_forms, base_forms, why, entries_to=entries, base_major=base_major)
+    elif os.path.exists(entries):
+        # An earlier run's, which no longer names a failure.
+        os.remove(entries)
     return bool(fails)
 
 
@@ -822,14 +1023,40 @@ def against_frozen(name, head_exe, target_root):
     how = (f"frozen at {head_info['tag']} ({head_info['commit'][:12]}), as its own parser "
            f"read them under grammar epoch {head_info['epoch']}")
     return judged(name, how, texts, run(head_exe, texts), (head_info["epoch"], base_rows),
-                  major(head_info["tag"]), head_exe, lambda: tag_exe(head_info, target_root))
+                  major(head_info["tag"]), head_exe, lambda: tag_exe(head_info, target_root),
+                  target_root=target_root)
+
+
+def frozen_changed(commit, root=ROOT):
+    """The corpora frozen in `commit` that this checkout holds otherwise or
+    not at all, each `(path, "changed" | "removed")`: once landed, a frozen
+    corpus is added, never replaced -- `--freeze` refuses to write over one,
+    and this a pull request editing or deleting one by hand. Compared by
+    git's object id, the checkout's filters applied."""
+    out = subprocess.run(["git", "ls-tree", "-r", "-z", commit, "--", FROZEN + "/"], cwd=root, check=True,
+                         stdout=subprocess.PIPE).stdout.decode()
+    found = []
+    for entry in filter(None, out.split("\0")):
+        meta, path = entry.split("\t", 1)
+        if not path.endswith(".jsonl"):
+            continue
+        if not os.path.isfile(os.path.join(root, path)):
+            found.append((path, "removed"))
+            continue
+        mine = subprocess.run(["git", "hash-object", "--", path], cwd=root, check=True,
+                              stdout=subprocess.PIPE).stdout.decode().strip()
+        if mine != meta.split()[2]:
+            found.append((path, "changed"))
+    return found
 
 
 def against_tree(base_name, head_exe, target_root):
     """This tree's texts and BASE's -- a change that edits away the texts
-    showing it is still read -- by both trees."""
+    showing it is still read -- by both trees; and every corpus frozen in
+    BASE, as BASE holds it."""
     commit = commit_of(base_name)
-    scratch = tempfile.mkdtemp(prefix="fennec-corpus-base-")
+    kept_otherwise = frozen_changed(commit)
+    scratch = unpacked(target_root, "base")
     try:
         tree = os.path.join(scratch, "tree")
         extract(commit, tree)
@@ -839,8 +1066,15 @@ def against_tree(base_name, head_exe, target_root):
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
     how = f"this tree's texts and {base_name}'s ({commit[:12]}, version {version}), read by both"
-    return judged(base_name, how, texts, run(head_exe, texts), run(base_exe, texts), major(version),
-                  head_exe, base_exe)
+    failed = judged(base_name, how, texts, run(head_exe, texts), run(base_exe, texts), major(version),
+                    head_exe, base_exe, target_root=target_root)
+    if kept_otherwise:
+        print(f"\n### Frozen corpora {base_name} holds, changed or removed\n")
+        print("A frozen corpus is added, never changed or removed: its tag's reading is the one thing "
+              "no later tree can give again (a new tag's goes in a file of its own).\n")
+        for path, how in kept_otherwise:
+            print(f"- `{path}`: {how}")
+    return failed or bool(kept_otherwise)
 
 
 def main():
@@ -849,11 +1083,15 @@ def main():
         for t in harvest():
             print(json.dumps(t, ensure_ascii=False))
         return
+    errors = entry_errors(ACCEPTED)
+    if errors:
+        sys.exit("\n".join(errors))
+    target_root = targets()
+    clear_leftovers(target_root)
     if args and args[0] == "--freeze":
         freeze(args[1], replace="--replace" in args[2:])
         return
-    target_root = targets()
-    head_exe = build(ROOT, os.path.join(target_root, "head"))
+    head_exe = build(ROOT, head_target(target_root))
     if args and args[0] == "--frozen":
         names = frozen_names()
         if not names:

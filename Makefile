@@ -401,8 +401,10 @@ size-report:
 ## (docs/design/fennecql.md#the-corpus). BASE=v0.2.0 holds this tree to the
 ## texts frozen at the tag, as its own parser read them
 ## (integrations/fennecql-corpus/v0.2.0.jsonl), BASE=frozen to every frozen
-## corpus; FREEZE=<tag> adds a tag's from its tree, never replacing one. CI
-## runs BASE=origin/main and BASE=frozen. make fennecql-corpus BASE=origin/main
+## corpus; FREEZE=<tag> adds a tag's from its tree and the earlier frozen
+## corpora's texts, never replacing one. A failure writes every entry to
+## paste beside the builds. CI runs BASE=origin/main and BASE=frozen.
+## make fennecql-corpus BASE=origin/main
 fennecql-corpus:
 	@python3 tools/fennecql_corpus.py $(if $(FREEZE),--freeze $(FREEZE),$(if $(filter frozen,$(BASE)),--frozen,$(or $(BASE),origin/main)))
 

@@ -115,6 +115,29 @@ class Harvest(unittest.TestCase):
         self.assertEqual(thin, {})
         self.assertTrue(all(t["from"] == corpus.LISTED for t in texts))
 
+    def test_the_list_holds_two_of_every_refusal_by_name(self):
+        texts = [t["text"] for t in corpus.harvest(corpus.ROOT, [corpus.LISTED])]
+        counts = {name: sum(1 for t in texts if re.match(rx, t, re.I)) for name, rx in corpus.REFUSED_KINDS}
+        self.assertEqual({k: n for k, n in counts.items() if n < 2}, {})
+        # Each pattern is the path it names, and no other's.
+        for text, name in (("create function f() returns int", "create function"),
+                           ("CREATE OR REPLACE PROCEDURE p()", "create or replace function"),
+                           ("create or replace view v as select 1", "create or replace, no statement"),
+                           ("create unlogged table t (a int)", "create temp table"),
+                           ("users join orders", "a name, then join"),
+                           ("alter collection u modify a text", "alter ... modify"),
+                           ("alter collection u alter field a @hash", "alter field @other"),
+                           ("alter collection u owner to x", "alter collection, another change"),
+                           ("explain put t {a: 1}", "explain, no get")):
+            found = [n for n, rx in corpus.REFUSED_KINDS if re.match(rx, text, re.I)]
+            self.assertEqual(found, [name], text)
+        matched = lambda text: [n for n, rx in corpus.REFUSED_KINDS if re.match(rx, text, re.I)]  # noqa: E731
+        self.assertEqual(matched("inner join orders"), ["a leading join"])
+        for text in ("create or replace statement f() as get t", "alter collection u add a int",
+                     "alter collection u alter field a @ttl(1d)", "explain get t", "get t", "create table t (a int)",
+                     "alter collection u rename a to b"):
+            self.assertEqual(matched(text), [], text)
+
     def test_both_trees_texts_are_read(self):
         # A change that edits away the texts showing it is still read: the
         # base tree's texts join this tree's, each once.
@@ -254,10 +277,61 @@ class Compare(unittest.TestCase):
         self.assertEqual(self.compare(head, base, entry, major=1), {"refused": 1, "held": 1})
         raised = [dict(entry_of("q", base, head), epoch=5)]
         self.assertEqual(self.compare(head, base, raised, (5, 4), major=1), {"accepted": 1})
-        # A statement no definition holds, read otherwise, is the fix of a
-        # reading: an entry alone, under 1.x too.
+        # Saying the meaning is the same lets no refusal through.
+        claimed = [dict(entry_of("q", base, head), same_meaning="refused, as it always meant")]
+        self.assertEqual(self.compare(head, base, claimed, major=1), {"refused": 1, "held": 1})
+
+    def test_a_statement_read_otherwise_against_a_1x_base_needs_the_epoch_or_its_meaning_kept(self):
+        # A `d` word is a hash of a representation: it moves where the tree
+        # changed shape and the meaning did not (a field renamed), and where
+        # the meaning changed (`drop collection if exists t` read without
+        # its `if exists`). Against 1.x an entry alone tells the two apart
+        # no more than the word does.
         d_head, d_base = (f"ok {D2}", f"ok {D2}", "-"), (f"ok {D1}", f"ok {D1}", "-")
-        self.assertEqual(self.compare(d_head, d_base, [entry_of("q", d_base, d_head)], major=1), {"accepted": 1})
+        entry = [entry_of("q", d_base, d_head)]
+        self.assertEqual(self.compare(d_head, d_base, entry, major=1), {"changed": 1, "held": 1})
+        # The epoch raised, as a moved digest's.
+        raised = [dict(entry_of("q", d_base, d_head), epoch=5)]
+        self.assertEqual(self.compare(d_head, d_base, raised, (5, 4), major=1), {"accepted": 1})
+        # Or the meaning said to be the same, and why: a claim the summary
+        # prints, for a reviewer to read.
+        same = [dict(entry_of("q", d_base, d_head), same_meaning="`if_exists` renamed `exists`, as read")]
+        self.assertEqual(self.compare(d_head, d_base, same, major=1), {"accepted": 1, "claimed": 1})
+        # An empty claim claims nothing, and is refused before anything runs.
+        for empty in ("", "   ", None, 1):
+            bad = [dict(entry_of("q", d_base, d_head), same_meaning=empty)]
+            self.assertEqual(self.compare(d_head, d_base, bad, major=1), {"changed": 1, "held": 1}, empty)
+            self.assertEqual(len(corpus.entry_errors(bad)), 1, empty)
+        self.assertEqual(corpus.entry_errors(same + entry + raised), [])
+        # A claim lets no digest move.
+        head, base = (f"ok {S2}", f"ok {S2}", f"ok {S2}"), (f"ok {S1}", f"ok {S1}", f"ok {S1}")
+        claimed = [dict(entry_of("q", base, head), same_meaning="the same, said")]
+        self.assertEqual(self.compare(head, base, claimed, major=1), {"changed": 1, "held": 1})
+        self.assertEqual(self.compare(head, base, claimed, major=0), {"changed": 1, "held": 1})
+        # Against 0.x an entry alone stays enough.
+        self.assertEqual(self.compare(d_head, d_base, entry, major=0), {"accepted": 1})
+
+    def test_every_claim_of_the_same_meaning_is_in_the_summary(self):
+        texts = [text("drop collection t"), text("collections")]
+        base = [(f"ok {D1}", f"ok {D1}", "-"), (f"ok {D2}", f"ok {D2}", "-")]
+        head = [(f"ok {D2}", f"ok {D2}", "-"), (f"ok {D3}", f"ok {D3}", "-")]
+        claims = [dict(entry_of("drop collection t", base[0], head[0]), same_meaning="a field renamed"),
+                  dict(entry_of("collections", base[1], head[1]), same_meaning="a variant moved")]
+        same, groups = corpus.compare(texts, head, base, 4, 4, claims, 1)
+        out = io.StringIO()
+        corpus.report("origin/main", "both", texts, same, groups, out)
+        said = out.getvalue()
+        self.assertIn("- accepted (ACCEPTED): 2", said)
+        self.assertIn("- of them saying the meaning is the same (`same_meaning`): 2", said)
+        self.assertIn("same_meaning: a field renamed", said)
+        self.assertIn("same_meaning: a variant moved", said)
+
+    def test_the_entry_printed_against_a_1x_base_asks_for_the_meaning(self):
+        d_head, d_base = (f"ok {D2}", f"ok {D2}", "-"), (f"ok {D1}", f"ok {D1}", "-")
+        self.assertEqual(corpus.entry_for("q", d_head, d_base, 1)["same_meaning"], "")
+        self.assertNotIn("same_meaning", corpus.entry_for("q", d_head, d_base, 0))
+        head, base = (f"ok {C2}", f"ok {C2}", "-"), (f"ok {C1}", f"ok {C1}", "-")
+        self.assertNotIn("same_meaning", corpus.entry_for("q", head, base, 1))
 
     def test_a_base_is_1x_by_its_version(self):
         self.assertEqual([corpus.major(v) for v in ("v0.2.0", "0.2.0", "1.0.0-rc.1", "v1.4.2", "2.0.0")],
@@ -328,6 +402,30 @@ class Compare(unittest.TestCase):
         self.assertIn("and 10 texts more", said)
         self.assertIn("BASE's forms not built: no tag here", said)
 
+    def test_every_failing_texts_entry_is_written_to_a_file(self):
+        # A change of precedence failed 56 texts: three rounds of pasting
+        # 20. The screen stays short; the file holds every entry.
+        texts = [text(f"get t{i}") for i in range(30)]
+        rows = [(f"ok {C1}", f"ok {C1}", "-")] * 30
+        _, groups = corpus.compare(texts, [(f"ok {C2}", f"ok {C2}", "-")] * 30, rows, 4, 4)
+        forms = [("ok\x1ea", "ok\x1ea", "-")] * corpus.SHOWN_TEXTS
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "accepted-origin-main.txt")
+            out = io.StringIO()
+            corpus.explain(corpus.failing(groups), forms, None, "no tag here", out=out, entries_to=path)
+            said = out.getvalue()
+            with open(path, encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        self.assertEqual(said.count('"pr": "#"'), corpus.SHOWN_TEXTS)
+        self.assertIn(f"of every one of the 30 failing texts, ready to paste: {path}", said)
+        entries = [json.loads(line.rstrip(",")) for line in lines if line.strip().startswith("{")]
+        self.assertEqual([e["text"] for e in entries], [f"get t{i}" for i in range(30)])
+        self.assertTrue(all(line.endswith(",") for line in lines if line.strip().startswith("{")))
+
+    def test_the_entries_file_is_named_by_its_base(self):
+        self.assertEqual(os.path.basename(corpus.entries_path("/t", "origin/main")), "accepted-origin-main.txt")
+        self.assertEqual(os.path.basename(corpus.entries_path("/t", "v1.0.0-rc.1")), "accepted-v1.0.0-rc.1.txt")
+
 
 class Frozen(unittest.TestCase):
     def test_written_and_read_back(self):
@@ -384,6 +482,53 @@ class Frozen(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 corpus.may_write(path, False)
             corpus.may_write(path, True)
+
+    def test_a_frozen_corpus_main_holds_is_never_changed_nor_removed(self):
+        # `--freeze` refuses to write over one, but a pull request may edit
+        # one by hand: the step against main refuses that, naming the file.
+        with tempfile.TemporaryDirectory() as repo:
+            d = os.path.join(repo, corpus.FROZEN)
+            os.makedirs(d)
+            for name in ("v1.jsonl", "v2.jsonl", "kinds.txt"):
+                with open(os.path.join(d, name), "w") as f:
+                    f.write(f'{{"tag": "{name}"}}\n')
+            git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+            subprocess.run(["git", "init", "-q", repo], check=True)
+            subprocess.run(git + ["add", "-A"], cwd=repo, check=True)
+            subprocess.run(git + ["commit", "-q", "-m", "frozen"], cwd=repo, check=True)
+            base = corpus.commit_of("HEAD", repo)
+            self.assertEqual(corpus.frozen_changed(base, repo), [])
+            # One added, and the hand-written list grown: both free.
+            with open(os.path.join(d, "v3.jsonl"), "w") as f:
+                f.write("{}\n")
+            with open(os.path.join(d, "kinds.txt"), "a") as f:
+                f.write("get more\n")
+            self.assertEqual(corpus.frozen_changed(base, repo), [])
+            with open(os.path.join(d, "v1.jsonl"), "a") as f:
+                f.write('{"text": "get t"}\n')
+            os.remove(os.path.join(d, "v2.jsonl"))
+            self.assertEqual(corpus.frozen_changed(base, repo),
+                             [(f"{corpus.FROZEN}/v1.jsonl", "changed"), (f"{corpus.FROZEN}/v2.jsonl", "removed")])
+
+    def test_a_freeze_reads_the_earlier_frozen_corpora_texts(self):
+        # A text an earlier tag's corpus holds that the tree no longer does
+        # (nine of v0.2.0's already) is read by the later tag's code too, so
+        # it is held to 1.x's reading, not to 0.x's alone, for good.
+        with tempfile.TemporaryDirectory() as root:
+            d = os.path.join(root, corpus.FROZEN)
+            os.makedirs(d)
+            for name in ("v0.2.0", "v0.10.0", "v1.0.0-rc.1", "v1.0.0", "v1.2.0"):
+                with open(os.path.join(d, f"{name}.jsonl"), "w") as f:
+                    f.write(json.dumps({"tag": name}) + "\n")
+                    f.write(json.dumps({"text": f"get only_{name}", "from": "docs/gone.md", "parse": "err"}) + "\n")
+                    f.write(json.dumps({"text": "get t", "from": "docs/t.md", "parse": "err"}) + "\n")
+            self.assertEqual(corpus.earlier_corpora("v1.0.0", root), ["v0.2.0", "v0.10.0", "v1.0.0-rc.1"])
+            self.assertEqual(corpus.earlier_corpora("v0.2.0", root), [])
+            tree = [{"text": "get t", "from": "docs/t.md"}]
+            listed = [{"text": "BEGIN", "from": corpus.LISTED}]
+            texts, earlier = corpus.freeze_texts(tree, listed, ["v0.2.0", "v0.10.0"], root)
+        self.assertEqual([t["text"] for t in texts], ["get t", "BEGIN", "get only_v0.2.0", "get only_v0.10.0"])
+        self.assertEqual(earlier, {"v0.2.0": 1, "v0.10.0": 1})
 
     def test_a_definition_alone_is_its_own_stored_reading(self):
         self.assertEqual(corpus.default_stored(f"ok {S1}"), f"ok {S1}")
@@ -455,6 +600,56 @@ class Tree(unittest.TestCase):
             # The first commit's target went with it: one base's at a time.
             self.assertEqual(os.listdir(root), [f"base-{commits[1][:12]}"])
 
+    def test_two_checkouts_sharing_a_target_are_each_built(self):
+        """Two checkouts of a crate reading otherwise, the second written
+        before the first was built, each built as the tool builds this
+        tree's head, into one `$FENNECQL_CORPUS_TARGET`: each answers its
+        own reading. Built into one `head` target, the second was taken as
+        built -- cargo's freshness is by time and by paths within the
+        workspace -- and answered the first's."""
+        with tempfile.TemporaryDirectory() as d:
+            root = os.path.join(d, "shared")
+            example = os.path.join(d, "corpus.rs")
+            with open(example, "w") as f:
+                f.write("fn main() { println!(\"{}\", fennec_ql::READ); }\n")
+            checkouts = []
+            for reading in ("first", "second"):
+                tree = os.path.join(d, reading)
+                os.makedirs(os.path.join(tree, "crates", "fennec-ql", "src"))
+                for path, body in (("Cargo.toml", '[workspace]\nmembers = ["crates/fennec-ql"]\nresolver = "2"\n'),
+                                   ("crates/fennec-ql/Cargo.toml", '[package]\nname = "fennec-ql"\n'
+                                                                   'version = "0.0.0"\nedition = "2021"\n'),
+                                   ("crates/fennec-ql/src/lib.rs", f'pub const READ: &str = "{reading}";\n')):
+                    with open(os.path.join(tree, path), "w") as f:
+                        f.write(body)
+                checkouts.append(tree)
+            read = []
+            for tree in checkouts:
+                exe = corpus.build(tree, corpus.head_target(root, tree), example)
+                read.append(subprocess.run([exe], stdout=subprocess.PIPE, check=True).stdout.decode().strip())
+            self.assertEqual(read, ["first", "second"])
+            self.assertNotEqual(corpus.head_target(root, checkouts[0]), corpus.head_target(root, checkouts[1]))
+            self.assertEqual(corpus.head_target(root, checkouts[0]), corpus.head_target(root, checkouts[0] + "/"))
+
+    def test_a_tree_is_unpacked_under_the_target_and_a_killed_runs_left_behind(self):
+        # A SIGKILL leaves the unpacked tree behind: under the target, by
+        # the process' id, cleared at the next start once that process is
+        # gone -- never another live run's, which may share the target.
+        gone = subprocess.Popen(["true"])
+        gone.wait()
+        with tempfile.TemporaryDirectory() as root:
+            mine = corpus.unpacked(root, "base")
+            self.assertEqual(os.path.dirname(mine), os.path.join(root, "trees"))
+            self.assertTrue(os.path.basename(mine).startswith("base-"))
+            left = os.path.join(root, "trees", f"freeze-{gone.pid}")
+            live = os.path.join(root, "trees", f"base-{os.getppid()}")
+            for p in (left, live, os.path.join(left, "tree")):
+                os.makedirs(p, exist_ok=True)
+            corpus.clear_leftovers(root)
+            self.assertFalse(os.path.exists(left))
+            self.assertTrue(os.path.isdir(live) and os.path.isdir(mine))
+            corpus.clear_leftovers(os.path.join(root, "nothing-yet"))
+
 
 WORD = re.compile(r"^[cdes][0-9a-f]{16}r?$")
 
@@ -492,6 +687,7 @@ class Committed(unittest.TestCase):
                 self.assertEqual(len(entry[side]), 3, entry)
                 self.assertTrue(all(r == corpus.norm(r) for r in entry[side]), entry)
             self.assertIsInstance(entry.get("epoch", 0), int, entry)
+        self.assertEqual(corpus.entry_errors(corpus.ACCEPTED), [])
 
 
 if __name__ == "__main__":
