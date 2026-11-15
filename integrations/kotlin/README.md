@@ -93,11 +93,43 @@ as a `?`'s parameter.
 val db = Fennec.sync(
     url = "https://api.example.com", token = jwt,
     shapes = listOf(Shape("todos", where = mapOf("owner" to me), key = "key")),
-    path = File(context.filesDir, "todos.fennec").path,
-    tokenProvider = { refreshToken() },
+    path = File(context.filesDir, "${account.id}.fennec").path, // one account's replica
+    // A fresh token at every 401, whatever the code: it throws where the
+    // issuer refuses -- the session ended, and the app signs out there.
+    tokenProvider = { refusal -> refreshToken(force = refusal.expired) },
 )
 db.replica!!.ready()
 ```
+
+A `401` asks `tokenProvider` for a token, handed a `TokenRefusal`: the
+code the server named (`errorCode`, "token_expired" where the token's `exp`
+passed), `expired`, whether the refused request carried a token
+(`hadToken`) and the asks in a row since the server last took the token
+held (`attempt`). The provider asks the issuer for a fresh token at every
+one: a 401 alone is never a sign-out, since the server keeps no list of
+revoked tokens -- the app signs out where the issuer refuses to issue one.
+Where the token handed over is refused too (`attempt` past 1: a key the
+server has not fetched yet, an `nbf` its clock has not reached), the sync
+asks again after 1 s doubling to 60 s; an expiry of the token the server
+took last, or of the first handed over since, starts the count at 1 again.
+A provider that throws, or hands over an empty token, leaves the sync
+waiting, `replica.status`'s `token` reading `FAILED` and its error "the
+token provider failed: …", and is asked again at `resume()` or
+`setOnline(true)` -- never while it is still at work: it is called once at
+a time. Nothing bounds its time, since it may wait on a sign-in, so it
+must return: time out its own requests to the issuer and throw. One that
+never returns holds the sync, `token` reading `ASKED`, until the app hands
+a token over itself with `setToken`. A file is one account's -- its path
+names the account, and it is never opened for another -- and signing out
+keeps it, for that account's next sign-in to send its `pending` writes.
+
+While a token is wanted `replica.status`'s `token` says so: its `stage`
+(`DELAYED` while the wait before the next ask runs, `ASKED`, `FAILED`)
+and the `TokenRefusal` its `refusal`, the error the token's whatever else
+failed since -- a stream that ended, as streams end offline. An app that
+hands its tokens over with `setToken` rather than a provider does so at
+`ASKED`. A `FennecRemote` refusal names its body's code as
+`FennecException.errorCode`.
 
 The same `Fennec`: reads and live queries are the file's, a write to a
 shape's collection shows at once and is sent -- queued in the file while
@@ -201,6 +233,28 @@ event)` on `FennecRemote` sends a webhook consumer a test event, run as a
 delivery is, keeping no key. The library runs no schedule and takes no
 event: a server's file opened in the app keeps its schedules and hooks for
 the server that next opens it.
+
+## Changed before 1.0
+
+1.0 freezes the API; these broke before it:
+
+- `Fennec.sync`'s `tokenProvider` is handed a `TokenRefusal`. A lambda
+  asking nothing, `{ refreshToken() }`, still takes; a reference to a
+  function of none, `::refreshToken`, no longer does: write
+  `{ refreshToken() }` for it.
+- A 401 never asks the app to sign out: the provider asks its issuer for a
+  fresh token at every one, the sync waiting 1 s doubling to 60 s before
+  it asks again where the token handed over was refused too, and
+  `resume()` asks again for a token a provider that threw never handed
+  over.
+- A provider that throws, or hands over an empty token, is told in
+  `replica.status` (`token` `FAILED`, the error "the token provider
+  failed: …"), where it was swallowed; an empty token is no longer handed
+  to the server as none.
+- `SyncStatus` has `token`, a `TokenWait` -- its `stage` and the
+  `TokenRefusal` -- while a token is wanted, and `SyncStatus.Failure`
+  `errorCode` (their constructors and `copy` take them last), and
+  `FennecException` a refusal's `errorCode`.
 
 ## Building and testing
 

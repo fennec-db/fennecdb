@@ -80,14 +80,20 @@ def main():
 def changelogs(v):
     """pub.dev shows a package's CHANGELOG.md and warns at the upload when it
     names no entry for the version: 0.1.8 to 0.1.11 went up with only
-    0.1.7's. Each release's entry points at its notes, written once."""
+    0.1.7's. Each release's entry points at its notes, written once. What a
+    change a user must act on wrote under `## Unreleased` as it landed -- a
+    break before 1.0 -- becomes the release's entry, its notes' link first:
+    an entry put above it would have left it under the release it came
+    before."""
     for package in ("fennecdb", "fennecdb_flutter"):
         p = ROOT / f"integrations/dart/{package}/CHANGELOG.md"
         text = p.read_text(encoding="utf-8")
         if re.search(rf"^## {re.escape(v)}$", text, flags=re.M):
             continue
         entry = f"## {v}\n\nThe release notes: https://github.com/fennec-db/fennecdb/releases/tag/v{v}\n\n"
-        text, n = re.subn(r"^(# Changelog\n\n)", lambda m: m.group(1) + entry, text, count=1, flags=re.M)
+        text, n = re.subn(r"^## Unreleased\n\n", lambda m: entry, text, count=1, flags=re.M)
+        if n == 0:
+            text, n = re.subn(r"^(# Changelog\n\n)", lambda m: m.group(1) + entry, text, count=1, flags=re.M)
         if n != 1:
             sys.exit(f"{p}: no '# Changelog' heading")
         p.write_text(text, encoding="utf-8")
