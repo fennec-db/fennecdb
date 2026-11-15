@@ -849,12 +849,17 @@ fn a_set_not_read_back_records_every_copy_behind() {
 /// the move is not undone -- it was, 502 "its hook secrets not taken",
 /// while that `PUT` refused it -- the hook kept as it was on the target and
 /// the new replica, its other hook armed there, its own verified events
-/// refused (409) naming `key body`. A new `key delivery` is refused through
-/// the router as at the node.
+/// refused (409) naming `key body` and the listings the router relays
+/// saying it is not armed. A new `key delivery` is refused through the
+/// router as at the node.
 #[test]
 fn a_set_kept_with_key_delivery_moves_with_its_tenant() {
     let (nodes, port) = three("delivery");
     create(port, "acme", "n1");
+    let q = "create statement pushed($sha text from event.sha) on hook pushes as insert \
+             journal {what: $sha}";
+    let (status, body) = query(port, "acme", q);
+    assert_eq!(status, 200, "{body}");
     assert_eq!(set_hook(port, "acme", "stripe", "whsec_acme").0, 200);
     let pushes = |key: &str| {
         let body = format!(r#"{{"scheme":"github","secrets":["gh"],"key":"{key}"}}"#);
@@ -915,4 +920,20 @@ fn a_set_kept_with_key_delivery_moves_with_its_tenant() {
     let (status, body, _) = call(port, "POST", "/t/acme/_hooks/pushes", &headers, push);
     assert_eq!(status, 409, "{body}");
     assert!(body.contains("key body"), "{body}");
+    // What the router relays of the target's listings says so: that hook is
+    // not armed, its other is.
+    let armed = |listed: &str, statement: &str| {
+        let at = listed.find(&format!(r#""name":"{statement}""#))?;
+        let rest = &listed[at..];
+        let value = &rest[rest.find(r#""armed":"#)? + r#""armed":"#.len()..];
+        Some(value.starts_with("true"))
+    };
+    let (status, statements) = query(port, "acme", "statements");
+    assert_eq!(status, 200, "{statements}");
+    let (status, schema, _) = call(port, "GET", "/t/acme/_schema", &[], "");
+    assert_eq!(status, 200, "{schema}");
+    for listed in [&statements, &schema] {
+        assert_eq!(armed(listed, "pushed"), Some(false), "{listed}");
+        assert_eq!(armed(listed, "paid"), Some(true), "{listed}");
+    }
 }

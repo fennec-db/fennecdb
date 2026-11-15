@@ -161,8 +161,9 @@ archive's, a log's, a trace's or an answer's but `hook-secrets`'. An
 event's key is a value its signature covers -- GitHub's its body's digest,
 never `X-GitHub-Delivery`, which nothing signs (`key delivery` refused at
 the start and at a hook's `PUT`; a set 0.2.0 kept with it reads whole,
-that hook's verified events refused 409 naming `key body`,
-`Hook::delivery`) -- kept more than twice the tolerance and `SKEW_MS`. A sender is
+that hook's verified events refused 409 naming `key body`, listed not
+armed, `Hook::delivery`, `Store::armed`) -- kept more than twice the
+tolerance and `SKEW_MS`. A sender is
 told 2xx only once its event
 is durable whatever `--sync` says (`hooks::taken` flushes as `--sync
 always` does), and a standby holds it (`Feed::standby_sent`, an archiver's

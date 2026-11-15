@@ -47,11 +47,13 @@
 //! the set as `hook-secrets` answers it, which [`Store::install`]'s reader
 //! reads. A later layout raises the number, which this one reads as no
 //! set. One that does not read -- that layout, a file cut short or changed
-//! by hand, a rule another binary reads otherwise -- is set aside as
-//! `<t>.hooks.unread`, never removed nor written over ([`Store::set_aside`]):
-//! no router keeps a secret, so it may be the only copy. A `github` hook
-//! 0.2.0 saved with `key delivery` reads, kept as it was and its events
-//! refused ([`hooks::Hook::delivery`]).
+//! by hand, a rule another binary reads otherwise -- or whose tenant's file
+//! could not be looked at for another reason than its not being there, is
+//! set aside as `<t>.hooks.unread`, never removed nor written over
+//! ([`Store::set_aside`]): no router keeps a secret, so it may be the only
+//! copy. A `github` hook 0.2.0 saved with `key delivery` reads, kept as it
+//! was and its events refused ([`hooks::Hook::delivery`]), its listings
+//! saying it is not armed ([`Store::armed`]).
 
 use crate::crypto::HmacKey;
 use crate::hooks::{self, Check, Hook, Scheme, CEILING};
@@ -118,10 +120,12 @@ type Changing<'a> = MutexGuard<'a, ()>;
 
 /// Why a sidecar was not taken as the node started.
 enum Unread {
-    /// Bound to another file than the tenant's, or to none: a set no longer
-    /// the tenant's, put away ([`Store::forget`]).
+    /// Bound to another file than the tenant's, or to none -- no file at
+    /// the tenant's place, `NotFound` alone: a set no longer the tenant's,
+    /// put away ([`Store::forget`]).
     Bound(&'static str),
-    /// It does not read: set aside, never removed ([`Store::set_aside`]).
+    /// It does not read, or the tenant's file could not be looked at: set
+    /// aside, never removed ([`Store::set_aside`]).
     Unread(&'static str),
 }
 
@@ -301,12 +305,24 @@ impl Store {
         (self.read_map().get(tenant)).is_some_and(|e| Arc::ptr_eq(&e.set, &v.set))
     }
 
-    /// Whether `tenant` holds a secret for hook `hook`: what the log says
-    /// as a tenant opens.
+    /// Whether `tenant`'s set holds hook `hook`, and if so whether it was
+    /// kept with `key delivery` ([`Hook::delivery`]).
+    fn held(&self, tenant: &str, hook: &str) -> Option<bool> {
+        let map = self.read_map();
+        let set = &map.get(tenant)?.set;
+        set.hooks
+            .iter()
+            .find(|h| h.name == hook)
+            .map(|h| h.delivery)
+    }
+
+    /// Whether `tenant`'s hook `hook` takes an event that verifies: its set
+    /// holds the hook, not kept with `key delivery` -- what the listings'
+    /// `armed` says, and the log as a tenant opens. A hook so kept holds a
+    /// secret but every event of it that verifies is refused (409): asking
+    /// only whether the set names it listed such a hook armed.
     pub fn armed(&self, tenant: &str, hook: &str) -> bool {
-        self.read_map()
-            .get(tenant)
-            .is_some_and(|e| e.set.hooks.iter().any(|h| h.name == hook))
+        self.held(tenant, hook) == Some(false)
     }
 
     /// The sidecar read and held to the file it names, or why not.
@@ -326,7 +342,22 @@ impl Store {
         match instance::binding(&self.file(name)) {
             Ok(now) if now == bound => {}
             Ok(_) => return Err(Unread::Bound("name another file than the tenant's")),
-            Err(_) => return Err(Unread::Bound("lie beside no file of the tenant")),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Err(Unread::Bound("lie beside no file of the tenant"))
+            }
+            // Only a file that is not there says the set is no longer the
+            // tenant's. Any other error -- a directory on the way the node
+            // may not search, a file where a directory should be, a link
+            // that loops, an I/O error that passes -- says nothing of whose
+            // it is, and the tenant's file may be there as it was: removing
+            // the sidecar then lost what may be the only copy of its
+            // secrets, which no router keeps. Set aside as one that does not
+            // read. On Windows the binding is read through an open of the
+            // file asking no access, which no other handle's sharing refuses
+            // (`fennec_abi::lock::file_id`): a file or a directory not found
+            // is `NotFound`, put away; access denied -- an ACL, a file
+            // pending its deletion -- sets it aside.
+            Err(_) => return Err(Unread::Unread("name a file the node could not look at")),
         }
         // The version line is a reader's: the set holds its own.
         let set = lines.nth(1).unwrap_or("");
@@ -640,7 +671,9 @@ impl Store {
         hook: &str,
         open: u64,
     ) -> Result<Option<u64>, Refused> {
-        if !self.armed(name, hook) {
+        // A hook kept with `key delivery` is not armed, but is held: taken
+        // away as any is.
+        if self.held(name, hook).is_none() {
             return Err(Refused(
                 404,
                 format!("tenant `{name}` holds no secret for hook `{hook}`"),
@@ -870,9 +903,11 @@ impl Store {
         self.read_map().get(name).map(|e| e.set.version)
     }
 
-    /// Says, as tenant `name` opens, each hook its statements take that it
-    /// holds no secret for: its events are answered 401 until one is set.
-    /// A tenant whose statements take no hook pays a walk of them.
+    /// Says, as tenant `name` opens, each hook its statements take that is
+    /// not armed: one it holds no secret for, its events answered 401 until
+    /// one is set, and one kept with `key delivery`, its verified events
+    /// refused (409) until it is set again. A tenant whose statements take
+    /// no hook pays a walk of them.
     pub(crate) fn log_unarmed(&self, name: &str, db: &fennec_core::prelude::Database) {
         let statements = db.statements();
         let mut taken: Vec<(&str, usize)> = Vec::new();
@@ -886,13 +921,19 @@ impl Store {
             }
         }
         for (hook, n) in taken {
-            if !self.armed(name, hook) {
-                crate::log!(
-                    "tenant `{name}`'s hook `{hook}`: consumed by {n} statement{}, no secret -- \
+            let s = if n == 1 { "" } else { "s" };
+            match self.held(name, hook) {
+                Some(false) => {}
+                Some(true) => crate::log!(
+                    "tenant `{name}`'s hook `{hook}`: consumed by {n} statement{s}, set with \
+                     `key delivery` -- its events are refused (409) until it is set again with \
+                     `key body` (PUT /_shard/tenants/{name}/hooks/{hook})"
+                ),
+                None => crate::log!(
+                    "tenant `{name}`'s hook `{hook}`: consumed by {n} statement{s}, no secret -- \
                      its events are answered 401 until one is set (PUT \
-                     /_shard/tenants/{name}/hooks/{hook})",
-                    if n == 1 { "" } else { "s" }
-                );
+                     /_shard/tenants/{name}/hooks/{hook})"
+                ),
             }
         }
     }
