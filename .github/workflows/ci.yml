@@ -255,6 +255,18 @@ jobs:
       - name: tools/coverage_report.py's tables, and its boundary list's paths
         run: python3 tools/test_coverage_report.py
 
+      # docs/design/compatibility.md#the-compatibility-matrix: the harness
+      # compat.yml runs weekly and on a release's tag, held here on every
+      # change with no binary -- a case dying after its first part, one
+      # printing a part too few, each failing the run; every record kind,
+      # type tag and op of the tree named in its history or said to need
+      # none, so the next one cannot be forgotten; and a release's tarball
+      # with a byte flipped refused by release-bins.sh, nothing installed.
+      - name: The compatibility matrix fails a case dying part way, names every kind, tag and op of the tree, and refuses a tampered tarball
+        run: |
+          bash tools/compat-matrix.sh --self-test
+          bash tools/test_release_bins.sh
+
       - name: Save the cache (main only)
         if: github.ref == 'refs/heads/main' && steps.unicode-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
