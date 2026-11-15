@@ -6,7 +6,7 @@ The long form of the invariants [web/CLAUDE.md](../../web/CLAUDE.md) lists under
 
 **One module and a client entry, by where the queries run, and a test
 build.** `@fennecdb/web` ships `fennec.wasm` (every index and the schema
-check, 287.7 KB brotli) and `@fennecdb/web/client`, so a user has two
+check, 287.6 KB brotli) and `@fennecdb/web/client`, so a user has two
 clear choices: queries on a server through the client entry and no
 module, or a database in the page or a synced replica through the full
 module. `fennec-lite.wasm` (no index, no schema check, 173 KB brotli; `make
@@ -665,6 +665,81 @@ gives back; the module's memory, which it keeps, was within 1 MB of
 238 -> 217 at 100 000. The write alone, apart from the event's parse and
 the rest of a seed, went 1.7x as fast for the first row type (748 -> 429
 ms at 300 000) and 2.6x for points (917 -> 353).
+
+## Seeds in parts
+
+**A seed in parts lands in one task.** A seed past a mebibyte comes in
+parts ([http.md](http.md#seeds-in-parts)), and the browser's replica holds
+them until the last as the text each came as (`#seedPart`), then lands
+them in the task the last one came in (`#landParts`): each part parsed in
+turn, its rows written 500 a statement as a seed's always were
+([The server's rows](#the-servers-rows)), then what the replica holds and
+the seed does not deleted, but the rows of writes not yet answered, and
+the cursor written. JavaScript runs a task at a time, and nothing is
+awaited from the first write to the last, so no read, write or live query
+of the page -- each its own task, a live query's run a frame's or a
+timer's -- comes between them, and a stream that ends before the last
+part leaves the replica as it was: its parts go with it (`#cancel`), and
+the stream opened again seeds from its start. A part out of turn ends the
+stream, as natively. `FennecHttp.subscribe` hands each part as it came
+(`part`, `more`), and `live` runs its query once the last came.
+
+The parts wait in the page, not in the module: the module's memory is the
+replica's and never shrinks ([browser-module.md](browser-module.md#chunked-memory)),
+and a part written into the replica would go through `persist`'s journal
+only to be deleted. Nor in IndexedDB: its reads are awaited, and the
+landing, which may await nothing, would read every part back first --
+the seed whole in the page again. So the page holds the seed's text till
+it lands, 46.7 MB for 300 000 rows of 155 bytes, and gives it back to the
+collector after; what it no longer holds is the seed parsed whole, which
+was most of its peak.
+
+Not one block either, though a block would make the landing one record:
+a block keeps every write it makes until it lands -- its frames, doubling
+as they grow, and an undo a write -- in the module's memory, which never
+gives them back. Landed in one block, a 300 000-row seed left the module at
+168.9 MB against 68.7 without one, and a 5 000-row seed of one part at 5.0
+against 3.8. Without it, a replica in a file (`openFile`), which flushes
+each statement as it lands, keeps the first writes of a landing a page
+ended half way through. So there the landing writes the shape's row first,
+its cursor `LANDING` (-1, no change of the server's), and its last write
+puts the seed's change there: a replica opened with `LANDING` in a shape's
+row deletes the shape's rows but those of writes not yet answered before
+anything reads them, and seeds it again whole (`start`, `#emptyShape`).
+Elsewhere no mark is written: `persist` drains what a task wrote after it,
+into one chunk stored in one transaction, so a landing reaches IndexedDB
+whole or not at all, and the mark's write -- a statement the module had
+not compiled yet at the first seed -- took 1.2 ms of a 5 000-row seed's
+28. A statement refused half way -- a value a `@unique` field of the
+replica's holds -- empties the shape at once, before the error ends the
+stream. Whether a collection is collated is noted with its schema
+(`collatedIn`), not asked of `describe()` at each seed, which took
+0.3 ms of the same seed.
+
+A collated field's statement is refused where the module lacks the
+collation data its text needs, and that data is fetched, which is awaited.
+So a seed of several parts into a collection with a collated field fetches
+every chunk first (`collation('all')`, 190 KB once); a seed of one part
+there lands in a block (`#landSeed`), put back whole where a statement is
+refused, the chunks it named fetched and the seed landed again, as it did
+-- only what it names. A module built without the schema check has no
+`describe()` to name a collated field by (`#described`); a statement
+refused half way there empties the shape, as a refused one does, and the
+chunks it named fetched, the seed lands again. The leader tab hands each part to the others as it
+came (`{t: 'seed', data}`), and a tab that missed one waits for the seed
+begun again; a new tab is handed what the leader holds as a seed in parts
+of 2 000 rows (`HELLO_ROWS`), posted in one task, so it lands them as one.
+
+Measured in Node 26 on an M1 (load under 3), a process a run: a seed of
+155-byte rows handed to `sync()` by a stand-in `fetch` -- one event before,
+the server's parts after -- from the stream to `ready()`, the module's
+memory after and the process's peak from `/usr/bin/time -l`, six runs a
+side in ABBA turns:
+
+| seed | time | the module | the page's peak footprint | resident peak |
+| --- | ---: | ---: | ---: | ---: |
+| 100 000 rows (15 parts) | 310 -> 298 ms | 24.8 -> 24.8 MB | 190.2 -> 127.3 MB | 222.5 -> 164.7 MB |
+| 300 000 rows (45 parts) | 882 -> 856 ms | 68.7 -> 68.7 MB | 366.9 -> 260.4 MB | 393.0 -> 293.3 MB |
 
 ## Retries
 

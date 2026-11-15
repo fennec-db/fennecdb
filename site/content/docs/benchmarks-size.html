@@ -40,26 +40,25 @@ container memory is a sensible <code>--max-memory</code>: it covers both this
 
 <h2 id="binary-size">Binary size</h2>
 
-<p>How large each build is. For the module and the client together, what
-the browser pays is <b>352 KB brotli</b>; for an app whose queries run on a
-server, the client alone in its bundle.</p>
+<p>How large each build is. The binaries are what a release ships for
+x86-64 Linux, static with musl, as CI measures them on every change. For the
+module and the client together, what the browser pays is <b>355 KB
+brotli</b>; for an app whose queries run on a server, the client alone in
+its bundle.</p>
 
 <div class="tbl">
 <table>
 <thead><tr><th>Build</th><th class="n">On disk</th><th class="n">Brotli</th><th class="n">gzip</th></tr></thead>
 <tbody>
-<tr><td><code>cargo build --release -p fennec-cli</code>, default</td><td class="n">4355 KB</td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td><code>--profile cli</code>, default, as a release builds it</td><td class="n">3357 KB</td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td><code>--no-default-features</code>, no import, backup or MCP</td><td class="n">2479 KB</td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>2091 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td><code>cargo build --release -p fennec-server</code>, default</td><td class="n">5922 KB</td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td><code>cargo build --release -p fennec-shard</code>, default, the router</td><td class="n">5113 KB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>fennec</code>, as a release ships it: <code>--profile cli</code>, default features</td><td class="n">4743 KB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>fennec</code> with no default feature, no import, backup or MCP: <code>make small</code></td><td class="n"><b>2883 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>fennec-server</code>, as a release ships it: <code>--release</code>, default features</td><td class="n">7995 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td>wasm32, browser</td><td class="n"><b>833 KB</b></td><td class="n"><b>285 KB</b></td><td class="n">345 KB</td></tr>
 <tr><td>wasm32, no index or schema check, <code>make wasm FEATURES=language SCHEMA=0</code></td><td class="n">611 KB</td><td class="n">213 KB</td><td class="n">255 KB</td></tr>
 <tr><td>wasm32, no feature at all, <code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">551 KB</td><td class="n">190 KB</td><td class="n">227 KB</td></tr>
-<tr><td><code>web/fennec.js</code> and its modules, the client</td><td class="n">248 KB</td><td class="n">65 KB</td><td class="n">77 KB</td></tr>
+<tr><td><code>web/fennec.js</code> and its modules, the client</td><td class="n">257 KB</td><td class="n">68 KB</td><td class="n">80 KB</td></tr>
 <tr><td><code>@fennecdb/web/client</code> in an app's bundle, <code>connect</code> and a query's rows, esbuild, minified</td><td class="n">35 KB</td><td class="n">12 KB</td><td class="n">13 KB</td></tr>
-<tr><td>container image, scratch + musl, amd64</td><td class="n">7.18 MB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td>container image, scratch + musl, amd64: its one file, <code>fennec-server</code></td><td class="n">8.19 MB</td><td class="n">—</td><td class="n">—</td></tr>
 </tbody>
 </table>
 </div>
@@ -67,7 +66,7 @@ server, the client alone in its bundle.</p>
 <details class="deep"><summary>Method, and where the module's bytes go</summary>
 <p>The compressed columns are filled in only where they mean something: the
 wasm module and the client are fetched over HTTP, so what the browser pays is
-<b>352 KB brotli</b> for both together. A binary you execute and an image
+<b>355 KB brotli</b> for both together. A binary you execute and an image
 whose layers are already compressed are not served that way, hence the
 dashes.</p>
 
@@ -96,11 +95,21 @@ href="import.html#tls">TLS</a>) and to serve HTTPS (<a
 href="server.html#tls">HTTPS</a>), are 1164 KB of <code>fennec-server</code>,
 857 KB of <code>fennec-shard</code> and 730 KB of <code>fennec</code> as a
 release builds it, where the
-<code>cli</code> profile builds them for size. The <code>tls</code> feature
+<code>cli</code> profile builds them for size, each measured on macOS arm64
+when HTTPS came in (2026-11-02). The <code>tls</code> feature
 is a default one: <code>--no-default-features</code> leaves it out with
 the rest, and the binaries then take no crate from outside the workspace
-(<a href="concepts.html#zero-dependencies">Zero dependencies</a>). The
-binaries are measured on macOS arm64, a KB 1024 bytes.</p>
+(<a href="concepts.html#zero-dependencies">Zero dependencies</a>).</p>
+
+<p><b>The table's binaries are CI's measurements.</b> The build job every
+change passes builds <code>fennec</code> and <code>fennec-server</code> as a
+release builds its x86-64 Linux tarball, static with musl, and <code>make
+small</code> the same way, and holds each to a budget: a change that grows
+one past it raises the budget and says what the bytes bought. A KB is 1024
+bytes. The image holds one file, that <code>fennec-server</code>, so its
+figure is the file's, in MB of 1 000 000 bytes: what <code>docker
+images</code> reports is another thing. The same programs come out smaller
+as arm64 code, on Linux and on macOS.</p>
 
 <p id="module-parts"><b>Where the module's bytes go.</b>
 <code>make size-report</code> builds the module with its function names
@@ -114,10 +123,10 @@ every pull request's CI run shows the same against the branch it goes into.</p>
 
 <div class="tbl">
 <table>
-<thead><tr><th>Code, 745.5 KB of the 839.4</th><th class="n">KB</th><th class="n">Share</th></tr></thead>
+<thead><tr><th>Code, 746.0 KB of the 840.0</th><th class="n">KB</th><th class="n">Share</th></tr></thead>
 <tbody>
-<tr><td><b>fennecdb's own</b></td><td class="n"><b>611.2</b></td><td class="n"><b>81.9%</b></td></tr>
-<tr><td>the engine, <code>fennec_core::engine</code></td><td class="n">225.2</td><td class="n">30.3%</td></tr>
+<tr><td><b>fennecdb's own</b></td><td class="n"><b>611.6</b></td><td class="n"><b>81.9%</b></td></tr>
+<tr><td>the engine, <code>fennec_core::engine</code></td><td class="n">225.5</td><td class="n">30.3%</td></tr>
 <tr><td>FennecQL's parser and lexer</td><td class="n">83.6</td><td class="n">11.2%</td></tr>
 <tr><td>the vector index</td><td class="n">42.0</td><td class="n">5.7%</td></tr>
 <tr><td><code>@sorted</code></td><td class="n">19.5</td><td class="n">2.6%</td></tr>
@@ -132,7 +141,7 @@ every pull request's CI run shows the same against the branch it goes into.</p>
 </table>
 </div>
 
-<p>The data section is another 83.9 KB. Most of the standard library's share
+<p>The data section is another 84.0 KB. Most of the standard library's share
 is generic code compiled once for each type it is used with, so the module
 sorts few types and keeps few maps: ids as <code>u64</code>s, scored ids
 through one comparator that the text index's terms share, rows through one
@@ -166,8 +175,8 @@ WHY=&lt;pattern&gt;</code> names what pulls a part in.</p>
 
 <p>A page that does not search text, needs no graph behind its vector
 search, or asks no facets, can load a smaller module built without what it
-does not use. With every feature the module is 287.7 KB brotli; with none,
-190.7 KB, 34% less, and a <code>near</code> still answers, every vector
+does not use. With every feature the module is 287.6 KB brotli; with none,
+191.0 KB, 34% less, and a <code>near</code> still answers, every vector
 measured. The release ships the module with every feature; any other set
 is a build option.</p>
 
@@ -175,17 +184,17 @@ is a build option.</p>
 <table>
 <thead><tr><th>Feature</th><th class="n">Added to none, brotli KB</th><th class="n">Left out of every one, brotli KB</th><th class="n">On disk, KB saved</th></tr></thead>
 <tbody>
-<tr><td><code>vector</code>, the HNSW graph</td><td class="n">20.4</td><td class="n">18.8</td><td class="n">61.4</td></tr>
-<tr><td><code>text</code>, <code>match</code> with <code>fuzzy</code> and <code>prefix</code></td><td class="n">17.0</td><td class="n">18.4</td><td class="n">51.6</td></tr>
-<tr><td><code>sparse</code>, <code>@inverted</code></td><td class="n">2.7</td><td class="n">1.2</td><td class="n">3.8</td></tr>
-<tr><td><code>sorted</code>, <code>@sorted</code>, and <code>composite</code> with it</td><td class="n">8.5</td><td class="n">23.0</td><td class="n">73.9</td></tr>
-<tr><td><code>composite</code>, an index over several fields, beside <code>sorted</code></td><td class="n">11.4</td><td class="n">10.8</td><td class="n">32.6</td></tr>
-<tr><td><code>geo</code>, points, and <code>@geo</code> where <code>sorted</code> is</td><td class="n">2.7</td><td class="n">5.7</td><td class="n">15.4</td></tr>
-<tr><td><code>nocase</code></td><td class="n">2.7</td><td class="n">2.6</td><td class="n">7.1</td></tr>
-<tr><td><code>collate</code>, ICU's order</td><td class="n">8.8</td><td class="n">8.4</td><td class="n">19.1</td></tr>
-<tr><td><code>facets</code></td><td class="n">3.4</td><td class="n">4.1</td><td class="n">10.9</td></tr>
-<tr><td><code>highlight</code>, beside <code>text</code></td><td class="n">3.5</td><td class="n">3.7</td><td class="n">9.9</td></tr>
-<tr><td><code>analytics</code></td><td class="n">5.3</td><td class="n">5.3</td><td class="n">14.3</td></tr>
+<tr><td><code>vector</code>, the HNSW graph</td><td class="n">20.4</td><td class="n">18.4</td><td class="n">61.4</td></tr>
+<tr><td><code>text</code>, <code>match</code> with <code>fuzzy</code> and <code>prefix</code></td><td class="n">16.8</td><td class="n">18.1</td><td class="n">51.6</td></tr>
+<tr><td><code>sparse</code>, <code>@inverted</code></td><td class="n">2.6</td><td class="n">1.0</td><td class="n">3.8</td></tr>
+<tr><td><code>sorted</code>, <code>@sorted</code>, and <code>composite</code> with it</td><td class="n">8.4</td><td class="n">22.8</td><td class="n">73.9</td></tr>
+<tr><td><code>composite</code>, an index over several fields, beside <code>sorted</code></td><td class="n">11.1</td><td class="n">10.3</td><td class="n">32.6</td></tr>
+<tr><td><code>geo</code>, points, and <code>@geo</code> where <code>sorted</code> is</td><td class="n">2.5</td><td class="n">5.4</td><td class="n">15.4</td></tr>
+<tr><td><code>nocase</code></td><td class="n">2.9</td><td class="n">2.6</td><td class="n">7.0</td></tr>
+<tr><td><code>collate</code>, ICU's order</td><td class="n">8.6</td><td class="n">8.0</td><td class="n">19.1</td></tr>
+<tr><td><code>facets</code></td><td class="n">3.5</td><td class="n">3.7</td><td class="n">10.9</td></tr>
+<tr><td><code>highlight</code>, beside <code>text</code></td><td class="n">4.1</td><td class="n">3.5</td><td class="n">9.9</td></tr>
+<tr><td><code>analytics</code></td><td class="n">5.2</td><td class="n">5.2</td><td class="n">14.3</td></tr>
 <tr><td>the schema check, <code>SCHEMA=0</code> without</td><td class="n">9.6</td><td class="n">9.5</td><td class="n">29.2</td></tr>
 </tbody>
 </table>
@@ -196,7 +205,7 @@ is a build option.</p>
 href="javascript.html#features">A smaller module</a>): <code>make wasm
 FEATURES="text sorted"</code>, <code>FEATURES=indexes</code> or
 <code>language</code> for a group. <code>make wasm-sizes</code> builds the
-module with every feature (839.4 KB on disk), with none (552.3 KB), with
+module with every feature (840.0 KB on disk), with none (552.9 KB), with
 each added to none and with every one but each, and measures each under
 gzip -9 and brotli -q 11. The two columns differ where features share
 code: the sort and the map the sparse index ranks through are the other

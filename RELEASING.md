@@ -55,7 +55,11 @@ nothing reaches a registry before the notes have had a read.
    for each ABI inside) and the multi-arch image on ghcr.io, takes the
    XCFramework zips step 2's run kept -- the static one held to the checksum the tag's
    `Package.swift` names, and stopping the release where none matches --
-   and drafts the release with all of them and their checksums. It also
+   and drafts the release with all of them and their checksums, its notes
+   opening with the compiler: each `binaries` job holds its `rustc -V` to
+   the release `rust-toolchain.toml` names and, on Linux, to the one the
+   image's build stage resolves, and a difference stops the release before
+   the draft ([A toolchain bump](#a-toolchain-bump)). It also
    makes a `.deb` and an `.rpm` for amd64 and arm64 from the musl tarballs
    (`tools/linux-packages.sh`, `packaging/nfpm.yaml`), each architecture on a
    runner of its own, installs them in a Debian and a Fedora container and
@@ -441,11 +445,20 @@ every tag. Before a 1.x tag, check:
    reads the earlier corpora's texts too, so a text deleted since is still
    held to its release's reading and to the tag's -- and `GRAMMAR_EPOCH`
    (`crates/fennec-core/src/named.rs`) is still 4.
-3. `fennec.h`'s prototypes, `web/fennec.d.ts`, `web/client.d.ts`, each
-   SDK's public names, the CLI flags and exit codes, and `/_metrics` names
-   only gained entries. Where a dump is not built yet (T5 of the 1.0 plan,
-   which also dumps the CLI usage text, exit codes and metric names)
-   diff them by hand against the previous tag.
+3. `make api-check` is green and `make api-golden` leaves no diff:
+   `fennec.h`'s prototypes and macros, `web/fennec.d.ts` and
+   `web/client.d.ts`, the flags and exit codes of `fennec`, `fennec-server`
+   and `fennec-shard`, and the `/_metrics` names, types and labels of the
+   server and the router only gained entries against
+   `integrations/api-golden/` (the CLI's and the metrics' dumps are held to
+   the binaries by `make test`). The SDKs' public names have no dump yet
+   (they come in 1.0.x, needing outside tools): diff them by hand against
+   the previous tag. **Before the 1.0 tag, once:** `python3 tools/api_compat.py --freeze 1.0`
+   on the commit to be tagged, committed (it writes
+   `integrations/api-golden/frozen.json`, and needs the dumps current and no
+   `BREAKS` entry for a release not made yet). `make version V=1.0.0` or
+   later refuses until it has been run; from then a break needs a major
+   version above 1.0 in its `BREAKS` entry.
 4. HEAD opens every file written from v0.2.0 on (`tests/language.fennec`,
    `tests/statements.fennec`; T2 adds each release's own), and
    `make upgrade-check` (by hand, kind 13 alone; CI check: T3) passes: an older replica stops by name on a record
@@ -548,6 +561,42 @@ This procedure is written and not yet run. Its rehearsal -- a draft
 advisory, a private fork, and a patch built from a release branch through
 `release.yml`'s dispatch to the draft release -- is owed before 1.0.0, and
 its elapsed time goes in the roadmap's log.
+## A toolchain bump
+
+The compiler is part of what a release ships, and it moves only by a pull
+request of its own ([docs/design/crates.md](docs/design/crates.md#toolchain)).
+`rust-toolchain.toml` names an exact release, never `stable`, which moved
+under main's CI on 2026-11-12 with no change of ours: 1.100.0's Unicode
+tables failed fennec-core's case tests on every pull request. A bump is
+deliberate, not each stable release -- one taken for what it brings, a fix,
+a lint, a measured speed or size -- and its pull request changes nothing
+else but what the new compiler needs:
+
+1. `rust-toolchain.toml`'s `channel`, the `FROM rust:` of `Dockerfile` and
+   `deploy/Dockerfile` and the Kotlin harnesses' image
+   (`integrations/kotlin/run-tests.sh`, `examples/kotlin-android/run-smoke.sh`),
+   each tag with the index digest `docker buildx imagetools inspect
+   rust:X.Y.Z-alpine` (`-slim-bookworm`) names; `python3
+   tools/toolchain_check.py` passes.
+2. What the compiler breaks, fixed in the same pull request -- a lint, a
+   table held to the standard library's (fennec-core's case tables) --
+   never a test held back.
+3. In its body, against main:
+   - `make wasm-sizes`, before and after: what each feature adds to the
+     module and what leaving it out saves;
+   - the size report: CI's size job measures the module against the base,
+     each built by its own `rust-toolchain.toml` and named in the summary,
+     and `make size-report BIN=fennec-server` and `BIN=fennec`, run on main
+     and on the branch, the binaries' code by crate; a size the docs quote
+     that moved is written again, which `site/build.py` asks for under CI;
+   - `make instr-compare`: the instructions a request costs, read over
+     re-signed copies ([docs/design/benchmarks.md](docs/design/benchmarks.md#instruction-counts));
+   - `make float-test`, which `float-tests.yml` also runs on the pull
+     request: fennec-core's own float formatting and reading held to the
+     new standard library's over every `f32` and 10^8 random `f64`s.
+
+A tag's `release.yml` holds its binaries' `rustc -V` to the file's release
+and the image's to theirs, and the draft's notes name it.
 
 ## Once: the desktop app's signing Environment
 

@@ -90,6 +90,14 @@ In scope, and worth reporting:
   its body bounded by `max_body` before it is read -- a tenant node reads past
   it an image's import alone, and only once its head carries the admin token;
   a path around either is a vulnerability.
+- A connection held past its request's time by a slow peer. `fennec-server`
+  and `fennec-shard` read a request within `--header-timeout` (10 s by
+  default) of its first byte and a second more for each KiB of it that came
+  -- a pace of 1 KiB a second, head and body alike, over HTTPS from its
+  first record's first part -- and a write of an answer waits
+  `--write-timeout` (30 s by default) at most for its client to take any of
+  it; a way to hold a thread and a `--max-connections` slot past them is a
+  vulnerability.
 - A crafted `.fennec` file that does more than fail to open — the reader is
   expected to reject a damaged or hostile file, not to be exploited by it.
 - Query text reaching an identifier or a value without validation, from any
@@ -290,6 +298,12 @@ These are deliberate. The [server](https://fennecdb.com/docs/server),
   would be passed, until the next request opens it again. An authenticated
   client can ask for work that costs memory; `--max-memory` is the bound, and
   `make memory` is how you calibrate it.
+- **A peer holding many connections, each within its bounds, is not cut.**
+  `fennec-server` and `fennec-shard` cap connections in all
+  (`--max-connections`), not by address: a peer holding many, each read and
+  written in time, takes the slots a newcomer is refused (503) for. A cap
+  per address is the operator's, in front. A client that reads an answer
+  slowly, taking some of each write within `--write-timeout`, is never cut.
 - **A PostgreSQL connection is protected as its `sslmode` says.** Only
   `verify-full` keeps out someone standing in for the server. `prefer` is the
   default, as libpq's, and goes on in plain text where the server, or whoever

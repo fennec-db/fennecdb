@@ -530,7 +530,10 @@ pub(super) fn decode(body: &[u8]) -> Result<Record> {
     }
     let mut p = 1;
     let version = (get_uvarint(body, &mut p)?, get_uvarint(body, &mut p)?);
-    let epoch = get_uvarint(body, &mut p)? as u32;
+    // A `u32` as `encode` wrote it, read whole or refused: `as u32` read
+    // 2^32 + 4 as epoch 4, which a misread's message then named and a
+    // rewrite of the file wrote in its place.
+    let epoch = u32::try_from(get_uvarint(body, &mut p)?).map_err(|_| unread())?;
     let mut d = [0u8; 8];
     d.copy_from_slice(body.get(p..p.saturating_add(8)).ok_or_else(cut)?);
     p += 8;
@@ -1658,4 +1661,42 @@ fn misread(s: &Stored, how: &str) -> String {
         crate::named::GRAMMAR_EPOCH,
         s.epoch
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A definition's grammar epoch is a `u32` as written, read whole or
+    /// the record refused -- never read as its low bits, another epoch
+    /// (root CLAUDE.md, *Limits error, they do not truncate*).
+    #[test]
+    fn an_epoch_past_u32_is_refused() {
+        let body = |epoch: u64| {
+            let mut b = vec![OP_DEFINE];
+            put_uvarint(&mut b, 1);
+            put_uvarint(&mut b, 2);
+            put_uvarint(&mut b, epoch);
+            b.extend_from_slice(&7u64.to_le_bytes());
+            encode_str(&mut b, "f");
+            put_uvarint(&mut b, 0);
+            encode_str(&mut b, "get t");
+            b
+        };
+        for epoch in [4, u32::MAX as u64] {
+            let Ok(Record::Defined(s)) = decode(&body(epoch)) else {
+                panic!("{epoch}: not read as a definition");
+            };
+            assert_eq!(s.epoch as u64, epoch);
+        }
+        for epoch in [(1 << 32) + 4, u64::MAX] {
+            assert!(
+                matches!(
+                    decode(&body(epoch)),
+                    Err(Error::Corrupt(m)) if m == "a statement record this version does not read"
+                ),
+                "{epoch}"
+            );
+        }
+    }
 }

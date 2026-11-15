@@ -5,6 +5,10 @@
 //! so many threads that beside the rest the process would pass macOS's
 //! 2 048 threads a process.
 
+// fennec-server's: the three binaries' dumps are made and held one way.
+#[path = "../../fennec-server/tests/api_dump.rs"]
+mod api_dump;
+mod api_golden;
 mod chunked;
 mod cors;
 mod fanout;
@@ -19,6 +23,7 @@ mod regions;
 mod replicas;
 mod request_rate;
 mod router;
+mod slow_clients;
 mod standby;
 mod tls;
 mod tls_nodes;
