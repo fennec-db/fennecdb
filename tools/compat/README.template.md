@@ -105,7 +105,7 @@ expiry, a kept Idempotency-Key's time, the sync's queued write's key, the
 archive's file names and times, and the sync log's generation and
 identity -- its header's generation and the file's device, inode and the
 header's hash, and every entry's hash. `torn-wide.fennec` and the sync logs are
-most of the set's bytes, text repeated, which git keeps at a few
-kilobytes.
+most of the set's bytes, text repeated and zeros: 89 KB compressed of their
+3 MB.
 
 Files: {files}.

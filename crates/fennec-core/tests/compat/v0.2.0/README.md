@@ -105,7 +105,7 @@ expiry, a kept Idempotency-Key's time, the sync's queued write's key, the
 archive's file names and times, and the sync log's generation and
 identity -- its header's generation and the file's device, inode and the
 header's hash, and every entry's hash. `torn-wide.fennec` and the sync logs are
-most of the set's bytes, text repeated, which git keeps at a few
-kilobytes.
+most of the set's bytes, text repeated and zeros: 89 KB compressed of their
+3 MB.
 
 Files: archive, archive-plain, archive-plain.answers, archive-plain.fennecql, archive.answers, archive.fennecql, backup.answers, backup.fennecql, backup.sealed, graph.answers, graph.fennec, graph.fennecql, kept.answers, kept.fennec, kept.fennecql, key, page-idb-sealed.fennecql, page-idb-sealed.json, page-idb-sealed.web, page-idb.fennecql, page-idb.json, page-idb.web, page-opfs.answers, page-opfs.fennec, page-opfs.fennecql, page-opfs.web, promoted.answers, promoted.fennec, promoted.fennecql, replica.answers, replica.fennec, replica.fennecql, server.answers, server.fennec, server.fennecql, server.http.json, shell.answers, shell.fennec, shell.fennecql, spill.answers, spill.fennec, spill.fennecql, synclog-torn.answers, synclog-torn.fennec, synclog-torn.fennec.sync, synclog-torn.fennecql, synclog.answers, synclog.fennec, synclog.fennec.sync, synclog.fennecql, torn-mark.answers, torn-mark.fennec, torn-mark.fennecql, torn-tail.answers, torn-tail.fennec, torn-tail.fennecql, torn-wide.answers, torn-wide.fennec, torn-wide.fennecql, waiting.answers, waiting.fennec, waiting.fennecql, SHA256SUMS.

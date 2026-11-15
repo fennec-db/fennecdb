@@ -39,7 +39,7 @@
 //!   looks at for the point claiming in two bytes. `fennec verify` refuses
 //!   the file.
 //!   No knob: the writes as a server makes them between fsyncs, their text
-//!   repeated so git keeps them small.
+//!   repeated: 2.5 MB, 83 KB compressed.
 //! - `kept <file>`: a graph kept in the file's tail (kind 4, version 10),
 //!   tombstones in it, which a server appends once 10 000 nodes changed and
 //!   the file grew by three times the graph (`GRAPH_SAVE_CHANGES`);
