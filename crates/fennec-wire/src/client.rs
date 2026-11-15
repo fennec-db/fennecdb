@@ -22,7 +22,7 @@
 use crate::crypto::{b64_decode, b64_encode, ct_eq, hmac_sha256, nonce, pbkdf2_sha256, sha256};
 use crate::proto::{put_cstr, read_message, Message, Writer, MAX_MESSAGE, PROTOCOL_V3};
 use fennec_core::error::{Error, Result};
-use std::io::{self as stdio, BufReader, ErrorKind, Read, Write};
+use std::io::{self as stdio, BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -2358,7 +2358,7 @@ impl CopyOut {
         let mut r = Watched {
             stream: &mut self.client.stream,
             stop,
-            heard: Instant::now(),
+            quiet: None,
         };
         read_message(&mut r).map_err(|e| match e.kind() {
             ErrorKind::TimedOut => io(format!("the server sent nothing for {TIMEOUT:?}")),
@@ -2371,22 +2371,32 @@ impl CopyOut {
 /// ends is asked again -- nothing of the message is lost, the bytes taken
 /// before it being the reader's, rustls's or the socket's -- until `stop`
 /// is set, an error then, or the server has been silent for [`TIMEOUT`].
+///
+/// What the buffer already holds is taken with no look at the flag or the
+/// clock (`read_exact`): a message is three reads, a row one message, and a
+/// clock read and the generic read path at each were 740 instructions a row,
+/// 4 % of a million-row import (19.20 against 18.41 thousand million, now
+/// 18.32). The flag is looked at whenever a read goes
+/// to the socket, at least every buffer's worth, and the clock only once a
+/// read timed out: the silence is counted from the first timeout after the
+/// last byte, within `LOOK` of it.
 struct Watched<'a> {
     stream: &'a mut BufReader<Conn>,
     stop: &'a AtomicBool,
-    /// When the server last sent a byte.
-    heard: Instant,
+    /// Since when the server has said nothing: the first timeout after its
+    /// last byte.
+    quiet: Option<Instant>,
 }
 
 impl Read for Watched<'_> {
     fn read(&mut self, buf: &mut [u8]) -> stdio::Result<usize> {
         loop {
-            if self.stop.load(Ordering::SeqCst) {
+            if self.stop.load(Ordering::Relaxed) {
                 return Err(stdio::Error::other("the copy was stopped"));
             }
             match self.stream.read(buf) {
                 Ok(n) => {
-                    self.heard = Instant::now();
+                    self.quiet = None;
                     return Ok(n);
                 }
                 Err(e)
@@ -2395,13 +2405,30 @@ impl Read for Watched<'_> {
                         ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
                     ) =>
                 {
-                    if self.heard.elapsed() >= TIMEOUT {
+                    let since = *self.quiet.get_or_insert_with(Instant::now);
+                    if since.elapsed() >= TIMEOUT {
                         return Err(ErrorKind::TimedOut.into());
                     }
                 }
                 Err(e) => return Err(e),
             }
         }
+    }
+
+    fn read_exact(&mut self, mut buf: &mut [u8]) -> stdio::Result<()> {
+        let held = self.stream.buffer();
+        if held.len() >= buf.len() {
+            buf.copy_from_slice(&held[..buf.len()]);
+            self.stream.consume(buf.len());
+            return Ok(());
+        }
+        while !buf.is_empty() {
+            match self.read(buf)? {
+                0 => return Err(ErrorKind::UnexpectedEof.into()),
+                n => buf = &mut buf[n..],
+            }
+        }
+        Ok(())
     }
 }
 
