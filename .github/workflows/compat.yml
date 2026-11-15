@@ -1,0 +1,125 @@
+# Two releases' processes beside each other (docs/design/compatibility.md,
+# "The compatibility matrix"): this commit's fennec-server, fennec and
+# fennec-shard against the last published release's -- its Linux x86_64
+# musl tarball, checked against its SHA256SUMS by site/install.sh, and its
+# router built from its tag, which no release ships (tools/release-bins.sh)
+# -- through tools/compat-matrix.sh: replication both ways, archives and
+# backups plain and sealed, the values 0.2.0 wrote that this tree does not
+# read whole, a router over nodes of the other release, and a rolling
+# upgrade of a router and a node pair under durable writes.
+#
+# Minutes, and a check of a release rather than of a change: weekly, on a
+# release's tag, and by hand with the release to hold this tree to. Not
+# part of ci.yml and no merge waits for it; a release needs its run on the
+# release commit green (RELEASING.md).
+name: compat
+
+on:
+  workflow_dispatch:
+    inputs:
+      old:
+        description: "The release to hold this tree to (vX.Y.Z); empty: the newest published one before this tree's version"
+        required: false
+        default: ''
+  schedule:
+    - cron: '47 3 * * 2'
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compat-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  matrix:
+    name: compat (the last release's binaries)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      # Every tag, so the old release's sources are here to build its router.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install the pinned toolchain
+        run: rustup show
+
+      # The harness held to its own promises first: a case dying part way
+      # or a part unsaid failing the run, every record kind, tag and op of
+      # the tree named in its history, a tampered tarball refused with
+      # nothing installed (ci.yml's fmt job runs the same on every change).
+      - name: The harness's own tests
+        run: |
+          bash tools/compat-matrix.sh --self-test
+          bash tools/test_release_bins.sh
+
+      # #662's pattern: restored on every run, saved on main's alone -- the
+      # weekly run is main's (a schedule runs on the default branch) and so
+      # is a dispatch from main, and they save; a run on a release's tag
+      # only restores. target/ holds this tree's build and the old router's
+      # (target/compat-shard, tools/release-bins.sh), so neither builds its
+      # dependencies cold.
+      - id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: v2-ubuntu-latest-compat-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-ubuntu-latest-compat-
+
+      - name: This tree's binaries
+        run: cargo build -p fennec-server -p fennec-cli -p fennec-shard
+
+      - name: The old release's binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OLD: ${{ github.event.inputs.old }}
+        run: bash tools/release-bins.sh "${OLD:-latest}" "$RUNNER_TEMP/old"
+
+      - name: The matrix
+        run: |
+          set -o pipefail
+          status=0
+          COMPAT_LOGS="$RUNNER_TEMP/compat-logs" bash tools/compat-matrix.sh "$RUNNER_TEMP/old" target/debug 2>&1 |
+            tee "$RUNNER_TEMP/compat.log" || status=$?
+          {
+            echo '### The compatibility matrix'
+            echo '```'
+            grep -E '^(old:|new:|[a-z][0-9a-z]* (ok|FAILED):|compat-matrix:)' "$RUNNER_TEMP/compat.log" || true
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      - name: The logs, where it failed
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: compat-logs
+          path: |
+            ${{ runner.temp }}/compat.log
+            ${{ runner.temp }}/compat-logs/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Prune target/ to the crates from outside the workspace (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: sh tools/ci_prune_target.sh
+
+      - name: Save the cache (main only)
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}

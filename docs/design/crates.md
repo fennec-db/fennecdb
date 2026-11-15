@@ -272,6 +272,8 @@ fennecdb is alpha, with no file of a user's to keep
 of vectors past the range that a version before made -- v0.2.0's check
 held none below the list, and took SQL's `vector(1000000001)[]`, `fennec
 import --cast e=[vector<1000000001>]` and `Schema::new`'s `[vector<0>]`.
+So is a field declaring a point under 64 lists, a type of 65 levels that
+v0.2.0 took ([how deep a value nests](#how-deep-a-value-nests)).
 An alter refuses only the field it changes: every field it holds was read
 within the ranges.
 
@@ -500,21 +502,33 @@ so such a record is refused where something reads it or past it: a read,
 an index's build, a vector index linked at the open -- which reads each
 document's vector past the fields before it, and refuses the open.
 
-*What it refuses that a version before opened.* Two kinds of file, both
+*What it refuses that a version before opened.* Three kinds of file, all
 pathological. A field declared `[[json]]`, which a version before took
 (`[json]` alone was refused), holds a json value of up to 64 levels inside
 its two lists, 66 in all: a row whose value nests past 64 so is refused
-where it is read. And a field whose type nests more than 64 lists, which
+where it is read. A field whose type nests more than 64 lists, which
 no version bounded: its schema's type is read past the limit
-(`decode_type`), and the file is refused at the open. No write makes
-either now (`Schema::new`). v0.2.0's fixture set holds one of each, written
-by its shell (`deep.fennec`, `refused-lists.fennec`, beside a schema whose
-list of vectors is past a dimension's range, `refused-dims.fennec`, and a
-point under 64 lists, `points-deep.fennec`), and its compat test holds
-what this build does with them (`ON_PURPOSE`,
-[compatibility.md](compatibility.md#fixture-sets)): beside the deep row a
-`del` finding it is refused in the same words, a drop of its field and a
-compact work, the compact copying the row as it is.
+(`decode_type`), and the file is refused at the open. And a field
+declaring a point under 64 lists, a type of 65 levels, which v0.2.0 took
+(it bounded no type's depth): the point is a level of the type as it is
+of the value it reads as, and the file is refused at the open alike --
+read, as the fuzz fix's second review found, the schema opened and every
+row's point was refused at each read. No write makes any of them now
+(`Schema::new`; `a_point_past_the_depth_a_type_nests_is_refused_where_a_file_is_opened_and_applied`).
+v0.2.0's fixture set holds one of each, written by its shell
+(`deep.fennec`, `refused-lists.fennec`, `points-deep.fennec`, and
+`refused-dims.fennec`, a list of vectors past a dimension's range), and
+its compat test holds what this build does with each (`ON_PURPOSE`,
+[compatibility.md](compatibility.md#fixture-sets)): the deep row's `get`
+and `del` refused in its words; dropped, its field is skipped as a read
+skips it, depth-bound, so the row reads -- and its `del` works -- only
+where no field is declared after the dropped one, a field added after it
+refused in the same words; the other three refused at the open.
+The 1.x contract names all three, a schema's number past its range beside
+them, as the exceptions to "1.x opens every file written from v0.2.0 on",
+with what each still answers and the advice the first 1.x release's notes
+give ([compatibility.md](compatibility.md#what-1x-does-not-read-of-020s-files));
+`compat.yml` has 0.2.0's own server write the first two (a3, a3b).
 
 *A point is a level, as its type is.* A point's bytes (`TAG_GEO`) read as
 the list `[lon, lat]`, which `DataType::depth` counts as a level, but the
@@ -523,9 +537,14 @@ deep, whose own bytes written back were refused -- the `codec` target's
 finding, CI's `fuzz-smoke` red from the day the fuzzer landed. The point
 is a function of its own now (`codec::decode_point`, `#[inline(never)]`,
 as a list's and an object's read is, `decode_at` handing the depth on
-untested) refused past the limit, and the skip tests it in its arm. A
-write puts a point only as a field's whole value, a level down, so no file
-a write made reads otherwise. A sparse vector's dimension and the steps
+untested) refused past the limit, and the skip tests it in its arm; a
+file's schema is refused a point under 64 lists (`decode_type`), as
+`Schema::new` refuses one. No file a write made reads otherwise: a write
+puts a point's bytes only as a `geo` field's whole value
+(`encode_value_as`; a `[geo]` field's points go as the lists of two
+floats they read as), and every field's type counts the point as a level
+(`DataType::depth`), so no value of a type `Schema::new` took nests past
+64. A sparse vector's dimension and the steps
 between its indexes are `u32`s, read whole or refused
 (`codec::get_within`): `as u32` read a dimension of 2^32 + 16 as 16.
 
