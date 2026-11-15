@@ -1005,6 +1005,8 @@ struct Layout {
     /// Source column -> position in the relation's tuples.
     at: Vec<usize>,
     kinds: Vec<Kind>,
+    /// The relation's columns: every tuple of it is as wide.
+    width: usize,
 }
 
 /// Turns the stream's changes into writes to the collection.
@@ -1098,6 +1100,7 @@ impl<'a> Mirror<'a> {
             rel: r.id,
             at,
             kinds,
+            width: r.columns.len(),
         });
         Ok(())
     }
@@ -1138,9 +1141,21 @@ impl<'a> Mirror<'a> {
         Ok(1)
     }
 
-    /// The document id a row carries.
+    /// The document id a row carries. Every row a change carries comes
+    /// through here first, and is held here to its table's width:
+    /// PostgreSQL sends each as wide as the table's description -- a key's
+    /// too, the columns not in it null -- and a narrower one's values were
+    /// read as nulls, written over the document's own.
     fn id_of(&self, cells: &[Cell]) -> Result<DocId> {
         let layout = self.layout.as_ref().ok_or_else(no_layout)?;
+        if cells.len() != layout.width {
+            return Err(Error::Corrupt(format!(
+                "pgoutput: a change to {} carried {} columns, its description {}",
+                self.source.sql,
+                cells.len(),
+                layout.width
+            )));
+        }
         let name = &self.source.columns[self.id_column].name;
         match cells.get(layout.at[self.id_column]) {
             Some(Cell::Text(raw)) => {
@@ -1274,6 +1289,19 @@ impl<'a> Mirror<'a> {
         let Some(row) = r.rows.first() else {
             return Ok(None);
         };
+        // A row as wide as its description, or the server's error: a value
+        // paired with its column by index panicked past a narrower row's
+        // end -- which PostgreSQL never sends, and a broken proxy, or
+        // whoever answers in its place under `sslmode=prefer` or
+        // `disable`, can.
+        if row.len() != r.columns.len() {
+            return Err(Error::Corrupt(format!(
+                "postgres: a row of {} read back holds {} values for {} columns",
+                self.source.sql,
+                row.len(),
+                r.columns.len()
+            )));
+        }
         let mut out = Vec::with_capacity(self.source.columns.len());
         for (col, kind) in self.source.columns.iter().zip(&self.source.kinds) {
             let j = r
@@ -1783,6 +1811,121 @@ mod tests {
         let _ = VecPrec::F32;
     }
 
+    /// A change whose row is narrower or wider than its table's
+    /// description is the server's error, as a row read back is
+    /// (`a_row_read_back_narrower_than_its_description_is_an_error`): a
+    /// value it left out was a null written over the document's own.
+    /// PostgreSQL sends every row of a table as wide as its description, a
+    /// key's too, the columns not in it null.
+    #[test]
+    fn a_change_narrower_or_wider_than_its_table_is_an_error() {
+        let (source, opts, db) = fixture(None);
+        let mut m = Mirror::new(&source, &opts);
+        apply(
+            &mut m,
+            &db,
+            &[
+                relation(b'd', &COLS),
+                insert(&[Some("1"), Some("one"), Some("[1,0]"), Some("{a}")]),
+            ],
+        );
+        for (change, widths) in [
+            (
+                insert(&[Some("1"), Some("uno")]),
+                "2 columns, its description 4",
+            ),
+            (
+                update(None, &[Some("1"), Some("uno"), None]),
+                "3 columns, its description 4",
+            ),
+            (
+                update(Some(&[Some("1")]), &[Some("2"), Some("two"), None, None]),
+                "1 columns, its description 4",
+            ),
+            (
+                delete(&[Some("1"), None, None, None, None]),
+                "5 columns, its description 4",
+            ),
+        ] {
+            let e = m.change(decode(&change).unwrap(), &db).unwrap_err();
+            assert!(matches!(e, Error::Corrupt(_)), "{e}");
+            let e = e.to_string();
+            assert!(e.contains("\"docs\"") && e.contains(widths), "{e}");
+        }
+        m.flush(&db).unwrap();
+        let one = doc(&db, 1).unwrap();
+        assert_eq!(one.get("title"), Some(&Value::Text("one".into())));
+        assert_eq!(one.get("embed"), Some(&Value::Vector(vec![1.0, 0.0])));
+    }
+
+    /// A stand-in server over a port of its own answering its connection's
+    /// first query with `answer`, messages framed whole.
+    fn answering(answer: Vec<u8>) -> Url {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut s = started(&listener);
+            let Some((b'Q', _)) = read_msg(&mut s) else {
+                panic!("no query");
+            };
+            s.write_all(&answer).unwrap();
+            // Up to the client's close.
+            while read_msg(&mut s).is_some() {}
+        });
+        Url::parse(&format!("postgres://u@127.0.0.1:{port}/d?sslmode=disable")).unwrap()
+    }
+
+    /// A row read back -- an update leaving a TOASTed value untouched, of a
+    /// row the collection does not hold -- whose `DataRow` holds fewer
+    /// values than its `RowDescription` names columns is the server's
+    /// error, naming the table and both widths. PostgreSQL never sends one;
+    /// a broken proxy can, and so can whoever answers in its place under
+    /// `sslmode=prefer` or `disable`. The value paired by index panicked:
+    /// `fennec-server` exited 1 with its slot held, and the shell, whose
+    /// profile aborts, aborted.
+    #[test]
+    fn a_row_read_back_narrower_than_its_description_is_an_error() {
+        let mut t = 4u16.to_be_bytes().to_vec();
+        for (name, oid, typmod) in [
+            ("id", 20, -1),
+            ("title", 25, -1),
+            ("embed", 90_000, 2),
+            ("tags", 1009, -1),
+        ] {
+            cstr(&mut t, name);
+            t.extend_from_slice(&[0; 6]); // the table's oid, the column's number
+            t.extend_from_slice(&(oid as u32).to_be_bytes());
+            t.extend_from_slice(&(-1i16).to_be_bytes()); // the type's length
+            t.extend_from_slice(&(typmod as u32).to_be_bytes());
+            t.extend_from_slice(&[0; 2]); // text
+        }
+        let mut d = 2u16.to_be_bytes().to_vec();
+        for v in ["1", "one"] {
+            d.extend_from_slice(&(v.len() as u32).to_be_bytes());
+            d.extend_from_slice(v.as_bytes());
+        }
+        let mut answer = framed(b'T', &t);
+        answer.extend_from_slice(&framed(b'D', &d));
+        answer.extend_from_slice(&framed(b'C', b"SELECT 1\0"));
+        answer.extend_from_slice(&framed(b'Z', b"I"));
+        let (mut source, opts, db) = fixture(None);
+        source.url = answering(answer);
+        let mut m = Mirror::new(&source, &opts);
+        let Message::Relation(r) = decode(&relation(b'd', &COLS)).unwrap() else {
+            unreachable!()
+        };
+        m.relation(r, &mut |_| {}).unwrap();
+        // Row 1 is not in the collection: its untouched vector is read back.
+        let change = decode(&update(None, &[Some("1"), Some("uno"), U, Some("{a}")])).unwrap();
+        let e = m.change(change, &db).unwrap_err();
+        assert!(matches!(e, Error::Corrupt(_)), "{e}");
+        let e = e.to_string();
+        assert!(
+            e.contains("\"docs\"") && e.contains("2 values for 4 columns"),
+            "{e}"
+        );
+    }
+
     #[test]
     fn slots_are_named_after_the_collection() {
         assert_eq!(Follow::named_after("articles").slot, "fennec_articles");
@@ -1848,6 +1991,21 @@ mod tests {
         Some((head[0], body))
     }
 
+    /// A stand-in server's one connection, its startup taken -- no password
+    /// asked -- and ready for a query.
+    fn started(listener: &TcpListener) -> TcpStream {
+        let (mut s, _) = listener.accept().unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+        let mut len = [0u8; 4];
+        s.read_exact(&mut len).unwrap();
+        let mut startup = vec![0u8; i32::from_be_bytes(len) as usize - 4];
+        s.read_exact(&mut startup).unwrap();
+        let mut out = framed(b'R', &0i32.to_be_bytes());
+        out.extend_from_slice(&framed(b'Z', b"I"));
+        s.write_all(&out).unwrap();
+        s
+    }
+
     fn walsender(changes: Vec<Vec<u8>>, answer: Answer) -> Walsender {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1856,15 +2014,7 @@ mod tests {
         let (tell, sent) = mpsc::channel();
         let slot = Arc::clone(&released);
         std::thread::spawn(move || {
-            let (mut s, _) = listener.accept().unwrap();
-            s.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
-            let mut len = [0u8; 4];
-            s.read_exact(&mut len).unwrap();
-            let mut startup = vec![0u8; i32::from_be_bytes(len) as usize - 4];
-            s.read_exact(&mut startup).unwrap();
-            let mut out = framed(b'R', &0i32.to_be_bytes());
-            out.extend_from_slice(&framed(b'Z', b"I"));
-            s.write_all(&out).unwrap();
+            let mut s = started(&listener);
             let Some((b'Q', _)) = read_msg(&mut s) else {
                 panic!("no START_REPLICATION");
             };
