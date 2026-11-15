@@ -9,6 +9,7 @@
 //! curl localhost:8090/t/acme/
 //! ```
 
+use fennec_http::crypto::ct_eq;
 use fennec_http::replication::{self, Follower, Replication};
 use fennec_shard::directory::Directory;
 use fennec_shard::{Config, Router};
@@ -25,7 +26,8 @@ usage: fennec-shard [options]
                             default: shard.fennec
       --token <value>       require `Authorization: Bearer <value>` on /_shard/.
                             Data requests pass their own Authorization through
-                            to the nodes, which check it against --http-token
+                            to the nodes, which check it against --http-token.
+                            Past loopback 32 bytes at least
       --insecure            allow a non-loopback address without --token
       --tls-cert <pem>      serve clients HTTPS alone, with this certificate
       --tls-key <pem>       chain and its private key, both or neither. Read
@@ -68,7 +70,8 @@ usage: fennec-shard [options]
                             then put it in the Worker (ENTRY_TOKEN); between
                             the two every request is served, and its client
                             counted by Cloudflare's address, as bad_mark in
-                            fennec_router_entry_clients_total
+                            fennec_router_entry_clients_total. Past loopback
+                            32 bytes at least
       --audit <path>        append a JSON line to this file for each request
                             refused for its token and each /_shard/ request
                             that changes something
@@ -110,8 +113,9 @@ usage: fennec-shard [options]
       --otlp-endpoint <url> send OpenTelemetry traces, OTLP over HTTP as JSON,
                             to this collector: http://localhost:4318 (the
                             OpenTelemetry Collector, the Datadog Agent's OTLP
-                            receiver). No TLS: a collector on this host or
-                            network forwards over TLS. Also read from
+                            receiver), or https:// to dial one over TLS.
+                            A collector on this host or network may forward
+                            over TLS instead. Also read from
                             OTEL_EXPORTER_OTLP_TRACES_ENDPOINT and
                             OTEL_EXPORTER_OTLP_ENDPOINT. Off by default
       --otlp-header <k=v>   a header on every post, such as an API key;
@@ -122,7 +126,8 @@ usage: fennec-shard [options]
                             is traced whatever the ratio. The service is
                             named by OTEL_SERVICE_NAME  default: fennec-shard
       --replication-token <value>  serve the directory to standby routers at
-                            /_replication, and present this to a primary
+                            /_replication, and present this to a primary.
+                            Past loopback 32 bytes at least
       --replica-of <url>    follow the primary router at http://host:port
                             (https:// over TLS): the directory arrives from
                             it, /_shard/ changes are refused here, and
@@ -166,7 +171,11 @@ usage: fennec-shard [options]
 The token is also read from the FENNEC_SHARD_TOKEN environment variable, the
 entry's from FENNEC_SHARD_ENTRY_TOKEN and the replication token from
 FENNEC_SHARD_REPLICATION_TOKEN: argv shows up in `ps`. Each one set and empty
-is unset.
+is unset. Where --listen is past loopback each is 32 bytes at least, refused
+at the start otherwise, since guesses there may come from any number of
+addresses: `openssl rand -hex 32` makes one. On loopback any length is taken;
+behind a TLS proxy, which reaches the router from past this machine, give
+each 32 bytes too: a shorter one is warned of at the first request it sends.
 ";
 
 fn fail(msg: &str) -> ! {
@@ -198,12 +207,24 @@ fn hold_file(path: &str, what: &str) -> fennec_abi::lock::FileLock {
 /// as it is added (`PUT /_shard/nodes/<n>`).
 fn refuse_node_token(dir: &Directory, entry_token: Option<&str>, path: &str) {
     let Some(t) = entry_token else { return };
-    if let Some((name, _)) = dir.nodes().iter().find(|(_, n)| n.token == t) {
+    if let Some((name, _)) = dir
+        .nodes()
+        .iter()
+        .find(|(_, n)| same_token(Some(&n.token), t))
+    {
         fail(&format!(
             "--entry-token is node `{name}`'s admin token in {path}: the entry's Worker holds \
              its token, and that one reaches /_admin/ on the node; give the entry one of its own"
         ));
     }
+}
+
+/// Whether `held` is the token `t`, compared as every token is: no request
+/// reaches these, which hold one flag's token to another's at the start,
+/// but a token compared any other way would be one more to tell apart
+/// (`tools/secret_eq_check.py`).
+fn same_token(held: Option<&str>, t: &str) -> bool {
+    held.is_some_and(|h| ct_eq(h.as_bytes(), t.as_bytes()))
 }
 
 fn main() {
@@ -432,17 +453,46 @@ fn main() {
     }
     match cfg.entry_token.as_deref() {
         Some("") => fail("--entry-token is empty: the entry's mark would be anyone's to make"),
-        Some(t) if cfg.token.as_deref() == Some(t) => fail(
+        Some(t) if same_token(cfg.token.as_deref(), t) => fail(
             "--entry-token is --token: the entry's Worker holds its token, and --token moves \
              and deletes every tenant; give the entry one of its own",
         ),
-        Some(t) if replication_token.as_deref() == Some(t) => fail(
+        Some(t) if same_token(replication_token.as_deref(), t) => fail(
             "--entry-token is --replication-token: the entry's Worker holds its token, and \
              the directory's replication stream carries every node's admin token; give the \
              entry one of its own",
         ),
         _ => {}
     }
+    // Past loopback each is 32 bytes at least, as a node's tokens are
+    // (`fennec_http::short_token`), from the flag or its variable: a refused
+    // guess at one waits, but by its address alone, and every one is taken
+    // on --listen -- looked up once, here, judged of the addresses that
+    // lookup answered and bound on them (`Router::bind_on`), a name not
+    // looked up judged past loopback. One shorter on loopback is warned of
+    // as the first request comes through a proxy (`fennec_http::kept_short`).
+    let listen = fennec_http::Listen::look_up(&cfg.addr);
+    let tokens = [
+        ("--token (FENNEC_SHARD_TOKEN)", cfg.token.as_deref()),
+        (
+            "--entry-token (FENNEC_SHARD_ENTRY_TOKEN)",
+            cfg.entry_token.as_deref(),
+        ),
+        (
+            "--replication-token (FENNEC_SHARD_REPLICATION_TOKEN)",
+            replication_token.as_deref(),
+        ),
+    ];
+    for (flag, token) in tokens {
+        if let Some(refused) = fennec_http::short_token(flag, token, &[&listen]) {
+            fail(&refused);
+        }
+    }
+    let short: Vec<String> = (tokens.iter())
+        .filter(|(_, token)| token.is_some_and(|t| fennec_http::too_short(t.len())))
+        .map(|(flag, _)| flag.to_string())
+        .collect();
+    fennec_http::kept_short(&short);
     let replicating = replication_token.as_deref().is_some_and(|t| !t.is_empty());
     if replica_of.is_some() && !replicating {
         fail("--replica-of needs --replication-token: the primary asks for it");
@@ -573,7 +623,7 @@ fn main() {
         (None, Some(repl)) => Router::replicated(dir, cfg, repl),
         (None, None) => Router::new(dir, cfg),
     };
-    let listener = match router.bind() {
+    let listener = match router.bind_on(&listen) {
         Ok(l) => l,
         Err(e) => fail(&format!("could not listen: {e}")),
     };

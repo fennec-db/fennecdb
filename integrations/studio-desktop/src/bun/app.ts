@@ -38,6 +38,8 @@ import {
 	remoteNotice,
 	servedDiedNotice,
 	startFailedNotice,
+	startFailure,
+	type StartWhy,
 } from "./messages.ts";
 import { between, readMetrics, type Sample } from "./metrics.ts";
 import { portAnswers } from "./process.ts";
@@ -45,7 +47,7 @@ import { collectionStatement, databaseFileName, fileNameRefusal } from "./names.
 import { originOf, probeRemote } from "./remote.ts";
 import { secrets } from "./secrets.ts";
 import { AlreadyOpen, PortTaken, StartFailed, cliBusy, randomToken, runCli, serverBinary, startFileServer, stopCli, type FileServer } from "./server.ts";
-import { revealLabel } from "./opener.ts";
+import { fileManager, revealLabel } from "./opener.ts";
 import { commandShown, factsOf, hostOf, servePlan, snippets, taskPlan, thisMachine, windowPlan, type ServeSettings, type Sync } from "./serving.ts";
 import { store, type StoredConnection, type StoredDatabase } from "./store.ts";
 import { keychainName, sealToken, serveItemName, servedToken, tokenFor } from "./token.ts";
@@ -174,7 +176,7 @@ function startNotice(name: string, err: unknown, again: () => void, settings?: (
 		return failed(`${name} is open in another program.`);
 	}
 	if (err instanceof PortTaken) {
-		notify(portTakenNotice(name, err.port, said), (id) => id === "settings" && settings?.());
+		notify(portTakenNotice(name, err.port, err.said), (id) => id === "settings" && settings?.());
 		return failed(`Port ${err.port} is taken.`);
 	}
 	// Exit 2 is a flag refused: nothing to retry, the server is not this app's.
@@ -184,6 +186,14 @@ function startNotice(name: string, err: unknown, again: () => void, settings?: (
 	}
 	notify(startFailedNotice(name, said), (id) => id === "retry" && again());
 	return failed(`Could not open ${name}.`);
+}
+
+/** A failed start as messages.ts words it, with what the server wrote where one ran (process.ts's errors). */
+function whyNotStarted(err: unknown): StartWhy {
+	if (err instanceof PortTaken) return { kind: "port", port: err.port, said: err.said };
+	if (err instanceof AlreadyOpen) return { kind: "held", said: err.message };
+	if (err instanceof StartFailed) return { kind: "failed", exit: err.exit, said: err.said, message: err.message };
+	return { kind: "failed", exit: null, said: null, message: String((err as Error)?.message ?? err) };
 }
 
 // ------------------------------------------------------------------ files
@@ -370,7 +380,9 @@ function servedRow(d: StoredDatabase): ServedRow | null {
 		networkUrls: running && settings.reach === "lan" ? networkUrls(s.server.port) : [],
 		metricsUrl: running && s.server.metrics ? `${s.server.metrics}/_metrics` : null,
 		startedAt: s ? s.server.startedAt : null,
-		lastRan: d.lastRan ?? null,
+		lastRan: d.lastRan ? { at: d.lastRan.at, port: d.lastRan.port, why: d.lastRan.why } : null,
+		// Only while nothing runs or starts: a start under way or done says otherwise.
+		failed: !s && !serveStarting.has(d.path) ? (d.lastRan?.failed ?? null) : null,
 		facts: factsOf(settings, sync),
 		command: commandShown(plan, Utils.paths.home),
 		snippets: url ? snippets(url, d.seen?.first || "orders") : null,
@@ -434,7 +446,9 @@ export function serveFile(raw: string, settings: ServeSettings, sync: Sync, { re
 			server = await startFileServer(servePlan(path, sync, settings, Boolean(d.archive)), token);
 		} catch (err) {
 			serveStarting.delete(path);
-			store.updateDatabase(path, (x) => (x.lastRan = { at: Date.now(), port: settings.port, why: "could not start" }));
+			// Kept, not only told: the notice goes once closed, and the Servers list
+			// says why until the next start (rpc.ts `StartFailure`).
+			store.updateDatabase(path, (x) => (x.lastRan = { at: Date.now(), port: settings.port, why: "could not start", failed: startFailure(name, whyNotStarted(err)) }));
 			changed();
 			return startNotice(
 				name,
@@ -1130,6 +1144,7 @@ export async function overview(): Promise<Overview> {
 		keychain: secrets.kind,
 		machine: thisMachine(),
 		reveal: revealLabel(),
+		fileManager: fileManager(),
 		bundled: await bundledVersion(),
 		home: Utils.paths.home,
 	};

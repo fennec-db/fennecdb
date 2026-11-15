@@ -1140,10 +1140,11 @@ fn a_moves_source_that_would_not_go_is_taken_back() {
 
 /// A copy a failed attach made, which the try after did not adopt -- a
 /// node of another zone than the primary's came free meanwhile, which the
-/// rule puts first -- is taken back: noted under the identities of its
-/// `PUT` and of the follow that landed unanswered, it carries the second.
-/// Unnoted, it went on following the primary beside the replica the
-/// directory names, unsaid.
+/// rule puts first -- is taken back by that try, in the pass that gives the
+/// tenant its replica: noted under the identities of its `PUT` and of the
+/// follow that landed unanswered, it carries the second. A repair after
+/// names nothing left. Unnoted, it went on following the primary beside
+/// the replica the directory names, unsaid.
 #[test]
 fn a_copy_left_where_the_replica_went_elsewhere_is_taken_back() {
     let (n0, n1, n2) = (node("to0"), node("to1"), node("to2"));
@@ -1164,11 +1165,21 @@ fn a_copy_left_where_the_replica_went_elsewhere_is_taken_back() {
     until("acme never got its replica on n0", || {
         placed(port, "acme").1.as_deref() == Some("n0")
     });
+    // Recorded, the replica is not the try's end: it goes on to have n2
+    // take the copy back, holding the tenant's claim across the call, and
+    // a repair meeting the claim leaves the file to the next look. Asked
+    // as soon as the replica read, as this test first did, the repair
+    // named the copy "not taken back: another operation holds the tenant"
+    // -- 6 runs of 200 beside busy loops under three CPUs. The take-back
+    // is what must happen.
+    until("acme's copy on n2 was never taken back", || {
+        files_left(port) == 0
+    });
+    assert!(!n2.holds("acme"), "the try left the copy");
     reads(n0.port, "acme", "get notes select title", "\"one\"");
     let (status, body) = repair(port);
     assert_eq!(status, 200, "{body}");
     assert!(body.contains(r#""left":[]"#), "{body}");
-    assert!(!n2.holds("acme"), "the repair left the copy");
     assert_eq!(files_left(port), 0);
     reads(n0.port, "acme", "get notes select title", "\"one\"");
 }

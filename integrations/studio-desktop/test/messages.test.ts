@@ -1,6 +1,19 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { alreadyHereMessage, diedNotice, emptyFile, heldNotice, missingFile, notADatabase, outOfStepNotice, remoteNotice, startFailedNotice } from "../src/bun/messages.ts";
+import {
+	alreadyHereMessage,
+	diedNotice,
+	emptyFile,
+	heldNotice,
+	internalError,
+	missingFile,
+	notADatabase,
+	outOfStepNotice,
+	portTakenNotice,
+	remoteNotice,
+	startFailedNotice,
+	startFailure,
+} from "../src/bun/messages.ts";
 import type { Probe } from "../src/bun/remote.ts";
 
 const origin = "https://db.example.com";
@@ -79,6 +92,48 @@ test("a server that refuses the app's flags says the app and its server are out 
 	assert.match(n.hint ?? "", /0\.1\.12/);
 	assert.match(n.detail ?? "", /unknown option/);
 	assert.equal(n.actions, undefined, "trying again would not help");
+});
+
+test("a port found taken before any server started has no server's words; one the server could not listen on has them", () => {
+	const before = portTakenNotice("a.fennec", 8080, null);
+	assert.equal(before.detail, undefined, "the app's own finding is not filed under what the server said");
+	assert.deepEqual(before.actions?.map((a) => a.id), ["settings"]);
+	const after = portTakenNotice("a.fennec", 8080, "opened: /x/a.fennec\ncould not open the HTTP endpoint: Address already in use (os error 48)");
+	assert.match(after.detail ?? "", /Address already in use/);
+});
+
+test("a served database that did not start keeps why, in words, with the server's own last lines where one wrote them", () => {
+	const early = startFailure("a.fennec", { kind: "port", port: 8080, said: null });
+	assert.match(early.reason, /^Port 8080 is in use: something else answers on it, so no server was started\. /);
+	assert.match(early.reason, /or free 8080\.$/);
+	assert.equal(early.said, null, "no server ran, so nothing is the server's");
+	assert.equal(early.port, 8080, "the port was the reason: changing it is the way on");
+
+	const late = startFailure("a.fennec", { kind: "port", port: 8080, said: "opened: /x/a.fennec\ncould not open the HTTP endpoint: Address already in use (os error 48)" });
+	assert.match(late.reason, /^Port 8080 is in use by another program, so its server could not listen there\./);
+	assert.match(late.said ?? "", /Address already in use \(os error 48\)$/, "its error the last line");
+
+	const held = startFailure("a.fennec", { kind: "held", said: "could not open /x/a.fennec: it is open already, in this process or another" });
+	assert.match(held.reason, /a\.fennec is open in another program/);
+	assert.equal(held.port, null, "a port would not help");
+	assert.match(held.said ?? "", /it is open already/);
+
+	assert.match(startFailure("a.fennec", { kind: "failed", exit: 2, said: "unknown option", message: "unknown option" }).reason, /built apart/);
+	assert.match(startFailure("a.fennec", { kind: "failed", exit: 1, said: "bad magic", message: "bad magic" }).reason, /could not open a\.fennec \(exit 1\)/);
+	assert.match(startFailure("a.fennec", { kind: "failed", exit: null, said: "opened: /x/a.fennec", message: "opened: /x/a.fennec" }).reason, /did not say where it listens in time/);
+	const found = startFailure("a.fennec", { kind: "failed", exit: null, said: null, message: "fennec-server says it listens on http://10.0.0.1:1, not on 127.0.0.1 as it was asked to" });
+	assert.equal(found.reason, "fennec-server says it listens on http://10.0.0.1:1, not on 127.0.0.1 as it was asked to.");
+	assert.equal(found.said, null, "the app's finding, not the server's words");
+
+	const long = startFailure("a.fennec", { kind: "held", said: "1\n2\n3\n4\n5\n6\n7\n8\n9\n10" });
+	assert.equal(long.said, "3\n4\n5\n6\n7\n8\n9\n10", "its last eight lines, as a notice keeps");
+});
+
+test("an error of the app's own is not called what the server said", () => {
+	const n = internalError("The window could not be opened.", new Error("boom"));
+	assert.equal(n.detail, "boom");
+	assert.match(n.detailTitle ?? "", /error/);
+	assert.equal(heldNotice("a.fennec", "x").detailTitle, undefined, "the server's words keep the notice's own summary");
 });
 
 test("the rest", () => {

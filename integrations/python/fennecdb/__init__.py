@@ -168,7 +168,14 @@ class FennecError(Exception):
     where it left the node's database, and a read sent after them once the
     tenant settles is answered by a primary holding the write and refused
     504 by one without it. Not the client's position, which this answer
-    does not move. None otherwise."""
+    does not move. None otherwise.
+
+    The body's `code` is `error_code`: "token_expired" on a 401 for a token
+    past its `exp`, which a fresh token from its issuer cures. No other
+    refusal names one today, and a 401 naming none may be cured by a fresh
+    token too (a key rotation), so it is not by itself a sign-out. A string
+    that later releases may add to, never an enum; None where the body
+    names none, or a non-string or empty one."""
 
     def __init__(
         self,
@@ -184,6 +191,7 @@ class FennecError(Exception):
         history: str | None = None,
         reason: str | None = None,
         binding: str | None = None,
+        error_code: str | None = None,
     ):
         super().__init__(message)
         self.status = status
@@ -196,6 +204,7 @@ class FennecError(Exception):
         self.outcome = outcome
         self.seq = seq
         self.history = history
+        self.error_code = error_code
 
 
 class SchemaError(FennecError):
@@ -1015,6 +1024,7 @@ def _answer(status: int, raw: bytes) -> Any:
     if 200 <= status < 300:
         return json.loads(raw) if raw else None
     at = completed = quota = retry_after = outcome = seq = history = reason = binding = None
+    error_code = None
     try:
         body = json.loads(raw)
         message = body.get("error", raw.decode(errors="replace"))
@@ -1024,6 +1034,11 @@ def _answer(status: int, raw: bytes) -> Any:
         reason = body.get("reason")
         # The statement bound to the write that refused it, by name.
         binding = body.get("binding")
+        # The body's own `code`, which a client tells "refresh the token"
+        # by, never by the message's words; only a non-empty string counts.
+        code = body.get("code")
+        if isinstance(code, str) and code:
+            error_code = code
         # A quota's refusal says which, and the wait its `Retry-After`
         # says -- a quota's 429, a move's 503 -- in the body too: what is
         # read here has no headers. To the millisecond where it says it: a
@@ -1050,6 +1065,7 @@ def _answer(status: int, raw: bytes) -> Any:
         history=history,
         reason=reason,
         binding=binding,
+        error_code=error_code,
     )
 
 

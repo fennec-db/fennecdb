@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import vm from "node:vm";
-import { EXTERNAL_GAP_MS, fileUri, folderOf, LINK_OUT, linkOut, linuxOpeners, newWindowPreload, runFirst, webLink } from "../src/bun/opener.ts";
+import { EXTERNAL_GAP_MS, fileManager, fileUri, folderOf, LINK_OUT, linkOut, linuxOpeners, newWindowPreload, revealLabel, runFirst, webLink } from "../src/bun/opener.ts";
 
 // What the app hands the system to open, and the filter a studio window's
 // links go through. The page-to-app hop is a WebKit event a script cannot
@@ -53,6 +53,15 @@ test("a database is shown in its folder, and a folder in itself", () => {
 	assert.equal(folderOf(db), dir);
 	assert.equal(folderOf(dir), dir);
 	assert.equal(folderOf(join(dir, "gone.fennec")), dir, "a file gone since: its folder");
+});
+
+test("the file manager is named in each system's words: no Finder off a Mac (checks/pages.mjs reads the page for it)", () => {
+	assert.equal(revealLabel("darwin"), "Reveal in Finder");
+	assert.equal(fileManager("darwin"), "Finder");
+	assert.equal(revealLabel("win32"), "Show in Explorer");
+	assert.equal(fileManager("win32"), "Explorer");
+	assert.equal(revealLabel("linux"), "Open its folder");
+	assert.equal(fileManager("linux"), "your file manager");
 });
 
 test("Linux's openers are argument vectors, the address one argument of each", () => {

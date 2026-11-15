@@ -41,12 +41,13 @@ pub mod upstream;
 use directory::{Directory, Node, State};
 use fennec_core::prelude::*;
 use fennec_http::conn::Conn;
+use fennec_http::crypto::ct_eq;
 use fennec_http::http::{self, Method, Request, Response};
 use fennec_http::replication::{self, Replication};
 use metrics::Route;
 use std::collections::HashSet;
 use std::io::{BufReader, Write};
-use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -139,7 +140,8 @@ pub struct Config {
     pub entry_token: Option<String>,
     /// HTTPS alone from clients (`--tls-cert`, `--tls-key`), each
     /// handshake on its connection's thread ([`fennec_http::conn`]); `None`,
-    /// plain HTTP. To the nodes the router speaks plain HTTP still.
+    /// plain HTTP. To the nodes it speaks what their address says: `https://`
+    /// is dialed over TLS (`upstream`, `fennec_http::dial::tls_of`).
     pub tls: Option<Arc<fennec_http::conn::Tls>>,
 }
 
@@ -747,21 +749,25 @@ impl Router {
     /// Opens the listener. As with the nodes, a non-loopback address needs
     /// a token: `/_shard/` can move and delete every tenant.
     pub fn bind(&self) -> std::io::Result<TcpListener> {
-        let remote = match self.cfg.addr.to_socket_addrs() {
-            Ok(mut it) => it.any(|a| !a.ip().is_loopback()),
-            Err(_) => false,
-        };
-        if remote && self.cfg.token.is_none() && !self.cfg.insecure {
+        self.bind_on(&fennec_http::Listen::look_up(&self.cfg.addr))
+    }
+
+    /// [`Router::bind`] on `listen`, its name looked up once: judged of the
+    /// addresses it is bound on, never of a second lookup's. The binary
+    /// looks `--listen` up as it starts, its tokens' lengths judged by the
+    /// same lookup (`fennec_http::short_token`).
+    pub fn bind_on(&self, listen: &fennec_http::Listen) -> std::io::Result<TcpListener> {
+        if listen.binds_past_loopback() && self.cfg.token.is_none() && !self.cfg.insecure {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 format!(
                     "{} is not a loopback address and there is no --token: \
                      /_shard/ would let anyone move and delete tenants",
-                    self.cfg.addr
+                    listen.given()
                 ),
             ));
         }
-        TcpListener::bind(&self.cfg.addr)
+        listen.bind()
     }
 
     pub fn serve_on(self: &Arc<Router>, listener: TcpListener) -> std::io::Result<()> {
@@ -1842,6 +1848,9 @@ impl Router {
             // The client's id, or one made here, which the node is sent
             // (`Pool::send`) and answers with.
             fennec_http::request_id::begin_request(&req);
+            // A proxy in front of a router on loopback holding a token
+            // shorter than 32 bytes: warned of once (a load and a branch).
+            fennec_http::proxied(&req);
             let arrived = Instant::now();
             // The client another router relayed this for, believed from a
             // router holding the same `--token` alone ([`region`]): it
@@ -3344,7 +3353,7 @@ impl Router {
             .header("authorization")
             .and_then(|v| v.strip_prefix("Bearer "))
             .unwrap_or("");
-        if constant_eq(given.as_bytes(), token.as_bytes()) {
+        if ct_eq(given.as_bytes(), token.as_bytes()) {
             fennec_http::audit::verified();
             return None;
         }
@@ -3701,7 +3710,8 @@ impl Router {
         };
         // The entry's token is in a Worker's secrets: as a node's admin
         // token it would reach `/_admin/` there, every tenant's file.
-        if self.cfg.entry_token.as_deref() == Some(token) {
+        let entry = self.cfg.entry_token.as_deref();
+        if entry.is_some_and(|e| ct_eq(e.as_bytes(), token.as_bytes())) {
             return Err(Fail(
                 400,
                 "the node's admin token is this router's --entry-token, which the global \
@@ -6763,17 +6773,6 @@ fn write(d: &RwLock<Directory>) -> std::sync::RwLockWriteGuard<'_, Directory> {
     d.write().unwrap_or_else(|e| e.into_inner())
 }
 
-fn constant_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7303,6 +7302,12 @@ mod tests {
         let (read, came) = std::sync::mpsc::channel::<()>();
         std::thread::spawn(move || {
             let mut tries = 0;
+            // Each try's connection is held open and unread past what it
+            // read. A reader draining it took the body whole whenever it beat
+            // the cut, and the router, the write gone out, rightly judged
+            // that try as one that may have run: a 502 at the first try, and
+            // no second for the cutter to wait for.
+            let mut held = Vec::new();
             for conn in l.incoming() {
                 let Ok(conn) = conn else { return };
                 let mut conn = std::io::BufReader::new(conn);
@@ -7327,7 +7332,7 @@ mod tests {
                     std::io::Read::read_exact(&mut conn, &mut body).unwrap();
                 }
                 let _ = read.send(());
-                std::thread::spawn(move || std::io::copy(&mut conn, &mut std::io::sink()));
+                held.push(conn);
             }
         });
         let cutter = Arc::clone(&r);

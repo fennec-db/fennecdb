@@ -13,6 +13,27 @@ refused naming the FennecQL to write, without consuming its word; `"name"`
 where SQL reads a column (`Parser::quoted`) and a regex-like `~`
 (`regex_like`) are refused, `<>` stays `!=`.
 
+**[No text that parsed reads as another statement, held in CI by canonical
+digest.](../../docs/design/fennecql.md#the-corpus)** `make fennecql-corpus`
+reads every FennecQL text this tree and main's track, the hand-written
+list's among them (`integrations/fennecql-corpus/kinds.txt`, five of every
+kind, two of every refusal by name), with both trees, and every corpus
+frozen at a tag (`integrations/fennecql-corpus/<tag>.jsonl`, its texts and
+the earlier corpora's as the tag's own parser read them, added by
+`FREEZE=<tag>`, never replaced, nor changed or removed once main holds it)
+with this one; CI's test job runs both. A statement a definition may hold,
+and a definition, compare by `Definition::digest`, any other by its form --
+its pretty `Debug`, a struct's named field holding `None`, `false`, `0`,
+`[]`, `""` or `{}` left out, never a map's entry -- so a field added that
+holds nothing moves neither, and `Definition::canonical` takes every node
+apart whole, so none is passed over; a field whose `Debug` writes something where it holds nothing owes
+one that does not. A text read otherwise, refused or panicking fails; an
+`ACCEPTED` entry in the tool names one change by both readings, and a
+digest moved, or a refusal of what a 1.x base read, needs `GRAMMAR_EPOCH`
+raised too -- a major version; a form a 1.x base read moved needs it or
+the entry's `same_meaning`, a claim the summary prints, since a hash of a
+form moves with a renamed field as with a changed meaning.
+
 **[A JOIN on a key is a `lookup` answered flat, or one table's `get` with
 the other's rows a filter](../../docs/design/fennecql.md#sql-joins-subqueries-and-schema)**
 (`join::relate`). The flat rows are `Select::flat`, set by SQL alone and
@@ -74,7 +95,10 @@ counts, alone or in a block (`Undo::Statements`), kept by every image,
 `Beside` and build, applied by a replica and passed over by `/_changes`.
 With the feature an open reads its text back (`fennec_ql::install`) and
 holds its digest, the quick read's, running the text read as written
-(`stored_definition`). A schema change's commit holds its `depends`: refused
+(`stored_definition`), a float past its range read as it was stored, an
+infinity or 0, where every other text refuses it: every reader of a number
+in a text asks `stored_float`, a token's and pgvector's text's.
+A schema change's commit holds its `depends`: refused
 naming it, or marked broken (`Database::internally`, an apply, an open),
 never failing; the mark is derived, never stored. A replacement keeps the
 old tree's contract; a writing body reads through an index or says `scans`
@@ -105,8 +129,8 @@ outside `full`, named by the server, the shell and the native library; the
 module refuses in its own words, a definition's own path `#[cold]`.
 `Definition::canonical` writes a field only where it holds something, an
 operator by a byte of its own; reading a stored text otherwise raises
-`GRAMMAR_EPOCH`; `make fennecql-corpus` holds the repository's FennecQL
-texts to main's trees.
+`GRAMMAR_EPOCH`; the corpus (above) holds every text to main's digests
+and every frozen corpus's.
 
 **[A write-bound statement runs in the block of the write that woke it,
 once a row.](../../docs/design/named-statements.md#write-bound-statements-f2)**
@@ -176,7 +200,9 @@ module keeps it as the record's tail (`Timing`), reading none of it. The
 event's values reach a body through its typed parameters alone
 (`named::event_at`, no cast, a key of digits a list's place; 400 where one
 is missing or mistyped), its condition -- the event and literals alone --
-picking the events it takes. An event's statements run in name order in
+picking the events it takes. Its key is a value its signature covers,
+never an unsigned header (fennec-http's rule): a captured event sent again
+is answered from it while it is kept. An event's statements run in name order in
 one block with its key's row in `_hook_events` (`<hook>`, `U+001F`, the
 key; its own `until`, `@ttl(1ms)`), under one `--call-max-rows`, `now()`
 one instant (`Clocked`): `Database::take_event`, or `judge_event` beside

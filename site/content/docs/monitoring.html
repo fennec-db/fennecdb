@@ -122,9 +122,10 @@ Prometheus and Grafana and the dashboards already loaded: the server's
 metrics, and the database's own rows through fennecdb's data source plugin
 and through the Infinity plugin.</p>
 
-<pre data-lang="bash">FENNEC_HTTP_TOKEN=secret FENNEC_METRICS_TOKEN=scrape \
-FENNEC_JWT_SECRET=$(openssl rand -hex 32) \
-  docker compose -f monitoring/docker-compose.yml up -d --build
+<pre data-lang="bash"># tokens of 32 bytes: the server listens on the compose network, past loopback
+export FENNEC_HTTP_TOKEN=$(openssl rand -hex 32) FENNEC_METRICS_TOKEN=$(openssl rand -hex 32) \
+  FENNEC_JWT_SECRET=$(openssl rand -hex 32)
+docker compose -f monitoring/docker-compose.yml up -d --build
 # metrics: http://127.0.0.1:3000/d/fennecdb     data: http://127.0.0.1:3000/d/fennecdb-data-plugin
 # Prometheus: http://127.0.0.1:9090
 </pre>
@@ -319,7 +320,7 @@ not logged.</p>
 
 <ul>
   <li><b>Refused tokens are slowed down,</b> from 100 ms doubling to 5 s per
-    address (<code>--auth-delay</code>).</li>
+    address, an IPv6 one's /64 (<code>--auth-delay</code>).</li>
   <li><b>No literal reaches the log:</b> a schema change is logged by its
     shape.</li>
 </ul>
@@ -434,7 +435,11 @@ router from Cloudflare's addresses; a router started with the entry's token
 within a minute, and counts, clears, logs (<code>peer</code>, the entry as
 <code>via</code>) and names that address onwards. An IPv4 client is one
 count however it arrives: a listener on <code>[::]</code> sees it as
-<code>::ffff:a.b.c.d</code>, counted as <code>a.b.c.d</code>. Behind another reverse
+<code>::ffff:a.b.c.d</code>, counted as <code>a.b.c.d</code>. An IPv6 client
+is counted by its /64, since it may send from any address of the /64 its
+network was given. The
+server keeps 10 000 counts, and past them lets the one refused longest ago
+go, never all of them at once. Behind another reverse
 proxy every client has the proxy's address, so the proxy's own rate limit
 is the one that counts there. <code>--auth-delay 0</code> turns the wait
 off.</p>

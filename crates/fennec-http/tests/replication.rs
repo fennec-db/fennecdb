@@ -153,6 +153,20 @@ fn caught_up(replica: &Node, primary: &Node) {
     }
 }
 
+/// `f` halted, as `Follower::halt` halts it, the wait for its thread
+/// bounded: a follower that read on past its halt's cut held the halt, and
+/// Windows CI's job with it, for hours, where it now fails here.
+fn halt(f: &Arc<Follower>) {
+    let (halted, done) = std::sync::mpsc::channel();
+    let f = Arc::clone(f);
+    std::thread::spawn(move || {
+        f.halt();
+        let _ = halted.send(());
+    });
+    done.recv_timeout(Duration::from_secs(20))
+        .expect("the halt waited 20 s for the follower's thread, which never ended");
+}
+
 fn write_some(node: &Node, from: usize, n: usize) {
     for i in from..from + n {
         let (status, body) = query(
@@ -295,7 +309,7 @@ fn a_replica_follows_and_a_restarted_one_goes_on_from_where_it_was() {
     // missed rather than for an image. The file is looked at before the
     // follower starts: read after, the follower had often fetched the
     // writes it missed already.
-    r.follower.as_ref().unwrap().halt();
+    halt(r.follower.as_ref().unwrap());
     let at = seq(&r);
     write_some(&p, 50, 10);
     drop(r);
@@ -351,7 +365,7 @@ fn a_primary_compacts_beside_the_database_while_a_replica_follows() {
     }
 
     let (seq_was, rows_were) = (seq(&p), rows(&p, "get items"));
-    r.follower.as_ref().unwrap().halt();
+    halt(r.follower.as_ref().unwrap());
     drop(p);
     let back = fennec_core::fs::open(&file).unwrap();
     assert_eq!(back.change_seq(), seq_was);
@@ -386,6 +400,34 @@ fn a_replica_behind_the_buffer_is_sent_an_image() {
     assert_eq!(rows(&r, "get items"), rows(&p, "get items"));
     let near = "get items select id near e [7.0, 1.0, 0.5] exact limit 3";
     assert_eq!(rows(&r, near), rows(&p, near));
+}
+
+/// An image a copy took says on disk that the copy follows. The image's
+/// own history is its primary's, taking writes, and the record making it a
+/// follower's, appended after the rename, waited for a write behind that a
+/// copy with nothing to apply never makes: a kill then, and the restart
+/// opened the copy as a primary's file, following nothing.
+#[test]
+fn an_image_a_copy_took_says_on_disk_that_it_follows() {
+    let d = dir("image-follows");
+    let p = primary(&d.join("p.fennec"), 256);
+    assert_eq!(query(&p, SCHEMA).0, 200);
+    write_some(&p, 0, 40);
+    let r = replica(&d.join("r.fennec"), p.port);
+    caught_up(&r, &p);
+    assert_eq!(r.follower.as_ref().unwrap().images(), 1);
+    // What a kill leaves: the file as the system holds it, not what the
+    // process kept to write.
+    let killed = d.join("killed.fennec");
+    std::fs::write(&killed, std::fs::read(d.join("r.fennec")).unwrap()).unwrap();
+    let (db, _feed) =
+        replication::open(killed.to_str().unwrap(), replication::DEFAULT_BUFFER).unwrap();
+    assert!(
+        db.history().following,
+        "the image's own history, a primary's"
+    );
+    assert_eq!(db.history().lineage, r.db.read().unwrap().history().lineage);
+    assert_eq!(db.change_seq(), seq(&p));
 }
 
 #[test]
@@ -463,7 +505,7 @@ fn a_replica_on_the_forked_side_of_nothing_goes_on_without_an_image() {
 
     // The primary goes; `a` is promoted and `b` pointed at it. `b` holds
     // nothing `a` does not, so it goes on from where it was.
-    b.follower.as_ref().unwrap().halt();
+    halt(b.follower.as_ref().unwrap());
     drop(b);
     drop(p);
     let (status, _) = http(a.port, "POST", "/_replication/promote", Some(TOKEN), "");
@@ -540,7 +582,7 @@ fn a_read_sent_after_a_write_waits_for_it_on_a_replica() {
     // A replica held back: without the header a read is answered from
     // where it stands, and with it waits until the write is there.
     let f = r.follower.as_ref().unwrap();
-    f.halt();
+    halt(f);
     let put = "{\"query\":\"put items {name: \\\"held back\\\", n: 999, e: [1.0, 0.5, 2.0]}\"}";
     let (_, head, _) = raw(p.port, "POST", "/query", "", put);
     let written: u64 = head
@@ -603,10 +645,13 @@ fn a_read_sent_after_a_write_waits_for_it_on_a_replica() {
 }
 
 /// A subscription's first event, read on a connection of its own -- or,
-/// refused, its whole answer: the status and that text.
+/// refused, its whole answer: the status and that text. Bounded as a whole,
+/// not a read at a time: a stream sending its keep-alives and no event never
+/// lets a read run out, and was read for as long as it stayed open.
 fn first_event(port: u16, path: &str, headers: &str) -> (u16, String) {
+    const WITHIN: Duration = Duration::from_secs(30);
+    let deadline = Instant::now() + WITHIN;
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
     // Closed after an answer that is not a stream, which a stream is anyway.
     write!(
         s,
@@ -624,13 +669,22 @@ fn first_event(port: u16, path: &str, headers: &str) -> (u16, String) {
                 return (head[9..12].parse().unwrap(), event.to_string());
             }
         }
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !left.is_zero(),
+            "{path}: no event and no end within {WITHIN:?}, only {out:?}"
+        );
+        s.set_read_timeout(Some(left)).unwrap();
         match s.read(&mut chunk) {
             Ok(0) | Err(_) => break,
             Ok(n) => out.push_str(&String::from_utf8_lossy(&chunk[..n])),
         }
     }
     let (head, body) = out.split_once("\r\n\r\n").unwrap_or((&out, ""));
-    (head[9..12].parse().unwrap(), body.to_string())
+    let status = head.get(9..12).and_then(|s| s.parse().ok());
+    let status =
+        status.unwrap_or_else(|| panic!("{path}: no answer within {WITHIN:?}, only {out:?}"));
+    (status, body.to_string())
 }
 
 /// A put of a row named `name` on `node`: the change it left it at.
@@ -689,7 +743,7 @@ fn a_stream_and_changes_sent_after_a_write_wait_for_it_on_a_replica() {
         ),
     ];
     for (i, (what, target, kind)) in cases.into_iter().enumerate() {
-        f.halt();
+        halt(f);
         let name = format!("held back {i}");
         let written = put_named(&p, &name);
         assert!(
@@ -1058,7 +1112,7 @@ fn a_primary_and_its_replica_compact_on_their_own_while_writes_go_on() {
 
     // Opened again over the file it compacted, it goes on from where it was.
     let images = r.follower.as_ref().unwrap().images();
-    r.follower.as_ref().unwrap().halt();
+    halt(r.follower.as_ref().unwrap());
     let at = seq(&r);
     drop(r);
     write_some(&p, 500, 5);
@@ -1315,6 +1369,91 @@ fn a_promotion_does_not_wait_for_a_primary_that_never_answers() {
     assert!(!db.read().unwrap().history().following);
 }
 
+/// A halt ends a follower that is between two reads as it comes, whatever
+/// its socket does with a read begun after the cut. On Windows the cut -- a
+/// `shutdown` through a duplicate of the socket -- ends a read already
+/// waiting, not one begun after it, which read on: the primary's keep-alive
+/// every 2 s kept it short of its 10 s of silence, the session never looked
+/// at the halt again, and the halt waited for it for good. Five runs of
+/// Windows CI hung so, each in a test halting a follower that had just
+/// landed a write. Here the follower is held in its hello's callback, past
+/// its read, until the cut has reached the primary's side of a relay
+/// between them; let go, it reads no more.
+#[test]
+fn a_halt_ends_a_follower_held_between_two_reads() {
+    use std::sync::mpsc;
+    use std::sync::{Condvar, Mutex};
+    let d = dir("halt-between-reads");
+    let p = primary(&d.join("p.fennec"), replication::DEFAULT_BUFFER);
+    // The follower's bytes to the primary and back, and word once the
+    // follower's side has ended: the cut's FIN.
+    let relay = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let via = relay.local_addr().unwrap();
+    let (ended, cut) = mpsc::channel();
+    let to = p.port;
+    std::thread::spawn(move || {
+        for conn in relay.incoming() {
+            let Ok(follower) = conn else { continue };
+            let primary = TcpStream::connect(("127.0.0.1", to)).unwrap();
+            let mut up = (follower.try_clone().unwrap(), primary.try_clone().unwrap());
+            let ended = ended.clone();
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut up.0, &mut up.1);
+                let _ = ended.send(());
+            });
+            let mut down = (primary, follower);
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut down.0, &mut down.1);
+            });
+        }
+    });
+    let file = d.join("r.fennec");
+    let (mut db, feed) =
+        replication::open(file.to_str().unwrap(), replication::DEFAULT_BUFFER).unwrap();
+    let lineage = db.history().lineage.clone();
+    db.follow(lineage).unwrap();
+    let db = Arc::new(RwLock::new(db));
+    let follower = Follower::new(
+        &format!("http://{via}"),
+        TOKEN.into(),
+        Arc::clone(&db),
+        Some(feed),
+        true,
+    )
+    .unwrap();
+    // Held after the hello is read and taken, before the next read, until
+    // the gate opens.
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let (said, hello) = mpsc::channel();
+    let held = Arc::clone(&gate);
+    follower.on_hello(Box::new(move |_| {
+        let _ = said.send(());
+        let (open, opened) = &*held;
+        let mut open = open.lock().unwrap();
+        while !*open {
+            open = opened.wait(open).unwrap();
+        }
+    }));
+    follower.start("halt-between-reads".into()).unwrap();
+    hello
+        .recv_timeout(Duration::from_secs(20))
+        .expect("the primary never said hello to the follower");
+    let (halted, done) = mpsc::channel();
+    let f = Arc::clone(&follower);
+    std::thread::spawn(move || {
+        f.halt();
+        let _ = halted.send(());
+    });
+    cut.recv_timeout(Duration::from_secs(20))
+        .expect("the halt never cut the follower's connection");
+    *gate.0.lock().unwrap() = true;
+    gate.1.notify_all();
+    done.recv_timeout(Duration::from_secs(20))
+        .expect("the follower read on past its halt's cut, and the halt never ended");
+    assert!(!follower.running());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// A copy's own sink, panicking as it is handed a write: a panic as the
 /// copy applies its primary's records, past the point the engine puts them
 /// back.
@@ -1463,6 +1602,222 @@ fn a_copy_that_could_not_apply_a_write_takes_an_image_and_goes_on() {
             .collect();
         assert_eq!(got, rows(&p, sql), "{sql}");
     }
-    follower.halt();
+    halt(&follower);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The `(seq, at)` of each change `/_changes` on `node` hands over after
+/// `since`.
+fn change_times(node: &Node, since: u64) -> Vec<(u64, u64)> {
+    let (status, body) = http(
+        node.port,
+        "GET",
+        &format!("/_changes?since={since}"),
+        None,
+        "",
+    );
+    assert_eq!(status, 200, "{body}");
+    let number = |line: &str, key: &str| -> u64 {
+        let from = line.find(key).unwrap_or_else(|| panic!("{key} in {line}")) + key.len();
+        let digits: String = line[from..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        digits.parse().unwrap()
+    };
+    body.lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| (number(l, "\"seq\":"), number(l, "\"at\":")))
+        .collect()
+}
+
+/// [`change_times`] once `/_changes` on `node` hands over write `upto`: a
+/// copy's counter moves as it applies a write, which its feed sends on
+/// once its fsync has covered it.
+fn change_times_to(node: &Node, since: u64, upto: u64) -> Vec<(u64, u64)> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let times = change_times(node, since);
+        if times.last().is_some_and(|t| t.0 >= upto) {
+            return times;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "/_changes stayed at {times:?}, short of {upto}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Waits until a restore of the archive in `arch` to its end, into
+/// `probe`, reaches `seq`.
+fn archived(arch: &Path, probe: &Path, seq: u64) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let a = fennec_http::archive::Archive::new(arch).unwrap();
+    loop {
+        if let Ok(r) = a.restore(probe, fennec_http::archive::Target::End) {
+            if r.seq >= seq {
+                return;
+            }
+        }
+        assert!(Instant::now() < deadline, "the archive did not reach {seq}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+/// Each write a replica applies keeps the time its primary appended it --
+/// in the replica's own feed, so in its `/_changes`, in a replica of it and
+/// in an archive cut from it -- and never takes the time the replica
+/// applied it at. The follower dropped the times the primary sent with its
+/// records, and the replica's feed stamped each with its own clock: an
+/// archive of a replica timed every write a replication lag late, and a
+/// restore to a moment left out writes the primary had appended, and
+/// answered, before it. Here the replica is held back while the primary
+/// writes and let go only once the clock has passed every time the primary
+/// appended at, so a time of its own is one the primary's is not: a
+/// statement's writes, a block that spilled and landed as one record, and,
+/// once the replica has taken an image its primary sent it, the writes
+/// after it. Promoted, the replica times its own writes by its own clock.
+#[test]
+fn a_replica_and_an_archive_of_it_keep_the_times_its_primary_appended_at() {
+    use fennec_http::archive::{Archive, Target};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let d = dir("times");
+    // A buffer small enough that the replica, held back past two large
+    // writes, is sent an image.
+    let p = primary(&d.join("p.fennec"), 64 << 10);
+    let (status, body) = query(&p, "create collection notes (title text, n int)");
+    assert_eq!(status, 200, "{body}");
+    let r = replica(&d.join("r.fennec"), p.port);
+    let r2 = replica(&d.join("r2.fennec"), r.port);
+    caught_up(&r, &p);
+    caught_up(&r2, &p);
+    let arch = d.join("archive");
+    let probe = d.join("probe.fennec");
+    let stop = Arc::new(AtomicBool::new(false));
+    let archiver = {
+        let (stop, arch) = (Arc::clone(&stop), arch.clone());
+        let upstream =
+            replication::Upstream::new(&format!("http://127.0.0.1:{}", r.port), TOKEN.into())
+                .unwrap();
+        std::thread::spawn(move || Archive::new(&arch)?.follow(&upstream, &stop, &|_| {}))
+    };
+    archived(&arch, &probe, seq(&p));
+
+    // Statements run on the primary as one block, fsynced and sent.
+    let exec = |sqls: &[String]| {
+        let durable = {
+            let mut g = p.db.write().unwrap();
+            let s: Vec<Statement> = sqls
+                .iter()
+                .map(|q| fennec_ql::parse_one(q).unwrap())
+                .collect();
+            let block: Vec<(&Statement, &[Value])> = s.iter().map(|s| (s, &[][..])).collect();
+            g.execute_block(&block).unwrap();
+            g.flush().unwrap()
+        };
+        if let Some(d) = durable {
+            d().unwrap();
+        }
+    };
+    let notes = |from: usize, n: usize, len: usize| -> String {
+        let docs: Vec<String> = (from..from + n)
+            .map(|i| format!("{{title: \"{}\", n: {i}}}", "x".repeat(len)))
+            .collect();
+        format!("put notes [{}]", docs.join(", "))
+    };
+    let follower = Arc::clone(r.follower.as_ref().unwrap());
+    // The replica held back while `write` runs on the primary and let go
+    // again; where `timed`, once the clock is past the last time the
+    // primary appended one of its writes at: the primary's `(seq, at)` of
+    // them.
+    let held_back = |timed: bool, write: &dyn Fn()| -> Vec<(u64, u64)> {
+        let since = seq(&p);
+        halt(&follower);
+        write();
+        let times = match timed {
+            true => change_times(&p, since),
+            false => Vec::new(),
+        };
+        if let Some(last) = times.iter().map(|t| t.1).max() {
+            assert_eq!(times.last().map(|t| t.0), Some(seq(&p)));
+            while now_ms() <= last {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        follower.start("fennec-replica".into()).unwrap();
+        caught_up(&r, &p);
+        caught_up(&r2, &p);
+        times
+    };
+
+    // A statement's writes, and a block spilling as it goes, which lands
+    // as one record.
+    let first = held_back(true, &|| {
+        assert_eq!(query(&p, "put notes {title: \"one\", n: 1}").0, 200);
+        assert_eq!(query(&p, &notes(2, 3, 8)).0, 200);
+        p.db.write().unwrap().set_spill(2048);
+        exec(&[notes(10, 2, 3000), notes(20, 2, 3000)]);
+    });
+    let (since, first_end) = (first[0].0 - 1, first.last().unwrap().0);
+    assert_eq!(change_times_to(&r, since, first_end), first);
+    assert_eq!(change_times_to(&r2, since, first_end), first);
+    // The archive cut from the replica: a restore to the moment the
+    // primary appended the last of them holds every one.
+    archived(&arch, &probe, first_end);
+    let moment = first.iter().map(|t| t.1).max().unwrap();
+    let restored = Archive::new(&arch)
+        .unwrap()
+        .restore(&d.join("moment.fennec"), Target::Time(moment))
+        .unwrap();
+    assert_eq!(restored.seq, first_end);
+
+    // Past what the primary keeps for it, the replica takes an image; the
+    // writes after it keep their times as well.
+    let images = follower.images();
+    held_back(false, &|| {
+        exec(&[notes(100, 80, 1000)]);
+        exec(&[notes(200, 80, 1000)]);
+    });
+    assert_eq!(follower.images(), images + 1);
+    // The archive past that image too, which it takes from the replica:
+    // the writes after it then come to it as writes, not inside an image.
+    archived(&arch, &probe, seq(&p));
+    let after = held_back(true, &|| {
+        assert_eq!(query(&p, "put notes {title: \"after\", n: 300}").0, 200);
+        assert_eq!(query(&p, &notes(301, 2, 8)).0, 200);
+    });
+    let (since, end) = (after[0].0 - 1, seq(&p));
+    assert_eq!(change_times_to(&r, since, end), after);
+    assert_eq!(change_times_to(&r2, since, end), after);
+    archived(&arch, &probe, end);
+    let moment = after.iter().map(|t| t.1).max().unwrap();
+    let restored = Archive::new(&arch)
+        .unwrap()
+        .restore(&d.join("after.fennec"), Target::Time(moment))
+        .unwrap();
+    assert_eq!(restored.seq, seq(&p));
+    stop.store(true, Ordering::SeqCst);
+    archiver.join().unwrap().unwrap();
+
+    // Promoted, it times its own writes by its own clock: no time its
+    // primary sent is left over for them.
+    let (status, body) = http(r.port, "POST", "/_replication/promote", Some(TOKEN), "");
+    assert_eq!(status, 200, "{body}");
+    let since = seq(&r);
+    let before = now_ms();
+    assert_eq!(query(&r, "put notes {title: \"own\", n: 400}").0, 200);
+    let own = change_times(&r, since);
+    assert_eq!(own.len(), 1);
+    assert!(own[0].1 >= before, "{own:?} before {before}");
+    assert_eq!(change_times_to(&r2, since, own[0].0), own);
+    halt(r2.follower.as_ref().unwrap());
     let _ = std::fs::remove_dir_all(&d);
 }

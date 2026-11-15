@@ -28,8 +28,8 @@ command -v docker >/dev/null 2>&1 || { echo "kotlin-test: needs Docker, or Linux
 
 # A target directory of its own: the host's target/ holds this machine's
 # builds, and a Linux build in it would make Cargo build each again. The
-# image's own toolchain, by name: rust-toolchain.toml's `stable` is not
-# its name, and rustup installed a second one each run.
+# image's own toolchain, by name: rust-toolchain.toml's release and its
+# wasm32 target are not this image's, and rustup installed them each run.
 docker run --rm -v "$ROOT":/src -w /src \
   -v fennec-cargo-registry:/usr/local/cargo/registry \
   -e CARGO_TARGET_DIR=/src/target/linux-docker \

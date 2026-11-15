@@ -1050,6 +1050,18 @@ fn a_tenant_gone_by_hand_is_not_given_an_earlier_delete() {
     archived(&root.join("e"), seq(&e));
     drop(e);
     n.tenants.delete("e").unwrap();
+    // The delete's time is the node's millisecond, and the second life's
+    // hello can be said in the same one, which the stream cannot tell from
+    // a delete after it: the second life is made a millisecond on, so its
+    // hello is later than the delete by the clock itself, and `remade`,
+    // taken before the second life exists, is before everything it says.
+    // (`>= before` with `before` taken just before the removal ordered two
+    // threads' clock reads, and failed 12 ms off.)
+    let deleted = now_ms();
+    while now_ms() < deleted + 2 {
+        std::hint::spin_loop();
+    }
+    let remade = now_ms();
     let e = made(&n, "e", 2);
     until("the old line was not moved aside", || {
         node_archive::lines(&root).unwrap().len() == 2
@@ -1057,7 +1069,6 @@ fn a_tenant_gone_by_hand_is_not_given_an_earlier_delete() {
     archived(&root.join("e"), seq(&e));
     drop(e);
     close_all(&n.tenants, 1);
-    let before = now_ms();
     std::fs::remove_file(d.join("node").join("e.fennec")).unwrap();
     // Seen at the stream's next reading of the directory.
     until("the archive was not told `e` went", || {
@@ -1066,8 +1077,8 @@ fn a_tenant_gone_by_hand_is_not_given_an_earlier_delete() {
     a.finish();
     let at = node_archive::gone_at(&root.join("e")).unwrap();
     assert!(
-        at >= before,
-        "gone at {at}, before the file went at {before}"
+        at >= remade,
+        "gone at {at}, before the second life was made at {remade}: the delete's"
     );
 }
 

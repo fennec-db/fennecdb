@@ -39,7 +39,10 @@ assert.match(launcherText.text, /Servers/);
 async function save(name, url, token, tenant = '') {
   const n = lines().length;
   cmd({ cmd: 'addconn', name, url, token, tenant });
-  return (await waitFor((l, i) => i >= n && l.what === 'conn-added' && l.name === name, 10000, `${name} saved`)).id;
+  // A refusal is the answer too, and fails at once with the app's words (the credential store's, on Linux).
+  const answer = await waitFor((l, i) => i >= n && ((l.what === 'conn-added' && l.name === name) || l.what === 'conn-refused'), 10000, `${name} saved`);
+  if (answer.what === 'conn-refused') throw new Error(`${name} not saved: ${answer.message}`);
+  return answer.id;
 }
 /** Opens a saved server and returns what the app answered. */
 async function open(id) {
@@ -229,10 +232,22 @@ for (const c of removing) cmd({ cmd: 'rmconn', id: c });
 // side by side, so the last id can be reported while the first half is still
 // deleting its items (a hosted runner's Keychain takes about 130 ms a
 // removal). A report comes only once its item is gone (removeConnection).
-await until(() => {
-  const removed = new Set(lines().filter((l) => l.what === 'conn-removed').map((l) => l.id));
-  return removing.every((c) => removed.has(c));
-}, 10000, 'all removed');
+// Each is waited for in turn as long as the app gives one removal: its
+// window's close (closeWindow, 3 s) and its store (on Windows its WebView2
+// folder, removeStoreFolder, 20 s, while the processes of the window just
+// closed still hold it), seconds to spare. Ten seconds for all nine was
+// less: on the x64 runner the first, the one with a window, was not reported
+// 10 s after its window closed (another window's WebView2 took as long to
+// start beside it), while the app still had its own bound left. An app that
+// gave a store up says so (store-dropped, not ok), and that fails at once.
+const REMOVAL_MS = 3000 + 20000 + 5000;
+for (const c of removing) {
+  await until(() => {
+    const kept = lines().find((l) => l.what === 'store-dropped' && l.partition === `persist:remote-${c}` && !l.ok);
+    if (kept) throw new Error(`the app could not take ${c}'s store away: ${JSON.stringify(kept)}`);
+    return lines().some((l) => l.what === 'conn-removed' && l.id === c);
+  }, REMOVAL_MS, `${c} removed`);
+}
 assert.deepEqual(removing.filter(keychainHas), [], 'every item is gone');
 assert.deepEqual(state().connections, []);
 

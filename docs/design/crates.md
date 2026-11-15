@@ -150,7 +150,12 @@ and each held to its type as a scalar is, refused naming the field and the
 element counted from 0 -- "field `xs`, element 2: an int is from ..." --
 where they were the `f32`s of a vector, `[16777217]` stored as 16777216
 and 2^63 as `i64::MAX` ([vector-search.md](vector-search.md#numbers-in)).
-Full table in `site/content/docs/limits.html`.
+A float past an `f64`'s range is refused so too, by every reader -- JSON,
+FennecQL, the query string, an import -- naming the number, where it was
+and the range: `1e400` read as an infinity, which JSON writes as `null`,
+and `1e-400` as 0 (`num::read_f64`,
+[vector-search.md](vector-search.md#numbers-in), *Past the range,
+refused*). Full table in `site/content/docs/limits.html`.
 
 A number a statement writes is read as written or refused naming its
 range, never fitted to it: `Parser::int_in(what, lo, hi)` reads every
@@ -180,15 +185,22 @@ the same ranges (`declared::index`, and `declared::type_named`, whose
 `dimension` reads the digits in a `u32`, checked at each: folded in a
 32-bit build's `usize` -- the native library's on a 32-bit device --
 `vector<4294967297>` wrapped to 1). What no parser reads -- SQL's
-`vector(n)`, `fennec import --vector`, a schema built in code -- meets
-`IndexKind::check`'s `MAX_DIM`, and natively its `MAX_M`: in the browser
-module every spec comes through the parser or SQL's `with (m = ..)`, which
-holds `m` to pgvector's 2 to 100 and `ef_construction` to 4 to 1 000. A
+`vector(n)` and its arrays (`vector(n)[]`, `[3]`, `array`), `fennec import
+--vector` and `--cast`, a schema built in code -- meets `IndexKind::check`,
+which holds a dimension at any depth of lists and an `@hnsw`'s `m` by the
+test a file's schema is read with (`schema::out_of_range`, *A file's schema
+is held to the same ranges*, below), in the browser module too; and,
+natively, a beam built in code to `u32::MAX`, past which a 32-bit reader of
+the file -- a page replicating it, the native library on a 32-bit device --
+refuses the schema (`codec::get_usize`). SQL's `with (m = ..)` holds `m` to
+pgvector's 2 to 100 and `ef_construction` to 4 to 1 000. A
 dimension or a parameter a file's schema holds is read whole or the file
 refused (`codec::get_usize`, through `get_within` at the target's width,
-which its test runs at a wasm32 build's); a graph record holds the same
-numbers and reads them as it did (checked there too, 88 bytes of the
-module). A beam wider than the walk found reserves no more than it found
+which its test runs at a wasm32 build's), and a dimension and an `m` within
+these ranges, or the file refused as damage (*A file's schema is held to
+the same ranges*, below); a graph record holds the same numbers and reads
+them as it did (checked there too, 88 bytes of the module), its `m` held to
+the field's range before it sizes a node's links. A beam wider than the walk found reserves no more than it found
 (`VectorIndex::search`, `nearest_docs`): `ef 4294967295` asked for 64 GiB
 for its answer, which macOS hands over unbacked and a wasm32 build cannot
 count (`a_beam_past_the_graph_reserves_only_what_it_found`, by the
@@ -212,28 +224,230 @@ FennecQL `ef_construction=4` to `7`, built as 8 before, now builds what it
 says: the one tree that moves (`make fennecql-corpus`), DDL, which no named
 statement's definition holds.
 
-*A collection a version before made out of range.* A file holds its
-schema as written; an open reads it without `Schema::new`, so a
-collection main made with an `@hnsw` `m` past 32 767 -- a graph whose
-nodes' counts of links were already cut to 16 bits -- or a `vector<N>`
-past 10^9 opens, reads and writes as it did. Every `alter collection`
-builds the schema anew, asking each field, so `add field x int` and
-`rename field` were refused naming `e`, a field neither touches. Refusing
-is right -- the collection holds what a `create` refuses, and letting an
-alter through where the field is untouched would keep it -- so the
-refusal says so (`held_over`): "`b` holds a field a version before this
-one made, which this one no longer takes (`e`: @hnsw's `m` is 2 to
-32767): drop it (`alter collection b drop field e`) and add it again
-within the range, or copy the rows into a collection made so". A field's
-own index goes only with the field (`drop index` takes one over several
-fields alone), and a drop asks nothing of the other fields; a field with
-an `m` past the bound was answering from a cut graph, and a `vector<N>`
-past 10^9 holds no vector past 2^30 dimensions, a document's 4 GiB, so its
-vectors are put again from where they came, or the rows copied
-(`a_field_made_out_of_range_before_is_named_at_any_alter`). Natively: the
-browser module asks no `m`, and a dimension past 10^9, of which no page
-holds a vector, is refused there in `Schema::new`'s words, which name the
-field and its range -- the message was 0.7 KB of the module.
+*A file's schema is held to the same ranges.* A file holds its schema as
+written, and an open reads it without `Schema::new`; so does a replica
+applying its primary's records, and a page's replica in the browser
+module its server's. Read as written, the numbers were a crafted file's to
+choose: 77 bytes declaring `create collection w (v vector<2> @hnsw)` with
+an `m` of 2^40 had the open's index keep `2m` links a node (`m0`, then
+`l0`'s growth and `Read::new`'s count of nodes times `m0`) and the process
+was killed at `Database::load`; a `vector<N>` past `MAX_DIM` reserved N
+floats for each vector an open read (`fill_in_turn`). So `Schema::decode`
+holds each field's dimension, wherever its type holds one (`[vector<N>]`
+too), to 1 to `MAX_DIM`, and its `@hnsw`'s `m` to 2 to `MAX_M`, the
+ranges `Parser::int_in` reads them in, and refuses the record as damage
+naming the field and the range (`schema::out_of_range`: "`v`: @hnsw's
+`m` is 2 to 32767, not 1099511627776"), in the browser module too. The
+test is the one `IndexKind::check` asks of every schema a write makes, so
+no open refuses what a write took. With a test each, the check held a
+field's own vector alone: SQL's `create table t (e vector(1000000001)[])`
+and `Schema::new`'s `[vector<0>]` were taken and written, and at the next
+open the file was refused as damage, by every replica and every page
+replicating it -- a server's file one DDL statement from not opening at its
+restart (the review's finding). `whatever_a_write_takes_an_open_reads_back`
+makes a schema at each edge of the ranges, a field's own vector and a
+list's at every depth, every way one is made -- `Schema::new`, FennecQL's
+`create` and `alter`, SQL's arrays, a declaration -- and reads each one
+taken back from the image as it was made; in code the write and the read
+take exactly the same fields. One test for both took 79 bytes off the
+browser module (855 790 to 855 711; gzip 78, brotli 113): the check's own
+refusal of a dimension went, and `m` is asked there for nothing. A graph
+record carries its own `m`, which sized its node's links before the open
+held its spec to the field's: it is held to the same range, the graph
+rebuilt from the documents otherwise. `tests/damage.rs` makes such files
+by hand -- `m` of 2^40, 32 768 and 1, a dimension of 2^40, 10^9 + 1 and 0,
+a sparse one and one inside a list -- each refused read into memory,
+mapped and applied by a replica, and the first killing the test binary
+with the bound taken out.
+
+That takes back a promise. A collection main made with an `m` past
+32 767 -- a graph whose nodes' counts of links were already cut to 16 bits
+-- or a `vector<N>` past 10^9 opened, read and wrote as it did, and every
+`alter collection` of it was refused saying so and the way out
+(`held_over`: drop the field and add it again within the range). Such a
+file is now refused at the open as any other file holding those numbers:
+told apart from a crafted one it cannot be, the check being the bytes', and
+fennecdb is alpha, with no file of a user's to keep
+(`a_field_made_out_of_range_before_is_refused_at_the_open`). So is a list
+of vectors past the range that a version before made -- v0.2.0's check
+held none below the list, and took SQL's `vector(1000000001)[]`, `fennec
+import --cast e=[vector<1000000001>]` and `Schema::new`'s `[vector<0>]`.
+An alter refuses only the field it changes: every field it holds was read
+within the ranges.
+
+*A vector's components.* A vector holds `f32`s, and a number within an
+`f64`'s range but past an `f32`'s -- `1e39`, `-1e39`, `3.5e38`: everything
+from 2^128 - 2^103 (3.4028235677973366e38) on, the tie between the largest
+`f32` and the next power of two going to the even one -- was read as the
+`f32`'s infinity, as a `NaN` or an infinity handed over as bits (the native
+library's and the browser module's vectors, `fennec_abi::with_vectors`) was
+kept. Stored, JSON wrote the component as `null`, and every distance from
+it was an infinity or a `NaN`. A vector field now refuses each where a
+write takes it, naming the field and the element counted from 0 -- "field
+`v`, element 3: a vector's component is a number at most 3.4028235e38
+either side of 0" -- in `Value::coerce`, which every write meets: a
+statement's literal, a parameter read from JSON or handed over as `f32`s, a
+document's object (`put t $1`), a `set`, an upsert, a named statement's
+argument, an import (which names the row and the component first,
+`fennec_import::load`); and `near` and `rerank` refuse their query vector
+so, naming its field, from a literal, a parameter or pgvector's text
+(`engine::near_vector`). A `vector<N, f16>` keeps each component as the
+nearest `f16`, and from 65 520 either side that is the `f16`'s infinity --
+65 504, the largest, is odd, so the tie halfway to the next goes up:
+refused there in its own words, where it was stored as the infinity and
+read back as `null`, as `limits.html` said. A sparse vector's weights were
+refused already (`sparse::normalise`), and are named by their index now. A
+number too small for an `f32` is the nearest one -- 0, its sign kept, at or
+under half the smallest subnormal (7×10^-46) -- as pgvector's `strtof`
+reads a vector's text, refusing an infinity ("out of range for type
+vector") and a `NaN` alone; in an `f16` field, 0 at or under about 3×10^-8,
+half its smallest subnormal.
+
+*Where the check is.* Once a vector, where the engine takes it:
+`value::held`, one pass and no branch a component. The exact pass
+(`each_held`) reads each component's bits: those under the sign order as
+the magnitudes do, a `NaN`'s above an infinity's, so taken from the bound's
+bits less one they borrow into the top bit exactly where they reach it,
+and the pass ORs them. LLVM makes the loop four lanes at a time on
+aarch64, 16 instructions for 16 components; on x86-64, inlined where a
+write and `near` call it, it left it scalar, 8 instructions a component
+(the release build's assembly). The browser module, built for size,
+vectorises nothing on its own, and the loop ran there scalar, 18 wasm
+instructions a component; written out in lanes it is 21 for four -- one
+`v128.load` each, where lanes built from the elements, as `vector::simd`
+builds them, took a load a lane. On aarch64 a pass over the components'
+top bytes comes first (`value::tops`): a top byte is the sign and the top
+seven bits of the exponent, a de-interleaving load (`ld4`) puts sixteen
+components' in a register, and a signed and an unsigned maximum keep the
+largest of a positive's and of a negative's -- 18 instructions for 64
+components, four blocks a turn, where a block a turn took 20. On x86-64
+the pass is over each component's top half (`value::halves`), in SSE2,
+which every x86-64 has and the release builds ask no more than: one AND
+clears the sign and the lower 16 bits, and a signed maximum of 16-bit
+lanes keeps the largest -- 15 instructions for 16 components, loads and
+all. Only where one reaches the bound's -- on aarch64 an `f32` from 2^127
+(1.7×10^38), every infinity and `NaN` among them, an `f16` from 2^15; on
+x86-64 an infinity or a `NaN`, exactly, and an `f16` from 65 280 -- does
+the exact pass read the whole vector; otherwise it reads the few
+components past the last sixteen.
+`held_and_its_copy_answer_as_each_component_does` holds each pass to each
+component's own answer, at every place of every length to 70 and at each
+block's ends past it.
+
+A `put` tests a vector it is given in its copy into the document
+(`engine::held_member`, `value::held_copy`): a literal's or a parameter's
+value that a vector field of its length takes (`build_docs`), and a member
+of a page of documents (`document_of`). `eval` cloned it there, a
+`memmove`, and `coerce` read it again. On aarch64 and x86-64 the copy is
+the test's pass. On aarch64 each block is loaded and stored as it came, and
+its top bytes gathered by one table lookup over its four registers (`tbl`),
+31 instructions for 64 components; loaded de-interleaved and stored so,
+LLVM made the pair a plain copy and gathered the top bytes in three
+shuffles a block, 40. On x86-64 each register is stored as it was loaded,
+19 instructions for 16 components. Elsewhere the test runs, then the copy.
+A vector the copy does not pass goes the way every value goes, which
+refuses it naming the element, and a literal or a parameter a `put`'s
+document names is read where it is, `eval`'s call spared. The browser
+module keeps the one way, `eval` and `coerce`: its bytes are what it is
+held to. A `set`, an upsert's `else set`, a named statement's argument, an
+expression's vector, an import and `near`'s and `rerank`'s query vector
+(`engine::near_vector`) take the test alone: `near`'s is 243 instructions
+on aarch64, of a request of 4.36 million, and its copy taking it would
+spare some 400 more.
+
+No pass the readers make could take it: they make a vector's `f32`s before
+any field is known -- a list read the quick way is a vector until it binds,
+a `[float]` or a json field keeps `1e39` as written and a typed array's
+`NaN` as it came -- and a `Value::Vector` has no room to say it was
+tested, so neither a parameter's bytes made `f32`s (`codec::f32s`) nor
+JSON's narrowing spares the field its test. From the document to the
+record nothing reads the components but the encoder, which cannot refuse:
+a row written over has left its indexes by then. A key looked up by a
+vector is not checked (`Value::key_as`): `=` finds a row an earlier build
+stored with an infinity, as the scan does.
+
+*What it costs.* By lldb's count of one call (`tools/instr/trace.py`,
+aarch64, a 768-dimension vector), the exact pass alone was 801 instructions
+where a write took it (`check_dim`, 21 on main, 822 with it) and 800 where
+`near` did (`near_vector`, 32, then 832); with the top bytes first it is
+249 and 243 (`check_dim` 270, `near_vector` 275). A `put` of the vector
+handed over as `f32`s copies and tests it in 422 instructions (`held_copy`)
+and no longer calls `eval`, `set_field`, `coerce_as` or `check_dim` for it,
+nor `memmove`s it: the request's own code and the system's are 37 700
+instructions, where main's are 38 122 and the exact pass's were 38 977 --
+the allocator's share apart, which follows the binary's identity
+(`benchmarks.md#instruction-counts`). A document of scalars is read where
+it is too, `eval`'s calls spared: of a `put` of three parameters, the own
+code is 114 instructions fewer. Counted a request over four identities a
+build, five runs each, every run started and ended under a 1-minute load
+between 1.9 and 2.6 (`tools/instr/compare.py`, a program running each as
+the native library does -- `fennec_abi::prepare`, `exact`, `execute` or
+`query`, `answer` -- over a database in memory): a `put` of one handed over
+as `f32`s is 55 764 instructions, 321 fewer than main's 56 084 (-0.57%,
+SE 50), where the exact pass made it 869 more (+1.55%); one read from JSON
+231 162, 170 fewer than 231 332 (-0.07%, SE 65), where it made it 938 more
+(+0.41%); a `put` of three scalars 27 388, 54 fewer than 27 442 (-0.20%,
+SE 69); a `near` over 2 000 vectors under `@hnsw(cosine)`, ten rows
+answered with their vectors, 4 363 599, 147 more than 4 363 452 (SE 96),
+where it made it 860 more (+0.02%). Of a `near` the program's own code
+moved by the test's 243 alone (lldb's count of one over 200 vectors, the
+ids alone: `near_vector` +243, `run_near` +1); the allocator's share, which
+four identities a build average but do not cancel, moves the rest either
+way. In the module `held` is 217 bytes, out of line, the two refusals 280
+(`unheld`, `query_unheld`) and their words 216 of data: 906 bytes raw, 0.3
+to 0.5 KB under gzip and brotli, in each build (`make wasm`, `wasm-lite`,
+`wasm-min`). The top bytes, the top halves and the copy are a native
+build's: the module kept the exact pass, 8 bytes smaller in each build
+since, its gzip and brotli moved by the layout alone (-132 to +120 bytes,
+under the 0.3 KB `size_report.py` reads as that).
+
+On x86-64 the release build's assembly counts it
+(`x86_64-unknown-linux-musl`, `--emit asm`, each loop's instructions times
+its turns, a 768-dimension vector). LLVM left the exact pass scalar where a
+write and `near` inline it, 8 instructions a component: `check_dim` went
+from 20 instructions on main to 6 178, and `near`'s test was 6 151. With
+the top halves first `check_dim` is 773 and `near`'s test 735; a `put`'s
+copy and test (`held_copy`) is 978, where main's clone copied the vector in
+384 turns of musl's `rep movsq` and the exact pass then took 6 158 to test
+it. The perf gate #619 proposes counts that build under callgrind: its
+`core-near` and `core-near-filtered` meet `near`'s test over 64 dimensions
+-- 4 turns of 15 instructions, where the exact pass took 512 -- and none of
+its workloads writes a vector. AVX2 would take 32 bytes a register, half
+the turns, behind a check of the CPU at the call; the release builds ask
+for SSE2 alone.
+
+*What a file holds.* A vector an earlier build stored with an infinity or a
+`NaN` -- `1e39` read as an `f32`, a binding's bits, or a hook's, whose
+changes no check reads again -- opens and reads as it did: JSON writes the
+component as `null`, another field of its row is written as ever, `=` finds
+it by a key holding it, and its vector written again puts it right
+(`a_file_holding_a_component_no_f32_holds_opens_and_reads`). `near`
+measures it as it is, which no distance pays for: its distance is what IEEE
+arithmetic makes of the infinity or the `NaN`, ordered by `total_cmp`
+(`Cand`), so the walk, the scan and a filtered search answer, the finite
+rows come in the order they would without it, and the row comes after every
+number -- a distance of `+inf`, a positive `NaN` -- or before it -- `-inf`,
+a dot product's `+inf` negated, a negative `NaN` -- never among them
+(`near_ranks_a_file_s_vector_holding_no_number_as_ieee_orders_it`). The
+sign of a `NaN` the arithmetic makes is the platform's, negative on x86-64,
+positive on aarch64; one a vector holds keeps its own through a sum and a
+product. `_score` goes out as `null`, which finds the row to write again.
+Ranking such a row last everywhere would test every distance the walk
+measures, a compare and a select each, on every query, for a row no write
+makes now. A function over vectors (`dot`, `l2_distance`) computes over
+what it is handed, a row's vector as a literal's -- it cannot tell them
+apart, and a read of a file holding one must not fail -- so `dot([1e39],
+[0])` is a `NaN` still.
+
+*In the page.* `vectorsApart` hands a JavaScript `1e39` over as the
+`f32`'s infinity, as `Float32Array.set` makes it, and the module refuses
+it as a server reading the digits does; it is not exact, so a list of
+numbers asks for it as JSON and keeps it as written. A typed array goes
+over whatever it holds, a `NaN` and an infinity among them, as a native
+binding hands its `f32`s, and the module names the element: in the JSON a
+`NaN` was `null` and the array an object, which no vector field takes. An
+array's `NaN` or infinity stays in the JSON, `null` as a server is sent
+it.
 
 *Grammar epoch 3.* A named statement is stored as its text and read again
 at every open ([named-statements.md](named-statements.md#what-is-built),
@@ -258,6 +472,102 @@ and `rerank`, `fuse k` in `Select::check` and the alter's refusal natively
 alone (98 bytes and 0.7 KB of the module). Reading `@hnsw(..)`'s number
 once before its key was 33 bytes more, a function of its own for the
 range's test, and is not done.
+
+### How deep a value nests
+
+**A value read off the bytes nests no deeper than JSON's limit.** A
+document's field in a file, a primary's record a replica applies, a page's
+image in the browser module: each value of it nests at most
+`codec::MAX_DEPTH` lists and objects, `value::MAX_JSON_DEPTH`'s 64, the
+most any write makes. A json field's value is held to it as it is written
+(`json_value`), a typed list's by its type, which `Schema::new` holds to
+the same 64 (`DataType::depth`: a list a level, a point -- `[lon, lat]`
+once read -- one, a json value all 64, so a list of json is refused at any
+depth, `[[json]]` as `[json]` was) and every reader of a type counts as it
+reads, recursing into none: the parser (`Parser::data_type`, "a list type
+nests at most 64 levels"), a declared schema's text (`declared::type_named`)
+and a file's schema (`codec::decode_type`, refused past it as damage).
+Past it the bytes are damage or a file made to hurt: `decode_value`, the
+skip and a path's read refuse them, `Error::Corrupt` naming the limit --
+"a value nests more than 64 levels deep" -- where the decoder recursed a
+level at a time and a record of 100 000 nested lists, 200 KB, overflowed
+the stack, which aborts the process: a server on a read of its file, a
+replica on its primary's record, the browser module on a page's image
+(`tests/damage.rs`: the open, the read and the apply, each refused with
+the stack whole, and each aborting the test binary with the bound taken
+out). An open reads no document ([indexes.md](indexes.md#lazy-indexes)),
+so such a record is refused where something reads it or past it: a read,
+an index's build, a vector index linked at the open -- which reads each
+document's vector past the fields before it, and refuses the open.
+
+*What it refuses that a version before opened.* Two kinds of file, both
+pathological. A field declared `[[json]]`, which a version before took
+(`[json]` alone was refused), holds a json value of up to 64 levels inside
+its two lists, 66 in all: a row whose value nests past 64 so is refused
+where it is read. And a field whose type nests more than 64 lists, which
+no version bounded: its schema's type is read past the limit
+(`decode_type`), and the file is refused at the open. No write makes
+either now (`Schema::new`), and no test file of the repository's holds one.
+
+A length counting items of several bytes -- a vector's `f32`s, a
+half-precision vector's halves, a sparse vector's weights -- is multiplied
+saturating, and `take` refuses what passes `usize` as longer than the
+bytes ("length overflow"): `n * 4` wrapped in a release build, so a vector
+declaring 2^62 `f32`s took none of the bytes after it and read as empty,
+and a half-precision one declaring 2^63 asked for its whole `Vec` before a
+byte was looked for (capacity overflow, a panic). A function of its own
+returning the refusal, checked, was 102 bytes of the module and a branch
+at each of six sites, for what `take` already refuses. A
+bool the bytes end before is refused by the skip as by the decoder:
+stepped over unseen, it left the position past the end, and a compact's
+copy of the bytes it skipped (`Schema::without_dropped`) sliced past them.
+
+*What the bound costs.* Tested in the arms of the decoder's match, as the
+first version of this change tested it, the depth was an argument live
+across every value's read, and every value paid about two instructions,
+not the list or object alone -- "some 11 to 14 instructions a list or
+object", as that version read its trace, was the whole value's cost laid
+on its three containers. So the decoder tests it where a list or an
+object is read, functions of their own (`decode_list`, `decode_object`,
+`#[inline(never)]`), `decode_at` handing it on and no more. Measured as
+the retired instructions of a probe built release with LTO
+(`/usr/bin/time -l`, 5 million loops, the start-up's taken off, three
+runs each within half an instruction) at the base, at the first version
+and here: a row of eight scalars decodes in 1 763.3, 1 779.1 and 1 763.3
+instructions, and an object holding a list of three floats, a text, an
+object of two and a 4-dimensional vector in 5 352.3, 5 394.5 and 5 359.0,
+about two a container now, the calls they are. The skip keeps the depth
+in its match: its eight skips of the row take 556.0 instructions at the
+base and 570.0 so, the object's 906.0 and 934.0 (+2.5% and +3.1%). The
+browser module grew by 1 977 bytes, 826 gzip, with every refusal the
+fuzzer and its review brought ([conventions.md](conventions.md#fuzzing);
+`make size-report BASE=f104d32e`): the codec 501 -- `decode_list` and
+`decode_object` a function each, 97 more than the arms they were -- the
+schema 632 (the ranges' refusal 274, written out rather than formatted,
+where an `i32` literal had brought `i32`'s formatting, 307 bytes), the
+store's two refusals 340 and the graph's 86.
+
+### A SQLite file's lengths
+
+**A SQLite file's lengths are held to the file before anything is
+allocated, and its walk reaches a page once.** `fennec import`'s reader
+(`crates/fennec-import/src/sqlite.rs`) reads a file it did not write: a
+cell's payload length is a varint of the file's, and `Vec::with_capacity`
+of one declaring 2^62 bytes ended the import -- capacity overflow, or the
+allocator's abort -- before the length met the file; it is held to the
+file's length now (`Pager::payload`), as a wire message's is held to
+`proto::MAX_MESSAGE` (`proto::zeroed`). The b-tree walk keeps a bit a page
+of the file (`Walk::visit`): an interior page naming itself or a page
+above it as a child walked on for ever, its stack growing by the page's
+cells each time round, and is refused at the page reached twice; a child
+past the file's pages is refused before it is read. A page's usable part
+is held to SQLite's own floor of 480 bytes (`MIN_USABLE`), which the
+overflow arithmetic (`local_len`) stands on. And a column's type is read a
+character at a time (`take_type`): a space of two bytes, U+00A0, read a
+byte at a time began a word that ended at once, and the reading never
+moved on. Each is a test of `tests/sqlite.rs` on a file made by hand, and
+the fuzzer's `sqlite` target runs the reader over every seed's mutations
+([conventions.md](conventions.md#fuzzing)).
 
 ## Profiles
 

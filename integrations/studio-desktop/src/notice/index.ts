@@ -18,7 +18,11 @@ const text = (id: string, value: string | undefined) => {
 text("title", notice.title);
 text("message", notice.message);
 text("hint", notice.hint);
-text("detail", notice.detail);
+// The detail is in a fold of its own, shown only when there is one; its
+// summary says whose words they are, the server's unless the notice says.
+document.getElementById("detail")!.textContent = notice.detail ?? "";
+document.getElementById("detail-box")!.hidden = !notice.detail;
+if (notice.detailTitle) document.getElementById("detail-title")!.textContent = notice.detailTitle;
 document.title = notice.title;
 
 const buttons = document.getElementById("buttons")!;

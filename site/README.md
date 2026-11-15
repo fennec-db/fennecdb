@@ -96,6 +96,15 @@ prompt and none of the answers beneath. A set of tabs that are not languages
 names its own `data-tabs` and `data-key` (the Quickstart's macOS and Linux
 and Docker).
 
+Every figure with a unit that README.md, the home page, benchmarks.html and
+the `vs-*` pages quote as a measurement is held the same way, to the median of
+a `(family, cell, metric)` in `crates/fennec-bench/results/<family>.tsv` (YCSB's
+cells as `ycsb:` claims, the rest as `figures.py`'s `FIGURES`). A figure with
+no recorded run behind it is held to a `hand` row, marked hand-measured with the
+commit that first wrote it, until a night measures it; the detail pages
+(`benchmarks-vector`, `-requests`, `-text`) carry a dated "measured at" note
+(`{{measured: <families>}}`) instead of a claim for each figure.
+
 Because it has the module in hand, `build.py` also checks the numbers the prose
 puts on it. The module's size is written into eight files and had drifted by
 13 KB across all of them before this existed; `CLAIMS` at the top of the
@@ -644,3 +653,9 @@ for pull requests touching the site. Measured, every page scores 100 in all
 four categories. Accessibility, best practices and SEO are held at 100,
 the same on every run; performance and the timings, measured on a shared
 runner, a little under. A floor is raised, never lowered to pass.
+
+Each page also has a byte budget: `total-byte-weight` and the script and
+stylesheet transfer sizes, 10% above what Lighthouse measured, as the
+local server sends them (brotli, the edge's encoding), so the same on every
+run. A page that grows past one fails the audit by name; measure it again
+and raise the budget in the same pull request, saying why the page grew.

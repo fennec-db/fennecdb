@@ -32,7 +32,7 @@ if command -v flutter >/dev/null 2>&1; then
   flutter test
   if [ "${1:-}" = apk ]; then
     # The plugin's jniLibs, from integrations/kotlin/build-aar.sh's build.
-    "$ROOT/integrations/dart/fennecdb_flutter/prepare.sh"
+    "$ROOT/integrations/dart/fennecdb_flutter/prepare.sh" --platforms android
     flutter create --platforms=android --project-name fennecdb_notes . >/dev/null
     rm -rf test/widget_test.dart
     flutter build apk --debug

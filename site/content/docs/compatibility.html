@@ -1,0 +1,82 @@
+<!--
+title: Compatibility and upgrades — fennecdb
+description: What fennecdb 1.x promises not to break: the file, FennecQL, the HTTP API, the C library, the JS types, the SDKs, the sync protocol, the CLI and the metrics; the upgrade order and the support window.
+-->
+
+<h1>Compatibility and upgrades</h1>
+<p class="kicker">From 1.0 a release only adds to what is listed here. A change
+that would break one of them waits for 2.0.</p>
+
+<h2>What 1.x promises</h2>
+
+<p>A 1.x release <em>grows</em> a surface: a new record kind in the file, a
+new route or optional field, a flag, a statement. It never changes or removes
+what was there. A feature is deprecated in a minor, kept for the rest of 1.x
+and removed only in 2.0. 0.x releases promise nothing.</p>
+
+<table>
+<thead><tr><th>Surface</th><th>What holds</th><th>Checked by</th></tr></thead>
+<tbody>
+<tr><td>The file</td><td>1.x opens every file written from v0.2.0 on, and a file a 1.x wrote opens in every later 1.x. Record kinds 1 to 14 and type tags 0 to 18 keep their meaning; a new one takes the next number (<a href="file-format.html">File format</a>).</td><td>Fixture files opened by every later build (a change that rewrites one says why in its pull request); the power-cut runs on Linux and Windows. A directory per release is still to come.</td></tr>
+<tr><td>FennecQL</td><td>No text that parsed reads as another statement, and none a 1.x release read is refused by a later 1.x. A stored statement keeps its meaning, so the grammar epoch stays 4.</td><td>Every pull request: each text the repository and main hold, and a list of every kind of statement, read as main reads it; and the 8 845 texts of v0.2.0's corpus as v0.2.0's own parser read them, with each later release's corpus kept beside it (<code>make fennecql-corpus</code>). A statement a named statement may hold is compared by the digest a stored statement is held to; a schema change, a listing or a <code>call</code> by the tree it reads as, a field that holds nothing left out. Where that tree changes under a 1.x release's text, the change passes only with the grammar epoch raised -- a major version -- or with a written claim that the statement means what it meant, which the check prints for review. A text that was refused may come to be accepted.</td></tr>
+<tr><td>HTTP API</td><td>It only grows: no route, parameter, field or status removed or narrowed. The OpenAPI document the server serves is held to it.</td><td>The same steps as <code>make openapi-check</code>, on every pull request.</td></tr>
+<tr><td>C library</td><td><code>fennec.h</code>'s functions and <code>FENNEC_*</code> codes keep their prototypes and values.</td><td>The library's tests check the codes; a dump of the prototypes is to come.</td></tr>
+<tr><td>JavaScript types</td><td><code>fennec.d.ts</code> and <code>client.d.ts</code> only gain declarations.</td><td><code>make types-check</code>, and the builder's and schema's golden files.</td></tr>
+<tr><td>The SDKs</td><td>Python, JavaScript, Go, .NET, Swift, Kotlin and Dart keep the public names they ship at 1.0.</td><td>Each SDK's tests; a dump per language and a run against servers of other versions are to come.</td></tr>
+<tr><td>Sync</td><td>A replica of one release syncs with a server of another.</td><td><code>make sync-scenarios-check</code>: both runners pass every scenario.</td></tr>
+<tr><td>Sealed archives and backups</td><td>A file sealed with a key opens with that key in every later 1.x, those 0.2.0 sealed among them. A release from before files were bound to themselves refuses one sealed after, so upgrade every <code>fennec</code> that restores or verifies before any archiver (<a href="replication.html#sealed">Sealed archives and backups</a>).</td><td>An archive and a backup sealed by 0.2.0's code, opened by every build; a script drives an older reader's refusal by hand.</td></tr>
+<tr><td>Command line and metrics</td><td>A flag, an exit code or a metric name is not removed or renamed.</td><td>Each command's tests; dumps of the usage text, exit codes and metric names are to come.</td></tr>
+<tr><td>Release files</td><td>The names of the archives, zips, packages and checksums.</td><td>CI checks the tarballs' and the Windows zip's names through the installers' tests; the release workflow checks each file; the rest by hand.</td></tr>
+<tr><td>Stored data in a page</td><td>What a page keeps in IndexedDB or OPFS restores in every later 1.x.</td><td>The browser tests; real Chrome, Firefox and Safari runs are to come.</td></tr>
+</tbody>
+</table>
+
+<h2>What is not frozen</h2>
+
+<ul>
+  <li>The Rust crates' API. None is published; use fennecdb through the
+    server, the shell, the C library or the browser module.</li>
+  <li>The browser module's exports, which belong to <code>@fennecdb/web</code>
+    and ship with its glue.</li>
+  <li>How a page lays out its IndexedDB or OPFS data. Only that the data
+    restores.</li>
+  <li>The studio's pages and the desktop app (beta).</li>
+</ul>
+
+<h2>Upgrading</h2>
+
+<p>Upgrade replicas before primaries, and roll forward. For a cluster the
+order is archivers, routers, nodes holding replicas or standbys, then
+primaries (<a href="sharding-reference.html">Sharding reference</a>).</p>
+
+<ul>
+  <li>A newer replica follows an older primary. This order is not yet checked in CI; a script drives it by hand for record kind 13.</li>
+  <li>An older replica that meets a record kind or type tag it does not know
+    stops and names it, for example <code>record kind 13 is not a
+    write</code>. It never reads it as something else.</li>
+  <li>Such a record appears when a feature is first used, not when it is
+    installed: the first <code>create statement</code>, a field with a second
+    index. The release notes name each, so upgrade every reader first.</li>
+  <li>An older binary refuses a file a newer one has written to. Going back is
+    safe only before a feature's first use.</li>
+</ul>
+
+<h2>The grammar epoch</h2>
+
+<p>A named statement is stored as its text with the grammar epoch it was parsed
+under. An open parses it again and, where the result differs, marks it broken
+until it is defined again. The epoch is 4, as it was in v0.2.0, and it stays 4
+through 1.x. Raising it is a major version, and its notes name the stored
+statements it breaks.</p>
+
+<h2>Support</h2>
+
+<p>The latest 1.x minor gets every fix. The previous minor gets security fixes
+for six months after the next one is released. Release candidates are tagged
+<code>1.0.0-rc.N</code>.</p>
+
+<p>Until 1.0.0 fennecdb is 0.x, an alpha: a security bug found in a 0.x release
+gets no advisory and no patch release. The fix lands on <code>main</code> and
+ships in the next release, so run the latest release. Report a vulnerability
+privately, as <a href="https://github.com/fennec-db/fennecdb/blob/main/SECURITY.md">SECURITY.md</a>
+says; a report is acknowledged within 3 working days.</p>

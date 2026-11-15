@@ -158,6 +158,11 @@ pub fn tmp(tag: &str, name: &str) -> PathBuf {
     path
 }
 
+/// How long [`Server::signal`] waits, past the process's exit, for the
+/// reader to meet the pipe's end: within it, at once but where another
+/// test's server holds the pipe open ([`Server::read_out`]).
+const READ_OUT: Duration = Duration::from_secs(10);
+
 pub struct Server {
     pub child: Child,
     pub port: u16,
@@ -204,11 +209,27 @@ pub fn start_piped(args: &[&str]) -> Server {
         .unwrap_or_else(|log| panic!("fennec-server ended before it listened:\n{log}"))
 }
 
+/// `cmd` without the token variables this process inherited
+/// (`FENNEC_*_TOKEN`): a server a test starts reads only the tokens the
+/// test gives it. One exported in a developer's shell stood in for a flag a
+/// test left out -- a short one there refused at the start for a flag the
+/// test never named.
+pub fn without_tokens(cmd: &mut Command) -> &mut Command {
+    for (name, _) in std::env::vars_os() {
+        if let Some(name) = name.to_str() {
+            if name.starts_with("FENNEC_") && name.ends_with("_TOKEN") {
+                cmd.env_remove(name);
+            }
+        }
+    }
+    cmd
+}
+
 /// [`try_start_env`] with `stdin` as the server's stdin.
 pub fn try_start_with(args: &[&str], env: &[(&str, &str)], stdin: Stdio) -> Result<Server, String> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_fennec-server"));
     own_group(&mut cmd);
-    cmd.envs(env.iter().copied());
+    without_tokens(&mut cmd).envs(env.iter().copied());
     if !args.contains(&"--http") {
         cmd.args(["--http", "127.0.0.1:0"]);
     }
@@ -287,9 +308,7 @@ impl Server {
             _ => panic!("signal {sig}: Windows has Ctrl+Break and TerminateProcess alone"),
         }
         let status = self.child.wait().expect("could not wait for the process");
-        // The reader thread takes the last lines as the pipe closes.
-        std::thread::sleep(Duration::from_millis(100));
-        let log = self.log.lock().unwrap().clone();
+        let log = self.read_out(Instant::now() + READ_OUT);
         (status.code().unwrap_or(-1), log)
     }
 
@@ -314,19 +333,26 @@ impl Server {
             }
             std::thread::sleep(Duration::from_millis(20));
         };
-        // Every line is in once the reader has met the pipe's end -- unless
-        // a server another test spawned meanwhile inherited the pipe's write
-        // end (macOS marks a new pipe close-on-exec after making it, not
-        // with it), which holds the pipe open past this one's exit: waited
-        // for within the same bound, the lines then those read so far.
+        let log = self.read_out(deadline);
+        Some((status.code().unwrap_or(-1), log))
+    }
+
+    /// Everything an ended process logged: every line is in once the
+    /// reader has met the pipe's end -- unless a server another test
+    /// spawned meanwhile inherited the pipe's write end (macOS marks a new
+    /// pipe close-on-exec after making it, not with it), which holds the
+    /// pipe open past this one's exit: waited for until `deadline`, the
+    /// lines then those read so far. A fixed 100 ms for the reader, as
+    /// `signal` gave it, was a guess, and a line not yet read made a test's
+    /// "never logged" pass without having looked.
+    fn read_out(&mut self, deadline: Instant) -> String {
         while self.reader.as_ref().is_some_and(|r| !r.is_finished()) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
         if let Some(reader) = self.reader.take_if(|r| r.is_finished()) {
             let _ = reader.join();
         }
-        let log = self.log.lock().unwrap().clone();
-        Some((status.code().unwrap_or(-1), log))
+        self.log.lock().unwrap().clone()
     }
 }
 
@@ -535,7 +561,15 @@ pub fn ended(mut child: Child, within: Duration) -> (i32, String) {
 /// `/dev/null` and stderr piped: for a start that must end of its own
 /// accord ([`ended`]).
 pub fn command(args: &[&str]) -> Child {
-    own_group(&mut Command::new(env!("CARGO_BIN_EXE_fennec-server")))
+    command_env(args, &[])
+}
+
+/// [`command`] with variables of its own in the server's environment, the
+/// token variables this process inherited taken out ([`without_tokens`]).
+pub fn command_env(args: &[&str], env: &[(&str, &str)]) -> Child {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_fennec-server"));
+    without_tokens(own_group(&mut cmd))
+        .envs(env.iter().copied())
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

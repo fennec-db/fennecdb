@@ -13,6 +13,8 @@ WASM_OUT = target/wasm32-unknown-unknown/wasm/fennec_wasm.wasm
 # code opens with comes with any set, unless SCHEMA=0: 7.5 KB brotli for a
 # page whose code declares none.
 FEATURES ?=
+# `make test`'s logs, counted for the tests that skipped themselves (tools/skips_check.py)
+SKIPS = python3 tools/skips_check.py
 SCHEMA ?= 1
 # `make studio-desktop STUDIO_SERVER=0.1.12`: the server the desktop app bundles
 # is that release's, not built from this checkout. A release's version, and
@@ -22,10 +24,10 @@ SCHEMA ?= 1
 STUDIO_SERVER ?=
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js upgrade-check openapi-lint openapi-check openapi-golden sync-scenarios-check fennecql-corpus builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-desktop studio-desktop-dist studio-desktop-test studio-highlight statements-bench gzip-bench replay-bench hook-bench instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \ lists-bench
+.PHONY: all test test-js upgrade-check openapi-lint openapi-check openapi-golden sync-scenarios-check fennecql-corpus fuzz fuzz-smoke fuzz-toolchain fuzz-seeds builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test browser-test studio-desktop studio-desktop-dist studio-desktop-test studio-highlight statements-bench gzip-bench replay-bench hook-bench perf-gate instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench lists-bench stress-test
 	python-test go-test dotnet-test languages-test examples-test recipes-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench entry-bench \
 	compare beir import-test follow-bench \
-	pgvector-up pgvector-down pgvector-tls docker docker-run docker-compact docker-down grafana-check deploy-check drill memory clean \
+	pgvector-up pgvector-down pgvector-tls docker docker-run docker-compact docker-down grafana-check deploy-check drill chaos memory clean \
 	site site-serve site-deploy packaging-test
 
 all: test wasm
@@ -41,20 +43,21 @@ all: test wasm
 ## The sync scenarios' reports go first, so a runner that did not run this
 ## time leaves none for sync-scenarios-check to find.
 test:
-	@rm -rf target/sync-scenarios
-	$(CARGO) test --workspace --exclude fennec-bench --lib --bins --tests
-	$(CARGO) test --workspace --exclude fennec-bench --doc
-	$(CARGO) test -p fennec-core --no-default-features --features std-fs,language --lib --test features
-	$(CARGO) test -p fennec-core --no-default-features --features std-fs --lib --test features
+	@rm -rf target/sync-scenarios target/skips
+	$(SKIPS) tee target/skips/rust-1.log -- $(CARGO) test --workspace --exclude fennec-bench --lib --bins --tests
+	$(SKIPS) tee target/skips/rust-2.log -- $(CARGO) test --workspace --exclude fennec-bench --doc
+	$(SKIPS) tee target/skips/rust-3.log -- $(CARGO) test -p fennec-core --no-default-features --features std-fs,language --lib --test features
+	$(SKIPS) tee target/skips/rust-4.log -- $(CARGO) test -p fennec-core --no-default-features --features std-fs --lib --test features
 	@$(MAKE) --no-print-directory test-js
 	@if [ -f web/fennec.wasm ] && command -v node >/dev/null 2>&1; then $(MAKE) --no-print-directory sync-scenarios-check; fi
+	@python3 tools/skips_check.py check target/skips/*.log
 
 ## JS tests. node's own runner; no dependencies. The spec reporter ends a
 ## failing run with each failing test's name and assertion: Node 22's
 ## default away from a terminal is TAP, a failure among a thousand lines.
 ##   fennec.test.js      query builder (end-to-end too when wasm is present)
 ##   fennec.sync.test.js sync layer -- against a real `fennec-server --http` server;
-##                     skipped when `web/fennec.wasm` or the binary is missing
+##                     skipped when `web/fennec.wasm` or the binary is missing (a failure under CI)
 ##   fennec.sync.scenarios.test.js  integrations/sync-scenarios.json against
 ##                     FennecSync, over a scripted transport
 ##   fennec.persist.test.js  incremental persistence, over an in-memory IndexedDB
@@ -81,7 +84,7 @@ test:
 ##                     `web/fennec.wasm` or the binary is missing
 test-js:
 	@if command -v node >/dev/null 2>&1; then \
-		node --test --test-reporter=spec web/fennec.test.js web/fennec.sync.test.js web/fennec.sync.scenarios.test.js web/fennec.persist.test.js web/fennec.file.test.js web/fennec.schema.test.js web/fennec.client.test.js web/fennec.replicas.test.js web/fennec.https.test.js studio/test/statements.test.mjs studio/test/transport.test.mjs; \
+		$(SKIPS) tee target/skips/js.log -- node --test --test-reporter=spec web/fennec.test.js web/fennec.sync.test.js web/fennec.sync.scenarios.test.js web/fennec.persist.test.js web/fennec.file.test.js web/fennec.schema.test.js web/fennec.client.test.js web/fennec.replicas.test.js web/fennec.https.test.js studio/test/statements.test.mjs studio/test/transport.test.mjs; \
 	else \
 		echo "node not found -- JS tests skipped"; \
 	fi
@@ -327,6 +330,20 @@ else
 	  $(if $(ONLY),--only '$(ONLY)') $(if $(OUT),--out '$(OUT)')
 endif
 
+## This tree against BASE's (origin/main) in instructions and heap bytes an
+## op under callgrind: what CI's `perf (instructions)` job holds every pull
+## request to. Each workload of crates/fennec-http/examples/gate.rs, the one
+## program built on both sides, RUNS (5) times a build, JOBS at a time;
+## a median 1% or more above the base's, in instructions or bytes, fails
+## unless the pull request adds a PERF_ACCEPTED entry (tools/perf_gate.py). HEAD=<ref> replays two
+## commits; TARGET=x86_64-unknown-linux-musl builds as CI does. Linux with
+## valgrind: on macOS, in Docker. Scratch in target/perf-gate, BASE's
+## worktree kept with KEEP=1 (docs/design/benchmarks.md#the-gate)
+perf-gate:
+	python3 tools/perf_gate.py run --cargo '$(CARGO)' --base '$(or $(BASE),origin/main)' \
+	  $(if $(HEAD),--head '$(HEAD)') $(if $(TARGET),--target '$(TARGET)') --runs $(or $(RUNS),5) \
+	  $(if $(JOBS),--jobs $(JOBS)) $(if $(KEEP),--keep)
+
 ## This tree's build against BASE's (origin/main) in instructions an op, on
 ## macOS: the allocator there takes paths a binary's identity picks, moving a
 ## request by hundreds of instructions with the code unchanged, so each build
@@ -341,7 +358,10 @@ endif
 ## MODES=get,row,patch,patch-row,if-match: a row by id read and written
 ## over REST, by a filter and by its path, and under `If-Match`;
 ## MODES=scoped,token,get: that read under a scoped token, one of 1 000
-## subjects in turn, under the server's token and under none);
+## subjects in turn, under the server's token and under none;
+## EXAMPLE=served MODES=file,node,put,pipelined: a request through a served
+## connection, read off a socket and answered on it, of a file's server and
+## a tenant node, a row written by its path, 16 requests written at once);
 ## TRACE=fennec_http::handle also counts one call (HIT, the 30th) by
 ## function under lldb, the program's own code apart from the allocator's.
 ## UUIDS=0 for plain pairs. Each run once the 1-minute load is under QUIET
@@ -360,9 +380,10 @@ instr-compare:
 
 ## The browser module's size with every feature, with none, with each alone
 ## and with every one but each: raw, gzip -9 and brotli -q 11, in KB, and
-## what each adds and saves. ONLY="geo collate" for those alone.
+## what each adds and saves. ONLY="geo collate" for those alone; JSON=1
+## also writes crates/fennec-wasm/sizes.json, which site/build.py holds the docs to.
 wasm-sizes:
-	@ONLY="$(ONLY)" python3 crates/fennec-wasm/sizes.py
+	@ONLY="$(ONLY)" python3 crates/fennec-wasm/sizes.py $(if $(JSON),--json)
 
 ## How fast the browser module is, in Node: an HNSW build, `near`, a filter
 ## and an order, `match`, a page of vectors as JSON. A list of .wasm files
@@ -388,13 +409,70 @@ size-report:
 	@python3 crates/fennec-wasm/size_report.py $(BASE) $(if $(WHY),--why '$(WHY)') $(if $(BIN),--bin $(BIN)) $(if $(FEATURES),--features '$(if $(filter none,$(FEATURES)),,$(FEATURES))')
 
 ## Every FennecQL text the repository holds -- the docs' blocks and inline
-## code, the golden files, the sources' strings -- parsed by this tree and by
-## BASE's, both `parse` and `parse_exact` (tools/fennecql_corpus.py, the
-## example crates/fennec-ql/examples/corpus.rs): fails where a text that
-## parsed reads as another tree or is refused, the rule a grammar change
-## keeps (docs/design/fennecql.md). make fennecql-corpus BASE=origin/main
+## code, the golden files, the sources' strings, the hand-written list --
+## this tree's and BASE's, read by both trees with `parse`, `parse_exact`
+## and `stored_definition`, a statement a named statement may hold by its
+## canonical digest (tools/fennecql_corpus.py, the example
+## crates/fennec-ql/examples/corpus.rs): fails where a text that parsed
+## reads as another statement, is refused or panics, printing what changed
+## (docs/design/fennecql.md#the-corpus). BASE=v0.2.0 holds this tree to the
+## texts frozen at the tag, as its own parser read them
+## (integrations/fennecql-corpus/v0.2.0.jsonl), BASE=frozen to every frozen
+## corpus; FREEZE=<tag> adds a tag's from its tree and the earlier frozen
+## corpora's texts, never replacing one. A failure writes every entry to
+## paste beside the builds. CI runs BASE=origin/main and BASE=frozen.
+## make fennecql-corpus BASE=origin/main
 fennecql-corpus:
-	@python3 tools/fennecql_corpus.py $(or $(BASE),origin/main)
+	@python3 tools/fennecql_corpus.py $(if $(FREEZE),--freeze $(FREEZE),$(if $(filter frozen,$(BASE)),--frozen,$(or $(BASE),origin/main)))
+
+# The fuzzer's nightly, a date: AddressSanitizer is a nightly flag, and only
+# the fuzz targets and the jobs running them take one (ci.yml's fuzz-smoke,
+# fuzz.yml). Moved forward in a pull request of its own.
+FUZZ_NIGHTLY ?= nightly-2026-11-01
+FUZZ_SECONDS ?=
+# Flags for each run, CI's: `--private --corpus none` (a finding says its
+# recipe alone), the weekly run's `--seed`.
+FUZZ_FLAGS ?=
+ASAN ?= 0
+FUZZ_HOST = $(shell $(CARGO) -vV | sed -n 's/^host: //p')
+# AddressSanitizer, and LLVM's coverage counters on every edge, which the
+# fuzzer reads to keep the inputs reaching new ones (crates/fennec-fuzz/src/cover.rs).
+FUZZ_RUSTFLAGS = -Zsanitizer=address -Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=3 -Cllvm-args=-sanitizer-coverage-inline-8bit-counters
+FUZZ_BIN = $(if $(filter 1,$(ASAN)),target/$(FUZZ_HOST)/fuzz/fennec-fuzz,target/fuzz/fennec-fuzz)
+
+## The fuzzer (crates/fennec-fuzz, docs/design/conventions.md#fuzzing): its
+## targets listed; TARGET=<name> runs one -- FUZZ_SECONDS long, else until it
+## finds something -- its corpus kept in target/fuzz/corpus/<name>, what it
+## finds in target/fuzz/crashes (`fennec-fuzz replay <name> <file>` runs it
+## again, `fennec-fuzz reproduce <name> <recipe>` makes a CI finding's input
+## from the recipe it said). ASAN=1 builds it with AddressSanitizer and the
+## coverage counters that guide it, on FUZZ_NIGHTLY (`make fuzz-toolchain`);
+## without, a plain build mutates its seeds unguided
+fuzz: fuzz-seeds
+ifeq ($(ASAN),1)
+	RUSTFLAGS="$(FUZZ_RUSTFLAGS)" $(CARGO) +$(FUZZ_NIGHTLY) build -p fennec-fuzz --profile fuzz --target $(FUZZ_HOST)
+else
+	$(CARGO) build -p fennec-fuzz --profile fuzz
+endif
+	@if [ -z "$(TARGET)" ]; then $(FUZZ_BIN) list; else $(FUZZ_BIN) run $(TARGET) $(if $(FUZZ_SECONDS),--seconds $(FUZZ_SECONDS)) $(FUZZ_FLAGS); fi
+
+## Every target of the fuzzer for FUZZ_SECONDS (30) under AddressSanitizer,
+## guided by coverage: CI's fuzz-smoke job. SMOKE_ASAN=0 runs a plain build
+SMOKE_ASAN ?= 1
+fuzz-smoke:
+	@$(MAKE) --no-print-directory fuzz ASAN=$(SMOKE_ASAN)
+	@bin=$(if $(filter 1,$(SMOKE_ASAN)),target/$(FUZZ_HOST)/fuzz/fennec-fuzz,target/fuzz/fennec-fuzz); \
+	for t in $$($$bin names); do $$bin run $$t --seconds $(or $(FUZZ_SECONDS),30) $(FUZZ_FLAGS) || exit 1; done
+
+## FUZZ_NIGHTLY, the one nightly the fuzzer is built with
+fuzz-toolchain:
+	rustup toolchain install $(FUZZ_NIGHTLY) --profile minimal
+
+## The fuzzer's seeds the repository holds as text: every FennecQL text of
+## tools/fennecql_corpus.py, a JSON line each
+fuzz-seeds:
+	@mkdir -p target/fuzz/seeds
+	@python3 tools/fennecql_corpus.py --list > target/fuzz/seeds/fennecql.jsonl
 
 ## PyPI's fennecdb and npm's @fennecdb/web and @fennecdb/react as a release
 ## publishes them, installed into a project and a venv of their own and
@@ -408,6 +486,17 @@ packages: wasm
 ## One version wherever a release reads it: make version V=0.1.5
 version:
 	@python3 tools/version.py $(or $(V),$(error V=<version> is required))
+
+## A page's database kept in real browsers (web/browser/run.mjs): persist,
+## restore and openFile against the engine's own IndexedDB, WebCrypto and
+## origin private file system, the page reloaded in the middle of a
+## persist's transaction and at each step of a file's flush, a quota
+## passed. BROWSERS="chrome firefox safari" (Chrome alone by default):
+## Chrome and Firefox through puppeteer-core (CHROME_PATH, FIREFOX_PATH),
+## Safari through safaridriver once `sudo safaridriver --enable` allowed it
+browser-test: wasm
+	@if [ "$(BROWSERS)" != safari ]; then cd web/browser && npm ci --no-audit --no-fund --loglevel=error; fi
+	node web/browser/run.mjs $(or $(BROWSERS),chrome)
 
 ## What keeping a database costs a page: IndexedDB (persist) against an
 ## OPFS file (openFile), 32 MB, in a worker of headless Chrome --
@@ -822,11 +911,17 @@ entry-bench:
 collate-bench:
 	$(CARGO) run --release -p fennec-bench --bin collate
 
-## Verifies the import's PostgreSQL arm against a live server, TLS on in it
+## Verifies the import's PostgreSQL arm and `--follow` against a live server,
+## TLS on in it: every `#[ignore]`d test of fennec-import's tests/pg.rs and
+## tests/follow.rs and of fennec-server's tests/follow.rs. CI's `postgres`
+## job runs its two cargo lines against a service container started as
+## `pgvector-up` starts this server, and fails unless each test ran and
+## passed. A failure prints the end of the server's log before it goes.
 import-test: pgvector-up
 	@$(MAKE) pgvector-tls && $(CARGO) test -p fennec-import --test all -- --ignored pg:: follow:: && \
 	  $(CARGO) test -p fennec-server --test all -- --ignored follow::; \
-	  status=$$?; $(MAKE) pgvector-down; exit $$status
+	  status=$$?; [ $$status -eq 0 ] || docker logs --tail 100 fennecbench-pg; \
+	  $(MAKE) pgvector-down; exit $$status
 
 ## `fennec import --follow` against a live server: commit-to-visible latency,
 ## how fast a burst drains, how long a cut stream takes to come back.
@@ -834,9 +929,6 @@ import-test: pgvector-up
 follow-bench:
 	$(CARGO) run --release -p fennec-import --example follow -- 10000 384
 
-## Starts PostgreSQL with pgvector for the comparison. `wal_level=logical`
-## is for `fennec import --follow` and its tests; it changes what is logged
-## for updates and deletes, not how the compared reads run.
 ## `fennec-server --follow` serving what it follows: commit to a subscriber of
 ## the collection, and a server killed while the table is written to,
 ## started again. Needs `make pgvector-up` first.
@@ -844,26 +936,49 @@ mirror-bench:
 	$(CARGO) build --release -p fennec-server
 	$(CARGO) run --release -p fennec-server --example mirror -- 10000
 
+## PostgreSQL 17 with pgvector 0.8.7, by the digest of the tag's index
+## (linux/amd64 and linux/arm64): ci.yml's `postgres` service names it too,
+## so CI and a developer's run start the same server, and a new one is a
+## change to both made on purpose. `make import-test
+## PG_IMAGE=pgvector/pgvector:pg18` tries another.
+PG_IMAGE ?= pgvector/pgvector:0.8.7-pg17@sha256:b513c48566e4777cd3370451400000c78eda6a08131d68f4c31d4a76f27bd8fd
+
+## Starts PostgreSQL with pgvector for the comparison. `wal_level=logical`
+## is for `fennec import --follow` and its tests; it changes what is logged
+## for updates and deletes, not how the compared reads run.
 ## --shm-size: a parallel HNSW build holds its graph in dynamic shared
 ## memory, up to maintenance_work_mem, which scale-bench sets to 1 800 MB so
-## that its graphs build in memory
+## that its graphs build in memory.
+## Ready once it answers over TCP, asked 120 times a second apart at most:
+## the image first runs a server of its own on the socket alone, for its
+## setup, and stops it, so a `pg_isready` over the socket could take that
+## one for this.
 pgvector-up:
 	docker run -d --name fennecbench-pg --rm \
 	  -e POSTGRES_PASSWORD=fennec -e POSTGRES_DB=fennecbench \
-	  -p 55432:5432 --shm-size=2g pgvector/pgvector:pg17 \
+	  -p 55432:5432 --shm-size=2g $(PG_IMAGE) \
 	  -c shared_buffers=1GB -c maintenance_work_mem=1GB \
 	  -c max_parallel_workers_per_gather=0 -c wal_level=logical
 	@echo "waiting for it to become ready..."
-	@until docker exec fennecbench-pg pg_isready -U postgres -d fennecbench >/dev/null 2>&1; do sleep 1; done
+	@n=0; until docker exec fennecbench-pg pg_isready -h 127.0.0.1 -U postgres -d fennecbench >/dev/null 2>&1; do \
+	  n=$$((n + 1)); if [ $$n -ge 120 ]; then docker logs fennecbench-pg; echo "not ready after $$n tries"; exit 1; fi; \
+	  sleep 1; done
 	@echo "postgres://postgres:fennec@127.0.0.1:55432/fennecbench"
 
+## Removes the server with its data: the image keeps PostgreSQL's data
+## directory in an anonymous volume, which `--rm` removes with a container
+## that exits, not with one `docker rm` takes running -- without `-v` one
+## was left behind at every up and down, five of them 2.7 GB on one machine.
 pgvector-down:
-	-docker rm -f fennecbench-pg
+	-docker rm -f -v fennecbench-pg
 
 ## TLS on in the server `make pgvector-up` started (PG=<container> another),
 ## with fennec-wire's test certificates -- a CA of their own, `localhost` --
 ## for `make import-test`'s TLS test. Off in `pgvector-up` itself: a libpq
 ## client's `prefer` would take it, and the benchmarks' figures with it.
+## The reload is a signal the server takes in its own time, so this ends
+## once a session over TCP is encrypted: a certificate the server refused
+## fails here, not in the test.
 PG ?= fennecbench-pg
 pgvector-tls:
 	@docker cp crates/fennec-wire/tests/certs/server.pem $(PG):/var/lib/postgresql/server.pem
@@ -873,15 +988,19 @@ pgvector-tls:
 	  -c "alter system set ssl_cert_file = '/var/lib/postgresql/server.pem'" \
 	  -c "alter system set ssl_key_file = '/var/lib/postgresql/server.key'" \
 	  -c "alter system set ssl = on" -c "select pg_reload_conf()" >/dev/null
+	@n=0; until docker exec $(PG) psql -qAtX "host=127.0.0.1 sslmode=require user=postgres dbname=postgres" -c "select 1" >/dev/null 2>&1; do \
+	  n=$$((n + 1)); if [ $$n -ge 30 ]; then docker logs --tail 20 $(PG); echo "TLS not on in $(PG) after $$n tries"; exit 1; fi; \
+	  sleep 1; done
 
 ## Builds the server image (static with musl, ~7 MB)
 docker:
 	docker build -t fennecdb .
 
-## Starts the container: make docker-run TOKEN=secret
+## Starts the container: make docker-run TOKEN=<32 bytes or more>, such as
+## openssl rand -hex 32 makes: the server listens on 0.0.0.0 inside it.
 ## The memory limit must be at least 3x the data file (compact peak).
 docker-run: docker
-	@test -n "$(TOKEN)" || (echo "token required: make docker-run TOKEN=secret"; exit 1)
+	@test -n "$(TOKEN)" || (echo 'token required, 32 bytes or more: make docker-run TOKEN=$$(openssl rand -hex 32)'; exit 1)
 	docker run -d --name fennecdb --restart unless-stopped \
 	  -p 127.0.0.1:8080:8080 -v fennecdata:/data \
 	  -e FENNEC_HTTP_TOKEN=$(TOKEN) --memory 1g --memory-swap 1g fennecdb
@@ -890,7 +1009,7 @@ docker-run: docker
 ## Compacts the running container's file: what deletes and rewrites left
 ## dead goes, and every graph holding tombstones is built again.
 docker-compact:
-	@test -n "$(TOKEN)" || (echo "token required: make docker-compact TOKEN=secret"; exit 1)
+	@test -n "$(TOKEN)" || (echo "token required: make docker-compact TOKEN=<the container's token>"; exit 1)
 	curl -fsS -H 'Authorization: Bearer $(TOKEN)' -d '{"query": "compact"}' \
 	  http://127.0.0.1:8080/query
 
@@ -906,14 +1025,15 @@ docker-down:
 ## Grafana's /api/ds/query, through the Infinity data source and through the
 ## plugin, and held to fennec-server's own answer, the plugin's alert rule
 ## evaluated; then down with its volumes, whatever happened
-GRAFANA_CHECK = FENNEC_HTTP_TOKEN=grafana-check FENNEC_METRICS_TOKEN=grafana-check-scrape \
+GRAFANA_CHECK = FENNEC_HTTP_TOKEN=grafana-check-data-token-of-32-bytes \
+	FENNEC_METRICS_TOKEN=grafana-check-scrape-token-of-32-bytes \
 	FENNEC_JWT_SECRET=grafana-check-secret-of-32-bytes-at-least \
 	FENNEC_PORT=0 GRAFANA_PORT=0 PROMETHEUS_PORT=0 \
 	docker compose -p fennec-grafana-check-$$$$ -f monitoring/docker-compose.yml
 grafana-check:
 	@$(GRAFANA_CHECK) up -d --build && \
 	  GRAFANA_URL=http://$$($(GRAFANA_CHECK) port grafana 3000) \
-	  FENNEC_URL=http://$$($(GRAFANA_CHECK) port fennecdb 8080) FENNEC_HTTP_TOKEN=grafana-check \
+	  FENNEC_URL=http://$$($(GRAFANA_CHECK) port fennecdb 8080) FENNEC_HTTP_TOKEN=grafana-check-data-token-of-32-bytes \
 	    sh -c 'node monitoring/grafana/check.mjs && node monitoring/grafana/check-plugin.mjs'; \
 	  status=$$?; \
 	  if [ $$status -ne 0 ]; then $(GRAFANA_CHECK) logs --no-color --tail 60; fi; \
@@ -947,12 +1067,39 @@ deploy-check:
 ## behind the global router and its standby; writers record every write
 ## answered while a node is killed and brought back, a region's router is
 ## killed and its standby promoted, the global routers are cut off, and a
-## tenant is restored from its archive; every answered write is read back
-## (lost = 0) and the times printed. No fixed port, everything removed after.
+## tenant is restored from its archive to a moment (the rows answered by then,
+## and the one after them only where its answer never came); every answered
+## write is read back (lost = 0) and the times printed. No fixed port,
+## everything removed after. Its judgments' tests run first, with no Docker.
 ## DRILL_LEASE, DRILL_TENANTS, DRILL_RATE, DRILL_KEEP=1, DRILL_JSON=<path>
 drill:
+	python3 deploy/drill/test_drill.py
 	docker build -f deploy/Dockerfile --target kit -t fennec-kit .
 	python3 deploy/drill/drill.py
+
+## The drill's seeded faults (Docker): a region of three nodes, its router
+## and standby, every container held to --cpus and --memory, clients writing
+## and reading registers and appending rows while a schedule drawn from each
+## seed kills and pauses nodes, delays, drops and cuts links between a router
+## and a node and between two nodes (tc netem), kills a node again mid
+## catch-up, fails a move's source over and jumps a node's clock (a test
+## build's, `test-clock`), each fault drawn again until it lands. After each
+## fault heals every replica's rows are held to its primary's; at the end the
+## history is held to the YCSB register checker, every write and append
+## answered found -- but one a failover lost while its replica was behind,
+## the window the design names, counted -- and no tenant written by two
+## primaries at once (deploy/drill/oracle.py). The driver runs in a container
+## too, removed with everything else however the run ends.
+## SEEDS (3) seeds from SEED0 (1), CHAOS_MINUTES (3) of faults each, at a
+## lease of CHAOS_LEASE (5) s; CHAOS_OUT=<dir> keeps each seed's result, and a
+## failure's history and logs; CHAOS_KEEP=1 leaves a failed seed's containers
+SEEDS ?= 3
+SEED0 ?= 1
+CHAOS_MINUTES ?= 3
+chaos:
+	python3 deploy/drill/test_oracle.py
+	docker build -f deploy/Dockerfile --target chaos -t fennec-kit-chaos .
+	SEEDS=$(SEEDS) SEED0=$(SEED0) CHAOS_MINUTES=$(CHAOS_MINUTES) python3 deploy/drill/chaos.py
 
 ## A file under updates, compacted on its own or not: YCSB's 1 KB records,
 ## a field updated at a time while a thread reads whole records, the file's
@@ -1208,7 +1355,9 @@ packaging-test:
 ## built before them stop in words at this tree's first record, and this
 ## tree's replica follows a primary from before and its server opens that
 ## primary's file; the cases above run CK_BASE's binaries in this tree's
-## place, a binary from before stopping at the checksum first.
+## place, a binary from before stopping at the checksum first. Then a sealed
+## frame bound to its file: CK_BASE's `fennec restore` and `verify` refuse a
+## backup and an archive this tree sealed, which this tree's read.
 ## Builds BASE -- 12d6f8db^, the last main before the kind, unless given --
 ## OP3_BASE -- b73ce4ca, the last before op 3 -- OP4_BASE -- cd907d6c, the
 ## last before op 4 -- OP6_BASE -- 6fb28002, the last before op 6 -- and
@@ -1227,3 +1376,11 @@ clean:
 	$(CARGO) clean
 	rm -f web/fennec.wasm web/fennec-lite.wasm web/fennec-min.wasm
 	rm -rf web/collate site/dist
+
+## The Rust and JS suites ITER (20) times in `docker run --cpus=3` beside BUSY
+## (3) busy loops, GitHub's three-core runner, the way a flake reproduces
+## (docs/design/conventions.md#reruns). CRATE=fennec-ql: that crate's tests
+## alone; TIMEOUT seconds (14400), CPUS, IMAGE (the pinned rust image) and
+## LOGDIR (under /tmp) as tools/stress-test.sh says. Needs Docker.
+stress-test:
+	ITER="$(ITER)" CRATE="$(CRATE)" TIMEOUT="$(TIMEOUT)" BUSY="$(BUSY)" CPUS="$(CPUS)" IMAGE="$(IMAGE)" LOGDIR="$(LOGDIR)" ./tools/stress-test.sh

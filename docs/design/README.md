@@ -9,7 +9,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [crates.md](crates.md) -- zero dependencies, limits that error rather than truncate, and the build profiles
 - [storage.md](storage.md) -- the mapped file, the handover of writes to it, a block's spills, compaction and the file format
 - [engine.md](engine.md) -- the single writer, a block's documents built beside the readers, long reads pinned, and a block as one record
-- [durability.md](durability.md) -- a storage error stopping writes, buffered writes written behind the lock, the sync log, the power cut that holds it on Linux, and the one shutdown
+- [durability.md](durability.md) -- a storage error stopping writes, buffered writes written behind the lock, the sync log, the power cuts that hold it on Linux -- `--sync always`, `--sync 250`'s window and a node with its standby -- and the one shutdown
 - [replication.md](replication.md) -- replication, a node's tenants archived over one stream, `/_changes`, `Fennec-After`, sealed archives and `--follow`
 - [tenants.md](tenants.md) -- scaling out by tenant, the router's directory, moves, failovers and leases, and replicas tried again
 - [regions.md](regions.md) -- regions and zones, a region's own directory, and the global entry
@@ -18,7 +18,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [quotas.md](quotas.md) -- a tenant's quotas, how the sync meets them, a scoped caller's request rate, and the wait every 503 names
 - [http.md](http.md) -- the studio, MCP, open servers, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, row tags and conditional writes, compressed answers, connections no thread is made for, chunked bodies, TLS served and HTTPS dialed, the OpenAPI document and its compatibility
 - [hnsw.md](hnsw.md) -- the graph as derived data, its records, its restore and open, its linking, and vectors written again
-- [benchmarks.md](benchmarks.md) -- what `make scale-bench` and `make ycsb` measure and how, and how two builds' instruction counts are read on macOS
+- [benchmarks.md](benchmarks.md) -- what `make scale-bench` and `make ycsb` measure and how, how two builds' instruction counts are read on macOS, and the gate every pull request's instructions and heap bytes are held to, its workloads and the claims they stand for
 - [writes.md](writes.md) -- `insert` and `put`, arithmetic in `set`, `require`, upserts, picked writes, an `order` by expression and `returning`
 - [fennecql.md](fennecql.md) -- SQL's spellings, its joins, subqueries and schema, parameters for counts, inner `get`s, `alter`, json paths, the shell's reading and declared schemas
 - [waits.md](waits.md) -- `Fennec-Wait`, the writes that wake held ones, the bids that settle a row, and the leader's looks
@@ -30,15 +30,17 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [lookup-and-aggregates.md](lookup-and-aggregates.md) -- `lookup`, `required`, keys of several fields, folded levels, select-list expressions, HyperLogLog and time zones
 - [native-and-sync.md](native-and-sync.md) -- `fennec-ffi`, the sans-IO sync core and the scenario file both sync runners are held to
 - [router.md](router.md) -- the router's CORS, its pooled connections, the cuts a failover makes, the leading router's and its followers', and queries across tenants
-- [integrations.md](integrations.md) -- `integrations/`, the Grafana data source, the desktop app, the `deploy/` kit, the install channels (Homebrew, `install.sh`, `.deb` and `.rpm`) and the workflows' pinned actions, permissions and secrets
+- [integrations.md](integrations.md) -- `integrations/`, the Grafana data source, the desktop app, the `deploy/` kit and its chaos drill, the install channels (Homebrew, `install.sh`, `.deb` and `.rpm`), the image's user: a server started as root hands its volume over and drops root before it touches a file, and the workflows' pinned actions, permissions and secrets
 
 The conventions hold no invariant of the code, and are listed apart:
 
-- [conventions.md](conventions.md) -- where tests live and which run alone, a test that fails on one run, Chrome's launch, the clock, ports, and the docs a change a user meets owes
+- [compatibility.md](compatibility.md) -- what 1.x freezes (the file, FennecQL, the API, `fennec.h`, the JS types, the SDKs, the sync protocol, CLI flags, metrics, release assets), the check that holds each, the upgrade order, the grammar epoch and the support window
+- [conventions.md](conventions.md) -- where tests live and which run alone, a test that fails on one run, Chrome's launch, the clock, ports, the docs a change a user meets owes, and how a secret is compared and a primitive held to its vectors
 
 A proposal holds no invariant until it is built, and is listed apart:
 
 - [named-statements.md](named-statements.md) -- FennecQL defined once in a database and called by name with typed arguments and an authority of its own: its storage, its authority model against `SECURITY DEFINER`'s, its surfaces -- HTTP, the SDKs, MCP's tools, the studio and the shell -- and the slices that built it; and write-bound statements (F2), run in the block of the write that woke them, built in six slices; and scheduled statements (F3), run by the primary that may write the file, once a slot, the run and its slot's mark one block, built in six slices; and webhook consumers (F4), a statement taking another service's signed events at `/_hooks/<name>`, verified before anything is read and taken once by the event's key, its writes and the key one block, built in six slices
+- [tenants.md](tenants.md#a-detached-copy-taken-back-by-its-identity) -- a replica's identity kept in the directory, so a copy detached as its node was failed over is taken back or followed over by it, and a region of three nodes failed over twice gives every tenant its copy back with no operator (proposed for 1.0)
 - [windows.md](windows.md) -- what Windows still lacks after its single writer (#453), designed in seven decisions and five slices, the first two built: the file mapped in views laid end to end in a placeholder, fennec-core's suite on Windows CI (slice 2), a file a view still maps replaced by std's rename, which no view refuses as the experiment on CI found (slice 1), a rename made durable on NTFS and one another handle refuses tried again (slice 1), every console event the one shutdown, the server's tests on Windows CI, and a release installed by `install.ps1` from a checksummed zip
 
 ## The original order
@@ -124,7 +126,7 @@ A proposal holds no invariant until it is built, and is listed apart:
 79. [The browser module holds one copy of a generic where it can](browser-module.md#one-copy-of-a-generic)
 80. [The core lost what it held twice or for one use](browser-module.md#size-cuts)
 81. [A vector goes out as its `f32`s](vector-search.md#vectors-out)
-82. [A number is read three ways, each exact](vector-search.md#numbers-in)
+82. [A number is read four ways, each exact, or refused past an `f64`'s range](vector-search.md#numbers-in)
 83. [A vector parameter goes into the module as `f32`s](vector-search.md#vector-parameters)
 84. [A quantized index holds codes, and `near` orders by the documents' vectors](vector-search.md#quantized-indexes)
 85. [A bit code is a residual's signs, from a centre the index learned](vector-search.md#bit-codes)
@@ -197,6 +199,9 @@ A proposal holds no invariant until it is built, and is listed apart:
 152. [The OpenAPI document is held to the routes](http.md#openapi) (added after the move, under *The HTTP server*)
 153. [A client sends a request again only where it cannot have run or may run twice, and bounds every request in time](js-client.md#retries) (added after the move, under *The JS client and Cloudflare*)
 154. [A scoped caller is held to `--request-rate` before anything runs](quotas.md#a-callers-request-rate) (added after the move, under *Quotas and retries*)
+155. [Started as root, a server becomes its user before it touches a file](integrations.md#the-images-user) (added after the move, under *Integrations and deploy*)
 155. [An answer past `--http-gzip` goes as gzip where its client takes it, never one carrying a tag](http.md#compressed-answers) (added after the move, under *The HTTP server*)
 156. [A server that asks for no token answers only under this machine's name, and a page only of its own origin or `--http-cors`'s](http.md#open-servers) (added after the move, under *Access*)
-157. [A workflow runs actions pinned by commit, and a job that writes builds nothing](integrations.md#workflows) (added after the move, under *Integrations and deploy*)
+157. [`make chaos` breaks a region by seed, one fault at a time, and holds its history to an oracle](integrations.md#the-chaos-drill) (added after the move, under *Integrations and deploy*)
+158. [A pull request is held to its base in instructions and heap bytes an op](benchmarks.md#the-gate) (added after the move, under *Benchmarks*)
+159. [A workflow runs actions pinned by commit, and a job that writes builds nothing](integrations.md#workflows) (added after the move, under *Integrations and deploy*)

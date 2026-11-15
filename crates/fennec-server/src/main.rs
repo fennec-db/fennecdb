@@ -13,6 +13,16 @@ use std::io::{IsTerminal, Read, Write};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+/// What `--version` says after the version: a test build's mark, which
+/// keeps one out of a release -- every release's package check holds the
+/// line to `fennec-server <version>` (`tools/linux-packages-check.sh`).
+/// `test-clock` lets a file move a tenant node's clock (`make chaos`).
+const BUILD: &str = if cfg!(feature = "test-clock") {
+    "+test-clock"
+} else {
+    ""
+};
+
 const USAGE: &str = "\
 usage: fennec-server [options]
 
@@ -25,7 +35,8 @@ usage: fennec-server [options]
                             under /t/<tenant>/
       --admin-token <value> token for /_admin/ (--dir only): create, delete,
                             freeze and move tenants. Without it, off. Also
-                            read from FENNEC_ADMIN_TOKEN: argv shows up in `ps`
+                            read from FENNEC_ADMIN_TOKEN: argv shows up in `ps`.
+                            Past loopback 32 bytes at least
       --idle-close <s>      close a tenant untouched for this long  default: 300
                             (0 = never). The next request reopens it
       --lease               write a tenant only while the router's lease names
@@ -110,6 +121,14 @@ usage: fennec-server [options]
                             `compact` peaks at ~3x the file. With --dir it
                             covers the open tenants together, and opening one
                             more over it closes the idle ones first
+      --user <uid>:<gid>    started as root, run as this user and group: the
+                            directory the server writes in (--file's, or
+                            --dir) handed to them first where it is a volume
+                            of its own holding nothing but the database,
+                            then root dropped for good, before any file is
+                            opened. Also read from FENNEC_USER, which the
+                            image sets to 65534:65534; started as anyone
+                            else, the variable is passed over. Unix only
       --insecure            allow listening without a token on a non-loopback
                             address
       --tls-cert <pem>      serve HTTPS alone, with this certificate chain
@@ -123,7 +142,8 @@ usage: fennec-server [options]
                             roots, which it trusts without it
 
       --http-token <value>  require `Authorization: Bearer <value>`. Also read
-                            from FENNEC_HTTP_TOKEN: argv shows up in `ps`
+                            from FENNEC_HTTP_TOKEN: argv shows up in `ps`.
+                            Past loopback 32 bytes at least
       --jwt-secret <value>  also take HS256 JSON Web Tokens signed with this,
                             each held to --policy: which collections, which
                             rows (`where owner = $jwt.sub`). Also read from
@@ -201,7 +221,7 @@ usage: fennec-server [options]
       --hooks <path>        take webhook events at POST /_hooks/<name> (--file
                             only): a line a hook, `<name> <scheme> <secret
                             file> [<secret file>] [keep <d>] [tolerance <d>]
-                            [key body|delivery] [max-body <size>]`, the
+                            [key body] [max-body <size>]`, the
                             scheme stripe, github or standard (Standard
                             Webhooks, Svix), two secret files while a secret
                             rolls. Each event is verified by its signature
@@ -305,7 +325,8 @@ usage: fennec-server [options]
                             status, and promotes a replica. With --dir every
                             tenant has one of its own under
                             /t/<tenant>/_replication. Refuses --sync off.
-                            Also read from FENNEC_REPLICATION_TOKEN
+                            Also read from FENNEC_REPLICATION_TOKEN. Past
+                            loopback 32 bytes at least
       --replica-of <url>    follow the primary at http://host:port, or
                             https://host:port over TLS (--tls-ca), and take
                             no write of its own (403). With --dir it
@@ -352,7 +373,13 @@ usage: fennec-server [options]
                             bound
 
 A token or key set empty in the environment is unset; one given empty as a
-flag is refused at the start.
+flag is refused at the start. A token taken where --http or --metrics is
+past loopback is 32 bytes at least, refused at the start otherwise, since
+guesses there may come from any number of addresses: `openssl rand -hex 32`
+makes one. On loopback any length is taken; behind a proxy or a router,
+which reach it from past this machine, give it 32 bytes too: a shorter one
+is warned of at the first request one sends. A --hooks secret shorter than
+32 bytes is taken, and warned of.
 
 With --tls-cert and --tls-key fennec-server serves HTTPS itself, no proxy
 in front needed; without them it speaks plain HTTP, for loopback or a TLS
@@ -502,7 +529,7 @@ fn start_tracing(options: fennec_http::trace::Options, service: &str) {
             }
             fennec_http::log!("tracing: OTLP/HTTP JSON to {url}, sampling {sample}");
             // The last second's spans go out before the process does.
-            durability::before_shutdown(|| {
+            durability::before_shutdown(|_| {
                 fennec_http::trace::flush(std::time::Duration::from_secs(2))
             });
         }
@@ -556,6 +583,14 @@ fn main() {
     let mut studio_connect: Option<String> = None;
     let mut mcp: Option<fennec_http::mcp::Options> = None;
     let mut tracing = fennec_http::trace::Options::default();
+    // `--user`, and the files the flags name that are read or made before
+    // the server runs: each opened once root is dropped (below the
+    // arguments), never as they are read.
+    let mut user_flag: Option<String> = None;
+    let mut audit_paths: Vec<String> = Vec::new();
+    let mut jwt_secret_file: Option<String> = None;
+    let mut policy_path: Option<String> = None;
+    let mut tls_ca: Option<String> = None;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut metrics: Option<String> = None;
@@ -685,12 +720,8 @@ fn main() {
                 let v = next(&mut i, "--trace-sample");
                 tracing.sample(&v).unwrap_or_else(|e| fail(&e));
             }
-            "--audit" => {
-                let path = next(&mut i, "--audit");
-                if let Err(e) = fennec_http::audit::open(std::path::Path::new(&path)) {
-                    fail(&format!("could not open {path}: {e}"));
-                }
-            }
+            "--audit" => audit_paths.push(next(&mut i, "--audit")),
+            "--user" => user_flag = Some(next(&mut i, "--user")),
             "--auth-delay" => {
                 let v = next(&mut i, "--auth-delay");
                 let ms: u64 = v.parse().unwrap_or_else(|_| {
@@ -706,7 +737,11 @@ fn main() {
                 fennec_http::metrics::set_slow(ms);
             }
             "--http-token" => http_cfg.token = Some(next(&mut i, "--http-token")),
-            "--jwt-secret" => jwt_secret = Some(next(&mut i, "--jwt-secret")),
+            // The later of the secret and its file is the one taken.
+            "--jwt-secret" => {
+                jwt_secret = Some(next(&mut i, "--jwt-secret"));
+                jwt_secret_file = None;
+            }
             "--jwt-keys" => jwt_keys = Some(next(&mut i, "--jwt-keys")),
             "--jwt-require-exp" => {
                 demands.require_exp = match next(&mut i, "--jwt-require-exp").as_str() {
@@ -744,25 +779,8 @@ fn main() {
                     .unwrap_or_else(|_| fail(&format!("--jwt-max-age expects seconds, got `{v}`")));
                 demands.max_age = (secs > 0).then_some(secs);
             }
-            "--jwt-secret-file" => {
-                let path = next(&mut i, "--jwt-secret-file");
-                not_stdin("--jwt-secret-file", &path);
-                match std::fs::read_to_string(&path) {
-                    Ok(s) if s.trim_end_matches(['\n', '\r']).is_empty() => {
-                        fail(&format!("--jwt-secret-file {path} is empty"))
-                    }
-                    Ok(s) => jwt_secret = Some(s.trim_end_matches(['\n', '\r']).to_string()),
-                    Err(e) => fail(&format!("could not read {path}: {e}")),
-                }
-            }
-            "--policy" => {
-                let path = next(&mut i, "--policy");
-                not_stdin("--policy", &path);
-                match std::fs::read_to_string(&path) {
-                    Ok(s) => policy = Some(s),
-                    Err(e) => fail(&format!("could not read {path}: {e}")),
-                }
-            }
+            "--jwt-secret-file" => jwt_secret_file = Some(next(&mut i, "--jwt-secret-file")),
+            "--policy" => policy_path = Some(next(&mut i, "--policy")),
             "--hooks" => {
                 let path = next(&mut i, "--hooks");
                 not_stdin("--hooks", &path);
@@ -881,10 +899,7 @@ fn main() {
             "--insecure" => http_cfg.insecure = true,
             "--tls-cert" => tls_cert = Some(next(&mut i, "--tls-cert")),
             "--tls-key" => tls_key = Some(next(&mut i, "--tls-key")),
-            // Before any dial: every one is made after the flags are read.
-            "--tls-ca" => {
-                fennec_http::dial::trust_ca(&next(&mut i, "--tls-ca")).unwrap_or_else(|e| fail(&e))
-            }
+            "--tls-ca" => tls_ca = Some(next(&mut i, "--tls-ca")),
             "--studio" => studio = true,
             "--mcp" => {
                 mcp.get_or_insert_with(Default::default);
@@ -955,12 +970,50 @@ fn main() {
             // script read it: the file is opened and the port bound only
             // once every argument has been read.
             "--version" | "-V" => {
-                println!("fennec-server {}", env!("CARGO_PKG_VERSION"));
+                println!("fennec-server {}{BUILD}", env!("CARGO_PKG_VERSION"));
                 return;
             }
             other => fail(&format!("unknown option: {other}\n\n{USAGE}")),
         }
         i += 1;
+    }
+
+    // Started as root with `--user` or `FENNEC_USER` -- the image sets the
+    // variable, and starts as root to hand a volume its platform made
+    // root's over -- the server becomes that user here, straight after the
+    // arguments (fennec_server::user). Before any file is opened -- the
+    // audit log, a secret, the policy, `<file>.lock` -- so every file the
+    // server makes is the user's, and every one it reads is read as the
+    // user will read it again (a keys file it watches); before any thread,
+    // so none keeps root. `--ping`, the image's health check, and
+    // `--mint-token` drop root too, handing nothing over: run as root in
+    // the container, they make nothing root's. `--help` and `--version`
+    // ended above, having opened nothing.
+    #[cfg(unix)]
+    {
+        use fennec_server::user;
+        let (euid, now) = user::current();
+        let env = std::env::var("FENNEC_USER").ok();
+        match user::wanted(user_flag.as_deref(), env.as_deref(), euid, now) {
+            Err(e) => fail(&e),
+            Ok(None) => {}
+            Ok(Some((who, _))) if ping || mint.is_some() => {
+                user::become_user(who).unwrap_or_else(|e| fail(&e))
+            }
+            Ok(Some((who, from))) => {
+                let audit = audit_paths.first().map(std::path::Path::new);
+                let writes = match (&file, &dir) {
+                    (Some(f), _) => user::Writes::file(std::path::Path::new(f), audit),
+                    (None, Some(d)) => user::Writes::node(std::path::Path::new(d), audit),
+                    (None, None) => None,
+                };
+                user::start_as(who, from, writes.as_ref()).unwrap_or_else(|e| fail(&e));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    if user_flag.is_some() {
+        fail("--user is a Unix server's: a Windows service runs as the account it is given");
     }
 
     // Before any check of how a server would be configured: a probe runs in
@@ -969,6 +1022,34 @@ fn main() {
     // line failed it (2), and the container never turned healthy.
     if ping {
         std::process::exit(health_check(&http_cfg.addr));
+    }
+
+    // The files the flags name, opened as the user the server runs as: the
+    // CAs before any dial, the audit log before any request.
+    if let Some(pem) = &tls_ca {
+        fennec_http::dial::trust_ca(pem).unwrap_or_else(|e| fail(&e));
+    }
+    for path in &audit_paths {
+        if let Err(e) = fennec_http::audit::open(std::path::Path::new(path)) {
+            fail(&format!("could not open {path}: {e}"));
+        }
+    }
+    if let Some(path) = &jwt_secret_file {
+        not_stdin("--jwt-secret-file", path);
+        match std::fs::read_to_string(path) {
+            Ok(s) if s.trim_end_matches(['\n', '\r']).is_empty() => {
+                fail(&format!("--jwt-secret-file {path} is empty"))
+            }
+            Ok(s) => jwt_secret = Some(s.trim_end_matches(['\n', '\r']).to_string()),
+            Err(e) => fail(&format!("could not read {path}: {e}")),
+        }
+    }
+    if let Some(path) = &policy_path {
+        not_stdin("--policy", path);
+        match std::fs::read_to_string(path) {
+            Ok(s) => policy = Some(s),
+            Err(e) => fail(&format!("could not read {path}: {e}")),
+        }
     }
 
     // Both or neither, each read and the key the certificate's, refused
@@ -1191,8 +1272,67 @@ fn main() {
     http_cfg.sync_on_write = sync == SyncPolicy::Always;
 
     // An endpoint on an open network without a token is a question of the
-    // flags alone, refused with them (2) before anything is opened.
-    if let Some(refused) = fennec_http::exposed(&http_cfg, false) {
+    // flags alone, refused with them (2) before anything is opened; so is a
+    // token taken there shorter than `fennec_http::TOKEN_MIN`, from the flag
+    // or its variable (`fennec_http::short_token`). The data and admin tokens
+    // are taken on --metrics' listener too, the replication token on the
+    // HTTP one alone. Each listener's name is looked up once, here: judged
+    // of the addresses the lookup answered and bound on them below, never
+    // on a second lookup, and a name not looked up is judged past loopback.
+    let http_listen = fennec_http::Listen::look_up(&http_cfg.addr);
+    let metrics_listen = metrics.as_deref().map(fennec_http::Listen::look_up);
+    let listeners: Vec<&fennec_http::Listen> = std::iter::once(&http_listen)
+        .chain(metrics_listen.as_ref())
+        .collect();
+    let tokens = [
+        (
+            "--http-token (FENNEC_HTTP_TOKEN)",
+            http_cfg.token.as_deref(),
+            &listeners[..],
+        ),
+        (
+            "--admin-token (FENNEC_ADMIN_TOKEN)",
+            http_cfg.admin_token.as_deref(),
+            &listeners[..],
+        ),
+        (
+            "--replication-token (FENNEC_REPLICATION_TOKEN)",
+            replication_token.as_deref(),
+            &listeners[..1],
+        ),
+    ];
+    for (flag, token, on) in tokens {
+        if let Some(refused) = fennec_http::short_token(flag, token, on) {
+            fail(&refused);
+        }
+    }
+    // Every one shorter is on loopback alone, which a proxy or a router in
+    // front takes past this machine: the first request through one warns
+    // of them (`fennec_http::kept_short`), as of a hook's secret on such a
+    // listener. Past loopback a hook's short secret is warned of now:
+    // refused, a sender's secret would stop a server its operator cannot
+    // change without the sender (`docs/design/access.md`, *Short tokens*).
+    let mut short: Vec<String> = (tokens.iter())
+        .filter(|(_, token, _)| token.is_some_and(|t| fennec_http::too_short(t.len())))
+        .map(|(flag, ..)| flag.to_string())
+        .collect();
+    let short_hooks = (http_cfg.hooks.iter())
+        .flat_map(|hooks| hooks.iter().filter(|h| h.short))
+        .map(|h| format!("hook `{}`'s secret", h.name));
+    if http_listen.past_loopback() {
+        for hook in short_hooks {
+            fennec_http::log!(
+                "warning: {hook} is shorter than {} bytes, and --http is past loopback: a \
+                 shorter one can be guessed, from one event signed with it too. Where its \
+                 sender lets you choose it, make one with `openssl rand -hex 32`",
+                fennec_http::TOKEN_MIN
+            );
+        }
+    } else {
+        short.extend(short_hooks);
+    }
+    fennec_http::kept_short(&short);
+    if let Some(refused) = fennec_http::exposed(&http_cfg, false, &http_listen) {
         fail(&format!("could not open the HTTP endpoint: {refused}"));
     }
     let metrics_cfg = metrics.map(|addr| fennec_http::Config {
@@ -1206,9 +1346,8 @@ fn main() {
         tls: http_cfg.tls.clone(),
         ..fennec_http::Config::default()
     });
-    if let Some(refused) = metrics_cfg
-        .as_ref()
-        .and_then(|c| fennec_http::exposed(c, true))
+    if let Some(refused) = (metrics_cfg.as_ref().zip(metrics_listen.as_ref()))
+        .and_then(|(c, on)| fennec_http::exposed(c, true, on))
     {
         fail(&format!("could not open the metrics endpoint: {refused}"));
     }
@@ -1240,6 +1379,7 @@ fn main() {
         serve_dir(
             &dir,
             http_cfg,
+            &http_listen,
             sync,
             checkpoint,
             idle_close,
@@ -1324,11 +1464,13 @@ fn main() {
     // settled, a failed `--promote` had forked and synced its file. Not
     // before the open: a connection would wait in the backlog through it,
     // where it is refused at once.
-    let metrics_listener = metrics_cfg.as_ref().map(|c| {
-        std::net::TcpListener::bind(&c.addr)
+    // Each on the addresses its name was looked up to and judged by, before
+    // the open.
+    let metrics_listener = metrics_listen.as_ref().map(|on| {
+        on.bind()
             .unwrap_or_else(|e| fail(&format!("could not open the metrics endpoint: {e}")))
     });
-    let listener = match std::net::TcpListener::bind(&http_cfg.addr) {
+    let listener = match http_listen.bind() {
         Ok(l) => l,
         Err(e) => {
             fennec_http::log!("could not open the HTTP endpoint: {e}");
@@ -1514,6 +1656,7 @@ fn main() {
 fn serve_dir(
     dir: &str,
     http_cfg: fennec_http::Config,
+    http_listen: &fennec_http::Listen,
     sync: SyncPolicy,
     checkpoint: bool,
     idle_close: Duration,
@@ -1569,8 +1712,9 @@ fn serve_dir(
     // The listener before any tenant opens: a port that cannot be had stops
     // the start here, with nothing to sync. Taken after, a standby's failed
     // starts opened its tenants and rewrote each one's file of vectors at
-    // every restart its unit made.
-    let listener = std::net::TcpListener::bind(&http_cfg.addr)
+    // every restart its unit made. On the addresses judged at the start.
+    let listener = http_listen
+        .bind()
         .unwrap_or_else(|e| fail(&format!("could not open the HTTP endpoint: {e}")));
     // The tenants' scheduled statements run from one thread, a tenant at a
     // time (`fennec_http::schedule::Node`), set on the registry before any
@@ -1613,6 +1757,10 @@ fn serve_dir(
         if let Some(s) = &scheduler {
             s.start(durability::stop_with)?;
         }
+        // A test build's clock, moved by a file (`make chaos`), its thread
+        // started with the node's as the scheduler's is.
+        #[cfg(feature = "test-clock")]
+        fennec_http::test_clock::follow(&tenants)?;
         // Before the thread that says it listens, as a file server reads it.
         let asked = durability::shutdown_requested();
         std::thread::Builder::new()

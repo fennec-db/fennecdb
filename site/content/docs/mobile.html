@@ -1,6 +1,6 @@
 <!--
 title: Mobile and native apps — fennecdb
-description: Keep a fennecdb database in a file on the device from Swift, Kotlin or Dart and Flutter, with the query builder and live queries driving the UI.
+description: Keep a fennecdb database in a file on the device from Swift, Kotlin or Dart and Flutter, with the query builder and live queries driving the UI, or from C on Linux through the release's library.
 -->
 
 <h1>Mobile and native apps</h1>
@@ -11,14 +11,16 @@ network, the same engine and file format as the server and the browser.</p>
 and asks it questions in FennecQL or through the query builder, with
 <code>near</code>, <code>match</code> and <code>lookup</code> as anywhere
 else. A live query hands the UI its rows again after every write to what it
-reads.</p>
+reads. A Linux program -- a GTK app, a C or C++ program, any language with
+a C FFI -- links the same engine from the release's library
+(<a href="#c-on-linux">C on Linux</a>).</p>
 
 <div class="tbl">
 <table>
 <thead><tr><th>&nbsp;</th><th>Swift</th><th>Kotlin and Java</th><th>Dart and Flutter</th></tr></thead>
 <tbody>
 <tr><td>install</td><td>SwiftPM: <code>github.com/fennec-db/fennecdb</code>, product <code>FennecDB</code></td><td><code>com.fennecdb:fennecdb-android</code> (the AAR), <code>com.fennecdb:fennecdb</code> (the JVM)</td><td><code>fennecdb_flutter</code>, or <code>fennecdb</code> in Dart alone</td></tr>
-<tr><td>platforms</td><td>iOS 15, macOS 12</td><td>Android 5 (API 21): arm64-v8a, armeabi-v7a, x86_64; the JVM</td><td>iOS, Android, macOS</td></tr>
+<tr><td>platforms</td><td>iOS 15, macOS 11</td><td>Android 5 (API 21): arm64-v8a, armeabi-v7a, x86_64; the JVM</td><td>iOS 15, macOS 11, Android 5 (API 21)</td></tr>
 <tr><td>calls</td><td><code>async</code>, off the caller's thread</td><td><code>suspend</code> on <code>Dispatchers.IO</code>; <code>...Blocking</code> for Java</td><td><code>Future</code>s, on an isolate of the database's</td></tr>
 <tr><td>live queries</td><td><code>LiveQuery</code> (<code>ObservableObject</code>), <code>LiveRows</code> (<code>@Observable</code>), an <code>AsyncThrowingStream</code></td><td>a <code>Flow</code>: Compose's <code>collectAsState</code></td><td>a <code>Stream</code>: <code>StreamBuilder</code></td></tr>
 <tr><td>rows</td><td><code>Row</code>, or any <code>Decodable</code></td><td><code>Row</code>, a <code>Map</code> with typed getters</td><td><code>Map&lt;String, Object?&gt;</code></td></tr>
@@ -178,8 +180,11 @@ class Todos extends StatelessWidget {
         ),
       );
 }</pre>
-<p>The plugin's <code>example/</code> is this app, built for Android and
-the iOS simulator on every change.</p>
+<p>The plugin's <code>example/</code> is this app, built for Android on
+every change, and for macOS and the iOS simulator from the plugin as
+pub.dev gets it: packed as a release publishes it, with each platform's
+library in it once, and the macOS app's own test opening a file through
+the library it embeds.</p>
 </div>
 
 </div>
@@ -416,7 +421,8 @@ static and instance member of one name.</p>
 <tr><td>status</td><td><code>replica.status</code>, <code>statuses()</code> (an <code>AsyncStream</code>)</td><td><code>replica.status</code> (a <code>StateFlow</code>)</td><td><code>replica.status</code>, <code>statuses</code> (a <code>Stream</code>)</td></tr>
 <tr><td>first seed, writes answered</td><td colspan="3"><code>ready()</code>, <code>pushed()</code></td></tr>
 <tr><td>refused writes</td><td><code>refusals()</code></td><td><code>refusals</code> (a <code>SharedFlow</code>)</td><td><code>refusals</code></td></tr>
-<tr><td>a new token</td><td colspan="3"><code>setToken(jwt)</code>, or a <code>tokenProvider</code> asked on a <code>401</code></td></tr>
+<tr><td>a new token</td><td colspan="3"><code>setToken(jwt)</code>, or a <code>tokenProvider</code> asked on a <code>401</code>, handed a <code>TokenRefusal</code></td></tr>
+<tr><td>a token wanted</td><td><code>status.token?.stage</code>: <code>.delayed</code>, <code>.asked</code>, <code>.failed</code></td><td><code>status.value.token?.stage</code>: <code>DELAYED</code>, <code>ASKED</code>, <code>FAILED</code></td><td><code>status.token?.stage</code>: <code>TokenStage.delayed</code>, <code>.asked</code>, <code>.failed</code></td></tr>
 <tr><td>the network</td><td colspan="3"><code>setOnline(bool)</code>, <code>resume()</code></td></tr>
 <tr><td>the server itself</td><td colspan="3"><code>replica.remote</code> (<a href="#connect">below</a>)</td></tr>
 </tbody>
@@ -427,6 +433,92 @@ static and instance member of one name.</p>
 <code>catchingUp</code> (connecting, seeding, or sending the writes left
 from before), how many writes the server has not answered, and the last
 error.</p>
+
+<p>A <code>401</code> stops the sending until a token is handed over, and
+asks <code>tokenProvider</code> for one, handed a <code>TokenRefusal</code>:
+<code>errorCode</code>, the code the server named --
+<code>token_expired</code> where the token's <code>exp</code> passed, none
+otherwise (<a href="/docs/auth#expiry">Expiry</a>) -- <code>expired</code>,
+that code's, <code>hadToken</code>, whether the refused request carried a
+token, and <code>attempt</code>, how many times in a row it is asked since
+the server last took the token held. The provider asks the issuer for a
+fresh token at every <code>401</code>, whatever the code -- forcing a
+refresh at <code>expired</code> -- and the replica goes on where it
+stopped, its waiting writes sent under the keys they kept. A
+<code>401</code> alone is never a sign-out: the server keeps no list of
+revoked tokens, so only the issuer knows that a session ended, and the app
+signs out where it refuses to issue a token. Where the token handed over
+is refused too (<code>attempt</code> past 1: a key the server has not
+fetched yet, an <code>nbf</code> its clock has not reached, a
+misconfiguration -- none of which a fresh token cures), the sync asks
+again after 1 s doubling to 60 s, a wait the token just refused, handed
+over again, does not end; an expiry of the token the server took last, or
+of the first one handed over since, starts the count at 1 again, any other
+-- a token minted expired, as every one is where the server's clock runs
+ahead of the issuer's -- counts. A provider that throws -- the issuer out
+of reach -- or hands over an empty token leaves the sync waiting, the
+status's <code>token</code> reading failed and its error <code>the token
+provider failed: …</code>, and is asked again at <code>resume()</code> or
+<code>setOnline(true)</code>; while it is at work nothing asks it again.
+Nothing bounds its time, since it may be waiting on a sign-in, so <b>a
+provider must return</b>: it times out its own requests to the issuer, and
+throws. One that never returns holds the sync until the app hands a token
+over itself with <code>setToken</code>, which gets it going whatever the
+stage.</p>
+
+<p>While a token is wanted the status's <code>token</code> says where the
+ask stands -- its <code>stage</code>: delayed while the wait before the
+next ask runs, asked once the provider is asked and no token has come,
+failed where it threw or handed over none -- beside its
+<code>refusal</code>, the <code>TokenRefusal</code>. Nothing is sent
+meanwhile, and the status's error is the token's, its
+<code>errorCode</code> the code the <code>401</code> named, whatever else
+fails while it waits: streams end where the network goes, which is where
+providers fail. An app that hands its tokens over with
+<code>setToken</code> rather than a provider does so at asked.</p>
+
+<p>A replica belongs to one account: its file's path names the account,
+and it is never opened for another, or the next account signing in on the
+device sends the writes left in it under its own token and is shown its
+rows. Signing out, an app closes the replica and keeps the file while its
+status says <code>pending</code> writes, for that account's next sign-in to
+send; deleting it loses them.</p>
+
+<div class="langs" data-langs>
+
+<div class="lang" data-name="Swift">
+<pre data-lang="swift">let db = try await Fennec.sync(url: url, token: jwt, shapes: shapes,
+                              path: dir.appendingPathComponent("\(account.id).fennec").path,
+                              tokenProvider: { refusal in
+                                  // A fresh token at every 401; throws where the issuer refuses.
+                                  try await auth.refresh(force: refusal.expired)
+                              })</pre>
+</div>
+
+<div class="lang" data-name="Kotlin">
+<pre data-lang="kotlin">val db = Fennec.sync(url = url, token = jwt, shapes = shapes,
+                    path = File(context.filesDir, "${account.id}.fennec").path,
+                    tokenProvider = { refusal ->
+                        // A fresh token at every 401; throws where the issuer refuses.
+                        auth.refresh(force = refusal.expired)
+                    })</pre>
+</div>
+
+<div class="lang" data-name="Dart">
+<pre data-lang="dart">final db = await Fennec.openSynced(url: url, token: jwt, shapes: shapes,
+    path: '${dir.path}/${account.id}.fennec',
+    // A fresh token at every 401; throws where the issuer refuses.
+    tokenProvider: (refusal) => auth.refresh(force: refusal.expired));</pre>
+</div>
+
+</div>
+
+<p>Before 1.0 a provider took no argument. Swift's no longer compiles
+(<code>{ _ in try await refresh() }</code> for it); a Kotlin lambda asking
+nothing still takes, but a reference to a function of none,
+<code>::refresh</code>, no longer does (<code>{ refresh() }</code> for it);
+Dart's provider takes the <code>TokenRefusal</code>,
+<code>(_) =&gt; refresh()</code> where it reads none of it.</p>
 
 <details class="deep"><summary>How the sync core and the bindings divide the work</summary>
 <p>What to ask, what an answer means and what is written are one state
@@ -446,7 +538,13 @@ not made again. A server's answer of <code>0</code> (no answer),
 backoff, 250 ms doubling to 15 s, or after the wait a tenant's quota (to
 the millisecond, <code>retry_after_ms</code>), a move or a failover
 (<code>retry_after</code>) names where that is longer; a
-<code>401</code> asks for a token; a <code>507</code> naming a tenant's
+<code>401</code> asks for a token, the action naming the code the server
+did (<code>token_expired</code>), whether the refused request carried a
+token and the asks in a row, after 1 s doubling to 60 s where the token
+handed over was refused too -- a <code>401</code> to a request sent with a
+token since replaced goes again with the new one, unasked, and one ask is
+out at a time, the binding answering it with a token or with why none came
+(<code>{"token_failed":..}</code>), which the status's <code>token</code> says; a <code>507</code> naming a tenant's
 quota, and any other <code>4xx</code>, is a refusal, and the writes behind
 it go on
 (<a href="sync.html#refusals-retries-and-offline">why</a>). The status's
@@ -470,7 +568,7 @@ rows 72 ms (<code>make sync-bench</code>).</p>
 <p>The browser's <code>sync</code> (<a href="sync.html">Sync</a>) is
 written apart -- this core in the browser module was 21 KB brotli more --
 and the two are held to one script: <code>integrations/sync-scenarios.json</code>,
-84 scenarios of shapes, writes, answers and server events, each step's
+112 scenarios of shapes, writes, answers and server events, each step's
 replica, queue and requests stated once and run against both. What is left
 between them is the platforms':</p>
 <ul>
@@ -769,16 +867,17 @@ whole open.</p>
 <table>
 <thead><tr><th>the native library, stripped</th><th class="n">size</th></tr></thead>
 <tbody>
-<tr><td>macOS, Apple silicon</td><td class="n">1.68 MB</td></tr>
-<tr><td>macOS, Intel</td><td class="n">1.77 MB</td></tr>
-<tr><td>Linux arm64, with the JNI functions</td><td class="n">1.71 MB</td></tr>
-<tr><td>Linux x86-64, with the JNI functions</td><td class="n">1.88 MB</td></tr>
+<tr><td>macOS, Apple silicon</td><td class="n">3.07 MB</td></tr>
+<tr><td>macOS, Intel</td><td class="n">3.34 MB</td></tr>
+<tr><td>Linux x86-64, with the JNI functions</td><td class="n">3.52 MB</td></tr>
 </tbody>
 </table>
 </div>
 
-<p>The sync with a server is 165 to 198 KB of each. iOS's and Android's
-are measured by CI for every change, in the run's summary. An app ships the code it links: the XCFramework's static library
+<p>The sync with a server is 165 to 198 KB of each. Linux's are the
+release's <code>libfennec_ffi.so</code> (<a href="#c-on-linux">C on
+Linux</a>); iOS's and Android's are measured by CI for every change, in the
+run's summary. An app ships the code it links: the XCFramework's static library
 is the objects before the app's linker takes what it uses.</p>
 
 <div class="tbl">
@@ -806,7 +905,9 @@ takes 23.3 µs, the server's time, most of it the vector's digits.</p>
 
 <p>Any language with a C FFI can call the library: the header is
 <code>crates/fennec-ffi/include/fennec.h</code>, and <code>make ffi</code>
-builds the library for this machine, or <code>TARGET=...</code> for another.
+builds the library for this machine, or <code>TARGET=...</code> for another;
+for Linux each release carries it built (<a href="#c-on-linux">C on
+Linux</a>).
 Every call returns a code -- 0, an error's kind, or the boundary's own:
 <code>FENNEC_MISUSE</code>, <code>FENNEC_LOCKED</code>,
 <code>FENNEC_PANIC</code> -- and writes its answer or its error as
@@ -829,4 +930,79 @@ Kotlin binding reaches the same calls through JNI functions the library
 carries itself (its <code>jni</code> feature): each call answers one
 <code>byte[]</code>, its code then its JSON, and text goes in as UTF-8
 bytes, since JNI's own strings write an emoji as two halves.</p>
+</details>
+
+<h2 id="c-on-linux">C on Linux</h2>
+
+<p>Releases after 0.2.0 carry the library built for Linux with glibc, for
+x86_64 and arm64, each a tarball listed in the release's
+<code>SHA256SUMS</code>: <code>fennec-ffi-v{{version}}-x86_64-unknown-linux-gnu.tar.gz</code>
+and <code>fennec-ffi-v{{version}}-aarch64-unknown-linux-gnu.tar.gz</code>.
+Each holds the shared library <code>lib/libfennec_ffi.so</code>, the static
+<code>lib/libfennec_ffi.a</code>, <code>include/fennec.h</code> and a
+pkg-config file for each library, <code>fennec-ffi</code> and
+<code>fennec-ffi-static</code>, which find the folder wherever it is
+unpacked. A GTK app, a C or C++ program, or any language with a C FFI
+links it. It runs on glibc 2.34 or later -- Ubuntu 22.04, Debian 12,
+RHEL 9 and the releases after them -- and asks the system for nothing else
+but <code>libgcc_s</code>.</p>
+
+<pre data-lang="bash">TARGET=x86_64-unknown-linux-gnu   # or aarch64-unknown-linux-gnu
+curl -fLO https://github.com/fennec-db/fennecdb/releases/download/v{{version}}/fennec-ffi-v{{version}}-$TARGET.tar.gz
+curl -fLO https://github.com/fennec-db/fennecdb/releases/download/v{{version}}/SHA256SUMS
+sha256sum --ignore-missing -c SHA256SUMS
+tar -xzf fennec-ffi-v{{version}}-$TARGET.tar.gz
+export PKG_CONFIG_PATH=$PWD/fennec-ffi-v{{version}}-$TARGET/lib/pkgconfig
+cc notes.c $(pkg-config --cflags --libs fennec-ffi) -o notes          # the shared library
+cc notes.c $(pkg-config --cflags --libs fennec-ffi-static) -o notes   # or the static one, linked in</pre>
+
+<pre data-lang="c" data-label="notes.c">#include &lt;fennec.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+
+int main(void) {
+    const char *path = "notes.fennec";
+    uint64_t db;
+    char *out = NULL;
+    if (fennec_open((const uint8_t *)path, strlen(path), 0, &amp;db, &amp;out, NULL) != FENNEC_OK) {
+        fprintf(stderr, "%s\n", out);
+        return 1;
+    }
+    const char *text = "create collection if not exists notes (title text); "
+                       "put notes {title: $1}; get notes select title";
+    const char *params = "[\"from C\"]";
+    int32_t code = fennec_query(db, (const uint8_t *)text, strlen(text),
+                                (const uint8_t *)params, strlen(params), NULL, 0, &amp;out, NULL);
+    printf("%d %s\n", code, out);
+    fennec_free_string(out);
+    fennec_close(db, NULL, NULL);
+    return code;
+}</pre>
+
+<pre data-lang="text">0 {"kind":"rows","result":{"columns":["title"],"rows":[{"title":"from C"}]}}</pre>
+
+<p>A program linked to the shared library finds
+<code>libfennec_ffi.so</code> where the loader looks: copy it into
+<code>/usr/local/lib</code> and run <code>ldconfig</code>, start the program
+with <code>LD_LIBRARY_PATH</code> naming the folder's <code>lib</code>, or
+link it with <code>-Wl,-rpath,&lt;folder&gt;/lib</code>. The static one is
+linked into the program, which then needs nothing beside it. The shared
+library carries the JNI functions too, so Kotlin's
+<code>com.fennecdb:fennecdb</code> on the JVM loads this file, named by
+<code>-Dfennec.library=&lt;folder&gt;/lib/libfennec_ffi.so</code> or
+<code>FENNEC_LIBRARY</code>.</p>
+
+<details class="deep"><summary>How each release checks it</summary>
+<p>Each architecture's tarball is built on a runner of its own and held
+before the release keeps it (<code>tools/linux-ffi-check.sh</code>): its
+files, its header the repository's, the shared library's name, its
+exports -- the header's functions and the JNI functions alone -- and what
+it asks the system for, glibc and <code>libgcc_s</code> and no glibc symbol
+newer than 2.34. Then a C program compiled against the header with every
+warning an error is linked to each library through its pkg-config file, as
+above, and run on the runner and in AlmaLinux 9, whose glibc is 2.34: it
+opens a file, writes a row with parameters and reads it back, is refused a
+second open of the file, finds the row after a close, and starts a sync and
+drives it as a binding does. CI does the same on every change and keeps
+the tarballs as the run's artifacts.</p>
 </details>

@@ -1,0 +1,200 @@
+# The perf gate's holdout (docs/design/benchmarks.md#the-gate): the fifteen
+# most recent first-parent pairs of main touching crates/ before the gate,
+# none of which the calibration that set its rule used, each replayed as the
+# job judges a pull request -- this tree's program built on both sides,
+# every workload's figure and heap bytes held to +1%, the workloads held to
+# the program's own list -- and the heap-shift control on x86_64 musl: one
+# build against itself, its runs leaking 4 KiB, 64 KiB and 1 MiB before the
+# setup. Beside them, the calibration's nine pairs again: it judged them
+# with the allocator priced by its call lines, which the self costs
+# replaced, so its six merged changes must still pass and its three
+# regressions still fail. The gate stays a check no merge requires until
+# this passes: every pair as expected, or a holdout pair failing on a cost
+# its change is shown to have.
+#
+# Run by hand at a quiet hour, never on a push: by dispatch once this file
+# is on main, or before by the `perf-holdout` label on the pull request
+# that carries it.
+name: perf holdout
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+    paths:
+      - .github/workflows/perf-holdout.yml
+
+permissions:
+  contents: read
+
+# Every build uses the toolchain main pins: these commits' own
+# rust-toolchain.toml says `stable`, which two parallel builds would install
+# at once and fail renaming a component file. It is installed once, below,
+# before any build starts.
+env:
+  RUSTUP_TOOLCHAIN: 1.99.1
+
+jobs:
+  pair:
+    name: holdout (${{ matrix.name }})
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'perf-holdout'
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The holdout: merged, none of them the calibration's.
+          - { name: "#592", slug: "592", base: 10f653a2, head: 378f4a81, expect: pass }
+          - { name: "#593", slug: "593", base: b7a92e30, head: 8bc349b9, expect: pass }
+          - { name: "#568", slug: "568", base: 0bbc77a5, head: cebfbeaa, expect: pass }
+          - { name: "#559", slug: "559", base: 58ed72d5, head: 16f6eca9, expect: pass }
+          - { name: "#556", slug: "556", base: 6ebadaf8, head: debef146, expect: pass }
+          - { name: "#554", slug: "554", base: fa6afcc4, head: 19e2e5d9, expect: pass }
+          - { name: "#540", slug: "540", base: 6c136be0, head: 31cf9040, expect: pass }
+          - { name: "#541", slug: "541", base: b361a668, head: 6c136be0, expect: pass }
+          - { name: "#537", slug: "537", base: de23ce27, head: 66f3e8eb, expect: pass }
+          - { name: "#538", slug: "538", base: 94b794ef, head: 147dd137, expect: pass }
+          - { name: "#464", slug: "464", base: b1d94163, head: 94b794ef, expect: pass }
+          - { name: "#529", slug: "529", base: edd13565, head: 088bc30f, expect: pass }
+          - { name: "#526", slug: "526", base: abcf1296, head: 15a85666, expect: pass }
+          - { name: "#522", slug: "522", base: ca4666a2, head: 39e4ba08, expect: pass }
+          - { name: "#520", slug: "520", base: a86fea55, head: ca4666a2, expect: pass }
+          # The calibration's pairs, rechecked under self costs.
+          - { name: "recheck #531", slug: "c531", base: 088bc30f, head: de59fdd1, expect: pass }
+          - { name: "recheck #524", slug: "c524", base: a96bd554, head: c736b5c0, expect: pass }
+          - { name: "recheck #506", slug: "c506", base: edb629d2, head: bc7636b2, expect: pass }
+          - { name: "recheck #513", slug: "c513", base: fb93539e, head: 61fe4261, expect: pass }
+          - { name: "recheck #542", slug: "c542", base: 4a157cdd, head: 1dee77aa, expect: pass }
+          - { name: "recheck #474", slug: "c474", base: d45afa21, head: e3d58955, expect: pass }
+          - { name: "recheck regression #511 undone", slug: "r511", base: 82319b7f, head: 9da6411e, expect: fail }
+          - { name: "recheck regression #542 first head", slug: "r542", base: de23ce27, head: 0e05fe22, expect: fail }
+          - { name: "recheck regression #474 first head", slug: "r474", base: e1d6a47c, head: 41f293a9, expect: fail }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install the pinned toolchain, the musl target, valgrind and musl-gcc
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal --target x86_64-unknown-linux-musl
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends valgrind musl-tools
+
+      # Both commits predate the program, which runs the same on both
+      # sides: every workload of its list is the base's too, so a base run
+      # that crashed fails here rather than passing as new.
+      - name: Replay the pair with this tree's program, and judge it
+        run: |
+          W="$RUNNER_TEMP/perf"
+          start=$(date +%s)
+          python3 tools/perf_gate.py run --base "${{ matrix.base }}" --head "${{ matrix.head }}" \
+            --target x86_64-unknown-linux-musl --work "$W" --out "$W/results.json" --no-check
+          echo "replayed in $(( $(date +%s) - start )) s"
+          verdict=pass
+          python3 tools/perf_gate.py check "$W/results.json" --base-program crates/fennec-http/examples/gate.rs \
+            --summary "$GITHUB_STEP_SUMMARY" || verdict=fail
+          python3 - "$W/results.json" "${{ matrix.name }} (\`${{ matrix.base }}\` → \`${{ matrix.head }}\`)" \
+            "$verdict (expected ${{ matrix.expect }})" > "$W/profiles/row.md" <<'EOF'
+          import importlib.util, json, sys
+          spec = importlib.util.spec_from_file_location("perf_gate", "tools/perf_gate.py")
+          gate = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(gate)
+          rows, _ = gate.judge(json.load(open(sys.argv[1])), [])
+          fig = max((r for r in rows if r[4] is not None), key=lambda r: r[4], default=None)
+          mem = max((r for r in rows if r[7]), key=lambda r: r[7]["delta"], default=None)
+          said = lambda r, d: f"`{r[0]}` {d * 100:+.2f}%" if r else "-"
+          print(f"| {sys.argv[2]} | {sys.argv[3]} | {said(fig, fig and fig[4])} | {said(mem, mem and mem[7]['delta'])} |")
+          EOF
+          cp "$W/results.json" "$W/profiles/"
+          test "$verdict" = "${{ matrix.expect }}"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: perf-holdout-${{ matrix.slug }}
+          path: ${{ runner.temp }}/perf/profiles/
+          retention-days: 14
+
+  control:
+    name: holdout (heap-shift control)
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'perf-holdout'
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned toolchain, the musl target, valgrind and musl-gcc
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal --target x86_64-unknown-linux-musl
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends valgrind musl-tools
+
+      # One build, as the gate builds a side; the base's runs as they are,
+      # this tree's after a leak that moves every later block in musl's
+      # groups. The figure with the allocator priced and the bytes must not
+      # move: the plain count may.
+      - name: The build held to itself over three heap layouts
+        run: |
+          W="$RUNNER_TEMP/perf"
+          mkdir -p "$W/profiles"
+          CARGO_PROFILE_RELEASE_STRIP=false cargo build --locked --release -p fennec-http --example gate \
+            --features fennec-abi/sync --target x86_64-unknown-linux-musl
+          bin=target/x86_64-unknown-linux-musl/release/examples/gate
+          verdict=pass
+          for k in 4096 65536 1048576; do
+            python3 tools/perf_gate.py measure --base-bin "$bin" --head-bin "$bin" --head-leak "$k" \
+              --out "$W/profiles/leak-$k.json"
+            python3 tools/perf_gate.py check "$W/profiles/leak-$k.json" \
+              --base-program crates/fennec-http/examples/gate.rs --summary "$GITHUB_STEP_SUMMARY" || verdict=fail
+          done
+          echo "| the heap-shift control (4 KiB, 64 KiB, 1 MiB) | $verdict (expected pass) | - | - |" > "$W/profiles/row.md"
+          test "$verdict" = pass
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: perf-holdout-control
+          path: ${{ runner.temp }}/perf/profiles/
+          retention-days: 14
+
+  verdicts:
+    name: holdout (verdicts)
+    needs: [pair, control]
+    if: always() && (github.event_name == 'workflow_dispatch' || github.event.label.name == 'perf-holdout')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: perf-holdout-*
+          path: ${{ runner.temp }}/holdout
+
+      # One row a pair, its widest deltas; each pair's table is on its own
+      # job's page, its profiles and results in its artifact.
+      - name: Every pair and the control as expected
+        env:
+          PAIRS: ${{ needs.pair.result }}
+          CONTROL: ${{ needs.control.result }}
+        run: |
+          {
+            echo "### The perf gate's holdout"
+            echo
+            echo "| pair (base → head) | verdict | widest figure delta | widest bytes delta |"
+            echo "|---|---|---:|---:|"
+            for slug in 592 593 568 559 556 554 540 541 537 538 464 529 526 522 520 \
+                c531 c524 c506 c513 c542 c474 r511 r542 r474 control; do
+              cat "$RUNNER_TEMP/holdout/perf-holdout-$slug/row.md" 2>/dev/null \
+                || echo "| $slug | no verdict: the job did not finish | - | - |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+          test "$PAIRS" = success && test "$CONTROL" = success

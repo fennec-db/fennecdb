@@ -1,0 +1,16 @@
+run	commit	machine	date	family	cell	metric	value
+hand	60f42c19	hand-measured	2026-10-02	size	pglite_0.5.8:pglite.wasm	brotli_kb	2585
+hand	60f42c19	hand-measured	2026-10-02	size	pglite_0.5.8:pglite.wasm	gzip_kb	3310
+hand	60f42c19	hand-measured	2026-10-02	size	pglite_0.5.8:pglite.data	brotli_kb	1038
+hand	60f42c19	hand-measured	2026-10-02	size	pglite_0.5.8:pglite.data	gzip_kb	1816
+hand	60f42c19	hand-measured	2026-10-02	size	pglite_0.5.8:initdb.wasm	brotli_kb	117
+hand	60f42c19	hand-measured	2026-10-02	size	pglite_0.5.8:initdb.wasm	gzip_kb	141
+hand	60f42c19	hand-measured	2026-10-02	size	pglite_0.5.8:the_three	brotli_kb	3740
+hand	60f42c19	hand-measured	2026-10-02	size	pglite_0.5.8:the_three	gzip_kb	5267
+hand	60f42c19	hand-measured	2026-10-02	size	pgvector:archive	gzip_kb	45
+hand	60f42c19	hand-measured	2026-10-02	size	pgvector:extensions_page	kb	42.9
+hand	60f42c19	hand-measured	2026-10-02	size	sqlite3.wasm_3.53.4-build2	brotli_kb	341
+hand	60f42c19	hand-measured	2026-10-02	size	sqlite3.wasm_3.53.4-build2	gzip_kb	393
+hand	a4e4d5a0	hand-measured	2026-11-02	size	fennec-server:container_image	mb	7.18
+hand	ad251c8a	hand-measured	2026-11-01	size	fennec-binaries	min_kb	2091
+hand	ad251c8a	hand-measured	2026-11-01	size	fennec-binaries	max_kb	4355

@@ -13,12 +13,13 @@
 //! can and checks nothing, so only `verify-full` keeps a stand-in for the
 //! server out. TLS is fennec-tls's, behind the `tls` feature.
 
-use crate::crypto::{b64_decode, b64_encode, hmac_sha256, nonce, pbkdf2_sha256, sha256};
+use crate::crypto::{b64_decode, b64_encode, ct_eq, hmac_sha256, nonce, pbkdf2_sha256, sha256};
 use crate::proto::{put_cstr, read_message, Message, Writer, PROTOCOL_V3};
 use fennec_core::error::{Error, Result};
 use std::io::{self as stdio, BufReader, ErrorKind, Read, Write};
 use std::net::TcpStream;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The timeout used while connecting and while waiting for a message.
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -382,11 +383,16 @@ impl Write for Conn {
         }
     }
 
+    /// Records rustls holds go out here, a send that a signal's handler
+    /// may interrupt: nothing of a record is lost, and the flush is asked
+    /// again here, since `Writer::flush_to` asks no flush again as
+    /// `write_all` asks a write, and failed on it.
     fn flush(&mut self) -> stdio::Result<()> {
-        match self {
-            Conn::Plain(s) => s.flush(),
-            #[cfg(feature = "tls")]
-            Conn::Tls(s) => s.flush(),
+        loop {
+            match self.flush_once() {
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                done => return done,
+            }
         }
     }
 }
@@ -397,7 +403,32 @@ impl Conn {
     /// time out halfway through a message, which would leave the rest of it
     /// to be taken for the start of the next one: on a plain socket a peek,
     /// over TLS rustls taking whole records in (`TlsStream::readable`).
+    ///
+    /// A signal is no answer: a wait a signal's handler interrupted goes
+    /// on, for what is left of `wait`. Linux never restarts a `recv` on a
+    /// socket with a timeout, `SA_RESTART` or not (signal(7)), and every
+    /// socket here has one; a SIGINT or SIGTERM lands on the thread that
+    /// runs `fennec import --follow`'s follower, its main one, which waits
+    /// here nearly all the time it follows an idle table. Returned, the
+    /// `EINTR` was a broken stream: the follower closed it without ending
+    /// it, its slot left held, and said it would connect again.
     fn readable(&mut self, wait: Duration) -> stdio::Result<bool> {
+        let deadline = Instant::now() + wait;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.readable_within(left) {
+                Err(e) if e.kind() == ErrorKind::Interrupted => {
+                    if left.is_zero() {
+                        return Ok(false);
+                    }
+                }
+                got => return got,
+            }
+        }
+    }
+
+    /// [`Conn::readable`]'s one wait, which a signal may interrupt.
+    fn readable_within(&mut self, wait: Duration) -> stdio::Result<bool> {
         match self {
             Conn::Plain(sock) => {
                 // A zero timeout is refused by the socket, and means
@@ -416,6 +447,38 @@ impl Conn {
             }
             #[cfg(feature = "tls")]
             Conn::Tls(s) => s.readable(wait),
+        }
+    }
+
+    /// The socket's write timeout, beneath TLS too.
+    fn set_write_timeout(&self, wait: Duration) -> stdio::Result<()> {
+        // A zero timeout is refused by the socket.
+        let wait = Some(wait.max(Duration::from_millis(1)));
+        match self {
+            Conn::Plain(s) => s.set_write_timeout(wait),
+            #[cfg(feature = "tls")]
+            Conn::Tls(s) => s.get_ref().set_write_timeout(wait),
+        }
+    }
+
+    /// One flush, which a signal may interrupt: `Until` looks at its
+    /// deadline between two, where [`Write::flush`]'s asking again would
+    /// not.
+    fn flush_once(&mut self) -> stdio::Result<()> {
+        match self {
+            Conn::Plain(s) => s.flush(),
+            #[cfg(feature = "tls")]
+            Conn::Tls(s) => s.flush(),
+        }
+    }
+
+    /// The socket made non-blocking, beneath TLS too: a write then takes
+    /// what fits at once and waits for nothing.
+    fn set_nonblocking(&self) -> stdio::Result<()> {
+        match self {
+            Conn::Plain(s) => s.set_nonblocking(true),
+            #[cfg(feature = "tls")]
+            Conn::Tls(s) => s.get_ref().set_nonblocking(true),
         }
     }
 }
@@ -570,6 +633,144 @@ fn tls_client(url: &Url) -> Result<fennec_tls::Client> {
     })
 }
 
+// ------------------------------------------------------------------- SCRAM
+
+/// The most PBKDF2 iterations SCRAM runs for a server: 2^22, 1 024 times
+/// PostgreSQL's 4 096, its `scram_iterations` default, with room above a
+/// hardened setting near a million (OWASP asks 600 000 of
+/// PBKDF2-HMAC-SHA256), which the first bound, 2^20, barely had. The
+/// count is the server's to choose -- and, under any `sslmode` short of
+/// `verify-full`, whoever stands in for it -- and is run before the proof
+/// goes out: `i=4294967295` was 54 trillion instructions of PBKDF2, more
+/// than half an hour of an M1 core even at its widest (eight a cycle at
+/// 3.2 GHz), `fennec import`, or `--follow` connecting again, waiting on
+/// it. The bound is 28.6 thousand million, seconds of a core. A count past
+/// it is refused naming the range and how to come under it, never run, nor
+/// cut to fit.
+pub const SCRAM_MAX_ITERATIONS: u32 = 1 << 22;
+
+/// The client half of one SCRAM-SHA-256 exchange (RFC 5802, RFC 7677), its
+/// messages made and checked apart from the connection, the nonce given:
+/// [`Client::scram`] gives the system's, and `scram_rfc7677_exchange` RFC
+/// 7677's, holding the messages to the RFC's byte for byte.
+struct Scram {
+    /// The client-first message less its GS2 header: `n=<user>,r=<nonce>`.
+    first_bare: String,
+    /// The client's nonce, which the server's must begin with.
+    nonce: String,
+}
+
+/// What the server-final message must be: `v=` and the server's
+/// signature, which only a holder of the password's verifier can make.
+struct ServerFinal(String);
+
+impl Scram {
+    /// `user` is written as given: the client sends none, and RFC 7677's
+    /// example `user`, neither with a `,` or `=` to escape.
+    fn new(user: &str, nonce: &str) -> Scram {
+        Scram {
+            first_bare: format!("n={user},r={nonce}"),
+            nonce: nonce.to_string(),
+        }
+    }
+
+    /// The client-first message: no channel binding (`n,,`).
+    fn first(&self) -> String {
+        format!("n,,{}", self.first_bare)
+    }
+
+    /// The client-final message answering `server_first` -- the proof that
+    /// `password` is known -- and the server-final message to expect.
+    fn last(&self, server_first: &str, password: &str) -> Result<(String, ServerFinal)> {
+        let (mut snonce, mut salt, mut iterations) = (None, None, None);
+        for kv in server_first.split(',') {
+            let Some((k, v)) = kv.split_once('=') else {
+                continue;
+            };
+            match k {
+                "r" => snonce = Some(v),
+                "s" => salt = Some(b64_decode(v).ok_or_else(scram_unparsed)?),
+                "i" => iterations = Some(scram_iterations(v)?),
+                _ => {}
+            }
+        }
+        // The server has to carry our nonce as a prefix; otherwise the
+        // response belongs to another session.
+        let (Some(snonce), Some(salt), Some(iterations)) = (snonce, salt, iterations) else {
+            return Err(scram_invalid());
+        };
+        if !snonce.starts_with(&self.nonce) || salt.is_empty() {
+            return Err(scram_invalid());
+        }
+
+        // `c=biws`, base64("n,,") -- no channel binding in use.
+        let without_proof = format!("c=biws,r={snonce}");
+        let auth = format!("{},{server_first},{without_proof}", self.first_bare);
+        let salted = pbkdf2_sha256(password.as_bytes(), &salt, iterations);
+        let client_key = hmac_sha256(&salted, b"Client Key");
+        let sig = hmac_sha256(&sha256(&client_key), auth.as_bytes());
+        let proof: Vec<u8> = client_key.iter().zip(sig).map(|(a, b)| a ^ b).collect();
+        let server_key = hmac_sha256(&salted, b"Server Key");
+        let server_final = format!(
+            "v={}",
+            b64_encode(&hmac_sha256(&server_key, auth.as_bytes()))
+        );
+        Ok((
+            format!("{without_proof},p={}", b64_encode(&proof)),
+            ServerFinal(server_final),
+        ))
+    }
+}
+
+impl ServerFinal {
+    /// Whether the server's last message is the one expected, compared as
+    /// every signature is (`ct_eq`): one made fresh each exchange gives a
+    /// guess nothing to grow, but the rule has no exceptions to tell apart.
+    fn verify(&self, got: &str) -> Result<()> {
+        if !ct_eq(got.as_bytes(), self.0.as_bytes()) {
+            return Err(Error::Query(
+                "postgres: the server signature could not be verified".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// A server-first message's iteration count, held to 1 to
+/// [`SCRAM_MAX_ITERATIONS`]: a count past it, however many digits it has,
+/// is refused naming the range before PBKDF2 runs, and what brings a
+/// server's under it: the role's password set again, its verifier made
+/// under a lower `scram_iterations`.
+fn scram_iterations(v: &str) -> Result<u32> {
+    if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(scram_unparsed());
+    }
+    // A count no `u32` holds is past the bound too; one past twenty digits
+    // is shown by its length, the message being the server's, as long as a
+    // gigabyte.
+    let digits = v.trim_start_matches('0');
+    if let Ok(n @ 1..=SCRAM_MAX_ITERATIONS) = digits.parse::<u32>() {
+        return Ok(n);
+    }
+    let shown = if digits.len() > 20 {
+        format!("a count of {} digits", digits.len())
+    } else {
+        v.to_string()
+    };
+    Err(Error::Query(format!(
+        "postgres: the server's SCRAM iteration count is 1 to {SCRAM_MAX_ITERATIONS}, not {shown}: \
+         set the role's password again under a lower scram_iterations"
+    )))
+}
+
+fn scram_unparsed() -> Error {
+    Error::Corrupt("postgres: the SCRAM response could not be parsed".into())
+}
+
+fn scram_invalid() -> Error {
+    Error::Query("postgres: invalid SCRAM server response".into())
+}
+
 /// A connection to a live PostgreSQL server.
 #[derive(Debug)]
 pub struct Client {
@@ -680,7 +881,8 @@ impl Client {
         }
     }
 
-    /// The SCRAM-SHA-256 client half (RFC 5802 + RFC 7677).
+    /// The SCRAM-SHA-256 client half (RFC 5802 + RFC 7677) over the
+    /// connection, its messages [`Scram`]'s.
     ///
     /// The password is never sent over the wire; only nonces and HMAC proofs
     /// travel. The server signature is verified too, which proves the other
@@ -690,8 +892,10 @@ impl Client {
         // come again, and a proof with it.
         let cnonce =
             nonce(24).ok_or_else(|| io("no randomness from the system for SCRAM's nonce"))?;
-        let client_first_bare = format!("n=,r={cnonce}");
-        let initial = format!("n,,{client_first_bare}");
+        // No user name: PostgreSQL reads the startup message's, and libpq
+        // sends `n=,` too.
+        let scram = Scram::new("", &cnonce);
+        let initial = scram.first();
         let mut w = Writer::new();
         w.msg(b'p', |b| {
             put_cstr(b, "SCRAM-SHA-256");
@@ -700,60 +904,24 @@ impl Client {
         });
         w.flush_to(self.stream.get_mut()).map_err(io)?;
 
-        let m = self.read()?;
-        if m.tag == b'E' {
-            return Err(server_error(&m));
-        }
-        let bad = || Error::Corrupt("postgres: the SCRAM response could not be parsed".into());
-        let server_first = String::from_utf8_lossy(m.body.get(4..).ok_or_else(bad)?).into_owned();
-        let (mut snonce, mut salt, mut iters) = (String::new(), Vec::new(), 0u32);
-        for kv in server_first.split(',') {
-            let Some((k, v)) = kv.split_once('=') else {
-                continue;
-            };
-            match k {
-                "r" => snonce = v.to_string(),
-                "s" => salt = b64_decode(v).ok_or_else(bad)?,
-                "i" => iters = v.parse().map_err(|_| bad())?,
-                _ => {}
-            }
-        }
-        // The server has to carry our nonce as a prefix; otherwise the
-        // response belongs to another session.
-        if !snonce.starts_with(&cnonce) || salt.is_empty() || iters == 0 {
-            return Err(Error::Query(
-                "postgres: invalid SCRAM server response".into(),
-            ));
-        }
-
-        // `c=biws`, base64("n,,") -- no channel binding in use.
-        let without_proof = format!("c=biws,r={snonce}");
-        let auth = format!("{client_first_bare},{server_first},{without_proof}");
-        let salted = pbkdf2_sha256(password.as_bytes(), &salt, iters);
-        let client_key = hmac_sha256(&salted, b"Client Key");
-        let sig = hmac_sha256(&sha256(&client_key), auth.as_bytes());
-        let proof: Vec<u8> = client_key.iter().zip(sig).map(|(a, b)| a ^ b).collect();
-        let final_msg = format!("{without_proof},p={}", b64_encode(&proof));
+        let server_first = self.sasl_answer()?;
+        let (last, server_final) = scram.last(&server_first, password)?;
         let mut w = Writer::new();
-        w.msg(b'p', |b| b.extend_from_slice(final_msg.as_bytes()));
+        w.msg(b'p', |b| b.extend_from_slice(last.as_bytes()));
         w.flush_to(self.stream.get_mut()).map_err(io)?;
 
+        server_final.verify(&self.sasl_answer()?)
+    }
+
+    /// The text of a SASL answer -- the server-first or the server-final
+    /// message -- or the server's error.
+    fn sasl_answer(&mut self) -> Result<String> {
         let m = self.read()?;
         if m.tag == b'E' {
             return Err(server_error(&m));
         }
-        let got = String::from_utf8_lossy(m.body.get(4..).ok_or_else(bad)?).into_owned();
-        let server_key = hmac_sha256(&salted, b"Server Key");
-        let want = format!(
-            "v={}",
-            b64_encode(&hmac_sha256(&server_key, auth.as_bytes()))
-        );
-        if got != want {
-            return Err(Error::Query(
-                "postgres: the server signature could not be verified".into(),
-            ));
-        }
-        Ok(())
+        let body = m.body.get(4..).ok_or_else(scram_unparsed)?;
+        Ok(String::from_utf8_lossy(body).into_owned())
     }
 
     fn read(&mut self) -> Result<Message> {
@@ -950,6 +1118,192 @@ impl WalStream {
         });
         w.flush_to(self.client.stream.get_mut()).map_err(io)
     }
+
+    /// Ends the stream as the protocol ends one: `CopyDone`, then the
+    /// server's messages read up to its `ReadyForQuery`. The walsender lets
+    /// the slot go before it answers (`ReplicationSlotRelease`, then
+    /// `CommandComplete`), so once this returns `Ok` the slot is free: to
+    /// drop, or to stream again.
+    ///
+    /// Closing the connection instead left the slot held until the
+    /// walsender next read its socket, which it does not while it decodes
+    /// a transaction -- any table's, published or not -- so a slot dropped,
+    /// or streamed again, just after its follower stopped was refused,
+    /// `55006`, "active for PID". What the server still sends of the stream
+    /// is dropped unread: nothing of it was applied, so nothing of it is
+    /// confirmed, and it comes again from the slot.
+    ///
+    /// `wait` bounds it all: the `CopyDone`'s write and every read -- the
+    /// rest of a message already begun and what was buffered with it
+    /// included, over TLS too, where a read of the rest of a message waited
+    /// out the socket's own `TIMEOUT`, 30 s, a read (`Until`) -- and the
+    /// `Terminate` of the close after it, which the drop sends only where
+    /// the socket takes it at once. A signal neither ends the wait nor
+    /// starts it again. It ends sooner, within [`CUT_LOOK`], once `cut` is
+    /// set: the caller's second stop. Either way the connection is then
+    /// closed, and the server lets the slot go once it reads that, if it
+    /// still holds it ([`Unended`] says which).
+    pub fn end(mut self, wait: Duration, cut: &AtomicBool) -> std::result::Result<(), Unended> {
+        let mut r = Until {
+            stream: &mut self.client.stream,
+            deadline: Instant::now() + wait,
+            cut,
+            gave: None,
+        };
+        let mut failed = None;
+        let ended = ending(&mut r, &mut failed);
+        match (ended, r.gave) {
+            (Ok(()), _) => failed.map_or(Ok(()), |e| Err(Unended::Failed(e))),
+            (Err(_), Some(Gave::Late)) => Err(Unended::Held(io(format!(
+                "the server did not end the replication stream within {wait:?}"
+            )))),
+            (Err(_), Some(Gave::Cut)) => Err(Unended::Held(io(
+                "the wait for the server to end the replication stream was cut short",
+            ))),
+            // The server's own error, when it closed after it.
+            (Err(e), None) => Err(Unended::Failed(failed.unwrap_or_else(|| {
+                if e.kind() == ErrorKind::UnexpectedEof {
+                    io("the server closed the replication stream")
+                } else {
+                    io(e)
+                }
+            }))),
+        }
+    }
+}
+
+/// [`WalStream::end`]'s exchange: `CopyDone` out, then the server's messages
+/// up to its `ReadyForQuery`, an error it sent kept in `failed`.
+fn ending(r: &mut Until<'_>, failed: &mut Option<Error>) -> stdio::Result<()> {
+    let mut w = Writer::new();
+    w.msg(b'c', |_| {});
+    w.flush_to(r)?;
+    loop {
+        let m = read_message(r)?;
+        match m.tag {
+            b'E' => *failed = Some(server_error(&m)),
+            b'Z' => return Ok(()),
+            // CopyData still on its way, the server's CopyDone, its
+            // CommandComplete, a notice.
+            _ => {}
+        }
+    }
+}
+
+/// Why [`WalStream::end`] returned short of the server's answer. The
+/// connection is closed either way, and the server lets the slot go once
+/// it reads that -- if it still holds it.
+#[derive(Debug)]
+pub enum Unended {
+    /// The server said nothing within the wait, or the wait was cut short:
+    /// it is busy -- decoding a transaction -- and holds the slot until it
+    /// next reads the connection.
+    Held(Error),
+    /// The connection ended or failed first, or the server answered with
+    /// an error: its walsender may have let the slot go, as one that exits
+    /// or fails does, or not yet -- a proxy's close, a network's failure.
+    Failed(Error),
+}
+
+impl std::fmt::Display for Unended {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Unended::Held(e) | Unended::Failed(e) => e.fmt(f),
+        }
+    }
+}
+
+/// How often [`WalStream::end`] looks at its `cut` while it waits.
+pub const CUT_LOOK: Duration = Duration::from_millis(50);
+
+/// Why a read or write of [`Until`] gave up.
+#[derive(Clone, Copy)]
+enum Gave {
+    Late,
+    Cut,
+}
+
+/// A connection read and written with every wait held to a deadline and a
+/// flag. A read that would go to the socket -- the reader's buffer empty --
+/// waits first for what is left (`Conn::readable`: a peek, or rustls taking
+/// whole records in), and reads only once bytes are there, which it then
+/// takes without waiting; a write waits for room no longer than what is
+/// left, the socket's write timeout set to it before each try. Either
+/// waits in slices of [`CUT_LOOK`], so that `cut` is looked at, and goes
+/// on after a signal for what is left: no read or write blocks past the
+/// deadline, then, even in the middle of a message, whose rest a plain
+/// read would wait for under the socket's timeout, nor at a full send
+/// buffer, nor starts its wait again at each signal, as `read_exact` and
+/// `write_all`, asking again, would. What it stops in the middle of is
+/// never read or written on: the connection is closed after it.
+struct Until<'a> {
+    stream: &'a mut BufReader<Conn>,
+    deadline: Instant,
+    cut: &'a AtomicBool,
+    gave: Option<Gave>,
+}
+
+impl Until<'_> {
+    /// The next wait: a slice of what is left, or, cut or past the
+    /// deadline, the error that gives up, `gave` saying why.
+    fn slice(&mut self) -> stdio::Result<Duration> {
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        let gave = if self.cut.load(Ordering::SeqCst) {
+            Gave::Cut
+        } else if left.is_zero() {
+            Gave::Late
+        } else {
+            return Ok(left.min(CUT_LOOK));
+        };
+        self.gave = Some(gave);
+        // Not `Interrupted`, which `read_exact` and `write_all` would ask
+        // again.
+        Err(ErrorKind::TimedOut.into())
+    }
+
+    /// `step` -- a write, or a flush of what rustls holds -- tried until
+    /// it is done or the wait is over: a try that took nothing as the
+    /// slice ran out, or that a signal interrupted, is made again.
+    fn sending<T>(
+        &mut self,
+        mut step: impl FnMut(&mut Conn) -> stdio::Result<T>,
+    ) -> stdio::Result<T> {
+        loop {
+            let wait = self.slice()?;
+            let conn = self.stream.get_mut();
+            conn.set_write_timeout(wait)?;
+            match step(conn) {
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+                    ) => {}
+                done => return done,
+            }
+        }
+    }
+}
+
+impl Read for Until<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> stdio::Result<usize> {
+        while self.stream.buffer().is_empty() {
+            let wait = self.slice()?;
+            if self.stream.get_mut().readable(wait)? {
+                break;
+            }
+        }
+        self.stream.read(buf)
+    }
+}
+
+impl Write for Until<'_> {
+    fn write(&mut self, buf: &[u8]) -> stdio::Result<usize> {
+        self.sending(|c| c.write(buf))
+    }
+
+    fn flush(&mut self) -> stdio::Result<()> {
+        self.sending(|c| c.flush_once())
+    }
 }
 
 /// The body of a `CopyData` on a replication stream.
@@ -979,11 +1333,19 @@ fn wal_message(b: &[u8]) -> Result<Wal> {
 }
 
 impl Drop for Client {
+    /// Terminate, which lets the server close the connection cleanly --
+    /// sent only where the socket takes it at once. A drop waits for
+    /// nothing: where the send buffer is full the server is reading
+    /// nothing, and the close tells it as much once it reads. Waiting held
+    /// a stop's end a whole `wait` past its bound, and a failed follower's
+    /// return -- which `fennec-server`'s mirror stores its exit code after
+    /// -- with no bound at all.
     fn drop(&mut self) {
-        // Terminate: let the server close the connection cleanly.
-        let mut w = Writer::new();
-        w.msg(b'X', |_| {});
-        let _ = w.flush_to(self.stream.get_mut());
+        if self.stream.get_ref().set_nonblocking().is_ok() {
+            let mut w = Writer::new();
+            w.msg(b'X', |_| {});
+            let _ = w.flush_to(self.stream.get_mut());
+        }
     }
 }
 
@@ -1219,5 +1581,212 @@ mod tests {
         let e = server_error(&Message { tag: b'E', body }).to_string();
         assert!(e.contains("42P01"), "{e}");
         assert!(e.contains("does not exist"), "{e}");
+    }
+
+    /// RFC 7677, section 3: its exchange, user `user` and password
+    /// `pencil`, with its nonce -- the client's messages, the proof among
+    /// them, byte for byte as the RFC prints them, and its server signature
+    /// verified. The RFC breaks the server-first and the client-final
+    /// messages across lines; the messages hold no space.
+    #[test]
+    fn scram_rfc7677_exchange() {
+        let scram = Scram::new("user", "rOprNGfwEbeRWgbNEkqO");
+        assert_eq!(scram.first(), "n,,n=user,r=rOprNGfwEbeRWgbNEkqO");
+        let server_first = "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,\
+                            s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096";
+        let (last, server_final) = scram.last(server_first, "pencil").unwrap();
+        assert_eq!(
+            last,
+            "c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,\
+             p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ="
+        );
+        server_final
+            .verify("v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=")
+            .unwrap();
+        // A server-final message that is not the RFC's: a character of its
+        // signature changed, its last cut off, one more, none, or an error.
+        let refused: [&str; 6] = [
+            "v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G5=",
+            "v=7rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=",
+            "v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4",
+            "v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4==",
+            "",
+            "e=invalid-proof",
+        ];
+        for got in refused {
+            let e = server_final.verify(got).unwrap_err().to_string();
+            assert!(e.contains("server signature"), "{got:?}: {e}");
+        }
+        // Another password is another proof, and expects another signature.
+        let (other, other_final) = scram.last(server_first, "pencil!").unwrap();
+        assert_ne!(other, last);
+        assert!(other_final
+            .verify("v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=")
+            .is_err());
+        // A server nonce not beginning with the client's is another
+        // session's.
+        let e = scram
+            .last(&server_first.replacen("rOpr", "xOpr", 1), "pencil")
+            .err()
+            .unwrap();
+        assert!(e.to_string().contains("invalid SCRAM"), "{e}");
+    }
+
+    /// The iteration count a server asks for is 1 to SCRAM_MAX_ITERATIONS,
+    /// read as written: the bound itself is run, and a hardened setting
+    /// past a million, past the first bound of 2^20; one past it or any
+    /// count no `u32` holds is refused naming the range and how to come
+    /// under it, before PBKDF2 runs.
+    #[test]
+    fn scram_iterations_are_held_to_their_range() {
+        let taken: [(&str, u32); 5] = [
+            ("1", 1),
+            ("4096", 4096),
+            ("2000000", 2_000_000),
+            ("04194304", 1 << 22),
+            ("4194304", SCRAM_MAX_ITERATIONS),
+        ];
+        for (v, n) in taken {
+            assert_eq!(scram_iterations(v).unwrap(), n, "{v}");
+        }
+        let refused: [(&str, &str); 6] = [
+            ("0", "not 0"),
+            ("4194305", "not 4194305"),
+            ("4294967295", "not 4294967295"),
+            ("4294967296", "not 4294967296"),
+            ("18446744073709551616", "not 18446744073709551616"),
+            ("123456789012345678901", "not a count of 21 digits"),
+        ];
+        for (v, says) in refused {
+            let e = scram_iterations(v).unwrap_err().to_string();
+            assert!(
+                e.contains("is 1 to 4194304")
+                    && e.contains(says)
+                    && e.contains("set the role's password again under a lower scram_iterations"),
+                "{v}: {e}"
+            );
+        }
+        for v in ["", "-1", "+5", "1e6", "4096 ", "0x10"] {
+            let e = scram_iterations(v).unwrap_err().to_string();
+            assert!(e.contains("could not be parsed"), "{v:?}: {e}");
+        }
+        // Refused as the server-first message is read, before its proof is
+        // made: no PBKDF2 of four billion rounds runs here.
+        let e = Scram::new("", "abc")
+            .last("r=abcdef,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4294967295", "p")
+            .err()
+            .unwrap();
+        assert!(e.to_string().contains("not 4294967295"), "{e}");
+    }
+
+    // ------------------------------------------------ a full send buffer
+
+    /// A socket's send or receive buffer set to 64 KiB, which stops the
+    /// system growing it, and the fill below quick. libc's `setsockopt`,
+    /// declared here as the crates declare what they take of it.
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+    fn fixed_buffer(sock: &impl std::os::fd::AsRawFd, send: bool) {
+        extern "C" {
+            fn setsockopt(fd: i32, level: i32, name: i32, value: *const i32, len: u32) -> i32;
+        }
+        #[cfg(target_vendor = "apple")]
+        let (level, sndbuf, rcvbuf) = (0xffff, 0x1001, 0x1002);
+        #[cfg(target_os = "linux")]
+        let (level, sndbuf, rcvbuf) = (1, 7, 8);
+        let name = if send { sndbuf } else { rcvbuf };
+        let size: i32 = 64 << 10;
+        // SAFETY: an `int` the call reads, which outlives it.
+        let r = unsafe { setsockopt(sock.as_raw_fd(), level, name, &size, 4) };
+        assert_eq!(r, 0, "{}", std::io::Error::last_os_error());
+    }
+
+    /// A replication stream whose socket cannot send: the server, the
+    /// socket returned beside it, reads nothing, and the client's send
+    /// buffer and the server's receive buffer are full. A server decoding
+    /// a long transaction reads nothing either; a follower fills nothing
+    /// with its little feedback, but nothing else holds its writes then.
+    /// Full for seconds, not for good: macOS makes room again some 5 s
+    /// later (the server's buffer compacted, the next window probe told of
+    /// it), and a blocked write goes through then.
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+    fn deaf() -> (WalStream, TcpStream) {
+        use std::net::TcpListener;
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        // An accepted socket takes the listener's.
+        fixed_buffer(&l, false);
+        let mut c = TcpStream::connect(l.local_addr().unwrap()).unwrap();
+        fixed_buffer(&c, true);
+        let (server, _) = l.accept().unwrap();
+        c.set_nonblocking(true).unwrap();
+        // Until a round takes nothing: what one took drains into the
+        // server's buffer until that is full as well, and room a delayed
+        // acknowledgement makes comes up to 200 ms later -- after a pause of
+        // 20 ms the 5 bytes of a `CopyDone` went through.
+        loop {
+            let mut took = 0;
+            while let Ok(n) = c.write(&[0u8; 4096]) {
+                took += n;
+            }
+            while let Ok(n) = c.write(&[0u8; 1]) {
+                took += n;
+            }
+            if took == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        c.set_nonblocking(false).unwrap();
+        c.set_read_timeout(Some(TIMEOUT)).unwrap();
+        let client = Client {
+            stream: BufReader::new(Conn::Plain(c)),
+            server_version: String::new(),
+        };
+        (WalStream { client }, server)
+    }
+
+    /// A server that reads nothing holds the end's `CopyDone` for as long
+    /// as the buffers stay full: the end is held to its wait all the same,
+    /// the `Terminate` after it too, where the drop's waited a whole wait
+    /// more -- twice the bound.
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+    #[test]
+    fn a_full_send_buffer_holds_the_end_no_longer_than_its_wait() {
+        let (wal, _server) = deaf();
+        let wait = Duration::from_secs(2);
+        let began = Instant::now();
+        let e = wal
+            .end(wait, &AtomicBool::new(false))
+            .unwrap_err()
+            .to_string();
+        let took = began.elapsed();
+        assert!(
+            e.contains("did not end the replication stream within"),
+            "{e}"
+        );
+        // Held from above, the time being the property, by what it stands
+        // against: the `Terminate` waiting a whole wait more, twice the
+        // wait, 2 s to spare over the end's own. The message alone would
+        // pass that.
+        assert!(took >= wait && took < 2 * wait, "{took:?}");
+    }
+
+    /// A client dropped with its send buffer full returns at once, its
+    /// `Terminate` unsent: the close says as much to a server once it
+    /// reads. A failed follower's drop waited for room, with no bound,
+    /// before `fennec-server` could store its exit code: for good on Linux,
+    /// and here until macOS made room, seconds after the 2 s allowed.
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+    #[test]
+    fn a_drop_never_waits_for_the_server() {
+        let (wal, _server) = deaf();
+        let (dropped, told) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(wal);
+            let _ = dropped.send(());
+        });
+        assert!(
+            told.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "the drop's Terminate waited for room the server never made"
+        );
     }
 }

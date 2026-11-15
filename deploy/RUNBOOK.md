@@ -17,6 +17,7 @@ this page is the procedures, and the files beside it are the kit:
 | `env/*.env` | the environment files the units read: addresses, flags and tokens |
 | `alerts/fennecdb.rules.yml`, `alerts/grafana.yml` | alert rules, for Prometheus and for Grafana |
 | `drill/drill.py` | `make drill`: the failovers below, in Docker, timed |
+| `drill/chaos.py`, `drill/oracle.py` | `make chaos`: a region broken by a schedule each seed draws, its history held to an oracle |
 | `test/units.py` | `make deploy-check`: these units under a real systemd |
 | `test/ingress.py` | `make deploy-check`: the tunnel's rules, asked of cloudflared's own matcher |
 
@@ -118,7 +119,9 @@ a token: a router or a node refuses an address past loopback without one.
 
 ## Tokens
 
-Every token is made with `openssl rand -hex 32` and lives in an
+Every token is made with `openssl rand -hex 32` -- a node and a router
+listening past loopback refuse at the start a token shorter than 32 bytes,
+the env files' `change-me` examples among them -- and lives in an
 environment file, `/etc/fennecdb/*.env`, mode 0600, owned by root. systemd
 reads it as root before the process starts, so no service's user can read
 the file, and no token is on a command line (`ps` shows every process's
@@ -562,10 +565,20 @@ node's tenants have their copy on the standby) -- and the router's log,
 which says why each has none:
 
 - **A node failed over** (`FennecNodeFailedOver`). Its own tenants were
-  promoted on their replicas, and the replicas it held are gone: none of
-  them has a copy until the node answers again (A node back), when its
-  files follow the new primaries. A node gone for good: `POST
-  /_shard/replicas` gives them copies on the nodes left.
+  promoted on their replicas, and the replicas it held were taken off
+  their records: none of them has a copy until a repair places one -- the
+  router's own as a node answers again (A node back), or `POST
+  /_shard/replicas`. As the node answers again, the tenants it lost follow
+  their new primaries from it; the replica copies it held come back only
+  where no repair placed their tenants' copies elsewhere first. Once one
+  has -- another node back before it, an operator's repair -- each copy it
+  held is a file left on it with no identity to take it back by, which no
+  repair follows over or deletes (Files left on nodes), and its node is no
+  place for that tenant's replica: in a region of three nodes, two failed
+  over in turn, a tenant can be left with no node for a copy until you
+  remove those files and run `POST /_shard/replicas` again (Known gaps). A
+  node gone for good: `POST /_shard/replicas` gives them copies on the
+  nodes left.
 - **A replica that did not take**: `tenant `t` has no replica yet: `eu-b`
   answered 503 ...; a repair tries again`, or `did not answer`. The router
   tries again by itself 2, 4, 8 s ... later, up to a minute apart, eight
@@ -652,7 +665,9 @@ not. Read the end of its `why`:
   (Upgrading with no downtime): a file made after that is taken back, while
   one already there carries no identity, so remove it by hand as below.
 - `not taken back: another operation holds the tenant` -- a create, a move
-  or an attach of the tenant was running; the next repair tries again.
+  or an attach of the tenant was running, or another repair was taking
+  that file back (the router runs one of its own 2 s after a replica's
+  attach fails); the next repair tries again, or finds the file gone.
 - `did not answer this repair's look` -- the node was silent; below.
 
 A move whose target already holds a file of the tenant (the install
@@ -886,6 +901,39 @@ records say; one refused names the damaged record and the
 whole one after it that says the file was synced past it -- restore that
 tenant from its archive or a replica, and keep the file for a look.
 
+**A sealed archive's next file is bound to itself, which older readers
+refuse.** From the release that binds a sealed frame to its file, an
+archiver restarted on it seals its next image and segment, and `fennec
+backup --key-file` its backup, with a file id (`FENECSL\x02`), and a
+`fennec restore` or `fennec verify` from 0.2.0 or earlier refuses such a
+file (`not a sealed file`, `<image>: not sealed, where the archive is`).
+The files sealed before still open in the new release, and a segment an
+older archiver began goes on as it was. So `fennec` is upgraded on every
+machine that restores or verifies -- an operator's, the weekly restore's --
+with step 1, before any archiver is restarted on the new release. The older files still open under their key, and whoever
+holds two of them can build a third from their frames: to be rid of that,
+make a new key (`fennec key`), point every archiver and backup at it, and
+begin a new archive under it, keeping the old key to read the older one
+(Archives and restores; the site's replication page, *How archives and
+backups are sealed*).
+
+**A tenant's `github` hook set with `key delivery` is kept, its events
+refused.** From the release that refuses `key delivery`, a set a node kept
+from 0.2.0 still reads -- every secret kept, the tenant's other hooks
+armed -- and the node logs each such hook as it starts (its line says the
+hook "was set with `key delivery`"); that hook's verified events are
+answered 409 naming `key body` until it is set again (`PUT
+/_shard/tenants/<t>/hooks/<h>` with its secret and `"key":"body"`, or no
+`key`). Then redeliver from GitHub's delivery log what was refused
+meanwhile. Its listings say `"armed":false` for each statement taking it
+until then. A single server started with `--hooks` reads no kept set: a
+hooks file line `<name> github <secret file> key delivery` stops it at the
+start on the new release (exit 2, ``<hooks file>: hooks file line N: `key
+delivery` is refused: ...``). Take `key delivery` out of that line, or make
+it `key body`, before restarting the server on the release; its events are
+keyed by their body from then on, so one taken before under its delivery id
+is taken once more if GitHub redelivers it.
+
 What a mix of versions tolerates is said release by release in the
 changelog; the docs hold these today: nothing records an `https://` node
 address until every router (each region's, each standby) and every node is
@@ -1049,6 +1097,21 @@ account alone, and another account is refused it -- and the command with it
 file the folder's rules do not reach), where on Linux the directory's write
 permission is enough.
 
+**A tenant's hook secrets set aside**: a node that cannot read a tenant's
+`<t>.hooks` as it starts -- cut short or changed by hand, written by a later
+release and met after a downgrade, or its tenant's file not looked at for
+another reason than its not being there (a directory the node may not
+search, an I/O error) -- renames it `<t>.hooks.unread` (`.unread.2` and on,
+never over one) and logs ``tenant `<t>`'s hook secrets ...: set aside as
+<path>, which nothing reads``; the tenant's hooks are answered 401 until set
+again. Only a tenant's file that is not there makes its set one to put away.
+The file holds the secrets, mode 0600 (on Windows an ACL granting the node's
+account alone). Nothing reads or removes it: it stays through a delete and a
+re-creation of the tenant, and on the source node of a move, which does not
+carry it. Read the secrets from it, set the hooks again through the router
+(`PUT /_shard/tenants/<t>/hooks/<h>`), then remove it by hand; `ls
+"$FENNEC_DIR"/*.hooks.unread*` finds every one.
+
 **The weekly restore**, from the bucket and on a machine of no role, as a
 disaster would have it -- the archiver's own disk proves nothing about the
 bucket:
@@ -1166,7 +1229,8 @@ it short and says what it costs.
 - `FennecRouterRefusals`, `FennecNodeRefusals`: more than one refused token a
   second -- a client with a stale token, or someone guessing. The audit log
   (`/var/log/fennecdb/<role>/audit.log`) names the address; each refusal
-  waits, longer for each one more from the same address.
+  waits, longer for each one more from the same address (an IPv6 one's
+  /64).
 
 ## The entry token
 
@@ -1248,6 +1312,27 @@ back from each tenant's primary and its replica; the summary prints the
 times and `lost`, which must be 0. No port is fixed and everything it
 made is removed; `DRILL_KEEP=1` leaves it for a look.
 
+`make chaos` breaks a region at random instead: a router and its standby,
+three nodes, clients writing and reading registers and appending rows,
+while a schedule drawn from each seed kills and pauses nodes, delays,
+drops and cuts the links between a router and a node and between two
+nodes (tc netem), kills a node again while it catches up, fails a move's
+source over and jumps a node's clock -- one fault at a time, every
+replica's rows checked against its primary's after each. At the end every
+answered write must be found, every read must have found a value a write
+could have left, and no tenant may have been written by two primaries at
+once -- but for a write a failover lost while its replica was behind, the
+window *A node lost* names, which the run counts and names rather than
+fails. Each fault must land, drawn again where it did not, and every kind
+lands once. `make chaos SEEDS=5 SEED0=40 CHAOS_MINUTES=10` runs seeds 40
+to 44 for ten minutes each; a failed seed names itself, and the same seed
+draws the same schedule again; `CHAOS_KEEP=1` leaves a failed seed's
+containers for a look and stops there. Every container, the driver's too,
+is held to `--cpus` and `--memory`, at the kit's lease of 5 s
+(`CHAOS_LEASE`). Its nodes run a test build of fennec-server
+(`test-clock`), never one a release ships: `release.yml` refuses a
+binary or an image whose `--version` says it.
+
 ## Known gaps
 
 - **A node's virtual machine paused by its host.** A node measures its
@@ -1324,6 +1409,20 @@ made is removed; `DRILL_KEEP=1` leaves it for a look.
   back. A process stopped after the second check sends a success whenever
   it runs again.
 
+- **Copies a failed node held, once a repair placed them elsewhere.** A
+  node failed over leaves the replica copies it held behind as files noted
+  with no identity, once a repair has placed their tenants' copies on
+  another node: the router never takes one back or follows over it, and
+  its node is no place for that tenant's replica (Tenants without a
+  replica, Files left on nodes). In a region of three nodes, two failed
+  over in turn, a tenant is left without a copy -- its primary lost, it
+  stays there writing nothing -- until an operator removes the files `POST
+  /_shard/replicas` lists under `left` (`DELETE /_admin/tenants/<t>` on the
+  node, where the directory places neither the tenant nor its replica) and
+  asks for a repair again. `make chaos` does that as an operator would.
+  The fix proposed for 1.0 keeps each replica's identity in the directory,
+  so a repair takes such a copy back or follows over it by itself
+  (docs/design/tenants.md, *A detached copy taken back by its identity*).
 - **No scrape-only token.** `/_metrics` takes a node's data or admin token,
   a router's `--token`.
 - **No per-tenant replica lag** on a node's `/_metrics`

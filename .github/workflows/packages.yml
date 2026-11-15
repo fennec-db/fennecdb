@@ -259,7 +259,7 @@ jobs:
           rustup show
           rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
 
-      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         if: steps.keys.outputs.set == 'true'
         with:
           distribution: temurin
@@ -440,6 +440,13 @@ jobs:
             # publish refused before its upload goes again, and one whose
             # version is on pub.dev by then counts as done.
             for try in 1 2 3 4 5 6 7 8 9 10; do
+              if [ "$pkg" = fennecdb_flutter ]; then
+                # The archive pub.dev would get, held to what it must hold
+                # before anything is uploaded (an old-layout zip would pass
+                # prepare.sh's copy with a macOS library missing).
+                (cd "$out" && flutter pub publish --skip-validation --to-archive="$RUNNER_TEMP/$pkg.tar.gz")
+                python3 tools/flutter_archive_check.py "$RUNNER_TEMP/$pkg.tar.gz" >/dev/null
+              fi
               if (cd "$out" && flutter pub publish --force); then
                 break
               fi

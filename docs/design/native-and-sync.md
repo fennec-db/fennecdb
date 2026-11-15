@@ -79,19 +79,37 @@ isolate a database), sends a vector as its `f32` bytes and a json field's
 has live queries as `Lives` has them, the looks of a burst gathered a frame
 (16 ms) and taken once no write is under way. The libraries are built alone
 (`cargo rustc --crate-type cdylib`): beside the staticlib and rlib, LTO left
-the shared one 4% larger. 1.68 MB stripped on aarch64-apple-darwin, 1.88 on
-x86_64 Linux with JNI, the sync (below) 165 and 198 KB of them; a buffered put of a 128-dim vector 4.6 us against
+the shared one 4% larger. 3.07 MB stripped on aarch64-apple-darwin, 3.52 on
+x86_64 Linux with JNI (CI's figures, `integrations/ffi-sizes.md`, held by
+`site/build.py`), the sync (below) 165 and 198 KB of them, measured by hand
+when the libraries were 1.68 and 1.88 MB; a buffered put of a 128-dim vector 4.6 us against
 the server handler's 23.2, a fsynced one 4.0 ms on an M1, `near` 97.8 us
 against 151.4 (`make ffi-bench`). The XCFramework is assembled by hand
 (`build-xcframework.sh`), so the Command Line Tools build every slice; a
 release's zip is built before its tag (`swift-binary.yml`), since the tag's
 `Package.swift` must name its checksum. Swift links a static library; the
-Flutter plugin vendors a dynamic `FennecFFI.xcframework` (`--dynamic`,
-`FennecFFI.framework` a slice, install name `@rpath/FennecFFI.framework/...`)
-and Dart opens `FennecFFI.framework/FennecFFI`: a static one kept whole with
-`-force_load` had the Runner link a file CocoaPods' "Copy XCFrameworks"
-phase makes with no order declared against it, and `flutter build ios`
-failed on it.
+Flutter plugin vendors shared ones (`--dynamic`): on iOS a
+`FennecFFI.xcframework` of `FennecFFI.framework`s (install name
+`@rpath/FennecFFI.framework/FennecFFI`), which Dart opens as
+`FennecFFI.framework/FennecFFI`, and on macOS that XCFramework's macOS
+framework binary as a plain `libfennec_ffi.dylib` beside it, which Dart
+opens by name
+([integrations.md](integrations.md#flutter-plugin)): a static one kept
+whole with `-force_load` had the Runner link a file CocoaPods' "Copy
+XCFrameworks" phase makes with no order declared against it, and `flutter
+build ios` failed on it. Every slice is built for iOS 15 and macOS 11 on,
+macOS 11 the lowest aarch64-apple-darwin builds for: an app on the library
+alone, through `fennec.h`, asked for macOS 11, where the slices said 12.
+`Package.swift` and the pods declare the same. The package had declared
+macOS 12 for `URLSession`'s async `data(for:)`, which the SDK back-deploys
+to 10.15 (an `@_alwaysEmitIntoClient` overload in Foundation's interface,
+the macOS 26.2 SDK's among them): its sources and tests typecheck at macOS
+11 as they are.
+Linux's is a release's tarball for x86_64 and aarch64 with
+glibc, the shared library with the JNI functions, the static one without,
+`fennec.h` and two pkg-config files, held to glibc 2.34 and run there before
+it is kept ([integrations.md](integrations.md#install-channels)); the JVM's
+jar loads that file on Linux.
 
 ## Sync core
 
@@ -129,7 +147,21 @@ describes: `_sync_shapes` (cursors), `_sync_queue` (unanswered writes, their
 keys and undo), `_sync_temps` (rows under temporary ids). Writes go one at
 a time in order; 0/408/429/5xx retry with backoff (250 ms doubling to 15 s,
 30% jitter) or the `retry_after` a quota names where longer, 401 asks for
-a token, a 507 naming a tenant's quota and any other 4xx are a refusal put
+a token -- `{"do":"token","code":..,"had_token":B,"attempt":N}`, the code
+the server named (`token_expired` where the token's `exp` passed), whether
+the refused request carried a token and the asks in a row since the server
+last took the token held, after 1 s doubling to 60 s where the token handed
+over was refused too, the status's `token` naming the same three and where
+the ask stands -- `delayed`, `asked`, `failed`, said from the ask itself so
+that no fault set since, a stream's end offline, hides it -- a 401 to a
+request sent with a token since replaced sent again with the new one,
+unasked, one ask out at a time -- the binding answering it with a token or
+with `{"token_failed":".."}`, its provider called once at a time, and with
+no bound on its time, a token the app hands over itself getting the sync
+going where it never returns -- and `{"online":true}` asking again only
+after the second
+([access.md](access.md#expired-tokens)) -- a
+507 naming a tenant's quota and any other 4xx are a refusal put
 back (below). A
 replica reopened sends its queue before opening its streams. An update of
 an unanswered insert reaches the server's copy by its key as well
@@ -171,8 +203,8 @@ and the browser module nothing: it has no sync. A one-row change
 costs 18.4 us against 7.1 for the same put alone, rows in changes of 100
 3.8 us either way, a 128-dim row under HNSW 482 against 465, a seed of 10
 000 rows 72 ms against 44 (`make sync-bench`). It adds about 165 KB to the
-native library -- 1.51 -> 1.68 MB on aarch64-apple-darwin, 1.68 -> 1.88 on
-x86_64 Linux, about 77 KB of it the sync's own code -- and the browser module is built without it:
+native library (when it was 1.51 -> 1.68 MB on aarch64-apple-darwin, 1.68 -> 1.88 on
+x86_64 Linux), about 77 KB of it the sync's own code -- and the browser module is built without it:
 `fennec-abi`'s `sync` feature, which only `fennec-ffi` turns on. It turns
 on fennec-ql's `statements`, to read the named statements it refuses: the
 native library names them anyway, so the refusal is its only cost, 128
@@ -189,15 +221,27 @@ fsync `sync()`.
 **The browser's sync and the native core are held to one scenario file.**
 Moving `FennecSync` onto `fennec_abi::sync` was measured at +21 KB brotli of
 the browser module, so the two are written apart, and
-`integrations/sync-scenarios.json` says what both do: 84 scenarios, each a
+`integrations/sync-scenarios.json` says what both do: 115 scenarios, each a
 script of shapes, app writes and server events -- a seed, a change, a
 stream dropped, the status each write's request is answered with, a seed
-past the horizon, the network's signal, a token -- with what the replica,
+past the horizon, the network's signal, a token, a provider that failed or
+never returns and the app's own token meanwhile, a stop, an answer held
+back until the script releases it (a stream's open or
+`GET /collections` answered after a token was handed over; given to no one
+once its stream was cancelled, as a fetch aborted rejects -- a stand-in that
+opened it kept a stream no shape held, which the next event went to) --
+with what the replica,
 the queue, the requests sent (method, path, body, the idempotency key
-reused or new), the timers and the refusals are after every step.
+reused or new), the timers, the refusals, the status's error and its token
+are after every step, each runner failing a scenario whose sync asks for a
+token while an ask is out, and calling a provider once at a time, as every
+binding calls it.
 `crates/fennec-abi/tests/scenarios.rs` drives the sans-IO core through it,
 and `web/fennec.sync.scenarios.test.js` drives `FennecSync` through a fetch
-and a clock the script plays, its replica persisted over an in-memory
+and a clock the script plays -- every body it answers thrown away at an
+abort, as a real fetch throws it away: a stand-in that kept its bodies hid a
+stream refused at its open whose body was read after the stream was
+cancelled, told nothing on Node's own fetch -- its replica persisted over an in-memory
 IndexedDB so a restart is a page opened again; each writes the names that
 passed to `target/sync-scenarios/`, and `make sync-scenarios-check` (in
 `make test` where the module is built, and its own CI step) fails unless

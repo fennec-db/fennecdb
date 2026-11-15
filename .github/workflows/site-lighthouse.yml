@@ -23,6 +23,12 @@ on:
       - '.github/workflows/site-lighthouse.yml'
   workflow_dispatch:
 
+# A newer commit on the same pull request ends the audit of the one before
+# it, as ci.yml's runs do: the account's 20 job slots are CI's bottleneck.
+concurrency:
+  group: lighthouse-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -39,15 +45,18 @@ jobs:
         with:
           node-version: '22'
 
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # Restore only: this runs on pull requests alone, and an entry saved on
+      # a pull request's ref is read by no other run. site.yml saves it on
+      # main (docs/design/conventions.md, "ci.yml runs on a pull request").
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: site-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: site-cargo-
+          key: v2-site-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-site-cargo-
 
       # As the deploy's build has them: minified assets, and the brotli
       # figures build.py checks the site's quoted sizes against.

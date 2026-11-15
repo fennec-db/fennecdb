@@ -1,6 +1,6 @@
 # AGENTS.md
 
-fennec-http's access -- scoped tokens and their rules, field lists, the server's own collections, tenant binding and whom a token is for -- for code in `crates/fennec-http/src/access.rs` and `crates/fennec-http/src/access/`, which binds fennec-core's hooks (`plugin::Hook`, `Check`), its `Filter` -- the order it tests an `and`'s terms in -- and its own collections' names (`declared::OWN`) too; the rest of fennec-http's rules are in [its AGENTS.md](../../AGENTS.md), the rules every change meets in the root's [AGENTS.md](../../../../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
+fennec-http's access -- scoped tokens and their rules, field lists, the server's own collections, tenant binding, whom a token is for and its expiry -- for code in `crates/fennec-http/src/access.rs` and `crates/fennec-http/src/access/`, which binds fennec-core's hooks (`plugin::Hook`, `Check`), its `Filter` -- the order it tests an `and`'s terms in -- and its own collections' names (`declared::OWN`) too, and how a replica's sync reads a 401 (`fennec_abi::sync`, `web/fennec.js`); the rest of fennec-http's rules are in [its AGENTS.md](../../AGENTS.md), the rules every change meets in the root's [AGENTS.md](../../../../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
 
 ## Invariants
 
@@ -39,8 +39,13 @@ side to its kind under any number of `not`s (`kind_held`), a row with no
 value answering as the rule written out; an inner `get`'s rules are bound
 for the `not`s it stands under (`hold`). Refused at startup: a claim in a
 call or arithmetic (`like`'s pattern aside) or compared in order inside a
-value (`claims_held`), and a policy writing its own `$<n>`. A tenant claim
-naming no tenant reaches none; a `sub` of `""` is no subject.
+value (`claims_held`), an inner `get` standing anywhere but under `and`,
+`or` and `not` -- `(... in (get ...)) = false`, a call's argument, which
+has no `not` to bind it by -- or in an inner `get` anywhere but its `where`
+(`inner_gets`), a policy writing its own `$<n>`, and a clause after a
+rule's `where`, which no rule applies (`rule`). A tenant claim
+naming no tenant reaches none; a `sub` of `""`, or one no string, is no
+subject, a refusal needing one saying which (`sub_not_text`).
 
 **[A field a read rule withholds is held out of what a statement
 does.](../../../../docs/design/access.md#field-lists)** `fields::hold` and
@@ -53,9 +58,12 @@ stream sends no row a write left showing the same (`sse::Seen`).
 statement.](../../../../docs/design/access.md#rules-reading-another-collection)**
 Its `in` lists are answered under each lock (`Scope::bound`), the scope
 `Check`, the mask and streams use; a list past `MAX_CLAIM_VALUES` is
-refused, never cut, and rules reading each other's collections, a `*` rule
-reading one, or `new.` or `expired()` in one are refused at startup
-(`ring`). A stream's filter reading another collection -- a rule's, or the
+refused naming its rule, never cut, nor made of the rows read before the
+bound stopped its `get`, nor of a group's one value where `in` tells its
+values apart -- a `nocase` or json field is read row by row (`listed`,
+`grouped_whole`) -- and rules reading each other's collections, a `*` rule
+reading one, `new.` or `expired()` in one, or a ranking in one, a page and
+not a set (`ranking`), are refused at startup (`ring`, `inner_gets`). A stream's filter reading another collection -- a rule's, or the
 shape's own inner `get`, any token's -- is answered again at each look
 after a write to what it reads, once a row of it reached its `@ttl`, or
 a second after the read answering it ended where it reads the time -- the
@@ -99,8 +107,50 @@ where not a word (`claim_name`): a path into a nested object, or an
 unquoted name running into `-` or `:`, is refused at startup, never read; a
 role is the word after the last `for` or a quoted name (`role_of`).
 
+**[A token past its `exp` is told so by a code, and no other refusal
+is.](../../../../docs/design/access.md#expired-tokens)** A request whose
+token's `exp` passed is answered 401 `{"error":"the token has
+expired","code":"token_expired"}` (`refusal_code`, in `authenticate`), and
+a stream ended at the `exp` says the same (`sse::EXPIRED`); the `exp` is
+asked after the signature and whom the token is for (`Access::verify`), so
+the code is told only of a token this server took until then. A client
+reads the code alone, never the words, and no 401 is a sign-out: the
+server keeps no list of revoked tokens, so an app asks its issuer at every
+one and signs out where the issuer refuses. So a replica's sync hands its
+provider the code, whether the refused request carried a token and the
+asks in a row since the server took the token held -- a 2xx or a stream
+opened, never a 408, 429 or 5xx (`TokenRefusal`, the token action's
+`code`, `had_token`, `attempt`) -- asks once while it waits, after 1 s
+doubling to 60 s where the token handed over was refused too, a wait the
+same token handed over again does not end (an expiry starting at 1 only
+for the token the server took last or the first handed over since, never
+for one already refused for its expiry), one ask out at a time -- a
+binding calls its provider once at a time, bounding none, and answers with
+the token or `{"token_failed":..}`, which the status's `token` tells in
+every SDK (its stage, said from the ask: no fault set since hides it) --
+again at `{"online":true}` only after that, nothing once stopped, and
+sends a request refused for a token since replaced again, unasked
+(`fennec_abi::sync`, `web/fennec.js`, held by the scenario file); a
+replica is one account's, its key or path naming it; every SDK names the
+code `errorCode`.
+
 **[An empty token is no token.](../../../../docs/design/access.md#empty-tokens)**
 A variable set empty is unset (`env_secret`, fennec-shard's `env`); a token
 flag, a JWT secret's file or a key file given empty is refused at the
 start; a library constructor takes an empty token as none
 (`Config::settled`).
+
+**[A token taken past loopback is 32 bytes at least.](../../../../docs/design/access.md#short-tokens)**
+`fennec-server` and `fennec-shard` refuse at the start, before anything is
+opened, a token shorter than `TOKEN_MIN` where a listener taking it binds
+past loopback (`fennec_http::short_token`), naming the flag, its variable
+and the minimum: `--http-token` and `--admin-token` on `--http` and
+`--metrics`, `--replication-token` on `--http`, the router's `--token`,
+`--entry-token` and `--replication-token` on `--listen`. A new token flag
+joins those lists. Loopback is judged of the addresses the listener is
+bound on, its name looked up once (`fennec_http::Listen`), never bound by
+its text again, and a name not looked up is past loopback. On loopback any
+length is taken (`make server TOKEN=secret`), one shorter warned of once,
+at the first request a proxy or a router sent (`kept_short`, `proxied`: a
+load and a branch a request, nothing refused), as is a hook's secret
+shorter (`Hook::short`); `--insecure` waives nothing.

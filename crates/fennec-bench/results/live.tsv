@@ -1,0 +1,3 @@
+run	commit	machine	date	family	cell	metric	value
+hand	8d6cf892	hand-measured	2026-11-09	live	todos_page_50_of_1000_to_3000:rerun	ms	0.19
+hand	8d6cf892	hand-measured	2026-11-09	live	write_no_live_query_reads	us	2

@@ -40,6 +40,10 @@ timing = ["fennec-http/timing"]
 # (docs/design/crates.md#zero-dependencies). Without it, `--no-default-features`,
 # the server takes none.
 tls = ["fennec-import/tls", "fennec-http/tls", "dep:fennec-tls"]
+# A tenant node's clock moved by a file, for `make chaos` (`fennec-http`'s
+# `test-clock`): never a release's, and `--version` says `+test-clock`, which
+# a release's package check refuses.
+test-clock = ["fennec-http/test-clock"]
 
 [[test]]
 name = "all"

@@ -10,7 +10,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { CreateBucketCommand, HeadObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
+import { CreateBucketCommand, DeleteObjectCommand, HeadObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { backend } from './files-backend.mjs';
 import { follow } from './blobs.mjs';
 import { reconcile } from './reconcile.mjs';
@@ -23,6 +23,20 @@ const say = (...a) => console.log(...a);
 // The URL as it is shown here: the store's address is the run's, and a signature is no one's business.
 const short = (url) => `<store>${new URL(url).pathname}?…`;
 let container = null;
+// What the store's container last said, for an error that names a store's refusal.
+const storeLog = () => {
+  if (!container) return '(no container: the store is not ours)';
+  try {
+    return execFileSync('docker', ['logs', '--tail', '40', container], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (e) { return `(docker logs failed: ${e.message})`; }
+};
+// A store request that must have worked and did not stops the run here, with the
+// status, the store's own body and its log: in CI run 43651440505 a presigned PUT
+// answered 500, nothing said so, and the run crashed three steps later on a URL.
+const stored = async (what, res) => {
+  if (res.ok) return res;
+  throw new Error(`${what}: the store answered ${res.status}\n${await res.text()}\n-- the store's last log lines:\n${storeLog()}`);
+};
 atExit(() => container && execFileSync('docker', ['rm', '-f', container], { stdio: 'ignore' }));
 
 // Pinned: a store that changes under a recipe is a recipe that fails for another reason.
@@ -82,6 +96,20 @@ try {
   const keys = keysOf();
   await until('the bucket', () => s3.send(new CreateBucketCommand({ Bucket: env.BUCKET })).then(() => true,
     (e) => e.name === 'BucketAlreadyOwnedByYou'), 30_000);
+  // The store taking a write is what the steps below need, and neither check above says
+  // so: SeaweedFS starts its master, volume server, filer and S3 gateway as goroutines
+  // (`weed/command/server.go`, the gateway after a fixed 2 s sleep, the volume server
+  // not waited for), the master has no volume to assign until the volume server's
+  // first heartbeat has registered it, and the first write into a bucket needs one
+  // (`volume_growth.go`: "Only has 0 data nodes"). The first presigned PUT of CI run
+  // 43651440505 answered 500, once in 80 runs, and could not be reproduced locally.
+  // So wait for a write: a probe object, in a key no follower or reconcile reads
+  // (`keys.parse` is null), deleted at once.
+  let probed = 'no answer';
+  await until('the store to take a write', () => s3.send(new PutObjectCommand({ Bucket: env.BUCKET, Key: '_ready', Body: 'x' }))
+    .then(() => s3.send(new DeleteObjectCommand({ Bucket: env.BUCKET, Key: '_ready' }))).then(() => true,
+      (e) => { probed = `${e.name}: ${e.message}`; return false; }), 60_000)
+    .catch((e) => { throw new Error(`${e.message}; the last answer was ${probed}\n-- the store's last log lines:\n${storeLog()}`); });
   say(`fennec-server and the bucket ${env.BUCKET} are up`);
 
   const app = backend({ fennec: url, appToken, s3, bucket: env.BUCKET });
@@ -106,7 +134,7 @@ try {
     const ctl = new AbortController();
     const done = follow({ fennec: url, adminToken: 'root', s3, bucket: env.BUCKET, signal: ctl.signal, wait: 500, log: (m) => said.push(m) });
     // A follower that ends with an error fails the run, with the container removed.
-    done.catch((e) => cleanup().then(() => { console.error(e); process.exit(1); }));
+    done.catch((e) => { const log = storeLog(); return cleanup().then(() => { console.error(e, `\n-- the store's last log lines:\n${log}`); process.exit(1); }); });
     return { ctl, done };
   };
   let follower = startFollower();
@@ -119,7 +147,7 @@ try {
   say('the row the server holds:', await rows('get files select id, owner, name, type, size, state'));
 
   say('\n-- she sends the bytes to the bucket herself, with the URL');
-  res = await fetch(made.url, { method: 'PUT', headers: made.headers, body: bytes });
+  res = await stored('the first PUT', await fetch(made.url, { method: 'PUT', headers: made.headers, body: bytes }));
   say(`PUT <presigned>         ${res.status}`);
   res = await call(alice, 'GET', `/files/${made.id}`);
   say(`GET /files/${made.id} before done ${res.status} ${JSON.stringify(await json(res))}`);
@@ -147,7 +175,7 @@ try {
   say('\n-- a name that is not ASCII, and what a download is saved as');
   res = await call(alice, 'POST', '/files', { name: 'résumé "final".pdf', type: 'application/pdf', size: 4 });
   const pdf = await json(res);
-  await fetch(pdf.url, { method: 'PUT', headers: pdf.headers, body: '%PDF' });
+  await stored('the PDF PUT', await fetch(pdf.url, { method: 'PUT', headers: pdf.headers, body: '%PDF' }));
   await call(alice, 'POST', `/files/${pdf.id}/done`);
   const pdfGot = await json(await call(alice, 'GET', `/files/${pdf.id}`));
   const pdfDownload = await fetch(pdfGot.url);
@@ -214,7 +242,7 @@ try {
 
   say('\n-- the follower is stopped, a file is deleted, and the stream moves past what the server keeps');
   const second = await json(await call(alice, 'POST', '/files', { name: 'second.txt', type: 'text/plain', size: 6 }));
-  await fetch(second.url, { method: 'PUT', headers: second.headers, body: 'second' });
+  await stored('the second PUT', await fetch(second.url, { method: 'PUT', headers: second.headers, body: 'second' }));
   await call(alice, 'POST', `/files/${second.id}/done`);
   follower.ctl.abort();
   await follower.done;

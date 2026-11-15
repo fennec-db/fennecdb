@@ -440,9 +440,19 @@ fn run_follow(source: &str, table: &str, target: &str, opts: &Options, f: &Follo
             Event::Reconnecting { error, wait } => {
                 say(open, format!("stream   {error}; again in {wait:.1?}"))
             }
+            Event::SlotHeld(why) => say(open, format!("warning  {why}")),
         }
     };
-    let result = follow::run(&url, table, &db, opts, f, &stop::STOP, &mut report);
+    let result = follow::run(
+        &url,
+        table,
+        &db,
+        opts,
+        f,
+        &stop::STOP,
+        &stop::AGAIN,
+        &mut report,
+    );
     if open_line {
         println!();
     }

@@ -54,7 +54,7 @@
 //! `&image=1` asks for an image whatever the positions say: a replica sends
 //! it after a record it could not apply.
 
-use crate::constant_eq;
+use crate::crypto::ct_eq;
 use crate::http::{Request, Response};
 use fennec_core::prelude::*;
 use std::cell::Cell;
@@ -594,6 +594,61 @@ impl Feed {
         }
     }
 
+    /// The records a follower has just applied from its primary, from
+    /// write `first` on, take the times the primary sent with them, the
+    /// message's `k`th record `times[k]`. Each that landed entered this feed
+    /// through the sink ([`Feed::push`]), one entry a record, stamped with
+    /// this server's clock as it was applied: they are the ring's newest.
+    /// Where the apply said how many landed (`landed`, every record of the
+    /// message) they are paired from the last back, which a ring letting go
+    /// of the first of them as later ones came in -- a buffer smaller than
+    /// one message -- leaves right. An apply refused part way landed a
+    /// prefix and says nothing: paired from the first on, where the ring
+    /// still holds the first; where it does not, they keep this clock's
+    /// time until the image the follower now connects again for starts the
+    /// feed over. Under the database's write lock, before the follower's
+    /// flush: no record a follower applied is durable, so sendable, before
+    /// its time is its primary's. After the apply, never in `push`: a
+    /// primary's write runs the code it ran before.
+    pub(crate) fn sent_times(&self, first: u64, landed: Option<usize>, times: &[u64]) {
+        let mut g = lock(&self.ring);
+        let r = &mut *g;
+        // The ring's records holding writes from `first` on, and where the
+        // earliest of them starts.
+        let (mut held, mut start) = (0, None);
+        for c in r.chunks.iter().rev() {
+            let k = c.lasts.partition_point(|&l| l < first);
+            held += c.lasts.len() - k;
+            start = Some(if k > 0 { c.lasts[k - 1] + 1 } else { c.first });
+            if k > 0 {
+                break;
+            }
+        }
+        let top = match landed {
+            Some(n) => n,
+            None if start == Some(first) => held,
+            None => return,
+        };
+        if held > top || top > times.len() {
+            return;
+        }
+        let durable = r.durable;
+        let mut j = 0;
+        'chunks: for c in r.chunks.iter_mut().rev() {
+            for k in (0..c.lasts.len()).rev() {
+                if j == held {
+                    break 'chunks;
+                }
+                let last = c.lasts[k];
+                debug_assert!(last > durable, "write {last} was sendable before its time");
+                if last > durable {
+                    c.times[k] = times[top - 1 - j];
+                }
+                j += 1;
+            }
+        }
+    }
+
     /// A record appended and synced, as a [`Tee`] makes one: for tests.
     #[cfg(test)]
     pub(crate) fn push_durable(&self, seq: u64, bytes: &[u8]) {
@@ -916,6 +971,12 @@ impl Sink for Tee {
             }
         }
     }
+    /// Passed on, the feed told nothing: it comes after the last sync, which
+    /// told it, and a durability still running tells it as before.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn close_log(&mut self) {
+        self.file.close_log()
+    }
 }
 
 /// The history a history record holds, `[8][0][length][history]`; `None`
@@ -1130,7 +1191,7 @@ impl Replication {
         let ok = self
             .token
             .as_ref()
-            .is_some_and(|t| constant_eq(given.as_bytes(), t.as_bytes()));
+            .is_some_and(|t| ct_eq(given.as_bytes(), t.as_bytes()));
         if ok {
             crate::audit::verified();
         }
@@ -1906,12 +1967,26 @@ impl Follower {
             }
         }
         if image {
-            let Message::Image(bytes) = stream.receive()? else {
+            let Message::Image(mut bytes) = stream.receive()? else {
                 return Err(io::Error::other("the primary promised an image"));
             };
             // Every record held to its sum, which an open does not ask of an
             // image's: one damaged on the way would be this file's whole.
             fennec_core::engine::check_records(&bytes).map_err(io::Error::other)?;
+            // A follower's file in the bytes that replace it: the image's
+            // own history is its primary's, taking writes, and the record
+            // `follow` appends after the rename went with a kill before a
+            // write behind -- the restart opened the copy as a primary's
+            // file, following nothing (`Tenants::open_as`). `follow` below
+            // then appends nothing. Room for the record alone: grown as a
+            // `Vec` grows, a 40 MB image took 80.
+            let follows = fennec_core::history::History {
+                lineage: lineage.clone(),
+                following: true,
+            }
+            .record();
+            bytes.reserve_exact(follows.len());
+            bytes.extend_from_slice(&follows);
             // Loaded before the lock is taken: reads go on meanwhile.
             let mut fresh = Database::new();
             fresh.load(&bytes).map_err(io::Error::other)?;
@@ -1946,8 +2021,24 @@ impl Follower {
         }
 
         loop {
+            // A halt is looked at between messages, as an archiver looks at
+            // its stop, never left to the socket's cut alone: on Windows the
+            // cut -- a `shutdown` through a duplicate of the socket -- ends a
+            // read already waiting, but a read begun after it reads on, the
+            // primary's keep-alive every `ALIVE` keeping it short of its
+            // `SILENCE`. A follower between two reads at the halt -- landing
+            // a write, its fsync -- followed on for good, and the halt
+            // waited for it for good: five runs of Windows CI hung so. One
+            // that looked just before the cut ends after its next message.
+            if self.stop.load(Ordering::SeqCst) {
+                return Ok(());
+            }
             match stream.receive()? {
-                Message::Writes { first, records, .. } => {
+                Message::Writes {
+                    first,
+                    times,
+                    records,
+                } => {
                     let mut g = crate::held::write(&self.db);
                     if first != g.change_seq() + 1 {
                         *force_image = true;
@@ -1965,6 +2056,26 @@ impl Follower {
                     let applied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         g.apply(&records)
                     }));
+                    // Each record that landed, the times its primary appended
+                    // it at, before the lock goes and before the flush makes
+                    // it sendable: entered in this server's feed, it was
+                    // stamped with this clock as it was applied, and a copy
+                    // of this one, its `/_changes` and an archive cut from it
+                    // read each write a replication lag late -- a restore to
+                    // a moment leaving out writes the primary had answered.
+                    // Counted from the message's own records, a `writes_in`
+                    // each, this read a third caller of it, which had the
+                    // release build's LTO stop inlining it into
+                    // `Feed::push`: a call more on every write a primary
+                    // makes. The apply's count of records it landed needs
+                    // none.
+                    if let Some(feed) = &self.feed {
+                        let landed = match &applied {
+                            Ok(Ok(n)) => Some(*n),
+                            _ => None,
+                        };
+                        feed.sent_times(first, landed, &times);
+                    }
                     let failed = match applied {
                         Ok(Ok(_)) => None,
                         Ok(Err(e)) => Some(e.to_string()),
@@ -2041,7 +2152,9 @@ impl Follower {
     }
 
     /// Stops following and stays a replica: started again, it follows on
-    /// from where it stopped.
+    /// from where it stopped. The cut ends a read waiting on the primary;
+    /// the session sees the flag at its next message whatever the socket
+    /// does with a read begun after the cut (`Follower::session`).
     pub fn halt(&self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(s) = lock(&self.conn).take() {
@@ -2308,5 +2421,80 @@ mod tests {
         // Starting over ends every stream begun before.
         feed.start(n);
         assert!(matches!(feed.next(n - 10, epoch, MESSAGE), Next::Moved));
+    }
+
+    /// A follower's feed holds each record it applied at the time its
+    /// primary sent with it: a block's record one time for its writes, a
+    /// message landed whole each record's own, one of which only a prefix
+    /// landed -- the records after a refused one put back, never handed to
+    /// the sink -- its prefix's, and a write of the copy's own after them,
+    /// promoted, its own clock's.
+    #[test]
+    fn a_followers_feed_holds_the_times_its_primary_sent() {
+        let feed = Feed::new(1 << 20);
+        feed.start(10);
+        let epoch = feed.epoch();
+        // A message of four records, a write, a block of four, a write and
+        // a write: landed whole.
+        feed.push(11, &record(4));
+        feed.push(15, &frames(4));
+        feed.push(16, &record(4));
+        feed.push(17, &record(4));
+        feed.sent_times(11, Some(4), &[100, 200, 300, 400]);
+        // The same, of which three landed: the apply was refused at the
+        // fourth.
+        feed.push(18, &record(4));
+        feed.push(22, &frames(4));
+        feed.push(23, &record(4));
+        feed.sent_times(18, None, &[500, 600, 700, 800]);
+        let before = now_ms();
+        feed.push(24, &record(4));
+        feed.mark_durable(24);
+        let Next::Records(first, last, times, _) = feed.next(10, epoch, MESSAGE) else {
+            panic!("records expected");
+        };
+        assert_eq!((first, last), (11, 24));
+        assert_eq!(times[..7], [100, 200, 300, 400, 500, 600, 700]);
+        assert!(times[7] >= before, "{times:?}");
+        // Times for none of the records here move nothing.
+        let feed = Feed::new(1 << 20);
+        feed.start(10);
+        feed.push(11, &record(4));
+        let stamped = lock(&feed.ring).chunks[0].times.clone();
+        feed.sent_times(12, Some(2), &[1, 2]);
+        feed.sent_times(12, None, &[1, 2]);
+        assert_eq!(lock(&feed.ring).chunks[0].times, stamped);
+    }
+
+    /// A message whose first records the ring let go of as its later ones
+    /// came in -- a buffer smaller than what one apply puts in it -- gives
+    /// each record still kept its own time, never the time of the record
+    /// that came first; an apply refused part way, which says nothing of
+    /// how many landed, then gives none, the image the follower connects
+    /// again for starting the feed over.
+    #[test]
+    fn a_followers_records_the_ring_kept_take_their_own_times() {
+        // 8 000 bytes in chunks of 1 000, a record of 3 000 a chunk: four
+        // of them leave the last two.
+        let big = record(3_000);
+        let fed = |landed: Option<usize>| {
+            let feed = Feed::new(8_000);
+            feed.start(0);
+            for seq in 1..=4 {
+                feed.push(seq, &big);
+            }
+            assert!(!feed.serves(1));
+            feed.sent_times(1, landed, &[10, 20, 30, 40]);
+            feed.mark_durable(4);
+            let Next::Records(first, _, times, _) = feed.next(2, feed.epoch(), MESSAGE) else {
+                panic!("records expected");
+            };
+            assert_eq!(first, 3);
+            times
+        };
+        assert_eq!(fed(Some(4)), [30, 40]);
+        let before = now_ms();
+        let times = fed(None);
+        assert!(times.iter().all(|&t| t >= before), "{times:?}");
     }
 }

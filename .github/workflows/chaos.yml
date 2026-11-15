@@ -1,0 +1,141 @@
+# The drill's seeded faults (`make chaos`, deploy/drill/chaos.py): a region
+# of fennecdb in Docker -- its router and standby, three nodes under leases
+# and --replicas -- broken at random by a schedule each seed draws: nodes
+# killed and paused, links between a router and a node and between two
+# nodes delayed, lossy and cut (tc netem), a node killed again while its
+# copies catch up, a move's source failed over, a node's clock jumped (a
+# test build's fennec-server, `test-clock`). After each fault heals every
+# replica's rows must be its primary's, and at the end the history must
+# pass the YCSB register checker, every write and append answered must be
+# found -- but one a failover lost while its replica was behind, the window
+# the design names, which is counted -- and no tenant may have been written
+# by two primaries at once (deploy/drill/oracle.py,
+# docs/design/integrations.md#the-chaos-drill).
+#
+# Fifty seeds of ten minutes a week: more than a hosted job's six hours, so
+# three jobs, each a share of the seeds, after one that builds the image
+# they load. Each run's seeds are its own (the run's number times 1000 on),
+# so every week tries schedules no week before did; a failure names its
+# seed, and `make chaos SEEDS=1 SEED0=<seed>` draws the same schedule.
+# Hours long, so never on a pull request: weekly, and by hand with fewer.
+name: chaos
+
+on:
+  schedule:
+    - cron: '23 2 * * 6'
+  workflow_dispatch:
+    inputs:
+      seeds:
+        description: 'Seeds in all, split over the three jobs'
+        default: '50'
+      minutes:
+        description: 'Minutes of faults a seed'
+        default: '10'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chaos-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # The kit's binaries and the test build's fennec-server, as `make chaos`
+  # builds them (deploy/Dockerfile's `chaos`), once for the three jobs.
+  image:
+    name: The chaos image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build
+        run: docker build -f deploy/Dockerfile --target chaos -t fennec-kit-chaos .
+      - name: Save
+        run: docker save fennec-kit-chaos | gzip -1 > "$RUNNER_TEMP/chaos-image.tar.gz"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: chaos-image
+          path: ${{ runner.temp }}/chaos-image.tar.gz
+          retention-days: 1
+          if-no-files-found: error
+
+  seeds:
+    name: Seeds, share ${{ matrix.share }} of 3
+    needs: image
+    runs-on: ubuntu-24.04
+    # A share is 17 seeds of 10 minutes and about 2 more each to make,
+    # settle and check its world: some 3.5 hours, inside a hosted job's 6.
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        share: [1, 2, 3]
+    env:
+      SEEDS_ALL: ${{ inputs.seeds || '50' }}
+      CHAOS_MINUTES: ${{ inputs.minutes || '10' }}
+      # The kit's own lease. Three nodes at a CPU each, three routers at a
+      # half and the driver at one are 5.5 CPUs of quota on a runner of 4:
+      # a lease of 2 s, missed under that load, failed a node over that no
+      # fault touched -- in a replica fault's lag, a loss in the window the
+      # design names (deploy/drill/oracle.py's `documented`), and a seed
+      # failed that found no bug.
+      CHAOS_LEASE: '5'
+      SHARE: ${{ matrix.share }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: chaos-image
+          path: ${{ runner.temp }}
+      - name: The runner
+        run: |
+          echo "cpus $(nproc)"; free -m | head -2; uname -r
+          # netem is a module of the runner's kernel, which every container
+          # shares: a fault that cannot take would make the run a pass.
+          sudo modprobe sch_netem || {
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)" >/dev/null
+            sudo modprobe sch_netem
+          }
+      - name: Load the image
+        run: gunzip -c "$RUNNER_TEMP/chaos-image.tar.gz" | docker load
+      - name: The oracle's tests
+        run: python3 deploy/drill/test_oracle.py
+      - name: This share's seeds
+        run: |
+          # The inputs are a dispatcher's text: bash's arithmetic evaluates
+          # a variable's value as an expression, so `a[$(...)]` would run
+          # a command in $(( n / 3 )). Digits alone, or nothing runs.
+          case "$SEEDS_ALL" in
+            ''|*[!0-9]*) echo "seeds: not a whole number: [$SEEDS_ALL]" >&2; exit 1 ;;
+          esac
+          case "$CHAOS_MINUTES" in
+            ''|.|*[!0-9.]*|*.*.*) echo "minutes: not a number: [$CHAOS_MINUTES]" >&2; exit 1 ;;
+          esac
+          # SEEDS_ALL split over three shares of consecutive seeds, the
+          # first shares one more where it does not divide.
+          n=$((10#$SEEDS_ALL)); k=$SHARE
+          each=$(( n / 3 )); extra=$(( n % 3 ))
+          count=$(( each + (k <= extra ? 1 : 0) ))
+          before=$(( (k - 1) * each + (k - 1 < extra ? k - 1 : extra) ))
+          echo "SEEDS=$count" >> "$GITHUB_ENV"
+          echo "SEED0=$(( GITHUB_RUN_NUMBER * 1000 + before + 1 ))" >> "$GITHUB_ENV"
+          echo "share $k: $count seed(s) from $(( GITHUB_RUN_NUMBER * 1000 + before + 1 )), $CHAOS_MINUTES min each"
+      - name: Chaos
+        if: env.SEEDS != '0'
+        env:
+          CHAOS_OUT: ${{ runner.temp }}/chaos
+        run: python3 deploy/drill/chaos.py
+      # Each seed's result, and a failed one's history, its containers'
+      # logs and the schedule it drew: nothing else is left to look at.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && env.SEEDS != '0'
+        with:
+          name: chaos-share-${{ matrix.share }}
+          path: ${{ runner.temp }}/chaos
+          retention-days: 14
+          if-no-files-found: ignore

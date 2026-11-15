@@ -35,9 +35,10 @@ different tokens.</p>
 
 <h2 id="run">Run it</h2>
 
-<pre data-lang="bash">FENNEC_HTTP_TOKEN=secret FENNEC_METRICS_TOKEN=scrape \
-FENNEC_JWT_SECRET=$(openssl rand -hex 32) \
-  docker compose -f monitoring/docker-compose.yml up -d --build
+<pre data-lang="bash"># tokens of 32 bytes: the server listens on the compose network, past loopback
+export FENNEC_HTTP_TOKEN=$(openssl rand -hex 32) FENNEC_METRICS_TOKEN=$(openssl rand -hex 32) \
+  FENNEC_JWT_SECRET=$(openssl rand -hex 32)
+docker compose -f monitoring/docker-compose.yml up -d --build
 # the data:     http://127.0.0.1:3000/d/fennecdb-data-plugin
 # the metrics:  http://127.0.0.1:3000/d/fennecdb
 

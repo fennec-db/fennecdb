@@ -1,6 +1,6 @@
 # AGENTS.md
 
-The install channels' and the workflows' invariants, for `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/windows-zip.sh`, `tools/windows-zip-check.ps1`, `tools/install-ps1-check.ps1`, `tools/image-check.sh`, `tools/image-latest.sh`, `site/install.sh`, `site/install.ps1`, the release workflows, and every workflow in `.github/workflows/` with `tools/workflow_check.py`, `tools/install-flutter.sh` and `.github/dependabot.yml`. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
+The install channels' and the workflows' invariants, for `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/windows-zip.sh`, `tools/windows-zip-check.ps1`, `tools/install-ps1-check.ps1`, `tools/linux-ffi.sh`, `tools/linux-ffi-check.sh`, `tools/image-check.sh`, `tools/image-latest.sh`, `site/install.sh`, `site/install.ps1`, the release workflows, and every workflow in `.github/workflows/` with `tools/workflow_check.py`, `tools/install-flutter.sh` and `.github/dependabot.yml`. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
 
 ## Invariants
 
@@ -34,7 +34,10 @@ nothing (`site/test_install.sh`, `site/test_install.ps1`). A package is installe
 and the Windows zip through `install.ps1` on the runner that built it,
 before it is kept (`tools/linux-packages-check.sh`,
 `tools/windows-zip-check.ps1`, which CI's `windows (release zip)` runs on
-every change), and the image on the runner that built it -- its
+every change), the C library for Linux linked into a C program, shared
+and static, run on its runner and on the oldest glibc its docs name, its
+exports and glibc symbols held (`tools/linux-ffi-check.sh`, CI's `linux (C
+library)` on every change), and the image on the runner that built it -- its
 `--version`, its server healthy by its own HEALTHCHECK
 (`tools/image-check.sh`, which CI's Grafana job runs on the image it
 builds) -- before `image-push` pushes it, from a Docker on its classic
@@ -51,8 +54,8 @@ that 404 and the registry's `not found` for an answer, failing on any
 other, as one finding no `<version>` fails saying so, never green
 (`tools/test_image_latest.py`, under dash); a new channel names what it
 installs by its checksum. A release job that builds runs with `contents: read` and
-a checkout keeping no token (`binaries`, `windows`, `wasm`, `android`,
-`linux-packages`, `image`): the crates' build scripts run there, and only
+a checkout keeping no token (`binaries`, `windows`, `linux-ffi`, `wasm`,
+`android`, `linux-packages`, `image`): the crates' build scripts run there, and only
 the jobs that publish write (`publish`, `image-push`, `manifest`,
 `image-latest`).
 
