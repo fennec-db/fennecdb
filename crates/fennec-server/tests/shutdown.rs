@@ -83,7 +83,10 @@ fn a_nodes_interval_sync_flushes_each_tenant_in_background() {
             .with_token("adm")
             .ask("PUT", &format!("/_admin/tenants/{n}"), "");
         assert_eq!(made.status, 201, "{}", made.body);
-        for q in ["create collection t (name text)", r#"put t {name: "delayed"}"#] {
+        for q in [
+            "create collection t (name text)",
+            r#"put t {name: "delayed"}"#,
+        ] {
             c.query_at(&format!("/t/{n}"), q)
                 .unwrap_or_else(|e| panic!("{n}: {q}: {e:?}"));
         }

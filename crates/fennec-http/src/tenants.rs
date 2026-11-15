@@ -3856,7 +3856,12 @@ mod tests {
         let dir = scratch("slow-sync");
         let reg = synced_later(&dir);
         // Names of this test's own: the hold is the process's.
-        let names = ["slow-sync-held", "slow-sync-a", "slow-sync-b", "slow-sync-c"];
+        let names = [
+            "slow-sync-held",
+            "slow-sync-a",
+            "slow-sync-b",
+            "slow-sync-c",
+        ];
         let ts: Vec<_> = names.iter().map(|n| reg.create(n).unwrap()).collect();
         for t in &ts {
             run(t, "create collection n (i int)");
@@ -3924,7 +3929,10 @@ mod tests {
         });
         assert!(!on_disk(busy), "synced under a writer's lock");
         drop(writing);
-        until("the busy tenant's write on disk once its lock was let go", &|| on_disk(busy));
+        until(
+            "the busy tenant's write on disk once its lock was let go",
+            &|| on_disk(busy),
+        );
         drop(ts);
         drop(reg);
         let _ = std::fs::remove_dir_all(&dir);

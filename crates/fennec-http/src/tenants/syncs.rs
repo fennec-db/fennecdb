@@ -94,7 +94,9 @@ impl Syncs {
             .spawn(move || inner.work());
         if let Err(e) = made {
             if !self.inner.said.swap(true, Ordering::Relaxed) {
-                crate::log!("a tenant's sync thread could not be made ({e}): synced by those running");
+                crate::log!(
+                    "a tenant's sync thread could not be made ({e}): synced by those running"
+                );
             }
             let mut q = lock(&self.inner.queue);
             q.threads -= 1;
@@ -135,7 +137,10 @@ impl Inner {
                 let words = crate::schedule::panic_words(p.as_ref());
                 match self.stop.get() {
                     Some(stop) => {
-                        crate::log!("tenant `{}`'s sync panicked ({words}): the node stops", t.name);
+                        crate::log!(
+                            "tenant `{}`'s sync panicked ({words}): the node stops",
+                            t.name
+                        );
                         stop(1);
                     }
                     None => crate::log!("tenant `{}`'s sync panicked ({words})", t.name),
