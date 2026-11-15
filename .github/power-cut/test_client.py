@@ -11,7 +11,8 @@ stopped 3 s before the cut, one that syncs every second, one every half
 second and one stuck for a second and a half in the middle each fail --
 the first two the cases PR #627's review found the window's bound, read
 from the pages being judged, letting pass (bounds of 3 058 and 1 708 ms;
-3 050 and 1 707 here). A cut with no write in flight fails as the rig's,
+3 050 and 1 707 here). A cut with no write in flight fails as the rig's
+(under `--sync 250` only if no acknowledged write was unsynced either),
 and so does a standby far behind the node; one at its tip counts what a
 promotion at the cut would have lost. The standard library alone, as
 client.py: ci.yml's fmt job runs it.
@@ -247,17 +248,50 @@ class MidWrite(unittest.TestCase):
         # them, and held nothing to a write cut short.
         ev, _, cut_at, killed = load(0.25, 0.008, 3.0)
         ev = [e for e in ev if not (e["ev"] == "send" and e["t"] > cut_at)]
-        c = Cut(self, ev, cut_at, killed)
+        c = Cut(self, ev, cut_at, killed, sync_ms=0)
         bad = c(c.check.describe_load)
         self.assertTrue(has(bad, "landed between writes"), bad)
         self.assertIn("RIG cut 1 landed between writes", c.out.getvalue())
+
+    def test_between_writes_under_sync_always_fails_whatever_was_unsynced(self):
+        # Writes answered after the last page, yet `--sync always` has no
+        # window: the rule stays as strict as it was.
+        ev, _, cut_at, killed = load(0.25, 0.008, 3.0)
+        ev = [e for e in ev if not (e["ev"] == "send" and e["t"] > cut_at)]
+        c = Cut(self, ev, cut_at, killed, sync_ms=0)
+        self.assertGreater(c.check.unsynced(), 0)
+        self.assertTrue(has(c(c.check.describe_load), "landed between writes"))
+
+    def test_between_writes_under_sync_ms_with_unsynced_writes_passes(self):
+        # The cut held the server to the acknowledged writes no page had
+        # covered, which `window` checks.
+        ev, _, cut_at, killed = load(0.25, 0.008, 3.0)
+        ev = [e for e in ev if not (e["ev"] == "send" and e["t"] > cut_at)]
+        c = Cut(self, ev, cut_at, killed)
+        self.assertGreater(c.check.unsynced(), 0)
+        self.assertEqual(c(c.check.describe_load), [])
+        self.assertIn("held to the window all the same", c.out.getvalue())
+
+    def test_between_writes_under_sync_ms_with_none_unsynced_fails(self):
+        # Every acknowledged write covered by a page: nothing was held.
+        ev, _, cut_at, killed = load(0.25, 0.008, 3.0)
+        ev = [e for e in ev if not (e["ev"] == "send" and e["t"] > cut_at)]
+        last = max(e["next"] for e in ev if e["ev"] == "durable")
+        dropped = {e["q"] for e in ev if e["ev"] == "ack" and e["seq"] > last}
+        ev = [e for e in ev if not (e["ev"] == "ack" and e["q"] in dropped)]
+        ev = [e for e in ev if not (e["ev"] == "send" and e["q"] in dropped)]
+        c = Cut(self, ev, cut_at, killed)
+        self.assertEqual(c.check.unsynced(), 0)
+        bad = c(c.check.describe_load)
+        self.assertTrue(has(bad, "landed between writes"), bad)
+        self.assertIn("nor an acknowledged write left for a sync to cover", c.out.getvalue())
 
     def test_a_write_tried_after_the_kill_is_not_in_flight(self):
         ev, _, cut_at, killed = load(0.25, 0.008, 3.0)
         for e in ev:
             if e["ev"] == "send" and e["t"] > cut_at:
                 e["t"] = round(killed + 0.3, 4)
-        c = Cut(self, ev, cut_at, killed)
+        c = Cut(self, ev, cut_at, killed, sync_ms=0)
         bad = c(c.check.describe_load)
         self.assertTrue(has(bad, "landed between writes"), bad)
         self.assertIn("AFTER single puts", c.out.getvalue())

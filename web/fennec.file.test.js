@@ -26,6 +26,7 @@ const open = () => Fennec.open(wasm);
  * Files by name. `crashAfter(n)` lets n more writes, truncates and flushes
  * through and stops the next -- a write halfway -- and every one after it,
  * until `restart()`, which also lets go of the handles a dead page held.
+ * `onRefused` is told each file a handle was refused for, held elsewhere.
  */
 function fakeDir() {
   const files = new Map();
@@ -34,8 +35,9 @@ function fakeDir() {
     if (budget <= 0) throw new Error('crash');
     budget--;
   };
-  return {
+  const dir = {
     files,
+    onRefused: null,
     crashAfter(n) {
       budget = n;
     },
@@ -62,7 +64,10 @@ function fakeDir() {
       };
       return {
         async createSyncAccessHandle() {
-          if (f.open) throw Object.assign(new Error('locked'), { name: 'NoModificationAllowedError' });
+          if (f.open) {
+            dir.onRefused?.(name);
+            throw Object.assign(new Error('locked'), { name: 'NoModificationAllowedError' });
+          }
           f.open = true;
           return {
             getSize: () => f.bytes.length,
@@ -98,6 +103,7 @@ function fakeDir() {
       };
     },
   };
+  return dir;
 }
 
 /** A database opened from `name` in `dir`, as a page opens it again. */
@@ -356,6 +362,139 @@ test('one keeper a file and a database: the rest are refused', { skip }, async (
   const full = await open();
   full.run('create collection other (n int)');
   await assert.rejects(openFile(full, 'i.fennec', { dir }), /holds a database/);
+});
+
+// `openFile` names the database kept only once its file is open: a second
+// call, or a `persist`, made meanwhile found it kept nowhere, and the second
+// file took the database while the first went on holding its handles,
+// never written again.
+test('a call made while openFile is out waits for it, and is refused by what it kept', { skip }, async () => {
+  const dir = fakeDir();
+  const db = await open();
+  const first = openFile(db, 'p.fennec', { dir });
+  const second = openFile(db, 'q.fennec', { dir });
+  const stored = persist(db, 'p');
+  const file = await first;
+  await assert.rejects(second, /already kept/);
+  await assert.rejects(stored, /kept in a file/);
+  assert.equal(dir.files.has('q.fennec'), false, 'the second file never opened');
+  db.run('create collection docs (title text)');
+  db.run('put docs {title: "a"}');
+  file.close();
+  const { db: again } = await reopen(dir, 'p.fennec');
+  assert.deepEqual(titles(again), ['a']);
+});
+
+// A database closed while `openFile` asked for its file was kept in it all
+// the same: an empty file took the closed database's empty image, and its
+// handles stayed held, so the next `openFile` of that file in this worker
+// was refused at once as open elsewhere.
+test('an openFile that has not run by the close is refused, its file let go of', { skip }, async () => {
+  const dir = fakeDir();
+  const db = await open();
+  db.run('create collection docs (title text)');
+  const asking = openFile(db, 'c.fennec', { dir });
+  const waiting = openFile(db, 'w.fennec', { dir });
+  db.close();
+  await assert.rejects(asking, /openFile refused: the database was closed/);
+  await assert.rejects(waiting, /openFile refused: the database was closed/);
+  assert.equal(dir.files.get('c.fennec').open, false, 'its handle let go of');
+  assert.equal(dir.bytes('c.fennec').length, 0, 'nothing written');
+  assert.equal(dir.files.has('w.fennec'), false, 'the one waiting never asked');
+  const other = await open();
+  const file = await openFile(other, 'c.fennec', { dir });
+  other.run('create collection docs (title text)');
+  other.run('put docs {title: "a"}');
+  file.close();
+  const { db: again } = await reopen(dir, 'c.fennec');
+  assert.deepEqual(titles(again), ['a']);
+
+  // Nor is an empty image written into a file, however it came.
+  const empty = await open();
+  empty.snapshot = () => new Uint8Array(0);
+  await assert.rejects(openFile(empty, 'e.fennec', { dir }), /empty image/);
+  assert.equal(dir.files.get('e.fennec').open, false);
+});
+
+// Closed while `openFile` fetched the collation data the file's image
+// needs, the load met a closed handle and called the file corrupt; closed
+// while it checked the database against the code's schema, the check
+// called it a handle not found, or -- the check answered before the close
+// -- the file kept a closed database.
+test('an openFile the database is closed under as it loads or checks is refused, its file let go of', { skip }, async () => {
+  const dir = fakeDir();
+  const fetched = (name) => readFile(new URL(`./collate/${name}.bin`, import.meta.url));
+  const schema = 'create collection words (w text collate und @sorted)';
+  const writer = await Fennec.open(wasm, { schema, collation: fetched });
+  await writer.from('words').insert([{ w: 'Ελλάδα' }]);
+  dir.put('g.fennec', writer.snapshot());
+  const size = dir.bytes('g.fennec').length;
+  const closed = /openFile refused: the database was closed/;
+  const untouched = (name, n) => {
+    assert.equal(dir.files.get(name).open, false, `${name} let go of`);
+    assert.equal(dir.bytes(name).length, n, `${name} as it was`);
+  };
+
+  const fetching = await Fennec.open(wasm, {
+    schema,
+    collation: async (name) => {
+      fetching.close();
+      return fetched(name);
+    },
+  });
+  await assert.rejects(openFile(fetching, 'g.fennec', { dir }), closed);
+  untouched('g.fennec', size);
+
+  // The check asks for nothing over the network: the close comes as one
+  // would while it fetched collation data a migration needs, the check
+  // after meeting the closed handle -- or while it waited for the answer.
+  const plain = await Fennec.open(wasm, { schema: 'create collection t (n int)' });
+  plain.run('put t {n: 1}');
+  dir.put('p.fennec', plain.snapshot());
+  const n = dir.bytes('p.fennec').length;
+  const failing = await Fennec.open(wasm, { schema: 'create collection t (n int)' });
+  failing.checkSchema = function (...args) {
+    this.close();
+    return Fennec.prototype.checkSchema.apply(this, args);
+  };
+  await assert.rejects(openFile(failing, 'p.fennec', { dir }), closed);
+  untouched('p.fennec', n);
+  const answered = await Fennec.open(wasm, { schema: 'create collection t (n int)' });
+  answered.checkSchema = function (...args) {
+    const out = Fennec.prototype.checkSchema.apply(this, args);
+    queueMicrotask(() => this.close());
+    return out;
+  };
+  await assert.rejects(openFile(answered, 'p.fennec', { dir }), closed);
+  untouched('p.fennec', n);
+
+  const { db: again, file } = await reopen(dir, 'p.fennec');
+  assert.deepEqual(again.rows('get t select n').map((r) => r.n), [1]);
+  file.close();
+});
+
+// A page loaded again finds its file held by the worker of the page before
+// until that worker has ended -- in Chrome 2 s after the page went, when
+// it was busy (web/browser/) -- and opens it once it is let go of.
+test('a file held by another worker is opened once it is let go of', { skip }, async () => {
+  const dir = fakeDir();
+  const before = await open();
+  const file = await openFile(before, 'w.fennec', { dir });
+  before.run('create collection docs (title text)');
+  before.run('put docs {title: "kept"}');
+  file.close();
+  // Held as the worker of the page before holds it: a handle of no file
+  // this one keeps.
+  const held = await (await dir.getFileHandle('w.fennec')).createSyncAccessHandle();
+  let refusals = 0;
+  dir.onRefused = (name) => {
+    assert.equal(name, 'w.fennec');
+    if (++refusals === 2) held.close();
+  };
+  const db = await open();
+  await openFile(db, 'w.fennec', { dir });
+  assert.equal(refusals, 2, 'asked again until it was let go of');
+  assert.deepEqual(titles(db), ['kept']);
 });
 
 test('close lets the file go and stops keeping the writes', { skip }, async () => {

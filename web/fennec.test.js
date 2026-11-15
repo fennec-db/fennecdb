@@ -605,6 +605,26 @@ test('a number past an int\'s range is refused naming its field, in the module',
   db.close();
 });
 
+// A page's parameters are doubles, so the module meets a number past a
+// float's range in a statement's text: refused naming it, where it read as
+// an infinity (written back as null) or 0; the ends of the range read.
+test('a number past a float\'s range is refused naming it, in the module', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const { Fennec } = await import('./fennec.js');
+  const db = await Fennec.open(wasm);
+  db.run('create collection t (x float, xs [float])');
+  const large = 'is past a float\'s range: a float is at most 1.7976931348623157e308 either side of 0';
+  const small = 'is past a float\'s range: a float is 0 or at least 5e-324 either side of 0';
+  const refused = (text, says) => assert.throws(() => db.run(text), (e) => e.message.includes(says), text);
+  refused('put t {x: 1e400}', `position 10: number \`1e400\` ${large}`);
+  refused('put t {x: -1e-400}', `position 10: number \`-1e-400\` ${small}`);
+  refused('put t {xs: [0.5, 2e999]}', `position 17: number \`2e999\` ${large}`);
+  refused('get t where x > 1e309', `position 16: number \`1e309\` ${large}`);
+  assert.equal(db.rows('get t count')[0].count, 0);
+  db.run('put t [{x: 1.7976931348623157e308}, {x: -5e-324}, {x: 0e-999}]');
+  assert.deepEqual(db.rows('get t select x').map((r) => r.x), [1.7976931348623157e308, -5e-324, 0]);
+  db.close();
+});
+
 test('an [int] and a [float] keep their numbers as written, in the module', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
   const { Fennec } = await import('./fennec.js');
   const db = await Fennec.open(wasm);
@@ -2839,6 +2859,52 @@ test('vectors handed over as f32s store what JSON stored', { skip: wasm ? false 
   // Not finite: JSON as before, where it is `null`, which no vector holds.
   assert.throws(() => f32s.run('put t {n: 10, v: $1}', [[1, NaN, 2, 3]]));
   assert.equal(f32s.rows('get t where n = 10').length, 0);
+});
+
+// A vector's component is a number an f32 holds: `1e39`, which an f32
+// rounds to its infinity, and a NaN or an infinity a typed array holds are
+// refused naming the field and the element, as a server refuses them, in a
+// write and in `near`'s query vector, where they were stored to come back
+// as `null`. The module checks four lanes at a time and the rest past them
+// alone, so a vector of 9 holds one at each place. A `[float]` keeps `1e39`
+// as written; the largest f32 and the smallest subnormal are taken.
+test('a vector component no f32 holds is refused naming the element, in the module', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const { Fennec } = await import('./fennec.js');
+  const db = await Fennec.open(wasm);
+  db.run('create collection t (v vector<9>, e vector<3> @hnsw(cosine), h vector<3, f16>, fs [float])');
+  const range = "a vector's component is a number at most 3\\.4028235e38 either side of 0";
+  const refused = (field, at) => new RegExp(`field \`${field}\`, element ${at}: ${range}`);
+  for (let at = 0; at < 9; at++) {
+    for (const bad of [1e39, -3.5e38, 3.4028236e38, NaN, Infinity, -Infinity]) {
+      const v = Array.from({ length: 9 }, (_, k) => (k === at ? bad : k / 8));
+      const what = `${bad} at ${at}`;
+      // An array's NaN and infinities go as JSON's `null`, which no vector
+      // takes either; its 1e39 goes over as the f32 it rounds to.
+      if (Number.isFinite(bad)) {
+        assert.throws(() => db.run('put t {v: $1}', [v]), refused('v', at), what);
+        assert.throws(() => db.run(`put t {v: [${v.join(', ')}]}`), refused('v', at), what);
+      }
+      assert.throws(() => db.run('put t {v: $1}', [Float32Array.from(v)]), refused('v', at), what);
+      assert.throws(() => db.run('put t {v: $1}', [Float64Array.from(v)]), refused('v', at), what);
+    }
+  }
+  const query = (at) => new RegExp(`the query vector for \`e\`, element ${at}: ${range}`);
+  assert.throws(() => db.rows('get t near e $1 limit 1', [[0, 1e39, 0]]), query(1));
+  assert.throws(() => db.rows('get t near e $1 limit 1', [Float32Array.of(0, 0, NaN)]), query(2));
+  assert.throws(() => db.rows("get t near e '[-1e39, 0, 0]' limit 1"), query(0));
+  const half = /field `h`, element 1: an f16 vector's component is a number at most 65504 either side of 0/;
+  assert.throws(() => db.run('put t {h: $1}', [[0, 65520, 0]]), half);
+  assert.throws(() => db.run('put t {h: $1}', [Float32Array.of(0, NaN, 0)]), half);
+  assert.equal(db.rows('get t count')[0].count, 0);
+  // What an f32 and an f16 hold goes in; a [float] keeps a float's 1e39.
+  const max = 3.4028234663852886e38;
+  db.run('put t {e: $1, h: $2, fs: $3}', [[max, -max, 1.401298464324817e-45], [65504, -65519, 1e-8], [1e39, 0.5]]);
+  const [row] = db.rows('get t select e, h, fs');
+  assert.deepEqual(row.e.map(Math.fround), [max, -max, 1.401298464324817e-45]);
+  assert.deepEqual(row.h, [65504, -65504, 0]);
+  assert.deepEqual(row.fs, [1e39, 0.5]);
+  assert.equal(db.rows('get t near e $1 limit 1', [[max, -max, 0]]).length, 1);
+  db.close();
 });
 
 // A sync's replica writes the server's rows as `put <c> $1`, the rows one

@@ -181,12 +181,13 @@ nothing.</p>
 <div class="lang" data-name="Docker" data-keep="false">
 <div class="dl-panel">
 <p class="dl-say">Anywhere Docker runs · amd64 and arm64 · fennec-server alone, 7 MB</p>
-<div class="dl-main"><pre data-lang="bash">docker run -d --name fennecdb -v fennecdata:/data \
-  -p 127.0.0.1:8080:8080 -e FENNEC_HTTP_TOKEN=a-token \
+<div class="dl-main"><pre data-lang="bash">export FENNEC_HTTP_TOKEN=$(openssl rand -hex 32)
+docker run -d --name fennecdb -v fennecdata:/data \
+  -p 127.0.0.1:8080:8080 -e FENNEC_HTTP_TOKEN \
   ghcr.io/fennec-db/fennec-server:{{version}}</pre></div>
 <p class="dl-under">No shell and no libc in the image. Its data lives in
 <code>/data</code>, kept here in a volume. A container listens beyond
-localhost, so the server asks for a token. <a
+localhost, so the server asks for a token of 32 bytes or more. <a
 href="docs/server.html#containers">Run it in a container</a> has the rest.</p>
 </div>
 </div>

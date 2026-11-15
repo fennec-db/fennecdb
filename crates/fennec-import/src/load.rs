@@ -12,7 +12,7 @@ use fennec_core::error::{Error, Result};
 use fennec_core::plugin::Registry;
 use fennec_core::prelude::*;
 use fennec_core::query::{eval, truthy, EvalCtx, RowAccess};
-use fennec_core::value::DataType;
+use fennec_core::value::{DataType, VecPrec};
 use std::time::Instant;
 
 /// Reads the source, derives the schema and loads it.
@@ -225,7 +225,7 @@ fn adapt(v: Value, ty: &DataType) -> Result<Value> {
     };
     Ok(match (ty, v) {
         // Raw bytes marked with `--vector`: an f32 little-endian array.
-        (DataType::Vector(n, _), Value::Bytes(b)) => {
+        (DataType::Vector(n, prec), Value::Bytes(b)) => {
             if b.len() != n * 4 {
                 return Err(Error::Type(format!(
                     "vector<{n}> expects {} bytes, found {}",
@@ -239,18 +239,25 @@ fn adapt(v: Value, ty: &DataType) -> Result<Value> {
                     .iter()
                     .map(|c| f32::from_le_bytes(*c))
                     .collect(),
+                *prec,
             )?
         }
         // List and vector values are checked before they enter the index too:
         // a PostgreSQL `float8[]` or `real[]` read as a list holds `NaN`
         // and `Infinity` as its floats do, and went into a vector field
-        // unchecked, the `put` making the list a vector.
-        (DataType::Vector(..), Value::Vector(v)) => finite(v)?,
-        (DataType::Vector(..), Value::List(items)) => {
+        // unchecked, the `put` making the list a vector -- and a `float8[]`
+        // `1e39`, a float, whose `f32` is an infinity. The `put` refuses
+        // each as well (`value::held`); refused here, the row is named.
+        (DataType::Vector(_, prec), Value::Vector(v)) => finite(v, *prec)?,
+        (DataType::Vector(_, prec), Value::List(items)) => {
             for (i, x) in items.iter().enumerate() {
-                match x {
-                    Value::Float(f) if !f.is_finite() => return Err(not_finite(i, *f)),
-                    _ => {}
+                let x = match x {
+                    Value::Float(f) => *f,
+                    Value::Int(n) => *n as f64,
+                    _ => continue,
+                };
+                if !fennec_core::value::held(&[x as f32], *prec) {
+                    return Err(not_finite(i, x, *prec));
                 }
             }
             Value::List(items)
@@ -268,10 +275,19 @@ fn adapt(v: Value, ty: &DataType) -> Result<Value> {
         },
         // `NaN` and the infinities are a float column's values, as
         // PostgreSQL holds them (and `parse` reads `nan` and `inf` in any
-        // case): a `float` keeps them, ordered as PostgreSQL orders them.
-        (DataType::Float, Value::Text(s)) => match s.trim().parse::<f64>() {
+        // case): a `float` keeps them, ordered as PostgreSQL orders them. A
+        // decimal past a float's range -- a `numeric`'s 1e400 -- is refused
+        // naming it, where it read as an infinity or 0 (`num::read_f64`).
+        (DataType::Float, Value::Text(s)) => match fennec_core::num::read_f64(s.trim()) {
             Ok(f) => Value::Float(f),
-            Err(_) => return Err(mismatch("float", &Value::Text(s))),
+            Err(why) => match (why.range(), s.trim().parse::<f64>()) {
+                (Some(range), _) => {
+                    let shown = fennec_core::num::shown(s.trim());
+                    return Err(Error::Type(format!("number `{shown}` {range}")));
+                }
+                (None, Ok(f)) if !f.is_finite() => Value::Float(f),
+                _ => return Err(mismatch("float", &Value::Text(s))),
+            },
         },
         // A numeric value landing in a text column: in SQLite the type
         // belongs to the value rather than the column, so this is ordinary.
@@ -283,23 +299,35 @@ fn adapt(v: Value, ty: &DataType) -> Result<Value> {
     })
 }
 
-/// Rejects a vector carrying a non-finite component.
+/// Rejects a vector carrying a component its field does not hold
+/// (`value::held`): a `NaN`, an infinity, or in a `vector<N, f16>` one past
+/// 65 504.
 ///
-/// A NaN makes a distance unsortable: while sorting the HNSW candidate list
-/// the comparison does not produce a total order and `sort` panics. Rather
-/// than feeding corrupt data into the index, it is better to stop and say
-/// which row it was.
-fn finite(v: Vec<f32>) -> Result<Value> {
-    if let Some(i) = v.iter().position(|f| !f.is_finite()) {
-        return Err(not_finite(i, v[i] as f64));
+/// A NaN makes every distance from it meaningless, and JSON writes it as
+/// `null`. Rather than feeding corrupt data into the index, it is better to
+/// stop and say which row it was.
+fn finite(v: Vec<f32>, prec: VecPrec) -> Result<Value> {
+    if !fennec_core::value::held(&v, prec) {
+        let held = |x: &f32| fennec_core::value::held(std::slice::from_ref(x), prec);
+        let i = v.iter().position(|x| !held(x)).unwrap_or(0);
+        return Err(not_finite(i, v[i] as f64, prec));
     }
     Ok(Value::Vector(v))
 }
 
-fn not_finite(i: usize, x: f64) -> Error {
-    Error::Type(format!(
-        "component {i} of the vector is not finite ({x}); is the source column really an f32 array?"
-    ))
+/// The refusal of component `i`, `x`: a `NaN` or an infinity as random
+/// bytes read as `f32`s make them, or a number past what the field holds
+/// in the engine's words (`value::component`).
+fn not_finite(i: usize, x: f64, prec: VecPrec) -> Error {
+    Error::Type(match x.is_finite() {
+        false => format!(
+            "component {i} of the vector is not finite ({x}); is the source column really an f32 array?"
+        ),
+        true => format!(
+            "component {i} of the vector, {x}: {}",
+            fennec_core::value::component(prec)
+        ),
+    })
 }
 
 /// Shows the value briefly in error text; long strings and byte blobs are truncated.
@@ -360,6 +388,24 @@ mod tests {
     use crate::{Column, IdSource, Rows};
     use fennec_core::schema::VectorIndexSpec;
     use fennec_core::value::VecPrec;
+
+    /// A text bound for a `float` -- SQLite's, a PostgreSQL cell -- past a
+    /// float's range is refused naming it, where it read as an infinity or
+    /// 0; the infinities and `NaN` spelled as words are kept.
+    #[test]
+    fn a_text_past_a_float_s_range_is_refused() {
+        let float = |s: &str| adapt(Value::Text(s.into()), &DataType::Float);
+        let e = float(" 1e400 ").unwrap_err().to_string();
+        assert!(e.contains("number `1e400` is past a float's range"), "{e}");
+        let e = float("1e-400").unwrap_err().to_string();
+        assert!(e.contains("a float is 0 or at least 5e-324"), "{e}");
+        assert_eq!(float("-inf").unwrap(), Value::Float(f64::NEG_INFINITY));
+        assert_eq!(float("Infinity").unwrap(), Value::Float(f64::INFINITY));
+        assert!(matches!(float("nan").unwrap(), Value::Float(f) if f.is_nan()));
+        assert_eq!(float("2.5").unwrap(), Value::Float(2.5));
+        let e = float("2.5x").unwrap_err().to_string();
+        assert!(e.contains("expected float"), "{e}");
+    }
 
     /// Document count in a collection. `Collection` gives stats, not a counter.
     fn count(db: &Database, name: &str) -> usize {
@@ -793,6 +839,64 @@ mod tests {
                 v => panic!("{v:?}"),
             }
         }
+    }
+
+    /// A `float8[]` holds numbers past an `f32`'s range, `1e39`, whose `f32`
+    /// is an infinity: the import stops naming the row, the field and the
+    /// component, in the engine's words, as it does at a `NaN`; a
+    /// `vector<N, f16>` stops at one past 65 504, a BLOB's `f32`s too. The
+    /// largest `f32` goes in.
+    #[test]
+    fn a_component_past_what_the_field_holds_stops_the_import() {
+        let list = |x: f64| Value::List(vec![Value::Float(0.5), Value::Float(x), Value::Int(2)]);
+        let source = |embed: Value, ty: &str| {
+            Rows::new(
+                vec![Column::new(
+                    "embed",
+                    DataType::List(Box::new(DataType::Float)),
+                    ty,
+                )],
+                vec![vec![list(0.25)], vec![embed]],
+            )
+        };
+        for x in [1e39, -3.4028236e38] {
+            let mut db = Database::new();
+            let mut o = Options::new("m");
+            o.vectors.push(("embed".into(), 3));
+            let e = run(&mut source(list(x), "_float8"), &mut db, &o)
+                .unwrap_err()
+                .to_string();
+            let says = format!(
+                "row 2, field `embed`: component 1 of the vector, {x}: a vector's component is a \
+                 number at most 3.4028235e38 either side of 0"
+            );
+            assert!(e.contains(&says), "{e}");
+        }
+        let mut db = Database::new();
+        let mut o = Options::new("m");
+        o.vectors.push(("embed".into(), 3));
+        run(&mut source(list(3.4028235e38), "_float8"), &mut db, &o).unwrap();
+        // An `f16` field holds 65 504 at most, from a list or a BLOB.
+        let half = |rows: Vec<Vec<Value>>, ty: DataType| {
+            let mut src = Rows::new(vec![Column::new("embed", ty, "BLOB")], rows);
+            let mut db = Database::new();
+            let mut o = Options::new("m");
+            o.casts
+                .push(("embed".into(), DataType::Vector(3, VecPrec::F16)));
+            run(&mut src, &mut db, &o).map_err(|e| e.to_string())
+        };
+        let blob = |x: f32| {
+            let v = [0.5f32, x, 2.0];
+            Value::Bytes(v.iter().flat_map(|f| f.to_le_bytes()).collect())
+        };
+        let says = "row 1, field `embed`: component 1 of the vector, 70000: an f16 vector's \
+                    component is a number at most 65504 either side of 0";
+        let e = half(vec![vec![blob(70000.0)]], DataType::Bytes).unwrap_err();
+        assert!(e.contains(says), "{e}");
+        let float = DataType::List(Box::new(DataType::Float));
+        let e = half(vec![vec![list(70000.0)]], float.clone()).unwrap_err();
+        assert!(e.contains(says), "{e}");
+        half(vec![vec![blob(65504.0)], vec![list(-65504.0)]], float).unwrap();
     }
 
     /// A wrongly sized BLOB must not be truncated silently.
