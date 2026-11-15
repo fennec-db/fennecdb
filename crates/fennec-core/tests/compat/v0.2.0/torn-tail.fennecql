@@ -2,5 +2,6 @@
 -- torn-mark.fennec: what a crash leaves, cut off as the open cuts it.
 describe t
 get t count
-get t order n
+get t order n select n
 get t where n = 4
+get t where n = 5 select n

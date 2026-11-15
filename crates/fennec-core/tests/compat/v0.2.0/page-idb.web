@@ -29,6 +29,6 @@
 {"columns":["i"],"rows":[{"i":1,"notes":[{"body":"café crème"}]},{"i":9007199254740992,"notes":[]}]}
 {"columns":["id","title","done"],"rows":[{"id":1,"title":"seeded","done":false},{"id":2,"title":"seeded too","done":true}]}
 {"columns":["collection","cursor","seeded"],"rows":[{"collection":"tasks","cursor":3,"seeded":true}]}
-{"columns":["id","path","body","key","undo","label"],"rows":[{"id":1,"path":"/query","body":"{\"query\":\"put tasks {title: $1, done: $2}\",\"params\":[\"written offline\",false]}","key":"fennec-5f94919b-83fd-4957-b2af-d918c3562144","undo":"[{\"c\":\"tasks\",\"del\":[],\"put\":\"[]\"}]","label":"put tasks {title: $1, done: $2}"}]}
+{"columns":["id","path","body","key","undo","label"],"rows":[{"id":1,"path":"/query","body":"{\"query\":\"put tasks {title: $1, done: $2}\",\"params\":[\"written offline\",false]}","key":"fennec-67bbf0e7-d6c7-442b-8099-ca37705fba69","undo":"[{\"c\":\"tasks\",\"del\":[],\"put\":\"[]\"}]","label":"put tasks {title: $1, done: $2}"}]}
 {"columns":["id","collection","key","op","until"],"rows":[]}
 {"columns":["n","text"],"rows":[{"n":1,"text":"put notes {n: 9, body: \"migrated\"}"}]}

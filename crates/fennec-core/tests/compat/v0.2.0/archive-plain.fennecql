@@ -1,0 +1,91 @@
+-- The statements every later build answers over server.fennec, its sealed
+-- backup and its sealed archive, as the release answered them: a line each,
+-- every reading statement kind and every index through its own operator.
+collections
+describe kinds
+describe orders
+describe extra
+describe blocked
+get kinds order i
+get kinds select i, b, f, t, by, ts, l, j, g, tr, un, email, tag, word, acc, exp, a, z, remark order i
+get kinds select i, v, vi, vh, sp order i
+get kinds where i = 2
+get kinds where i = 9007199254740993 select i, j
+get kinds where email = "alice@example.com" select i, email
+get kinds where email = "ALICE@EXAMPLE.COM" select i
+get kinds where tag = "green fox" select i
+get kinds match tag "fox" select i
+get kinds match t "quick fox" select i
+get kinds match word "東京" select i
+get kinds match acc "cafe" select i
+get kinds match acc "café" select i
+get kinds where j.kind = "a" select i
+get kinds where j.big = 9007199254740993 select i
+get kinds order tr select i, tr
+get kinds where tr != null order tr desc select i
+get kinds order un select i, un
+get kinds where un >= "eclair" order un desc select i, un
+get kinds order f desc select i, f
+get kinds where f > 1 order f select i
+get kinds where ts >= "2026-01-01T00:00:00Z" order ts select i, ts
+get kinds where l has 2 select i
+get kinds where by = "text as bytes" select i
+get kinds where exp != null select i, exp
+get kinds where exp > "2099-03-01T00:00:00Z" select i
+get kinds near vi [1, 0, 0, 0] limit 2 select i
+get kinds near vi [1, 0, 0, 0] exact limit 2 select i
+get kinds near sp "{1:1}/8" limit 2 select i
+get kinds near sp "{1:1}/8" exact limit 2 select i
+get kinds near g [13, 52] limit 1 select i
+get kinds where within(g, [0, 40, 20, 60]) order i select i
+get kinds where a = 1 order z desc select i, z
+get kinds where a = 1 and i = 2 select i
+get kinds count
+get kinds select a, count(*) as n group a order a
+get kinds select approx_count_distinct(a) as n
+get kinds select a, approx_count_distinct(z) as n group a order a
+get kinds match t "quik" fuzzy select i
+get kinds match t "brow" prefix select i
+get kinds match t "fox" near vi [0, 0, 1, 0] fuse limit 3 select i
+get kinds match t "fox" rerank vi [0, 0, 1, 0] limit 3 select i
+get kinds select i, highlight(t) match t "fox"
+get kinds select i, snippet(t, 2, "…") match t "brown"
+get kinds select i match t "fox" facet tag
+get kinds limit 0 facet b, a
+get extra order n
+get orders order ref
+get audit order ref
+get orders select ref lookup audit on ref = ref select what order ref
+get orders select ref lookup audit on ref = ref required select what where what = "placed" order ref
+get blocked order n
+get ticks
+get issues
+get _idempotency select status, body
+get _consumers select name, since
+get _migrations select n, text
+get _hook_events select taken
+statements
+describe statement order_by_ref
+describe statement on_order
+describe statement gh_issue
+describe statement blocked_n
+call order_by_ref {r: "o-1"}
+call order_by_ref {r: "o-3"}
+call blocked_n {n: 2}
+get shapes order req
+get shapes order tn select req, tn
+get shapes order a desc, b select req, a, b
+get shapes where tn = "IŞIK" select req
+get shapes match tn "ışık" select req
+get shapes match cb "京" select req
+get shapes match nb "creme" select req
+get shapes match ca "naive" select req
+get shapes where j.n = 2 select req
+get shapes where j.k = "one" select req
+get shapes where nb >= "c" order nb select req, nb
+get shapes order cn select req, cn
+get shapes where cn = "ÄRGER" select req
+get shapes where cx = "facade" select req
+get shapes match cx "facade" select req
+get shapes match cx "東" select req
+describe statement on_isd

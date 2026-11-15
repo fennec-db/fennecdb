@@ -9,11 +9,13 @@ web/fennec.compat.test.js.
 
     python3 tools/compat_fixtures.py build v0.2.0 <bin-dir>
         the release's binaries, built from its tag alone: `git archive` of
-        the tag into a scratch directory, `cargo build --release --locked` of
-        fennec-server and fennec, the tag's own `make wasm`, and
-        tools/compat/writer.rs built as an example of the tag's fennec-core;
-        the binaries and the tag's web/ copied into <bin-dir> and the scratch
-        directory, its target/ with it, deleted
+        the tag into a scratch directory, `cargo build --release --locked
+        --offline` of fennec-server and fennec (their crates from outside
+        the workspace, behind `tls`, from cargo's cache: nothing
+        downloaded), the tag's own `make wasm`, and tools/compat/writer.rs
+        built as an example of the tag's fennec-core; the binaries and the
+        tag's web/ copied into <bin-dir> and the scratch directory, its
+        target/ with it, deleted
     python3 tools/compat_fixtures.py write <bin-dir> <set-dir>
         the set, written by those binaries (macOS or Linux), its files'
         sums last in SHA256SUMS, which `make version` holds the set to
@@ -84,6 +86,23 @@ PHASE_A = [
     'put kinds {i: 6, t: "expired fox", exp: "2000-01-01T00:00:00Z", a: 6, z: 6}',
     'put kinds {b: true, i: 9007199254740993, f: 0.1, t: "a fox again", vi: [0, 0, 1, 0], '
     'j: {kind: "b", big: 9007199254740993}, un: "eclair", a: 2, z: 1}',
+    # What a schema writes beside `kinds`' fields: a `required` byte set, a
+    # field's tags in every combination -- collated, `nocase` and a `@text`
+    # beside its own index -- each text index's options, a list of every
+    # type a list takes, a descending part of an index over several fields,
+    # and a last place dropped in `PHASE_B`.
+    "create collection shapes (req int required, tn text collate tr nocase @unique @text, "
+    "cb text collate und @hash @text(chars), nb text nocase @sorted @text(accents), ca text @text(chars, accents), "
+    "lb [bool], lf [float], lt [text], lby [bytes], lts [timestamp], lv [vector<2>], lvh [vector<2, f16>], "
+    "ll [[int]], lsp [sparse<4>], lg [geo], j json, a int, b int, cn text collate und nocase, "
+    "cx text @unique @text(chars, accents), last int, @sorted(a desc, b))",
+    'put shapes {req: 1, tn: "Işık", cb: "東京 tower", nb: "Crème Brûlée", ca: "naïve 東京", lb: [true, false], '
+    'lf: [1.5, -2.25], lt: ["x", "y"], lby: ["ab", "c"], lts: ["2026-01-01T00:00:00Z", 1767225600000], '
+    'lv: [[1, 0], [0, 1]], lvh: [[0.5, 0.25]], ll: [[1, 2], [3]], lsp: ["{1:0.5}/4", "{2:1,4:2}/4"], '
+    'lg: [[13.4, 52.5]], j: {k: "one", n: 1}, a: 1, b: 2, cn: "Ärger", cx: "Façade 東京", last: 1}',
+    'put shapes {req: 2, tn: "istanbul", cb: "京都", nb: "creme", ca: "cafe", lb: [], lf: [0.5], lt: [], lby: [], '
+    'lts: [], lv: [], lvh: [], ll: [[]], lsp: [], lg: [], j: {k: "two", n: 2}, a: 1, b: 3}',
+    'put shapes {req: 3, a: 2, b: 1, j: {k: "three", n: 3}}',
     "create collection orders (ref text @unique, status text, total int)",
     "create collection audit (ref text @hash, what text)",
     "create collection ticks (k text @unique)",
@@ -111,6 +130,21 @@ PHASE_B = [
     "del kinds where i = 3",
     "create or replace statement order_by_ref($r text) as get orders select ref, status, total where ref = $r "
     "and status != 'void'",
+    # An index on a path of each kind a path takes.
+    "create index on shapes (j.n) @sorted",
+    "create index on shapes (j.k) @unique",
+    # A binding of every set of events, each writing nothing, then a write
+    # of each kind waking them.
+    *[f"create statement on_{n} after {e} shapes as del ticks where k = 'never'" for n, e in (
+        ("i", "insert"), ("s", "set"), ("d", "del"), ("is", "insert or set"), ("id", "insert or del"),
+        ("sd", "set or del"), ("isd", "insert or set or del"))],
+    'put shapes {req: 4, tn: "Ilık", a: 3, b: 1, j: {k: "four", n: 4}, cn: "apfel", cx: "facade"}',
+    # The last place dropped: a document written after it holds no value
+    # for it, one fewer than its schema's places.
+    "alter collection shapes drop field last",
+    'put shapes {req: 5, a: 4, b: 2, cn: "Zebra", cx: "Zürich"}',
+    'set shapes {b: 5} where req = 4',
+    "del shapes where req = 3",
 ]
 
 # A block across collections (kind 9): /batch, its statements one record.
@@ -134,6 +168,19 @@ SCHEMA_BATCH = [
 ]
 
 SCHEDULED = "create statement tick every 1m as insert ticks {k: 'tick'} if absent"
+# A slot refused: `tick`'s row is there, so this insert clashes on `k`'s
+# `@unique` (409), and the slot's mark says so.
+REFUSED = "create statement tock every 1m as insert ticks {k: 'tick'}"
+# Every other schedule a record writes -- months, a cron, a named zone and
+# an offset -- defined and dropped in one block, so no slot runs between.
+SCHEDULES = [
+    "create statement monthly every 1mo as del ticks where k = 'never'",
+    "create statement nightly at '0 3 * * *' in 'Europe/Berlin' as del ticks where k = 'never'",
+    "create statement offset_daily every 1d in '+03:00' as del ticks where k = 'never'",
+    "drop statement monthly",
+    "drop statement nightly",
+    "drop statement offset_daily",
+]
 HOOKED = (
     "create statement gh_issue($n int from event.issue.number, $a text from event.action) "
     "on hook github as insert issues {n: $n, action: $a}"
@@ -335,21 +382,26 @@ def write_server(bins, work, out):
     key = out / "key"
     run(bins / "fennec", "key", key)
     s = Server(str(bins / "fennec-server"), serve_args(out / "server.fennec", hooks), work / "server.log")
-    archiver = None
+    archivers = []
     try:
         for q in PHASE_A:
             s.query(q)
         s.query("compact")
         primary = f"http://{s.addr}"
         archive = out / "archive"
-        archiver = subprocess.Popen(
-            [bins / "fennec", "archive", primary, archive, "--token", REPLICATION, "--key-file", key],
-            stdout=open(work / "archive.log", "w"), stderr=subprocess.STDOUT,
+        plain = out / "archive-plain"
+        archivers = [
+            subprocess.Popen(
+                [bins / "fennec", "archive", primary, archive, "--token", REPLICATION, *keyed],
+                stdout=open(work / f"{archive.name}.log", "w"), stderr=subprocess.STDOUT,
+            )
+            for archive, keyed in ((archive, ["--key-file", key]), (plain, []))
+        ]
+        verify = lambda a, keyed: subprocess.run(
+            [bins / "fennec", "verify", a, *keyed], capture_output=True, text=True
         )
-        verify = lambda: subprocess.run(
-            [bins / "fennec", "verify", archive, "--key-file", key], capture_output=True, text=True
-        )
-        wait_for("the archive's base image", lambda: verify().returncode == 0, 60)
+        both = ((archive, ["--key-file", key]), (plain, []))
+        wait_for("the archives' base images", lambda: all(verify(a, k).returncode == 0 for a, k in both), 60)
         for q in PHASE_B:
             s.query(q)
         s.batch(BATCH)
@@ -360,6 +412,12 @@ def write_server(bins, work, out):
         # so no later slot writes more.
         wait_for("the scheduled statement's first slot", lambda: '"tick"' in s.query("get ticks"), 150)
         s.query("drop statement tick")
+        s.query(REFUSED)
+        wait_for("the refused slot", lambda: '"refused"' in s.query("statements"), 150)
+        # A slot that wrote nothing lands its mark with the next block.
+        s.query('put extra {k: "after the refused slot", n: 5}')
+        s.query("drop statement tock")
+        s.batch(SCHEDULES)
         s.query(HOOKED)
         status, body = send(s, hook_request())
         if status // 100 != 2:
@@ -390,20 +448,25 @@ def write_server(bins, work, out):
         last = s.seq
 
         def caught_up():
-            r = verify()
-            m = re.search(r"restores changes \d+ to (\d+)", r.stdout)
-            return r.returncode == 0 and m and int(m.group(1)) >= last
+            for a, k in both:
+                r = verify(a, k)
+                m = re.search(r"restores changes \d+ to (\d+)", r.stdout)
+                if not (r.returncode == 0 and m and int(m.group(1)) >= last):
+                    return False
+            return True
 
-        wait_for(f"the archive at change {last}", caught_up, 60)
-        archiver.send_signal(signal.SIGINT)
-        archiver.wait(60)
-        archiver = None
+        wait_for(f"the archives at change {last}", caught_up, 60)
+        for a in archivers:
+            a.send_signal(signal.SIGINT)
+            a.wait(60)
+        archivers = []
         run(bins / "fennec", "backup", primary, out / "backup.sealed", "--token", REPLICATION, "--key-file", key)
         write_replica(bins, work, out, primary, last)
     finally:
-        if archiver and archiver.poll() is None:
-            archiver.kill()
-            archiver.wait()
+        for a in archivers:
+            if a.poll() is None:
+                a.kill()
+                a.wait()
         s.stop()
     # Started again on its file, as a later build is: what the release's
     # own server answers then is what that build's is held to over HTTP.
@@ -555,7 +618,7 @@ def write(bins, out):
         write_server(bins, work, stage)
         write_graph(bins, work, stage)
         write_shell(bins, stage)
-        for what in ("kept", "waiting", "spill", "synclog", "torn-tail", "torn-mark"):
+        for what in ("kept", "waiting", "spill", "synclog", "synclog-torn", "torn-wide", "torn-tail", "torn-mark"):
             run(bins / "compat_writer", what, stage / f"{what}.fennec")
         write_page(bins, work, stage)
         # The lock files the binaries leave beside what they wrote are no
@@ -565,18 +628,21 @@ def write(bins, out):
         # The answers, each file read as it lies -- the sync log beside the
         # file it names, its inode -- a sealed one restored first.
         lists = {"server": "server", "replica": "replica", "promoted": "replica", "shell": "shell", "graph": "graph",
-                 "kept": "kept", "waiting": "waiting", "spill": "spill", "synclog": "synclog", "torn-tail": "torn",
-                 "torn-mark": "torn", "backup": "server", "archive": "server", "page-opfs": "page",
+                 "kept": "kept", "waiting": "waiting", "spill": "spill", "synclog": "synclog",
+                 "synclog-torn": "synclog", "torn-wide": "wide", "torn-tail": "torn", "torn-mark": "torn",
+                 "backup": "server", "archive": "server", "archive-plain": "server", "page-opfs": "page",
                  "page-idb": "page", "page-idb-sealed": "page"}
         for name, src in lists.items():
             shutil.copyfile(COMPAT / f"{src}.fennecql", stage / f"{name}.fennecql")
         for name in ("server", "replica", "promoted", "shell", "graph", "kept", "waiting", "spill", "synclog",
-                     "torn-tail", "torn-mark", "page-opfs"):
+                     "synclog-torn", "torn-wide", "torn-tail", "torn-mark", "page-opfs"):
             run(bins / "compat_writer", "answers", stage / f"{name}.fennec", stage / f"{name}.fennecql",
                 stage / f"{name}.answers")
-        for name, src in (("backup", stage / "backup.sealed"), ("archive", stage / "archive")):
+        for name, src, keyed in (("backup", stage / "backup.sealed", ["--key-file", stage / "key"]),
+                                 ("archive", stage / "archive", ["--key-file", stage / "key"]),
+                                 ("archive-plain", stage / "archive-plain", [])):
             restored = work / f"{name}.fennec"
-            run(bins / "fennec", "restore", src, restored, "--key-file", stage / "key")
+            run(bins / "fennec", "restore", src, restored, *keyed)
             run(bins / "compat_writer", "answers", restored, stage / f"{name}.fennecql", stage / f"{name}.answers")
         versions = {
             "server": run(bins / "fennec-server", "--version").strip(),
@@ -607,7 +673,13 @@ def build(tag, bins):
         if archive.wait() != 0:
             die(f"git archive {tag} failed")
         shutil.copyfile(COMPAT / "writer.rs", src / "crates" / "fennec-core" / "examples" / "compat_writer.rs")
+        # Nothing downloaded: cargo resolves the tag's Cargo.lock from its
+        # own cache, offline. The release binaries take rustls, ring and
+        # webpki-roots behind their default `tls` feature -- the only crates
+        # from outside the workspace -- so a cache that lacks them is told
+        # so, never fetched behind the build's back.
         env = {k: v for k, v in os.environ.items() if k != "CARGO_TARGET_DIR"}
+        env["CARGO_NET_OFFLINE"] = "true"
         # The rustc beside the cargo that builds, as the tag's
         # rust-toolchain.toml picks it: Homebrew's has no wasm32.
         rustc = str(Path(CARGO).with_name("rustc")) if os.path.isabs(CARGO) else "rustc"
@@ -615,11 +687,16 @@ def build(tag, bins):
         # `--locked`: the tag's Cargo.lock as it was released, never one
         # resolved again today.
         for cmd in (
-            [CARGO, "build", "--release", "--locked", "-p", "fennec-server", "-p", "fennec-cli"],
-            [CARGO, "build", "--release", "--locked", "-p", "fennec-core", "--example", "compat_writer"],
+            [CARGO, "build", "--release", "--locked", "--offline", "-p", "fennec-server", "-p", "fennec-cli"],
+            [CARGO, "build", "--release", "--locked", "--offline", "-p", "fennec-core", "--example", "compat_writer"],
             ["make", "wasm"],
         ):
-            subprocess.run(cmd, cwd=src, env=env, check=True)
+            r = subprocess.run(cmd, cwd=src, env=env)
+            if r.returncode != 0:
+                die(f"{' '.join(map(str, cmd))} in {tag}'s tree failed (exit {r.returncode}). Built offline from "
+                    "cargo's cache: where it lacks a crate of the tag's Cargo.lock (rustls, ring and webpki-roots, "
+                    f"behind the release binaries' `tls` feature), fetch them once, online -- `git worktree add "
+                    f"<dir> {tag} && cargo fetch --locked --manifest-path <dir>/Cargo.toml` -- and build again")
         release = src / "target" / "release"
         for b in ("fennec-server", "fennec"):
             shutil.copy2(release / b, bins / b)

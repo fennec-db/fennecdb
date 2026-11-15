@@ -72,3 +72,20 @@ describe statement blocked_n
 call order_by_ref {r: "o-1"}
 call order_by_ref {r: "o-3"}
 call blocked_n {n: 2}
+get shapes order req
+get shapes order tn select req, tn
+get shapes order a desc, b select req, a, b
+get shapes where tn = "IŞIK" select req
+get shapes match tn "ışık" select req
+get shapes match cb "京" select req
+get shapes match nb "creme" select req
+get shapes match ca "naive" select req
+get shapes where j.n = 2 select req
+get shapes where j.k = "one" select req
+get shapes where nb >= "c" order nb select req, nb
+get shapes order cn select req, cn
+get shapes where cn = "ÄRGER" select req
+get shapes where cx = "facade" select req
+get shapes match cx "facade" select req
+get shapes match cx "東" select req
+describe statement on_isd

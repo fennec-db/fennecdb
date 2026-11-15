@@ -8,6 +8,7 @@ pkg/
 # (tools/compat_fixtures.py), opened by every later build's tests.
 !crates/fennec-core/tests/compat/*/*.fennec
 !crates/fennec-core/tests/compat/*/archive/*.fennec
+!crates/fennec-core/tests/compat/*/archive-plain/*.fennec
 .DS_Store
 node_modules/
 web/fennec-schema.d.ts

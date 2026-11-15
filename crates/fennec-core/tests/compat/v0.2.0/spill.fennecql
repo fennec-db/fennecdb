@@ -6,3 +6,5 @@ get notes where n = 49
 get notes where n = 50
 get tags where tag = "t3" order n select n
 get notes order n desc limit 3 select n
+get side
+get late

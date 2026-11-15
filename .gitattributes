@@ -9,5 +9,6 @@ crates/fennec-core/tests/compat/*/*.fennec binary
 crates/fennec-core/tests/compat/*/*.sync binary
 crates/fennec-core/tests/compat/*/*.sealed binary
 crates/fennec-core/tests/compat/*/archive/** binary
+crates/fennec-core/tests/compat/*/archive-plain/** binary
 # The font's licence holds CRLF as its authors wrote it, kept as it is.
 site/fonts/OFL-IBMPlexMono.txt -text

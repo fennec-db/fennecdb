@@ -2,3 +2,5 @@
 {"kind":"rows","result":{"columns":["id","n","what","at"],"rows":[{"id":1,"n":0,"what":"seen","at":"2026-01-01T00:00:00Z"},{"id":2,"n":1,"what":"seen","at":"2026-01-01T00:01:00Z"},{"id":3,"n":2,"what":"seen","at":"2026-01-01T00:02:00Z"},{"id":4,"n":3,"what":"event 3","at":"2026-01-01T00:03:00Z"},{"id":5,"n":4,"what":"event 4","at":"2026-01-01T00:04:00Z"},{"id":6,"n":5,"what":"event 5","at":"2026-01-01T00:05:00Z"},{"id":7,"n":6,"what":"event 6","at":"2026-01-01T00:06:00Z"},{"id":8,"n":7,"what":"event 7","at":"2026-01-01T00:07:00Z"},{"id":9,"n":8,"what":"event 8","at":"2026-01-01T00:08:00Z"},{"id":10,"n":9,"what":"event 9","at":"2026-01-01T00:09:00Z"},{"id":11,"n":10,"what":"event 10","at":"2026-01-01T00:10:00Z"}]}}
 {"kind":"rows","result":{"columns":["id","n","what","at"],"rows":[{"id":3,"n":2,"what":"seen","at":"2026-01-01T00:02:00Z"}]}}
 {"kind":"rows","result":{"columns":["n","at"],"rows":[{"n":10,"at":"2026-01-01T00:10:00Z"},{"n":9,"at":"2026-01-01T00:09:00Z"}]}}
+{"kind":"rows","result":{"columns":["count"],"rows":[{"count":2}]}}
+{"kind":"rows","result":{"columns":["n"],"rows":[{"n":1}]}}
