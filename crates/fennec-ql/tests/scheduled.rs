@@ -544,7 +544,7 @@ AS BEGIN UPDATE holds SET state = 'lapsed', lapsed_at = now()
     assert_ne!(zoned("Etc/UTC"), every("1d"));
 
     // Written as tag 10 after the body, and nowhere for any other:
-    // `Debug`, which `make fennecql-corpus` compares, says it alike.
+    // `Debug` says it alike, and the digest of every other is as it was.
     let bytes = definition("create statement s every 1h as del u where a = 1")
         .canonical()
         .unwrap();

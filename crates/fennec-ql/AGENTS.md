@@ -13,6 +13,18 @@ refused naming the FennecQL to write, without consuming its word; `"name"`
 where SQL reads a column (`Parser::quoted`) and a regex-like `~`
 (`regex_like`) are refused, `<>` stays `!=`.
 
+**[No text that parsed reads as another statement, held in CI by canonical
+digest.](../../docs/design/fennecql.md#the-corpus)** `make fennecql-corpus`
+reads every FennecQL text the repository tracks in this tree and main's,
+and the texts v0.2.0's own parser read (`integrations/fennecql-corpus/`,
+written once by `FREEZE=<tag>` from the tag's code, never again) in this
+tree; CI's test job runs both. A statement a definition may hold, and a
+definition, compare by `Definition::digest`, any other by its `Debug`
+form: a field added is written by either only where it holds something,
+and `Definition::canonical` takes every node apart whole, so none is
+passed over. A text read otherwise or refused needs an `ACCEPTED` entry in
+the tool, and a digest moved `GRAMMAR_EPOCH` raised -- a major version.
+
 **[A JOIN on a key is a `lookup` answered flat, or one table's `get` with
 the other's rows a filter](../../docs/design/fennecql.md#sql-joins-subqueries-and-schema)**
 (`join::relate`). The flat rows are `Select::flat`, set by SQL alone and
@@ -105,8 +117,8 @@ outside `full`, named by the server, the shell and the native library; the
 module refuses in its own words, a definition's own path `#[cold]`.
 `Definition::canonical` writes a field only where it holds something, an
 operator by a byte of its own; reading a stored text otherwise raises
-`GRAMMAR_EPOCH`; `make fennecql-corpus` holds the repository's FennecQL
-texts to main's trees.
+`GRAMMAR_EPOCH`; the corpus (above) holds every text to main's digests
+and v0.2.0's.
 
 **[A write-bound statement runs in the block of the write that woke it,
 once a row.](../../docs/design/named-statements.md#write-bound-statements-f2)**

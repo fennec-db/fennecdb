@@ -15,7 +15,15 @@ server answers 503 to whichever test asked), and so are `fennec-http`'s
 refusal is the process's, so the other tests' servers ask with none
 (`audit::set_delay(0)` in their helpers). Measurement programs are each
 crate's `examples/` and `fennec-bench`'s binaries, wired to `make` targets,
-not to CI.
+not to CI. An example that is a check rather than a measurement runs in
+CI: fennec-ql's `corpus`, which `make fennecql-corpus` builds in this tree
+and in main's from an archive of it, run by the test job's two steps on
+the ubuntu runner -- against main, and against the corpus frozen at
+v0.2.0 (`integrations/fennecql-corpus/`) -- its reader held by
+`tools/test_fennecql_corpus.py` in the fmt job
+([fennecql.md](fennecql.md#the-corpus)). It is an example, not a test,
+because it is built in two trees, BASE's taking this tree's file as it
+stands.
 
 ## Skips
 

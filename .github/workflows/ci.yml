@@ -108,6 +108,13 @@ jobs:
       - name: tools/openapi_compat.py finds every break and passes every addition
         run: python3 tools/test_openapi_compat.py
 
+      # docs/design/fennecql.md#the-corpus: what the test job's corpus steps
+      # harvest from each kind of file, how a reading is judged against
+      # another's, what ACCEPTED lets through -- a digest moving only with
+      # the grammar epoch raised -- and the corpus frozen at v0.2.0.
+      - name: tools/fennecql_corpus.py harvests, judges and lets through only what it must
+        run: python3 tools/test_fennecql_corpus.py
+
       # docs/design/durability.md#a-power-cut: the power cuts run by hand,
       # weekly and on a push to main, never on a pull request; what their
       # shared check must fail -- a sync come late, a write lost past
@@ -298,6 +305,28 @@ jobs:
           else
             echo "main has no tools/openapi_compat.py yet: no base pass"
           fi
+
+      # docs/design/fennecql.md#the-corpus: no text that parsed reads as
+      # another statement or is refused. Every FennecQL text the repository
+      # holds, read by this tree and by main's -- each tree's fennec-ql built
+      # unoptimised from `git archive`, beside make test's target, the
+      # corpus example copied in -- a statement a named statement may hold
+      # by its canonical digest. A change on purpose is an ACCEPTED entry in
+      # the tool; a digest moves only with GRAMMAR_EPOCH raised. Not on a
+      # push: main against itself.
+      - name: FennecQL reads every text as main reads it
+        if: matrix.os == 'ubuntu-latest' && github.event_name != 'push'
+        run: |
+          git fetch --no-tags --depth=1 origin +refs/heads/main:refs/remotes/origin/main
+          make fennecql-corpus BASE=origin/main
+
+      # The texts v0.2.0's tree held, as v0.2.0's own parser read them
+      # (integrations/fennecql-corpus/v0.2.0.jsonl, never written again):
+      # a named statement stored as its text under any release since keeps
+      # its meaning. This tree's build is the step before's.
+      - name: FennecQL reads every text v0.2.0 held as v0.2.0 read it
+        if: matrix.os == 'ubuntu-latest'
+        run: make fennecql-corpus BASE=v0.2.0
 
       # A node measures its lease on the boot clock (fennec-http's
       # `lease::Moment`), which counts the time a machine was suspended. No

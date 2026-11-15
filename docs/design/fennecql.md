@@ -1,6 +1,6 @@
 # FennecQL and schemas
 
-The long form of the invariants [crates/fennec-ql/CLAUDE.md](../../crates/fennec-ql/CLAUDE.md) lists under *FennecQL and schemas*: SQL's spellings, parameters for counts, inner `get`s, `alter`, json paths, the shell's reading and declared schemas. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [crates/fennec-ql/CLAUDE.md](../../crates/fennec-ql/CLAUDE.md) lists under *FennecQL and schemas*: SQL's spellings, parameters for counts, inner `get`s, `alter`, json paths, the shell's reading, declared schemas and the corpus that holds every text to the reading it had. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## SQL spellings
 
@@ -1012,3 +1012,116 @@ golden file and read a row into it), the tables as code (`--schema`) and the sch
 (`--fennecql`); `integrations/types-golden/` holds each for one schema, with the
 named statements of [named-statements.md](named-statements.md#what-is-built) typed
 beside its collections (slice 6).
+
+## The corpus
+
+**No text that parsed reads as another statement, held in CI by canonical
+digest.** `make fennecql-corpus` (`tools/fennecql_corpus.py`, the example
+`crates/fennec-ql/examples/corpus.rs`) harvests every FennecQL text the
+repository tracks -- the docs' blocks and inline code, the golden files and
+the sync's scenarios, the string literals of every SDK's sources and the
+crates' -- and reads each with `parse`, `parse_exact` and, where the text
+is one definition, `stored_definition`, the reading whose digest an open
+holds a stored record to. Each statement read is a word: one a named
+statement's body may hold (`get`, `put`, `insert`, `set`, `del` and SQL's
+spellings of them) the digest of a definition whose body it is alone, an
+`explain` its `get`'s, a definition its own `Definition::digest` and
+whether it replaces, any other statement -- a schema change, a listing,
+`call` -- a hash of its `Debug` form. CI's test job runs it on every pull
+request and merge group against `origin/main`, both trees built from `git
+archive`, and on every run against the corpus frozen at v0.2.0. A text
+read otherwise, or refused where it parsed, fails it; one that parses now
+and was refused, or is refused in other words, is told.
+
+*Why the digest.* The check compared the trees' `Debug` forms. Against
+main that held, a field added in the same change kept out of `Debug` by
+hand where it held nothing (`Field`'s `beside`, `TextIndexSpec`'s
+`accents`, a definition's `after`, `schedule` and `hook`); against a tag
+months old, every field added since would differ in every text whose node
+has it. `Definition::canonical` writes a field only where it holds
+something, under a tag never reused, so a field added that a text does not
+use writes nothing and the text's digest is as it was. Checked in the
+code: each field goes through a writer that writes nothing for its empty
+value (`text`, `opt_text`, `flag`, `num`, `opt_num`, `list`, `names`,
+`opt_names`, `opt_count`, `offset`, `opt_expr`, `require`), those written
+whole being required ones (a parameter's or a claim's type, `near`'s
+vector); an
+operator is a byte of its own (`cmp_byte`, `arith_byte`), never its
+variant's place; a literal and a type are the file's own encodings, and
+the digest is `hll::hash`, which every stored record holds. The claim's other half
+did not hold everywhere: `Param`, `Claim`, `Require`, `Schedule`, `Cron`,
+`Webhook`, `Place`, a flat row's columns and a join's names were read field
+by field, so a field added to one of them and not written would have left
+a statement using it at the digest of one that does not -- run by an open
+as another tree, unmarked, and invisible to any corpus. Each is now taken
+apart whole, as `Select`, `Lookup`, `Pick` and the rest were, so the
+compiler refuses a field added until it is written or named as left out
+(`replace: _`). No byte moved: this tree reads every text of the frozen
+corpus to v0.2.0's digest.
+
+*Statements no definition holds* -- schema changes, listings, `call`;
+1 989 of the frozen texts' statements -- have no canonical tree: no record
+keeps their text, and a schema is kept in the file's own encoding. They
+compare by their `Debug` form's hash (FNV-1a), so a field added to one of
+their nodes keeps `Debug` as it was by writing itself only where it holds
+something, as `Field` and `TextIndexSpec` do; one that does not fails the
+step against main in the pull request adding it. A canonical form of their
+own was weighed and left: the example is copied into BASE's tree and built
+there, so it calls only what both trees export, and a writer of its own,
+compiled against two trees, could take a node apart only with `..`,
+passing over every field added -- what the digest is there to see.
+
+*The frozen corpus.* `integrations/fennecql-corpus/v0.2.0.jsonl` holds the
+texts v0.2.0's tree held, as v0.2.0's own parser read them. `make
+fennecql-corpus FREEZE=v0.2.0` writes the tag's tree from `git archive`
+into a temporary directory, harvests it, copies this tree's example in and
+builds the tag's fennec-ql with it -- the crates were already `fennec-*` at
+the tag, and the example calls only what v0.2.0 exports: `parse`,
+`parse_exact`, `parse_one`, `stored_definition`, `Definition::digest` and
+`GRAMMAR_EPOCH` -- run with `CARGO_NET_OFFLINE=true`: nothing downloaded.
+Of the tag's 12 114 texts the 8 637 one reading of which parsed are kept,
+25 911 readings: a refusal as `err` alone, its words free to change,
+`parse_exact`'s and the stored reading written only where `parse` does not
+make them (304 and none); 1.3 MB. Its first line names the tag, its commit
+and the epoch, 4. It is never written again: a tag's own reading is the
+one thing no later tree can produce, and a tree reading otherwise would
+write its own reading into it. CI reads it with this tree's build alone, so
+the tag is never fetched.
+
+*When the canonical form must change.* Under 1.x it does not: writing a
+tree that parsed before otherwise raises `GRAMMAR_EPOCH`, which stays 4
+through 1.x ([compatibility.md](compatibility.md#the-grammar-epoch)), so the
+frozen step holds every 1.x to v0.2.0's digests. A change made on purpose
+is an entry of `ACCEPTED` in the tool -- the text, the pull request and
+why, as `tools/openapi_compat.py`'s `BREAKS` -- which both steps read. An
+entry lets through a statement no definition holds read otherwise, or a
+text refused now whose stored reading holds: under 1.x, only the fix of a
+reading no caller could rely on. Where a digest moves -- a `c`, `e` or `s`
+word read otherwise, or a definition's stored reading changed or refused,
+what an open marks broken -- the entry passes only with `GRAMMAR_EPOCH`
+raised past BASE's and named in it, a major version, whose comment in
+`named.rs` names the texts as epochs 2 to 4 did. A major version's first
+tag freezes its own corpus, which CI then runs in the last one's place.
+
+*What runs, and what it costs.* Each tree's fennec-ql is built unoptimised
+-- `release`'s LTO and single codegen unit took minutes a tree -- with
+debug information, overflow checks and debug assertions off, so a text
+reads as the shipped parser reads it, on a stack of 256 MiB (the depth
+test's 512 levels outgrew 8 MiB of a debug build), and with this tree's
+pinned compiler (`RUSTUP_TOOLCHAIN`: v0.2.0's `rust-toolchain.toml` said
+`stable`). Each build is 154 MB in `target/fennecql-corpus/`; reading
+12 239 texts three ways takes under a second. The cost is two builds of
+fennec-core and fennec-ql in the ubuntu test job, the frozen step reusing
+the first's, a step of a job rather than a job of its own: no second
+checkout, toolchain or cache. Its time is the first runs' to say -- this
+machine stood at a load of 12 to 50 while it was written, and a time taken
+under someone else's load is no figure -- and the job's bound with it: the
+test job's last 20 green ubuntu runs took 11.3 to 16.0 minutes, a median of
+13.4, under its 30.
+
+*Today.* Against v0.2.0's frozen corpus: 8 637 texts, 25 911 readings,
+every one alike. Against main: 12 239 texts, 36 717 readings, alike; and
+this tree's texts read by v0.2.0's tree, built from its archive, alike --
+fennec-ql, `query.rs`, `named.rs` and `codec.rs` were as the tag left them.
+`>=`'s byte in `cmp_byte` moved from 5 to 6, as a check of the check,
+failed the frozen step with 370 texts.

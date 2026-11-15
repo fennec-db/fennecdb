@@ -322,6 +322,7 @@ Covers `crates/fennec-ql/` and the shell in `crates/fennec-cli/`; its rules bind
 
 *FennecQL and schemas*
 - SQL's spellings are FennecQL, read by the one parser
+- No text that parsed reads as another statement, held in CI by canonical digest.
 - A JOIN on a key is a `lookup` answered flat, or one table's `get` with the other's rows a filter
 - `limit`, `offset` and `top` take a parameter, read where the plan reads them
 - `in (get ...)` is answered before the query, as the list it is.
@@ -519,7 +520,8 @@ Covers `crates/fennec-bench/`.
   hold many threads and one opening the audit log (`tests/audit.rs`,
   `tests/refusals.rs`) are each a `[[test]]` of its own, the other tests'
   servers asking with no refusal wait (`audit::set_delay(0)`). Measurement
-  programs (`examples/`, `fennec-bench`) are wired to `make`, not CI.
+  programs (`examples/`, `fennec-bench`) are wired to `make`, not CI; an
+  example that is a check -- fennec-ql's `corpus` -- runs in CI's test job.
 - [A test that fails and passes on a rerun](docs/design/conventions.md#reruns)
   is a bug, the test's or the code's: reproduce it in a loop under load
   (`docker run --cpus=3` beside busy loops is GitHub's runner) and fix it,
