@@ -13,8 +13,8 @@
 use crate::codec;
 use crate::error::{Error, Result};
 use crate::query::{
-    ArithOp, CmpOp, Column, Count, Expr, Facet, Flat, Fuse, Lookup, Mark, Match, Near, Pick,
-    Require, Rerank, Select, Sort, Statement,
+    ArithOp, CmpOp, Column, Count, Expr, Facet, Flat, FlatColumn, Fuse, JoinNames, Lookup, Mark,
+    Match, Near, Pick, Require, Rerank, Select, Sort, Statement,
 };
 use crate::schema::Schema;
 use crate::value::{DataType, Value};
@@ -60,10 +60,11 @@ pub enum What {
 /// was parsed under and its tree's digest ([`Definition::digest`]); an open
 /// parses it again and marks it broken where the digest is another, rather
 /// than run a tree its author never wrote. The corpus rule keeps that from
-/// happening (`docs/design/fennecql.md`): no text that parsed reads
-/// otherwise, so the epoch moves only where a change means to, and says
-/// so. Here, beside the encoder whose change raises it, so the engine
-/// writes it into a record; `fennec_ql::GRAMMAR_EPOCH` is this one.
+/// happening (`docs/design/fennecql.md#the-corpus`, in CI): no text that
+/// parsed reads otherwise, so the epoch moves only where a change means
+/// to, and says so. Here, beside the encoder whose change raises it, so
+/// the engine writes it into a record; `fennec_ql::GRAMMAR_EPOCH` is this
+/// one.
 ///
 /// 2: SQL's `x = any($n)` and `x <> all($n)` read as `x in $n` and `not (x
 /// in $n)`, where they were a call of a function no build has, refused as
@@ -159,7 +160,7 @@ pub const MAX_NAME: usize = 59;
 /// <body>` ([`Webhook`]). Two are equal where
 /// everything but their [`Definition::text`] is: the same statement
 /// written over one line or several. Its `Debug` form is its tree's, the
-/// text left out, which `make fennecql-corpus` compares.
+/// text left out; `make fennecql-corpus` compares its digest.
 #[derive(Clone)]
 pub struct Definition {
     pub name: String,
@@ -1236,9 +1237,16 @@ impl Definition {
     /// writes them (`codec::encode_value`, `codec::encode_type`), an
     /// expression its variant's byte and its operands. So a field added to
     /// the tree that holds nothing in a statement leaves that statement's
-    /// digest as it was: only a statement using it reads otherwise. A
+    /// digest as it was: only a statement using it reads otherwise. Every
+    /// node is taken apart whole (`let Param { name, ty, default } = p`),
+    /// so a field added is written or named as left out (`replace: _`)
+    /// where it is added -- one passed over would leave a statement using
+    /// it at the digest of one that does not, which no corpus could see. A
     /// tag is never reused nor renumbered; a change that writes an old
-    /// tree otherwise raises [`GRAMMAR_EPOCH`].
+    /// tree otherwise raises [`GRAMMAR_EPOCH`]. `make fennecql-corpus`
+    /// holds every text the repository holds, and every text v0.2.0's tree
+    /// held, to the digests its base read them to
+    /// (docs/design/fennecql.md#the-corpus).
     pub fn canonical(&self) -> Result<Vec<u8>> {
         let Definition {
             name,
@@ -1260,20 +1268,22 @@ impl Definition {
         c.node(1);
         c.text(1, name);
         c.list(2, params, |c, p| {
+            let Param { name, ty, default } = p;
             c.node(2);
-            c.text(1, &p.name);
-            c.ty(2, &p.ty);
-            if let Some(v) = &p.default {
+            c.text(1, name);
+            c.ty(2, ty);
+            if let Some(v) = default {
                 c.tag(3);
                 c.value(v);
             }
             c.end();
         });
         c.list(3, claims, |c, k| {
+            let Claim { name, ty, from } = k;
             c.node(3);
-            c.text(1, &k.name);
-            c.ty(2, &k.ty);
-            c.opt_text(3, k.from.as_deref());
+            c.text(1, name);
+            c.ty(2, ty);
+            c.opt_text(3, from.as_deref());
             c.end();
         });
         c.flag(4, *public);
@@ -1302,9 +1312,10 @@ impl Definition {
             c.num(2, u64::from(*events));
             c.opt_expr(3, condition);
             c.list(4, places, |c, p| {
+                let Place { old, field } = p;
                 c.node(5);
-                c.flag(1, p.old);
-                c.text(2, &p.field);
+                c.flag(1, *old);
+                c.text(2, field);
                 c.end();
             });
             c.end();
@@ -1339,8 +1350,8 @@ impl std::fmt::Debug for Definition {
             .field("check", &self.check)
             .field("body", &self.body)
             .field("block", &self.block);
-        // Only where it holds one, as the canonical tree writes it: the
-        // corpus compares every callable definition's form as it was.
+        // Only where it holds one, as the canonical tree writes it: every
+        // callable definition's form reads as it did before them.
         if let Some(b) = &self.after {
             d.field("after", b);
         }
@@ -2404,22 +2415,29 @@ impl Canon {
     #[inline(never)]
     fn schedule(&mut self, s: &Schedule) {
         use crate::query::Interval;
+        let Schedule { when, zone } = s;
         self.node(6);
-        match s.when {
+        match *when {
             When::Every(Interval::Ms(step, origin)) => {
                 self.num(1, step as u64);
                 self.num(2, origin as u64);
             }
             When::Every(Interval::Months(n)) => self.num(3, n as u64),
-            When::At(c) => {
-                self.num(4, c.minutes);
-                self.num(5, c.hours.into());
-                self.num(6, c.days.into());
-                self.num(7, c.months.into());
-                self.num(8, c.weekdays.into());
+            When::At(Cron {
+                minutes,
+                hours,
+                days,
+                months,
+                weekdays,
+            }) => {
+                self.num(4, minutes);
+                self.num(5, hours.into());
+                self.num(6, days.into());
+                self.num(7, months.into());
+                self.num(8, weekdays.into());
             }
         }
-        self.opt_text(9, s.zone.as_deref());
+        self.opt_text(9, zone.as_deref());
         self.end();
     }
 
@@ -2432,10 +2450,15 @@ impl Canon {
     #[cold]
     #[inline(never)]
     fn webhook(&mut self, h: &Webhook) {
+        let Webhook {
+            name,
+            condition,
+            sources,
+        } = h;
         self.node(7);
-        self.text(1, &h.name);
-        self.opt_expr(2, &h.condition);
-        self.list(3, &h.sources, |c, s| {
+        self.text(1, name);
+        self.opt_expr(2, condition);
+        self.list(3, sources, |c, s| {
             c.node(8);
             match s {
                 // Each key under 2, as a list of them was written: a text
@@ -2520,14 +2543,14 @@ impl Canon {
     }
 
     /// `require <n> [else '<reason>']`: the count under `tag`, and the
-    /// reason, a part of the API it answers, under `reason` where one is
+    /// reason, a part of the API it answers, under `reason_tag` where one is
     /// given -- a field of its own, so a guard without one writes what it
     /// wrote before reasons were read.
-    fn require(&mut self, tag: u8, reason: u8, r: &Option<Require>) {
-        if let Some(r) = r {
+    fn require(&mut self, tag: u8, reason_tag: u8, r: &Option<Require>) {
+        if let Some(Require { n, reason }) = r {
             self.tag(tag);
-            self.uint(r.n);
-            self.text(reason, &r.reason);
+            self.uint(*n);
+            self.text(reason_tag, reason);
         }
     }
 
@@ -2862,9 +2885,14 @@ impl Canon {
         } = f;
         self.node(1);
         self.list(1, columns, |c, col| {
-            c.uint(col.level as u64);
-            c.str(&col.column);
-            c.str(&col.name);
+            let FlatColumn {
+                level,
+                column,
+                name,
+            } = col;
+            c.uint(*level as u64);
+            c.str(column);
+            c.str(name);
         });
         self.offset(2, *offset);
         self.opt_count(3, *limit);
@@ -2876,14 +2904,15 @@ impl Canon {
             }
         });
         if let Some(n) = names {
+            let JoinNames { tables, names } = &**n;
             self.tag(5);
-            self.uint(n.tables.len() as u64);
-            for (alias, collection) in &n.tables {
+            self.uint(tables.len() as u64);
+            for (alias, collection) in tables {
                 self.str(alias);
                 self.str(collection);
             }
-            self.uint(n.names.len() as u64);
-            for (table, name, bare) in &n.names {
+            self.uint(names.len() as u64);
+            for (table, name, bare) in names {
                 self.uint(*table as u64);
                 self.str(name);
                 self.uint(u64::from(*bare));

@@ -347,6 +347,7 @@ Covers `crates/fennec-ql/` and the shell in `crates/fennec-cli/`; its rules bind
 
 *FennecQL and schemas*
 - SQL's spellings are FennecQL, read by the one parser
+- No text that parsed reads as another statement, held in CI by canonical digest.
 - A JOIN on a key is a `lookup` answered flat, or one table's `get` with the other's rows a filter
 - `limit`, `offset` and `top` take a parameter, read where the plan reads them
 - `in (get ...)` is answered before the query, as the list it is.

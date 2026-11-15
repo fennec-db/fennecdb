@@ -13,6 +13,27 @@ refused naming the FennecQL to write, without consuming its word; `"name"`
 where SQL reads a column (`Parser::quoted`) and a regex-like `~`
 (`regex_like`) are refused, `<>` stays `!=`.
 
+**[No text that parsed reads as another statement, held in CI by canonical
+digest.](../../docs/design/fennecql.md#the-corpus)** `make fennecql-corpus`
+reads every FennecQL text this tree and main's track, the hand-written
+list's among them (`integrations/fennecql-corpus/kinds.txt`, five of every
+kind, two of every refusal by name), with both trees, and every corpus
+frozen at a tag (`integrations/fennecql-corpus/<tag>.jsonl`, its texts and
+the earlier corpora's as the tag's own parser read them, added by
+`FREEZE=<tag>`, never replaced, nor changed or removed once main holds it)
+with this one; CI's test job runs both. A statement a definition may hold,
+and a definition, compare by `Definition::digest`, any other by its form --
+its pretty `Debug`, a struct's named field holding `None`, `false`, `0`,
+`[]`, `""` or `{}` left out, never a map's entry -- so a field added that
+holds nothing moves neither, and `Definition::canonical` takes every node
+apart whole, so none is passed over; a field whose `Debug` writes something where it holds nothing owes
+one that does not. A text read otherwise, refused or panicking fails; an
+`ACCEPTED` entry in the tool names one change by both readings, and a
+digest moved, or a refusal of what a 1.x base read, needs `GRAMMAR_EPOCH`
+raised too -- a major version; a form a 1.x base read moved needs it or
+the entry's `same_meaning`, a claim the summary prints, since a hash of a
+form moves with a renamed field as with a changed meaning.
+
 **[A JOIN on a key is a `lookup` answered flat, or one table's `get` with
 the other's rows a filter](../../docs/design/fennecql.md#sql-joins-subqueries-and-schema)**
 (`join::relate`). The flat rows are `Select::flat`, set by SQL alone and
@@ -108,8 +129,8 @@ outside `full`, named by the server, the shell and the native library; the
 module refuses in its own words, a definition's own path `#[cold]`.
 `Definition::canonical` writes a field only where it holds something, an
 operator by a byte of its own; reading a stored text otherwise raises
-`GRAMMAR_EPOCH`; `make fennecql-corpus` holds the repository's FennecQL
-texts to main's trees.
+`GRAMMAR_EPOCH`; the corpus (above) holds every text to main's digests
+and every frozen corpus's.
 
 **[A write-bound statement runs in the block of the write that woke it,
 once a row.](../../docs/design/named-statements.md#write-bound-statements-f2)**

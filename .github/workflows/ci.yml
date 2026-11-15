@@ -161,6 +161,19 @@ jobs:
       - name: tools/openapi_compat.py finds every break and passes every addition
         run: python3 tools/test_openapi_compat.py
 
+      # docs/design/fennecql.md#the-corpus: what the test job's corpus steps
+      # harvest from each kind of file and the hand-written list, how a
+      # reading is judged against another's -- word by word, a panic failing
+      # whatever BASE read -- what ACCEPTED lets through -- one change, both
+      # readings named, a digest moving or a 1.x release's text refused only
+      # with the grammar epoch raised, a 1.x release's statement read
+      # otherwise with it or its `same_meaning` -- what a failure prints, the
+      # frozen corpora kept as main holds them, and trees of a few lines
+      # built in turn, each answering its own reading. The test job runs it
+      # too, beside the steps it holds: this job is no required check.
+      - name: tools/fennecql_corpus.py harvests, judges and lets through only what it must
+        run: python3 tools/test_fennecql_corpus.py
+
       # docs/design/durability.md#a-power-cut: the power cuts run by hand,
       # weekly and on a push to main, never on a pull request; what their
       # shared check must fail -- a sync come late, a write lost past
@@ -352,6 +365,40 @@ jobs:
           else
             echo "main has no tools/openapi_compat.py yet: no base pass"
           fi
+
+      # The corpus tool's own tests (the fmt job's step), in a required
+      # check beside the two steps whose reading and judging they hold.
+      - name: tools/fennecql_corpus.py harvests, judges and lets through only what it must
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 tools/test_fennecql_corpus.py
+
+      # docs/design/fennecql.md#the-corpus: no text that parsed reads as
+      # another statement, is refused or panics. Every FennecQL text this
+      # tree and main's hold, read by both -- each tree's fennec-ql built
+      # unoptimised, main's from `git archive`, the corpus example copied
+      # in -- a statement a named statement may hold by its canonical
+      # digest. A change on purpose is an ACCEPTED entry in the tool naming
+      # both readings, which a failure prints. The builds go under the
+      # runner's temp, not target/: the cache saves target/, and they were
+      # 306 MB of it. A frozen corpus main holds, changed or removed, fails
+      # it too. Not on a push: main against itself.
+      - name: FennecQL reads every text as main reads it
+        if: matrix.os == 'ubuntu-latest' && github.event_name != 'push'
+        env:
+          FENNECQL_CORPUS_TARGET: ${{ runner.temp }}/fennecql-corpus
+        run: |
+          git fetch --no-tags --depth=1 origin +refs/heads/main:refs/remotes/origin/main
+          make fennecql-corpus BASE=origin/main
+
+      # The texts each frozen corpus holds (integrations/fennecql-corpus/
+      # *.jsonl, each added once and kept), as its tag's own parser read
+      # them: a named statement stored as its text under any release since
+      # keeps its meaning. This tree's build is the step before's.
+      - name: FennecQL reads every text a frozen corpus holds as its tag read it
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          FENNECQL_CORPUS_TARGET: ${{ runner.temp }}/fennecql-corpus
+        run: make fennecql-corpus BASE=frozen
 
       # A node measures its lease on the boot clock (fennec-http's
       # `lease::Moment`), which counts the time a machine was suspended. No

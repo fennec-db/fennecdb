@@ -409,13 +409,21 @@ size-report:
 	@python3 crates/fennec-wasm/size_report.py $(BASE) $(if $(WHY),--why '$(WHY)') $(if $(BIN),--bin $(BIN)) $(if $(FEATURES),--features '$(if $(filter none,$(FEATURES)),,$(FEATURES))')
 
 ## Every FennecQL text the repository holds -- the docs' blocks and inline
-## code, the golden files, the sources' strings -- parsed by this tree and by
-## BASE's, both `parse` and `parse_exact` (tools/fennecql_corpus.py, the
-## example crates/fennec-ql/examples/corpus.rs): fails where a text that
-## parsed reads as another tree or is refused, the rule a grammar change
-## keeps (docs/design/fennecql.md). make fennecql-corpus BASE=origin/main
+## code, the golden files, the sources' strings, the hand-written list --
+## this tree's and BASE's, read by both trees with `parse`, `parse_exact`
+## and `stored_definition`, a statement a named statement may hold by its
+## canonical digest (tools/fennecql_corpus.py, the example
+## crates/fennec-ql/examples/corpus.rs): fails where a text that parsed
+## reads as another statement, is refused or panics, printing what changed
+## (docs/design/fennecql.md#the-corpus). BASE=v0.2.0 holds this tree to the
+## texts frozen at the tag, as its own parser read them
+## (integrations/fennecql-corpus/v0.2.0.jsonl), BASE=frozen to every frozen
+## corpus; FREEZE=<tag> adds a tag's from its tree and the earlier frozen
+## corpora's texts, never replacing one. A failure writes every entry to
+## paste beside the builds. CI runs BASE=origin/main and BASE=frozen.
+## make fennecql-corpus BASE=origin/main
 fennecql-corpus:
-	@python3 tools/fennecql_corpus.py $(or $(BASE),origin/main)
+	@python3 tools/fennecql_corpus.py $(if $(FREEZE),--freeze $(FREEZE),$(if $(filter frozen,$(BASE)),--frozen,$(or $(BASE),origin/main)))
 
 # The fuzzer's nightly, a date: AddressSanitizer is a nightly flag, and only
 # the fuzz targets and the jobs running them take one (ci.yml's fuzz-smoke,
