@@ -103,6 +103,10 @@ jobs:
           test -f "$f" || { mkdir -p "$(dirname "$f")" && curl -fsSL --retry 3 -o "$f" https://www.unicode.org/Public/17.0.0/ucd/UnicodeData.txt; }
           python3 crates/fennec-core/tools/fold/gen.py --check "$f"
 
+      # Also a step of the `test` job (see there): on 2026-11-15, before
+      # this job was a required check, a pull request green on its own took
+      # crates/fennec-core/CLAUDE.md past 24 000 bytes once merged with main,
+      # through the queue with this job red. Here for the quick answer.
       - name: Each AGENTS.md is its CLAUDE.md under its own title; the root under 32 000 bytes, an area file under 24 000, each rule in one file and the root's index
         run: python3 tools/agents_md.py --check
 
@@ -168,11 +172,26 @@ jobs:
       - name: tools/flutter_archive_check.py refuses a library packed twice or for another platform
         run: python3 tools/test_flutter_archive_check.py
 
+      # docs/design/benchmarks.md#binary-sizes: the build job holds what a
+      # release ships to tools/size-budgets.json. What its check refuses --
+      # a binary past its budget, more than 1% under it or from the figure
+      # the docs quote, an entry no run measures -- and the file's own
+      # entries, each inside its budget, are held here.
+      - name: tools/size_budgets.py refuses a binary past its budget or 1% off it, and the file's entries pass
+        run: python3 tools/test_size_budgets.py
+
       # docs/design/http.md#compatibility: the checker the test job runs on
       # the served documents finds each kind of break, lets each addition
       # through, and holds BREAKS and the committed baseline.
       - name: tools/openapi_compat.py finds every break and passes every addition
         run: python3 tools/test_openapi_compat.py
+
+      # docs/design/compatibility.md: fennec.h, the JS types, the CLI and
+      # the metrics only grow. Here only the checker's own tests, a break
+      # seeded into each surface for the quick answer; the check over the
+      # sources is a step of the `test` job below, beside the REST API's.
+      - name: tools/api_compat.py finds every break and passes every addition
+        run: python3 tools/test_api_compat.py
 
       # docs/design/fennecql.md#the-corpus: what the test job's corpus steps
       # harvest from each kind of file and the hand-written list, how a
@@ -411,6 +430,32 @@ jobs:
             echo "main has no tools/openapi_compat.py yet: no base pass"
           fi
 
+      # docs/design/compatibility.md: fennec.h, the JS types, the CLI and
+      # the metrics only grow. `make api-check`: the checker's tests, then
+      # the sources held to integrations/api-golden/ -- which must be what
+      # they dump to -- by this checkout's checker, and the baselines to
+      # main's by main's copy (BREAKS read from this one as data, as the
+      # REST API's is), so neither a baseline edited by hand nor a checker
+      # changed to see less lets a break through. The CLI's and the
+      # metrics' dumps are held to the binaries by `make test` above (each
+      # binary's crate's tests/api_golden.rs, on Linux and macOS).
+      - name: The C header, the JS types, the CLI and the metrics only grow
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          make api-check BASE=FETCH_HEAD
+
+      # Run twice on purpose: fmt has it for the quick answer, this job
+      # since fmt was not a required check. On 2026-11-15 a pull request
+      # green on its own would have taken crates/fennec-core/CLAUDE.md past
+      # its 24 000 bytes once merged with main; it landed through the queue
+      # with fmt red and every later run's fmt was red too. The queue builds
+      # every required job on the merged result, fmt among them now
+      # (docs/design/conventions.md: every job but two).
+      - name: Each AGENTS.md is its CLAUDE.md, and no file is past its size
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 tools/agents_md.py --check
+
       # The corpus tool's own tests (the fmt job's step), in a required
       # check beside the two steps whose reading and judging they hold.
       - name: tools/fennecql_corpus.py harvests, judges and lets through only what it must
@@ -474,6 +519,18 @@ jobs:
         run: |
           cargo test -p fennec-http --features test-clock --lib -- --exact \
             tenants::tests::a_tenant_busy_as_its_clock_shift_ends_takes_the_systems_clock_back \
+            | tee /dev/stderr | grep -q 'test result: ok. 1 passed'
+
+      # The scheduler's stop ends fennec-server with 1, held on a real server
+      # through the scheduler's fault (`FENNEC_TEST_SCHEDULER_PANIC`), which
+      # is a test build's, behind `test-clock` with its clock: a debug build
+      # without it -- `cargo run`'s, the web tests' -- reads no such
+      # variable. Built with the feature here, the test named whole.
+      - name: A scheduler's failure ends the server with 1
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo test -p fennec-server --features test-clock --test all -- --exact \
+            scheduled::a_scheduler_s_failure_ends_the_server_with_1 \
             | tee /dev/stderr | grep -q 'test result: ok. 1 passed'
 
       # fennec studio (`--studio`) in the runner's Chrome against the debug
@@ -1970,7 +2027,8 @@ jobs:
   # dashboards asked of Grafana (through Infinity and through the plugin)
   # and held to fennec-server's own answer, the plugin's alert rule
   # evaluated, and what the data sources must refuse. Last, the backend's
-  # Go tests, against the fennec-server of the image just built.
+  # Go tests, against the fennec-server of the image just built, and that
+  # binary's size against the image's figure the docs quote.
   grafana:
     name: monitoring (Grafana)
     runs-on: ubuntu-latest
@@ -2031,6 +2089,14 @@ jobs:
           docker create --name fennec-server fennecdb
           docker cp fennec-server:/usr/local/bin/fennec-server "$RUNNER_TEMP/fennec-server"
           FENNEC_SERVER="$RUNNER_TEMP/fennec-server" go test -count=1 ./pkg/...
+
+      # The image the root Dockerfile builds, as release.yml's image job
+      # does, holds that one file, and the docs quote its size for the
+      # image: the build job's musl fennec-server's (tools/size-budgets.json).
+      # This is the one job that builds the image; its binary, built on
+      # Alpine with the same toolchain, within 1% of that figure.
+      - name: The image's fennec-server is the size the docs quote
+        run: python3 tools/size_budgets.py --summary "$GITHUB_STEP_SUMMARY" --near fennec-server="$RUNNER_TEMP/fennec-server"
 
       - name: Save the npm cache (main only)
         if: github.ref == 'refs/heads/main' && steps.npm-cache.outputs.cache-hit != 'true'
@@ -2135,16 +2201,36 @@ jobs:
           tools/linux-packages.sh "$pre" "$RUNNER_TEMP/pre-tarballs" "$RUNNER_TEMP/pre-packages" amd64
           FENNEC_BINARY_VERSION="$version" tools/linux-packages-check.sh "$pre" "$RUNNER_TEMP/pre-packages" amd64
 
+  # What a release ships, built as release.yml builds its x86_64 Linux
+  # tarball -- `fennec` on the cli profile and `fennec-server` on release,
+  # static with musl -- and `make small`, the smallest shell binary and the
+  # only build of the CLI without its default features, import and backup.
+  # fennec-core without std-fs is the browser build's, in the test and
+  # clippy jobs. Their bytes are held to tools/size-budgets.json
+  # (docs/design/benchmarks.md#binary-sizes): one past its budget fails,
+  # and so does one more than 1% under it or from the figure the docs
+  # quote, which site/build.py holds the docs within 1% of. On the runner
+  # release.yml builds the tarball on, not ubuntu-latest: that is 26.04
+  # since 2026-11, whose musl, gcc and linker are not the release's.
   build:
     name: build (release + cli profile)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install the pinned toolchain
-        run: rustup show
+      # musl-tools is the C compiler ring's C and assembly are built with
+      # for musl, as release.yml's Linux builds take it.
+      - name: Install the pinned toolchain, its musl target and musl-tools
+        run: |
+          rustup show
+          rustup target add x86_64-unknown-linux-musl
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends musl-tools
 
+      # The crates from outside the workspace, built once for each profile:
+      # the workspace's are compiled every run, their sources newer than
+      # any cache.
       - id: cargo-cache
         uses: actions/cache/restore@v6
         with:
@@ -2153,17 +2239,46 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-ubuntu-latest-build-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-ubuntu-latest-build-
+          key: v2-ubuntu-24.04-build-musl-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v2-ubuntu-24.04-build-musl-
 
-      # `make small` is the smallest shell binary and the only build of the
-      # CLI without its default features, import and backup. fennec-core
-      # without std-fs is the browser build's, in the test and clippy jobs.
-      - name: Build the CLI (cli profile, no default features)
-        run: make small
+      # The three at once. Each build is a chain of compiles of one unit
+      # (`codegen-units = 1`) ending in one fat LTO, a core's work most of
+      # its time, and the runner has four: with nothing cached they took
+      # 98 s at once, their own times adding to 4 min 5 s (#648's first
+      # run), and the job 2.2 minutes against 2.3 for the two host builds
+      # it made one after another before. `fennec` and `fennec-server` in a
+      # cargo run each, as release.yml builds them: one run unifies its
+      # packages' features, which would change the bytes. `make small` in a
+      # target directory of its own: a second run on the cli profile's
+      # waits for the first's lock. It takes no crate from outside the
+      # workspace, so nothing of it is worth a cache.
+      - name: Build fennec and fennec-server as a release does, and make small
+        run: |
+          t=x86_64-unknown-linux-musl
+          cargo build --profile cli --target $t -p fennec-cli > "$RUNNER_TEMP/fennec.log" 2>&1 &
+          fennec=$!
+          cargo build --release --target $t -p fennec-server > "$RUNNER_TEMP/fennec-server.log" 2>&1 &
+          server=$!
+          CARGO_TARGET_DIR="$RUNNER_TEMP/small" make small TARGET=$t > "$RUNNER_TEMP/small.log" 2>&1 &
+          small=$!
+          failed=
+          for build in fennec:$fennec fennec-server:$server small:$small; do
+            name=${build%%:*}
+            if wait "${build##*:}"; then
+              echo "::group::$name"; cat "$RUNNER_TEMP/$name.log"; echo "::endgroup::"
+            else
+              cat "$RUNNER_TEMP/$name.log"; failed="$failed $name"
+            fi
+          done
+          if [ -n "$failed" ]; then echo "::error::did not build:$failed"; exit 1; fi
 
-      - name: Build the server (release)
-        run: cargo build --release -p fennec-server
+      - name: Their sizes against tools/size-budgets.json
+        run: >-
+          python3 tools/size_budgets.py --summary "$GITHUB_STEP_SUMMARY"
+          fennec=target/x86_64-unknown-linux-musl/cli/fennec
+          fennec-server=target/x86_64-unknown-linux-musl/release/fennec-server
+          small="$RUNNER_TEMP/small/x86_64-unknown-linux-musl/cli/fennec"
 
       - name: Prune target/ to the crates from outside the workspace (main only)
         if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
@@ -2183,17 +2298,23 @@ jobs:
 
   # docs/design/conventions.md#fuzzing: every parser of untrusted bytes --
   # an HTTP request, JSON, FennecQL, the codec, a .fennec file's open and a
-  # replica's apply, a SQLite file -- fuzzed for 30 s each, built with
-  # AddressSanitizer and LLVM's coverage counters on the Makefile's dated
-  # nightly (a nightly only here and in fuzz.yml). The test job runs the same
-  # targets over their seeds in a plain build; fuzz.yml gives each half an
-  # hour a week. It runs on main's pushes too, whose logs and artifacts
-  # anyone reads: a finding keeps no input and says no backtrace, only the
-  # recipe `fennec-fuzz reproduce` makes its input again from (fuzz.yml).
+  # replica's apply, a SQLite file -- fuzzed for a count of runs each (about
+  # 30 s of this runner), built with AddressSanitizer and LLVM's coverage
+  # counters on the Makefile's dated nightly (a nightly only here and in
+  # fuzz.yml). A count, not a time: the same commit hands each target the
+  # same inputs on any runner, so the job passes or fails by the commit,
+  # never by the runner's speed, and anyone makes a finding again with
+  # `make fuzz-smoke` -- which is why it says a panic's message and an
+  # ASan report here, where fuzz.yml's runs, each week's own, say only the
+  # recipe. The test job runs the same targets over their seeds in a plain
+  # build; fuzz.yml gives each half an hour a week. Each target is capped
+  # at six minutes of CPU time (`SMOKE_CAP`), so a commit slowing every run
+  # ends at a named target's cap before this timeout: six just under it
+  # are 36 minutes, and the build a minute and a half.
   fuzz-smoke:
-    name: fuzz-smoke (each target 30 s under ASan)
+    name: fuzz-smoke (each target a count of runs under ASan)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:
@@ -2204,18 +2325,16 @@ jobs:
       - name: Install the fuzzer's nightly, pinned to a date
         run: make fuzz-toolchain
 
-      - name: Each target for 30 s under AddressSanitizer
-        env:
-          ASAN_OPTIONS: log_path=${{ runner.temp }}/asan
-        run: make fuzz-smoke FUZZ_SECONDS=30 FUZZ_FLAGS="--private --corpus none"
+      - name: Each target for its count of runs under AddressSanitizer
+        run: make fuzz-smoke
 
       - name: Say how to make what it found again
         if: failure()
         run: |
-          echo "fennec-fuzz found something at $GITHUB_SHA. Its input is kept nowhere: check out"
-          echo "$GITHUB_SHA, run 'make fuzz-seeds' and 'make fuzz ASAN=1', then the line"
-          echo "'fennec-fuzz reproduce ...' above with target/<host>/fuzz/fennec-fuzz"
-          echo "(docs/design/conventions.md#fuzzing)."
+          echo "fennec-fuzz found something at $GITHUB_SHA: 'make fuzz-smoke' on that commit"
+          echo "makes the same inputs, and the line 'fennec-fuzz reproduce ...' above, run"
+          echo "with target/<host>/fuzz/fennec-fuzz after 'make fuzz ASAN=1', makes the one"
+          echo "that ended it (docs/design/conventions.md#fuzzing)."
 
   # The native library an app links (crates/fennec-ffi) on Android and the
   # JVM, and its Kotlin, Dart and Flutter bindings: the Kotlin library's

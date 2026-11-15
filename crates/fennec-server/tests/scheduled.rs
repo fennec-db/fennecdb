@@ -237,3 +237,72 @@ fn a_read_only_node_says_what_it_holds_unrun() {
     assert_eq!(ran(&dir.join("acme.fennec")), (0, None));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A failure of the scheduler -- its thread ended by a panic outside any
+/// run, a test build's fault (`FENNEC_TEST_SCHEDULER_PANIC`, behind
+/// `test-clock`) -- stops the server through its one shutdown with 1
+/// (`durability::stop_failed`), a file's server and a node alike: waited
+/// on, the process's own end, the bound only for a hang. Built with the
+/// feature alone: CI's `test` job runs it so, by name.
+#[cfg(feature = "test-clock")]
+#[test]
+fn a_scheduler_s_failure_ends_the_server_with_1() {
+    use crate::support::own_group;
+    use std::process::{Command, Stdio};
+    let file = ticking("fault");
+    let dir = node_dir("fault");
+    for args in [
+        vec!["--file", file.to_str().unwrap(), "--http", "127.0.0.1:0"],
+        vec![
+            "--dir",
+            dir.to_str().unwrap(),
+            "--admin-token",
+            "adm",
+            "--http",
+            "127.0.0.1:0",
+        ],
+    ] {
+        let child = own_group(&mut Command::new(env!("CARGO_BIN_EXE_fennec-server")))
+            .args(&args)
+            .env("FENNEC_TEST_SCHEDULER_PANIC", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("could not start fennec-server");
+        let (code, log) = ended(child, Duration::from_secs(60));
+        assert_eq!(code, 1, "{args:?}:\n{log}");
+        assert!(
+            log.contains("the scheduler stopped (FENNEC_TEST_SCHEDULER_PANIC is set)"),
+            "{args:?}:\n{log}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&file);
+    let _ = std::fs::remove_file(file.with_extension("fennec.lock"));
+}
+
+/// A build without `test-clock` -- a debug one too, `cargo run`'s and the
+/// web tests' -- never reads `FENNEC_TEST_SCHEDULER_PANIC`: set, the
+/// scheduler still runs the slot due, past where the fault stands, and the
+/// server goes on until it is asked to stop.
+#[cfg(not(feature = "test-clock"))]
+#[test]
+fn a_build_without_test_clock_has_no_scheduler_fault() {
+    let path = ticking("no-fault");
+    let server = crate::support::start_env(
+        &["--file", path.to_str().unwrap()],
+        &[("FENNEC_TEST_SCHEDULER_PANIC", "1")],
+    );
+    let mut http = server.http();
+    let t = Instant::now();
+    while !http.run("get ticks count").contains("\"count\":1") {
+        assert!(t.elapsed() < Duration::from_secs(20), "never ran");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let (code, log) = server.terminate();
+    assert_eq!(code, 0, "{log}");
+    assert!(!log.contains("the scheduler stopped"), "{log}");
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("fennec.lock"));
+}

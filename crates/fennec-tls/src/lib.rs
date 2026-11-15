@@ -694,6 +694,21 @@ macro_rules! with_stream {
     };
 }
 
+/// When a record that comes in parts must be whole ([`TlsStream::read_by`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum By {
+    /// By this moment.
+    At(Instant),
+    /// Within this of its first part, read first by the socket's own
+    /// timeout: the clock is read only once a part came and more is waited
+    /// for, and the bound is `At` that moment and this from then on --
+    /// written back to the caller's, who learns so when the record began
+    /// (fennec-http's `conn::Paced` runs a request's time from it). Left
+    /// `Within` where the record came whole, the clock never read, or where
+    /// the moment is past what `Instant` can name.
+    Within(Duration),
+}
+
 /// A connection whose handshake is done: plaintext in, plaintext out.
 pub struct TlsStream {
     conn: Conn,
@@ -788,6 +803,117 @@ impl TlsStream {
                     return Ok(false)
                 }
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// [`Read::read`], a record that comes in parts read by `by`, and a
+    /// second past it for every `rate` bytes of it that came in the call
+    /// (`0`: none): the first read of the socket waits as the socket's
+    /// timeout says, as `read`'s does, and each one after it in the call --
+    /// the record not whole yet, which `read` reads again inside one call
+    /// until plaintext comes -- the time left at most, the socket's timeout
+    /// put back after. A peer sending a record a byte at a time, each
+    /// inside the socket's timeout, held a `read` as long as it liked; a
+    /// served connection holds a request to a pace with this (fennec-http's
+    /// `conn::Paced`), and a record's bytes earn their time as they come,
+    /// as a plain request's do, where its plaintext counts only once the
+    /// record is whole: a 16 KiB record held to the bound alone was a floor
+    /// of 1.6 KiB a second within ten seconds. A wait run out is
+    /// `TimedOut`, the part that came kept in rustls's buffer for the next
+    /// read. Plaintext already buffered is read with no read of the socket,
+    /// as `read` reads it. A `By::Within` whose clock was read is left `By::At`
+    /// ([`By::Within`]).
+    pub fn read_by(&mut self, buf: &mut [u8], by: &mut By, rate: u64) -> io::Result<usize> {
+        let mut before = None;
+        let read = self.read_parts_by(buf, by, rate, &mut before);
+        if let Some(before) = before {
+            unless_gone(self.sock.set_read_timeout(before))?;
+        }
+        read
+    }
+
+    /// [`Self::read_by`]'s reads, `before` the socket's timeout where they
+    /// changed it.
+    fn read_parts_by(
+        &mut self,
+        buf: &mut [u8],
+        by: &mut By,
+        rate: u64,
+        before: &mut Option<Option<Duration>>,
+    ) -> io::Result<usize> {
+        // The bound, named once a part came: `Some(None)` past what the
+        // clock can name.
+        let mut named = None;
+        // Bytes read off the socket in this call, and whether the read
+        // waiting now waits under a timeout set here.
+        let (mut got, mut timed) = (0u64, false);
+        loop {
+            let (plain, closed) = self.processed()?;
+            if plain || closed {
+                return with_stream!(self, s => s.read(buf));
+            }
+            // What a post-handshake message asked to have sent (a key
+            // update's answer) goes out before the wait, as `read` sends it.
+            self.flush_tls()?;
+            if got > 0 {
+                // A bound past what the clock can name -- `Within`
+                // centuries, which `+` would panic at -- is none: the
+                // socket's own timeout a part, as `read`'s.
+                let at = *named.get_or_insert_with(|| match *by {
+                    By::At(at) => Some(at),
+                    By::Within(within) => {
+                        let at = Instant::now().checked_add(within);
+                        if let Some(at) = at {
+                            *by = By::At(at);
+                        }
+                        at
+                    }
+                });
+                let earned = match rate {
+                    0 => Duration::ZERO,
+                    rate => Duration::from_millis(got.saturating_mul(1000) / rate),
+                };
+                if let Some(at) = at.and_then(|at| at.checked_add(earned)) {
+                    let left = at.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Err(io::Error::new(
+                            ErrorKind::TimedOut,
+                            "a TLS record not whole in time",
+                        ));
+                    }
+                    if before.is_none() {
+                        *before = Some(self.sock.read_timeout()?);
+                    }
+                    // A zero timeout is refused by the socket, and is
+                    // "forever" to the kernel.
+                    unless_gone(
+                        self.sock
+                            .set_read_timeout(Some(left.max(Duration::from_millis(1)))),
+                    )?;
+                    timed = true;
+                }
+            }
+            let read = match &mut self.conn {
+                Conn::Client(c) => c.read_tls(&mut self.sock),
+                Conn::Server(c) => c.read_tls(&mut self.sock),
+            };
+            match read {
+                // The end: told as `read` tells it, `close_notify` or not.
+                Ok(0) => return with_stream!(self, s => s.read(buf)),
+                Ok(n) => got += n as u64,
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                // The time left ran out in the read (EAGAIN, or Windows'
+                // timeout): the bound's, told as one.
+                Err(e)
+                    if timed && matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
+                {
+                    return Err(io::Error::new(
+                        ErrorKind::TimedOut,
+                        "a TLS record not whole in time",
+                    ))
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -1260,6 +1386,181 @@ mod tests {
         // The trickle goes on for ten seconds: cut well before it ends.
         assert!(took < Duration::from_secs(5), "{took:?}");
         trickle.join().unwrap();
+    }
+
+    /// A [`proxy`]'s gate: what the client sends passed on at once.
+    const AT_ONCE: usize = usize::MAX;
+    /// A [`proxy`]'s gate: a byte every 50 ms.
+    const TRICKLED: usize = usize::MAX - 1;
+
+    /// Between a client and the listener at `port`, a proxy passing on what
+    /// the client sends as `gate` says -- [`AT_ONCE`], [`TRICKLED`], or a
+    /// count: that many bytes at once, in one write, then nothing until the
+    /// gate changes. Its port. A test leaves the gate [`AT_ONCE`], so the
+    /// proxy ends with its client.
+    fn proxy(port: u16, gate: Arc<std::sync::atomic::AtomicUsize>) -> u16 {
+        use std::sync::atomic::Ordering::SeqCst;
+        let front = TcpListener::bind("127.0.0.1:0").unwrap();
+        let front_port = front.local_addr().unwrap().port();
+        thread::spawn(move || {
+            let (mut from, _) = front.accept().unwrap();
+            let mut to = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            to.set_nodelay(true).unwrap();
+            let (mut back_from, mut back_to) = (to.try_clone().unwrap(), from.try_clone().unwrap());
+            thread::spawn(move || {
+                let _ = io::copy(&mut back_from, &mut back_to);
+            });
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = from.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                let mut i = 0;
+                while i < n {
+                    let passed = match gate.load(SeqCst) {
+                        AT_ONCE => to.write_all(&buf[i..n]).map(|()| n - i),
+                        TRICKLED => {
+                            thread::sleep(Duration::from_millis(50));
+                            to.write_all(&buf[i..=i]).map(|()| 1)
+                        }
+                        0 => {
+                            thread::sleep(Duration::from_millis(5));
+                            Ok(0)
+                        }
+                        // Taken from the count only where the test did not
+                        // change the gate meanwhile.
+                        g => match gate.compare_exchange(g, g - g.min(n - i), SeqCst, SeqCst) {
+                            Ok(_) => {
+                                let k = g.min(n - i);
+                                to.write_all(&buf[i..i + k]).map(|()| k)
+                            }
+                            Err(_) => Ok(0),
+                        },
+                    };
+                    match passed {
+                        Ok(k) => i += k,
+                        Err(_) => return,
+                    }
+                }
+            }
+        });
+        front_port
+    }
+
+    /// A session through a [`proxy`] whose gate is `gate`: the server's
+    /// end, its socket's read timeout ten seconds, and the client's.
+    fn proxied(gate: &Arc<std::sync::atomic::AtomicUsize>) -> (TlsStream, TlsStream) {
+        let ca = ca("fennec test CA");
+        let server = server_for(&ca, &["localhost"]);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let front = proxy(listener.local_addr().unwrap().port(), Arc::clone(gate));
+        let client = trusting(&ca);
+        let dialed = thread::spawn(move || dial(&client, front, "localhost").unwrap());
+        let (sock, _) = listener.accept().unwrap();
+        let s = server.accept_within(sock, Duration::from_secs(10)).unwrap();
+        let c = dialed.join().unwrap();
+        s.get_ref()
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        (s, c)
+    }
+
+    /// A record trickled a byte at a time, each well inside the socket's
+    /// timeout, is a `read_by` timed out at its bound, where `read` read
+    /// on as long as the bytes came; the part that came is kept, and read
+    /// whole once the rest comes, the socket's timeout put back. `Within`
+    /// is left `At` the bound from the record's first part.
+    #[test]
+    fn read_by_bounds_a_record_that_comes_in_parts() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let gate = Arc::new(AtomicUsize::new(AT_ONCE));
+        let (mut s, mut c) = proxied(&gate);
+
+        // 200 bytes of plaintext, a record of some 220: eleven seconds a
+        // byte at a time, each 50 ms inside the socket's ten.
+        gate.store(TRICKLED, SeqCst);
+        let sent: Vec<u8> = (0..200u8).collect();
+        c.write_all(&sent).unwrap();
+        c.flush().unwrap();
+        let mut buf = [0u8; 256];
+        let within = Duration::from_millis(400);
+        let started = Instant::now();
+        let mut by = By::Within(within);
+        let e = s.read_by(&mut buf, &mut by, 0).unwrap_err();
+        let took = started.elapsed();
+        assert_eq!(e.kind(), ErrorKind::TimedOut, "{e}");
+        assert!(took >= within, "{took:?}");
+        // The clock was read once the first part came, after `started`.
+        match by {
+            By::At(at) => assert!(at >= started + within, "{:?}", at - started),
+            By::Within(_) => panic!("the bound its first part named was not written back"),
+        }
+        assert_eq!(
+            s.get_ref().read_timeout().unwrap(),
+            Some(Duration::from_secs(10)),
+            "the socket's timeout is put back"
+        );
+        // The rest at once: the record is read whole, its first part kept.
+        gate.store(AT_ONCE, SeqCst);
+        let by = Instant::now() + Duration::from_secs(10);
+        let mut got = Vec::new();
+        while got.len() < sent.len() {
+            let n = s.read_by(&mut buf, &mut By::At(by), 0).unwrap();
+            assert!(n > 0);
+            got.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(got, sent);
+
+        // A bound past what the clock can name is none, never a panic at
+        // `+`: a record of some 23 bytes in parts, read on under the
+        // socket's own timeout, its bytes earning nothing past it.
+        gate.store(TRICKLED, SeqCst);
+        c.write_all(b"x").unwrap();
+        c.flush().unwrap();
+        let mut by = By::Within(Duration::MAX);
+        let n = s.read_by(&mut buf, &mut by, 1024).unwrap();
+        assert_eq!(&buf[..n], b"x");
+        assert_eq!(by, By::Within(Duration::MAX));
+        gate.store(AT_ONCE, SeqCst);
+    }
+
+    /// A record's bytes earn it time as they come, `rate` of them a second:
+    /// one whose first 150 bytes came at once, and the rest not, is cut no
+    /// sooner than its bound and the 750 ms they earned at 200 a second --
+    /// with no rate, at its bound -- and read whole once the rest comes.
+    /// Its plaintext counts for nothing until it is whole: a 16 KiB record
+    /// held to the bound alone had to come at 1.6 KiB a second.
+    #[test]
+    fn read_by_earns_a_records_time_by_its_bytes() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let gate = Arc::new(AtomicUsize::new(AT_ONCE));
+        let (mut s, mut c) = proxied(&gate);
+
+        // 150 bytes of a record of some 220 passed in one write: the
+        // server's first read of the record takes them whole.
+        gate.store(150, SeqCst);
+        let sent: Vec<u8> = (0..200u8).collect();
+        c.write_all(&sent).unwrap();
+        c.flush().unwrap();
+        let mut buf = [0u8; 256];
+        let within = Duration::from_millis(400);
+        let started = Instant::now();
+        let e = s
+            .read_by(&mut buf, &mut By::Within(within), 200)
+            .unwrap_err();
+        let took = started.elapsed();
+        assert_eq!(e.kind(), ErrorKind::TimedOut, "{e}");
+        assert!(took >= within + Duration::from_millis(750), "{took:?}");
+
+        gate.store(AT_ONCE, SeqCst);
+        let by = Instant::now() + Duration::from_secs(10);
+        let mut got = Vec::new();
+        while got.len() < sent.len() {
+            let n = s.read_by(&mut buf, &mut By::At(by), 200).unwrap();
+            assert!(n > 0);
+            got.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(got, sent);
     }
 
     /// A client that finishes its handshake, writes and closes at once is

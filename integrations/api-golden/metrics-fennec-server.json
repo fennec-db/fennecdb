@@ -1,0 +1,227 @@
+{
+ "fennec_auto_compactions_total": {
+  "labels": [],
+  "type": "counter"
+ },
+ "fennec_bound_refused_total": {
+  "labels": [],
+  "type": "counter"
+ },
+ "fennec_bound_runs_total": {
+  "labels": [],
+  "type": "counter"
+ },
+ "fennec_build_info": {
+  "labels": [
+   "version"
+  ],
+  "type": "gauge"
+ },
+ "fennec_change_sequence": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_client_timeouts_total": {
+  "labels": [
+   "reason"
+  ],
+  "type": "counter"
+ },
+ "fennec_connections": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_connections_refused_total": {
+  "labels": [
+   "reason"
+  ],
+  "type": "counter"
+ },
+ "fennec_copies_refused_total": {
+  "labels": [],
+  "type": "counter"
+ },
+ "fennec_data_bytes": {
+  "labels": [
+   "collection"
+  ],
+  "type": "gauge"
+ },
+ "fennec_dead_bytes": {
+  "labels": [
+   "collection"
+  ],
+  "type": "gauge"
+ },
+ "fennec_documents": {
+  "labels": [
+   "collection"
+  ],
+  "type": "gauge"
+ },
+ "fennec_file_bytes": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_held_looks_total": {
+  "labels": [],
+  "type": "counter"
+ },
+ "fennec_held_requests": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_held_runs_total": {
+  "labels": [],
+  "type": "counter"
+ },
+ "fennec_hook_events_total": {
+  "labels": [
+   "outcome"
+  ],
+  "type": "counter"
+ },
+ "fennec_hook_unverified_total": {
+  "labels": [
+   "check"
+  ],
+  "type": "counter"
+ },
+ "fennec_mcp_tool_calls_total": {
+  "labels": [
+   "outcome",
+   "tool"
+  ],
+  "type": "counter"
+ },
+ "fennec_memory_bytes": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_node_streams": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_quota_refused_total": {
+  "labels": [
+   "quota"
+  ],
+  "type": "counter"
+ },
+ "fennec_reclaimable_bytes": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_refused_total": {
+  "labels": [],
+  "type": "counter"
+ },
+ "fennec_replica_behind": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_replica_connected": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_replica_images_total": {
+  "labels": [],
+  "type": "counter"
+ },
+ "fennec_replica_last_contact_seconds": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_replica_reconnects_total": {
+  "labels": [],
+  "type": "counter"
+ },
+ "fennec_replicas": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_request_rate_refused_total": {
+  "labels": [],
+  "type": "counter"
+ },
+ "fennec_scheduled_lateness_seconds": {
+  "labels": [],
+  "type": "histogram"
+ },
+ "fennec_scheduled_mark_ahead_total": {
+  "labels": [],
+  "type": "counter"
+ },
+ "fennec_scheduled_runs_total": {
+  "labels": [
+   "outcome"
+  ],
+  "type": "counter"
+ },
+ "fennec_scheduled_skipped_total": {
+  "labels": [],
+  "type": "counter"
+ },
+ "fennec_slow_statements_total": {
+  "labels": [],
+  "type": "counter"
+ },
+ "fennec_start_time_seconds": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_statement_duration_seconds": {
+  "labels": [
+   "kind"
+  ],
+  "type": "histogram"
+ },
+ "fennec_statement_errors_total": {
+  "labels": [
+   "kind"
+  ],
+  "type": "counter"
+ },
+ "fennec_statements_total": {
+  "labels": [
+   "kind"
+  ],
+  "type": "counter"
+ },
+ "fennec_storage_failed": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_tenants": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_tenants_disk_bytes": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_tenants_open": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_tls_handshakes_failed_total": {
+  "labels": [
+   "reason"
+  ],
+  "type": "counter"
+ },
+ "fennec_trace_spans_dropped_total": {
+  "labels": [
+   "reason"
+  ],
+  "type": "counter"
+ },
+ "fennec_trace_spans_exported_total": {
+  "labels": [],
+  "type": "counter"
+ },
+ "fennec_vectors_unlinked": {
+  "labels": [],
+  "type": "gauge"
+ }
+}

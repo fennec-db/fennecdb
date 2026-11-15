@@ -91,6 +91,29 @@ class Dockerfiles(unittest.TestCase):
         self.assertEqual(check.problems("Dockerfile", text, "1.99.1", True), [])
 
 
+class Scripts(unittest.TestCase):
+    def test_the_release_by_digest_passes(self):
+        text = (f'docker run --rm -v "$ROOT":/src \\\n  rust:1.99.1-slim-bookworm{D} \\\n  cargo build\n'
+                f"image: docker.io/library/rust:1.99.1-alpine{D}\n")
+        self.assertEqual(check.script_problems("run.sh", text, "1.99.1"), [])
+
+    def test_another_release_or_no_digest_is_refused(self):
+        for ref in ("rust:1-slim-bookworm", "rust:alpine", "rust:latest", "rust:1.99.1-slim-bookworm",
+                    f"rust:1.98.0-slim-bookworm{D}", f"library/rust:1.100.0{D}"):
+            got = check.script_problems("run.sh", f"docker run --rm {ref} cargo -V\n", "1.99.1")
+            self.assertEqual(len(got), 1, ref)
+            self.assertIn(f"run.sh:1: {ref.split('@')[0]}", got[0])
+
+    def test_what_names_no_image_passes(self):
+        text = ("# rust:1-slim-bookworm built it before the pin\n"
+                "  --rust: #9c3f1c;\n"
+                '  rust: "#9c4a26",\n'
+                '    println!("rust: ok");\n'
+                "if not triple and not rust:\n"
+                "trust:1 and crust:2\n")
+        self.assertEqual(check.script_problems("x.py", text, "1.99.1"), [])
+
+
 class Committed(unittest.TestCase):
     def test_the_repository_passes(self):
         want, why = check.release((check.ROOT / "rust-toolchain.toml").read_text())
@@ -99,6 +122,12 @@ class Committed(unittest.TestCase):
             text = (check.ROOT / path).read_text()
             self.assertEqual(check.problems(path, text, want, path in check.PINNED), [], path)
         self.assertTrue(set(check.PINNED) <= set(check.dockerfiles()))
+        scripts = check.scripts()
+        for path in ("integrations/kotlin/run-tests.sh", "examples/kotlin-android/run-smoke.sh"):
+            self.assertIn(path, scripts)
+        for path in scripts:
+            text = (check.ROOT / path).read_text(encoding="utf-8", errors="replace")
+            self.assertEqual(check.script_problems(path, text, want), [], path)
 
 
 if __name__ == "__main__":

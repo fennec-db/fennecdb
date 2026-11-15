@@ -177,11 +177,10 @@ fig(VG, r"extensions page gives " + NUM + r" KB", SZ, "pgvector:extensions_page"
 fig(VS, td("SQLite's official build, <code>sqlite3.wasm</code> 3.53.4-build2", r"<td class=\"n\">" + NUM + r" KB"), SZ, "sqlite3.wasm_3.53.4-build2", "brotli_kb")
 fig(VS, td("SQLite's official build, <code>sqlite3.wasm</code> 3.53.4-build2", r"<td class=\"n\">[\d ]+ KB</td><td class=\"n\">" + NUM + r" KB"), SZ, "sqlite3.wasm_3.53.4-build2", "gzip_kb")
 fig(VS, r"<td>" + NUM + r" KB, without sqlite-vec", SZ, "sqlite3.wasm_3.53.4-build2", "brotli_kb")
-fig(VP, r"A " + NUM + r" MB server image", SZ, "fennec-server:container_image", "mb")
-fig(RM, r"\*\*Container\.\*\* " + NUM + r" MB", SZ, "fennec-server:container_image", "mb")
-fig(RM, r"· " + NUM + r" MB container image", SZ, "fennec-server:container_image", "mb")
-fig(RM, r"· " + NUM + r"[–-]\d+ KB binary", SZ, "fennec-binaries", "min_kb")
-fig(RM, r"· \d+[–-]" + NUM + r" KB binary", SZ, "fennec-binaries", "max_kb")
+# The binaries a release ships and the image are sizes of this build: CI's
+# build job measures them into tools/size-budgets.json, and CLAIMS holds the
+# pages to it (`kb_bin_*`, `mb_image`, build.py's `binary_facts`). Their
+# hand rows in results/size.tsv are superseded by it.
 
 # ---- the seed's stream (README)
 SD = "seed"

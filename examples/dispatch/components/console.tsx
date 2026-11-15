@@ -96,11 +96,17 @@ function useRows<T extends { id: number }>(conn: FennecHttp, collection: string,
     const stop = conn.subscribe(
       collection,
       JSON.parse(key),
-      (ev: { type: string; rows?: unknown[]; puts?: unknown[]; dels?: unknown[] }) => {
+      (ev: { type: string; rows?: unknown[]; puts?: unknown[]; dels?: unknown[]; part?: number }) => {
         if (ev.type === 'seed') {
-          const seeded = new Map((ev.rows as T[]).map((r) => [r.id, r]));
-          pending = [];
-          setRows(seeded);
+          // A long seed comes in parts: its first replaces what is shown,
+          // each after it adds its rows.
+          const rows = ev.rows as T[];
+          if (!ev.part) pending = [];
+          setRows((m) => {
+            const next = ev.part ? new Map(m) : new Map<number, T>();
+            for (const r of rows) next.set(r.id, r);
+            return next;
+          });
           return;
         }
         pending.push((m) => {

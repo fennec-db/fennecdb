@@ -476,6 +476,64 @@ mod tests {
         assert!(open_appended(&k, &seal_whole(&k, b"x").unwrap()).is_err());
     }
 
+    /// One bit changed, each bit of an appended file in turn. The head's
+    /// magic and id, a frame's nonce, its sealed bytes and its tag are
+    /// refused. A frame's length is under no tag: changed so the frame
+    /// still ends inside the file, the bytes read as its tag are not it
+    /// and the frame is refused; changed so the frame runs past the
+    /// file's end, it is a frame cut short there, which nothing tells from
+    /// the one a crash leaves, and the file opens to the frame before it
+    /// -- what whoever can write the file does by cutting it. The
+    /// archive's sealed test changed its segment's middle byte and looked
+    /// for a refusal, which the third or fourth byte of a length did not
+    /// give it.
+    #[test]
+    fn a_bit_changed_is_refused_unless_a_length_then_runs_past_the_end() {
+        let k = key(4);
+        let mut whole = Vec::new();
+        let id = FileId::begin(&mut whole).unwrap();
+        let mut starts = Vec::new();
+        for (i, len) in [8usize, 40, 0, 300, 17].into_iter().enumerate() {
+            starts.push(whole.len());
+            seal_frame(&k, &id, i as u64, false, &vec![i as u8; len], &mut whole).unwrap();
+        }
+        let (_, end, frames, _) = open_appended(&k, &whole).unwrap();
+        assert_eq!((end, frames), (whole.len(), 5));
+        let mut cut_short = 0;
+        for at in 0..whole.len() {
+            for bit in 0..8 {
+                let mut changed = whole.clone();
+                changed[at] ^= 1 << bit;
+                let Ok((_, end, frames, _)) = open_appended(&k, &changed) else {
+                    continue;
+                };
+                // Opened: as far as the frame the bit is in and no
+                // further, the bit one of its length, the length now
+                // past the end.
+                let Some(f) = starts.iter().rposition(|&s| s <= at) else {
+                    panic!("bit {bit} of byte {at}, in the head: the file opened");
+                };
+                assert!(
+                    at < starts[f] + 4,
+                    "bit {bit} of byte {at} is in no length, and the file opened"
+                );
+                let len: [u8; 4] = changed[starts[f]..starts[f] + 4].try_into().unwrap();
+                assert!(
+                    starts[f] + HEAD + u32::from_le_bytes(len) as usize + TAG > whole.len(),
+                    "bit {bit} of byte {at}: a frame that ends inside the file opened"
+                );
+                assert_eq!(
+                    (end, frames),
+                    (starts[f], f as u64),
+                    "bit {bit} of byte {at}"
+                );
+                cut_short += 1;
+            }
+        }
+        // Every frame has such bits: the high ones of its length.
+        assert!(cut_short >= 5 * 8, "{cut_short}");
+    }
+
     fn nonce_of(frame: &[u8]) -> [u8; 12] {
         frame[4..HEAD].try_into().unwrap()
     }

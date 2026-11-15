@@ -254,7 +254,7 @@ fn adopt_shares(
         parts.push(Mutex::new(part));
         rest = after;
     }
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let threads = crate::threads();
     let mut states = vec![(); threads.min(shares)];
     let done = crate::vector::spread(shares, &mut states, |_, i| {
         let mut part = parts[i].lock().unwrap_or_else(|e| e.into_inner());
@@ -1345,10 +1345,16 @@ impl Store {
         };
         pos += 1;
         let n = crate::codec::get_uvarint(buf, &mut pos)? as usize;
-        let end = pos + n * if half { 2 } else { 4 };
-        if end > buf.len() {
-            return Err(Error::Corrupt("vector outside the segment".into()));
-        }
+        // Its bytes counted without overflowing, as the codec counts them
+        // (`codec::decode_value`): `n * 4` of a count near 2^62 overflowed
+        // -- in a release build it wrapped to a few bytes, and the reserve
+        // below asked for the count -- reached from an open restoring a
+        // graph (the fuzzer's `image` target).
+        let end = n
+            .checked_mul(if half { 2 } else { 4 })
+            .and_then(|b| b.checked_add(pos))
+            .filter(|&end| end <= buf.len())
+            .ok_or_else(|| Error::Corrupt("vector outside the segment".into()))?;
         out.clear();
         out.reserve(n);
         if half {
@@ -2073,6 +2079,41 @@ mod tests {
         // A payload cut inside a value is no field added after it.
         let cut = &payload[..payload.len() - 1];
         assert!(later.read_doc(2, cut).is_err());
+    }
+
+    /// A stored vector's count is held to the bytes it lies in without
+    /// overflowing: `n * 4` of 2^62 overflowed where an open restoring a
+    /// graph read the documents' vectors (the fuzzer's `image` target, its
+    /// input the target's seed `vector-count-past-usize`), and wrapped in a
+    /// release build to a few bytes, the count then reserved whole. Each
+    /// is refused as a vector outside the segment; one that fits is read.
+    #[test]
+    fn a_stored_vectors_count_past_its_bytes_is_refused() {
+        use crate::codec::{put_uvarint, TAG_VECTOR, TAG_VECTOR_F16};
+        let mut st = Store::new();
+        let mut id = 0;
+        for tag in [TAG_VECTOR, TAG_VECTOR_F16] {
+            for n in [1u64 << 62, 1 << 63, u64::MAX, 5] {
+                let mut payload = vec![tag];
+                put_uvarint(&mut payload, n);
+                payload.extend_from_slice(&[0; 8]);
+                id += 1;
+                st.append(OP_PUT, id, &payload);
+                let read = st.read_vector_into(id, 0, &mut Vec::new());
+                assert!(
+                    matches!(&read, Err(Error::Corrupt(m)) if m == "vector outside the segment"),
+                    "{tag} {n}: {read:?}"
+                );
+            }
+            let mut payload = vec![tag];
+            put_uvarint(&mut payload, 2);
+            payload.extend_from_slice(&[0; 8]);
+            id += 1;
+            st.append(OP_PUT, id, &payload);
+            let mut out = Vec::new();
+            assert!(st.read_vector_into(id, 0, &mut out).unwrap());
+            assert_eq!(out, [0.0, 0.0]);
+        }
     }
 
     #[test]

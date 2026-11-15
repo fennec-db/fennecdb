@@ -4,14 +4,15 @@
 //! HTTP: the endpoint itself is `fennec-http`'s, and this crate is what runs
 //! around it -- when writes reach the disk and what a shutdown does
 //! ([`durability`]), and `--follow`'s mirror of a PostgreSQL table
-//! ([`mirror`]), and, started as root, the user it becomes before it
-//! touches a file ([`user`]).
+//! ([`mirror`]), started as root, the user it becomes before it touches a
+//! file ([`user`]), and the codes it exits with ([`exit`]).
 //!
 //! One process writes one file: the HTTP endpoint, a replica's follower,
 //! the graph keeper and the mirror are threads of it over the same
 //! database, since two processes over a file corrupt it.
 
 pub mod durability;
+pub mod exit;
 pub mod mirror;
 pub mod user;
 

@@ -94,3 +94,56 @@ fn a_second_router_over_the_directory_is_refused() {
     let _ = again.wait();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A directory whose lock file cannot be made -- its folder missing -- is a
+/// path that cannot be opened, refused at the start (2) as a directory file
+/// that cannot be opened is, never the held lock's 1: a supervisor reads 1
+/// as another router running.
+#[test]
+fn a_lock_file_that_cannot_be_made_is_refused_with_2() {
+    let missing = std::env::temp_dir()
+        .join(format!("fennec-shard-no-dir-{}", std::process::id()))
+        .join("shard.fennec");
+    let out = Command::new(env!("CARGO_BIN_EXE_fennec-shard"))
+        .args(["--listen", "127.0.0.1:0", "--directory"])
+        .arg(&missing)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{said}");
+    assert!(said.contains("could not open the directory"), "{said}");
+    assert!(said.contains("its lock file"), "{said}");
+    assert!(!missing.parent().unwrap().exists());
+}
+
+/// A `--tls-ca` that cannot be read and an `--audit` that cannot be opened
+/// are refused (2) before tracing starts: started first, the router said
+/// `tracing: OTLP/HTTP JSON to ...` and ran its exporter's thread before
+/// it was refused, where fennec-server reads both before it starts tracing.
+/// Nothing is made: not the directory, nor its lock file.
+#[test]
+fn a_ca_or_an_audit_log_is_refused_before_tracing_starts() {
+    let dir = std::env::temp_dir().join(format!("fennec-shard-no-trace-{}", std::process::id()));
+    let directory = dir.join("shard.fennec");
+    let missing = dir.join("missing");
+    for (flag, value, refusal) in [
+        ("--tls-ca", missing.join("ca.pem"), "--tls-ca: "),
+        ("--audit", missing.join("audit.log"), "could not open "),
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_fennec-shard"))
+            .args(["--listen", "127.0.0.1:0", "--directory"])
+            .arg(&directory)
+            .args(["--otlp-endpoint", "http://127.0.0.1:1/v1/traces", flag])
+            .arg(&value)
+            .env_remove("OTEL_SDK_DISABLED")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{flag}: {said}");
+        assert!(said.contains(refusal), "{flag}: {said}");
+        assert!(!said.contains("tracing:"), "{flag}: {said}");
+        assert!(!dir.exists(), "{flag}: {said}");
+    }
+}
