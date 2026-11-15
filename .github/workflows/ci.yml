@@ -94,13 +94,13 @@ jobs:
       - id: unicode-cache
         uses: actions/cache/restore@v6
         with:
-          path: ~/.cache/unicode/17.0.0
-          key: unicode-17.0.0-UnicodeData
+          path: ~/.cache/unicode/18.0.0
+          key: unicode-18.0.0-UnicodeData
 
       - name: The accent fold's table is what tools/fold/gen.py writes
         run: |
-          f=~/.cache/unicode/17.0.0/UnicodeData.txt
-          test -f "$f" || { mkdir -p "$(dirname "$f")" && curl -fsSL --retry 3 -o "$f" https://www.unicode.org/Public/17.0.0/ucd/UnicodeData.txt; }
+          f=~/.cache/unicode/18.0.0/UnicodeData.txt
+          test -f "$f" || { mkdir -p "$(dirname "$f")" && curl -fsSL --retry 3 -o "$f" https://www.unicode.org/Public/18.0.0/ucd/UnicodeData.txt; }
           python3 crates/fennec-core/tools/fold/gen.py --check "$f"
 
       - name: Each AGENTS.md is its CLAUDE.md under its own title; the root under 32 000 bytes, an area file under 24 000, each rule in one file and the root's index
@@ -191,7 +191,7 @@ jobs:
         if: github.ref == 'refs/heads/main' && steps.unicode-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
-          path: ~/.cache/unicode/17.0.0
+          path: ~/.cache/unicode/18.0.0
           key: ${{ steps.unicode-cache.outputs.cache-primary-key }}
 
   clippy:
