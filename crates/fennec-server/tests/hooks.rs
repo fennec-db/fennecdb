@@ -1316,3 +1316,106 @@ fn what_watches_a_hook_lists_counts_logs_and_describes_it() {
     assert!(slow[0].contains(r#"],1]]]"#), "{}", slow[0]);
     assert!(slow[1].contains(r#"],0]]]"#), "{}", slow[1]);
 }
+
+/// A hook's secret shorter than 32 bytes -- GitHub's, which a person
+/// chooses; Stripe's test fixtures here -- is taken, and warned of: at the
+/// start where `--http` is past loopback, naming the hook and never the
+/// secret, a `standard` one of 24 bytes of key, 38 as its sender shows it,
+/// not named; on loopback once a request comes through a proxy, beside a
+/// short token.
+#[test]
+fn a_short_secret_is_warned_of_and_taken() {
+    const PAST: &str = "is shorter than 32 bytes, and --http is past loopback";
+    let path = tmp("short-secret", "data.fennec");
+    let hooks = hooks_file("short-secret", "");
+    let long = "t".repeat(32);
+    // Past loopback, here an address of the documentation's no machine
+    // holds: the start goes on past the warning to its listener, which the
+    // system refuses -- or binds, unreached, where it binds addresses it
+    // does not hold.
+    let args = [
+        "--file",
+        path.to_str().unwrap(),
+        "--hooks",
+        &hooks,
+        "--http",
+        "192.0.2.1:0",
+        "--http-token",
+        &long,
+    ];
+    let log = match try_start(&args) {
+        Ok(server) => server.log.lock().unwrap().clone(),
+        Err(log) => log,
+    };
+    for hook in ["stripe", "stripe_test", "github", "delivered"] {
+        assert!(
+            log.contains(&format!("warning: hook `{hook}`'s secret {PAST}")),
+            "{hook}: {log}"
+        );
+    }
+    assert!(!log.contains("hook `standard`'s secret"), "{log}");
+    assert!(!log.contains(GITHUB_SECRET), "a secret in the log: {log}");
+
+    // On loopback, nothing said at the start; a request through a proxy
+    // names the short ones, the server's token among them.
+    let (mut server, _) = serve("short-secret-proxied", &[]);
+    let mut http = server.http().with_token(ROOT);
+    let through = http.ask_with("GET", "/_schema", "", &[("X-Forwarded-For", "203.0.113.9")]);
+    assert_eq!(through.status, 200, "{}", through.body);
+    ask_to_stop(&mut server.child);
+    let (_, log) = server
+        .exited(Duration::from_secs(30))
+        .expect("the server went on");
+    assert!(!log.contains(PAST), "{log}");
+    let line = (log.lines())
+        .find(|l| l.contains("warning: a request came through a proxy"))
+        .unwrap_or_else(|| panic!("{log}"));
+    assert!(
+        line.contains("--http-token (FENNEC_HTTP_TOKEN), hook `stripe`'s secret")
+            && line.contains("hook `delivered`'s secret are shorter than 32 bytes")
+            && !line.contains("`standard`"),
+        "{line}"
+    );
+}
+
+/// A tenant's secret shorter than 32 bytes, set through the node's `PUT`
+/// of one hook or of its whole set (a router copying it onto a copy), is
+/// taken and said in the node's log, naming the tenant and the hook and
+/// never the secret; one of 32 bytes is not.
+#[test]
+fn a_tenants_short_secret_is_said_as_it_is_set() {
+    let dir = tmp("short-tenant-secret", "node");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut server = start(&["--dir", dir.to_str().unwrap(), "--admin-token", "adm"]);
+    let mut admin = server.http().with_token("adm");
+    assert_eq!(admin.ask("PUT", "/_admin/tenants/acme", "").status, 201);
+    let hook = |secret: &str| format!(r#"{{"scheme":"github","secrets":["{secret}"]}}"#);
+    let long = "g".repeat(32);
+    for (name, secret) in [("chosen", GITHUB_SECRET), ("made", long.as_str())] {
+        let set = admin.ask(
+            "PUT",
+            &format!("/_admin/tenants/acme/hooks/{name}"),
+            &hook(secret),
+        );
+        assert_eq!(set.status, 200, "{name}: {}", set.body);
+    }
+    let whole = format!(
+        r#"{{"version":"00000000000000a1","hooks":{{"copied":{{"scheme":"github","secrets":["{GITHUB_SECRET}"],"set":1}}}}}}"#
+    );
+    let set = admin.ask("PUT", "/_admin/tenants/acme/hook-secrets", &whole);
+    assert_eq!(set.status, 200, "{}", set.body);
+    ask_to_stop(&mut server.child);
+    let (_, log) = server
+        .exited(Duration::from_secs(30))
+        .expect("the server went on");
+    for name in ["chosen", "copied"] {
+        assert!(
+            log.contains(&format!(
+                "warning: tenant `acme`'s hook `{name}` was set with a secret shorter than 32 bytes"
+            )),
+            "{name}: {log}"
+        );
+    }
+    assert!(!log.contains("hook `made` was set"), "{log}");
+    assert!(!log.contains(GITHUB_SECRET), "a secret in the log: {log}");
+}

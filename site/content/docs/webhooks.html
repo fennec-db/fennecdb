@@ -106,6 +106,11 @@ as put refunds {charge: $charge, at: $created * 1000} if absent</pre>
 <pre data-lang="text">github  github  /run/secrets/github-webhook
 </pre>
 
+<p>GitHub takes whatever secret you type: make it long enough not to be
+guessed from one event it signed, <code>openssl rand -hex 32 &gt;
+/run/secrets/github-webhook</code>. A secret shorter than 32 bytes is taken,
+and warned of.</p>
+
 <pre data-lang="fennecql">create statement pushed(
     $repo   text from event.repository.full_name,
     $branch text from event.ref,
@@ -193,7 +198,7 @@ to write, never the secret's value.</p>
 <tr><th>Part</th><th>What it says</th></tr>
 <tr><td>name</td><td>the path's last segment, <code>/_hooks/&lt;name&gt;</code>, and what a statement's <code>on hook</code> names: a word, as a statement's name is</td></tr>
 <tr><td>scheme</td><td><code>stripe</code> (<code>Stripe-Signature</code>), <code>github</code> (<code>X-Hub-Signature-256</code>) or <code>standard</code> (<code>webhook-id</code>, <code>webhook-timestamp</code>, <code>webhook-signature</code>, or Svix's <code>svix-id</code>, <code>svix-timestamp</code>, <code>svix-signature</code>)</td></tr>
-<tr><td>secret files</td><td>one, or two while a secret rolls: an event verifies under either. The file's trailing newline is not the secret's. An empty file is refused: it would make every signature anyone can compute verify</td></tr>
+<tr><td>secret files</td><td>one, or two while a secret rolls: an event verifies under either. The file's trailing newline is not the secret's. An empty file is refused: it would make every signature anyone can compute verify. One shorter than 32 bytes as written is taken, and warned of: at the start where <code>--http</code> is past loopback (a token that short is refused there: <a href="/docs/server#token-length">token length</a>), and on loopback at the first request a proxy or a router sends, as a short token is (<a href="/docs/server#behind-a-proxy">behind a proxy</a>)</td></tr>
 <tr><td><code>keep</code></td><td>how long an event's key is kept: 30 days for <code>stripe</code> (Stripe retries for three), 7 for the others. A day at least, and more than twice the tolerance and a minute</td></tr>
 <tr><td><code>tolerance</code></td><td>how far the signed time may be from the server's clock either way: 5 minutes, Stripe's libraries' default; from a second to an hour. <code>github</code> signs no time, and is held to none</td></tr>
 <tr><td><code>key</code></td><td><code>github</code> alone: <code>body</code> or <code>delivery</code> (<a href="#github">above</a>)</td></tr>
@@ -232,7 +237,7 @@ files.</p>
 <table>
 <tr><th>Field</th><th>What it says</th></tr>
 <tr><td><code>scheme</code></td><td><code>stripe</code>, <code>github</code> or <code>standard</code></td></tr>
-<tr><td><code>secrets</code></td><td>one, or two while a secret rolls; an empty one, or a <code>standard</code> one not <code>whsec_</code> and base64, refused (400) naming the field, never its value</td></tr>
+<tr><td><code>secrets</code></td><td>one, or two while a secret rolls; an empty one, or a <code>standard</code> one not <code>whsec_</code> and base64, refused (400) naming the field, never its value; one shorter than 32 bytes taken, and said in the node's log, naming the tenant and the hook</td></tr>
 <tr><td><code>keep</code>, <code>tolerance</code>, <code>key</code>, <code>max_body</code></td><td>as in <a href="#hooks-file">a hooks file</a>, held to the same bounds</td></tr>
 </table>
 

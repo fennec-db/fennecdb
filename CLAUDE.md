@@ -412,6 +412,7 @@ Covers `crates/fennec-http/src/access.rs` and `src/access/`; access binds fennec
 - A token is taken only from the issuers, for the audiences and clients, a server was told.
 - A token past its `exp` is told so by a code, and no other refusal is.
 - An empty token is no token.
+- A token taken past loopback is 32 bytes at least.
 
 ### `crates/fennec-server/CLAUDE.md`
 

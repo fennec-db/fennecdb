@@ -568,6 +568,38 @@ as it always could. `tests/audit.rs` (fennec-http) and `tests/refusals.rs`
 (fennec-shard) send a guessed token to each of those answers and hold the
 count where it was, a good token to the others and see it cleared, and
 fail with the inference put back.
+An IPv6 address is counted by its /64 (`audit::counted_ip`, the hooks'
+count's key too): a /64 is the least a network is given -- the prefix
+SLAAC hands a link's hosts their addresses from, what a provider gives a
+customer, or more -- and every one of its 2^64 addresses is theirs to send
+from, so counted by the whole address a client guessing tokens started
+each new one at the first 100 ms. Hosts sharing a /64 share its count, as those behind a NAT
+share an IPv4 address's, and a token verified from any of them clears it.
+The table keeps 10 000 counts (`audit::ADDRESSES`) and, full, lets the one
+refused longest ago go as a new address comes (`Table::count`): it was
+cleared whole there, and a client sending from that many addresses forgave
+every count with it, its own guessing address's among them. The order is a
+queue of each refusal's key and time, a place passed over where its time is
+no longer its count's and those passed over let go once they are more than
+half as many as the counts (`Table::kept`) -- three places looked at a
+refusal on the whole, where a scan for the oldest was a pass over 10 000
+counts for each new address, under the lock every verified token takes
+while any count is held; the one refusal that sweeps looks at them all, its
+tail measured in [access.md](access.md#short-tokens). Its buffer holds 16 384 places of 48 bytes at
+most, 768 KiB beside a full table's 10 000 counts of 56 bytes in 16 384
+buckets (some 900 KiB, as before); swept at twice the counts it reached
+32 768. A new address is not made to
+wait the longest instead, as one past the hooks' full table is
+([named-statements.md](named-statements.md#verifying-an-event)): an app's
+clients whose tokens expired together are each a 401 of their own, and each
+would wait 5 s before it learned to refresh. The success path is as it was:
+a verified token asks the table only while a count is held, and then masks
+its address before the lock. `ipv6_refusals_count_by_their_64` (through a
+server on `[::1]` too, where the machine has IPv6) and
+`a_full_failure_table_keeps_its_counts` in `tests/audit.rs`, and
+`audit.rs`'s `a_full_table_lets_its_oldest_count_go`, fail without it; past
+loopback a token is 32 bytes besides ([access.md](access.md#short-tokens)),
+so the wait is no longer all that stands between a guess and a short one.
 Behind `fennec-shard` every request came from the router's address -- four
 forged tokens made a fifth client's expired one wait 1.6 s, and any good
 token cleared the attacker's count -- so the router waits out a refusal
