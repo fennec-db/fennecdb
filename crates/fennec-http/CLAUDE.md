@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-fennec-http's invariants -- replication and archives, quotas, the HTTP server and held writes -- for code in `crates/fennec-http/`. Access -- scoped tokens and their rules, field lists, the server's own collections, tenant binding, whom a token is for and its expiry -- is in [src/access/CLAUDE.md](src/access/CLAUDE.md), beside its code (`src/access.rs`, `src/access/`): read it before changing either, or a path a token's statement takes. The rules every change meets, and where every other area's are, are in the root's [CLAUDE.md](../../CLAUDE.md).
+fennec-http's invariants -- replication and archives, quotas, the HTTP server, held writes and a node's syncs -- for code in `crates/fennec-http/`. Access -- scoped tokens and their rules, field lists, the server's own collections, tenant binding, whom a token is for and its expiry -- is in [src/access/CLAUDE.md](src/access/CLAUDE.md), beside its code (`src/access.rs`, `src/access/`): read it before changing either, or a path a token's statement takes. The rules every change meets, and where every other area's are, are in the root's [CLAUDE.md](../../CLAUDE.md).
 
 ## Invariants
 
@@ -362,3 +362,17 @@ looks among the rows written since](../../docs/design/waits.md#the-leaders-looks
 (`waits::look_all`): a look among the rows written must pick as the whole
 pick does, which runs wherever that is not shown -- a load, a compact, a
 maintenance or a schema mark moves `epoch` (`wrote(None)`).
+
+### Durability
+
+**[A node syncs each tenant on a thread of its own.](../../docs/design/durability.md#a-nodes-syncs)**
+Under `--sync <ms>` a clock hands every dirty tenant to the node's sync
+threads each interval and waits for none (`Tenants::sync_every`,
+`sync_each`), each sync a file's syncer's -- the flush under the tenant's
+write lock, the fsync after it, no stream waited for (`sync_now`) -- so a
+tenant's window is a file's whatever the others' syncs or locks take.
+Never sync them in turn on one thread, nor look at one under a lock a
+writer may hold (`try_read`); one still syncing is passed over, and a
+sync's panic stops the node through its one shutdown. The pass in turn
+(`sync_dirty`) is for a caller that must see the writes down first:
+Windows' shutdown.

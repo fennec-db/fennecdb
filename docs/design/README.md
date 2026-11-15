@@ -9,7 +9,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [crates.md](crates.md) -- zero dependencies, limits that error rather than truncate, and the build profiles
 - [storage.md](storage.md) -- the mapped file, the handover of writes to it, a block's spills, compaction and the file format
 - [engine.md](engine.md) -- the single writer, a block's documents built beside the readers, long reads pinned, and a block as one record
-- [durability.md](durability.md) -- a storage error stopping writes, buffered writes written behind the lock, the sync log, the power cuts that hold it on Linux -- `--sync always`, `--sync 250`'s window and a node with its standby -- and the one shutdown
+- [durability.md](durability.md) -- a storage error stopping writes, buffered writes written behind the lock, the sync log, a node's tenants each synced on a thread of its own, the power cuts that hold it on Linux -- `--sync always`, `--sync 250`'s window and a node with its standby -- and the one shutdown
 - [replication.md](replication.md) -- replication, a node's tenants archived over one stream, `/_changes`, `Fennec-After`, sealed archives and `--follow`
 - [tenants.md](tenants.md) -- scaling out by tenant, the router's directory, moves, failovers and leases, and replicas tried again
 - [regions.md](regions.md) -- regions and zones, a region's own directory, and the global entry
@@ -207,3 +207,4 @@ A proposal holds no invariant until it is built, and is listed apart:
 159. [A seed goes in parts, read a page at a time](http.md#seeds-in-parts) (added after the move, under *The HTTP server*)
 160. [A seed's parts wait in the replica's file and land in one block](native-and-sync.md#seeds-in-parts) (added after the move, under *The native library and sync*)
 161. [A seed in parts lands in one task](js-client.md#seeds-in-parts) (added after the move, under *The JS client and Cloudflare*)
+162. [A node syncs each tenant on a thread of its own](durability.md#a-nodes-syncs) (added after the move, under *Durability*)
