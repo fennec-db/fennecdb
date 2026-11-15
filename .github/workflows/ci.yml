@@ -1,8 +1,48 @@
 name: ci
 
+# main moves only through the merge queue, and a merge group's head is the
+# very commit main then holds: a run on every push to main tested again what
+# the group had (14 landings in 14 hours on 2026-11-14, each three runs of
+# about 28 jobs, the merge groups dropped at the queue's 60-minute timeout
+# behind that backlog). So a push starts this workflow only when an input of
+# a cache moved, or the workflow itself: a run on main is the only one whose
+# caches other branches may restore (a pull request's and a merge group's are
+# scoped to their own refs). The caches and their inputs:
+#   - the 21 cargo actions/cache steps: Cargo.lock and rust-toolchain.toml
+#     (the one Unicode table step is keyed by its version, pinned here);
+#   - setup-node `cache: npm`, the Grafana job: its package-lock.json;
+#   - setup-go, the same job: go.sum, and go.mod for the Go version;
+#   - the Flutter caches: the version pinned in this file;
+#   - setup-gradle: its key is the job and the commit, not a file's hash, and
+#     only main writes it (`cache-read-only` off the default branch), so what
+#     it holds is as old as main's last run; the Gradle build files, the
+#     Groovy and Kotlin ones and gradle.properties, decide what is worth
+#     holding, so a change to one starts a run. There is no
+#     gradle-wrapper.properties and no libs.versions.toml in the repository
+#     today (the Gradle version is pinned here): add either to `paths` the
+#     day one appears.
+# The schedule is main's whole run in between, for what comes with time
+# (runner and base images, the badge, the flake ledger's view of main) and as
+# the backstop for a cache GitHub evicted (unused for 7 days, or past the
+# 10 GB limit), twice a day, not every six hours: each run is about 170
+# job-minutes of the 20 slots, and a drift found within 12 hours is as good as
+# within 6. Minute 17, as a scheduled run at the top of an hour is the one
+# GitHub delays or drops.
 on:
   push:
     branches: [main]
+    paths:
+      - '**/Cargo.lock'
+      - rust-toolchain.toml
+      - .github/workflows/ci.yml
+      - integrations/grafana/package-lock.json
+      - integrations/grafana/go.mod
+      - integrations/grafana/go.sum
+      - '**/*.gradle'
+      - '**/*.gradle.kts'
+      - '**/gradle.properties'
+  schedule:
+    - cron: '17 4,16 * * *'
   pull_request:
   # The merge queue tests each pull request as it would land on main, with
   # the ones queued before it: two that pass apart can fail together (#292
@@ -350,6 +390,81 @@ jobs:
       # it was, and a runner that skipped a scenario fails the job.
       - name: Both sync runners ran every scenario
         run: node integrations/sync-scenarios-check.mjs
+
+  # docs/design/replication.md#follow: the import's PostgreSQL arm and
+  # `--follow` -- COPY, pgoutput, the mirror fennec-server serves, SCRAM
+  # and TLS against the real server -- are tests marked `#[ignore]`, which
+  # need PostgreSQL 17 with pgvector and wal_level=logical: the server
+  # `make pgvector-up` starts on a developer's machine, here a service
+  # container given the same image, options and port (a service's `command`
+  # is the runner's since 2.333.0). It is ready once `pg_isready` answers
+  # over TCP, polled a second apart and failed after 120 tries: the image
+  # first runs a server of its own on the socket alone, for its setup. TLS
+  # is turned on once the checkout holds fennec-wire's test certificates,
+  # by `make pgvector-tls`. No cache: a checkout's new file times make
+  # cargo build the workspace's crates again whatever target/ holds, what it
+  # would keep is fennec-tls's few crates from outside, and the
+  # repository's caches are at GitHub's 10 GB already.
+  postgres:
+    name: postgres (import and --follow)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    services:
+      postgres:
+        # The Makefile's PG_IMAGE: a new one changes both.
+        image: pgvector/pgvector:0.8.7-pg17@sha256:b513c48566e4777cd3370451400000c78eda6a08131d68f4c31d4a76f27bd8fd
+        env:
+          POSTGRES_PASSWORD: fennec
+          POSTGRES_DB: fennecbench
+        ports:
+          - 55432:5432
+        command: >-
+          postgres -c shared_buffers=1GB -c maintenance_work_mem=1GB
+          -c max_parallel_workers_per_gather=0 -c wal_level=logical
+        options: >-
+          --shm-size=2g
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres -d fennecbench"
+          --health-interval 1s --health-timeout 5s --health-retries 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: TLS on in it, fennec-wire's test CA's certificate
+        env:
+          PG: ${{ job.services.postgres.id }}
+        run: make pgvector-tls PG="$PG"
+
+      - name: Install the pinned toolchain
+        run: rustup show
+
+      # Built first, so the next step's time is the tests' and the server's.
+      - name: Build the tests
+        run: |
+          cargo test -p fennec-import --test all --no-run
+          cargo test -p fennec-server --test all --no-run
+
+      # `make import-test`'s two runs, less its server's start and stop.
+      - name: The import's and --follow's tests against PostgreSQL 17
+        run: |
+          set -o pipefail
+          { cargo test -p fennec-import --test all -- --ignored pg:: follow:: &&
+            cargo test -p fennec-server --test all -- --ignored follow::; } 2>&1 | tee "$RUNNER_TEMP/import-test.log"
+
+      # A filter that matches nothing, or a test a feature compiles out,
+      # passes cargo: the two runs' summaries must count every test the
+      # three files mark `#[ignore]` passed, and none ignored.
+      - name: Every one of them ran and passed, none ignored
+        run: |
+          want=$(cat crates/fennec-import/tests/pg.rs crates/fennec-import/tests/follow.rs \
+            crates/fennec-server/tests/follow.rs | grep -c '^[[:space:]]*#\[ignore')
+          runs=0 passed=0 ignored=0
+          while read -r line; do
+            [[ $line =~ ([0-9]+)\ passed\;\ ([0-9]+)\ failed\;\ ([0-9]+)\ ignored\; ]] || continue
+            runs=$((runs + 1)) passed=$((passed + BASH_REMATCH[1])) ignored=$((ignored + BASH_REMATCH[3]))
+          done < <(sed 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/import-test.log" | grep '^test result: ')
+          echo "$runs runs: $passed passed and $ignored ignored, of the $want tests marked #[ignore]"
+          if [ "$runs" -ne 2 ] || [ "$passed" -ne "$want" ] || [ "$ignored" -ne 0 ]; then exit 1; fi
 
   # Windows, which no release is built for yet: the programs and the native
   # library build, and `<file>.lock` (`LockFileEx` there) refuses a second
@@ -1375,7 +1490,9 @@ jobs:
         run: |
           export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
           integrations/ffi-sizes.sh x86_64-unknown-linux-gnu aarch64-linux-android armv7-linux-androideabi x86_64-linux-android \
-            | tee -a "$GITHUB_STEP_SUMMARY"
+            | tee -a "$GITHUB_STEP_SUMMARY" "$RUNNER_TEMP/ffi-sizes.md"
+          # The docs quote these; a size 1% off integrations/ffi-sizes.md fails.
+          python3 integrations/ffi_sizes_check.py "$RUNNER_TEMP/ffi-sizes.md"
 
       # Flutter is pinned here, in the plugin's job and in packages.yml: `stable`
       # alone floats, and 3.50.0 (2026-11-11) deprecated
@@ -1511,7 +1628,8 @@ jobs:
       - name: The library's size on Apple's platforms
         run: |
           integrations/ffi-sizes.sh aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios aarch64-apple-darwin x86_64-apple-darwin \
-            | tee -a "$GITHUB_STEP_SUMMARY"
+            | tee -a "$GITHUB_STEP_SUMMARY" "$RUNNER_TEMP/ffi-sizes.md"
+          python3 integrations/ffi_sizes_check.py "$RUNNER_TEMP/ffi-sizes.md"
 
       # Nothing downloads this either (see the Android upload): a failed
       # upload on GitHub's side does not fail a job whose tests passed.

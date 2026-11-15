@@ -6,7 +6,7 @@ The long form of the invariants [web/CLAUDE.md](../../web/CLAUDE.md) lists under
 
 **One module and a client entry, by where the queries run, and a test
 build.** `@fennecdb/web` ships `fennec.wasm` (every index and the schema
-check, 244.1 KB brotli) and `@fennecdb/web/client`, so a user has two
+check, 285.1 KB brotli) and `@fennecdb/web/client`, so a user has two
 clear choices: queries on a server through the client entry and no
 module, or a database in the page or a synced replica through the full
 module. `fennec-lite.wasm` (no index, no schema check, 173 KB brotli; `make

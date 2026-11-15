@@ -310,6 +310,45 @@ fn a_log_is_applied_once() {
     assert_eq!(std::fs::metadata(&path).unwrap().len(), at);
 }
 
+/// A database held to its process's exit, never dropped -- a server's,
+/// which keeps its write lock to `process::exit` -- lets the log go when
+/// asked (`Database::close_log`), the file synced: the drop that let it go
+/// never runs there, and every clean stop left the log beside the file. A
+/// durability handed out before and run after it -- a `--sync always`
+/// write's still in flight at the stop, the file's first sync among them --
+/// begins no log again, and the next open finds every row in the file.
+#[test]
+fn a_database_held_to_the_exit_lets_its_log_go() {
+    let dir = Dir::new("held");
+    for first in [false, true] {
+        let path = dir.0.join(format!("db-{first}.fennec"));
+        let mut db = fs::open(&path).unwrap();
+        run(&mut db, "create collection t (n int)");
+        if !first {
+            durable(&mut db);
+            run(&mut db, "put t {n: 0}");
+            durable(&mut db);
+            assert!(log_of(&path).exists(), "no log to let go");
+        }
+        run(&mut db, "put t {n: 1}");
+        let late = db.flush().unwrap().expect("a durability");
+        db.close_log();
+        assert!(
+            !log_of(&path).exists(),
+            "first sync {first}: the log stayed"
+        );
+        late().unwrap();
+        assert!(
+            !log_of(&path).exists(),
+            "first sync {first}: a durability run after began the log again"
+        );
+        // The process exits holding it.
+        std::mem::forget(db);
+        let mut db = fs::open(&path).unwrap();
+        assert_eq!(count(&mut db), if first { 1 } else { 2 });
+    }
+}
+
 /// `x.db` and `x.fennec` keep logs of their own: with the extension
 /// replaced, both were `x.fennec.sync`, each writing over the other.
 #[test]

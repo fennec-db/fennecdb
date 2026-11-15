@@ -37,7 +37,7 @@ class Recorded:
 
     def gh(self, *args):
         if args[0] == "run" and args[1] == "list":
-            return self.runs[args[args.index("--event") + 1]]
+            return self.runs.get(args[args.index("--event") + 1], [])
         if args[0] == "run" and args[1] == "view":
             return {"jobs": self.jobs[int(args[2])]}
         raise AssertionError(args)
@@ -141,6 +141,18 @@ class Case(unittest.TestCase):
 
     def test_push_source_change_fixes(self):
         self.assertEqual(self.push({"crates/b.rs": "2"})[0]["verdict"], "fixed")
+
+    def test_scheduled_run_on_main_is_in_the_ledger(self):
+        """main's push run is gone for most commits: its schedule run is the
+        view of main, a failure of it listed and a later pass of it counted."""
+        runs = {"merge_group": [], "push": [], "schedule": [
+            run(2, "schedule", "main", "bbb", "2026-11-02T00:00:00Z", "success"),
+            run(1, "schedule", "main", "aaa", "2026-11-01T00:00:00Z")]}
+        jobs = {1: [job("test (ubuntu-latest)", "failure", "Run make test")],
+                2: [job("test (ubuntu-latest)", "success")]}
+        self.use(Recorded(runs, jobs, {"aaa": ("p", {"crates/a.rs": "1"}), "bbb": ("aaa", {"crates/b.rs": "2"})}))
+        rows = cf.ledger(REPO, 10)[1]
+        self.assertEqual([(r["event"], r["verdict"]) for r in rows], [("schedule", "fixed")])
 
     def test_over_300_files_read_from_json_lines(self):
         """gh prints one object a line however many pages: 650 files parse."""
