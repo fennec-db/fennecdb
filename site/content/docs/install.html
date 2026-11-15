@@ -337,8 +337,24 @@ built by <code>desktop.yml</code> from <code>main</code>:
 (<code>FennecFFI*</code>) are built before the tag by
 <code>swift-binary.yml</code>: <code>--signer-workflow
 fennec-db/fennecdb/.github/workflows/swift-binary.yml --source-ref
-refs/heads/main</code>. <code>SHA256SUMS</code> itself has none: it grows as
-the app's downloads are attached, each of them attested.</p>
+refs/heads/main</code> for an X.Y.0 and its release candidates, and
+<code>--source-ref refs/heads/release/X.Y</code> for a patch (X.Y.Z with Z
+above 0), each the one ref its version is built on.</p>
+
+<p>An attestation names a file's bytes, not its name, so what ties a file
+to its name in a release is <code>SHA256SUMS</code>, attested by the tag's
+own run too. The app's lines are added at its end once the app's downloads
+are attached; the lines before them are the attested file:</p>
+
+<pre data-lang="bash">n=$(grep -vc ' fennec-studio-' SHA256SUMS)
+head -n "$n" SHA256SUMS > SHA256SUMS.release
+gh attestation verify SHA256SUMS.release -R fennec-db/fennecdb \
+  --signer-workflow fennec-db/fennecdb/.github/workflows/release.yml \
+  --source-ref refs/tags/vX.Y.Z --deny-self-hosted-runners</pre>
+
+<p>Then a sum read from it says the file is the one that release built
+under that name. RELEASING.md's <code>tools/release-verify.sh</code> makes
+every one of these checks for a whole release.</p>
 
 <p>The npm packages carry npm's SLSA provenance and PyPI's files PEP 740
 attestations, both from <code>packages.yml</code>.

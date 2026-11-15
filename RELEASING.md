@@ -28,10 +28,21 @@ nothing reaches a registry before the notes have had a read.
    summaries) into `integrations/ffi-sizes.md`; those jobs fail a run more
    than 1% from it.
 2. Build the Swift package's binary: `gh workflow run swift-binary.yml -f
-   version=X.Y.Z`. SwiftPM fetches the package by its tag, and the
+   version=X.Y.Z` for an X.Y.0 and its candidates, which are built from
+   `main`; a patch (X.Y.Z, Z above 0) is built from `release/X.Y`, the
+   branch the owner cuts from the minor's last tag the first time one is
+   needed (`git push origin vX.Y.0^{commit}:refs/heads/release/X.Y`), its
+   fixes merged there: `gh workflow run swift-binary.yml --ref release/X.Y
+   -f version=X.Y.Z`, and step 3 tags that branch's merge. The run stops on
+   any other branch, and step 6 takes the XCFramework's attestation from
+   that one ref alone: a `release/*` branch is pushed by whoever may write
+   the repository, and its run of an edited `swift-binary.yml` would attest
+   whatever bytes it was given, so `release/X.Y` vouches for a patch and
+   never for an X.Y.0 (and the owner's ruleset on `release/*` decides who
+   pushes one). SwiftPM fetches the package by its tag, and the
    `Package.swift` at that tag must already name the XCFramework's zip by
    its URL and checksum, so the zip is built before the tag: the run builds
-   it from main, tests it on macOS and an iOS simulator, keeps it as its
+   it from its branch, tests it on macOS and an iOS simulator, keeps it as its
    artifact and opens a pull request writing its checksum into
    `Package.swift` (`integrations/swift/set-binary.sh`). It keeps the
    `FennecFFIDynamic.xcframework.zip` beside it -- the frameworks, and
@@ -43,7 +54,12 @@ nothing reaches a registry before the notes have had a read.
    them and does not attest them again (step 6 verifies them against
    `swift-binary.yml`). Merge it.
 3. Tag what was merged and push the tag:
-   `git tag vX.Y.Z origin/main && git push origin vX.Y.Z`.
+   `git tag vX.Y.Z origin/main && git push origin vX.Y.Z` (a patch:
+   `origin/release/X.Y`). A tag is `vX.Y.Z`, or `vX.Y.Z-rc.N` for a
+   candidate with N from 1, and nothing else: every job of `release.yml`
+   refuses another form in its first step, saying so, and
+   `tools/release-verify.sh` and `release-latest.sh` take the same one
+   (`tools/test_release_verify.py` holds each copy to it).
    `release.yml` builds the binaries for Linux and macOS, the Windows zips
    (`fennec-vX.Y.Z-<arch>-pc-windows-msvc.zip` for x86_64 and aarch64, each
    on a runner of its architecture, `tools/windows-zip.sh`: the
@@ -69,9 +85,10 @@ nothing reaches a registry before the notes have had a read.
    the release `rust-toolchain.toml` names and, on Linux, to the one the
    image's build stage resolves, and a difference stops the release before
    the draft ([A toolchain bump](#a-toolchain-bump)). Each file it built is
-   attested first as this run's build (`publish`), and the image's
+   attested first as this run's build (`publish`), then `SHA256SUMS`, which
+   ties each file to its name in the release, and the image's
    list and its two architectures' manifests once the list is made
-   (`manifest`; step 6 verifies both). A candidate's tag (`vX.Y.Z-rc.N`) is
+   (`manifest`; step 6 verifies all of them). A candidate's tag (`vX.Y.Z-rc.N`) is
    drafted as a pre-release, which GitHub never makes Latest. It also
    makes a `.deb` and an `.rpm` for amd64 and arm64 from the musl tarballs
    (`tools/linux-packages.sh`, `packaging/nfpm.yaml`), each architecture on a
@@ -95,7 +112,14 @@ nothing reaches a registry before the notes have had a read.
    after the tag) builds the tag's tree under the branch's name and head
    commit, and would sign that as the source: its files and image are
    attached unattested, with a warning, and step 6 fails on them, so such
-   a fix ships in the next version, a candidate's or a patch's. The Homebrew formula, `install.sh`,
+   a fix ships in the next version, a candidate's or a patch's. **A
+   published release whose file went out without its attestation stays
+   unverifiable for good**: a rebuild at the tag is not the same bytes,
+   and `publish` gives a published release only the files it has no asset
+   of, so nothing can put an attested file under that name, and step 6
+   fails on that release as long as it stands. Its fix ships in the next
+   version. A draft is still mended: a dispatch at the tag replaces its
+   files and `SHA256SUMS` with attested ones. The Homebrew formula, `install.sh`,
    `install.ps1` and the packages name the release's files by checksum, and a
    rebuild is not byte for byte the first build: a replaced tarball would fail
    every `brew install` and every sum already taken. To change what a
@@ -153,7 +177,16 @@ nothing reaches a registry before the notes have had a read.
    the highest version uploaded, pre-releases among them, so while a
    candidate is the highest, Gradle's `latest.release` and Maven's
    `RELEASE` resolve to it. The upload stays (a candidate is there to be
-   tried); a user pins a version.
+   tried); a user pins a version. npm's `next` is left on the last
+   candidate once X.Y.Z is out, so `npm i @fennecdb/web@next` would install
+   an older build than `latest`, and the workflow cannot move it: each
+   package's trusted publisher allows `npm publish` alone (*Allow npm
+   dist-tag* off, *Once: the registries' side*), and a publish names one
+   dist-tag. So after a release that went out under `latest`, the owner
+   moves `next` to it with npm's own login (2FA):
+   `for p in web react cloudflare langchain; do npm dist-tag add
+   @fennecdb/$p@X.Y.Z next; done`, where `npm view @fennecdb/web
+   dist-tags.next` names an older version.
    `packages.yml` builds the three packages again, installs them where a user
    would and uses them (`integrations/packages.sh`), and only then publishes
    `fennecdb` to PyPI, `@fennecdb/web`, `@fennecdb/react`,
@@ -236,7 +269,8 @@ nothing reaches a registry before the notes have had a read.
    in, `npm`, `curl` and `jq`. It holds the release to what the workflows
    publish and attest ([docs/design/integrations.md](docs/design/integrations.md#provenance)),
    one line an asset, and stops non-zero at the first thing missing or
-   wrong:
+   wrong, its last lines (`not checked: ...`) naming every check it did
+   not make:
    - the assets are exactly `release.yml`'s 17 -- its own 14 and
      `swift-binary.yml`'s three XCFramework files -- `SHA256SUMS`, and for
      an X.Y.Z the app's 5: 23, none missing and none beside them; a
@@ -245,15 +279,21 @@ nothing reaches a registry before the notes have had a read.
      `tools/test_release_verify.py`);
    - a candidate is a pre-release, an X.Y.Z is not, and GitHub's Latest is
      an X.Y.Z;
-   - `SHA256SUMS` lists every asset but itself and the `.checksum`, each by
-     its sum;
+   - `SHA256SUMS`'s lines before the app's verify as the file `release.yml`
+     attested at `refs/tags/vX.Y.Z` (the app's lines follow them, appended
+     by `desktop.yml` in step 5), before a sum is read from it; then it
+     lists every asset but itself and the `.checksum`, each by its sum.
+     It is what ties a file to its name in this release: an attestation
+     names bytes, so two of the tag's files swapped under each other's
+     names would each verify alone;
    - each other asset verifies as built by its workflow at its ref, on
      GitHub's runners: `gh attestation verify <file> -R
      fennec-db/fennecdb --signer-workflow
      fennec-db/fennecdb/.github/workflows/release.yml --source-ref
      refs/tags/vX.Y.Z --deny-self-hosted-runners`; the XCFramework's with
-     `swift-binary.yml` and `refs/heads/main` (`refs/heads/release/X.Y`
-     for a patch built there); the app's with `desktop.yml` and
+     `swift-binary.yml` and the one ref of its version (step 2):
+     `refs/heads/main` for an X.Y.0 and its candidates,
+     `refs/heads/release/X.Y` for a patch; the app's with `desktop.yml` and
      `refs/heads/main`, the one ref `desktop.yml` attaches from. `-R`
      alone takes an attestation by any workflow of the repository at any
      ref -- a branch's, or `desktop.yml`'s `attach` vouching for a server
@@ -275,7 +315,9 @@ nothing reaches a registry before the notes have had a read.
    stops there. A file that does not verify is a release job that attached
    without attesting, or a run that was not the tag's own (step 3): fix
    the workflow, and the next release carries it (a published release's
-   files are never replaced).
+   files are never replaced, so that release stays unverifiable: step 3).
+   What each check proves, and what none does, is in
+   [the design file](docs/design/integrations.md#provenance).
 
    **The app's attest step before 1.0.0.** A candidate has no app files,
    so `attach` and `attach-unsigned` first attest at 1.0.0. Once this is
@@ -289,7 +331,14 @@ nothing reaches a registry before the notes have had a read.
    they are. Nothing else is written: the build jobs read alone, `sign`
    signs nothing without its secrets (with a reviewer on
    `desktop-signing` it waits for one), and `attach`, the signed DMG's,
-   runs only after a signing. The run's red `attach-unsigned` is the
+   runs only after a signing. **Approve nothing there: reject the
+   `desktop-signing` review the run asks for.** Were its signing secrets
+   set and the review approved, `sign` would sign the rebuilt DMG and
+   `attach` would run `gh release upload v0.2.0 ... --clobber`: a published
+   release's DMG replaced (or one added beside it, as the signed DMG's
+   name falls), its bytes in no line of v0.2.0's `SHA256SUMS`, so
+   `install.sh --app` would refuse v0.2.0's app from then on, and nothing
+   puts the first DMG back. The run's red `attach-unsigned` is the
    expected end; what it proves is the attest step's log, and an artifact
    of the run verifying: `gh run download <run-id> -R fennec-db/fennecdb
    -n fennec-studio-app-Linux-X64`, then `gh attestation verify
@@ -549,12 +598,15 @@ sealed, which this tree's read.
 
 From 1.0.0 on a release only grows what [the compatibility
 contract](docs/design/compatibility.md) freezes; a break is a major
-version. Release candidates are tagged `1.0.0-rc.N`, and the owner pushes
+version. Release candidates are tagged `1.0.0-rc.N`, N from 1 -- the one
+form a candidate's tag takes, `vX.Y.Z-rc.N`, which every job of
+`release.yml` holds in its first step (step 3) -- and the owner pushes
 every tag. A candidate goes through [A release](#a-release) as its steps
 say for one: drafted and published as a pre-release, never GitHub's
 Latest (step 4, where Maven Central's `<release>`, which a candidate
 becomes while it is the highest version, is said too), no app (step 5),
-and verified as 18 assets (step 6). `make version` (`tools/version.py`)
+and verified as 18 assets (step 6), its XCFramework built from `main`
+(step 2). `make version` (`tools/version.py`)
 takes X.Y.Z alone today, so a candidate's version needs it to take a
 pre-release part first. Before a 1.x tag, check:
 
@@ -661,7 +713,8 @@ tag, a setting or a secret.
    6 verifies (one dispatched from `release/1.N` builds the same tree but
    attaches it unattested, since its attestations would name the branch:
    step 3 there). The swift-binary run's files are attested as built on
-   `release/1.N`, which that step 6 takes for a patch. The power-cut checks of step 3 are read the same way,
+   `release/1.N`, the one ref that step 6 takes for a patch's (and never
+   for an X.Y.0's, step 2 there). The power-cut checks of step 3 are read the same way,
    with `--ref release/1.N` where they say `--ref main`. Read the draft,
    publish it, and `packages.yml` follows, as in steps 4 to 6 there: every
    channel of the table above -- PyPI, npm, NuGet, Maven Central, pub.dev,
@@ -692,9 +745,11 @@ tag, a setting or a secret.
      as a semver range. A package's first publish ever is `latest`
      whatever the tag: the registry gives a package with none that
      version. The tag is decided from the
-     release list as the job runs, and npm's trusted publishing cannot move
-     it after, so publish one release at a time, each once the previous
-     one's `packages.yml` run is done.
+     release list as the job runs, and the job's credential (a trusted
+     publisher allowing `npm publish` alone) cannot move it after, so
+     publish one release at a time, each once the previous one's
+     `packages.yml` run is done; `next` left on a candidate older than the
+     newest release is moved by hand (step 4 there).
    - The Homebrew tap is never moved back (`homebrew` skips a release older
      than the formula).
    - The rest have no pointer the pipeline sets: PyPI, NuGet, pub.dev and

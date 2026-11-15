@@ -65,7 +65,10 @@ other, as one finding no `<version>` fails saying so, never green
 (`tools/test_image_latest.py`, under dash). GitHub's Latest, which the
 install scripts read, is held there too: GitHub makes every release it
 publishes Latest unless it is a pre-release, so `release.yml` drafts a
-candidate (`vX.Y.Z-<pre-release>`) as one, and `packages.yml`'s
+candidate as one -- `vX.Y.Z-rc.N`, N from 1, the one form beside `vX.Y.Z`
+that every job of `release.yml` and `swift-binary.yml` holds in its first
+step and both scripts take (`tools/test_release_verify.py` holds each copy
+to one definition) -- and `packages.yml`'s
 `github-latest` puts Latest back on the newest published X.Y.Z whatever
 was published, a patch to an older minor or a candidate; npm's `latest`
 names that release alone, an older minor's patch going out under
@@ -83,17 +86,21 @@ that job's write), before it is attached: `release.yml`'s `publish` and
 `manifest` in the tag's own run alone (its ref the tag, its commit the
 one built), since an attestation names the run's ref and commit as the
 source, a branch's dispatch attaching unattested; `swift-binary.yml`'s
-`pull-request` the XCFramework it built before the tag, which `publish`
-does not attest again; `desktop.yml`'s attach jobs the app. `SHA256SUMS`,
-which grows after the publish, is not. `tools/release-verify.sh`
-(RELEASING.md's step 6) holds a release's assets to the list the workflows
-attach (`tools/test_release_verify.py` holds the list to them), verifies
-each with `--signer-workflow`, `--source-ref` and
+`pull-request` the XCFramework it built before the tag on its version's
+one branch (`main` for an X.Y.0 and its candidates, `release/X.Y` for a
+patch, each job refusing another), which `publish` does not attest again;
+`desktop.yml`'s attach jobs the app; and `publish` `SHA256SUMS`, which ties
+a file to its name, the app's lines appended after it byte for byte.
+`tools/release-verify.sh` (RELEASING.md's step 6) holds a release's assets
+to the list the workflows attach (`tools/test_release_verify.py` holds the
+list to them, every job uploading a `dist-*` artifact by its name),
+verifies `SHA256SUMS`'s lines before the app's as `release.yml`'s at the
+tag before it reads a sum, verifies each asset with `--signer-workflow`, `--source-ref` and
 `--deny-self-hosted-runners` -- never `-R` alone, which takes any workflow
 at any ref -- the image by the digest ghcr.io serves, npm's provenance by
 `dist.attestations` (`npm audit signatures` passes a package with none)
-and PyPI's attestations, and fails at the first thing missing or wrong
-([provenance](../docs/design/integrations.md#provenance)). A release job that builds runs with `contents: read` and
+and PyPI's attestations, and fails at the first thing missing or wrong,
+naming every check it did not make ([provenance](../docs/design/integrations.md#provenance)). A release job that builds runs with `contents: read` and
 a checkout keeping no token (`binaries`, `windows`, `linux-ffi`, `wasm`,
 `android`, `linux-packages`, `image`): the crates' build scripts run there, and only
 the jobs that publish write (`publish`, `image-push`, `manifest`,
@@ -109,7 +116,8 @@ action runs another by a tag inside it (a composite one's `action.yml`,
 which `sha_pinning_required` refuses under a pinned commit too: Flutter
 comes from its archive, `tools/install-flutter.sh`, held to the sum the
 workflow names and to the version Flutter then reports); every workflow
-says `permissions:` at its top, and a job widens only what it uses; a job
+says `permissions:` at its top (where one does not, each job naming none
+is a finding by its name), and a job widens only what it uses; a job
 holding any write, `id-token: write` among them, runs no build: it runs
 only what the check lists, each entry with the reason it builds nothing --
 every command its `run:` scripts run, read as their shell reads them
@@ -123,12 +131,14 @@ that reads alone built as an artifact (`release.yml`'s `image` to
 `image-push`, `swift-binary.yml`'s `build` to `pull-request`); and a job
 reading a stored secret names its `environment:`, where the secret is kept
 under rules saying which runs may read it, but never one that does not
-exist yet, which GitHub would create with no rules; and no `run:` script
-names in an expression a value a person outside the workflow chooses --
+exist yet, which GitHub would create with no rules; and no `run:` script,
+nor `actions/github-script`'s `script:`, names in an expression a value a
+person outside the workflow chooses --
 an input, the event's payload, a branch's or a tag's name, `env` (one
 list, `CHOSEN`) -- which GitHub pastes into the script's text, so a tag
 named `v1$(...)` would run as the job: such a value reaches a step through
-`env:` or `with:`, held to its form in the job's first step before any use.
+`env:` or `with:`, held to its form in the job's first step before any use,
+and a local action (`./...`), whose steps are not read, is refused.
 `tools/workflow_check.py` holds every workflow to all five in CI's fmt
 job, itself held by `tools/test_workflow_check.py`; a job let off the
 third or the fourth is listed in `WRITE_AND_BUILD` or `REPOSITORY_SECRETS`
