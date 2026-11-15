@@ -20,7 +20,7 @@ a C FFI -- links the same engine from the release's library
 <thead><tr><th>&nbsp;</th><th>Swift</th><th>Kotlin and Java</th><th>Dart and Flutter</th></tr></thead>
 <tbody>
 <tr><td>install</td><td>SwiftPM: <code>github.com/fennec-db/fennecdb</code>, product <code>FennecDB</code></td><td><code>com.fennecdb:fennecdb-android</code> (the AAR), <code>com.fennecdb:fennecdb</code> (the JVM)</td><td><code>fennecdb_flutter</code>, or <code>fennecdb</code> in Dart alone</td></tr>
-<tr><td>platforms</td><td>iOS 15, macOS 12</td><td>Android 5 (API 21): arm64-v8a, armeabi-v7a, x86_64; the JVM</td><td>iOS, Android, macOS</td></tr>
+<tr><td>platforms</td><td>iOS 15, macOS 11</td><td>Android 5 (API 21): arm64-v8a, armeabi-v7a, x86_64; the JVM</td><td>iOS 15, macOS 11, Android 5 (API 21)</td></tr>
 <tr><td>calls</td><td><code>async</code>, off the caller's thread</td><td><code>suspend</code> on <code>Dispatchers.IO</code>; <code>...Blocking</code> for Java</td><td><code>Future</code>s, on an isolate of the database's</td></tr>
 <tr><td>live queries</td><td><code>LiveQuery</code> (<code>ObservableObject</code>), <code>LiveRows</code> (<code>@Observable</code>), an <code>AsyncThrowingStream</code></td><td>a <code>Flow</code>: Compose's <code>collectAsState</code></td><td>a <code>Stream</code>: <code>StreamBuilder</code></td></tr>
 <tr><td>rows</td><td><code>Row</code>, or any <code>Decodable</code></td><td><code>Row</code>, a <code>Map</code> with typed getters</td><td><code>Map&lt;String, Object?&gt;</code></td></tr>
@@ -180,8 +180,11 @@ class Todos extends StatelessWidget {
         ),
       );
 }</pre>
-<p>The plugin's <code>example/</code> is this app, built for Android and
-the iOS simulator on every change.</p>
+<p>The plugin's <code>example/</code> is this app, built for Android on
+every change, and for macOS and the iOS simulator from the plugin as
+pub.dev gets it: packed as a release publishes it, with each platform's
+library in it once, and the macOS app's own test opening a file through
+the library it embeds.</p>
 </div>
 
 </div>
