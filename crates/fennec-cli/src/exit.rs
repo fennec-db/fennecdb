@@ -32,11 +32,12 @@ impl Code {
             Code::Failed => {
                 "failed: a statement of -c, the file's open or its sync, its lock another's, or \
                  the subcommand's work (an import, a backup, a restore, a verify finding what \
-                 cannot be restored)"
+                 cannot be restored, the file `fennec types` reads or the one it writes)"
             }
             Code::Refused => {
-                "refused before anything ran: a flag, an argument or a value, a file it would \
-                 write over without --force, or a subcommand this build was made without"
+                "refused before anything ran: a flag the command does not read, a value or an \
+                 argument missing or malformed, a file it would write over without --force, or \
+                 a subcommand this build was made without"
             }
         }
     }

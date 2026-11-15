@@ -350,7 +350,12 @@ impl Node {
                 return;
             };
             match due {
-                Some((name, st)) => self.look_caught(&tenants, &name, st, now_ms(), true, None),
+                Some((name, st)) => {
+                    // Outside the look's own catch: the node's thread ends.
+                    #[cfg(debug_assertions)]
+                    super::debug_fault();
+                    self.look_caught(&tenants, &name, st, now_ms(), true, None)
+                }
                 None => {
                     if let Err(e) = self.write_hint() {
                         crate::log!("could not write the schedule hint: {e}");

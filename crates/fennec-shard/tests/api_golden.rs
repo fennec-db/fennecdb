@@ -27,7 +27,7 @@ fn the_flags_and_exit_codes_are_the_dump() {
         .map(|c| (*c as i32, c.means(), format!("{c:?}")))
         .collect();
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let dump = api_dump::cli(Path::new(BIN), "fennec-shard", &src, &codes);
+    let (_, dump) = api_dump::cli(Path::new(BIN), "fennec-shard", &src, &codes);
     api_dump::hold("cli-fennec-shard.json", &dump);
 }
 
@@ -86,9 +86,9 @@ fn the_metrics_are_the_dump() {
     let scratch = Scratch(root);
     let n1 = leasing_node(&scratch.0.join("n1"));
     // A node nothing listens on: what a crashed one looks like from here.
-    let gone = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let dead = gone.local_addr().unwrap().to_string();
-    drop(gone);
+    // Port 1 (`unsent::refusing`): a port found free and let go of is the
+    // next listener's to take (docs/design/conventions.md#ports).
+    let dead = crate::unsent::refusing();
     let primary_file = scratch.0.join("primary.fennec");
     {
         let mut dir = Directory::open(&primary_file).unwrap();

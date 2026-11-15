@@ -10,28 +10,20 @@
    "-h": "switch"
   },
   "fennec archive": {
-   "--force": "switch",
    "--help": "switch",
    "--image-every": "value",
    "--keep": "value",
    "--key-file": "value",
    "--tenants": "switch",
    "--tls-ca": "value",
-   "--to": "value",
-   "--to-change": "value",
    "--token": "value",
    "-h": "switch"
   },
   "fennec backup": {
    "--force": "switch",
    "--help": "switch",
-   "--image-every": "value",
-   "--keep": "value",
    "--key-file": "value",
-   "--tenants": "switch",
    "--tls-ca": "value",
-   "--to": "value",
-   "--to-change": "value",
    "--token": "value",
    "-h": "switch"
   },
@@ -60,16 +52,7 @@
    "-t": "value"
   },
   "fennec key": {
-   "--force": "switch",
    "--help": "switch",
-   "--image-every": "value",
-   "--keep": "value",
-   "--key-file": "value",
-   "--tenants": "switch",
-   "--tls-ca": "value",
-   "--to": "value",
-   "--to-change": "value",
-   "--token": "value",
    "-h": "switch"
   },
   "fennec mcp": {
@@ -86,29 +69,19 @@
    "-h": "switch"
   },
   "fennec prune": {
-   "--force": "switch",
    "--help": "switch",
-   "--image-every": "value",
    "--keep": "value",
    "--key-file": "value",
    "--tenants": "switch",
-   "--tls-ca": "value",
-   "--to": "value",
-   "--to-change": "value",
-   "--token": "value",
    "-h": "switch"
   },
   "fennec restore": {
    "--force": "switch",
    "--help": "switch",
-   "--image-every": "value",
-   "--keep": "value",
    "--key-file": "value",
    "--tenants": "switch",
-   "--tls-ca": "value",
    "--to": "value",
    "--to-change": "value",
-   "--token": "value",
    "-h": "switch"
   },
   "fennec types": {
@@ -123,22 +96,15 @@
    "-o": "value"
   },
   "fennec verify": {
-   "--force": "switch",
    "--help": "switch",
-   "--image-every": "value",
-   "--keep": "value",
    "--key-file": "value",
    "--tenants": "switch",
-   "--tls-ca": "value",
-   "--to": "value",
-   "--to-change": "value",
-   "--token": "value",
    "-h": "switch"
   }
  },
  "exit codes": {
   "0": "done: the session, every statement of -c, or the subcommand did what it was asked; --help or --version printed",
-  "1": "failed: a statement of -c, the file's open or its sync, its lock another's, or the subcommand's work (an import, a backup, a restore, a verify finding what cannot be restored)",
-  "2": "refused before anything ran: a flag, an argument or a value, a file it would write over without --force, or a subcommand this build was made without"
+  "1": "failed: a statement of -c, the file's open or its sync, its lock another's, or the subcommand's work (an import, a backup, a restore, a verify finding what cannot be restored, the file `fennec types` reads or the one it writes)",
+  "2": "refused before anything ran: a flag the command does not read, a value or an argument missing or malformed, a file it would write over without --force, or a subcommand this build was made without"
  }
 }

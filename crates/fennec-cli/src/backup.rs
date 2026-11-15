@@ -26,61 +26,100 @@ fn duration(v: &str) -> Option<Duration> {
     Some(Duration::from_secs(n.checked_mul(secs)?))
 }
 
-pub const USAGE: &str = r#"
-usage: fennec backup <primary> <file.fennec | archive-dir>  [--token <t>] [--force]
-       fennec archive <primary> <archive-dir>               [--token <t>]
-                     [--image-every <1h>] [--keep <7d>]
-       fennec archive --tenants <node> <root-dir>           [the same]
-       fennec restore <archive-dir | sealed-file> <out.fennec> [--to <time> | --to-change <n>]
-                     [--force]
-       fennec restore --tenants <root-dir> <out-dir>         [--to <time>]
-       fennec prune  [--tenants] <archive-dir | root-dir> --keep <7d>
-       fennec verify [--tenants] <archive-dir | root-dir | file.fennec>
-       fennec key    <key-file>
-  each but `key` takes --key-file <path> (or FENNEC_KEY_FILE): the archive's
-  files, or the backup file, sealed with it
+// Each command's help, made of the parts below that it reads: a command's
+// `--help` names the flags it takes alone, as its dump in
+// `integrations/api-golden/cli-fennec.json` holds them. One help shared by
+// the six showed, and so froze, every flag on each -- `fennec key
+// --to-change`, `fennec verify --tls-ca` -- which those took and ignored.
+const BACKUP: &str = r#"
+usage: fennec backup <primary> <file.fennec | archive-dir> [--token <t>] [--force]
+                     [--key-file <path>] [--tls-ca <pem>]
 
+  The database as it stands, taken while the server runs: into a file that
+  opens as a database of its own, or into an archive as a base image a
+  restore can start from.
+"#;
+
+const ARCHIVE: &str = r#"
+usage: fennec archive <primary> <archive-dir> [--token <t>] [--image-every <1h>]
+                      [--keep <7d>] [--key-file <path>] [--tls-ca <pem>]
+       fennec archive --tenants <node> <root-dir>  [the same]
+
+  Keeps every write that reaches the primary's disk, with when it was made,
+  until interrupted; starts with a base image, and takes one of its own end
+  every --image-every (1h unless given) without asking the primary, so a
+  restore replays at most that much; with --keep, lets go of what no
+  restore within it needs. A primary on a history that does not lead from
+  the archive's end, at or before it -- restored to an earlier moment, or
+  another database -- is refused: its writes would land among the
+  archive's; archive it into a directory of its own.
+"#;
+
+const RESTORE: &str = r#"
+usage: fennec restore <archive-dir | sealed-file> <out.fennec>
+                      [--to <time> | --to-change <n>] [--force] [--key-file <path>]
+       fennec restore --tenants <root-dir> <out-dir> [--to <time>] [--key-file <path>]
+
+  The database as it stood at <time> (2026-09-22T10:15:00Z) or after change
+  <n>, or at the archive's end: the latest image at or before that point
+  and the writes after it. A backup file sealed with a key, given in place
+  of the archive, is opened with that key.
+"#;
+
+const PRUNE: &str = r#"
+usage: fennec prune [--tenants] <archive-dir | root-dir> --keep <7d> [--key-file <path>]
+
+  What `archive --keep` lets go of, done once: the images before the
+  newest one taken by the start of the window and the segments before the
+  oldest image kept -- as on a copy synced elsewhere.
+"#;
+
+const VERIFY: &str = r#"
+usage: fennec verify [--tenants] <archive-dir | root-dir | file.fennec> [--key-file <path>]
+
+  Reads the archive as a restore would: every image opens at its change,
+  the segments run on with none missing, a restore to the end opens; says
+  from when to when it can restore, and exits 1 when it cannot. Given a
+  database file, holds every record of it to its checksum -- the image's
+  and those before the point the file was synced to, which an open reads
+  unchecked, the sync log's writes put back as an open would -- and exits 1
+  naming the first that fails; on a file no server is writing, whose last
+  record a write in flight would show cut short.
+"#;
+
+const KEY: &str = r#"
+usage: fennec key <key-file>
+
+  Writes a new key into <key-file>, 64 hexadecimal digits, readable by its
+  owner alone, and never over a file there already. With it an archive's
+  images, segments and history, and a backup, are encrypted and
+  authenticated (ChaCha20-Poly1305): a byte changed, a file cut short or
+  the wrong key is refused, never read. Keep the key apart from the
+  archive: without it nothing can be restored.
+"#;
+
+const PRIMARY: &str = r#"
   <primary> is its HTTP address, http://host:port -- https://host:port for
   one serving HTTPS, its certificate held to Mozilla's roots or to
-  --tls-ca <pem>'s CAs in their place -- <node> a --dir node's, and <t>
-  its --replication-token (also read from FENNEC_REPLICATION_TOKEN; set
-  and empty, it is unset). An empty --token, and an empty key file from
-  --key-file or FENNEC_KEY_FILE, are refused.
+  --tls-ca <pem>'s CAs in their place -- and <t> its --replication-token
+  (also read from FENNEC_REPLICATION_TOKEN; set and empty, it is unset). An
+  empty --token is refused.
+"#;
 
-  backup    the database as it stands, taken while the server runs: into a
-            file that opens as a database of its own, or into an archive as
-            a base image a restore can start from
-  archive   keeps every write that reaches the primary's disk, with when it
-            was made, until interrupted; starts with a base image, and takes
-            one of its own end every --image-every (1h unless given) without
-            asking the primary, so a restore replays at most that much;
-            with --keep, lets go of what no restore within it needs. A
-            primary on a history that does not lead from the archive's
-            end, at or before it -- restored to an earlier moment, or
-            another database -- is refused: its writes would land among
-            the archive's; archive it into a directory of its own
-  restore   the database as it stood at <time> (2026-09-22T10:15:00Z) or
-            after change <n>, or at the archive's end: the latest image at
-            or before that point and the writes after it
-  prune     what `archive --keep` lets go of, done once: the images before the
-            newest one taken by the start of the window and the segments
-            before the oldest image kept -- as on a copy synced elsewhere
+const SEALED: &str = r#"
+  --key-file <path>  the key `fennec key` wrote (or FENNEC_KEY_FILE): the
+            archive's files, or the backup file, sealed with it. An empty
+            key file, from either, is refused.
+"#;
 
-  verify    reads the archive as a restore would: every image opens at its
-            change, the segments run on with none missing, a restore to the
-            end opens; says from when to when it can restore, and exits 1
-            when it cannot. Given a database file, holds every record of it
-            to its checksum -- the image's and those before the point the
-            file was synced to, which an open reads unchecked, the sync
-            log's writes put back as an open would -- and exits 1 naming the
-            first that fails; on a file no server is writing, whose last
-            record a write in flight would show cut short
+const FORCE: &str = r#"
+  --force   write over a file there already, which is refused without it
+            (exit 2): a database is never replaced unasked. One a server or
+            an app has open is refused either way.
+"#;
 
-  --force   backup and restore write a file over one there already, which
-            they refuse without it (exit 2): a database is never replaced
-            unasked. One a server or an app has open is refused either way
-
-  --tenants every tenant of a --dir node (fennec-server --dir
+const TENANTS_ARCHIVE: &str = r#"
+  --tenants every tenant of a --dir node <node> (fennec-server --dir
             --replication-token), each an archive of its own under
             <root-dir>/<tenant>/, over one connection to the node however
             many tenants it holds: a tenant made there is archived from its
@@ -91,23 +130,64 @@ usage: fennec backup <primary> <file.fennec | archive-dir>  [--token <t>] [--for
             its name -- has its line so far moved aside to
             <root-dir>/<tenant>.<history> and a new one begun.
             --image-every and --keep apply to each line. Each directory is
-            an archive that restore, verify and prune read alone; with
-            --tenants they read every one, the lines moved aside too.
-            restore writes <out-dir>/<tenant>.fennec for each tenant the node
-            held at that moment, from the line that began last by then -- a
+            an archive that restore, verify and prune read alone, or every
+            one of them with their own --tenants.
+"#;
+
+const TENANTS_READ: &str = r#"
+  --tenants every archive of a node's tenants kept under <root-dir> (fennec
+            archive --tenants), the lines moved aside too.
+"#;
+
+const TENANTS_RESTORE: &str = r#"
+            Writes <out-dir>/<tenant>.fennec for each tenant the node held
+            at that moment, from the line that began last by then -- a
             directory a node serves (fennec-server --dir) -- passes over a
             tenant gone then or archived only after, and fails on one whose
-            moment --keep let go of
+            moment the archive's keeping let go of. Never over a file there
+            already, and to a moment alone: a change is one database's.
+"#;
 
-  key       writes a new key into <key-file>, 64 hexadecimal digits,
-            readable by its owner alone. With it an archive's images,
-            segments and history, and a backup, are encrypted and
-            authenticated (ChaCha20-Poly1305): a byte changed, a file cut
-            short or the wrong key is refused, never read. Keep the key
-            apart from the archive: without it nothing can be restored
-
+const DURATION: &str = r#"
   A duration is a number and s, m, h or d: 90s, 30m, 6h, 7d.
 "#;
+
+// The family named in each help: the desktop app's build reads `fennec
+// verify` in `fennec backup --help` to know a shell has its backups
+// (integrations/studio-desktop/scripts/get-server.sh).
+const KIN: &str = r#"
+  Each of fennec backup, fennec archive, fennec restore, fennec prune,
+  fennec verify and fennec key says its own flags with --help.
+"#;
+
+/// The help of `command`, one of the six: its own flags alone.
+fn usage(command: &str) -> String {
+    let parts: &[&str] = match command {
+        "backup" => &[BACKUP, PRIMARY, SEALED, FORCE, KIN],
+        "archive" => &[ARCHIVE, PRIMARY, SEALED, TENANTS_ARCHIVE, DURATION, KIN],
+        "restore" => &[RESTORE, SEALED, FORCE, TENANTS_READ, TENANTS_RESTORE, KIN],
+        "prune" => &[PRUNE, SEALED, TENANTS_READ, DURATION, KIN],
+        "verify" => &[VERIFY, SEALED, TENANTS_READ, KIN],
+        _ => &[KEY, KIN],
+    };
+    parts.concat()
+}
+
+/// Whether `command` reads `flag`: any other is refused as unknown (2),
+/// never taken and ignored.
+fn reads(command: &str, flag: &str) -> bool {
+    match flag {
+        "-h" | "--help" => true,
+        "--key-file" => command != "key",
+        "--token" | "--tls-ca" => matches!(command, "backup" | "archive"),
+        "--force" => matches!(command, "backup" | "restore"),
+        "--tenants" => matches!(command, "archive" | "restore" | "prune" | "verify"),
+        "--to" | "--to-change" => command == "restore",
+        "--image-every" => command == "archive",
+        "--keep" => matches!(command, "archive" | "prune"),
+        _ => false,
+    }
+}
 
 /// Writes `text` into a new file only its owner can read: a DACL on Windows.
 fn write_private(path: &str, text: &str) -> std::io::Result<()> {
@@ -130,7 +210,9 @@ fn fail(msg: &str) -> ! {
 }
 
 /// Runs `fennec backup|archive|restore ...`; the return value is the process
-/// exit code.
+/// exit code. The whole line is read, and refused where a flag is not the
+/// command's or wants a value it lacks, before anything a flag names is
+/// read, made or opened.
 pub fn main(command: &str, args: &[String]) -> Code {
     let mut positional = Vec::new();
     // Set and empty is unset, as an environment file leaves a line it does
@@ -144,6 +226,9 @@ pub fn main(command: &str, args: &[String]) -> Code {
     let mut key_file = std::env::var("FENNEC_KEY_FILE").ok();
     let mut tenants = false;
     let mut force = false;
+    // Read once the line is: as it was read, `--tls-ca --help <no such
+    // flag>` read a file named `--help` before the flag after it was refused.
+    let mut tls_ca: Option<String> = None;
     let mut i = 0;
     let next = |i: &mut usize, flag: &str| -> String {
         *i += 1;
@@ -153,14 +238,16 @@ pub fn main(command: &str, args: &[String]) -> Code {
         }
     };
     while i < args.len() {
-        match args[i].as_str() {
+        let flag = args[i].as_str();
+        if flag.starts_with('-') && !reads(command, flag) {
+            fail(&format!("unknown option: {flag}\n{}", usage(command)));
+        }
+        match flag {
             "--token" => token = Some(next(&mut i, "--token")),
             "--tenants" => tenants = true,
             "--force" => force = true,
             "--key-file" => key_file = Some(next(&mut i, "--key-file")),
-            "--tls-ca" => {
-                fennec_http::dial::trust_ca(&next(&mut i, "--tls-ca")).unwrap_or_else(|e| fail(&e))
-            }
+            "--tls-ca" => tls_ca = Some(next(&mut i, "--tls-ca")),
             "--to" => {
                 let v = next(&mut i, "--to");
                 match fennec_core::time::parse(&v) {
@@ -192,23 +279,33 @@ pub fn main(command: &str, args: &[String]) -> Code {
                 }));
             }
             "-h" | "--help" => {
-                println!("{USAGE}");
+                println!("{}", usage(command));
                 return Code::Ok;
             }
-            other if other.starts_with('-') => fail(&format!("unknown option: {other}\n{USAGE}")),
+            other if other.starts_with('-') => unreachable!("{other}: refused above"),
             other => positional.push(other.to_string()),
         }
         i += 1;
     }
     // `restore --tenants` writes no tenant's file over one there already,
-    // forced or not; `key` writes no key over one.
-    if force && (tenants || !matches!(command, "backup" | "restore")) {
-        fail("--force writes a backup or a restore over a file there already, and only those");
+    // forced or not.
+    if force && tenants {
+        fail(
+            "--force writes one database's restore over a file there already: `restore \
+             --tenants` writes no tenant's file over one, forced or not",
+        );
+    }
+    // A change is one database's: the tenants' are restored to a moment.
+    // Refused here, with the line, before the directory to restore into is
+    // made.
+    if tenants && matches!(target, Target::Change(_)) {
+        fail("--to-change names one database's change: a node's tenants are restored to a moment (--to)");
     }
     if command == "key" {
         let [path] = positional.as_slice() else {
             fail(&format!(
-                "`fennec key` takes the file to write the key into\n{USAGE}"
+                "`fennec key` takes the file to write the key into\n{}",
+                usage(command)
             ));
         };
         if Path::new(path).exists() {
@@ -243,6 +340,9 @@ pub fn main(command: &str, args: &[String]) -> Code {
              out for an archive or a backup in the clear",
         );
     }
+    if let Some(pem) = &tls_ca {
+        fennec_http::dial::trust_ca(pem).unwrap_or_else(|e| fail(&e));
+    }
     let key = key_file.as_ref().map(|p| {
         Key::from_file(Path::new(p)).unwrap_or_else(|e| fail(&format!("--key-file {p}: {e}")))
     });
@@ -259,7 +359,8 @@ pub fn main(command: &str, args: &[String]) -> Code {
     if command == "verify" {
         let [dir] = positional.as_slice() else {
             fail(&format!(
-                "`fennec verify` takes the archive's directory\n{USAGE}"
+                "`fennec verify` takes the archive's directory\n{}",
+                usage(command)
             ));
         };
         if std::path::Path::new(dir).is_file() {
@@ -315,7 +416,8 @@ pub fn main(command: &str, args: &[String]) -> Code {
     if command == "prune" {
         let [dir] = positional.as_slice() else {
             fail(&format!(
-                "`fennec prune` takes the archive's directory\n{USAGE}"
+                "`fennec prune` takes the archive's directory\n{}",
+                usage(command)
             ));
         };
         let keep = keep.unwrap_or_else(|| fail("`fennec prune` needs --keep <duration>"));
@@ -334,7 +436,10 @@ pub fn main(command: &str, args: &[String]) -> Code {
         };
     }
     let [a, b] = positional.as_slice() else {
-        fail(&format!("`fennec {command}` takes two arguments\n{USAGE}"));
+        fail(&format!(
+            "`fennec {command}` takes two arguments\n{}",
+            usage(command)
+        ));
     };
     let upstream = || {
         let token = token
@@ -444,7 +549,8 @@ fn every_tenant(
         "archive" => {
             let [node, root] = positional else {
                 fail(&format!(
-                    "`fennec archive --tenants` takes the node and the root directory\n{USAGE}"
+                    "`fennec archive --tenants` takes the node and the root directory\n{}",
+                    usage(command)
                 ));
             };
             let token =
@@ -480,15 +586,23 @@ fn every_tenant(
         "verify" | "prune" => {
             let [root] = positional else {
                 fail(&format!(
-                    "`fennec {command} --tenants` takes the root directory\n{USAGE}"
+                    "`fennec {command} --tenants` takes the root directory\n{}",
+                    usage(command)
                 ));
             };
             let keep = (command == "prune")
                 .then(|| keep.unwrap_or_else(|| fail("`fennec prune` needs --keep <duration>")));
             // Every line, those moved aside too: each is an archive a restore
-            // to a moment may take.
-            let lines = node_archive::lines(Path::new(root))
-                .unwrap_or_else(|e| fail(&format!("{root}: {e}")));
+            // to a moment may take. A root that cannot be read is the work
+            // failing (1), as an archive's directory that cannot be is to
+            // `verify` and `prune` of one.
+            let lines = match node_archive::lines(Path::new(root)) {
+                Ok(lines) => lines,
+                Err(e) => {
+                    eprintln!("fennec {command} --tenants: {root}: {e}");
+                    return Code::Failed;
+                }
+            };
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_millis() as u64);
@@ -545,12 +659,23 @@ fn every_tenant(
             let [root, out] = positional else {
                 fail(&format!(
                     "`fennec restore --tenants` takes the root directory and the directory \
-                     to restore into\n{USAGE}"
+                     to restore into\n{}",
+                    usage(command)
                 ));
             };
             let iso = |t: u64| fennec_core::time::format_iso(t as i64);
-            let done = node_archive::restore_all(Path::new(root), Path::new(out), target, key)
-                .unwrap_or_else(|e| fail(&format!("fennec restore --tenants: {e}")));
+            // Failing here -- a root that cannot be read, a directory that
+            // cannot be made or synced -- the restore did not do its work
+            // (1), as one database's restore failing does; `--to-change`
+            // was refused with the line.
+            let done = match node_archive::restore_all(Path::new(root), Path::new(out), target, key)
+            {
+                Ok(done) => done,
+                Err(e) => {
+                    eprintln!("fennec restore --tenants: {e}");
+                    return Code::Failed;
+                }
+            };
             let (mut restored, mut passed, mut failed) = (0, 0, 0);
             for (name, outcome) in &done {
                 match outcome {
@@ -590,6 +715,6 @@ fn every_tenant(
                 _ => Code::Failed,
             }
         }
-        _ => fail(&format!("`fennec {command}` takes no --tenants\n{USAGE}")),
+        _ => unreachable!("`fennec {command}` reads no --tenants: refused with the line"),
     }
 }

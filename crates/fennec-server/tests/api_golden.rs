@@ -25,7 +25,22 @@ fn the_flags_and_exit_codes_are_the_dump() {
         .map(|c| (*c as i32, c.means(), format!("{c:?}")))
         .collect();
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let dump = api_dump::cli(Path::new(BIN), "fennec-server", &src, &codes);
+    let (commands, dump) = api_dump::cli(Path::new(BIN), "fennec-server", &src, &codes);
+    // `--follow-<option>` is made at run time from fennec-import's list
+    // (`src/main.rs`), where no scan of the sources sees it: each option the
+    // importer offers is a flag of the server's help and dump, taking a
+    // value, or a new one would be a flag no dump holds.
+    let flags = &commands["fennec-server"];
+    let missing: Vec<String> = fennec_import::args::OPTIONS
+        .iter()
+        .map(|o| format!("--follow-{}", &o[2..]))
+        .filter(|f| flags.get(f) != Some(&api_dump::Takes::Value))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "fennec-import's options the server takes as --follow-<option> that its --help does \
+         not show, or its parser does not take with a value: name each in USAGE\n  {missing:?}"
+    );
     api_dump::hold("cli-fennec-server.json", &dump);
 }
 
@@ -44,6 +59,9 @@ fn scrape(server: &Server, token: &str) -> String {
 #[test]
 fn the_metrics_are_the_dump_and_every_name_the_code_declares_is_in_one() {
     let secret = tmp("api-golden", "stripe.whsec");
+    // The test's directory goes with it, a failed assertion's too: declared
+    // first, it is removed after the servers below are stopped.
+    let _scratch = api_dump::Scratch(secret.parent().unwrap().to_path_buf());
     std::fs::write(&secret, "whsec_api_golden").unwrap();
     let hooks = tmp("api-golden", "hooks");
     std::fs::write(&hooks, format!("orders stripe {}\n", secret.display())).unwrap();

@@ -7,11 +7,15 @@
 //!   takes, each asked of the binary itself: `<flag> --help <no such flag>`
 //!   is refused naming the flag where the parser does not know it, prints
 //!   the help and exits 0 where it is a switch, and is refused at the flag
-//!   after `--help` where the flag took `--help` for its value. A flag the
-//!   crate's sources name that no help shows fails the test.
+//!   after `--help` where the flag took `--help` for its value. Each probe
+//!   runs in an empty directory of its own, which it must leave empty, and
+//!   its answer must carry no system error: a binary reads its whole line,
+//!   and refuses it, before it makes, opens or reads anything a flag names.
+//!   A flag the crate's sources name that no help shows fails the test.
 //! - The exit codes are the binary's `exit::Code`s with their meanings; a
-//!   source of the crate that exits other than through `exit::now`, or
-//!   names a code the list leaves out, fails the test.
+//!   source of the crate with another way out of the process
+//!   ([`other_exits`]), or naming a code the list leaves out, fails the
+//!   test.
 //! - The metrics are the families scrapes show, each with its type and every
 //!   label one of its samples carries; a family with no sample, whose labels
 //!   no scrape shows, fails the test.
@@ -38,6 +42,25 @@ const NO_SUCH: &str = "--fennec-api-golden-no-such-flag";
 /// The longest a probe or a server's start may take: they answer in
 /// milliseconds, so only a hang meets it.
 const WITHIN: Duration = Duration::from_secs(60);
+
+/// A directory of a test's own, removed when the guard goes -- a failed
+/// assertion's unwinding too, which left it in the temporary directory.
+pub struct Scratch(pub PathBuf);
+
+impl Scratch {
+    /// `dir`, made empty.
+    pub fn new(dir: PathBuf) -> Scratch {
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+        Scratch(dir)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 /// The committed dumps.
 pub fn golden() -> PathBuf {
@@ -299,7 +322,8 @@ fn literals_of(src: &str) -> Vec<String> {
         } else if b[i] == b'\'' {
             // A char literal ('"', '\'', '\u{..}') or a lifetime ('a).
             if b.get(i + 1) == Some(&b'\\') {
-                i = src[i + 2..].find('\'').map_or(n, |j| i + 2 + j + 1);
+                // Past the escaped character, which may be a quote: `'\''`.
+                i = (src.get(i + 3..).and_then(|r| r.find('\''))).map_or(n, |j| i + 3 + j + 1);
             } else if b.get(i + 2) == Some(&b'\'') {
                 i += 3;
             } else {
@@ -529,13 +553,16 @@ pub enum Takes {
 /// Asks `exe prefix flag --help <no such flag>` what `flag` is to the
 /// command: not one (None), a switch, or a flag taking a value. A refusal
 /// is the binary's `refused` code, which the probe holds it to. Run in
-/// `cwd`, a directory of the test's own: a flag may act on its value as it
-/// is read (the router's `--audit` opens its file), and there makes a file
-/// named `--help`.
+/// `cwd`, an empty directory of the probe's own, which it must leave
+/// empty, and answered with no system error: a binary that acted on a
+/// flag's value as it read it -- the router's `--audit` made a file named
+/// `--help`, `--tls-ca` read one -- before the flag after it was refused
+/// would run, not answer, a probe.
 pub fn probe(exe: &Path, prefix: &[&str], flag: &str, refused: i32, cwd: &Path) -> Option<Takes> {
     let mut args = prefix.to_vec();
     args.extend([flag, "--help", NO_SUCH]);
     let (code, out) = run(exe, &args, cwd);
+    touched_nothing(&args, cwd, &out);
     let unknown = |f: &str| {
         out.lines().any(|l| {
             l.split_once("unknown option").is_some_and(|(_, rest)| {
@@ -561,12 +588,35 @@ pub fn probe(exe: &Path, prefix: &[&str], flag: &str, refused: i32, cwd: &Path) 
     Some(Takes::Value)
 }
 
-/// `exe prefix --help`: its text, held to exit 0.
+/// Holds a probe run in `cwd`, which was empty, to what it left there and
+/// what it answered, `out`: nothing made, and no error of the system's
+/// (`(os error 2)`, a file named `--help` read), since a probe's line is
+/// refused before anything a flag names is touched.
+pub fn touched_nothing(args: &[&str], cwd: &Path, out: &str) {
+    let left: Vec<String> = std::fs::read_dir(cwd)
+        .unwrap_or_else(|e| panic!("{}: {e}", cwd.display()))
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        left.is_empty(),
+        "{args:?} made {left:?} in its empty directory: a binary reads its whole line, and \
+         refuses it, before it makes anything a flag names\n{out}"
+    );
+    assert!(
+        !out.contains("(os error"),
+        "{args:?} met the system over what a flag named before its line was read whole and \
+         refused:\n{out}"
+    );
+}
+
+/// `exe prefix --help`: its text, held to exit 0, in `cwd`, which was empty
+/// and stays so.
 pub fn help(exe: &Path, prefix: &[&str], cwd: &Path) -> String {
     let mut args = prefix.to_vec();
     args.push("--help");
     let (code, out) = run(exe, &args, cwd);
     assert_eq!(code, 0, "{args:?}:\n{out}");
+    touched_nothing(&args, cwd, &out);
     out
 }
 
@@ -588,12 +638,15 @@ fn subcommands(help: &str, name: &str) -> BTreeSet<String> {
 
 /// Every command of the binary `exe`, called `name` -- itself and each
 /// subcommand its helps name, found from help to help -- with each flag it
-/// takes. Each probe is a process of its own: they run eight at a time.
+/// takes. Each probe is a process of its own, in an empty directory of its
+/// own: they run eight at a time.
 pub fn commands(exe: &Path, name: &str, refused: i32) -> BTreeMap<String, BTreeMap<String, Takes>> {
-    let cwd = std::env::temp_dir().join(format!("fennec-api-golden-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&cwd);
-    std::fs::create_dir_all(&cwd).unwrap();
-    let cwd = cwd.as_path();
+    let scratch = Scratch::new(
+        std::env::temp_dir().join(format!("fennec-api-golden-{name}-{}", std::process::id())),
+    );
+    let helped = scratch.0.join("help");
+    std::fs::create_dir(&helped).unwrap();
+    let cwd = helped.as_path();
     let top = help(exe, &[], cwd);
     let mut helps = BTreeMap::from([(String::new(), top.clone())]);
     let mut todo: Vec<String> = subcommands(&top, name).into_iter().collect();
@@ -610,6 +663,7 @@ pub fn commands(exe: &Path, name: &str, refused: i32) -> BTreeMap<String, BTreeM
         helps.insert(sub, text);
     }
     let mut out = BTreeMap::new();
+    let mut probes = 0usize;
     for (sub, text) in &helps {
         let prefix: Vec<&str> = if sub.is_empty() {
             vec![]
@@ -626,7 +680,10 @@ pub fn commands(exe: &Path, name: &str, refused: i32) -> BTreeMap<String, BTreeM
                     .iter()
                     .map(|w| {
                         let prefix = &prefix;
-                        s.spawn(move || (w.clone(), probe(exe, prefix, w, refused, cwd)))
+                        probes += 1;
+                        let own = scratch.0.join(probes.to_string());
+                        std::fs::create_dir(&own).unwrap();
+                        s.spawn(move || (w.clone(), probe(exe, prefix, w, refused, &own)))
                     })
                     .collect();
                 asks.into_iter().map(|a| a.join().unwrap()).collect()
@@ -640,7 +697,6 @@ pub fn commands(exe: &Path, name: &str, refused: i32) -> BTreeMap<String, BTreeM
         };
         out.insert(line, flags);
     }
-    let _ = std::fs::remove_dir_all(cwd);
     out
 }
 
@@ -674,7 +730,8 @@ pub fn no_hidden_flags(src: &Path, commands: &BTreeMap<String, BTreeMap<String, 
 }
 
 /// Holds the crate's sources to the codes `listed` (each code's variant
-/// name): no exit but `exit.rs`'s, and no `Code::` the list leaves out.
+/// name): no way out of the process but `exit.rs`'s ([`other_exits`]), and
+/// no `Code::` the list leaves out.
 pub fn exits_held(src: &Path, listed: &[String]) {
     let mut files = Vec::new();
     rust_files(src, &mut files);
@@ -683,10 +740,13 @@ pub fn exits_held(src: &Path, listed: &[String]) {
             continue;
         }
         let text = std::fs::read_to_string(&path).unwrap();
+        let ways = other_exits(&text);
         assert!(
-            !text.contains("process::exit("),
-            "{} exits other than through exit::now: give it a Code",
-            path.display()
+            ways.is_empty(),
+            "{} has a way out of the process other than exit::now -- {} -- which decides its \
+             code where the dump does not see it: hand exit::now a Code",
+            path.display(),
+            ways.join("; ")
         );
         for (_, rest) in text
             .match_indices("Code::")
@@ -708,6 +768,123 @@ pub fn exits_held(src: &Path, listed: &[String]) {
             }
         }
     }
+}
+
+/// The ways out of the process the source `src` takes other than
+/// `exit::now`, each named: `std::process::exit` or `abort`, by its path or
+/// by a name a `use` gave it (`use std::process::{self, exit}`, `use
+/// std::process as p`), an `ExitCode`, and the binary's `main()` returning
+/// a value -- an `Err` from one exits 1 with no `Code`. Comments and
+/// literals are not code: a message naming `process::exit` is none.
+pub fn other_exits(src: &str) -> Vec<&'static str> {
+    let code = code_of(src);
+    let mut out = Vec::new();
+    for (word, way) in [
+        ("process::exit", "std::process::exit"),
+        ("process::abort", "std::process::abort"),
+        ("ExitCode", "an ExitCode"),
+    ] {
+        if !at_words(&code, word).is_empty() {
+            out.push(way);
+        }
+    }
+    for at in at_words(&code, "use") {
+        let stmt = code[at..].split(';').next().unwrap_or("");
+        let words: Vec<&str> = stmt
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|w| !w.is_empty())
+            .collect();
+        let after_process = |w: &str| words.windows(2).any(|p| p[0] == "process" && p[1] == w);
+        if words.contains(&"process") && (words.contains(&"exit") || words.contains(&"abort")) {
+            out.push("std::process's exit or abort taken in by a use");
+        } else if after_process("as") {
+            out.push("std::process renamed by a use");
+        }
+    }
+    for at in at_words(&code, "fn") {
+        let rest = code[at + 2..].trim_start();
+        let Some(params) = rest.strip_prefix("main") else {
+            continue;
+        };
+        // The binary's, which takes no arguments: a subcommand's `main(args)`
+        // hands its `Code` to the binary's.
+        let Some(after) = params.trim_start().strip_prefix('(') else {
+            continue;
+        };
+        let Some(after) = after.trim_start().strip_prefix(')') else {
+            continue;
+        };
+        if after.split('{').next().unwrap_or("").contains("->") {
+            out.push("a main returning a value");
+        }
+    }
+    out
+}
+
+/// Where `word` stands in `code` as a whole: neither end inside a longer
+/// name.
+fn at_words(code: &str, word: &str) -> Vec<usize> {
+    let ident = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+    code.match_indices(word)
+        .map(|(i, _)| i)
+        .filter(|&i| {
+            !ident(code[..i].chars().next_back()) && !ident(code[i + word.len()..].chars().next())
+        })
+        .collect()
+}
+
+/// `src` with its comments and its string and char literals blanked, line
+/// breaks kept.
+fn code_of(src: &str) -> String {
+    let b = src.as_bytes();
+    let (mut out, mut i) = (String::with_capacity(src.len()), 0);
+    let blank = |out: &mut String, s: &str| {
+        out.extend(s.chars().map(|c| if c == '\n' { '\n' } else { ' ' }));
+    };
+    while i < b.len() {
+        let end = if b[i..].starts_with(b"//") {
+            src[i..].find('\n').map_or(b.len(), |j| i + j)
+        } else if b[i..].starts_with(b"/*") {
+            src[i + 2..].find("*/").map_or(b.len(), |j| i + 2 + j + 2)
+        } else if b[i] == b'r'
+            && (i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_'))
+            && matches!(b.get(i + 1), Some(b'"' | b'#'))
+            && b[i + 1..].iter().find(|&&c| c != b'#') == Some(&b'"')
+        {
+            let hashes = b[i + 1..].iter().take_while(|&&c| c == b'#').count();
+            let close = format!("\"{}", "#".repeat(hashes));
+            let open = i + 1 + hashes;
+            src[open + 1..]
+                .find(&close)
+                .map_or(b.len(), |j| open + 1 + j + close.len())
+        } else if b[i] == b'"' {
+            let mut j = i + 1;
+            while j < b.len() && b[j] != b'"' {
+                j += if b[j] == b'\\' { 2 } else { 1 };
+            }
+            (j + 1).min(b.len())
+        } else if b[i] == b'\'' {
+            // A char literal ('"', '\'', 'é') or a lifetime ('a).
+            let c = src[i + 1..].chars().next().map_or(0, char::len_utf8);
+            // Its closing quote after the escaped character, which may be
+            // one: `'\''`.
+            if b.get(i + 1) == Some(&b'\\') {
+                (src.get(i + 3..).and_then(|r| r.find('\''))).map_or(b.len(), |j| i + 3 + j + 1)
+            } else if b.get(i + 1 + c) == Some(&b'\'') {
+                i + 2 + c
+            } else {
+                i + 1
+            }
+        } else {
+            let c = src[i..].chars().next().unwrap();
+            out.push(c);
+            i += c.len_utf8();
+            continue;
+        };
+        blank(&mut out, &src[i..end]);
+        i = end;
+    }
+    out
 }
 
 /// The CLI dump of a binary: its commands' flags and its exit codes (code,
@@ -742,10 +919,19 @@ pub fn cli_json(
     ])))
 }
 
+/// The commands of a binary, each with its flags.
+pub type Commands = BTreeMap<String, BTreeMap<String, Takes>>;
+
 /// Everything [`commands`], [`no_hidden_flags`] and [`exits_held`] hold of
-/// the binary `exe`, called `name`, whose crate's sources are `src`, as its
-/// dump; `codes` are its `Code::ALL` (code, meaning, variant name).
-pub fn cli(exe: &Path, name: &str, src: &Path, codes: &[(i32, &str, String)]) -> String {
+/// the binary `exe`, called `name`, whose crate's sources are `src`: its
+/// commands, and its dump; `codes` are its `Code::ALL` (code, meaning,
+/// variant name).
+pub fn cli(
+    exe: &Path,
+    name: &str,
+    src: &Path,
+    codes: &[(i32, &str, String)],
+) -> (Commands, String) {
     let refused = codes
         .iter()
         .find(|(_, _, v)| v == "Refused")
@@ -758,7 +944,8 @@ pub fn cli(exe: &Path, name: &str, src: &Path, codes: &[(i32, &str, String)]) ->
         &codes.iter().map(|(_, _, v)| v.clone()).collect::<Vec<_>>(),
     );
     let codes: Vec<(i32, &str)> = codes.iter().map(|(c, m, _)| (*c, *m)).collect();
-    cli_json(&commands, &codes)
+    let json = cli_json(&commands, &codes);
+    (commands, json)
 }
 
 // ------------------------------------------------------------ metrics

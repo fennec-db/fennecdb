@@ -27,13 +27,13 @@ impl Code {
                  signal ends it by the system's default, with no code of its own"
             }
             Code::Failed => {
-                "the directory is another process's (its lock is held), or the listener failed \
-                 while serving"
+                "the directory or its global copy is another process's (its lock is held), or the \
+                 listener failed while serving"
             }
             Code::Refused => {
                 "refused at the start: a flag, its value or what they configure, the directory or \
-                 its global copy that could not be opened or read, the address that could not be \
-                 had, or a thread the start could not make"
+                 its global copy, or its lock file, that could not be opened, made or read, the \
+                 address that could not be had, or a thread the start could not make"
             }
         }
     }

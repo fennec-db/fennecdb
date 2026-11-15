@@ -121,7 +121,8 @@ Backup
   fennec restore <dir> <out> [--to <time>]   the database as it stood then
   fennec prune <dir> --keep <7d>             let go of what no restore since then needs
   fennec verify <dir>                        what the archive can restore, read as a restore would
-                                         for details: fennec backup --help
+  fennec key <key-file>                      a new key, to seal an archive or a backup with
+                                         for details: fennec <command> --help
 "#;
 #[cfg(not(feature = "backup"))]
 const BACKUP_HELP: &str = "";
@@ -214,9 +215,17 @@ fn main() {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            // Refused with no text, as every flag wanting a value is:
+            // `fennec -c` took none and opened the interactive shell.
             "-c" | "--command" => {
                 i += 1;
-                command = args.get(i).cloned();
+                match args.get(i) {
+                    Some(text) => command = Some(text.clone()),
+                    None => {
+                        eprintln!("{} expects a statement", args[i - 1]);
+                        exit::now(Code::Refused);
+                    }
+                }
             }
             "--read-only" => read_only = true,
             "-h" | "--help" => {

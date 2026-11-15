@@ -470,11 +470,27 @@ fn scheduler(stop: fn()) {
 fn looking() {
     loop {
         for w in due() {
+            #[cfg(debug_assertions)]
+            debug_fault();
             if let Some(db) = w.db.upgrade() {
                 w.woken.store(false, Ordering::Release);
                 look(&w, &db, now_ms(), true, None);
             }
         }
+    }
+}
+
+/// A debug build's fault -- `cargo test`'s binaries; a release compiles
+/// none: with `FENNEC_TEST_SCHEDULER_PANIC` set, the scheduler's thread
+/// panics outside any run as a database comes due, a file's or a node's
+/// tenant's. No failure a release can meet ends that thread on demand, and
+/// fennec-server's `tests/scheduled.rs` stops a real server's scheduler
+/// with this to hold the server's exit to 1 (`durability::stop_failed`):
+/// the unit tests here see `stop` called, never the code it exits with.
+#[cfg(debug_assertions)]
+pub(crate) fn debug_fault() {
+    if std::env::var_os("FENNEC_TEST_SCHEDULER_PANIC").is_some() {
+        panic!("FENNEC_TEST_SCHEDULER_PANIC is set");
     }
 }
 

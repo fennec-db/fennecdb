@@ -6,8 +6,9 @@
 //! writes runs none, saying how many it holds unrun; and a tenant node
 //! learns which of its tenants hold one and runs them.
 
-use crate::support::{command, ended, start, tmp};
+use crate::support::{command, ended, own_group, start, tmp};
 use std::path::Path;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const HOUR: i64 = 3_600_000;
@@ -236,4 +237,44 @@ fn a_read_only_node_says_what_it_holds_unrun() {
     assert!(!dir.join("schedules.hint").exists());
     assert_eq!(ran(&dir.join("acme.fennec")), (0, None));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A failure of the scheduler -- its thread ended by a panic outside any
+/// run, a debug build's fault (`FENNEC_TEST_SCHEDULER_PANIC`) -- stops the
+/// server through its one shutdown with 1 (`durability::stop_failed`), a
+/// file's server and a node alike: waited on, the process's own end, the
+/// bound only for a hang.
+#[test]
+fn a_scheduler_s_failure_ends_the_server_with_1() {
+    let file = ticking("fault");
+    let dir = node_dir("fault");
+    for args in [
+        vec!["--file", file.to_str().unwrap(), "--http", "127.0.0.1:0"],
+        vec![
+            "--dir",
+            dir.to_str().unwrap(),
+            "--admin-token",
+            "adm",
+            "--http",
+            "127.0.0.1:0",
+        ],
+    ] {
+        let child = own_group(&mut Command::new(env!("CARGO_BIN_EXE_fennec-server")))
+            .args(&args)
+            .env("FENNEC_TEST_SCHEDULER_PANIC", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("could not start fennec-server");
+        let (code, log) = ended(child, Duration::from_secs(60));
+        assert_eq!(code, 1, "{args:?}:\n{log}");
+        assert!(
+            log.contains("the scheduler stopped (FENNEC_TEST_SCHEDULER_PANIC is set)"),
+            "{args:?}:\n{log}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&file);
+    let _ = std::fs::remove_file(file.with_extension("fennec.lock"));
 }

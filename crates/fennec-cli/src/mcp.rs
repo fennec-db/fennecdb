@@ -56,6 +56,9 @@ pub fn main(args: &[String]) -> Code {
         ..mcp::Options::default()
     };
     let mut local_flag: Option<&str> = None;
+    // Read once the line is: as it was read, `--tls-ca --help <no such
+    // flag>` read a file named `--help` before the flag after it was refused.
+    let mut tls_ca: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         let flag = args[i].as_str();
@@ -70,16 +73,7 @@ pub fn main(args: &[String]) -> Code {
             }
             "--file" => value().map(|v| file = Some(v)).is_some(),
             "--url" => value().map(|v| url = Some(v)).is_some(),
-            "--tls-ca" => match value() {
-                Some(v) => match fennec_http::dial::trust_ca(&v) {
-                    Ok(()) => true,
-                    Err(e) => {
-                        eprintln!("fennec mcp: {e}");
-                        return Code::Refused;
-                    }
-                },
-                None => false,
-            },
+            "--tls-ca" => value().map(|v| tls_ca = Some(v)).is_some(),
             "--token-env" => value().map(|v| token_env = v).is_some(),
             "--read-only" => {
                 read_only = true;
@@ -127,6 +121,12 @@ pub fn main(args: &[String]) -> Code {
             && m.chars().all(|c| c.is_alphanumeric() || c == '_');
         if !ok {
             eprintln!("fennec mcp: --memory names a collection, and `{m}` is not a name");
+            return Code::Refused;
+        }
+    }
+    if let Some(pem) = &tls_ca {
+        if let Err(e) = fennec_http::dial::trust_ca(pem) {
+            eprintln!("fennec mcp: {e}");
             return Code::Refused;
         }
     }

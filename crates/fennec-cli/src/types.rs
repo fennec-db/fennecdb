@@ -116,16 +116,33 @@ pub fn main(args: &[String]) -> Code {
         eprintln!("{USAGE}");
         return Code::Refused;
     };
+    // The forms refused with the line, before the file is read: read
+    // first, a missing file was the answer to two forms at once.
+    if [tables, fennecql, lang.is_some()]
+        .iter()
+        .filter(|f| **f)
+        .count()
+        > 1
+    {
+        return fail("one of --schema, --fennecql and --lang");
+    }
 
+    // A file that cannot be read or parsed, and an `-o` that cannot be
+    // written, are the work failing (1), as the shell's file that cannot
+    // be opened is, or an import's source: 2 is a line refused before
+    // anything ran.
     let file = match read(path) {
         Ok(f) => f,
-        Err(e) => return fail(&e),
+        Err(e) => {
+            eprintln!("{e}");
+            return Code::Failed;
+        }
     };
     let schemas = &file.schemas;
     let src = match (tables, fennecql, lang) {
-        (true, false, None) => render_tables(path, import, schemas),
-        (false, true, None) => render_fennecql(path, schemas),
-        (false, false, Some(lang)) => {
+        (true, _, _) => render_tables(path, import, schemas),
+        (_, true, _) => render_fennecql(path, schemas),
+        (_, _, Some(lang)) => {
             let default = match lang {
                 crate::langs::Lang::Go | crate::langs::Lang::Kotlin => "fennecschema",
                 _ => "FennecSchema",
@@ -133,7 +150,6 @@ pub fn main(args: &[String]) -> Code {
             crate::langs::render(lang, path, if named { name } else { default }, &file)
         }
         (false, false, None) => render(path, name, &file),
-        _ => return fail("one of --schema, --fennecql and --lang"),
     };
     match out {
         Some(p) => match std::fs::write(p, &src) {
@@ -143,7 +159,10 @@ pub fn main(args: &[String]) -> Code {
                 }
                 _ => eprintln!("{p}  {} collections", schemas.len()),
             },
-            Err(e) => return fail(&format!("could not write {p}: {e}")),
+            Err(e) => {
+                eprintln!("could not write {p}: {e}");
+                return Code::Failed;
+            }
         },
         None => print!("{src}"),
     }
@@ -1329,5 +1348,33 @@ mod tests {
         );
         // A parameter is required unless it has a default.
         assert!(typed[0].args[0].required);
+    }
+
+    /// 2 is a line refused before anything ran -- no file, two forms at
+    /// once, a missing file among them -- and 1 the work failing: a file
+    /// that cannot be read or parsed, an `-o` that cannot be written, as
+    /// the shell's file that cannot be opened is 1.
+    #[test]
+    fn a_refused_line_is_2_and_a_failed_read_or_write_1() {
+        let scratch = Scratch::new("codes");
+        let at = |name: &str| scratch.0.join(name).to_string_lossy().into_owned();
+        let types = |args: &[&str]| main(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+        std::fs::write(at("good.fennecql"), "create collection notes (body text)\n").unwrap();
+        std::fs::write(at("bad.fennecql"), "create collection notes (body\n").unwrap();
+        assert_eq!(types(&[]), Code::Refused);
+        assert_eq!(types(&["--out"]), Code::Refused);
+        assert_eq!(
+            types(&["--schema", "--fennecql", &at("missing.fennec")]),
+            Code::Refused,
+            "two forms are refused before the file is read"
+        );
+        assert_eq!(types(&[&at("missing.fennecql")]), Code::Failed);
+        assert_eq!(types(&[&at("missing.fennec")]), Code::Failed);
+        assert_eq!(types(&[&at("bad.fennecql")]), Code::Failed);
+        let out = at("no-such-dir/schema.d.ts");
+        assert_eq!(types(&[&at("good.fennecql"), "-o", &out]), Code::Failed);
+        let out = at("schema.d.ts");
+        assert_eq!(types(&[&at("good.fennecql"), "-o", &out]), Code::Ok);
+        assert!(std::fs::read_to_string(&out).unwrap().contains("notes"));
     }
 }

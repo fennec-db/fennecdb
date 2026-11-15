@@ -101,7 +101,9 @@ pub fn main(args: &[String]) -> Code {
             "--table" | "-t" => table = Some(next(&mut i, "--table")),
             "--into" => into = Some(next(&mut i, "--into")),
             "--file" | "-f" => file = Some(next(&mut i, "--file")),
-            flag @ ("--where" | "--vector" | "--index" | "--cast" | "--id" | "--batch") => {
+            // fennec-import's list, which fennec-server takes as
+            // `--follow-<name>`: the dump test holds each to this help.
+            flag if args::OPTIONS.contains(&flag) => {
                 let v = next(&mut i, flag);
                 if let Some(Err(e)) = args::option(&mut opts, flag, &v) {
                     fail(&e);
