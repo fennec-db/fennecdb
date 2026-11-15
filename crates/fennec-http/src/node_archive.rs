@@ -33,6 +33,12 @@
 //! <root>/<tenant>/presence       `gone <ms>` and `back <ms>`, by the node's clock
 //! <root>/<tenant>.<hex>/         a line moved aside, its history's id
 //! ```
+//!
+//! Sealed, every file of a line names its tenant, `began` is held to what
+//! its images say and `presence` is sealed too: a line copied over
+//! another's, or either file edited, is refused by name ([`Line::archive`],
+//! `Archive::held`), never read as another tenant's or a choice it did not
+//! make.
 
 use crate::archive::{Archive, Parent, Took, Writer};
 use crate::replication::{self, read_head, read_message, u64_at, Upstream, MESSAGE};

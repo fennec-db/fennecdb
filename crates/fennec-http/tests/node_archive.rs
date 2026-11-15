@@ -1531,7 +1531,9 @@ fn a_tenants_archive_copied_over_anothers_is_refused() {
 /// `began`, which an edit made later than a moment so the tenant was
 /// passed over as not yet archived. Sealed, the presence is sealed too and
 /// a plain one is refused, and `began` is held to what the images say --
-/// its edit refused, its loss nothing, the images saying it still.
+/// its edit refused, its loss nothing, the images saying it still -- and
+/// the images' heads to their first frames' tags, every head edited with it
+/// refused too.
 #[test]
 fn presence_and_began_edited_are_refused() {
     use fennec_http::seal::Key;
@@ -1571,6 +1573,33 @@ fn presence_and_began_edited_are_refused() {
         ),
         "with no began, the images say when it began"
     );
+
+    // Every image's head edited to say the archive began later, and `began`
+    // with them: a head is read before its file is opened, and vouched for
+    // by its first frame's tag, which refuses it.
+    let later = now + 86_400_000;
+    let mut images = Vec::new();
+    for e in std::fs::read_dir(root.join("acme")).unwrap() {
+        let p = e.unwrap().path();
+        if p.extension().is_some_and(|x| x == "fennec") {
+            let bytes = std::fs::read(&p).unwrap();
+            let mut edited = bytes.clone();
+            // The magic, the id, the role, the archive, the change, the time.
+            edited[57..65].copy_from_slice(&later.to_le_bytes());
+            std::fs::write(&p, edited).unwrap();
+            images.push((p, bytes));
+        }
+    }
+    assert!(!images.is_empty());
+    std::fs::write(root.join("acme/began"), format!("{later}\n")).unwrap();
+    match &all("heads", Target::Time(now))[0].1 {
+        Restoring::Failed(e) => assert!(e.contains("does not open"), "{e}"),
+        other => panic!("every image's head edited, and began: {other:?}"),
+    }
+    for (p, bytes) in images {
+        std::fs::write(p, bytes).unwrap();
+    }
+    std::fs::remove_file(root.join("acme/began")).unwrap();
 
     // A presence an archiver before this version left plain, in a line it
     // sealed nothing of in this version, reads as it did, and the next

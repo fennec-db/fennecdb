@@ -212,6 +212,10 @@ struct Identity {
     archive: [u8; 16],
     tenant: String,
     began: Option<u64>,
+    /// The image `began` was read from, until its first frame vouched for
+    /// it (`Archive::began_of`): `None` once it has, or where this process
+    /// sealed it.
+    began_from: Option<PathBuf>,
 }
 
 /// Whose archive files of `tenant` are, in words.
@@ -645,11 +649,13 @@ impl Archive {
     /// when it began, read from their heads ([`seal::bound_in`]) once and
     /// kept. Refused where two disagree -- two archives' files in one
     /// directory, two tenants', two first images -- or where they name
-    /// another tenant than the one this is the line of. Nothing vouches for
-    /// a head until its file is opened, so each file read is held to this
-    /// once its frames open ([`Self::held`]): a head changed to agree opens
-    /// nothing. `None` where no file is sealed in this version: a plain
-    /// archive, one sealed before, or one not begun.
+    /// another tenant than the one this is the line of. The file the id and
+    /// tenant are taken from is vouched for by its first frame
+    /// ([`seal::vouched_in`]), and `began` by its image's once it is asked
+    /// for ([`Self::began_of`]); the other heads need only agree, each file
+    /// held to this once its frames open ([`Self::held`]): a head changed to
+    /// agree opens nothing. `None` where no file is sealed in this version: a
+    /// plain archive, one sealed before, or one not begun.
     fn learned(&self) -> io::Result<Option<Identity>> {
         let mut held = self.identity.lock().unwrap_or_else(|e| e.into_inner());
         if held.is_none() {
@@ -660,9 +666,9 @@ impl Archive {
 
     /// [`Self::learned`]'s reading of the files' heads.
     fn scan(&self) -> io::Result<Option<Identity>> {
-        if self.key.is_none() {
+        let Some(key) = &self.key else {
             return Ok(None);
-        }
+        };
         let mut names = Vec::new();
         for e in fs::read_dir(&self.dir)? {
             let name = e?.file_name().to_string_lossy().into_owned();
@@ -673,17 +679,35 @@ impl Archive {
         }
         names.sort_unstable();
         let mut found: Option<(Identity, PathBuf)> = None;
-        let mut began: Option<(u64, PathBuf)> = None;
+        // When the archive began, the image it was read from, and whether
+        // that image's first frame vouched for it here.
+        let mut began: Option<(u64, PathBuf, bool)> = None;
         for name in names {
             let path = self.dir.join(&name);
-            let mut head = Vec::with_capacity(seal::HEAD_MAX);
+            // A head is read before its file is opened, and anyone who can
+            // write the file can change it: the one the archive's id and
+            // tenant are taken from is vouched for by its first frame, a
+            // segment's few bytes as a rule, the history's or an image's
+            // mebibyte at most. The others need only agree with it.
+            let vouch = found.is_none();
+            let most = if vouch {
+                seal::FIRST_MAX
+            } else {
+                seal::HEAD_MAX
+            };
+            let mut head = Vec::new();
             match File::open(&path) {
-                Ok(f) => f.take(seal::HEAD_MAX as u64).read_to_end(&mut head)?,
+                Ok(f) => f.take(most as u64).read_to_end(&mut head)?,
                 // Let go of meanwhile, by `prune` or a round.
                 Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
                 Err(e) => return Err(e),
             };
-            let Some(b) = seal::bound_in(&head) else {
+            let bound = match vouch {
+                true => seal::vouched_in(key, &head)
+                    .map_err(|e| corrupt(format!("{}: {e}", path.display())))?,
+                false => seal::bound_in(&head),
+            };
+            let Some(b) = bound else {
                 continue;
             };
             let two = |what: &str, p: &Path| {
@@ -695,14 +719,14 @@ impl Archive {
             };
             if b.role == Role::Image {
                 match &began {
-                    Some((t, p)) if *t != b.began => {
+                    Some((t, p, _)) if *t != b.began => {
                         return Err(two(
                             &format!("images of archives begun at {t} and {}", b.began),
                             p,
                         ))
                     }
                     Some(_) => {}
-                    None => began = Some((b.began, path.clone())),
+                    None => began = Some((b.began, path.clone(), vouch)),
                 }
             }
             match &found {
@@ -728,6 +752,7 @@ impl Archive {
                         archive: b.archive,
                         tenant: b.tenant,
                         began: None,
+                        began_from: None,
                     };
                     found = Some((id, path.clone()));
                 }
@@ -743,8 +768,53 @@ impl Archive {
                 whose(&id.tenant)
             )));
         }
-        id.began = began.map(|b| b.0);
+        if let Some((t, from, vouched)) = began {
+            id.began = Some(t);
+            id.began_from = (!vouched).then_some(from);
+        }
         Ok(Some(id))
+    }
+
+    /// `id`'s `began`, vouched for by the first frame of the image it was
+    /// read from once ([`seal::vouched_in`]): every image of a line says it
+    /// in its head, which anyone who can write the files can change, and
+    /// those heads edited with the plain `began` chose another line for a
+    /// restore to a moment, or passed the tenant over as not yet archived,
+    /// and sealed the archive's next images so. An image let go of
+    /// meanwhile -- by `prune` -- is looked for again.
+    fn began_of(&self, id: Identity) -> io::Result<Option<u64>> {
+        let (Some(began), Some(from), Some(key)) = (id.began, &id.began_from, &self.key) else {
+            return Ok(id.began);
+        };
+        let mut bytes = Vec::new();
+        match File::open(from) {
+            Ok(f) => f.take(seal::FIRST_MAX as u64).read_to_end(&mut bytes)?,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                *self.identity.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                return match self.learned()? {
+                    Some(again) if again.began_from.as_ref() != Some(from) => self.began_of(again),
+                    _ => Err(e),
+                };
+            }
+            Err(e) => return Err(e),
+        };
+        let vouched = seal::vouched_in(key, &bytes)
+            .map_err(|e| corrupt(format!("{}: {e}", from.display())))?;
+        if vouched.map(|b| (b.role, b.began)) != Some((Role::Image, began)) {
+            return Err(corrupt(format!(
+                "{}: an image whose head its first frame does not vouch for",
+                from.display()
+            )));
+        }
+        if let Some(held) = self
+            .identity
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            held.began_from = None;
+        }
+        Ok(Some(began))
     }
 
     /// What a file of `role` sealed into this archive now is bound to: the
@@ -768,14 +838,17 @@ impl Archive {
                         archive,
                         tenant: self.tenant.clone().unwrap_or_default(),
                         began: None,
+                        began_from: None,
                     });
                 }
                 held.clone().expect("made above")
             }
         };
-        let began = match (role, id.began) {
-            (Role::Image, Some(b)) => b,
-            (Role::Image, None) => self.began_unsealed()?.unwrap_or(time),
+        let began = match role {
+            Role::Image => match self.began_of(id.clone())? {
+                Some(b) => b,
+                None => self.began_unsealed()?.unwrap_or(time),
+            },
             _ => 0,
         };
         Ok(Binding {
@@ -1028,7 +1101,11 @@ impl Archive {
             Err(e) if e.kind() == io::ErrorKind::NotFound => None,
             Err(e) => return Err(e),
         };
-        if let Some(began) = self.learned()?.and_then(|id| id.began) {
+        let sealed = match self.learned()? {
+            Some(id) => self.began_of(id)?,
+            None => None,
+        };
+        if let Some(began) = sealed {
             if let Some(t) = plain.filter(|t| t.trim().parse::<u64>().ok() != Some(began)) {
                 return Err(corrupt(format!(
                     "{}: says {:?}, where the archive's sealed images say it began at {began}",

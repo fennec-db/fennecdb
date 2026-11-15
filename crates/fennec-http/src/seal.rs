@@ -444,6 +444,53 @@ pub fn bound_in(bytes: &[u8]) -> Option<Binding> {
 /// The bytes a version 3 head may take at most: what [`bound_in`] needs.
 pub const HEAD_MAX: usize = BOUND + TENANT;
 
+/// The bytes [`vouched_in`] reads at most: a head, and a first frame of a
+/// mebibyte.
+pub const FIRST_MAX: usize = HEAD_MAX + HEAD + FRAME + TAG;
+
+/// What a version 3 file's head says it is, vouched for by its first
+/// frame's tag, which covers the head: read from the file's first
+/// [`FIRST_MAX`] bytes, or all it has. A choice made from what a file is
+/// before it is read -- which archive a directory is, when it began -- is
+/// made from this, never from [`bound_in`]'s, which anyone who can write the
+/// file can change. `None` for an older version or a plain file, and for a
+/// head or a first frame cut short, which a crash leaves of a file just
+/// begun and which says nothing; refused where the first frame does not
+/// open.
+pub fn vouched_in(key: &Key, bytes: &[u8]) -> io::Result<Option<Binding>> {
+    if !bytes.starts_with(MAGIC) || cut_in_head(bytes) {
+        return Ok(None);
+    }
+    let (frames, binding, start) = head(key, bytes)?;
+    let Some(h) = bytes.get(start..start + HEAD) else {
+        return Ok(None);
+    };
+    // Zeros to the end: an append whose length reached the disk before its
+    // bytes, as `open_frames` reads them.
+    if h == [0; HEAD] && bytes[start..].iter().all(|&b| b == 0) {
+        return Ok(None);
+    }
+    let len = u32::from_le_bytes([h[0], h[1], h[2], h[3]]) as usize;
+    let end = len.checked_add(start + HEAD + TAG);
+    let Some(frame) = end.and_then(|end| bytes.get(start + HEAD..end)) else {
+        return Ok(None);
+    };
+    let nonce: [u8; 12] = h[4..].try_into().unwrap_or([0; 12]);
+    let tag: [u8; TAG] = frame[len..].try_into().unwrap_or([0; TAG]);
+    let mut plain = frame[..len].to_vec();
+    let mut aad = [0; AAD];
+    let opened = [false, true].into_iter().any(|l| {
+        let aad = frames.aad(l, &mut aad);
+        crypto::open_in_place(&frames.key, &nonce, aad, &mut plain, &tag)
+    });
+    if !opened {
+        return Err(corrupt(
+            "frame 0 does not open: another key, or bytes changed",
+        ));
+    }
+    Ok(binding)
+}
+
 /// The file `bytes`' head names: what its frames are sealed with, what it
 /// is (version 3), and where its frames begin; a version this binary seals
 /// none of refused by its number.
@@ -876,6 +923,46 @@ mod tests {
         assert_eq!(open(&k.0), None, "the key itself");
     }
 
+    /// A head read before its file is opened is vouched for by its first
+    /// frame alone: what it says once that frame opens, from the file's
+    /// start or the whole of it; refused where a byte of it changed or the
+    /// key is another; nothing where it or the frame is cut short, or the
+    /// file is of an older version or plain.
+    #[test]
+    fn a_head_is_vouched_for_by_its_first_frame() {
+        let k = key(8);
+        let sealed = seal_whole_by(&k, &image(), &[5u8; 300], 100).unwrap();
+        let start = START + "acme".len();
+        let first = &sealed[..start + HEAD + 100 + TAG];
+        assert_eq!(vouched_in(&k, first).unwrap(), Some(image()));
+        assert_eq!(vouched_in(&k, &sealed).unwrap(), Some(image()));
+        for byte in 0..start {
+            let mut changed = first.to_vec();
+            changed[byte] ^= 0x80;
+            match vouched_in(&k, &changed) {
+                // The name's length grown: its first frame read from
+                // further on, past the end of what was read.
+                Ok(None) if byte == START - 1 => {}
+                // The magic changed: no file of this version.
+                Ok(None) if byte < MAGIC.len() => {}
+                Ok(b) => panic!("byte {byte} of the head changed, vouched for: {b:?}"),
+                Err(_) => {}
+            }
+        }
+        assert!(vouched_in(&key(9), first).is_err(), "another key");
+        assert_eq!(vouched_in(&k, &sealed[..start + HEAD + 10]).unwrap(), None);
+        assert_eq!(vouched_in(&k, &sealed[..start - 1]).unwrap(), None);
+        let mut old = [&MAGIC_V2[..], &[1; ID]].concat();
+        let mut v2 = Frames {
+            key: k.0,
+            kind: Kind::V2([1; ID]),
+            index: 0,
+        };
+        v2.seal(true, b"x", &mut old).unwrap();
+        assert_eq!(vouched_in(&k, &old).unwrap(), None);
+        assert_eq!(vouched_in(&k, b"plain bytes").unwrap(), None);
+    }
+
     /// A frame holds a mebibyte at most, and its length is written as it
     /// is: one byte past refused, nothing appended. Driven at a frame's
     /// edge with a smaller one, a whole file goes out in as many frames as
@@ -981,11 +1068,12 @@ mod tests {
     /// runs past the file's end, it is a frame cut short there, which
     /// nothing tells from the one a crash leaves, and the file opens to the
     /// frame before it -- what whoever can write the file does by cutting
-    /// it. So with the magic's version set back to an older one: its frames
-    /// are read from where that version's begin, the first one's length past
-    /// the end, and the file opens holding nothing, as one cut after its head
-    /// does -- never a byte of what was sealed, which no older version's tag
-    /// opens. The archive's sealed test changed its segment's middle byte and
+    /// it. So with the magic's version set back to an older one, or the
+    /// tenant's name made longer: the first frame is read from further on,
+    /// its length past the end, and the file opens holding nothing, as one
+    /// cut after its head does -- never a byte of what was sealed, and its
+    /// head vouched for by no tag (a reader holds a file to its head only
+    /// once a frame opened). The archive's sealed test changed its segment's middle byte and
     /// looked for a refusal, which the third or fourth byte of a length did
     /// not give it.
     #[test]
@@ -1012,14 +1100,16 @@ mod tests {
                 // further, the bit one of its length, the length now
                 // past the end.
                 let Some(f) = starts.iter().rposition(|&s| s <= at) else {
-                    // The version set back to 2 or 1 reads the rest of the
-                    // head as a first frame's length, past the end: a file
-                    // of no frame, what cutting it after its head leaves.
+                    // The version set back to 2 or 1, or the name's length
+                    // grown, moves where the first frame is read from, its
+                    // length now past the end: a file of no frame, what
+                    // cutting it after its head leaves, its head vouched for
+                    // by no tag.
                     assert!(
-                        at == NAME.len() && o.plain.is_empty() && o.next.index() == 0,
+                        o.plain.is_empty() && o.next.index() == 0,
                         "bit {bit} of byte {at}, in the head: the file opened"
                     );
-                    assert!(changed[at] == 1 || changed[at] == 2);
+                    assert!(at == NAME.len() || at == START - 1, "{at}");
                     continue;
                 };
                 assert!(
