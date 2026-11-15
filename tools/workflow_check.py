@@ -1251,6 +1251,9 @@ WRITE_SCRIPTS = {
     " downloads",
     "tools/image-latest.sh": "moves ghcr.io's `latest` with gh, docker's `buildx imagetools` and jq:"
     " it builds no image and runs none",
+    "tools/release-latest.sh": "reads the release list with gh and prints npm's dist-tag (`npm-tag`),"
+    " or moves GitHub's Latest with `gh release edit --latest` (`github`): it builds nothing and runs"
+    " nothing it reads",
 }
 
 # Actions a job holding a write may use, by their path (`owner/repo` and a

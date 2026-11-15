@@ -106,13 +106,25 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Against the branch the run was started on, which both jobs checked
+      # out: main for a release, release/1.N for a patch to an older minor
+      # (RELEASING.md, A security release), whose Package.swift is that
+      # branch's. The branch's name reaches gh in the environment, never
+      # spliced into the script; a run started on a tag has no branch to
+      # merge into, and stops.
       - name: Open the pull request naming its checksum
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
           SUM: ${{ needs.build.outputs.checksum }}
+          BASE: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
         run: |
           set -eu
+          if [ "$REF_TYPE" != branch ]; then
+            echo "::error::swift-binary.yml ran on the $REF_TYPE $BASE: start it on the branch the release is cut from (main, or release/1.N)"
+            exit 1
+          fi
           v="$VERSION"
           integrations/swift/set-binary.sh "$v" "$SUM"
           branch="swift-binary-v$v"
@@ -122,6 +134,6 @@ jobs:
           git commit -am "Package.swift: the XCFramework of v$v" \
             -m "Built by run ${{ github.run_id }}, which keeps the zip; release.yml attaches it to v$v."
           git push -f origin "$branch"
-          gh pr create --head "$branch" --title "Package.swift: the XCFramework of v$v" \
+          gh pr create --base "$BASE" --head "$branch" --title "Package.swift: the XCFramework of v$v" \
             --body "The checksum of the zip run ${{ github.run_id }} built. Merge, then tag the merge v$v (RELEASING.md)." \
             || echo "::notice::the branch $branch is pushed; open its pull request by hand where Actions may not"

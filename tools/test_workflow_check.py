@@ -363,6 +363,10 @@ class WritesAndBuilds(unittest.TestCase):
             make_it=1 echo "${#make_it}"
             [ -n "$(jq -r .digest m.json)" ] || exit 1
             workflow/tools/image-latest.sh "$IMAGE" "$TAG"
+            tag=$(workflow/tools/release-latest.sh npm-tag "$RELEASE_TAG")
+            npm publish "./pkg.tgz" --access public --provenance --ignore-scripts --tag "$tag"
+            workflow/tools/release-latest.sh github "$RELEASE_TAG"
+            gh pr create --base "$BASE" --head "$branch"
             sh integrations/studio-desktop/scripts/attach.sh "$RELEASE" dist/*
             "$GITHUB_WORKSPACE/integrations/swift/set-binary.sh" 1.0.0 "$SUM"
         """

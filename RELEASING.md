@@ -116,7 +116,9 @@ nothing reaches a registry before the notes have had a read.
    installs are run once more.
 4. Read the draft, then publish it, once step 3's run has passed
    `image (manifest)`, the job that makes the image's `X.Y.Z`:
-   `gh release edit vX.Y.Z --draft=false`.
+   `gh release edit vX.Y.Z --draft=false` (with `--latest=false` where
+   `X.Y.Z` is not the newest release: a patch to an older minor, [A
+   security release](#a-security-release)).
    `packages.yml` builds the three packages again, installs them where a user
    would and uses them (`integrations/packages.sh`), and only then publishes
    `fennecdb` to PyPI, `@fennecdb/web`, `@fennecdb/react`,
@@ -568,38 +570,51 @@ tag, a setting or a secret.
    whose `Package.swift` `release` is not the tag's version and wants a
    swift-binary run for it, and `make version` moves `release` but not the
    checksum: `gh workflow run swift-binary.yml --ref release/1.N -f
-   version=1.N.P`. Its pull request is opened with no `--base`, so it
-   targets `main`: retarget it, `gh pr edit <n> --base release/1.N`, and
-   merge it there (the workflow is not changed for this). Then the owner
+   version=1.N.P`. Its pull request is opened against the branch the run
+   was started on, `release/1.N`: merge it there. Then the owner
    tags the branch's commit (`git tag v1.N.P <commit>`, then `git push
    origin v1.N.P`) and `release.yml` drafts the release. A tag already
    pushed is built again by `gh workflow run release.yml --ref release/1.N
    -f tag=v1.N.P`. The power-cut checks of step 3 are read the same way,
    with `--ref release/1.N` where they say `--ref main`. Read the draft,
-   publish it, and `packages.yml` follows, as in steps 4 and 5 there: every
+   publish it, and `packages.yml` follows, as in steps 4 to 6 there: every
    channel of the table above -- PyPI, npm, NuGet, Maven Central, pub.dev,
    Homebrew, the `.deb` and `.rpm`, the image on ghcr.io, the Go module's
    tag, the Swift package's tag and zip, the install scripts (which read
-   the latest release) and the desktop app -- gets the patch; check each by
-   installing it.
+   the latest release, so a patch to an older minor reaches them only as
+   the newest minor's own) and the desktop app -- gets the patch; check
+   each by installing it.
 
-   **A minor that is not the newest must not be published yet.** The
-   pipeline has pointers that mean "the newest", and only one is guarded:
-   the Homebrew tap is never moved back (`packages.yml`'s `homebrew` job
-   skips a release older than the formula). The others would move to the
-   backport: a published release becomes GitHub's Latest, which
-   `site/install.sh` and `site/install.ps1` read; `release.yml` tags the
-   image `:latest` on every run; `packages.yml`'s `npm publish` has no
-   `--tag`, so npm's `latest` moves. Where a hand step exists today it is
-   `gh release edit v1.N.P --latest=false` (publish with `--draft=false
-   --latest=false`); the image's `:latest` and npm's dist-tag
-   (`npm dist-tag add <pkg>@<newest> latest`) have none in the workflows.
-   **Owed before the first backport to a non-newest minor:** `release.yml`
-   and `packages.yml` keep the image's `:latest`, npm's `latest` and the
-   GitHub Latest on the newest release, and swift-binary opens its pull
-   request against the branch it ran on. Tracked apart from this file; until
-   it lands, the previous minor's fix waits, or is released with those three
-   put back by hand at once. A patch to the newest minor has none of this.
+   **A patch to a minor that is not the newest** moves none of the
+   pointers that mean "the newest"; each is kept there by the pipeline,
+   by version order (`sort -V`), never by which release was published
+   last:
+   - GitHub's Latest, which `site/install.sh` and `site/install.ps1` read:
+     GitHub makes a release Latest as it is published, whatever its
+     version, so publish it with `gh release edit v1.N.P --draft=false
+     --latest=false` and Latest does not move. Published without it,
+     `packages.yml`'s `github-latest` (`tools/release-latest.sh github`)
+     puts Latest back on the newest release within the minute its run
+     takes, the installs in between taking the patch.
+   - The image's `latest`: `image-latest` (`tools/image-latest.sh`) moves it
+     only to the newest published release; `1.N.P` gets its own tag alone.
+   - npm's `latest`: `packages.yml`'s `npm` publishes `1.N.P` under the
+     dist-tag `release-1.N` (`npm install @fennecdb/web@release-1.N`), never
+     `latest`; a pre-release goes out under `next`. Not `v1.N`: npm refuses
+     a dist-tag that reads as a semver range. The tag is decided from the
+     release list as the job runs, and npm's trusted publishing cannot move
+     it after, so publish one release at a time, each once the previous
+     one's `packages.yml` run is done.
+   - The Homebrew tap is never moved back (`homebrew` skips a release older
+     than the formula).
+   - The rest have no pointer the pipeline sets: PyPI, NuGet, pub.dev and
+     Maven Central each name their newest by version order (a `pip
+     install`, a `dotnet add`, a `dart pub add` takes the highest; Central
+     writes `maven-metadata.xml`'s `<release>` as the highest version, and
+     `packages.yml` uploads none of its own), Go's proxy answers `@latest`
+     with the highest `integrations/go/v*` tag, SwiftPM resolves the
+     highest tag a requirement allows, and the `.deb` and `.rpm` are files
+     of the release, named by its version.
 6. **Disclose.** Publish the advisory (with the CVE) the same hour the
    release is published, as step 2 says, and put it in the release's notes with the first
    fixed version of each supported minor. Merge the private fork's changes

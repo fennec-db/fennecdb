@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-The install channels' and the workflows' invariants, for `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/windows-zip.sh`, `tools/windows-zip-check.ps1`, `tools/install-ps1-check.ps1`, `tools/linux-ffi.sh`, `tools/linux-ffi-check.sh`, `tools/image-check.sh`, `tools/image-latest.sh`, `site/install.sh`, `site/install.ps1`, the release workflows, and every workflow in `.github/workflows/` with `tools/workflow_check.py`, `tools/install-flutter.sh` and `.github/dependabot.yml`. The rules every change meets, and where every other area's are, are in the root's [CLAUDE.md](../CLAUDE.md).
+The install channels' and the workflows' invariants, for `tools/homebrew-formula.py`, `tools/linux-packages-check.sh`, `tools/windows-zip.sh`, `tools/windows-zip-check.ps1`, `tools/install-ps1-check.ps1`, `tools/linux-ffi.sh`, `tools/linux-ffi-check.sh`, `tools/image-check.sh`, `tools/image-latest.sh`, `tools/release-latest.sh`, `site/install.sh`, `site/install.ps1`, the release workflows, and every workflow in `.github/workflows/` with `tools/workflow_check.py`, `tools/install-flutter.sh` and `.github/dependabot.yml`. The rules every change meets, and where every other area's are, are in the root's [CLAUDE.md](../CLAUDE.md).
 
 ## Invariants
 
@@ -52,7 +52,13 @@ the release by its tag through the API, which answers a draft with a 404
 whatever the token (`gh release view` fails on one), and takes no error but
 that 404 and the registry's `not found` for an answer, failing on any
 other, as one finding no `<version>` fails saying so, never green
-(`tools/test_image_latest.py`, under dash); a new channel names what it
+(`tools/test_image_latest.py`, under dash). GitHub's Latest, which the
+install scripts read, is held there too: GitHub makes every release it
+publishes Latest, and `packages.yml`'s `github-latest` puts it back where a
+patch to an older minor took it; npm's `latest` names that release alone,
+an older minor's patch going out under `release-X.Y`, a pre-release under
+`next` (`tools/release-latest.sh`, the same `sort -V` and the same reading
+of errors, `tools/test_release_latest.py`, under dash). A new channel names what it
 installs by its checksum. Every file `release.yml` and `desktop.yml` attach,
 and the image's list by its digest, is attested as its run's build by the
 job that attaches it, before it is attached (`actions/attest-build-provenance`,
@@ -63,7 +69,7 @@ RELEASING.md's step 6 verifies every other asset and the image
 a checkout keeping no token (`binaries`, `windows`, `linux-ffi`, `wasm`,
 `android`, `linux-packages`, `image`): the crates' build scripts run there, and only
 the jobs that publish write (`publish`, `image-push`, `manifest`,
-`image-latest`).
+`image-latest`, `github-latest`).
 
 **[A workflow runs actions pinned by commit, and a job that writes builds
 nothing.](../docs/design/integrations.md#workflows)** Every `uses:` names a

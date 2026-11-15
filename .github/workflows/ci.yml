@@ -194,6 +194,11 @@ jobs:
       - name: tools/image-latest.sh moves latest to the newest published release alone
         run: python3 tools/test_image_latest.py
 
+      # packages.yml's hold of GitHub's Latest and its npm dist-tag, against
+      # a stand-in for gh: a patch to an older minor moves neither back.
+      - name: tools/release-latest.sh keeps GitHub's Latest and npm's latest on the newest release
+        run: python3 tools/test_release_latest.py
+
       # docs/design/fennecql.md#the-corpus: what the test job's corpus steps
       # harvest from each kind of file and the hand-written list, how a
       # reading is judged against another's -- word by word, a panic failing
@@ -2033,7 +2038,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: shellcheck
-        run: shellcheck --shell=sh site/install.sh site/test_install.sh tools/install-nfpm.sh tools/install-flutter.sh tools/linux-packages.sh tools/linux-packages-check.sh tools/windows-zip.sh tools/linux-ffi.sh tools/linux-ffi-check.sh tools/image-check.sh tools/image-latest.sh
+        run: shellcheck --shell=sh site/install.sh site/test_install.sh tools/install-nfpm.sh tools/install-flutter.sh tools/linux-packages.sh tools/linux-packages-check.sh tools/windows-zip.sh tools/linux-ffi.sh tools/linux-ffi-check.sh tools/image-check.sh tools/image-latest.sh tools/release-latest.sh
 
       - name: The installer, its checksum and its refusals
         run: sh site/test_install.sh
