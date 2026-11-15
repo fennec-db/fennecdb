@@ -86,11 +86,39 @@ never retried.
 `tools/ci_flakes.py -n 50` is the ledger: the failed jobs of the last 50
 completed `ci.yml` runs on main and in the merge queue, each with its failing
 step and whether a later commit fixed it (a pull request that passed again
-with changed files, a later push touching a source file the failing job's area
-owns or a pull request's branch updated; every conclusion but success, skipped
-and cancelled counts, a timeout too). A failure that
+with changed files, a later push or scheduled run touching a source file the
+failing job's area owns or a pull request's branch updated; every conclusion
+but success, skipped and cancelled counts, a timeout too). A failure that
 passed again with the same files is a flake and counts, whatever its cause.
 The 1.0 plan's budget is none without a fixing commit.
+
+**`ci.yml` runs on a pull request, in the merge queue, twice a day on main
+and on a push to main that moved a cache's key.** main moves only through the
+merge queue, and a merge group's head is the commit main then holds, so a run
+on every push tested it a second time (14 landings in 14 hours on 2026-11-14,
+three runs of about 28 jobs each, merge groups dropped at the queue's
+60-minute timeout behind the backlog; the account runs 20 jobs, 5 on macOS).
+A push to main starts the workflow only when an input of a cache changed, or
+`ci.yml`: a run on main is the only one whose caches other branches' runs
+restore (GitHub's caches are read from the run's own ref or the default
+branch's; a pull request's is its merge ref's, a merge group's its queue
+branch's). The caches and their inputs, each in `paths`: the 21 cargo `actions/cache`
+steps by `hashFiles('**/Cargo.lock', 'rust-toolchain.toml')` (the Unicode
+table's by its pinned version in the file); `setup-node`'s npm cache by the
+Grafana plugin's `package-lock.json`; `setup-go`'s by its `go.sum`, and
+`go.mod` for the Go version; the Flutter caches by the version pinned in
+`ci.yml`; `setup-gradle`'s key is the job and the commit, not a file's hash,
+and only main writes it, so the Gradle build files (`**/*.gradle`,
+`**/*.gradle.kts`, `**/gradle.properties`) are listed for what it holds, not
+for its key (no `gradle-wrapper.properties` or `libs.versions.toml` exists
+today: add either to `paths` when one does). The merge group's run is a
+commit's whole run; its jobs finish after it merges as long as nothing cancels
+them (observed on #651 and #652: they finished minutes after the merge). The `schedule` (04:17 and 16:17 UTC)
+is main's periodic whole run: the badge, runner and base images that drift,
+the ledger's view of main, and the backstop for an evicted cache (unused for 7
+days, the 10 GB limit). Jobs gated on the event: `test (macos x86_64,
+Rosetta)` runs on everything but a pull request, so on the schedule, and `size
+(browser module)` only on a pull request.
 
 Which `ci.yml` jobs are required checks is a repository setting (classic
 branch protection on main, not the merge queue's ruleset). As of
@@ -99,18 +127,42 @@ branch protection on main, not the merge queue's ruleset). As of
 the merge queue lands a group whose job that is not required is red. A check
 that must stop a merge is therefore a step of one of those three (the API
 check and the size check of the `CLAUDE.md` files are in `test`, the second
-also in `fmt` for the quick answer). A job given a path filter or an `if:`
-that skips it on some events cannot be required for the same reason: a
-skipped required check blocks a merge it should not (`size (browser
-module)` only runs on a pull request, so it never reports in the queue). A
-new job whose result must stop a merge needs adding to the setting, which
-is the owner's.
+also in `fmt` for the quick answer). A job skipped by an `if:` reports
+success and can be required; a whole workflow skipped by a path or branch
+filter reports nothing, its checks stay pending, and a required check of one
+blocks a merge it should not, so `ci.yml`'s `pull_request` and `merge_group`
+triggers take no filter (its `push` has a path filter, which no required
+check is read from). GitHub's "Troubleshooting required status checks" says
+both. A new job whose result must stop a merge needs adding to the setting,
+which is the owner's.
 
 The mobile jobs upload build products nothing downloads
 (`fennecdb-android`, `fennecdb-xcframework`) with `continue-on-error`: an
 upload that fails on GitHub's side does not fail a job whose tests passed
 (#590 and #591 lost merge-queue runs to one). The test-report uploads run
 only when a step failed, and no step retries a test.
+
+The Android job's Gradle takes what it can from setup-gradle's cache of the
+Gradle User Home, which only main's runs write: the plugins and
+dependencies, and the distributions its wrappers unpacked -- 8.10.2 for the
+Kotlin builds, through a wrapper the job writes with the runner's own Gradle
+(offline, the download held to Gradle's published sum), and 9.5.0 for the
+app `flutter create` makes. setup-gradle's `gradle-version: 8.10.2` had kept
+that distribution under a key of its own beside the entry, and asked
+services.gradle.org for its list of versions every run: of the job's 50
+runs on 2026-11-14, the 6 that restored main's Gradle User Home each
+downloaded 8.10.2 again. Its six failures on a fetch from 2026-11-08 to
+11-11 -- the Kotlin plugin from the plugin portal, and five times Gradle
+9.3.1 for the Flutter app from GitHub's releases, a 504 -- were each in a
+run that restored nothing, which is most runs: an entry written for a pull
+request or a merge group is read by no other run, and main's was gone within
+about an hour and a half, so each of main's four runs that day began
+empty. The repository's caches then stood at 10.3 GB against GitHub's 10,
+7 GB of it in two merge groups' entries, 3.6 GB of that the Flutter SDK for
+Linux and for macOS, which both mobile jobs cache on every ref that misses.
+A step after the builds, `What Gradle fetched`, names each distribution
+unpacked and each plugin fetched, and counts the artifacts written after the
+restore, so a run's log says whether the cache served it.
 
 ## Chrome
 
