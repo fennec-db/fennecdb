@@ -59,8 +59,16 @@ pub static TARGETS: &[Target] = &[
     Target {
         name: "sqlite",
         about: "fennec_import::sqlite: a SQLite file's schema found, its table's rows read and counted",
-        max_len: 64 << 10,
-        smoke: 80_000,
+        // Four pages of SQLite's largest, 64 KiB: page 1, a leaf and its
+        // overflow pages. At 64 KiB a file of such pages held page 1
+        // alone, and the reader's paths of large pages were never fuzzed.
+        max_len: 256 << 10,
+        // Each run writes its input as a file, now up to four times as
+        // long: 80 000 runs took 65 s on an M-series Mac where 64 KiB
+        // inputs took 36, run back to back. 45 000, about 37 s at that
+        // rate, hold its time and reach some 3 570 edges where the 64 KiB
+        // inputs' 80 000 reached 2 431.
+        smoke: 45_000,
         seeds: sqlite_seeds,
         dictionary: SQLITE_TOKENS,
         run: sqlite,
@@ -836,6 +844,30 @@ const SQLITE_TOKENS: &[&[u8]] = &[
     b" COLLATE NOCASE",
     b"\xc2\xa0",
     b"WITHOUT ROWID",
+    b" AS (a * 2) VIRTUAL",
+    b" GENERATED ALWAYS AS (a) STORED",
+    b" DEFAULT ",
+    b" PRIMARY KEY DESC",
+    b"\"\"",
+    b"-- ",
+    b"/* ",
+    b" */",
+    b"x'00ff'",
+];
+
+/// The tables the target opens: `t` and `u`, and those of the seeds SQLite
+/// wrote for `fennec-import`'s tests (`tests/sqlite-files/`), so their
+/// schemas are read and not only found.
+const SQLITE_TABLES: &[&str] = &[
+    "t",
+    "u",
+    "quotes",
+    "comments",
+    "empty",
+    "my (table",
+    "desc_pk",
+    "named_pk",
+    "Ünits",
 ];
 
 fn sqlite_seeds() -> Vec<Vec<u8>> {
@@ -848,9 +880,10 @@ fn sqlite(data: &[u8]) {
     if std::fs::write(&path, data).is_err() {
         return;
     }
-    for table in ["t", "u"] {
+    for &table in SQLITE_TABLES {
         if let Ok(mut r) = fennec_import::sqlite::Reader::open_sampled(&path, table, 16) {
             let _ = r.columns();
+            let _ = r.left_out();
             for _ in 0..100_000 {
                 match r.next_row() {
                     Ok(Some(_)) => {}
