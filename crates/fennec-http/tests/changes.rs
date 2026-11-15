@@ -1702,3 +1702,238 @@ fn a_pin_reaching_for_an_index_is_read_again_under_the_lock() {
         assert_eq!(count(&data, "puts"), 0, "{data}");
     }
 }
+
+// ------------------------------------------------------------ seed parts
+
+/// `n` rows of about 150 bytes, ids 1 to `n`, every third closed.
+fn long(n: usize) -> Database {
+    let mut db = Database::new();
+    db.execute(
+        &fennec_ql::parse_one("create collection items (k int, status text @hash, title text)")
+            .unwrap(),
+    )
+    .unwrap();
+    let put = fennec_ql::parse_one("put items $1").unwrap();
+    for start in (0..n).step_by(5_000) {
+        let docs: Vec<Value> = (start..(start + 5_000).min(n))
+            .map(|i| {
+                let status = if i % 3 == 2 { "closed" } else { "open" };
+                Value::Object(vec![
+                    ("k".into(), Value::Int(i as i64)),
+                    ("status".into(), Value::Text(status.into())),
+                    ("title".into(), Value::Text(format!("{i:0>120}"))),
+                ])
+            })
+            .collect();
+        db.execute_with(&put, &[Value::List(docs)]).unwrap();
+    }
+    db
+}
+
+/// One part of a seed as it came: its change, its number, whether more
+/// follow, and its rows' ids and titles.
+struct Part {
+    seq: u64,
+    part: i64,
+    more: bool,
+    bytes: usize,
+    rows: Vec<(i64, String)>,
+}
+
+fn part_of(data: &str) -> Part {
+    let v = fennec_core::json::parse_json(data).unwrap();
+    let Value::Object(m) = v else {
+        panic!("{data}")
+    };
+    let get = |k: &str| m.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    let rows = match get("rows") {
+        Some(Value::List(rows)) => rows
+            .into_iter()
+            .map(|r| {
+                let Value::Object(r) = r else { panic!() };
+                let id = match r.iter().find(|(n, _)| n == "id") {
+                    Some((_, Value::Int(i))) => *i,
+                    _ => panic!("a row with no id"),
+                };
+                let title = match r.iter().find(|(n, _)| n == "title") {
+                    Some((_, Value::Text(t))) => t.clone(),
+                    _ => String::new(),
+                };
+                (id, title)
+            })
+            .collect(),
+        _ => panic!("a part with no rows: {data}"),
+    };
+    Part {
+        seq: match get("seq") {
+            Some(Value::Int(n)) => n as u64,
+            _ => panic!("a part with no seq"),
+        },
+        part: match get("part") {
+            Some(Value::Int(n)) => n,
+            None => 0,
+            _ => panic!("a part numbered otherwise"),
+        },
+        more: get("more") == Some(Value::Bool(true)),
+        bytes: data.len(),
+        rows,
+    }
+}
+
+/// Every part of the seed the stream sends first, in order, each held to
+/// the form: the first without `part`, each after it the next, one `seq`,
+/// `more` on all but the last, and no part past a part's bytes by more
+/// than a page of rows.
+fn parts(s: &mut Sub) -> Vec<Part> {
+    let mut out: Vec<Part> = Vec::new();
+    loop {
+        let (name, data) = s.next_within(Duration::from_secs(30)).expect("a part");
+        assert_eq!(name, "seed", "{}", &data[..data.len().min(200)]);
+        let p = part_of(&data);
+        assert_eq!(p.part, out.len() as i64, "the parts in order");
+        if let Some(first) = out.first() {
+            assert_eq!(p.seq, first.seq, "one change for every part");
+        }
+        assert!(
+            p.bytes < fennec_http::sse::SEED_PART + 64 * 1024,
+            "{}",
+            p.bytes
+        );
+        let more = p.more;
+        out.push(p);
+        if !more {
+            return out;
+        }
+    }
+}
+
+/// A seed past a part's bytes comes in parts, read on the pin a page at a
+/// time: every row of the shape once, ids ascending across the parts, at
+/// the one change each part names; a write after it comes as a change past
+/// that change.
+#[test]
+fn a_long_seed_comes_in_parts_at_one_change() {
+    let h = start_over(long(30_000), Config::default());
+    let mut s = Sub::open(h.port, "/items/changes");
+    let got = parts(&mut s);
+    assert!(got.len() >= 3, "{} parts", got.len());
+    assert!(got[..got.len() - 1]
+        .iter()
+        .all(|p| p.bytes >= fennec_http::sse::SEED_PART));
+    let ids: Vec<i64> = got
+        .iter()
+        .flat_map(|p| p.rows.iter().map(|r| r.0))
+        .collect();
+    assert_eq!(ids, (1..=30_000).collect::<Vec<_>>());
+    let seq = got[0].seq;
+    assert_eq!(seq, h.db.read().unwrap().change_seq());
+
+    let (st, body) = post(
+        h.port,
+        "/items",
+        r#"{"k":-1,"status":"open","title":"after"}"#,
+    );
+    assert_eq!(st, 201, "{body}");
+    let (name, data) = s.next().expect("a change");
+    assert_eq!(name, "change", "{data}");
+    assert!(part_of_change_seq(&data) > seq, "{data}");
+    assert!(data.contains("after"), "{data}");
+}
+
+/// A change's `seq`.
+fn part_of_change_seq(data: &str) -> u64 {
+    let at = data.find("\"seq\":").unwrap() + 6;
+    data[at..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .unwrap()
+}
+
+/// A shape an index answers is read under the lock, but only its ids: the
+/// rows are pinned by them (`Database::pin_rows`) and sent in parts as a
+/// pinned shape's are, every row the shape's.
+#[test]
+fn a_seed_an_index_answers_comes_in_parts_too() {
+    let h = start_over(long(30_000), Config::default());
+    let mut s = Sub::open(h.port, "/items/changes?status=eq.open");
+    let got = parts(&mut s);
+    assert!(got.len() >= 2, "{} parts", got.len());
+    let ids: Vec<i64> = got
+        .iter()
+        .flat_map(|p| p.rows.iter().map(|r| r.0))
+        .collect();
+    let open: Vec<i64> = (1..=30_000).filter(|id| (id - 1) % 3 != 2).collect();
+    assert_eq!(ids, open);
+}
+
+/// A write landing while a seed's parts go out is in none of them -- the
+/// parts are the shape at the change their `seq` names, as a pin holds it
+/// -- and comes after the last as a change: a row written over shows its
+/// old title in the parts and its new one in the change, a row made shows
+/// in the change alone.
+#[test]
+fn a_write_beside_a_seed_in_parts_comes_after_it() {
+    for path in ["/items/changes", "/items/changes?status=eq.open"] {
+        let h = start_over(long(30_000), Config::default());
+        let mut s = Sub::open(h.port, path);
+        let (name, data) = s.next_within(Duration::from_secs(30)).expect("a part");
+        assert_eq!(name, "seed");
+        let first = part_of(&data);
+        assert!(first.more, "{path}: one part");
+        // The last row of the shape, which the first part does not hold.
+        let (st, body) = call(
+            h.port,
+            "PATCH",
+            "/items/29998",
+            Some(r#"{"title":"written"}"#),
+            &[],
+        );
+        assert_eq!(st, 200, "{body}");
+        let (st, body) = post(
+            h.port,
+            "/items",
+            r#"{"k":-1,"status":"open","title":"made"}"#,
+        );
+        assert_eq!(st, 201, "{body}");
+        let mut rest = vec![first];
+        loop {
+            let (name, data) = s.next_within(Duration::from_secs(30)).expect("a part");
+            assert_eq!(name, "seed");
+            let p = part_of(&data);
+            assert_eq!(p.part, rest.len() as i64);
+            let more = p.more;
+            rest.push(p);
+            if !more {
+                break;
+            }
+        }
+        let rows: Vec<&(i64, String)> = rest.iter().flat_map(|p| &p.rows).collect();
+        let old = rows.iter().find(|r| r.0 == 29_998).expect("its row");
+        assert_eq!(old.1, format!("{:0>120}", 29_997), "{path}");
+        assert!(!rows.iter().any(|r| r.1 == "made"), "{path}");
+        let mut told = String::new();
+        while !(told.contains("written") && told.contains("made")) {
+            let (name, data) = s.next().expect("a change");
+            assert_eq!(name, "change", "{data}");
+            assert!(part_of_change_seq(&data) > rest[0].seq, "{data}");
+            told.push_str(&data);
+        }
+    }
+}
+
+/// A seed under a part's bytes is the one event it always was: no `part`,
+/// no `more`.
+#[test]
+fn a_short_seed_is_one_event() {
+    let h = start(Config::default());
+    let mut s = Sub::open(h.port, "/tasks/changes");
+    let (name, data) = s.next().expect("seed");
+    assert_eq!(name, "seed");
+    assert!(
+        !data.contains("\"part\"") && !data.contains("\"more\""),
+        "{data}"
+    );
+    assert!(data.starts_with("{\"seq\":"), "{data}");
+}

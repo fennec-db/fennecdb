@@ -366,7 +366,11 @@ database the pin and the readers beside it share
 ([named-statements.md](named-statements.md#calls)). The browser module has
 one thread and none of it: not a byte of it changed.
 
-A stream's seed is pinned too (`sse::seed`). Read under the lock, the seed
+A stream's seed is pinned too (`sse::seed`), and read on the pin a page at
+a time, the pin held until its last part is sent
+([http.md](http.md#seeds-in-parts)); a seed the lock answers past a page
+pins the rows of the ids it read there (`Database::pin_rows`) and is read
+so too. Read under the lock, the seed
 of a large shape held every writer for its scan and encoding: single
 writes at 1 000 a second beside a subscriber seeded over and over from a
 million rows, 57 MB of JSON a seed (`make seed-bench`, writes timed from

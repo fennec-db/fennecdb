@@ -391,6 +391,7 @@ Covers `crates/fennec-http/`, access aside (below); an open server's rule binds 
 - A text's lists are read as written at once from its second request.
 - A body is held to the ceiling its head earns.
 - A chunked body grows as it comes, held to the ceiling
+- A seed goes in parts, read a page at a time.
 - A plain `get` is written as JSON from the stored documents.
 - A row's tag is its JSON as its reader is shown it, and a write's preconditions are judged under the lock that writes it.
 - An answer past `--http-gzip` goes as gzip where its client takes it, never one carrying a tag.
@@ -482,6 +483,7 @@ Covers `crates/fennec-abi/`; the scenario file is `integrations/sync-scenarios.j
 *The native library and sync*
 - A replica's sync is a state machine; the network is the binding's.
 - Both sync runners are held to one scenario file.
+- A seed's parts wait in the replica's file and land in one block.
 
 ### `crates/fennec-ffi/CLAUDE.md`
 
@@ -499,6 +501,7 @@ Covers `web/`; its retry rule binds Python's clients (`integrations/python/`), G
 - A Durable Object keeps a database as a file would.
 - An object's alarm keeps its database.
 - A live query learns what changed from the change ring.
+- A seed in parts lands in one task.
 - A page's IndexedDB calls share one connection, and let it go when asked.
 - A number from 2^53 on goes out as every digit.
 - A client sends a request again only where it cannot have run or may run twice, and bounds every request in time.

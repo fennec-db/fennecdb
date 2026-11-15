@@ -1602,6 +1602,79 @@
       ]
     },
     {
+      "name": "a seed in parts lands once its last part came, and nothing of it shows before",
+      "covers": "sync.html#seeds-in-parts, mobile.html#sync, http-reference.html#subscriptions: a seed past a mebibyte comes in parts, the first without `part`, every one but the last with `more`",
+      "steps": [
+        {"do": "start", "expect": {"ready": false}},
+        {"do": "seed", "seq": 3, "rows": [{"id": 1, "key": "a", "priority": 1, "status": "open", "title": "one"}], "more": true, "expect": {
+          "rows": {"tasks": []}, "ready": false, "requests": [], "streams": []}},
+        {"do": "seed", "seq": 3, "part": 1, "rows": [], "more": true, "expect": {
+          "rows": {"tasks": []}, "ready": false}},
+        {"do": "seed", "seq": 3, "part": 2, "rows": [{"id": 2, "key": "b", "priority": 5, "status": "open", "title": "two"}], "expect": {
+          "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2, "title": "two"}]}, "ready": true}},
+        {"do": "drop"},
+        {"do": "fire", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open&since=3"}]}}
+      ]
+    },
+    {
+      "name": "a read during a reseed in parts answers the rows as they were, and a change after its last part goes on from it",
+      "covers": "sync.html#seeds-in-parts, mobile.html#sync: every read before the last part answers the replica as it stood",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "drop"},
+        {"do": "fire", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open&since=3"}]}},
+        {"do": "seed", "seq": 9, "rows": [{"id": 1, "key": "a", "priority": 1, "status": "open", "title": "ONE"}], "more": true, "expect": {
+          "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2, "title": "two"}]}, "ready": true}},
+        {"do": "seed", "seq": 9, "part": 1, "rows": [{"id": 5, "key": "e", "priority": 2, "status": "open", "title": "five"}], "expect": {
+          "rows": {"tasks": [{"id": 1, "title": "ONE"}, {"id": 5, "title": "five"}]}, "ready": true}},
+        {"do": "change", "seq": 10, "puts": [{"id": 5, "key": "e", "priority": 2, "status": "open", "title": "FIVE"}], "dels": [1], "expect": {
+          "rows": {"tasks": [{"id": 5, "title": "FIVE"}]}}},
+        {"do": "drop"},
+        {"do": "fire", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open&since=10"}]}}
+      ]
+    },
+    {
+      "name": "a stream dropped mid-seed leaves the rows as they were, and the shape is seeded again from its start",
+      "covers": "sync.html#seeds-in-parts, mobile.html#sync: a seed's parts never land without its last",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "drop"},
+        {"do": "fire"},
+        {"do": "seed", "seq": 9, "rows": [{"id": 1, "key": "a", "priority": 1, "status": "open", "title": "ONE"}], "more": true},
+        {"do": "drop", "expect": {
+          "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2, "title": "two"}]}, "ready": true}},
+        {"do": "fire", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open&since=3"}]}},
+        {"do": "seed", "seq": 11, "part": 1, "rows": [{"id": 7, "key": "g", "priority": 7, "status": "open", "title": "seven"}], "expect": {
+          "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2, "title": "two"}]}, "streams": []}},
+        {"do": "fire", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open&since=3"}]}},
+        {"do": "seed", "seq": 11, "rows": [{"id": 2, "key": "b", "priority": 5, "status": "open", "title": "TWO"}], "expect": {
+          "rows": {"tasks": [{"id": 2, "title": "TWO"}]}, "ready": true}}
+      ]
+    },
+    {
+      "name": "an app's write during a seed in parts is kept as a seed keeps it",
+      "covers": "sync.html#seeds-in-parts, mobile.html#sync: a write made while the parts come shows at once, and the seed keeps its row until the server's copy comes",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "drop"},
+        {"do": "fire"},
+        {"do": "seed", "seq": 9, "rows": [{"id": 1, "key": "a", "priority": 1, "status": "open", "title": "ONE"}], "more": true},
+        {"do": "write", "write": {"insert": "tasks", "docs": [{"status": "open", "title": "mine"}]}, "expect": {
+          "requests": [{"body": [{"params": ["open", "mine", "<k1>"]}]}],
+          "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2, "title": "two"}, {"id": 4503599627370496, "title": "mine"}]},
+          "pending": 1}},
+        {"do": "seed", "seq": 9, "part": 1, "rows": [{"id": 5, "key": "e", "priority": 2, "status": "open", "title": "five"}], "expect": {
+          "rows": {"tasks": [{"id": 1, "title": "ONE"}, {"id": 5, "title": "five"}, {"id": 4503599627370496, "title": "mine"}]},
+          "pending": 1, "ready": true}},
+        {"do": "answer", "status": 200, "seq": 10, "expect": {"pending": 0}},
+        {"do": "change", "seq": 10, "puts": [{"id": 6, "key": "<k1>", "priority": null, "status": "open", "title": "mine"}], "dels": [], "expect": {
+          "rows": {"tasks": [{"id": 1, "title": "ONE"}, {"id": 5, "title": "five"}, {"id": 6, "title": "mine", "key": "<k1>"}]}}}
+      ]
+    },
+    {
       "name": "a seed keeps an answered insert's row while the seed is from before the answer",
       "steps": [
         {"do": "start"},

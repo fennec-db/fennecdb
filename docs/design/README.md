@@ -16,7 +16,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [read-replicas.md](read-replicas.md) -- a tenant's read replicas in other regions, the reads marked for them, and reading one's own writes across a failover
 - [access.md](access.md) -- scoped tokens, field lists, rules reading another collection, the server's own collections, a token bound to its tenant, whom a token is for, and empty tokens
 - [quotas.md](quotas.md) -- a tenant's quotas, how the sync meets them, a scoped caller's request rate, and the wait every 503 names
-- [http.md](http.md) -- the studio, MCP, open servers, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, row tags and conditional writes, compressed answers, connections no thread is made for, chunked bodies, TLS served, slow clients and HTTPS dialed, the OpenAPI document and its compatibility
+- [http.md](http.md) -- the studio, MCP, open servers, idempotency keys, the audit log, request ids, traces, metrics, statement counts, the parse cache, JSON written from stored rows, row tags and conditional writes, compressed answers, seeds in parts, connections no thread is made for, chunked bodies, TLS served, slow clients and HTTPS dialed, the OpenAPI document and its compatibility
 - [hnsw.md](hnsw.md) -- the graph as derived data, its records, its restore and open, its linking, and vectors written again
 - [benchmarks.md](benchmarks.md) -- what `make scale-bench` and `make ycsb` measure and how, how two builds' instruction counts are read on macOS, the gate every pull request's instructions and heap bytes are held to, its workloads and the claims they stand for, and how the binaries a release ships are measured and held to their budgets
 - [writes.md](writes.md) -- `insert` and `put`, arithmetic in `set`, `require`, upserts, picked writes, an `order` by expression and `returning`
@@ -25,10 +25,10 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [indexes.md](indexes.md) -- `@unique`, two indexes on a field, hash buckets and tables, `@ttl`, what reaches an index, bound filters, `@sorted`, composite indexes, lazy builds, `--warm` and `@geo`
 - [browser-module.md](browser-module.md) -- threads and features, what is core, and the bytes the module holds
 - [vector-search.md](vector-search.md) -- the distance kernels, vectors as numbers, quantized codes, filtered `near` and sparse vectors
-- [js-client.md](js-client.md) -- the module and the client entry, how the page persists a database, live queries, how a replica writes the server's rows, Durable Objects and their alarms, and what the HTTP clients send again
+- [js-client.md](js-client.md) -- the module and the client entry, how the page persists a database, live queries, how a replica writes the server's rows and lands a seed in parts, Durable Objects and their alarms, and what the HTTP clients send again
 - [text.md](text.md) -- collations, `nocase`, `match` and `match` as a filter, the text index, `fuzzy` and `prefix`, `rerank`, `fuse`, `highlight()` and facets
 - [lookup-and-aggregates.md](lookup-and-aggregates.md) -- `lookup`, `required`, keys of several fields, folded levels, select-list expressions, HyperLogLog and time zones
-- [native-and-sync.md](native-and-sync.md) -- `fennec-ffi`, the sans-IO sync core and the scenario file both sync runners are held to
+- [native-and-sync.md](native-and-sync.md) -- `fennec-ffi`, the sans-IO sync core, the scenario file both sync runners are held to and a seed's parts kept in the replica's file
 - [router.md](router.md) -- the router's CORS, its pooled connections, the cuts a failover makes, the leading router's and its followers', and queries across tenants
 - [integrations.md](integrations.md) -- `integrations/`, the Grafana data source, the desktop app, the `deploy/` kit and its chaos drill, the install channels (Homebrew, `install.sh`, `.deb` and `.rpm`), and the image's user: a server started as root hands its volume over and drops root before it touches a file
 
@@ -204,5 +204,8 @@ A proposal holds no invariant until it is built, and is listed apart:
 156. [A server that asks for no token answers only under this machine's name, and a page only of its own origin or `--http-cors`'s](http.md#open-servers) (added after the move, under *Access*)
 157. [`make chaos` breaks a region by seed, one fault at a time, and holds its history to an oracle](integrations.md#the-chaos-drill) (added after the move, under *Integrations and deploy*)
 158. [A pull request is held to its base in instructions and heap bytes an op](benchmarks.md#the-gate) (added after the move, under *Benchmarks*)
+159. [A seed goes in parts, read a page at a time](http.md#seeds-in-parts) (added after the move, under *The HTTP server*)
+160. [A seed's parts wait in the replica's file and land in one block](native-and-sync.md#seeds-in-parts) (added after the move, under *The native library and sync*)
+161. [A seed in parts lands in one task](js-client.md#seeds-in-parts) (added after the move, under *The JS client and Cloudflare*)
 162. [A request is read in time, and an answer written in time](http.md#slow-clients) (added after the move, under *The HTTP server*)
 163. [The compiler CI tests with is the one that ships](crates.md#toolchain) (added after the move, under *The crates*)

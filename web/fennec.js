@@ -75,6 +75,11 @@ let sibling;
 let emptied;
 /** The ints past 2^53 a database's module read (`Fennec`'s static block). */
 let met;
+/**
+ * A block of a database's statements begun (0), landed (1) or put back (2)
+ * (`Fennec`'s static block): what lands a sync's seed in parts as one.
+ */
+let block;
 
 // The module is built with WebAssembly SIMD (Chrome 91, Firefox 89, Safari
 // 16.4). An engine without it fails to compile it with an opaque message; this
@@ -179,6 +184,10 @@ export class Fennec {
       f.#handle = f.#wasm.fennec_open();
     };
     met = (f) => f.#wasm.fennec_wide?.();
+    block = (f, op) => {
+      const out = JSON.parse(f.#readString(f.#wasm.fennec_block(f.#handle, op)));
+      if (out.kind === 'error') throw new FennecError(out.message);
+    };
   }
 
   /**
@@ -822,8 +831,9 @@ export class Fennec {
  * (`changes`), a block's once it lands whole, so the notice costs a write
  * nothing: it is asked for once after a burst of writes, and only by a
  * database holding a live query. Each holder says when (`tick`): a page's
- * own database after the task that wrote, a replica at the next frame, as a
- * seed lands in chunks and should not be shown half way.
+ * own database after the task that wrote, a replica at the next frame. A
+ * seed in parts lands in one block once its last part came, so no tick sees
+ * it half way.
  */
 class Lives {
   #db;
@@ -1834,6 +1844,26 @@ const PUT_TEMP = 'put _sync_temps {id: $1, collection: $2, key: $3, op: $4, unti
  */
 const PUT_ROWS = 500;
 /**
+ * A part of a seed sent in parts, its head read without its rows: the
+ * server writes `{"seq":S,"part":N,"rows":[...],"more":true}`, `part` past
+ * the first and `more` before the last, so a part held aside until the
+ * last is parsed once, as the seed lands. Any other form is parsed whole.
+ */
+function seedHead(data) {
+  const m = /^\{"seq":(\d+)(?:,"part":(\d+))?,"rows":\[/.exec(data);
+  if (m) return { seq: Number(m[1]), part: Number(m[2] ?? 0), more: data.endsWith('],"more":true}') };
+  const msg = data ? JSON.parse(data) : {};
+  return { seq: msg.seq ?? 0, part: msg.part ?? 0, more: msg.more === true };
+}
+/** The rows of a part the leader hands a new tab of what it holds. */
+const HELLO_ROWS = 2_000;
+/**
+ * A shape's cursor while a seed of several parts lands (`#landParts`): no
+ * change of the server's, so a replica opened again holding it knows the
+ * landing never ended.
+ */
+const LANDING = -1;
+/**
  * A vector's or bytes' type: the builder's text hands its value to the
  * module as `f32`s (`vectorsApart`), where in a parameter it is digits the
  * module reads a number at a time -- a seed of 32-dim vectors' rows took
@@ -1842,6 +1872,8 @@ const PUT_ROWS = 500;
 const APART = /^(vector<|bytes$)/;
 /** Whether a field of `schema` is `APART`'s. */
 const apartIn = (schema) => !!schema?.fields.some((f) => APART.test(f.type));
+/** Whether a field of `schema` compares by a collation: the server's schema and `describe()` name it, `schemas()` does not. */
+const collatedIn = (schema) => !!schema?.fields.some((f) => f.collate);
 /** An answer with no `Fennec-Seq`: no stream is known to be past it. */
 const NO_SEQ = Number.MAX_SAFE_INTEGER;
 /** The longest a server's `retry_after` is waited: `setTimeout` fires at once past 2^31 ms. */
@@ -2776,6 +2808,7 @@ export class FennecSync {
     const c = s.collection;
     const had = this.#local.schemas().some((x) => x.name === c);
     s.apart = apartIn(schema);
+    s.collated = collatedIn(schema);
     if (had) {
       const fields = new Set(schema.fields.map((f) => f.name));
       const rows = (this.#local.run(`get ${c}`).rows ?? []).map((r) =>
@@ -2942,35 +2975,173 @@ export class FennecSync {
   // ---------------------------------------------------------- applying
 
   /**
-   * The seed: the whole shape. What the replica holds of the collection and
-   * the seed does not is deleted -- written over rather than cleared first,
-   * so a row that stayed keeps its vector's node -- except the rows of
-   * writes the server has not answered yet, and of those it answered after
-   * the seed was taken, whose copies come later.
+   * A part of the seed: the whole shape, or a part of it where the server
+   * sent it in parts. A part without `part` begins the seed, letting go of
+   * the parts of one before it; each with `more` is held as the text it
+   * came as, and the last lands them all (`#landSeed`). So every read and
+   * live query before the last answers the replica as it was, and a stream
+   * that ends before it leaves that as it was: its parts go, and the stream,
+   * opened again, seeds again from its start. The page holds them, not the
+   * module: the module's memory is the replica's and never shrinks, and a
+   * part written into it would go through `persist`'s journal only to be
+   * deleted. The native core's rule (`Sync::seed`), which keeps them in
+   * the replica's file.
    */
-  async #applySeed(s, msg) {
-    const rows = msg.rows ?? [];
-    const seq = msg.seq ?? 0;
-    if (!this.#fits(s, rows)) return this.#refresh(s);
-    const c = s.collection;
-    const held = (this.#local.run(`get ${c} select id`).rows ?? []).map((r) => r.id);
-    const came = new Set(rows.map((r) => r.id));
-    this.#reconcile(s, rows);
-    const keep = new Set(this.#temps.filter((t) => t.collection === c && (t.op !== 0 || t.until > seq)).map((t) => t.temp));
-    this.#deleteLocal(c, held.filter((id) => !came.has(id) && !keep.has(id)));
-    const dropped = this.#temps.filter((t) => t.collection === c && t.op === 0 && t.until <= seq);
-    this.#deleteLocal('_sync_temps', dropped.map((t) => t.temp));
-    this.#temps = this.#temps.filter((t) => !dropped.includes(t));
-    await this.#putRows(s, rows);
-    // Every id but the temporary rows kept: a row an unanswered write
-    // deleted is not held, so a seed lacking it names it too. After the
-    // rows, so a seed that fails part way marks nothing.
-    if (this.#queue.length) this.#heard(c, null, keep);
+  async #seedPart(s, data, relayed = false) {
+    const head = seedHead(data);
+    if (head.part === 0) s.parts = null;
+    else if (s.parts?.seq !== head.seq || s.parts.texts.length !== head.part) {
+      s.parts = null;
+      // Relayed, the leader's stream ended mid-seed: the tab waits for the
+      // seed begun again, as the leader does.
+      if (relayed) return false;
+      throw new FennecError(`part ${head.part} of a seed at ${head.seq} came out of order`);
+    }
+    if (head.more) {
+      (s.parts ??= { seq: head.seq, texts: [] }).texts.push(data);
+      return true;
+    }
+    const texts = s.parts?.texts ?? [];
+    s.parts = null;
+    texts.push(data);
+    return this.#landSeed(s, head.seq, texts);
+  }
+
+  /**
+   * The seed landed: its parts, written over the shape's collection, and
+   * what the replica holds of it and the seed does not deleted -- written
+   * over rather than cleared first, so a row that stayed keeps its vector's
+   * node -- except the rows of writes the server has not answered yet, and
+   * of those it answered after the seed was taken, whose copies come later.
+   * It lands a part at a time in this task (`#landParts`): JavaScript runs
+   * one task at a time, so no read, write or live query of the page comes
+   * between its first write and its last. Not in a block: a block holds
+   * every write it makes until it lands, and the module's memory, which
+   * never shrinks, grew 68.7 -> 168.9 MB for a seed of 300 000 rows so, and
+   * 3.8 -> 5.0 MB for one of 5 000 (docs/design/js-client.md#seeds-in-parts).
+   * Nothing is awaited from the first write to the last, so a collated
+   * field's data, which a statement half way may be refused for, is fetched
+   * first for a seed of several parts; one of one part lands in a block,
+   * put back whole where it is refused, the chunks it named fetched and the
+   * seed landed again -- only those, as a write fetches them.
+   */
+  async #landSeed(s, seq, texts) {
+    const whole = s.collated && texts.length === 1;
+    if (s.collated && !whole) await this.#local.collation('all');
+    for (;;) {
+      // What a block changes in memory -- the temporary rows, the undo of
+      // each write waiting (`#heard`) -- kept to put back with it: the
+      // queue itself is not read again, which holds each write's promise.
+      const temps = this.#temps;
+      const undos = whole ? this.#queue.map((op) => [op, op.undo, op.touched && new Map([...op.touched].map(([c, ids]) => [c, new Set(ids)]))]) : [];
+      const back = () => {
+        this.#temps = temps;
+        for (const [op, undo, touched] of undos) Object.assign(op, { undo, touched });
+      };
+      let landed;
+      if (whole) block(this.#local, 0);
+      try {
+        landed = this.#landParts(s, seq, texts, whole);
+        if (whole) block(this.#local, landed ? 1 : 2);
+      } catch (e) {
+        if (whole) {
+          block(this.#local, 2);
+          back();
+        }
+        // Without a block, a statement half way refused for collation data
+        // left the shape emptied (`#landParts`), never half seeded: a module
+        // built without the schema check cannot say which fields are
+        // collated (`start`). The data fetched, the seed lands again.
+        if (!e.collation || !(await this.#local.collation(...e.collation))) throw e;
+        continue;
+      }
+      if (!landed) {
+        back();
+        return this.#refresh(s);
+      }
+      break;
+    }
     s.cursor = seq;
     s.seeded = true;
     s.fresh = false;
-    this.#afterApply(s);
+    this.#afterApply(s, true);
     return true;
+  }
+
+  /**
+   * A seed landed, a part at a time, each parsed as it lands and its rows
+   * written in chunks (`PUT_ROWS`). Every part is the rows of one statement
+   * of the server's, its columns the same, so the first holding rows is the
+   * one that may name a field the replica has not got: false then, nothing
+   * written. A replica in a file (`openFile`) holds each statement as it
+   * lands, so there the shape's row says a landing is under way (`LANDING`)
+   * from the first write to the last, which writes its cursor: a page that
+   * ended between them finds it as it opens again and empties the shape
+   * before anything reads it (`start`), the rows of writes not yet answered
+   * kept, to be seeded again. Elsewhere the writes reach storage after the
+   * task, `persist`'s drain one chunk, and the mark would cost a seed of
+   * 5 000 rows a write the module had not compiled yet, 1.2 ms of 28. A
+   * statement refused half way empties the shape at once, but `inBlock`,
+   * which `#landSeed` puts back.
+   */
+  #landParts(s, seq, texts, inBlock) {
+    const c = s.collection;
+    const held = (this.#local.run(`get ${c} select id`).rows ?? []).map((r) => r.id);
+    const came = new Set();
+    const mark = !inBlock && kept.has(this.#local);
+    let begun = false;
+    try {
+      for (const text of texts) {
+        const rows = JSON.parse(text).rows ?? [];
+        if (rows.length === 0) continue;
+        if (!this.#fits(s, rows)) {
+          if (!begun) return false;
+          throw new FennecError(`a part of the seed of \`${c}\` names a field the parts before it did not`);
+        }
+        if (!begun && mark) this.#local.run(PUT_SHAPE, [s.row, c, s.fingerprint, LANDING, false]);
+        begun = true;
+        for (const r of rows) came.add(r.id);
+        this.#reconcile(s, rows);
+        this.#writeRows(s, rows);
+      }
+      const keep = new Set(this.#temps.filter((t) => t.collection === c && (t.op !== 0 || t.until > seq)).map((t) => t.temp));
+      this.#deleteLocal(c, held.filter((id) => !came.has(id) && !keep.has(id)));
+      const dropped = this.#temps.filter((t) => t.collection === c && t.op === 0 && t.until <= seq);
+      this.#deleteLocal('_sync_temps', dropped.map((t) => t.temp));
+      this.#temps = this.#temps.filter((t) => !dropped.includes(t));
+      // Every id but the temporary rows kept: a row an unanswered write
+      // deleted is not held, so a seed lacking it names it too.
+      if (this.#queue.length) this.#heard(c, null, keep);
+      this.#local.run(PUT_SHAPE, [s.row, c, s.fingerprint, seq, true]);
+      return true;
+    } catch (e) {
+      if (begun && !inBlock) this.#emptyShape(s);
+      throw e;
+    }
+  }
+
+  /**
+   * The replica's collections as `describe()` tells them, collations named;
+   * none from a module built without the schema check, which has no
+   * description (`make wasm SCHEMA=0`).
+   */
+  #described() {
+    try {
+      return this.#local.describe().collections ?? [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * The shape's rows but those of writes not yet answered deleted, and the
+   * shape no longer seeded: what a landing cut short leaves to read, rather
+   * than half a seed.
+   */
+  #emptyShape(s) {
+    this.#local.run(...from(s.collection).where('id', '<', TEMP_BASE).toDelete());
+    Object.assign(s, { cursor: 0, seeded: false });
+    this.#local.run(PUT_SHAPE, [s.row, s.collection, s.fingerprint, 0, false]);
   }
 
   /** A change: the rows that changed as they are now, and the ids that left the shape. */
@@ -3090,9 +3261,22 @@ export class FennecSync {
     }
   }
 
-  /** The cursor kept beside the rows it stands for. */
-  #afterApply(s) {
-    this.#local.run(PUT_SHAPE, [s.row, s.collection, s.fingerprint, s.cursor, s.seeded]);
+  /**
+   * `#putRows` in this task, for a block: a statement refused for collation
+   * data throws, for the block's owner to fetch it and run the block again.
+   */
+  #writeRows(s, rows) {
+    const c = ident(s.collection, 'collection');
+    for (let i = 0; i < rows.length; i += PUT_ROWS) {
+      const chunk = rows.slice(i, i + PUT_ROWS);
+      if (s.apart) this.#local.run(...from(c).toInsert(chunk));
+      else this.#local.run(`put ${c} $1`, [chunk]);
+    }
+  }
+
+  /** The cursor kept beside the rows it stands for: in their block where `saved`. */
+  #afterApply(s, saved = false) {
+    if (!saved) this.#local.run(PUT_SHAPE, [s.row, s.collection, s.fingerprint, s.cursor, s.seeded]);
     s.error = null;
     this.#touch();
     this.#persistSoon();
@@ -3150,12 +3334,24 @@ export class FennecSync {
     await this.#loadPersist();
     for (const text of SYNC_STATE) this.#local.run(text);
     this.#load();
+    // A seed of several parts the page ended in the middle of landing: what
+    // it wrote of the shape goes before anything reads it -- reads answer
+    // none rather than half a seed -- the rows of unanswered writes kept,
+    // and the shape is seeded again whole.
+    for (const s of this.#shapes.values()) {
+      if (!s.cut) continue;
+      s.cut = false;
+      this.#emptyShape(s);
+    }
     const schemas = this.#local.schemas();
+    // `schemas` names no collation; the description does.
+    const described = schemas.length ? this.#described() : [];
     for (const s of this.#shapes.values()) {
       const schema = schemas.find((x) => x.name === s.collection);
       s.made = !!schema;
       s.fields = new Set(schema?.fields.map((f) => f.name));
       s.apart = apartIn(schema);
+      s.collated = collatedIn(described.find((x) => x.name === s.collection));
     }
     this.#flushing = this.#queue.length > 0;
     if (this.#allSeeded) this.#resolveReady();
@@ -3185,6 +3381,7 @@ export class FennecSync {
         s.cursor = r.cursor;
         s.seeded = r.seeded === true;
       }
+      if (r.cursor === LANDING) s.cut = true;
     }
     for (const s of this.#shapes.values()) if (!s.row) s.row = ++top;
     this.#queue = (this.#local.run('get _sync_queue').rows ?? []).sort((a, b) => a.id - b.id).map((r) => ({
@@ -3295,11 +3492,12 @@ export class FennecSync {
     this.#stream(s, ctl).catch((e) => this.#onError?.(e));
   }
 
-  /** Ends `s`'s stream from this side. */
+  /** Ends `s`'s stream from this side, and the parts of a seed it was sending: opened again, it seeds again. */
   #cancel(s) {
     s.stream?.abort();
     s.stream = null;
     s.connected = false;
+    s.parts = null;
   }
 
   async #stream(s, ctl) {
@@ -3365,10 +3563,12 @@ export class FennecSync {
   }
 
   async #onEvent(s, ev) {
-    const msg = ev.data ? JSON.parse(ev.data) : {};
     if (ev.name === 'seed') {
-      if (await this.#applySeed(s, msg)) this.#relay({ t: 'seed', c: s.collection, ...msg });
-    } else if (ev.name === 'change' && s.seeded) {
+      if (await this.#seedPart(s, ev.data)) this.#relay({ t: 'seed', c: s.collection, data: ev.data });
+      return;
+    }
+    const msg = ev.data ? JSON.parse(ev.data) : {};
+    if (ev.name === 'change' && s.seeded) {
       if (await this.#applyChange(s, msg)) this.#relay({ t: 'change', c: s.collection, ...msg });
     } else if (ev.name === 'error') {
       throw new FennecError(msg.error ?? 'subscription error');
@@ -3406,10 +3606,21 @@ export class FennecSync {
       } else if (msg.t === 'hello') {
         // Hand the new tab what we have, its own rows not among it: a
         // temporary id is this replica's alone.
+        // In parts as a stream's seed comes, read in this task so they are
+        // one moment; then the parts of a seed it is being sent, which the
+        // new tab takes the rest of as they come.
         for (const s of this.#shapes.values()) {
           if (!s.seeded) continue;
-          const rows = await from(s.collection).where('id', '<', TEMP_BASE).bind(this.#localExec).rows();
-          this.#chan.postMessage({ t: 'seed', c: s.collection, rows, seq: s.cursor });
+          const get = `get ${s.collection} where id > $1 and id < $2 limit $3`;
+          for (let part = 0, after = -1; ; part++) {
+            const rows = this.#local.run(get, [after, TEMP_BASE, HELLO_ROWS]).rows ?? [];
+            const more = rows.length === HELLO_ROWS;
+            const data = JSON.stringify({ seq: s.cursor, ...(part && { part }), rows, ...(more && { more }) });
+            this.#chan.postMessage({ t: 'seed', c: s.collection, data });
+            if (!more) break;
+            after = rows.at(-1).id;
+          }
+          for (const data of s.parts?.texts ?? []) this.#chan.postMessage({ t: 'seed', c: s.collection, data });
         }
         this.#chan.postMessage({ t: 'leader' });
       }
@@ -3429,7 +3640,7 @@ export class FennecSync {
     const s = this.#shapes.get(msg.c);
     if (!s) return;
     if (msg.t === 'schema') await this.#remake(s, msg.s);
-    else if (msg.t === 'seed') await this.#applySeed(s, msg);
+    else if (msg.t === 'seed') await this.#seedPart(s, msg.data, true);
     // An incremental diff cannot be applied to an unseeded copy: we would
     // be left with the changed rows only, the rest missing.
     else if (msg.t === 'change' && s.seeded) await this.#applyChange(s, msg);
@@ -3542,8 +3753,15 @@ function normalizeShape(raw, url) {
     fields: new Set(),
     // Whether its rows go by the builder's text (`#putRows`).
     apart: false,
+    // Whether a field compares by a collation, whose data the module may
+    // lack (`#landSeed`).
+    collated: false,
     rebuild: false,
     fresh: false,
+    // A seed in parts under way: its change and its parts' texts (`#seedPart`).
+    parts: null,
+    // A landing of parts the page ended half way, found as it opened (`start`).
+    cut: false,
   };
 }
 
