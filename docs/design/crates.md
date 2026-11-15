@@ -150,7 +150,12 @@ and each held to its type as a scalar is, refused naming the field and the
 element counted from 0 -- "field `xs`, element 2: an int is from ..." --
 where they were the `f32`s of a vector, `[16777217]` stored as 16777216
 and 2^63 as `i64::MAX` ([vector-search.md](vector-search.md#numbers-in)).
-Full table in `site/content/docs/limits.html`.
+A float past an `f64`'s range is refused so too, by every reader -- JSON,
+FennecQL, the query string, an import -- naming the number, where it was
+and the range: `1e400` read as an infinity, which JSON writes as `null`,
+and `1e-400` as 0 (`num::read_f64`,
+[vector-search.md](vector-search.md#numbers-in), *Past the range,
+refused*). Full table in `site/content/docs/limits.html`.
 
 A number a statement writes is read as written or refused naming its
 range, never fitted to it: `Parser::int_in(what, lo, hi)` reads every

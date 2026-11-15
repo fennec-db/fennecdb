@@ -1865,6 +1865,21 @@ fn a_float_in_the_query_string_is_read_like_every_other_number() {
             "{bad:?} should not be a number"
         );
     }
+
+    // A number past a float's range is refused naming the field and the
+    // range, as a body's is, where it read as an infinity or 0.
+    for (past, range) in [
+        ("1e400", "at most 1.7976931348623157e308"),
+        ("-1e-400", "0 or at least 5e-324"),
+    ] {
+        let r = get(h.port, &format!("/readings?value={past}"));
+        let says = format!("`value`: number `{past}` is past a float's range: a float is {range}");
+        assert!(
+            r.status == 400 && r.body.contains(&says),
+            "{past}: {}",
+            r.body
+        );
+    }
 }
 
 /// `lookup` over the query string: the collection is named once and
