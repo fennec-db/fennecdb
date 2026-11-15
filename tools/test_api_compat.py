@@ -417,6 +417,61 @@ class Gate(unittest.TestCase):
         self.assertEqual(self.run_main("--base-ref", "nonesuch")[0], 2)
 
 
+class Judged(unittest.TestCase):
+    """check() itself: every break is judged on its own, whatever a break
+    before it with the same symbol and change was told."""
+
+    H2 = HEADER.replace("void t_free", "int32_t t_changes(uint64_t handle, uint64_t since);\nvoid t_free")
+
+    def run_check(self, old, new, allowed):
+        lines = []
+        # The baseline is the new dump (as after `--write`); main's is the old.
+        n = compat.check(new, new, old, list(allowed), out=lines.append)
+        return n, "\n".join(lines)
+
+    def two(self, a, b):
+        old = dumps(header=self.H2)
+        new = dumps(header=self.H2.replace("uint64_t handle, uint64_t since", f"{a}, {b}"))
+        return old, new
+
+    def test_two_parameter_types_changed_need_two_entries(self):
+        old, new = self.two("uint32_t handle", "uint32_t since")
+        got = compat.breaks("fennec.h", old["fennec.h"], new["fennec.h"])
+        self.assertEqual([c for _, c, _, _ in got], ["parameter type changed"] * 2)
+        first = entry_for(old, new, "fennec.h", pick=0)
+        second = entry_for(old, new, "fennec.h", pick=1)
+        n, out = self.run_check(old, new, [first])
+        self.assertEqual(n, 1, out)
+        self.assertIn("#2 since", out)
+        n, out = self.run_check(old, new, [first, second])
+        self.assertEqual(n, 0, out)
+        n, out = self.run_check(old, new, [second])
+        self.assertEqual(n, 1, out)
+        self.assertIn("#1 handle", out)
+
+    def test_two_parameter_names_changed_need_two_entries(self):
+        old, new = self.two("uint64_t h", "uint64_t s")
+        first = entry_for(old, new, "fennec.h", pick=0)
+        second = entry_for(old, new, "fennec.h", pick=1)
+        n, out = self.run_check(old, new, [first])
+        self.assertEqual(n, 1, out)
+        self.assertIn("#2: since -> #2: s", out)
+        n, out = self.run_check(old, new, [first, second])
+        self.assertEqual(n, 0, out)
+
+    def test_two_changes_of_one_symbol_on_the_declarations_side(self):
+        old = dumps()
+        new = dumps(types=TYPES.replace("run(n: number): string;", "run(n: boolean): string;")
+                    .replace("run(s: string): string;", "run(s: boolean): string;"))
+        got = compat.breaks("fennec.d.ts", old["fennec.d.ts"], new["fennec.d.ts"])
+        entries = [entry_for(old, new, "fennec.d.ts", pick=i) for i in range(len(got))]
+        if len(got) > 1:
+            n, out = self.run_check(old, new, entries[:-1])
+            self.assertEqual(n, 1, out)
+        n, out = self.run_check(old, new, entries)
+        self.assertEqual(n, 0, out)
+
+
 class Releases(unittest.TestCase):
     """The release an entry names, and the freeze at 1.0."""
 
@@ -471,6 +526,18 @@ class Releases(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(self.run_main("--require-frozen")[0], 0)
         self.assertEqual(self.run_main("--freeze", "1.0")[0], 1)  # once
+
+    def test_a_freeze_takes_only_the_next_major(self):
+        for v in ("0.9", "1.3", "2.0", "1.1"):
+            code, out = self.run_main("--freeze", v)
+            self.assertEqual(code, 1, v)
+            self.assertIn("1.0", out)
+        self.assertEqual(self.run_main("--freeze", "1.0")[0], 0)
+        for v in ("1.0", "1.3", "3.0", "2.1"):
+            code, out = self.run_main("--freeze", v)
+            self.assertEqual(code, 1, v)
+            self.assertIn("2.0", out)
+        self.assertEqual(self.run_main("--freeze", "2.0")[0], 0)
 
     def test_make_version_refuses_1_0_while_the_baselines_are_not_frozen(self):
         spec = importlib.util.spec_from_file_location("version_tool", os.path.join(HERE, "version.py"))
@@ -555,20 +622,93 @@ class Workflow(unittest.TestCase):
     """The check that must stop a merge is a step of a required job."""
 
     ci = open(os.path.join(HERE, "..", ".github", "workflows", "ci.yml"), encoding="utf-8").read()
+    UBUNTU = "matrix.os == 'ubuntu-latest'"
+    API = "make api-check BASE=FETCH_HEAD"
+    AGENTS = "python3 tools/agents_md.py --check"
 
-    def job(self, name):
-        m = re.search(rf"^  {name}:\n(.*?)(?=^  \S+:\n|\Z)", self.ci, re.M | re.S)
-        self.assertTrue(m, name)
+    @staticmethod
+    def job_of(ci, name):
+        m = re.search(rf"^  {name}:\n(.*?)(?=^  \S+:\n|\Z)", ci, re.M | re.S)
+        assert m, name
         return m.group(1)
 
-    def test_the_api_check_runs_in_the_test_job_and_fmt_keeps_its_tests(self):
-        self.assertIn("make api-check", self.job("test"))
+    @staticmethod
+    def steps(job):
+        """A job's steps as {key: text}, read from the text with comment
+        lines dropped, so a comment satisfies nothing; a block scalar
+        (`run: |`) is its lines joined."""
+        out, cur, key = [], None, None
+        for line in job.split("\n"):
+            if line.lstrip().startswith("#"):
+                continue
+            m = re.match(r"^      - (\w[\w-]*):\s*(.*)$", line)
+            k = re.match(r"^        (\w[\w-]*):\s*(.*)$", line)
+            if m:
+                cur = {}
+                out.append(cur)
+            elif k and cur is not None:
+                m = k
+            elif key is not None and cur is not None and re.match(r"^          \S", line):
+                cur[key] += "\n" + line.strip()
+                continue
+            elif re.match(r"^      \S", line) or re.match(r"^    \S", line):
+                cur, key = None, None
+                continue
+            else:
+                continue
+            key, val = m.group(1), m.group(2)
+            cur[key] = "" if val in ("|", ">", "|-", ">-") else val
+        return out
+
+    def job(self, name):
+        return self.job_of(self.ci, name)
+
+    def verdict(self, ci, command, fetched):
+        """What is wrong with the one step of `test` running `command`, or
+        None: none or several, `continue-on-error`, an `if:` that is not
+        the ubuntu one alone, no fetch of origin main before it."""
+        steps = self.steps(self.job_of(ci, "test"))
+        found = [s for s in steps if command in s.get("run", "")]
+        if len(found) != 1:
+            return f"{len(found)} steps run {command!r}"
+        s = found[0]
+        if "continue-on-error" in s:
+            return "continue-on-error"
+        if s.get("if") != self.UBUNTU:
+            return f"if: {s.get('if')!r}"
+        if fetched:
+            ahead = "\n".join(b.get("run", "") for b in steps[: steps.index(s)]) + "\n" + s["run"].split(command)[0]
+            if not re.search(r"git fetch\b[^\n]*\borigin main\b", ahead):
+                return "no fetch of origin main before it"
+        return None
+
+    def test_the_api_check_is_a_step_that_stops_the_merge(self):
+        self.assertIsNone(self.verdict(self.ci, self.API, True))
         self.assertNotIn("make api-check", self.job("fmt"))
         self.assertIn("tools/test_api_compat.py", self.job("fmt"))
 
-    def test_the_size_check_runs_in_both_jobs(self):
-        self.assertIn("tools/agents_md.py --check", self.job("test"))
-        self.assertIn("tools/agents_md.py --check", self.job("fmt"))
+    def test_the_size_check_is_a_step_of_both_jobs(self):
+        self.assertIsNone(self.verdict(self.ci, self.AGENTS, False))
+        self.assertTrue([s for s in self.steps(self.job("fmt")) if self.AGENTS in s.get("run", "")])
+
+    def test_a_missing_step_a_soft_one_a_wider_if_and_no_fetch_each_fail(self):
+        step = re.search(r"      - name: fennec.h and the JS types only grow\n.*?make api-check BASE=FETCH_HEAD\n", self.ci, re.S).group(0)
+        deleted = self.ci.replace(step, "")
+        self.assertIn("`make api-check`", deleted)  # its comment stays
+        self.assertIn("0 steps", self.verdict(deleted, self.API, True))
+        soft = self.ci.replace(step, step.replace("        if:", "        continue-on-error: true\n        if:"))
+        self.assertEqual(self.verdict(soft, self.API, True), "continue-on-error")
+        for wide in ("always()", f"{self.UBUNTU} || failure()"):
+            got = self.verdict(self.ci.replace(step, step.replace(self.UBUNTU, wide)), self.API, True)
+            self.assertTrue(got and got.startswith("if:"), got)
+        unfetched = self.ci.replace("          git fetch --no-tags --depth=1 origin main\n", "")  # every one
+        self.assertIn("no fetch", self.verdict(unfetched, self.API, True))
+        astep = re.search(r"      - name: Each AGENTS.md is its CLAUDE.md, and no file is past its size\n.*?--check\n", self.ci, re.S).group(0)
+        self.assertIn("0 steps", self.verdict(self.ci.replace(astep, ""), self.AGENTS, False))
+        soft = self.ci.replace(astep, astep.replace("        if:", "        continue-on-error: true\n        if:"))
+        self.assertEqual(self.verdict(soft, self.AGENTS, False), "continue-on-error")
+        wide = self.ci.replace(astep, astep.replace(f"        if: {self.UBUNTU}\n", ""))
+        self.assertTrue(self.verdict(wide, self.AGENTS, False).startswith("if:"))
 
 
 class Committed(unittest.TestCase):

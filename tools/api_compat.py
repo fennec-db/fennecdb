@@ -708,13 +708,16 @@ def check(built, baseline, base=None, allowed=BREAKS, out=print, frozen=None, ba
                 continue
             passed, failed = judge(surface, old, now, allowed, frozen)
             for symbol, change, detail, reason in passed:
-                if (symbol, change) not in told:
-                    told.add((symbol, change))
+                if (symbol, change, detail) not in told:
+                    told.add((symbol, change, detail))
                     out(f"{surface}: {symbol}: {change} ({detail}): allowed by BREAKS: {reason}")
             for symbol, change, detail, why in failed:
-                if (symbol, change) in told:
+                # Folded only where the whole line repeats (the committed pass
+                # and the base pass finding one break): breaks that share a
+                # symbol and a change differ in their text and are each judged.
+                if (symbol, change, detail) in told:
                     continue
-                told.add((symbol, change))
+                told.add((symbol, change, detail))
                 failures += 1
                 head = f"BREAKING against {what} (integrations/api-golden/{name})"
                 if what != "the committed baseline":
@@ -737,10 +740,11 @@ def freeze(version, built, baseline, allowed, baseline_dir, frozen, out=print):
     sources', every BREAKS entry is for a release already made (not above
     `version`), and `version` is above any freeze before."""
     wrong = []
-    if not re.fullmatch(r"\d+\.\d+", version):
-        wrong.append(f"{version!r} is not a MAJOR.MINOR version")
-    elif frozen is not None and major(version) <= major(frozen):
-        wrong.append(f"already frozen at {frozen}")
+    # One value only: a freeze is a major version's, so 1.0 first and then
+    # the next major's .0, never a minor or a skipped major.
+    takes = "1.0" if frozen is None else f"{major(frozen) + 1}.0"
+    if version != takes:
+        wrong.append(f"{version!r}: a freeze at this point takes {takes!r} alone")
     for surface in SURFACES:
         if baseline[surface] != built[surface]:
             wrong.append(f"{surface}: the baseline is not what the sources dump to: run `make api-golden` first")
