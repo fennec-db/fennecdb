@@ -72,8 +72,13 @@ jobs:
           cargo test -p fennec-core --no-default-features --features std-fs --lib --test features --no-fail-fast || failed=1
           echo "failed=$failed" >> "$GITHUB_OUTPUT"
 
-      # The test binaries llvm-cov reads the counters against: each run's
+      # The binaries llvm-cov reads the counters against: each run's
       # `--no-run` names the same ones cargo just built, nothing built again.
+      # The test binaries and, with them, the binaries the tests start
+      # (`fennec-server`, `fennec`, `fennec-shard`): a server a test runs
+      # writes its own counters, and a binary's own modules are counted by
+      # its symbols alone, which the test harness built of the same sources
+      # does not share.
       - name: Merge the counters and export them
         if: ${{ !cancelled() }}
         run: |
@@ -85,7 +90,7 @@ jobs:
             cargo test --workspace --exclude fennec-bench --lib --bins --tests --no-run --message-format=json
             cargo test -p fennec-core --no-default-features --features std-fs,language --lib --test features --no-run --message-format=json
             cargo test -p fennec-core --no-default-features --features std-fs --lib --test features --no-run --message-format=json
-          } | jq -r 'select(.profile.test == true and .executable != null) | .executable' | sort -u > target/coverage-report/binaries.txt
+          } | jq -r 'select(.reason == "compiler-artifact" and .executable != null) | .executable' | sort -u > target/coverage-report/binaries.txt
           wc -l target/coverage-report/binaries.txt
           "$llvm/llvm-profdata" merge -sparse -o target/coverage-report/merged.profdata target/coverage-profraw/*.profraw
           objects=()
