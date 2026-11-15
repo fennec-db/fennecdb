@@ -2120,11 +2120,14 @@ jobs:
   # `make fuzz-smoke` -- which is why it says a panic's message and an
   # ASan report here, where fuzz.yml's runs, each week's own, say only the
   # recipe. The test job runs the same targets over their seeds in a plain
-  # build; fuzz.yml gives each half an hour a week.
+  # build; fuzz.yml gives each half an hour a week. Each target is capped
+  # at six minutes of CPU time (`SMOKE_CAP`), so a commit slowing every run
+  # ends at a named target's cap before this timeout: six just under it
+  # are 36 minutes, and the build a minute and a half.
   fuzz-smoke:
     name: fuzz-smoke (each target a count of runs under ASan)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:

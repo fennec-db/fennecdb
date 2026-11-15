@@ -96,14 +96,15 @@ pub enum Outcome {
 }
 
 /// The CPU time a target's smoke may take (`--smoke`, [`Options::cap`]):
-/// four minutes, eight times the 30 s of CI's runner each count was set
-/// from. Generous, so a machine slower than the runner, or a run of it
-/// slower than the one the counts were read from, never meets it; and
-/// short enough that six targets each just under it, 24 minutes, end
-/// inside the job's 30 with the build's minute and a half: a smoke slowed
+/// six minutes, twelve times the 30 s of CI's runner each count was set
+/// from. Generous, so a machine slower than the runner never meets it --
+/// an M-series Mac under ASan spent 104 s of CPU on `http`'s count at a
+/// load near 15 and 110 s at one of 70 to 200, the most of any target --
+/// and short enough that six targets each just under it, 36 minutes, end
+/// inside ci.yml's 45 with the build's minute and a half: a smoke slowed
 /// past the job's timeout ends at a target's cap first, named, rather
 /// than at the timeout, naming none.
-pub const SMOKE_CAP: Duration = Duration::from_secs(240);
+pub const SMOKE_CAP: Duration = Duration::from_secs(360);
 
 /// The stack a run is on: a server's connection thread's
 /// (`fennec_http::CONNECTION_STACK`), which a request parses, plans and

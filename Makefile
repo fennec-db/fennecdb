@@ -463,7 +463,7 @@ endif
 ## 30 s each on CI) under AddressSanitizer, guided by coverage, from the
 ## repository's seeds alone: CI's fuzz-smoke job. A count, never a time: a
 ## commit's smoke hands each the same inputs on any machine of a platform,
-## and ends on the same line; four minutes of CPU time end one failing,
+## and ends on the same line; six minutes of CPU time end one failing,
 ## named. FUZZ_SECONDS=N runs each that long instead; SMOKE_ASAN=0 a plain
 ## build
 SMOKE_ASAN ?= 1

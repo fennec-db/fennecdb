@@ -389,8 +389,9 @@ pub fn arm(run: u64, input: &[u8]) {
 /// beside the runs until it goes off -- a thread watching would run code
 /// the coverage counts, as [`TIMEOUT_US`]'s timer says -- so a smoke that
 /// ends within it ran the inputs it would have run without it. CPU time,
-/// not the wall's: a machine others load runs a target slower by the
-/// clock, not by its own work.
+/// not the wall's: a machine others load lengthens a target by the clock
+/// more than by its CPU time (`http` took 375 s by the clock and 110 s of
+/// CPU at a load of 70 to 200, 150 s and 104 s near 15).
 pub fn cap(cpu: Option<Duration>, runs: u64) {
     let ms = cpu.map_or(0, |c| c.as_millis().clamp(1, u64::MAX as u128) as u64);
     CAP_MS.store(ms, Ordering::Relaxed);

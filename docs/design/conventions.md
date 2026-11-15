@@ -460,12 +460,14 @@ target's databases read a fixed time as now (`set_clock`), where a
 `@ttl` collection's read asked the system's for its cutoff, a row alive
 in one run and expired in a later one. A count still needs a bound in
 time, or a commit slowing every run ends at the job's timeout naming no
-target: `--smoke` caps each target at four minutes of CPU time
-(`SMOKE_CAP`, eight times its 30 s on CI, six targets just under it
-inside the job's 30 minutes with the build), by a timer of the process's
-CPU time (`ITIMER_PROF`) set once, whose handler says the target and the
-run it reached and exits 4. A bound, never a pass; CPU time, so a
-machine others load is not slower by it.
+target: `--smoke` caps each target at six minutes of CPU time
+(`SMOKE_CAP`, twelve times its 30 s on CI and three times the most a Mac
+under ASan spent, `http`'s 110 s; six targets just under it end inside
+the job's 45 minutes with the build), by a timer of the process's CPU
+time (`ITIMER_PROF`) set once, whose handler says the target and the run
+it reached and exits 4. A bound, never a pass; CPU time, which a machine
+others load lengthens less than the clock (`http` 375 s by the clock and
+110 s of CPU at a load of 70 to 200, 150 s and 104 s near 15).
 
 *A finding is a regression test in its own crate*, the input's bytes or
 the file made by hand, failing before the fix. The pull request that added
