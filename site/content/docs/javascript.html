@@ -441,14 +441,16 @@ in the order they were made: a <code>persist</code> called before the one
 before it answered waits for it and stores what was written by then, and one
 refused holds up none after it. One not yet run when the database is closed
 (<code>db.close()</code>) is refused, naming the close, as is a
-<code>restore</code> or <code>openFile</code> still reading when it came; a
+<code>restore</code> or <code>openFile</code> still reading or loading when
+it came; a
 <code>persist</code> already storing what it took finishes. A
 <code>persist</code> or <code>openFile</code> called while a
 <code>restore</code> is out is refused when that restore fails, naming it:
 the database is not the one it waited for, and stored it would replace the
 record the restore could not read. A <code>restore</code> called after the
 failed one that loads its record lets them run, and a call made once the
-failure was answered runs as any other. The calls share one connection, which closes
+failure was answered runs as any other, a <code>persist</code> storing the
+database whole as the failed restore left it. The calls share one connection, which closes
 as soon as a delete of the database
 (<code>indexedDB.deleteDatabase('fennecdb')</code>) or an upgrade asks, so
 nothing of fennecdb's holds either up. Deleted under the page, or with the

@@ -1168,15 +1168,20 @@ export async function restore(fennec, key = 'default', opts = {}) {
   const r = { prev: restoring.get(fennec) };
   restoring.set(fennec, r);
   // Noted inside the turn: before the next call's begins.
-  return inTurn(fennec, async () => {
+  const out = inTurn(fennec, async () => {
     try {
       return (r.loaded = await restoreNow(fennec, key, opts));
     } catch (e) {
       throw (r.failed = e);
-    } finally {
-      if (restoring.get(fennec) === r) restoring.delete(fennec);
     }
   });
+  // Out until the promise its caller holds settles: let go of beside the
+  // turn, before the caller's own handlers, whose calls run. Let go of as
+  // its work ended, jobs earlier, a call made between ran as one made once
+  // the failure was seen.
+  const answered = () => restoring.get(fennec) === r && restoring.delete(fennec);
+  out.then(answered, answered);
+  return out;
 }
 
 async function restoreNow(fennec, key, opts) {
@@ -1215,14 +1220,26 @@ async function restoreNow(fennec, key, opts) {
   }
   // Closed while the record was read: `emptied` would open it again.
   alive(fennec, 'restore');
+  // A load that fails may leave another database -- `emptied`, no journal
+  // on it, or emptied by the module for collation data it lacks, the
+  // journal holding writes of the one gone -- and `persist` drained that
+  // journal after the image of the one gone: nothing, or writes of a
+  // database no longer there. The next stores an image.
+  stored.delete(fennec);
   if (replaceable(fennec)) emptied(fennec);
-  await fennec.loadAsync(bytes);
-  fennec.journal();
-  // Its chunks follow over the connection it was read over, as `persist`'s.
-  stored.set(fennec, { key, ck, db: on, gen, next: chunks.length + 1, image: image.length, chunks: bytes.length - image.length });
-  // The database the code declared its schema for is this one now: checked
-  // again, what it adds journaled with the rest.
-  await checked(fennec, declared.get(fennec), 'apply');
+  try {
+    await fennec.loadAsync(bytes);
+    fennec.journal();
+    // Its chunks follow over the connection it was read over, as `persist`'s.
+    stored.set(fennec, { key, ck, db: on, gen, next: chunks.length + 1, image: image.length, chunks: bytes.length - image.length });
+    // The database the code declared its schema for is this one now: checked
+    // again, what it adds journaled with the rest.
+    await checked(fennec, declared.get(fennec), 'apply');
+  } finally {
+    // Closed while collation data was fetched or the schema checked: the
+    // load called the record corrupt, the check the handle not found.
+    alive(fennec, 'restore');
+  }
   return true;
 }
 
@@ -1464,10 +1481,13 @@ async function openFileNow(fennec, name, opts) {
   const ours = holding.get(where)?.has(name) ?? false;
   const main = await syncAccess(dir, name, ours);
   let aside = null;
+  // Closed while the file was asked for, its handles are let go of below,
+  // and closed while collation data was fetched or the schema checked: the
+  // load called the file corrupt, the check the handle not found.
+  const live = () => alive(fennec, 'openFile');
   try {
     aside = await syncAccess(dir, `${name}~`, ours);
-    // Closed while the file was asked for: its handles are let go of below.
-    alive(fennec, 'openFile');
+    live();
     const beside = aside.getSize();
     if (beside > 0) {
       // A rewrite stopped: its copy was flushed before the file was
@@ -1492,7 +1512,7 @@ async function openFileNow(fennec, name, opts) {
       if (replaceable(fennec)) emptied(fennec);
       if (fennec.schemas().length) throw new FennecError(`${name} holds a database: open it into one that holds nothing`);
       const bytes = readAt(main, size);
-      const took = await fennec.loadAsync(bytes);
+      const took = await fennec.loadAsync(bytes).finally(live);
       // A last record a crash cut short: appended after, the next write
       // would be read back as the rest of it.
       if (took < size) {
@@ -1507,8 +1527,7 @@ async function openFileNow(fennec, name, opts) {
     kept.set(fennec, file);
     // Refused, or the database closed meanwhile, the file is let go of.
     try {
-      await checked(fennec, opts.schema ? opts : declared.get(fennec), 'apply');
-      alive(fennec, 'openFile');
+      await checked(fennec, opts.schema ? opts : declared.get(fennec), 'apply').finally(live);
     } catch (e) {
       file.close();
       throw e;

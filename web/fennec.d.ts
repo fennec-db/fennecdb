@@ -1736,7 +1736,8 @@ export function persist(fennec: Fennec<any, any>, key?: string, opts?: PersistOp
 /**
  * Restores from IndexedDB, image and chunks; `false` when there is no
  * record. In turn with `persist` and `openFile`; refused when the database
- * is closed before it runs, or before it loads what it read.
+ * is closed before it runs, or before it is done loading what it read. Out
+ * until the promise it returns settles.
  */
 export function restore(fennec: Fennec<any, any>, key?: string, opts?: PersistOptions): Promise<boolean>;
 /** Free-form state (cursors) -- next to the image, under a separate key. */
@@ -1770,8 +1771,8 @@ export interface FennecFile {
  * worker holds is waited for 3 s, then refused -- the worker of a page
  * reloaded while it was busy lets go of it only once it has ended. In turn
  * with `persist` and `restore`: refused, its file let go of, once the
- * database is closed before it has opened the file, and, called while a
- * `restore` is out, when that restore fails.
+ * database is closed before it is done opening the file, and, called while
+ * a `restore` is out, when that restore fails.
  */
 export function openFile(
   fennec: Fennec<any, any>,

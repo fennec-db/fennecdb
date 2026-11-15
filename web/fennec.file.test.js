@@ -416,6 +416,63 @@ test('an openFile that has not run by the close is refused, its file let go of',
   assert.equal(dir.files.get('e.fennec').open, false);
 });
 
+// Closed while `openFile` fetched the collation data the file's image
+// needs, the load met a closed handle and called the file corrupt; closed
+// while it checked the database against the code's schema, the check
+// called it a handle not found, or -- the check answered before the close
+// -- the file kept a closed database.
+test('an openFile the database is closed under as it loads or checks is refused, its file let go of', { skip }, async () => {
+  const dir = fakeDir();
+  const fetched = (name) => readFile(new URL(`./collate/${name}.bin`, import.meta.url));
+  const schema = 'create collection words (w text collate und @sorted)';
+  const writer = await Fennec.open(wasm, { schema, collation: fetched });
+  await writer.from('words').insert([{ w: 'Ελλάδα' }]);
+  dir.put('g.fennec', writer.snapshot());
+  const size = dir.bytes('g.fennec').length;
+  const closed = /openFile refused: the database was closed/;
+  const untouched = (name, n) => {
+    assert.equal(dir.files.get(name).open, false, `${name} let go of`);
+    assert.equal(dir.bytes(name).length, n, `${name} as it was`);
+  };
+
+  const fetching = await Fennec.open(wasm, {
+    schema,
+    collation: async (name) => {
+      fetching.close();
+      return fetched(name);
+    },
+  });
+  await assert.rejects(openFile(fetching, 'g.fennec', { dir }), closed);
+  untouched('g.fennec', size);
+
+  // The check asks for nothing over the network: the close comes as one
+  // would while it fetched collation data a migration needs, the check
+  // after meeting the closed handle -- or while it waited for the answer.
+  const plain = await Fennec.open(wasm, { schema: 'create collection t (n int)' });
+  plain.run('put t {n: 1}');
+  dir.put('p.fennec', plain.snapshot());
+  const n = dir.bytes('p.fennec').length;
+  const failing = await Fennec.open(wasm, { schema: 'create collection t (n int)' });
+  failing.checkSchema = function (...args) {
+    this.close();
+    return Fennec.prototype.checkSchema.apply(this, args);
+  };
+  await assert.rejects(openFile(failing, 'p.fennec', { dir }), closed);
+  untouched('p.fennec', n);
+  const answered = await Fennec.open(wasm, { schema: 'create collection t (n int)' });
+  answered.checkSchema = function (...args) {
+    const out = Fennec.prototype.checkSchema.apply(this, args);
+    queueMicrotask(() => this.close());
+    return out;
+  };
+  await assert.rejects(openFile(answered, 'p.fennec', { dir }), closed);
+  untouched('p.fennec', n);
+
+  const { db: again, file } = await reopen(dir, 'p.fennec');
+  assert.deepEqual(again.rows('get t select n').map((r) => r.n), [1]);
+  file.close();
+});
+
 // A page loaded again finds its file held by the worker of the page before
 // until that worker has ended -- in Chrome 2 s after the page went, when
 // it was busy (web/browser/) -- and opens it once it is let go of.

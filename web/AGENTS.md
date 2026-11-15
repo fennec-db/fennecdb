@@ -42,19 +42,23 @@ the one a transaction failed on is let go (Firefox refuses its next
 requests). A chunk follows its image only over the connection that stored
 or read the image, open since (`stored`'s `db`, `inStore`'s `on`): past a
 delete of the database or the site's data cleared, the next `persist`
-stores an image. A database's `persist`, `restore` and `openFile` run one
-after another in call order (`inTurn`), each once the one before has
-settled, refused or not: two at once read one chunk number, and the
-second chunk was stored over the first; a retry inside one runs in its
-turn (`persistNow`), never through `persist`, which would wait for itself.
-A database `close`d is refused by each of them not yet run, by the retry
-and by one that awaited before it touches the database (`alive`): its
-image is empty, and stored it replaced the record and its chunks; nor is
-an empty image ever stored (`filled`). A `persist` or `openFile` made
-while a `restore` was out is refused when that restore was (`restoring`),
+stores an image, as it does after a `restore` that failed as it loaded,
+which lets go of `stored` first: the database may be another, its journal
+off or holding another's writes. A database's `persist`, `restore` and
+`openFile` run one after another in call order (`inTurn`), each once the
+one before has settled, refused or not: two at once read one chunk
+number, and the second chunk was stored over the first; a retry inside
+one runs in its turn (`persistNow`), never through `persist`, which would
+wait for itself. A database `close`d is refused by each of them not yet
+run, by the retry and by one that awaited before it touches the database
+or while it loads or checks it (`alive`), naming the close: its image is
+empty, and stored it replaced the record and its chunks; nor is an empty
+image ever stored (`filled`). A `persist` or `openFile` made
+while a `restore` was out -- till the promise it returned settles, let go
+of beside its turn -- is refused when that restore was (`restoring`),
 unless a later one before it loaded its record: the restore may have
 emptied the database. `web/fennec.persist.test.js`,
-`web/fennec.file.test.js` and `web/browser/` hold all four. A change to
+`web/fennec.file.test.js` and `web/browser/` hold all seven. A change to
 these calls or to `idb` runs `web/browser/` in Chrome, Firefox and Safari
 before it lands -- every pull request's run has `browsers (safari)` --
 and `make file-bench` in Chrome and Firefox against main's.

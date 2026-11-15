@@ -487,6 +487,11 @@ test('a persist or restore that has not run by the close is refused, the record 
     await assert.rejects(queued, closed);
     await assert.rejects(persist(db, 'r'), closed);
     await assert.rejects(restore(db, 'r'), closed);
+    // Refused before it reads: read first, a key holding nothing answered
+    // false, and a sealed record its key's absence.
+    await assert.rejects(restore(db, 'nothing'), closed);
+    const cryptoKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+    await assert.rejects(restore(db, 'r', { cryptoKey }), closed);
     assert.deepEqual(await restored('r'), [1, 2]);
   });
 
@@ -549,6 +554,160 @@ test('a persist waiting for a restore that fails is refused with it; one called 
   const copy = await Fennec.open(wasm, { collation });
   assert.equal(await restore(copy, 'copy'), true);
   assert.deepEqual(words(copy), ['Ελλάδα']);
+});
+
+// A restore whose load failed left `persist` believing the database it had
+// stored was still there. One holding only what its schema made had been
+// given a new handle, no journal on it: every later persist drained
+// nothing and answered 0, the page's writes stored nowhere. The module
+// empties a database a load found collation data missing for, its journal
+// kept: a persist appended the writes from before the restore to a record
+// another had replaced, of a database that was gone.
+test('a persist after a restore that failed as it loaded stores the database whole', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const idb = fakeIndexedDB();
+  globalThis.indexedDB = idb;
+  globalThis.IDBKeyRange = KeyRange;
+  const { Fennec, persist, restore } = await import('./fennec.js');
+  const collation = (name) => readFile(new URL(`./collate/${name}.bin`, import.meta.url));
+  const schema = 'create collection words (w text collate und @sorted)';
+  const offline = () => {
+    throw new Error('offline');
+  };
+  const ns = (d) => d.rows('get t select n order n').map((r) => r.n);
+  const greek = async (key) => {
+    const other = await Fennec.open(wasm, { schema, collation });
+    await other.from('words').insert([{ w: 'Ελλάδα' }]);
+    assert.ok((await persist(other, key)) > 0);
+  };
+  const restored = async (key) => {
+    const back = await Fennec.open(wasm, { collation });
+    assert.equal(await restore(back, key), true);
+    return back;
+  };
+  const stores = async (db, key) => {
+    assert.ok((await persist(db, key)) > 0, 'stored');
+    assert.deepEqual(idb.log.at(-1).map((w) => w[1]), [key, `${key}#..`], 'an image');
+  };
+
+  // The review's sequence: emptied for the image, then refused.
+  const page = await Fennec.open(wasm, { schema, collation: offline });
+  assert.ok((await persist(page, 'e')) > 0);
+  await greek('e');
+  await assert.rejects(restore(page, 'e'), /offline/);
+  page.run('create collection t (n int)');
+  page.run('put t {n: 1}');
+  await stores(page, 'e');
+  page.run('put t {n: 2}');
+  assert.ok((await persist(page, 'e')) > 0, 'a chunk after it');
+  assert.deepEqual(ns(await restored('e')), [1, 2]);
+
+  // Holding more, it is not emptied first: the module empties it. Its
+  // image large enough that the next writes are a chunk, not folded.
+  const more = await Fennec.open(wasm, { collation: offline });
+  more.run('create collection t (n int)');
+  for (let n = 10; n < 60; n++) more.run(`put t {n: ${n}}`);
+  assert.ok((await persist(more, 'm')) > 0);
+  more.run('put t {n: 2}');
+  await greek('m');
+  await assert.rejects(restore(more, 'm'), /offline/);
+  assert.deepEqual(more.schemas(), [], 'emptied by the module');
+  more.run('create collection t (n int)');
+  more.run('put t {n: 3}');
+  await stores(more, 'm');
+  const back = await restored('m');
+  assert.deepEqual(ns(back), [3]);
+  assert.deepEqual(back.schemas().map((s) => s.name), ['t']);
+});
+
+// Closed while `restore` fetched the collation data its image needs, the
+// load met a closed handle and refused the record as corrupt; closed while
+// it checked the database against the code's schema, the check refused it
+// as a handle not found.
+test('a restore the database is closed under as it loads or checks is refused, naming the close', { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  globalThis.indexedDB = fakeIndexedDB();
+  globalThis.IDBKeyRange = KeyRange;
+  const { Fennec, persist, restore } = await import('./fennec.js');
+  const fetched = (name) => readFile(new URL(`./collate/${name}.bin`, import.meta.url));
+  const schema = 'create collection words (w text collate und @sorted)';
+  const words = (d) => d.rows('get words select w order w').map((r) => r.w);
+  const writer = await Fennec.open(wasm, { schema, collation: fetched });
+  await writer.from('words').insert([{ w: 'Ελλάδα' }, { w: 'b' }]);
+  await persist(writer, 'g');
+  const closed = /restore refused: the database was closed/;
+
+  const fetching = await Fennec.open(wasm, {
+    schema,
+    collation: async (name) => {
+      fetching.close();
+      return fetched(name);
+    },
+  });
+  await assert.rejects(restore(fetching, 'g'), closed);
+
+  // The schema's check asks for nothing over the network: the close comes
+  // as one would while it fetched collation data a migration needs, and
+  // the check after meets the closed handle.
+  const plain = await Fennec.open(wasm, { schema: 'create collection t (n int)' });
+  plain.run('put t {n: 1}');
+  await persist(plain, 'p');
+  const checking = await Fennec.open(wasm, { schema: 'create collection t (n int)' });
+  checking.checkSchema = function (...args) {
+    this.close();
+    return Fennec.prototype.checkSchema.apply(this, args);
+  };
+  await assert.rejects(restore(checking, 'p'), closed);
+
+  const back = await Fennec.open(wasm, { collation: fetched });
+  assert.equal(await restore(back, 'g'), true);
+  assert.deepEqual(words(back), ['b', 'Ελλάδα'], 'the record stands');
+});
+
+// The restore was let go of as its work ended, a few jobs before its
+// caller was answered: a persist made between counted as made after the
+// failure, and stored the database the restore had emptied.
+test("a restore is out until its caller is answered, and the caller's own handler may persist", { skip: wasm ? false : 'no web/fennec.wasm (make wasm)' }, async () => {
+  const idb = fakeIndexedDB();
+  globalThis.indexedDB = idb;
+  globalThis.IDBKeyRange = KeyRange;
+  const { Fennec, persist, restore } = await import('./fennec.js');
+  const { inspect } = await import('node:util');
+  const schema = 'create collection words (w text collate und @sorted)';
+  const writer = await Fennec.open(wasm, { schema, collation: (name) => readFile(new URL(`./collate/${name}.bin`, import.meta.url)) });
+  await writer.from('words').insert([{ w: 'Ελλάδα' }]);
+  await persist(writer, 'u');
+
+  // From the failed fetch on, a persist every job, each noting whether the
+  // promise restore answered was still pending when it was made.
+  const made = [];
+  let restoring = null;
+  let answered = false;
+  const tick = () => {
+    if (answered) return;
+    made.push([inspect(restoring).includes('<pending>'), persist(page, `t${made.length}`)]);
+    queueMicrotask(tick);
+  };
+  const page = await Fennec.open(wasm, {
+    schema,
+    collation: () => {
+      queueMicrotask(tick);
+      throw new Error('offline');
+    },
+  });
+  restoring = restore(page, 'u');
+  let own = null;
+  await restoring.catch((e) => {
+    answered = true;
+    assert.match(e.message, /offline/);
+    own = persist(page, 'own');
+  });
+  const ended = await Promise.allSettled(made.map(([, p]) => p));
+  assert.ok(made.some(([out]) => out) && made.some(([out]) => !out), 'calls made on both sides of the answer');
+  made.forEach(([out], i) => {
+    if (out) assert.match(ended[i].reason?.message ?? 'ran', /the restore it waited for failed \(offline\)/, `t${i}, made while it was out`);
+    else assert.equal(ended[i].status, 'fulfilled', `t${i}, made once it was answered`);
+  });
+  assert.ok((await own) > 0, "its caller's own handler stores");
+  assert.ok(idb.records.has('own'));
 });
 
 // A transaction past its quota is refused at its commit, by `abort` alone:

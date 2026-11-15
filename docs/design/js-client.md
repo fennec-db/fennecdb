@@ -179,11 +179,13 @@ in call order (`inTurn`), each once the one before has settled, refused or
 not: a `persist` called while another is out stores what was written by its
 turn, and one called with none out runs at once, as it always did. One
 not yet run when the database is `close`d is refused, naming the close, as
-is a `restore` or `openFile` that was awaiting IndexedDB or the file when
-it came; a `persist` already storing what it took finishes. A `persist` or
-`openFile` made while a `restore` was out is refused, naming it, when that
+is a `restore` or `openFile` that was awaiting IndexedDB or the file, or
+loading it, when it came; a `persist` already storing what it took
+finishes. A `persist` or `openFile` made while a `restore` was out -- till
+the promise it returned settles -- is refused, naming it, when that
 restore fails -- unless a later restore called before it loaded its
-record -- and one called once the failure was answered runs.
+record -- and one called once the failure was answered runs, a `persist`
+storing the database whole as the failed restore left it.
 
 ### In real browsers
 
@@ -365,6 +367,39 @@ What it found, fixed with it:
   hold each case, failing before; the browser suite's seventeenth and
   eighteenth tests hold a `persist` and a `restore` waiting at the close,
   and a `persist` waiting for a `restore` under another key.
+- (A third review; the first older than this work, main doing the same.)
+  A `restore` whose load failed left `persist` believing the database it
+  had stored still there (`stored`). One holding only what its schema
+  made had been given a new handle with no journal on it (`emptied`), so
+  every later `persist` of that key drained nothing and answered 0, the
+  page's writes stored nowhere and no error said; one holding more is
+  emptied by the module when collation data is missing, its journal kept
+  with the writes from before the restore, which the next `persist`
+  appended to a record another may have replaced, of a database that was
+  gone. A `restore` now lets go of `stored` before it loads, and the next
+  `persist` starts the journal again and stores an image of what the
+  database holds. A close while `restore` or `openFile` fetched the
+  collation data the image needs, or checked the code's schema, was
+  refused in the load's or the check's words -- "could not load image
+  (corrupt or incompatible version)" of a good record, "not found: handle
+  N" -- and is now refused naming the close (`alive` after both). No
+  caller branches on the load's message: the sync layer takes any refused
+  `restore` for a cache to seed again, and a closed replica's `persist` is
+  refused, so no close made it store over a good record. A `restore` was
+  let go of as its work ended (`restoring`), jobs before the promise its
+  caller holds settled, so a `persist` made between counted as made after
+  the failure and ran; it is let go of now beside its turn, as that
+  promise settles, before its caller's own handlers, whose calls run. Each
+  holds a test that fails before: `web/fennec.persist.test.js` (a persist
+  after a restore that failed as it loaded, a restore closed under as it
+  loads or checks, a restore out until its caller is answered) and
+  `web/fennec.file.test.js` (an openFile closed under as it loads or
+  checks, which pins its look after the check too); `restore`'s look
+  before it reads is pinned as well, a closed database's key holding
+  nothing answered `false` without it. `web/fennec.js` grows 1 055 bytes,
+  319 gzip and 278 brotli as served (26 gzip minified), the client 73.10
+  KiB gzip, 61.92 brotli and 235 KiB raw; a `restore` adds a promise
+  reaction and `openFile` two, no request, and `persist` is unchanged.
 - A file past the quota: Chrome's file system throws QuotaExceededError,
   Firefox's writes nothing and says so by its count, which the file now
   names as the origin out of room. Either way the write is refused, every
