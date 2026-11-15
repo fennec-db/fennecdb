@@ -418,17 +418,13 @@ fn main() {
     cfg.tls = fennec_http::conn::from_flags(tls_cert.as_deref(), tls_key.as_deref())
         .unwrap_or_else(|e| fail(&e));
 
-    match tracing.settings("fennec-shard") {
-        Err(e) => fail(&e),
-        Ok(None) => {}
-        Ok(Some(s)) => {
-            let (url, sample) = (s.endpoint.url(), s.sample);
-            if let Err(e) = fennec_http::trace::install(s) {
-                fail(&format!("could not start the tracing thread: {e}"));
-            }
-            fennec_http::log!("tracing: OTLP/HTTP JSON to {url}, sampling {sample}");
-        }
-    }
+    // Read with the line, refused with it; the thread is started once the
+    // files the flags name were read: started before, a `--tls-ca` or an
+    // `--audit` refused (2) printed `tracing:` and started an exporter
+    // first, where fennec-server reads them before it starts tracing.
+    let tracing = tracing
+        .settings("fennec-shard")
+        .unwrap_or_else(|e| fail(&e));
 
     // An empty key would let anyone make the entry's mark, and a token
     // the entry's Worker holds that this router takes for something else
@@ -490,6 +486,13 @@ fn main() {
         if let Err(e) = fennec_http::audit::open(std::path::Path::new(p)) {
             fail(&format!("could not open {p}: {e}"));
         }
+    }
+    if let Some(s) = tracing {
+        let (url, sample) = (s.endpoint.url(), s.sample);
+        if let Err(e) = fennec_http::trace::install(s) {
+            fail(&format!("could not start the tracing thread: {e}"));
+        }
+        fennec_http::log!("tracing: OTLP/HTTP JSON to {url}, sampling {sample}");
     }
 
     // Held until the process ends, every way it ends.
