@@ -356,16 +356,16 @@ unsafe fn call(
         if !ptr.is_null() {
             // SAFETY: `ptr` is `CString::into_raw`'s, just above, given to
             // no one: the caller asked for no answer.
-            drop(CString::from_raw(ptr));
+            drop(unsafe { CString::from_raw(ptr) });
         }
     } else {
         // SAFETY: `out` is not null, so valid to write one pointer, as this
         // function's contract and fennec.h's (*Pointers and lengths*) say.
-        *out = ptr;
+        unsafe { *out = ptr };
     }
     if !out_len.is_null() {
         // SAFETY: as for `out`.
-        *out_len = len;
+        unsafe { *out_len = len };
     }
     code
 }
@@ -386,7 +386,7 @@ unsafe fn text<'a>(ptr: *const u8, len: usize, what: &str) -> Result<&'a str, Fa
     // say -- which also bounds `len` by the caller's buffer, below
     // `isize::MAX`. The `&str` is the call's alone: each caller hands it
     // straight to a function whose signature ties it to that call.
-    std::str::from_utf8(std::slice::from_raw_parts(ptr, len))
+    std::str::from_utf8(unsafe { std::slice::from_raw_parts(ptr, len) })
         .map_err(|_| misuse(&format!("{what} is not UTF-8")))
 }
 
@@ -398,7 +398,7 @@ unsafe fn bytes<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
     match ptr.is_null() || len == 0 {
         true => &[],
         // SAFETY: as in [`text`].
-        false => std::slice::from_raw_parts(ptr, len),
+        false => unsafe { std::slice::from_raw_parts(ptr, len) },
     }
 }
 
@@ -428,16 +428,22 @@ pub unsafe extern "C" fn fennec_open(
     out: *mut *mut c_char,
     out_len: *mut usize,
 ) -> i32 {
-    call(out, out_len, || {
-        let path = text(path, path_len, "the path")?;
+    let answer = || {
+        // SAFETY: `path` is null with `path_len` 0 or valid for `path_len` bytes,
+        // as this function's contract says.
+        let path = unsafe { text(path, path_len, "the path") }?;
         if path.is_empty() || handle.is_null() {
             return Err(misuse("fennec_open needs a path and a handle to write"));
         }
+        let h = open_wrapped(path, flags, Box::new(Ok))?;
         // SAFETY: not null, so valid to write a `u64`, as the contract and
         // fennec.h's say.
-        *handle = open_wrapped(path, flags, Box::new(Ok))?;
+        unsafe { *handle = h };
         Ok(None)
-    })
+    };
+    // SAFETY: `out` and `out_len` are null or valid to write, as this
+    // function's contract and fennec.h's (*Pointers and lengths*) say.
+    unsafe { call(out, out_len, answer) }
 }
 
 /// [`fennec_open`] as Rust, the file's sink wrapped before the database
@@ -475,7 +481,7 @@ pub unsafe extern "C" fn fennec_open_memory(
     out: *mut *mut c_char,
     out_len: *mut usize,
 ) -> i32 {
-    call(out, out_len, || {
+    let answer = || {
         if handle.is_null() {
             return Err(misuse("fennec_open_memory needs a handle to write"));
         }
@@ -484,11 +490,15 @@ pub unsafe extern "C" fn fennec_open_memory(
         // had each statement it defined marked broken ("its text did not
         // read"), and every call of it refused.
         fennec_ql::install();
+        let h = keep(Database::new(), false, None);
         // SAFETY: not null, so valid to write a `u64`, as the contract and
         // fennec.h's say.
-        *handle = keep(Database::new(), false, None);
+        unsafe { *handle = h };
         Ok(None)
-    })
+    };
+    // SAFETY: `out` and `out_len` are null or valid to write, as this
+    // function's contract and fennec.h's (*Pointers and lengths*) say.
+    unsafe { call(out, out_len, answer) }
 }
 
 fn keep(db: Database, durable: bool, lock: Option<FileLock>) -> u64 {
@@ -542,7 +552,7 @@ pub unsafe extern "C" fn fennec_close(
     out: *mut *mut c_char,
     out_len: *mut usize,
 ) -> i32 {
-    call(out, out_len, || {
+    let answer = || {
         let n = {
             let mut hs = handles();
             let at = hs
@@ -571,7 +581,10 @@ pub unsafe extern "C" fn fennec_close(
         drop(db);
         drop(n.lock.lock().unwrap_or_else(|e| e.into_inner()).take());
         result.map(|_| None).map_err(|e| failed(&e))
-    })
+    };
+    // SAFETY: `out` and `out_len` are null or valid to write, as this
+    // function's contract and fennec.h's (*Pointers and lengths*) say.
+    unsafe { call(out, out_len, answer) }
 }
 
 // ------------------------------------------------------------------ query
@@ -603,16 +616,25 @@ pub unsafe extern "C" fn fennec_query(
     out: *mut *mut c_char,
     out_len: *mut usize,
 ) -> i32 {
-    call(out, out_len, || {
+    let answer = || {
         let n = native(handle)?;
-        let sql = text(text_ptr, text_len, "the text")?;
-        let params = text(params_ptr, params_len, "the parameters")?;
-        let vectors = bytes(vectors_ptr, vectors_len);
+        // SAFETY: `text_ptr` is null with `text_len` 0 or valid for `text_len` bytes,
+        // as this function's contract says.
+        let sql = unsafe { text(text_ptr, text_len, "the text") }?;
+        // SAFETY: `params_ptr` is null with `params_len` 0 or valid for `params_len` bytes,
+        // as this function's contract says.
+        let params = unsafe { text(params_ptr, params_len, "the parameters") }?;
+        // SAFETY: `vectors_ptr` is null with `vectors_len` 0 or valid for `vectors_len` bytes,
+        // as this function's contract says.
+        let vectors = unsafe { bytes(vectors_ptr, vectors_len) };
         match query(&n, sql, params, vectors) {
             (FENNEC_OK, answer) => Ok(Some(answer)),
             failed => Err(failed),
         }
-    })
+    };
+    // SAFETY: `out` and `out_len` are null or valid to write, as this
+    // function's contract and fennec.h's (*Pointers and lengths*) say.
+    unsafe { call(out, out_len, answer) }
 }
 
 /// [`fennec_query`] as Rust: the code and the answer's JSON.
@@ -834,11 +856,14 @@ pub unsafe extern "C" fn fennec_changes(
     out: *mut *mut c_char,
     out_len: *mut usize,
 ) -> i32 {
-    call(out, out_len, || {
+    let answer = || {
         let n = native(handle)?;
         let db = n.read()?;
         Ok(Some(fennec_abi::changes(&db, since)))
-    })
+    };
+    // SAFETY: `out` and `out_len` are null or valid to write, as this
+    // function's contract and fennec.h's (*Pointers and lengths*) say.
+    unsafe { call(out, out_len, answer) }
 }
 
 // ----------------------------------------------------------------- schema
@@ -873,7 +898,7 @@ pub unsafe extern "C" fn fennec_schema(
     out: *mut *mut c_char,
     out_len: *mut usize,
 ) -> i32 {
-    call(out, out_len, || {
+    let answer = || {
         let n = native(handle)?;
         // Before the text is read: fennec.h says this mode leaves it
         // unread, so a caller may hand it anything. Read as UTF-8 first, a
@@ -881,7 +906,10 @@ pub unsafe extern "C" fn fennec_schema(
         if mode == FENNEC_SCHEMA_DESCRIBE {
             return Ok(Some(fennec_abi::describe(&*n.read()?, false)));
         }
-        let request = text(text_ptr, text_len, "the description")?;
+        // SAFETY: under every mode but `FENNEC_SCHEMA_DESCRIBE`, answered
+        // above, `text_ptr` is null with `text_len` 0 or valid for
+        // `text_len` bytes, as this function's contract says.
+        let request = unsafe { text(text_ptr, text_len, "the description") }?;
         let outcome = match mode {
             FENNEC_SCHEMA_FOLLOW => fennec_abi::follow(&*n.read()?, request),
             FENNEC_SCHEMA_PLAN | FENNEC_SCHEMA_APPLY => {
@@ -901,7 +929,10 @@ pub unsafe extern "C" fn fennec_schema(
             _ => return Err(misuse(&format!("no schema mode {mode}"))),
         };
         outcome.map(|o| Some(o.json())).map_err(|e| failed(&e))
-    })
+    };
+    // SAFETY: `out` and `out_len` are null or valid to write, as this
+    // function's contract and fennec.h's (*Pointers and lengths*) say.
+    unsafe { call(out, out_len, answer) }
 }
 
 // ------------------------------------------------------------- durability
@@ -918,12 +949,15 @@ pub unsafe extern "C" fn fennec_sync(
     out: *mut *mut c_char,
     out_len: *mut usize,
 ) -> i32 {
-    call(out, out_len, || {
+    let answer = || {
         let n = native(handle)?;
         let durability = n.write()?.flush().map_err(|e| failed(&e))?;
         n.after_lock(durability).map_err(|e| failed(&e))?;
         Ok(None)
-    })
+    };
+    // SAFETY: `out` and `out_len` are null or valid to write, as this
+    // function's contract and fennec.h's (*Pointers and lengths*) say.
+    unsafe { call(out, out_len, answer) }
 }
 
 /// Hands the buffered writes to the system with no fsync: they outlive the
@@ -938,12 +972,15 @@ pub unsafe extern "C" fn fennec_flush(
     out: *mut *mut c_char,
     out_len: *mut usize,
 ) -> i32 {
-    call(out, out_len, || {
+    let answer = || {
         let n = native(handle)?;
         let mut db = n.write()?;
         db.write_out().map_err(|e| failed(&e))?;
         Ok(None)
-    })
+    };
+    // SAFETY: `out` and `out_len` are null or valid to write, as this
+    // function's contract and fennec.h's (*Pointers and lengths*) say.
+    unsafe { call(out, out_len, answer) }
 }
 
 /// Writes the file anew as an image of the database, graphs and all, so the
@@ -958,12 +995,15 @@ pub unsafe extern "C" fn fennec_checkpoint(
     out: *mut *mut c_char,
     out_len: *mut usize,
 ) -> i32 {
-    call(out, out_len, || {
+    let answer = || {
         let n = native(handle)?;
         let mut db = n.write()?;
         db.checkpoint().map_err(|e| failed(&e))?;
         Ok(None)
-    })
+    };
+    // SAFETY: `out` and `out_len` are null or valid to write, as this
+    // function's contract and fennec.h's (*Pointers and lengths*) say.
+    unsafe { call(out, out_len, answer) }
 }
 
 /// Builds the hash, text, ordered and sparse indexes an open leaves for
@@ -985,9 +1025,11 @@ pub unsafe extern "C" fn fennec_warm(
     out: *mut *mut c_char,
     out_len: *mut usize,
 ) -> i32 {
-    call(out, out_len, || {
+    let answer = || {
         let n = native(handle)?;
-        let only: Vec<String> = text(only_ptr, only_len, "the indexes")?
+        // SAFETY: `only_ptr` is null with `only_len` 0 or valid for
+        // `only_len` bytes, as this function's contract says.
+        let only: Vec<String> = unsafe { text(only_ptr, only_len, "the indexes") }?
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
@@ -997,7 +1039,10 @@ pub unsafe extern "C" fn fennec_warm(
             n.read()?.warm_index(c, f, *kind).map_err(|e| failed(&e))?;
         }
         Ok(Some(format!("{{\"built\":{}}}", todo.len())))
-    })
+    };
+    // SAFETY: `out` and `out_len` are null or valid to write, as this
+    // function's contract and fennec.h's (*Pointers and lengths*) say.
+    unsafe { call(out, out_len, answer) }
 }
 
 // ------------------------------------------------------------------- sync
@@ -1033,9 +1078,11 @@ pub unsafe extern "C" fn fennec_sync_start(
     out: *mut *mut c_char,
     out_len: *mut usize,
 ) -> i32 {
-    call(out, out_len, || {
+    let answer = || {
         let n = native(handle)?;
-        let config = text(config, config_len, "the configuration")?;
+        // SAFETY: `config` is null with `config_len` 0 or valid for `config_len` bytes,
+        // as this function's contract says.
+        let config = unsafe { text(config, config_len, "the configuration") }?;
         let mut slot = n.sync_lock();
         if slot.is_some() {
             return Err(misuse("the database syncs already"));
@@ -1045,7 +1092,10 @@ pub unsafe extern "C" fn fennec_sync_start(
         let actions = sync.actions();
         *slot = Some(sync);
         Ok(Some(actions))
-    })
+    };
+    // SAFETY: `out` and `out_len` are null or valid to write, as this
+    // function's contract and fennec.h's (*Pointers and lengths*) say.
+    unsafe { call(out, out_len, answer) }
 }
 
 /// Tells the sync what happened, and writes the actions now due: `kind` one
@@ -1071,9 +1121,11 @@ pub unsafe extern "C" fn fennec_sync_feed(
     out: *mut *mut c_char,
     out_len: *mut usize,
 ) -> i32 {
-    call(out, out_len, || {
+    let answer = || {
         let n = native(handle)?;
-        let body = bytes(bytes_ptr, len);
+        // SAFETY: `bytes_ptr` is null with `len` 0 or valid for `len` bytes,
+        // as this function's contract says.
+        let body = unsafe { bytes(bytes_ptr, len) };
         let mut slot = n.sync_lock();
         let Some(sync) = slot.as_mut() else {
             return Err(misuse(
@@ -1106,7 +1158,10 @@ pub unsafe extern "C" fn fennec_sync_feed(
         // same, or a binding would never perform them.
         let _ = n.after_lock(behind);
         Ok(Some(actions))
-    })
+    };
+    // SAFETY: `out` and `out_len` are null or valid to write, as this
+    // function's contract and fennec.h's (*Pointers and lengths*) say.
+    unsafe { call(out, out_len, answer) }
 }
 
 /// The sync's state:
@@ -1121,7 +1176,7 @@ pub unsafe extern "C" fn fennec_sync_status(
     out: *mut *mut c_char,
     out_len: *mut usize,
 ) -> i32 {
-    call(out, out_len, || {
+    let answer = || {
         let n = native(handle)?;
         let slot = n.sync_lock();
         match slot.as_ref() {
@@ -1130,7 +1185,10 @@ pub unsafe extern "C" fn fennec_sync_status(
                 "the database does not sync: fennec_sync_start first",
             )),
         }
-    })
+    };
+    // SAFETY: `out` and `out_len` are null or valid to write, as this
+    // function's contract and fennec.h's (*Pointers and lengths*) say.
+    unsafe { call(out, out_len, answer) }
 }
 
 /// Frees text the library handed out.
@@ -1142,7 +1200,7 @@ pub unsafe extern "C" fn fennec_free_string(s: *mut c_char) {
     if !s.is_null() {
         // SAFETY: as the contract says, `s` is text a call wrote through its
         // out pointer -- `CString::into_raw`'s, in `call` -- freed once.
-        drop(CString::from_raw(s));
+        drop(unsafe { CString::from_raw(s) });
     }
 }
 

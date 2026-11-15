@@ -111,8 +111,10 @@ jobs:
       # it is sound, clippy's undocumented_unsafe_blocks denied in the root
       # Cargo.toml's [workspace.lints], which a crate takes only by naming
       # it: each does, a new one too.
-      - name: Every crate takes the workspace's lints, unsafe code documented among them
-        run: python3 tools/lints_check.py
+      - name: Every crate takes the workspace's lints, and every unsafe block says why it is sound, whatever its cfg
+        run: |
+          python3 tools/test_lints_check.py
+          python3 tools/lints_check.py
 
       # The compiler CI tests with is the one that ships: rust-toolchain.toml
       # names an exact release, and every Dockerfile's rust image is that

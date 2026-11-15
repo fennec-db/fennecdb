@@ -29,12 +29,22 @@ categories = ["database", "database-implementations", "wasm"]
 # Every `unsafe` block and `unsafe impl` says why it is sound, in a `//
 # SAFETY:` comment above it: what the caller or the code around it
 # guarantees, by name -- for the C ABIs the contract fennec.h and their
-# `# Safety` sections write. Denied here, so every clippy run CI makes, on
-# every target, refuses one without (docs/design/conventions.md#unsafe-code);
-# each crate takes this table by `[lints] workspace = true`, which
-# tools/lints_check.py holds every member of the workspace to.
+# `# Safety` sections write (docs/design/conventions.md#unsafe-code). Each
+# crate takes these tables by `[lints] workspace = true`, which
+# tools/lints_check.py holds every member of the workspace to. Clippy's
+# deny refuses a block without its comment in the code a clippy run
+# compiles: CI's are x86_64 Linux's, wasm32's and part of Windows'.
+# tools/lints_check.py (CI's fmt job) reads every `.rs` file whatever its
+# `cfg` -- aarch64's kernels, Apple's and Windows' system calls -- and
+# refuses the same, by clippy's reading of where the comment goes.
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "deny"
+
+# An unsafe operation in an `unsafe fn` goes in a block of its own, which
+# then says why it is sound like any other: rustc's lint, so every build for
+# every target refuses one outside, clippy's run or not.
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
 
 # The internal crates carry a version as well as a path: cargo refuses to
 # publish a dependency that has only a path, and keeping them here means a

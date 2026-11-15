@@ -254,11 +254,19 @@ fn boxed(payload: &[u8]) -> *mut u8 {
 /// outlives the call. Copied out, as it was, a page of 200 768-dim vectors'
 /// parameters were 3 MB more to write before the first was read, and took
 /// 23.7 ms to read against 21.9.
+///
+/// # Safety
+/// `ptr` is null, `len` is 0, or `ptr` is valid for `len` bytes that do not
+/// change while the text lives.
 unsafe fn str_from<'a>(ptr: *const u8, len: usize) -> std::borrow::Cow<'a, str> {
     if ptr.is_null() || len == 0 {
         return "".into();
     }
-    let bytes = std::slice::from_raw_parts(ptr, len);
+    // SAFETY: not null and not empty, so valid for `len` bytes, as the
+    // contract says: an allocation the page made with `fennec_alloc(len)`
+    // and wrote, `len` at most `isize::MAX`, which `fennec_alloc` refuses
+    // past, kept unchanged until the export reading it returns.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
     match std::str::from_utf8(bytes) {
         Ok(s) => s.into(),
         Err(_) => lossy(bytes).into(),
@@ -360,11 +368,17 @@ pub unsafe extern "C" fn fennec_query(
     vectors_len: usize,
     now: f64,
 ) -> *mut u8 {
-    let sql = str_from(sql_ptr, sql_len);
-    let params_src = str_from(params_ptr, params_len);
+    // SAFETY: each pointer is null, or valid for its length, as the
+    // contract says -- the page's `fennec_alloc` buffers, written, alive
+    // across the call -- which `str_from` asks.
+    let sql = unsafe { str_from(sql_ptr, sql_len) };
+    // SAFETY: as for `sql`.
+    let params_src = unsafe { str_from(params_ptr, params_len) };
     let vectors = match vectors_ptr.is_null() || vectors_len == 0 {
         true => &[][..],
-        false => std::slice::from_raw_parts(vectors_ptr, vectors_len),
+        // SAFETY: not null and not empty, so valid for `vectors_len` bytes,
+        // as the contract says, at most `isize::MAX` (`fennec_alloc`).
+        false => unsafe { std::slice::from_raw_parts(vectors_ptr, vectors_len) },
     };
 
     let now = now.is_finite().then_some(now as i64);
@@ -433,7 +447,9 @@ pub unsafe extern "C" fn fennec_schema(
     mode: u32,
     now: f64,
 ) -> *mut u8 {
-    let request = str_from(ptr, len);
+    // SAFETY: as the contract says, `ptr` is valid for `len` bytes, which
+    // the page wrote and keeps across the call.
+    let request = unsafe { str_from(ptr, len) };
     let now = now.is_finite().then_some(now as i64);
     collate::take_missing();
     let out = with_db(handle, |db| {
@@ -517,7 +533,10 @@ pub unsafe extern "C" fn fennec_add_chunk(ptr: *const u8, len: usize) -> i32 {
     if ptr.is_null() {
         return -1;
     }
-    let bytes = std::slice::from_raw_parts(ptr, len);
+    // SAFETY: not null, so valid for `len` bytes, as the contract says: the
+    // page's `fennec_alloc(len)` buffer holding the chunk, alive across the
+    // call, `len` at most `isize::MAX`.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
     match collate::add_chunk(bytes) {
         Some(name) => collate::CHUNKS
             .iter()
@@ -659,7 +678,10 @@ pub unsafe extern "C" fn fennec_load(handle: u32, ptr: *const u8, len: usize) ->
     if ptr.is_null() || len == 0 {
         return 1;
     }
-    let bytes = std::slice::from_raw_parts(ptr, len);
+    // SAFETY: not null and not empty, so valid for `len` bytes, as the
+    // contract says: the page's `fennec_alloc(len)` buffer holding the
+    // image, alive across the call, `len` at most `isize::MAX`.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
     collate::take_missing();
     loaded(with_slot(handle, |s| {
         s.loaded = s.db.load(bytes).ok()?;

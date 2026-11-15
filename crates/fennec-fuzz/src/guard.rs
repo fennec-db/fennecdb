@@ -168,18 +168,25 @@ pub struct Capped;
 unsafe impl GlobalAlloc for Capped {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
         capped(l.size());
-        System.alloc(l)
+        // SAFETY: `l` is this call's layout, of a nonzero size as
+        // `GlobalAlloc::alloc`'s caller guarantees, handed on as it came.
+        unsafe { System.alloc(l) }
     }
     unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
         capped(l.size());
-        System.alloc_zeroed(l)
+        // SAFETY: as `alloc`'s.
+        unsafe { System.alloc_zeroed(l) }
     }
     unsafe fn realloc(&self, p: *mut u8, l: Layout, size: usize) -> *mut u8 {
         capped(size);
-        System.realloc(p, l, size)
+        // SAFETY: `p` is `System`'s, made with `l` -- every call here hands
+        // on to it -- and `size` is nonzero and fits `isize` once rounded
+        // to `l.align()`, as `GlobalAlloc::realloc`'s caller guarantees.
+        unsafe { System.realloc(p, l, size) }
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
-        System.dealloc(p, l)
+        // SAFETY: `p` is `System`'s, made with `l`, as for `realloc`.
+        unsafe { System.dealloc(p, l) }
     }
 }
 
@@ -432,13 +439,20 @@ mod sys {
         unsafe { write_all(2, bytes.as_ptr(), bytes.len()) };
     }
 
+    /// # Safety
+    /// `p` is valid to read for `n` bytes.
     unsafe fn write_all(fd: c_int, mut p: *const u8, mut n: usize) {
         while n > 0 {
-            let w = write(fd, p as *const c_void, n);
+            // SAFETY: `p` is valid to read for `n` bytes (the contract, and
+            // below), which `write` reads no more of.
+            let w = unsafe { write(fd, p as *const c_void, n) };
             if w <= 0 {
                 return;
             }
-            p = p.add(w as usize);
+            // SAFETY: `write` took `w` of the `n` bytes from `p`, at most
+            // all of them: `p + w` is inside them or at their end, and the
+            // `n - w` from it are the rest.
+            p = unsafe { p.add(w as usize) };
             n -= w as usize;
         }
     }
