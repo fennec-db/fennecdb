@@ -74,6 +74,14 @@ case $MODE in
     dir250) IS_NODE=1; SYNC_MS=250 ;;
     *) echo "MODE is always, sync250, dir or dir250, not $MODE" >&2; exit 2 ;;
 esac
+# ext4's data=journal: a write()'s bytes join the journal's running
+# transaction as it returns, and the sync log's fdatasync commits that
+# transaction, so a cut finds the file holding every entry the log does and
+# the open puts none back -- run 43696612848's guest, all five cuts and both
+# rebuilt disks, its checks passing. `summary` holds that guest to the log
+# having been written instead (`JOURNALED`).
+JOURNALED=
+case ",$MOUNT_OPTIONS," in *,data=journal,*) JOURNALED=1 ;; esac
 # What the checks are run for: the file (""), or a node's tenants by name.
 # The second tenant takes single puts, batches and rewrites beside the
 # first's whole load -- no spill nor compact, so none holds its writes up,
@@ -664,10 +672,17 @@ summary() {
     fi
     # Under `--sync 250` a sync holds a quarter of a second's writes, past
     # the 64 KiB the sync log takes, and the file is fsynced itself: the
-    # log is exercised under `--sync always`, a file's or a node's.
+    # log is exercised under `--sync always`, a file's or a node's. Under
+    # data=journal the file holds what the log does (`JOURNALED`): there a
+    # cut must have found a live log naming the file with entries in it,
+    # the durable writes having gone through it, and the file holding them.
     if [ -z "$SYNC_MS" ] && [ "$total" -eq 0 ] && [ -n "$whole" ]; then
-        say "RIG the sync log was never exercised: no cut in the run left an entry for the open to put back"
-        rc=1
+        if [ -n "$JOURNALED" ] && grep -q -E '^SYNCLOG .*: a live log of generation [0-9]+ naming the file, from byte [0-9]+: [1-9][0-9]* entries whole' "$VM/summary.txt"; then
+            say "SYNCLOG under data=journal: no cut left an entry for the open to put back, the file holding every one the log held, committed with it by the journal"
+        else
+            say "RIG the sync log was never exercised: no cut in the run left an entry for the open to put back"
+            rc=1
+        fi
     fi
     # And `--sync 250`'s window, by a cut that took an acknowledged write:
     # one that took none held nothing to it.
