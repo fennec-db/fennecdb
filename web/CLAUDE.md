@@ -32,6 +32,16 @@ refusing `restore`.
 ring.](../docs/design/js-client.md#live-queries)** `Query.reads` names each
 collection read (`Lives`), `fennec_changes` those written.
 
+**[A seed in parts lands in one task.](../docs/design/js-client.md#seeds-in-parts)**
+`FennecSync` holds a seed's parts as the text they came as (`#seedPart`),
+never in the module, and lands them once the last came, a part at a time
+with nothing awaited between the first write and the last (`#landParts`),
+never in a block, whose writes the module's memory would keep -- but one
+part into a collated collection (`#landSeed`), put back for the data it
+lacks; several there fetch it all first. The shape's row says `LANDING`
+until the cursor is written; an open finding it, or a write refused half
+way, empties the shape before anything reads it (`#emptyShape`).
+
 **[A number from 2^53 on goes out as every
 digit.](../docs/design/indexes.md#sorted)** Whatever sends values to a
 server as JSON -- `FennecHttp`'s bodies, the sync layer's lines -- writes

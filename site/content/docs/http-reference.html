@@ -823,6 +823,28 @@ the rows matching your filter, then each change to them as it happens.</p>
 # data: {"seq":12,"rows":[...]}
 </pre>
 
+<p>A seed whose rows pass 1 MiB of JSON comes in parts, each an
+<code>event: seed</code> of the same <code>seq</code>. The first has no
+<code>part</code>, each later one carries it (1, 2, ...), and every part but
+the last says <code>"more":true</code>. A seed under 1 MiB is one event, with
+neither field.</p>
+
+<pre data-lang="bash"># event: seed
+# data: {"seq":42,"rows":[...],"more":true}
+#
+# event: seed
+# data: {"seq":42,"part":1,"rows":[...],"more":true}
+#
+# event: seed
+# data: {"seq":42,"part":2,"rows":[...]}
+</pre>
+
+<p>A part without <code>part</code> begins the seed, again where parts of one
+came before it: the server may begin a seed anew, and a client lets go of the
+parts it held. The server reads the rows a page at a time beside the writers
+and never holds a seed whole. A client shows nothing of the seed until its
+last part (<a href="sync.html#seeds-in-parts">a seed in parts</a>).</p>
+
 <ul>
   <li><b>Limited separately</b> from ordinary requests:
     <code>--http-max-streams</code>, 64 by default, a database's -- on a
@@ -831,7 +853,8 @@ the rows matching your filter, then each change to them as it happens.</p>
     (<a href="sharding-reference.html#quota-bounds">a tenant's share</a>).</li>
   <li><b>In gzip</b> where the client asks for it and is across the
     network, the seed five to six times smaller, each event readable as it
-    arrives (<a href="#gzip">Compressed answers</a>).</li>
+    arrives, each part of a seed deflated alone as every event is
+    (<a href="#gzip">Compressed answers</a>).</li>
   <li><b>A row reaching its <code>@ttl</code></b> is told as a deletion at
     its time, as a write would be, not when the sweep deletes it a minute
     and its grace later.</li>

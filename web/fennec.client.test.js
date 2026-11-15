@@ -198,15 +198,21 @@ test('subscribe hands a shape its seed and changes, opens it again, and stops at
   server.streams[0].emit('change', { seq: 4, puts: [{ id: 2, title: 'b' }], dels: [1], schema: false });
   await until(() => events.length === 2);
   assert.deepEqual(events, [
-    { type: 'seed', seq: 3, rows: [{ id: 1, title: 'a' }] },
+    { type: 'seed', seq: 3, rows: [{ id: 1, title: 'a' }], part: 0, more: false },
     { type: 'change', seq: 4, puts: [{ id: 2, title: 'b' }], dels: [1], schema: false },
   ]);
   // The server says why a stream ends: told, and the stream opened again.
   server.streams[0].emit('error', { error: 'the tenant was closed on this node' });
   await until(() => server.streams.length === 2);
   assert.match(errors[0].message, /tenant was closed/);
-  server.streams[1].emit('seed', { seq: 9, rows: [] });
-  await until(() => events.length === 3);
+  // A long seed in parts: each handed on with its number, `open` once.
+  server.streams[1].emit('seed', { seq: 9, rows: [{ id: 2, title: 'b' }], more: true });
+  server.streams[1].emit('seed', { seq: 9, part: 1, rows: [{ id: 3, title: 'c' }] });
+  await until(() => events.length === 4);
+  assert.deepEqual(events.slice(2), [
+    { type: 'seed', seq: 9, rows: [{ id: 2, title: 'b' }], part: 0, more: true },
+    { type: 'seed', seq: 9, rows: [{ id: 3, title: 'c' }], part: 1, more: false },
+  ]);
   assert.deepEqual(states, ['open', 'retry', 'open']);
   // Ended at its token's exp: an auth error, and not opened again.
   server.streams[1].emit('error', { error: 'the token has expired', status: 401 });

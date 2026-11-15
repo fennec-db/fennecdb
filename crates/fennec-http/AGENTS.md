@@ -181,6 +181,15 @@ again alone (`fennec_ql::read_listed`).
 ceiling](../../docs/design/http.md#chunked-bodies)** (`read_onto`); a framing
 read two ways is refused (`chunked_framing`, `end_refused`).
 
+**[A seed goes in parts, read a page at a time.](../../docs/design/http.md#seeds-in-parts)**
+Past `SEED_PART` bytes of rows a seed is several `seed` events of one
+`seq` (`part` past the first, `more` before the last), each page read on
+a pin with no lock held (`sse::send_seed`) -- the shape's own, or the rows
+the lock's answer names (`Database::pin_rows`) -- so no stream holds a
+seed whole; one read again after parts of it went out is sent from its
+start, its first part without `part`, which a client takes as the seed
+begun anew.
+
 **[A plain `get` is written as JSON from the stored
 documents.](../../docs/design/http.md#json-from-stored-rows)**
 `Database::query_json` must match `query` through `json::rows_array_into`

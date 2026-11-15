@@ -106,7 +106,9 @@ public sealed record BatchResult(int Ok, IReadOnlyList<JsonElement> Results, lon
 /// <summary>
 /// One event of a subscription. <see cref="Type"/> is <c>seed</c> -- <see cref="Rows"/> is the whole shape, which
 /// replaces what the subscriber held -- <c>change</c> -- <see cref="Puts"/> and <see cref="Dels"/> since the last
-/// event -- or <c>error</c>, the last event, with <see cref="Error"/>.
+/// event -- or <c>error</c>, the last event, with <see cref="Error"/>. A seed past a mebibyte of rows comes in parts
+/// of one <see cref="Seq"/>: <see cref="Part"/> 0 replaces what the subscriber held, each after it adds its rows, and
+/// the last has <see cref="More"/> false; a part 0 coming again is the seed begun again.
 /// </summary>
 public sealed record Event(
     string Type,
@@ -120,6 +122,12 @@ public sealed record Event(
     /// <summary>An <c>error</c> event's status, where the server gave one: 401 when it ended the stream at its
     /// token's <c>exp</c>, for the caller to subscribe again with a fresh token.</summary>
     public int? Status { get; init; }
+
+    /// <summary>Which part of a seed: 0 for its first, or its only.</summary>
+    public int Part { get; init; }
+
+    /// <summary>More parts of the seed follow.</summary>
+    public bool More { get; init; }
 
     internal static Event Failed(string error) => new("error", 0, [], [], [], false, error);
 
@@ -141,7 +149,11 @@ public sealed record Event(
                 List(d, "puts"),
                 d.TryGetProperty("dels", out var dels) ? dels.EnumerateArray().Select(x => x.GetInt64()).ToList() : [],
                 d.TryGetProperty("schema", out var sc) && sc.GetBoolean(),
-                null);
+                null)
+            {
+                Part = d.TryGetProperty("part", out var p) && p.TryGetInt32(out var part) ? part : 0,
+                More = d.TryGetProperty("more", out var m) && m.ValueKind == JsonValueKind.True,
+            };
         }
         catch (JsonException e)
         {

@@ -1463,12 +1463,20 @@ export type ShapeFilter = { select?: string | readonly string[]; where?: string 
   [field: string]: string | readonly string[] | undefined;
 };
 
-/** The whole shape: what the subscriber held is replaced by `rows`. */
+/**
+ * The whole shape: what the subscriber held is replaced by `rows`. A seed
+ * past a mebibyte of rows comes in parts of one `seq`: part 0 replaces,
+ * each after it adds, and the last has `more` false.
+ */
 export interface ShapeSeed<R = Row<Fields>> {
   type: 'seed';
   /** The change the shape stands at. */
   seq: number;
   rows: R[];
+  /** Which part of the seed: 0 for its first, or its only. */
+  part: number;
+  /** More parts follow. */
+  more: boolean;
 }
 
 /** What changed since the last event: rows written into the shape, ids that left it. */
@@ -1486,7 +1494,7 @@ export type ShapeEvent<R = Row<Fields>> = ShapeSeed<R> | ShapeChange<R>;
 export interface SubscribeOptions {
   /** Why a stream ended or was refused; else the client's `onError`, else thrown. */
   onError?: (e: unknown) => void;
-  /** `'open'` at each seed, `'retry'` while it waits to open the stream again. */
+  /** `'open'` at each seed's first part, `'retry'` while it waits to open the stream again. */
   onState?: (state: 'open' | 'retry') => void;
 }
 

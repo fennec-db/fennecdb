@@ -503,10 +503,12 @@ export class FennecHttp {
           for await (const ev of sseEvents(res)) {
             if (stop.signal.aborted) return;
             if (ev.name === 'error') throw streamError(ev.data);
-            const p = near && position(JSON.parse(ev.data).seq, history);
+            const msg = JSON.parse(ev.data);
+            const p = near && position(msg.seq, history);
             if (p?.seq > 0 && later(p, seen.at)) seen.at = p;
             attempt = 0;
-            if (ev.name === 'seed' && !seeded) {
+            // Seeded once the last part of a seed in parts came.
+            if (ev.name === 'seed' && !seeded && !msg.more) {
               seeded = true;
               unseeded--;
             }
@@ -534,9 +536,13 @@ export class FennecHttp {
 
   /**
    * A shape's rows, and every change to them (`GET /<collection>/changes`):
-   * `onEvent` is handed `{ type: 'seed', seq, rows }` -- the whole shape,
-   * which replaces what the caller held -- then `{ type: 'change', seq,
-   * puts, dels, schema }` as each write lands. `shape` is the REST
+   * `onEvent` is handed `{ type: 'seed', seq, rows, part, more }` -- the
+   * whole shape, which replaces what the caller held -- then `{ type:
+   * 'change', seq, puts, dels, schema }` as each write lands. A seed past a
+   * mebibyte of rows comes in parts, each a `seed` of the same `seq`: part
+   * 0 replaces what the caller held, each after it adds its rows, and the
+   * last says `more: false` -- a part 0 coming again is the seed begun
+   * again. `shape` is the REST
    * surface's: a field's filter (`{ team: 'eq.design' }`), `where` (a
    * FennecQL condition) and `select` (a list or a text); a scoped token's
    * rules are ANDed in by the server. A stream that ends -- a tenant moved,
@@ -544,7 +550,7 @@ export class FennecHttp {
    * again; one refused or ended for its token (401, as the server ends one
    * at its token's `exp`) is not, for the app to subscribe again with a
    * fresh one. `onError` hears why a stream ended, `onState` `'open'` at
-   * each seed and `'retry'` as it waits to open again. Returns the
+   * each seed's first part and `'retry'` as it waits to open again. Returns the
    * function that stops it.
    *
    * @param {string} collection
@@ -578,8 +584,9 @@ export class FennecHttp {
             const msg = JSON.parse(ev.data);
             if (ev.name === 'seed') {
               attempt = 0;
-              opts.onState?.('open');
-              onEvent({ type: 'seed', seq: msg.seq, rows: msg.rows ?? [] });
+              const part = msg.part ?? 0;
+              if (part === 0) opts.onState?.('open');
+              onEvent({ type: 'seed', seq: msg.seq, rows: msg.rows ?? [], part, more: msg.more === true });
             } else if (ev.name === 'change') {
               onEvent({ type: 'change', seq: msg.seq, puts: msg.puts ?? [], dels: msg.dels ?? [], schema: !!msg.schema });
             }

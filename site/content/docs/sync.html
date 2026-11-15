@@ -502,6 +502,36 @@ the primary keeps, reseeds every stream open on it, a seed being read
 included, even where the image stands at the stream's own change.</p>
 </details>
 
+<h3 id="seeds-in-parts">A seed in parts</h3>
+
+<p>A seed whose rows pass 1 MiB of JSON comes in parts, each an
+<code>event: seed</code> of the same <code>seq</code>
+(<a href="http-reference.html#subscriptions">the wire format</a>). The server
+reads the rows a page at a time beside the writers and never holds the seed
+whole.</p>
+
+<p>The replica holds the parts aside and lands the seed once its last part
+came. Until then every read, live query and read of the app's own answers the
+rows as they were, or none for a shape never seeded. A stream that drops
+mid-seed leaves the replica as it was, and the next stream seeds again from the
+start: a seed is not resumed. A write the app makes while parts arrive is
+applied at once and kept by the seed until the server's copy arrives, as with
+any seed.</p>
+
+<details class="deep"><summary>Where the parts wait</summary>
+<p>Natively the parts wait in the replica's own file, in a collection of the
+sync's own, <code>_sync_seed</code>, and land in one block. They are deleted
+when the stream drops and when the replica opens again. In the browser they
+wait in the page as the text they came as, not in the module, whose memory
+never shrinks, and land in one task, part by part, so nothing in the page runs
+between the first write and the last.</p>
+
+<p>A page that ended in the middle of a landing, a replica kept in a file with
+<code>openFile</code>, finds that on its next open. Before anything reads the
+shape it empties its rows, keeping those of writes not yet answered, and seeds
+it again whole.</p>
+</details>
+
 <h2>Cost</h2>
 
 <p>The server's change ring is about 96 KB at the default size,
@@ -534,7 +564,8 @@ single writes at 1 000 a second took 0.8 ms at p99, where they took 212 to
 </details>
 
 <details class="deep"><summary>What a seed costs in the page</summary>
-<p>The replica writes a seed's rows, and a change's, 500 at a time, each
+<p>The replica writes a seed's rows, and a change's, 500 at a time (a seed in
+parts lands in one task, still 500 rows a statement), each
 chunk one parameter (<code>put &lt;collection&gt; $1</code>) whose values
 are made their fields' types as a statement's would be. From the seed's
 event to <code>ready()</code>, 100 000 rows of a text, a float and a json
@@ -544,6 +575,12 @@ twice as fast. A collection with a vector or a bytes field still goes as
 statement text, which hands its vectors to the module as <code>f32</code>s:
 as one parameter they are digits read one at a time, and rows of a 32-dim
 vector took 1.7 times as long.</p>
+
+<p>A seed in parts is parsed a part at a time as it lands. A seed of 300 000
+rows of 155 bytes took Node's process to a peak of 260 MB, against 367 MB
+when it came as one event, and landed in 856 ms against 882; the module held
+68.7 MB either way. Natively the same seed took the process to 182 MB
+against 542.</p>
 </details>
 
 <h2>Limits</h2>

@@ -167,6 +167,82 @@ test('the seed fills the local replica with the shape', opts, async () => {
   }
 });
 
+// A seed past a mebibyte comes in parts, each held aside until the last
+// lands them in one block: a live query over the shape is handed none of
+// the rows or all of them, never a part, and `subscribe` hands each part on
+// with its number.
+test('a seed in parts lands whole, and a live query never sees part of it', opts, async () => {
+  const s = await server();
+  const N = 12_000;
+  for (let i = 0; i < N; i += 2_000) {
+    const docs = [];
+    for (let j = i; j < i + 2_000; j++) docs.push({ key: `k${j}`, title: `${'t'.repeat(120)}${j}`, status: 'open', priority: j });
+    await s.run('put tasks $1', [docs]);
+  }
+  const parts = [];
+  const remote = connect(s.url);
+  const unsubscribe = remote.subscribe('tasks', { status: 'eq.open' }, (ev) => ev.type === 'seed' && parts.push(ev));
+  const db = await open(s.url);
+  const seen = [];
+  let stop = () => {};
+  try {
+    // Looking from the moment the replica holds the collection, made from
+    // the server's schema before the stream opens.
+    await until(() => db.local.schemas().some((c) => c.name === 'tasks'), 'the collection made');
+    stop = db.live(db.from('tasks'), (rows) => seen.push(rows.length));
+    await db.ready();
+    await until(() => seen.at(-1) === N + 2, 'the live query handed the whole seed');
+    assert.ok(seen.every((n) => n === 0 || n === N + 2), JSON.stringify(seen));
+    assert.equal(await db.from('tasks').count(), N + 2);
+    await until(() => parts.at(-1)?.more === false, 'every part subscribed to');
+    assert.ok(parts.length >= 2, `${parts.length} parts`);
+    assert.deepEqual(parts.map((p) => p.part), parts.map((_, i) => i));
+    assert.equal(parts.reduce((n, p) => n + p.rows.length, 0), N + 2);
+    // A write after it comes as a change over the rows it landed.
+    await s.run('put tasks {key: "z", title: "after", status: "open", priority: 0}');
+    await until(async () => (await db.from('tasks').count()) === N + 3, 'the change after the seed');
+  } finally {
+    stop();
+    unsubscribe();
+    db.close();
+    s.close();
+  }
+});
+
+// A page that ended while a seed of several parts landed -- a replica in a
+// file holds each statement as it lands -- left its shape's row saying so:
+// opened again, the shape reads none of its rows before anything reads it,
+// the row of a write not yet answered kept, and is no longer seeded, so its
+// stream opens for the whole shape.
+test('a landing of parts cut short empties the shape as the replica opens', opts, async () => {
+  const s = await server();
+  let db = await open(s.url);
+  let bytes;
+  try {
+    await db.ready();
+    assert.equal(await db.from('tasks').count(), 2);
+    s.close();
+    // Applied at once; its promise waits for a server that is gone.
+    db.from('tasks').insert({ key: 'p', title: 'pending', status: 'open' }).catch(() => {});
+    const [shape] = db.local.run('get _sync_shapes').rows;
+    db.local.run('put _sync_shapes {id: $1, collection: $2, shape: $3, cursor: -1, seeded: false}', [shape.id, shape.collection, shape.shape]);
+    bytes = db.local.snapshot();
+  } finally {
+    db.close();
+  }
+  const local = await Fennec.open(wasm);
+  local.load(bytes);
+  // The server it names is not there: nothing comes before the reads.
+  db = await sync({ url: 'http://127.0.0.1:1', local, leader: false, shapes: [{ collection: 'tasks', where: { status: 'open' }, key: 'key' }] });
+  try {
+    assert.deepEqual((await db.from('tasks').rows()).map((r) => r.title), ['pending']);
+    assert.equal(db.status()[0].seeded, false);
+    assert.equal(db.local.run('get _sync_shapes').rows[0].cursor, 0);
+  } finally {
+    db.close();
+  }
+});
+
 // A named statement is the server's: the replica holds its shapes' rows, not
 // the statements, so its local database refuses a call in the sync's words
 // and the call goes through the HTTP client -- what it wrote comes back
