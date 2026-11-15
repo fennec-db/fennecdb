@@ -16,15 +16,23 @@ usage: fennec import <source> --table <name> [options]
 source
   file.sqlite                          a SQLite database file
   postgres://user[:password]@host[:port]/database[?sslmode=..&sslrootcert=..]
-                                       TLS as libpq's sslmode: disable, prefer
-                                       (the default), require, verify-ca or
-                                       verify-full; sslrootcert, a CA PEM file
-                                       (else ~/.postgresql/root.crt if there).
-                                       prefer and require encrypt but check
-                                       nothing of the server (require: unless
-                                       a CA file is there), so anyone in the
-                                       path can stand in for it: across a
-                                       network, use verify-full
+                                       TLS as libpq's sslmode: disable, prefer,
+                                       require, verify-ca or verify-full;
+                                       sslrootcert, a CA PEM file (else
+                                       ~/.postgresql/root.crt if there). The
+                                       default is verify-full for a host off
+                                       this machine (Mozilla's CAs or the
+                                       file's) and prefer on it. prefer and
+                                       require check nothing of the server
+                                       (require: unless a CA file is there),
+                                       so anyone in the path can stand in for
+                                       it. Holding a password, it signs in by
+                                       SCRAM alone, bound to TLS where the
+                                       server offers it: require_auth= and
+                                       channel_binding= as libpq's; a sign-in
+                                       is held to connect_timeout= (30 s).
+                                       PGPASSWORD keeps the password out of
+                                       the process list
 
 options
   -t, --table <name>      source table (required)
@@ -187,7 +195,7 @@ pub fn main(args: &[String]) -> Code {
         return match run_follow(&source, &table, &target, &opts, f) {
             Ok(()) => Code::Ok,
             Err(e) => {
-                eprintln!("error: {e}");
+                eprintln!("error: {}", said(&e));
                 Code::Failed
             }
         };
@@ -213,10 +221,18 @@ pub fn main(args: &[String]) -> Code {
             Code::Ok
         }
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", said(&e));
             Code::Failed
         }
     }
+}
+
+/// An error or a warning for the terminal: it may carry a source's words --
+/// PostgreSQL's, or whoever's answers in its place, a column's name, a
+/// SQLite file's -- so its control characters are escaped, an escape
+/// sequence never reaching the terminal, and it is cut at 4 KiB.
+fn said(e: &impl std::fmt::Display) -> String {
+    pg::peer_text(e.to_string().as_bytes(), 4096)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -252,6 +268,7 @@ fn run(
             "source   {}@{}:{}/{} -> {table}",
             url.user, url.host, url.port, url.database
         );
+        println!("tls      {}", url.tls_said());
         if count {
             total = Some(pg::count_rows(&url, &query)?);
         }
@@ -344,6 +361,7 @@ fn run_follow(source: &str, table: &str, target: &str, opts: &Options, f: &Follo
         "source   {}@{}:{}/{} -> {table}",
         url.user, url.host, url.port, url.database
     );
+    println!("tls      {}", url.tls_said());
     println!("target   {target} -> {}", opts.into);
     // A file this run made and never wrote a copy into goes again on an
     // error, as the one-shot import's does; one with a copy is never removed.
@@ -408,7 +426,7 @@ fn run_follow(source: &str, table: &str, target: &str, opts: &Options, f: &Follo
                     say(open, format!("skipped  {} rows (--where)", s.skipped));
                 }
                 for w in &s.warnings {
-                    say(open, format!("warning  {w}"));
+                    say(open, format!("warning  {}", said(w)));
                 }
             }
             Event::Streaming => say(
@@ -440,10 +458,11 @@ fn run_follow(source: &str, table: &str, target: &str, opts: &Options, f: &Follo
                     "warning  column `{c}` has no field in the collection; its values are not kept"
                 ),
             ),
-            Event::Reconnecting { error, wait } => {
-                say(open, format!("stream   {error}; again in {wait:.1?}"))
-            }
-            Event::SlotHeld(why) => say(open, format!("warning  {why}")),
+            Event::Reconnecting { error, wait } => say(
+                open,
+                format!("stream   {}; again in {wait:.1?}", said(&error)),
+            ),
+            Event::SlotHeld(why) => say(open, format!("warning  {}", said(&why))),
         }
     };
     let result = follow::run(
