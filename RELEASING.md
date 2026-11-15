@@ -405,8 +405,16 @@ every tag. Before a 1.x tag, check:
    `make sync-scenarios-check` pass. `openapi-check` asserts the API only
    grew; the golden targets rewrite their files, so `git diff` must show no
    changed or removed line in them, only added ones.
-2. `make fennecql-corpus BASE=<the previous 1.x tag>` finds no text reading as another statement (CI runs it against main and v0.2.0's frozen corpus on every pull request; a major version's first tag is frozen with `FREEZE=<tag>`), and
-   `GRAMMAR_EPOCH` (`crates/fennec-core/src/named.rs`) is still 4.
+2. `make fennecql-corpus BASE=<the previous 1.x tag>` finds no text
+   reading as another statement or refused: against a 1.x base an
+   `ACCEPTED` entry lets a refusal through only with the grammar epoch
+   raised, as a moved digest (CI runs it against main, and `BASE=frozen`
+   against every frozen corpus, on every pull request). A major version's
+   first tag is frozen with `FREEZE=<tag>`, its file added beside the
+   others in `integrations/fennecql-corpus/` -- a frozen corpus is added,
+   never replaced or removed, so a text deleted since is still held to its
+   release's reading -- and `GRAMMAR_EPOCH`
+   (`crates/fennec-core/src/named.rs`) is still 4.
 3. `fennec.h`'s prototypes, `web/fennec.d.ts`, `web/client.d.ts`, each
    SDK's public names, the CLI flags and exit codes, and `/_metrics` names
    only gained entries. Where a dump is not built yet (T5 of the 1.0 plan,

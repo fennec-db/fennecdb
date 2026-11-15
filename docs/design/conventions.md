@@ -18,12 +18,13 @@ crate's `examples/` and `fennec-bench`'s binaries, wired to `make` targets,
 not to CI. An example that is a check rather than a measurement runs in
 CI: fennec-ql's `corpus`, which `make fennecql-corpus` builds in this tree
 and in main's from an archive of it, run by the test job's two steps on
-the ubuntu runner -- against main, and against the corpus frozen at
-v0.2.0 (`integrations/fennecql-corpus/`) -- its reader held by
+the ubuntu runner -- against main, and against every corpus frozen at a
+tag (`integrations/fennecql-corpus/`) -- its reader held by
 `tools/test_fennecql_corpus.py` in the fmt job
 ([fennecql.md](fennecql.md#the-corpus)). It is an example, not a test,
 because it is built in two trees, BASE's taking this tree's file as it
-stands.
+stands; its own tests (`test = true`), which only this tree builds, run
+with fennec-ql's.
 
 ## Skips
 
