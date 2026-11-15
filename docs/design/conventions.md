@@ -414,19 +414,46 @@ that its parser takes, each asked of the binary: `<flag> --help <no such
 flag>` is refused naming the flag where the parser does not know it,
 prints the help and exits 0 for a switch, and is refused at the unknown
 flag where the flag took `--help` for its value -- so a probe never runs
-the binary, and a flag's arity is the parser's, not the help's words. The
-subcommands are those the helps name (`fennec import ...`), found from help
-to help. A literal in the crate's sources that is a flag's whole spelling
-and no help shows fails the test, so no flag is taken unseen by the dump.
-Removing a flag, or turning a switch into a flag taking a value or the
-reverse, is a break; the words of its help line are not held, so a value
-read in other units is not seen. The exit codes are each binary's
-`exit::Code` (`src/exit.rs`) with its meaning: every exit goes through
-`exit::now` or a subcommand returning a `Code` -- the test refuses a
-`process::exit` anywhere else in the crate and a variant `Code::ALL` leaves
-out -- and the scheduler hands the server a failure (`fn()`), never a
-number, so no code is decided outside it. A code removed or its meaning
-reworded is a break; one added grows the dump. The metrics are the
+the binary, and a flag's arity is the parser's, not the help's words.
+That holds because every binary and subcommand reads its whole command
+line, refusing a flag it does not read or a value missing, before it
+makes, opens, reads or locks anything a flag names: the router opened
+`--audit`'s file as the flag was read, so its probe left a file named
+`--help`, and the router, the backup family and `fennec mcp` read
+`--tls-ca`'s. Each probe runs in an empty directory of its own, which it
+must leave empty, and its answer must carry no system error (`(os
+error`, a file named `--help` read). A command reads, and its help names,
+its own flags alone: `fennec key`, `verify` and `prune` shared `backup`'s
+parser and help, so each took and ignored the family's eleven flags and
+the dump froze them. The subcommands are those the helps name (`fennec
+import ...`), found from help to help. A literal in the crate's sources
+that is a flag's whole spelling and no help shows fails the test, so no
+flag is taken unseen by the dump; `fennec-server`'s `--follow-<option>`
+flags, made at run time from fennec-import's `args::OPTIONS` where no scan
+sees them, are held to that list instead, each a flag of the server's help
+and dump taking a value, as `fennec import`'s are. Removing a flag, or
+turning a switch into a flag taking a value or the reverse, is a break;
+the words of its help line are not held, so a value read in other units is
+not seen. The exit codes are each binary's `exit::Code` (`src/exit.rs`)
+with its meaning: every exit goes through `exit::now` or a subcommand
+returning a `Code`, and the test refuses any other way out of the process
+in the crate's sources, comments and literals aside -- `std::process::exit`
+or `abort` by any path or a name a `use` gave it, an `ExitCode`, the
+binary's `main()` returning a value (an `Err` exits 1 with no `Code`),
+each seeded in fennec-cli's `every_way_out_but_exit_now_is_refused` -- and
+a variant `Code::ALL` leaves out. The scheduler hands the server a failure
+(`fn()`), never a number, so no code is decided outside it, and
+fennec-server's `a_scheduler_s_failure_ends_the_server_with_1` holds that
+stop to 1, a file's server and a node's, through a debug build's fault
+(`FENNEC_TEST_SCHEDULER_PANIC`; a release compiles none): no failure a
+release can meet ends that thread on demand. A code means what the code
+does: 2 is a line refused before anything ran, 1 the work failing -- `fennec
+types` exits 1 for a file it cannot read or parse and an `-o` it cannot
+write, as the shell does for a file it cannot open, `verify`, `prune` and
+`restore --tenants` 1 for a root they cannot read, as for one archive, and
+the router 2 for a lock file it cannot make, as for a directory it cannot open, keeping 1 for
+a lock another holds. A code removed or its meaning reworded is a break;
+one added grows the dump. The metrics are the
 families the binaries' scrapes show, each with its type and every label a
 sample carries (a histogram's `le` aside), over configurations that between
 them show every family: a file's primary with `--hooks`, `--mcp`, a
