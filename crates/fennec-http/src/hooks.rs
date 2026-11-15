@@ -34,12 +34,12 @@
 //! **Taken once.** Verified, the event's content type is asked (415), its
 //! body parsed exactly as an object (400), its key read -- Stripe's `id`,
 //! Standard Webhooks' `webhook-id`, GitHub's body digest: a value each
-//! signature covers -- and under a short read lock
-//! its key looked up and its statements judged; under the write lock the
-//! key looked up again and the event taken. A duplicate is answered as the
-//! first taking was, once that block is as durable and sent as the first's
-//! answer was to be; a second body under a key is answered so too, logged
-//! and counted, never run.
+//! signature covers -- and under a short read lock its key looked up and
+//! its statements judged; under the write lock the key looked up again and
+//! the event taken. A duplicate is answered as the first taking was, once
+//! that block is as durable and sent as the first's answer was to be; a
+//! second body under a key is answered so too, logged and counted, never
+//! run.
 //!
 //! **A 2xx is durable.** Whatever `--sync` says, the block is fsynced
 //! after the lock and sent to the streams keeping up, and where the server
@@ -238,9 +238,9 @@ impl Hooks {
     /// base64, a tolerance of none or past an hour, a `keep` shorter than
     /// a day or not past twice the tolerance and [`SKEW_MS`], a `key` on a
     /// hook not `github`'s or other than `body`, a `max-body` past
-    /// `max_body`. Never a word of
-    /// the line, so never a secret's value. Refused too where the system's
-    /// randomness cannot be read: a stand-in key is never the clock's.
+    /// `max_body`. Never a word of the line, so never a secret's value.
+    /// Refused too where the system's randomness cannot be read: a stand-in
+    /// key is never the clock's.
     pub fn read(
         text: &str,
         secret: impl Fn(&str) -> std::io::Result<Vec<u8>>,

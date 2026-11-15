@@ -129,8 +129,8 @@ webhook is made: no condition takes it, so it is answered
 <code>X-GitHub-Event</code>. Whoever holds one signed body can send it
 again under another event's name: the copy is answered from its key while
 it is kept, and taken again once <code>keep</code> has passed. A condition
-on <code>hook.event</code>
-alone can then take an event its statement was never meant for. Write the
+on <code>hook.event</code> alone can then take an event its statement was
+never meant for. Write the
 condition on fields of the signed body as well, which tell one kind of
 event from another — <code>event.ref</code> for a push,
 <code>event.action</code> for a pull request: <code>where hook.event =
@@ -148,13 +148,12 @@ in <code>client_payload</code> or the workflow's <code>inputs</code>.</p>
 
 <p><code>key delivery</code>, which 0.2.0 took, is refused at the start,
 and a tenant's hook naming it at its <code>PUT</code> (400): GitHub does
-not sign <code>X-GitHub-Delivery</code>, so whoever held one
-signed body could send it again under a new delivery id and have it taken
-again. Remove it from the line (<code>key body</code> may stay). GitHub
-signs no time either: once <code>keep</code> (7 days unless the line says
+not sign <code>X-GitHub-Delivery</code>, so whoever held one signed body
+could send it again under a new delivery id and have it taken again.
+Remove it from the line (<code>key body</code> may stay). GitHub signs no
+time either: once <code>keep</code> (7 days unless the line says
 otherwise) has passed, a captured body can be sent again and is taken
-again. Where that matters, keep keys longer, or hold a condition to a time
-the body carries.</p>
+again. Where that matters, keep keys longer (<code>keep 90d</code>).</p>
 
 <h2 id="standard">Any sender of Standard Webhooks</h2>
 

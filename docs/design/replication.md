@@ -613,9 +613,10 @@ database holds already 247.8-252.7.
 encryption, so with a key every archive file and a backup file is
 ChaCha20-Poly1305 (`crypto.rs`, RFC 8439's vectors and 2 000 random cases
 against node:crypto): ChaCha20 over AES-GCM because it has no secret-indexed
-tables in software, Poly1305 in 26-bit limbs. Frames carry a random nonce,
-and their file's id, place and last-ness in the AAD (below); an image and the history are
-sealed whole (`open_whole` refuses a file cut short), a segment a frame for
+tables in software, Poly1305 in 26-bit limbs. Frames carry a random
+nonce, and their file's id, place and last-ness in the AAD (below); an
+image and the history are sealed whole (`open_whole` refuses a file cut
+short), a segment a frame for
 each batch of writes, whole records in each, so a crash cuts off a frame as
 it cut a record (`open_appended`, the segment's `sealed` state). A file of
 the other kind than the archive is refused. About 400 MB/s either way on
@@ -628,7 +629,7 @@ lock, and the browser has no hardware CRC.
 sealed now begins with the magic and its id, 16 bytes of the system's
 randomness -- refused without it, as a nonce is -- and every frame's AAD
 is `[id 16][index u64][last u8]`, 25 bytes. Until 1.0's security review
-(plan item G8) the AAD was the place and last-ness alone, version 1
+the AAD was the place and last-ness alone, version 1
 (`FENECSL\x01`, every release from 0.1.7 to 0.2.0): two files sealed under
 one key -- two images of an archive, two segments, last week's backup and
 today's -- each held frames at places the other's frames of those places
@@ -664,16 +665,27 @@ beside the older files, which leave as `prune` lets them go; an older
 backup is bound by restoring it and backing it up again. A version past 2
 is refused by its number (`sealed as version 3, which this binary does not
 open`), never read as a plain file: `is_sealed` reads the magic's first
-seven bytes. A binary from before G8 took the magic's whole eight bytes,
-so a version 2 file is no sealed file to it, and it refuses one: `fennec
-restore today.sealed out.fennec --key-file k` says `today.sealed: not a
-sealed file`, `fennec verify` or `restore` of an archive `<image>: not
-sealed, where the archive is`, and without a key an image does not open as
-a database (`corrupt: invalid fennecdb signature`), nothing written. The
-binaries reading an archive are upgraded before the one writing it.
+seven bytes. A binary from before the id took the magic's whole eight
+bytes, so a version 2 file is no sealed file to it, and it refuses one:
+`fennec restore today.sealed out.fennec --key-file k` says `today.sealed:
+not a sealed file`, `fennec verify` or `restore` of an archive `<image>:
+not sealed, where the archive is`, and without a key an image does not
+open as a database (`corrupt: invalid fennecdb signature`), the file asked
+for never made. The binaries reading an archive are upgraded before the one
+writing it.
 
 *Cost*: one Poly1305 block more a frame -- the AAD padded to 32 bytes
-where it was 16 -- and 16 bytes a file. SEAL_COST
+where it was 16 -- and 16 bytes a file, some 13 000 instructions a
+64 MB file sealed and opened. Measured, that took 3 970.2 and 3 970.1
+million instructions before, 3 974.3 and 3 970.4 million after
+(`/usr/bin/time -l`, six rounds less one, two runs of each): the 0.01 to
+0.1% between them is the runs' own spread, a build's whole runs differing
+by up to 34 million between two tries. Timed on a quiet M1 before the
+change, 164 ms to seal and 165 to open at the median, about 410 MB/s; the
+machine was not quiet again while this was measured (a load of 8 to 10),
+where both builds took 244 to 282 ms alike, so the instructions stand for
+the time. fennec-server's code grew by 3.2 KB: the head read, the AAD
+built and a version named.
 
 **A frame's nonce is the system's randomness, never a fallback**
 (`crypto::system_random`), and so is every key and nonce fennecdb makes:
