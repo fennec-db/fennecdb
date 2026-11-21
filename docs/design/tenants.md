@@ -779,7 +779,10 @@ release binary already makes of every sidecar it reads: device and inode,
 the sidecar put away before its file goes (above). One written and read
 where both name a birth time is held to it as before, and a close or a
 rebind finding the same file leaves the sidecar as written, so the binary
-that wrote it still reads it. Left: a sidecar this tree writes with a
+that wrote it still reads it. A glibc node so keeps a 0.2.0 sidecar's
+birth time of 0 until a write of its own rewrites it -- a hook's `PUT`, a
+compact's rebind -- and until then that tenant has the device-and-inode
+check alone. Left: a sidecar this tree writes with a
 birth time -- a `PUT` of a hook, a compact's rebind, a stamp -- is another
 file to 0.2.0's musl binary, which compares as written, after a downgrade.
 The tests: `a_binding_naming_no_birth_time_names_its_file_to_a_node_reading_one`
@@ -792,8 +795,16 @@ born after the sidecar was last written being another, which a node
 reading no birth time cannot ask and a copy keeping times or a `touch`
 moves; *the birth time written into the sidecar as a node first meets the
 file*, which makes 0.2.0 put away, after a downgrade, a set it wrote;
-*birth times read on musl* (`statx` asked directly), which alone would
-turn every upgrade between two musl releases into the case above.
+*birth times read on musl* (`statx` asked directly), for now: with `same`
+an upgrade between two musl releases keeps every set, but 0.2.0 compares
+as written, so after a downgrade to it any set a later version wrote with
+a birth time is put away -- every musl node's, where today only a glibc
+build's. A raw `statx` system call on musl, its birth time read whatever
+std asks, is a possible follow-up. Until then this tree's own Linux
+release binaries are musl too: they write and read every birth time as 0,
+and the guard the birth time gives against a reused inode has never been
+on in a shipped Linux binary -- device and inode, the sidecar put away
+before its file goes (above), are what a Linux release holds.
 
 An open notes the file's binding as it takes it, one
 `stat` (`Tenant::bound`, moved by a stamp while open); the open file
