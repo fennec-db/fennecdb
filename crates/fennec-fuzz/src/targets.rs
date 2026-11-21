@@ -639,6 +639,25 @@ fn codec_schemas() -> &'static [fennec_core::schema::Schema] {
     })
 }
 
+/// A document as the bytes of what it holds: its id, its fields' count,
+/// and each field's name and value as `encode_value` writes them, a float
+/// by its bits. What a reclaim keeps it copies as its bytes stood, so a
+/// document read after it is this one bit for bit; `==` cannot say so of
+/// one holding a `NaN`, which equals nothing -- the codec's own document
+/// seed puts one at a kept place -- while these bytes find a `NaN` kept
+/// equal and one with another payload, or a value moved, apart.
+fn doc_bits(doc: &fennec_core::value::Document) -> Vec<u8> {
+    use fennec_core::codec::{encode_str, encode_value, put_uvarint};
+    let mut out = Vec::new();
+    put_uvarint(&mut out, doc.id);
+    put_uvarint(&mut out, doc.fields.len() as u64);
+    for (name, v) in &doc.fields {
+        encode_str(&mut out, name);
+        encode_value(&mut out, v);
+    }
+    out
+}
+
 fn codec(data: &[u8]) {
     use fennec_core::codec::*;
     let mut read = 0;
@@ -676,7 +695,11 @@ fn codec(data: &[u8]) {
             assert!(looked, "reclaimed, and the walk said nothing would be");
             if let Ok(doc) = &read {
                 let again = schema.read_doc(1, &reclaimed);
-                assert_eq!(again.as_ref().ok(), Some(doc), "reclaimed, read otherwise");
+                assert_eq!(
+                    again.as_ref().ok().map(doc_bits),
+                    Some(doc_bits(doc)),
+                    "reclaimed, read otherwise: {again:?}, read before as {doc:?}"
+                );
             }
             assert!(!fennec_core::schema::reclaim(
                 &schema.dropped,
