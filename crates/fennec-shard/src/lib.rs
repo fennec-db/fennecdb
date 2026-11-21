@@ -142,6 +142,11 @@ pub struct Config {
     /// The longest a call a read replica's upkeep makes may take
     /// ([`readers::CALL`] unless set).
     pub reader_timeout: Duration,
+    /// How long a node's word that it asks no data token is taken, by a
+    /// router guarding against such a node, before a request it refuses
+    /// asks the node again ([`OPEN_ASKED_AGAIN`] unless set): set to
+    /// nothing by a test, which then asks at every refusal.
+    pub open_asked_again: Duration,
     /// The global entry's token (`--entry-token`, its `ENTRY_TOKEN`): a
     /// request whose `Fennec-Client` header carries the entry's mark for
     /// its address and a time within a minute of this clock is the named
@@ -182,6 +187,7 @@ impl Default for Config {
             replica_rest: readers::RESTING,
             health_wait: readers::HEALTH_WAIT,
             reader_timeout: readers::CALL,
+            open_asked_again: OPEN_ASKED_AGAIN,
             entry_token: None,
             tls: None,
         }
@@ -671,6 +677,10 @@ struct Toward {
     marked: Option<Arc<Marked>>,
     routers: Option<(String, Vec<String>)>,
     home: Option<String>,
+    /// The target sent in place of the request's own: a stand-in's, its
+    /// tenant named past [`fennec_http::tenants::STAND_IN`]
+    /// ([`Router::stand_in`]).
+    target: Option<String>,
 }
 
 /// [`Router::listens`]: a listener bound on a loopback address.
@@ -680,6 +690,14 @@ const LISTENS_PAST: u8 = 2;
 
 /// [`Marked::open`]: not asked yet.
 const OPEN_UNKNOWN: u64 = 0;
+/// [`Marked::open`]'s low two bits, what the node said: it asks a data
+/// token.
+const WORD_TOKEN: u64 = 0;
+/// It asks none.
+const WORD_OPEN: u64 = 1;
+/// It said nothing: asked, it did not answer, or refused the admin token
+/// recorded for it.
+const WORD_NONE: u64 = 2;
 
 /// The router process's seconds, from one: what a node's word on its data
 /// token is timed by ([`Marked::open`]).
@@ -691,6 +709,11 @@ fn open_clock() -> u64 {
 /// asked again, as a refusal comes: one given a token since is forwarded
 /// to within this, the router started again or not.
 const OPEN_ASKED_AGAIN: Duration = Duration::from_secs(10);
+/// How long, in seconds, a node that said nothing of its token is let be
+/// before a request asks it again: what a request meanwhile is told to
+/// wait (`Retry-After`), and the most a node that does not answer is asked
+/// a second.
+const SILENT_ASKED_AGAIN: u64 = 1;
 
 /// A node as the router marks what it forwards to it: the marks made from
 /// its admin token, of either class of the router's listener, and what the
@@ -701,10 +724,15 @@ pub(crate) struct Marked {
     token: String,
     past: Arc<str>,
     local: Arc<str>,
-    /// [`OPEN_UNKNOWN`], or the second of [`open_clock`] it was asked at,
-    /// shifted left, and in the low bit whether the node said it asks no
-    /// data token: a word asked for and not in yet holds a clear bit.
+    /// [`OPEN_UNKNOWN`], or the second of [`open_clock`] the node was asked
+    /// at, shifted left two, and in the low two bits what it said: a
+    /// [`WORD_TOKEN`], [`WORD_OPEN`] or [`WORD_NONE`].
     open: std::sync::atomic::AtomicU64,
+    /// Held by whoever asks the node: one ask a node at a time, the
+    /// requests meeting it waiting for its word rather than asking again.
+    asking: Mutex<()>,
+    /// Whether a thread asks it beside a read ([`Router::open_copy`]).
+    beside: std::sync::atomic::AtomicBool,
 }
 
 impl Marked {
@@ -715,6 +743,8 @@ impl Marked {
             past: marks.past.into(),
             local: marks.local.into(),
             open: std::sync::atomic::AtomicU64::new(OPEN_UNKNOWN),
+            asking: Mutex::new(()),
+            beside: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -1879,122 +1909,206 @@ impl Router {
     }
 
     /// The router's refusal to forward to `node`, at `addr`, marked `m`,
-    /// where it asks no data token ([`Self::guards_open_nodes`]): 403 naming
-    /// the node and what to give it, counted
-    /// (`fennec_router_open_node_refusals_total`). What the node said of its
-    /// token is its `GET /_admin/stats`'s `no_token`: asked as the node is
-    /// added ([`Self::set_node`]), and of a node not asked since the router
+    /// where it cannot tell that the node asks a data token
+    /// ([`Self::guards_open_nodes`]): 403 naming the node and what to give
+    /// it, counted (`fennec_router_open_node_refusals_total`), where it
+    /// asks none; 503 naming it where it said nothing. What the node says
+    /// of its token is its `GET /_admin/stats`'s `no_token`, and of a node
+    /// from before, which says nothing there, its `GET /_whoami` asked with
+    /// no token ([`Self::word_of`]): asked as the node is added
+    /// ([`Self::set_node`]), and of a node not asked since the router
     /// started -- one its directory held, or a standby's directory brought
-    /// -- beside the first request to it, which goes on: the node refuses
-    /// it itself unless it runs `--insecure`, by the mark it bears. A node
-    /// that said so is asked again by a request refused once its word is
-    /// [`OPEN_ASKED_AGAIN`] old, so one given a token since is forwarded to
-    /// with no router started again. A node that said it asks a token is
-    /// not asked again: given none since, it refuses what this router sends
-    /// it unless it runs `--insecure`.
+    /// -- by the first request to it, before it goes ([`Self::ask_now`]).
+    /// A node that said so is asked again by a request refused once its
+    /// word is [`Config::open_asked_again`] old, so one given a token since
+    /// is forwarded to with no router started again; one that said nothing
+    /// by the first request [`SILENT_ASKED_AGAIN`] after. A node that said
+    /// it asks a token is not asked again: given none since, it refuses
+    /// what this router sends it unless it runs `--insecure`. Not known
+    /// means not forwarded: sent on while its word was not in, a node from
+    /// before, or one running `--insecure` itself, answered whoever reached
+    /// this router. The forward pays one load and a compare.
+    #[inline]
     fn open_node(&self, node: &str, addr: &str, m: &Arc<Marked>) -> Option<Response> {
         let state = m.open.load(Ordering::Relaxed);
-        if state & 1 == 0 && state != OPEN_UNKNOWN {
+        if state != OPEN_UNKNOWN && state & 3 == WORD_TOKEN {
             return None;
         }
-        if state == OPEN_UNKNOWN {
-            self.ask_open_beside(addr, m);
-            return None;
-        }
-        let now = open_clock();
-        if now.saturating_sub(state >> 1) >= OPEN_ASKED_AGAIN.as_secs()
-            && m.open
-                .compare_exchange(state, (now << 1) | 1, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-        {
-            self.ask_open(addr, m);
-            if m.open.load(Ordering::Relaxed) & 1 == 0 {
-                return None;
-            }
-        }
-        metrics::open_node_refused();
-        Some(Response::error(
-            403,
-            &format!(
-                "node `{node}` asks no token, and this router listens past loopback, where \
-                 anyone on the network reaches it: give the node --http-token or --jwt-keys, \
-                 or start this router with --insecure if the network may read and write its \
-                 tenants (the node too, unless it runs with it)"
-            ),
-        ))
+        self.open_node_asked(node, addr, m, state)
     }
 
-    /// Whether the node at `addr`, marked `m`, said it asks no data token,
-    /// for a read replica's read, which goes home where it did: asked
-    /// beside the read where it was not asked yet, as [`Self::open_node`]
-    /// asks.
+    /// [`Self::open_node`] of a node that did not say it asks a token, as
+    /// `state` held it.
+    #[cold]
+    #[inline(never)]
+    fn open_node_asked(
+        &self,
+        node: &str,
+        addr: &str,
+        m: &Arc<Marked>,
+        state: u64,
+    ) -> Option<Response> {
+        let word = match self.word_aged(state) {
+            true => self.ask_now(addr, m, state),
+            false => state & 3,
+        };
+        match word {
+            WORD_TOKEN => None,
+            WORD_OPEN => {
+                metrics::open_node_refused();
+                Some(Response::error(
+                    403,
+                    &format!(
+                        "node `{node}` asks no token, and this router listens past loopback, \
+                         where anyone on the network reaches it: give the node --http-token or \
+                         --jwt-keys, or start this router with --insecure if the network may \
+                         read and write its tenants (the node too, unless it runs with it)"
+                    ),
+                ))
+            }
+            _ => Some(Response::retry_after(
+                503,
+                &format!(
+                    "node `{node}` did not say whether it asks a data token -- its \
+                     /_admin/stats did not answer the admin token recorded for it -- and this \
+                     router listens past loopback, where it forwards to no node that may ask \
+                     none"
+                ),
+                SILENT_ASKED_AGAIN,
+            )),
+        }
+    }
+
+    /// Whether a node's word `state` is to be asked again now: not asked,
+    /// nothing said [`SILENT_ASKED_AGAIN`] ago, or no token
+    /// [`Config::open_asked_again`] ago.
+    fn word_aged(&self, state: u64) -> bool {
+        let age = open_clock().saturating_sub(state >> 2);
+        match state & 3 {
+            _ if state == OPEN_UNKNOWN => true,
+            WORD_OPEN => age >= self.cfg.open_asked_again.as_secs(),
+            WORD_NONE => age >= SILENT_ASKED_AGAIN,
+            _ => false,
+        }
+    }
+
+    /// Whether the node at `addr`, marked `m`, may hold a read replica's
+    /// read this router sends it, listening past loopback: only where it
+    /// said it asks a token. One not asked, or whose word is old, is asked
+    /// on a thread beside the read, which goes home meanwhile, as asked of
+    /// the home's node as any forward is ([`Self::open_node`]).
     fn open_copy(&self, addr: &str, m: &Arc<Marked>) -> bool {
         let state = m.open.load(Ordering::Relaxed);
-        if state == OPEN_UNKNOWN {
-            self.ask_open_beside(addr, m);
+        if state != OPEN_UNKNOWN && state & 3 == WORD_TOKEN {
+            return false;
         }
-        state & 1 == 1
+        if self.word_aged(state) {
+            self.ask_beside(addr, m);
+        }
+        true
     }
 
-    /// [`Self::ask_open`] on a thread of its own, once for a node not
-    /// asked: the request asking goes on meanwhile.
+    /// [`Self::ask_now`] on a thread of its own, one at a time a node: the
+    /// read asking goes on meanwhile.
     #[cold]
-    fn ask_open_beside(&self, addr: &str, m: &Arc<Marked>) {
-        // Taken for asked now, its word not in: a second request starts no
-        // second thread, and is forwarded as the first is.
-        if m.open
-            .compare_exchange(
-                OPEN_UNKNOWN,
-                open_clock() << 1,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            )
-            .is_err()
-        {
+    fn ask_beside(&self, addr: &str, m: &Arc<Marked>) {
+        if m.beside.swap(true, Ordering::Relaxed) {
             return;
         }
         let Some(router) = self.me.upgrade() else {
+            m.beside.store(false, Ordering::Relaxed);
             return;
         };
         let (addr, marked) = (addr.to_string(), Arc::clone(m));
         let spawned = std::thread::Builder::new()
             .name("fennec-open-node".into())
-            .spawn(move || router.ask_open(&addr, &marked));
+            .spawn(move || {
+                let state = marked.open.load(Ordering::Relaxed);
+                router.ask_now(&addr, &marked, state);
+                marked.beside.store(false, Ordering::Relaxed);
+            });
         if spawned.is_err() {
-            m.open.store(OPEN_UNKNOWN, Ordering::Relaxed);
+            m.beside.store(false, Ordering::Relaxed);
         }
     }
 
-    /// Asks the node at `addr` whether it takes a data token
-    /// (`GET /_admin/stats`'s `no_token`), and keeps its word in `m`; one
-    /// that does not answer is asked again by a later request. Said once a
-    /// node, where this router guards against it: a node from before says
-    /// nothing of it, and is taken at its word as one taking a token.
-    fn ask_open(&self, addr: &str, m: &Marked) {
-        match self.pool.call(addr, "GET", "/_admin/stats", &m.token, b"") {
-            Ok((200, body)) => self.note_open(addr, m, &body),
-            _ => m.open.store(OPEN_UNKNOWN, Ordering::Relaxed),
+    /// Asks the node at `addr` what it says of its data token, unless
+    /// another asked it since its word was `seen` -- one ask a node at a
+    /// time, the others waiting for its word -- and keeps the word in `m`:
+    /// the word, a [`WORD_TOKEN`], [`WORD_OPEN`] or [`WORD_NONE`].
+    fn ask_now(&self, addr: &str, m: &Marked, seen: u64) -> u64 {
+        let _one = m.asking.lock().unwrap_or_else(|e| e.into_inner());
+        let state = m.open.load(Ordering::Relaxed);
+        if state != seen {
+            return match state {
+                OPEN_UNKNOWN => WORD_NONE,
+                s => s & 3,
+            };
+        }
+        let word = match self.pool.call(addr, "GET", "/_admin/stats", &m.token, b"") {
+            Ok((200, body)) => self.word_of(addr, &body),
+            _ => WORD_NONE,
+        };
+        self.note_word(addr, m, word)
+    }
+
+    /// What the node at `addr` says of its data token by its `/_admin/stats`
+    /// answer `stats`: its `no_token`, or where it says nothing of it -- a
+    /// node from before, v0.2.0 among them -- its `GET /_whoami` asked with
+    /// no token, `"kind":"open"` from a node asking none and its 401 from
+    /// one asking one. Read as asking one, a v0.2.0 node asking none stayed
+    /// open to the network behind a router past loopback for as long as a
+    /// rolling upgrade, routers first, left it so.
+    fn word_of(&self, addr: &str, stats: &[u8]) -> u64 {
+        match fields_of(stats).into_iter().find(|(k, _)| k == "no_token") {
+            Some((_, Value::Bool(true))) => return WORD_OPEN,
+            Some((_, Value::Bool(false))) => return WORD_TOKEN,
+            _ => {}
+        }
+        match self.pool.call(addr, "GET", "/_whoami", "", b"") {
+            Ok((200, body)) => match (fields_of(&body).into_iter())
+                .any(|(k, v)| k == "kind" && matches!(v, Value::Text(t) if t == "open"))
+            {
+                true => WORD_OPEN,
+                false => WORD_NONE,
+            },
+            Ok((401, _)) => WORD_TOKEN,
+            _ => WORD_NONE,
         }
     }
 
-    /// The node at `addr`'s `/_admin/stats` answer `body`, kept in `m`, and
-    /// said where it asks no token and this router guards against such a
-    /// node, once as it says so after it said otherwise or nothing.
-    fn note_open(&self, addr: &str, m: &Marked, body: &[u8]) {
-        let open = fields_of(body)
-            .iter()
-            .any(|(k, v)| k == "no_token" && matches!(v, Value::Bool(true)));
-        let was = m
-            .open
-            .swap((open_clock() << 1) | open as u64, Ordering::Relaxed);
-        if open && was & 1 == 0 && self.guards_open_nodes() {
-            fennec_http::log!(
+    /// The node at `addr`'s `word`, kept in `m` and returned as kept: a node
+    /// that said it asks no token and now says nothing goes on as having
+    /// said so -- reset to not known, it was forwarded to. Said in the log
+    /// where it asks none or says nothing and this router guards against
+    /// such a node, once as it says so after it said otherwise.
+    fn note_word(&self, addr: &str, m: &Marked, word: u64) -> u64 {
+        let was = m.open.load(Ordering::Relaxed);
+        let word = match word {
+            WORD_NONE if was != OPEN_UNKNOWN && was & 3 == WORD_OPEN => WORD_OPEN,
+            w => w,
+        };
+        let was = m.open.swap((open_clock() << 2) | word, Ordering::Relaxed);
+        let again = was != OPEN_UNKNOWN && was & 3 == word;
+        if again || !self.guards_open_nodes() {
+            return word;
+        }
+        match word {
+            WORD_OPEN => fennec_http::log!(
                 "warning: the node at {addr} asks no token, and this router listens past \
                  loopback: it forwards nothing to that node's tenants, answering 403, until \
                  the node has --http-token or --jwt-keys, or this router (and the node, unless \
                  it does) runs --insecure (fennec_router_open_node_refusals_total counts them)"
-            );
+            ),
+            WORD_NONE => fennec_http::log!(
+                "warning: the node at {addr} did not say whether it asks a data token -- its \
+                 /_admin/stats did not answer the admin token this router holds for it -- and \
+                 this router listens past loopback: it forwards nothing to that node's tenants, \
+                 answering 503, and asks it again each second a request comes"
+            ),
+            _ => {}
         }
+        word
     }
 
     /// `resp` with the CORS headers `--http-cors` asks for: on every answer
@@ -2328,10 +2442,12 @@ impl Router {
             marked,
             routers,
             home,
+            target,
         } = match self.toward(req, tenant, relayed) {
             Ok(t) => t,
             Err(resp) => return reply(out, resp),
         };
+        let target = target.as_deref().unwrap_or(&req.target);
         // A node asking no token, behind a listener past loopback: one
         // load, unless the router guards against such a node.
         if let Some(m) = marked.as_ref().filter(|_| self.guards_open_nodes()) {
@@ -2396,7 +2512,7 @@ impl Router {
             None => self.pool.send_held(
                 &addr,
                 req.method.name(),
-                &req.target,
+                target,
                 &headers,
                 &req.body,
                 held,
@@ -2480,6 +2596,7 @@ impl Router {
                 marked: Some(marked),
                 routers: None,
                 home,
+                target: None,
             },
             None => match self.elsewhere(req, tenant, relayed.is_some()) {
                 region::Target::Node(node, addr, marked, region) => Toward {
@@ -2489,6 +2606,16 @@ impl Router {
                     marked: Some(marked),
                     routers: None,
                     home: self.home_asked(req, &region),
+                    target: None,
+                },
+                region::Target::StandIn(node, addr, marked) => Toward {
+                    node,
+                    addr,
+                    mark: Some(self.mark_of(&marked)),
+                    marked: Some(marked),
+                    routers: None,
+                    home: None,
+                    target: Some(region::stand_in_target(&req.target, tenant)),
                 },
                 region::Target::Region(region, routers) => {
                     let first = self.first_router(&region, &routers);
@@ -2500,6 +2627,7 @@ impl Router {
                         marked: None,
                         routers: Some((region, routers)),
                         home: None,
+                        target: None,
                     }
                 }
                 region::Target::Answer(resp) => return Err(resp),
@@ -2592,10 +2720,12 @@ impl Router {
                 marked,
                 routers,
                 home,
+                target,
             } = match self.toward(req, tenant, relayed) {
                 Ok(t) => t,
                 Err(resp) => return reply(out, resp),
             };
+            let target = target.as_deref().unwrap_or(&req.target);
             // The tenant's node now may ask no token, as its first did not.
             if let Some(m) = marked.as_ref().filter(|_| self.guards_open_nodes()) {
                 if let Some(refused) = self.open_node(&to, &addr, m) {
@@ -2638,7 +2768,7 @@ impl Router {
                 None => self.pool.send_held(
                     &addr,
                     req.method.name(),
-                    &req.target,
+                    target,
                     &headers,
                     &req.body,
                     left,
@@ -3998,7 +4128,8 @@ impl Router {
         }
         // A node is checked before it is recorded: an address or token that
         // does not work would otherwise surface on the first placement.
-        // Its answer says whether it asks a data token, which a router
+        // Its answer says whether it asks a data token -- a node from before
+        // says nothing, and its `/_whoami` is asked -- which a router
         // listening past loopback asks before it forwards to it, and says
         // in its log where it does not ([`Self::open_node`]).
         let (status, stats) = self
@@ -4011,7 +4142,8 @@ impl Router {
                 format!("{addr} refused its admin token ({status})"),
             ));
         }
-        self.note_open(addr, &self.marked(&node), &stats);
+        let word = self.word_of(addr, &stats);
+        self.note_word(addr, &self.marked(&node), word);
         let mut dir = self.write_dir();
         // A region or a zone left out is the one recorded: a node given a
         // new token keeps where it is.
@@ -7439,7 +7571,13 @@ mod tests {
             upstream_timeout: Duration::from_secs(10),
             ..Config::default()
         };
-        Router::new(d, cfg)
+        let r = Router::new(d, cfg);
+        // As it serves on its address, loopback alone: a router that has
+        // not served is taken for one past it, which forwards to no node
+        // before the node says it asks a token.
+        r.listens
+            .fetch_or(LISTENS_LOOPBACK, std::sync::atomic::Ordering::Relaxed);
+        r
     }
 
     /// A router placing `acme` on node `n2`, at `addr`.

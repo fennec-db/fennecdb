@@ -190,7 +190,9 @@ These are deliberate. The [server](https://fennecdb.com/docs/server),
   named origin, or a token. A router asks a tenant's request no token, the
   node does, and a client names any host it likes: so a `fennec-shard`
   listening past loopback forwards nothing to a node asking no data token
-  (403, `fennec_router_open_node_refusals_total`), and such a node answers
+  (403, `fennec_router_open_node_refusals_total`), nor to one that has not
+  said whether it asks one (503), a node from before asked its `/_whoami`;
+  and such a node answers
   a router listening past loopback -- told by the router's mark -- or a
   request another region's router relayed or the global entry named, only
   under its own `--insecure`; the router's `--insecure` lets it forward.

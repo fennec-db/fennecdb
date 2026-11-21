@@ -575,3 +575,140 @@ fn a_router_tells_no_one_it_cannot_vouch_for_which_tenants_exist() {
     audit::succeeded(Some("192.0.2.9".parse().unwrap()));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The node a router sends a tenant it does not place to, in the tenant's
+/// place ([`a_router_tells_no_one_it_cannot_vouch_for_which_tenants_exist`]),
+/// opens no file of that name: a deleted tenant's copy that would not come
+/// off, or a create taken back whose delete failed, stays on a node's disk
+/// as a normal state, and a token reaching the name read it through the
+/// router and wrote into it, where the router had answered 404. It is
+/// told the tenant is not there, by the node, after its token is asked,
+/// and the file is neither opened nor written. So is a tenant at home in
+/// a region with no router recorded told to the router's own token alone,
+/// and to anyone else as acme is.
+#[test]
+fn a_stand_in_opens_no_file_its_router_does_not_place() {
+    let _turn = turn();
+    let dir = std::env::temp_dir().join(format!("fennec-shard-leftover-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    // The leftover, written and closed before the node opens the directory:
+    // on its disk, not open.
+    {
+        let before = Tenants::new(&dir).unwrap();
+        let t = before.create("nosuch").unwrap();
+        let mut db = t.db.write().unwrap();
+        for sql in ["create collection left (n int)", "put left {n: 1}"] {
+            db.execute(&fennec_ql::parse_one(sql).unwrap()).unwrap();
+        }
+    }
+    let tenants = Arc::new(Tenants::new(&dir).unwrap());
+    tenants.create("acme").unwrap();
+    let access = Arc::new(Access::new(SECRET, "* read,write\n").unwrap());
+    let server = fennec_http::Server::with_tenants(
+        Arc::clone(&tenants),
+        fennec_http::Config {
+            addr: "127.0.0.1:0".into(),
+            admin_token: Some("adm".into()),
+            token: Some("data".into()),
+            access: Some(Arc::clone(&access)),
+            ..fennec_http::Config::default()
+        },
+    );
+    let listener = server.bind().unwrap();
+    let node = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let _ = server.serve_on(listener);
+    });
+    let mut d = Directory::in_memory();
+    d.set_node(
+        "n1",
+        Node {
+            addr: node.clone(),
+            token: "adm".into(),
+            ..Node::default()
+        },
+    )
+    .unwrap();
+    d.place("acme", "n1", State::Active).unwrap();
+    // At home in a region no router is recorded for.
+    d.place_home("faraway", "ap").unwrap();
+    let router = Router::new(
+        d,
+        Config {
+            addr: "127.0.0.1:0".into(),
+            token: Some("rt".into()),
+            upstream_timeout: Duration::from_secs(10),
+            ..Config::default()
+        },
+    );
+    let listener = router.bind().unwrap();
+    let at = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let _ = router.serve_on(listener);
+    });
+
+    // Tokens reaching `nosuch`: the node's own, and a JWT naming it.
+    let jwt = format!(
+        "Authorization: Bearer {}\r\n",
+        access.mint(r#"{"sub":"vera","tenant":"nosuch"}"#).unwrap()
+    );
+    for auth in ["Authorization: Bearer data\r\n", jwt.as_str()] {
+        for (method, rest, body) in [
+            ("GET", "left", ""),
+            ("GET", "collections", ""),
+            ("POST", "query", r#"{"query":"put left {n: 2}"}"#),
+        ] {
+            let (status, out) = ask(&at, method, &format!("/t/nosuch/{rest}"), auth, body);
+            assert_eq!(status, 404, "{method} /t/nosuch/{rest}: {out}");
+            assert!(out.contains("no tenant `nosuch`"), "{out}");
+        }
+    }
+    assert!(
+        !tenants.stats().open.iter().any(|(n, ..)| n == "nosuch"),
+        "the node opened the file its router does not place"
+    );
+    // Asked of the node itself, the file holds what it held.
+    let (status, out) = ask(
+        &node,
+        "POST",
+        "/t/nosuch/query",
+        "Authorization: Bearer data\r\n",
+        r#"{"query":"get left count"}"#,
+    );
+    assert_eq!(status, 200, "{out}");
+    assert!(
+        out.contains(r#""count":1"#),
+        "a write reached the leftover: {out}"
+    );
+
+    // A tenant at home where no router is recorded: the router's own token
+    // is told so, anyone else what acme tells them.
+    audit::succeeded(V4);
+    let (status, out) = ask(
+        &at,
+        "GET",
+        "/t/faraway/notes",
+        "Authorization: Bearer rt\r\n",
+        "",
+    );
+    assert_eq!(status, 503, "{out}");
+    assert!(
+        out.contains("no router is recorded for region `ap`"),
+        "{out}"
+    );
+    for headers in [
+        "",
+        "Authorization: Bearer guessed\r\n",
+        "Fennec-Home: 1\r\n",
+    ] {
+        let (_, held) = ask(&at, "GET", "/t/acme/notes", headers, "");
+        let waited = would_wait(V4);
+        audit::succeeded(V4);
+        let (_, away) = ask(&at, "GET", "/t/faraway/notes", headers, "");
+        assert_eq!(shape(&away), shape(&held), "faraway told apart from acme");
+        assert!(!away.contains("`ap`"), "{away}");
+        assert_eq!(would_wait(V4), waited, "faraway waits as acme does");
+        audit::succeeded(V4);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

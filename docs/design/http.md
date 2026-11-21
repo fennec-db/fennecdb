@@ -382,11 +382,28 @@ A router whose listener is not loopback alone and that was not started
 (fennec-shard's `Router::open_node`): 403 naming the node and the fix,
 counted (`fennec_router_open_node_refusals_total`) and said in its log once
 a node. It learns it from the node's `GET /_admin/stats`, which says
-`no_token` now: as the node is added, and of a node it has not asked since
-it started -- one its directory held, one a standby's directory brought --
-on a thread of its own beside the first request, which goes on; a node
-that said so is asked again by a refused request once its word is 10 s old,
-so one given a token since is reached with no router started again. And
+`no_token` now, and of a node from before, which says nothing there, from
+its `GET /_whoami` asked with no token: v0.2.0 answers `"kind":"open"`
+where it asks none and its 401 where it asks one (`Router::word_of`). It
+asks as the node is added, and of a node it has not asked since it
+started -- one its directory held, one a standby's directory brought -- at
+the first request to it, before that request goes, one ask a node at a
+time (`ask_now`); a node that said so is asked again by a refused request
+once its word is 10 s old, so one given a token since is reached with no
+router started again. Not known is not forwarded to: a node that does not
+say -- its stats refusing the admin token recorded for it, or not
+answering -- is answered 503 naming it, `Retry-After: 1`, said in the log
+once as it stops saying, and asked again by the first request a second
+later; one that said it asks none and then
+says nothing stays refused. Not known meant forwarded in the first shape
+(the review of the G14 fixes, finding C): the first request went on while
+a thread asked, a node whose ask failed went back to not known, and a node
+saying nothing of `no_token` was taken for one asking a token -- so a
+v0.2.0 node asking none behind a new router, the routers upgraded first,
+and a node running `--insecure` itself whose stats failed after its admin
+token changed, answered whoever reached the router. A read replica's copy
+on a node not known to ask a token is passed by, the marked read going
+home, and its node asked on a thread beside it (`open_copy`). And
 the router says what it listens on under its mark: one bound on loopback
 alone marks a request no other router relayed and the global entry named
 no client of with `audit::router_mark_local`, an HMAC of the node's admin
@@ -406,10 +423,12 @@ closed: a router on loopback behind a proxy or a tunnel on its machine
 server behind one is (above); its nodes take a token there, as the docs
 say. The class is judged of the address each listener is bound on
 (`serve_on`), `0.0.0.0` and `[::]` past loopback, and before a router
-serves it is past loopback. A node from before says nothing of
-`no_token` and is taken for one asking a token, and does not ask a mark's
-class: behind a new router it is held only once upgraded, which the
-upgrade order (routers, then nodes) leaves for last. The class costs
+serves it is past loopback. A node from before does not ask a
+mark's class: behind a new router listening past loopback it is held by
+the router, by its `/_whoami`; behind one on loopback it answers as it
+did. A router from before sends the first mark alone, so a new node asking
+no token refuses what it forwards, from loopback too, unless the node runs
+`--insecure`: routers upgrade before nodes ([compatibility.md](compatibility.md#upgrade-order)). The class costs
 nothing on a node with a token -- `open_refusal` returns before it -- and
 on an open node two thread-local loads; the router, one load where it is
 loopback alone or `--insecure`, two where it guards, and a node's second
@@ -418,7 +437,22 @@ mark compared only where the first is not the one sent.
 holds the four cases, the operator of neither, the node, the router and
 both saying `--insecure`, on a router bound on `0.0.0.0` and reached on
 127.0.0.1; the recipe's `a_token_router_tells_an_open_node_the_name_its_client_reached_it_by`
-stays as it was.
+stays as it was. Against a node the test scripts (`scripted`): a node from
+before asking none refused, one asking a token forwarded, each asked its
+stats and then its `/_whoami`
+(`a_router_past_loopback_asks_a_node_from_before_whether_it_is_open`); a
+node not asked is asked before the first request goes, refused where it
+asks none, 503 where its stats refuse the admin token, and one asking a
+token asked once (`a_router_past_loopback_forwards_to_no_node_it_could_not_ask`);
+an open node's word held inside its 10 s, asked again past it -- the period
+set to nothing -- and kept where the node then says nothing
+(`a_router_past_loopback_asks_an_open_node_again_once_its_word_is_old`);
+and a marked read passing a copy on a node not asked, and then one asking
+none, for home (`a_marked_read_goes_to_no_copy_on_a_node_past_loopback_could_not_tell_is_closed`).
+Each waits for the scripted node's requests, not a time. Before, the first
+two were answered 200 by the scripted node, and the marked read by the
+copy; the third needs the period this made a setting
+(`Config::open_asked_again`).
 
 `X-Forwarded-Host` rather than RFC 7239's `Forwarded: host=`, the
 standard's own: one value where `Forwarded` is a list of hops, each a list

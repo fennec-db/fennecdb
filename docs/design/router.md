@@ -108,6 +108,40 @@ answer for a tenant it holds is one round trip either way, but a node
 that is down answers a tenant it holds 502 and a missing one the stand-in's
 401.
 
+**A stand-in's request opens no file** (`tenants::STAND_IN`,
+`region::stand_in_target`; the review of the G14 fixes, finding A). Sent
+`/t/x/...` as it came, the node the stand-in picked opened any `x.fennec`
+in its directory for a token reaching `x` -- the node's own token, an
+unbound JWT, a deleted tenant's user whose JWT had not expired -- and a
+file of a name the router does not place is a normal state on a node: a
+deleted tenant's replica or standby copy that would not come off, a
+create taken back whose delete failed ([tenants.md](tenants.md)). Through
+the router they read it, and on a node without leases wrote into it,
+where before the stand-in the router answered 404. So the stand-in names
+the tenant past `~` (`/t/~x/...`), a character no tenant's name holds
+(`check_name`): no tenant can be made under it, and no node opens a file
+for it. A node reads the tenant past the mark, asks every credential of
+it as of a tenant it holds -- the token and its tenant claim, a hook's
+signature, the replication token -- and answers as for one it holds no
+file of, 404 with `Fennec-Tenant: absent`, before `Tenants::get`; what
+the stand-in is for, a node's own status, body, headers and wait, holds
+for every caller who could not reach the tenant, and a caller who could
+is told it is not there, as the router told it before. A marked header
+was the other shape: a node from before reads no header it does not
+know, and during a rolling upgrade, routers first, it would have opened
+the file; it refuses `~x` as a name, after its token, so a token reaching
+`x` is told 400 or, a JWT bound to `x`, 403 by such a node, and nothing
+is opened. A client sending `/t/~x/` itself, to a router or a node, is
+answered 404 after its own credentials, the file unopened.
+`tests/refusals.rs`'s `a_stand_in_opens_no_file_its_router_does_not_place`
+leaves `nosuch.fennec` on the stand-in's node, written and closed, and
+sends a read, a listing and a write through the router with the node's
+token and a JWT bound to `nosuch`: each 404, the node holding the file
+unopened and its row count as it was. Before the mark, `GET
+/t/nosuch/left` answered the leftover's row, `[{"id":1,"n":1}]`. The same
+test holds a tenant at home in a region with no router recorded: 503
+naming the region to the router's own token, acme's 401 to anyone else.
+
 A tenant's home is named (`Fennec-Home`) to the same callers alone
 (`region::home_asked`): named to anyone asking, a 401 carrying it and one
 not told the tenants apart, and told the home of each. A router relaying

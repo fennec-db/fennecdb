@@ -2103,8 +2103,14 @@ fn route_tenant(
     }
     // No body past `max_body` comes this far: an image's import, the one
     // read past it, is `/_admin/`'s, answered above ([`body_ceiling`]).
-    let name = match segs.as_slice() {
-        ["t", name, ..] => name.to_string(),
+    // A router's stand-in for a tenant it does not place names it past
+    // [`tenants::STAND_IN`]: asked as that tenant, answered as one with no
+    // file here.
+    let (name, standing_in) = match segs.as_slice() {
+        ["t", name, ..] => match name.strip_prefix(tenants::STAND_IN) {
+            Some(name) => (name.to_string(), true),
+            None => (name.to_string(), false),
+        },
         _ => {
             return Err(Response::error(
                 404,
@@ -2157,6 +2163,13 @@ fn route_tenant(
         scope
             .reaches(&name)
             .map_err(|why| Response::error(403, why))?;
+    }
+    // A router's stand-in, every credential asked as of a tenant held: the
+    // tenant is not here, whatever file of its name is -- one the router
+    // does not place is a leftover, opened by no request.
+    if standing_in {
+        let absent = tenants::Refused(404, format!("no tenant `{name}` on this node"));
+        return Err(absent.response().header(ABSENT_HEADER, "absent"));
     }
     // A tenant this node has no file of says so in a header besides the
     // words: a router reading a read replica's 404 tells a copy gone from

@@ -131,15 +131,71 @@ type Whole = (u16, Vec<(String, String)>, Vec<u8>);
 /// Where a tenant this router's own directory does not place is.
 pub(crate) enum Target {
     /// On a node the global directory places it on: its name, address,
-    /// marks and region -- or a node of this router's that stands in for a
-    /// tenant it cannot tell a caller of ([`Router::stand_in`]), with no
-    /// region to name.
+    /// marks and region.
     Node(String, String, Arc<crate::Marked>, String),
+    /// A node of this router's that stands in for a tenant it cannot tell
+    /// a caller of ([`Router::stand_in`]): its name, address and marks, the
+    /// request sent it naming the tenant past
+    /// [`fennec_http::tenants::STAND_IN`] ([`stand_in_target`]).
+    StandIn(String, String, Arc<crate::Marked>),
     /// At home in a region keeping its own directory: the region and its
     /// routers.
     Region(String, Vec<String>),
     /// Nowhere this router can send it: the answer.
     Answer(Response),
+}
+
+/// `target`, a request's for `tenant`, as a stand-in sends it
+/// ([`Router::stand_in`]): [`fennec_http::tenants::STAND_IN`] before its
+/// path's second segment, the tenant's as sent, the rest as it came -- a
+/// node decodes the path as this router did, and reads the same tenant
+/// past the mark and the same rest. Where the encoding moves the segments
+/// -- `/t%2Fx/...`, whose second segment as sent is not the tenant -- the
+/// path is written again from its segments as this router read them, each
+/// encoded: either way the node reads `~` and the tenant, checked here,
+/// and never the tenant alone, which would open its file.
+pub(crate) fn stand_in_target(target: &str, tenant: &str) -> String {
+    use fennec_http::tenants::STAND_IN;
+    let (path, query) = target.split_at(target.find('?').unwrap_or(target.len()));
+    let b = path.as_bytes();
+    let second = (0..b.len())
+        .filter(|&i| b[i] != b'/' && (i == 0 || b[i - 1] == b'/'))
+        .nth(1);
+    if let Some(i) = second {
+        let sent = format!("{}{STAND_IN}{}{query}", &path[..i], &path[i..]);
+        if stands_in_for(&sent, tenant) {
+            return sent;
+        }
+    }
+    let decoded = fennec_http::http::percent_decode(path);
+    let mut out = String::with_capacity(target.len() + 8);
+    for (k, seg) in decoded.split('/').filter(|s| !s.is_empty()).enumerate() {
+        out.push('/');
+        if k == 1 {
+            out.push_str(STAND_IN);
+        }
+        for &c in seg.as_bytes() {
+            match c {
+                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                    out.push(c as char)
+                }
+                _ => out.push_str(&format!("%{c:02X}")),
+            }
+        }
+    }
+    out.push_str(query);
+    out
+}
+
+/// Whether a node reads `target`'s tenant as `tenant` past the stand-in's
+/// mark.
+fn stands_in_for(target: &str, tenant: &str) -> bool {
+    let path = target.split('?').next().unwrap_or("");
+    let decoded = fennec_http::http::percent_decode(path);
+    let mut segs = decoded.split('/').filter(|s| !s.is_empty());
+    segs.nth(1)
+        .and_then(|s| s.strip_prefix(fennec_http::tenants::STAND_IN))
+        == Some(tenant)
 }
 
 /// What [`Router::elsewhere`] found before it asks who the caller is:
@@ -328,7 +384,11 @@ impl Router {
     /// no file of it. Chosen by the tenant's name, so one name asks one
     /// node, and the node's region, no home of the tenant's, is not named.
     /// `None` where the directory holds no node, and so no tenant to keep
-    /// from anyone.
+    /// from anyone. The request names the tenant past
+    /// [`fennec_http::tenants::STAND_IN`], which no file answers: sent the
+    /// name, a node opened any file of it it held -- a leftover this router
+    /// does not place, a deleted tenant's copy that would not come off --
+    /// for a token reaching the name, read and written.
     #[cold]
     pub(crate) fn stand_in(&self, tenant: &str) -> Option<Target> {
         let dir = self.read_dir();
@@ -340,12 +400,7 @@ impl Router {
             .iter()
             .nth((at % nodes.len().max(1) as u64) as usize)?;
         let marked = self.marked(n);
-        Some(Target::Node(
-            name.clone(),
-            n.addr.clone(),
-            marked,
-            String::new(),
-        ))
+        Some(Target::StandIn(name.clone(), n.addr.clone(), marked))
     }
 
     /// The index of the router of `region`'s list to ask first: the one
@@ -1705,5 +1760,42 @@ mod tests {
         assert_eq!(host("h:1"), "h:1");
         assert_eq!(host("https://h:1/"), "https://h:1");
         assert_eq!(label("us"), "@us");
+    }
+
+    /// A stand-in's target names its tenant past the mark, whatever else
+    /// the path holds, and its query is the request's: decoded as the node
+    /// decodes it, it is the same tenant and the same rest.
+    #[test]
+    fn a_stand_ins_target_names_its_tenant_past_the_mark() {
+        let segs = |target: &str| -> Vec<String> {
+            let path = target.split('?').next().unwrap();
+            let decoded = fennec_http::http::percent_decode(path);
+            decoded
+                .split('/')
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        };
+        for (sent, want) in [
+            ("/t/nosuch/notes", "/t/~nosuch/notes"),
+            ("/t/nosuch", "/t/~nosuch"),
+            (
+                "//t//nosuch/_hooks/paid?x=1",
+                "//t//~nosuch/_hooks/paid?x=1",
+            ),
+            ("/t/no%73uch/q?a=/t/b", "/t/~no%73uch/q?a=/t/b"),
+            // Its encoding moves the segments: written again from them.
+            ("/t%2Fnosuch/q%20r+s?x", "/t/~nosuch/q%20r%20s?x"),
+            ("/t/nosuch%2Fq/r", "/t/~nosuch%2Fq/r"),
+            ("/%74/x%2F/nosuch", "/%74/~x%2F/nosuch"),
+        ] {
+            let tenant = segs(sent)[1].clone();
+            let got = stand_in_target(sent, &tenant);
+            assert_eq!(got, want, "{sent}");
+            let (was, now) = (segs(sent), segs(&got));
+            assert_eq!(now[1], format!("~{tenant}"), "{sent}");
+            assert_eq!(now[2..], was[2..], "{sent}");
+            assert_eq!(now[0], was[0], "{sent}");
+        }
     }
 }

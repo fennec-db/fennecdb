@@ -100,7 +100,8 @@ entry token empty or equal to another it holds, at the start and as a node
 is added (`set_node`). A home is named, and a tenant not placed told of,
 to a caller the router vouches for alone (`vouches_for`: the entry's mark,
 a relay, its `--token`), anyone else's request going to a node in the
-tenant's place (`stand_in`), which asks the token first
+tenant's place (`stand_in`), which asks the token first and opens no
+file, the tenant named past `~` (`tenants::STAND_IN`)
 ([router.md](../../docs/design/router.md#tenants-it-does-not-place)). Every
 router answer carries `Fennec-Shard: 1`; a request that may have reached
 one goes again only as a `GET`, `HEAD`, `OPTIONS` or keyed
@@ -143,8 +144,9 @@ at the router from a client's headers, which a rebound page sets as it
 likes. Without `--token` the router is an open server, held to
 fennec-http's rule, a forward without `--http-cors` to its `Host` alone,
 the node judging its `Origin`. Listening past loopback, it forwards nothing
-to a node asking no token (`open_node`, 403) but under `--insecure`, and
-marks every forward by its listener's class (`mark_of`), a relayed or
+to a node asking no token (`open_node`, 403) but under `--insecure`, nor
+to one not known to ask one (503), a node from before asked its
+`/_whoami`, and marks every forward by its listener's class (`mark_of`), a relayed or
 entry-named one as past loopback, for the node to hold the same line.
 
 **[The router looks at a pooled connection first, and resends only what
