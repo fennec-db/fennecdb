@@ -9,7 +9,8 @@ nothing reaches a registry before the notes have had a read.
 1. `make version V=X.Y.Z` refuses while the release it moves on from has
    no whole fixture set in the working tree: the workspace's version, from
    v0.2.0 on, needs `crates/fennec-core/tests/compat/v<that version>/`
-   (step 7 writes it), every file the bytes its `SHA256SUMS` names, every
+   (step 7 writes it), every file the bytes its `SHA256SUMS` names and the
+   `SHA256SUMS` the one its `RELEASES` line pins, every
    later build's tests opening its files -- and so does every release this
    clone has the tag of from v0.2.0 on, a release candidate aside, so a
    set deleted with its `RELEASES` line is refused here though every compat
@@ -388,12 +389,19 @@ nothing reaches a registry before the notes have had a read.
    removed after); each is asked for before anything is built or written.
    `tools/compat_fixtures.py build` puts the
    tag's tree in a scratch directory (`git archive`), builds its
-   `fennec-server` and `fennec` (`cargo build --release --locked
-   --offline`: nothing downloaded, the tag's rustls, ring and webpki-roots
-   from cargo's cache, a cache lacking them named with the `cargo fetch`
-   that brings them), its module (the tag's `make wasm`) and
-   `tools/compat/writer.rs` as an example of its fennec-core, keeps the
-   binaries and the tag's `web/` and deletes the rest (about four minutes on an M1); `write`
+   `fennec-server` (`--release`) and `fennec` (`--profile cli`) as the
+   tag's `release.yml` does, `--locked --offline` for the host's target
+   (nothing downloaded, the tag's rustls, ring and webpki-roots from
+   cargo's cache, a cache lacking them named with the `cargo fetch` that
+   brings them), its module (the tag's `make wasm`) and
+   `tools/compat/writer.rs` as an example of its fennec-core, by the pinned
+   compiler and no other, keeps the binaries, the tag's `web/` and its
+   @fennecdb/cloudflare module with `MANIFEST.json` naming each by its
+   SHA-256 beside the tag, its commit and the compiler, and deletes the
+   rest (about ten minutes on an M1); `write` refuses a directory whose
+   files are not the manifest's, whose manifest names another tag, commit
+   or compiler, or whose copies of the tag's files are not `git show
+   <tag>:<path>`'s bytes, before any program of it runs, then
    runs them into `crates/fennec-core/tests/compat/vX.Y.Z/`: a server's
    file and its answers over HTTP, a replica's file and that file
    promoted, a shell's, a checkpoint's graphs, the files a crash leaves, a
@@ -403,10 +411,14 @@ nothing reaches a registry before the notes have had a read.
    otherwise on purpose, two sealed backups (one of several frames), a
    sealed archive and a plain one and what `fennec verify` said of each, a
    tenant node's archive of every tenant and what the release's restore of
-   it said at each moment, the page's IndexedDB records, its OPFS file and
-   the copy a stopped rewrite left beside one, the answers the release gave
-   over each, and `SHA256SUMS` last (the set's README says how long each
-   part took). Written to
+   it said at each moment, the release's restore of each archive to every
+   moment a later build restores it to, a graph past 65 536 vectors, the
+   page's IndexedDB records, its OPFS file and the copy a stopped rewrite
+   left beside one, a Durable Object's SQL rows and key-value values as
+   the release's @fennecdb/cloudflare kept them, the answers the release
+   gave over each, the manifest, and `SHA256SUMS` last (the set's README
+   says how long each part took), whose SHA-256 `write` prints for the
+   set's `RELEASES` line (`sums`). Written to
    another directory instead, `FENNEC_COMPAT_SETS=<its parent>` runs every
    `compat::` test and `web/fennec.compat.test.js` over it before it
    lands. A release that writes something new -- a record kind, a form
@@ -417,12 +429,26 @@ nothing reaches a registry before the notes have had a read.
    which fails a set without its line, a line without its set, a form no
    file holds that its line does not name absent with why, and one a file
    holds that its line does not name. The set goes through a pull request
-   like any other, never written again -- nor its README, whose list of
-   the forms no file holds is never amended: review it before it lands --
-   and `make version` refuses while any release tagged from v0.2.0 on (a
-   release candidate aside) has no whole set in the tree it runs in, and
-   every later build's `compat::` tests, in fennec-core, fennec-http, fennec
-   and fennec-server, and `web/fennec.compat.test.js` open it.
+   like any other with its line pinning the SHA-256 of its `SHA256SUMS`,
+   never written again -- nor its README, whose list of the forms no file
+   holds is never amended: review it before it lands. A set written again
+   whole, its sums with it, fails its pin in every `compat::` test and in
+   `make version`. A form the release writes that its set is found to lack
+   after it landed goes into a further set of the same tag,
+   `crates/fennec-core/tests/compat/vX.Y.Z+2/` (then `+3`, ...): written
+   by `make compat-fixtures`'s two steps with binaries built from the same
+   tag commit, `write <bin-dir> .../vX.Y.Z+2`, the statements writing the
+   form added first, a README, sums, manifest and `RELEASES` line pinning
+   it of its own; the first set stays as it landed. `make version`
+   refuses while any release tagged from v0.2.0 on (a release candidate
+   aside) has no whole set in the tree it runs in, or a set the tree names
+   is not the one its line pins, and every later build's `compat::` tests,
+   in fennec-core, fennec-http, fennec and fennec-server, and
+   `web/fennec.compat.test.js` open every set. A release candidate gets
+   no set: its files carry no promise -- a candidate is tried on copies --
+   and the release's set is written by the release's own binaries; a
+   change to a file format between two candidates is named in the later
+   candidate's notes.
 
 `make packages` runs the same checks locally at any time, NuGet's where
 the .NET SDK is installed.
@@ -735,7 +761,11 @@ say for one: drafted and published as a pre-release, never GitHub's
 Latest (step 4, where Maven Central's `<release>`, which a candidate
 becomes while it is the highest version, is said too), no app (step 5),
 and verified as 18 assets (step 6), its XCFramework built from `main`
-(step 2). `make version` (`tools/version.py`)
+(step 2), and no fixture set (step 7): a candidate's files carry no
+promise, a candidate being tried on copies, so a change to a file format
+between two candidates is named in the later candidate's notes, and the
+release's set, written by the release's own binaries, is the one later
+builds are held to. `make version` (`tools/version.py`)
 takes X.Y.Z alone today, so a candidate's version needs it to take a
 pre-release part first. Before a 1.x tag, check:
 
