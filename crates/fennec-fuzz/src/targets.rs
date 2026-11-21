@@ -853,6 +853,10 @@ const SQLITE_TOKENS: &[&[u8]] = &[
     b"/* ",
     b" */",
     b"x'00ff'",
+    b" DEFAULT (CAST(",
+    b" AS TEXT))",
+    b" DEFAULT (-(-",
+    b"0x100000000",
 ];
 
 /// The tables the target opens: `t` and `u`, and those of the seeds SQLite
