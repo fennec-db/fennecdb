@@ -580,7 +580,12 @@ third of what the compact writes is dead, where the file has reached three
 quarters of the memory the system has for its pages or the server is
 waiting for the disk, so that its reads stay in memory. The compact runs
 beside the queries, and takes the write lock only to put the new file in
-place.</p>
+place. A compact is refused for nothing a document holds: one it cannot
+read is copied as it is, and a dropped field's values become
+<code>null</code>s, its place kept. A refusal that stands -- a damaged
+file, a disk that will not take the new one -- is tried again at every
+look, logged once and counted in
+<code>fennec_auto_compactions_refused_total</code>.</p>
 
 <div class="tbl">
 <table>

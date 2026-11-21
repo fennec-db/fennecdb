@@ -203,6 +203,52 @@ macOS arm64, release). The image's buffer is
 grown by the record alone: a `Vec` grown its own way took twice a large
 image's size.
 
+### A copy across a compact
+
+**A copy agrees with its primary across a compact because a compact
+changes no place** ([storage.md](storage.md#dropped-places)). A compact is
+no record: it rewrites the file, marks the feed durable and sends nothing,
+so a copy, an archive or a standby holds whatever places it held, and
+applies every record after the compact by them. A compact that took a
+dropped field's places out -- every release from 0.1.7 to 0.2.0 -- left
+each copy reading the collection's later writes one field early. A copy
+that compacted itself first read them one field late. An archive's restore
+from an image before the compact misread them, and so did its images
+after. A `--dir` node's standby misread them, and a failover made those
+values the tenant's. Kept places, each one's value made a `null`, leave
+every copy's documents readable by the primary's places whichever of the
+two compacts, and in whatever order.
+`tests/replication.rs` holds a copy caught up before its primary's compact,
+one behind that catches up across it by the records, one connecting after
+it, and one compacting first, each over real replication. `tests/archive.rs`
+holds a restore from the image before the compact, its `verify`, and an
+image of the archive's own end. fennec-shard's `tests/replicas.rs` holds a
+standby and its failover, the promoted copy's file read on its own. The sync
+protocol's replicas take rows as values and write them by their own schema
+(`fennec_abi::sync`), so no place reaches them; `fennec-abi`'s
+`tests/sync.rs` holds one across a drop and a compact on its server.
+
+*A 0.2.0 primary.* Replicas upgrade before primaries, so for as long as a
+0.2.0 primary runs, its compact still takes the places out and tells
+nobody. A newer copy cannot tell from the writes after it, which carry no
+layout, and reads them one field early. It can tell at the primary's next
+schema record of that collection. A `create index` carries the whole
+schema, held to the copy's layout as it was. An alter of any kind --
+`add`, `drop`, `rename`, `ttl` -- carries the schema after it (record kind
+12), and the copy now holds that schema's dropped places to its own:
+the same, or one more for a drop (`keeps_places`), refused by name
+otherwise -- "a schema change moved the fields of `x`: its primary took a
+dropped field's places out of its documents, which this copy keeps; seed
+the copy again from its primary". A server's follower takes an image of its
+primary on a write it cannot apply, and holds what the primary holds from
+there; an archive's restore past that record is refused. A check that
+tells at once would need the compact to say so in the feed: a record kind,
+which a format change and an older copy's refusal would bring, for a
+window 1.0 closes. `tests/replication.rs`'
+`a_copy_of_a_primary_that_took_the_places_out_is_seeded_again_at_its_next_alter`
+holds the window and its end. What an operator does is the compatibility
+contract's ([compatibility.md](compatibility.md#a-020-primary-and-a-compact)).
+
 ## A write's time
 
 **A copy keeps the time its primary appended each write at, and an

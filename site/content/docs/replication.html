@@ -68,6 +68,10 @@ its own file. Only writes already on the primary's disk are sent.</p>
     copy of the database instead.</li>
   <li><b><code>--sync off</code> is refused</b> on a server with a
     replication token.</li>
+  <li><b>A <code>compact</code></b>, the primary's or the replica's own, is
+    not sent and changes nothing a replica reads: a dropped field's place
+    stays in every document, so the writes after it read alike on both
+    (<a href="#upgrading-from-0-2-0">from 0.2.0</a>).</li>
 </ul>
 
 <details class="deep"><summary>How records are sent and caught up</summary>
@@ -352,6 +356,10 @@ fennec restore /backups/archive before.fennec --to-change 41873
     restore within that window needs.</li>
   <li><b><code>fennec verify</code></b> says from when to when the archive can
     restore.</li>
+  <li><b>A restore across a <code>compact</code></b> on the primary reads the
+    writes after it as the primary did, from an image taken before it too: a
+    compact keeps every field's place (<a href="#upgrading-from-0-2-0">from
+    0.2.0</a>).</li>
   <li>A <b>backup or a restore into a file</b> holds the file while it is
     written, as the shell does: one a running server has open is refused, its
     holder named, rather than renamed over under it. A file there already is
@@ -779,6 +787,29 @@ feeding and how far each has been sent.</p>
 </tbody>
 </table>
 </div>
+
+<h2 id="upgrading-from-0-2-0">A 0.2.0 primary and its compacts</h2>
+
+<p>Replicas upgrade before primaries. Up to 0.2.0, a <code>compact</code>
+took a dropped field's place out of every document and told no replica,
+archive or standby, which then read every later write of that collection
+one field off. From 1.0 a compact keeps the place, so this happens only
+while a 0.2.0 primary still runs:</p>
+
+<ul>
+  <li><b>Before upgrading the first replica</b>, if a field was dropped on
+    the primary since its last compact, run <code>compact</code> on it and
+    seed every replica again from a <code>fennec backup</code> of it taken
+    after; begin an archive again in a directory of its own.</li>
+  <li><b>Drop no field on the primary</b> until it runs 1.0. Its next
+    compact would take the place out, and <code>--auto-compact</code> runs
+    one on its own.</li>
+  <li><b>A replica that logs <code>a schema change moved the fields
+    of</code></b> met such a compact at the primary's next
+    <code>alter</code> or <code>create index</code> of the collection, and
+    takes a copy of the primary on its own; the writes between read one
+    field off on it until then.</li>
+</ul>
 
 <h2>What it does not do</h2>
 

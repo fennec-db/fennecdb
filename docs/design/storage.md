@@ -234,6 +234,148 @@ read into memory compacts beside itself too, the live records copied into
 fresh segments with no lock held; it used to copy them under the read lock
 and build every index again, though the indexes are keyed by id.
 
+### Dropped places
+
+**A compact keeps every place a collection's documents hold.** `alter
+collection x drop field b` leaves `b`'s place in the documents
+([fennecql.md](fennecql.md#alter-collection)), and every write after it
+puts a one-byte `null` there, or nothing where no field follows it. A
+compact makes the value at each dropped place that `null`, and leaves out
+the dropped places a document ends with, as a write does; every other
+value is copied as its bytes stand, at the place it stood
+(`schema::reclaim`). It renumbers nothing: the schema's `dropped` list
+stays for the collection's life, in memory, in the file and on every copy.
+The reclaim rides on the copy every compact makes of the live records: in
+memory into the fresh segments (`Store::compacted`), and over a mapped
+file by writing again, into the store's segments, only the documents
+holding a value at a dropped place, before the rewrite streams the live
+records into the new file and points the store at it (`Store::reclaim`,
+`relocate_live`). It does so under the lock and beside the database alike,
+so a compact over a collection holding a dropped place runs beside the
+database as every other compact does; one used to hold the write lock
+throughout. The store notes the places it reclaimed (`Store::cleared`, in
+memory alone): the compacts after the first walk no document for them, as
+none walked once the places were taken out, until a drop adds a place or
+the process starts again.
+
+*The two bugs.* A compact took the places out (`strip_dropped`) from 0.1.7,
+the release that brought `drop field`, to 0.2.0, and emptied the list.
+That went wrong two ways. *Refused part way:* it stripped one collection
+at a time, in memory as it went, so a document no decoder reads in a later
+collection -- a value nesting past `codec::MAX_DEPTH` that 0.2.0 wrote
+through a `[[json]]` field ([crates.md](crates.md#how-deep-a-value-nests)),
+or a damaged value -- refused it with the earlier collections renumbered
+in memory and the file not rewritten. A later `put x {a: 10, c: 30, d: 40}`
+then read `[10, 30, 40]` in the process and `[10, 40, null]` after a
+reopen, on a replica, and after the server's own compaction, which met the
+same refusal every five seconds. *Succeeded, telling no copy:* a compact
+appends no record. A copy caught up before it kept the places, and read
+every later write of the collection one field early. A copy that
+compacted itself first (`may_write` lets a following database compact, and
+a server's compaction runs on one) read its primary's later writes one
+field late, `[10, null, 30]`. An archive restored from an image taken
+before the compact, with the writes after it, misread them, and so did
+every image the archive took after. A `--dir` node's standby misread them,
+and after a failover the misread values were the tenant's. Nothing was
+loud until the primary's next `create index`, whose record carries the
+whole schema and failed the copy's layout check (`Database::apply`).
+
+*What a compact meets that it cannot read.* A compact is refused for
+nothing a document holds, and fails only as storage fails:
+
+- The reclaim reads a document as far as its last dropped place, a value
+  at a time (`skip_value`). One it cannot read that far is copied as it
+  is, and is refused where it is read, in the same words, after the compact
+  as before.
+- A graph holding tombstones is built again from every document's vector
+  (`build_graph` under the lock, `begin_graphs` and `finish_graphs` beside
+  the database). A document it cannot read leaves the graph as it stands,
+  tombstones and all, answering as it did; a graph built without the
+  document would not. No file brings such a document to it today: an open
+  reads every vector a graph holds, past every value before it, and
+  refuses the file, as `create index`, a write and a replica's apply do
+  (`compact_places::a_vector_past_a_value_none_reads_is_refused_at_the_open`).
+  So the engine's own test puts one in a store
+  (`maintenance::tests::a_graph_a_compact_cannot_rebuild_stays_as_it_stood`),
+  where each path used to refuse the compact: under the lock part way, the
+  collections before it compacted.
+- Nothing else in a compact decodes a document. The rewrite copies payloads
+  by their locations, whose one refusal is a location outside its segment
+  or the mapped file: a damaged store, which every read of that row meets
+  too.
+
+The browser module's compact is `execute`'s, under the lock. The copy it
+built beside the page, and every index over it built again
+(`begin_compact`, `finish_compact`), refused a compact for a document any
+index could not read. Nothing reached it, since fennec-wasm calls no
+`maintain`, and it is gone.
+
+*Why places are never renumbered.* A copy applies its primary's records by
+the places it holds, and a compact is no record. The ways rejected:
+
+- A record that carries the strip to every copy. It costs nothing a write,
+  but every copy then runs a full rewrite as it applies it, an open must
+  replay it idempotently, and a copy must never strip on its own. It is a
+  new record kind besides, which an older copy refuses.
+- A layout number in every write: bytes on every write, and a new kind of
+  data record.
+- Seeding every copy again after a stripping compact. That sends an image
+  to each copy, and leaves a window while standbys are seeding, which a
+  failover inside it would lose.
+- The first fix (branch `compact-refused-midway`): every stripped store,
+  and every graph, built before any is put in place. It mended the refusal
+  part way and left the copies misreading. It also held the data twice at
+  the peak, every rebuilt graph a second time, and in the browser that
+  peak is never given back.
+
+Kept places mend both bugs with no format change: 0.2.0 reads every file
+this writes.
+
+*What it costs.* A byte a document for each dropped place a field
+follows, for the collection's life, and a value every read of such a field
+passes: MEASURED_STORAGE
+
+*How many places.* A collection holds `schema::MAX_PLACES`, 4 096, over
+its life: its fields and its dropped ones. An `alter ... add field` past
+them is refused, and so is a `create` declaring more fields. The refusal
+says to make the collection again -- create another and copy the rows into
+it -- which is rid of the places. PostgreSQL's dropped columns count toward
+its 1 600 the same way; 4 096 is MySQL's column count, past SQLite's
+default 2 000, so a table `fennec import` copies fits. A file holding more
+places opens as it is (`Schema::decode` counts none): no read refuses what
+a write took. A copy takes its primary's schema as it comes.
+
+*The rest of a compact.*
+
+- From the first store a compact changes until every store points at the
+  new file, a panic fails the database (`compact_unwound`), as one landing
+  a block does through `unwound`. A server takes a lock a panic poisoned as
+  it stands, and stores half pointed at the new file would read a
+  handover's records at the old one's places.
+- Beside the database nothing changes before the side file takes the
+  file's place. From there to the last store, a panic fails the database
+  too (`adopted_beside`).
+- A rewritten file the sink cannot map (`Sink::remapped`: the file's length
+  unread, the mapping refused) fails the database as well. `repoint`
+  answered `Ok` there, and the stores read on from the old file's mapping,
+  which they hold. The next handover then read the records appended to the
+  new file at their places in the old one. A checkpoint and an adopted
+  image reach `repoint` too, and fail alike.
+- Under the lock, a store compacted in memory before a later collection's
+  damaged location refuses the compact holds the same documents at the same
+  places. Only its dead-byte counters are ahead of the file, until the next
+  compact. A compact refuses there for nothing a document holds, and no
+  test reaches it without damaging the store's own offsets.
+- A refusal the server's compaction meets at every look is counted in
+  `fennec_auto_compactions_refused_total` each time, and logged once in its
+  words, until the words change or a compact runs (`link::refusal_is_news`).
+  It was logged every five seconds for as long as it stood. Left after
+  this change: a damaged location, which reads of that row meet too; a side
+  file the disk refuses (`Error::Io`, the disk full); and a schema changed
+  or an image adopted during the compact, which the next look gets past.
+  The native library's `Compactor` keeps no log, and tries again at its
+  next look.
+
 ## Compaction and the page cache
 
 **A file is compacted before it outgrows the page cache** (`cache.rs`,

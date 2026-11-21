@@ -309,3 +309,20 @@ fn compact(what: &str, db: &RwLock<Database>, policy: &CompactPolicy, memory: Me
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// A refusal that stands is logged once, again only once its words
+    /// change, and once more after a compact ran.
+    #[test]
+    fn a_refusal_that_stands_is_news_once() {
+        let what = "a database no other test names";
+        assert!(super::refusal_is_news(what, Some("damaged")));
+        assert!(!super::refusal_is_news(what, Some("damaged")));
+        assert!(super::refusal_is_news(what, Some("the disk is full")));
+        assert!(!super::refusal_is_news(what, Some("the disk is full")));
+        assert!(!super::refusal_is_news(what, None));
+        assert!(super::refusal_is_news(what, Some("the disk is full")));
+        super::refusal_is_news(what, None);
+    }
+}
