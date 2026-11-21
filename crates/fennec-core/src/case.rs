@@ -456,6 +456,33 @@ fn leb(at: &mut usize) -> u32 {
 mod tests {
     use super::*;
 
+    /// The Unicode version the engine's answers are of. They follow the
+    /// standard library's tables -- `lower` and `upper`, `nocase`'s fold,
+    /// what `@text` calls a word and the term it keeps, which names
+    /// FennecQL, a declared schema, a token's rules and a replica's shape
+    /// read -- so they are the pinned compiler's Unicode, and a minor
+    /// release's to move (docs/design/compatibility.md#unicode).
+    const UNICODE: (u8, u8, u8) = (18, 0, 0);
+
+    #[test]
+    fn the_unicode_version_is_the_one_the_answers_are_of() {
+        assert!(
+            char::UNICODE_VERSION == UNICODE,
+            "the toolchain's Unicode is {:?}, and the answers are of {UNICODE:?}. A bump that \
+             moves it owes, in its own pull request (RELEASING.md, \"A toolchain bump\"): \
+             `CASE_IGNORABLE` and `UNLIKE_LOWER` here, which the two tests after this one \
+             print; tests/nocase.rs's `NEWER`, the capitals newer than its Python table; \
+             tools/fold/gen.py's `UNICODE` and `SHA256`, then its `--check` (src/text/fold.rs's \
+             table and first line) and ci.yml's fmt job's Unicode cache, its path and key; \
+             every code point's case, letter, digit and space answers diffed under both \
+             compilers -- one that stops being a letter or a digit refuses a name a 1.x read, \
+             which no 1.x may ship; docs/design/compatibility.md#unicode's version and moved \
+             letters; the release notes naming each assigned code point whose upper(), \
+             lower(), fold or word-hood moved; and this constant",
+            char::UNICODE_VERSION
+        );
+    }
+
     /// `lower("AΣ" + c + tail)` names `σ` or `ς` for the sigma: what the
     /// standard library decided about `c`.
     fn sigma_after(c: char, tail: &str) -> char {
