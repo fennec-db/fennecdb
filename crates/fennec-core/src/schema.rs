@@ -1012,10 +1012,12 @@ impl Schema {
         // The names met so far. Natively in a set: each against every one
         // before it was 5.4e8 comparisons for the 32 767 fields an import of
         // a SQLite table may declare, and 3.8e9 for the 87 376 one did before
-        // the importer held a table to SQLite's own ceiling (G14 F2b). The
-        // browser module keeps the list it had: it reads no SQLite file, its
-        // schemas are its page's or its server's, and the set's table was
-        // 1 568 bytes of it.
+        // the importer held a table to SQLite's own ceiling (G14 F2b). An
+        // import of more than `MAX_PLACES` columns is refused by the count
+        // above now, but a collection a release made of them, with no bound,
+        // takes its alters here uncounted. The browser module keeps the list
+        // it had: it reads no SQLite file, its schemas are its page's or its
+        // server's, and the set's table was 1 568 bytes of it.
         #[cfg(not(target_arch = "wasm32"))]
         let mut seen = std::collections::HashSet::with_capacity(fields.len());
         #[cfg(target_arch = "wasm32")]
@@ -1764,10 +1766,13 @@ mod tests {
     use super::*;
 
     /// `Schema::new` refuses a name met before, naming the first one met
-    /// again in the fields' order, wherever the two stand -- a schema of
-    /// SQLite's 32 767 columns, its last field the first's name, too -- and
-    /// the refusals it makes before that one in a field's checks (`id`, a
-    /// dot) still come first. The names are looked up in a set.
+    /// again in the fields' order, wherever the two stand -- and so do its
+    /// checks without the count (`Schema::checked`, an alter's of a
+    /// collection a release made past `MAX_PLACES`) over a schema of
+    /// SQLite's 32 767 columns, its last field the first's name, which
+    /// `Schema::new` refuses by its count first -- and the refusals it makes
+    /// before that one in a field's checks (`id`, a dot) still come first.
+    /// The names are looked up in a set.
     #[test]
     fn a_field_named_twice_is_refused_by_the_first_name_met_again() {
         let fields = |names: &[&str]| {
@@ -1790,9 +1795,16 @@ mod tests {
                 .map(|n| Field::new(n.as_str(), DataType::Text))
                 .collect::<Vec<_>>()
         };
-        assert_eq!(Schema::new("w", named(&wide)).unwrap().fields.len(), 32_767);
-        wide.push("c0".into());
         let e = Schema::new("w", named(&wide)).unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("`w` declares 32767 fields, and a collection holds 4096 at most"),
+            "{e}"
+        );
+        let uncounted = |names: &[String]| Schema::checked("w".into(), named(names), false);
+        assert_eq!(uncounted(&wide).unwrap().fields.len(), 32_767);
+        wide.push("c0".into());
+        let e = uncounted(&wide).unwrap_err();
         assert!(
             matches!(&e, Error::Exists(m) if m == "duplicate field `c0`"),
             "{e}"
