@@ -622,10 +622,12 @@ Two checks hold it, each where the other cannot reach. Clippy's
 not, a new crate too -- so every clippy run CI makes refuses a site without
 one in the code it compiles: the workspace's, wasm32's and each feature
 set's, part of Windows', the JNI functions' and `test-clock`'s. That is
-x86_64 Linux, wasm32 and Windows' check. The scanner below counts 366
-`unsafe` blocks and impls in the repository's 480 `.rs` files (2026-11-21,
+x86_64 Linux, wasm32 and Windows' check. The scanner below counts 371
+`unsafe` blocks and impls in the repository's 484 `.rs` files (2026-11-21,
 after the 79 blocks `unsafe_op_in_unsafe_fn` added, the merges after them
-and a reader's mapping laid over, `Mapping::reading`), and a review found about 48 of them, when they were 255, compiled
+-- the fifth train's counting allocator of fennec-import's tests among
+them -- and a reader's mapping laid over, `Mapping::reading`), and a
+review found about 48 of them, when they were 255, compiled
 in none of those runs -- aarch64's NEON kernels, prefetch and CRC
 instructions, Apple's system calls (the page cache's `F_NOCACHE`,
 `vm_statistics64`, `rusage_info_v4`, the lease's clock), the macOS-only

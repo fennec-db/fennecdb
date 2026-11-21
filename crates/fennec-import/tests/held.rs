@@ -31,9 +31,13 @@ fn moved(by: isize) {
     });
 }
 
+// SAFETY: the system's allocator, each call handed on as it came; the
+// count reads and writes thread locals alone, which allocate nothing.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
-        let p = System.alloc(l);
+        // SAFETY: `l` is this call's layout, of a nonzero size as
+        // `GlobalAlloc::alloc`'s caller guarantees, handed on as it came.
+        let p = unsafe { System.alloc(l) };
         if !p.is_null() {
             moved(l.size() as isize);
         }
@@ -41,7 +45,8 @@ unsafe impl GlobalAlloc for Counting {
     }
 
     unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
-        let p = System.alloc_zeroed(l);
+        // SAFETY: as `alloc`'s.
+        let p = unsafe { System.alloc_zeroed(l) };
         if !p.is_null() {
             moved(l.size() as isize);
         }
@@ -49,12 +54,17 @@ unsafe impl GlobalAlloc for Counting {
     }
 
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
-        System.dealloc(p, l);
+        // SAFETY: `p` is `System`'s, made with `l` -- every call here hands
+        // on to it -- as `GlobalAlloc::dealloc`'s caller guarantees.
+        unsafe { System.dealloc(p, l) };
         moved(-(l.size() as isize));
     }
 
     unsafe fn realloc(&self, p: *mut u8, l: Layout, size: usize) -> *mut u8 {
-        let q = System.realloc(p, l, size);
+        // SAFETY: `p` is `System`'s, made with `l`, and `size` is nonzero and
+        // fits `isize` once rounded to `l.align()`, as
+        // `GlobalAlloc::realloc`'s caller guarantees.
+        let q = unsafe { System.realloc(p, l, size) };
         if !q.is_null() {
             moved(size as isize - l.size() as isize);
         }
