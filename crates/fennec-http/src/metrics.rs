@@ -639,6 +639,16 @@ fn render(source: Source) -> String {
         &[],
         crate::link::AUTO_COMPACTIONS.load(Ordering::Relaxed),
     );
+    out.family(
+        "fennec_auto_compactions_refused_total",
+        "counter",
+        "Compacts the server tried on its own and was refused, each refusal that stands logged once.",
+    );
+    out.sample(
+        "fennec_auto_compactions_refused_total",
+        &[],
+        crate::link::AUTO_COMPACTIONS_REFUSED.load(Ordering::Relaxed),
+    );
     out.family("fennec_connections", "gauge", "Connections open now.");
     out.sample(
         "fennec_connections",

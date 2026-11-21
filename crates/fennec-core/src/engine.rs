@@ -3393,23 +3393,6 @@ impl Collection {
         taken
     }
 
-    /// The documents written again without the places of dropped fields,
-    /// which `compact` takes out: the bytes of every value kept copied as
-    /// they stand, into a fresh store -- in memory until the rewrite that
-    /// follows points it at the new file.
-    fn strip_dropped(&mut self) -> Result<()> {
-        let mut fresh = Store::new();
-        fresh.raise_next_id(self.store.next_id());
-        fresh.reserve(self.store.len());
-        for id in self.store.iter_ids() {
-            let payload = self.store.raw(id)?.unwrap_or_default();
-            fresh.append(OP_PUT, id, &self.schema.without_dropped(payload)?);
-        }
-        self.store = fresh;
-        SchemaCell::make_mut(&mut self.schema).dropped.clear();
-        Ok(())
-    }
-
     /// The other documents holding one of `doc`'s `@unique` values, each
     /// with the field it holds it in -- or the index over several fields
     /// whose every part it holds them in, after the fields.
@@ -6628,9 +6611,33 @@ impl Database {
         if !self.mapped {
             return Ok(());
         }
-        let Some(base) = self.sink_mut().remapped() else {
-            return Ok(());
+        let remapped = self.sink_mut().remapped();
+        #[cfg(test)]
+        let remapped = remapped.filter(|_| !unwinding::armed("remap"));
+        // Not mapped -- the file's length unread, a mapping refused -- the
+        // stores would read on from the old file, whose mapping they hold,
+        // and the next handover read the records appended to the new one
+        // at their places in the old: the database is failed instead, until
+        // it is opened again.
+        let Some(base) = remapped else {
+            return self.storage(Err(Error::Io(
+                "the rewritten file could not be mapped; open it again".into(),
+            )));
         };
+        // A walk of the new file that refuses leaves the stores as they
+        // were, at the old file's places: failed as well.
+        let r = self.repoint_at(base, placed, compacted);
+        self.storage(r)
+    }
+
+    /// [`Self::repoint`] once the rewritten file is mapped, at `base`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn repoint_at(
+        &mut self,
+        base: crate::store::Base,
+        placed: Option<&[(u32, u64)]>,
+        compacted: &[String],
+    ) -> Result<()> {
         if let Some(placed) = placed {
             for (name, c) in self.collections.iter_mut() {
                 match placed.iter().find(|(cid, _)| *cid == c.id) {
@@ -8460,6 +8467,9 @@ impl Database {
             let ch = FieldChange::decode(body)?;
             let name = self.named(cid).ok_or_else(|| missing(cid))?;
             let c = self.collections.get_mut(&name).unwrap();
+            if !keeps_places(&c.schema, &ch) {
+                return Err(crate::schema::places_moved(&name));
+            }
             let before = c.schema.clone();
             let taken = c.alter_fields(&ch);
             // Before the index of a field added is built, as `alter
@@ -8607,9 +8617,13 @@ impl Database {
                 None => None,
             };
             let new = match op {
+                // Read as a write made it: a value at every place up to the
+                // last field, and none past it -- one written by other
+                // places than this copy holds is refused before anything
+                // reads it a field off.
                 OP_PUT => {
                     crate::store::written_id(id)?;
-                    Some(c.schema.read_doc(id, payload)?)
+                    Some(c.schema.read_written(id, payload)?)
                 }
                 OP_DEL => None,
                 other => {
@@ -8962,6 +8976,18 @@ impl Database {
         let r = f(&mut *g.0);
         std::mem::forget(g);
         r
+    }
+
+    /// What a panic in a compact's rewrite leaves ([`Self::compact`]):
+    /// the stores compacted in memory, some perhaps pointed at a new file
+    /// and others at the old one. Stopped as a storage error stops writes,
+    /// which an open reads back as the file holds them.
+    #[cold]
+    #[inline(never)]
+    fn compact_unwound(&mut self) {
+        self.fail(&Error::Io(
+            "a panic as a compact rewrote the file: what the stores point at is unknown".into(),
+        ));
     }
 
     #[cold]
@@ -9534,6 +9560,12 @@ impl Database {
                 }
                 // Past the payload's end nothing is skipped: a field added
                 // after the document was written reads as `null`.
+                // A dropped place is passed as any value: a test here for
+                // its `null` (`codec::skip_passing`) cost every other
+                // collection's page of 100 rows 150 to 518 instructions,
+                // held across the rows or asked of the collection, where a
+                // page passing one pays 47 a row without it
+                // (docs/design/storage.md#dropped-places).
                 while at < want {
                     crate::codec::skip_field(doc, &mut pos)?;
                     at += 1;
@@ -10551,6 +10583,10 @@ impl Database {
                          value for it",
                         f.name
                     )));
+                }
+                // Every place a field ever had stays (`MAX_PLACES`).
+                if schema.width() >= crate::schema::MAX_PLACES {
+                    return Err(places_full(collection, &schema));
                 }
                 // The checks a `create collection` makes of its fields: a
                 // name taken or reserved, a collation or an index the type
@@ -13510,7 +13546,7 @@ impl Database {
             // at all. Elsewhere `order` has no such guarantee, which is why
             // the engine sorts in full there.
             kept.sort_unstable();
-            kept = order_ids(&child.store, &kept, keys, want)?;
+            kept = order_ids_of(&child.store, &kept, keys, want)?;
         }
         Ok(kept)
     }
@@ -13959,7 +13995,7 @@ impl Database {
                     };
                     format!("order: {by}, every key read, {} matches, {kept}", ids.len())
                 });
-                ids = order_ids(&c.store, &ids, &keys, k)?;
+                ids = order_ids_of(&c.store, &ids, &keys, k)?;
             }
             Ok((ids, facet_ids))
         }
@@ -14937,8 +14973,6 @@ impl Database {
     /// rebuilt here -- a compact beside the database has rebuilt them
     /// already, without the lock.
     fn compact(&mut self, which: Option<&str>, graphs: bool) -> Result<Response> {
-        #[cfg(not(target_arch = "wasm32"))]
-        let began = std::time::Instant::now();
         let targets: Vec<String> = match which {
             Some(n) => {
                 self.collection(n)?;
@@ -14950,6 +14984,29 @@ impl Database {
             .iter()
             .map(|n| self.collections[n].store.dead_bytes())
             .sum();
+        // From the first store changed to the stores pointed at the new
+        // file, a panic fails the database, as one landing a block does: a
+        // server takes the lock it poisoned as it stands, and stores half
+        // pointed at the new file would read a later handover's records at
+        // the old one's places.
+        self.unwinding(
+            |db| db.compact_stores(&targets, graphs, reclaimed),
+            Self::compact_unwound,
+        )
+    }
+
+    /// [`Self::compact`] past its targets: every one of their stores
+    /// compacted, a dropped field's values reclaimed and its places kept,
+    /// the graphs holding tombstones rebuilt where `graphs` says, and the
+    /// file rewritten.
+    fn compact_stores(
+        &mut self,
+        targets: &[String],
+        graphs: bool,
+        reclaimed: usize,
+    ) -> Result<Response> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let began = std::time::Instant::now();
         // Over a mapped file the records never come into memory: the live
         // ones are written into the new file, and the stores are pointed at
         // it. The documents are the same ones, so no index is rebuilt.
@@ -14957,18 +15014,35 @@ impl Database {
         let mapped = self.mapped;
         #[cfg(target_arch = "wasm32")]
         let mapped = false;
-        // A dropped field's places are taken out of every document, which
-        // compacts the store besides; over a mapped file the documents come
-        // into memory for it, until the rewrite below points them at the new
-        // file.
-        for name in &targets {
+        // A dropped field's value becomes a `null` in each document, its
+        // place kept, as the compact copies the live records into fresh
+        // segments; over a mapped file only the documents holding one come
+        // into memory, written again, until the rewrite below points them
+        // at the new file. Nothing here is refused for what a document
+        // holds: one it cannot read is copied as it is. What refuses is a
+        // location outside its segment or the mapped file -- a damaged
+        // store, which the rewrite would meet copying that record and fail
+        // the database for -- and it fails it here too: the stores before
+        // it were compacted already, their counters and their records'
+        // places ahead of the file, and a compact refused there would be
+        // asked again every few seconds by a server, meeting it each time.
+        for name in targets {
             let c = self.collections.get_mut(name).unwrap();
-            match c.schema.dropped.is_empty() {
-                false => c.strip_dropped()?,
-                true if !mapped => c.store.compact()?,
-                true => {}
-            }
+            let r = match mapped {
+                false => c.store.compact(),
+                true => c.store.reclaim(),
+            };
+            // A damaged location, which no write makes, put where a test
+            // asks for one.
+            #[cfg(test)]
+            let r = r.and_then(|()| match unwinding::armed("refused") {
+                true => Err(Error::Corrupt("a test's location outside the file".into())),
+                false => Ok(()),
+            });
+            self.storage(r)?;
         }
+        #[cfg(test)]
+        unwinding::panic_at("compacted");
         // A compact drops dead records and moves the live ones; the
         // documents are the same, and every index is keyed by id, so none
         // needs rebuilding for that -- a graph without tombstones took 50 s
@@ -14977,7 +15051,7 @@ impl Database {
         // document with a vector leaves one, and they crowd the beam `near`
         // walks (a `limit 10` answered 4 rows once enough had gathered).
         if graphs {
-            for name in &targets {
+            for name in targets {
                 let c = self.collections.get_mut(name).unwrap();
                 // By position, not by collecting the names: the list of
                 // strings was 440 bytes of the browser module.
@@ -14986,14 +15060,17 @@ impl Database {
                         continue;
                     };
                     let field = &c.schema.fields[pos].name;
+                    // A document it cannot read leaves the graph as it
+                    // stands, tombstones and all, and answering as it did:
+                    // one built without it would not.
                     if c.vectors.get(field).is_some_and(|ix| ix.dead() > 0) {
-                        build_graph(c, pos, spec)?;
+                        let _ = build_graph(c, pos, spec);
                     }
                 }
             }
         }
         // After compaction the persisted image is rewritten from scratch.
-        let compacting: &[String] = if mapped { &targets } else { &[] };
+        let compacting: &[String] = if mapped { targets } else { &[] };
         let mut placed = Vec::new();
         let mut len = 0;
         let r = {
@@ -16986,16 +17063,63 @@ fn past_tombstones(
     Short::Exact
 }
 
+/// Whether `ch`, a primary's alter, leaves the dropped places the copy's
+/// `before` holds where they are, adding one for a drop alone. A compact
+/// of 0.2.0 or before took them out of the documents of the database it
+/// ran on, which no record says: the copy tells at the primary's next
+/// write of the collection ([`Schema::read_written`]) or, before any, at
+/// its next alter here (a `create index`'s schema, whole, is held to the
+/// copy's layout as well). Where no field followed a place taken out, it
+/// was last in every document, which a write leaves out: the writes agree
+/// and read alike, and the next alter alone tells.
+fn keeps_places(before: &Schema, ch: &FieldChange) -> bool {
+    let (was, now) = (&before.dropped, &ch.schema.dropped);
+    match ch.op {
+        FIELD_DROP => now.len() == was.len() + 1 && was.iter().all(|d| now.contains(d)),
+        _ => now == was,
+    }
+}
+
+/// The refusal of a field added to a collection holding
+/// [`crate::schema::MAX_PLACES`] places, and the way out where there is
+/// one: made again, a collection is rid of its dropped places, and holds
+/// its fields still -- a collection 0.2.0 made past the bound, which had
+/// none, has no way out but fewer fields. One message, its way out a
+/// `&str`: a second message was 195 bytes of the browser module.
+#[cold]
+#[inline(never)]
+fn places_full(collection: &str, schema: &Schema) -> Error {
+    let way = match schema.fields.len() < crate::schema::MAX_PLACES {
+        true => {
+            "make the collection again (create another and copy the rows into it) to be rid \
+             of the dropped places"
+        }
+        false => {
+            "its fields alone fill the places a collection holds, and making it again keeps them"
+        }
+    };
+    Error::Query(format!(
+        "`{collection}` holds {} places -- its {} fields and the {} its dropped fields left, \
+         which its documents keep -- and takes no field more: {way}",
+        schema.width(),
+        schema.fields.len(),
+        schema.dropped.len()
+    ))
+}
+
 /// The fields an alter of `collection` leaves, checked as `Schema::new`
-/// checks a `create`'s: one copy for `add` and `rename`. Every field it
-/// held was read within the language's ranges (`Schema::decode`), so a
-/// refusal is of the field the alter changes.
+/// checks a `create`'s but for their count: one copy for `add` and
+/// `rename`. An add is held to the bound before (`places_full`), and a
+/// rename adds no place, so it is taken on a collection past the bound --
+/// one 0.2.0 made, which had none, and which an open reads as it is. Every
+/// field the collection held was read within the language's ranges
+/// (`Schema::decode`), so a refusal is of the field the alter changes.
 #[inline(never)]
 fn altered(
     collection: &str,
     fields: Vec<crate::schema::Field>,
 ) -> Result<Vec<crate::schema::Field>> {
-    Schema::new(collection.to_string(), fields).map(|s| s.fields)
+    Schema::checked(collection.to_string(), fields, false).map(|s| s.fields)
 }
 
 /// The beam [`past_tombstones`] widens to: `ef`, at least the page, and
@@ -17085,6 +17209,20 @@ struct Filter<'q> {
     /// among them.
     positions: Vec<usize>,
     index_of: Vec<usize>,
+    /// The places of [`Self::positions`] where a dropped place comes
+    /// before one of them, and `positions` left empty: read out of line
+    /// with the paths (`Store::read_fields_passing`), a dropped place's
+    /// `null` passed by its byte. Read in line, each dropped place a row
+    /// passed was a call into the skip, 44 instructions of a 440-instruction
+    /// row of a scan by one field past one; a test in line telling the two
+    /// apart would be paid by every row of every other collection. Always
+    /// empty in the browser module, which holds one copy of the reader.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    passing: Vec<usize>,
+    /// Where the paths' values begin in `vals`: past the fields'.
+    paths_at: usize,
+    /// Whether a row is read out of line too: paths, or `passing`.
+    out_of_line: bool,
     /// The paths into json fields the filter reads, each its field's
     /// position and the keys past it: read a row after the fields, each
     /// its value off the bytes, into `vals` past theirs.
@@ -17479,11 +17617,24 @@ impl<'q> Filter<'q> {
             // query rather than once a row.
             *p = c.schema.place(*p);
         }
+        let paths_at = positions.len();
+        // Not in the browser module, which holds one copy of the reader.
+        let past_dropped = match (c.schema.dropped.first(), positions.iter().max()) {
+            (Some(d), Some(last)) => !cfg!(target_arch = "wasm32") && d < last,
+            _ => false,
+        };
+        let (positions, passing) = match past_dropped {
+            true => (Vec::new(), positions),
+            false => (positions, Vec::new()),
+        };
         Filter {
             c,
             root,
             positions,
             index_of,
+            out_of_line: !paths.is_empty() || !passing.is_empty(),
+            passing,
+            paths_at,
             paths,
             vals: std::cell::RefCell::new(Vec::new()),
             key: std::cell::RefCell::new(Vec::new()),
@@ -17828,8 +17979,10 @@ impl<'q> Filter<'q> {
         // A filter over no path reads none, and asks no more than this,
         // the reading out of line so that what is inlined into every scan
         // stays the size it was. Its paths' values go after its fields',
-        // which `read_fields` leaves where they are.
-        if !self.paths.is_empty() {
+        // which `read_fields` leaves where they are. A collection holding a
+        // dropped place before a field read has its fields read there too
+        // (`passing`).
+        if self.out_of_line {
             self.read_paths(id, &mut vals)?;
         }
         self.test(&self.root, id, &vals, &Value::Int(id as i64), ctx)
@@ -17988,7 +18141,15 @@ impl<'q> Filter<'q> {
 
     #[inline(never)]
     fn read_paths(&self, id: DocId, vals: &mut Vec<Value>) -> Result<()> {
-        let n = self.positions.len();
+        #[cfg(not(target_arch = "wasm32"))]
+        if !self.passing.is_empty() && !self.c.store.read_fields_passing(id, &self.passing, vals)? {
+            vals.clear();
+            vals.resize(self.passing.len(), Value::Null);
+        }
+        if self.paths.is_empty() {
+            return Ok(());
+        }
+        let n = self.paths_at;
         vals.resize(n + self.paths.len(), Value::Null);
         if !self.c.store.read_paths(id, &self.paths, &mut vals[n..])? {
             vals[n..].fill(Value::Null);
@@ -18007,7 +18168,7 @@ impl<'q> Filter<'q> {
         let get = |s: Slot| match s {
             Slot::Id => idv,
             Slot::At(p) => &vals[self.index_of[p]],
-            Slot::Path(n) => &vals[self.positions.len() + n],
+            Slot::Path(n) => &vals[self.paths_at + n],
         };
         Ok(match t {
             Test::And(a, b) => {
@@ -18706,6 +18867,61 @@ fn order_ids(store: &Store, ids: &[DocId], keys: &[OrderKey], k: usize) -> Resul
             flat.push(match (pos, path) {
                 (None, _) => Value::Int(id as i64),
                 (Some(p), None) => store.read_field(id, *p)?.unwrap_or(Value::Null),
+                (Some(p), Some(k)) => store.read_path(id, *p, k)?.unwrap_or(Value::Null),
+            });
+        }
+    }
+    let unfolded: Vec<OrderKey>;
+    let keys = match keys.iter().any(|k| k.2.fold.is_some()) {
+        false => keys,
+        true => {
+            unfolded = folded_keys(&mut flat, keys);
+            &unfolded
+        }
+    };
+    let idx = order_rows(&flat, n, ids.len(), keys, k);
+    Ok(idx.into_iter().map(|i| ids[i]).collect())
+}
+
+/// [`order_ids`], or [`order_ids_passing`] where a field an order reads is
+/// past a dropped place, picked once a query at the call. Not inside
+/// `order_ids`: any test or copy beside its loop there -- a loop of its
+/// own, a generic copy, a call out of line -- moved its registers and took
+/// 1 to 11 instructions a row from every other collection's order.
+#[inline(always)]
+fn order_ids_of(store: &Store, ids: &[DocId], keys: &[OrderKey], k: usize) -> Result<Vec<DocId>> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if keys
+        .iter()
+        .any(|(p, _, _, path)| path.is_none() && p.is_some_and(|p| store.passes(p)))
+    {
+        return order_ids_passing(store, ids, keys, k);
+    }
+    order_ids(store, ids, keys, k)
+}
+
+/// [`order_ids`] where a field read is past a dropped place: each `null`
+/// passed by its byte ([`Store::read_field_in`]), a call into the skip a
+/// row saved. Not in the browser module, which holds one copy of the
+/// reader.
+#[cfg(not(target_arch = "wasm32"))]
+#[inline(never)]
+fn order_ids_passing(
+    store: &Store,
+    ids: &[DocId],
+    keys: &[OrderKey],
+    k: usize,
+) -> Result<Vec<DocId>> {
+    if k == 0 {
+        return Ok(Vec::new());
+    }
+    let n = keys.len();
+    let mut flat: Vec<Value> = Vec::with_capacity(ids.len() * n);
+    for &id in ids {
+        for (pos, _, _, path) in keys {
+            flat.push(match (pos, path) {
+                (None, _) => Value::Int(id as i64),
+                (Some(p), None) => store.read_field_in::<true>(id, *p)?.unwrap_or(Value::Null),
                 (Some(p), Some(k)) => store.read_path(id, *p, k)?.unwrap_or(Value::Null),
             });
         }

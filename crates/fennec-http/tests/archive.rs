@@ -228,6 +228,62 @@ fn a_restore_holds_what_the_primary_held_at_that_moment() {
         .unwrap();
 }
 
+/// An archive restored to a moment after a compact, from an image taken
+/// before it, reads the writes after the compact as the primary does, and
+/// so does the image it takes of its own end; `verify` says it restores.
+/// A compact appends no record, and keeps every place: while one took a
+/// dropped field's places out, the image before it kept them and every
+/// write after it was read a field early, in each restore and in each
+/// image the archive took after.
+#[test]
+fn a_restore_across_a_compact_reads_the_writes_after_it_as_the_primary_did() {
+    let d = dir("places");
+    let p = primary(&d.join("p.fennec"), replication::DEFAULT_BUFFER);
+    p.exec("create collection x (a int, b int, c int, d int)");
+    p.exec("put x {a: 1, b: 2, c: 3, d: 4}");
+    let arch = d.join("archive");
+    let shared = Arc::new(Archive::new(&arch).unwrap());
+    let stop = Arc::new(AtomicBool::new(false));
+    let follower = {
+        let (a, flag, url) = (Arc::clone(&shared), Arc::clone(&stop), p.url.clone());
+        std::thread::spawn(move || {
+            let upstream = Upstream::new(&url, TOKEN.into()).unwrap();
+            a.follow(&upstream, &flag, &|_| {})
+        })
+    };
+    first_image(&arch);
+    p.exec("alter collection x drop field b");
+    p.exec("compact");
+    p.exec("put x {a: 10, c: 30, d: 40}");
+    let xs = "get x select a, c, d order id";
+    let want = rows(&p.db.read().unwrap(), xs);
+    assert_eq!(want[1].1, [Value::Int(10), Value::Int(30), Value::Int(40)]);
+    archived(&arch, p.seq());
+    // The image from before the compact alone, and the writes after it.
+    assert_eq!(files(&arch, "image-"), 1);
+    let (db, r) = restored(&arch, &d.join("end.fennec"), Target::End);
+    assert_eq!(r.seq, p.seq());
+    assert_eq!(rows(&db, xs), want);
+    drop(db);
+    let (db, _) = restored(&arch, &d.join("change.fennec"), Target::Change(p.seq()));
+    assert_eq!(rows(&db, xs), want);
+    drop(db);
+    let v = shared.verify().unwrap();
+    assert_eq!((v.images, v.last, v.torn), (1, p.seq(), 0));
+    assert!(v.gaps.is_empty() && v.to.is_some(), "{v:?}");
+    // An image of the archive's own end, and a restore from it.
+    assert!(shared.consolidate().unwrap().is_some());
+    p.exec("put x {a: 100, c: 300, d: 400}");
+    archived(&arch, p.seq());
+    stop.store(true, Ordering::SeqCst);
+    follower.join().unwrap().unwrap();
+    let (db, _) = restored(&arch, &d.join("again.fennec"), Target::End);
+    assert_eq!(rows(&db, xs), rows(&p.db.read().unwrap(), xs));
+    assert_eq!(db.collection("x").unwrap().schema.dropped, [1]);
+    let v = shared.verify().unwrap();
+    assert!(v.gaps.is_empty() && v.to.is_some(), "{v:?}");
+}
+
 #[test]
 fn an_archiver_stopped_goes_on_and_one_behind_takes_an_image() {
     let d = dir("resume");

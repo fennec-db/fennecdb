@@ -841,7 +841,17 @@ works beside the new one or stops in words, never reading wrong
 (RELEASING.md). A node holding both primaries and replicas -- its own
 tenants and another node's standbys -- cannot be upgraded before every
 primary: in such a fleet nothing uses a feature that moves the format
-until every node runs the release. `compat.yml` drives steps 2 and 3 with
+until every node runs the release. Upgrading from 0.2.0, drop no field
+(`alter collection ... drop field`) until every node runs 1.x: a 0.2.0
+node's compact -- its `--auto-compact` too -- takes a dropped field's place
+out of its documents and tells no copy, so a 1.x standby of a 0.2.0
+primary takes an image at the next write, and a 0.2.0 standby of a 1.x
+primary reads every later write of that collection a field late, which a
+failover onto it makes the tenant's. Where a drop cannot wait, run the
+0.2.0 nodes with `--auto-compact off`, and no `compact` on their tenants,
+until they are upgraded (docs/design/compatibility.md, *A 0.2.0 node and
+a compact*).
+`compat.yml` drives steps 2 and 3 with
 the last release's `fennec-server` and `fennec` and its router -- built
 from the release's tag with its `Cargo.lock` by the tree's toolchain, a
 debug build, since no release publishes one -- weekly and on every

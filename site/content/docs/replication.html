@@ -68,6 +68,10 @@ its own file. Only writes already on the primary's disk are sent.</p>
     copy of the database instead.</li>
   <li><b><code>--sync off</code> is refused</b> on a server with a
     replication token.</li>
+  <li><b>A <code>compact</code></b>, the primary's or the replica's own, is
+    not sent and changes nothing a replica reads: a dropped field's place
+    stays in every document, so the writes after it read alike on both
+    (<a href="#upgrading-from-0-2-0">from 0.2.0</a>).</li>
 </ul>
 
 <details class="deep"><summary>How records are sent and caught up</summary>
@@ -353,6 +357,10 @@ fennec restore /backups/archive before.fennec --to-change 41873
     restore within that window needs.</li>
   <li><b><code>fennec verify</code></b> says from when to when the archive can
     restore.</li>
+  <li><b>A restore across a <code>compact</code></b> on the primary reads the
+    writes after it as the primary did, from an image taken before it too: a
+    compact keeps every field's place (<a href="#upgrading-from-0-2-0">from
+    0.2.0</a>).</li>
   <li>A <b>backup or a restore into a file</b> holds the file while it is
     written, as the shell does: one a running server has open is refused, its
     holder named, rather than renamed over under it. A file there already is
@@ -858,6 +866,50 @@ feeding and how far each has been sent.</p>
 </tbody>
 </table>
 </div>
+
+<h2 id="upgrading-from-0-2-0">Upgrading from 0.2.0: a dropped field's place</h2>
+
+<p>Up to 0.2.0, a <code>compact</code> took a dropped field's place out of
+every document and told no replica, archive or standby, which then read
+every later write of that collection one field off. From 1.0 a compact
+keeps the place. While 0.2.0 and 1.0 run beside each other it can still
+happen, both ways round:</p>
+
+<ul>
+  <li><b>A 0.2.0 primary, a newer replica</b> (replicas upgrade first). The
+    replica notices at the primary's first write of that collection after
+    such a compact: it refuses the write, logs <code>the primary's writes
+    moved the fields of</code> and takes a fresh copy of the primary on its
+    own. Where the dropped field was the last one, the writes after the
+    compact read the same on both, and the replica notices at the
+    primary's next <code>alter collection</code> or <code>create
+    index</code> of that collection instead. An archive does not notice: a
+    restore across that compact reads the writes after it one field
+    off.</li>
+  <li><b>A 1.0 primary, a 0.2.0 replica or standby</b>, as a node pair
+    leaves it while one node is upgraded and the other is not. A field
+    dropped on the primary keeps its place, but the 0.2.0 standby's own
+    <code>--auto-compact</code> takes it out of its documents, and it reads
+    every later write of that collection one field late, with nothing to
+    tell it. After a failover those values are the tenant's. The primary
+    cannot tell an older replica from its connection, so nothing refuses
+    the drop.</li>
+</ul>
+
+<ul>
+  <li><b>Drop no field until every node and every replica runs 1.0.</b>
+    If a drop on a 1.0 primary cannot wait, run every 0.2.0 replica and
+    standby with <code>--auto-compact off</code>, and no
+    <code>compact</code> on one, until it is upgraded.</li>
+  <li><b>Before upgrading the first replica</b>, if a field was ever
+    dropped on the primary, the replicas may already hold rows read one
+    field off. Run <code>compact</code> on the primary and seed every
+    replica and standby again from a <code>fennec backup</code> of it taken
+    after; begin an archive again in a directory of its own, keeping the
+    old one for restores to a moment before.</li>
+  <li><b>Promote no replica</b> that logged <code>moved the fields
+    of</code> until it has caught up again.</li>
+</ul>
 
 <h2>What it does not do</h2>
 

@@ -38,6 +38,18 @@ pub(super) struct Reader<'q> {
     given: usize,
     /// What is worked out of a row, in turn, and the slot each goes in.
     calc: Vec<(Calc, usize)>,
+    /// Whether a row has more to read than its fields
+    /// ([`Self::read_more`]): paths, or what is worked out. A flag, where
+    /// the lengths of the two lists were asked a row.
+    more: bool,
+    /// Whether a dropped place comes before a field read: the fields are
+    /// then read by the reader that passes its `null` by its byte
+    /// (`Store::read_fields_passing`), where a call into the skip was 34
+    /// instructions a row of an aggregate grouped past it. Chosen once a
+    /// query, and asked a row for what the flag above saves. Not in the
+    /// browser module, which holds one copy of the reader.
+    #[cfg(not(target_arch = "wasm32"))]
+    passing: bool,
     /// A row's values: its fields', its paths', the query's parameters --
     /// which an expression's own `$n` is moved past the paths to -- and
     /// what is worked out.
@@ -85,6 +97,9 @@ impl<'q> Reader<'q> {
             names: Vec::new(),
             given: params.len(),
             calc: Vec::new(),
+            more: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            passing: false,
             env: Vec::new(),
         };
         for name in &used {
@@ -102,6 +117,14 @@ impl<'q> Reader<'q> {
             rd.find_paths(e)?;
         }
         rd.places = rd.positions.iter().map(|&p| c.schema.place(p)).collect();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            rd.passing = match (c.schema.dropped.first(), rd.places.last()) {
+                (Some(d), Some(last)) => d < last,
+                _ => false,
+            };
+        }
+        rd.more = !rd.paths.is_empty();
         rd.env.resize(rd.base(), Value::Null);
         rd.env.extend_from_slice(params);
         Ok(rd)
@@ -177,6 +200,7 @@ impl<'q> Reader<'q> {
         };
         self.env.push(Value::Null);
         self.calc.push((calc, self.env.len() - 1));
+        self.more = true;
         Ok(self.env.len() - 1)
     }
 
@@ -209,12 +233,25 @@ impl<'q> Reader<'q> {
         registry: &Registry,
         clock: Option<i64>,
     ) -> Result<bool> {
-        if !self.c.store.read_fields(id, &self.places, &mut self.env)? {
+        // Either reader is a call of its own. A wrapper out of line for
+        // the second, as the paths are read, took 34 instructions a row,
+        // all a passed `null` saves.
+        #[cfg(not(target_arch = "wasm32"))]
+        let found = match self.passing {
+            true => self
+                .c
+                .store
+                .read_fields_passing(id, &self.places, &mut self.env)?,
+            false => self.c.store.read_fields(id, &self.places, &mut self.env)?,
+        };
+        #[cfg(target_arch = "wasm32")]
+        let found = self.c.store.read_fields(id, &self.places, &mut self.env)?;
+        if !found {
             return Ok(false);
         }
         // The paths and what is worked out, out of line: a list of fields
-        // alone -- every aggregate of before -- asks one length.
-        if self.paths.len() + self.calc.len() != 0 {
+        // alone -- every aggregate of before -- asks one flag.
+        if self.more {
             self.read_more(id, registry, clock)?;
         }
         Ok(true)

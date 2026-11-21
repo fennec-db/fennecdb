@@ -122,13 +122,21 @@ pub fn keep_held(what: &str, db: &Arc<RwLock<Database>>, bytes: Option<Bytes>) {
                 // /proc and the cgroup's read, for every database a node
                 // serves.
                 let memory = fennec_core::engine::memory(&policy);
+                let mut looked = Vec::with_capacity(kept.len());
                 for (what, db, bytes) in kept {
                     if let Some(db) = crate::held::beside(&db) {
                         let quota = bytes.map_or(0, |b| b());
                         let policy = quota_policy(&db, quota).unwrap_or(policy);
                         compact(&what, &db, &policy, memory);
+                        looked.push(what);
                     }
                 }
+                // A database let go of -- a tenant deleted, or closed until
+                // its next open -- takes its refusal with it.
+                gone_refusals(
+                    &mut REFUSED.lock().unwrap_or_else(|e| e.into_inner()),
+                    &looked,
+                );
             });
         if let Err(e) = started {
             crate::log!("could not start compacting the files: {e}");
@@ -205,6 +213,49 @@ static COMPACTER: Once = Once::new();
 /// The compacts the process ran on its own, for `/_metrics`.
 pub static AUTO_COMPACTIONS: AtomicU64 = AtomicU64::new(0);
 
+/// The compacts the process tried on its own and was refused, for
+/// `/_metrics`: one the next look meets again -- dead records stay due --
+/// is counted each time and logged once (`REFUSED`).
+pub static AUTO_COMPACTIONS_REFUSED: AtomicU64 = AtomicU64::new(0);
+
+/// Each database's last refusal logged, by what the log names it: a
+/// refusal the next look meets again in the same words is not logged
+/// again, five seconds after it, for as long as it stands. A compact that
+/// runs takes its database's off, and a database let go of takes its own
+/// ([`gone_refusals`]).
+static REFUSED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// `refused` holding only the refusals of databases a pass looked at
+/// (`looked`): the entry of one let go of -- a tenant deleted while its
+/// refusal stood -- was kept for the process's life. One closed and opened
+/// again logs a refusal that stands once more, as news after an open.
+fn gone_refusals(refused: &mut Vec<(String, String)>, looked: &[String]) {
+    refused.retain(|(what, _)| looked.contains(what));
+}
+
+/// Whether `what`'s refusal `why` is news: not the one logged last for it.
+/// `None` takes the one logged off, as a compact that ran does.
+fn refusal_is_news(what: &str, why: Option<&str>) -> bool {
+    let mut refused = REFUSED.lock().unwrap_or_else(|e| e.into_inner());
+    let at = refused.iter().position(|(w, _)| w == what);
+    match (at, why) {
+        (Some(i), None) => {
+            refused.swap_remove(i);
+            false
+        }
+        (None, None) => false,
+        (Some(i), Some(why)) if refused[i].1 == why => false,
+        (Some(i), Some(why)) => {
+            refused[i].1 = why.to_string();
+            true
+        }
+        (None, Some(why)) => {
+            refused.push((what.to_string(), why.to_string()));
+            true
+        }
+    }
+}
+
 /// Sets when the files the process serves are compacted on their own, or
 /// that they never are.
 pub fn auto_compact(policy: Option<CompactPolicy>) {
@@ -249,6 +300,7 @@ fn compact(what: &str, db: &RwLock<Database>, policy: &CompactPolicy, memory: Me
     match r {
         Ok(_) => {
             AUTO_COMPACTIONS.fetch_add(1, Ordering::Relaxed);
+            refusal_is_news(what, None);
             crate::log!(
                 "{what}: compacted, {:.1} MB -> {:.1} MB in {took:.1?}, {:.1?} under the write lock",
                 before.file as f64 / 1e6,
@@ -256,7 +308,50 @@ fn compact(what: &str, db: &RwLock<Database>, policy: &CompactPolicy, memory: Me
                 g.last_compact_held()
             );
         }
-        // Put back as it was: the next look tries again.
-        Err(e) => crate::log!("{what}: could not compact: {e}"),
+        // Put back as it was: the next look tries again. A compact is
+        // refused for nothing a document holds (a document it cannot read
+        // is copied as it is), but a refusal that stands -- a location
+        // outside the file it maps, a side file the disk will not take --
+        // would be met every look: counted each time, and logged once in
+        // its words until it changes or a compact runs.
+        Err(e) => {
+            AUTO_COMPACTIONS_REFUSED.fetch_add(1, Ordering::Relaxed);
+            let why = e.to_string();
+            if refusal_is_news(what, Some(&why)) {
+                crate::log!(
+                    "{what}: could not compact: {why} (tried again at every look, logged again \
+                     once the refusal changes)"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// A refusal that stands is logged once, again only once its words
+    /// change, and once more after a compact ran.
+    #[test]
+    fn a_refusal_that_stands_is_news_once() {
+        let what = "a database no other test names";
+        assert!(super::refusal_is_news(what, Some("damaged")));
+        assert!(!super::refusal_is_news(what, Some("damaged")));
+        assert!(super::refusal_is_news(what, Some("the disk is full")));
+        assert!(!super::refusal_is_news(what, Some("the disk is full")));
+        assert!(!super::refusal_is_news(what, None));
+        assert!(super::refusal_is_news(what, Some("the disk is full")));
+        super::refusal_is_news(what, None);
+    }
+
+    /// A pass keeps the refusals of the databases it looked at alone: a
+    /// tenant deleted while its refusal stood leaves none behind.
+    #[test]
+    fn a_database_let_go_of_takes_its_refusal_with_it() {
+        let entry = |w: &str| (w.to_string(), "damaged".to_string());
+        let mut refused = vec![entry("tenant a"), entry("tenant b"), entry("db.fennec")];
+        super::gone_refusals(&mut refused, &["db.fennec".into(), "tenant a".into()]);
+        assert_eq!(refused, [entry("tenant a"), entry("db.fennec")]);
+        super::gone_refusals(&mut refused, &[]);
+        assert!(refused.is_empty());
     }
 }

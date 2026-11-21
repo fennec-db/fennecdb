@@ -1,4 +1,8 @@
 {
+ "fennec_auto_compactions_refused_total": {
+  "labels": [],
+  "type": "counter"
+ },
  "fennec_auto_compactions_total": {
   "labels": [],
   "type": "counter"

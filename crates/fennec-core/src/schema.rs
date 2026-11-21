@@ -628,6 +628,34 @@ impl Field {
     }
 }
 
+/// The most places a collection holds over its life: its fields and the
+/// places of those dropped from it ([`Schema::dropped`]), which a compact
+/// keeps. Each dropped place a field follows is a byte in every document
+/// written since and a value every read of that field passes, so the
+/// places a collection gathers are bounded: past them a `create
+/// collection` and an `alter ... add field` are refused, saying to make the
+/// collection again, which is rid of them. PostgreSQL's dropped columns
+/// count toward its 1 600 alike; 4 096 is MySQL's columns, past SQLite's
+/// 2 000 that `fennec import` copies a table of. A file holding more opens
+/// as it is -- no read refuses what a write took -- and its collection
+/// takes every alter but an add: a rename and a drop add no place.
+pub const MAX_PLACES: usize = 4096;
+
+/// The refusal of a primary's write or alter of `collection` made by other
+/// places than the copy applying it holds ([`Schema::read_written`],
+/// `keeps_places`): what a compact of 0.2.0 or before left, taking a
+/// dropped field's places out of one side's documents. A server's follower
+/// takes an image of its primary on it.
+#[cold]
+#[inline(never)]
+pub(crate) fn places_moved(collection: &str) -> Error {
+    Error::Corrupt(format!(
+        "the primary's writes moved the fields of `{collection}`: a compact of 0.2.0 or before \
+         took a dropped field's places out of the primary's documents or this copy's, and told \
+         the other nothing; seed the copy again from its primary"
+    ))
+}
+
 /// The most parts an index over several fields takes: past a handful, a key
 /// is wider than the rows a prefix of it narrows to are worth.
 pub const MAX_COMPOSITE_KEYS: usize = 8;
@@ -807,13 +835,16 @@ pub struct Schema {
     /// position in `fields` stays a place in the payload. The schema writes
     /// each with the field it reads into ([`Schema::encode`]).
     pub paths: Vec<Field>,
-    /// Where a dropped field's value still is in the documents written
-    /// before its drop, ascending: a document is a run of values in field
-    /// order, so `alter ... drop field` leaves the place, skipped on read
-    /// and written as `null`, rather than rewrite every document under the
-    /// write lock. `compact` writes the documents without them and empties
-    /// this. Every field after one sits a place further in the documents
-    /// than in `fields` ([`Schema::place`]).
+    /// Where a dropped field's value is in the documents written before
+    /// its drop, ascending: a document is a run of values in field order,
+    /// so `alter ... drop field` leaves the place, skipped on read and
+    /// written as `null`, rather than rewrite every document under the
+    /// write lock. Kept for the collection's life: `compact` makes each
+    /// value there a `null` ([`reclaim`]) and renumbers nothing, since a
+    /// copy applying its primary's writes reads them by the places it
+    /// holds and no record tells it of a compact. Every field after one
+    /// sits a place further in the documents than in `fields`
+    /// ([`Schema::place`]).
     pub dropped: Vec<usize>,
     /// The indexes over several fields, in the order they were made.
     pub composites: Vec<Composite>,
@@ -844,6 +875,101 @@ pub fn split_path(name: &str) -> Option<(&str, &str)> {
     name.split_once('.')
 }
 
+/// A payload as a write after its drops would have written it, into `out`:
+/// the value at each of the `dropped` places (ascending) a `null` of one
+/// byte, and the dropped places it ends with left out, as a write leaves
+/// out those no field follows -- what `compact` reclaims of a dropped
+/// field. Every other value is copied as its bytes stand, at the place it
+/// stood: places are never renumbered, since a copy applying its
+/// primary's writes reads them by the places it holds, and no record
+/// tells it of a compact (docs/design/storage.md#dropped-places).
+///
+/// `false`, `out` left empty, where nothing would change -- each dropped
+/// place a `null` already and none ending the payload -- and where the
+/// payload cannot be read as far as its last dropped place: a value
+/// nested past [`MAX_DEPTH`] or cut short. Copied as it is, such a
+/// document is refused where it is read, in the same words, after the
+/// compact as before it, and the compact is never refused for it.
+pub fn reclaim(dropped: &[usize], buf: &[u8], out: &mut Vec<u8>) -> bool {
+    out.clear();
+    let Some(&last) = dropped.last() else {
+        return false;
+    };
+    let (mut pos, mut at, mut gap) = (0usize, 0usize, 0usize);
+    // Where the last value kept ends in `out`: the dropped places after it
+    // end the payload, and go.
+    let mut kept = 0;
+    let mut changed = false;
+    while at <= last && pos < buf.len() {
+        let from = pos;
+        if skip_value(buf, &mut pos).is_err() {
+            out.clear();
+            return false;
+        }
+        match dropped.get(gap) == Some(&at) {
+            true => {
+                gap += 1;
+                changed |= pos - from != 1 || buf[from] != TAG_NULL;
+                out.push(TAG_NULL);
+            }
+            false => {
+                out.extend_from_slice(&buf[from..pos]);
+                kept = out.len();
+            }
+        }
+        at += 1;
+    }
+    match pos < buf.len() {
+        // Past the last dropped place every value is kept, copied whole
+        // and never walked.
+        true => out.extend_from_slice(&buf[pos..]),
+        false if out.len() > kept => {
+            out.truncate(kept);
+            changed = true;
+        }
+        false => {}
+    }
+    if !changed {
+        out.clear();
+    }
+    changed
+}
+
+/// Whether [`reclaim`] would change `buf`: a value other than a one-byte
+/// `null` at a dropped place, or a dropped place ending it. Walked a value
+/// at a time as far as its last dropped place, a `null` there passed by its
+/// byte and nothing copied: every document a compact meets after the first
+/// since an open is one the reclaim leaves as it is, and building its copy
+/// to compare took a compact over 100 000 rows from 86 to 127 million
+/// instructions. `false` where it cannot be read so far, which `reclaim`
+/// copies as it is; `true` may still meet a value it cannot read past it,
+/// which `reclaim` tells.
+pub fn reclaims(dropped: &[usize], buf: &[u8]) -> bool {
+    let Some(&last) = dropped.last() else {
+        return false;
+    };
+    let (mut pos, mut at, mut gap) = (0usize, 0usize, 0usize);
+    let mut ends_dropped = false;
+    while at <= last && pos < buf.len() {
+        match dropped.get(gap) == Some(&at) {
+            true if buf[pos] == TAG_NULL => {
+                gap += 1;
+                pos += 1;
+                ends_dropped = true;
+            }
+            true => return true,
+            false => {
+                if skip_value(buf, &mut pos).is_err() {
+                    return false;
+                }
+                ends_dropped = false;
+            }
+        }
+        at += 1;
+    }
+    ends_dropped && pos >= buf.len()
+}
+
 /// Where the field at `pos` is in a document, past the `dropped` places
 /// before it (ascending): what the store and the schema both work out.
 #[inline]
@@ -859,8 +985,27 @@ pub fn place(dropped: &[usize], pos: usize) -> usize {
 }
 
 impl Schema {
-    pub fn new(name: impl Into<String>, mut fields: Vec<Field>) -> Result<Schema> {
-        let name = name.into();
+    /// A collection's schema as a `create` declares it: no more fields
+    /// than [`MAX_PLACES`], each checked as [`Schema::checked`] checks it.
+    pub fn new(name: impl Into<String>, fields: Vec<Field>) -> Result<Schema> {
+        Schema::checked(name.into(), fields, true)
+    }
+
+    /// Each field's name, type, collation and index checked, no two of one
+    /// name, and with `counted` no more of them than [`MAX_PLACES`]. The
+    /// count is held where a collection is made -- a `create`, a declared
+    /// schema, an import, through [`Schema::new`] -- and where an alter
+    /// adds a field (`places_full`), never by an alter that adds no place:
+    /// a rename of a collection holding more -- one 0.2.0 made, which had
+    /// no bound -- was refused ("declares 4097 fields"). One copy of the
+    /// checks, the count among them: the browser module's size.
+    pub(crate) fn checked(name: String, mut fields: Vec<Field>, counted: bool) -> Result<Schema> {
+        if counted && fields.len() > MAX_PLACES {
+            return Err(Error::Query(format!(
+                "`{name}` declares {} fields, and a collection holds {MAX_PLACES} at most",
+                fields.len()
+            )));
+        }
         for f in &mut fields {
             f.index = f.index.resolved();
         }
@@ -1166,8 +1311,11 @@ impl Schema {
         let (mut pos, mut at) = (0, 0);
         for (i, f) in self.fields.iter().enumerate() {
             let want = self.place(i);
+            // Only dropped places are passed here, each field read in
+            // turn: a `null` by its byte, as a write or a compact leaves
+            // one (`skip_passing`). No other collection's read enters it.
             while at < want {
-                skip_field(buf, &mut pos)?;
+                skip_passing(buf, &mut pos)?;
                 at += 1;
             }
             let v = match pos < buf.len() {
@@ -1180,20 +1328,42 @@ impl Schema {
         Ok(crate::value::Document { id, fields })
     }
 
-    /// A payload without its dropped places: what `compact` writes. Each
-    /// value kept is copied as its bytes stand.
-    pub fn without_dropped(&self, buf: &[u8]) -> Result<Vec<u8>> {
-        let mut out = Vec::with_capacity(buf.len());
+    /// [`Self::read_doc`] of a payload a write made under this schema --
+    /// a primary's, which a copy applies -- refused unless it holds a value
+    /// at every place up to its last field and none past it, as every
+    /// write of every release since dropped places came (0.1.7) encodes
+    /// one ([`crate::store::Store::encode_doc`]). One that does not was
+    /// written by other places than the copy holds: a compact of 0.2.0 or
+    /// before took a dropped field's out of one side's documents and told
+    /// the other nothing, and read on, every field after the place would
+    /// be the next one's value. Only a document stored before an `add
+    /// field` ends early, and no write sends one. A loop of its own rather
+    /// than `read_doc` telling it where the payload ended: that was 9
+    /// instructions more on every document every read decodes.
+    pub fn read_written(
+        &self,
+        id: crate::value::DocId,
+        buf: &[u8],
+    ) -> Result<crate::value::Document> {
+        let mut fields = Vec::with_capacity(self.fields.len());
         let (mut pos, mut at) = (0, 0);
-        while pos < buf.len() {
-            let from = pos;
-            skip_value(buf, &mut pos)?;
-            if !self.dropped.contains(&at) {
-                out.extend_from_slice(&buf[from..pos]);
+        for (i, f) in self.fields.iter().enumerate() {
+            let want = self.place(i);
+            while at < want {
+                skip_passing(buf, &mut pos)?;
+                at += 1;
             }
+            if pos >= buf.len() {
+                return Err(places_moved(&self.name));
+            }
+            let v = decode_value(buf, &mut pos)?;
             at += 1;
+            fields.push((f.name.clone(), v));
         }
-        Ok(out)
+        match pos == buf.len() {
+            true => Ok(crate::value::Document { id, fields }),
+            false => Err(places_moved(&self.name)),
+        }
     }
 
     pub fn field(&self, name: &str) -> Option<&Field> {

@@ -802,9 +802,12 @@ nothing at the end, and the read is `null` (`Schema::read_doc`,
 `Store::read_field`, `read_fields`); a rename is the schema alone; a drop
 leaves the place in `Schema::dropped`, written as a nameless field of type
 tag 12, skipped on read, written as `null`, refused by name, its index
-taken off (`Collection::take_indexes`), until `compact` writes each
-document without it (`strip_dropped`, the kept values' bytes copied: 95
-ms over a million rows in memory against 56 for a compact with none). A
+taken off (`Collection::take_indexes`), for the collection's life: a
+`compact` makes the value there a `null` and keeps the place
+(`schema::reclaim`), since a copy applying its primary's writes reads them
+by the places it holds and no record tells it of a compact
+([storage.md](storage.md#dropped-places)); until 0.2.0 it took the places
+out, and the copies misread every write after it. A
 field's position -- what `field_pos` gives and every reader passes -- is
 its index in `fields`; its place in a payload is past the dropped ones
 before it (`Schema::place`). The store keeps the dropped places
@@ -830,8 +833,11 @@ write path does, checking nothing; `changes_in` reads the documents after
 it by the schema it made. A field added under a dropped one's name is a new
 field: the old values stay in the dropped place. A type change is refused:
 it would rewrite every document under the write lock. A compact over a
-collection holding a dropped place holds the lock (`compact_online`): the
-copies made beside the database are the records as they stand. An add, a rename and a drop take 0.025,
+collection holding a dropped place runs beside the database as any other,
+the documents holding a value there written again on the way. A
+collection holds `MAX_PLACES` (4 096) places over its life, its dropped
+fields' among them: an `add` past them is refused, saying to make the
+collection again. An add, a rename and a drop take 0.025,
 0.021 and 0.004 ms over a million rows; the browser module grew 12.2 KB,
 4.0 KB brotli -- the reading side, which a file from a server needs, and
 the writing side, which a page's own database does.
