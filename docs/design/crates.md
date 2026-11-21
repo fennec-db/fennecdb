@@ -516,6 +516,11 @@ read, as the fuzz fix's second review found, the schema opened and every
 row's point was refused at each read. No write makes any of them now
 (`Schema::new`), and no test file of the repository's holds one
 (`a_point_past_the_depth_a_type_nests_is_refused_where_a_file_is_opened_and_applied`).
+The 1.x contract names all three, a schema's number past its range beside
+them, as the exceptions to "1.x opens every file written from v0.2.0 on",
+with what each still answers and the advice the first 1.x release's notes
+give ([compatibility.md](compatibility.md#what-1x-does-not-read-of-020s-files));
+`compat.yml` has 0.2.0's own server write the first two (a3, a3b).
 
 *A point is a level, as its type is.* A point's bytes (`TAG_GEO`) read as
 the list `[lon, lat]`, which `DataType::depth` counts as a level, but the

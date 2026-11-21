@@ -489,8 +489,14 @@ fn the_smoke_runs_each_target_its_count_under_its_cap_of_cpu_time() {
         Outcome::Clean { runs: 3, corpus: 1 }
     );
     let peeked = Duration::from_micros(PEEKED.load(std::sync::atomic::Ordering::Relaxed));
+    // Linux adds a tick (1/HZ, 1 to 10 ms) to a CPU timer it is handed, so
+    // that a clock it reads a tick at a time never fires it sooner than
+    // asked (`set_cpu_itimer`): read back at once, the timer stands above
+    // the cap by that tick, less the CPU time since -- 360.001 s on both
+    // Linux runners, where macOS reads 360 s or less.
+    let tick = Duration::from_millis(10);
     assert!(
-        peeked > fennec_fuzz::SMOKE_CAP / 2 && peeked <= fennec_fuzz::SMOKE_CAP,
+        peeked > fennec_fuzz::SMOKE_CAP / 2 && peeked <= fennec_fuzz::SMOKE_CAP + tick,
         "{peeked:?}"
     );
     assert_eq!(guard::cap_left(), Duration::ZERO);
