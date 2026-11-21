@@ -39,13 +39,19 @@ held. `SECURITY.md` is held to the tree the same way, by
 it names that is gone fails, and so does any kind of check counting zero.
 
 **[A file is made by `fennec_core::fs`'s helpers, its owner's alone](../docs/design/durability.md#files-modes)**
--- `private` or `private_beside` on the open that makes it,
-`create_private` or `create_like` for a side file (`O_EXCL`, no link
-followed), `create_dir_private` or `create_dir_new` for a directory --
-`0600`, a directory `0700`, whatever the umask, never a `chmod` after. A
-file renamed over another takes its mode on the open handle (`mode_like`),
-a group's bits only where it is of that group, nothing from a file another
-user owns; nothing is chowned. `tools/file_create_check.py` (CI's fmt job)
-refuses `File::create`, `fs::write`, `.create(true)`, `create_dir_all`,
-`fs::copy` and the like in `crates/*/src` outside tests, fennec-bench and
-fennec-fuzz, an exception allowed with why and how many times.
+-- `private` on the open of a file its operator names, which goes through
+a link there as a database's open does (`fs::resolved`); `private_beside`
+(`O_NOFOLLOW`, each target's number, a Unix without one failing to build)
+on a file opened again beside a database; `create_private` or
+`create_like` (`O_EXCL`) for a side file written whole, these two following
+no link at their name; `create_dir_private` or `create_dir_new` for a
+directory -- `0600`, a directory `0700`, from the call that makes it
+whatever the umask, never a `chmod` narrowing it after. A file renamed over
+another is given that one's mode before the rename, by an `fchmod` of its
+open handle (`mode_like`), a group's bits only where it is of that group,
+nothing from a file another user owns; nothing is chowned.
+`tools/file_create_check.py` (CI's fmt job) refuses `File::create`,
+`fs::write`, `.create(..)`, `create_dir_all`, `fs::copy`, an `fs::rename`
+in a function giving no mode and the like, by any name a `use` gives them,
+in `crates/*/src` outside tests, fennec-bench and fennec-fuzz, an exception
+allowed with why and how many times.

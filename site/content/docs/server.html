@@ -290,10 +290,10 @@ renames it over the old one, and the new file is in the group new files in
 that directory get: the server's group on Linux, the directory's on macOS. It
 keeps the group's bits only where that group is the old file's, and otherwise
 drops them, so no other group ever gains the read. To let a backup group read
-the database, give the group the directory, setgid, so every file made in it
-is the group's, and set the database's mode once:</p>
+the database, give the group the directory, searchable by it and setgid, so
+every file made in it is the group's, and set the database's mode once:</p>
 
-<pre data-lang="bash">chgrp backup /var/lib/fennec &amp;&amp; chmod g+s /var/lib/fennec
+<pre data-lang="bash">chgrp backup /var/lib/fennec &amp;&amp; chmod g+xs /var/lib/fennec
 chgrp backup data.fennec &amp;&amp; chmod 640 data.fennec</pre>
 
 <p>A sync log made beside a database takes the database's mode, and its lock

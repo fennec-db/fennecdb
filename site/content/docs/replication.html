@@ -361,7 +361,8 @@ fennec restore /backups/archive before.fennec --to-change 41873
     owner's alone: each file mode <code>0600</code>, an archive's directory
     <code>0700</code>, whatever the umask. A file replaced with
     <code>--force</code> keeps the mode it had, so a <code>chmod 640</code>
-    for a backup group is set once, in a directory of that group, setgid;
+    for a backup group is set once, in a directory of that group, setgid
+    and searchable by it (<code>chmod g+xs</code>);
     an archive's new images and segments are
     its owner's, and read by its user (<a href="/docs/server#file-modes">Files
     on a shared machine</a>). <code>fennec verify</code> restores the
