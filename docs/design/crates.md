@@ -114,6 +114,16 @@ says to review the crate and write the list again. Not `cargo deny`: a
 dependency of its own, for the one question asked. A change that would
 take another dependency anywhere argues its case first, as this one did.
 
+**A week's cooldown.** `.cargo/config.toml` sets `[registry]
+global-min-publish-age = "7 days"` (stable since Cargo 1.100.0): a `cargo
+update` takes no release published within the week, the newest old enough
+instead -- under it the dry run held `zeroize` at 1.9.1 where 1.9.2 was 4
+days old -- since a compromised release of a crate is usually found and
+pulled within days, and these crates come in only by an update. It bounds
+resolution alone: every version Cargo.lock holds builds as it is, a lock of
+versions younger than the bound included, and `deps_check.py` reads the
+same tree.
+
 **Build scripts.** Three crates of that tree run one: ring's compiles its
 C and assembly, libc's and rustls's probe the compiler.
 `tools/image-cargo.sh`, which builds the images' binaries and holds each
