@@ -307,9 +307,11 @@ These are deliberate. The [server](https://fennecdb.com/docs/server),
   nothing of a file another user owns; a copy made elsewhere
   with other modes; a user who may write the directory a database is in,
   trusted with its files as one who may remove or replace the database
-  itself: a restore opens its `.restoring` there again by its name, and
-  `fennec unseal` reads its `.tmp` so, each held to the file it wrote just
-  before, a link put there in the moment between followed; and what the
+  itself: a restore opens its `.restoring` there again by its name,
+  checkpoints it and renames it in, and `fennec unseal` reads its `.tmp`
+  so, each held to the file it wrote just before it opens it again, a link
+  put there after that check followed -- for a restore, the file the link
+  names opened, checkpointed and renamed in; and what the
   process list shows, a password in
   `--follow`'s connection string among it
   ([server docs](https://fennecdb.com/docs/server#file-modes)). On Windows a
