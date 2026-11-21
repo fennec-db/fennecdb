@@ -870,11 +870,13 @@ fn refused_in(answer: &str, words: &str) -> bool {
 /// read-only and to write, in its words; a row nesting past 64 levels
 /// refused where it is read -- exactly the statements named, each in its
 /// words, and every other statement over the file answering as the release
-/// did -- and, on copies of `deep.fennec`, what stands on 1.x whatever a
-/// compact does: the row's `del` refused; its field dropped, the row read
-/// and its `del` taken where no field is declared after the dropped one,
-/// and refused, the row with it, once one is; the collection dropped and
-/// the rest of the file answering as the release did.
+/// did -- and, on copies of `deep.fennec`, each step that stands on 1.x
+/// ([`deep_steps`]): the row's `del` refused and a compact taken, copying
+/// the row as it is; its field dropped, the row read, a compact refused
+/// until the row is deleted or written over; refused again, the row and
+/// its `del`, once a field is declared after the dropped one; the
+/// collection dropped and the rest of the file answering as the release
+/// did.
 #[test]
 fn the_files_this_build_refuses_on_purpose_are_refused_in_its_words() {
     fennec_ql::install();
@@ -954,14 +956,20 @@ fn the_files_this_build_refuses_on_purpose_are_refused_in_its_words() {
 }
 
 /// What stands on 1.x beside `deep.fennec`'s row -- its field `j`, a
-/// `[[json]]`, the collection's last -- each on a copy of its own, a step
-/// each, the file opened anew after each write: its `del` refused, the
-/// rest answering as the release did; `j` dropped, the row read and its `del` taken --
-/// no field is declared after it, and the skip of a dropped place is
-/// depth-bound; `j` dropped and a field added after it, the row
-/// refused again, its `del` too, and the way out the collection dropped,
-/// the rest of the file answering as the release did. A compact, whatever
-/// it answers, changes no other answer of the file.
+/// `[[json]]`, the collection's last -- each step on a copy of its own, the
+/// file opened anew after each write:
+/// - as the release wrote it, the row's `del`, a `set` of it and a `put`
+///   writing over it are refused in the words, the rest answering as the
+///   release did; a `compact` is taken and copies the row as it is, every
+///   answer of the file the release's once it opens again, the row refused;
+/// - `j` dropped, the row reads; a `compact` is refused in the words --
+///   copying the row it skips the dropped place, and that skip is
+///   depth-bound -- and stays refused while the row's record is in the
+///   file; once the row is deleted, or written over, a `compact` is taken:
+///   dropping the field never frees the file by itself;
+/// - the other layout, `j` dropped and a field added after it: the row and
+///   its `del` refused again, the way out the collection dropped, the rest
+///   of the file answering as the release did.
 fn deep_steps(
     set: &Path,
     scratch: &Path,
@@ -975,10 +983,18 @@ fn deep_steps(
         std::fs::create_dir_all(&dir).unwrap();
         copied(set, "deep", &dir)
     };
-    let open = |path: &Path| fennec_core::fs::open(path).unwrap();
+    // One statement as a write, the file opened for it alone.
+    let write = |path: &Path, q: &str| match fennec_core::fs::open(path) {
+        Ok(mut db) => tried(&mut db, q),
+        Err(e) => Err(format!("opened again: {e}")),
+    };
     let read = |path: &Path, q: &str| {
         let db = at_clock(fennec_core::fs::open_read_only(path).unwrap(), set);
         answers::answer(&db, q)
+    };
+    let answered = |a: String| match a.starts_with("{\"kind\":\"error\"") {
+        true => Err(a),
+        false => Ok(()),
     };
     let mut want = |what: &str, ok: bool, got: Result<(), String>| {
         let held = match (&got, ok) {
@@ -990,73 +1006,96 @@ fn deep_steps(
         if !held {
             found.push(format!(
                 "deep: {what}: {got:?}, where {} was held",
-                if ok {
-                    "Ok".to_string()
-                } else {
-                    format!("a refusal in `{words}`")
+                match ok {
+                    true => "Ok".to_string(),
+                    false => format!("a refusal in `{words}`"),
                 }
             ));
         }
     };
-    let answered = |a: String| {
-        if a.starts_with("{\"kind\":\"error\"") {
-            Err(a)
-        } else {
-            Ok(())
-        }
+    let mut also = Vec::new();
+
+    // As the release wrote it: every write that reads the row refused,
+    // every answer as it was; a compact copies the row as it is.
+    let path = copy("as-written");
+    for (what, q) in [
+        ("a del of the row", "del deep where n = 2"),
+        ("a set of the row", "set deep {n: 5} where n = 2"),
+        (
+            "a put writing over the row",
+            "put deep {id: 2, n: 2, j: [[1]]}",
+        ),
+    ] {
+        want(what, false, write(&path, q));
+    }
+    also.extend(held_to(&path, "its del, set and put refused", true));
+    want("a compact", true, write(&path, "compact"));
+    also.extend(held_to(&path, "compacted", true));
+
+    // Its field dropped, the collection's last: the row reads, and a
+    // compact is refused for as long as the row's record is in the file.
+    let dropped = |step: &str| {
+        let path = copy(step);
+        let mut db = fennec_core::fs::open(&path).unwrap();
+        let got = tried(&mut db, "alter collection deep drop field j");
+        drop(db);
+        (path, got)
     };
-
-    // As the release wrote it: the row's `del` refused, the row and the
-    // rest of the file as they were.
-    let path = copy("del");
-    want(
-        "a del of the row",
-        false,
-        tried(&mut open(&path), "del deep where n = 2"),
-    );
-    let after_del = held_to(&path, "its del refused", true);
-
-    // Its field dropped, the collection's last: the row reads, and goes.
-    let path = copy("drop");
-    want(
-        "a drop of its field",
-        true,
-        tried(&mut open(&path), "alter collection deep drop field j"),
-    );
+    let (path, got) = dropped("dropped");
+    want("a drop of its field", true, got);
     want(
         "the row, its field dropped",
         true,
         answered(read(&path, row)),
     );
-    want(
-        "a del of the row, its field dropped",
-        true,
-        tried(&mut open(&path), "del deep where n = 2"),
-    );
-    want(
-        "the row gone",
-        true,
-        match read(&path, "get deep count").contains("\"count\":1") {
-            true => Ok(()),
-            false => Err(read(&path, "get deep count")),
-        },
-    );
+    for when in ["a compact, its field dropped", "a compact asked again"] {
+        want(when, false, write(&path, "compact"));
+        want(
+            &format!("the row after {when}"),
+            true,
+            answered(read(&path, row)),
+        );
+    }
+    // Deleted, or written over: the compact is taken.
+    for (step, q, count) in [
+        ("deleted", "del deep where n = 2", 1),
+        ("written-over", "put deep {id: 2, n: 2}", 2),
+    ] {
+        let (path, got) = dropped(step);
+        want("a drop of its field", true, got);
+        want(&format!("`{q}`, its field dropped"), true, write(&path, q));
+        want(
+            &format!("a compact after `{q}`"),
+            true,
+            write(&path, "compact"),
+        );
+        let counted = read(&path, "get deep count");
+        want(
+            &format!("the collection's count after `{q}` and a compact"),
+            true,
+            match counted.contains(&format!("\"count\":{count}")) {
+                true => Ok(()),
+                false => Err(counted),
+            },
+        );
+        for q in ["get deep where n = 1", "get plain order n"] {
+            want(
+                &format!("`{q}` after the compact"),
+                true,
+                answered(read(&path, q)),
+            );
+        }
+    }
 
-    // A field added after the dropped one: reading it skips the dropped
-    // place first, which refuses the row again, and its `del`.
-    let path = copy("drop-and-add");
-    let mut db = open(&path);
-    want(
-        "a drop of its field",
-        true,
-        tried(&mut db, "alter collection deep drop field j"),
-    );
+    // The other layout: a field added after the dropped one, whose place is
+    // reached by skipping it -- the row refused again, and its `del`.
+    let (path, got) = dropped("drop-and-add");
+    want("a drop of its field", true, got);
     want(
         "a field added after it",
         true,
-        tried(&mut db, "alter collection deep add field k int"),
+        write(&path, "alter collection deep add field k int"),
     );
-    drop(db);
     want(
         "the row, a field after the dropped one",
         false,
@@ -1065,7 +1104,7 @@ fn deep_steps(
     want(
         "a del of the row, a field after the dropped one",
         false,
-        tried(&mut open(&path), "del deep where n = 2"),
+        write(&path, "del deep where n = 2"),
     );
     want(
         "the other row",
@@ -1076,7 +1115,7 @@ fn deep_steps(
     want(
         "the collection dropped",
         true,
-        tried(&mut open(&path), "drop collection deep"),
+        write(&path, "drop collection deep"),
     );
     let untouched = copy("untouched");
     for q in ["get plain order n", "get plain where n = 2"] {
@@ -1090,14 +1129,7 @@ fn deep_steps(
             },
         );
     }
-
-    // A compact: whatever it answers, every other answer stands.
-    let path = copy("compact");
-    let compacted = tried(&mut open(&path), "compact");
-    eprintln!("deep: a compact: {compacted:?}");
-    let mut found_after = held_to(&path, "a compact tried", false);
-    found_after.extend(after_del);
-    found.extend(found_after);
+    found.extend(also);
     found
 }
 
