@@ -450,6 +450,15 @@ impl Url {
     /// is refused rather than passed over. No refusal shows the string, nor
     /// any part of it that may be a password's.
     pub fn parse(s: &str) -> Result<Url> {
+        Url::parse_in(s, |name| std::env::var(name).ok())
+    }
+
+    /// [`Url::parse`], libpq's variables read through `var` rather than the
+    /// process's environment: a test's string then means the same on every
+    /// machine. A trust stand-in's URL read `PGPASSWORD` where a developer
+    /// had it exported, and its client, holding a password, refused the
+    /// stand-in's `AuthenticationOk`.
+    pub fn parse_in(s: &str, var: impl Fn(&str) -> Option<String>) -> Result<Url> {
         let rest = s
             .strip_prefix("postgresql://")
             .or_else(|| s.strip_prefix("postgres://"))
@@ -540,11 +549,7 @@ impl Url {
                 }
             }
         }
-        let sslrootcert = sslrootcert.or_else(|| {
-            std::env::var("PGSSLROOTCERT")
-                .ok()
-                .filter(|r| !r.is_empty())
-        });
+        let sslrootcert = sslrootcert.or_else(|| var("PGSSLROOTCERT").filter(|r| !r.is_empty()));
         // The user info runs up to the last `@`; the host contains no `@`.
         let (userinfo, authority) = match rest.rsplit_once('@') {
             Some((u, a)) => (Some(u), a),
@@ -579,8 +584,8 @@ impl Url {
         // as libpq makes it.
         let (sslmode, sslmode_from) = match sslmode {
             Some(m) => (m, SslModeFrom::Written),
-            None => match std::env::var("PGSSLMODE") {
-                Ok(m) if !m.is_empty() => (SslMode::parse(&m)?, SslModeFrom::Environment),
+            None => match var("PGSSLMODE") {
+                Some(m) if !m.is_empty() => (SslMode::parse(&m)?, SslModeFrom::Environment),
                 _ if sslrootcert.as_deref() == Some("system") => {
                     (SslMode::VerifyFull, SslModeFrom::SystemRoots)
                 }
@@ -612,15 +617,15 @@ impl Url {
             None => (String::new(), None),
         };
         let user = if user.is_empty() {
-            std::env::var("PGUSER")
-                .or_else(|_| std::env::var("USER"))
-                .map_err(|_| Error::Query("the connection string has no user name".into()))?
+            var("PGUSER")
+                .or_else(|| var("USER"))
+                .ok_or_else(|| Error::Query("the connection string has no user name".into()))?
         } else {
             user
         };
         Ok(Url {
             user,
-            password: password.or_else(|| std::env::var("PGPASSWORD").ok()),
+            password: password.or_else(|| var("PGPASSWORD")),
             host,
             port,
             database: decode(database, "database name")?,
@@ -1891,6 +1896,8 @@ impl Client {
             done: false,
             limit: MAX_MESSAGE,
             looked: 0,
+            #[cfg(test)]
+            waiting: None,
         })
     }
 }
@@ -2280,6 +2287,10 @@ pub struct CopyOut {
     /// The bytes looked at for line ends, all told: what a test holds to
     /// the bytes that came.
     looked: u64,
+    /// A test's: told each time a read wakes with nothing come, the copy
+    /// then waiting on the server -- the event a stop is set after.
+    #[cfg(test)]
+    waiting: Option<std::sync::mpsc::Sender<()>>,
 }
 
 impl CopyOut {
@@ -2359,6 +2370,8 @@ impl CopyOut {
             stream: &mut self.client.stream,
             stop,
             quiet: None,
+            #[cfg(test)]
+            waiting: self.waiting.as_ref(),
         };
         read_message(&mut r).map_err(|e| match e.kind() {
             ErrorKind::TimedOut => io(format!("the server sent nothing for {TIMEOUT:?}")),
@@ -2386,6 +2399,8 @@ struct Watched<'a> {
     /// Since when the server has said nothing: the first timeout after its
     /// last byte.
     quiet: Option<Instant>,
+    #[cfg(test)]
+    waiting: Option<&'a std::sync::mpsc::Sender<()>>,
 }
 
 impl Read for Watched<'_> {
@@ -2405,6 +2420,10 @@ impl Read for Watched<'_> {
                         ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
                     ) =>
                 {
+                    #[cfg(test)]
+                    if let Some(waiting) = self.waiting {
+                        let _ = waiting.send(());
+                    }
                     let since = *self.quiet.get_or_insert_with(Instant::now);
                     if since.elapsed() >= TIMEOUT {
                         return Err(ErrorKind::TimedOut.into());
@@ -2436,9 +2455,15 @@ impl Read for Watched<'_> {
 mod tests {
     use super::*;
 
+    /// A connection string read with no variable of libpq's, whatever this
+    /// process's environment exports.
+    fn parsed(s: &str) -> Result<Url> {
+        Url::parse_in(s, |_| None)
+    }
+
     #[test]
     fn urls_are_parsed() {
-        let u = Url::parse("postgres://alice:secret@db.local:6432/production").unwrap();
+        let u = parsed("postgres://alice:secret@db.local:6432/production").unwrap();
         assert_eq!(u.user, "alice");
         assert_eq!(u.password.as_deref(), Some("secret"));
         assert_eq!(u.host, "db.local");
@@ -2446,7 +2471,7 @@ mod tests {
         assert_eq!(u.database, "production");
 
         // 5432 when no port is given.
-        let u = Url::parse("postgresql://alice@localhost/test").unwrap();
+        let u = parsed("postgresql://alice@localhost/test").unwrap();
         assert_eq!(u.port, 5432);
         assert_eq!(u.password, None);
     }
@@ -2455,19 +2480,16 @@ mod tests {
     /// last `@` is essential, otherwise the password is mistaken for the host.
     #[test]
     fn password_escapes_survive() {
-        let u = Url::parse("postgres://alice:a%40b%3Ac@localhost/t").unwrap();
+        let u = parsed("postgres://alice:a%40b%3Ac@localhost/t").unwrap();
         assert_eq!(u.password.as_deref(), Some("a@b:c"));
         assert_eq!(u.host, "localhost");
     }
 
     #[test]
     fn bad_urls_are_refused() {
-        assert!(Url::parse("mysql://x@y/z").is_err());
-        assert!(
-            Url::parse("postgres://alice@localhost").is_err(),
-            "no database"
-        );
-        assert!(Url::parse("postgres://alice@localhost:abc/t").is_err());
+        assert!(parsed("mysql://x@y/z").is_err());
+        assert!(parsed("postgres://alice@localhost").is_err(), "no database");
+        assert!(parsed("postgres://alice@localhost:abc/t").is_err());
         // A parameter the client does not act on must not be swallowed.
         for p in [
             "sslcert=c.pem",
@@ -2482,12 +2504,12 @@ mod tests {
             "require_auth=trust",
         ] {
             assert!(
-                Url::parse(&format!("postgres://alice@localhost/t?{p}")).is_err(),
+                parsed(&format!("postgres://alice@localhost/t?{p}")).is_err(),
                 "{p}"
             );
         }
         // An empty value is libpq's default, as no value.
-        let u = Url::parse("postgres://alice@localhost/t?require_auth=&sslrootcert=").unwrap();
+        let u = parsed("postgres://alice@localhost/t?require_auth=&sslrootcert=").unwrap();
         assert_eq!((u.require_auth, u.sslrootcert), (None, None));
     }
 
@@ -2514,12 +2536,12 @@ mod tests {
             // where the port would be.
             "postgres://alice:hunter2/t",
         ] {
-            let e = Url::parse(s).unwrap_err().to_string();
+            let e = parsed(s).unwrap_err().to_string();
             assert!(!e.contains(secret) && !e.contains("hunter"), "{s}: {e}");
         }
-        let e = Url::parse("mysql://alice:hunter2@db.example/t").unwrap_err();
+        let e = parsed("mysql://alice:hunter2@db.example/t").unwrap_err();
         assert!(e.to_string().contains("beginning mysql://"), "{e}");
-        let e = Url::parse("postgres://alice:x?hunter2=1@db.example/t").unwrap_err();
+        let e = parsed("postgres://alice:x?hunter2=1@db.example/t").unwrap_err();
         assert!(e.to_string().contains("%3F"), "{e}");
         // A `%` before a character of several bytes, or at the end: refused
         // in words naming the part, where the first panicked.
@@ -2527,21 +2549,21 @@ mod tests {
             "postgres://alice:p%a\u{e9}@db.example/t",
             "postgres://alice:p%\u{1F98A}@h/t",
         ] {
-            let e = Url::parse(s).unwrap_err().to_string();
+            let e = parsed(s).unwrap_err().to_string();
             assert!(
                 e.contains("password holds a `%` not followed by two hex"),
                 "{e}"
             );
         }
-        let e = Url::parse("postgres://al%2@h/t").unwrap_err().to_string();
+        let e = parsed("postgres://al%2@h/t").unwrap_err().to_string();
         assert!(e.contains("user name holds a `%`"), "{e}");
         // Escapes still decode: `@`, `:`, `?` and a character of several
         // bytes.
-        let u = Url::parse("postgres://alice:a%40b%3Ac%3F%C3%A9@h/t").unwrap();
+        let u = parsed("postgres://alice:a%40b%3Ac%3F%C3%A9@h/t").unwrap();
         assert_eq!(u.password.as_deref(), Some("a@b:c?\u{e9}"));
         // A libpq keyword this client does not take is named; no other
         // text is.
-        let e = Url::parse("postgres://alice@h/t?sslcert=c.pem").unwrap_err();
+        let e = parsed("postgres://alice@h/t?sslcert=c.pem").unwrap_err();
         assert!(e.to_string().contains("`sslcert` is not supported"), "{e}");
     }
 
@@ -2553,7 +2575,7 @@ mod tests {
     #[test]
     fn require_auth_is_read_as_libpq_reads_it() {
         let auth = |q: &str| {
-            Url::parse(&format!("postgres://alice@localhost/t?require_auth={q}"))
+            parsed(&format!("postgres://alice@localhost/t?require_auth={q}"))
                 .map(|u| u.require_auth.unwrap())
         };
         let scram = auth("scram-sha-256").unwrap();
@@ -2599,12 +2621,11 @@ mod tests {
         let none = RequireAuth::default_for(false);
         assert!(none.allows(AUTH_OK, false).is_ok() && none.allows(AUTH_PASSWORD, false).is_ok());
 
-        let u = Url::parse("postgres://alice@localhost/t").unwrap();
+        let u = parsed("postgres://alice@localhost/t").unwrap();
         assert_eq!(u.channel_binding, ChannelBinding::Prefer);
         assert_eq!(u.connect_timeout, CONNECT_WAIT);
-        let u =
-            Url::parse("postgres://alice@localhost/t?channel_binding=require&connect_timeout=1")
-                .unwrap();
+        let u = parsed("postgres://alice@localhost/t?channel_binding=require&connect_timeout=1")
+            .unwrap();
         assert_eq!(u.channel_binding, ChannelBinding::Require);
         assert_eq!(
             u.connect_timeout,
@@ -2637,7 +2658,7 @@ mod tests {
 
     #[test]
     fn sslmode_and_sslrootcert_are_read_as_libpq_reads_them() {
-        let parse = |q: &str| Url::parse(&format!("postgres://alice@db.example/t?{q}"));
+        let parse = |q: &str| parsed(&format!("postgres://alice@db.example/t?{q}"));
         for (q, mode) in [
             ("sslmode=disable", SslMode::Disable),
             ("sslmode=prefer", SslMode::Prefer),
@@ -2657,46 +2678,76 @@ mod tests {
         assert_eq!(u.sslrootcert.as_deref(), Some("/etc/pg ca.pem"));
         // The default: `verify-full` off this machine, libpq's `prefer` on
         // it; written, the string wins, here and there.
-        if std::env::var_os("PGSSLMODE").is_none() {
-            for (host, mode) in [
-                ("db.example", SslMode::VerifyFull),
-                ("10.0.0.5", SslMode::VerifyFull),
-                ("[2001:db8::1]", SslMode::VerifyFull),
-                ("127.0.0.2", SslMode::Prefer),
-                ("localhost", SslMode::Prefer),
-                ("LocalHost", SslMode::Prefer),
-                ("[::1]", SslMode::Prefer),
-                ("[::ffff:127.0.0.1]", SslMode::Prefer),
-                ("", SslMode::Prefer),
-            ] {
-                let u = Url::parse(&format!("postgres://alice@{host}:5432/t")).unwrap();
-                assert_eq!(
-                    (u.sslmode, u.sslmode_from),
-                    (mode, SslModeFrom::Default),
-                    "{host}"
-                );
-            }
-            let u = Url::parse("postgres://alice@db.example/t").unwrap();
-            assert!(
-                u.tls_said()
-                    .contains("sslmode=verify-full (the default for a host off"),
-                "{}",
-                u.tls_said()
-            );
-            let u = Url::parse("postgres://alice@db.example/t?sslmode=prefer").unwrap();
+        for (host, mode) in [
+            ("db.example", SslMode::VerifyFull),
+            ("10.0.0.5", SslMode::VerifyFull),
+            ("[2001:db8::1]", SslMode::VerifyFull),
+            ("127.0.0.2", SslMode::Prefer),
+            ("localhost", SslMode::Prefer),
+            ("LocalHost", SslMode::Prefer),
+            ("[::1]", SslMode::Prefer),
+            ("[::ffff:127.0.0.1]", SslMode::Prefer),
+            ("", SslMode::Prefer),
+        ] {
+            let u = parsed(&format!("postgres://alice@{host}:5432/t")).unwrap();
             assert_eq!(
                 (u.sslmode, u.sslmode_from),
-                (SslMode::Prefer, SslModeFrom::Written)
-            );
-            let u = Url::parse("postgres://alice@localhost/t?sslmode=verify-full").unwrap();
-            assert_eq!(u.sslmode, SslMode::VerifyFull);
-            // sslrootcert=system alone makes verify-full, as libpq's.
-            let u = Url::parse("postgres://alice@localhost/t?sslrootcert=system").unwrap();
-            assert_eq!(
-                (u.sslmode, u.sslmode_from),
-                (SslMode::VerifyFull, SslModeFrom::SystemRoots)
+                (mode, SslModeFrom::Default),
+                "{host}"
             );
         }
+        let u = parsed("postgres://alice@db.example/t").unwrap();
+        assert!(
+            u.tls_said()
+                .contains("sslmode=verify-full (the default for a host off"),
+            "{}",
+            u.tls_said()
+        );
+        let u = parsed("postgres://alice@db.example/t?sslmode=prefer").unwrap();
+        assert_eq!(
+            (u.sslmode, u.sslmode_from),
+            (SslMode::Prefer, SslModeFrom::Written)
+        );
+        let u = parsed("postgres://alice@localhost/t?sslmode=verify-full").unwrap();
+        assert_eq!(u.sslmode, SslMode::VerifyFull);
+        // sslrootcert=system alone makes verify-full, as libpq's.
+        let u = parsed("postgres://alice@localhost/t?sslrootcert=system").unwrap();
+        assert_eq!(
+            (u.sslmode, u.sslmode_from),
+            (SslMode::VerifyFull, SslModeFrom::SystemRoots)
+        );
+        // libpq's variables, where the string names none: read through
+        // `parse_in`'s `var`, which `Url::parse` makes the process's
+        // environment; written, the string wins over them.
+        let vars = |name: &str| match name {
+            "PGSSLMODE" => Some("disable".to_string()),
+            "PGPASSWORD" => Some("from-the-environment".to_string()),
+            "PGUSER" => Some("bob".to_string()),
+            "PGSSLROOTCERT" => Some("/etc/pg/ca.pem".to_string()),
+            _ => None,
+        };
+        let u = Url::parse_in("postgres://@db.example/t", vars).unwrap();
+        assert_eq!(
+            (u.sslmode, u.sslmode_from),
+            (SslMode::Disable, SslModeFrom::Environment)
+        );
+        assert_eq!(u.password.as_deref(), Some("from-the-environment"));
+        assert_eq!(u.user, "bob");
+        assert_eq!(u.sslrootcert.as_deref(), Some("/etc/pg/ca.pem"));
+        let u = Url::parse_in(
+            "postgres://alice:own@db.example/t?sslmode=verify-full&sslrootcert=mine.pem",
+            vars,
+        )
+        .unwrap();
+        assert_eq!(
+            (u.sslmode, u.sslmode_from),
+            (SslMode::VerifyFull, SslModeFrom::Written)
+        );
+        assert_eq!(
+            (u.user.as_str(), u.password.as_deref()),
+            ("alice", Some("own"))
+        );
+        assert_eq!(u.sslrootcert.as_deref(), Some("mine.pem"));
         // The public CAs vouch for every public name: taken only where the
         // name is checked too. `verify-ca` without a file named is the
         // dial's to answer, where libpq's root file may be (tests/tls.rs).
@@ -3042,15 +3093,28 @@ mod tests {
         (WalStream { client }, server)
     }
 
-    /// A COPY stream from a socket of the test's, its server half writing
-    /// `frames` and then whatever `then` writes, `limit` the longest line.
+    /// A COPY stream begun by `copy_out` on a socket of the test's, its
+    /// server half answering the query with a `CopyOutResponse`, then
+    /// writing `frames` and holding the connection open; `limit` the
+    /// longest line. The client's socket waits as a signed-in one does,
+    /// [`TIMEOUT`] a read: `copy_out` is what turns it into a [`LOOK`].
     fn copy_of(frames: Vec<Vec<u8>>, limit: usize) -> CopyOut {
         use std::net::TcpListener;
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let c = TcpStream::connect(l.local_addr().unwrap()).unwrap();
         let (mut server, _) = l.accept().unwrap();
         std::thread::spawn(move || {
+            let mut head = [0u8; 5];
+            if server.read_exact(&mut head).is_err() || head[0] != b'Q' {
+                return;
+            }
+            let len = u32::from_be_bytes([head[1], head[2], head[3], head[4]]) as usize;
+            if server.read_exact(&mut vec![0u8; len - 4]).is_err() {
+                return;
+            }
             let mut w = Writer::new();
+            // Text format, no column formats said: the client reads none.
+            w.msg(b'H', |b| b.extend_from_slice(&[0, 0, 0]));
             for f in &frames {
                 w.msg(b'd', |b| b.extend_from_slice(f));
             }
@@ -3058,20 +3122,15 @@ mod tests {
             // Held open until the client is done: a close is no answer.
             let _ = server.read(&mut [0u8; 1]);
         });
-        c.set_read_timeout(Some(LOOK)).unwrap();
-        CopyOut {
-            client: Client {
-                stream: BufReader::new(Conn::Plain(c)),
-                server_version: String::new(),
-                proven: true,
-            },
-            buf: Vec::new(),
-            pos: 0,
-            scanned: 0,
-            done: false,
-            limit,
-            looked: 0,
-        }
+        c.set_read_timeout(Some(TIMEOUT)).unwrap();
+        let client = Client {
+            stream: BufReader::new(Conn::Plain(c)),
+            server_version: String::new(),
+            proven: true,
+        };
+        let mut copy = client.copy_out("copy t to stdout").unwrap();
+        copy.limit = limit;
+        copy
     }
 
     /// A line the server never ends -- 1-byte `CopyData` messages and no
@@ -3108,29 +3167,34 @@ mod tests {
     /// A stop wakes a COPY's read that waits on a server sending nothing:
     /// the follower copying a table for a server's mirror gives up within a
     /// [`LOOK`] or two of the shutdown, where its read waited on the
-    /// socket, 30 s at a time and for good under a trickle.
+    /// socket, 30 s at a time and for good under a trickle. The stop is set
+    /// once the copy is blocked in its read, told by the read's first wake
+    /// with nothing come: a `LOOK` after it began to wait, which `copy_out`
+    /// set -- left at the sign-in's 30 s, the wake never comes in time.
     #[test]
     fn a_stop_wakes_a_copy_that_waits_on_the_server() {
-        let mut copy = copy_of(vec![b"a\nb".to_vec()], 1 << 20);
+        let mut copy = copy_of(vec![b"a\nb".to_vec()], MAX_MESSAGE);
+        assert_eq!(copy.limit, MAX_MESSAGE);
         let stop = std::sync::Arc::new(AtomicBool::new(false));
         assert_eq!(copy.next_line_until(&stop).unwrap().unwrap(), b"a");
-        let setter = {
+        let (waiting, woke) = std::sync::mpsc::channel();
+        copy.waiting = Some(waiting);
+        let copier = {
             let stop = std::sync::Arc::clone(&stop);
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(300));
-                stop.store(true, Ordering::SeqCst);
-            })
+            std::thread::spawn(move || copy.next_line_until(&stop).map_err(|e| e.to_string()))
         };
-        let began = Instant::now();
-        let e = copy.next_line_until(&stop).unwrap_err().to_string();
-        setter.join().unwrap();
-        assert!(e.contains("the copy was stopped"), "{e}");
         // Bounded from above where the time is the property: by what it
-        // stands against, the 30 s of a read's timeout.
+        // stands against, the sign-in's 30 s a read.
+        woke.recv_timeout(Duration::from_secs(10))
+            .expect("the copy's read never woke while it waited: is LOOK its socket's timeout?");
+        let stopped = Instant::now();
+        stop.store(true, Ordering::SeqCst);
+        let e = copier.join().unwrap().unwrap_err();
+        assert!(e.contains("the copy was stopped"), "{e}");
         assert!(
-            began.elapsed() < Duration::from_secs(10),
+            stopped.elapsed() < Duration::from_secs(10),
             "{:?}",
-            began.elapsed()
+            stopped.elapsed()
         );
     }
 

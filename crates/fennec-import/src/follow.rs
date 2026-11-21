@@ -1457,6 +1457,13 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::sync::{mpsc, Arc};
 
+    /// A stand-in's URL, read with no variable of libpq's: a `PGPASSWORD`
+    /// this process inherited had the client hold a password and refuse
+    /// the stand-in's `AuthenticationOk`.
+    fn stand_in_url(s: &str) -> Result<Url> {
+        Url::parse_in(s, |_| None)
+    }
+
     // ------------------------------------------------ building messages
 
     fn cstr(b: &mut Vec<u8>, s: &str) {
@@ -1619,7 +1626,7 @@ mod tests {
         })
         .unwrap();
         let source = Source {
-            url: Url::parse("postgres://u@127.0.0.1:1/d").unwrap(),
+            url: stand_in_url("postgres://u@127.0.0.1:1/d").unwrap(),
             table: "docs".into(),
             sql: "\"docs\"".into(),
             namespace: "public".into(),
@@ -1939,7 +1946,7 @@ mod tests {
             // Up to the client's close.
             while read_msg(&mut s).is_some() {}
         });
-        Url::parse(&format!("postgres://u@127.0.0.1:{port}/d?sslmode=disable")).unwrap()
+        stand_in_url(&format!("postgres://u@127.0.0.1:{port}/d?sslmode=disable")).unwrap()
     }
 
     /// A row read back -- an update leaving a TOASTed value untouched, of a
@@ -2115,7 +2122,7 @@ mod tests {
             let _ = tell.send(tags);
         });
         Walsender {
-            url: Url::parse(&format!("postgres://u@127.0.0.1:{port}/d?sslmode=disable")).unwrap(),
+            url: stand_in_url(&format!("postgres://u@127.0.0.1:{port}/d?sslmode=disable")).unwrap(),
             released,
             asked,
             sent,
@@ -2351,7 +2358,7 @@ mod tests {
         if host != "127.0.0.1" {
             fennec_http::dial::stand_in(&format!("{host}:{port}"), move || Ok(vec![addr]));
         }
-        let url = Url::parse(&format!("postgres://u@{host}:{port}/d?sslmode=disable")).unwrap();
+        let url = stand_in_url(&format!("postgres://u@{host}:{port}/d?sslmode=disable")).unwrap();
         (url, statuses)
     }
 

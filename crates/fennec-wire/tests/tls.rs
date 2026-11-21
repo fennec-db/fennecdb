@@ -223,7 +223,8 @@ fn url(host: &str, port: u16, sslmode: SslMode, rootcert: Option<&str>) -> Url {
 }
 
 /// A URL of the stand-in's, `query` its parameters, `rootcert` a file of
-/// `tests/certs`, `password` the user's.
+/// `tests/certs`, `password` the user's: read with no variable of libpq's,
+/// so a `PGPASSWORD` or `PGSSLMODE` this process inherited changes nothing.
 fn url_as(
     host: &str,
     port: u16,
@@ -242,9 +243,10 @@ fn url_as(
         format!("&sslrootcert={path}")
     });
     let pw = password.map_or_else(String::new, |p| format!(":{p}"));
-    Url::parse(&format!(
-        "postgres://fennec{pw}@{host}:{port}/fennec?{query}{root}"
-    ))
+    Url::parse_in(
+        &format!("postgres://fennec{pw}@{host}:{port}/fennec?{query}{root}"),
+        |_| None,
+    )
     .unwrap()
 }
 
@@ -414,9 +416,12 @@ fn dial_in_a_home_of_its_own() {
     };
     let mut it = what.splitn(3, ' ');
     let (host, port, query) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
-    let got = Url::parse(&format!("postgres://fennec@{host}:{port}/fennec?{query}"))
-        .map_err(|e| e.to_string())
-        .and_then(|u| via(&u));
+    let got = Url::parse_in(
+        &format!("postgres://fennec@{host}:{port}/fennec?{query}"),
+        |_| None,
+    )
+    .map_err(|e| e.to_string())
+    .and_then(|u| via(&u));
     println!("dialed: {got:?}");
 }
 
@@ -764,25 +769,55 @@ fn a_plus_offer_taken_out_is_told_the_client_could_bind() {
 /// the handshake, go into the handshake, which refuses them, and never
 /// into what the client reads as the server's: here an `AuthenticationOk`
 /// and a `ReadyForQuery`, which taken as the server's would have signed
-/// the client in with no TLS at all (libpq's CVE-2021-23222).
+/// the client in (libpq's CVE-2021-23222). The stand-in goes on to a real
+/// handshake, with a certificate the client trusts: a client that kept the
+/// bytes aside would finish it and read them as the server's first words
+/// over TLS, signed in by them -- with no password held, nothing else is
+/// asked of an `AuthenticationOk`.
 #[test]
 fn bytes_after_the_servers_s_are_never_read_as_the_servers() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
+    let server =
+        fennec_tls::Server::from_pem_files(&cert("server.pem"), &cert("server.key")).unwrap();
+    let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let (mut s, _) = listener.accept().unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
         let mut request = [0u8; 8];
         s.read_exact(&mut request).unwrap();
         let mut out = b"S".to_vec();
         out.extend_from_slice(&framed(b'R', &0i32.to_be_bytes()));
         out.extend_from_slice(&framed(b'Z', b"I"));
         s.write_all(&out).unwrap();
-        let _ = s.read_to_end(&mut Vec::new());
+        let seen = match server.accept(s) {
+            // Over TLS the stand-in answers nothing: what signs a client
+            // in here is the bytes it sent before the handshake.
+            Ok(mut t) => {
+                let startup = startup(&mut t);
+                let _ = t.read_to_end(&mut Vec::new());
+                Seen::Tls { startup }
+            }
+            Err(e) => Seen::HandshakeFailed(e.to_string()),
+        };
+        let _ = tx.send(seen);
     });
-    let e = Client::connect(&url("localhost", port, SslMode::Require, None))
-        .unwrap_err()
-        .to_string();
+    let u = url_as(
+        "localhost",
+        port,
+        "sslmode=verify-full",
+        Some("ca.pem"),
+        None,
+    );
+    let e = match Client::connect(&u) {
+        Ok(_) => panic!("signed in by the bytes sent before the handshake"),
+        Err(e) => e.to_string(),
+    };
     assert!(e.contains("TLS") || e.contains("handshake"), "{e}");
+    match rx.recv_timeout(Duration::from_secs(30)).unwrap() {
+        Seen::HandshakeFailed(_) => {}
+        other => panic!("{other:?}: {e}"),
+    }
 }
 
 /// Off this machine `verify-full` is the default: a certificate it cannot

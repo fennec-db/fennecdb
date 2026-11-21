@@ -296,6 +296,8 @@ fn url(port: u16, password: Option<&str>) -> Url {
 
 /// The stand-in's URL, its password percent-escaped, `params` after
 /// `sslmode=disable`: the stand-in takes no SSLRequest; tests/tls.rs's does.
+/// Read with no variable of libpq's: a `PGPASSWORD` this process inherited
+/// had the client hold a password and refuse a trust stand-in.
 pub(crate) fn url_with(port: u16, password: Option<&str>, params: &str) -> Url {
     let pw = password.map_or_else(String::new, |p| {
         let mut out = String::from(":");
@@ -307,9 +309,10 @@ pub(crate) fn url_with(port: u16, password: Option<&str>, params: &str) -> Url {
         }
         out
     });
-    let u = Url::parse(&format!(
-        "postgres://fennec{pw}@127.0.0.1:{port}/fennec?sslmode=disable{params}"
-    ))
+    let u = Url::parse_in(
+        &format!("postgres://fennec{pw}@127.0.0.1:{port}/fennec?sslmode=disable{params}"),
+        |_| None,
+    )
     .unwrap();
     assert_eq!(u.sslmode, SslMode::Disable);
     u
@@ -676,7 +679,11 @@ fn an_unverified_servers_words_are_not_shown() {
     });
     let name = format!("pg-{}.test:{}", addr.port(), addr.port());
     fennec_http::dial::stand_in(&name, move || Ok(vec![addr]));
-    let far = Url::parse(&format!("postgres://fennec@{name}/fennec?sslmode=disable")).unwrap();
+    let far = Url::parse_in(
+        &format!("postgres://fennec@{name}/fennec?sslmode=disable"),
+        |_| None,
+    )
+    .unwrap();
     let e = Client::connect(&far)
         .unwrap()
         .query("select 1")
