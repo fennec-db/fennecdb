@@ -840,7 +840,7 @@ module is the same to the byte.
 rule's reach** (`access::covers`, `access::own_refused`, `path_refusal`,
 `own_declared`, `fennec_core::declared::own` and `OWN`). The server keeps
 its bookkeeping in collections of its file: `_idempotency` (each
-`Idempotency-Key` under its subject, with the answer kept for it),
+`Idempotency-Key` under its caller, with the answer kept for it),
 `_consumers` (`/_changes`' cursors), `_migrations` (the migrations a
 schema declared in code ran), `--follow`'s `_follow`, a webhook consumer's
 `_hook_events` (F4, an event's key a row, `Database::take_event`), and in a synced replica's

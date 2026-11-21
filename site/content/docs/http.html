@@ -393,8 +393,8 @@ waits for it as after the first answer.</p>
   of another issuer, or of the same user with another team or role, runs
   the write as a key seen for the first time; so no caller is handed
   another's answer, nor rows its own token cannot read. Keys kept by 0.2.0
-  and earlier were the subject's alone, and a retry across the upgrade
-  runs again. A token with no subject, or a
+  and earlier, the server token's too, are not looked up after the
+  upgrade: a request sent before it and again after it runs again. A token with no subject, or a
   <code>sub</code> that is not a text or is <code>""</code>, is refused a
   key (400). One whose <code>sub</code> is a number is told the claim must
   be a string, as RFC 7519 makes it: mint the id as its decimal text,

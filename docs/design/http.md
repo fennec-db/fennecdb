@@ -489,7 +489,7 @@ sends no `Origin`.
 with no id makes a row each time, so a retry after a timeout wrote it
 twice. A keyed REST write, `/query` or `/batch` runs as a block under the
 write lock, and its answer is kept in the same block as a row of
-`_idempotency` -- the key the subject's for a scoped token, and the
+`_idempotency` -- the key its caller's for a scoped token, and the
 request's hash beside it -- so the write and its key land together, a
 second request with the key waits for the lock and is handed the answer
 (`Idempotent-Replayed`), the key with another request is 422, a failed
@@ -509,9 +509,8 @@ the first, its `returning` rows those of a team the second token cannot
 read. A caller is now everything of its token that decides what it may
 do: its issuer and subject, the claims naming its tenants and its roles
 (`--jwt-tenant-claim`, `--jwt-role-claim`), and every claim a rule reads,
-each value as JSON, an absent one told from a `null`, under SHA-256, 32
-hex digits kept in the subject's place; the server's own token is one
-caller, as before. Two tokens of one caller name one key, and a token of
+each value as JSON, an absent one told from a `null`, under SHA-256; the
+server's own token is one caller, as before. Two tokens of one caller name one key, and a token of
 another issuer or other rights another, which runs the write as a key
 seen for the first time does. The names are worked out once a policy
 (`authority_claims`, in the `Lines` every scope shares), and the digest
@@ -522,11 +521,65 @@ scoped keyed `set` 9 700 instructions of 94 000 (the review of the G14
 fixes, measured; `make replay-bench MODE=scoped-keyed`). A write without
 a key asks nothing new, and the statement cache, a row's tag and the
 token cache read nothing of it -- none hashes a token on a request's
-path. Keys kept by a server from
-before are their subject's, and are no caller's now: a retry across the
-upgrade, within the key's day, runs again. `tests/idempotency.rs`'s
+path. `tests/idempotency.rs`'s
 `a_key_is_replayed_only_to_a_caller_of_the_same_authority` holds another
 team, another issuer and a role, each of them run and never replayed.
+
+**A key's caller is 16 bytes of the digest, and the key is bytes**
+(`idempotent::key`, `access::AUTHORITY_LEN`). `key bytes @hash` holds a
+first byte saying whose a key is -- `0xff` the server's token, `0xfe` a
+scoped caller, whose 16 bytes of the SHA-256 follow -- and then the key as
+the header gave it. Neither byte begins a text, so the server's keys and a
+caller's never meet, a caller's being of one width, and the hash index's
+UTF-8 test of a bytes key (`codec::key_bytes_tag`) fails at its first
+byte, some 40 instructions a lookup. 128 bits: two callers name one with a chance of 2^-128 a
+pair, 2^-65 that any two of a server's 2^32 callers do; a token whose
+claims were ground to name a given caller's needs 2^128 SHA-256s, and the
+claims are its issuer's to sign. The first form kept the caller as the
+digest's 32 hex digits where the subject had been, a `text` key: with
+`replays`' 5-letter `sub` and keys `k-<n>`, the `_idempotency` row of a
+scoped keyed `set` passed the 64 bytes `Store::encode_doc` begins a record
+in (a realloc to 128 and a copy) and every copy of the key -- the key's
+own, the lookup's, the hash index's, the `put`'s and the document's --
+went to a larger block: +2 532 instructions a request against the base
+(SipHash +174, `malloc` +1 233, `memcpy` and the system +568 in one
+traced call). In 17 bytes the row stays under 64 for that bench's keys,
+and the lookup is handed the key's value as `Key` holds it rather than a
+copy, one allocation a keyed write fewer, the server token's too; a
+subject of an identity provider's length (30 characters) took more than
+17 bytes in the base already. A collection whose `key` is not `bytes` --
+any server's from before -- is made again at the first keyed write, as
+one from before the expiry is, so a key sent before the upgrade, the
+server token's among them, runs again if it is sent again after it
+within its day.
+
+What the 17 bytes still cost -- 11 more than `bench` and its separator,
+hashed three times, tested for UTF-8 three times, and the key's copies
+and encodings in 32-byte blocks where the base's fit in 16 -- a scoped
+keyed `set` read +1 200 instructions a request against the base
+(`replays`, 8 identities a build, 7 runs each). The keyed write pays it
+back: `keep`'s `del` of the row a key had, for a key sent again after
+its time, ran at every keyed write, and a `del` finding nothing is a
+statement the engine runs whole -- its filter copied and bound to the
+parameter, the collection found by name, the bucket looked up, the copy
+dropped: in one traced call of a scoped keyed `set`, 5 515 instructions
+of its own code, 7 386 of the allocator's and 884 of the system's. It
+runs now only where the look under the same write
+lock found a row (`Key::absent`, set by `answered`; every path asks
+`replay` under the lock it then keeps the key in, and a key whose look
+found none is written over by no one before `keep`); and the expiry's
+text is written only to make or move the collection, a `format!` a
+write before. Against train-d, the mean of each build's 8 identities:
+
+| instructions a request | train-d | 32 hex digits | 16 bytes | and no `del` |
+|---|---|---|---|---|
+| `keyed` (the server's token) | 80 411.9 | -24.9 | -116.6 | -14 846.3 |
+| `scoped` (no key) | 35 656.2 | -21.5 | -21.7 | -84.3 |
+| `scoped-keyed`, `sub` `bench` | 93 925.8 | +2 472.7 | +1 200.4 | -13 939.7 |
+| `scoped-keyed`, a 30-character `sub` | 96 634.5 | +37.9 | -1 407.0 | -16 389.0 |
+
+Two standard errors are 84 to 199 instructions in every row; `scoped`
+sends no key, and every figure of its row is inside them.
 
 **A replay answers only once the first try's record is as durable, and as
 sent, as its answer was to be** (`idempotent::replay`,
