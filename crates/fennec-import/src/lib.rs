@@ -161,8 +161,8 @@ pub struct Options {
 /// per-document cost, while peak memory grows linearly.
 pub const DEFAULT_BATCH: usize = 2_000;
 
-/// The most a batch holds of the rows it puts, in bytes as read
-/// (`load::run`): a batch is put once it holds `--batch` rows or this
+/// The most a batch holds of the rows it puts, in bytes, each value
+/// counted as its field holds it (`load::run`): a batch is put once it holds `--batch` rows or this
 /// many bytes, whichever comes first. A row holds a value for each column
 /// its source declares and a SQLite row a copy of each default its record
 /// lacks, whatever its bytes in the source: rows bounded by their count
@@ -175,7 +175,7 @@ pub const DEFAULT_BATCH: usize = 2_000;
 /// batch -- beside the frames the store holds since its file was opened,
 /// up to `HANDOVER_AT` (16 MB). So an import holds under five times this
 /// beside the row it reads, whatever its source declares. Rows under 8
-/// KiB as read -- 2 000 of them -- never reach it, so `--batch` alone
+/// KiB each -- 2 000 of them -- never reach it, so `--batch` alone
 /// decides for them, as before.
 pub const BATCH_BYTES: usize = 16 << 20;
 

@@ -45,8 +45,8 @@ overflow chain's -- to the file's pages and reached once by any path
 read as it is yielded, so a walk holds a page and a row; a page's usable
 part to SQLite's 480 bytes (`MIN_USABLE`); a table to SQLite's 32 767
 columns (`MAX_COLUMNS`), since a row holds a value a declared column; and
-an import's batch to `BATCH_BYTES` as read as well as `--batch` rows
-(`load::run`), since a row may read far larger than it is stored. A
+an import's batch to `BATCH_BYTES`, a value counted once adapted to its
+field, as well as `--batch` rows (`load::run`), since a row may read far larger than it is stored. A
 table's columns are read where SQLite puts them -- comments spaces, a
 VIRTUAL generated column in no record and named in the summary
 (`Source::left_out`), `""` kept as `column<N>`, a lacking column its

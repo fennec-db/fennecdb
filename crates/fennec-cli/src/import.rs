@@ -42,7 +42,7 @@ options
                           rows never stream. It is SQL, not FennecQL.
   --limit <N>             at most N rows
   --batch <N>             rows a put takes at most (default 2000); a batch
-                          is put sooner once its rows hold 16 MiB as read
+                          is put sooner once its rows hold 16 MiB
   --sample <N>            sqlite: rows scanned for untyped columns (1000)
   -n, --dry-run           print the plan, write nothing
   --count                 with --dry-run: also count how many rows will be

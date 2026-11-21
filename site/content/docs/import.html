@@ -127,8 +127,9 @@ twice, cells that overlap, an overflow chain longer than its row. Reading
 the file holds a page and a row in memory at a time, whatever lengths it
 declares: a row is a value for each of its table's columns, 32 767 at most,
 which may read far larger than it is stored — a column it lacks reads as its
-default — so a batch is written once it holds 16 MiB of rows as read, before
-<code>--batch</code> rows where rows are large. What an import holds at
+default — so a batch is written once its rows hold 16 MiB, each value
+counted as its field will hold it, before <code>--batch</code> rows where
+rows are large. What an import holds at
 once is that batch and what the database makes of it while writing it —
 under five times 16 MiB — beside the row being read: some 1 MiB of values
 for the widest table, and its texts, blobs and defaults, each no longer than

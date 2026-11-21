@@ -75,7 +75,7 @@ fn load(
     let mut skipped: u64 = 0;
     let mut seen: u64 = 0;
     let mut batch: Vec<Vec<(String, Expr)>> = Vec::with_capacity(opts.batch);
-    // What the batch holds as read: put at `opts.batch` rows or at
+    // What the batch's rows hold: put at `opts.batch` rows or at
     // `BATCH_BYTES`, whichever comes first.
     let mut held: usize = 0;
     let fields = fields_bytes(&plan);
@@ -151,7 +151,7 @@ pub(crate) fn document(
 /// ([`value_bytes`]): counted where each value is at hand, after it is
 /// adapted to its field -- a text read into a `json` field or a vector
 /// holds more than it did as read. The count is some 75 instructions a row
-/// of five values, 0.66% of a million-row import's, the same within the
+/// of four small values, 0.66% of a million-row import's, the same within the
 /// noise as a pass of its own over the row's values or over its document.
 fn built(
     plan: &Plan,
@@ -476,8 +476,8 @@ mod tests {
     use fennec_core::schema::VectorIndexSpec;
     use fennec_core::value::VecPrec;
 
-    /// A batch is put at `--batch` rows or once its rows hold `BATCH_BYTES`
-    /// as read, whichever comes first: rows of 1 MiB go 16 a batch under
+    /// A batch is put at `--batch` rows or once its rows hold `BATCH_BYTES`,
+    /// whichever comes first: rows of 1 MiB go 16 a batch under
     /// the default of 2 000, and 5 a batch under `--batch 5`.
     #[test]
     fn a_batch_is_put_at_its_rows_or_its_bytes() {
