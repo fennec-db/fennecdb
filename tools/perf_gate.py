@@ -1247,15 +1247,46 @@ def show(ref, path):
     """`path` at `ref`, or "" where `ref` has no such file; a ref that is
     no commit is refused."""
     git("rev-parse", "--verify", f"{ref}^{{commit}}")
-    p = subprocess.run(["git", "show", f"{ref}:{path}"], cwd=ROOT, capture_output=True, text=True)
-    return p.stdout if p.returncode == 0 else ""
+    # The path as git gave it (`diff_paths`), its bytes that are not UTF-8
+    # handed back as they came whatever the locale; git's error, which
+    # quotes them, is never decoded. The file reads as it did through
+    # `text=True` under the runner's UTF-8 locale, its line ends `\n`.
+    p = subprocess.run(["git", "show", f"{ref}:{path}".encode("utf-8", "surrogateescape")],
+                       cwd=ROOT, capture_output=True)
+    return p.stdout.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n") if p.returncode == 0 else ""
 
 
 def diff_paths(base, head):
     """Every path a change from `base` to `head` touches, a rename as both
-    of its paths."""
-    out = git("diff", "--name-only", "--no-renames", base, head)
-    return [p for p in out.splitlines() if p.strip()]
+    of its paths, each as git stores it: without `-z` git quotes a path
+    holding a byte past ASCII, a `"`, a `\\` or a control character
+    (`".github/workflows/\\303\\274.yml"`), which no test of a prefix here
+    reads as the place it is. Decoded as UTF-8, each byte that is no UTF-8
+    kept as a lone surrogate (`surrogateescape`): such a path is never
+    dropped nor refused, its ASCII prefix reads as written, `show` hands
+    git its bytes back, and a note writes them escaped (`path_said`). Only
+    the empty piece after the last NUL is left out."""
+    out = subprocess.run(["git", "diff", "--name-only", "-z", "--no-renames", base, head],
+                         cwd=ROOT, capture_output=True, check=True).stdout
+    return [p.decode("utf-8", "surrogateescape") for p in out.split(b"\0") if p]
+
+
+def path_said(path):
+    """`path` as a note writes it, on one line and as it is: a character no
+    line shows as itself -- a control, a separator, a format character such
+    as a direction's override -- escaped, a byte that is not UTF-8 as
+    `\\xNN`, and a `\\` doubled so no escape reads as one."""
+    out = []
+    for c in path:
+        if c == "\\":
+            out.append("\\\\")
+        elif 0xDC80 <= ord(c) <= 0xDCFF:
+            out.append(f"\\x{ord(c) - 0xDC00:02x}")
+        elif c.isprintable():
+            out.append(c)
+        else:
+            out.append(c.encode("unicode_escape").decode("ascii"))
+    return "".join(out)
 
 
 def reaches(paths):
@@ -1267,6 +1298,18 @@ def reaches(paths):
     return any(not (p.startswith(UNREAD) or p.endswith(".md")) for p in paths)
 
 
+# YAML's line breaks, CR LF, CR and LF, and no other: `str.splitlines`
+# breaks on \v, \f, \x1c-\x1e, \x85, U+2028 and U+2029 too, which YAML 1.2
+# reads as a line's own characters, so a `# ; curl ... | sh` after one was
+# read here as a comment on a line of its own, an edit of a script unnamed.
+YAML_BREAK = re.compile(r"\r\n|\r|\n")
+# What Python's strings take for a break or a space and YAML 1.2 does not:
+# those eight, \x1f, U+00A0, U+1680, U+2000-U+200A, U+202F, U+205F and
+# U+3000, which `strip()` and `\s` here read otherwise than YAML, and on
+# which readers of YAML differ (YAML 1.1 broke a line at \x85, U+2028 and
+# U+2029): a line one reads as a comment another may run, so where a
+# workflow holds one its every edit is named, as where it reads an alias.
+UNYAML = re.compile(r"[^\S \t\r\n]")
 # A block scalar's header, `|`, `>-`, `|2+`: its lines are the scalar's,
 # a `#` among them a script's, never a comment.
 YAML_BLOCK = re.compile(r"[|>](?:[1-9][+-]?|[+-][1-9]?)?(?=[ \t]|$)")
@@ -1307,11 +1350,15 @@ def yaml_lines(text):
     start or after a space, outside a quoted scalar and a block one, so an
     edit of a comment changes no line here and an edit of a key's value
     does. `aliases`, every alias read (`*name`, `<<: *name`): through one,
-    a part of the workflow takes another's lines."""
+    a part of the workflow takes another's lines. Lines end where YAML's
+    do (`YAML_BREAK`), never where `str.splitlines` alone ends one."""
     out, aliases, held = [], set(), []
     block = quote = plain = opened = None
     flow, blanks, expect = 0, 0, True
-    for raw in text.splitlines():
+    rows = YAML_BREAK.split(text)
+    if rows and rows[-1] == "":
+        rows.pop()
+    for raw in rows:
         line = raw.rstrip()
         indent = len(line) - len(line.lstrip(" "))
         if block is not None:
@@ -1488,7 +1535,9 @@ def jobs_of(text, ids=JOBS):
 def job_property(lines, name):
     """The text after `name:` at a job's own level (its first line's), and
     the lines beneath it: (text, [lines]), or None where the job has none."""
-    rows = lines.splitlines()
+    # Split where `workflow_parts` joined them, never where a character
+    # of a line's own (`YAML_BREAK`) would end one.
+    rows = lines.split("\n") if lines else []
     if not rows:
         return None
     level = len(rows[0]) - len(rows[0].lstrip(" "))
@@ -1680,9 +1729,18 @@ def workflow_edits(base, head, changed):
     among them, so its job is named where its own lines change, not at
     every edit of its file). Compared as YAML reads them, so a comment's
     edit is none; and every edit where the workflow reads an alias,
-    through which any of its lines may reach the gate's."""
-    was, now = workflow_parts(show(base, WORKFLOW)), workflow_parts(show(head, WORKFLOW))
+    through which any of its lines may reach the gate's, or where a
+    workflow holds a character of `UNYAML`'s, a comment's edit too."""
+    was_text, now_text = show(base, WORKFLOW), show(head, WORKFLOW)
+    was, now = workflow_parts(was_text), workflow_parts(now_text)
     notes = []
+    odd = unyaml_said(was_text, now_text)
+    if odd and was_text != now_text:
+        notes.append(
+            f"`{WORKFLOW}` holds {odd} and is edited: a break or a space to Python and none to YAML, on which "
+            "readers of YAML differ, so a line one reads as a comment another may run; every edit of it is the "
+            "gate's, which the owner approves"
+        )
     if (was["aliases"] or now["aliases"]) and (was["keys"], was["jobs"]) != (now["keys"], now["jobs"]):
         notes.append(
             f"`{WORKFLOW}` reads a YAML alias (`*{sorted(was['aliases'] | now['aliases'])[0]}`) and is edited: through "
@@ -1705,8 +1763,8 @@ def workflow_edits(base, head, changed):
     for used in sorted(local_uses([*(was["jobs"].get(j, "") for j in ours), *(now["jobs"].get(j, "") for j in ours)])):
         hit = sorted(p for p in changed if not used or p == used or p.startswith(used + "/"))
         if hit:
-            notes.append(f"`./{used}`, which a job of the gate's uses, is edited (`{hit[0]}`): the gate's own, which "
-                         "the owner approves")
+            notes.append(f"`./{path_said(used)}`, which a job of the gate's uses, is edited (`{path_said(hit[0])}`): "
+                         "the gate's own, which the owner approves")
     names = {n for parts in (was, now) for j in JOBS if j in parts["jobs"]
              for n in (j, name_in(parts, j)[0]) if n is not None}
     for path in sorted(p for p in changed if p.startswith(WORKFLOWS) and "/" not in p[len(WORKFLOWS):]
@@ -1715,13 +1773,29 @@ def workflow_edits(base, head, changed):
             # Its keys outside the jobs are named above, and its gate's jobs.
             like = named_jobs_edited(was, now, names, skip=ours, keys=False)
         else:
-            like = named_jobs_edited(workflow_parts(show(base, path)), workflow_parts(show(head, path)), names)
+            a, b = show(base, path), show(head, path)
+            odd = unyaml_said(a, b)
+            if odd and a != b:
+                notes.append(
+                    f"`{path_said(path)}` holds {odd} and is edited: a break or a space to Python and none to YAML, "
+                    "on which readers of YAML differ, so a job one reads as a comment another may show under the "
+                    "gate's name, which the owner approves"
+                )
+                continue
+            like = named_jobs_edited(workflow_parts(a), workflow_parts(b), names)
         if like:
             notes.append(
-                f"`{path}` is edited, and its job `{like[0]}` is named as one of the gate's ({', '.join(sorted(names))}): "
+                f"`{path_said(path)}` is edited, and its job `{like[0]}` is named as one of the gate's "
+                f"({', '.join(sorted(names))}): "
                 "a check shown under the gate's name, which the owner approves"
             )
     return notes
+
+
+def unyaml_said(*texts):
+    """The characters of `UNYAML` that `texts` hold, as a note names them
+    (`U+0085, U+2028`), or "" where they hold none."""
+    return ", ".join(f"U+{ord(c):04X}" for c in sorted({c for t in texts for c in UNYAML.findall(t)}))
 
 
 def gate_edits(base, head):
