@@ -37,3 +37,15 @@ meets its block to another implementation's, each test's count of cases
 held. `SECURITY.md` is held to the tree the same way, by
 `tools/security_md_check.py` (CI's fmt job): a flag, path, link or primitive
 it names that is gone fails, and so does any kind of check counting zero.
+
+**[A file is made by `fennec_core::fs`'s helpers, its owner's alone](../docs/design/durability.md#files-modes)**
+-- `private` or `private_beside` on the open that makes it,
+`create_private` or `create_like` for a side file (`O_EXCL`, no link
+followed), `create_dir_private` or `create_dir_new` for a directory --
+`0600`, a directory `0700`, whatever the umask, never a `chmod` after. A
+file renamed over another takes its mode on the open handle (`mode_like`),
+a group's bits only where it is of that group, nothing from a file another
+user owns; nothing is chowned. `tools/file_create_check.py` (CI's fmt job)
+refuses `File::create`, `fs::write`, `.create(true)`, `create_dir_all`,
+`fs::copy` and the like in `crates/*/src` outside tests, fennec-bench and
+fennec-fuzz, an exception allowed with why and how many times.

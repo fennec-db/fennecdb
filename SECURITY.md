@@ -302,7 +302,9 @@ These are deliberate. The [server](https://fennecdb.com/docs/server),
   each took the umask's mode, usually readable by every user. Not defended:
   anything running as the server's user or as root; a file made by 0.2.0 or
   before, or given a wider mode by its operator, which keeps that mode -- a
-  file replaced keeps the mode of the one it replaces; a copy made elsewhere
+  file replaced keeps the mode of the one it replaces, a group's bits only
+  where the new file is in that group (a setgid directory keeps it), and
+  nothing of a file another user owns; a copy made elsewhere
   with other modes; and what the process list shows, a password in
   `--follow`'s connection string among it
   ([server docs](https://fennecdb.com/docs/server#file-modes)). On Windows a
