@@ -43,6 +43,10 @@ LoadCredential=rclone.conf:/etc/fennecdb/rclone.conf
 # step waits for the next run. The files are sealed, and the group holds
 # this unit's user alone. As root ("+"): this unit's user may not change
 # another's modes; a side file renamed away meanwhile is no failure ("-").
+# When the run began is noted first, as this unit's user in its own state
+# directory: a directory older than that the group still cannot read is
+# one the chmod never reached, which fails the run (fennec-archive-sync).
+ExecStartPre=/usr/bin/touch %S/fennecdb/sync/%i/began
 ExecStartPre=-+/usr/bin/chmod -R g+rX /var/lib/fennecdb/archive/%i
 ExecStart=/usr/local/libexec/fennecdb/fennec-archive-sync %i
 # Which archive it last copied from (copied-from): the archive directory's

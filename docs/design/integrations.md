@@ -1780,7 +1780,15 @@ of the files the archiver's group may read: fennecdb makes every file 0600
 whatever the archiver's `UMask`, so each run first gives the group read of
 the archive as root (`ExecStartPre=+chmod -R g+rX`), and lists what the
 group then reads (`--files-from-raw`), since a busy tenant's 64 MB segment
-made between that step and rclone's listing failed the run; it refuses a first copy from an archive it has not copied before (the
+made between that step and rclone's listing failed the run. A directory
+the group cannot read that is older than the run -- its change time before
+`began`, which the unit touches before the chmod -- is one the chmod never
+reached (its `-` lets a failure or a missing `+` pass, and the root's own
+`StateDirectoryMode=0750` passed the script's first look), so the run
+fails: passed over, a tenant was left out of the bucket while every run
+wrote its success and `FennecArchiveSyncStale` never fired (G14's review,
+F5; `make deploy-check` runs the sync with the chmod taken out). It
+refuses a first copy from an archive it has not copied before (the
 directory's filesystem and inode, noted in its state directory) where the
 bucket holds a file the disk does not, since a rebuilt machine's new
 archive rewrote the bucket's `history`, `began` and `presence` within the
