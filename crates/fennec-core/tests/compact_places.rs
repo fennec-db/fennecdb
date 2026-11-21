@@ -677,3 +677,86 @@ fn a_collection_takes_no_place_past_its_bound() {
         Ok(Ok(r)) => panic!("{r:?}"),
     }
 }
+
+/// A collection holding more places than the bound opens, reads, and takes
+/// every alter that adds no place -- a rename, a drop -- refusing an add in
+/// words that fit it. 0.2.0 had no bound: a collection of more fields than
+/// it, or as many and a dropped one before a compact, is a file a release
+/// wrote. A rename went through `Schema::new`'s count, and was refused
+/// ("declares 4097 fields") though it adds no place. Made here as 0.2.0's
+/// parser made one, with nothing counting it: a `Schema` built whole and
+/// handed to `create collection`, which counts nothing itself (the bound is
+/// `Schema::new`'s, a declared schema's and an add's), and its records read
+/// again as an open reads a file.
+#[test]
+fn a_collection_past_the_bound_takes_every_alter_but_an_add() {
+    let max = fennec_core::schema::MAX_PLACES;
+    let made = |name: &str, fields: usize, dropped: Vec<usize>| Schema {
+        name: name.to_string(),
+        fields: (0..fields)
+            .map(|i| Field::new(format!("f{i}"), DataType::Int))
+            .collect(),
+        paths: Vec::new(),
+        dropped,
+        composites: Vec::new(),
+    };
+    let sink = Records::default();
+    {
+        let mut db = Database::with_sink(Box::new(sink.clone()));
+        // `w` a field past the bound; `v` within it by its fields, past it
+        // by the four places its dropped fields left.
+        for schema in [
+            made("w", max + 1, Vec::new()),
+            made("v", max - 2, vec![1, 3, 5, 7]),
+        ] {
+            db.execute(&Statement::CreateCollection {
+                schema,
+                if_not_exists: false,
+            })
+            .unwrap();
+        }
+        ok(&mut db, &format!("put w {{f0: 10, f{max}: 20}}"));
+        ok(&mut db, &format!("put v {{f0: 10, f{}: 20}}", max - 3));
+    }
+    let mut db = loaded(&sink.image());
+    for (c, last) in [("w", max), ("v", max - 3)] {
+        let read = |db: &Database, field: &str| {
+            rows_of(db, &format!("get {c} select f0, {field}")).unwrap()
+        };
+        assert_eq!(
+            read(&db, &format!("f{last}")),
+            [(1, vec![int(10), int(20)])]
+        );
+        ok(
+            &mut db,
+            &format!("alter collection {c} rename field f{last} to last"),
+        );
+        assert_eq!(read(&db, "last"), [(1, vec![int(10), int(20)])]);
+        ok(&mut db, &format!("alter collection {c} drop field f1"));
+        assert_eq!(read(&db, "last"), [(1, vec![int(10), int(20)])]);
+        let schema = db.collection(c).unwrap().schema.clone();
+        let (n, dropped) = (schema.fields.len(), schema.dropped.len());
+        let way = match n < max {
+            true => {
+                "make the collection again (create another and copy the rows into it) to be \
+                 rid of the dropped places"
+            }
+            // Made again, it would hold its fields still: no way out but
+            // fewer.
+            false => {
+                "its fields alone fill the places a collection holds, and making it again \
+                      keeps them"
+            }
+        };
+        let words = format!(
+            "`{c}` holds {} places -- its {n} fields and the {dropped} its dropped fields left, \
+             which its documents keep -- and takes no field more: {way}",
+            n + dropped
+        );
+        match run(&mut db, &format!("alter collection {c} add field more int")) {
+            Err(Error::Query(m)) => assert_eq!(m, words),
+            other => panic!("{c}: {other:?}"),
+        }
+        assert_eq!(db.collection(c).unwrap().schema, schema);
+    }
+}

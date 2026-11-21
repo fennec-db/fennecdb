@@ -17047,14 +17047,26 @@ fn keeps_places(before: &Schema, ch: &FieldChange) -> bool {
 }
 
 /// The refusal of a field added to a collection holding
-/// [`crate::schema::MAX_PLACES`] places, and the way out.
+/// [`crate::schema::MAX_PLACES`] places, and the way out where there is
+/// one: made again, a collection is rid of its dropped places, and holds
+/// its fields still -- a collection 0.2.0 made past the bound, which had
+/// none, has no way out but fewer fields. One message, its way out a
+/// `&str`: a second message was 195 bytes of the browser module.
 #[cold]
 #[inline(never)]
 fn places_full(collection: &str, schema: &Schema) -> Error {
+    let way = match schema.fields.len() < crate::schema::MAX_PLACES {
+        true => {
+            "make the collection again (create another and copy the rows into it) to be rid \
+             of the dropped places"
+        }
+        false => {
+            "its fields alone fill the places a collection holds, and making it again keeps them"
+        }
+    };
     Error::Query(format!(
         "`{collection}` holds {} places -- its {} fields and the {} its dropped fields left, \
-         which its documents keep -- and takes no field more: make the collection again \
-         (create another and copy the rows into it) to be rid of the dropped places",
+         which its documents keep -- and takes no field more: {way}",
         schema.width(),
         schema.fields.len(),
         schema.dropped.len()
@@ -17062,15 +17074,18 @@ fn places_full(collection: &str, schema: &Schema) -> Error {
 }
 
 /// The fields an alter of `collection` leaves, checked as `Schema::new`
-/// checks a `create`'s: one copy for `add` and `rename`. Every field it
-/// held was read within the language's ranges (`Schema::decode`), so a
-/// refusal is of the field the alter changes.
+/// checks a `create`'s but for their count: one copy for `add` and
+/// `rename`. An add is held to the bound before (`places_full`), and a
+/// rename adds no place, so it is taken on a collection past the bound --
+/// one 0.2.0 made, which had none, and which an open reads as it is. Every
+/// field the collection held was read within the language's ranges
+/// (`Schema::decode`), so a refusal is of the field the alter changes.
 #[inline(never)]
 fn altered(
     collection: &str,
     fields: Vec<crate::schema::Field>,
 ) -> Result<Vec<crate::schema::Field>> {
-    Schema::new(collection.to_string(), fields).map(|s| s.fields)
+    Schema::checked(collection.to_string(), fields, false).map(|s| s.fields)
 }
 
 /// The beam [`past_tombstones`] widens to: `ef`, at least the page, and

@@ -665,7 +665,8 @@ alter collection orders rename field total to amount
     collection again: create another and copy the rows into it.</li>
   <li><b>A collection holds 4 096 places</b> over its life: its fields and
     the ones dropped from it. A field added past them is refused, and so is
-    a <code>create</code> declaring more.</li>
+    a <code>create</code> declaring more. A collection an earlier version
+    made past them still takes a rename or a drop.</li>
   <li><b>A type does not change in place.</b> Add a field of the new type,
     <code>set</code> it from the old one, and drop the old one.</li>
 </ul>

@@ -392,13 +392,25 @@ after it walk nothing; an open forgets them, the note being in no file.
 
 *How many places.* A collection holds `schema::MAX_PLACES`, 4 096, over
 its life: its fields and its dropped ones. An `alter ... add field` past
-them is refused, and so is a `create` declaring more fields. The refusal
-says to make the collection again -- create another and copy the rows into
-it -- which is rid of the places. PostgreSQL's dropped columns count toward
+them is refused, and so is a `create` declaring more fields, a declared
+schema too. The refusal says to make the collection again -- create
+another and copy the rows into it -- which is rid of the places, or,
+where the fields alone fill them, that making it again keeps them.
+PostgreSQL's dropped columns count toward
 its 1 600 the same way; 4 096 is MySQL's column count, past SQLite's
 default 2 000, so a table `fennec import` copies fits. A file holding more
-places opens as it is (`Schema::decode` counts none): no read refuses what
-a write took. A copy takes its primary's schema as it comes.
+places -- 0.2.0 had no bound -- opens as it is (`Schema::decode` counts
+none): no read refuses what a write took. Its collection takes every alter
+that adds no place, a rename and a drop: the count is held where
+`Schema::new` asks for it -- a `create`, a declared schema, an import --
+and on an add (`places_full`); an alter's check of the fields it leaves
+counts none (`Schema::checked`). A rename first went through
+`Schema::new`, which refused it on a collection of 4 097 fields ("declares
+4097 fields") though it adds no place
+(`compact_places::a_collection_past_the_bound_takes_every_alter_but_an_add`,
+a schema of 4 097 fields made whole, as 0.2.0's parser made one, and one of
+4 094 and four dropped places). A copy takes its primary's schema as it
+comes.
 
 *The rest of a compact.*
 

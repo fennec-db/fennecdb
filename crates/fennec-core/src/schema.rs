@@ -637,7 +637,8 @@ impl Field {
 /// collection again, which is rid of them. PostgreSQL's dropped columns
 /// count toward its 1 600 alike; 4 096 is MySQL's columns, past SQLite's
 /// 2 000 that `fennec import` copies a table of. A file holding more opens
-/// as it is: no read refuses what a write took.
+/// as it is -- no read refuses what a write took -- and its collection
+/// takes every alter but an add: a rename and a drop add no place.
 pub const MAX_PLACES: usize = 4096;
 
 /// The refusal of a primary's write or alter of `collection` made by other
@@ -970,9 +971,22 @@ pub fn place(dropped: &[usize], pos: usize) -> usize {
 }
 
 impl Schema {
-    pub fn new(name: impl Into<String>, mut fields: Vec<Field>) -> Result<Schema> {
-        let name = name.into();
-        if fields.len() > MAX_PLACES {
+    /// A collection's schema as a `create` declares it: no more fields
+    /// than [`MAX_PLACES`], each checked as [`Schema::checked`] checks it.
+    pub fn new(name: impl Into<String>, fields: Vec<Field>) -> Result<Schema> {
+        Schema::checked(name.into(), fields, true)
+    }
+
+    /// Each field's name, type, collation and index checked, no two of one
+    /// name, and with `counted` no more of them than [`MAX_PLACES`]. The
+    /// count is held where a collection is made -- a `create`, a declared
+    /// schema, an import, through [`Schema::new`] -- and where an alter
+    /// adds a field (`places_full`), never by an alter that adds no place:
+    /// a rename of a collection holding more -- one 0.2.0 made, which had
+    /// no bound -- was refused ("declares 4097 fields"). One copy of the
+    /// checks, the count among them: the browser module's size.
+    pub(crate) fn checked(name: String, mut fields: Vec<Field>, counted: bool) -> Result<Schema> {
+        if counted && fields.len() > MAX_PLACES {
             return Err(Error::Query(format!(
                 "`{name}` declares {} fields, and a collection holds {MAX_PLACES} at most",
                 fields.len()
