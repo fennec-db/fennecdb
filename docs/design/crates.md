@@ -546,7 +546,7 @@ returning the refusal, checked, was 102 bytes of the module and a branch
 at each of six sites, for what `take` already refuses. A
 bool the bytes end before is refused by the skip as by the decoder:
 stepped over unseen, it left the position past the end, and a compact's
-copy of the bytes it skipped (`Schema::without_dropped`) sliced past them.
+copy of the bytes it skipped (`schema::reclaim`) sliced past them.
 
 *What the bound costs.* Tested in the arms of the decoder's match, as the
 first version of this change tested it, the depth was an argument live

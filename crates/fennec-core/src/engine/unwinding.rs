@@ -193,6 +193,66 @@ mod on_file {
             let _ = std::fs::remove_file(crate::synclog::path_for(&path));
         }
     }
+
+    /// A compact past the point where it changed a store, until every
+    /// store points at the file it wrote: a panic there -- in the rewrite
+    /// under the lock, or as one written beside the database takes the
+    /// file's place -- and a rewritten file the sink cannot map fail the
+    /// database, as a storage error does, rather than leave it answering
+    /// from stores the file may not hold, behind a lock a server takes as
+    /// it stands. Opened again, the file holds every row.
+    #[test]
+    fn a_compact_stopped_after_it_changed_a_store_fails_the_database() {
+        let scratch = Scratch::new("fennecdb-compact-stopped");
+        let dir = &scratch.0;
+        for (at, beside) in [("compacted", false), ("adopted", true), ("remap", false)] {
+            let path = dir.join(format!("{at}.fennec"));
+            let _ = std::fs::remove_file(&path);
+            let mut db = crate::fs::open(&path).expect("open");
+            let schema = Schema::new("t", vec![crate::schema::Field::new("n", DataType::Int)])
+                .expect("schema");
+            db.execute(&Statement::CreateCollection {
+                schema,
+                if_not_exists: false,
+            })
+            .expect("create");
+            for n in 0..3 {
+                put(&mut db, n).expect("put");
+            }
+            db.sync().expect("sync");
+            PANIC_AT.with(|p| p.set(Some(at)));
+            let compact = Statement::Compact(None);
+            let db = match beside {
+                false => {
+                    let r = catch_unwind(AssertUnwindSafe(|| db.execute(&compact)));
+                    match at {
+                        "remap" => assert!(matches!(r, Ok(Err(Error::Io(_)))), "{at}: {r:?}"),
+                        _ => assert!(r.is_err(), "{at}: no panic"),
+                    }
+                    db
+                }
+                true => {
+                    let lock = std::sync::RwLock::new(db);
+                    let r = catch_unwind(AssertUnwindSafe(|| Database::maintain(&lock, &compact)));
+                    assert!(r.is_err(), "{at}: no panic");
+                    lock.into_inner().unwrap_or_else(|e| e.into_inner())
+                }
+            };
+            PANIC_AT.with(|p| p.set(None));
+            let mut db = db;
+            assert!(db.failure().is_some(), "{at}: the database goes on");
+            assert!(matches!(put(&mut db, 9), Err(Error::Io(_))), "{at}");
+            drop(db);
+            let mut db = crate::fs::open(&path).expect("reopen");
+            assert_eq!(rows(&db), 3, "{at}: the rows");
+            put(&mut db, 4).expect("a write after the reopen");
+            assert_eq!(rows(&db), 4, "{at}");
+            drop(db);
+            let _ = std::fs::remove_file(&path);
+            #[cfg(unix)]
+            let _ = std::fs::remove_file(crate::synclog::path_for(&path));
+        }
+    }
 }
 
 /// A panic in the middle of a write, at each place a write changes

@@ -3393,23 +3393,6 @@ impl Collection {
         taken
     }
 
-    /// The documents written again without the places of dropped fields,
-    /// which `compact` takes out: the bytes of every value kept copied as
-    /// they stand, into a fresh store -- in memory until the rewrite that
-    /// follows points it at the new file.
-    fn strip_dropped(&mut self) -> Result<()> {
-        let mut fresh = Store::new();
-        fresh.raise_next_id(self.store.next_id());
-        fresh.reserve(self.store.len());
-        for id in self.store.iter_ids() {
-            let payload = self.store.raw(id)?.unwrap_or_default();
-            fresh.append(OP_PUT, id, &self.schema.without_dropped(payload)?);
-        }
-        self.store = fresh;
-        SchemaCell::make_mut(&mut self.schema).dropped.clear();
-        Ok(())
-    }
-
     /// The other documents holding one of `doc`'s `@unique` values, each
     /// with the field it holds it in -- or the index over several fields
     /// whose every part it holds them in, after the fields.
@@ -6628,8 +6611,18 @@ impl Database {
         if !self.mapped {
             return Ok(());
         }
-        let Some(base) = self.sink_mut().remapped() else {
-            return Ok(());
+        let remapped = self.sink_mut().remapped();
+        #[cfg(test)]
+        let remapped = remapped.filter(|_| !unwinding::armed("remap"));
+        // Not mapped -- the file's length unread, a mapping refused -- the
+        // stores would read on from the old file, whose mapping they hold,
+        // and the next handover read the records appended to the new one
+        // at their places in the old: the database is failed instead, until
+        // it is opened again.
+        let Some(base) = remapped else {
+            return self.storage(Err(Error::Io(
+                "the rewritten file could not be mapped; open it again".into(),
+            )));
         };
         if let Some(placed) = placed {
             for (name, c) in self.collections.iter_mut() {
@@ -8433,6 +8426,9 @@ impl Database {
             let ch = FieldChange::decode(body)?;
             let name = self.named(cid).ok_or_else(|| missing(cid))?;
             let c = self.collections.get_mut(&name).unwrap();
+            if !keeps_places(&c.schema, &ch) {
+                return Err(places_moved(&name));
+            }
             let before = c.schema.clone();
             let taken = c.alter_fields(&ch);
             // Before the index of a field added is built, as `alter
@@ -8935,6 +8931,18 @@ impl Database {
         let r = f(&mut *g.0);
         std::mem::forget(g);
         r
+    }
+
+    /// What a panic in a compact's rewrite leaves ([`Self::compact`]):
+    /// the stores compacted in memory, some perhaps pointed at a new file
+    /// and others at the old one. Stopped as a storage error stops writes,
+    /// which an open reads back as the file holds them.
+    #[cold]
+    #[inline(never)]
+    fn compact_unwound(&mut self) {
+        self.fail(&Error::Io(
+            "a panic as a compact rewrote the file: what the stores point at is unknown".into(),
+        ));
     }
 
     #[cold]
@@ -10519,6 +10527,10 @@ impl Database {
                          value for it",
                         f.name
                     )));
+                }
+                // Every place a field ever had stays (`MAX_PLACES`).
+                if schema.width() >= crate::schema::MAX_PLACES {
+                    return Err(places_full(collection, &schema));
                 }
                 // The checks a `create collection` makes of its fields: a
                 // name taken or reserved, a collation or an index the type
@@ -14905,8 +14917,6 @@ impl Database {
     /// rebuilt here -- a compact beside the database has rebuilt them
     /// already, without the lock.
     fn compact(&mut self, which: Option<&str>, graphs: bool) -> Result<Response> {
-        #[cfg(not(target_arch = "wasm32"))]
-        let began = std::time::Instant::now();
         let targets: Vec<String> = match which {
             Some(n) => {
                 self.collection(n)?;
@@ -14918,6 +14928,29 @@ impl Database {
             .iter()
             .map(|n| self.collections[n].store.dead_bytes())
             .sum();
+        // From the first store changed to the stores pointed at the new
+        // file, a panic fails the database, as one landing a block does: a
+        // server takes the lock it poisoned as it stands, and stores half
+        // pointed at the new file would read a later handover's records at
+        // the old one's places.
+        self.unwinding(
+            |db| db.compact_stores(&targets, graphs, reclaimed),
+            Self::compact_unwound,
+        )
+    }
+
+    /// [`Self::compact`] past its targets: every one of their stores
+    /// compacted, a dropped field's values reclaimed and its places kept,
+    /// the graphs holding tombstones rebuilt where `graphs` says, and the
+    /// file rewritten.
+    fn compact_stores(
+        &mut self,
+        targets: &[String],
+        graphs: bool,
+        reclaimed: usize,
+    ) -> Result<Response> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let began = std::time::Instant::now();
         // Over a mapped file the records never come into memory: the live
         // ones are written into the new file, and the stores are pointed at
         // it. The documents are the same ones, so no index is rebuilt.
@@ -14925,18 +14958,21 @@ impl Database {
         let mapped = self.mapped;
         #[cfg(target_arch = "wasm32")]
         let mapped = false;
-        // A dropped field's places are taken out of every document, which
-        // compacts the store besides; over a mapped file the documents come
-        // into memory for it, until the rewrite below points them at the new
-        // file.
-        for name in &targets {
+        // A dropped field's value becomes a `null` in each document, its
+        // place kept, as the compact copies the live records into fresh
+        // segments; over a mapped file only the documents holding one come
+        // into memory, written again, until the rewrite below points them
+        // at the new file. Nothing here is refused for what a document
+        // holds: one it cannot read is copied as it is.
+        for name in targets {
             let c = self.collections.get_mut(name).unwrap();
-            match c.schema.dropped.is_empty() {
-                false => c.strip_dropped()?,
-                true if !mapped => c.store.compact()?,
-                true => {}
+            match mapped {
+                false => c.store.compact()?,
+                true => c.store.reclaim()?,
             }
         }
+        #[cfg(test)]
+        unwinding::panic_at("compacted");
         // A compact drops dead records and moves the live ones; the
         // documents are the same, and every index is keyed by id, so none
         // needs rebuilding for that -- a graph without tombstones took 50 s
@@ -14945,7 +14981,7 @@ impl Database {
         // document with a vector leaves one, and they crowd the beam `near`
         // walks (a `limit 10` answered 4 rows once enough had gathered).
         if graphs {
-            for name in &targets {
+            for name in targets {
                 let c = self.collections.get_mut(name).unwrap();
                 // By position, not by collecting the names: the list of
                 // strings was 440 bytes of the browser module.
@@ -14954,14 +14990,17 @@ impl Database {
                         continue;
                     };
                     let field = &c.schema.fields[pos].name;
+                    // A document it cannot read leaves the graph as it
+                    // stands, tombstones and all, and answering as it did:
+                    // one built without it would not.
                     if c.vectors.get(field).is_some_and(|ix| ix.dead() > 0) {
-                        build_graph(c, pos, spec)?;
+                        let _ = build_graph(c, pos, spec);
                     }
                 }
             }
         }
         // After compaction the persisted image is rewritten from scratch.
-        let compacting: &[String] = if mapped { &targets } else { &[] };
+        let compacting: &[String] = if mapped { targets } else { &[] };
         let mut placed = Vec::new();
         let mut len = 0;
         let r = {
@@ -16952,6 +16991,47 @@ fn past_tombstones(
         format!("near: the ANN came up short past {dead} tombstones, every vector searched exactly")
     });
     Short::Exact
+}
+
+/// Whether `ch`, a primary's alter, leaves the dropped places the copy's
+/// `before` holds where they are, adding one for a drop alone. A primary
+/// of 0.2.0 or before took them out of its documents at a compact, which
+/// no record says: its writes after it read a field early here, and this
+/// is where the copy can first tell (a `create index`'s schema, whole, is
+/// held to the copy's layout as well).
+fn keeps_places(before: &Schema, ch: &FieldChange) -> bool {
+    let (was, now) = (&before.dropped, &ch.schema.dropped);
+    match ch.op {
+        FIELD_DROP => now.len() == was.len() + 1 && was.iter().all(|d| now.contains(d)),
+        _ => now == was,
+    }
+}
+
+/// The refusal of a primary's alter whose dropped places are not the
+/// copy's ([`keeps_places`]).
+#[cold]
+#[inline(never)]
+fn places_moved(collection: &str) -> Error {
+    Error::Corrupt(format!(
+        "a schema change moved the fields of `{collection}`: its primary took a dropped field's \
+         places out of its documents, which this copy keeps; seed the copy again from its \
+         primary"
+    ))
+}
+
+/// The refusal of a field added to a collection holding
+/// [`crate::schema::MAX_PLACES`] places, and the way out.
+#[cold]
+#[inline(never)]
+fn places_full(collection: &str, schema: &Schema) -> Error {
+    Error::Query(format!(
+        "`{collection}` holds {} places -- its {} fields and the {} its dropped fields left, \
+         which its documents keep -- and takes no field more: make the collection again \
+         (create another and copy the rows into it) to be rid of the dropped places",
+        schema.width(),
+        schema.fields.len(),
+        schema.dropped.len()
+    ))
 }
 
 /// The fields an alter of `collection` leaves, checked as `Schema::new`

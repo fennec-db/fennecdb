@@ -639,9 +639,18 @@ fn codec(data: &[u8]) {
     for path in ["a", "b.c", "a.b.c.d"] {
         let _ = decode_path(data, 0, path);
     }
+    let mut reclaimed = Vec::new();
     for schema in codec_schemas() {
-        let _ = schema.read_doc(1, data);
-        let _ = schema.without_dropped(data);
+        let read = schema.read_doc(1, data);
+        // What a compact reclaims of a dropped place reads as the payload
+        // did, and leaves nothing more to reclaim.
+        if fennec_core::schema::reclaim(&schema.dropped, data, &mut reclaimed) {
+            if let Ok(doc) = &read {
+                let again = schema.read_doc(1, &reclaimed);
+                assert_eq!(again.as_ref().ok(), Some(doc), "reclaimed, read otherwise");
+            }
+            assert!(!fennec_core::schema::reclaim(&schema.dropped, &reclaimed, &mut Vec::new()));
+        }
     }
 }
 

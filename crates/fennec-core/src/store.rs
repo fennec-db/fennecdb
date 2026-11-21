@@ -771,6 +771,13 @@ pub struct Store {
     /// payload for each before it. Kept here, set wherever the schema
     /// changes, so that a read of one field takes no schema.
     dropped: Vec<usize>,
+    /// The dropped places every payload here holds a `null` at, or ends
+    /// before: those a compact reclaimed ([`Self::reclaims`]). No write
+    /// fills one again -- a write puts a `null` there, and a block put back
+    /// points its ids at payloads held before it -- so the compacts after
+    /// the first walk no document for them, as none walked where a compact
+    /// took the places out. Not in the file: an open walks them once more.
+    cleared: Vec<usize>,
 }
 
 impl Default for Store {
@@ -789,6 +796,7 @@ impl Store {
             dead_bytes: 0,
             total_bytes: 0,
             dropped: Vec::new(),
+            cleared: Vec::new(),
         }
     }
 
@@ -797,6 +805,36 @@ impl Store {
     pub fn set_dropped(&mut self, dropped: &[usize]) {
         self.dropped.clear();
         self.dropped.extend_from_slice(dropped);
+    }
+
+    /// Whether a payload may hold a value at a dropped place: a drop no
+    /// compact has reclaimed since the store was read in ([`Self::cleared`]).
+    fn reclaims(&self) -> bool {
+        self.dropped != self.cleared
+    }
+
+    /// Each document holding a value at a dropped place written again as a
+    /// write after the drop writes it ([`crate::schema::reclaim`]),
+    /// appended as a write is: what a compact of a mapped file does before
+    /// the rewrite copies the live records into the new file and points the
+    /// store at it ([`Self::relocate_live`]), so that only the documents
+    /// written again are held in memory meanwhile, and only once a drop.
+    /// Every place stays where it is, and the documents read as they did.
+    pub fn reclaim(&mut self) -> Result<()> {
+        if !self.reclaims() {
+            return Ok(());
+        }
+        let mut out = Vec::new();
+        for id in self.index.ids() {
+            let Some(loc) = self.index.get(id) else {
+                continue;
+            };
+            if crate::schema::reclaim(&self.dropped, self.payload(loc)?, &mut out) {
+                self.append(OP_PUT, id, &out);
+            }
+        }
+        self.cleared.clone_from(&self.dropped);
+        Ok(())
     }
 
     /// Where the field at `pos` is in a payload.
@@ -1842,6 +1880,7 @@ impl Store {
             dead_bytes: self.dead_bytes,
             total_bytes: self.total_bytes,
             dropped: self.dropped.clone(),
+            cleared: Vec::new(),
         }
     }
 
@@ -1882,18 +1921,26 @@ impl Store {
         Ok(())
     }
 
-    /// The live records in a fresh store, the dead ones left behind -- and
-    /// `self` untouched, so the database goes on using it while a
-    /// maintenance builds beside it.
+    /// The live records in a fresh store, the dead ones left behind, each
+    /// value at a dropped place a `null` ([`Self::reclaim`]) -- and `self`
+    /// untouched, so the database goes on using it while a maintenance
+    /// builds beside it.
     pub fn compacted(&self) -> Result<Store> {
         let mut fresh = Store::new();
         fresh.next_id = self.next_id;
         fresh.dropped.clone_from(&self.dropped);
+        fresh.cleared.clone_from(&self.dropped);
+        let reclaims = self.reclaims();
+        let mut out = Vec::new();
         let ids = self.index.ids();
         fresh.reserve(ids.len());
         for id in ids {
             let loc = self.index.get(id).unwrap();
-            fresh.append(OP_PUT, id, self.payload(loc)?);
+            let payload = self.payload(loc)?;
+            match reclaims && crate::schema::reclaim(&self.dropped, payload, &mut out) {
+                true => fresh.append(OP_PUT, id, &out),
+                false => fresh.append(OP_PUT, id, payload),
+            };
         }
         Ok(fresh)
     }
@@ -2068,14 +2115,26 @@ mod tests {
             later.read_doc(2, &payload).unwrap().get("c"),
             Some(&Value::Int(3))
         );
-        // Taken out, the place is gone and the values stand.
-        let stripped = later.without_dropped(st.raw(1).unwrap().unwrap()).unwrap();
-        let mut compacted = later.clone();
-        compacted.dropped.clear();
+        // Reclaimed, the value at the place is gone and the place stays:
+        // the payload ends where a write's would, every value read as it
+        // was. The one written now holds a `null` there already, as
+        // nothing to reclaim.
+        let mut reclaimed = Vec::new();
+        let before = st.raw(1).unwrap().unwrap();
+        assert!(crate::schema::reclaim(&later.dropped, before, &mut reclaimed));
+        // `a` alone: the dropped place ended the payload.
+        assert_eq!(reclaimed, before[..3]);
         assert_eq!(
-            compacted.read_doc(1, &stripped).unwrap(),
-            later.read_doc(1, st.raw(1).unwrap().unwrap()).unwrap()
+            later.read_doc(1, &reclaimed).unwrap(),
+            later.read_doc(1, before).unwrap()
         );
+        let mut nothing = Vec::new();
+        assert!(!crate::schema::reclaim(&later.dropped, &payload, &mut nothing));
+        assert!(nothing.is_empty());
+        let compacted = st.compacted().unwrap();
+        assert_eq!(compacted.raw(1).unwrap().unwrap(), reclaimed);
+        assert_eq!(compacted.raw(2).unwrap().unwrap(), payload);
+        assert!(!compacted.reclaims());
         // A payload cut inside a value is no field added after it.
         let cut = &payload[..payload.len() - 1];
         assert!(later.read_doc(2, cut).is_err());

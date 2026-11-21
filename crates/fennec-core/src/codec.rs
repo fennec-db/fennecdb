@@ -637,7 +637,7 @@ fn skip<const FIELD: bool>(buf: &[u8], pos: &mut usize, depth: usize) -> Result<
         TAG_NULL => Ok(()),
         // Its byte looked for, as the decoder does: stepped over unseen, a
         // bool the payload ends before left `pos` past the end, and a
-        // compact's copy of the bytes it skipped (`Schema::without_dropped`)
+        // compact's copy of the bytes it skipped (`schema::reclaim`)
         // sliced past them.
         TAG_BOOL => {
             take(buf, pos, 1)?;

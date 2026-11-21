@@ -205,6 +205,40 @@ static COMPACTER: Once = Once::new();
 /// The compacts the process ran on its own, for `/_metrics`.
 pub static AUTO_COMPACTIONS: AtomicU64 = AtomicU64::new(0);
 
+/// The compacts the process tried on its own and was refused, for
+/// `/_metrics`: one the next look meets again -- dead records stay due --
+/// is counted each time and logged once (`REFUSED`).
+pub static AUTO_COMPACTIONS_REFUSED: AtomicU64 = AtomicU64::new(0);
+
+/// Each database's last refusal logged, by what the log names it: a
+/// refusal the next look meets again in the same words is not logged
+/// again, five seconds after it, for as long as it stands. A compact that
+/// runs takes its database's off.
+static REFUSED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// Whether `what`'s refusal `why` is news: not the one logged last for it.
+/// `None` takes the one logged off, as a compact that ran does.
+fn refusal_is_news(what: &str, why: Option<&str>) -> bool {
+    let mut refused = REFUSED.lock().unwrap_or_else(|e| e.into_inner());
+    let at = refused.iter().position(|(w, _)| w == what);
+    match (at, why) {
+        (Some(i), None) => {
+            refused.swap_remove(i);
+            false
+        }
+        (None, None) => false,
+        (Some(i), Some(why)) if refused[i].1 == why => false,
+        (Some(i), Some(why)) => {
+            refused[i].1 = why.to_string();
+            true
+        }
+        (None, Some(why)) => {
+            refused.push((what.to_string(), why.to_string()));
+            true
+        }
+    }
+}
+
 /// Sets when the files the process serves are compacted on their own, or
 /// that they never are.
 pub fn auto_compact(policy: Option<CompactPolicy>) {
@@ -249,6 +283,7 @@ fn compact(what: &str, db: &RwLock<Database>, policy: &CompactPolicy, memory: Me
     match r {
         Ok(_) => {
             AUTO_COMPACTIONS.fetch_add(1, Ordering::Relaxed);
+            refusal_is_news(what, None);
             crate::log!(
                 "{what}: compacted, {:.1} MB -> {:.1} MB in {took:.1?}, {:.1?} under the write lock",
                 before.file as f64 / 1e6,
@@ -256,7 +291,21 @@ fn compact(what: &str, db: &RwLock<Database>, policy: &CompactPolicy, memory: Me
                 g.last_compact_held()
             );
         }
-        // Put back as it was: the next look tries again.
-        Err(e) => crate::log!("{what}: could not compact: {e}"),
+        // Put back as it was: the next look tries again. A compact is
+        // refused for nothing a document holds (a document it cannot read
+        // is copied as it is), but a refusal that stands -- a location
+        // outside the file it maps, a side file the disk will not take --
+        // would be met every look: counted each time, and logged once in
+        // its words until it changes or a compact runs.
+        Err(e) => {
+            AUTO_COMPACTIONS_REFUSED.fetch_add(1, Ordering::Relaxed);
+            let why = e.to_string();
+            if refusal_is_news(what, Some(&why)) {
+                crate::log!(
+                    "{what}: could not compact: {why} (tried again at every look, logged again \
+                     once the refusal changes)"
+                );
+            }
+        }
     }
 }

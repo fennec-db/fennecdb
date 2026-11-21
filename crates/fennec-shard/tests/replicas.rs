@@ -185,6 +185,94 @@ fn a_nodes_tenants_are_followed_by_its_standby_and_promoted_on_failover() {
     drop(n2);
 }
 
+/// A tenant's standby reads the writes after its primary's compact as the
+/// primary does, and promoted on a failover takes writes that its file
+/// holds as it answers them. A compact keeps every place: while it took a
+/// dropped field's places out, telling no copy, the standby read every
+/// later write of the collection a field early, and after a failover the
+/// values it misread were the tenant's.
+#[test]
+fn a_standby_reads_the_writes_after_a_compact_and_after_its_failover_as_written() {
+    let n1 = node("c1", None);
+    let n2 = node("c2", Some(&n1.addr));
+    let cfg = Config {
+        addr: "127.0.0.1:0".into(),
+        upstream_timeout: Duration::from_secs(5),
+        ..Config::default()
+    };
+    let router = Router::new(Directory::in_memory(), cfg);
+    let listener = router.bind().unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let _ = router.serve_on(listener);
+    });
+    for (name, nd) in [("n1", &n1), ("n2", &n2)] {
+        let body = format!(r#"{{"addr":"{}","token":"adm-c{}"}}"#, nd.addr, &name[1..]);
+        assert_eq!(
+            call(port, "PUT", &format!("/_shard/nodes/{name}"), &body, None).0,
+            201
+        );
+    }
+    let body = format!(
+        r#"{{"addr":"{}","token":"adm-c1","standby":"n2"}}"#,
+        n1.addr
+    );
+    assert_eq!(call(port, "PUT", "/_shard/nodes/n1", &body, None).0, 201);
+    assert_eq!(call(port, "PUT", "/_shard/tenants/acme", "", None).0, 201);
+    let ok = |at: u16, sql: &str| {
+        let (status, body) = query(at, "/t/acme/query", sql);
+        assert_eq!(status, 200, "{sql}: {body}");
+        body
+    };
+    for sql in [
+        "create collection x (a int, b int, c int, d int)",
+        "put x {a: 1, b: 2, c: 3, d: 4}",
+        "alter collection x drop field b",
+        "compact",
+        "put x {a: 10, c: 30, d: 40}",
+    ] {
+        ok(port, sql);
+    }
+    let xs = "get x select a, c, d order id";
+    let want = ok(port, xs);
+    assert!(want.contains(r#""a":10,"c":30,"d":40"#), "{want}");
+    until(n2.port, "/t/acme/query", xs, r#""a":10,"c":30,"d":40"#);
+    let copy = ok(n2.port, xs);
+    assert!(copy.contains(r#""a":1,"c":3,"d":4"#), "{copy}");
+
+    let (status, body) = call(port, "POST", "/_shard/nodes/n1/failover", "", None);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"promoted\":[\"acme\"]"), "{body}");
+    // Promoted, it takes writes, through the router, and holds them where
+    // its documents' places say.
+    ok(port, "put x {a: 100, c: 300, d: 400}");
+    ok(port, "compact");
+    ok(port, "put x {a: 1000, c: 3000, d: 4000}");
+    let now = ok(port, xs);
+    let (one, two) = (r#""a":100,"c":300,"d":400"#, r#""a":1000,"c":3000,"d":4000"#);
+    assert!(now.contains(one) && now.contains(two), "{now}");
+    // Its file read on its own holds the same.
+    let file = std::fs::read(n2.dir.join("acme.fennec")).unwrap();
+    let mut db = fennec_core::prelude::Database::new();
+    db.load(&file).unwrap();
+    let r = db
+        .query(&fennec_ql::parse_one(xs).unwrap(), &[])
+        .unwrap();
+    let held: Vec<Vec<fennec_core::prelude::Value>> =
+        r.rows().unwrap().rows.iter().map(|r| r.values.clone()).collect();
+    assert_eq!(held.len(), 4);
+    assert_eq!(
+        held[3],
+        [1000, 3000, 4000].map(fennec_core::prelude::Value::Int)
+    );
+    assert_eq!(
+        held[1],
+        [10, 30, 40].map(fennec_core::prelude::Value::Int)
+    );
+    drop(n1);
+    drop(n2);
+}
+
 #[test]
 fn a_tenant_deleted_through_the_router_goes_from_the_standby_as_well() {
     let n1 = node("d1", None);

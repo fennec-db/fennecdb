@@ -659,7 +659,13 @@ alter collection orders rename field total to amount
   <li><b>A field added reads <code>null</code></b> in every document
     written before it, and cannot be <code>required</code>.</li>
   <li><b>A field dropped is gone</b> from every read and write, and its
-    index with it. <code>compact</code> gives its space back.</li>
+    index with it. The next <code>compact</code> gives its values' space
+    back; its place stays, a byte in each document a field after it is
+    in, for the collection's life. To be rid of the places, make the
+    collection again: create another and copy the rows into it.</li>
+  <li><b>A collection holds 4 096 places</b> over its life: its fields and
+    the ones dropped from it. A field added past them is refused, and so is
+    a <code>create</code> declaring more.</li>
   <li><b>A type does not change in place.</b> Add a field of the new type,
     <code>set</code> it from the old one, and drop the old one.</li>
 </ul>
@@ -671,8 +677,15 @@ document written before it ends before the field's place, and reads
 <code>null</code> there. A rename is the schema alone. A field dropped
 leaves its place in the documents written before the drop — skipped on
 read, written as <code>null</code> after it, refused by name everywhere —
-and <code>compact</code> writes every document without it, copying each
-other value as its bytes stand. A field added under a dropped one's name is
+and <code>compact</code> makes the value there a <code>null</code> of one
+byte, copying each other value as its bytes stand and every place where it
+was. It never takes the place out: a replica, an archive or a standby
+applies the writes after the compact by the places it holds, and no record
+tells it of a compact. Up to 0.2.0 a compact did take them out, and each
+copy read the writes after it a field off; see
+<a href="replication.html">Replication</a> for a 0.2.0 primary.
+A document <code>compact</code> cannot read is copied as it is and refused
+where it is read, as before; the compact goes on. A field added under a dropped one's name is
 a new field: the old values stay in the dropped place, and the new field
 reads <code>null</code> until it is written. A change of type is the one
 thing that would rewrite every document under the write lock, and is not
@@ -695,10 +708,11 @@ nothing a scan can measure: five scans of the million took 21.2 to 39.1 ms
 before the feature and 21.6 to 39.3 after, from 1.7% slower to 1.7% faster
 by the scan — as the same build with the reads written as before was,
 which makes it where the code lands, not what it does — and the browser
-module's scan of 20 000 rows 1.70 ms against 1.71. A <code>compact</code> that takes
-a dropped field out took 95 ms against 56 for one with none to take: it
-writes each document again rather than copy it. On a server it holds the
-write lock, where a compact otherwise runs beside the database.</p>
+module's scan of 20 000 rows 1.70 ms against 1.71. The first
+<code>compact</code> after a drop writes the documents holding a value
+there again; on a server it runs beside the database, as every compact
+does. A dropped place a field follows is a byte a document and a value a
+read of that field passes: MEASURED_PLACES</p>
 </details>
 
 <h2 id="inspecting-the-database">Inspecting the database</h2>
@@ -714,6 +728,9 @@ compact articles
 <p><code>compact</code> drops the dead records and rewrites the file. The
 indexes stand — the documents are the same ones, and every index is keyed by
 id — except a vector graph holding tombstones, which is rebuilt: nothing else
-takes a deleted or rewritten document's node out of it. See
-<a href="limits.html#index-build-open-and-maintenance">Limits</a>.</p>
+takes a deleted or rewritten document's node out of it. A dropped field's
+values become <code>null</code>s, and its place stays
+(<a href="#changing-a-collection">Changing a collection</a>). A compact is
+refused for nothing a document holds: one it cannot read is copied as it is.
+See <a href="limits.html#index-build-open-and-maintenance">Limits</a>.</p>
 </details>

@@ -628,6 +628,18 @@ impl Field {
     }
 }
 
+/// The most places a collection holds over its life: its fields and the
+/// places of those dropped from it ([`Schema::dropped`]), which a compact
+/// keeps. Each dropped place a field follows is a byte in every document
+/// written since and a value every read of that field passes, so the
+/// places a collection gathers are bounded: past them a `create
+/// collection` and an `alter ... add field` are refused, saying to make the
+/// collection again, which is rid of them. PostgreSQL's dropped columns
+/// count toward its 1 600 alike; 4 096 is MySQL's columns, past SQLite's
+/// 2 000 that `fennec import` copies a table of. A file holding more opens
+/// as it is: no read refuses what a write took.
+pub const MAX_PLACES: usize = 4096;
+
 /// The most parts an index over several fields takes: past a handful, a key
 /// is wider than the rows a prefix of it narrows to are worth.
 pub const MAX_COMPOSITE_KEYS: usize = 8;
@@ -793,13 +805,16 @@ pub struct Schema {
     /// position in `fields` stays a place in the payload. The schema writes
     /// each with the field it reads into ([`Schema::encode`]).
     pub paths: Vec<Field>,
-    /// Where a dropped field's value still is in the documents written
-    /// before its drop, ascending: a document is a run of values in field
-    /// order, so `alter ... drop field` leaves the place, skipped on read
-    /// and written as `null`, rather than rewrite every document under the
-    /// write lock. `compact` writes the documents without them and empties
-    /// this. Every field after one sits a place further in the documents
-    /// than in `fields` ([`Schema::place`]).
+    /// Where a dropped field's value is in the documents written before
+    /// its drop, ascending: a document is a run of values in field order,
+    /// so `alter ... drop field` leaves the place, skipped on read and
+    /// written as `null`, rather than rewrite every document under the
+    /// write lock. Kept for the collection's life: `compact` makes each
+    /// value there a `null` ([`reclaim`]) and renumbers nothing, since a
+    /// copy applying its primary's writes reads them by the places it
+    /// holds and no record tells it of a compact. Every field after one
+    /// sits a place further in the documents than in `fields`
+    /// ([`Schema::place`]).
     pub dropped: Vec<usize>,
     /// The indexes over several fields, in the order they were made.
     pub composites: Vec<Composite>,
@@ -830,6 +845,66 @@ pub fn split_path(name: &str) -> Option<(&str, &str)> {
     name.split_once('.')
 }
 
+/// A payload as a write after its drops would have written it, into `out`:
+/// the value at each of the `dropped` places (ascending) a `null` of one
+/// byte, and the dropped places it ends with left out, as a write leaves
+/// out those no field follows -- what `compact` reclaims of a dropped
+/// field. Every other value is copied as its bytes stand, at the place it
+/// stood: places are never renumbered, since a copy applying its
+/// primary's writes reads them by the places it holds, and no record
+/// tells it of a compact (docs/design/storage.md#dropped-places).
+///
+/// `false`, `out` left empty, where nothing would change -- each dropped
+/// place a `null` already and none ending the payload -- and where the
+/// payload cannot be read as far as its last dropped place: a value
+/// nested past [`MAX_DEPTH`] or cut short. Copied as it is, such a
+/// document is refused where it is read, in the same words, after the
+/// compact as before it, and the compact is never refused for it.
+pub fn reclaim(dropped: &[usize], buf: &[u8], out: &mut Vec<u8>) -> bool {
+    out.clear();
+    let Some(&last) = dropped.last() else {
+        return false;
+    };
+    let (mut pos, mut at, mut gap) = (0usize, 0usize, 0usize);
+    // Where the last value kept ends in `out`: the dropped places after it
+    // end the payload, and go.
+    let mut kept = 0;
+    let mut changed = false;
+    while at <= last && pos < buf.len() {
+        let from = pos;
+        if skip_value(buf, &mut pos).is_err() {
+            out.clear();
+            return false;
+        }
+        match dropped.get(gap) == Some(&at) {
+            true => {
+                gap += 1;
+                changed |= pos - from != 1 || buf[from] != TAG_NULL;
+                out.push(TAG_NULL);
+            }
+            false => {
+                out.extend_from_slice(&buf[from..pos]);
+                kept = out.len();
+            }
+        }
+        at += 1;
+    }
+    match pos < buf.len() {
+        // Past the last dropped place every value is kept, copied whole
+        // and never walked.
+        true => out.extend_from_slice(&buf[pos..]),
+        false if out.len() > kept => {
+            out.truncate(kept);
+            changed = true;
+        }
+        false => {}
+    }
+    if !changed {
+        out.clear();
+    }
+    changed
+}
+
 /// Where the field at `pos` is in a document, past the `dropped` places
 /// before it (ascending): what the store and the schema both work out.
 #[inline]
@@ -847,6 +922,12 @@ pub fn place(dropped: &[usize], pos: usize) -> usize {
 impl Schema {
     pub fn new(name: impl Into<String>, mut fields: Vec<Field>) -> Result<Schema> {
         let name = name.into();
+        if fields.len() > MAX_PLACES {
+            return Err(Error::Query(format!(
+                "`{name}` declares {} fields, and a collection holds {MAX_PLACES} at most",
+                fields.len()
+            )));
+        }
         let mut seen = Vec::new();
         for f in &mut fields {
             f.index = f.index.resolved();
@@ -1128,22 +1209,6 @@ impl Schema {
             fields.push((f.name.clone(), v));
         }
         Ok(crate::value::Document { id, fields })
-    }
-
-    /// A payload without its dropped places: what `compact` writes. Each
-    /// value kept is copied as its bytes stand.
-    pub fn without_dropped(&self, buf: &[u8]) -> Result<Vec<u8>> {
-        let mut out = Vec::with_capacity(buf.len());
-        let (mut pos, mut at) = (0, 0);
-        while pos < buf.len() {
-            let from = pos;
-            skip_value(buf, &mut pos)?;
-            if !self.dropped.contains(&at) {
-                out.extend_from_slice(&buf[from..pos]);
-            }
-            at += 1;
-        }
-        Ok(out)
     }
 
     pub fn field(&self, name: &str) -> Option<&Field> {
