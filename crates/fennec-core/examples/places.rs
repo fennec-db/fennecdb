@@ -163,6 +163,37 @@ fn main() {
     };
     let kind = mode.split_once('-').map_or("", |(_, k)| k);
     match (mode.as_str(), kind) {
+        ("gate-compact", _) => {
+            let dir = scratch(&mode);
+            let path = dir.join("compact.fennec");
+            let mut db = fennec_core::fs::open(&path).unwrap();
+            run(
+                &mut db,
+                "create collection t (n int, k text @hash, body text)",
+            );
+            let put = stmt("put t {id: $1, n: $2, k: $3, body: $4}");
+            for id in 1..=10_000i64 {
+                let params = [
+                    Value::Int(id),
+                    Value::Int(id * 31 % 1_000),
+                    Value::Text(format!("k{}", id % 100)),
+                    Value::Text(format!("row {id}, some forty bytes of its own text")),
+                ];
+                db.execute_with(&put, &params).unwrap();
+            }
+            drop(db);
+            let mut db = fennec_core::fs::open(&path).unwrap();
+            let set = stmt("set t {n: n + 1} where id = $1");
+            for id in 1..=10_000 {
+                db.execute_with(&set, &[Value::Int(id)]).unwrap();
+            }
+            let compact = stmt("compact");
+            count(&mode, 1, |_| {
+                black_box(db.execute(&compact).unwrap());
+            });
+            drop(db);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
         (_, "get-id") => {
             let mut db = Database::new();
             rows(&mut db, name, dropped, ROWS);
@@ -241,37 +272,6 @@ fn main() {
             let compact = stmt("compact");
             count(&mode, 1, |_| {
                 black_box(Database::maintain(&db, &compact).unwrap().unwrap());
-            });
-            drop(db);
-            let _ = std::fs::remove_dir_all(&dir);
-        }
-        ("gate-compact", _) => {
-            let dir = scratch(&mode);
-            let path = dir.join("compact.fennec");
-            let mut db = fennec_core::fs::open(&path).unwrap();
-            run(
-                &mut db,
-                "create collection t (n int, k text @hash, body text)",
-            );
-            let put = stmt("put t {id: $1, n: $2, k: $3, body: $4}");
-            for id in 1..=10_000i64 {
-                let params = [
-                    Value::Int(id),
-                    Value::Int(id * 31 % 1_000),
-                    Value::Text(format!("k{}", id % 100)),
-                    Value::Text(format!("row {id}, some forty bytes of its own text")),
-                ];
-                db.execute_with(&put, &params).unwrap();
-            }
-            drop(db);
-            let mut db = fennec_core::fs::open(&path).unwrap();
-            let set = stmt("set t {n: n + 1} where id = $1");
-            for id in 1..=10_000 {
-                db.execute_with(&set, &[Value::Int(id)]).unwrap();
-            }
-            let compact = stmt("compact");
-            count(&mode, 1, |_| {
-                black_box(db.execute(&compact).unwrap());
             });
             drop(db);
             let _ = std::fs::remove_dir_all(&dir);

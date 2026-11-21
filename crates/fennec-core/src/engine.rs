@@ -9511,6 +9511,10 @@ impl Database {
         };
         let (ids, _) = self.page_ids(c, sel, params, &ctx, false, true, false)?;
         let limit = sel.limit.map_or(usize::MAX, |l| l.at(params));
+        // A collection holding a dropped place passes its `null` by its
+        // byte (`codec::skip_passing`): asked only where a place is passed,
+        // which a `get` of every field of any other collection never does.
+        let passing = !c.schema.dropped.is_empty();
         let mut n = 0;
         out.push('[');
         for id in ids.into_iter().skip(sel.offset.at(params)).take(limit) {
@@ -9534,7 +9538,10 @@ impl Database {
                 // Past the payload's end nothing is skipped: a field added
                 // after the document was written reads as `null`.
                 while at < want {
-                    crate::codec::skip_field(doc, &mut pos)?;
+                    match passing {
+                        true => crate::codec::skip_passing(doc, &mut pos)?,
+                        false => crate::codec::skip_field(doc, &mut pos)?,
+                    }
                     at += 1;
                 }
                 at += 1;
@@ -17154,6 +17161,18 @@ struct Filter<'q> {
     /// among them.
     positions: Vec<usize>,
     index_of: Vec<usize>,
+    /// The places of [`Self::positions`] where a dropped place comes
+    /// before one of them, and `positions` left empty: read out of line
+    /// with the paths (`Store::read_fields_passing`), a dropped place's
+    /// `null` passed by its byte. Read in line, each dropped place a row
+    /// passed was a call into the skip, 44 instructions of a 440-instruction
+    /// row of a scan by one field past one; a test in line telling the two
+    /// apart would be paid by every row of every other collection.
+    passing: Vec<usize>,
+    /// Where the paths' values begin in `vals`: past the fields'.
+    paths_at: usize,
+    /// Whether a row is read out of line too: paths, or `passing`.
+    out_of_line: bool,
     /// The paths into json fields the filter reads, each its field's
     /// position and the keys past it: read a row after the fields, each
     /// its value off the bytes, into `vals` past theirs.
@@ -17548,11 +17567,23 @@ impl<'q> Filter<'q> {
             // query rather than once a row.
             *p = c.schema.place(*p);
         }
+        let paths_at = positions.len();
+        let past_dropped = match (c.schema.dropped.first(), positions.iter().max()) {
+            (Some(d), Some(last)) => d < last,
+            _ => false,
+        };
+        let (positions, passing) = match past_dropped {
+            true => (Vec::new(), positions),
+            false => (positions, Vec::new()),
+        };
         Filter {
             c,
             root,
             positions,
             index_of,
+            out_of_line: !paths.is_empty() || !passing.is_empty(),
+            passing,
+            paths_at,
             paths,
             vals: std::cell::RefCell::new(Vec::new()),
             key: std::cell::RefCell::new(Vec::new()),
@@ -17897,8 +17928,10 @@ impl<'q> Filter<'q> {
         // A filter over no path reads none, and asks no more than this,
         // the reading out of line so that what is inlined into every scan
         // stays the size it was. Its paths' values go after its fields',
-        // which `read_fields` leaves where they are.
-        if !self.paths.is_empty() {
+        // which `read_fields` leaves where they are. A collection holding a
+        // dropped place before a field read has its fields read there too
+        // (`passing`).
+        if self.out_of_line {
             self.read_paths(id, &mut vals)?;
         }
         self.test(&self.root, id, &vals, &Value::Int(id as i64), ctx)
@@ -18057,7 +18090,16 @@ impl<'q> Filter<'q> {
 
     #[inline(never)]
     fn read_paths(&self, id: DocId, vals: &mut Vec<Value>) -> Result<()> {
-        let n = self.positions.len();
+        if !self.passing.is_empty()
+            && !self.c.store.read_fields_passing(id, &self.passing, vals)?
+        {
+            vals.clear();
+            vals.resize(self.passing.len(), Value::Null);
+        }
+        if self.paths.is_empty() {
+            return Ok(());
+        }
+        let n = self.paths_at;
         vals.resize(n + self.paths.len(), Value::Null);
         if !self.c.store.read_paths(id, &self.paths, &mut vals[n..])? {
             vals[n..].fill(Value::Null);
@@ -18076,7 +18118,7 @@ impl<'q> Filter<'q> {
         let get = |s: Slot| match s {
             Slot::Id => idv,
             Slot::At(p) => &vals[self.index_of[p]],
-            Slot::Path(n) => &vals[self.positions.len() + n],
+            Slot::Path(n) => &vals[self.paths_at + n],
         };
         Ok(match t {
             Test::And(a, b) => {

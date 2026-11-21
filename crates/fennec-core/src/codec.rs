@@ -625,6 +625,21 @@ pub fn skip_field(buf: &[u8], pos: &mut usize) -> Result<()> {
     skip::<true>(buf, pos, 0)
 }
 
+/// [`skip_field`] where a dropped place may stand, which every write after
+/// the drop and every compact makes a one-byte `null`: a null stepped over
+/// by its byte, the call into the skip -- 34 instructions of its frame and
+/// its match -- not made. Asked only by a reader of a collection holding a
+/// dropped place (`Store::read_fields_passing`, `Database::query_json`):
+/// a compare more on every other value it passes.
+#[inline(always)]
+pub fn skip_passing(buf: &[u8], pos: &mut usize) -> Result<()> {
+    if buf.get(*pos) == Some(&TAG_NULL) {
+        *pos += 1;
+        return Ok(());
+    }
+    skip_field(buf, pos)
+}
+
 #[inline]
 fn skip<const FIELD: bool>(buf: &[u8], pos: &mut usize, depth: usize) -> Result<()> {
     let tag = match buf.get(*pos) {

@@ -829,7 +829,10 @@ impl Store {
             let Some(loc) = self.index.get(id) else {
                 continue;
             };
-            if crate::schema::reclaim(&self.dropped, self.payload(loc)?, &mut out) {
+            let payload = self.payload(loc)?;
+            if crate::schema::reclaims(&self.dropped, payload)
+                && crate::schema::reclaim(&self.dropped, payload, &mut out)
+            {
                 self.append(OP_PUT, id, &out);
             }
         }
@@ -1274,6 +1277,47 @@ impl Store {
     /// dropped field took a scan of a million rows by one condition 21.2 ->
     /// 21.8 ms.
     pub fn read_fields(&self, id: DocId, places: &[usize], out: &mut Vec<Value>) -> Result<bool> {
+        self.read_fields_in::<false>(id, places, out)
+    }
+
+    /// [`Self::read_fields`] of a collection holding a dropped place before
+    /// one of `places`, every `null` it passes stepped over by its byte
+    /// ([`crate::codec::skip_passing`]): every write after a drop, and
+    /// every compact, makes a dropped place's value one, and a call into
+    /// the skip for it was 44 instructions a row. A second copy of the
+    /// reader rather than a test in the one every scan runs, which every
+    /// other collection's rows would pay.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn read_fields_passing(
+        &self,
+        id: DocId,
+        places: &[usize],
+        out: &mut Vec<Value>,
+    ) -> Result<bool> {
+        self.read_fields_in::<true>(id, places, out)
+    }
+
+    /// [`Self::read_fields`] in the browser module, which holds one copy of
+    /// the reader.
+    #[cfg(target_arch = "wasm32")]
+    pub fn read_fields_passing(
+        &self,
+        id: DocId,
+        places: &[usize],
+        out: &mut Vec<Value>,
+    ) -> Result<bool> {
+        self.read_fields(id, places, out)
+    }
+
+    /// [`Self::read_fields`], each value it passes stepped over by
+    /// [`crate::codec::skip_passing`] where `PASS` says.
+    #[inline(always)]
+    fn read_fields_in<const PASS: bool>(
+        &self,
+        id: DocId,
+        places: &[usize],
+        out: &mut Vec<Value>,
+    ) -> Result<bool> {
         let Some(loc) = self.index.get(id) else {
             return Ok(false);
         };
@@ -1287,7 +1331,10 @@ impl Store {
             // after the document was written is not in it, and reads as
             // `null` below.
             while at < want {
-                crate::codec::skip_field(buf, &mut pos)?;
+                match PASS {
+                    true => crate::codec::skip_passing(buf, &mut pos)?,
+                    false => crate::codec::skip_field(buf, &mut pos)?,
+                }
                 at += 1;
             }
             // A text into the text the slot held: a scan reads a field of
@@ -1937,7 +1984,10 @@ impl Store {
         for id in ids {
             let loc = self.index.get(id).unwrap();
             let payload = self.payload(loc)?;
-            match reclaims && crate::schema::reclaim(&self.dropped, payload, &mut out) {
+            let changed = reclaims
+                && crate::schema::reclaims(&self.dropped, payload)
+                && crate::schema::reclaim(&self.dropped, payload, &mut out);
+            match changed {
                 true => fresh.append(OP_PUT, id, &out),
                 false => fresh.append(OP_PUT, id, payload),
             };
@@ -2115,6 +2165,16 @@ mod tests {
             later.read_doc(2, &payload).unwrap().get("c"),
             Some(&Value::Int(3))
         );
+        // Read passing a dropped place's `null` by its byte, or its value
+        // where one was written before the drop: the same values.
+        for id in [1, 2] {
+            let (mut plain, mut passing) = (Vec::new(), Vec::new());
+            assert!(st.read_fields(id, &places, &mut plain).unwrap());
+            assert!(st.read_fields_passing(id, &places, &mut passing).unwrap());
+            assert_eq!(plain, passing, "{id}");
+        }
+        assert!(!crate::schema::reclaims(&later.dropped, &payload));
+        assert!(crate::schema::reclaims(&later.dropped, st.raw(1).unwrap().unwrap()));
         // Reclaimed, the value at the place is gone and the place stays:
         // the payload ends where a write's would, every value read as it
         // was. The one written now holds a `null` there already, as

@@ -566,6 +566,58 @@ fn a_copy_refuses_a_write_made_by_other_places_than_it_holds() {
     }
 }
 
+/// A read past a dropped place -- a filter's fields and a plain `get`
+/// written as JSON, which pass a dropped place's `null` by its byte --
+/// reads the value a write before the drop left there as a value it steps
+/// over, and the `null` a write after it or a compact puts there by its
+/// byte: the same rows before the compact and after it.
+#[test]
+fn reads_past_a_dropped_place_answer_alike_before_and_after_a_compact() {
+    let mut db = Database::new();
+    for sql in [
+        "create collection x (a int, b text, c int, d text)",
+        "put x {a: 1, b: 'gone', c: 3, d: 'one'}",
+        "alter collection x drop field b",
+        "put x {a: 2, c: 30, d: 'two'}",
+    ] {
+        ok(&mut db, sql);
+    }
+    let text = |s: &str| Value::Text(s.into());
+    for compacted in [false, true] {
+        if compacted {
+            ok(&mut db, "compact");
+        }
+        assert_eq!(
+            rows_of(&db, "get x select a, c, d where c > 1 order id").unwrap(),
+            [
+                (1, vec![int(1), int(3), text("one")]),
+                (2, vec![int(2), int(30), text("two")])
+            ],
+            "compacted: {compacted}"
+        );
+        assert_eq!(
+            rows_of(&db, "get x select a where d == 'two' and c == 30").unwrap(),
+            [(2, vec![int(2)])],
+            "compacted: {compacted}"
+        );
+        for (sql, want) in [
+            (
+                "get x where id >= 1 limit 10",
+                r#"[{"id":1,"a":1,"c":3,"d":"one"},{"id":2,"a":2,"c":30,"d":"two"}]"#,
+            ),
+            (
+                "get x select c, d where id >= 1 limit 10",
+                r#"[{"c":3,"d":"one"},{"c":30,"d":"two"}]"#,
+            ),
+        ] {
+            let mut json = String::new();
+            let stmt = fennec_ql::parse_one(sql).unwrap();
+            assert_eq!(db.query_json(&stmt, &[], &mut json).unwrap(), Some(2), "{sql}");
+            assert_eq!(json, want, "{sql}, compacted: {compacted}");
+        }
+    }
+}
+
 /// A collection holds `MAX_PLACES` places over its life, its dropped
 /// fields' among them: a field past them is refused, saying how to be rid
 /// of them, and so is a `create` declaring more.

@@ -920,6 +920,41 @@ pub fn reclaim(dropped: &[usize], buf: &[u8], out: &mut Vec<u8>) -> bool {
     changed
 }
 
+/// Whether [`reclaim`] would change `buf`: a value other than a one-byte
+/// `null` at a dropped place, or a dropped place ending it. Walked a value
+/// at a time as far as its last dropped place, a `null` there passed by its
+/// byte and nothing copied: every document a compact meets after the first
+/// since an open is one the reclaim leaves as it is, and building its copy
+/// to compare took a compact over 100 000 rows from 86 to 127 million
+/// instructions. `false` where it cannot be read so far, which `reclaim`
+/// copies as it is; `true` may still meet a value it cannot read past it,
+/// which `reclaim` tells.
+pub fn reclaims(dropped: &[usize], buf: &[u8]) -> bool {
+    let Some(&last) = dropped.last() else {
+        return false;
+    };
+    let (mut pos, mut at, mut gap) = (0usize, 0usize, 0usize);
+    let mut ends_dropped = false;
+    while at <= last && pos < buf.len() {
+        match dropped.get(gap) == Some(&at) {
+            true if buf[pos] == TAG_NULL => {
+                gap += 1;
+                pos += 1;
+                ends_dropped = true;
+            }
+            true => return true,
+            false => {
+                if skip_value(buf, &mut pos).is_err() {
+                    return false;
+                }
+                ends_dropped = false;
+            }
+        }
+        at += 1;
+    }
+    ends_dropped && pos >= buf.len()
+}
+
 /// Where the field at `pos` is in a document, past the `dropped` places
 /// before it (ascending): what the store and the schema both work out.
 #[inline]
