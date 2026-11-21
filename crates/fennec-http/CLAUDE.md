@@ -122,6 +122,10 @@ A replay is a write's answer on every path, a call made to read's too
 waits.](../../docs/design/http.md#audit)** Only `audit::verified_as`,
 where a token checks out, clears its kind's wait (`audit::Kind`); a new
 check must call it, and nothing infers it from an answer. A node believes `Fennec-Router` from the router alone.
+A tenant named past `~`, a router's stand-in for one it does not place
+([router.md](../../docs/design/router.md#tenants-it-does-not-place)), is
+asked every credential as one held, then answered 404 before
+`Tenants::get` (`route_tenant`): no file of its name opens.
 A refusal is counted by its address, an IPv6 one's /64
 (`audit::counted_ip`, the hooks' count's key too), in a table that, full,
 lets the count refused longest ago go (`audit::ADDRESSES`): never every

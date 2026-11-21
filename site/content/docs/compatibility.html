@@ -72,6 +72,11 @@ replicas or standbys, then primaries
     the restart: the router answers each that it was not sent (503), safe to
     send again. A router fails a node over only with
     <code>--auto-failover</code>.</li>
+  <li>An <code>Idempotency-Key</code> a v0.2.0 server or node kept is not
+    looked up once it runs the new release: a keyed write sent before its
+    upgrade and again after runs again. Let clients' retries of writes made
+    before end first (<a href="http.html#idempotency">Retrying a
+    write</a>).</li>
   <li>A node holding both primaries and replicas cannot be upgraded before
     every primary: in such a fleet, use no feature that moves the format until
     every node runs the release.</li>

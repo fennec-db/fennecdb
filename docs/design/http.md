@@ -601,7 +601,12 @@ Against train-d, the mean of each build's 8 identities:
 | `scoped-keyed`, a 30-character `sub` | 96 634.5 | +37.9 | -1 407.0 | -16 389.0 |
 
 Two standard errors are 84 to 199 instructions in every row; `scoped`
-sends no key, and every figure of its row is inside them.
+sends no key, and every figure of its row is inside them. Counted again
+with the `del` on the write that moves the expiry (the same way, under a
+load of 2.5): `keyed` 65 670.6 against 46ae74f3's 65 612.6 (+58.0, two
+standard errors 147) and train-d's 80 365.4, and `scoped-keyed` 79 985.8
+against 79 992.7 (-6.9, 125) and 93 908.5: the table holds, the `del`
+running on the one write a restart's longer expiry moves.
 
 **A replay answers only once the first try's record is as durable, and as
 sent, as its answer was to be** (`idempotent::replay`,

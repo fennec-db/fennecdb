@@ -800,6 +800,11 @@ alerts between steps:
    through it as the connection ends: the entry sends a read or a keyed
    write on to the standby, and answers any other write 502, which may have
    run (send writes with an `Idempotency-Key` and they are retried safely).
+   Not across this upgrade, though: a key a 0.2.0 node kept is not looked
+   up once its node runs the new release (a key is its caller's now, kept
+   another way), so a keyed write first sent to a 0.2.0 node and sent
+   again after that node's upgrade in step 3 runs twice. Let the clients'
+   retries of writes made before a node's upgrade end before it.
    Then the global standby and the global router the same way. No release
    publishes `fennec-shard` yet: upgrading a router means building it from
    the release's tag (`cargo build --release --locked -p fennec-shard`, or
