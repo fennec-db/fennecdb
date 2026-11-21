@@ -1670,18 +1670,25 @@ connection of its own over TLS (`ssl_in_use`, `read_client_first_message`)
 -- so a server whose `pg_hba.conf` takes the role by a `host` line, not
 `hostssl` alone, signs the relay in, which then reads the rows and can
 write the stream's commits. What keeps that relay out: `verify-full`, where
-no certificate but the server's passes (the default off this machine),
-`hostssl` alone at the server, or `channel_binding=require` at the client,
-which refuses a server offering no `-PLUS`. A stream signed in unbound is
-not proven, so its keepalives move nothing it confirms (above). The first
-form of this section, SECURITY.md and the import page said a stand-in
-under `require` got no sign-in it could relay; the review of the change
-found the plain-text relay by reading PostgreSQL's SCRAM, and the three
-now say what holds. `channel_binding` is libpq's: `prefer` binds where
+no certificate but the server's passes (the default off this machine), or
+`channel_binding=require` at the client, which refuses a server offering
+no `-PLUS` and a connection in plain text; under `require`, `hostssl` alone
+at the server too. Under `prefer` `hostssl` does not: the stand-in answers
+the client's `SSLRequest` with `N`, takes its sign-in in plain text --
+`n,,`, nothing to bind -- and relays it over TLS of its own to the server,
+which takes `n,,`, its offer of `-PLUS` never shown to the client. A
+stream signed in unbound is not proven, so its keepalives move nothing it
+confirms (above). The first form of this section, SECURITY.md and the
+import page said a stand-in under `require` got no sign-in it could relay;
+the review of the change found the plain-text relay by reading
+PostgreSQL's SCRAM, and the three now say what holds. `channel_binding` is libpq's: `prefer` binds where
 offered and says `y,,` where no `-PLUS` came over TLS -- a server that did
 offer it, its offer taken out on a connection that reaches it over TLS,
-refuses -- `require` refuses a server not offering it and a connection in
-plain text (`a_plus_offer_taken_out_is_told_the_client_could_bind`),
+refuses -- `require` refuses a server not offering it
+(`a_plus_offer_taken_out_is_told_the_client_could_bind`), a connection in
+plain text (`channel_binding_required_refuses_a_sign_in_in_plain_text`)
+and a sign-in it did not bind, an `AuthenticationOk` with no SCRAM before
+it (`channel_binding_required_refuses_a_sign_in_it_did_not_bind`);
 `disable` sends `n,,`. A bound sign-in makes the connection proven.
 PostgreSQL offers `-PLUS` over TLS from 11 on, so `make import-test`'s
 server, TLS on, signs every live test in bound.

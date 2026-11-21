@@ -765,6 +765,63 @@ fn a_plus_offer_taken_out_is_told_the_client_could_bind() {
     );
 }
 
+/// Under `prefer` whoever stands in for the server can answer `N`, take
+/// the sign-in in plain text -- `n,,`, nothing to bind -- and relay it over
+/// TLS of its own to a server taking `hostssl` alone, which takes `n,,`:
+/// `channel_binding=require` refuses a connection in plain text before
+/// anything of SCRAM goes out.
+#[test]
+fn channel_binding_required_refuses_a_sign_in_in_plain_text() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        let mut request = [0u8; 8];
+        s.read_exact(&mut request).unwrap();
+        s.write_all(b"N").unwrap();
+        assert!(startup(&mut s));
+        let mut b = 10i32.to_be_bytes().to_vec();
+        b.extend_from_slice(b"SCRAM-SHA-256\0\0");
+        s.write_all(&framed(b'R', &b)).unwrap();
+        s.flush().unwrap();
+        // What the client sent after the offer: a `Terminate` or its end,
+        // no `p` of SCRAM's.
+        tx.send(message(&mut s).map(|(tag, _)| tag)).unwrap();
+    });
+    let u = url_as(
+        "localhost",
+        port,
+        "sslmode=prefer&channel_binding=require",
+        None,
+        Some("p"),
+    );
+    let e = Client::connect(&u).unwrap_err().to_string();
+    assert!(e.contains("this connection is plain text"), "{e}");
+    let after = rx.recv().unwrap();
+    assert!(matches!(after, None | Some(b'X')), "SCRAM began: {after:?}");
+}
+
+/// `channel_binding=require` takes no sign-in it did not bind: a server --
+/// or whoever stands in for it, here over TLS with a certificate the
+/// client trusts -- signing the client in at once, an `AuthenticationOk`
+/// with no SCRAM before it, is refused, a password held or not.
+#[test]
+fn channel_binding_required_refuses_a_sign_in_it_did_not_bind() {
+    let (port, rx) = standin(Answer::Tls);
+    let u = url_as(
+        "localhost",
+        port,
+        "sslmode=verify-full&channel_binding=require",
+        Some("ca.pem"),
+        None,
+    );
+    let e = Client::connect(&u).unwrap_err().to_string();
+    assert!(e.contains("signed the client in without it"), "{e}");
+    assert_eq!(seen(port, &rx), [Seen::Tls { startup: true }]);
+}
+
 /// Bytes a server -- or someone on the path -- sends after its `S`, before
 /// the handshake, go into the handshake, which refuses them, and never
 /// into what the client reads as the server's: here an `AuthenticationOk`
