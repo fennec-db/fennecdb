@@ -35,22 +35,30 @@ fn counted(f: impl FnOnce(usize, usize) -> (usize, usize)) {
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
         counted(|live, peak| (live + l.size(), peak));
+        // SAFETY: `l` is this call's layout, of a nonzero size as
+        // `GlobalAlloc::alloc`'s caller guarantees, handed on as it came.
         unsafe { System.alloc(l) }
     }
 
     unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
         counted(|live, peak| (live + l.size(), peak));
+        // SAFETY: as `alloc`'s.
         unsafe { System.alloc_zeroed(l) }
     }
 
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
         counted(|live, peak| (live.saturating_sub(l.size()), peak));
+        // SAFETY: `p` is `System`'s, made with `l` -- every call here hands
+        // on to it -- as `GlobalAlloc::dealloc`'s caller guarantees.
         unsafe { System.dealloc(p, l) }
     }
 
     unsafe fn realloc(&self, p: *mut u8, l: Layout, to: usize) -> *mut u8 {
         // Moved, the old block and the new are held at once.
         counted(|live, peak| (live - l.size().min(live) + to, peak.max(live + to)));
+        // SAFETY: `p` is `System`'s, made with `l`, and `to` is nonzero and
+        // fits `isize` once rounded to `l.align()`, as
+        // `GlobalAlloc::realloc`'s caller guarantees.
         unsafe { System.realloc(p, l, to) }
     }
 }
