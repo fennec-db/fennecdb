@@ -2351,7 +2351,9 @@ impl Window<'_> {
                     Ok(0) => break,
                     Ok(k) => got += k,
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                    Err(e) => return Err(e.into()),
+                    // Mapped here: a build without `std-fs` -- fennec-ql's
+                    // corpus, its own -- has no `From` for it.
+                    Err(e) => return Err(Error::Io(e.to_string())),
                 }
             }
             self.buf.truncate(got);
@@ -6980,7 +6982,8 @@ impl Database {
     /// by reading it, which the load takes in the place of its own walk of
     /// the mapping: a reader taking no lock (`fs::open_read_only`), whose
     /// mapping stops short of the bytes an open to write the file may cut.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// A file's alone (`std-fs`).
+    #[cfg(all(feature = "std-fs", not(target_arch = "wasm32")))]
     pub(crate) fn load_surveyed(&mut self, file: crate::store::Base, s: Survey) -> Result<usize> {
         self.surveyed = Some(s);
         let took = self.load_mapped(file);
