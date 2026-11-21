@@ -197,7 +197,9 @@ mod on_file {
     /// A compact past the point where it changed a store, until every
     /// store points at the file it wrote: a panic there -- in the rewrite
     /// under the lock, or as one written beside the database takes the
-    /// file's place -- and a rewritten file the sink cannot map fail the
+    /// file's place -- a later collection's store refusing once an
+    /// earlier one was compacted (a location outside the file, which no
+    /// write makes), and a rewritten file the sink cannot map fail the
     /// database, as a storage error does, rather than leave it answering
     /// from stores the file may not hold, behind a lock a server takes as
     /// it stands. Opened again, the file holds every row.
@@ -205,7 +207,12 @@ mod on_file {
     fn a_compact_stopped_after_it_changed_a_store_fails_the_database() {
         let scratch = Scratch::new("fennecdb-compact-stopped");
         let dir = &scratch.0;
-        for (at, beside) in [("compacted", false), ("adopted", true), ("remap", false)] {
+        for (at, beside) in [
+            ("compacted", false),
+            ("adopted", true),
+            ("remap", false),
+            ("refused", false),
+        ] {
             let path = dir.join(format!("{at}.fennec"));
             let _ = std::fs::remove_file(&path);
             let mut db = crate::fs::open(&path).expect("open");
@@ -219,14 +226,27 @@ mod on_file {
             for n in 0..3 {
                 put(&mut db, n).expect("put");
             }
+            // A second collection, compacted after `t`: the one whose
+            // store refuses.
+            let other = Schema::new("u", vec![crate::schema::Field::new("n", DataType::Int)])
+                .expect("schema");
+            db.execute(&Statement::CreateCollection {
+                schema: other,
+                if_not_exists: false,
+            })
+            .expect("create");
             db.sync().expect("sync");
             PANIC_AT.with(|p| p.set(Some(at)));
+            super::PANIC_SKIP.with(|s| s.set(usize::from(at == "refused")));
             let compact = Statement::Compact(None);
             let db = match beside {
                 false => {
                     let r = catch_unwind(AssertUnwindSafe(|| db.execute(&compact)));
                     match at {
                         "remap" => assert!(matches!(r, Ok(Err(Error::Io(_)))), "{at}: {r:?}"),
+                        "refused" => {
+                            assert!(matches!(r, Ok(Err(Error::Corrupt(_)))), "{at}: {r:?}")
+                        }
                         _ => assert!(r.is_err(), "{at}: no panic"),
                     }
                     db

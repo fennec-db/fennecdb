@@ -272,13 +272,14 @@ fn policy() -> CompactPolicy {
     }
 }
 
-/// The server's compaction meets the document with nobody asking: run as
-/// a server runs it -- the look under the read lock, the compact beside the
-/// database -- it succeeds once and is not due again, the deep row refused
-/// as before; a `Compactor`'s thread, the native library's, alike.
+/// A compaction nobody asked for meets the document: the look a host runs
+/// (`compact_when_due`, the read lock's look and the compact beside the
+/// database) succeeds once and is not due again, the deep row refused as
+/// before; a `Compactor`'s thread, the native library's, alike. The
+/// server's own loop is fennec-http's `tests/auto_compact_places.rs`.
 #[cfg(all(feature = "std-fs", any(unix, windows), target_pointer_width = "64"))]
 #[test]
-fn the_servers_compaction_runs_once_past_a_document_it_cannot_read() {
+fn a_hosts_compaction_runs_once_past_a_document_it_cannot_read() {
     let d = dir("auto");
     let path = written(&d, true);
     let db = RwLock::new(fennec_core::fs::open(&path).unwrap());
@@ -492,6 +493,65 @@ fn a_copy_refuses_an_alter_of_a_primary_that_took_the_places_out() {
         copy.apply(&r).unwrap();
     }
     assert_eq!(places(&copy, "x"), places(&primary, "x"));
+}
+
+/// A copy and a primary holding other places for one collection -- one
+/// side's compact of 0.2.0 or before took a dropped field's out, which no
+/// record says -- meet at the primary's next write of it: the copy reads a
+/// write as it was made, a value at every place up to the last field and
+/// none past it, and refuses one that is not, by name, either way round,
+/// rather than read it a field off (`[10, 40, null]` where the primary
+/// took the place out, `[10, null, 30]` where the copy did). A write of a
+/// collection whose places agree lands beside it.
+#[test]
+fn a_copy_refuses_a_write_made_by_other_places_than_it_holds() {
+    let stripped: &[&str] = &[
+        "create collection x (a int, c int, d int)",
+        "put x {a: 1, c: 3, d: 4}",
+    ];
+    let kept: &[&str] = &[
+        "create collection x (a int, b int, c int, d int)",
+        "put x {a: 1, b: 2, c: 3, d: 4}",
+        "alter collection x drop field b",
+    ];
+    for (primary_sql, copy_sql) in [(stripped, kept), (kept, stripped)] {
+        let sink = Records::default();
+        let mut primary = Database::with_sink(Box::new(sink.clone()));
+        let mut copy = Database::new();
+        for (db, sql) in [(&mut primary, primary_sql), (&mut copy, copy_sql)] {
+            for s in sql {
+                ok(db, s);
+            }
+            ok(db, "create collection y (n int)");
+        }
+        assert_eq!(
+            primary.collection("x").unwrap().id,
+            copy.collection("x").unwrap().id
+        );
+        let held = xs(&copy);
+        let from = primary.change_seq();
+        ok(&mut primary, "put x {a: 10, c: 30, d: 40}");
+        let records = sink.after(from);
+        match copy.apply(&records[0]) {
+            Err(Error::Corrupt(m)) => {
+                assert!(m.contains("moved the fields of `x`"), "{m}");
+                assert!(m.contains("seed the copy again"), "{m}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // Put back whole: the copy holds what it held, and goes on.
+        assert_eq!(xs(&copy), held);
+        assert!(copy.failure().is_none());
+        let from = primary.change_seq();
+        ok(&mut primary, "put y {n: 1}");
+        for r in sink.after(from) {
+            copy.apply(&r).unwrap();
+        }
+        assert_eq!(
+            rows_of(&copy, "get y select n").unwrap(),
+            rows_of(&primary, "get y select n").unwrap()
+        );
+    }
 }
 
 /// A collection holds `MAX_PLACES` places over its life, its dropped

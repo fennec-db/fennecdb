@@ -6624,6 +6624,20 @@ impl Database {
                 "the rewritten file could not be mapped; open it again".into(),
             )));
         };
+        // A walk of the new file that refuses leaves the stores as they
+        // were, at the old file's places: failed as well.
+        let r = self.repoint_at(base, placed, compacted);
+        self.storage(r)
+    }
+
+    /// [`Self::repoint`] once the rewritten file is mapped, at `base`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn repoint_at(
+        &mut self,
+        base: crate::store::Base,
+        placed: Option<&[(u32, u64)]>,
+        compacted: &[String],
+    ) -> Result<()> {
         if let Some(placed) = placed {
             for (name, c) in self.collections.iter_mut() {
                 match placed.iter().find(|(cid, _)| *cid == c.id) {
@@ -8427,7 +8441,7 @@ impl Database {
             let name = self.named(cid).ok_or_else(|| missing(cid))?;
             let c = self.collections.get_mut(&name).unwrap();
             if !keeps_places(&c.schema, &ch) {
-                return Err(places_moved(&name));
+                return Err(crate::schema::places_moved(&name));
             }
             let before = c.schema.clone();
             let taken = c.alter_fields(&ch);
@@ -8576,9 +8590,13 @@ impl Database {
                 None => None,
             };
             let new = match op {
+                // Read as a write made it: a value at every place up to the
+                // last field, and none past it -- one written by other
+                // places than this copy holds is refused before anything
+                // reads it a field off.
                 OP_PUT => {
                     crate::store::written_id(id)?;
-                    Some(c.schema.read_doc(id, payload)?)
+                    Some(c.schema.read_written(id, payload)?)
                 }
                 OP_DEL => None,
                 other => {
@@ -14963,13 +14981,27 @@ impl Database {
         // segments; over a mapped file only the documents holding one come
         // into memory, written again, until the rewrite below points them
         // at the new file. Nothing here is refused for what a document
-        // holds: one it cannot read is copied as it is.
+        // holds: one it cannot read is copied as it is. What refuses is a
+        // location outside its segment or the mapped file -- a damaged
+        // store, which the rewrite would meet copying that record and fail
+        // the database for -- and it fails it here too: the stores before
+        // it were compacted already, their counters and their records'
+        // places ahead of the file, and a compact refused there would be
+        // asked again every few seconds by a server, meeting it each time.
         for name in targets {
             let c = self.collections.get_mut(name).unwrap();
-            match mapped {
-                false => c.store.compact()?,
-                true => c.store.reclaim()?,
-            }
+            let r = match mapped {
+                false => c.store.compact(),
+                true => c.store.reclaim(),
+            };
+            // A damaged location, which no write makes, put where a test
+            // asks for one.
+            #[cfg(test)]
+            let r = r.and_then(|()| match unwinding::armed("refused") {
+                true => Err(Error::Corrupt("a test's location outside the file".into())),
+                false => Ok(()),
+            });
+            self.storage(r)?;
         }
         #[cfg(test)]
         unwinding::panic_at("compacted");
@@ -16994,29 +17026,18 @@ fn past_tombstones(
 }
 
 /// Whether `ch`, a primary's alter, leaves the dropped places the copy's
-/// `before` holds where they are, adding one for a drop alone. A primary
-/// of 0.2.0 or before took them out of its documents at a compact, which
-/// no record says: its writes after it read a field early here, and this
-/// is where the copy can first tell (a `create index`'s schema, whole, is
-/// held to the copy's layout as well).
+/// `before` holds where they are, adding one for a drop alone. A compact
+/// of 0.2.0 or before took them out of the documents of the database it
+/// ran on, which no record says: the copy tells at the primary's next
+/// write of the collection ([`Schema::read_written`]) or, before any, at
+/// its next alter here (a `create index`'s schema, whole, is held to the
+/// copy's layout as well).
 fn keeps_places(before: &Schema, ch: &FieldChange) -> bool {
     let (was, now) = (&before.dropped, &ch.schema.dropped);
     match ch.op {
         FIELD_DROP => now.len() == was.len() + 1 && was.iter().all(|d| now.contains(d)),
         _ => now == was,
     }
-}
-
-/// The refusal of a primary's alter whose dropped places are not the
-/// copy's ([`keeps_places`]).
-#[cold]
-#[inline(never)]
-fn places_moved(collection: &str) -> Error {
-    Error::Corrupt(format!(
-        "a schema change moved the fields of `{collection}`: its primary took a dropped field's \
-         places out of its documents, which this copy keeps; seed the copy again from its \
-         primary"
-    ))
 }
 
 /// The refusal of a field added to a collection holding

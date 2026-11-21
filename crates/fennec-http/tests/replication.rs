@@ -1920,13 +1920,14 @@ fn a_copy_that_compacts_first_reads_its_primarys_writes_as_its_primary_does() {
 }
 
 /// A copy of a primary that took a dropped field's places out -- a compact
-/// of a release from 0.1.7 to 0.2.0, which no record says -- cannot tell
-/// from the writes after it, which it reads one field early. The
-/// primary's next alter of the collection carries its schema, whose
-/// dropped places are not the copy's: refused by name, and the copy takes
-/// an image of its primary and holds what the primary holds from there.
+/// of a release from 0.1.7 to 0.2.0, which no record says -- reads the
+/// primary's next write of the collection as it was made: it holds a value
+/// less than the copy's places, so the copy refuses it by name rather than
+/// read it one field early (`[10, 40, null]`, which it used to hold), takes
+/// an image of its primary and holds what the primary holds from there. No
+/// value misread reaches its file.
 #[test]
-fn a_copy_of_a_primary_that_took_the_places_out_is_seeded_again_at_its_next_alter() {
+fn a_copy_of_a_primary_that_took_the_places_out_is_seeded_again_at_its_next_write() {
     let d = dir("stripped-primary");
     let p = primary(&d.join("p.fennec"), replication::DEFAULT_BUFFER);
     // The primary as a release's compact left it: `x` of three fields, its
@@ -1969,21 +1970,20 @@ fn a_copy_of_a_primary_that_took_the_places_out_is_seeded_again_at_its_next_alte
             std::thread::sleep(Duration::from_millis(5));
         }
     };
-    // The write after the primary's compact: read a field early, and
-    // nothing can tell.
-    ok(&p, "put x {a: 10, c: 30, d: 40}");
-    until("the write", &|| at() == seq(&p));
-    assert_eq!(
-        copy_rows()[1].1,
-        [Value::Int(10), Value::Int(40), Value::Null]
-    );
     assert_eq!(follower.images(), 0);
-    // Its next alter of `x` is where the copy tells, and is seeded again.
-    ok(&p, "alter collection x add field e int");
+    // The write after the primary's compact: refused, and the copy seeded
+    // again.
+    ok(&p, "put x {a: 10, c: 30, d: 40}");
     until("the image", &|| follower.images() == 1 && at() == seq(&p));
     assert_eq!(copy_rows(), rows(&p, XS));
     assert_eq!(copy_rows(), after_compact());
     assert!(db.read().unwrap().failure().is_none());
+    // Followed on from there, write by write.
+    ok(&p, "alter collection x add field e int");
+    ok(&p, "put x {a: 100, c: 300, d: 400, e: 500}");
+    until("the writes after", &|| at() == seq(&p));
+    assert_eq!(copy_rows(), rows(&p, XS));
+    assert_eq!(follower.images(), 1);
     halt(&follower);
     let _ = std::fs::remove_dir_all(&d);
 }

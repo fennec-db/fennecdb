@@ -640,6 +640,21 @@ impl Field {
 /// as it is: no read refuses what a write took.
 pub const MAX_PLACES: usize = 4096;
 
+/// The refusal of a primary's write or alter of `collection` made by other
+/// places than the copy applying it holds ([`Schema::read_written`],
+/// `keeps_places`): what a compact of 0.2.0 or before left, taking a
+/// dropped field's places out of one side's documents. A server's follower
+/// takes an image of its primary on it.
+#[cold]
+#[inline(never)]
+pub(crate) fn places_moved(collection: &str) -> Error {
+    Error::Corrupt(format!(
+        "the primary's writes moved the fields of `{collection}`: a compact of 0.2.0 or before \
+         took a dropped field's places out of the primary's documents or this copy's, and told \
+         the other nothing; seed the copy again from its primary"
+    ))
+}
+
 /// The most parts an index over several fields takes: past a handful, a key
 /// is wider than the rows a prefix of it narrows to are worth.
 pub const MAX_COMPOSITE_KEYS: usize = 8;
@@ -1193,8 +1208,41 @@ impl Schema {
     /// passed over and a field the payload ends before -- one added after
     /// it was written -- `null`.
     pub fn read_doc(&self, id: crate::value::DocId, buf: &[u8]) -> Result<crate::value::Document> {
+        self.read_payload(id, buf).map(|(doc, _)| doc)
+    }
+
+    /// [`Self::read_doc`] of a payload a write made under this schema --
+    /// a primary's, which a copy applies -- refused unless it holds a value
+    /// at every place up to its last field and none past it, as every
+    /// write of every release since dropped places came (0.1.7) encodes
+    /// one ([`crate::store::Store::encode_doc`]). One that does not was
+    /// written by other places than the copy holds: a compact of 0.2.0 or
+    /// before took a dropped field's out of one side's documents and told
+    /// the other nothing, and read on, every field after the place would
+    /// be the next one's value. Only a document stored before an `add
+    /// field` ends early, and no write sends one.
+    pub fn read_written(
+        &self,
+        id: crate::value::DocId,
+        buf: &[u8],
+    ) -> Result<crate::value::Document> {
+        let (doc, whole) = self.read_payload(id, buf)?;
+        match whole {
+            true => Ok(doc),
+            false => Err(places_moved(&self.name)),
+        }
+    }
+
+    /// [`Self::read_doc`], and whether the payload held a value at every
+    /// place up to the last field and ended there.
+    fn read_payload(
+        &self,
+        id: crate::value::DocId,
+        buf: &[u8],
+    ) -> Result<(crate::value::Document, bool)> {
         let mut fields = Vec::with_capacity(self.fields.len());
         let (mut pos, mut at) = (0, 0);
+        let mut short = false;
         for (i, f) in self.fields.iter().enumerate() {
             let want = self.place(i);
             while at < want {
@@ -1203,12 +1251,16 @@ impl Schema {
             }
             let v = match pos < buf.len() {
                 true => decode_value(buf, &mut pos)?,
-                false => crate::value::Value::Null,
+                false => {
+                    short = true;
+                    crate::value::Value::Null
+                }
             };
             at += 1;
             fields.push((f.name.clone(), v));
         }
-        Ok(crate::value::Document { id, fields })
+        let whole = !short && pos == buf.len();
+        Ok((crate::value::Document { id, fields }, whole))
     }
 
     pub fn field(&self, name: &str) -> Option<&Field> {
