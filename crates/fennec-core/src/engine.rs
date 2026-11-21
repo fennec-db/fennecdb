@@ -1232,15 +1232,24 @@ pub fn claimed_into(
 /// sum holds and, where it does, the point it claims every byte before
 /// which was durable as it was appended (0 for none). What an archive's
 /// reader finds how far a segment was synced from ([`claimed_into`]).
+///
+/// A record naming a collection no create gives, which [`record_at`]
+/// refuses, is summed as any other ([`whole_head`]): read as carrying no
+/// sum, one whole by it was judged as damage and cut from the segment
+/// where nothing after it claimed past it, where a version before took it
+/// and a restore refused it as it applied it -- as an open refuses it.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn checked_claim(record: &[u8], at: usize) -> Option<(bool, usize)> {
-    let r = record_at(record, &mut 0).ok()?;
-    let c = r.claim_at?;
-    if !r.holds(record) {
-        return Some((false, 0));
-    }
+    let (c, sum_at) = match record_at(record, &mut 0) {
+        Ok(r) if !r.holds(record) => return Some((false, 0)),
+        Ok(r) => (r.claim_at?, r.sum_at),
+        Err(_) => match whole_head(record, 0)? {
+            (_, _, false) => return Some((false, 0)),
+            (end, w, true) => (end - SUM - w, end - SUM),
+        },
+    };
     let mut v = [0u8; 4];
-    let raw = &record[c..r.sum_at];
+    let raw = &record[c..sum_at];
     v[..raw.len()].copy_from_slice(raw);
     let point = match u64::from(u32::from_le_bytes(v)) {
         0 => 0,
@@ -1909,10 +1918,11 @@ impl Block {
 ///
 /// A head naming a collection no create gives ([`unmade_collection`]) is
 /// refused here too, once its length fits, so that a walk
-/// [`Walk::stopping`] judges it as a head no record reads from: stale
-/// bytes past the durable point read as one (`0a ff ff ff ff 0f 05`), and
-/// refused by [`record_at`] after this said whole, an open refused what a
-/// version before cut. One cut short is a torn tail whatever it names.
+/// [`Walk::stopping`] stops at it and the load judges it as it judges a
+/// head no record reads from ([`whole_head`]): stale bytes past the
+/// durable point read as one (`0a ff ff ff ff 0f 05`), and refused by
+/// [`record_at`] after this said whole, an open refused what a version
+/// before cut. One cut short is a torn tail whatever it names.
 fn whole_record(bytes: &[u8], at: usize, edge: usize) -> Result<bool> {
     let kind = bytes[at];
     if !known(kind) {
@@ -1922,24 +1932,30 @@ fn whole_record(bytes: &[u8], at: usize, edge: usize) -> Result<bool> {
             _ => Err(unknown_kind(kind, at)),
         };
     }
+    match framed_at(bytes, at)? {
+        None => Ok(false),
+        Some((cid, _)) if cid >= u32::MAX as u64 => Err(unmade_collection(cid)),
+        Some(_) => Ok(true),
+    }
+}
+
+/// The collection the head at `at` of a kind this version knows names,
+/// and where its length ends its record: `None` where its head or its
+/// length runs past the end of the bytes. How a walk frames a record
+/// ([`whole_record`]), and what a cut counts ([`records_from`]).
+fn framed_at(bytes: &[u8], at: usize) -> Result<Option<(u64, usize)>> {
     let mut pos = at + 1;
     // The collection's id, then the body's length.
     let mut head = [0u64; 2];
     for v in &mut head {
         *v = match get_uvarint(bytes, &mut pos) {
             Ok(v) => v,
-            Err(_) if pos >= bytes.len() => return Ok(false),
+            Err(_) if pos >= bytes.len() => return Ok(None),
             Err(e) => return Err(e),
         };
     }
     let [cid, len] = head;
-    if len > (bytes.len() - pos) as u64 {
-        return Ok(false);
-    }
-    if cid >= u32::MAX as u64 {
-        return Err(unmade_collection(cid));
-    }
-    Ok(true)
+    Ok((len <= (bytes.len() - pos) as u64).then(|| (cid, pos + len as usize)))
 }
 
 /// Whether `byte`, a record's first, is a kind this version reads with a
@@ -1981,10 +1997,12 @@ enum Head {
 }
 
 /// The record a head at `at` frames as [`judge_after`] reads one: checked,
-/// of a kind this version knows (any, `any` said), its collection id 0
-/// where its kind has none, and its length holding its claim and sum --
-/// and for the close's mark nothing more. Cheap to ask at every byte: no
-/// more than the head is read.
+/// of a kind this version knows, naming a collection a create gives -- 0
+/// where its kind has none -- and its length holding its claim and sum,
+/// and for the close's mark nothing more. With `any`, a checked record of
+/// any kind naming any collection whose length holds a claim and a sum:
+/// what [`whole_head`] sums. Cheap to ask at every byte: no more than the
+/// head is read.
 fn head_at(bytes: &[u8], at: usize, any: bool) -> Head {
     let Some(&byte) = bytes.get(at) else {
         return Head::Past;
@@ -2024,11 +2042,14 @@ fn head_at(bytes: &[u8], at: usize, any: bool) -> Head {
         REC_BLOCK | REC_SPILL | REC_LAND | REC_HISTORY | REC_STATEMENT | REC_SYNCED
     );
     // An id no create gives, the last `u32` among them, as the walk reads
-    // it ([`whole_record`]).
-    if cid >= u32::MAX as u64
-        || (none && cid != 0)
-        || len < trailer
-        || (kind == REC_SYNCED && len != trailer)
+    // it ([`whole_record`]), frames no record a judgment goes on from; a
+    // record that names one and is whole by its sum is no crash's leaving
+    // all the same, refused where the walk stopped at it ([`whole_head`]).
+    if len < trailer
+        || !any
+            && (cid >= u32::MAX as u64
+                || (none && cid != 0)
+                || (kind == REC_SYNCED && len != trailer))
     {
         return Head::No;
     }
@@ -2081,16 +2102,20 @@ fn may_head(b: u8) -> bool {
     HEADS[(b >> 6) as usize] >> (b & 63) & 1 != 0
 }
 
-/// Whether a checked record of any kind starts at `at`, whole by its sum:
-/// one of a kind this version does not know is a later version's, refused
-/// for its kind rather than judged as damage.
-fn whole_unknown(bytes: &[u8], at: usize) -> bool {
+/// Where a checked record of any kind starting at `at`, naming any
+/// collection, ends by its length, its claim's width, and whether it is
+/// whole by its sum: what the load asks of a head its walk stopped at.
+/// One whole is no crash's leaving -- a crash leaves bytes no sum holds --
+/// so it is refused as the walk refused it, never cut: a later version's
+/// kind, or a collection no create gives. One whose sum fails is damage
+/// judged as a crash's may be.
+fn whole_head(bytes: &[u8], at: usize) -> Option<(usize, usize, bool)> {
     match head_at(bytes, at, true) {
-        Head::Fits { end, .. } => {
+        Head::Fits { end, w } => {
             let sum = u32::from_le_bytes(bytes[end - SUM..end].try_into().unwrap());
-            crc32c(0, &bytes[at..end - SUM]) == sum
+            Some((end, w, crc32c(0, &bytes[at..end - SUM]) == sum))
         }
-        _ => false,
+        _ => None,
     }
 }
 
@@ -2174,12 +2199,23 @@ fn torn_mark(cut: &[u8]) -> bool {
     cut.len() <= head.len() + SUM && cut.iter().zip(&head).all(|(&b, &m)| b == m || b == 0)
 }
 
-/// How many records a walk frames from `at` on: what a cut there takes.
+/// How many records a walk frames from `at` on, by their kinds and
+/// lengths: what a cut there takes, never at the counter's head. A head
+/// naming a collection no create gives, which a walk stops at, frames as
+/// any other of its kind, and is counted as a version before counted it,
+/// the count going on past it -- by `framed_at` alone, where the walk and
+/// a framing of that head after it took 222 bytes more of the browser
+/// module.
 fn records_from(bytes: &[u8], at: usize) -> u64 {
-    let mut walk = Walk::stopping(bytes, at);
-    let mut n = 0;
-    while let Ok(Some(_)) = walk.next() {
-        n += 1;
+    let (mut at, mut n) = (at, 0);
+    while let Some(&kind) = bytes.get(at) {
+        match framed_at(bytes, at) {
+            Ok(Some((_, end))) if known(kind) => {
+                n += 1;
+                at = end;
+            }
+            _ => break,
+        }
     }
     n
 }
@@ -4205,8 +4241,10 @@ pub struct TextIndexStats {
     pub bytes: usize,
 }
 
-/// `explain`'s words for a set an equality's bucket gave, which
-/// `Database::candidates_held` reads back to know that it did.
+/// `explain`'s words for a set an equality's bucket gave. A debug build
+/// holds `Database::candidates_held`'s `given` to them; a release build
+/// compares them no more, which cost every read by an id or a bucket 108
+/// instructions.
 const BY_ID: &str = "the id index";
 const BY_HASH: &str = "the hash index on";
 
@@ -7205,19 +7243,34 @@ impl Database {
                 // In a file this version wrote to, a head no record reads
                 // from -- zeros with a byte after them, stale bytes -- is
                 // judged as a record failing its sum is, by whether a whole
-                // record after it claims the file durable past it. A whole
-                // record of a kind this version does not know is a later
-                // version's, refused as before.
-                if whole_unknown(bytes, at) {
-                    return Err(unknown_kind(bytes[at], at));
+                // record after it claims the file durable past it. A record
+                // whole by its sum is not what a crash leaves, so it is
+                // refused as the walk refused it -- a later version's kind,
+                // as before, or a collection no create gives, which judged
+                // as stale bytes were cut, the file truncated, where a
+                // version before refused it. One of a kind this version
+                // knows whose sum fails is a record failing its sum, judged
+                // from its end, as a version before framed it.
+                let head = whole_head(bytes, at);
+                if let (Some((_, _, true)), Some(e)) = (head, walk.refused) {
+                    return Err(e);
                 }
-                judge(
-                    bytes,
-                    at,
-                    None,
-                    durable,
-                    format_args!("no whole record starts at {at}"),
-                )?;
+                match head {
+                    Some((end, ..)) if known(bytes[at]) => judge(
+                        bytes,
+                        at,
+                        Some(end),
+                        durable,
+                        format_args!("the record at {at} fails its checksum"),
+                    )?,
+                    _ => judge(
+                        bytes,
+                        at,
+                        None,
+                        durable,
+                        format_args!("no whole record starts at {at}"),
+                    )?,
+                }
             } else if let Some(e) = walk.refused {
                 // One a version before wrote: zeros only where they run to the
                 // end from a head (`zero_tail`), any other byte refused.
@@ -11246,8 +11299,19 @@ impl Database {
         let (found, test) = {
             let mut held = None;
             let found = self.candidates_held(c, f, params, range_want, &mut held)?;
+            // The index's answer is the filter's: no filter is bound for
+            // rows that need no second look. Bound before, every read by an
+            // id or by a bucket made one it never asked, and freed it
+            // (indexes.md, *Bound filters*). The browser module binds first
+            // and answers below, as it did: answered ahead of the binding
+            // there too, it was 8 bytes larger.
+            if let Some((mut b, true)) = found {
+                b.truncate(want);
+                self.examine(b.len())?;
+                return Ok(b);
+            }
             let test = match held {
-                Some(eq) => Filter::without(c, f, &ctx, eq, params),
+                Some(eq) => Filter::without(c, f, &ctx, eq),
                 None => Filter::new(c, f, &ctx),
             };
             (found, test)
@@ -11409,6 +11473,7 @@ impl Database {
                 {
                     candidates = Some(hit);
                     source = ("the id index, `in`", "id");
+                    given = None;
                     bare_in = matches!(f, Expr::In(..) | Expr::InParam(..));
                 }
                 continue;
@@ -11469,6 +11534,7 @@ impl Database {
             {
                 candidates = Some(union);
                 source = ("the hash index, `in`, on", field);
+                given = None;
                 // Exact only when the list is the whole filter. With anything
                 // `and`ed on, every candidate still has to be tested -- and a
                 // filter holding an equality as well cannot be a bare `in`,
@@ -11525,6 +11591,7 @@ impl Database {
                     ids.dedup();
                 }
                 candidates = Some(ids);
+                given = None;
                 composed_said = Some(composed_text(comp, &p));
                 composed_exact = Some(p.exact);
             }
@@ -11569,6 +11636,7 @@ impl Database {
                 if let Some(ids) = ix.range_ids(&range, cap) {
                     candidates = Some(ids);
                     source = ("the ordered index on", field);
+                    given = None;
                     bare_range = exact && f.only_ranges_on(field, params);
                     bare_in = false;
                     (composed_exact, composed_said) = (None, None);
@@ -11602,6 +11670,7 @@ impl Database {
                 if let Some(ids) = ix.candidates(&shape, cap) {
                     candidates = Some(ids);
                     source = ("the point index on", field);
+                    given = None;
                     (bare_range, bare_in) = (false, false);
                     (composed_exact, composed_said) = (Some(false), None);
                 } else {
@@ -11615,10 +11684,29 @@ impl Database {
             }
         }
 
-        // The equality's bucket, unless an `in`, a range, a box or an index
-        // over several fields took its place.
+        // The equality whose bucket the rows are, known where the bucket was
+        // taken and let go wherever an `in`, a range, a box or an index over
+        // several fields took its place. Told here by `explain`'s words, a
+        // read by id or by a bucket paid 108 instructions of `memcmp` for
+        // it (indexes.md, *Bound filters*).
+        //
+        // Letting it go is each set's own line to write: a set that took the
+        // candidates and kept it would have rows no bucket gave tested
+        // without a term, under a token's rules too. A debug build holds it
+        // to those words, which every set says for `explain`, so any test
+        // reaching a new set that kept it fails. Bound to the candidates in
+        // one type, it could not be kept; but every set would move that
+        // type, on the reads this was made cheaper for, where the check
+        // costs a release build nothing.
         #[cfg(not(target_arch = "wasm32"))]
-        if composed_said.is_none() && (source.0 == BY_ID || source.0 == BY_HASH) {
+        {
+            debug_assert_eq!(
+                given.is_some(),
+                composed_said.is_none() && (source.0 == BY_ID || source.0 == BY_HASH),
+                "the equality held ({:?}) and the set the rows came from ({source:?}, \
+                 {composed_said:?}) disagree",
+                given.map(|(field, _)| field),
+            );
             *held = given;
         }
         #[cfg(target_arch = "wasm32")]
@@ -15283,7 +15371,16 @@ fn build_path_index(c: &mut Collection, path: &str) -> Result<()> {
 /// Tests `ids` against `test` until `want` of them match, pushing those
 /// onto `out`: how many it tested. A filter's candidates and the scan, the
 /// one loop each always was; a call bounds it by a `take` around `ids`.
-#[inline(always)]
+///
+/// Natively a function of its own. Inlined, the loop took its registers
+/// from the function around it, and any change to the binding ahead of it
+/// in `matching_ids_to` laid the scan out anew: binding no filter for an
+/// index's whole answer cost the gate's `core-lookup`, a scan of some 530
+/// rows a query, an instruction a row (+0.12%), other layouts of the same
+/// change up to +0.35%. Apart, its rows cost what they did, and the call 42
+/// instructions a scan. The browser module keeps it inlined, as it was.
+#[cfg_attr(target_arch = "wasm32", inline(always))]
+#[cfg_attr(not(target_arch = "wasm32"), inline(never))]
 fn test_each(
     ids: impl Iterator<Item = DocId>,
     want: usize,
@@ -17200,6 +17297,38 @@ impl<'q> Chain<'q> {
         *part = Some(and_of(part.take(), t));
     }
 
+    /// [`Chain::place`] of `e` but for the first of its terms that is
+    /// `held`'s equality -- its field compared with the very value
+    /// [`Database::candidates_held`] took the bucket by -- which is let go
+    /// once met, so a second alike is placed. Walked in place, nothing
+    /// collected: a list of the terms was made and freed at every read of a
+    /// bucket's rows.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn place_but(
+        &mut self,
+        c: &Collection,
+        e: &'q Expr,
+        ctx: &EvalCtx,
+        positions: &mut Vec<usize>,
+        paths: &mut Vec<(usize, &'q str)>,
+        held: &mut Option<(&str, &Value)>,
+    ) {
+        if let Expr::And(a, b) = e {
+            self.place_but(c, a, ctx, positions, paths, held);
+            self.place_but(c, b, ctx, positions, paths, held);
+            return;
+        }
+        if let Some((field, value)) = *held {
+            if e.equality_key(ctx.params)
+                .is_some_and(|(k, v)| std::ptr::eq(v, value) && k == field)
+            {
+                *held = None;
+                return;
+            }
+        }
+        self.place(c, e, ctx, positions, paths);
+    }
+
     /// The `and` laid out; `f`, evaluated, where it held no term.
     fn tests(self, f: &'q Expr) -> Test<'q> {
         match (self.first, self.then) {
@@ -17290,29 +17419,16 @@ impl<'q> Filter<'q> {
     /// the rows it was, and what fails fails alike: the term left out is a
     /// comparison with a value, which fails over no row.
     #[cfg(not(target_arch = "wasm32"))]
-    fn without(
-        c: &'q Collection,
-        f: &'q Expr,
-        ctx: &EvalCtx,
-        (field, value): (&str, &Value),
-        params: &[Value],
-    ) -> Filter<'q> {
-        let mut terms = Vec::new();
-        f.conjuncts(&mut terms);
-        let held = terms.iter().position(|t| {
-            t.equality_key(params)
-                .is_some_and(|(k, v)| k == field && std::ptr::eq(v, value))
-        });
-        // A filter of that term alone was answered by its bucket.
-        let (Some(at), true) = (held, terms.len() > 1) else {
+    fn without(c: &'q Collection, f: &'q Expr, ctx: &EvalCtx, held: (&str, &Value)) -> Filter<'q> {
+        // A filter of that term alone is its bucket's answer, which no
+        // filter is bound for (`matching_ids_to`): never met here, it is
+        // bound whole all the same.
+        if !matches!(f, Expr::And(..)) {
             return Filter::new(c, f, ctx);
-        };
-        terms.remove(at);
+        }
         let (mut positions, mut paths) = (Vec::new(), Vec::new());
         let mut chain = Chain::default();
-        for t in terms {
-            chain.place(c, t, ctx, &mut positions, &mut paths);
-        }
+        chain.place_but(c, f, ctx, &mut positions, &mut paths, &mut Some(held));
         Filter::made(c, chain.tests(f), positions, paths)
     }
 

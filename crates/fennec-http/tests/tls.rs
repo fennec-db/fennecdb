@@ -32,13 +32,17 @@ fn client() -> fennec_tls::Client {
 }
 
 fn start(tune: impl FnOnce(&mut Config)) -> (u16, Arc<Server>) {
+    start_with(Database::new(), tune)
+}
+
+fn start_with(db: Database, tune: impl FnOnce(&mut Config)) -> (u16, Arc<Server>) {
     let mut cfg = Config {
         addr: "127.0.0.1:0".into(),
         tls: Some(Arc::new(tls())),
         ..Config::default()
     };
     tune(&mut cfg);
-    let server = Arc::new(Server::new(Arc::new(RwLock::new(Database::new())), cfg));
+    let server = Arc::new(Server::new(Arc::new(RwLock::new(db)), cfg));
     let listener = server.bind().unwrap();
     let port = listener.local_addr().unwrap().port();
     let serving = Arc::clone(&server);
@@ -484,8 +488,190 @@ fn a_requests_time_over_tls_runs_from_its_first_records_first_part() {
     }
     let a = answer(&mut r);
     let took = started.elapsed();
-    assert_eq!(a.status, 408, "{} after {took:?}", a.text());
+    assert_eq!(
+        a.status,
+        408,
+        "{} after {took:?}; {}; {}",
+        a.text(),
+        timeouts(port),
+        clone_probe()
+    );
     assert!(took >= within, "{took:?}");
+}
+
+/// A silence over TLS before a request -- a connection's first, right
+/// after its handshake, and one between requests -- ends the connection at
+/// the idle timeout, with nothing written: the timeout bounds the session's
+/// own reads. The server's end is the event: the client's read ends at it,
+/// its own 30 s bounding only a server that never ends it.
+#[test]
+fn a_silence_over_tls_ends_the_connection_at_the_idle_timeout() {
+    let idle = Duration::from_millis(600);
+    let (port, _server) = start(|c| c.idle_timeout = Some(idle));
+    let silent = BufReader::new(dial(port).unwrap());
+    let mut kept = BufReader::new(dial(port).unwrap());
+    assert_eq!(ask(&mut kept, "/query", &query("collections")).status, 200);
+    for (what, mut r) in [("after its handshake", silent), ("between requests", kept)] {
+        let started = Instant::now();
+        let mut got = Vec::new();
+        let ended = r.read_to_end(&mut got);
+        let took = started.elapsed();
+        if let Err(e) = &ended {
+            assert!(
+                !matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ),
+                "a silence {what} was never ended: {e} after {took:?}; {}",
+                clone_probe()
+            );
+        }
+        assert!(got.is_empty(), "{}", String::from_utf8_lossy(&got));
+    }
+}
+
+/// An answer its client reads nothing of over TLS ends its connection
+/// once a write of it takes nothing for `--write-timeout`, and gives its
+/// slot back: the timeout bounds the session's own writes. Forty answers of
+/// a mebibyte, past what the sockets hold, asked at once and none read;
+/// the slot given back is the event.
+#[test]
+fn an_unread_answer_over_tls_is_let_go_at_the_write_timeout() {
+    let mut db = Database::new();
+    for q in [
+        "create collection t (s text)".to_string(),
+        format!("put t {{id: 1, s: '{}'}}", "x".repeat(1 << 20)),
+    ] {
+        db.execute(&fennec_ql::parse_one(&q).unwrap()).unwrap();
+    }
+    let write_within = Duration::from_millis(300);
+    let (port, _server) = start_with(db, |c| {
+        c.max_connections = 1;
+        c.write_timeout = Some(write_within);
+    });
+    let mut unread = dial(port).unwrap();
+    let started = Instant::now();
+    unread
+        .write_all(&b"GET /t/1 HTTP/1.1\r\nHost: localhost\r\n\r\n".repeat(40))
+        .unwrap();
+    unread.flush().unwrap();
+    // The slot given back: a new connection served.
+    let deadline = started + Duration::from_secs(30);
+    loop {
+        if let Ok(s) = dial(port) {
+            let mut r = BufReader::new(s);
+            assert_eq!(ask(&mut r, "/query", &query("collections")).status, 200);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the unread answer's slot was never given back; {}",
+            clone_probe()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(started.elapsed() >= write_within, "{:?}", started.elapsed());
+    // What was sent is read off, then its end -- cut short, with no
+    // `close_notify` -- never this read's own 30 s.
+    let mut rest = Vec::new();
+    if let Err(e) = unread.read_to_end(&mut rest) {
+        assert!(
+            !matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ),
+            "{e}"
+        );
+    }
+    assert!(rest.len() < 40 << 20, "{}", rest.len());
+}
+
+/// The process's `fennec_client_timeouts_total` by reason, scraped over a
+/// connection of its own: every server's of this test binary, said in a
+/// timing test's failure beside [`clone_probe`], never asserted.
+fn timeouts(port: u16) -> String {
+    match scrape(port) {
+        Ok(got) => {
+            let text = String::from_utf8_lossy(&got);
+            let counts: Vec<&str> = text
+                .lines()
+                .filter(|l| l.starts_with("fennec_client_timeouts_total{"))
+                .collect();
+            format!(
+                "the process's client timeouts, every test server's: [{}]",
+                counts.join(", ")
+            )
+        }
+        Err(e) => format!("no scrape of the client timeouts: {e}"),
+    }
+}
+
+/// `GET /_metrics` over a connection of its own: what came before its end.
+fn scrape(port: u16) -> std::io::Result<Vec<u8>> {
+    let mut s = dial(port).map_err(std::io::Error::other)?;
+    s.write_all(b"GET /_metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
+    s.flush()?;
+    let mut got = Vec::new();
+    let _ = s.read_to_end(&mut got);
+    Ok(got)
+}
+
+/// What this platform does with what is set through a `try_clone` of a
+/// socket, said in a TLS timing test's failure so that a red run names the
+/// fact rather than leaving it to be guessed: a loopback pair, a read
+/// timeout of 200 ms set through a clone of one end and a read through the
+/// end itself, then that end made non-blocking through the clone and read
+/// again. On Windows a clone is `WSADuplicateSocketW`, a handle of its own.
+/// The peer sends a byte 3 s after each read begins, so a read nothing
+/// bounded ends then.
+pub fn clone_probe() -> String {
+    probed().unwrap_or_else(|e| format!("the probe failed: {e}"))
+}
+
+/// [`clone_probe`]'s looks.
+fn probed() -> std::io::Result<String> {
+    let l = std::net::TcpListener::bind("127.0.0.1:0")?;
+    // Held to the end: its close would end the reads at once.
+    let peer = TcpStream::connect(l.local_addr()?)?;
+    let (s, _) = l.accept()?;
+    let clone = s.try_clone()?;
+    clone.set_read_timeout(Some(Duration::from_millis(200)))?;
+    let mut said = Vec::new();
+    for what in ["a read timeout of 200 ms", "non-blocking"] {
+        if what == "non-blocking" {
+            clone.set_read_timeout(None)?;
+            clone.set_nonblocking(true)?;
+        }
+        let mut late = peer.try_clone()?;
+        let sender = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(3));
+            let _ = late.write_all(b"x");
+        });
+        let started = Instant::now();
+        let read = (&s).read(&mut [0u8; 1]);
+        let took = started.elapsed();
+        let bounded = matches!(
+            &read,
+            Err(e) if matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            )
+        );
+        said.push(format!(
+            "{what} set through a try_clone {} a read through the original ({read:?} after \
+             {took:?})",
+            if bounded { "bounded" } else { "did NOT bound" }
+        ));
+        let _ = sender.join();
+        if bounded {
+            // The byte sent meanwhile, taken off before the next look.
+            clone.set_nonblocking(false)?;
+            clone.set_read_timeout(Some(Duration::from_secs(10)))?;
+            (&s).read_exact(&mut [0u8; 1])?;
+            clone.set_read_timeout(Some(Duration::from_millis(200)))?;
+        }
+    }
+    Ok(format!("probe: {}", said.join("; ")))
 }
 
 /// Plain HTTP to the HTTPS port is answered 400 in the clear, naming the

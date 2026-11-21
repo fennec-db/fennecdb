@@ -58,6 +58,64 @@ fn interval_sync_flushes_in_background() {
     );
 }
 
+/// `--sync <ms>` on a node: each tenant is synced on a thread of its own
+/// (`Tenants::sync_every`), started with the node, and every tenant's
+/// writes leave the node's buffer for its file within the interval, with
+/// no shutdown and no further write. Read as a looking tool reads a file,
+/// writing nothing to it.
+#[test]
+fn a_nodes_interval_sync_flushes_each_tenant_in_background() {
+    let dir = tmp("shutdown", "interval-node");
+    std::fs::create_dir_all(&dir).unwrap();
+    let server = start(&[
+        "--admin-token",
+        "adm",
+        "--dir",
+        dir.to_str().unwrap(),
+        "--sync",
+        "50",
+    ]);
+    let names = ["a", "b", "c"];
+    let mut c = server.http();
+    for n in names {
+        let made = server
+            .http()
+            .with_token("adm")
+            .ask("PUT", &format!("/_admin/tenants/{n}"), "");
+        assert_eq!(made.status, 201, "{}", made.body);
+        for q in [
+            "create collection t (name text)",
+            r#"put t {name: "delayed"}"#,
+        ] {
+            c.query_at(&format!("/t/{n}"), q)
+                .unwrap_or_else(|e| panic!("{n}: {q}: {e:?}"));
+        }
+    }
+    let in_file = |n: &str| {
+        fennec_core::fs::open_read_only(dir.join(format!("{n}.fennec")))
+            .map(|db| {
+                db.stats()
+                    .iter()
+                    .find(|s| s.name == "t")
+                    .map_or(0, |s| s.documents)
+            })
+            .unwrap_or(0)
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while names.iter().any(|n| in_file(n) == 0) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    for n in names {
+        assert_eq!(
+            in_file(n),
+            1,
+            "tenant `{n}`'s write never left the node's buffer"
+        );
+    }
+    let (code, out) = server.terminate();
+    assert_eq!(code, 0, "expected a clean exit\n{out}");
+}
+
 /// Killed, a server holds every batch it answered, whole, and nothing of
 /// one cut short: a batch's writes reach the file as one record, after
 /// its last statement ran.

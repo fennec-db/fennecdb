@@ -1,6 +1,6 @@
 # AGENTS.md
 
-fennec-http's invariants -- replication and archives, quotas, the HTTP server and held writes -- for code in `crates/fennec-http/`. Access -- scoped tokens and their rules, field lists, the server's own collections, tenant binding, whom a token is for and its expiry -- is in [src/access/AGENTS.md](src/access/AGENTS.md), beside its code (`src/access.rs`, `src/access/`): read it before changing either, or a path a token's statement takes. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
+fennec-http's invariants -- replication and archives, quotas, the HTTP server, held writes and a node's syncs -- for code in `crates/fennec-http/`. Access -- scoped tokens and their rules, field lists, the server's own collections, tenant binding, whom a token is for and its expiry -- is in [src/access/AGENTS.md](src/access/AGENTS.md), beside its code (`src/access.rs`, `src/access/`): read it before changing either, or a path a token's statement takes. A connection's rules -- the thread it gets or its 503, the HTTPS listener, the time a request and an answer have, a body's ceiling and chunked bodies -- are in [src/conn/AGENTS.md](src/conn/AGENTS.md), beside `src/conn.rs` and `src/conn/`: read it before changing how a connection is accepted, read or written. The rules every change meets, and where every other area's are, are in the root's [AGENTS.md](../../AGENTS.md). It is written from CLAUDE.md by `make agents-md`: edit that one.
 
 ## Invariants
 
@@ -208,20 +208,6 @@ tenant left it. A hint keeps at most 4 096 places, a shard of long texts'
 16 384 (`HINT_PLACES`, `HINT_BUDGET`); a page's documents' lists are read
 again alone (`fennec_ql::read_listed`).
 
-**[A body is held to the ceiling its head
-earns.](../../docs/design/http.md#a-bodys-ceiling)** `max_body`, judged
-from the head before a byte of the body is read (`body_ceiling`,
-`http::read_head`): a tenant node reads an image's import, `PUT
-/_admin/tenants/<t>/file`, to `max_import` where it carries the admin token
-alone (`admin::carries`), and refuses one carrying another or none with its
-route's 401, waited out as every refusal is, its body unread. A route
-reading past `max_body` is judged so there, from its head, never by a
-ceiling raised for every request and refused after the read.
-
-**[A chunked body grows as it comes, held to the
-ceiling](../../docs/design/http.md#chunked-bodies)** (`read_onto`); a framing
-read two ways is refused (`chunked_framing`, `end_refused`).
-
 **[A seed goes in parts, read a page at a time.](../../docs/design/http.md#seeds-in-parts)**
 Past `SEED_PART` bytes of rows a seed is several `seed` events of one
 `seq` (`part` past the first, `more` before the last), each page read on
@@ -262,53 +248,6 @@ JSON, NDJSON or text that long says `Vary: Accept-Encoding`, gzipped where
 `writev`; never with an `ETag` or `no-transform`, nor a `HEAD`. A stream is
 one member, each event deflated alone and sync-flushed (`gzip::Stream`):
 nothing kept between events. The deflate is ours, no crate.
-
-**[A connection no thread can be made for is answered
-503.](../../docs/design/http.md#connections-without-a-thread)** Both accept loops
-spawn through `accept::spawn`, which hands back a refused thread's stream
-for `accept::refuse` to answer on the accepting thread, non-blocking,
-counted by `reason` and marked `Fennec-Unserved`: unrun to the entry and
-relays, as a standby's 409 marked `Fennec-Follows` is. Its writing then
-shut, the one lingering thread (`accept::linger`) reads it off till the
-client ends it; only no such thread, no room (`most_held`) or an answer not
-sent whole closes it at once. A new accept loop calls
-`accept::ready()` and `accept::widen` before its first accept. A TLS
-listener's is told `fennec_tls::REFUSAL`, an alert (`accept::refuse_tls`):
-no handshake runs on the accepting thread. A connection's place under
-`--max-connections` is an `accept::Slot`, given back by its drop before
-its socket closes, on every way out, a panic's unwinding too -- never by a
-line after the connection's work, which a panic skips; so is every count
-taken around a connection or a held request (`waits::Answering`, a
-`waits::Ticket` leaving its group).
-
-**[A request is read in time, and an answer written in
-time.](../../docs/design/http.md#slow-clients)** A served connection's
-requests, the router's too, are read through `conn::Paced`, told each
-(`waiting`): the wait for a request's first byte is the idle timeout's;
-from that byte -- over TLS its first record's first part -- the request,
-head and body alike, has `--header-timeout` and a second more for every
-`conn::MIN_RATE` bytes that came, else 408 and `end_refused`; a record in
-parts is held to the same bound, its bytes earning as they come
-(`fennec_tls::TlsStream::read_by`). The clock is read and a timeout set by
-a read past a request's first alone: a request one read takes whole (the
-`BufReader`'s 8 KiB), or in the buffer already, pays nothing; a bound past
-what `Instant` can name is none, never a panic. `--write-timeout` is set
-once a connection; a stream setting its own ends the connection after,
-and a handler that sets the read timeout and serves on puts the idle
-timeout back first (`node_stream`): `Paced` takes it to stand. A cut and a
-write timed out are counted by their bound (`conn::Timeout`) in the
-thread's shard, before a 408 is written. A new reader of a served
-connection goes through `Paced`, never a bare `BufReader` over the `Conn`.
-
-**[`--tls-cert` and `--tls-key` make a listener HTTPS
-alone](../../docs/design/http.md#tls)**, `--metrics` too, each handshake on its
-connection's thread (`Tls::handshake`, `conn::Conn::open`), a plain request
-a 400; without the flags the `&Conn` is the `TcpStream` it was, nothing
-added. A failed handshake is counted by reason, logged a minute apart at
-most; an end on purpose sends `close_notify` (`conn::end_all`), never after
-a failed write or `Conn::cut`. A timeout set where the peer may have reset,
-bytes of its still to read, goes through `conn::unless_gone` (fennec-tls's
-own in a handshake): macOS's EINVAL there never fails a handshake done.
 
 **[Every HTTP dial takes HTTPS by its URL.](../../docs/design/http.md#dialing-https)**
 `https://host:port` -- a primary, a node, a region's router, the OTLP
@@ -381,3 +320,17 @@ looks among the rows written since](../../docs/design/waits.md#the-leaders-looks
 (`waits::look_all`): a look among the rows written must pick as the whole
 pick does, which runs wherever that is not shown -- a load, a compact, a
 maintenance or a schema mark moves `epoch` (`wrote(None)`).
+
+### Durability
+
+**[A node syncs each tenant on a thread of its own.](../../docs/design/durability.md#a-nodes-syncs)**
+Under `--sync <ms>` a clock hands every dirty tenant to the node's sync
+threads each interval and waits for none (`Tenants::sync_every`,
+`sync_each`), each sync a file's syncer's -- the flush under the tenant's
+write lock, the fsync after it, no stream waited for (`sync_now`) -- so a
+tenant's window is a file's whatever the others' syncs or locks take.
+Never sync them in turn on one thread, nor look at one under a lock a
+writer may hold (`try_read`); one still syncing is passed over, and a
+sync's panic stops the node through its one shutdown. The pass in turn
+(`sync_dirty`) is for a caller that must see the writes down first:
+Windows' shutdown.

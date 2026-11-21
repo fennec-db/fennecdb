@@ -430,6 +430,123 @@ fn a_fuzzer_past_its_cap_of_cpu_time_ends_naming_the_target_and_its_run() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// Reads what is left of the cap of CPU time as it runs: the most any of
+/// its runs read.
+static PEEK: Target = Target {
+    name: "peek",
+    about: "reads the cap of CPU time its runs are under",
+    max_len: 64,
+    smoke: 3,
+    seeds: || vec![b"x".to_vec()],
+    dictionary: &[],
+    run: |_| {
+        let left = guard::cap_left().as_micros() as u64;
+        PEEKED.fetch_max(left, std::sync::atomic::Ordering::Relaxed);
+    },
+};
+static PEEKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `make fuzz-smoke` runs each target with `--smoke`, which gives it its
+/// count of runs and arms the cap of CPU time its runs are under, read
+/// off the timer by a run: the child test above holds the timer to the
+/// process's end, this one the smoke to the timer. Stopped once the
+/// fuzzer returns.
+#[test]
+fn the_smoke_runs_each_target_its_count_under_its_cap_of_cpu_time() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let make = concat!(env!("CARGO_MANIFEST_DIR"), "/../../Makefile");
+    let make = std::fs::read_to_string(make).unwrap();
+    let recipe: Vec<&str> = make
+        .lines()
+        .skip_while(|l| !l.starts_with("fuzz-smoke:"))
+        .take_while(|l| !l.is_empty())
+        .collect();
+    assert!(
+        recipe.iter().any(|l| l.contains(",--smoke) --corpus none")),
+        "{recipe:?}"
+    );
+    let flags = |more: &[&str]| -> Vec<String> {
+        ["--smoke", "--corpus", "none"]
+            .iter()
+            .chain(more)
+            .map(|f| f.to_string())
+            .collect()
+    };
+    for t in TARGETS {
+        let opts = fennec_fuzz::run_options(t, &flags(&[])).unwrap();
+        assert_eq!(
+            (opts.runs, opts.seconds, opts.cap, opts.corpus),
+            (Some(t.smoke), None, Some(fennec_fuzz::SMOKE_CAP), None),
+            "{}",
+            t.name
+        );
+    }
+    let dir = scratch("peek");
+    let crashes = dir.to_str().unwrap();
+    let opts = fennec_fuzz::run_options(&PEEK, &flags(&["--crashes", crashes, "--quiet"])).unwrap();
+    assert_eq!(
+        fennec_fuzz::fuzz(&PEEK, opts),
+        Outcome::Clean { runs: 3, corpus: 1 }
+    );
+    let peeked = Duration::from_micros(PEEKED.load(std::sync::atomic::Ordering::Relaxed));
+    // Linux adds a tick (1/HZ, 1 to 10 ms) to a CPU timer it is handed, so
+    // that a clock it reads a tick at a time never fires it sooner than
+    // asked (`set_cpu_itimer`): read back at once, the timer stands above
+    // the cap by that tick, less the CPU time since -- 360.001 s on both
+    // Linux runners, where macOS reads 360 s or less.
+    let tick = Duration::from_millis(10);
+    assert!(
+        peeked > fennec_fuzz::SMOKE_CAP / 2 && peeked <= fennec_fuzz::SMOKE_CAP + tick,
+        "{peeked:?}"
+    );
+    assert_eq!(guard::cap_left(), Duration::ZERO);
+    // Without it, no cap.
+    let opts = fennec_fuzz::run_options(&PEEK, &["--runs".to_string(), "3".to_string()]).unwrap();
+    assert_eq!((opts.runs, opts.cap), (Some(3), None));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Panics as it is dropped: a run's panic carrying it is caught, and
+/// dropping it after panics outside the catch, as a bug of the fuzzer's
+/// own would -- on its thread, past the point its cap was set.
+struct Bomb;
+
+impl Drop for Bomb {
+    fn drop(&mut self) {
+        panic!("a panic's payload that panics as it is dropped");
+    }
+}
+
+static BOMB: Target = Target {
+    name: "bomb",
+    about: "a panic the fuzzer's own thread does not catch",
+    max_len: 64,
+    smoke: 10,
+    seeds: || vec![b"x".to_vec()],
+    dictionary: &[],
+    run: |_| std::panic::panic_any(Bomb),
+};
+
+/// A fuzzer whose own thread panics stops the timers it set as it unwinds:
+/// the call after its thread's join that stopped its cap was skipped, and
+/// a test binary's tests after it ran under a cap none of them set, which
+/// ends the process naming that fuzzer's target. An hour here, so that a
+/// timer left set fails this test, not the binary.
+#[test]
+fn a_fuzzer_whose_own_thread_panics_stops_its_cap() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = scratch("bomb");
+    let mut opts = options(dir.clone(), 10);
+    opts.cap = Some(Duration::from_secs(3600));
+    let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        fennec_fuzz::fuzz(&BOMB, opts)
+    }));
+    assert!(ended.is_err(), "{ended:?}");
+    assert_eq!(guard::cap_left(), Duration::ZERO);
+    let _ = guard::take_panic();
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// The weekly run fuzzes every target: its matrix names each, and only
 /// those.
 #[test]
