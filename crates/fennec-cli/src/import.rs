@@ -227,10 +227,12 @@ pub fn main(args: &[String]) -> Code {
     }
 }
 
-/// An error or a warning for the terminal: it may carry a source's words --
-/// PostgreSQL's, or whoever's answers in its place, a column's name, a
-/// SQLite file's -- so its control characters are escaped, an escape
-/// sequence never reaching the terminal, and it is cut at 4 KiB.
+/// An error, a warning or a name for the terminal: it may carry a source's
+/// words -- PostgreSQL's, or whoever's answers in its place, a column's
+/// name, a SQLite file's column or type -- so its control characters are
+/// escaped, an escape sequence never reaching the terminal, and it is cut
+/// at 4 KiB. Every line `fennec import` prints of a source's goes through
+/// it: the plan's warnings, and `--dry-run`'s fields, types and id.
 fn said(e: &impl std::fmt::Display) -> String {
     pg::peer_text(e.to_string().as_bytes(), 4096)
 }
@@ -298,7 +300,7 @@ fn run(
 
     println!("target   {target} -> {}", opts.into);
     for w in &plan.warnings {
-        println!("warning  {w}");
+        println!("warning  {}", said(w));
     }
 
     // An import that stops halfway leaves the collection in the file; since
@@ -516,14 +518,11 @@ fn print_plan(
 ) {
     println!("target   {target} -> {}\n", plan.schema.name);
     println!("create collection {} (", plan.schema.name);
-    let width = plan
-        .schema
-        .fields
-        .iter()
-        .map(|f| f.name.len())
-        .max()
-        .unwrap_or(0);
-    for f in &plan.schema.fields {
+    // A field's name is its column's, the source's to choose: shown
+    // escaped, and aligned as shown.
+    let names: Vec<String> = plan.schema.fields.iter().map(|f| said(&f.name)).collect();
+    let width = names.iter().map(|n| n.chars().count()).max().unwrap_or(0);
+    for (f, name) in plan.schema.fields.iter().zip(&names) {
         // Show which source column the field comes from.
         let src = plan
             .targets
@@ -533,9 +532,10 @@ fn print_plan(
             .map(|(_, c)| c.source_type.as_str())
             .unwrap_or("");
         println!(
-            "  {:<width$}  {:<14} <- {src}",
-            f.name,
+            "  {:<width$}  {:<14} <- {}",
+            name,
             f.ty.name(),
+            said(&src),
             width = width
         );
     }
@@ -546,7 +546,7 @@ fn print_plan(
         .zip(columns)
         .find(|(t, _)| **t == map::Target::Id)
     {
-        println!("  id  <- {} ({})", c.name, c.source_type);
+        println!("  id  <- {} ({})", said(&c.name), said(&c.source_type));
     }
     for (field, kind) in &plan.indexes {
         println!(
@@ -557,7 +557,7 @@ fn print_plan(
     }
     println!();
     for w in &plan.warnings {
-        println!("warning  {w}");
+        println!("warning  {}", said(w));
     }
     match rows {
         Some(n) => println!("{n} rows will be read; nothing was written (--dry-run)"),
