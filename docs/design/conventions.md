@@ -611,10 +611,10 @@ Two checks hold it, each where the other cannot reach. Clippy's
 not, a new crate too -- so every clippy run CI makes refuses a site without
 one in the code it compiles: the workspace's, wasm32's and each feature
 set's, part of Windows', the JNI functions' and `test-clock`'s. That is
-x86_64 Linux, wasm32 and Windows' check. The scanner below counts 362
-`unsafe` blocks and impls in the repository's 478 `.rs` files (2026-11-15,
-after the 79 blocks `unsafe_op_in_unsafe_fn` added and the merges after
-them), and a review found about 48 of them, when they were 255, compiled
+x86_64 Linux, wasm32 and Windows' check. The scanner below counts 366
+`unsafe` blocks and impls in the repository's 480 `.rs` files (2026-11-21,
+after the 79 blocks `unsafe_op_in_unsafe_fn` added, the merges after them
+and a reader's mapping laid over, `Mapping::reading`), and a review found about 48 of them, when they were 255, compiled
 in none of those runs -- aarch64's NEON kernels, prefetch and CRC
 instructions, Apple's system calls (the page cache's `F_NOCACHE`,
 `vm_statistics64`, `rusage_info_v4`, the lease's clock), the macOS-only
@@ -723,11 +723,11 @@ a reader between its look at the file and its walk, cuts the file under it
 with a server's open, and walks: mapped at its length, the walk ended the
 process (`SIGBUS`). Its open covers the mapping only to the records it took
 (`Mapping::cover` once the load returns,
-`a_reader_is_covered_to_the_records_its_open_took`). Until 2026-11-15 it
+`a_reader_is_covered_to_the_records_its_open_took`). Until 2026-11-21 it
 mapped the file at its length and walked it there, a server's open cutting
-it in the middle of that walk ending the reader, and before that it kept
-the length for its life, every slice spanning the pages past the file's
-new end once a server had cut it. On Windows the reader maps the file at
+it in the middle of that walk ending the reader, and until 2026-11-15 it
+kept the length for its life, every slice spanning the pages past the
+file's new end once a server had cut it. On Windows the reader maps the file at
 its length still: its view refuses the cut (`ERROR_USER_MAPPED_FILE`), the
 server's open failing by name until the reader is gone
 ([windows.md](windows.md)); its mapping is views laid end to end, which
