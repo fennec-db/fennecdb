@@ -388,7 +388,9 @@ fn rounds(s: &mut [u32; 16]) {
 /// state's first and last rows with nothing added back. A sealed file's
 /// frames are sealed under the one made from its id (`seal.rs`): a nonce
 /// can then repeat only among one file's frames, never across every file
-/// a key seals.
+/// a key seals. Never of a key ChaCha20 also runs under: a block's
+/// keystream, 32 of its bytes known, is HChaCha20 of that key and the
+/// block's counter and nonce (`seal::FILE_KEYS`).
 pub fn hchacha20(key: &[u8; 32], input: &[u8; 16]) -> [u8; 32] {
     let mut s = [0u32; 16];
     s[..4].copy_from_slice(&[0x61707865, 0x3320646e, 0x79622d32, 0x6b206574]);

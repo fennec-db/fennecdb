@@ -13,10 +13,12 @@
 //!   [plaintext length u32][nonce 12][ciphertext][tag 16]
 //! ```
 //!
-//! Each file is sealed under a key of its own, HChaCha20 of the key and
-//! the file's id (as XChaCha20 derives its subkey), and each frame's nonce
-//! is the system's randomness -- a seal is refused without it, never given
-//! the clock's -- and so is the file's id. A frame's tag covers the tag of
+//! Each file is sealed under a key of its own, HChaCha20 (as XChaCha20
+//! derives its subkey) of the file's id under a key made from the key for
+//! that alone ([`FILE_KEYS`]), never under the key itself, which seals
+//! versions 1 and 2's frames; and each frame's nonce is the system's
+//! randomness -- a seal is refused without it, never given the clock's --
+//! and so is the file's id. A frame's tag covers the tag of
 //! the frame before it -- the first frame's, the file's whole head -- its
 //! place in the file and whether it is the last: a frame moved, dropped,
 //! repeated or taken from another file does not open, nor two runs of one
@@ -75,11 +77,53 @@ fn corrupt(msg: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.to_string())
 }
 
-/// A 256-bit key.
+/// What a version 3 file's key is made under: HKDF-Expand (RFC 5869, 2.3)
+/// of the key with this info, 32 bytes -- HMAC-SHA256(key, info || 0x01),
+/// the key a uniformly random one, so no Extract -- and the file's key is
+/// HChaCha20 of that and the file's id ([`file_key`]).
+///
+/// Never HChaCha20 of the key itself, as version 3 was first made: the key
+/// seals versions 1 and 2's frames with ChaCha20, and a ChaCha20 block at
+/// counter c and nonce N is HChaCha20's rounds over the same state with the
+/// state added back, so 32 known bytes of a block's keystream give
+/// HChaCha20(key, c || N): the key of a version 3 file whose id, read from
+/// the file, is c || N (1.0's review,
+/// `an_older_files_keystream_gives_no_file_key`). Those blocks are at
+/// counter 0 (Poly1305's key) and from 1 on (the keystream) under a frame's
+/// random nonce, wrapping at 2^32 blocks, and nothing in those versions
+/// bounded a frame but memory: a constant input with a counter of 2^32 - 1
+/// is outside them only for frames under 256 GiB and by the nonce's
+/// randomness. HMAC-SHA256 shares no rounds with ChaCha20, so nothing
+/// ChaCha20 under the key gives away tells anything of it, at any frame's
+/// length or nonce, and it is held to RFC 4231's vectors and Wycheproof's
+/// already. Made once a key ([`Key::of`]): a file pays the one
+/// HChaCha20 it did. That key is used by HChaCha20 alone, never by
+/// ChaCha20, so no keystream gives HChaCha20 under it away; a file's key is
+/// used by ChaCha20 alone, and what its keystream gives away, HChaCha20
+/// under the file's key, makes no key.
+pub const FILE_KEYS: &[u8] = b"fennecdb sealed file keys, version 3";
+
+/// A 256-bit key, and what version 3 files' keys are made under.
 #[derive(Clone)]
-pub struct Key([u8; 32]);
+pub struct Key {
+    /// The key itself: versions 1 and 2 sealed their frames under it.
+    raw: [u8; 32],
+    /// What version 3 files' keys are made under ([`FILE_KEYS`]).
+    files: [u8; 32],
+}
+
+/// A version 3 file's own key, from its id.
+fn file_key(key: &Key, id: &[u8; ID]) -> [u8; 32] {
+    crypto::hchacha20(&key.files, id)
+}
 
 impl Key {
+    /// `raw`, and the key its version 3 files' keys are made under.
+    fn of(raw: [u8; 32]) -> Key {
+        let files = crypto::HmacKey::new(&raw).mac(&[FILE_KEYS, &[1]]);
+        Key { raw, files }
+    }
+
     /// The key in `path`: 64 hexadecimal digits, as `fennec key` writes it.
     /// A file others than its owner may read is warned of, never refused:
     /// whoever reads the key opens every archive and backup it sealed, and
@@ -106,7 +150,7 @@ impl Key {
         for (i, b) in k.iter_mut().enumerate() {
             *b = u8::from_str_radix(text.get(i * 2..i * 2 + 2)?, 16).ok()?;
         }
-        Some(Key(k))
+        Some(Key::of(k))
     }
 
     /// A new key from the system's randomness, as hexadecimal; `None`
@@ -307,8 +351,20 @@ impl Frames {
     #[doc(hidden)]
     pub fn v1(key: &Key) -> Frames {
         Frames {
-            key: key.0,
+            key: key.raw,
             kind: Kind::V1,
+            index: 0,
+        }
+    }
+
+    /// A version 2 file's of id `id`, as main sealed one before 1.0: its
+    /// frames under the key itself, bound to the id and their places.
+    /// Nothing seals so but a test making such a file.
+    #[doc(hidden)]
+    pub fn v2(key: &Key, id: [u8; ID]) -> Frames {
+        Frames {
+            key: key.raw,
+            kind: Kind::V2(id),
             index: 0,
         }
     }
@@ -399,7 +455,7 @@ pub fn begin(key: &Key, binding: &Binding, out: &mut Vec<u8>) -> io::Result<Fram
     binding.put(&mut head)?;
     out.extend_from_slice(&head);
     Ok(Frames {
-        key: crypto::hchacha20(&key.0, &id),
+        key: file_key(key, &id),
         kind: Kind::V3(Chain::Head(head)),
         index: 0,
     })
@@ -513,8 +569,8 @@ fn head(key: &Key, bytes: &[u8]) -> io::Result<(Frames, Option<Binding>, usize)>
         index: 0,
     };
     match bytes[NAME.len()] {
-        1 => Ok((frames(Kind::V1, key.0), None, MAGIC_V1.len())),
-        2 => Ok((frames(Kind::V2(id()?), key.0), None, MAGIC.len() + ID)),
+        1 => Ok((frames(Kind::V1, key.raw), None, MAGIC_V1.len())),
+        2 => Ok((frames(Kind::V2(id()?), key.raw), None, MAGIC.len() + ID)),
         3 => {
             let id = id()?;
             let Some((binding, len)) = Binding::read(&bytes[MAGIC.len() + ID..])? else {
@@ -522,7 +578,7 @@ fn head(key: &Key, bytes: &[u8]) -> io::Result<(Frames, Option<Binding>, usize)>
             };
             let start = MAGIC.len() + ID + len;
             let kind = Kind::V3(Chain::Head(bytes[..start].to_vec()));
-            let key = crypto::hchacha20(&key.0, &id);
+            let key = file_key(key, &id);
             Ok((frames(kind, key), Some(binding), start))
         }
         v => Err(corrupt(&format!(
@@ -686,7 +742,13 @@ mod tests {
     use super::*;
 
     fn key(b: u8) -> Key {
-        Key([b; 32])
+        Key::of([b; 32])
+    }
+
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len() / 2)
+            .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap())
+            .collect()
     }
 
     /// An image's binding, tenant and all: what a whole file is sealed as
@@ -901,9 +963,11 @@ mod tests {
         assert_eq!(out, [1]);
     }
 
-    /// Each file seals under its own key, HChaCha20 of the key and its id:
-    /// a frame opens under that key, never under the key itself, so a
-    /// nonce two files' frames happen to share gives nothing away.
+    /// Each file seals under its own key, HChaCha20 of its id under the key
+    /// HKDF-Expand makes of the key ([`FILE_KEYS`]): a frame opens under
+    /// that, never under the key itself, so a nonce two files' frames happen
+    /// to share gives nothing away, nor under HChaCha20 of the key and the
+    /// id, which an older file's keystream gave away.
     #[test]
     fn each_file_seals_under_its_own_key() {
         let k = key(11);
@@ -919,8 +983,131 @@ mod tests {
             let mut b = body.to_vec();
             crypto::open_in_place(key, &nonce, &aad, &mut b, tag).then_some(b)
         };
-        assert_eq!(open(&crypto::hchacha20(&k.0, &id)), Some(vec![0; 40]));
-        assert_eq!(open(&k.0), None, "the key itself");
+        let files = crypto::hmac_sha256(&k.raw, &[FILE_KEYS, &[1]].concat());
+        assert_eq!(open(&crypto::hchacha20(&files, &id)), Some(vec![0; 40]));
+        assert_eq!(open(&k.raw), None, "the key itself");
+        assert_eq!(
+            open(&crypto::hchacha20(&k.raw, &id)),
+            None,
+            "HChaCha20 of the key itself"
+        );
+    }
+
+    /// A file's key as another implementation makes it, so a change of the
+    /// derivation fails here first: computed apart from this code, in
+    /// Python -- HMAC-SHA256 and HKDF from its standard library, HChaCha20
+    /// written from draft-irtf-cfrg-xchacha 2.2 and checked against its
+    /// 2.2.1 vector. The key 00..1f, the id f0..ff.
+    #[test]
+    fn a_file_key_is_the_one_another_reader_makes() {
+        let k = Key::of(std::array::from_fn(|i| i as u8));
+        let id: [u8; ID] = std::array::from_fn(|i| 0xf0 + i as u8);
+        assert_eq!(
+            k.files[..],
+            hex("b334afb4e085eabd2c6cd511a3ee509a414695c8e2fd8d1f50845a65eb2e47da")[..]
+        );
+        assert_eq!(
+            file_key(&k, &id)[..],
+            hex("862970b95cd16be8c85c3e3f58f648a77eafd77a3a3a96a3aa0de9fdf0421c09")[..]
+        );
+        // What version 3 first made, the key itself under HChaCha20.
+        assert_eq!(
+            crypto::hchacha20(&k.raw, &id)[..],
+            hex("969e1d9115842722d5eae8d284f3b3df60f137195872dc2cfb786bf75a22054d")[..]
+        );
+    }
+
+    /// The key files' keys are made under is HKDF-Expand's (RFC 5869, 2.3)
+    /// first block, HMAC-SHA256 of the key and the info then 0x01, so a
+    /// reader with an HKDF of its own makes it: RFC 5869's SHA-256 cases,
+    /// A.1 to A.3, their PRK and info, and the first 32 bytes of each OKM.
+    #[test]
+    fn the_file_keys_key_is_hkdf_expand() {
+        let info_a2: Vec<u8> = (0xb0..=0xff).collect();
+        let cases: [(&str, Vec<u8>, &str); 3] = [
+            (
+                "077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5",
+                (0xf0..=0xf9).collect(),
+                "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf",
+            ),
+            (
+                "06a6b88c5853361a06104c9ceb35b45cef760014904671014a193f40c15fc244",
+                info_a2,
+                "b11e398dc80327a1c8e7f78c596a49344f012eda2d4efad8a050cc4c19afa97c",
+            ),
+            (
+                "19ef24a32c717b167f33a91d6f648bdf96596776afdb6377ac434c1c293ccb04",
+                Vec::new(),
+                "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d",
+            ),
+        ];
+        for (prk, info, okm) in cases {
+            let t1 = crypto::HmacKey::new(&hex(prk)).mac(&[&info, &[1]]);
+            assert_eq!(t1[..], hex(okm)[..], "{prk}");
+        }
+    }
+
+    /// The finding that held version 3 back: a file's key was HChaCha20 of
+    /// the key and the file's id, the id read from the file, while the key
+    /// itself seals version 1 and 2 frames with ChaCha20. A ChaCha20 block
+    /// at counter c and nonce N is HChaCha20's rounds over the same state
+    /// with that state added back, so a block's keystream less the
+    /// constants (words 0-3) and less (c, N) (words 12-15) is HChaCha20 of
+    /// the key and c || N: 32 bytes of plaintext known, bytes 0-15 and
+    /// 48-63 of a block, and anyone holding an older file had the key of a
+    /// version 3 file of id c || N, and sealed one -- any role, archive,
+    /// tenant and contents -- that opened. The same bytes now give nothing.
+    #[test]
+    fn an_older_files_keystream_gives_no_file_key() {
+        let k = key(14);
+        // Frame 0 of a version 2 file, 64 bytes the forger knows: block 1
+        // of its keystream is the ciphertext xored with them.
+        let known: Vec<u8> = (0..64).map(|i| i as u8 ^ 0x5c).collect();
+        let mut v2 = [&MAGIC_V2[..], &[3; ID]].concat();
+        Frames::v2(&k, [3; ID])
+            .seal(false, &known, &mut v2)
+            .unwrap();
+        let frame = &v2[MAGIC.len() + ID..];
+        let stream: Vec<u8> = frame[HEAD..HEAD + 64]
+            .iter()
+            .zip(&known)
+            .map(|(c, p)| c ^ p)
+            .collect();
+        let mut input = [0u8; 16];
+        input[..4].copy_from_slice(&1u32.to_le_bytes());
+        input[4..].copy_from_slice(&frame[4..HEAD]);
+        let word = |b: &[u8], i: usize| u32::from_le_bytes(b[i * 4..i * 4 + 4].try_into().unwrap());
+        let sigma = [0x61707865u32, 0x3320646e, 0x79622d32, 0x6b206574];
+        let mut had = [0u8; 32];
+        for i in 0..4 {
+            let first = word(&stream, i).wrapping_sub(sigma[i]);
+            let last = word(&stream, 12 + i).wrapping_sub(word(&input, i));
+            had[i * 4..i * 4 + 4].copy_from_slice(&first.to_le_bytes());
+            had[16 + i * 4..16 + i * 4 + 4].copy_from_slice(&last.to_le_bytes());
+        }
+        // The arithmetic holds: it is HChaCha20 of the key and c || N.
+        assert_eq!(had, crypto::hchacha20(&k.raw, &input));
+        // A version 3 file of id c || N, sealed whole under it: an image
+        // of tenant xeno's at change 99, holding what the forger chose.
+        let mut forged = MAGIC.to_vec();
+        forged.extend_from_slice(&input);
+        let mut bound = image();
+        bound.tenant = "xeno".into();
+        bound.change = 99;
+        bound.put(&mut forged).unwrap();
+        let mut frames = Frames {
+            key: had,
+            kind: Kind::V3(Chain::Head(forged.clone())),
+            index: 0,
+        };
+        frames
+            .seal(true, b"rows of the forger's", &mut forged)
+            .unwrap();
+        let opened = open_whole(&k, &forged);
+        assert!(
+            opened.is_err(),
+            "a file sealed under an older file's keystream opened: {opened:?}"
+        );
     }
 
     /// A head read before its file is opened is vouched for by its first
@@ -954,7 +1141,7 @@ mod tests {
         assert_eq!(vouched_in(&k, &sealed[..start - 1]).unwrap(), None);
         let mut old = [&MAGIC_V2[..], &[1; ID]].concat();
         let mut v2 = Frames {
-            key: k.0,
+            key: k.raw,
             kind: Kind::V2([1; ID]),
             index: 0,
         };
@@ -1017,7 +1204,7 @@ mod tests {
         let mut v2 = MAGIC_V2.to_vec();
         v2.extend_from_slice(&id);
         let mut frames = Frames {
-            key: k.0,
+            key: k.raw,
             kind: Kind::V2(id),
             index: 0,
         };
@@ -1217,7 +1404,7 @@ mod tests {
                         if i % per_file == 0 {
                             f = Some(match v {
                                 0 => Frames {
-                                    key: k.0,
+                                    key: k.raw,
                                     kind: Kind::V2([i as u8; ID]),
                                     index: 0,
                                 },
@@ -1242,6 +1429,9 @@ mod tests {
 
     /// A key file another user, or its group, can read is warned of by
     /// name and mode, as `--tls-key` is; one its owner alone reads is not.
+    /// The words alone: that `Key::from_file` logs them, on the way every
+    /// `--key-file` takes, is held through the command (fennec-cli's
+    /// `tokens.rs`).
     #[cfg(unix)]
     #[test]
     fn a_key_file_others_can_read_is_warned_of() {
