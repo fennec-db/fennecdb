@@ -36,6 +36,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
+mod syncs;
+
 /// Ceiling on a tenant name. It becomes a file name, so it is also kept to
 /// a character set no file system treats specially.
 pub const MAX_NAME: usize = 64;
@@ -141,6 +143,9 @@ pub struct Tenant {
     /// The compacts of its file its hook secrets were last carried past
     /// ([`Tenants::rebind_hooks`]).
     hooks_compactions: AtomicU64,
+    /// Whether its sync is queued or running on the node's sync threads
+    /// ([`Tenants::sync_each`]): a tick finding it so passes it over.
+    syncing: AtomicBool,
 }
 
 impl Tenant {
@@ -499,6 +504,9 @@ pub struct Tenants {
     /// node starts and as each is set: an event is verified against them
     /// before its tenant is looked up ([`crate::tenant_hooks`]).
     hooks: Arc<crate::tenant_hooks::Store>,
+    /// The threads syncing its tenants under `--sync <ms>`
+    /// ([`Tenants::sync_each`]).
+    syncs: syncs::Syncs,
 }
 
 /// A tenant's `last_used` where no request has used it since it opened:
@@ -595,6 +603,7 @@ impl Tenants {
             me: std::sync::OnceLock::new(),
             scheduler: std::sync::OnceLock::new(),
             hooks,
+            syncs: syncs::Syncs::default(),
         })
     }
 
@@ -1805,6 +1814,7 @@ impl Tenants {
             opened,
             bound: Mutex::new(bound),
             hooks_compactions: AtomicU64::new(0),
+            syncing: AtomicBool::new(false),
         }))
     }
 
@@ -2168,12 +2178,16 @@ impl Tenants {
         every
     }
 
-    /// Pushes every dirty open tenant to disk. The periodic syncer calls it,
-    /// and does as the single database's does: the flush under the tenant's
-    /// write lock, the fsync once it is let go. Held through the fsync, the
-    /// lock kept every read and write of the tenant waiting out the disk
-    /// once a pass: up to 27 ms at a time on macOS, against 1.8 this way,
-    /// with a write every millisecond beside four readers.
+    /// Pushes every dirty open tenant to disk, one after another, before it
+    /// returns: Windows' shutdown, synced before each of its waits, and a
+    /// caller that must know the writes are down. It does as the single
+    /// database's syncer does: the flush under the tenant's write lock, the
+    /// fsync once it is let go. Held through the fsync, the lock kept every
+    /// read and write of the tenant waiting out the disk once a pass: up to
+    /// 27 ms at a time on macOS, against 1.8 this way, with a write every
+    /// millisecond beside four readers. `--sync <ms>` syncs each tenant on
+    /// a thread of its own instead ([`Self::sync_each`]): one after another,
+    /// a tenant's sync waited for every one before it.
     pub fn sync_dirty(&self) {
         for t in self.open_tenants() {
             // After a storage error nothing is clean again, and every pass
@@ -2702,6 +2716,8 @@ fn sync_now(t: &Tenant) {
     let flushed = t.write().flush();
     match flushed {
         Ok(Some(durability)) => {
+            #[cfg(test)]
+            syncs::held::pass(&t.name);
             if let Err(e) = crate::replication::unwaited(durability) {
                 crate::log!("sync error ({}): {e}", t.name);
                 t.write().fail(&e);
@@ -3798,5 +3814,127 @@ mod tests {
             "{said:?}"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A registry of `--sync <ms>`'s kind: no write synced as it is
+    /// answered, each tenant's feed marking what an fsync covered -- what
+    /// `/_changes` hands over as on disk.
+    fn synced_later(dir: &Path) -> Tenants {
+        Tenants::new(dir).unwrap().with_replication(Replicated {
+            token: "r".into(),
+            buffer: 1 << 20,
+            upstream: None,
+            sync_on_write: false,
+        })
+    }
+
+    /// Whether every write `t` took is on disk, as its feed says.
+    fn on_disk(t: &Tenant) -> bool {
+        let feed = t.repl.as_ref().and_then(|r| r.feed()).unwrap();
+        feed.durable() >= feed.seq()
+    }
+
+    /// Waits for `what` to hold, up to 30 s: what must happen, bounded.
+    fn until(what: &str, ok: &dyn Fn() -> bool) {
+        let end = Instant::now() + Duration::from_secs(30);
+        while !ok() {
+            assert!(Instant::now() < end, "never {what}");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// `--sync <ms>` syncs each of a node's tenants on a thread of its own
+    /// (`Tenants::sync_each`): one whose fsync is slow -- held here between
+    /// its flush and its fsync, as a disk slow for it alone would hold it --
+    /// keeps none of the others' writes off the disk. Synced one after
+    /// another, as the node's pass synced them, each waited for every sync
+    /// before it, and the power-cut rig handed a write over 772 ms after
+    /// its answer (run 43696612848). A tick passes the held one over, its
+    /// sync under way, and its writes are down once it is let go.
+    #[test]
+    fn a_tenant_slow_to_sync_holds_none_of_the_others() {
+        let dir = scratch("slow-sync");
+        let reg = synced_later(&dir);
+        // Names of this test's own: the hold is the process's.
+        let names = [
+            "slow-sync-held",
+            "slow-sync-a",
+            "slow-sync-b",
+            "slow-sync-c",
+        ];
+        let ts: Vec<_> = names.iter().map(|n| reg.create(n).unwrap()).collect();
+        for t in &ts {
+            run(t, "create collection n (i int)");
+        }
+        reg.sync_dirty();
+        assert!(ts.iter().all(|t| on_disk(t)));
+        let held = &ts[0];
+        let others = &ts[1..];
+        let before = Arc::strong_count(held);
+        syncs::held::hold(names[0]);
+        run(held, "put n {i: 0}");
+        reg.sync_each();
+        assert!(
+            syncs::held::waiting(names[0], Duration::from_secs(30)),
+            "the held tenant's sync never came to its fsync"
+        );
+        for t in others {
+            run(t, "put n {i: 1}");
+        }
+        reg.sync_each();
+        until("the others' writes on disk beside a sync held", &|| {
+            others.iter().all(|t| on_disk(t))
+        });
+        assert!(!on_disk(held), "the held tenant's write was on disk");
+        // Written again while its sync runs, it is passed over: one sync of
+        // it under way, its thread's hold on it alone.
+        run(held, "put n {i: 2}");
+        reg.sync_each();
+        assert_eq!(Arc::strong_count(held), before + 1);
+        syncs::held::release(names[0]);
+        until("the held tenant's writes on disk once let go", &|| {
+            reg.sync_each();
+            on_disk(held)
+        });
+        drop(ts);
+        drop(reg);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A tenant whose write lock a writer holds -- a spill landing, a long
+    /// block -- holds none of the others' syncs either: the tick hands it
+    /// over unlooked at, and its thread waits for the lock. The pass looked
+    /// at each tenant under its read lock, and waited a writer out before
+    /// it looked at the next.
+    #[test]
+    fn a_tenant_whose_writer_holds_its_lock_holds_none_of_the_others() {
+        let dir = scratch("held-lock");
+        let reg = synced_later(&dir);
+        let ts: Vec<_> = ["busy", "a", "b"]
+            .iter()
+            .map(|n| reg.create(n).unwrap())
+            .collect();
+        for t in &ts {
+            run(t, "create collection n (i int)");
+        }
+        reg.sync_dirty();
+        for t in &ts {
+            run(t, "put n {i: 1}");
+        }
+        let (busy, others) = (&ts[0], &ts[1..]);
+        let writing = busy.db.write().unwrap();
+        reg.sync_each();
+        until("the others' writes on disk beside a writer's lock", &|| {
+            others.iter().all(|t| on_disk(t))
+        });
+        assert!(!on_disk(busy), "synced under a writer's lock");
+        drop(writing);
+        until(
+            "the busy tenant's write on disk once its lock was let go",
+            &|| on_disk(busy),
+        );
+        drop(ts);
+        drop(reg);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

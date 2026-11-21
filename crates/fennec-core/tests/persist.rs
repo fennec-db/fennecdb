@@ -986,7 +986,14 @@ fn a_head_lost_before_vectors_is_judged_by_the_records_after_them() {
 /// an id no create gives -- plain, or checked of kind 3 -- reads as no
 /// record too: refused where its head was read past the walk's judgment of
 /// it, it refused the open a version before had cut (the fuzz fix's
-/// review).
+/// review). A checked one framed by its length whose sum fails is judged
+/// from its end, as a version before judged it; one whole by its sum --
+/// of a kind this version knows, or of one it does not -- is no crash's
+/// leaving, and is refused naming what it holds: judged as a head no
+/// record reads from, it was cut, the file truncated (the second review).
+/// What a cut takes counts the records a walk frames in it, as a version
+/// before counted them, a head naming that collection among them. Every
+/// way an open reads a file alike, a look cutting nothing.
 #[cfg(feature = "std-fs")]
 #[test]
 fn stale_bytes_past_the_durable_point_are_judged_as_damage() {
@@ -1002,39 +1009,71 @@ fn stale_bytes_past_the_durable_point_are_judged_as_damage() {
         good
     };
     let (last, _) = *heads(&good).last().unwrap();
-    // Each tail, and whether it reads as no record's head -- the counter's
-    // away from the front, a collection no create gives -- rather than a
-    // plain record after checked ones.
-    let stale: [(&[u8], bool); 7] = [
-        (b"\n\0\x05hello", false),
-        (b"\t\0\x03abc", false),
-        (&[6; 17], true),
-        (b"\x04\0\x05\xff\xff\xff\xff\xff", false),
-        (b"\x04\x01\x03\x02\xc3\x28", false),
-        (b"\n\xff\xff\xff\xff\x0f\x05hello", true),
-        (b"\x83\xff\xff\xff\xff\x0f\x05hello", true),
-    ];
-    for (bytes, no_record) in stale {
+    let x = good.len();
+    // A checked record naming collection `u32::MAX`, its kind 3 (a data
+    // record's) or 15 (none this version knows), whole by its sum, and the
+    // same with its sum's last byte flipped.
+    let named =
+        |kind| fennec_core::engine::record_claiming(kind, u32::MAX, b"", x as u64, x as u64);
+    let torn = |kind| {
+        let mut r = named(kind);
+        *r.last_mut().unwrap() ^= 1;
+        r
+    };
+    for (whole, says) in [
+        (
+            named(3),
+            "a record names collection 4294967295, an id no create gives".to_string(),
+        ),
+        (named(15), format!("unknown record kind 143 at {x}")),
+    ] {
         let mut bad = good.clone();
-        bad.extend_from_slice(bytes);
-        for way in ["mapped", "in-memory"] {
+        bad.extend_from_slice(&whole);
+        refused_every_way(&path, &bad, &says);
+    }
+    // Each tail; how many records a walk frames in it; and what it is
+    // judged as by a whole record after it claiming the file durable past
+    // it: no record's head -- the counter's away from the front, a plain
+    // record naming a collection no create gives, a kind this version does
+    // not know -- a plain record after checked ones, or a record failing
+    // its sum.
+    let (no_record, plain, fails) = ("no record", "plain", "fails");
+    let stale: [(Vec<u8>, u64, &str); 9] = [
+        (b"\n\0\x05hello".to_vec(), 1, plain),
+        (b"\t\0\x03abc".to_vec(), 1, plain),
+        (vec![6; 17], 0, no_record),
+        (b"\x04\0\x05\xff\xff\xff\xff\xff".to_vec(), 1, plain),
+        (b"\x04\x01\x03\x02\xc3\x28".to_vec(), 1, plain),
+        (b"\n\xff\xff\xff\xff\x0f\x05hello".to_vec(), 1, no_record),
+        (b"\x83\xff\xff\xff\xff\x0f\x05hello".to_vec(), 1, fails),
+        (torn(3), 1, fails),
+        (torn(15), 0, no_record),
+    ];
+    for (bytes, records, judged) in stale {
+        let mut bad = good.clone();
+        bad.extend_from_slice(&bytes);
+        for way in ["mapped", "in-memory", "read-only"] {
             std::fs::write(&path, &bad).unwrap();
             let mut db = match way {
                 "mapped" => fennec_core::fs::open(&path),
-                _ => fennec_core::fs::open_in_memory(&path),
+                "in-memory" => fennec_core::fs::open_in_memory(&path),
+                _ => fennec_core::fs::open_read_only(&path),
             }
             .unwrap_or_else(|e| panic!("{bytes:?}, {way}: {e}"));
             assert_eq!(ids(&mut db, "t"), vec![1, 2], "{bytes:?}, {way}");
-            assert_eq!(db.cut_on_open().map(|c| c.at), Some(good.len() as u64));
+            let cut = db.cut_on_open().map(|c| (c.at, c.records));
+            assert_eq!(cut, Some((x as u64, records)), "{bytes:?}, {way}");
             drop(db);
-            assert_eq!(std::fs::read(&path).unwrap(), good, "{bytes:?}, {way}");
+            let left = match way {
+                "read-only" => &bad,
+                _ => &good,
+            };
+            assert_eq!(&std::fs::read(&path).unwrap(), left, "{bytes:?}, {way}");
         }
         // A whole record after them claiming the file durable past them:
         // they were durable once, and refused -- a plain record framed by
         // its length is then below the point that record's claim makes,
         // refused as a checked record whose high bit flipped is.
-        let mut bad = good.clone();
-        bad.extend_from_slice(bytes);
         let mut p = last + 1;
         let cid = varint(&good, &mut p) as u32;
         let len = varint(&good, &mut p) as usize;
@@ -1042,13 +1081,11 @@ fn stale_bytes_past_the_durable_point_are_judged_as_damage() {
         let at = bad.len();
         let claiming = fennec_core::engine::record_claiming(3, cid, body, at as u64, at as u64);
         bad.extend_from_slice(&claiming);
-        let x = good.len();
-        let says = match no_record {
-            true => format!(
-                "no whole record starts at {x}, and the whole record at {at} says the file \
-                 was durable past it"
-            ),
-            false => format!("the record at {x} carries no checksum, after records that do"),
+        let past = format!("and the whole record at {at} says the file was durable past it");
+        let says = match judged {
+            "no record" => format!("no whole record starts at {x}, {past}"),
+            "fails" => format!("the record at {x} fails its checksum, {past}"),
+            _ => format!("the record at {x} carries no checksum, after records that do"),
         };
         refused_every_way(&path, &bad, &says);
     }
