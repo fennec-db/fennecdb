@@ -313,17 +313,27 @@ fn take(
     name: std::path::PathBuf,
     mut locked: MutexGuard<'_, Vec<Key>>,
 ) -> Result<FileLock, Refused> {
-    let lock = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&name)
-        .map_err(Refused::Io)?;
+    // Made its owner's alone, as every file is (`fennec_core::fs::private`).
+    let lock = fennec_core::fs::private(
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+    )
+    .open(&name)
+    .map_err(Refused::Io)?;
     let meta = lock.metadata().map_err(Refused::Io)?;
     let key = key_of(&lock, &meta).map_err(Refused::Io)?;
     #[cfg(any(unix, windows))]
     record::take(&lock)?;
+    // Made just now -- a holder writes its line at once -- it takes the
+    // mode of the database it guards, there already: whoever an operator
+    // let write that file opens its lock too. One there keeps its own.
+    // Missed, the lock is only narrower.
+    if meta.len() == 0 {
+        let _ = fennec_core::fs::mode_like(&name, &name.with_extension(""));
+    }
     locked.push(key);
     // Written only now, under the lock: before it, the line was the
     // holder's to keep. Over the old one in place, and cut only where that
@@ -768,6 +778,89 @@ pub fn file_id(path: &std::path::Path) -> std::io::Result<(u64, u128, std::time:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lock file made is its owner's alone whatever the umask -- 022,
+    /// the usual one, and 000, the widest, each set by `sh` for a child
+    /// running this test alone, since the umask is the process's and the
+    /// tests beside this one on cargo's threads make files too -- and one
+    /// made beside a database takes that file's mode, so whoever may write
+    /// the database may open its lock; one there keeps its own. Up to 0.2.0
+    /// it took the umask's: 0644, 0666.
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_file_is_made_its_owners_alone_or_as_its_database() {
+        use std::os::unix::fs::PermissionsExt;
+        const UMASK: &str = "FENNEC_TEST_UMASK";
+        fn mode(p: &str) -> u32 {
+            std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+        }
+        let Ok(mask) = std::env::var(UMASK) else {
+            for mask in ["022", "000"] {
+                let child = std::process::Command::new("/bin/sh")
+                    .args(["-c", "umask \"$0\" && exec \"$@\"", mask])
+                    .arg(std::env::current_exe().unwrap())
+                    .args([
+                        "lock::tests::a_lock_file_is_made_its_owners_alone_or_as_its_database",
+                        "--exact",
+                        "--test-threads=1",
+                    ])
+                    .env(UMASK, mask)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                // Its output once it exits, or killed past two minutes: a
+                // child that hangs fails the test with what it printed.
+                let pid = child.id().to_string();
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || tx.send(child.wait_with_output().unwrap()));
+                let out = rx
+                    .recv_timeout(Duration::from_secs(120))
+                    .unwrap_or_else(|_| {
+                        let _ = std::process::Command::new("kill")
+                            .args(["-KILL", &pid])
+                            .status();
+                        let out = rx.recv().unwrap();
+                        panic!(
+                            "under umask {mask}, killed past two minutes:\n{}{}",
+                            String::from_utf8_lossy(&out.stdout),
+                            String::from_utf8_lossy(&out.stderr)
+                        )
+                    });
+                let said = String::from_utf8_lossy(&out.stdout);
+                assert!(
+                    out.status.success() && said.contains("1 passed"),
+                    "under umask {mask}:\n{said}{}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            return;
+        };
+        let mask = u32::from_str_radix(&mask, 8).unwrap();
+        let path = scratch("modes.fennec");
+        let lock = format!("{path}.lock");
+        // The umask is the one asked: a plain create takes it.
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, b"").unwrap();
+        assert_eq!(mode(&path), 0o666 & !mask, "the child's umask");
+        std::fs::remove_file(&path).unwrap();
+
+        drop(hold(&path).unwrap());
+        assert_eq!(mode(&lock), 0o600, "a lock file made before its database");
+        drop(hold(&path).unwrap());
+        assert_eq!(mode(&lock), 0o600, "a lock file there");
+
+        std::fs::remove_file(&lock).unwrap();
+        std::fs::write(&path, b"").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).unwrap();
+        drop(hold(&path).unwrap());
+        assert_eq!(mode(&lock), 0o660, "a lock file made beside its database");
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o640)).unwrap();
+        drop(hold(&path).unwrap());
+        assert_eq!(mode(&lock), 0o640, "a lock file there keeps its mode");
+        std::fs::remove_file(&lock).unwrap();
+        std::fs::remove_file(&path).unwrap();
+    }
 
     fn scratch(name: &str) -> String {
         let dir = std::env::temp_dir().join(format!("fennec-abi-lock-{}", std::process::id()));
