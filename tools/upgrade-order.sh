@@ -40,7 +40,7 @@
 # them), where it ran this tree's, and the last case holds CK_BASE's to this
 # tree's, following its primary and refusing its file. Then a sealed frame
 # bound to its file: CK_BASE's `fennec restore` and `fennec verify` refuse a
-# backup and an archive this tree sealed (version 2) in words, writing no
+# backup and an archive this tree sealed (version 3) in words, writing no
 # file, and this tree's read them. Every server listens
 # on port 0, found by its `listening on:` line; everything it started is
 # killed and every path it made removed on its way out.
@@ -995,10 +995,10 @@ count_is "$PN" 7 || fail "this tree's server lost a write of the old primary's f
 echo "new replica:  followed the old primary, its file whole; this tree's server opened the old file and wrote to it"
 
 # A sealed frame bound to its file (docs/design/replication.md#sealed-archives):
-# a backup and an archive this tree sealed are version 2, a file id under
-# every frame's tag, which CK_BASE's `fennec restore` and `fennec verify`
-# refuse in words, never reading one as a plain file nor writing the file
-# asked for, and which this tree's read.
+# a backup and an archive this tree sealed are version 3, each file under a
+# key of its own and bound to what it is, which CK_BASE's `fennec restore`
+# and `fennec verify` refuse in words, never reading one as a plain file
+# nor writing the file asked for, and which this tree's read.
 "$NEW/fennec-server" --file "$WORK/sb.fennec" --http 127.0.0.1:0 \
     --http-token t --replication-token r 2>"$WORK/sb.log" &
 SB_PID=$!
@@ -1019,8 +1019,8 @@ said "$WORK/archivers.log" "image at change" ||
     fail "this tree's sealed archiver took no image: $(tail -3 "$WORK/archivers.log")"
 kill "$ARCHIVERS" 2>/dev/null || true
 wait "$ARCHIVERS" 2>/dev/null || true
-[ "$(head -c 8 "$WORK/sb.sealed" | od -An -c | tr -d ' ')" = 'FENECSL002' ] ||
-    fail "this tree's sealed backup is no version 2 file"
+[ "$(head -c 8 "$WORK/sb.sealed" | od -An -c | tr -d ' ')" = 'FENECSL003' ] ||
+    fail "this tree's sealed backup is no version 3 file"
 for what in sb.sealed archives; do
     if "$PRE/fennec" restore "$WORK/$what" "$WORK/old-$what.fennec" --key-file "$WORK/seal.key" \
         >"$WORK/old-restore-$what.log" 2>&1; then

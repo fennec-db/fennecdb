@@ -333,6 +333,20 @@ enum Walsends {
     Releases,
 }
 
+/// Where the stand-in holds up the copy's connection, its second -- the
+/// first is the catalog's -- and holds it for good.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Stall {
+    /// It takes the connection and answers nothing: not the TLS request,
+    /// not the startup.
+    Dial,
+    /// It answers the TLS request `S`, and then no byte of a handshake.
+    Handshake,
+    /// It starts the COPY and sends a byte of a row every half second,
+    /// never a line's end: a table that never finishes coming.
+    Copy,
+}
+
 /// A stand-in PostgreSQL on a port of its own: the catalog a follower asks
 /// for, a copy of two rows of `items (id bigint, title text)`, and a
 /// walsender doing as `Walsends` says.
@@ -344,6 +358,8 @@ struct StandIn {
     ending: mpsc::Receiver<u8>,
     /// The tags the follower sent once streaming, to its connection's end.
     sent: mpsc::Receiver<Vec<u8>>,
+    /// Told once the copy's connection reached its `Stall`.
+    stalled: mpsc::Receiver<()>,
 }
 
 fn framed(tag: u8, body: &[u8]) -> Vec<u8> {
@@ -389,20 +405,58 @@ fn answer(columns: &[(&str, i32)], rows: &[&[&str]]) -> Vec<u8> {
     out
 }
 
+/// Reads the rest of a connection, answering nothing: a stall held until
+/// the client goes.
+fn hold(mut s: TcpStream) {
+    let _ = s.read_to_end(&mut Vec::new());
+}
+
 /// One connection of the stand-in: a catalog query or the copy, each
-/// answered by what it asks; or, in replication mode, the walsender.
+/// answered by what it asks; or, in replication mode, the walsender. The
+/// copy's connection, the second (`at` 1), stops at `stall` where one is
+/// given.
+#[allow(clippy::too_many_arguments)]
 fn stand_in_connection(
     mut s: TcpStream,
+    at: usize,
     walsends: Walsends,
+    stall: Option<Stall>,
     released: &AtomicBool,
     ending: &mpsc::Sender<u8>,
     sent: &mpsc::Sender<Vec<u8>>,
+    stalled: &mpsc::Sender<()>,
 ) {
     s.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
-    let mut len = [0u8; 4];
-    s.read_exact(&mut len).unwrap();
-    let mut startup = vec![0u8; i32::from_be_bytes(len) as usize - 4];
-    s.read_exact(&mut startup).unwrap();
+    let stall = stall.filter(|_| at == 1);
+    // An `SSLRequest` (8 bytes, its code) or the startup's first 8.
+    let mut head = [0u8; 8];
+    s.read_exact(&mut head).unwrap();
+    let mut len = [head[0], head[1], head[2], head[3]];
+    let mut startup = Vec::new();
+    if head[4..] == 80_877_103i32.to_be_bytes() {
+        match stall {
+            Some(Stall::Dial) => {
+                let _ = stalled.send(());
+                return hold(s);
+            }
+            Some(Stall::Handshake) => {
+                s.write_all(b"S").unwrap();
+                let _ = stalled.send(());
+                return hold(s);
+            }
+            _ => s.write_all(b"N").unwrap(),
+        }
+        s.read_exact(&mut len).unwrap();
+    } else {
+        startup.extend_from_slice(&head[4..]);
+    }
+    let mut rest = vec![0u8; i32::from_be_bytes(len) as usize - 4 - startup.len()];
+    s.read_exact(&mut rest).unwrap();
+    startup.extend_from_slice(&rest);
+    if stall == Some(Stall::Dial) {
+        let _ = stalled.send(());
+        return hold(s);
+    }
     let replication = startup.windows(21).any(|w| w == b"replication\0database\0");
     let mut out = framed(b'R', &0i32.to_be_bytes());
     out.extend_from_slice(&framed(b'S', b"server_version\x0017.0\x00"));
@@ -441,6 +495,17 @@ fn stand_in_connection(
                 &[("plugin", 25), ("slot_type", 25), ("database", 25)],
                 &[&["pgoutput", "logical", "d"]],
             )
+        } else if q.starts_with("copy (") && stall == Some(Stall::Copy) {
+            // A row begun and never ended: a byte every half second, each
+            // its own CopyData, well within any one read's timeout.
+            let mut out = framed(b'H', &[0, 0, 2, 0, 0, 0, 0]);
+            out.extend_from_slice(&framed(b'd', b"1\tone\n"));
+            s.write_all(&out).unwrap();
+            let _ = stalled.send(());
+            while s.write_all(&framed(b'd', b"x")).is_ok() {
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            return;
         } else if q.starts_with("copy (") {
             let mut out = framed(b'H', &[0, 0, 2, 0, 0, 0, 0]);
             out.extend_from_slice(&framed(b'd', b"1\tone\n2\ttwo\n"));
@@ -495,27 +560,48 @@ fn stand_in_connection(
 }
 
 fn stand_in(walsends: Walsends) -> StandIn {
+    stalling(walsends, None, "sslmode=disable")
+}
+
+/// [`stand_in`], its copy's connection held up at `stall`; `query` the
+/// URL's parameters.
+fn stalling(walsends: Walsends, stall: Option<Stall>, query: &str) -> StandIn {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let released = Arc::new(AtomicBool::new(false));
     let (ending_tx, ending) = mpsc::channel();
     let (sent_tx, sent) = mpsc::channel();
+    let (stalled_tx, stalled) = mpsc::channel();
     let slot = Arc::clone(&released);
     std::thread::spawn(move || {
-        for s in listener.incoming() {
+        for (at, s) in listener.incoming().enumerate() {
             let Ok(s) = s else { return };
-            let (slot, ending_tx, sent_tx) =
-                (Arc::clone(&slot), ending_tx.clone(), sent_tx.clone());
+            let (slot, ending_tx, sent_tx, stalled_tx) = (
+                Arc::clone(&slot),
+                ending_tx.clone(),
+                sent_tx.clone(),
+                stalled_tx.clone(),
+            );
             std::thread::spawn(move || {
-                stand_in_connection(s, walsends, &slot, &ending_tx, &sent_tx)
+                stand_in_connection(
+                    s,
+                    at,
+                    walsends,
+                    stall,
+                    &slot,
+                    &ending_tx,
+                    &sent_tx,
+                    &stalled_tx,
+                )
             });
         }
     });
     StandIn {
-        url: format!("postgres://u@127.0.0.1:{port}/d?sslmode=disable"),
+        url: format!("postgres://u@127.0.0.1:{port}/d?{query}"),
         released,
         ending,
         sent,
+        stalled,
     }
 }
 
@@ -592,4 +678,68 @@ fn a_stopped_server_lets_its_slot_go_before_it_exits() {
     // written -- "still held at the stop", "may still be held at the stop".
     assert!(log.contains("shutting down: "), "{log}");
     assert!(!log.contains("held at the stop"), "{log}");
+}
+
+/// A first copy that PostgreSQL -- or whoever answers in its place -- holds
+/// up holds up nothing of the server's: not a read of another collection,
+/// nor a write to one, nor the shutdown, which ends within its wait and
+/// leaves the copy unfinished for the next start. The copy's dial, its
+/// sign-in and its rows each held the server's write lock: a request of
+/// any collection waited on PostgreSQL, a stall sending a byte a little
+/// under every 30 s held it for good, and a SIGTERM never ended the
+/// server, its shutdown waiting for the same lock. The three places a
+/// stand-in stalls: the dial, answered by nothing; the TLS handshake,
+/// begun and never answered; the COPY, a byte every half second.
+#[test]
+fn a_copy_held_up_holds_up_no_request_nor_the_shutdown() {
+    for (stall, query) in [
+        (Stall::Dial, "sslmode=disable"),
+        (Stall::Handshake, "sslmode=prefer"),
+        (Stall::Copy, "sslmode=disable"),
+    ] {
+        let p = stalling(Walsends::Releases, Some(stall), query);
+        let file = tmp(&format!("standin-stall-{stall:?}"));
+        let s = crate::support::start(&[
+            "--file",
+            file.to_str().unwrap(),
+            "--follow",
+            &p.url,
+            "--follow-table",
+            "items",
+        ]);
+        p.stalled
+            .recv_timeout(Duration::from_secs(60))
+            .unwrap_or_else(|_| panic!("{stall:?}: the copy never reached its stall"));
+        // A request of another collection, a write and a read, each
+        // answered while the copy waits: bounded by what it stands
+        // against, a wait for good.
+        let (tx, rx) = mpsc::channel();
+        let port = s.port;
+        std::thread::spawn(move || {
+            let mut h = crate::support::Http::open(port);
+            let w = h.query("create collection notes (title text)");
+            let r = h.query(r#"put notes {title: "one"}"#);
+            let g = h.query("get notes");
+            let _ = tx.send((w, r, g));
+        });
+        let (w, r, g) = rx
+            .recv_timeout(Duration::from_secs(20))
+            .unwrap_or_else(|_| panic!("{stall:?}: a request waited on the copy"));
+        assert!(w.is_ok() && r.is_ok(), "{stall:?}: {w:?} {r:?}");
+        assert!(g.unwrap().contains("\"one\""), "{stall:?}");
+        // The shutdown ends within its wait, 5 s, the copy left unfinished.
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(s.terminate());
+        });
+        let (code, log) = rx
+            .recv_timeout(Duration::from_secs(20))
+            .unwrap_or_else(|_| panic!("{stall:?}: the shutdown waited on the copy"));
+        assert_eq!(code, 0, "{stall:?}: {log}");
+        assert!(
+            !log.contains("the mirror of items stopped"),
+            "{stall:?}: {log}"
+        );
+        let _ = std::fs::remove_dir_all(file.parent().unwrap());
+    }
 }

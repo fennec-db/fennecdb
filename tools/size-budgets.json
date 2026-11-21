@@ -8,18 +8,18 @@
   "binaries": {
     "fennec": {
       "build": "cargo build --profile cli --target x86_64-unknown-linux-musl -p fennec-cli",
-      "measured": 4893456,
-      "budget": 4918000
+      "measured": 5028624,
+      "budget": 5054000
     },
     "fennec-server": {
       "build": "cargo build --release --target x86_64-unknown-linux-musl -p fennec-server",
-      "measured": 8292944,
-      "budget": 8335000
+      "measured": 8378960,
+      "budget": 8421000
     },
     "small": {
       "build": "make small TARGET=x86_64-unknown-linux-musl",
-      "measured": 2968064,
-      "budget": 2983000
+      "measured": 2972160,
+      "budget": 2988000
     }
   }
 }

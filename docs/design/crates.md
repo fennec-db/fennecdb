@@ -94,12 +94,14 @@ dial), `fennec-server` and `fennec` one 16 KB page each.
 **What must never happen.** A dependency in `fennec-core`, `fennec-ql`,
 `fennec-abi`, `fennec-wasm`, the browser module or `fennec-ffi`, the
 library apps embed -- not `fennec-tls`, not anything -- and another crate
-coming in by this door: `fennec-tls` takes rustls and webpki-roots, rcgen
+coming in by this door: `fennec-tls` takes rustls and webpki-roots -- and
+ring, rustls's own, by name for the digest of a channel binding
+(`server_end_point`), its version the one rustls resolves -- rcgen
 to test, and nothing else, and no other crate takes a crate from outside
 the workspace because TLS now does. `tools/deps_check.py`, in CI's fmt
 job, fails a change that breaks either: a crate but `fennec-tls` and
 `fennec-bench` naming a crate from outside the workspace, of any kind;
-`fennec-tls` naming one beyond its three; `fennec-tls` taken other than
+`fennec-tls` naming one beyond its four; `fennec-tls` taken other than
 optional behind `tls`; the trees of `fennec-core`, `fennec-ql`,
 `fennec-abi`, `fennec-wasm` and `fennec-ffi`, every feature on, reaching
 outside the workspace or `fennec-tls`; or `fennec-tls`'s own tree, normal
@@ -601,19 +603,255 @@ allocated, and its walk reaches a page once.** `fennec import`'s reader
 cell's payload length is a varint of the file's, and `Vec::with_capacity`
 of one declaring 2^62 bytes ended the import -- capacity overflow, or the
 allocator's abort -- before the length met the file; it is held to the
-file's length now (`Pager::payload`), as a wire message's is held to
-`proto::MAX_MESSAGE` (`proto::zeroed`). The b-tree walk keeps a bit a page
-of the file (`Walk::visit`): an interior page naming itself or a page
-above it as a child walked on for ever, its stack growing by the page's
-cells each time round, and is refused at the page reached twice; a child
-past the file's pages is refused before it is read. A page's usable part
-is held to SQLite's own floor of 480 bytes (`MIN_USABLE`), which the
-overflow arithmetic (`local_len`) stands on. And a column's type is read a
-character at a time (`take_type`): a space of two bytes, U+00A0, read a
-byte at a time began a word that ended at once, and the reading never
-moved on. Each is a test of `tests/sqlite.rs` on a file made by hand, and
-the fuzzer's `sqlite` target runs the reader over every seed's mutations
-([conventions.md](conventions.md#fuzzing)).
+file's length now, as the cell's page is entered (`Walk::cells_apart`,
+which refuses the page before a row of it is yielded) and again where the
+payload is allocated (`Pager::payload`, `Pager::held_to_file`: no file
+reaches this one, which reads the same length from the same bytes, and a
+unit test holds it), as a wire message's is held to `proto::MAX_MESSAGE`
+(`proto::zeroed`). A page's
+usable part is held to SQLite's own floor of 480 bytes (`MIN_USABLE`),
+which the overflow arithmetic (`local_len`) stands on. And a column's type
+is read a character at a time (`take_type`): a space of two bytes, U+00A0,
+read a byte at a time began a word that ended at once, and the reading
+never moved on.
+
+*A walk reaches a page once, whatever kind of page it is, and holds a
+page and a row.* A page of a SQLite file is one node of one b-tree or one
+page of one overflow chain, so a walk keeps a bit a page of the file
+(`Reached::reach`) and marks a page as it is named -- a b-tree's child as
+its parent is entered, an overflow page as its chain reaches it -- refusing
+one reached twice by any path, naming it, and a page past the file's pages
+before it is read. Before G14's review (finding C3) the bits covered b-tree
+pages alone: an interior page naming itself or a page above it was
+refused, but an overflow chain naming a page it held went round, reading
+the one page as each next part of the payload, and a chain naming a b-tree
+page read the page as the end of a row and then walked it as a node. A
+chain is as long as its payload needs and no longer (`Pager::chain`): the
+pages the bytes left need, the last naming no page after it, as SQLite
+writes it and its `integrity_check` holds it ("overflow list length").
+A page's cells are held apart as it is entered (`Walk::cells_apart`): each
+begins past the header and the cell pointers and ends inside the usable
+part, and no byte is two cells' (a bit a byte of the page), so a pointer
+repeating another or pointing into it is refused. And a cell's payload is
+read when the cell is yielded (`Walk::leaf_cell`), where every cell of a
+leaf was read as the leaf was entered: the review's leaf, of 64 KiB pages,
+whose 28 660 pointers named one cell whose payload was the file's length
+over a chain naming itself, made a 192 KiB file ask for 28 660 copies of
+itself, 5.2 GiB, and a 1 MiB file for 28 GiB, `--count` too -- 197 MB at
+1 000 pointers, as `tests/sqlite.rs` counted it. What a walk holds at once
+is a page (read into one buffer, `Walk::page`), a bit a byte of it, a bit
+a page of the file, the pages named and not yet entered (4 bytes each, a
+page at most once since a page is reached as it is named) and the row it
+yields, whose payload is at most the file's length and is read from pages
+no other row reads; the overflow pages are read through one more page
+(`Pager::spare`). The test holds the review's leaf, at 1 000 pointers and
+at 28 660, to under four of its pages, counting the bytes its thread
+allocates (`tests/held.rs`, the test binary's allocator) rather than
+timing it; and a leaf of ten rows of 20 301 bytes spilling over 40
+overflow pages each to two pages and a payload counted, and the payload
+and its row read (`a_walk_of_spilling_rows_holds_two_pages_and_a_payload`:
+read as the leaf was entered, the walk held 204 682 bytes at once, where
+the bound is 25 421).
+
+*A row is as wide as SQLite lets a table be, and an import holds a batch
+by its bytes.* A row holds a value for each column its table declares,
+whatever its record holds -- a record of one byte too -- and each column
+it lacks a copy of its default. A walk held a page and a row, but the row
+was the file's to size: G14 F2b's review made a 384 KiB file of 64 KiB
+pages whose `CREATE TABLE t("","",...)` declared 87 376 columns over 2 000
+three-byte rows, 2.8 MB a row as read, and `load::run` held its `--batch`
+of 2 000 rows at once, some 12.6 GB; `Schema::new`'s duplicate check, each
+name against each before it, made 3.8e9 comparisons of it. A table is held
+to SQLite's own ceiling, 32 767 columns -- `SQLITE_MAX_COLUMN`, 2 000
+unless a build raises it, can be raised no further -- counted before a
+column is read and refused naming the table (`MAX_COLUMNS`; the review's
+file is refused holding its `CREATE TABLE` text three times over and two
+of its pages, under three times its length,
+`a_table_past_sqlites_column_ceiling_is_refused_as_it_is_opened`, the
+body's pieces read one at a time where a vector of them was 2 MiB), and
+`Schema::new` looks a name up in a set. A row is then a value a column, 32
+bytes each, at most 1 MiB of them, its texts and blobs within its payload
+and its defaults within the `CREATE TABLE` text, each at most the file's
+length: as it is read a row holds its payload and its values, about twice
+the file at most, more where a text is not UTF-8, each such byte U+FFFD's
+three. And a batch is put once it holds `BATCH_BYTES`, 16 MiB, of its
+rows, or `--batch` rows, whichever comes first: 16 MiB is the most the
+engine holds of an open block before it spills it into the file
+(`SPILL_AT`), and a batch is one `put`, one block, which the engine holds
+again as its documents, and as their frames twice until the block lands
+-- in its record and in the store, each less than the batch -- beside the
+frames the store holds since its file was opened, up to `HANDOVER_AT` (16
+MB). A batch holds under `BATCH_BYTES` and the row that reached it, which
+the engine copies with the rest, so an import holds about five times
+`BATCH_BYTES` and its largest row at most, whatever its source declares.
+Rows under 8 KiB each, 2 000 of them, never reach it, so `--batch` alone
+decides for them, as before. A file of 128 KiB whose 2 000 three-byte rows
+read 46 KB each -- 199 columns named `""` with a default of 150 bytes --
+held 339 MB at once in `load::run` before
+(`an_import_holds_a_batch_by_its_bytes_not_its_rows`, counted as above),
+and 74 MB now, under five times `BATCH_BYTES`.
+
+*A row is counted once, from sizes known before its values are looked
+at.* A row's count is its fields' pairs and names, once a plan
+(`load::fields_bytes`), and what its source read (`Source::next_counted`): a
+SQLite row its record's length, which holds its texts and blobs, what
+decoding a text made it grow by (`decode_text`: bytes that are not UTF-8
+become U+FFFD's three each, a UTF-16 unit up to three bytes, added as the
+text is made, where valid UTF-8 is copied as it is), and the defaults of
+the columns it lacks, summed once a table (`Table::absent`), each copy its
+default's length; a PostgreSQL row and a change of `--follow` their
+values counted one by one (`load::values_bytes`), since a cell's text a
+`jsonb`, an array or a vector may make more of. Adapting a value to its
+field makes one larger than it was read: a number made text, up to 20
+bytes as an integer and 327 as a float, which Rust writes digit by digit
+(`-5e-324` is `-0.` and 324 decimals), added by the capacity it got where
+`adapt` allocates it (`load::built`) -- counted as the most a field could
+make, each text field of a narrow row would count 327 bytes on every row.
+A text read into a `json` field is passed on as text and kept so by the
+engine, and bytes made a vector are as many bytes, so nothing else grows.
+So a row holds nothing past its count but the allocator's rounding, and a
+batch, put once its count reaches `BATCH_BYTES`, holds under it and the
+row that reached it. The second round counted each value as its document
+was built, on the premise that adapting a value -- a text read into a
+`json` field, bytes made a vector -- makes it larger, which neither does:
+some 75 instructions a row, 0.66% of a million-row import of an id and
+three small columns (11.269 billion instructions against 11.343, four
+runs each in turn, macOS's `time -l`), the narrowest rows the most.
+Counted once a row, the same import, each build under six re-signed
+UUIDs and run three times each ([benchmarks.md](benchmarks.md#instruction-counts),
+the mean of the copies' medians, standard errors 1.8 to 4.6 million),
+retires 10.474 billion instructions, the same tree with the count taken
+out 10.450, the second round 10.511 and `train-d` 10.603: the count is
+some 24 instructions a row (two standard errors 12), where the second
+round's was some 60, and the branch retires 1.2% fewer than `train-d`:
+the first round's walk, which reads its pages into one buffer where it
+allocated one a page, took 175 a row off (`e7d6b6e7`, 10.427), and the
+later rounds' reader, the count aside -- a lacking column's default read
+for it, a text's decoding growth carried -- put 23 back. The count asked
+for in a call of its own after the row (`row_bytes`) measured the same,
+26 a row; it comes with its row (`Source::next_counted`).
+
+*A table's columns are read where SQLite puts them.* A record holds a
+value a column by position, so a column the reader misplaced took its
+neighbour's values, silently, and the import went on (the review's finding
+C7, each case a file SQLite 3.51 wrote, kept in `tests/sqlite-files/` with
+the commands that made it). The `CREATE TABLE` text is SQLite's as written,
+comments and all, and rewritten by `ALTER TABLE`: a comment is a space
+(`strip_comments`), where a comma in one split a column in two and a quote
+ran on over the columns after it; the body opens at the first parenthesis
+outside a quote (`create_body`), not one in a quoted table name. A VIRTUAL
+generated column is in no record -- SQLite computes it as the row is read
+(`sqlite3TableColumnToStorage`) -- so it is left out of the rows and named
+in the import's summary (`Source::left_out`), and a STORED one is in the
+record where it is declared and imported as a plain field, its expression
+not; the importer computes no expression. A column named `""` was dropped;
+it keeps its place as `column<N>`, N its place from 1, SQLite's own name for
+a result column with none (`sqlite3ColumnsFromExprList`), refused in words
+where another column has that name. A row written before an `ALTER TABLE
+ADD COLUMN` lacks the columns added after it, and SQLite reads each as its
+default made a value of the column's affinity (`sqlite3ColumnDefault`,
+`valueFromExpr`): `TEXT DEFAULT 5` is `'5'`, `NUMERIC DEFAULT '3.0e+5'`
+300000, a bare name a string; they were read as `NULL`, a `NOT NULL
+DEFAULT 7` column's too (`Absent`). Into a table holding rows `ADD
+COLUMN` takes only a default `valueFromExpr` reads as a constant -- a
+number, a string, a blob, `NULL`, `TRUE`, signs before any of them,
+`CAST`, parentheses -- and the reader reads each with its rules
+(`default_of`): a sign before a number taken with it but for a hexadecimal
+one past 32 bits, any other `-` the value made a number
+(`sqlite3VdbeMemNumerify`, a real equal to an integer within 2^51 an
+integer) and negated, `+` passed over, `CAST` the value read with the
+type's affinity and made one of it (`sqlite3VdbeMemCast`), a hexadecimal
+number of up to sixteen digits an i64's bits, a real token under no
+affinity a real. Read as one literal before, `(-(-5))`, `+'x'`, `-'5'` and
+`(CAST(5 AS TEXT))` refused the row that needed them (G14 F2b's review),
+`0x100000000` read as its text where SQLite reads 4294967296, `DEFAULT
+1.0` as 1 where SQLite reads 1.0, and `TEXT DEFAULT 012345678901` as
+written where SQLite reads `'12345678901'` (`tests/sqlite-files/
+constants.sqlite`, 23 defaults as SQLite 3.51 read them in the older row).
+SQLite reads such a default one way in a row written before its column
+and stores another in a row written after: `CAST('1e5' AS INTEGER)` is
+100000 in the first and 1 in the second, its cast's affinity applied to
+`'1e5'` first in one and not in the other; the reader reads the older
+row as SQLite does, and the newer holds what SQLite stored. A default the
+reader does not read so refuses the row that needs it, naming the table,
+the column and the default: what SQLite reads as no constant --
+`CURRENT_TIMESTAMP`, an expression -- which `ADD COLUMN` takes only into
+a table holding no row, so that no row SQLite wrote lacks it; and the
+constants SQLite reads by its own formatting of a real as text, which its
+versions changed (3.51 writes `9.22337203685477581e+18`), by a text's
+numeric prefix (`-'5 apples'` is -5), or by taking a blob's bytes as text
+or a text's as a blob, in the file's encoding (`(-(-1.5))` in a TEXT
+column, `(CAST(x'41' AS TEXT))`, `(CAST(7 AS BLOB))`), and one nested
+past eight parentheses (`DEFAULT_DEPTH`, the bound on the reading's
+recursion), which SQLite reads. A
+constraint is read as tokens (`tokens`, `constraints`): `PRIMARY KEY` in a
+default's string made a rowid alias, whose values the rowid replaced. The
+rowid alias is SQLite's: an `INTEGER` column that is the primary key,
+named by a column's constraint or the table's `PRIMARY KEY(..)` in any
+case, with `ASC`, `DESC` or `COLLATE` and after a `CONSTRAINT`'s name --
+each of which the reader missed, reading the column as `NULL` -- but not
+one declared `INTEGER PRIMARY KEY DESC`, SQLite's own exception, which
+keeps its value in the record and was replaced by the rowid. A WITHOUT
+ROWID table is refused as it is found (`find_table`), by its name, so
+`--dry-run` and `--count` say so too; a STRICT table's records are any
+table's.
+
+*A file is read only where it holds what its side files do not.* SQLite
+keeps two beside a database it writes, named by the file's name and a
+suffix: a non-empty `-wal` holds changes not yet checkpointed into the
+file, and a `-journal` whose first byte is not zero is hot (SQLite's
+`hasHotJournal`), left by a writer stopped inside a transaction whose pages
+it may have spilled into the file. Only `-wal` was looked for: a file
+beside a hot journal was read torn, what was never committed imported. Both
+are refused (`check_side_files`), each saying what to do -- a checkpoint,
+or one read with SQLite, which rolls the journal back. A journal whose
+header PERSIST mode zeroed, or one never synced, is not hot, as SQLite
+holds. They are looked for where SQLite keeps them: on Unix beside the
+file a symbolic link leads to, its VFS resolving the database's path
+(`unixFullPathname`) -- looked for beside the link, a hot journal beside
+the file it leads to was missed and the file read torn
+(`a_hot_journal_beside_a_linked_files_target_is_refused`); on Windows
+beside the path as named, as its VFS keeps them. The path is resolved once
+an import (`resolved`), and the file read is opened by it as its side
+files are looked for beside it: resolved to look and opened by the path
+as given, a link moved between the two had its side files checked for
+another file than the one read. Each is looked at before it is opened,
+and one that is no file -- a FIFO, a device, a socket, a directory -- is
+refused by its kind, where a FIFO named `-journal` held the import in its
+open for ever, waiting for a writer
+(`a_side_file_that_is_no_file_is_refused_not_waited_on`, its wait bounded:
+before, it met its 60 s bound). The journal, the side file read, is opened
+with `O_NONBLOCK` -- each target's number, as fennec-server's hand-over
+takes its flags, none where it was not read -- and refused again by the
+kind of what was opened (`side_opened`, `fstat`): a FIFO swapped in
+between the look and the open, by whoever writes the directory, is
+opened without waiting for a writer and refused, where `File::open`
+waited on it (`a_side_file_swapped_for_a_fifo_is_refused_not_waited_on`,
+which calls the open itself: opened as before, it met its 60 s bound). A
+non-empty journal that cannot be read is refused, where it was taken as
+not hot.
+
+*A file's text reaches a terminal escaped.* A table's or a column's name
+and a default's text are the file writer's, and the summary's warning
+lines and an import's errors carried them as they were: a column named
+`ESC ] 0 ;` retitled the terminal. Each is shown with its control
+characters and the characters that reorder a line escaped as Rust writes
+them, and at most 512 bytes (`shown`, which is
+`fennec_wire::client::peer_text`, the function a PostgreSQL server's words
+go through, G14 F2a: one escape for both sources), held by
+`a_files_names_reach_the_terminal_escaped` and, through `fennec import`,
+fennec-cli's `a_sqlite_files_names_reach_the_terminal_escaped`.
+
+Each is a test of `tests/sqlite.rs`, on a file made by hand or one SQLite
+wrote, and the fuzzer's `sqlite` target runs the reader over every seed's
+mutations ([conventions.md](conventions.md#fuzzing)): its inputs reach
+256 KiB, four pages of SQLite's largest, 64 KiB -- at 64 KiB a file of 64
+KiB pages held page 1 alone, and the paths of large pages were never
+fuzzed -- and its seeds are the tests' files, hand-made and SQLite's. Each
+run writes its input as a file, now up to four times as long: 80 000 runs
+took 65 s on an M-series Mac where 64 KiB inputs took 36, run back to
+back, so the smoke gives it 45 000, about 37 s at that rate, which reach
+some 3 570 edges where the 64 KiB inputs' 80 000 reached 2 431.
 
 ## Profiles
 

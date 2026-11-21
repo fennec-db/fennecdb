@@ -270,7 +270,11 @@ paths through, a tenant's replication stream not among them.
 - **Where a tenant lives** is learnt from the routers, not asked of
   anyone: each request carries `Fennec-Home: 1`, and the router that
   forwards it to the tenant's node answers `Fennec-Home: <region>`, which
-  the entry takes off the answer. A tenant not heard goes to the region of
+  the entry takes off the answer -- where the router can vouch for the
+  entry: one with `--token` names a home only to an entry naming its client
+  under `ENTRY_TOKEN` (below) or another router relaying, so an entry
+  without it learns none, and each request outside the region it guessed
+  is relayed. A tenant not heard goes to the region of
   the client's continent (`continents`) or `DEFAULT_REGION`, whose router
   relays it home once -- and on to the other regions in turn where that
   one's routers do not answer, or answer a read 5xx naming no home, since

@@ -469,8 +469,8 @@ release before any primary does. A binary one release back beside a newer
 one either works or stops in words, and never reads a record as another;
 where it names the record kind, the type tag or the version it does not
 know, it names it, and where it knew of no other it cannot: 0.2.0's
-`fennec` refuses a version 2 sealed file as "not a sealed file", naming
-nothing, so the notes of the release that made version 2 name it. A newer
+`fennec` refuses a version 3 sealed file as "not a sealed file", naming
+nothing, so the notes of the release that made version 3 name it. A newer
 reader reads what an older writer wrote, but for four values and types
 0.2.0 took that no write makes any more
 (`docs/design/compatibility.md#what-1x-does-not-read-of-020s-files`,
@@ -700,16 +700,32 @@ what follows the last colon -- not a host name, refused by the resolver
 node. A record of the directory carries the address alone, so no
 field of it is read another way.
 
-**A sealed frame bound to its file moves a sealed archive at once.** From
+**A sealed file bound to what it is moves a sealed archive at once.** From
 the release that binds it (`docs/design/replication.md#sealed-archives`),
 an archiver restarted on it seals its next image and segment, and `fennec
-backup --key-file` a backup, as version 2 (`FENECSL\x02`, a file id under
-every frame's tag), which a `fennec restore` or `fennec verify` from 0.2.0
-or earlier refuses (`not a sealed file`, `not sealed, where the archive
-is`): its notes say, under their upgrade heading, to upgrade `fennec`
-wherever an archive is restored or verified before any archiver, and that
-files sealed before stay open under their key -- splices of them with it
--- until a new key (`fennec key`) begins a new archive. The same notes say
+backup --key-file` a backup, as version 3 (`FENECSL\x03`: each file under
+a key of its own, its frames chained, its head naming its role, archive,
+tenant and first change), which a `fennec restore` or `fennec verify` from
+0.2.0 or earlier refuses (`not a sealed file`, `not sealed, where the
+archive is`), and a build of main from before it by its number (`sealed
+as version 3, which this binary does not open (it opens 1 and 2): a later
+fennecdb's`): its notes say, under their upgrade heading, to upgrade
+`fennec` wherever an archive is restored or verified before any archiver;
+that an upgraded archiver seals an image of each line's end as version 3
+before the line's next write (a node's archiver, each line's as it starts)
+-- read from the archive as the hourly image is, once a line, a one-time
+lag of about 9 s a GB of database (deploy/RUNBOOK.md says what a
+primary sees) -- and stops naming an end that does not restore and the
+ways out of it; that
+files sealed before stay open under their key -- splices of them with it,
+and any of them read where it is put -- until a new key (`fennec key`)
+begins a new archive; and that one `verify` or a restore refuses as
+standing at or past a line's first file of version 3 (`... sealed before
+version 3, at or past ...: no archiver puts it there`) was put there by no
+archiver, and is moved out of the archive's directory, the archive read
+without it. A tool reading sealed files itself reads
+version 3 as `docs/design/replication.md#sealed-archives` lays it out. The
+same notes say
 that a tenant's `github` hook 0.2.0 saved with `key delivery` is kept, its
 events answered 409 until it is set again with `key body`, its other hooks
 armed, and that a single server started with `--hooks` whose file has a

@@ -707,15 +707,60 @@ fennec restore today.sealed today.fennec --key-file /secrets/archive.key</pre>
 <details class="deep"><summary>How archives and backups are sealed</summary>
 <p>A copy in a bucket or on another disk is out of reach of the machine's
 disk encryption. With a key every file of an archive — its images, its
-segments, its history — and a backup file are sealed: encrypted and
-authenticated with ChaCha20-Poly1305 (RFC 8439), a random nonce a frame,
-and under each frame's tag the file's own random id, the frame's place in
-it and whether it is the last. A byte changed, a frame moved or dropped, a
-frame taken from another file sealed with the same key, a file cut short
-where it was sealed whole, or the wrong key, and the file is refused —
-never read as something else. A segment is sealed a frame for each batch of writes the
-primary sends, so a crash cuts off at most the frame being written, as it
-cut a record short before.</p>
+segments, its history, a tenant's presence — and a backup file are sealed:
+encrypted and authenticated with ChaCha20-Poly1305 (RFC 8439), each file
+under a key of its own made from the file's random id (HChaCha20, as
+XChaCha20 makes one) under a key made from yours for that alone
+(HKDF-Expand, RFC 5869), never from yours itself, a random nonce a frame, and under each
+frame's tag the tag of the frame before it, its place in the file and
+whether it is the last. A byte changed, a frame moved or dropped, a frame
+taken from another file sealed with the same key, two runs of a segment's
+frames spliced where it was cut and went on, a file cut short where it was
+sealed whole, or the wrong key, and the file is refused — never read as
+something else. A segment is sealed a frame for each batch of writes the
+primary sends, a mebibyte at most, so a crash cuts off at most the frames
+being written, as it cut a record short before.</p>
+
+<p>Each sealed file also says what it is, under its tags: a segment of
+writes, an image, the history, a tenant's presence or a backup; the
+archive it belongs to, by an id the archive made as it began; the tenant
+whose archive it is; and the change a segment begins at, or an image's
+change and time. Every read holds a file to its name and to the archive's
+other files, and refuses by name, with nothing written:</p>
+<ul>
+  <li>a segment renamed into another's place — one deleted and the next
+  given its name;</li>
+  <li>a file of another archive, or another tenant's, among an archive's —
+  a tenant's directory, or a line moved aside, copied over another's,
+  which <code>restore --tenants</code> refuses rather than restore as that
+  tenant's or pass over as gone;</li>
+  <li>an archive's image given to <code>fennec restore</code> as a backup
+  file, or a backup put where an image is.</li>
+</ul>
+<p>The plain <code>began</code> file is held to what the images say, and a
+tenant's <code>presence</code> is sealed: editing either cannot choose
+another line, or mark a tenant gone, without a refusal. To mark a tenant
+gone by hand in a sealed archive — a node lost before it said so — leave
+its file out of what <code>restore --tenants</code> writes, or move its
+lines out of the root first; in a plain archive a line in its
+<code>presence</code> (<code>gone &lt;ms&gt;</code>) does it as before.</p>
+
+<p>What a seal does not refuse: a file cut at a frame's edge opens as the
+shorter file, as the one a crash leaves does — in the last segment it is
+the archive's end, and <code>fennec verify</code> says where that is and
+how much is torn; anywhere else it leaves changes no segment holds, which
+<code>verify</code> refuses, or names as a gap where an image ends it, as it
+names a segment deleted. A tenant's line copied where one database's
+archive was restores as that database: <code>fennec restore</code> and
+<code>fennec verify</code> of a directory say the tenant its files are
+sealed as (<code>sealed as tenant `acme`'s archive</code>), and one
+database's archive names no database. An older copy of a whole file, or of a whole
+archive or tenant's line, put back opens as what it was, and so does a line
+whose later file was deleted — a tenant's <code>presence</code> gone, the
+tenant restores as never gone: a seal holds a file to its place, not to its
+age. A backup names no database, so one backup file put in another's place
+opens as itself. Keep archives and backups in a bucket that keeps versions
+or locks objects for as long as you keep them.</p>
 
 <p>An archive is sealed or it is not; a file of the other kind in
 it is refused. <code>FENNEC_KEY_FILE</code> names the key file too. Sealing
@@ -725,25 +770,55 @@ it is mapped and read where it lies, which encryption would take away —
 encrypt the disk it is on (LUKS, FileVault, an encrypted cloud volume).</p>
 
 <p>Files sealed by 0.2.0 and earlier still open, and an archive they began
-goes on. Their frames are bound to their places alone, so a frame of
-another such file sealed with the same key could be put in one unnoticed;
-files sealed now are bound to themselves. Because the older files still
-open, that stays true of every key that ever sealed one: whoever holds two
-of them can build a third from their frames and put it where a file sealed
-with that key is read, beside an archive or a backup sealed now. Pruning
-the older files does not end it, and neither does restoring a backup and
-sealing it again with the same key: copies of the older files may be
-anywhere. To be rid of it, make a new key (<code>fennec key</code>), seal
-with it from then on, and begin a new archive with it, in a directory or
-bucket path of its own; read the older archive and backups with the old
-key for as long as you keep them.</p>
+goes on: before its next write the upgraded archiver seals an image of the
+archive's end as files are now — read from the archive, as the hourly
+image is, once; a node's archiver seals each tenant's as it starts, beside
+its stream — and the write begins a segment sealed so after the older one.
+That image is a one-time lag: the archiver spends about 9 seconds a
+gigabyte of database on it, one database's archiver before it takes the
+primary's next write — the primary waits for its stream at most a second,
+on one durable write, and answers the writes after without it until it
+catches up. An archive whose end does not restore stops <code>fennec
+archive</code> (a node's archiver passes over that tenant), naming why and
+the ways out: put right what <code>fennec verify</code> refuses in it, or
+begin a new line and keep the old one for restores to earlier moments —
+archive into a new directory, or, for a node's tenant, stop the archiver
+and move the tenant's directory aside as
+<code>&lt;root&gt;/&lt;tenant&gt;.&lt;any name&gt;</code>, and the archiver
+begins the new line with the node's image. The older
+files say nothing of what they are — their frames are bound to their
+places alone — so a frame of another such file sealed with the same key
+could be put in one unnoticed, and an older file of any archive sealed
+with that key reads wherever it is put: in an archive sealed as files are
+now from that image on, an older image or segment after it is refused by
+name, and a restore past the upgrade starts from that image or a later
+one; one before it — read by a restore to a moment before the upgrade —
+or in an archive holding nothing sealed now, as a tenant's line moved
+aside before the upgrade, reads as the archive's own; an older image put
+in before the upgraded archiver seals that image, standing after the
+archive's own last one, is what that image is made from. No archiver puts
+an older file where it is refused, so <code>fennec verify</code> or a
+restore that refuses one (<code>image-…: an image of change 7, sealed
+before version 3, at or past its image of change 7 taken at …, the first
+file this archive holds of version 3: no archiver puts it there, so it is
+not this archive's</code>) names the way out: move that file out of the
+archive's directory, and the archive is read without it. Because the older
+files still open, that stays true of every key that ever sealed one,
+beside an archive or a backup sealed now. Pruning the older files does not
+end it, and neither does restoring a backup and sealing it again with the
+same key: copies of the older files may be anywhere. To be rid of it, make
+a new key (<code>fennec key</code>), seal with it from then on, and begin a
+new archive with it, in a directory or bucket path of its own; read the
+older archive and backups with the old key for as long as you keep
+them.</p>
 
 <p>A binary from 0.2.0 or earlier refuses a file sealed now (<code>not a
 sealed file</code>, <code>not sealed, where the archive is</code>), and an
 upgraded archiver seals its next image and segment so at once: upgrade
 what reads an archive — <code>fennec restore</code>, <code>fennec
 verify</code>, the hosts a restore drill runs on — before what writes
-it.</p>
+it. A key file others can read is warned of as it is read, by name and
+mode; <code>chmod 600</code> it.</p>
 </details>
 
 <h2>Endpoints</h2>

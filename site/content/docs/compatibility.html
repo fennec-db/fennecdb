@@ -24,7 +24,7 @@ and removed only in 2.0. 0.x releases promise nothing.</p>
 <tr><td>JavaScript types</td><td><code>fennec.d.ts</code> and <code>client.d.ts</code> only gain declarations.</td><td><code>make types-check</code>, the builder's and schema's golden files, and <code>make api-check</code>, which holds every export of both files to a dump of them, kept current and never smaller than the last release's: a removed export, a changed declaration or a dropped overload fails.</td></tr>
 <tr><td>The SDKs</td><td>Python, JavaScript, Go, .NET, Swift, Kotlin and Dart keep the public names they ship at 1.0.</td><td>Each SDK's tests; a dump per language (each needs an outside tool, so they come after 1.0) and a run against servers of other versions are to come.</td></tr>
 <tr><td>Sync</td><td>A replica of one release syncs with a server of another.</td><td><code>make sync-scenarios-check</code>: both runners pass every scenario.</td></tr>
-<tr><td>Sealed archives and backups</td><td>A file sealed with a key opens with that key in every later 1.x, those 0.2.0 sealed among them. A release from before files were bound to themselves refuses one sealed after, so upgrade every <code>fennec</code> that restores or verifies before any archiver (<a href="replication.html#sealed">Sealed archives and backups</a>).</td><td>An archive and a backup sealed by 0.2.0's code, opened by every build; a weekly run beside the last release's server and shell, whose <code>fennec</code> seals files this release opens and refuses the ones this release sealed in those words.</td></tr>
+<tr><td>Sealed archives and backups</td><td>A file sealed with a key opens with that key in every later 1.x, those 0.2.0 sealed among them. A release from before files were bound to what they are refuses one sealed after, so upgrade every <code>fennec</code> that restores or verifies before any archiver (<a href="replication.html#sealed">Sealed archives and backups</a>).</td><td>An archive and a backup sealed by 0.2.0's code, opened by every build; a weekly run beside the last release's server and shell, whose <code>fennec</code> seals files this release opens and refuses the ones this release sealed in those words.</td></tr>
 <tr><td>Replicas, archives and the router across releases</td><td>Every reader of a file or a stream — a replica, a standby, an archiver, a router, a node, the shell that verifies and restores — upgrades before any primary. One a release back beside a newer one works or stops in words, never reading wrong, naming the record kind, type tag or version where it names one. A newer one follows an older and reads what it wrote, but for the <a href="#not-read-whole">four exceptions</a>.</td><td>A weekly run, and one on every release tag, of this release's server, shell and router beside the last release's server and shell and its router, built from its tag (no release publishes one yet): replication both ways, every record kind, type tag and statement record of the release written, archives and backups, a router over nodes of the other release, and a rolling upgrade of a router and a node pair under writes, every acknowledged write read back from both nodes.</td></tr>
 <tr><td>Command line</td><td>A flag of <code>fennec</code>, <code>fennec-server</code> or <code>fennec-shard</code> is not removed, and a switch does not start taking a value or the reverse. An exit code keeps its meaning (<a href="server.html">Server</a> lists the server's, <a href="shell.html#exit-codes">the shell</a> the shell's).</td><td><code>make api-check</code> and each binary's tests, on every pull request: every command's flags, read off its <code>--help</code> and asked of the binary itself, and its exit codes with their meanings, held to a dump kept current and never smaller than the last release's.</td></tr>
 <tr><td>Metrics</td><td>A metric of <code>/_metrics</code>, the server's or the router's, keeps its name, its type and its labels; new metrics and new labels are added beside them.</td><td>The same check: every metric a scrape shows, with its type and labels, held to a dump, and every metric name in the code held to be in it.</td></tr>
@@ -45,6 +45,26 @@ and removed only in 2.0. 0.x releases promise nothing.</p>
   <li>The studio's pages and the desktop app (beta).</li>
 </ul>
 
+<h2 id="changed-before-1-0">Changed on purpose since v0.2.0</h2>
+
+<p>0.x promises nothing, but these changes are ones a v0.2.0 user can meet
+as a break:</p>
+
+<ul>
+  <li><b>Connecting to PostgreSQL</b> (<code>fennec import</code>, its
+    <code>--follow</code>, <code>fennec-server --follow</code>). A host off
+    this machine is spoken to under <code>sslmode=verify-full</code> unless
+    the connection string or <code>PGSSLMODE</code> names a mode: a server
+    whose <code>ssl</code> is off, or a certificate signed by a CA the client does not trust,
+    is refused, the error saying how to go on. Holding a password, the
+    client signs in by SCRAM-SHA-256 alone unless <code>require_auth</code>
+    says otherwise, bound to TLS where the server offers it. A SCRAM
+    iteration count under 4 096, a <code>%</code> not followed by two hex
+    digits and <code>connect_timeout=0</code> are refused
+    (<a href="import.html#tls">TLS</a>,
+    <a href="import.html#signing-in">Signing in</a>).</li>
+</ul>
+
 <h2>Upgrading</h2>
 
 <p>Upgrade every reader before any primary, and roll forward. For a cluster
@@ -56,6 +76,11 @@ replicas or standbys, then primaries
   <li>No release publishes the router, <code>fennec-shard</code>, yet: upgrading
     a router means building it from the release's tag
     (<code>cargo build --release --locked -p fennec-shard</code>).</li>
+  <li>Routers go before nodes for a node that asks no data token too: such a
+    node refuses what a v0.2.0 router forwards it, even on loopback, unless it
+    runs <code>--insecure</code>
+    (<a href="sharding-reference.html#open-nodes">A node with no token behind a
+    router</a>).</li>
   <li>In a node pair, the standby's node goes first. Before the next node, wait
     until the standby holds what the primary does: on the primary's node
     <code>/t/&lt;tenant&gt;/_replication/status</code> lists the standby with
@@ -67,6 +92,11 @@ replicas or standbys, then primaries
     the restart: the router answers each that it was not sent (503), safe to
     send again. A router fails a node over only with
     <code>--auto-failover</code>.</li>
+  <li>An <code>Idempotency-Key</code> a v0.2.0 server or node kept is not
+    looked up once it runs the new release: a keyed write sent before its
+    upgrade and again after runs again. Let clients' retries of writes made
+    before end first (<a href="http.html#idempotency">Retrying a
+    write</a>).</li>
   <li>A node holding both primaries and replicas cannot be upgraded before
     every primary: in such a fleet, use no feature that moves the format until
     every node runs the release.</li>

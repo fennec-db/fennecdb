@@ -59,6 +59,11 @@ connection goes through `Paced`, never a bare `BufReader` over the `Conn`.
 Over TLS every timeout and mode is set on the session's own socket
 (`fennec_tls::TlsStream::socket`), never a `dup`'s: on Windows a
 duplicate's timeouts are its own, and bound none of the session's reads.
+Held on every platform by the handles' numbers, which a `dup` shared on
+Linux and macOS cannot pass: `a_tls_connections_socket_is_its_sessions_own_handle`
+(`Conn::socket` against the session's `get_ref`) and fennec-tls's
+`what_is_set_through_the_socket_bounds_the_session` (`socket` against
+`get_ref`, a dial's and an accept's).
 
 **[`--tls-cert` and `--tls-key` make a listener HTTPS
 alone](../../../../docs/design/http.md#tls)**, `--metrics` too, each handshake on its

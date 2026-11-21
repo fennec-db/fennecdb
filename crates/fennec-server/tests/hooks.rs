@@ -329,6 +329,138 @@ fn every_refusal_before_the_signature_is_one_401() {
     );
 }
 
+/// An event signed outside its hook's tolerance either side of the
+/// server's clock is the one 401, its check `stale`; one signed inside it,
+/// before or after the server's now, is taken. The times are now's give or
+/// take five minutes, each five seconds from the window's end: no clock of
+/// this machine moves that far during a request.
+#[test]
+fn an_event_signed_outside_its_window_either_way_is_refused() {
+    let (server, _) = serve("window", &[]);
+    let t = now_s();
+    let window = 300;
+    for (i, at) in [t - window - 5, t + window + 5].into_iter().enumerate() {
+        let body = format!(r#"{{"id":"evt_out_{i}","type":"ping"}}"#);
+        let sig = stripe_sig(STRIPE_SECRET, at, &body);
+        let a = send(&server, "stripe", &[("Stripe-Signature", &sig)], &body);
+        assert_eq!(
+            a.status,
+            401,
+            "signed at now{:+}: {}",
+            at as i64 - t as i64,
+            a.body
+        );
+    }
+    assert_eq!(
+        sample(&server, "fennec_hook_unverified_total{check=\"stale\"}"),
+        2
+    );
+    for (i, at) in [t - window + 5, t + window - 5].into_iter().enumerate() {
+        let body = format!(r#"{{"id":"evt_in_{i}","type":"ping"}}"#);
+        let sig = stripe_sig(STRIPE_SECRET, at, &body);
+        let a = send(&server, "stripe", &[("Stripe-Signature", &sig)], &body);
+        assert_eq!(
+            a.status,
+            200,
+            "signed at now{:+}: {}",
+            at as i64 - t as i64,
+            a.body
+        );
+    }
+}
+
+/// A refused credential is named in no line and no answer: a wrong data
+/// token, a wrong admin token and an event with a wrong signature are each
+/// a 401 whose audit line names the check that failed, and none of their
+/// values -- nor the secrets they were held to -- is in the audit log, the
+/// server's log or any answer.
+#[test]
+fn a_refused_credential_is_written_nowhere() {
+    const DATA: &str = "the-node-data-token-of-thirty-two-bytes";
+    const ADMIN: &str = "the-node-admin-token-of-thirty-two-bytes";
+    const WRONG_DATA: &str = "wrong-data-token-d41d8cd98f00b204";
+    const WRONG_ADMIN: &str = "wrong-admin-token-e9800998ecf8427e";
+    let dir = tmp("written-nowhere", "node");
+    std::fs::create_dir_all(&dir).unwrap();
+    let audit = tmp("written-nowhere", "audit.log");
+    let mut server = start(&[
+        "--dir",
+        dir.to_str().unwrap(),
+        "--http-token",
+        DATA,
+        "--admin-token",
+        ADMIN,
+        "--audit",
+        audit.to_str().unwrap(),
+        "--auth-delay",
+        "0",
+    ]);
+    let mut admin = server.http().with_token(ADMIN);
+    assert_eq!(admin.ask("PUT", "/_admin/tenants/acme", "").status, 201);
+    let hook = format!(r#"{{"scheme":"stripe","secrets":["{STRIPE_SECRET}"]}}"#);
+    let set = admin.ask("PUT", "/_admin/tenants/acme/hooks/paid", &hook);
+    assert_eq!(set.status, 200, "{}", set.body);
+
+    let body = r#"{"id":"evt_forged","type":"ping"}"#;
+    let forged = stripe_sig(STRIPE_TEST_SECRET, now_s(), body);
+    let wrong_mac = forged.rsplit_once("v1=").unwrap().1.to_string();
+    let mut answers = Vec::new();
+    let a = server
+        .http()
+        .with_token(WRONG_DATA)
+        .ask("GET", "/t/acme/collections", "");
+    answers.push((401, a));
+    let a = server
+        .http()
+        .with_token(WRONG_ADMIN)
+        .ask("GET", "/_admin/stats", "");
+    answers.push((401, a));
+    let a = server.http().ask_with(
+        "POST",
+        "/t/acme/_hooks/paid",
+        body,
+        &[
+            ("Content-Type", "application/json"),
+            ("Stripe-Signature", &forged),
+        ],
+    );
+    answers.push((401, a));
+    for (status, a) in &answers {
+        assert_eq!(a.status, *status, "{}", a.body);
+    }
+    assert!(server.logged("did not verify (signature)", Duration::from_secs(10)));
+    ask_to_stop(&mut server.child);
+    let (_, log) = server
+        .exited(Duration::from_secs(30))
+        .expect("the server went on");
+    let audit = std::fs::read_to_string(&audit).unwrap();
+    let refused = audit.lines().filter(|l| l.contains("\"refused\"")).count();
+    assert_eq!(refused, 3, "{audit}");
+    let said: Vec<String> = answers
+        .iter()
+        .map(|(_, a)| format!("{:?} {}", a.headers, a.body))
+        .collect();
+    for secret in [
+        WRONG_DATA,
+        WRONG_ADMIN,
+        &wrong_mac[..],
+        &wrong_mac[..16],
+        STRIPE_SECRET,
+        STRIPE_TEST_SECRET,
+        DATA,
+        ADMIN,
+    ] {
+        assert!(
+            !audit.contains(secret),
+            "{secret} in the audit log: {audit}"
+        );
+        assert!(!log.contains(secret), "{secret} in the server's log: {log}");
+        for s in &said {
+            assert!(!s.contains(secret), "{secret} in an answer: {s}");
+        }
+    }
+}
+
 /// What a verified event is answered, in the order the design sets: a
 /// content type not JSON's 415, a held write's header 400, a body no
 /// object 400, a Stripe event naming no `id` 400; a hook no statement

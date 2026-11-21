@@ -100,8 +100,8 @@ pub enum Outcome {
 /// from. Generous, so a machine slower than the runner never meets it --
 /// an M-series Mac under ASan spent 104 s of CPU on `http`'s count at a
 /// load near 15 and 110 s at one of 70 to 200, the most of any target --
-/// and short enough that six targets each just under it, 36 minutes, end
-/// inside ci.yml's 45 with the build's minute and a half: a smoke slowed
+/// and short enough that eight targets each just under it, 48 minutes, end
+/// inside ci.yml's 57 with the build's minute and a half: a smoke slowed
 /// past the job's timeout ends at a target's cap first, named, rather
 /// than at the timeout, naming none.
 pub const SMOKE_CAP: Duration = Duration::from_secs(360);

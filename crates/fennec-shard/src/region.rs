@@ -125,26 +125,86 @@ pub(crate) fn homed(resp: Response, home: &Option<String>) -> Response {
     }
 }
 
-/// The region to name in an answer's [`HOME_HEADER`]: the placing node's,
-/// where `req` asks and the node is in one -- the unnamed region is every
-/// router's, and there is nothing to learn.
-pub(crate) fn home_asked(req: &Request, region: &str) -> Option<String> {
-    (!region.is_empty() && req.header(HOME_HEADER).is_some()).then(|| region.to_string())
-}
-
 /// A whole answer from another router: its status, headers and body.
 type Whole = (u16, Vec<(String, String)>, Vec<u8>);
 
 /// Where a tenant this router's own directory does not place is.
 pub(crate) enum Target {
     /// On a node the global directory places it on: its name, address,
-    /// mark and region.
-    Node(String, String, Arc<str>, String),
+    /// marks and region.
+    Node(String, String, Arc<crate::Marked>, String),
+    /// A node of this router's that stands in for a tenant it cannot tell
+    /// a caller of ([`Router::stand_in`]): its name, address and marks, the
+    /// request sent it naming the tenant past
+    /// [`fennec_http::tenants::STAND_IN`] ([`stand_in_target`]).
+    StandIn(String, String, Arc<crate::Marked>),
     /// At home in a region keeping its own directory: the region and its
     /// routers.
     Region(String, Vec<String>),
     /// Nowhere this router can send it: the answer.
     Answer(Response),
+}
+
+/// `target`, a request's for `tenant`, as a stand-in sends it
+/// ([`Router::stand_in`]): [`fennec_http::tenants::STAND_IN`] before its
+/// path's second segment, the tenant's as sent, the rest as it came -- a
+/// node decodes the path as this router did, and reads the same tenant
+/// past the mark and the same rest. Where the encoding moves the segments
+/// -- `/t%2Fx/...`, whose second segment as sent is not the tenant -- the
+/// path is written again from its segments as this router read them, each
+/// encoded: either way the node reads `~` and the tenant, checked here,
+/// and never the tenant alone, which would open its file.
+pub(crate) fn stand_in_target(target: &str, tenant: &str) -> String {
+    use fennec_http::tenants::STAND_IN;
+    let (path, query) = target.split_at(target.find('?').unwrap_or(target.len()));
+    let b = path.as_bytes();
+    let second = (0..b.len())
+        .filter(|&i| b[i] != b'/' && (i == 0 || b[i - 1] == b'/'))
+        .nth(1);
+    if let Some(i) = second {
+        let sent = format!("{}{STAND_IN}{}{query}", &path[..i], &path[i..]);
+        if stands_in_for(&sent, tenant) {
+            return sent;
+        }
+    }
+    let decoded = fennec_http::http::percent_decode(path);
+    let mut out = String::with_capacity(target.len() + 8);
+    for (k, seg) in decoded.split('/').filter(|s| !s.is_empty()).enumerate() {
+        out.push('/');
+        if k == 1 {
+            out.push_str(STAND_IN);
+        }
+        for &c in seg.as_bytes() {
+            match c {
+                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                    out.push(c as char)
+                }
+                _ => out.push_str(&format!("%{c:02X}")),
+            }
+        }
+    }
+    out.push_str(query);
+    out
+}
+
+/// Whether a node reads `target`'s tenant as `tenant` past the stand-in's
+/// mark.
+fn stands_in_for(target: &str, tenant: &str) -> bool {
+    let path = target.split('?').next().unwrap_or("");
+    let decoded = fennec_http::http::percent_decode(path);
+    let mut segs = decoded.split('/').filter(|s| !s.is_empty());
+    segs.nth(1)
+        .and_then(|s| s.strip_prefix(fennec_http::tenants::STAND_IN))
+        == Some(tenant)
+}
+
+/// What [`Router::elsewhere`] found before it asks who the caller is:
+/// where a request goes, or an answer saying the tenant is not here --
+/// absent, or at home where no router is recorded -- which a caller it
+/// cannot vouch for is not told.
+enum Told {
+    Target(Target),
+    Missing(Response),
 }
 
 /// What stands for a region's routers where a node's name goes: a label
@@ -193,22 +253,80 @@ impl Router {
     /// global directory says -- this router's own, or its copy of it.
     /// `relayed`: another router sent the request here, and it goes on to
     /// no third.
-    pub(crate) fn elsewhere(&self, tenant: &str, relayed: bool) -> Target {
+    ///
+    /// Where the answer would tell a caller that no such tenant is here,
+    /// or the region it lives in with no router to relay to, a router with
+    /// `--token` tells it so only where it can vouch for the caller
+    /// ([`Router::vouches_for`]); anyone else's request goes to a node of
+    /// this router's in the tenant's place ([`Router::stand_in`]), which
+    /// answers it as it answers a tenant it holds -- the token asked first,
+    /// a hook's event the one 401 -- so a caller holding nothing learns
+    /// which tenants exist no more from the router than from a node.
+    pub(crate) fn elsewhere(&self, req: &Request, tenant: &str, relayed: bool) -> Target {
+        match self.elsewhere_told(tenant, relayed) {
+            Told::Missing(answer) if !self.vouches_for(req) => {
+                self.stand_in(tenant).unwrap_or(Target::Answer(answer))
+            }
+            Told::Missing(answer) => Target::Answer(answer),
+            Told::Target(t) => t,
+        }
+    }
+
+    /// The region to name in an answer's [`HOME_HEADER`]: the placing
+    /// node's, where `req` asks and the node is in one -- the unnamed
+    /// region is every router's, and there is nothing to learn -- and only
+    /// to a caller this router vouches for ([`Self::vouches_for`]), the
+    /// global entry among them where it names its client under
+    /// `--entry-token`. Named to anyone asking, it told a caller holding
+    /// nothing a tenant's region, and which names were tenants -- a 401
+    /// carrying it and one not -- where a node asks the token before it
+    /// looks a tenant up so as to tell no one that.
+    pub(crate) fn home_asked(&self, req: &Request, region: &str) -> Option<String> {
+        (!region.is_empty() && req.header(HOME_HEADER).is_some() && self.vouches_for(req))
+            .then(|| region.to_string())
+    }
+
+    /// Whether this router may tell the caller of `req` that a tenant is not
+    /// here, or where it lives: any caller of one without `--token`, whose
+    /// `/_shard/` lists every tenant to whoever reaches it; another router
+    /// relaying under the `--token` both hold, or the global entry naming
+    /// its client under `--entry-token` (`audit::vouched`); or a caller
+    /// holding this router's `--token`. Asked only where a tenant is not
+    /// placed here or a request asks for its home.
+    pub(crate) fn vouches_for(&self, req: &Request) -> bool {
+        let Some(token) = self.cfg.token.as_deref() else {
+            return true;
+        };
+        if fennec_http::audit::vouched() {
+            return true;
+        }
+        let given = req
+            .header("authorization")
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .unwrap_or("");
+        fennec_http::crypto::ct_eq(given.as_bytes(), token.as_bytes())
+    }
+
+    /// [`Self::elsewhere`], before what a caller may be told is asked.
+    fn elsewhere_told(&self, tenant: &str, relayed: bool) -> Told {
+        // A tenant of this region moving or being made, or one relayed here
+        // by a router that knows it lives here: the region is the asker's
+        // already, and it comes back.
         let not_here = |region: &str| {
-            Target::Answer(Response::retry_after(
+            Told::Target(Target::Answer(Response::retry_after(
                 503,
                 &format!(
                     "tenant `{tenant}` lives in region `{region}`, and is not in its directory \
                      as this router has it: it is moving, or being made"
                 ),
                 1,
-            ))
+            )))
         };
         let to_region = |dir: &Directory, region: &str| match dir.routers(region) {
             Some(routers) if !routers.is_empty() => {
-                Target::Region(region.to_string(), routers.to_vec())
+                Told::Target(Target::Region(region.to_string(), routers.to_vec()))
             }
-            _ => Target::Answer(Response::retry_after(
+            _ => Told::Missing(Response::retry_after(
                 503,
                 &format!("no router is recorded for region `{region}`"),
                 1,
@@ -223,18 +341,20 @@ impl Router {
         }
         let arrived = dir.arrived();
         drop(dir);
-        let absent = |arrived: bool| {
-            Target::Answer(match arrived {
-                // A standby whose maps have not come from the primary yet
-                // cannot say a tenant does not exist: 404 tells a client to
-                // stop asking, this to ask again.
-                false => Response::retry_after(
-                    503,
-                    "the directory has not arrived from the primary yet",
-                    1,
-                ),
-                true => Response::error(404, &format!("no tenant `{tenant}` in the directory")),
-            })
+        let absent = |arrived: bool| match arrived {
+            // A standby whose maps have not come from the primary yet
+            // cannot say a tenant does not exist: 404 tells a client to
+            // stop asking, this to ask again. Every tenant's answer then, it
+            // tells no one which exist.
+            false => Told::Target(Target::Answer(Response::retry_after(
+                503,
+                "the directory has not arrived from the primary yet",
+                1,
+            ))),
+            true => Told::Missing(Response::error(
+                404,
+                &format!("no tenant `{tenant}` in the directory"),
+            )),
         };
         let Some(global) = &self.global else {
             return absent(arrived);
@@ -242,8 +362,9 @@ impl Router {
         let g = read(global);
         if let Some(p) = g.placement(tenant) {
             if let Some(n) = g.node(&p.node) {
-                let mark = self.mark(&n.token);
-                return Target::Node(p.node.clone(), n.addr.clone(), mark, n.region.clone());
+                let marked = self.marked(n);
+                let to = Target::Node(p.node.clone(), n.addr.clone(), marked, n.region.clone());
+                return Told::Target(to);
             }
         }
         if let Some(region) = g.home(tenant) {
@@ -253,6 +374,33 @@ impl Router {
             return to_region(&g, region);
         }
         absent(arrived && g.arrived())
+    }
+
+    /// A node of this router's own directory to send a request for a
+    /// tenant it does not place to, in the tenant's place: the node judges
+    /// the request's token before it looks the tenant up, and answers a
+    /// caller as it answers one of a tenant it holds -- a refusal, the one
+    /// 401 of a hook -- or, to a token that reaches the tenant, that it holds
+    /// no file of it. Chosen by the tenant's name, so one name asks one
+    /// node, and the node's region, no home of the tenant's, is not named.
+    /// `None` where the directory holds no node, and so no tenant to keep
+    /// from anyone. The request names the tenant past
+    /// [`fennec_http::tenants::STAND_IN`], which no file answers: sent the
+    /// name, a node opened any file of it it held -- a leftover this router
+    /// does not place, a deleted tenant's copy that would not come off --
+    /// for a token reaching the name, read and written.
+    #[cold]
+    pub(crate) fn stand_in(&self, tenant: &str) -> Option<Target> {
+        let dir = self.read_dir();
+        let nodes = dir.nodes();
+        let at = (tenant.bytes()).fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+            (h ^ b as u64).wrapping_mul(0x100_0000_01b3)
+        });
+        let (name, n) = nodes
+            .iter()
+            .nth((at % nodes.len().max(1) as u64) as usize)?;
+        let marked = self.marked(n);
+        Some(Target::StandIn(name.clone(), n.addr.clone(), marked))
     }
 
     /// The index of the router of `region`'s list to ask first: the one
@@ -303,6 +451,24 @@ impl Router {
         client: Option<&fennec_http::conn::Conn>,
         taken: bool,
     ) -> std::io::Result<Answer> {
+        // A tenant's home is named to a caller this router vouches for
+        // alone ([`Self::home_asked`]): asked on another's behalf, the
+        // home's router would name it to this one, and this one pass it on.
+        let kept;
+        let headers = match headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case(HOME_HEADER))
+            && !self.vouches_for(req)
+        {
+            true => {
+                kept = (headers.iter())
+                    .filter(|(k, _)| !k.eq_ignore_ascii_case(HOME_HEADER))
+                    .copied()
+                    .collect::<Vec<_>>();
+                &kept[..]
+            }
+            false => headers,
+        };
         let start = self.first_router(region, routers);
         let mut last = None;
         let mut refused = None;
@@ -1594,5 +1760,42 @@ mod tests {
         assert_eq!(host("h:1"), "h:1");
         assert_eq!(host("https://h:1/"), "https://h:1");
         assert_eq!(label("us"), "@us");
+    }
+
+    /// A stand-in's target names its tenant past the mark, whatever else
+    /// the path holds, and its query is the request's: decoded as the node
+    /// decodes it, it is the same tenant and the same rest.
+    #[test]
+    fn a_stand_ins_target_names_its_tenant_past_the_mark() {
+        let segs = |target: &str| -> Vec<String> {
+            let path = target.split('?').next().unwrap();
+            let decoded = fennec_http::http::percent_decode(path);
+            decoded
+                .split('/')
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        };
+        for (sent, want) in [
+            ("/t/nosuch/notes", "/t/~nosuch/notes"),
+            ("/t/nosuch", "/t/~nosuch"),
+            (
+                "//t//nosuch/_hooks/paid?x=1",
+                "//t//~nosuch/_hooks/paid?x=1",
+            ),
+            ("/t/no%73uch/q?a=/t/b", "/t/~no%73uch/q?a=/t/b"),
+            // Its encoding moves the segments: written again from them.
+            ("/t%2Fnosuch/q%20r+s?x", "/t/~nosuch/q%20r%20s?x"),
+            ("/t/nosuch%2Fq/r", "/t/~nosuch%2Fq/r"),
+            ("/%74/x%2F/nosuch", "/%74/~x%2F/nosuch"),
+        ] {
+            let tenant = segs(sent)[1].clone();
+            let got = stand_in_target(sent, &tenant);
+            assert_eq!(got, want, "{sent}");
+            let (was, now) = (segs(sent), segs(&got));
+            assert_eq!(now[1], format!("~{tenant}"), "{sent}");
+            assert_eq!(now[2..], was[2..], "{sent}");
+            assert_eq!(now[0], was[0], "{sent}");
+        }
     }
 }
