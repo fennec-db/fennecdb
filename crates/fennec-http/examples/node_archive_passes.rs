@@ -11,8 +11,12 @@
 //! the archiver takes as it connects, for SECONDS (20). WAY is the archiver
 //! beside it, a process of its own: `none`, `streams` (a `fennec archive` of
 //! each tenant's own stream) or `node` (one `fennec archive --tenants`).
-//! Every syncer pass is timed too. It reads nothing a build from before the
-//! node's stream lacks, so it measures one against the other.
+//! Every syncer pass is timed too: every dirty tenant synced in turn
+//! (`Tenants::sync_dirty`), the sum of their syncs -- what a node's syncer
+//! did before each tenant was synced on a thread of its own
+//! (`Tenants::sync_each`), kept so that its figures still compare. It reads
+//! nothing a build from before the node's stream lacks, so it measures one
+//! against the other.
 
 use fennec_http::tenants::{Replicated, Tenant, Tenants};
 use fennec_http::{Config, Server};
