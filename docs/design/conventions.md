@@ -33,7 +33,10 @@ where a long run is judged by them: `ycsb`'s -- the register checker
 soak's report on synthetic runs, a larger-than-memory cell's lines -- run in
 the clippy job beside the bench crate's SQL joins test (`cargo test -p
 fennec-bench --bin ycsb`), so that the hours a soak takes are never spent
-on a checker nothing ran.
+on a checker nothing ran; and so do the long runs' scripts' own
+self-tests (`run-soak.sh --self-test`, `run-larger-than-memory.sh
+--self-test`), which hold their traps and guard to their promises with
+toys and no Docker.
 
 ## Skips
 

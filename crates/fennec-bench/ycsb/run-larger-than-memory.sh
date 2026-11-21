@@ -9,7 +9,9 @@
 # mapped and there is no buffer pool: what does not fit is read again from
 # the disk, which is what this measures.
 #
+#   crates/fennec-bench/ycsb/run-larger-than-memory.sh --preflight
 #   nohup crates/fennec-bench/ycsb/run-larger-than-memory.sh > larger.log 2>&1 &
+#   crates/fennec-bench/ycsb/run-larger-than-memory.sh --self-test
 #
 # from the repository's root, on a machine doing nothing else. Defaults:
 # 4 700 000 records of 1 KB (4.8 GB live) under --memory 2g, three runs,
@@ -46,11 +48,27 @@
 # room, and while a step runs both disks are held to a floor
 # (ycsb/env-check.sh): a step the environment cannot take ends the run, its
 # cells written `env_failed` -- the environment's failure, never a pass
-# and never the server's. Everything it starts is named p51-* and removed
-# when it ends, however it ends: `kill <its pid>` stops it cleanly, the
+# and never the server's. `--preflight` says what must be on this machine
+# first, which a run checks before it starts anything (ycsb/env-check.sh):
+# nothing is pulled while it runs. Everything it starts is named p51-<its
+# pid>-*, so that a run never removes another's, and removed when it ends,
+# however it ends: `kill <its pid>` stops it cleanly, the measurement under
+# `caffeinate` too (`--self-test` holds the trap to it with toys), the
 # lines written so far kept.
 set -eu
 cd "$(dirname "$0")/../../.."
+ENV_PREFIX=p51
+. crates/fennec-bench/ycsb/env-check.sh
+case ${1:-} in
+--self-test)
+    env_self_test crates/fennec-bench/ycsb/run-larger-than-memory.sh ''
+    exit
+    ;;
+--preflight)
+    env_preflight
+    exit
+    ;;
+esac
 
 # Twice the limit at the least: the dry run's records were 1 026 to 1 059
 # bytes live each (550 000 of them, 566-582 MB), so 4 000 000 under 2g held
@@ -68,6 +86,12 @@ RUN=${RUN:-lm}
 QUIET_LOAD=${QUIET_LOAD:-4}
 OUT=${OUT:-crates/fennec-bench/results/ycsb_larger.tsv}
 VERIFY=${VERIFY:-crates/fennec-bench/ycsb/verify-larger.tsv}
+# What the run is made of, each replaced by a toy in `--self-test`.
+YCSB=${YCSB:-./target/release/ycsb}
+LINUX_TOOLS=${LINUX_TOOLS:-crates/fennec-bench/ycsb/linux-tools.sh}
+# The run's own names, its process id in each.
+P=p51-$$
+ENV_PREFIX=$P
 
 # A size as Docker writes it -- 512m, 2g -- in bytes.
 bytes() {
@@ -76,16 +100,6 @@ bytes() {
         if (u == "k") n *= 1024; else if (u == "m") n *= 1048576; else if (u == "g") n *= 1073741824
         printf "%.0f\n", n }'
 }
-load() {
-    if [ "$(uname)" = Darwin ]; then
-        sysctl -n vm.loadavg | awk '{print $2}'
-    else
-        cut -d' ' -f1 /proc/loadavg
-    fi
-}
-
-ENV_PREFIX=p51
-. crates/fennec-bench/ycsb/env-check.sh
 
 limit=$(bytes "$MEMORY")
 # A record is ten fields of 100 characters and its key: 1 026 to 1 059
@@ -97,7 +111,7 @@ if [ "$least" -lt $((limit * 2)) ]; then
     exit 2
 fi
 live=$((RECORDS * 1100))
-vm=$(docker info --format '{{.MemTotal}}')
+vm=$(env_within 60 "docker info" docker info --format '{{.MemTotal}}')
 if [ "$vm" -lt $((limit + (1 << 30))) ]; then
     echo "Docker's VM has $((vm >> 20)) MB: --memory $MEMORY and a GB for the rest do not fit" >&2
     exit 2
@@ -121,8 +135,8 @@ if [ "$free" -lt "$need" ]; then
     echo "not enough disk: $((need >> 20)) GB needed, $((free >> 20)) GB free" >&2
     exit 2
 fi
-if [ "$(load | awk -v q="$QUIET_LOAD" '{print ($1 > q)}')" = 1 ]; then
-    echo "the load average is $(load), over $QUIET_LOAD: the machine is not quiet" >&2
+if [ "$(env_load | awk -v q="$QUIET_LOAD" '{print ($1 > q)}')" = 1 ]; then
+    echo "the load average is $(env_load), over $QUIET_LOAD: the machine is not quiet" >&2
     exit 2
 fi
 
@@ -132,15 +146,13 @@ child=
 gate=$(mktemp -d "${TMPDIR:-/tmp}/p51-gate.XXXXXX")
 ENV_GATE=$gate
 ENV_MARKER=$gate/env-failed
+# shellcheck disable=SC2329 # the EXIT trap's
 cleanup() {
-    [ -n "$child" ] && kill "$child" 2>/dev/null
+    env_stop_child
     env_stop_guard
-    for c in p51-server-watch p51-server-look p51-server p51-engine p51-build p51-df; do
-        docker rm -f "$c" >/dev/null 2>&1
-    done
-    for v in p51-data p51-engine-data p51-tools; do
-        docker volume rm -f "$v" >/dev/null 2>&1
-    done
+    env_within 120 "docker rm" docker rm -f "$P-server-watch" "$P-server-look" "$P-server" \
+        "$P-engine" "$P-build" "$P-df" >/dev/null 2>&1
+    env_within 120 "docker volume rm" docker volume rm -f "$P-data" "$P-engine-data" "$P-tools" >/dev/null 2>&1
     [ -n "$gate" ] && [ -d "$gate" ] && rm -rf "$gate"
     return 0
 }
@@ -158,8 +170,8 @@ step() {
 }
 
 # rustup's cargo, never another on the PATH (CLAUDE.md).
-cargo=cargo
-[ -x "$HOME/.cargo/bin/cargo" ] && cargo="$HOME/.cargo/bin/cargo"
+cargo=${CARGO:-cargo}
+[ -z "${CARGO:-}" ] && [ -x "$HOME/.cargo/bin/cargo" ] && cargo="$HOME/.cargo/bin/cargo"
 awake=""
 if command -v caffeinate >/dev/null 2>&1; then
     awake="caffeinate -i"
@@ -173,10 +185,13 @@ mkdir -p "$(dirname "$OUT")" "$(dirname "$VERIFY")"
 outdir=$(cd "$(dirname "$OUT")" && pwd)
 verifydir=$(cd "$(dirname "$VERIFY")" && pwd)
 
-echo "$(date '+%F %H:%M') the images and tools"
-step docker build -q -t fennecdb-ycsb .
-step crates/fennec-bench/ycsb/linux-tools.sh p51
-step "$cargo" build --release -q -p fennec-bench --bin ycsb --no-default-features
+env_preflight || {
+    echo "the pre-flight failed: nothing was started" >&2
+    exit 2
+}
+echo "$(date '+%F %H:%M') the tools"
+step "$LINUX_TOOLS" "$P"
+step "$cargo" build --release --offline -q -p fennec-bench --bin ycsb --no-default-features
 
 probe=${PROBE_BASE:+--probe-base $PROBE_BASE}
 args="--records $RECORDS --memory $MEMORY --family ycsb_larger --workloads BCE
@@ -195,8 +210,8 @@ oom() {
 env_failed() {
     echo "$(date '+%F %H:%M') the environment's failure: $3" >&2
     # shellcheck disable=SC2086
-    ./target/release/ycsb fill --systems "$1" $args --run-id "$2" --out "$OUT" --env-failed 1
-    ./target/release/ycsb report "$OUT" || true
+    "$YCSB" fill --systems "$1" $args --run-id "$2" --out "$OUT" --env-failed 1
+    "$YCSB" report "$OUT" || true
     exit 3
 }
 # ycsb refused the run after a load: the live bytes under twice the
@@ -210,46 +225,46 @@ r=1
 while [ "$r" -le "$RUNS" ]; do
     id="$RUN$r"
     echo "$(date '+%F %H:%M') run $r: fennec-server in Docker under --memory $MEMORY"
-    env_check "$turn" p51-data || env_failed server-docker "$id" "$ENV_WHY"
-    ENV_VOLUME=p51-data ENV_KILL="p51-server p51-server-watch p51-server-look"
+    env_check "$turn" "$P-data" || env_failed server-docker "$id" "$ENV_WHY"
+    ENV_VOLUME="$P-data" ENV_KILL="$P-server $P-server-watch $P-server-look"
     s=0
     # shellcheck disable=SC2086
-    guarded $awake ./target/release/ycsb --systems server-docker --docker-name p51 \
+    guarded $awake "$YCSB" --systems server-docker --docker-name "$P" \
         $args --run-id "$id" --out "$OUT" --verify "$VERIFY" --gate "$gate" $probe || s=$?
     [ -s "$gate/refused" ] && refused
     [ -s "$ENV_MARKER" ] && env_failed server-docker "$id" "$(cat "$ENV_MARKER")"
     if [ "$s" != 0 ]; then
         # shellcheck disable=SC2086
-        ./target/release/ycsb fill --systems server-docker $args --run-id "$id" \
-            --out "$OUT" --oom "$(oom p51-server)"
+        "$YCSB" fill --systems server-docker $args --run-id "$id" \
+            --out "$OUT" --oom "$(oom "$P-server")"
     fi
-    docker rm -f p51-server-watch p51-server >/dev/null 2>&1 || true
-    docker volume rm -f p51-data >/dev/null 2>&1 || true
+    docker rm -f "$P-server-watch" "$P-server" >/dev/null 2>&1 || true
+    docker volume rm -f "$P-data" >/dev/null 2>&1 || true
     echo "$(date '+%F %H:%M') idle $GAP s"
     sleep "$GAP"
 
     echo "$(date '+%F %H:%M') run $r: fennecdb in process in a container under --memory $MEMORY"
-    env_check "$turn" p51-engine-data || env_failed fennec "$id" "$ENV_WHY"
-    ENV_VOLUME=p51-engine-data ENV_KILL=p51-engine
+    env_check "$turn" "$P-engine-data" || env_failed fennec "$id" "$ENV_WHY"
+    ENV_VOLUME="$P-engine-data" ENV_KILL="$P-engine"
     # shellcheck disable=SC2086
-    guarded $awake docker run --name p51-engine --memory "$MEMORY" --memory-swap "$MEMORY" \
+    guarded $awake docker run --pull never --name "$P-engine" --memory "$MEMORY" --memory-swap "$MEMORY" \
         -e TMPDIR=/work -e FENNEC_BENCH_COMMIT -e FENNEC_BENCH_MACHINE \
-        -v p51-tools:/tools:ro -v p51-engine-data:/work \
+        -v "$P-tools":/tools:ro -v "$P-engine-data":/work \
         -v "$outdir":/out -v "$verifydir":/verify -v "$gate":/gate \
         alpine /tools/ycsb --systems fennec $args --run-id "$id" \
         --out "/out/$(basename "$OUT")" --verify "/verify/$(basename "$VERIFY")" \
         --verify-max "$vmax" --gate /gate $probe || true
     [ -s "$gate/refused" ] && refused
     [ -s "$ENV_MARKER" ] && env_failed fennec "$id" "$(cat "$ENV_MARKER")"
-    code=$(docker inspect -f '{{.State.ExitCode}}' p51-engine 2>/dev/null || echo 1)
+    code=$(docker inspect -f '{{.State.ExitCode}}' "$P-engine" 2>/dev/null || echo 1)
     if [ "$code" != 0 ]; then
         echo "the process in the container ended with $code"
         # shellcheck disable=SC2086
-        ./target/release/ycsb fill --systems fennec $args --run-id "$id" \
-            --out "$OUT" --oom "$(oom p51-engine)"
+        "$YCSB" fill --systems fennec $args --run-id "$id" \
+            --out "$OUT" --oom "$(oom "$P-engine")"
     fi
-    docker rm -f p51-engine >/dev/null 2>&1 || true
-    docker volume rm -f p51-engine-data >/dev/null 2>&1 || true
+    docker rm -f "$P-engine" >/dev/null 2>&1 || true
+    docker volume rm -f "$P-engine-data" >/dev/null 2>&1 || true
     if [ "$r" -lt "$RUNS" ]; then
         echo "$(date '+%F %H:%M') idle $GAP s"
         sleep "$GAP"
@@ -269,16 +284,16 @@ heap_failed() {
         # A kind measured before the disk ran short stays as measured.
         awk -F'\t' -v r="${RUN}h" -v c="server-docker:heap:$kind" \
             '$1 == r && $6 == c && $7 == "bytes_row" {found = 1} END {exit !found}' "$OUT" ||
-            ./target/release/ycsb mark "$OUT" ycsb_larger "${RUN}h" "server-docker:heap:$kind" env_failed 1
+            "$YCSB" mark "$OUT" ycsb_larger "${RUN}h" "server-docker:heap:$kind" env_failed 1
     done
     exit 3
 }
-env_check "$heap_need" p51-data || heap_failed "$ENV_WHY"
-ENV_GATE='' ENV_VOLUME=p51-data ENV_KILL="p51-server p51-server-look"
+env_check "$heap_need" "$P-data" || heap_failed "$ENV_WHY"
+ENV_GATE='' ENV_VOLUME="$P-data" ENV_KILL="$P-server $P-server-look"
 # shellcheck disable=SC2086
-guarded $awake ./target/release/ycsb heap --records "$RECORDS" \
-    --docker-name p51 --family ycsb_larger --run-id "${RUN}h" --out "$OUT" --dim "$DIM" ||
+guarded $awake "$YCSB" heap --records "$RECORDS" \
+    --docker-name "$P" --family ycsb_larger --run-id "${RUN}h" --out "$OUT" --dim "$DIM" ||
     echo "the heap's measurement ended early: its lines say which kinds"
 [ -s "$ENV_MARKER" ] && heap_failed "$(cat "$ENV_MARKER")"
 echo "$(date '+%F %H:%M') done"
-./target/release/ycsb report "$OUT"
+"$YCSB" report "$OUT"

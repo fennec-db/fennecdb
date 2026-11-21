@@ -5,10 +5,11 @@
 # step the environment cannot take is the environment's failure, marked so
 # in the results (`env_failed`), never a pass and never the server's.
 #
-# The script sets, before it sources this:
+# The script sets, before it calls these:
 #   QUIET_LOAD   the one-minute load average a step may start under
-#   ENV_PREFIX   p51 or p6: the checks' own container is <ENV_PREFIX>-df,
-#                which the script's cleanup removes with the rest
+#   ENV_PREFIX   the run's own name (p51-<pid>, p6-...-<pid>): the checks'
+#                own container is <ENV_PREFIX>-df, which the script's cleanup
+#                removes with the rest
 # and may set:
 #   ENV_LOAD_WAIT=900  how long a step waits for the load to fall to
 #                      QUIET_LOAD -- the run's own last step lifts it, by
@@ -19,19 +20,70 @@
 #                      runs: a container's `df` each, which costs the VM
 #                      next to nothing against the server's cgroup look a
 #                      second
+#   ENV_PROGRESS       a file the step writes a line to as it goes (`ycsb
+#                      soak --progress`): a step whose file gained nothing
+#                      in ENV_SILENT seconds (600) is stopped as hung, its
+#                      reason in ENV_MARKER.hung
 #
 # The host's free disk is `df` here; Docker's VM's is a container's `df` on
 # the run's data volume (alpine, which must be local: nothing is pulled),
 # on the VM's own disk, which fills on its own: its disk image has a size
 # of its own, and a volume removed gives its space back to the Mac only
 # when Docker Desktop trims the image.
+#
+# Every docker call the guard makes is bounded (`env_within`): a daemon
+# that stopped answering would hang the guard, and with it the check that
+# a step still prints. `env_preflight` says what a run needs before its
+# first command; `env_self_test` holds a script's trap and guard to their
+# promises with toys.
 
 ENV_LOAD_WAIT=${ENV_LOAD_WAIT:-900}
 ENV_EVERY=${ENV_EVERY:-30}
+ENV_SILENT=${ENV_SILENT:-600}
 # Why the last check failed, for the log and the marker.
 ENV_WHY=
 # The guard beside a step (`guarded`), which the cleanup stops.
 env_guard_pid=
+
+# env_within SECS WHAT CMD...: CMD, stopped after SECS with WHAT named on
+# stderr; CMD's status (143 when it was stopped). No `timeout` on a Mac.
+env_within() {
+    ew_secs=$1 ew_what=$2
+    shift 2
+    "$@" &
+    ew_pid=$!
+    (
+        # The shell's word on its sleep stopped is no one's business.
+        exec 3>&2 2>/dev/null
+        sleep "$ew_secs"
+        if kill -TERM "$ew_pid"; then
+            echo "$ew_what: no end within $ew_secs s, stopped" >&3
+        fi
+    ) &
+    ew_watch=$!
+    ew_s=0
+    wait "$ew_pid" || ew_s=$?
+    # The watch and its sleep, which would outlive it; the watch's status
+    # is its stop's, never the command's (and never `set -e`'s to act on).
+    pkill -P "$ew_watch" 2>/dev/null || true
+    kill "$ew_watch" 2>/dev/null || true
+    wait "$ew_watch" 2>/dev/null || true
+    return "$ew_s"
+}
+
+# The step running in the background (`child`), stopped: its children
+# first -- `caffeinate -i` runs the measurement as its child and passes no
+# signal on, so a TERM to it alone left ycsb running, writing lines and,
+# where it panicked later, removing containers by name -- then itself.
+env_stop_child() {
+    if [ -n "${child:-}" ]; then
+        pkill -TERM -P "$child" 2>/dev/null || true
+        kill -TERM "$child" 2>/dev/null || true
+        wait "$child" 2>/dev/null || true
+        child=
+    fi
+    return 0
+}
 
 env_load() {
     if [ "$(uname)" = Darwin ]; then
@@ -50,10 +102,11 @@ env_host_free() {
 # its own root, on the same disk, where the volume is not made yet: a
 # mount would make it.
 env_vm_free() {
-    if [ -n "${1:-}" ] && docker volume inspect "$1" >/dev/null 2>&1; then
-        docker run --rm --name "$ENV_PREFIX-df" -v "$1":/v:ro alpine df -kP /v
+    if [ -n "${1:-}" ] && env_within 60 "docker volume inspect" docker volume inspect "$1" >/dev/null 2>&1; then
+        env_within 120 "Docker's df on $1" \
+            docker run --rm --pull never --name "$ENV_PREFIX-df" -v "$1":/v:ro alpine df -kP /v
     else
-        docker run --rm --name "$ENV_PREFIX-df" alpine df -kP /
+        env_within 120 "Docker's df" docker run --rm --pull never --name "$ENV_PREFIX-df" alpine df -kP /
     fi 2>/dev/null | awk 'NR == 2 {print $4}'
 }
 
@@ -108,14 +161,38 @@ env_check() {
 # disks to ENV_FLOOR KB, stopping the step when one is under it: PID, its
 # children (`caffeinate`'s) and the containers ENV_KILL names. Either way
 # the reason goes to ENV_MARKER, which the script reads after the step.
-# ENV_VOLUME is the volume the VM's disk is read on.
+# ENV_VOLUME is the volume the VM's disk is read on. Where ENV_PROGRESS is
+# set, a step whose file gained nothing in ENV_SILENT seconds is stopped
+# the same way as hung, its reason in ENV_MARKER.hung: a soak blocked on
+# a call that never returns stops every line, and would wait forever.
 env_guard() {
     # A background shell of a `set -e` script's: a `docker rm` that finds
-    # nothing must not end the guard.
+    # nothing must not end the guard. What it finds goes to its marker
+    # files; its stderr is the shell's word on a sleep it was stopped in.
     set +e
+    exec 2>/dev/null
     pid=$1
     ticks=0
+    said=-1
+    said_at=$(date +%s)
     while kill -0 "$pid" 2>/dev/null; do
+        if [ -n "${ENV_PROGRESS:-}" ]; then
+            size=$(wc -c <"$ENV_PROGRESS" 2>/dev/null || echo 0)
+            now=$(date +%s)
+            if [ "$size" != "$said" ]; then
+                said=$size
+                said_at=$now
+            elif [ $((now - said_at)) -ge "$ENV_SILENT" ]; then
+                echo "the step printed nothing for $((now - said_at)) s: stopped as hung" >"$ENV_MARKER.hung"
+                pkill -TERM -P "$pid" 2>/dev/null
+                kill "$pid" 2>/dev/null
+                if [ -n "${ENV_KILL:-}" ]; then
+                    # shellcheck disable=SC2086
+                    env_within 120 "docker rm" docker rm -f $ENV_KILL >/dev/null 2>&1
+                fi
+                return 0
+            fi
+        fi
         if [ -n "${ENV_GATE:-}" ]; then
             for ask in "$ENV_GATE"/ask.*; do
                 [ -f "$ask" ] || continue
@@ -138,9 +215,10 @@ env_guard() {
             echo "$ENV_WHY, under the floor a running step is held to" >"$ENV_MARKER"
             pkill -TERM -P "$pid" 2>/dev/null
             kill "$pid" 2>/dev/null
-            for c in ${ENV_KILL:-}; do
-                docker rm -f "$c" >/dev/null 2>&1
-            done
+            if [ -n "${ENV_KILL:-}" ]; then
+                # shellcheck disable=SC2086
+                env_within 120 "docker rm" docker rm -f $ENV_KILL >/dev/null 2>&1
+            fi
             return 0
         fi
         sleep 2
@@ -163,13 +241,267 @@ guarded() {
     return "$s"
 }
 
-# The guard stopped and waited for: the cleanup's, and each step's end.
+# The guard stopped and waited for: the cleanup's, and each step's end --
+# its children too, a `sleep` or a bounded docker call it was in.
 env_stop_guard() {
     if [ -n "$env_guard_pid" ]; then
+        pkill -P "$env_guard_pid" 2>/dev/null || true
         kill "$env_guard_pid" 2>/dev/null || true
         wait "$env_guard_pid" 2>/dev/null || true
         env_guard_pid=
     fi
-    docker rm -f "$ENV_PREFIX-df" >/dev/null 2>&1 || true
+    env_within 60 "docker rm" docker rm -f "$ENV_PREFIX-df" >/dev/null 2>&1 || true
     return 0
+}
+
+# env_preflight: what a run needs before its first command, each looked at
+# and said -- `ok` or `MISSING` with how to get it -- so that a run fails in
+# words before anything starts, and nothing is pulled while it runs: every
+# `docker run` of the scripts and of ycsb takes `--pull never`, and the
+# image is built with no network. 1 when one is missing.
+#
+#   the rust image the Dockerfile names, by its digest (the tag alone can
+#     move), which ycsb/linux-tools.sh builds the Linux tools in;
+#   alpine, which the looks, verifies, backups and df run in;
+#   rustup's toolchain rust-toolchain.toml names, with its targets: a
+#     cargo in this tree installs a missing one from the network;
+#   cargo's registry index, which the tools' build reads offline;
+#   the image `fennecdb-ycsb` built from this tree with no network
+#     (`docker build --network=none`): Docker's build cache must hold the
+#     apk and rustup layers and the cargo registry's mount -- a first build
+#     with the network (`docker build -t fennecdb-ycsb .`) fills it.
+env_preflight() {
+    pf_bad=0
+    pf() {
+        if [ "$1" = 0 ]; then
+            echo "  ok       $2"
+        else
+            echo "  MISSING  $2: $3"
+            pf_bad=1
+        fi
+    }
+    echo "$(date '+%F %H:%M') pre-flight: what the run needs before it starts"
+    pf_s=0
+    env_within 60 "docker info" docker info --format '{{.MemTotal}}' >/dev/null 2>&1 || pf_s=1
+    pf "$pf_s" "Docker answering" "start Docker Desktop"
+    rust=$(awk '/^FROM rust:[^ ]*@sha256:/ {print $2; exit}' Dockerfile)
+    pf_s=0
+    [ -n "$rust" ] && env_within 60 "docker image inspect" docker image inspect "$rust" >/dev/null 2>&1 || pf_s=1
+    pf "$pf_s" "the image ${rust:-the Dockerfile names}, by its digest" \
+        "docker pull $rust, where the network may be used"
+    pf_s=0
+    env_within 60 "docker image inspect" docker image inspect alpine:latest >/dev/null 2>&1 || pf_s=1
+    pf "$pf_s" "the image alpine:latest" "docker pull alpine:latest"
+    rustup=rustup
+    command -v rustup >/dev/null 2>&1 || rustup=$HOME/.cargo/bin/rustup
+    channel=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)
+    pf_s=0
+    "$rustup" toolchain list 2>/dev/null | grep -q "^$channel" || pf_s=1
+    pf "$pf_s" "rustup's toolchain $channel" "rustup toolchain install $channel"
+    for t in $(sed -n 's/^targets *= *\[\(.*\)\].*/\1/p' rust-toolchain.toml | tr -d '",'); do
+        pf_s=0
+        "$rustup" target list --installed --toolchain "$channel" 2>/dev/null | grep -qx "$t" || pf_s=1
+        pf "$pf_s" "the target $t of $channel" "rustup target add --toolchain $channel $t"
+    done
+    pf_s=0
+    [ -d "${CARGO_HOME:-$HOME/.cargo}/registry/index" ] || pf_s=1
+    pf "$pf_s" "cargo's registry index" "build the workspace once on this machine"
+    if [ "$pf_bad" = 0 ]; then
+        pf_s=0
+        env_within 1800 "the image's build" \
+            docker build --network=none -q -t fennecdb-ycsb . >/dev/null 2>&1 || pf_s=1
+        pf "$pf_s" "fennecdb-ycsb built from this tree with no network" \
+            "Docker's build cache lacks a layer or the cargo registry: docker build -t fennecdb-ycsb . once, where the network may be used"
+    fi
+    return "$pf_bad"
+}
+
+# env_toys DIR: what a script's self-test runs it with instead of Docker,
+# caffeinate, rustup, cargo and ycsb, in DIR, which it must be first on
+# the PATH of. Each records what it was asked in DIR. The toy ycsb runs a
+# soak or a cell as a loop that writes a line every 0.2 s until it is
+# stopped, its pid in DIR/toy.pid -- what a trap that stops `caffeinate`
+# alone leaves running -- and a line to its --progress file unless
+# TOY_SILENT is set; it lists its --kept file's first volume, `<name>-data`.
+env_toys() {
+    mkdir -p "$1/bin" "$1/cargo/registry/index"
+    cat >"$1/bin/docker" <<'TOY'
+#!/bin/sh
+echo "$*" >>"$TOY_DIR/docker.log"
+case "$1" in
+info) echo 68719476736 ;;
+volume) [ "$2" = inspect ] && exit 1 ;;
+run)
+    case "$*" in
+    *" df -kP "*) printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/vda1 100000000 0 100000000 0%% /\n' ;;
+    esac
+    ;;
+inspect)
+    case "$*" in
+    *OOMKilled*) echo false ;;
+    *ExitCode*) echo 0 ;;
+    esac
+    ;;
+esac
+exit 0
+TOY
+    # caffeinate runs its command as its child and passes no signal on.
+    cat >"$1/bin/caffeinate" <<'TOY'
+#!/bin/sh
+shift
+"$@" &
+wait $!
+TOY
+    cat >"$1/bin/rustup" <<'TOY'
+#!/bin/sh
+case "$1" in
+toolchain) sed -n 's/^channel *= *"\([^"]*\)".*/\1-toy/p' rust-toolchain.toml ;;
+target) sed -n 's/^targets *= *\[\(.*\)\].*/\1/p' rust-toolchain.toml | tr -d '",' | tr ' ' '\n' ;;
+esac
+TOY
+    cat >"$1/bin/ycsb" <<'TOY'
+#!/bin/sh
+echo "$*" >>"$TOY_DIR/ycsb.log"
+case "$1 ${2:-}" in
+"soak report" | mark* | report* | fill* | heap*) exit 0 ;;
+esac
+case " $* " in
+*" --peak "*)
+    echo "peak 1000"
+    exit 0
+    ;;
+esac
+progress='' kept='' name=''
+while [ $# -gt 0 ]; do
+    case "$1" in
+    --progress) progress=$2 ;;
+    --kept) kept=$2 ;;
+    --name) name=$2 ;;
+    esac
+    shift
+done
+[ -n "$kept" ] && echo "$name-data" >>"$kept"
+echo $$ >"$TOY_DIR/toy.pid"
+while :; do
+    echo tick >>"$TOY_DIR/toy.out"
+    [ -n "$progress" ] && [ -z "${TOY_SILENT:-}" ] && echo tick >>"$progress"
+    sleep 0.2
+done
+TOY
+    chmod +x "$1/bin/docker" "$1/bin/caffeinate" "$1/bin/rustup" "$1/bin/ycsb"
+}
+
+# env_toy_run DIR SCRIPT ARGS...: SCRIPT run in the background over the
+# toys in DIR, small enough for any disk and under any load; its pid in
+# `toy_run`.
+env_toy_run() {
+    tr_dir=$1
+    shift
+    TOY_DIR=$tr_dir PATH="$tr_dir/bin:$PATH" CARGO_HOME="$tr_dir/cargo" \
+        YCSB="$tr_dir/bin/ycsb" CARGO=true LINUX_TOOLS=true \
+        QUIET_LOAD=100000 RECORDS=4000 MEMORY=1m RUNS=1 GAP=0 FRACTIONS="50 80" \
+        OUT="$tr_dir/out.tsv" VERIFY="$tr_dir/verify.tsv" RUN=toy \
+        "${ENV_SHELL:-sh}" "$@" >>"$tr_dir/run.log" 2>&1 &
+    toy_run=$!
+}
+
+# env_toy_wait SECS WHAT CMD...: until CMD holds, SECS at the most; 1 and
+# WHAT said where it never did. A wait for an event, bounded.
+env_toy_wait() {
+    tw_left=$(($1 * 10))
+    tw_what=$2
+    shift 2
+    while ! "$@"; do
+        tw_left=$((tw_left - 1))
+        if [ "$tw_left" -le 0 ]; then
+            echo "self-test: $tw_what did not happen" >&2
+            return 1
+        fi
+        sleep 0.1
+    done
+    return 0
+}
+
+# env_self_test SCRIPT SOAK ARGS...: SCRIPT's trap and guard held to what
+# they promise, with toys and no Docker (`env_toys`). Interrupted in the
+# middle of a step run under `caffeinate`, the script stops the
+# measurement itself, not only its parent; where SOAK is not empty, it
+# leaves the volumes the soak said to keep and removes its others, and a
+# soak that prints nothing is stopped by the guard after ENV_SILENT seconds
+# and marked hung. Every toy is stopped however the test ends. 0 when each
+# held.
+env_self_test() {
+    st_script=$1
+    st_silent=$2
+    shift 2
+    # A failing check is the test's to say, not `set -e`'s to end it on.
+    set +e
+    st_dir=$(mktemp -d "${TMPDIR:-/tmp}/ycsb-self-test.XXXXXX")
+    st_bad=0
+    # shellcheck disable=SC2064
+    trap "env_toy_stop '$st_dir'" EXIT INT TERM
+    env_toys "$st_dir"
+    st() {
+        if [ "$1" = 0 ]; then
+            echo "self-test ok: $2"
+        else
+            echo "self-test FAILED: $2"
+            st_bad=1
+        fi
+    }
+    # Interrupted while its toy measures.
+    env_toy_run "$st_dir" "$st_script" "$@"
+    env_toy_wait 60 "the toy's first line" test -s "$st_dir/toy.out"
+    st_s=$?
+    st "$st_s" "the step started under caffeinate"
+    kill -TERM "$toy_run" 2>/dev/null
+    wait "$toy_run" 2>/dev/null
+    toy=$(cat "$st_dir/toy.pid" 2>/dev/null)
+    st_s=0
+    env_toy_wait 10 "the toy's end" env_toy_gone "$toy" || st_s=1
+    # One the script left running is the test's to stop.
+    [ -n "$toy" ] && kill -TERM "$toy" 2>/dev/null
+    st "$st_s" "interrupted, the script stopped the measurement under caffeinate, not only caffeinate"
+    if [ -n "$st_silent" ]; then
+        st_s=0
+        grep -- 'volume rm' "$st_dir/docker.log" | grep -q -- '-50-data' && st_s=1
+        grep -- 'volume rm' "$st_dir/docker.log" | grep -q -- '-50-replica-data' || st_s=1
+        st "$st_s" "the volume the soak said to keep kept, its others removed"
+        rm -f "$st_dir/toy.pid" "$st_dir/toy.out"
+        TOY_SILENT=1 ENV_SILENT=3 ENV_EVERY=2 env_toy_run "$st_dir" "$st_script" "$@"
+        st_s=0
+        env_toy_wait 120 "the silent run's end" env_toy_gone "$toy_run" || st_s=1
+        wait "$toy_run" 2>/dev/null
+        toy=$(cat "$st_dir/toy.pid" 2>/dev/null)
+        env_toy_wait 10 "the silent toy's end" env_toy_gone "$toy" || st_s=1
+        [ -n "$toy" ] && kill -TERM "$toy" 2>/dev/null
+        grep -q 'printed nothing for' "$st_dir/run.log" || st_s=1
+        grep -q ':hung hung 1' "$st_dir/ycsb.log" || st_s=1
+        st "$st_s" "a step silent for ENV_SILENT s stopped by the guard and marked hung"
+    fi
+    env_toy_stop "$st_dir"
+    trap - EXIT INT TERM
+    [ "$st_bad" = 0 ] && echo "self-test: every promise held" || echo "self-test: FAILED, its log in the run's output above"
+    return "$st_bad"
+}
+
+env_toy_gone() {
+    [ -z "$1" ] || ! kill -0 "$1" 2>/dev/null
+}
+
+# Whatever the test started, stopped -- the script and its toy loop -- and
+# its directory removed, after printing the toy run's log where one failed.
+env_toy_stop() {
+    if [ -n "${toy_run:-}" ]; then
+        kill -TERM "$toy_run" 2>/dev/null
+    fi
+    if [ -s "$1/toy.pid" ]; then
+        kill -TERM "$(cat "$1/toy.pid")" 2>/dev/null
+    fi
+    if [ "${st_bad:-0}" != 0 ] && [ -f "$1/run.log" ]; then
+        sed 's/^/  | /' "$1/run.log"
+    fi
+    case $1 in
+    */ycsb-self-test.*) rm -rf "$1" ;;
+    esac
 }

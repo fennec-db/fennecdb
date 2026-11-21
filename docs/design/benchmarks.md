@@ -82,7 +82,9 @@ Latencies go into a log-linear histogram, 64 steps an octave.
 thread logs its operations and answers into its own `Vec`, and after the
 cell a read must hold, field by field, a value a write that could have
 been the last one left (one ended before it and not followed by another
-that did, or one overlapping it), a scan consecutive keys as far as it
+that did, or one overlapping it), and never go back on a read that ended
+before it began -- the register is atomic, not merely regular, so the reads
+are held in the order they ended -- a scan consecutive keys as far as it
 could see, a write one record -- every write logged, since a read under
 concurrent writes is judged by every write's span, and nothing compared
 in an operation's time. The rule is `src/register.rs`'s, which the soak
@@ -233,6 +235,26 @@ server's error. A step the environment cannot take ends the run, its cells
 written `env_failed 1`: the environment's failure, counted in the report's
 `env` column, never a pass and never `failed`.
 
+What a run needs is looked at before its first command, and nothing is
+pulled while it runs (`--preflight`, `env_preflight`, both scripts): the
+rust image the Dockerfile names, by its digest -- a tag can move -- which
+the Linux tools build in; `alpine`, which the looks, verifies, backups and
+`df` run in; rustup's toolchain and the targets rust-toolchain.toml names,
+which a cargo in the tree would fetch; cargo's registry index, which the
+tools' build reads offline; and `fennecdb-ycsb` built from the tree with no
+network (`docker build --network=none`), which holds Docker's build cache to
+the apk and rustup layers and the cargo registry's mount. Each is said `ok`
+or `MISSING` with how to get it, and a run with one missing starts nothing.
+Every `docker run` of the scripts and of `ycsb` takes `--pull never`; the
+tools build with `--network none`, the host's `ycsb` with `--offline`.
+Every container, volume and network a run makes carries its process id
+(`p51-<pid>-server`), so that a run never removes another's; the trap stops
+the step's own children before the step -- `caffeinate -i` runs the
+measurement as its child and passes no signal on, so stopping it alone left
+`ycsb` running, writing lines and removing containers by a shared name --
+and `--self-test` holds it to that with toys and no Docker
+(`env_self_test`), in CI's clippy job.
+
 In process, the verify logs are the measured process's own memory, under
 the limit: `--verify-max` (half the limit, from the script) ends a cell's
 measured window once the logs reach it, so they never push the engine's
@@ -281,7 +303,9 @@ heap figures say how much it takes.
 whose `--memory` (512 MB by default) is under its file's size (1 000 000
 records, 1.1 GB live), a second container following it as a replica, for
 8 hours a run. First the peak the mix reaches as fast as it is answered,
-four minutes; then the soak open loop at 50% and at 80% of it, a run each.
+four minutes; then the soak open loop at 50% and at 80% of it, a run each
+-- the second only where the first's report passed, unless `KEEP_GOING=1`:
+eight hours on a known failure tell nothing more.
 
 **One checker.** `soak.rs` is the driver -- the mix, the schedule, the
 kills, the minute's line and the report -- and decides no answer: whether
@@ -290,18 +314,30 @@ a read could have been answered so is `src/register.rs`'s alone, the rule
 both use. A register is a field of a record, the record's being there, a
 session's, or a counter; a read over `[s, e]` may answer a write beside it,
 one that could have been the last before it, or, where no certain write
-ended before it, what the register held. The soak's mix needed three
-things YCSB's did not, each in the module with its tests: a delete (a
-write of the record's absence), a row a `@ttl` expired (a write of its
-absence over the span its time can fall in), and a write that may not have
-landed -- one not answered, and one a kill may have taken (below). Every
-such write is a value a read may answer, never one that makes an earlier
-value impossible. Counters are the module's too: an increment is not
-idempotent, so a read must answer at least the certain increments that
-ended before it and at most every one begun by its end. The table of
-histories in `register.rs`'s tests is run both ways the module is used: a
-cell at once, and settled a minute at a time behind the reads as the soak
-settles it.
+ended before it, what the register held. And the register is atomic, not
+merely regular: reads do not go back. Once a read answered `v`, a read
+that began after it ended may answer another value only from a write that
+can be ordered after the first read -- one that ended after it began, or
+one never answered -- until a kill, which may take back what the first saw.
+So two reads during one write cannot answer the new value and then the
+old, and after two overlapping writes -- the hot keys' everyday -- the reads
+cannot flip between their values: the first that settles on one holds the
+rest to it. The checker holds the reads in the order they ended, and keeps
+a register's last reads (eight, back to the settling's cutoff: a check
+that forgets only ever weakens). A read through the replica is held to the
+registers alone, never to the primary's reads before it: it is sent after
+the writes answered before it began and may lag the ones answered since.
+The soak's mix needed three things YCSB's did not, each in the module with
+its tests: a delete (a write of the record's absence), a row a `@ttl`
+expired (a write of its absence over the span its time can fall in), and
+a write that may not have landed -- one not answered, and one a kill may
+have taken (below). Every such write is a value a read may answer, never
+one that makes an earlier value impossible. Counters are the module's too:
+an increment is not idempotent, so a read must answer at least the certain
+increments that ended before it and at most every one begun by its end.
+The table of histories in `register.rs`'s tests is run both ways the
+module is used -- a cell at once, and settled a minute at a time behind
+the reads -- each read alone and, for the atomic rule, each history whole.
 
 **What a kill may take.** Under `--sync always` a write is answered after
 its fsync: a `kill -9` takes nothing answered. Under `--sync 250` a write
@@ -315,30 +351,54 @@ write answered just after one flush's write waits out that sync's own time,
 the interval, and the next one's lock and write. So it is in the kernel
 within 250 ms and two syncs' own time: the window the power-cut rig holds a
 cut to (`.github/power-cut/client.py`, 200 ms a sync, 650 ms), which also
-covers the second sync's fsync a kill does not need. The soak holds a kill
-to that: a write answered within 650 ms of the kill (or after it was sent,
-until the server answered again) may be gone for a read ending after the
-kill; one answered earlier must be there. A write not answered may or may
-not have landed under either mode.
+covers the second sync's fsync a kill does not need. But the rig measured a
+sync's own time on a GitHub runner with no compact running; the soak kills
+on Docker Desktop's disk, every third kill in a compact, and a slow fsync
+keeps answered writes in the process longer. So the bound is a parameter,
+`--loss-ms` (`LOSS_MS`), its present value the default, and the run
+measures what it bounds: a read after a kill that answered `d` shows a
+write gone where the write was answered before the read began, began after
+every write of `d` it could have answered ended -- had it landed, the
+register could not hold `d` -- and the server had not answered again since
+the kill when it was answered (`Registers::gone`). Each such write is
+counted once (`lost_writes`) with how long before its kill it was answered
+(`lost_ms_max`, the minute's largest), as the rig's `WINDOW` line names its
+first lost write; one past the bound is a mismatch, whose words say by how
+much. And each kill's line says whether a compact was writing at it (its
+side file, `<file>.beside`, left behind: `kill_compacting`) and whether the
+primary's main thread -- its syncer -- was in an fsync then, and for how
+long (`kill_sync_ms`): a container in the primary's process namespace
+watches `/proc/1/task/1/syscall` every 5 ms from the announced second, and
+the kill ends it with the namespace, its last look the thread's state at
+the kill. The report prints the run's largest gap beside the bound, and
+whether the run supports it or what it suggests (`notes`).
 
 **The mix**, over 32 connections: 36% read and 37% update of YCSB's records
 (A, its scrambled zipfian) and 4% read of them through the replica, sent
-after the latest write answered (`Fennec-After`: the replica answers once
-it holds it, so its answer is held to the registers as the primary's is --
-never across a restart, where it would wait out the primary's absence); 2%
-increment of one of 1 000 counters (`set counters {n: n + 1}`) and 1% read
-of one; 3% insert of new keys and 3% delete of the oldest inserted; 2% read
-of an inserted key; 4% insert into `sessions`, whose `seen timestamp
-@ttl(60s)` expires them, and 2% read of them -- by id, through a filter of
-16 ids, and counted (`count`), each held to the registers: a row is there
-until its time and gone from it in every read ("every read leaves them out
-at once"), within 5 s either way. The 5 s is the clocks', not the server's:
-this host's, which times each operation, against Docker's VM's, which
-`now()` and the expiry read and which Docker Desktop keeps to the host's --
-a drift of seconds is what it allows for, nothing on the server's side;
-2% `match` on a `@text` body, 2% `near` on a `vector<16> @hnsw(cosine)`
-(ten rows), 2% update of a doc. Two rows for one id, or a row not asked
-for, is a mismatch.
+after the latest write answered (`Fennec-After`, the read's start taken
+before the change it names is read: every write answered before the read
+began is in it) -- the replica answers once it holds it, so its answer is
+held to the registers as the primary's is; never across a restart, nor
+after one until the replica says it is connected and holds the newest
+change answered before the kill (`/_replication/status`; its reconnect
+pauses up to 5 s, and the restarted primary first syncs what the killed
+process left), those reads going to the primary meanwhile, and the time it
+took on the line (`replica_back_ms`, bounded by `--replica-back-max`, 60
+s); 2% increment of one of 1 000 counters (`set counters {n: n + 1}`) and
+1% read of one; 3% insert of new keys and 3% delete of the oldest
+inserted; 2% read of an inserted key; 4% insert into `sessions`, whose
+`seen timestamp @ttl(60s)` expires them, and 2% read of them -- by id,
+through a filter of 16 ids, and counted (`count`), each held to the
+registers: a row is there until its time and gone from it in every read
+("every read leaves them out at once"), within a second either way. The
+server stamps `seen` and judges the expiry by its own clock, so the VM's
+offset from this host cancels; a drift or a step of it within the ttl is
+what the second allows for, and each minute a probe (`put clock {id: 1, t:
+now()} returning *`) reads the server's clock against this host's
+(`clock_off_ms`, `clock_rtt_ms`), marking a move past 200 ms more than the
+probes' own round trips (`clock_step`); 2% `match` on a `@text` body, 2%
+`near` on a `vector<16> @hnsw(cosine)` (ten rows), 2% update of a doc. Two
+rows for one id, or a row not asked for, is a mismatch.
 
 Beside it 64 subscriptions to `GET /usertable/changes`, a range of 64 keys
 each, held to the writes in their range by the change each write was
@@ -358,22 +418,49 @@ the server's own scan, against the ranking over the vectors read, to the
 last digits of the f32 sums; and the `@hnsw` walk against `exact` by
 recall@10, the run's mean held to 0.925 -- the lowest the site states
 (`benchmarks-vector.html`, ef 40 over 1 000 000 x 128), a far harder set
-than 20 000 x 16. A doc written while a sample ran is left out of it.
+than 20 000 x 16. A doc written while a sample ran is left out of it, from
+before its request is sent: under `--sync always` it is visible from when
+it lands, before its fsync and its answer.
 
 **The schedule.** `compact usertable` every 20 minutes; every 120 from
 minute 50 a backup over the replication stream (`fennec backup` into an
-archive), restored (`fennec restore`) and the restored file verified, each
-step counted; every 30 the server killed (`docker kill --signal KILL`),
-its file held to its checksums (`fennec verify`) before it starts again.
-They queue one behind another, so a backup due with a compact runs after
-it (the first version let the compact take the minute, and with a compact
-every 20 minutes no backup ever ran); a kill waits for the queue but every
-90 minutes, when it lands a second into a compact of its own: a crash in
-the middle of a compact is what a soak should meet, and the file must
-verify after it (a mapped file is replaced only by rename). After each
-restart the keys written in the 10 s before the kill, or by a write not
-answered, are read back; at the end every key is, every counter and every
-session.
+archive), restored (`fennec restore`), the restored file verified and then
+served read-only beside the run, its change number held to the primary's
+at the backup's start and 1 000 of the records written so far read from it
+and held to the registers as reads over the backup's span (an empty or
+stale archive verifies as well as a whole one): a backup counts only when
+all of it holds (`backup_stale`, `backup_differs` where it does not); every
+30 the server killed (`docker kill --signal KILL`), its file held to its
+checksums (`fennec verify`) before it starts again. They queue one behind
+another, so a backup due with a compact runs after it; a kill waits for the
+queue but every 90 minutes, when it lands in a compact of its own: asked,
+and under way for a second when the kill is sent. fennec-server compacts
+on its own besides (`--auto-compact`), under the run's memory at a third
+dead, and refuses a second compact while one writes its file beside the
+database (`engine/maintenance.rs`): such a refusal is counted apart
+(`compact_busy`), never failed -- the file was being compacted -- and the
+compact a kill is to land in is asked again until it is taken; a kill must
+cut one (`compact_killed` at least the kills in a compact). The server's
+own compactions are read from its `fennec_auto_compactions_total`, the
+minute's count on its line (`auto_compacts`, `r_auto_compacts` for the
+replica), and whether one was writing at the minute's look from its side
+file (`compacting`, `r_compacting`). After each restart the keys written in
+the 10 s before the kill, or by a write not answered, are read back -- a
+sweep that cannot connect or read is counted (`sweep_failed`), never
+passed over -- and at the end every key, every counter and every session.
+
+Every wait the run can block on is bounded and named: a docker call (two
+minutes unless its own is longer), a kill's wait for the side job before
+it and for its compact to be under way, a server's answer after its start
+(`WAIT_MAX`, 540 s) -- under the ten minutes the script's guard gives a
+soak whose progress file (`--progress`) gained no line (`ENV_SILENT`):
+the guard stops it as hung and the script marks the run
+(`<sync>:<fraction>:hung`), which fails the report's dead-man. A soak that
+failed a verify -- the file copied aside before the server opens it again,
+`failed-m<minute>.fennec` -- or counted a mismatch keeps its volumes past
+its end, their names printed and listed for the script's cleanup to leave
+(`--kept`). Every name a run makes carries its process id, so that no run
+removes another's.
 
 **A minute's line**, `results/soak.tsv`, family `soak`, cell
 `<sync>:<fraction>:m<minute>`, appended as the minute ends so that a run
@@ -385,13 +472,17 @@ operation in the minute); the steady operations' `p50`, `p99`, `p999` and
 `max` in microseconds, each timed from when it was due, and `p99_hour`, the
 steady p99 of the 60 minutes to then; apart from them `restart_ops` and
 `p99_restart`, the operations due from a second before a kill until the
-server answered again, and `compact_ops` and `p99_compact`, those due while
-a compact ran; `errors`, `refused` (writes refused by their status) and
-`down`; `mismatches`; the streams' `stream_missing`, `stream_twice`,
-`stream_order`, `stream_late`, `stream_silent`, `events` and `streams`
-open; `file`, the database file's length alone, read through `/proc/1/root`
-(never the image a compact writes beside it), and `live`,
-`fennec_data_bytes`; `compactions` so far, the server's own and the run's;
+server answered again and, after it, until their connection was back on
+its schedule -- at 80% the open loop's backlog drains for minutes, its waits
+the restart's -- and `compact_ops`, `p99_compact` and `p99_compact_hour`,
+those due while a compact ran and until back on schedule after it;
+`errors`, `refused` (writes refused by their status) and `down`;
+`mismatches`, `lost_writes`, `lost_ms_max`, `backup_differs`; the streams'
+`stream_missing`, `stream_twice`, `stream_order`, `stream_late`,
+`stream_silent`, `events` and `streams` open; `file`, the database file's
+length alone, read through `/proc/1/root` (never the image a compact
+writes beside it), and `live`, `fennec_data_bytes`; `compactions` so far,
+`auto_compacts`, `r_auto_compacts`, `compacting`, `r_compacting`;
 `rss_anon`, `memory_bytes`, `cg_anon`, `cg_file`, `cg_current`, `majflt`,
 `threads`, `fds` and `connections` (`fennec_connections`) of the primary,
 `r_rss_anon`, `r_threads`, `r_fds` and `r_connections` of the replica;
@@ -400,61 +491,89 @@ minute's write rate) and `r_connected`; the sample's `match_n`,
 `match_differs`, `near_n`, `exact_differs`, `recall_sum` and
 `sample_skipped`; `host_free` and `vm_free`, the disk on each side; the
 run's doings in the minute (`kill`, `verify`, `verify_failed`, `backup`,
-`restore`, `backup_failed`, `compact`, `compact_failed`, `compact_killed`,
-`restart_ms`, `swept`), `died`, `oom` and `r_died` (a server gone that the
-run did not kill, the kernel's OOM kills of it); and `load1`, `load5`, the
-host's load: the machine is shared, and a minute it was busy shows.
-`:start` says the run's settings, `:end` closes a finished run: totals,
-`swept` against `keys`, the replica's `catchup_s`, `p99_restart` and
-`restart_ms_max` over the run, both files verified after both stopped as a
-supervisor stops them, and `replica_differs`: the same ordered read of
-`usertable`, `counters` and `docs` on both once the replica is at the
-primary's change, its pages' bytes digested (`sessions` aside: time, not
-the position, decides its rows).
+`restore`, `backup_failed`, `backup_stale`, `compact`, `compact_failed`,
+`compact_busy`, `compact_killed`, `restart_ms`, `swept`, `sweep_owed`,
+`sweep_failed`) and a kill's parts, each timed apart -- docker's kill and
+wait (`kill_ms`), the verify (`verify_ms`) and the server's own part,
+`docker start` to answering (`start_ms`) -- with `kill_compacting`,
+`kill_sync_ms` and `replica_back_ms`; `died`, `oom` and `r_died` (a server
+gone that the run did not kill, the kernel's OOM kills of it); the clock's
+`clock_off_ms`, `clock_rtt_ms` and `clock_step`; and what else used the
+machine: `load1`, `load5`, `others_host` (this host's other processes, in
+cores, by `ps` -- on macOS a decaying average of about the minute, every
+process but the run's and Docker's) and `others_vm` (what the VM's CPUs did
+beside the two servers' cgroups, from `/proc/stat` and their `cpu.stat`;
+the run's own look, verify and backup containers among it). `:start` says
+the run's settings and the load before it (`load_before`), `:end` closes a
+finished run: totals, `swept` against `keys`, the replica's `catchup_s`,
+`p99_restart` and `restart_ms_max` over the run, both files verified after
+both stopped as a supervisor stops them, and `replica_differs`: the same
+read of `usertable`, `counters` and `docs` in id order (`order id`: a page
+in storage order would differ after either side compacted) on both once
+the replica is at the primary's change, its pages' bytes digested
+(`sessions` aside: time, not the position, decides its rows).
 
 **The report**, `ycsb soak report soak.tsv [<run>]`, judges a run by the
 item's exit criterion and what holds it, a line each with the minutes that
 broke it: 8 hours and an end line; the planned minutes run; every minute
 with operations from every connection (the dead-man: a minute nothing was
-answered in, or a worker stuck); the last steady hour's p99 at most 1.25
-times the first's -- the restarts' windows and the compacts' apart, so that
-hours holding two kills and three compacts compare with one holding one
-and two (with no dry run yet, the compacts were put apart without data:
-`p99_compact` says whether it was needed); the file at most 2.2 times the
-live bytes every minute; the primary's `rss_anon` grown less than 5% from
-the fifth minute of each life to its last, every life (it is killed every
-30 minutes, so a run-long baseline would see processes at most 30 minutes
-old), and the replica's, never killed, from minute 60 to every minute
-after; threads and descriptors less the connections open, within 2 of
-their median, for both (each connection is a thread and a socket; a compact
-or a backup running at the look, the replica's reconnect and the scrape's
-own connection still move them); no error -- a status other than a 2xx is
-one wherever it falls, and so is a connection error or a 503 saying when to
-come back outside a restart's window, which within one is `down`; no
-mismatch; every stream held and all 64 open each minute; the replica
-connected each minute and within 5 s of the primary, its first follow
-within 1 800 s, caught up at the end within 300 s, and holding the
-primary's rows; every restart within 120 s and the restarts' p99 within
-122 s (the announced second, the restart and a request after it) -- a
-bound set without a measured restart, which the first run's `restart_ms`
-must show room under; the kills and verifies the schedule owes for the
-run's length (`(minutes - 1) / 30`), its compacts, kills in a compact,
-backups and restores; every verify clean; match and near as a scan; every
-key read back at the end; no server died and none was OOM-killed. A disk
-short of `--disk-floor` (3 GB) on either side ends the run as the
-environment's: the report says so and judges nothing of it (exit 2), never
-a pass and never the server's failure. It lists the minutes the host's
-load was 4 or more, and exits 1 unless every line passed. Each criterion
-has a synthetic run of lines that passes it and one that breaks it alone
+answered in, a worker stuck, or a soak the guard stopped as hung); the last
+hour's steady p99, and its p99 in compacts, at most 1.25 times those of
+the earliest hour before it that holds the same schedule -- the same kills,
+one in a compact, the same compacts and backups at the same minutes of the
+hour: lines 61-120 of an 8-hour run, against 421-480 (`same_hour`), so
+that neither a restart's backlog nor a compact's tail weighs more in one
+than in the other; a two-hour run has no such hour and is not judged on
+it; the file at most 2.2 times the live bytes every minute; the primary's
+`rss_anon` grown less than 5% within each life (it is killed every 30
+minutes), from the median of its first five quiet looks from its fifth
+line to the median of its last five, and the replica's, never killed, from
+the median of its first five quiet looks from minute 60 to the median of
+every five after -- a quiet look being none in a minute a compact ran or
+was writing at the look (`begin_beside` clones each store), so that one
+look in a compaction never decides; threads and descriptors less the
+connections open within 2 of their run's median, for both, and the
+primary's within 2 from the median of a life's first five looks to its last
+five -- a leak of a few a life never leaves a run-wide band; no error -- a
+status other than a 2xx is one wherever it falls, and so is a connection
+error or a 503 saying when to come back outside a restart's window, which
+within one is `down`; no mismatch (and the minutes the VM's clock stepped
+said beside it); every stream held and all 64 open each minute; the
+replica connected each minute and within 5 s of the primary, its first
+follow within 1 800 s, back after each restart within `--replica-back-max`,
+caught up at the end within 300 s, and holding the primary's rows; every
+restart within `--restart-max` (120 s) and the restarts' operations' p99
+within the run's longest restart and two seconds; the kills and verifies
+the schedule owes for the run's length (`(minutes - 1) / 30`), its
+compacts (one the server's own turned away counting), the kills that cut
+a compact, backups whose restored records held and restores; every verify,
+backup and restore clean; match and near as a scan; every key read back,
+after each restart and at the end; no server died and none was
+OOM-killed. A disk short of `--disk-floor` (3 GB) on either side ends the
+run as the environment's: the report says so and judges nothing of it
+(exit 2), never a pass and never the server's failure. Below the verdicts
+it says what the run measured of what was set without one: each kill's
+state (a compact writing, an fsync in flight); `--loss-ms` beside the
+largest gap of a write a read showed gone, and whether the run supports it
+or suggests another; `--restart-max` beside the longest restart and its
+parts -- the server's own at the median and at most -- and whether twice
+the longest fits it or what twice the longest is; the clock's offset and
+steps; and the load before the run and the minutes another process took a
+core or more, on this host or in the VM. It exits 1 unless every line
+passed. Each criterion has a synthetic run of lines that passes it and one
+that breaks it alone, and each finding of the reviews a run that breaks it
+or a right server's run it passes
 (`the_report_passes_a_good_run_and_fails_each_criterion_alone`).
 
 Not measured: the servers outside Docker's VM (the soak's kill, cgroup and
 `/proc` looks are Linux containers'), a primary under a failover (P5's),
-and a load the machine shares: the minutes it did are flagged, not taken
+and a load the machine shares: the minutes it did are said, not taken
 out. A sweep of every key after each restart, rather than of those the kill
 could have touched: it would read the whole file through the cgroup's
 512 MB sixteen times under load and push the working set out each time,
-into the tail the p99 is judged on.
+into the tail the p99 is judged on. An fsync in flight on a thread other
+than the primary's main one, where `--sync always` makes them: under it a
+kill takes nothing answered, so nothing turns on it.
 
 ## Instruction counts
 

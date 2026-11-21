@@ -619,7 +619,13 @@ const CGROUP_LOOK: &str = "cd /proc/1/root/sys/fs/cgroup && while :; do \
 /// before and after it rather than a look a second.
 fn container_cgroup(container: &str) -> Option<Cgroup> {
     let out = std::process::Command::new("docker")
-        .args(["run", "--rm", &format!("--pid=container:{container}")])
+        .args([
+            "run",
+            "--rm",
+            "--pull",
+            "never",
+            &format!("--pid=container:{container}"),
+        ])
         .args(["--name", &format!("{container}-look")])
         // Reading another user's `/proc/<pid>/root` is a ptrace's right.
         .args(["--cap-add", "SYS_PTRACE", "alpine", "sh", "-c"])
@@ -647,7 +653,13 @@ impl Watch {
     fn start(container: &str) -> Option<Watch> {
         let name = format!("{container}-watch");
         let mut child = std::process::Command::new("docker")
-            .args(["run", "--rm", &format!("--pid=container:{container}")])
+            .args([
+                "run",
+                "--rm",
+                "--pull",
+                "never",
+                &format!("--pid=container:{container}"),
+            ])
             .args(["--name", &name])
             // Reading another user's `/proc/<pid>/root` is a ptrace's right.
             .args(["--cap-add", "SYS_PTRACE", "alpine", "sh", "-c", CGROUP_LOOK])
@@ -706,7 +718,13 @@ impl Drop for Watch {
 /// fennec-server's image is empty but for the binary and has no `cat`.
 fn container_memory(name: &str) -> Option<u64> {
     let out = std::process::Command::new("docker")
-        .args(["run", "--rm", &format!("--pid=container:{name}")])
+        .args([
+            "run",
+            "--rm",
+            "--pull",
+            "never",
+            &format!("--pid=container:{name}"),
+        ])
         // Reading another user's `/proc/<pid>/root` is a ptrace's right.
         .args(["--cap-add", "SYS_PTRACE", "alpine"])
         .args(["cat", "/proc/1/root/sys/fs/cgroup/memory.stat"])
@@ -1226,7 +1244,7 @@ impl Server {
             return;
         }
         let mut run = std::process::Command::new("docker");
-        run.args(["run", "-d", "--name", &self.container()])
+        run.args(["run", "-d", "--pull", "never", "--name", &self.container()])
             .args(["-p", &format!("127.0.0.1:{}:8080", self.port)])
             .args(["-v", &format!("{}:/data", self.volume())]);
         if let Some(m) = &self.memory {
@@ -1349,7 +1367,14 @@ impl System for Server {
             // by a container mounting the volume beside the server.
             true => {
                 let out = std::process::Command::new("docker")
-                    .args(["run", "--rm", "-v", &format!("{}:/data", self.volume())])
+                    .args([
+                        "run",
+                        "--rm",
+                        "--pull",
+                        "never",
+                        "-v",
+                        &format!("{}:/data", self.volume()),
+                    ])
                     .args(["alpine", "du", "-b", "/data/ycsb.fennec"])
                     .output()
                     .ok()?;
@@ -2870,7 +2895,22 @@ fn check(logs: &[Vec<Entry>], model: &mut Model) -> Verdict {
             }
         }
     }
-    for e in logs.iter().flatten() {
+    // The reads in the order they ended: a register is atomic, so a read
+    // is held to every read that ended before it began (`register.rs`).
+    let mut reads: Vec<&Entry> = logs
+        .iter()
+        .flatten()
+        .filter(|e| matches!(e, Entry::Read { .. }))
+        .collect();
+    reads.sort_by_key(|x| match x {
+        Entry::Read { e, .. } => *e,
+        _ => 0,
+    });
+    let scans = logs
+        .iter()
+        .flatten()
+        .filter(|e| matches!(e, Entry::Scan { .. }));
+    for e in reads.into_iter().chain(scans) {
         match e {
             Entry::Read {
                 key,
@@ -2889,7 +2929,7 @@ fn check(logs: &[Vec<Entry>], model: &mut Model) -> Verdict {
                 }
                 let base = model.base(*key);
                 for (f, (&d, &b)) in got.1.iter().zip(&base).enumerate() {
-                    if !model.regs.may_hold(*key, f as u8, *s, *e, d, b) {
+                    if !model.regs.read(*key, f as u8, *s, *e, d, b) {
                         v.wrong(format!(
                             "read of {key} [{s}, {e}] ns: field{f} holds no value written to it"
                         ));

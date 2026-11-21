@@ -21,6 +21,16 @@
 //! uncertain write is a value a read may answer; it never makes an earlier
 //! value impossible.
 //!
+//! The register is atomic, not merely regular ([`Registers::read`]): reads
+//! do not go back. Once a read has answered `v`, a read that began after it
+//! ended may answer another value only from a write that can come after
+//! that read -- one that ended after it began, or one never answered --
+//! until a kill, which may take back what the first read saw. So two reads
+//! during one write cannot answer its new value and then the old one, and
+//! after two overlapping writes the reads cannot flip between their values:
+//! the first read that settles on one holds every later read to it.
+//! [`Registers::may_hold`] is the rule for a read alone.
+//!
 //! The registers are let go of as the reads move on ([`Registers::settle`]):
 //! once no read to come can begin before `cutoff`, a register keeps only the
 //! writes such a read could still be answered from, and one whose kept
@@ -136,6 +146,18 @@ impl Reg {
     }
 }
 
+/// A read a register answered, which reads after it may not go back on.
+#[derive(Clone, Copy, Debug)]
+struct Pin {
+    s: u64,
+    e: u64,
+    d: u64,
+}
+
+/// At most this many reads kept a register: dropping one only weakens the
+/// check, and a hot key is read thousands of times a minute.
+const PINS: usize = 8;
+
 /// The registers a run's writes made, and what each may hold before them.
 #[derive(Default)]
 pub struct Registers {
@@ -145,6 +167,10 @@ pub struct Registers {
     /// value is the one it was loaded with.
     held_one: HashMap<(u64, u8), u64>,
     held_many: HashMap<(u64, u8), Vec<u64>>,
+    /// The reads of a register more than one value could be read from --
+    /// one with writes kept, or settled to several -- that later reads are
+    /// held to ([`Registers::read`]).
+    pins: HashMap<(u64, u8), Vec<Pin>>,
     pub kills: Kills,
 }
 
@@ -238,11 +264,109 @@ impl Registers {
         }
     }
 
+    /// [`Registers::may_hold`], for a read held as one of a history: reads
+    /// do not go back (the module's account), and the read is kept for the
+    /// reads after it. A history's reads are given in the order they ended,
+    /// so that every read ended before another began is in when it comes.
+    pub fn read(&mut self, key: u64, f: u8, s: u64, e: u64, d: u64, base: u64) -> bool {
+        if !self.may_hold(key, f, s, e, d, base) || !self.after_reads(key, f, s, e, d) {
+            return false;
+        }
+        if self.regs.contains_key(&(key, f)) || self.held_many.contains_key(&(key, f)) {
+            let v = self.pins.entry((key, f)).or_default();
+            // A read of the same value begun no later and ended no later
+            // holds the reads after it to less than this one.
+            v.retain(|p| !(p.d == d && p.s <= s && p.e >= e));
+            v.push(Pin { s, e, d });
+            if v.len() > PINS {
+                let oldest = (0..v.len()).min_by_key(|&i| v[i].e).unwrap_or(0);
+                v.swap_remove(oldest);
+            }
+        }
+        true
+    }
+
+    /// Whether a read over `[s, e]` may answer `d` after the reads kept of
+    /// the register: where one ended before it began and answered another
+    /// value, with no kill since that one began, `d` must come from a write
+    /// that can be ordered after that read -- ended after it began, or never
+    /// answered, which may land at any time from its start. A value the
+    /// register held before its kept writes cannot: those writes ended
+    /// before any read still kept began (`settle`).
+    fn after_reads(&self, key: u64, f: u8, s: u64, e: u64, d: u64) -> bool {
+        let Some(pins) = self.pins.get(&(key, f)) else {
+            return true;
+        };
+        let kills = &self.kills.at;
+        let floor = pins
+            .iter()
+            .filter(|p| p.e < s && p.d != d && !kills.iter().any(|&(k, _)| k > p.s && k <= e))
+            .map(|p| p.s)
+            .max();
+        let Some(floor) = floor else {
+            return true;
+        };
+        self.regs.get(&(key, f)).is_some_and(|r| {
+            r.ws.iter()
+                .any(|w| w.d == d && w.s <= e && (w.unanswered || w.e > floor))
+        })
+    }
+
+    /// The writes a read over `[s, e]` that answered `d` shows gone with a
+    /// kill: each answered and ended before the read began, begun after
+    /// every write of `d` it could have answered ended -- so had it landed,
+    /// the register could not hold `d` -- and with a kill sent before the
+    /// read ended and before the server answered again after the write.
+    /// For each, how long before that kill it was answered in ns (negative:
+    /// after the kill was sent), and whether a kill may take it
+    /// ([`Kills::loss`]): one it may not is a write lost past the bound,
+    /// and the read a mismatch.
+    pub fn gone(&self, key: u64, f: u8, s: u64, e: u64, d: u64) -> Vec<(i64, bool, u64)> {
+        let mut out = Vec::new();
+        let Some(r) = self.regs.get(&(key, f)) else {
+            return out;
+        };
+        if !self.kills.at.iter().any(|&(k, _)| k <= e) {
+            return out;
+        }
+        let d_end =
+            r.ws.iter()
+                .filter(|w| w.d == d && w.s <= e)
+                .map(|w| w.e)
+                .max()
+                .unwrap_or(0);
+        for w in
+            r.ws.iter()
+                .filter(|w| !w.unanswered && w.e < s && w.d != d && w.s > d_end)
+        {
+            // The kill that took it: the first one the server had not come
+            // back from when it answered.
+            let kill = self
+                .kills
+                .at
+                .iter()
+                .filter(|&&(k, back)| k <= e && w.e <= back)
+                .min_by_key(|x| x.1);
+            if let Some(&(k, _)) = kill {
+                let lost = self.kills.lost_for(w, e);
+                out.push((k as i64 - w.e as i64, !lost, w.s));
+            }
+        }
+        out
+    }
+
     /// Lets go of what no read beginning at `cutoff` or later can be
     /// answered from (the module's account); `base` says what a register
     /// was loaded with. Every kill sent before `cutoff + loss` must be in
     /// `kills` by then.
     pub fn settle(&mut self, cutoff: u64, base: impl Fn(u64, u8) -> u64) {
+        // A read kept that began before `cutoff` could be one a write let
+        // go of below ended after: such a write's end is lost with it, so
+        // the read can no longer say which values came after it.
+        self.pins.retain(|_, v| {
+            v.retain(|p| p.s >= cutoff);
+            !v.is_empty()
+        });
         let kills = &self.kills;
         let mut settled: Vec<((u64, u8), Vec<u64>)> = Vec::new();
         self.regs.retain(|&r, reg| {
@@ -268,6 +392,8 @@ impl Registers {
             self.held_one.remove(&r);
             self.held_many.remove(&r);
             if v.len() == 1 {
+                // One value left: every read answers it, or none may.
+                self.pins.remove(&r);
                 if v[0] != base(r.0, r.1) {
                     self.held_one.insert(r, v[0]);
                 }
@@ -453,7 +579,7 @@ mod tests {
         },
     ];
 
-    fn run(c: &Case, settle_every: Option<u64>) {
+    fn with_writes(c: &Case) -> Registers {
         let mut r = Registers::new(Kills {
             at: c.kills.to_vec(),
             loss: c.loss,
@@ -468,6 +594,20 @@ mod tests {
                     d,
                     unanswered,
                 },
+            );
+        }
+        r
+    }
+
+    fn run(c: &Case, settle_every: Option<u64>) {
+        let mut r = with_writes(c);
+        // Each read alone, as a history's first: the same verdict.
+        for &(f, s, e, d, base, allowed) in c.reads {
+            assert_eq!(
+                with_writes(c).read(1, f, s, e, d, base),
+                allowed,
+                "{}: a read over [{s}, {e}] answering {d}, alone",
+                c.name
             );
         }
         let mut reads = c.reads.to_vec();
@@ -495,6 +635,151 @@ mod tests {
             run(c, Some(c.loss + 1));
             run(c, Some(c.loss + 10_000));
         }
+    }
+
+    /// Histories whose reads are one history each, held as the soak and
+    /// `--verify` hold them (`Registers::read`): what a register being
+    /// atomic, not merely regular, refuses.
+    const HISTORIES: &[Case] = &[
+        Case {
+            name: "two reads during one write: the new value, then the old",
+            loss: 0,
+            kills: &[],
+            writes: &[(0, 10, 100, 42, false)],
+            reads: &[(0, 20, 30, 42, 7, true), (0, 40, 50, 7, 7, false)],
+        },
+        Case {
+            name: "two reads during one write: the old value, then the new",
+            loss: 0,
+            kills: &[],
+            writes: &[(0, 10, 100, 42, false)],
+            reads: &[(0, 20, 30, 7, 7, true), (0, 40, 50, 42, 7, true)],
+        },
+        Case {
+            name: "two overlapping writes: the reads after them settle on one",
+            loss: 0,
+            kills: &[],
+            writes: &[(0, 10, 50, 41, false), (0, 20, 40, 42, false)],
+            reads: &[
+                (0, 60, 70, 41, 7, true),
+                (0, 80, 90, 42, 7, false),
+                (0, 100, 110, 41, 7, true),
+            ],
+        },
+        Case {
+            name: "a read beside a write, then one after it",
+            loss: 0,
+            kills: &[],
+            writes: &[(0, 10, 50, 41, false), (0, 40, 80, 42, false)],
+            reads: &[
+                (0, 60, 70, 42, 7, true),
+                // 41's write ended before the first read began.
+                (0, 90, 95, 41, 7, false),
+                (0, 96, 99, 42, 7, true),
+            ],
+        },
+        Case {
+            name: "a kill lets a read go back, once",
+            loss: 1_000,
+            kills: &[(5_500, 9_000)],
+            writes: &[(0, 100, 200, 41, false), (0, 5_000, 5_100, 42, false)],
+            reads: &[
+                (0, 5_200, 5_300, 42, 7, true),
+                // The kill took 42: the read after it may go back...
+                (0, 10_000, 10_100, 41, 7, true),
+                // ...and the one after that may not come forward again.
+                (0, 10_200, 10_300, 42, 7, false),
+                (0, 10_400, 10_500, 41, 7, true),
+            ],
+        },
+        Case {
+            name: "a write not answered may land late, and then it stays",
+            loss: 0,
+            kills: &[],
+            writes: &[(0, 100, 900, 42, true)],
+            reads: &[
+                (0, 1_000, 1_100, 7, 7, true),
+                (0, 1_200, 1_300, 42, 7, true),
+                (0, 1_400, 1_500, 7, 7, false),
+            ],
+        },
+    ];
+
+    fn history(c: &Case, settle_margin: Option<u64>) {
+        let mut r = with_writes(c);
+        let mut reads = c.reads.to_vec();
+        reads.sort_by_key(|x| x.2);
+        for &(f, s, e, d, base, allowed) in &reads {
+            if let Some(margin) = settle_margin {
+                r.settle(s.saturating_sub(margin), |_, _| base);
+            }
+            assert_eq!(
+                r.read(1, f, s, e, d, base),
+                allowed,
+                "{}: a read over [{s}, {e}] answering {d}",
+                c.name
+            );
+        }
+    }
+
+    #[test]
+    fn a_register_is_atomic_its_reads_never_going_back() {
+        for c in HISTORIES {
+            history(c, None);
+            // The soak settles a minute and the loss behind its reads, far
+            // past a read's span.
+            history(c, Some(c.loss + 10_000));
+        }
+        // Two overlapping writes settled into the values that could be
+        // last: the reads still settle on one of them.
+        let mut r = Registers::default();
+        r.write(1, 0, W::answered(10, 50, 41));
+        r.write(1, 0, W::answered(20, 40, 42));
+        r.settle(55, |_, _| 7);
+        assert_eq!(r.sizes(), (0, 1));
+        assert!(r.read(1, 0, 60, 70, 41, 7));
+        assert!(!r.read(1, 0, 80, 90, 42, 7));
+        assert!(r.read(1, 0, 100, 110, 41, 7));
+        // Reads let go of (begun before the cutoff) hold nothing more: the
+        // check weakens with time, it never refuses more.
+        r.settle(105, |_, _| 7);
+        assert!(r.read(1, 0, 120, 130, 42, 7));
+        // A register settled to one value keeps no read.
+        let mut r = Registers::default();
+        r.write(1, 0, W::answered(10, 20, 41));
+        assert!(r.read(1, 0, 30, 40, 41, 7));
+        assert_eq!(r.pins.len(), 1);
+        r.settle(25, |_, _| 7);
+        assert!(r.pins.is_empty());
+    }
+
+    #[test]
+    fn a_read_after_a_kill_names_the_writes_it_shows_gone() {
+        let kills = Kills {
+            at: vec![(5_500, 9_000)],
+            loss: 1_000,
+        };
+        // Answered 400 before the kill, within the loss: gone and allowed.
+        let mut r = Registers::new(kills.clone());
+        r.write(1, 0, W::answered(100, 200, 41));
+        r.write(1, 0, W::answered(5_000, 5_100, 42));
+        assert!(r.may_hold(1, 0, 10_000, 10_100, 41, 7));
+        assert_eq!(r.gone(1, 0, 10_000, 10_100, 41), vec![(400, false, 5_000)]);
+        // Nothing gone for a read that answered the last write, or one
+        // before the kill.
+        assert!(r.gone(1, 0, 10_000, 10_100, 42).is_empty());
+        assert!(r.gone(1, 0, 5_200, 5_300, 41).is_empty());
+        // Answered 1 500 before it, past the loss: gone, and a mismatch.
+        let mut r = Registers::new(kills);
+        r.write(1, 0, W::answered(100, 200, 41));
+        r.write(1, 0, W::answered(3_000, 4_000, 42));
+        assert!(!r.may_hold(1, 0, 10_000, 10_100, 41, 7));
+        assert_eq!(r.gone(1, 0, 10_000, 10_100, 41), vec![(1_500, true, 3_000)]);
+        // The value the register was loaded with: every write is after it.
+        assert_eq!(
+            r.gone(1, 0, 10_000, 10_100, 7),
+            vec![(5_300, true, 100), (1_500, true, 3_000)]
+        );
     }
 
     #[test]

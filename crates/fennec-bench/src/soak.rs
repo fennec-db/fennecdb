@@ -52,6 +52,7 @@ use super::{
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
+use std::fs::File;
 use std::io::{BufRead, BufReader, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -75,10 +76,18 @@ use std::time::{Duration, Instant};
 /// two syncs' own time, `SYNC_OWN` 200 ms, 650 ms), which also covers the
 /// second sync's fsync a kill does not need. A write answered earlier than
 /// that before a kill must be there after it.
+///
+/// The rig measured `SYNC_OWN` on a GitHub runner with no compact running;
+/// the soak kills on Docker Desktop's disk, every third kill in a compact,
+/// and a write behind is passed over while an fsync holds the disk. So the
+/// bound is a parameter (`--loss-ms`, this its default), and every read
+/// after a kill that shows a write gone names how long before the kill it
+/// was answered: the report prints the run's largest beside the bound, and
+/// whether the run supports it.
 const SYNC_INTERVAL_MS: u64 = 250;
 const SYNC_OWN_MS: u64 = 200;
 
-fn loss_ms(sync: &str) -> u64 {
+fn default_loss_ms(sync: &str) -> u64 {
     match sync {
         "always" => 0,
         _ => SYNC_INTERVAL_MS + 2 * SYNC_OWN_MS,
@@ -99,6 +108,18 @@ const HELD_FOR: u64 = 60_000_000_000;
 /// How long a stream may sit open past a write in its range without an
 /// event reporting it before it is `silent`.
 const SILENT_AFTER: u64 = 10_000_000_000;
+
+/// The longest the run waits on one thing before it says which and ends:
+/// a side job a kill waits for, a server's answer after its start, a docker
+/// call the minute's loop makes. Under the ten minutes the script's guard
+/// gives a soak that prints nothing (`ENV_SILENT`), so the soak names what
+/// hung before the guard has to.
+const WAIT_MAX: Duration = Duration::from_secs(540);
+
+/// A step of the VM's clock against this host's, from one minute's look to
+/// the next, past which the line marks it: a fifth of the `@ttl` slack's
+/// second, well past the probe's own round trip of a few ms.
+const CLOCK_STEP_MS: f64 = 200.0;
 
 /// A run's settings: `ycsb soak --help` lists them.
 struct Opts {
@@ -121,7 +142,9 @@ struct Opts {
     backup_at: u64,
     ttl: u64,
     slack: u64,
+    loss_ms: u64,
     restart_max: u64,
+    replica_back_max: u64,
     lag_max: u64,
     catchup_max: u64,
     recall_min: f64,
@@ -132,16 +155,20 @@ struct Opts {
     image: String,
     tools: String,
     name: String,
+    progress: Option<PathBuf>,
+    kept: Option<PathBuf>,
+    load_before: f64,
 }
 
 const HELP: &str = "ycsb soak --sync 250|always (--rate <ops/s> [--label 50] | --peak)
     [--minutes 480] [--records 1000000] [--docs 20000] [--counters 1000] [--dim 16]
     [--memory 512m] [--threads 32] [--subscriptions 64] [--kill-every 30]
     [--kill-in-compact-every 90] [--compact-every 20] [--backup-every 120]
-    [--backup-at 50] [--ttl 60] [--slack 5] [--restart-max 120] [--lag-max 5]
-    [--catchup-max 300] [--recall-min 0.925] [--samples 3] [--disk-floor 3g]
-    [--out soak.tsv] [--run-id <id>] [--image fennecdb-ycsb] [--tools p6-tools]
-    [--name p6]
+    [--backup-at 50] [--ttl 60] [--slack 1] [--loss-ms 650|0] [--restart-max 120]
+    [--replica-back-max 60] [--lag-max 5] [--catchup-max 300] [--recall-min 0.925]
+    [--samples 3] [--disk-floor 3g] [--out soak.tsv] [--run-id <id>]
+    [--image fennecdb-ycsb] [--tools p6-tools] [--name p6] [--progress <file>]
+    [--kept <file>] [--load-before <load>]
 ycsb soak report <soak.tsv> [<run-id>]";
 
 impl Opts {
@@ -165,8 +192,14 @@ impl Opts {
             backup_every: 120,
             backup_at: 50,
             ttl: 60,
-            slack: 5,
+            // The server stamps `seen` and judges the expiry by its own
+            // clock, so the VM's offset from this host cancels: only a
+            // drift or a step of it within the ttl is left, which the
+            // minute's clock probe marks.
+            slack: 1,
+            loss_ms: u64::MAX,
             restart_max: 120,
+            replica_back_max: 60,
             lag_max: 5,
             catchup_max: 300,
             recall_min: 0.925,
@@ -177,6 +210,9 @@ impl Opts {
             image: "fennecdb-ycsb".into(),
             tools: "p6-tools".into(),
             name: "p6".into(),
+            progress: None,
+            kept: None,
+            load_before: -1.0,
         };
         let mut i = 0;
         while i < args.len() {
@@ -209,7 +245,9 @@ impl Opts {
                 "--backup-at" => o.backup_at = n(),
                 "--ttl" => o.ttl = n(),
                 "--slack" => o.slack = n(),
+                "--loss-ms" => o.loss_ms = n(),
                 "--restart-max" => o.restart_max = n(),
+                "--replica-back-max" => o.replica_back_max = n(),
                 "--lag-max" => o.lag_max = n(),
                 "--catchup-max" => o.catchup_max = n(),
                 "--recall-min" => o.recall_min = v.parse().expect("--recall-min <0..1>"),
@@ -222,6 +260,9 @@ impl Opts {
                 "--image" => o.image = v.clone(),
                 "--tools" => o.tools = v.clone(),
                 "--name" => o.name = v.clone(),
+                "--progress" => o.progress = Some(PathBuf::from(&v)),
+                "--kept" => o.kept = Some(PathBuf::from(&v)),
+                "--load-before" => o.load_before = v.parse().expect("--load-before <load>"),
                 other => panic!("unknown argument {other}\n{HELP}"),
             }
             i += 2;
@@ -238,6 +279,9 @@ impl Opts {
         // A session read is held present until `slack` before its time:
         // a slack past half the ttl would hold nothing.
         assert!(2 * o.slack < o.ttl, "--slack under half --ttl\n{HELP}");
+        if o.loss_ms == u64::MAX {
+            o.loss_ms = default_loss_ms(&o.sync);
+        }
         if o.peak {
             o.label = "peak".into();
             o.rate = 0.0;
@@ -345,21 +389,95 @@ fn owed(n: u64, s: &Settings) -> (u64, u64, u64, u64) {
 
 // ------------------------------------------------------------- containers
 
-/// `docker <args>`: whether it succeeded, and what it printed.
-fn docker(args: &[&str]) -> (bool, String) {
-    match std::process::Command::new("docker").args(args).output() {
-        Ok(o) => {
-            let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
-            text.push_str(&String::from_utf8_lossy(&o.stderr));
-            (o.status.success(), text)
-        }
-        Err(e) => (false, e.to_string()),
+/// The run's progress, on stderr and in `--progress`'s file: the script's
+/// guard stops a soak whose file gained no line in ten minutes, so every
+/// phase that runs long says something every few minutes, and a wait that
+/// could outlast the guard is bounded and named here first (`WAIT_MAX`).
+static PROGRESS: Mutex<Option<File>> = Mutex::new(None);
+
+fn say(line: String) {
+    eprintln!("soak: {line}");
+    let mut p = PROGRESS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(f) = p.as_mut() {
+        let _ = writeln!(f, "{line}");
     }
 }
 
+/// `docker <args>`, ended after `within`: whether it succeeded, and what it
+/// printed -- or that it did not end, naming the call. Every docker call
+/// the run makes goes through here: one that hangs (a daemon that stopped
+/// answering, a container that will not die) would stop every line after
+/// it, and the script's guard would find the soak silent with no word of
+/// why. A container the call named is removed once it is given up on.
+fn docker_within(within: Duration, args: &[&str]) -> (bool, String) {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let spawned = Command::new("docker")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    let mut child = match spawned {
+        Ok(c) => c,
+        Err(e) => return (false, e.to_string()),
+    };
+    fn drain<R: Read + Send + 'static>(r: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut v = Vec::new();
+            if let Some(mut r) = r {
+                let _ = r.read_to_end(&mut v);
+            }
+            v
+        })
+    }
+    let out = drain(child.stdout.take());
+    let err = drain(child.stderr.take());
+    let until = Instant::now() + within;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break Some(st),
+            Ok(None) if Instant::now() < until => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let mut text = String::from_utf8_lossy(&out.join().unwrap_or_default()).into_owned();
+    text.push_str(&String::from_utf8_lossy(&err.join().unwrap_or_default()));
+    match status {
+        Some(st) => (st.success(), text),
+        None => {
+            if let Some(i) = args.iter().position(|a| *a == "--name") {
+                if let Some(name) = args.get(i + 1) {
+                    let _ = docker_within(Duration::from_secs(60), &["rm", "-f", name]);
+                }
+            }
+            (
+                false,
+                format!(
+                    "docker {} did not end within {} s, and was stopped. {text}",
+                    args.join(" "),
+                    within.as_secs()
+                ),
+            )
+        }
+    }
+}
+
+/// [`docker_within`] two minutes: every quick call's bound.
+fn docker(args: &[&str]) -> (bool, String) {
+    docker_within(Duration::from_secs(120), args)
+}
+
 /// The containers, volumes and network a run makes, every one named after
-/// `--name`, and removed when it ends -- a panic's too.
-struct Bench {
+/// `--name` -- which the script makes the run's own, so that a run never
+/// removes another's by a shared name -- and what the side thread needs of
+/// them. [`Bench`] removes them when the run ends.
+#[derive(Clone)]
+struct Kit {
     name: String,
     image: String,
     tools: String,
@@ -368,9 +486,13 @@ struct Bench {
     token: String,
     port: u16,
     replica_port: u16,
+    /// Set once a verify failed or a mismatch was counted: the volumes
+    /// outlive the run, for whoever reads why.
+    keep: Arc<AtomicBool>,
+    kept: Option<PathBuf>,
 }
 
-impl Bench {
+impl Kit {
     fn server(&self) -> String {
         format!("{}-server", self.name)
     }
@@ -383,20 +505,62 @@ impl Bench {
     fn volume(&self, what: &str) -> String {
         format!("{}-{what}", self.name)
     }
+    fn containers(&self) -> Vec<String> {
+        [
+            "server",
+            "replica",
+            "server-look",
+            "replica-look",
+            "verify",
+            "backup",
+            "restored",
+            "sampler",
+        ]
+        .iter()
+        .map(|c| format!("{}-{c}", self.name))
+        .collect()
+    }
+    fn volumes(&self) -> Vec<String> {
+        ["data", "replica-data", "backup-data"]
+            .iter()
+            .map(|v| self.volume(v))
+            .collect()
+    }
+
+    /// Keeps the run's volumes past its end, saying why and where -- in
+    /// `--kept`'s file too, whose volumes the script's cleanup leaves.
+    fn keep_data(&self, why: &str) {
+        if self.keep.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let vols = self.volumes();
+        say(format!(
+            "KEPT the volumes {} past the run ({why}): `docker run --rm -v {}:/data alpine ls -l /data` lists the primary's, `docker volume rm {}` removes them",
+            vols.join(", "),
+            vols[0],
+            vols.join(" ")
+        ));
+        if let Some(p) = &self.kept {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)
+            {
+                for v in &vols {
+                    let _ = writeln!(f, "{v}");
+                }
+            }
+        }
+    }
 
     fn clean(&self) {
-        for c in [
-            self.server(),
-            self.replica(),
-            format!("{}-look", self.server()),
-            format!("{}-look", self.replica()),
-            format!("{}-verify", self.name),
-            format!("{}-backup", self.name),
-        ] {
+        for c in self.containers() {
             docker(&["rm", "-f", &c]);
         }
-        for v in ["data", "replica-data", "backup-data"] {
-            docker(&["volume", "rm", "-f", &self.volume(v)]);
+        if !self.keep.load(Ordering::SeqCst) {
+            for v in self.volumes() {
+                docker(&["volume", "rm", "-f", &v]);
+            }
         }
         docker(&["network", "rm", &self.net()]);
     }
@@ -409,6 +573,8 @@ impl Bench {
                 &[
                     "run",
                     "-d",
+                    "--pull",
+                    "never",
                     "--name",
                     container,
                     "--network",
@@ -464,72 +630,81 @@ impl Bench {
 
     /// `script` in a container holding the tools' volume
     /// (`ycsb/linux-tools.sh`) and `volume` at `/data`, on the run's
-    /// network: whether it exited 0, and what it printed.
-    fn fennec(&self, container: &str, volume: &str, script: &str) -> (bool, String) {
-        docker(&[
-            "run",
-            "--rm",
-            "--name",
-            container,
-            "--network",
-            &self.net(),
-            "-v",
-            &format!("{}:/tools:ro", self.tools),
-            "-v",
-            &format!("{volume}:/data"),
-            "alpine",
-            "sh",
-            "-c",
-            script,
-        ])
+    /// network, for `within` at the most: whether it exited 0, and what it
+    /// printed.
+    fn fennec(
+        &self,
+        container: &str,
+        volume: &str,
+        script: &str,
+        within: Duration,
+    ) -> (bool, String) {
+        docker_within(
+            within,
+            &[
+                "run",
+                "--rm",
+                "--pull",
+                "never",
+                "--name",
+                container,
+                "--network",
+                &self.net(),
+                "-v",
+                &format!("{}:/tools:ro", self.tools),
+                "-v",
+                &format!("{volume}:/data"),
+                "alpine",
+                "sh",
+                "-c",
+                script,
+            ],
+        )
     }
 
     /// A server's process as a shell in its process namespace sees it: its
     /// cgroup, anonymous memory, threads, descriptors and major faults, its
-    /// database file's length alone, and the free bytes of the disk under
-    /// its volume -- the Docker VM's.
+    /// database file's length alone, whether a compact is writing its image
+    /// beside the file (`<file>.beside`, the side file `compact` writes
+    /// into, there from its start to its rename), the CPU its cgroup used,
+    /// the VM's CPUs as `/proc/stat` counts them, and the free bytes of the
+    /// disk under its volume -- the Docker VM's.
     fn look(&self, container: &str, file: &str) -> Option<Look> {
         let script = format!(
             "cd /proc/1/root/sys/fs/cgroup && cat memory.stat && \
              echo current $(cat memory.current) && grep oom_kill memory.events; \
+             echo cpu_usec $(awk '/^usage_usec/ {{print $2}}' cpu.stat); \
              grep -E '^(Threads|RssAnon):' /proc/1/status; \
              echo fds $(ls /proc/1/fd | wc -l); \
              echo majflt $(cut -d' ' -f12 /proc/1/stat); \
              echo filesize $(stat -c %s /proc/1/root/data/{file}); \
+             echo compacting $(ls /proc/1/root/data/{file}.beside 2>/dev/null | wc -l); \
+             head -1 /proc/stat; \
              echo vmfree $(df -kP /proc/1/root/data | awk 'NR == 2 {{print $4}}')"
         );
-        let (ok, out) = docker(&[
-            "run",
-            "--rm",
-            "--name",
-            &format!("{container}-look"),
-            &format!("--pid=container:{container}"),
-            // Reading another user's `/proc/<pid>/root` is a ptrace's right.
-            "--cap-add",
-            "SYS_PTRACE",
-            "alpine",
-            "sh",
-            "-c",
-            &script,
-        ]);
+        let (ok, out) = docker_within(
+            Duration::from_secs(60),
+            &[
+                "run",
+                "--rm",
+                "--pull",
+                "never",
+                "--name",
+                &format!("{container}-look"),
+                &format!("--pid=container:{container}"),
+                // Reading another user's `/proc/<pid>/root` is a ptrace's right.
+                "--cap-add",
+                "SYS_PTRACE",
+                "alpine",
+                "sh",
+                "-c",
+                &script,
+            ],
+        );
         if !ok {
             return None;
         }
-        let num = |key: &str| -> Option<u64> {
-            out.lines()
-                .find_map(|l| l.strip_prefix(key))
-                .and_then(|r| r.split_whitespace().next())
-                .and_then(|v| v.parse().ok())
-        };
-        Some(Look {
-            cgroup: Cgroup::parse(&out).unwrap_or_default(),
-            rss_anon: num("RssAnon:").map(|kb| kb << 10)?,
-            threads: num("Threads:")?,
-            fds: num("fds ")?,
-            majflt: num("majflt ")?,
-            file: num("filesize ")?,
-            vm_free: num("vmfree ").map(|kb| kb << 10),
-        })
+        Look::parse(&out)
     }
 
     /// Whether a container runs, and whether the kernel killed it for its
@@ -584,14 +759,24 @@ impl Bench {
     }
 }
 
+/// The run's [`Kit`], cleaned when the run ends -- a panic's too.
+struct Bench(Kit);
+
+impl std::ops::Deref for Bench {
+    type Target = Kit;
+    fn deref(&self) -> &Kit {
+        &self.0
+    }
+}
+
 impl Drop for Bench {
     fn drop(&mut self) {
-        self.clean();
+        self.0.clean();
     }
 }
 
 /// One look at a server's process.
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, Debug)]
 struct Look {
     cgroup: Cgroup,
     rss_anon: u64,
@@ -600,6 +785,47 @@ struct Look {
     majflt: u64,
     file: u64,
     vm_free: Option<u64>,
+    /// A compact was writing its image beside the file at the look.
+    compacting: bool,
+    /// The CPU the server's cgroup has used, in µs.
+    cpu_usec: Option<u64>,
+    /// The VM's CPUs' busy time since it started, in ticks.
+    vm_busy: Option<u64>,
+}
+
+impl Look {
+    fn parse(out: &str) -> Option<Look> {
+        let num = |key: &str| -> Option<u64> {
+            out.lines()
+                .find_map(|l| l.strip_prefix(key))
+                .and_then(|r| r.split_whitespace().next())
+                .and_then(|v| v.parse().ok())
+        };
+        // `cpu  user nice system idle iowait irq softirq steal ...`: idle
+        // and iowait are the CPUs doing nothing.
+        let ticks: Option<Vec<u64>> = out.lines().find_map(|l| l.strip_prefix("cpu ")).map(|r| {
+            r.split_whitespace()
+                .take(8)
+                .filter_map(|x| x.parse().ok())
+                .collect()
+        });
+        let vm_busy = match ticks {
+            Some(t) if t.len() == 8 => Some(t.iter().sum::<u64>() - t[3] - t[4]),
+            _ => None,
+        };
+        Some(Look {
+            cgroup: Cgroup::parse(out).unwrap_or_default(),
+            rss_anon: num("RssAnon:").map(|kb| kb << 10)?,
+            threads: num("Threads:")?,
+            fds: num("fds ")?,
+            majflt: num("majflt ")?,
+            file: num("filesize ")?,
+            vm_free: num("vmfree ").map(|kb| kb << 10),
+            compacting: num("compacting ").is_some_and(|n| n > 0),
+            cpu_usec: num("cpu_usec "),
+            vm_busy,
+        })
+    }
 }
 
 /// The free bytes of the disk holding `path`, by `df`: the host's.
@@ -667,8 +893,15 @@ fn schema(o: &Opts) -> Vec<String> {
             o.dim
         ),
         "create collection counters (n int)".into(),
+        // The server's clock against this host's, a probe a minute
+        // (`CLOCK_PROBE`): `now()` into an int is its milliseconds.
+        "create collection clock (t int)".into(),
     ]
 }
+
+/// The probe the minute's loop sends to read the server's clock: `now()`
+/// as the write ran, in ms since the epoch.
+const CLOCK_PROBE: &str = "put clock {id: 1, t: now()} returning *";
 
 /// The collections made and filled, YCSB's records as `ycsb` loads them.
 fn load(addr: &str, o: &Opts) {
@@ -681,7 +914,12 @@ fn load(addr: &str, o: &Opts) {
     let mut post =
         |c: &mut http::Http, path: &str, n: u64, row: &mut dyn FnMut(u64, &mut String)| {
             let mut key = 1;
+            let mut said = Instant::now();
             while key <= n {
+                if said.elapsed() >= Duration::from_secs(60) {
+                    say(format!("loading {path}: {} of {n}", key - 1));
+                    said = Instant::now();
+                }
                 let end = (key + LOAD_BATCH as u64).min(n + 1);
                 body.clear();
                 body.push('[');
@@ -716,13 +954,13 @@ fn load(addr: &str, o: &Opts) {
     post(&mut c, "/counters", o.counters, &mut |k, b| {
         write!(b, "{{\"id\":{k},\"n\":0}}").unwrap();
     });
-    eprintln!(
-        "soak: {} records, {} docs and {} counters loaded in {:.0} s",
+    say(format!(
+        "{} records, {} docs and {} counters loaded in {:.0} s",
         o.records,
         o.docs,
         o.counters,
         t.elapsed().as_secs_f64()
-    );
+    ));
 }
 
 // ---------------------------------------------------------------- checker
@@ -739,13 +977,17 @@ const DELETE: u8 = FIELDS as u8 + 1;
 /// span in ns from the run's start.
 #[derive(Clone, Debug)]
 enum Ev {
-    /// A read of a record: whether it was there, and its fields' digests.
+    /// A read of a record: whether it was there, and its fields' digests;
+    /// `replica`, one through the replica, which is sent after the writes
+    /// answered before it began and may lag those answered since: held to
+    /// the registers alone, never to the primary's reads before it.
     Row {
         key: u64,
         s: u64,
         e: u64,
         found: bool,
         got: [u64; FIELDS],
+        replica: bool,
     },
     /// An update of one field (`d` its value's digest), an insert or a
     /// delete; `unanswered` where it may or may not have landed.
@@ -793,6 +1035,16 @@ enum Ev {
     },
     /// A counter read.
     Count { key: u64, s: u64, e: u64, n: u64 },
+    /// A record as the file restored from backup `backup` holds it: a read
+    /// over the backup's span, the moment its image was taken being in it.
+    Restored {
+        backup: u64,
+        key: u64,
+        s: u64,
+        e: u64,
+        found: bool,
+        got: [u64; FIELDS],
+    },
     /// An answer wrong on its face: two rows for one id, a row not asked
     /// for, `near` short of its limit.
     Wrong(String),
@@ -807,7 +1059,8 @@ impl Ev {
             | Ev::Session { s, e, .. }
             | Ev::Sessions { s, e, .. }
             | Ev::Incr { s, e, .. }
-            | Ev::Count { s, e, .. } => Some((s, e)),
+            | Ev::Count { s, e, .. }
+            | Ev::Restored { s, e, .. } => Some((s, e)),
             Ev::Wrong(_) => None,
         }
     }
@@ -880,6 +1133,15 @@ struct Checker {
     /// what the restart's sweep reads back.
     touched: HashSet<u64>,
     base: Cell<(u64, [u64; FIELDS])>,
+    /// The writes a read after a kill showed gone (`Registers::gone`),
+    /// each counted once; how many since the minute's line took them, and
+    /// the largest gap among them between the answer and its kill, in ms.
+    gone_seen: HashSet<(u64, u8, u64)>,
+    lost_writes: u64,
+    lost_ms_max: Option<i64>,
+    /// Backups whose restored file held a record no write left.
+    restored_bad: HashSet<u64>,
+    backups_differ: u64,
 }
 
 impl Checker {
@@ -909,14 +1171,65 @@ impl Checker {
             horizon: 0,
             touched: HashSet::new(),
             base: Cell::new((u64::MAX, [0; FIELDS])),
+            gone_seen: HashSet::new(),
+            lost_writes: 0,
+            lost_ms_max: None,
+            restored_bad: HashSet::new(),
+            backups_differ: 0,
         }
     }
 
     fn wrong(&mut self, what: String) {
         self.mismatches += 1;
         if self.examples.len() < 20 {
-            eprintln!("soak: mismatch: {what}");
+            say(format!("mismatch: {what}"));
             self.examples.push(what);
+        }
+    }
+
+    /// One register's value read over `[s, e]`, held as one of the reads'
+    /// history (`pin`: a worker's or a sweep's read, given in the order the
+    /// reads ended) or alone (a stream's event); `None` where it may hold
+    /// it, else what to add to the mismatch's words. Where `gone`, the
+    /// writes the read shows gone with a kill are counted and the largest
+    /// gap between one's answer and its kill kept -- the figure the loss
+    /// bound is read against -- and one past the bound named.
+    fn held(
+        &mut self,
+        key: u64,
+        f: u8,
+        (s, e): (u64, u64),
+        d: u64,
+        pin: bool,
+        gone: bool,
+    ) -> Option<String> {
+        let base = self.base(key, f);
+        let ok = match pin {
+            true => self.regs.read(key, f, s, e, d, base),
+            false => self.regs.may_hold(key, f, s, e, d, base),
+        };
+        let mut past: Option<i64> = None;
+        if gone {
+            for (gap, certain, ws) in self.regs.gone(key, f, s, e, d) {
+                let ms = gap / 1_000_000;
+                if self.gone_seen.insert((key, f, ws)) {
+                    self.lost_writes += 1;
+                    self.lost_ms_max = Some(self.lost_ms_max.map_or(ms, |m| m.max(ms)));
+                }
+                if certain {
+                    past = Some(past.map_or(ms, |p| p.max(ms)));
+                }
+            }
+        }
+        match ok {
+            true => None,
+            false => Some(match past {
+                Some(ms) => format!(
+                    "; a write answered {ms} ms before a kill is gone, past the {} ms a kill may take",
+                    self.regs.kills.loss / 1_000_000
+                ),
+                None => String::new(),
+            }),
         }
     }
 
@@ -1086,7 +1399,9 @@ impl Checker {
     }
 
     /// Holds one read; whether it is held yet (`safe` passed its end).
-    fn hold_one(&mut self, ev: &Ev, safe: u64) -> bool {
+    /// `pin`: one of the workers' and sweeps' reads, given in the order
+    /// they ended, which the reads after it are held to.
+    fn hold_one(&mut self, ev: &Ev, safe: u64, pin: bool) -> bool {
         let Some((_, e)) = ev.span() else {
             return true;
         };
@@ -1100,18 +1415,20 @@ impl Checker {
                 e,
                 found,
                 got,
+                replica,
             } => {
                 self.reads += 1;
-                if !self.may_hold(key, EXISTS, s, e, found as u64) {
+                let pin = pin && !replica;
+                if let Some(why) = self.held(key, EXISTS, (s, e), found as u64, pin, true) {
                     let what = if found { "found it" } else { "found nothing" };
-                    self.wrong(format!("a read of {key} [{s}, {e}] ns {what}"));
+                    self.wrong(format!("a read of {key} [{s}, {e}] ns {what}{why}"));
                     return true;
                 }
                 if found {
                     for f in 0..FIELDS as u8 {
-                        if !self.may_hold(key, f, s, e, got[f as usize]) {
+                        if let Some(why) = self.held(key, f, (s, e), got[f as usize], pin, true) {
                             self.wrong(format!(
-                                "a read of {key} [{s}, {e}] ns: field{f} holds no value written to it"
+                                "a read of {key} [{s}, {e}] ns: field{f} holds no value written to it{why}"
                             ));
                             break;
                         }
@@ -1120,15 +1437,42 @@ impl Checker {
             }
             Ev::Session { id, s, e, found } => {
                 self.reads += 1;
-                if !self.may_hold(id, SESSION, s, e, found as u64) {
+                // A session's expiry is a write of its absence over a span:
+                // nothing a kill takes, so nothing is shown gone by it.
+                if self
+                    .held(id, SESSION, (s, e), found as u64, pin, false)
+                    .is_some()
+                {
                     self.wrong(format!(
                         "session {id} read over [{s}, {e}] ns: {}",
                         if found {
-                            "there past its time"
+                            "there past its time, or back after a read found it gone"
                         } else {
-                            "gone inside it"
+                            "gone inside it, or gone again after a read found it"
                         }
                     ));
+                }
+            }
+            Ev::Restored {
+                backup,
+                key,
+                s,
+                e,
+                found,
+                got,
+            } => {
+                self.reads += 1;
+                let bad = !self.may_hold(key, EXISTS, s, e, found as u64)
+                    || (found
+                        && (0..FIELDS as u8)
+                            .any(|f| !self.may_hold(key, f, s, e, got[f as usize])));
+                if bad {
+                    self.wrong(format!(
+                        "the file restored from backup {backup} holds {key} as no write left it over [{s}, {e}] ns"
+                    ));
+                    if self.restored_bad.insert(backup) {
+                        self.backups_differ += 1;
+                    }
                 }
             }
             Ev::Sessions { from, to, s, e, n } => {
@@ -1186,6 +1530,7 @@ impl Checker {
                         e: ev.e,
                         found,
                         got,
+                        replica: false,
                     });
                 }
             };
@@ -1280,7 +1625,7 @@ impl Checker {
             self.wrong(w);
         }
         for r in rows {
-            self.hold_one(&r, u64::MAX);
+            self.hold_one(&r, u64::MAX, false);
         }
     }
 
@@ -1289,9 +1634,12 @@ impl Checker {
     /// opened at, `u64::MAX` closed, and the latest change it read), then
     /// lets go of what no read from `cutoff` on can be answered from.
     fn hold(&mut self, safe: u64, cutoff: u64, now: u64, open: &[(u64, u64)]) {
-        let pending = std::mem::take(&mut self.pending);
+        let mut pending = std::mem::take(&mut self.pending);
+        // In the order they ended: every read that ended before another
+        // began is held before it (`Registers::read`).
+        pending.sort_by_key(|ev| ev.span().map_or(0, |x| x.1));
         for ev in pending {
-            if !self.hold_one(&ev, safe) {
+            if !self.hold_one(&ev, safe, true) {
                 self.pending.push(ev);
             }
         }
@@ -1367,9 +1715,47 @@ impl Checker {
 
 // ---------------------------------------------------------------- workers
 
+/// Which of a worker's histograms an operation goes to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Class {
+    Steady,
+    Compact,
+    Restart,
+}
+
+/// An operation's class: a restart's from a second before its kill until
+/// the server answered again, and after that until its worker is back on
+/// its schedule -- the open loop's backlog drains for minutes at 80%, its
+/// waits the restart's, not the steady tail's -- and a compact's alike;
+/// the steady otherwise. `at` is when it was due, `on_time` whether the
+/// worker reached it before it was due (it waited for it), `owed` the
+/// worker's own: the window it is still draining.
+fn class(
+    at: u64,
+    on_time: bool,
+    restart: (u64, u64),
+    compact: (u64, u64),
+    owed: &mut Option<Class>,
+) -> Class {
+    if on_time {
+        *owed = None;
+    }
+    let within = |w: (u64, u64)| at >= w.0 && at <= w.1;
+    let c = if within(restart) || *owed == Some(Class::Restart) {
+        Class::Restart
+    } else if within(compact) || *owed == Some(Class::Compact) {
+        Class::Compact
+    } else {
+        Class::Steady
+    };
+    if c != Class::Steady {
+        *owed = Some(c);
+    }
+    c
+}
+
 /// A worker's latencies: an operation is timed from when it was due, and
-/// counted apart where it was due in a restart's window (from a second
-/// before the kill until the server answered again) or a compact's.
+/// counted apart where it was a restart's or a compact's (`class`).
 struct Hists {
     steady: Hist,
     restart: Hist,
@@ -1449,13 +1835,27 @@ struct Shared {
     /// The latest change a write was answered as: what a read through the
     /// replica is sent after.
     max_seq: AtomicU64,
+    /// Whether reads may go through the replica: not from a kill until the
+    /// replica says it is connected again and past the newest change
+    /// answered before it (`restart`) -- before that it waits out the
+    /// primary's absence and its own reconnect, and answers 504.
+    replica_ok: AtomicBool,
+    /// The change the replica must hold before reads go through it again.
+    replica_target: AtomicU64,
+    /// When the side thread's compact was sent, `u64::MAX` while none is
+    /// out: what a kill meant for a compact waits for.
+    compact_since: AtomicU64,
+    /// The side thread's job, for a wait on it that runs out to name.
+    doing: Mutex<String>,
     /// Inserted keys: the next to hand out, and those inserted and not yet
     /// deleted, oldest first.
     fifo: Mutex<(u64, VecDeque<u64>)>,
     /// Sessions inserted, with when, kept past their time for reads.
     sessions: Mutex<VecDeque<(u64, u64)>>,
     next_session: AtomicU64,
-    /// Docs written: id and span, for the minute's sample to leave out.
+    /// Docs written: id and span, for the minute's sample to leave out --
+    /// each from before its request is sent (its end `u64::MAX` until it
+    /// is answered): a write lands, and is read, before its answer.
     doc_writes: Mutex<Vec<(u64, u64, u64)>>,
     slots: Vec<Slot>,
     readers: Vec<Reader>,
@@ -1464,6 +1864,64 @@ struct Shared {
 }
 
 impl Shared {
+    fn new(o: &Opts, addr: String, raddr: String, ranges: &[(u64, u64)]) -> Shared {
+        Shared {
+            t0: Instant::now(),
+            stop: AtomicBool::new(false),
+            addr,
+            raddr,
+            rate: o.rate,
+            threads: o.threads,
+            records: o.records,
+            docs: o.docs,
+            counters: o.counters,
+            dim: o.dim,
+            ttl: o.ttl,
+            ops: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+            refused: AtomicU64::new(0),
+            down: AtomicU64::new(0),
+            events: AtomicU64::new(0),
+            windows: Mutex::new(Vec::new()),
+            restart_from: AtomicU64::new(u64::MAX),
+            restart_to: AtomicU64::new(u64::MAX),
+            compact_from: AtomicU64::new(u64::MAX),
+            compact_to: AtomicU64::new(u64::MAX),
+            max_seq: AtomicU64::new(0),
+            replica_ok: AtomicBool::new(true),
+            replica_target: AtomicU64::new(0),
+            compact_since: AtomicU64::new(u64::MAX),
+            doing: Mutex::new(String::new()),
+            fifo: Mutex::new((o.records, VecDeque::new())),
+            sessions: Mutex::new(VecDeque::new()),
+            next_session: AtomicU64::new(1),
+            doc_writes: Mutex::new(Vec::new()),
+            slots: (0..o.threads)
+                .map(|_| Slot {
+                    hists: Mutex::new(Hists::new()),
+                    log: Mutex::new(Vec::new()),
+                    inflight: AtomicU64::new(u64::MAX),
+                    done: AtomicU64::new(0),
+                })
+                .collect(),
+            readers: vec![Reader {
+                log: Mutex::new(Vec::new()),
+                inflight: AtomicU64::new(u64::MAX),
+            }],
+            streams: ranges
+                .iter()
+                .map(|&(from, _)| Stream {
+                    from,
+                    log: Mutex::new(Vec::new()),
+                    open_since: AtomicU64::new(u64::MAX),
+                    conns: AtomicU64::new(0),
+                    seen: AtomicU64::new(0),
+                })
+                .collect(),
+            notes: Mutex::new(Vec::new()),
+        }
+    }
+
     fn ns(&self) -> u64 {
         self.t0.elapsed().as_nanos() as u64
     }
@@ -1481,8 +1939,37 @@ impl Shared {
     fn note(&self, what: String) {
         let mut n = self.notes.lock().unwrap();
         if n.len() < 200 {
-            eprintln!("soak: {what}");
+            say(what.clone());
             n.push(what);
+        }
+    }
+
+    /// When a read sent after the latest write answered begins, and the
+    /// change it is sent after: its start taken first, so that every write
+    /// answered before the read began is in the change it names (a write
+    /// notes its change before it takes its end). `load` reads the change.
+    fn sent_after(&self, load: impl FnOnce() -> u64) -> (u64, u64) {
+        let s = self.ns();
+        (s, load())
+    }
+
+    /// A doc's write about to be sent: in the sample's leave-out from now,
+    /// its end unknown until `doc_ended`.
+    fn doc_begun(&self, id: u64) -> u64 {
+        let s = self.ns();
+        self.doc_writes.lock().unwrap().push((id, s, u64::MAX));
+        s
+    }
+
+    fn doc_ended(&self, id: u64, s: u64) {
+        let e = self.ns();
+        let mut w = self.doc_writes.lock().unwrap();
+        if let Some(x) = w
+            .iter_mut()
+            .rev()
+            .find(|x| x.0 == id && x.1 == s && x.2 == u64::MAX)
+        {
+            x.2 = e;
         }
     }
 
@@ -1631,14 +2118,12 @@ impl Worker<'_> {
     /// after the latest write answered: the replica answers once it holds
     /// it, so its answer is held to the registers as the primary's is.
     fn read(&mut self, key: u64, replica: bool) -> bool {
+        let sh = self.sh;
+        let (s, after) = sh.sent_after(|| sh.max_seq.load(Ordering::SeqCst));
         let headers = match replica {
-            true => format!(
-                "Fennec-After: {}\r\n",
-                self.sh.max_seq.load(Ordering::SeqCst)
-            ),
+            true => format!("Fennec-After: {after}\r\n"),
             false => String::new(),
         };
-        let s = self.sh.ns();
         let Answer::Ok(body, _) = self.ask(
             replica,
             "get usertable where id = $1",
@@ -1665,6 +2150,7 @@ impl Worker<'_> {
             e,
             found: first.is_some(),
             got: first.map_or([0; FIELDS], |r| r.1),
+            replica,
         });
         true
     }
@@ -1839,8 +2325,10 @@ impl Worker<'_> {
             u if u < 0.40 => {
                 let key = zipf.next(&mut self.rng, records) + 1;
                 // Not across a restart: the replica would wait out the
-                // primary's absence for the write it is sent after.
-                let replica = !self.sh.restarting(self.sh.ns());
+                // primary's absence for the write it is sent after, and its
+                // own reconnect after it. To the primary meanwhile.
+                let replica =
+                    self.sh.replica_ok.load(Ordering::SeqCst) && !self.sh.restarting(self.sh.ns());
                 self.read(key, replica)
             }
             u if u < 0.77 => {
@@ -1953,18 +2441,19 @@ impl Worker<'_> {
                     words(&mut self.rng, 8),
                     unit_vector(&mut self.rng, self.sh.dim)
                 );
-                let s = self.sh.ns();
-                let done = self.written("set docs {body: $2, v: $3} where id = $1", &params);
-                // Answered or not, the minute's sample leaves the doc out
-                // around it.
-                self.sh
-                    .doc_writes
-                    .lock()
-                    .unwrap()
-                    .push((id, s, self.sh.ns()));
-                matches!(done, Some((false, ..)))
+                self.doc_write(id, &params)
             }
         }
+    }
+
+    /// A doc updated: in the minute's sample's leave-out from before it is
+    /// sent until it is answered, answered or not -- under `--sync always`
+    /// it is visible from when it lands, before its fsync and its answer.
+    fn doc_write(&mut self, id: u64, params: &str) -> bool {
+        let s = self.sh.doc_begun(id);
+        let done = self.written("set docs {body: $2, v: $3} where id = $1", params);
+        self.sh.doc_ended(id, s);
+        matches!(done, Some((false, ..)))
     }
 }
 
@@ -2000,18 +2489,20 @@ fn work(sh: &Shared, w: usize) {
     let every = (sh.rate > 0.0).then(|| Duration::from_secs_f64(sh.threads as f64 / sh.rate));
     let first = every.map(|e| sh.t0 + e.mul_f64(w as f64 / sh.threads as f64));
     let mut sent = 0u64;
-    let within = |t: u64, from: &AtomicU64, to: &AtomicU64| {
-        t >= from.load(Ordering::Relaxed) && t <= to.load(Ordering::Relaxed)
+    let window = |from: &AtomicU64, to: &AtomicU64| {
+        (from.load(Ordering::Relaxed), to.load(Ordering::Relaxed))
     };
+    let mut owed = None;
     while !sh.stop.load(Ordering::Relaxed) {
-        let due = match (first, every) {
+        let (due, on_time) = match (first, every) {
             (Some(first), Some(e)) => {
                 let due = first + e.mul_f64(sent as f64);
                 sent += 1;
-                std::thread::sleep(due.saturating_duration_since(Instant::now()));
-                due
+                let now = Instant::now();
+                std::thread::sleep(due.saturating_duration_since(now));
+                (due, due > now)
             }
-            _ => Instant::now(),
+            _ => (Instant::now(), true),
         };
         // Every write that began before this one is logged before the
         // checker reads past it (`safe`).
@@ -2019,16 +2510,21 @@ fn work(sh: &Shared, w: usize) {
         let ok = me.op(&mut value, &mut zipf);
         slot.inflight.store(u64::MAX, Ordering::SeqCst);
         slot.done.fetch_add(1, Ordering::Relaxed);
+        let at = due.saturating_duration_since(sh.t0).as_nanos() as u64;
+        let c = class(
+            at,
+            on_time,
+            window(&sh.restart_from, &sh.restart_to),
+            window(&sh.compact_from, &sh.compact_to),
+            &mut owed,
+        );
         if ok {
-            let at = due.saturating_duration_since(sh.t0).as_nanos() as u64;
             let took = due.elapsed().as_nanos() as u64;
             let mut h = slot.hists.lock().unwrap();
-            if within(at, &sh.restart_from, &sh.restart_to) {
-                h.restart.record(took);
-            } else if within(at, &sh.compact_from, &sh.compact_to) {
-                h.compact.record(took);
-            } else {
-                h.steady.record(took);
+            match c {
+                Class::Restart => h.restart.record(took),
+                Class::Compact => h.compact.record(took),
+                Class::Steady => h.steady.record(took),
             }
             drop(h);
             sh.ops.fetch_add(1, Ordering::Relaxed);
@@ -2346,14 +2842,37 @@ struct Doings {
     oom: AtomicU64,
     verifies: AtomicU64,
     verify_failed: AtomicU64,
+    /// Backups taken, restored into a file that verified, held at least
+    /// the primary's change at the backup's start, and whose sample of
+    /// records the checker reads (`backup_differs` on a later line where
+    /// one is not as written); `backup_failed` any other.
     backups: AtomicU64,
     restores: AtomicU64,
     backup_failed: AtomicU64,
+    /// Restored files short of the primary's change at the backup's start.
+    backup_stale: AtomicU64,
     compacts: AtomicU64,
     compact_failed: AtomicU64,
+    /// Compacts refused because one was writing its file beside the
+    /// database already -- the server's own (`--auto-compact`): the file
+    /// was being compacted, so no failure and nothing owed again.
+    compact_busy: AtomicU64,
+    /// Compacts a kill cut: asked, under way, the server killed.
     compact_killed: AtomicU64,
     restart_ms: AtomicU64,
     swept: AtomicU64,
+    /// Keys a restart's sweep was handed, and sweeps that could not read
+    /// them.
+    sweep_owed: AtomicU64,
+    sweep_failed: AtomicU64,
+    /// The figures of the minute's kill, said on its line as they are.
+    figures: Mutex<Vec<(&'static str, String)>>,
+}
+
+impl Doings {
+    fn figure(&self, name: &'static str, value: String) {
+        self.figures.lock().unwrap().push((name, value));
+    }
 }
 
 fn load_average() -> (f64, f64) {
@@ -2370,12 +2889,60 @@ fn load_average() -> (f64, f64) {
     }
 }
 
-/// A job beside the load, one at a time in the order asked.
+/// The CPU this host's other processes used, in cores: every process but
+/// this one and Docker's (its VM, whose CPUs the look counts apart), by
+/// `ps`'s `%cpu` -- on macOS a decaying average of about the last minute,
+/// on Linux a process's own lifetime's, so there a rough sign alone.
+fn others_on_host() -> Option<f64> {
+    let me = std::process::id();
+    let o = std::process::Command::new("ps")
+        .args(["-A", "-o", "pcpu=,pid=,comm="])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&o.stdout);
+    let mut sum = 0.0;
+    for l in text.lines() {
+        let mut w = l.split_whitespace();
+        let (Some(cpu), Some(pid)) = (w.next(), w.next()) else {
+            continue;
+        };
+        let comm: String = w.collect::<Vec<_>>().join(" ");
+        let docker = [
+            "docker",
+            "Docker",
+            "Virtualization",
+            "qemu",
+            "krun",
+            "fennec-server",
+        ]
+        .iter()
+        .any(|n| comm.contains(n));
+        if pid.parse::<u32>().ok() == Some(me) || docker {
+            continue;
+        }
+        sum += cpu.parse::<f64>().unwrap_or(0.0);
+    }
+    Some(sum / 100.0)
+}
+
+/// A job beside the load, one at a time in the order asked, each with the
+/// minute it was asked at, which a wait on it names.
 enum Job {
-    Compact,
-    Backup,
+    /// `compact usertable`; `for_kill`, the one a kill is to land in,
+    /// asked again while the server's own compact holds the file.
+    Compact {
+        minute: u64,
+        for_kill: bool,
+    },
+    Backup {
+        minute: u64,
+        id: u64,
+    },
     /// Read these records back, after a restart.
-    Sweep(Vec<u64>),
+    Sweep {
+        minute: u64,
+        keys: Vec<u64>,
+    },
     /// Answered once every job before it has ended.
     Fence(mpsc::Sender<()>),
 }
@@ -2384,90 +2951,233 @@ enum Job {
 struct Side {
     sh: Arc<Shared>,
     doings: Arc<Doings>,
-    server: String,
-    net: String,
-    tools: String,
-    volume: String,
-    token: String,
+    kit: Kit,
 }
 
 impl Side {
-    fn compact(&self) {
+    fn compact(&self, for_kill: bool) {
         let sh = &self.sh;
         sh.compact_to.store(u64::MAX, Ordering::SeqCst);
         sh.compact_from.store(sh.ns(), Ordering::SeqCst);
-        let done = http::Http::try_connect(&sh.addr, Duration::from_secs(3600))
-            .and_then(|mut c| c.try_query("compact usertable", "").map(|(s, _)| s));
-        sh.compact_to.store(sh.ns(), Ordering::SeqCst);
-        match done {
-            Ok(200) => {
-                self.doings.compacts.fetch_add(1, Ordering::Relaxed);
+        let first = Instant::now();
+        loop {
+            sh.compact_since.store(sh.ns(), Ordering::SeqCst);
+            let done =
+                http::Http::try_connect(&sh.addr, Duration::from_secs(3600)).and_then(|mut c| {
+                    c.try_query("compact usertable", "")
+                        .map(|(st, body)| (st, String::from_utf8_lossy(body).into_owned()))
+                });
+            sh.compact_since.store(u64::MAX, Ordering::SeqCst);
+            match done {
+                Ok((200, _)) => {
+                    self.doings.compacts.fetch_add(1, Ordering::Relaxed);
+                }
+                // fennec-server compacts on its own (`--auto-compact`), and
+                // under the run's memory it does at a third dead: a second
+                // compact is refused while that one writes its file
+                // (engine/maintenance.rs). The file is being compacted:
+                // no failure. The compact a kill is to land in waits its
+                // turn and is asked again.
+                Ok((_, body)) if body.contains("beside the database already") => {
+                    if for_kill && first.elapsed() < WAIT_MAX {
+                        std::thread::sleep(Duration::from_secs(2));
+                        continue;
+                    }
+                    self.doings.compact_busy.fetch_add(1, Ordering::Relaxed);
+                    say("compact refused: the server's own was writing its file".into());
+                }
+                // Cut by a kill the schedule landed in it: what the run means
+                // it to meet, not a failure -- the file must verify after.
+                Err(_) if sh.restarting(sh.ns()) => {
+                    self.doings.compact_killed.fetch_add(1, Ordering::Relaxed);
+                }
+                other => {
+                    sh.note(format!("compact failed: {other:?}"));
+                    self.doings.compact_failed.fetch_add(1, Ordering::Relaxed);
+                }
             }
-            // Cut by a kill the schedule landed in it: what the run means
-            // it to meet, not a failure -- the file must verify after.
-            Err(_) if sh.restarting(sh.ns()) => {
-                self.doings.compact_killed.fetch_add(1, Ordering::Relaxed);
-            }
-            other => {
-                sh.note(format!("compact failed: {other:?}"));
-                self.doings.compact_failed.fetch_add(1, Ordering::Relaxed);
-            }
+            break;
         }
+        sh.compact_to.store(sh.ns(), Ordering::SeqCst);
     }
 
     /// A backup over the replication stream into an archive, restored into
-    /// a file, the file verified: each step said on its own.
-    fn backup(&self) {
+    /// a file and the file verified, each step said on its own; then the
+    /// file served read-only, its change number held to the primary's at
+    /// the backup's start and a sample of its records logged for the
+    /// checker as reads over the backup's span -- an empty or stale archive
+    /// verifies as well as a whole one. A backup that fails any of it keeps
+    /// the run's volumes, the restored file among them.
+    fn backup(&self, id: u64) {
+        let sh = &self.sh;
+        let kit = &self.kit;
+        let me = &sh.readers[0];
+        let s = sh.ns();
+        // The registers the sample is held to are kept from here.
+        me.inflight.store(s, Ordering::SeqCst);
+        let seq0 = super::metrics_page(&sh.addr)
+            .map(|p| metric_sum(p.as_bytes(), "fennec_change_sequence"));
         let script = format!(
             "rm -rf /data/archive /data/restored.fennec; \
              /tools/fennec backup http://{}:8080 /data/archive --token {} && echo BACKUP-OK && \
              /tools/fennec restore /data/archive /data/restored.fennec && echo RESTORE-OK && \
              /tools/fennec verify /data/restored.fennec && echo VERIFY-OK; \
-             rm -rf /data/archive /data/restored.fennec",
-            self.server, self.token
+             rm -rf /data/archive",
+            kit.server(),
+            kit.token
         );
         let t = Instant::now();
-        let (_, out) = docker(&[
-            "run",
-            "--rm",
-            "--name",
-            &format!("{}-backup", self.net.trim_end_matches("-net")),
-            "--network",
-            &self.net,
-            "-v",
-            &format!("{}:/tools:ro", self.tools),
-            "-v",
-            &format!("{}:/data", self.volume),
-            "alpine",
-            "sh",
-            "-c",
+        let (_, out) = kit.fennec(
+            &format!("{}-backup", kit.name),
+            &kit.volume("backup-data"),
             &script,
-        ]);
+            Duration::from_secs(1800),
+        );
+        let e = sh.ns();
         let backed = out.contains("BACKUP-OK");
         let restored = out.contains("RESTORE-OK") && out.contains("VERIFY-OK");
-        eprintln!(
-            "soak: backup {}, restore and verify {} in {:.0} s",
+        let (seq, sampled) = match restored {
+            true => self.read_restored(id, s, e),
+            false => (None, 0),
+        };
+        me.inflight.store(u64::MAX, Ordering::SeqCst);
+        let fresh = matches!((seq0, seq), (Some(a), Some(b)) if b >= a);
+        let ok = backed && restored && fresh && sampled > 0;
+        say(format!(
+            "backup {id} {}, restored and verified {}, its change {} against the primary's {} at its start, {sampled} records read from it; {:.0} s",
             if backed { "taken" } else { "FAILED" },
             if restored { "clean" } else { "FAILED" },
+            seq.map_or("unread".into(), |x| x.to_string()),
+            seq0.map_or("unread".into(), |x| x.to_string()),
             t.elapsed().as_secs_f64()
-        );
-        if backed {
+        ));
+        if ok {
             self.doings.backups.fetch_add(1, Ordering::Relaxed);
-        }
-        if restored {
             self.doings.restores.fetch_add(1, Ordering::Relaxed);
-        }
-        if !backed || !restored {
-            eprintln!("{out}");
+            kit.fennec(
+                &format!("{}-backup", kit.name),
+                &kit.volume("backup-data"),
+                "rm -f /data/restored.fennec",
+                Duration::from_secs(120),
+            );
+        } else {
+            say(out);
             self.doings.backup_failed.fetch_add(1, Ordering::Relaxed);
+            if restored && !fresh {
+                self.doings.backup_stale.fetch_add(1, Ordering::Relaxed);
+            }
+            kit.keep_data(&format!(
+                "backup {id} failed; its restored file is restored.fennec in {}",
+                kit.volume("backup-data")
+            ));
         }
     }
 
-    /// Reads `keys` back, a thousand a request, each held as a read.
+    /// The restored file served read-only beside the run: its change
+    /// number, and 1 000 of the records written so far read from it and
+    /// logged as reads over the backup's span `[s, e]`; how many.
+    fn read_restored(&self, id: u64, s: u64, e: u64) -> (Option<u64>, usize) {
+        let sh = &self.sh;
+        let kit = &self.kit;
+        let port = http::free_port();
+        let (ok, out) = docker(&[
+            "run",
+            "-d",
+            "--pull",
+            "never",
+            "--name",
+            &format!("{}-restored", kit.name),
+            "--network",
+            &kit.net(),
+            "-p",
+            &format!("127.0.0.1:{port}:8080"),
+            "-v",
+            &format!("{}:/data", kit.volume("backup-data")),
+            "--memory",
+            &kit.memory,
+            "--memory-swap",
+            &kit.memory,
+            &kit.image,
+            "--http",
+            "0.0.0.0:8080",
+            "--insecure",
+            "--file",
+            "/data/restored.fennec",
+            "--http-read-only",
+            "--auto-compact",
+            "off",
+        ]);
+        let mut got = (None, 0);
+        if !ok {
+            sh.note(format!("the restored file's server did not start: {out}"));
+        } else if kit.wait_health(port, Duration::from_secs(300)) {
+            let addr = format!("127.0.0.1:{port}");
+            let seq = super::metrics_page(&addr)
+                .map(|p| metric_sum(p.as_bytes(), "fennec_change_sequence"));
+            let last = sh.fifo.lock().unwrap().0;
+            let mut rng = Rng::new(SEED ^ 0xBAC0 ^ id);
+            let mut keys: Vec<u64> = (0..1_000).map(|_| rng.below(last) + 1).collect();
+            keys.sort_unstable();
+            keys.dedup();
+            let list = keys
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let read = http::Http::try_connect(&addr, Duration::from_secs(60)).and_then(|mut c| {
+                c.try_query("get usertable where id in $1", &format!("[{list}]"))
+                    .map(|(st, body)| (st, json_rows(body)))
+            });
+            match read {
+                Ok((200, rows)) => {
+                    let evs: Vec<Ev> =
+                        page_reads(&rows, keys.iter().copied(), s, e, "the restored file")
+                            .into_iter()
+                            .map(|ev| match ev {
+                                Ev::Row {
+                                    key, found, got, ..
+                                } => Ev::Restored {
+                                    backup: id,
+                                    key,
+                                    s,
+                                    e,
+                                    found,
+                                    got,
+                                },
+                                other => other,
+                            })
+                            .collect();
+                    sh.readers[0].log.lock().unwrap().extend(evs);
+                    got = (seq, keys.len());
+                }
+                other => sh.note(format!(
+                    "the restored file's records: {:?}",
+                    other.map(|x| x.0)
+                )),
+            }
+        } else {
+            sh.note("the restored file's server did not answer within 300 s".into());
+        }
+        docker(&["rm", "-f", &format!("{}-restored", kit.name)]);
+        got
+    }
+
+    /// Reads `keys` back, a thousand a request, each held as a read; one
+    /// that cannot is counted, never passed over.
     fn sweep(&self, keys: Vec<u64>) {
         let sh = &self.sh;
         let me = &sh.readers[0];
+        self.doings
+            .sweep_owed
+            .fetch_add(keys.len() as u64, Ordering::Relaxed);
         let Ok(mut c) = http::Http::try_connect(&sh.addr, Duration::from_secs(60)) else {
+            self.doings.sweep_failed.fetch_add(1, Ordering::Relaxed);
+            sh.failed(sh.ns(), false, || {
+                format!(
+                    "the sweep of {} keys after a restart could not connect",
+                    keys.len()
+                )
+            });
             return;
         };
         for chunk in keys.chunks(1_000) {
@@ -2489,9 +3199,12 @@ impl Side {
                         .swept
                         .fetch_add(chunk.len() as u64, Ordering::Relaxed);
                 }
-                other => sh.failed(e, false, || {
-                    format!("the sweep's read: {:?}", other.map(|x| x.0))
-                }),
+                other => {
+                    self.doings.sweep_failed.fetch_add(1, Ordering::Relaxed);
+                    sh.failed(e, false, || {
+                        format!("the sweep's read: {:?}", other.map(|x| x.0))
+                    })
+                }
             }
             drop(log);
             me.inflight.store(u64::MAX, Ordering::SeqCst);
@@ -2500,10 +3213,26 @@ impl Side {
 
     fn run(self, jobs: mpsc::Receiver<Job>) {
         for job in jobs {
+            let what = match &job {
+                Job::Compact { minute, for_kill } => format!(
+                    "the compact asked at minute {minute}{}",
+                    if *for_kill {
+                        " for the kill to land in"
+                    } else {
+                        ""
+                    }
+                ),
+                Job::Backup { minute, id } => format!("backup {id}, asked at minute {minute}"),
+                Job::Sweep { minute, keys } => {
+                    format!("the sweep of {} keys asked at minute {minute}", keys.len())
+                }
+                Job::Fence(_) => String::new(),
+            };
+            *self.sh.doing.lock().unwrap() = what;
             match job {
-                Job::Compact => self.compact(),
-                Job::Backup => self.backup(),
-                Job::Sweep(keys) => self.sweep(keys),
+                Job::Compact { for_kill, .. } => self.compact(for_kill),
+                Job::Backup { id, .. } => self.backup(id),
+                Job::Sweep { keys, .. } => self.sweep(keys),
                 Job::Fence(done) => {
                     let _ = done.send(());
                 }
@@ -2542,6 +3271,7 @@ fn page_reads(
             e,
             found: got.is_some(),
             got: got.copied().unwrap_or([0; FIELDS]),
+            replica: false,
         });
     }
     out
@@ -2557,7 +3287,9 @@ struct Settings {
     compact_every: u64,
     backup_every: u64,
     backup_at: u64,
+    loss_ms: u64,
     restart_max: u64,
+    replica_back_max: u64,
     lag_max: u64,
     catchup_max: u64,
     recall_min: f64,
@@ -2574,7 +3306,9 @@ impl Settings {
             compact_every: o.compact_every,
             backup_every: o.backup_every,
             backup_at: o.backup_at,
+            loss_ms: o.loss_ms,
             restart_max: o.restart_max,
+            replica_back_max: o.replica_back_max,
             lag_max: o.lag_max,
             catchup_max: o.catchup_max,
             recall_min: o.recall_min,
@@ -2594,7 +3328,9 @@ impl Settings {
             ("compact_every", self.compact_every.to_string()),
             ("backup_every", self.backup_every.to_string()),
             ("backup_at", self.backup_at.to_string()),
+            ("loss_ms", self.loss_ms.to_string()),
             ("restart_max", self.restart_max.to_string()),
+            ("replica_back_max", self.replica_back_max.to_string()),
             ("lag_max", self.lag_max.to_string()),
             ("catchup_max", self.catchup_max.to_string()),
             ("recall_min", format!("{}", self.recall_min)),
@@ -2612,7 +3348,9 @@ impl Settings {
             compact_every: g("compact_every")? as u64,
             backup_every: g("backup_every")? as u64,
             backup_at: g("backup_at")? as u64,
+            loss_ms: g("loss_ms")? as u64,
             restart_max: g("restart_max")? as u64,
+            replica_back_max: g("replica_back_max")? as u64,
             lag_max: g("lag_max")? as u64,
             catchup_max: g("catchup_max")? as u64,
             recall_min: g("recall_min")?,
@@ -2633,8 +3371,11 @@ fn read_all(
     o: &Opts,
     mut checker: Option<&mut Checker>,
 ) -> Option<[u64; 3]> {
-    let mut c = http::Http::try_connect(addr, Duration::from_secs(600)).ok()?;
+    let mut c = http::Http::try_connect(addr, WAIT_MAX).ok()?;
     let mut digests = [0u64; 3];
+    // A line a minute: the end's read of a million records under the
+    // cgroup's limit is minutes, which the guard must not take for a hang.
+    let mut said = Instant::now();
     let last_key = sh.fifo.lock().unwrap().0;
     let tables: [(&str, u64, u64); 3] = [
         ("usertable", last_key, 1_000),
@@ -2647,14 +3388,20 @@ fn read_all(
             let to = (from + page).min(last + 1);
             let s = sh.ns();
             let (status, body) = c
+                // `order id`: a page in storage order would differ between
+                // two files holding the same rows, after either compacted.
                 .try_query(
-                    &format!("get {name} where id >= $1 and id < $2"),
+                    &format!("get {name} where id >= $1 and id < $2 order id"),
                     &format!("{from},{to}"),
                 )
                 .ok()?;
             let e = sh.ns();
             if status != 200 {
                 return None;
+            }
+            if said.elapsed() >= Duration::from_secs(60) {
+                say(format!("reading {name} on {addr}: {} of {last}", to - 1));
+                said = Instant::now();
             }
             digests[t] = (digests[t] ^ digest(body)).wrapping_mul(0x100_0000_01B3);
             if let Some(ch) = checker.as_deref_mut() {
@@ -2727,7 +3474,188 @@ fn read_all(
     Some(digests)
 }
 
+/// The server's clock against this host's, by a write of `now()`
+/// (`CLOCK_PROBE`): the offset in ms from the middle of the request, and
+/// the request's round trip, which bounds the offset's error.
+fn clock_probe(addr: &str) -> Option<(f64, f64)> {
+    let wall = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0.0, |d| d.as_secs_f64() * 1e3)
+    };
+    let mut c = http::Http::try_connect(addr, Duration::from_secs(10)).ok()?;
+    let before = wall();
+    let (status, body) = c.try_query(CLOCK_PROBE, "").ok()?;
+    let after = wall();
+    if status != 200 {
+        return None;
+    }
+    let t = *http::ints(body, "t").first()? as f64;
+    Some((t - (before + after) / 2.0, after - before))
+}
+
+/// Whether the clock moved against this host's from one probe to the next
+/// by more than a probe's error can explain: a step the `@ttl` slack must
+/// take (`CLOCK_STEP_MS`).
+fn clock_stepped(prev: (f64, f64), now: (f64, f64)) -> bool {
+    (now.0 - prev.0).abs() - (prev.1 + now.1) / 2.0 > CLOCK_STEP_MS
+}
+
+/// Whether the replica says it is connected and holds the change `target`.
+fn replica_ready(kit: &Kit, target: u64) -> bool {
+    kit.status(kit.replica_port).is_some_and(|st| {
+        st.contains("\"connected\":true") && json_num(&st, "seq").is_some_and(|q| q >= target)
+    })
+}
+
+/// A watch on the primary's main thread -- its syncer under `--sync <ms>`
+/// (fennec-server's `run_syncer` runs on it) -- from a container in its
+/// process namespace, which the kill ends with the namespace: what it last
+/// saw is what the thread was doing at the kill.
+struct Sampler {
+    child: std::process::Child,
+    lines: mpsc::Receiver<String>,
+    name: String,
+}
+
+/// The syscalls that wait for the disk, by the VM's architecture: fsync,
+/// fdatasync, sync_file_range, msync, sync and syncfs.
+fn syncing(arch: &str, n: u64) -> bool {
+    match arch {
+        "x86_64" => [74, 75, 277, 26, 162, 306].contains(&n),
+        _ => [82, 83, 84, 227, 81, 267].contains(&n),
+    }
+}
+
+impl Sampler {
+    /// Started and seen running, or `None`: the thread's syscall is not to
+    /// be read, and the kill's line says it is unknown.
+    fn start(kit: &Kit) -> Option<Sampler> {
+        use std::process::{Command, Stdio};
+        let name = format!("{}-sampler", kit.name);
+        let script = "echo \"A $(uname -m)\"; prev=; i=0; \
+            while read -r n _ < /proc/1/task/1/syscall; do \
+              if [ \"$n\" != \"$prev\" ]; then read -r up _ < /proc/uptime; echo \"S $up $n\"; prev=$n; fi; \
+              i=$((i + 1)); if [ $((i % 20)) = 0 ]; then read -r up _ < /proc/uptime; echo \"T $up\"; fi; \
+              usleep 5000 2>/dev/null || sleep 0.005; \
+            done";
+        let mut child = Command::new("docker")
+            .args([
+                "run",
+                "--rm",
+                "--pull",
+                "never",
+                "--name",
+                &name,
+                &format!("--pid=container:{}", kit.server()),
+                "--cap-add",
+                "SYS_PTRACE",
+                "alpine",
+                "sh",
+                "-c",
+                script,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        let out = child.stdout.take()?;
+        let (tx, lines) = mpsc::channel();
+        std::thread::spawn(move || {
+            for l in BufReader::new(out).lines().map_while(Result::ok) {
+                if tx.send(l).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut s = Sampler { child, lines, name };
+        let until = Instant::now() + Duration::from_secs(15);
+        let mut first = Vec::new();
+        while let Ok(l) = s
+            .lines
+            .recv_timeout(until.saturating_duration_since(Instant::now()))
+        {
+            let seen = l.starts_with("S ");
+            first.push(l);
+            if seen {
+                // Put back for `finish`, through a channel of its own.
+                let (tx, rx) = mpsc::channel();
+                for x in first {
+                    let _ = tx.send(x);
+                }
+                let rest = std::mem::replace(&mut s.lines, rx);
+                std::thread::spawn(move || {
+                    for x in rest {
+                        if tx.send(x).is_err() {
+                            break;
+                        }
+                    }
+                });
+                return Some(s);
+            }
+        }
+        s.stop();
+        None
+    }
+
+    fn stop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        docker(&["rm", "-f", &self.name]);
+    }
+
+    /// After the kill: whether the thread was in a call that waits for the
+    /// disk, and for how long it had been, in ms (0: it was not).
+    fn finish(mut self) -> Option<u64> {
+        let until = Instant::now() + Duration::from_secs(30);
+        let mut lines = Vec::new();
+        while let Ok(l) = self
+            .lines
+            .recv_timeout(until.saturating_duration_since(Instant::now()))
+        {
+            lines.push(l);
+        }
+        self.stop();
+        in_sync(&lines)
+    }
+}
+
+/// What a sampler's lines say of the thread at their end: in a call that
+/// waits for the disk, for so many ms, or 0 for not; `None` for not seen.
+/// `A <arch>` once, `S <uptime> <syscall>` at each change, `T <uptime>`
+/// every twentieth look.
+fn in_sync(lines: &[String]) -> Option<u64> {
+    let (mut arch, mut last, mut end) = ("", None::<(f64, u64)>, 0f64);
+    for l in lines {
+        let w: Vec<&str> = l.split_whitespace().collect();
+        match w.as_slice() {
+            ["A", a] => arch = a,
+            ["S", up, n] => {
+                let up: f64 = up.parse().unwrap_or(0.0);
+                // `running`, or -1 outside a syscall: neither waits.
+                last = Some((up, n.parse().unwrap_or(u64::MAX)));
+                end = end.max(up);
+            }
+            ["T", up] => end = end.max(up.parse().unwrap_or(0.0)),
+            _ => {}
+        }
+    }
+    let (since, n) = last?;
+    Some(match syncing(arch, n) {
+        true => ((end - since) * 1e3).max(1.0) as u64,
+        false => 0,
+    })
+}
+
 fn run(o: &Opts) {
+    if let Some(p) = &o.progress {
+        *PROGRESS.lock().unwrap() = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(p)
+            .ok();
+    }
     let started = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -2736,7 +3664,7 @@ fn run(o: &Opts) {
         let mut rng = Rng::new(started ^ std::process::id() as u64);
         (0..4).map(|_| format!("{:016x}", rng.next())).collect()
     };
-    let bench = Bench {
+    let bench = Bench(Kit {
         name: o.name.clone(),
         image: o.image.clone(),
         tools: o.tools.clone(),
@@ -2745,28 +3673,35 @@ fn run(o: &Opts) {
         token,
         port: http::free_port(),
         replica_port: http::free_port(),
-    };
+        keep: Arc::new(AtomicBool::new(false)),
+        kept: o.kept.clone(),
+    });
     bench.clean();
     let (ok, out) = docker(&["network", "create", &bench.net()]);
     assert!(ok, "docker network create: {out}");
     bench.start_primary();
+    say(format!("{} started", bench.server()));
     assert!(
-        bench.wait_health(bench.port, Duration::from_secs(600)),
-        "fennec-server did not answer"
+        bench.wait_health(bench.port, WAIT_MAX),
+        "fennec-server did not answer within {} s of its start",
+        WAIT_MAX.as_secs()
     );
     let addr = format!("127.0.0.1:{}", bench.port);
     load(&addr, o);
     bench.start_replica();
+    say(format!("{} started", bench.replica()));
     assert!(
-        bench.wait_health(bench.replica_port, Duration::from_secs(600)),
-        "the replica did not answer"
+        bench.wait_health(bench.replica_port, WAIT_MAX),
+        "the replica did not answer within {} s of its start",
+        WAIT_MAX.as_secs()
     );
     let raddr = format!("127.0.0.1:{}", bench.replica_port);
     let seq = |a: &str| {
         super::metrics_page(a).map(|p| metric_sum(p.as_bytes(), "fennec_change_sequence"))
     };
-    let caught_up = |within: Duration| -> Option<f64> {
+    let caught_up = |within: Duration, what: &str| -> Option<f64> {
         let t = Instant::now();
+        let mut said = Instant::now();
         loop {
             let (p, r) = (seq(&addr), seq(&raddr));
             if p.is_some() && p == r {
@@ -2775,15 +3710,22 @@ fn run(o: &Opts) {
             if t.elapsed() >= within {
                 return None;
             }
+            if said.elapsed() >= Duration::from_secs(60) {
+                say(format!(
+                    "{what}: the replica at change {r:?}, the primary at {p:?}, {:.0} s",
+                    t.elapsed().as_secs_f64()
+                ));
+                said = Instant::now();
+            }
             std::thread::sleep(Duration::from_millis(500));
         }
     };
     // The replica's first follow copies the loaded file: bounded by half
     // an hour, which a gigabyte over the VM's network takes a fraction of.
     let follow_max = 1_800;
-    let follow = caught_up(Duration::from_secs(follow_max));
-    eprintln!(
-        "soak: the replica {}; {} connections at {}, {} subscriptions, --sync {}, --memory {}",
+    let follow = caught_up(Duration::from_secs(follow_max), "the first follow");
+    say(format!(
+        "the replica {}; {} connections at {}, {} subscriptions, --sync {}, --memory {}",
         match follow {
             Some(s) => format!("followed in {s:.0} s"),
             None => format!("did NOT catch up in {follow_max} s"),
@@ -2796,18 +3738,18 @@ fn run(o: &Opts) {
         o.subscriptions,
         o.sync,
         o.memory
-    );
+    ));
     let settings = Settings::of(o);
     let mut v: Vec<(&str, String)> = settings.values();
     v.extend([
         ("started", started.to_string()),
-        ("loss_ms", loss_ms(&o.sync).to_string()),
         ("ttl", o.ttl.to_string()),
         ("slack", o.slack.to_string()),
         ("records", o.records.to_string()),
         ("rate", format!("{:.0}", o.rate)),
         ("follow_s", follow.unwrap_or(-1.0).to_string()),
         ("follow_max", follow_max.to_string()),
+        ("load_before", format!("{:.2}", o.load_before)),
     ]);
     append_values(
         &o.out,
@@ -2824,57 +3766,7 @@ fn run(o: &Opts) {
             (from, from + 64)
         })
         .collect();
-    let sh = Arc::new(Shared {
-        t0: Instant::now(),
-        stop: AtomicBool::new(false),
-        addr: addr.clone(),
-        raddr: raddr.clone(),
-        rate: o.rate,
-        threads: o.threads,
-        records: o.records,
-        docs: o.docs,
-        counters: o.counters,
-        dim: o.dim,
-        ttl: o.ttl,
-        ops: AtomicU64::new(0),
-        errors: AtomicU64::new(0),
-        refused: AtomicU64::new(0),
-        down: AtomicU64::new(0),
-        events: AtomicU64::new(0),
-        windows: Mutex::new(Vec::new()),
-        restart_from: AtomicU64::new(u64::MAX),
-        restart_to: AtomicU64::new(u64::MAX),
-        compact_from: AtomicU64::new(u64::MAX),
-        compact_to: AtomicU64::new(u64::MAX),
-        max_seq: AtomicU64::new(0),
-        fifo: Mutex::new((o.records, VecDeque::new())),
-        sessions: Mutex::new(VecDeque::new()),
-        next_session: AtomicU64::new(1),
-        doc_writes: Mutex::new(Vec::new()),
-        slots: (0..o.threads)
-            .map(|_| Slot {
-                hists: Mutex::new(Hists::new()),
-                log: Mutex::new(Vec::new()),
-                inflight: AtomicU64::new(u64::MAX),
-                done: AtomicU64::new(0),
-            })
-            .collect(),
-        readers: vec![Reader {
-            log: Mutex::new(Vec::new()),
-            inflight: AtomicU64::new(u64::MAX),
-        }],
-        streams: ranges
-            .iter()
-            .map(|&(from, _)| Stream {
-                from,
-                log: Mutex::new(Vec::new()),
-                open_since: AtomicU64::new(u64::MAX),
-                conns: AtomicU64::new(0),
-                seen: AtomicU64::new(0),
-            })
-            .collect(),
-        notes: Mutex::new(Vec::new()),
-    });
+    let sh = Arc::new(Shared::new(o, addr.clone(), raddr.clone(), &ranges));
     let mut handles = Vec::new();
     for w in 0..o.threads {
         let sh = Arc::clone(&sh);
@@ -2889,15 +3781,11 @@ fn run(o: &Opts) {
     let side = Side {
         sh: Arc::clone(&sh),
         doings: Arc::clone(&doings),
-        server: bench.server(),
-        net: bench.net(),
-        tools: bench.tools.clone(),
-        volume: bench.volume("backup-data"),
-        token: bench.token.clone(),
+        kit: bench.0.clone(),
     };
     let side = std::thread::spawn(move || side.run(side_jobs));
 
-    let loss = loss_ms(&o.sync) * 1_000_000;
+    let loss = o.loss_ms * 1_000_000;
     let mut checker = Checker::new(
         o.records,
         Kills {
@@ -2909,12 +3797,15 @@ fn run(o: &Opts) {
         &ranges,
     );
     let mut sample_rng = Rng::new(SEED ^ 0x5A4D);
-    let mut hours: VecDeque<Hist> = VecDeque::new();
+    // The steady and the compacts' latencies of each of the last 60
+    // minutes.
+    let mut hours: VecDeque<(Hist, Hist)> = VecDeque::new();
     let mut restarts = Hist::new();
     let mut prev_majflt = None;
     let mut prev_oom = 0;
-    let mut auto_before = 0u64;
-    let mut auto_last = 0u64;
+    // Each server's own compactions (`fennec_auto_compactions_total`), its
+    // count kept across the primary's restarts.
+    let mut auto = [(0u64, 0u64); 2];
     let mut totals = (0u64, 0u64, 0u64);
     let mut peak = Vec::new();
     let mut last = sh.t0;
@@ -2923,6 +3814,12 @@ fn run(o: &Opts) {
     let mut faults_before = StreamFaults::default();
     let mut minutes_run = 0;
     let mut restart_ms_max = 0u64;
+    let mut backup_id = 0u64;
+    let mut clock_prev: Option<(f64, f64)> = None;
+    // The CPU the two servers' cgroups and the VM's CPUs had used at the
+    // last look.
+    let mut cpu_prev: Option<(u64, u64, u64)> = None;
+    let (mut lost_before, mut differ_before) = (0u64, 0u64);
     // Kills the restart's sweep has not read back after yet.
     let mut swept_after = 0usize;
     let floor = o.disk_floor;
@@ -2934,8 +3831,7 @@ fn run(o: &Opts) {
         let secs = now.duration_since(last).as_secs_f64();
         last = now;
         // The latencies of the minute, and of the hour to it: the steady
-        // operations apart from those due in a restart's or a compact's
-        // window.
+        // operations apart from the restarts' and the compacts' (`class`).
         let mut h = Hists::new();
         let mut idle = 0;
         for s in &sh.slots {
@@ -2948,12 +3844,14 @@ fn run(o: &Opts) {
         if hours.len() == 60 {
             hours.pop_front();
         }
-        let mut minute = Hist::new();
+        let (mut minute, mut cminute) = (Hist::new(), Hist::new());
         minute.merge(&h.steady);
-        hours.push_back(minute);
-        let mut hour = Hist::new();
+        cminute.merge(&h.compact);
+        hours.push_back((minute, cminute));
+        let (mut hour, mut chour) = (Hist::new(), Hist::new());
         for x in &hours {
-            hour.merge(x);
+            hour.merge(&x.0);
+            chour.merge(&x.1);
         }
         // The checker: every read that ended before the earliest
         // operation in flight, what no later read needs let go of, past
@@ -2993,6 +3891,9 @@ fn run(o: &Opts) {
         let before = checker.mismatches;
         checker.hold(safe, safe.saturating_sub(loss + HELD_FOR), now_ns, &open);
         let mismatches = checker.mismatches - before;
+        if mismatches > 0 {
+            bench.keep_data(&format!("{mismatches} mismatches at minute {m}"));
+        }
         let f = checker.faults;
         let faults = StreamFaults {
             missing: f.missing - faults_before.missing,
@@ -3002,6 +3903,10 @@ fn run(o: &Opts) {
             silent: f.silent - faults_before.silent,
         };
         faults_before = f;
+        let lost = checker.lost_writes - lost_before;
+        lost_before = checker.lost_writes;
+        let differ = checker.backups_differ - differ_before;
+        differ_before = checker.backups_differ;
         // The keys a kill since the last sweep may have touched, read back
         // now that the writes around it are in.
         let kills_now = sh.windows.lock().unwrap().len();
@@ -3009,7 +3914,7 @@ fn run(o: &Opts) {
             swept_after = kills_now;
             let keys: Vec<u64> = std::mem::take(&mut checker.touched).into_iter().collect();
             if !keys.is_empty() {
-                let _ = jobs.send(Job::Sweep(keys));
+                let _ = jobs.send(Job::Sweep { minute: m, keys });
             }
         } else {
             checker.touched.clear();
@@ -3025,18 +3930,57 @@ fn run(o: &Opts) {
         let page = super::metrics_page(&addr).unwrap_or_default();
         let rpage = super::metrics_page(&raddr).unwrap_or_default();
         let status = bench.status(bench.replica_port).unwrap_or_default();
-        let auto = metric_sum(page.as_bytes(), "fennec_auto_compactions_total");
-        if auto < auto_last {
-            // Started again: its count with it.
-            auto_before += auto_last;
+        // The compactions each server ran on its own in the minute: its
+        // `fennec_auto_compactions_total`, which starts again with it.
+        let mut own = [0u64; 2];
+        for (i, p) in [&page, &rpage].into_iter().enumerate() {
+            if p.is_empty() {
+                continue;
+            }
+            let n = metric_sum(p.as_bytes(), "fennec_auto_compactions_total");
+            let (before, last) = &mut auto[i];
+            own[i] = match n >= *last {
+                true => n - *last,
+                false => {
+                    *before += *last;
+                    n
+                }
+            };
+            *last = n;
         }
-        auto_last = auto;
-        let compactions = auto_before + auto + doings.compacts.load(Ordering::Relaxed);
+        let compactions = auto[0].0 + auto[0].1 + doings.compacts.load(Ordering::Relaxed);
         let behind = json_num(&status, "behind");
         // About half the mix writes: the replica's lag in seconds of them.
         let write_rate = ops as f64 / secs * 0.5;
         let lag_s = behind.map_or(-1.0, |b| b as f64 / write_rate.max(1.0));
         let (load1, load5) = load_average();
+        let clock = clock_probe(&addr);
+        let stepped = match (clock_prev, clock) {
+            (Some(a), Some(b)) => clock_stepped(a, b),
+            _ => false,
+        };
+        if clock.is_some() {
+            clock_prev = clock;
+        }
+        // What the VM's CPUs did beside the two servers' cgroups -- the
+        // run's own look, verify and backup containers among it -- in
+        // cores, and this host's other processes.
+        let cpu_now = match (look, rlook) {
+            (Some(a), Some(b)) => match (a.cpu_usec, b.cpu_usec, a.vm_busy) {
+                (Some(x), Some(y), Some(busy)) => Some((x, y, busy)),
+                _ => None,
+            },
+            _ => None,
+        };
+        let others_vm = match (cpu_prev, cpu_now) {
+            (Some(p), Some(n)) if n.0 >= p.0 && n.1 >= p.1 && n.2 >= p.2 => {
+                let ours = (n.0 - p.0 + n.1 - p.1) as f64 / 1e6;
+                ((n.2 - p.2) as f64 / 100.0 - ours).max(0.0) / secs
+            }
+            _ => -1.0,
+        };
+        cpu_prev = cpu_now;
+        let others_host = others_on_host().unwrap_or(-1.0);
         let sample = match o.samples > 0 && !o.peak {
             true => sample(&sh, &mut sample_rng, o.samples),
             false => None,
@@ -3044,7 +3988,7 @@ fn run(o: &Opts) {
         sh.doc_writes
             .lock()
             .unwrap()
-            .retain(|w| w.2 + 120_000_000_000 > now_ns);
+            .retain(|w| w.2.saturating_add(120_000_000_000) > now_ns);
         let hfree = host_free(&o.out);
         let vfree = look.and_then(|l| l.vm_free);
         let mut v: Vec<(&str, String)> = vec![
@@ -3064,10 +4008,13 @@ fn run(o: &Opts) {
             ("p99_restart", format!("{:.0}", h.restart.pct(0.99))),
             ("compact_ops", h.compact.n.to_string()),
             ("p99_compact", format!("{:.0}", h.compact.pct(0.99))),
+            ("p99_compact_hour", format!("{:.0}", chour.pct(0.99))),
             ("errors", errors.to_string()),
             ("refused", sh.refused.swap(0, Ordering::Relaxed).to_string()),
             ("down", down.to_string()),
             ("mismatches", mismatches.to_string()),
+            ("lost_writes", lost.to_string()),
+            ("backup_differs", differ.to_string()),
             ("stream_missing", faults.missing.to_string()),
             ("stream_twice", faults.twice.to_string()),
             ("stream_order", faults.order.to_string()),
@@ -3083,6 +4030,8 @@ fn run(o: &Opts) {
                 metric_sum(page.as_bytes(), "fennec_data_bytes").to_string(),
             ),
             ("compactions", compactions.to_string()),
+            ("auto_compacts", own[0].to_string()),
+            ("r_auto_compacts", own[1].to_string()),
             (
                 "memory_bytes",
                 metric_sum(page.as_bytes(), "fennec_memory_bytes").to_string(),
@@ -3113,7 +4062,17 @@ fn run(o: &Opts) {
             ("vm_free", vfree.map_or(-1, |b| b as i64).to_string()),
             ("load1", format!("{load1:.2}")),
             ("load5", format!("{load5:.2}")),
+            ("others_host", format!("{others_host:.2}")),
+            ("others_vm", format!("{others_vm:.2}")),
+            ("clock_step", (stepped as u8).to_string()),
         ];
+        if let Some(ms) = checker.lost_ms_max.take() {
+            v.push(("lost_ms_max", ms.to_string()));
+        }
+        if let Some((off, rtt)) = clock {
+            v.push(("clock_off_ms", format!("{off:.1}")));
+            v.push(("clock_rtt_ms", format!("{rtt:.1}")));
+        }
         if let Some(s) = sample {
             v.extend([
                 ("match_n", s.matches.to_string()),
@@ -3145,6 +4104,7 @@ fn run(o: &Opts) {
                 ("majflt", majflt.to_string()),
                 ("threads", l.threads.to_string()),
                 ("fds", l.fds.to_string()),
+                ("compacting", (l.compacting as u8).to_string()),
             ]);
         }
         if let Some(l) = rlook {
@@ -3153,6 +4113,7 @@ fn run(o: &Opts) {
                 ("r_rss_anon", l.rss_anon.to_string()),
                 ("r_threads", l.threads.to_string()),
                 ("r_fds", l.fds.to_string()),
+                ("r_compacting", (l.compacting as u8).to_string()),
             ]);
         }
         // A server gone that the run did not kill: its death and whether
@@ -3171,15 +4132,34 @@ fn run(o: &Opts) {
             ("backup", &doings.backups),
             ("restore", &doings.restores),
             ("backup_failed", &doings.backup_failed),
+            ("backup_stale", &doings.backup_stale),
             ("compact", &doings.compacts),
             ("compact_failed", &doings.compact_failed),
+            ("compact_busy", &doings.compact_busy),
             ("compact_killed", &doings.compact_killed),
             ("restart_ms", &doings.restart_ms),
             ("swept", &doings.swept),
+            ("sweep_owed", &doings.sweep_owed),
+            ("sweep_failed", &doings.sweep_failed),
         ] {
             v.push((name, n.swap(0, Ordering::Relaxed).to_string()));
         }
+        // The kill's figures: one kill a minute at the most, a death beside
+        // it the rarer still -- the last said of each kept.
+        let figures = std::mem::take(&mut *doings.figures.lock().unwrap());
+        for (name, x) in figures {
+            v.retain(|(k, _)| *k != name);
+            v.push((name, x));
+        }
         v.push(("r_died", (!rup as u8).to_string()));
+        // The replica, kept from reads after a restart until it said it
+        // held the newest change: looked at again each minute.
+        if !sh.replica_ok.load(Ordering::SeqCst)
+            && replica_ready(&bench, sh.replica_target.load(Ordering::SeqCst))
+        {
+            sh.replica_ok.store(true, Ordering::SeqCst);
+            say(format!("the replica is back at minute {m}"));
+        }
         // The disk on both sides: one short of the floor ends the run as
         // the environment's, before a write fails for it.
         let short = [("this host", hfree), ("Docker's VM", vfree)]
@@ -3195,8 +4175,8 @@ fn run(o: &Opts) {
         }
         let cell = format!("{}:{}:m{m:04}", o.sync, o.label);
         append_values(&o.out, "soak", &o.run_id, &cell, &v);
-        eprintln!(
-            "soak {m:>4} min: {:.0} ops/s, p99 {:.0} us, p99.9 {:.0}, max {:.0} ms; {errors} errors, {down} at a restart, {mismatches} mismatches; file {} MB, live {} MB, anon {} MB, lag {lag_s:.1} s, load {load1:.1}",
+        say(format!(
+            "{m:>4} min: {:.0} ops/s, p99 {:.0} us, p99.9 {:.0}, max {:.0} ms; {errors} errors, {down} at a restart, {mismatches} mismatches; file {} MB, live {} MB, anon {} MB, lag {lag_s:.1} s, load {load1:.1}",
             ops as f64 / secs,
             h.steady.pct(0.99),
             h.steady.pct(0.999),
@@ -3204,9 +4184,9 @@ fn run(o: &Opts) {
             look.map(|l| l.file >> 20).unwrap_or(0),
             metric_sum(page.as_bytes(), "fennec_data_bytes") >> 20,
             look.map(|l| l.rss_anon >> 20).unwrap_or(0),
-        );
+        ));
         if let Some(why) = &env_failed {
-            eprintln!("soak: the environment failed the run: {why}");
+            say(format!("the environment failed the run: {why}"));
             break;
         }
         if o.peak && m > 1 {
@@ -3225,7 +4205,15 @@ fn run(o: &Opts) {
             ));
             doings.deaths.fetch_add(1, Ordering::Relaxed);
             let from = now_ns.saturating_sub(60_000_000_000);
-            restart(&bench, &sh, &doings, from, from, &mut restart_ms_max);
+            restart(
+                &bench,
+                &sh,
+                &doings,
+                (from, from, m),
+                None,
+                o,
+                &mut restart_ms_max,
+            );
             life += 1;
             prev_majflt = None;
             prev_oom = 0;
@@ -3242,31 +4230,97 @@ fn run(o: &Opts) {
         ) {
             match d {
                 Doing::Compact => {
-                    let _ = jobs.send(Job::Compact);
+                    let _ = jobs.send(Job::Compact {
+                        minute: m,
+                        for_kill: false,
+                    });
                 }
                 Doing::Backup => {
-                    let _ = jobs.send(Job::Backup);
+                    backup_id += 1;
+                    let _ = jobs.send(Job::Backup {
+                        minute: m,
+                        id: backup_id,
+                    });
                 }
                 Doing::Kill { in_compact } => {
-                    // One at a time: a kill waits for what is queued.
+                    // One at a time: a kill waits for what is queued, for
+                    // `WAIT_MAX` at the most -- a side job that hangs is
+                    // named, never waited on forever.
                     let (done, wait) = mpsc::channel();
                     let _ = jobs.send(Job::Fence(done));
-                    let _ = wait.recv();
+                    let t = Instant::now();
+                    if wait.recv_timeout(WAIT_MAX).is_err() {
+                        panic!(
+                            "the kill due at minute {m} waited {:.0} s for the side job, {}, which did not end",
+                            t.elapsed().as_secs_f64(),
+                            sh.doing.lock().unwrap()
+                        );
+                    }
+                    say(format!(
+                        "the kill due at minute {m}{}: announced",
+                        if in_compact { ", in a compact" } else { "" }
+                    ));
                     let from = sh.ns();
                     sh.windows.lock().unwrap().push((from, u64::MAX, u64::MAX));
                     sh.restart_to.store(u64::MAX, Ordering::SeqCst);
                     sh.restart_from.store(from, Ordering::SeqCst);
+                    sh.replica_ok.store(false, Ordering::SeqCst);
+                    // The primary's main thread watched to the kill: an
+                    // fsync in flight then is said on the kill's line.
+                    let sampler = match o.sync.as_str() {
+                        "always" => None,
+                        _ => Sampler::start(&bench),
+                    };
                     if in_compact {
-                        // The compact the kill lands in: asked, given a
-                        // second to be under way, the kill after.
-                        let _ = jobs.send(Job::Compact);
-                        std::thread::sleep(Duration::from_secs(1));
+                        // The compact the kill lands in: asked, and under
+                        // way a second -- asked again while the server's
+                        // own holds the file -- the kill after.
+                        let ended = || {
+                            doings.compacts.load(Ordering::SeqCst)
+                                + doings.compact_busy.load(Ordering::SeqCst)
+                                + doings.compact_failed.load(Ordering::SeqCst)
+                        };
+                        let before = ended();
+                        let _ = jobs.send(Job::Compact {
+                            minute: m,
+                            for_kill: true,
+                        });
+                        let t = Instant::now();
+                        loop {
+                            let since = sh.compact_since.load(Ordering::SeqCst);
+                            if since != u64::MAX && sh.ns().saturating_sub(since) >= 1_000_000_000 {
+                                break;
+                            }
+                            if ended() != before {
+                                sh.note(format!(
+                                    "the compact the kill at minute {m} was to land in ended within a second: killed without"
+                                ));
+                                break;
+                            }
+                            if t.elapsed() >= WAIT_MAX {
+                                sh.note(format!(
+                                    "the kill at minute {m} found no compact of its own under way within {} s: killed without",
+                                    WAIT_MAX.as_secs()
+                                ));
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
                     }
-                    // The announced second: operations due from here on
+                    // The announced second: operations due from `from` on
                     // are the restart's.
-                    std::thread::sleep(Duration::from_secs(1));
+                    let k = (from + 1_000_000_000).max(sh.ns());
+                    std::thread::sleep(Duration::from_nanos(k.saturating_sub(sh.ns())));
                     let k = sh.ns();
-                    restart(&bench, &sh, &doings, from, k, &mut restart_ms_max);
+                    restart(
+                        &bench,
+                        &sh,
+                        &doings,
+                        (from, k, m),
+                        sampler,
+                        o,
+                        &mut restart_ms_max,
+                    );
                     doings.kills.fetch_add(1, Ordering::Relaxed);
                     life += 1;
                     prev_majflt = None;
@@ -3310,7 +4364,7 @@ fn run(o: &Opts) {
     let swept_s = t.elapsed().as_secs_f64();
     let late = checker.mismatches - before;
     let catchup = match env_failed {
-        None => caught_up(Duration::from_secs(o.catchup_max)),
+        None => caught_up(Duration::from_secs(o.catchup_max), "the end's catch-up"),
         Some(_) => None,
     };
     let replica = match (catchup, &primary) {
@@ -3319,26 +4373,43 @@ fn run(o: &Opts) {
     };
     let same = primary.is_some() && primary == replica;
     if !same {
-        eprintln!(
-            "soak: the replica's rows {} the primary's (usertable, counters, docs: {replica:?} against {primary:?})",
+        say(format!(
+            "the replica's rows {} the primary's (usertable, counters, docs: {replica:?} against {primary:?})",
             if replica.is_none() { "were not read beside" } else { "DIFFER from" }
-        );
+        ));
     }
-    docker(&["stop", "-t", "300", &bench.server()]);
-    docker(&["stop", "-t", "300", &bench.replica()]);
+    // Each stop said apart: two bounded at 330 s would outlast the guard.
+    for c in [bench.server(), bench.replica()] {
+        let t = Instant::now();
+        let (ok, _) = docker_within(Duration::from_secs(330), &["stop", "-t", "300", &c]);
+        say(format!(
+            "{c} {} in {:.0} s",
+            if ok { "stopped" } else { "did NOT stop" },
+            t.elapsed().as_secs_f64()
+        ));
+    }
     let verify = |volume: &str, file: &str| {
         let (ok, out) = bench.fennec(
             &format!("{}-verify", bench.name),
             volume,
             &format!("/tools/fennec verify /data/{file}"),
+            WAIT_MAX,
         );
         if !ok {
-            eprintln!("{out}");
+            say(out);
         }
         ok
     };
     let primary_ok = verify(&bench.volume("data"), "soak.fennec");
     let replica_ok = verify(&bench.volume("replica-data"), "replica.fennec");
+    if !primary_ok || !replica_ok || late > 0 || !same {
+        bench.keep_data(&format!(
+            "at the end: the primary's file {}, the replica's {}, {late} mismatches in the end's read, the replica's rows {}",
+            if primary_ok { "verified" } else { "FAILED verify" },
+            if replica_ok { "verified" } else { "FAILED verify" },
+            if same { "the same" } else { "different or not compared" }
+        ));
+    }
     let cell = format!("{}:{}:end", o.sync, o.label);
     let mut v: Vec<(&str, String)> = vec![
         ("started", started.to_string()),
@@ -3365,12 +4436,23 @@ fn run(o: &Opts) {
         ("replica_verify_failed", (!replica_ok as u8).to_string()),
         ("replica_differs", (!same as u8).to_string()),
         (
+            "lost_writes",
+            (checker.lost_writes - lost_before).to_string(),
+        ),
+        (
+            "backup_differs",
+            (checker.backups_differ - differ_before).to_string(),
+        ),
+        (
             "memory_limit",
             super::bytes_of(&o.memory).unwrap_or(0).to_string(),
         ),
         ("records", o.records.to_string()),
         ("env_failed", (env_failed.is_some() as u8).to_string()),
     ];
+    if let Some(ms) = checker.lost_ms_max.take() {
+        v.push(("lost_ms_max", ms.to_string()));
+    }
     if o.peak && !peak.is_empty() {
         peak.sort_by(|a, b| a.total_cmp(b));
         let p = peak[peak.len() / 2];
@@ -3378,8 +4460,8 @@ fn run(o: &Opts) {
         println!("peak {p:.0}");
     }
     append_values(&o.out, "soak", &o.run_id, &cell, &v);
-    eprintln!(
-        "soak: {minutes_run} minutes, {} operations, {} errors, {} mismatches ({} reads and {} writes held), the files {} and {}, the replica {}{}",
+    say(format!(
+        "{minutes_run} minutes, {} operations, {} errors, {} mismatches ({} reads and {} writes held), the files {} and {}, the replica {}{}",
         totals.0,
         totals.1,
         totals.2 + late,
@@ -3392,15 +4474,34 @@ fn run(o: &Opts) {
             Some(why) => format!("; the ENVIRONMENT failed it: {why}"),
             None => String::new(),
         }
-    );
+    ));
     drop(bench);
 }
 
 /// The server killed (`kill -9`) -- or found dead -- its file verified,
 /// started again and waited for: the restart's window closed when it
-/// answers. `from` is when the window began (a second before the kill, or
-/// the last look before a death), `k` the kill.
-fn restart(bench: &Bench, sh: &Shared, doings: &Doings, from: u64, k: u64, longest: &mut u64) {
+/// answers. `at` is when the window began (a second before the kill, or
+/// the last look before a death), the kill, and its minute. Each part is
+/// timed and said on the minute's line -- docker's kill and wait
+/// (`kill_ms`), the file's verify (`verify_ms`), and the server's own part,
+/// `docker start` to answering (`start_ms`) -- with whether a compact was
+/// writing at the kill (its side file left behind: `kill_compacting`) and
+/// for how long the primary's syncer had been in an fsync then
+/// (`kill_sync_ms`, -1 where it could not be seen). A file that fails its
+/// verify is copied aside before the server opens it again, and the run's
+/// volumes kept. After it, no read goes through the replica until the
+/// replica is connected and holds the newest change answered before the
+/// kill (`replica_back_ms`, bounded by `--replica-back-max`).
+fn restart(
+    bench: &Kit,
+    sh: &Shared,
+    doings: &Doings,
+    at: (u64, u64, u64),
+    sampler: Option<Sampler>,
+    o: &Opts,
+    longest: &mut u64,
+) {
+    let (from, k, m) = at;
     {
         let mut w = sh.windows.lock().unwrap();
         match w.last_mut() {
@@ -3410,41 +4511,114 @@ fn restart(bench: &Bench, sh: &Shared, doings: &Doings, from: u64, k: u64, longe
     }
     sh.restart_to.store(u64::MAX, Ordering::SeqCst);
     sh.restart_from.store(from, Ordering::SeqCst);
-    docker(&["kill", "--signal", "KILL", &bench.server()]);
-    docker(&["wait", &bench.server()]);
-    let t = Instant::now();
-    let (ok, out) = bench.fennec(
-        &format!("{}-verify", bench.name),
-        &bench.volume("data"),
-        "/tools/fennec verify /data/soak.fennec",
-    );
-    eprintln!(
-        "soak: killed; fennec verify {} in {:.0} s",
-        if ok { "clean" } else { "FAILED" },
-        t.elapsed().as_secs_f64()
+    sh.replica_ok.store(false, Ordering::SeqCst);
+    let target = sh.max_seq.load(Ordering::SeqCst);
+    sh.replica_target.store(target, Ordering::SeqCst);
+    let (ok, out) = docker_within(
+        Duration::from_secs(60),
+        &["kill", "--signal", "KILL", &bench.server()],
     );
     if !ok {
-        eprintln!("{out}");
+        sh.note(format!("docker kill at minute {m}: {out}"));
+    }
+    let (ok, out) = docker_within(Duration::from_secs(120), &["wait", &bench.server()]);
+    if !ok {
+        sh.note(format!("docker wait at minute {m}: {out}"));
+    }
+    let killed = sh.ns();
+    say(format!(
+        "minute {m}: the server gone {:.1} s after the kill was sent; its file verified next",
+        (killed - k) as f64 / 1e9
+    ));
+    // A death has no kill of the run's to time, nor a watch on it.
+    let sync_ms = sampler.and_then(Sampler::finish);
+    if k != from {
+        doings.figure("kill_ms", ((killed - k) / 1_000_000).to_string());
+        doings.figure(
+            "kill_sync_ms",
+            sync_ms.map_or("-1".into(), |x| x.to_string()),
+        );
+    }
+    let t = Instant::now();
+    let copy = format!("failed-m{m:04}.fennec");
+    let (_, out) = bench.fennec(
+        &format!("{}-verify", bench.name),
+        &bench.volume("data"),
+        &format!(
+            "ls /data/soak.fennec.beside >/dev/null 2>&1 && echo BESIDE; \
+             if /tools/fennec verify /data/soak.fennec; then echo VERIFY-OK; \
+             else cp /data/soak.fennec /data/{copy} && echo KEPT; exit 1; fi"
+        ),
+        WAIT_MAX,
+    );
+    let verified = out.contains("VERIFY-OK");
+    let beside = out.contains("BESIDE");
+    doings.figure("verify_ms", t.elapsed().as_millis().to_string());
+    doings.figure("kill_compacting", (beside as u8).to_string());
+    say(format!(
+        "killed at minute {m}{}{}; fennec verify {} in {:.0} s",
+        if beside { ", a compact writing" } else { "" },
+        match sync_ms {
+            Some(0) => ", no fsync in flight".to_string(),
+            Some(x) => format!(", an fsync {x} ms in flight"),
+            None => String::new(),
+        },
+        if verified { "clean" } else { "FAILED" },
+        t.elapsed().as_secs_f64()
+    ));
+    if !verified {
+        say(out);
         doings.verify_failed.fetch_add(1, Ordering::Relaxed);
+        bench.keep_data(&format!(
+            "the file failed its verify after the kill at minute {m}: its copy is {copy} in {}",
+            bench.volume("data")
+        ));
     }
     doings.verifies.fetch_add(1, Ordering::Relaxed);
+    let started = Instant::now();
     let (ok, out) = docker(&["start", &bench.server()]);
-    assert!(ok, "docker start: {out}");
-    // However long it takes: the report holds it to `--restart-max`.
+    assert!(ok, "docker start after the kill at minute {m}: {out}");
+    // A line between docker's start and the wait for an answer: the two
+    // bounds together outlast the guard's ten minutes.
+    say(format!("minute {m}: {} started again", bench.server()));
+    // Bounded under the script's guard; the report holds the restart to
+    // `--restart-max`, which is shorter.
     assert!(
-        bench.wait_health(bench.port, Duration::from_secs(3600)),
-        "fennec-server did not answer within an hour of its restart"
+        bench.wait_health(bench.port, WAIT_MAX),
+        "fennec-server did not answer within {} s of its start after the kill at minute {m}",
+        WAIT_MAX.as_secs()
     );
     let back = sh.ns();
     sh.restart_to.store(back, Ordering::SeqCst);
     sh.windows.lock().unwrap().last_mut().unwrap().2 = back;
     let ms = (back - k) / 1_000_000;
     doings.restart_ms.fetch_max(ms, Ordering::Relaxed);
+    doings.figure("start_ms", started.elapsed().as_millis().to_string());
     *longest = (*longest).max(ms);
-    eprintln!(
-        "soak: answering again {:.1} s after the kill",
-        ms as f64 / 1e3
-    );
+    say(format!(
+        "answering again {:.1} s after the kill, {:.1} s after its start",
+        ms as f64 / 1e3,
+        started.elapsed().as_secs_f64()
+    ));
+    let t = Instant::now();
+    loop {
+        if replica_ready(bench, target) {
+            sh.replica_ok.store(true, Ordering::SeqCst);
+            doings.figure("replica_back_ms", t.elapsed().as_millis().to_string());
+            break;
+        }
+        if t.elapsed() >= Duration::from_secs(o.replica_back_max) {
+            // Past its bound, which the report fails: the minute's loop
+            // looks again each minute and lets reads through once it is.
+            doings.figure("replica_back_ms", t.elapsed().as_millis().to_string());
+            sh.note(format!(
+                "the replica was not connected at change {target} within {} s of the restart at minute {m}",
+                o.replica_back_max
+            ));
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
 }
 
 // ----------------------------------------------------------------- report
@@ -3464,28 +4638,30 @@ struct Judged {
     finished: bool,
     env: Option<String>,
     verdicts: Vec<Verdict>,
-    busy: Vec<u64>,
+    /// The figures the run gives beside its verdicts: each kill's state,
+    /// the two bounds against what the run measured, the clocks, the load.
+    notes: Vec<String>,
 }
 
 pub const CRITERIA: [&str; 19] = [
     "8 hours and an end line",
     "ran its planned minutes",
     "every minute has operations from every connection",
-    "last hour's steady p99 <= 1.25x the first's",
+    "last hour's p99, steady and in compacts, <= 1.25x its schedule's",
     "file <= 2.2x live every minute",
     "primary's anonymous memory < +5% within each life",
     "replica's anonymous memory < +5% after the first hour",
-    "threads less connections within 2 of their median",
-    "descriptors less connections within 2 of their median",
+    "threads less connections within 2, a life's too",
+    "descriptors less connections within 2, a life's too",
     "no error",
     "no mismatch",
     "every stream held",
-    "the replica followed, caught up and holds the primary's rows",
+    "the replica followed, came back, caught up and holds the rows",
     "every restart within its bound",
     "the schedule's kills, compacts, backups and restores",
-    "every verify clean",
+    "every verify, backup and restore clean",
     "match and near answer as a scan does",
-    "every key read back at the end",
+    "every key read back, after each restart and at the end",
     "no server died, none OOM-killed",
 ];
 
@@ -3509,8 +4685,52 @@ fn minutes_said(broke: &[u64]) -> String {
     }
 }
 
+fn median(v: &[f64]) -> f64 {
+    let mut s = v.to_vec();
+    s.sort_by(|a, b| a.total_cmp(b));
+    s.get(s.len() / 2).copied().unwrap_or(0.0)
+}
+
+/// The doings the lines `[a, a + 59]` hold, as offsets from `a`: a
+/// minute's doings show on the next line.
+fn hour_doings(a: u64, n: u64, s: &Settings) -> Vec<(u64, Doing)> {
+    let mut out = Vec::new();
+    for i in 0..60 {
+        let m = (a + i).saturating_sub(1);
+        for d in schedule(
+            m,
+            n,
+            s.kill_every,
+            s.kill_in_compact_every,
+            s.compact_every,
+            s.backup_every,
+            s.backup_at,
+        ) {
+            out.push((i, d));
+        }
+    }
+    out
+}
+
+/// The first line of the earliest hour before the last, and apart from
+/// it, that holds the last hour's schedule -- the same kills, the same
+/// compacts in them, the same backups, at the same minutes of the hour: the
+/// hour the last is compared with, so that a backlog a restart leaves and
+/// a compact's tail weigh alike in both. Lines 61-120 of an 8-hour run.
+fn same_hour(n: u64, s: &Settings) -> Option<u64> {
+    if n < 120 {
+        return None;
+    }
+    let last = n - 59;
+    let want = hour_doings(last, n, s);
+    (1..=last - 60).find(|&a| hour_doings(a, n, s) == want)
+}
+
 /// A cell's lines as one append wrote them: run, cell, metrics.
 type Block = (String, String, Vec<(String, f64)>);
+
+/// A minute's line as the report reads it: its minute and its values.
+type Line<'a> = (u64, &'a HashMap<String, f64>);
 
 /// Judges each run in a results file's text (or the one named) by the
 /// soak's exit criterion, each attempt of a run id apart and the latest
@@ -3520,8 +4740,6 @@ fn judge(text: &str, only: Option<&str>) -> Vec<Judged> {
     type Cells = HashMap<String, HashMap<String, f64>>;
     let mut runs: Vec<String> = Vec::new();
     let mut data: HashMap<String, BTreeMap<u64, Cells>> = HashMap::new();
-    // A line without `started` is one this run wrote before it did: the
-    // cell's other lines say which attempt it is.
     // A cell's lines are appended together, one block: the block's
     // `started` says whose attempt it is.
     let mut blocks: Vec<Block> = Vec::new();
@@ -3544,11 +4762,14 @@ fn judge(text: &str, only: Option<&str>) -> Vec<Judged> {
     }
     let mut latest: HashMap<String, u64> = HashMap::new();
     for (run, cell, metrics) in blocks {
-        // The script's mark that the environment ended a run (`:env`,
-        // `ycsb mark`) is the attempt's that wrote the lines before it.
+        // The script's marks -- the environment ended a run (`:env`), its
+        // guard stopped a soak that printed nothing (`:hung`), `ycsb mark`
+        // both -- are the attempt's that wrote the lines before them.
         let started = match metrics.iter().find(|(k, _)| k == "started") {
             Some(x) => x.1 as u64,
-            None if cell.ends_with(":env") => latest.get(&run).copied().unwrap_or(0),
+            None if cell.ends_with(":env") || cell.ends_with(":hung") => {
+                latest.get(&run).copied().unwrap_or(0)
+            }
             None => 0,
         };
         latest.insert(run.clone(), started);
@@ -3570,6 +4791,22 @@ fn judge(text: &str, only: Option<&str>) -> Vec<Judged> {
         out.push(judge_run(&run, attempts.len(), cells));
     }
     out
+}
+
+/// A memory look that says something of a leak: none with a compact
+/// writing at the look (`begin_beside` clones each store), none in a
+/// minute the server or the run compacted.
+fn quiet_look(m: &HashMap<String, f64>, replica: bool) -> bool {
+    let g = |k: &str| m.get(k).copied().unwrap_or(0.0);
+    match replica {
+        true => g("r_compacting") == 0.0 && g("r_auto_compacts") == 0.0,
+        false => {
+            g("compacting") == 0.0
+                && g("auto_compacts") == 0.0
+                && g("compact_ops") == 0.0
+                && g("compact") == 0.0
+        }
+    }
 }
 
 fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String, f64>>) -> Judged {
@@ -3597,11 +4834,6 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
         .unwrap_or_default();
     let get = |m: &HashMap<String, f64>, k: &str| m.get(k).copied();
     let n = minutes.len() as u64;
-    let busy: Vec<u64> = minutes
-        .iter()
-        .filter(|(_, m)| get(m, "load1").is_some_and(|x| x >= 4.0))
-        .map(|(k, _)| *k)
-        .collect();
     let env = minutes
         .iter()
         .find(|(_, m)| get(m, "env_failed") == Some(1.0))
@@ -3630,7 +4862,7 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
         finished: end.is_some(),
         env,
         verdicts: Vec::new(),
-        busy,
+        notes: Vec::new(),
     };
     if judged.env.is_some() {
         return judged;
@@ -3642,6 +4874,8 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
             .filter_map(|(_, m)| get(m, k))
             .fold(0.0, |a, b| a + b)
     };
+    // A count the end line adds to the minutes' (what the end's read found).
+    let total = |k: &str| sum(k) + end.and_then(|m| get(m, k)).unwrap_or(0.0);
     let broke = |f: &dyn Fn(&HashMap<String, f64>) -> bool| -> Vec<u64> {
         minutes
             .iter()
@@ -3669,44 +4903,56 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
             ),
         },
     ));
-    // The dead-man: a minute nothing was answered in, or a connection
-    // that answered nothing all minute -- a worker stuck or dead.
+    // The dead-man: a minute nothing was answered in, a connection that
+    // answered nothing all minute -- a worker stuck or dead -- or a soak
+    // the script's guard stopped for printing nothing.
     let dead = broke(&|m| {
         get(m, "ops").is_none_or(|x| x == 0.0) || get(m, "idle_workers").is_none_or(|x| x > 0.0)
     });
+    let hung = find(":hung").is_some_and(|m| get(m, "hung") == Some(1.0));
     v.push((
         CRITERIA[2],
-        n > 0 && dead.is_empty(),
-        format!("{n} minutes{}", minutes_said(&dead)),
+        n > 0 && dead.is_empty() && !hung,
+        format!(
+            "{n} minutes{}{}",
+            minutes_said(&dead),
+            match hung {
+                true => format!(
+                    "; the script's guard stopped it after minute {}, silent ten minutes",
+                    minutes.last().map_or(0, |x| x.0)
+                ),
+                false => String::new(),
+            }
+        ),
     ));
-    // The steady part's hour as the run wrote it at minute 60 and at the
-    // end: the restarts' windows and the compacts' apart, so that hours
-    // with more of them compare alike.
-    let at = |k: u64| minutes.iter().rev().find(|(m, _)| *m <= k).map(|x| x.1);
-    match (
-        at(60).and_then(|m| get(m, "p99_hour")),
-        minutes.last().and_then(|(_, m)| get(m, "p99_hour")),
-    ) {
-        (Some(a), Some(b)) if a > 0.0 && n >= 120 => {
-            let over = broke(&|m| get(m, "p99_hour").is_some_and(|x| x > 1.25 * a));
-            let over: Vec<u64> = over.into_iter().filter(|k| *k > 60).collect();
+    // The last hour against the earliest one holding its schedule: the
+    // restarts' and compacts' operations apart from the steady ones, each
+    // held to the same hour's, so that neither a schedule's backlog nor a
+    // compact's tail decides the verdict.
+    let line = |k: u64| minutes.iter().find(|(m, _)| *m == k).map(|x| x.1);
+    let same = settings.and_then(|s| same_hour(n, &s));
+    let pair = |k: &str| -> Option<(f64, f64)> {
+        let a = same?;
+        Some((get(line(a + 59)?, k)?, get(minutes.last()?.1, k)?))
+    };
+    match (same, pair("p99_hour"), pair("p99_compact_hour")) {
+        (Some(a), Some((s0, s1)), Some((c0, c1))) if s0 > 0.0 => {
+            let ok = s1 <= 1.25 * s0 && (c1 <= 1.25 * c0 || c0 == 0.0 && c1 == 0.0);
             v.push((
                 CRITERIA[3],
-                b <= 1.25 * a,
+                ok,
                 format!(
-                    "first {a:.0} us, last {b:.0} us: {:.2}x{}",
-                    b / a,
-                    match over.is_empty() {
-                        true => String::new(),
-                        false => format!("; an hour past 1.25x at minutes {}", list(&over)),
-                    }
+                    "minutes {a}-{} against the last hour: steady {s0:.0} us to {s1:.0} us ({:.2}x), in compacts {c0:.0} us to {c1:.0} us ({:.2}x)",
+                    a + 59,
+                    s1 / s0,
+                    if c0 > 0.0 { c1 / c0 } else { 0.0 }
                 ),
             ));
         }
         _ => v.push((
             CRITERIA[3],
             false,
-            format!("not judged: {n} minutes, two hours needed"),
+            format!("not judged: no hour of {n} minutes before the last holds the last's schedule"),
         )),
     }
     let big = broke(&|m| match (get(m, "file"), get(m, "live")) {
@@ -3722,24 +4968,38 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
         n > 0 && big.is_empty(),
         format!("at most {worst:.2}x{}", minutes_said(&big)),
     ));
-    // The primary is killed every half hour, so a leak is looked for
-    // within each life: its fifth minute against its last.
-    let mut lives: BTreeMap<u64, Vec<(u64, f64)>> = BTreeMap::new();
+    // Each life of the primary, from its fifth line: the line's place in
+    // its life, the line and its values.
+    let mut lives: BTreeMap<u64, Vec<Line>> = BTreeMap::new();
     for (k, m) in &minutes {
-        if let (Some(life), Some(a)) = (get(m, "life"), get(m, "rss_anon")) {
-            lives.entry(life as u64).or_default().push((*k, a));
+        if let Some(life) = get(m, "life") {
+            lives.entry(life as u64).or_default().push((*k, m));
         }
     }
+    /// A life's lines from its fifth: a process just started has not
+    /// settled.
+    fn settled<'a, 'b>(xs: &'b [Line<'a>]) -> &'b [Line<'a>] {
+        &xs[xs.len().min(4)..]
+    }
+    // The primary is killed every half hour, so a leak is looked for
+    // within each life: the median of its first five quiet looks from its
+    // fifth line against the median of its last five -- one look in a
+    // compact, or a minute's noise, moves neither.
     let mut grew = Vec::new();
     let mut most = 0.0f64;
     let mut judged_lives = 0;
     for (life, xs) in &lives {
-        if xs.len() < 6 {
+        let quiet: Vec<f64> = settled(xs)
+            .iter()
+            .filter(|(_, m)| quiet_look(m, false))
+            .filter_map(|(_, m)| get(m, "rss_anon"))
+            .collect();
+        if quiet.len() < 10 {
             continue;
         }
         judged_lives += 1;
-        let (fifth, last) = (xs[4].1, xs[xs.len() - 1].1);
-        let g = last / fifth.max(1.0) - 1.0;
+        let (early, late) = (median(&quiet[..5]), median(&quiet[quiet.len() - 5..]));
+        let g = late / early.max(1.0) - 1.0;
         most = most.max(g);
         if g >= 0.05 {
             grew.push(*life);
@@ -3749,7 +5009,7 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
         CRITERIA[5],
         judged_lives > 0 && grew.is_empty(),
         format!(
-            "{judged_lives} lives of 6 minutes or more, the most {:+.1}% from its fifth minute to its last{}",
+            "{judged_lives} lives of ten quiet looks or more, the most {:+.1}% from the median of the first five to the last five's{}",
             most * 100.0,
             match grew.is_empty() {
                 true => String::new(),
@@ -3757,36 +5017,55 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
             }
         ),
     ));
-    // The replica is never killed: minute 60 against every minute after.
-    match at(60).and_then(|m| get(m, "r_rss_anon")) {
-        Some(b) if n > 60 => {
-            let over = broke(&|m| get(m, "r_rss_anon").is_some_and(|x| x >= 1.05 * b));
-            let over: Vec<u64> = over.into_iter().filter(|k| *k > 60).collect();
-            let last = minutes
-                .last()
-                .and_then(|(_, m)| get(m, "r_rss_anon"))
-                .unwrap_or(0.0);
+    // The replica is never killed: the median of its first five quiet
+    // looks from minute 60 against the median of every five after.
+    let rq: Vec<(u64, f64)> = minutes
+        .iter()
+        .filter(|(k, m)| *k >= 60 && quiet_look(m, true))
+        .filter_map(|(k, m)| Some((*k, get(m, "r_rss_anon")?)))
+        .collect();
+    match rq.len() >= 10 {
+        true => {
+            let first: Vec<f64> = rq[..5].iter().map(|x| x.1).collect();
+            let b = median(&first);
+            let mut over = Vec::new();
+            let mut most = 0.0f64;
+            for w in rq[5..].windows(5) {
+                let xs: Vec<f64> = w.iter().map(|x| x.1).collect();
+                let g = median(&xs) / b.max(1.0) - 1.0;
+                most = most.max(g);
+                if g >= 0.05 {
+                    over.push(w[4].0);
+                }
+            }
             v.push((
                 CRITERIA[6],
                 over.is_empty(),
                 format!(
-                    "{:.0} MB at minute 60, {:.0} MB at the last{}",
+                    "{:.0} MB from minute {}, the most {:+.1}% after{}",
                     b / 1048576.0,
-                    last / 1048576.0,
+                    rq[0].0,
+                    most * 100.0,
                     minutes_said(&over)
                 ),
             ));
         }
-        _ => v.push((
+        false => v.push((
             CRITERIA[6],
             false,
-            format!("not judged: {n} minutes, no hour after the first"),
+            format!(
+                "not judged: {} quiet looks after the first hour, ten needed",
+                rq.len()
+            ),
         )),
     }
     // Threads and descriptors less the connections open as they were
     // looked at: each connection is a thread and a socket, and the
     // harness's own -- its workers', subscriptions', the scrape's -- move
-    // with its doings.
+    // with its doings. Each server within 2 of its run's median every
+    // minute; and the primary, which starts again every half hour, within
+    // 2 from the median of a life's first five looks to its last five --
+    // a leak of a few a life never leaves a run-wide band.
     for (c, key, conn, rkey, rconn) in [
         (
             CRITERIA[7],
@@ -3804,30 +5083,61 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
                 .iter()
                 .filter_map(|(m, x)| Some((*m, get(x, k)? - get(x, cn)?)))
                 .collect();
-            let mut sorted: Vec<f64> = net.iter().map(|x| x.1).collect();
-            sorted.sort_by(|a, b| a.total_cmp(b));
-            let Some(&mid) = sorted.get(sorted.len() / 2) else {
+            let sorted: Vec<f64> = net.iter().map(|x| x.1).collect();
+            if sorted.is_empty() {
                 ok = false;
                 write!(detail, "{who}: none; ").unwrap();
                 continue;
-            };
+            }
+            let mid = median(&sorted);
             let off: Vec<u64> = net
                 .iter()
                 .filter(|x| (x.1 - mid).abs() > 2.0)
                 .map(|x| x.0)
                 .collect();
             ok &= off.is_empty();
+            let (lo, hi) = sorted
+                .iter()
+                .fold((f64::MAX, f64::MIN), |(a, b), x| (a.min(*x), b.max(*x)));
             write!(
                 detail,
-                "{who}: median {mid:.0}, {:.0} to {:.0}{}; ",
-                sorted[0],
-                sorted[sorted.len() - 1],
+                "{who}: median {mid:.0}, {lo:.0} to {hi:.0}{}",
                 minutes_said(&off)
             )
             .unwrap();
+            if who == "the primary" {
+                let mut moved = Vec::new();
+                let mut most = 0.0f64;
+                for (life, xs) in &lives {
+                    let net: Vec<f64> = settled(xs)
+                        .iter()
+                        .filter_map(|(_, m)| Some(get(m, k)? - get(m, cn)?))
+                        .collect();
+                    if net.len() < 10 {
+                        continue;
+                    }
+                    let d = median(&net[net.len() - 5..]) - median(&net[..5]);
+                    most = most.max(d.abs());
+                    if d.abs() > 2.0 {
+                        moved.push(*life);
+                    }
+                }
+                ok &= moved.is_empty();
+                write!(
+                    detail,
+                    ", within a life {most:.0} at most{}",
+                    match moved.is_empty() {
+                        true => String::new(),
+                        false => format!(" (lives {})", list(&moved)),
+                    }
+                )
+                .unwrap();
+            }
+            detail.push_str("; ");
         }
         v.push((c, ok, detail.trim_end_matches("; ").to_string()));
     }
+    let steps = broke(&|m| get(m, "clock_step") == Some(1.0));
     for (c, key) in [(CRITERIA[9], "errors"), (CRITERIA[10], "mismatches")] {
         let total = sum(key);
         let at_end = end
@@ -3838,11 +5148,15 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
             c,
             b.is_empty() && at_end == 0.0,
             format!(
-                "{:.0}{}{}",
+                "{:.0}{}{}{}",
                 total + at_end,
                 minutes_said(&b),
                 match at_end > 0.0 {
                     true => format!("; {at_end:.0} found at the end"),
+                    false => String::new(),
+                },
+                match key == "mismatches" && !steps.is_empty() {
+                    true => format!("; the VM's clock stepped at minutes {}", list(&steps)),
                     false => String::new(),
                 }
             ),
@@ -3878,6 +5192,12 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
     let lagging = broke(&|m| {
         get(m, "r_connected") != Some(1.0) || get(m, "lag_s").is_none_or(|x| x < 0.0 || x > lag_max)
     });
+    let back_max = settings.map_or(0.0, |s| s.replica_back_max as f64 * 1e3);
+    let late_back = broke(&|m| get(m, "replica_back_ms").is_some_and(|x| x > back_max));
+    let back_most = minutes
+        .iter()
+        .filter_map(|(_, m)| get(m, "replica_back_ms"))
+        .fold(0.0f64, f64::max);
     let follow = start.and_then(|m| Some((get(m, "follow_s")?, get(m, "follow_max")?)));
     let catchup = end.and_then(|m| get(m, "catchup_s"));
     let catchup_max = settings.map_or(0.0, |s| s.catchup_max as f64);
@@ -3885,13 +5205,20 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
     v.push((
         CRITERIA[12],
         lagging.is_empty()
+            && late_back.is_empty()
             && follow.is_some_and(|(s, max)| s >= 0.0 && s <= max)
             && catchup.is_some_and(|s| s >= 0.0 && s <= catchup_max)
             && differs == Some(0.0),
         format!(
-            "connected and within {lag_max:.0} s of the primary{}; followed in {}; caught up at the end in {}; {}",
+            "connected and within {lag_max:.0} s of the primary{}; followed in {}; back after a restart within {:.1} s at most, the bound {:.0} s{}; caught up at the end in {}; {}",
             minutes_said(&lagging),
             follow.map_or("?".into(), |(s, _)| format!("{s:.0} s")),
+            back_most / 1e3,
+            back_max / 1e3,
+            match late_back.is_empty() {
+                true => String::new(),
+                false => format!(" (past it at minutes {})", list(&late_back)),
+            },
             catchup.map_or("? (no end line)".into(), |s| format!("{s:.0} s of {catchup_max:.0}")),
             match differs {
                 Some(0.0) => "the same rows",
@@ -3901,37 +5228,69 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
         ),
     ));
     // A restart's own time is bounded, and so is the wait of an operation
-    // due in it: the second announced before the kill, the restart, and a
-    // request's time after it -- one held longer was held by something
-    // else than the restart.
+    // due in it: no longer than the run's longest restart and two seconds
+    // -- one held longer was held by something else than the restart.
     let restart_max = settings.map_or(0, |s| s.restart_max) as f64;
     let slow = broke(&|m| get(m, "restart_ms").is_some_and(|x| x > restart_max * 1e3));
     let p99r = end.and_then(|m| get(m, "p99_restart"));
+    let longest = end
+        .and_then(|m| get(m, "restart_ms_max"))
+        .unwrap_or(0.0)
+        .max(
+            minutes
+                .iter()
+                .filter_map(|(_, m)| get(m, "restart_ms"))
+                .fold(0.0, f64::max),
+        );
+    let parts = |k: &str| -> Vec<f64> { minutes.iter().filter_map(|(_, m)| get(m, k)).collect() };
+    let starts = parts("start_ms");
+    let start_most = starts.iter().copied().fold(0.0f64, f64::max);
     v.push((
         CRITERIA[13],
-        settings.is_some() && slow.is_empty() && p99r.is_some_and(|x| x <= (restart_max + 2.0) * 1e6),
+        settings.is_some()
+            && slow.is_empty()
+            && p99r.is_some_and(|x| x <= longest * 1e3 + 2e6),
         format!(
-            "the longest {:.1} s of {restart_max:.0}{}; p99 of the operations due in one {}; {:.0} met a restart",
-            end.and_then(|m| get(m, "restart_ms_max")).unwrap_or(0.0) / 1e3,
+            "the longest {:.1} s of {restart_max:.0}{}; the server's own part, docker start to answering, {:.1} s at the median and {:.1} s at most; p99 of the operations due in one {}; {:.0} met a restart",
+            longest / 1e3,
             minutes_said(&slow),
-            p99r.map_or("? (no end line)".into(), |x| format!("{:.1} s of {:.0}", x / 1e6, restart_max + 2.0)),
+            median(&starts) / 1e3,
+            start_most / 1e3,
+            p99r.map_or("? (no end line)".into(), |x| format!(
+                "{:.1} s of {:.1}",
+                x / 1e6,
+                longest / 1e3 + 2.0
+            )),
             sum("down")
         ),
     ));
     let (kills, in_compact, compacts, backups) = settings.map_or((0, 0, 0, 0), |s| owed(n, &s));
     let got = |k: &str| sum(k) as u64;
+    let differ = total("backup_differs") as u64;
     let mut short = Vec::new();
     for (what, have, want, exact) in [
         ("kills", got("kill"), kills, true),
         ("verifies", got("verify"), kills, true),
-        ("compacts", got("compact"), compacts, false),
+        // One the server's own compact turned away was compacted all the
+        // same.
         (
-            "compacts a kill cut",
-            got("compact_killed") + got("compact"),
-            in_compact + compacts,
+            "compacts",
+            got("compact") + got("compact_busy"),
+            compacts,
             false,
         ),
-        ("backups", got("backup"), backups, false),
+        (
+            "kills that cut a compact",
+            got("compact_killed"),
+            in_compact,
+            false,
+        ),
+        (
+            "backups",
+            got("backup").saturating_sub(differ),
+            backups,
+            false,
+        ),
         ("restores", got("restore"), backups, false),
     ] {
         if (exact && have != want) || have < want {
@@ -3943,14 +5302,15 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
         settings.is_some() && short.is_empty(),
         match short.is_empty() {
             true => format!(
-                "{kills} kills ({in_compact} in a compact) and verifies, {} compacts, {} backups and restores",
-                got("compact"),
+                "{kills} kills ({in_compact} cutting a compact) and verifies, {} compacts ({} turned away by the server's own), {} backups and restores",
+                got("compact") + got("compact_busy"),
+                got("compact_busy"),
                 got("backup")
             ),
             false => short.join(", "),
         },
     ));
-    let bad = sum("verify_failed") + sum("backup_failed") + sum("compact_failed");
+    let bad = sum("verify_failed") + sum("backup_failed") + sum("compact_failed") + differ as f64;
     let end_bad = end.map_or(1.0, |m| {
         get(m, "verify_failed").unwrap_or(1.0) + get(m, "replica_verify_failed").unwrap_or(1.0)
     });
@@ -3958,9 +5318,13 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
         CRITERIA[15],
         bad == 0.0 && end_bad == 0.0,
         format!(
-            "{:.0} at restarts, {:.0} restores, {bad:.0} failed (verify, backup or compact); at the end {}",
+            "{:.0} at restarts, {:.0} restores; {:.0} verifies failed, {:.0} backups ({:.0} of them stale, {differ} holding a record no write left), {:.0} compacts; at the end {}",
             sum("verify"),
             sum("restore"),
+            sum("verify_failed"),
+            sum("backup_failed") + differ as f64,
+            sum("backup_stale"),
+            sum("compact_failed"),
             match end {
                 None => "none (not finished)".to_string(),
                 Some(m) => format!(
@@ -3987,16 +5351,21 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
         ),
     ));
     let swept = end.and_then(|m| Some((get(m, "swept")?, get(m, "keys")?)));
+    let (owed_back, back, sweeps_failed) = (sum("sweep_owed"), sum("swept"), sum("sweep_failed"));
     v.push((
         CRITERIA[17],
-        swept.is_some_and(|(s, k)| s >= k && k > 0.0),
-        match swept {
-            None => "no end line".into(),
-            Some((s, k)) => format!(
-                "{s:.0} of {k:.0} keys at the end, and {:.0} read back after the restarts",
-                sum("swept")
-            ),
-        },
+        swept.is_some_and(|(s, k)| s >= k && k > 0.0) && back >= owed_back && sweeps_failed == 0.0,
+        format!(
+            "{}; after the restarts {back:.0} of {owed_back:.0} keys read back{}",
+            match swept {
+                None => "no end line".to_string(),
+                Some((s, k)) => format!("{s:.0} of {k:.0} keys at the end"),
+            },
+            match sweeps_failed > 0.0 {
+                true => format!(", {sweeps_failed:.0} sweeps FAILED to read"),
+                false => String::new(),
+            }
+        ),
     ));
     let gone = broke(&|m| {
         get(m, "died").is_some_and(|x| x > 0.0)
@@ -4014,7 +5383,160 @@ fn judge_run(run: &str, attempts: usize, cells: &HashMap<String, HashMap<String,
             minutes_said(&gone)
         ),
     ));
+    judged.notes = notes(&minutes, start, end, settings);
     judged
+}
+
+/// The figures a run gives beside its verdicts, a line each: each kill's
+/// state, the two bounds set without a measured run against what this
+/// one measured -- whether it supports each, or what it suggests -- the
+/// VM's clock, and what else used the machine.
+fn notes(
+    minutes: &[(u64, &HashMap<String, f64>)],
+    start: Option<&HashMap<String, f64>>,
+    end: Option<&HashMap<String, f64>>,
+    settings: Option<Settings>,
+) -> Vec<String> {
+    let get = |m: &HashMap<String, f64>, k: &str| m.get(k).copied();
+    let mut out = Vec::new();
+    // A kill's figures are on the line after its minute.
+    let kills: Vec<String> = minutes
+        .iter()
+        .filter(|(_, m)| get(m, "kill").is_some_and(|x| x > 0.0))
+        .map(|(k, m)| {
+            format!(
+                "minute {} ({}, {})",
+                k - 1,
+                match get(m, "kill_compacting") {
+                    Some(1.0) => "a compact writing",
+                    Some(_) => "no compact writing",
+                    None => "compact unknown",
+                },
+                match get(m, "kill_sync_ms") {
+                    Some(x) if x > 0.0 => format!("an fsync {x:.0} ms in flight"),
+                    Some(0.0) => "no fsync in flight".into(),
+                    _ => "the syncer not seen".into(),
+                }
+            )
+        })
+        .collect();
+    if !kills.is_empty() {
+        out.push(format!("the kills: {}", kills.join("; ")));
+    }
+    let Some(s) = settings else {
+        return out;
+    };
+    let lost: f64 = minutes
+        .iter()
+        .filter_map(|(_, m)| get(m, "lost_writes"))
+        .sum::<f64>()
+        + end.and_then(|m| get(m, "lost_writes")).unwrap_or(0.0);
+    let lost_most = minutes
+        .iter()
+        .map(|x| x.1)
+        .chain(end)
+        .filter_map(|m| get(m, "lost_ms_max"))
+        .fold(f64::MIN, f64::max);
+    out.push(match lost > 0.0 {
+        false => format!(
+            "what a kill may take, --loss-ms {}: no write a read showed gone with a kill -- the run says nothing of the bound",
+            s.loss_ms
+        ),
+        true if lost_most <= s.loss_ms as f64 => format!(
+            "what a kill may take, --loss-ms {}: {lost:.0} writes a read showed gone with a kill, the earliest answered {lost_most:.0} ms before it -- the run supports the bound",
+            s.loss_ms
+        ),
+        true => format!(
+            "what a kill may take, --loss-ms {}: {lost:.0} writes a read showed gone with a kill, the earliest answered {lost_most:.0} ms before it, past the bound -- the run suggests --loss-ms {}, or a loss the server owes",
+            s.loss_ms,
+            (lost_most / 50.0).ceil() as u64 * 50
+        ),
+    });
+    let restarts: Vec<f64> = minutes
+        .iter()
+        .filter_map(|(_, m)| get(m, "restart_ms"))
+        .filter(|x| *x > 0.0)
+        .collect();
+    if !restarts.is_empty() {
+        let most = restarts.iter().copied().fold(0.0f64, f64::max) / 1e3;
+        let part = |k: &str| -> f64 {
+            minutes
+                .iter()
+                .filter_map(|(_, m)| get(m, k))
+                .fold(0.0f64, f64::max)
+                / 1e3
+        };
+        let starts: Vec<f64> = minutes
+            .iter()
+            .filter_map(|(_, m)| get(m, "start_ms"))
+            .collect();
+        let twice = 2.0 * most;
+        out.push(format!(
+            "a restart, --restart-max {}: the longest {most:.1} s -- docker's kill and wait {:.1} s at most, the verify {:.1} s, the server's own part (docker start to answering) {:.1} s at the median and {:.1} s at most -- {}",
+            s.restart_max,
+            part("kill_ms"),
+            part("verify_ms"),
+            median(&starts) / 1e3,
+            part("start_ms"),
+            match twice <= s.restart_max as f64 {
+                true => format!("the run supports the bound (twice the longest is {twice:.0} s)"),
+                false => format!(
+                    "the run suggests --restart-max {} (twice the longest)",
+                    (twice / 10.0).ceil() as u64 * 10
+                ),
+            }
+        ));
+    }
+    let offs: Vec<f64> = minutes
+        .iter()
+        .filter_map(|(_, m)| get(m, "clock_off_ms"))
+        .collect();
+    if !offs.is_empty() {
+        let steps: Vec<u64> = minutes
+            .iter()
+            .filter(|(_, m)| get(m, "clock_step") == Some(1.0))
+            .map(|(k, _)| *k)
+            .collect();
+        let (lo, hi) = offs
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(a, b), x| (a.min(*x), b.max(*x)));
+        out.push(format!(
+            "the server's clock against this host's: {lo:.0} to {hi:.0} ms over the run; {}",
+            match steps.is_empty() {
+                true => format!("no step past {CLOCK_STEP_MS:.0} ms from one minute to the next"),
+                false => format!(
+                    "a step past {CLOCK_STEP_MS:.0} ms at minutes {} -- a session's verdict near one is the clock's",
+                    list(&steps)
+                ),
+            }
+        ));
+    }
+    let busy = |k: &str| -> Vec<u64> {
+        minutes
+            .iter()
+            .filter(|(_, m)| get(m, k).is_some_and(|x| x >= 1.0))
+            .map(|(k, _)| *k)
+            .collect()
+    };
+    let (host, vm) = (busy("others_host"), busy("others_vm"));
+    out.push(format!(
+        "what else used the machine: the load {} before the run; other processes took a core or more in {} minutes on this host{} and in {} in Docker's VM beside the two servers{}",
+        start
+            .and_then(|m| get(m, "load_before"))
+            .filter(|x| *x >= 0.0)
+            .map_or("unknown".into(), |x| format!("{x:.1}")),
+        host.len(),
+        match host.is_empty() {
+            true => String::new(),
+            false => format!(" ({})", list(&host)),
+        },
+        vm.len(),
+        match vm.is_empty() {
+            true => String::new(),
+            false => format!(" ({})", list(&vm)),
+        }
+    ));
+    out
 }
 
 /// Prints each run's verdicts: 0 when every run passed, 1 when one failed,
@@ -4051,7 +5573,7 @@ fn report(path: &Path, only: Option<&str>) -> i32 {
         }
         for (what, ok, detail) in &j.verdicts {
             println!(
-                "  {:<62} {:<4} {detail}",
+                "  {:<66} {:<4} {detail}",
                 what,
                 if *ok { "PASS" } else { "FAIL" }
             );
@@ -4059,12 +5581,8 @@ fn report(path: &Path, only: Option<&str>) -> i32 {
                 code = code.max(1);
             }
         }
-        if !j.busy.is_empty() {
-            println!(
-                "  the host's load was 4 or more in {} minutes: {}",
-                j.busy.len(),
-                list(&j.busy)
-            );
+        for n in &j.notes {
+            println!("  {n}");
         }
     }
     code
@@ -4085,6 +5603,7 @@ mod tests {
             e,
             found: true,
             got,
+            replica: false,
         }
     }
 
@@ -4095,6 +5614,7 @@ mod tests {
             e,
             found: false,
             got: [0; FIELDS],
+            replica: false,
         }
     }
 
@@ -4347,7 +5867,9 @@ mod tests {
             compact_every: 20,
             backup_every: 120,
             backup_at: 50,
+            loss_ms: 650,
             restart_max: 120,
+            replica_back_max: 60,
             lag_max: 5,
             catchup_max: 300,
             recall_min: 0.925,
@@ -4391,7 +5913,9 @@ mod tests {
             compact_every: 20,
             backup_every: 120,
             backup_at: 50,
+            loss_ms: 650,
             restart_max: 120,
+            replica_back_max: 60,
             lag_max: 5,
             catchup_max: 300,
             recall_min: 0.925,
@@ -4413,6 +5937,7 @@ mod tests {
         start.insert("started", 1.0);
         start.insert("follow_s", 30.0);
         start.insert("follow_max", 1800.0);
+        start.insert("load_before", 1.0);
         tweak(0, &mut start);
         line("250:50:start", &start);
         let mut life = 0.0;
@@ -4431,6 +5956,12 @@ mod tests {
                         x.insert("kill", 1.0);
                         x.insert("verify", 1.0);
                         x.insert("restart_ms", 20_000.0);
+                        x.insert("kill_ms", 400.0);
+                        x.insert("verify_ms", 9_000.0);
+                        x.insert("start_ms", 6_000.0);
+                        x.insert("kill_sync_ms", 0.0);
+                        x.insert("replica_back_ms", 3_000.0);
+                        x.insert("kill_compacting", *in_compact as u8 as f64);
                         if *in_compact {
                             x.insert("compact_killed", 1.0);
                         }
@@ -4444,6 +5975,7 @@ mod tests {
                 ("ops", 60_000.0),
                 ("idle_workers", 0.0),
                 ("p99_hour", 2_000.0),
+                ("p99_compact_hour", 5_000.0),
                 ("file", 2.0e9),
                 ("live", 1.1e9),
                 ("rss_anon", 100e6),
@@ -4471,6 +6003,11 @@ mod tests {
                 ("exact_differs", 0.0),
                 ("recall_sum", 2.97),
                 ("load1", 1.0),
+                ("others_host", 0.2),
+                ("others_vm", 0.1),
+                ("clock_off_ms", 3.0),
+                ("clock_rtt_ms", 2.0),
+                ("clock_step", 0.0),
             ] {
                 x.entry(k).or_insert(val);
             }
@@ -4510,11 +6047,39 @@ mod tests {
     fn the_report_passes_a_good_run_and_fails_each_criterion_alone() {
         let none: &dyn Fn(u64, &mut HashMap<&'static str, f64>) = &|_, _| {};
         assert_eq!(failing(&synthetic(480, none)), Vec::<&str>::new());
-        // Two hours, all else held: only the eight hours fail -- what the
-        // first run's report must show.
-        assert_eq!(failing(&synthetic(120, none)), vec![CRITERIA[0]]);
+        // Two hours, all else held: the eight hours fail, and the last
+        // hour's tail is not judged -- no hour before it holds its schedule
+        // -- what the dry run's report must show.
+        assert_eq!(
+            failing(&synthetic(120, none)),
+            vec![CRITERIA[0], CRITERIA[3]]
+        );
+        // The hour the last is held to: lines 61-120 of 480, the same kills
+        // (a plain one, one in a compact) and compacts at the same minutes.
+        let s = Settings::read(
+            &synthetic(480, none)
+                .lines()
+                .filter(|l| l.contains(":start\t"))
+                .map(|l| {
+                    let f: Vec<&str> = l.split('\t').collect();
+                    (f[6].to_string(), f[7].parse().unwrap())
+                })
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(same_hour(480, &s), Some(61));
+        assert_eq!(same_hour(120, &s), None);
         type Tweak = Box<dyn Fn(u64, &mut HashMap<&'static str, f64>)>;
         let cases: Vec<(&str, Tweak, Vec<&str>)> = vec![
+            (
+                "a planned run of ten hours that ran eight",
+                Box::new(|m, x| {
+                    if m == 0 {
+                        x.insert("minutes", 600.0);
+                    }
+                }),
+                vec![CRITERIA[1]],
+            ),
             (
                 "a minute with no operations",
                 Box::new(|m, x| {
@@ -4538,6 +6103,15 @@ mod tests {
                 Box::new(|m, x| {
                     if m > 420 && m < u64::MAX {
                         x.insert("p99_hour", 2_600.0);
+                    }
+                }),
+                vec![CRITERIA[3]],
+            ),
+            (
+                "the compacts' tail drifting",
+                Box::new(|m, x| {
+                    if m > 420 && m < u64::MAX {
+                        x.insert("p99_compact_hour", 7_000.0);
                     }
                 }),
                 vec![CRITERIA[3]],
@@ -4574,6 +6148,15 @@ mod tests {
                 Box::new(|m, x| {
                     if m > 0 && m < u64::MAX {
                         x.insert("threads", 140.0 + (m / 60) as f64);
+                    }
+                }),
+                vec![CRITERIA[7]],
+            ),
+            (
+                "a thread more every 8 minutes of each life, given back at each restart",
+                Box::new(|m, x| {
+                    if m > 0 && m < u64::MAX {
+                        x.insert("threads", 140.0 + ((m - 1) % 30 / 8) as f64);
                     }
                 }),
                 vec![CRITERIA[7]],
@@ -4651,6 +6234,15 @@ mod tests {
                 vec![CRITERIA[12]],
             ),
             (
+                "the replica slow to come back after a restart",
+                Box::new(|m, x| {
+                    if m == 61 {
+                        x.insert("replica_back_ms", 90_000.0);
+                    }
+                }),
+                vec![CRITERIA[12]],
+            ),
+            (
                 "a restart too long",
                 Box::new(|m, x| {
                     if m == 91 {
@@ -4676,6 +6268,36 @@ mod tests {
                     }
                 }),
                 vec![CRITERIA[14]],
+            ),
+            (
+                "a kill that cut no compact",
+                Box::new(|m, x| {
+                    if m == 91 {
+                        x.remove("compact_killed");
+                    }
+                }),
+                vec![CRITERIA[14]],
+            ),
+            (
+                "a stale backup",
+                Box::new(|m, x| {
+                    if m == 51 {
+                        x.remove("backup");
+                        x.remove("restore");
+                        x.insert("backup_failed", 1.0);
+                        x.insert("backup_stale", 1.0);
+                    }
+                }),
+                vec![CRITERIA[14], CRITERIA[15]],
+            ),
+            (
+                "a backup whose restored records are not as written",
+                Box::new(|m, x| {
+                    if m == 53 {
+                        x.insert("backup_differs", 1.0);
+                    }
+                }),
+                vec![CRITERIA[14], CRITERIA[15]],
             ),
             (
                 "a verify that failed",
@@ -4714,6 +6336,16 @@ mod tests {
                 vec![CRITERIA[17]],
             ),
             (
+                "a restart's sweep that could not read",
+                Box::new(|m, x| {
+                    if m == 32 {
+                        x.insert("sweep_owed", 100.0);
+                        x.insert("sweep_failed", 1.0);
+                    }
+                }),
+                vec![CRITERIA[17]],
+            ),
+            (
                 "an OOM kill",
                 Box::new(|m, x| {
                     if m == 77 {
@@ -4726,6 +6358,100 @@ mod tests {
         for (name, tweak, want) in cases {
             assert_eq!(failing(&synthetic(480, &*tweak)), want, "{name}");
         }
+        // What a right server does and the report must pass.
+        let passes: Vec<(&str, Tweak)> = vec![
+            (
+                // The open loop's backlog after each restart in the hour's
+                // tail: two kills an hour cost more than one, and the last
+                // hour has two, the first one.
+                "a tail that follows the schedule's kills",
+                Box::new(|m, x| {
+                    if m > 0 && m < u64::MAX {
+                        let kills = (m.saturating_sub(60)..m)
+                            .filter(|k| *k > 0 && k % 30 == 0)
+                            .count();
+                        x.insert("p99_hour", 2_000.0 + 1_000.0 * kills as f64);
+                    }
+                }),
+            ),
+            (
+                "a compact turned away while the server's own wrote the file",
+                Box::new(|m, x| {
+                    if m == 41 {
+                        x.remove("compact");
+                        x.insert("compact_busy", 1.0);
+                    }
+                }),
+            ),
+            (
+                "a look at the primary in a compact, and one look apart",
+                Box::new(|m, x| {
+                    if m == 60 {
+                        x.insert("rss_anon", 108e6);
+                        x.insert("compacting", 1.0);
+                    }
+                    if m == 90 {
+                        x.insert("rss_anon", 108e6);
+                    }
+                }),
+            ),
+            (
+                "a look at the replica in its own compact",
+                Box::new(|m, x| {
+                    if m == 200 {
+                        x.insert("r_rss_anon", 98e6);
+                        x.insert("r_compacting", 1.0);
+                    }
+                }),
+            ),
+            (
+                "writes a kill took within the bound",
+                Box::new(|m, x| {
+                    if m == 31 {
+                        x.insert("lost_writes", 3.0);
+                        x.insert("lost_ms_max", 412.0);
+                    }
+                }),
+            ),
+        ];
+        for (name, tweak) in passes {
+            assert_eq!(
+                failing(&synthetic(480, &*tweak)),
+                Vec::<&str>::new(),
+                "{name}"
+            );
+        }
+        // The rule the first round had: the first hour against the last
+        // fails the right server whose tail follows its schedule.
+        let text = synthetic(480, &|m, x| {
+            if m > 0 && m < u64::MAX {
+                let kills = (m.saturating_sub(60)..m)
+                    .filter(|k| *k > 0 && k % 30 == 0)
+                    .count();
+                x.insert("p99_hour", 2_000.0 + 1_000.0 * kills as f64);
+            }
+        });
+        let first = text
+            .lines()
+            .find(|l| l.contains(":m0060\tp99_hour\t"))
+            .and_then(|l| l.rsplit('\t').next()?.parse::<f64>().ok())
+            .unwrap();
+        assert_eq!(first, 3_000.0);
+        // A soak its script's guard stopped as silent: the dead-man.
+        let hung = format!(
+            "{}t1\tc\tmac\t2026-11-15\tsoak\t250:50:hung\thung\t1\n",
+            synthetic(480, none)
+                .lines()
+                .filter(|l| l.split('\t').nth(5).is_some_and(|c| c < "250:50:m0101"))
+                .map(|l| format!("{l}\n"))
+                .collect::<String>()
+        );
+        let f = failing(&hung);
+        assert!(f.contains(&CRITERIA[2]), "{f:?}");
+        let j = judge(&hung, None);
+        assert!(j[0].verdicts[2]
+            .2
+            .contains("guard stopped it after minute 100"));
         // A run cut short: no end line, the minutes it had.
         let text = synthetic(480, none);
         let cut: String = text
@@ -4912,5 +6638,377 @@ mod tests {
             &[Value::List(vec![Value::Int(5), Value::Int(6)])],
         );
         assert_eq!(ids(&r), vec![5]);
+        // The digest's pages, in id order whatever a compact did.
+        let r = run(
+            &mut db,
+            "get usertable where id >= $1 and id < $2 order id",
+            &[Value::Int(1), Value::Int(10)],
+        );
+        assert_eq!(ids(&r), vec![5]);
+        // The clock's probe answers the server's `now()` in ms.
+        let r = run(&mut db, CLOCK_PROBE, &[]);
+        let rows = r.rows().unwrap();
+        let t = rows.columns.iter().position(|c| c == "t").unwrap();
+        match rows.rows[0].values[t] {
+            Value::Int(ms) => assert!(ms > 1_700_000_000_000, "{ms}"),
+            ref other => panic!("the clock's probe answered {other:?}"),
+        }
+    }
+
+    /// A server answering each request with `answer(path, body)`, a
+    /// connection at a time, until the test binary ends.
+    fn fake(answer: impl Fn(&str, &str) -> (u16, String) + Send + 'static) -> String {
+        use std::io::Read;
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            for c in l.incoming() {
+                let Ok(c) = c else { break };
+                let mut r = BufReader::new(c.try_clone().unwrap());
+                let mut w = c;
+                loop {
+                    let mut line = String::new();
+                    if r.read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
+                    let mut len = 0;
+                    loop {
+                        let mut h = String::new();
+                        if r.read_line(&mut h).unwrap_or(0) == 0 {
+                            break;
+                        }
+                        let h = h.trim_end().to_ascii_lowercase();
+                        if h.is_empty() {
+                            break;
+                        }
+                        if let Some(v) = h.strip_prefix("content-length:") {
+                            len = v.trim().parse().unwrap();
+                        }
+                    }
+                    let mut body = vec![0; len];
+                    if r.read_exact(&mut body).is_err() {
+                        break;
+                    }
+                    let (status, out) = answer(&path, &String::from_utf8_lossy(&body));
+                    let _ = write!(
+                        w,
+                        "HTTP/1.1 {status} OK\r\nContent-Length: {}\r\n\r\n{out}",
+                        out.len()
+                    );
+                }
+            }
+        });
+        addr
+    }
+
+    fn opts() -> Opts {
+        Opts::parse(&["--sync".into(), "250".into(), "--rate".into(), "100".into()])
+    }
+
+    #[test]
+    fn a_doc_write_is_left_out_of_the_sample_from_before_it_is_sent() {
+        let seen = Arc::new(AtomicBool::new(false));
+        let shared: Arc<Mutex<Option<Arc<Shared>>>> = Arc::new(Mutex::new(None));
+        let (cell, flag) = (Arc::clone(&shared), Arc::clone(&seen));
+        let addr = fake(move |_, body| {
+            if body.contains("set docs") {
+                let sh = cell.lock().unwrap().clone().unwrap();
+                // The server has the write: the sample must leave it out.
+                flag.store(written_docs(&sh, 0).contains(&7), Ordering::SeqCst);
+            }
+            (200, "{\"affected\":1}".into())
+        });
+        let sh = Arc::new(Shared::new(&opts(), addr.clone(), addr, &[]));
+        *shared.lock().unwrap() = Some(Arc::clone(&sh));
+        let mut w = Worker {
+            sh: &sh,
+            slot: &sh.slots[0],
+            c: None,
+            rc: None,
+            rng: Rng::new(1),
+        };
+        assert!(w.doc_write(7, "7,\"w1\",[0.5]"));
+        assert!(
+            seen.load(Ordering::SeqCst),
+            "the doc was not in the sample's leave-out while its write was at the server"
+        );
+        assert!(sh
+            .doc_writes
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|x| x.2 != u64::MAX));
+    }
+
+    #[test]
+    fn a_read_through_the_replica_is_sent_after_every_write_answered_before_it_began() {
+        let sh = Shared::new(&opts(), "127.0.0.1:1".into(), "127.0.0.1:1".into(), &[]);
+        sh.max_seq.store(41, Ordering::SeqCst);
+        let mut write = (0, 0);
+        let (s, after) = sh.sent_after(|| {
+            let q = sh.max_seq.load(Ordering::SeqCst);
+            // A write answered just as the change is read: its change
+            // noted, then its end taken.
+            sh.max_seq.fetch_max(42, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(1));
+            write = (42, sh.ns());
+            q
+        });
+        assert!(
+            write.1 >= s || after >= write.0,
+            "a write answered before the read began ({} < {s}) is past the change it was sent after ({after})",
+            write.1
+        );
+    }
+
+    fn kit(replica_port: u16) -> Kit {
+        Kit {
+            name: "t".into(),
+            image: String::new(),
+            tools: String::new(),
+            memory: String::new(),
+            sync: "250".into(),
+            token: "x".into(),
+            port: 1,
+            replica_port,
+            keep: Arc::new(AtomicBool::new(false)),
+            kept: None,
+        }
+    }
+
+    #[test]
+    fn the_replica_is_read_again_once_connected_and_past_the_newest_change() {
+        let status = Arc::new(Mutex::new(String::new()));
+        let s2 = Arc::clone(&status);
+        let addr = fake(move |path, _| match path {
+            "/_replication/status" => (200, s2.lock().unwrap().clone()),
+            _ => (404, String::new()),
+        });
+        let k = kit(addr.rsplit(':').next().unwrap().parse().unwrap());
+        let say = |seq: u64, connected: bool| {
+            *status.lock().unwrap() = format!(
+                "{{\"role\":\"replica\",\"seq\":{seq},\"history\":\"0\",\"primary\":\"x\",\"connected\":{connected},\"primary_durable\":{seq},\"behind\":0}}"
+            );
+        };
+        say(41, true);
+        assert!(!replica_ready(&k, 42), "short of the newest change");
+        say(42, false);
+        assert!(!replica_ready(&k, 42), "not connected");
+        say(42, true);
+        assert!(replica_ready(&k, 42));
+    }
+
+    #[test]
+    fn an_operation_is_the_restarts_until_its_worker_is_back_on_schedule() {
+        let mut owed = None;
+        let (r, none) = ((100, 200), (u64::MAX, u64::MAX));
+        assert_eq!(class(150, false, r, none, &mut owed), Class::Restart);
+        // Due after the server answered again, its worker still behind
+        // with the backlog the restart left: the restart's.
+        assert_eq!(class(210, false, r, none, &mut owed), Class::Restart);
+        assert_eq!(class(230, false, r, none, &mut owed), Class::Restart);
+        // Back on its schedule: steady from there.
+        assert_eq!(class(240, true, r, none, &mut owed), Class::Steady);
+        assert_eq!(class(250, false, r, none, &mut owed), Class::Steady);
+        // A compact's alike.
+        let c = (300, 400);
+        assert_eq!(class(350, true, r, c, &mut owed), Class::Compact);
+        assert_eq!(class(410, false, r, c, &mut owed), Class::Compact);
+        assert_eq!(class(420, true, r, c, &mut owed), Class::Steady);
+    }
+
+    #[test]
+    fn a_session_is_held_to_its_time_within_a_second() {
+        let o = opts();
+        assert_eq!(o.slack, 1);
+        let s = 1_000_000_000_000;
+        let mut c = Checker::new(
+            100,
+            kills(),
+            o.ttl * 1_000_000_000,
+            o.slack * 1_000_000_000,
+            &[],
+        );
+        c.take(vec![Ev::SessionPut {
+            id: 1,
+            s,
+            e: s + 10_000_000,
+            unanswered: false,
+            seq: None,
+        }]);
+        // Found two seconds past its time: the clocks' drift is a step a
+        // minute's probe would mark, not five seconds of slack.
+        let past = s + 10_000_000 + (o.ttl + 2) * 1_000_000_000;
+        c.take(vec![Ev::Session {
+            id: 1,
+            s: past,
+            e: past + 10_000_000,
+            found: true,
+        }]);
+        c.hold(u64::MAX, 0, u64::MAX, &[]);
+        assert_eq!(c.mismatches, 1);
+        assert!(!clock_stepped((3.0, 2.0), (3.5, 2.0)));
+        assert!(clock_stepped((3.0, 2.0), (400.0, 2.0)));
+        // A round trip as long as the move: no step it can tell.
+        assert!(!clock_stepped((3.0, 2.0), (300.0, 400.0)));
+    }
+
+    #[test]
+    fn a_look_and_a_sampler_are_read_as_written() {
+        let out = "anon 1000\nfile 2000\npgmajfault 3\ncurrent 4000\noom_kill 0\n\
+                   cpu_usec 123456\nThreads:\t41\nRssAnon:\t  2048 kB\nfds 77\nmajflt 5\n\
+                   filesize 999\ncompacting 1\ncpu  10 1 20 300 9 1 2 0 0 0\nvmfree 4096\n";
+        let l = Look::parse(out).unwrap();
+        assert_eq!(
+            (
+                l.threads,
+                l.rss_anon,
+                l.fds,
+                l.file,
+                l.compacting,
+                l.cpu_usec
+            ),
+            (41, 2 << 20, 77, 999, true, Some(123_456))
+        );
+        assert_eq!(l.vm_busy, Some(34));
+        let lines = |x: &[&str]| x.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            in_sync(&lines(&[
+                "A aarch64",
+                "S 100.00 98",
+                "S 100.50 82",
+                "T 100.70"
+            ])),
+            Some(200)
+        );
+        assert_eq!(
+            in_sync(&lines(&["A x86_64", "S 5.00 74", "S 5.10 running"])),
+            Some(0)
+        );
+        assert_eq!(in_sync(&lines(&["A aarch64"])), None);
+    }
+
+    #[test]
+    fn a_read_after_a_kill_names_how_long_before_it_a_write_it_lost_was_answered() {
+        let ms = 1_000_000;
+        let kills = Kills {
+            at: vec![(5_000 * ms, 9_000 * ms)],
+            loss: 650 * ms,
+        };
+        // Answered 400 ms before the kill and gone: within the bound,
+        // counted and its gap kept.
+        let mut c = Checker::new(100, kills.clone(), 60_000 * ms, 1_000 * ms, &[]);
+        c.take(vec![write(7, 3, 42, 4_000 * ms, 4_600 * ms, None)]);
+        c.take(vec![row(7, 10_000 * ms, 10_100 * ms, base_digests(7))]);
+        c.hold(20_000 * ms, 0, 20_000 * ms, &[]);
+        assert_eq!(
+            (c.mismatches, c.lost_writes, c.lost_ms_max),
+            (0, 1, Some(400))
+        );
+        // Answered 1 000 ms before it and gone: past the bound, a mismatch
+        // that says by how much.
+        let mut c = Checker::new(100, kills, 60_000 * ms, 1_000 * ms, &[]);
+        c.take(vec![write(7, 3, 42, 3_900 * ms, 4_000 * ms, None)]);
+        c.take(vec![row(7, 10_000 * ms, 10_100 * ms, base_digests(7))]);
+        c.hold(20_000 * ms, 0, 20_000 * ms, &[]);
+        assert_eq!(c.mismatches, 1);
+        assert!(
+            c.examples[0].contains("answered 1000 ms before a kill is gone, past the 650 ms"),
+            "{}",
+            c.examples[0]
+        );
+    }
+
+    #[test]
+    fn the_primarys_reads_never_go_back_and_the_replicas_may_lag_them() {
+        // A write in flight: the primary answered its value, then the old
+        // one -- a read going back, which an atomic register never does.
+        let mut c = Checker::new(100, kills(), 60, 1, &[]);
+        c.take(vec![
+            write(7, 3, 42, 10, 100, None),
+            row(7, 20, 30, with(7, 3, 42)),
+            row(7, 40, 50, base_digests(7)),
+        ]);
+        c.hold(200, 0, 200, &[]);
+        assert_eq!(c.mismatches, 1);
+        // The replica, sent after the writes answered before it began, may
+        // not hold this one yet: held to the registers alone.
+        let mut c = Checker::new(100, kills(), 60, 1, &[]);
+        let through = Ev::Row {
+            key: 7,
+            s: 40,
+            e: 50,
+            found: true,
+            got: base_digests(7),
+            replica: true,
+        };
+        c.take(vec![
+            write(7, 3, 42, 10, 100, None),
+            row(7, 20, 30, with(7, 3, 42)),
+            through,
+        ]);
+        c.hold(200, 0, 200, &[]);
+        assert_eq!(c.mismatches, 0);
+    }
+
+    #[test]
+    fn a_backup_whose_restored_file_holds_a_record_no_write_left_is_counted() {
+        let mut c = Checker::new(100, kills(), 60, 1, &[]);
+        c.take(vec![write(7, 3, 42, 10, 20, None)]);
+        let restored = |got| Ev::Restored {
+            backup: 1,
+            key: 7,
+            s: 30,
+            e: 40,
+            found: true,
+            got,
+        };
+        c.take(vec![
+            restored(with(7, 3, 42)),
+            restored(base_digests(7)),
+            restored(base_digests(7)),
+        ]);
+        c.hold(100, 100, 100, &[]);
+        assert_eq!((c.mismatches, c.backups_differ), (2, 1));
+    }
+
+    #[test]
+    fn the_report_says_what_the_run_suggests_of_each_bound() {
+        let notes = |tweak: &dyn Fn(u64, &mut HashMap<&'static str, f64>)| {
+            judge(&synthetic(480, tweak), None)[0].notes.join("\n")
+        };
+        let n = notes(&|_, _| {});
+        assert!(n.contains("no write a read showed gone"), "{n}");
+        assert!(
+            n.contains("the run supports the bound (twice the longest is 40 s)"),
+            "{n}"
+        );
+        assert!(
+            n.contains("minute 90 (a compact writing, no fsync in flight)"),
+            "{n}"
+        );
+        assert!(n.contains("the load 1.0 before the run"), "{n}");
+        let n = notes(&|m, x| {
+            if m == 31 {
+                x.insert("lost_writes", 2.0);
+                x.insert("lost_ms_max", 412.0);
+            }
+            if m == 61 {
+                x.insert("restart_ms", 70_000.0);
+            }
+        });
+        assert!(
+            n.contains("the earliest answered 412 ms before it -- the run supports the bound"),
+            "{n}"
+        );
+        assert!(n.contains("the run suggests --restart-max 140"), "{n}");
+        let n = notes(&|m, x| {
+            if m == 31 {
+                x.insert("lost_writes", 1.0);
+                x.insert("lost_ms_max", 870.0);
+            }
+        });
+        assert!(n.contains("the run suggests --loss-ms 900"), "{n}");
     }
 }
