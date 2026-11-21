@@ -1297,18 +1297,6 @@ impl Store {
         self.read_fields_in::<true>(id, places, out)
     }
 
-    /// [`Self::read_fields`] in the browser module, which holds one copy of
-    /// the reader.
-    #[cfg(target_arch = "wasm32")]
-    pub fn read_fields_passing(
-        &self,
-        id: DocId,
-        places: &[usize],
-        out: &mut Vec<Value>,
-    ) -> Result<bool> {
-        self.read_fields(id, places, out)
-    }
-
     /// [`Self::read_fields`], each value it passes stepped over by
     /// [`crate::codec::skip_passing`] where `PASS` says.
     #[inline(always)]
@@ -1984,8 +1972,11 @@ impl Store {
         for id in ids {
             let loc = self.index.get(id).unwrap();
             let payload = self.payload(loc)?;
+            // The walk that copies nothing first, natively: the browser
+            // module compacts when its page asks, and is smaller without it.
             let changed = reclaims
-                && crate::schema::reclaims(&self.dropped, payload)
+                && (cfg!(target_arch = "wasm32")
+                    || crate::schema::reclaims(&self.dropped, payload))
                 && crate::schema::reclaim(&self.dropped, payload, &mut out);
             match changed {
                 true => fresh.append(OP_PUT, id, &out),

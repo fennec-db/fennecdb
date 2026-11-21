@@ -17568,8 +17568,9 @@ impl<'q> Filter<'q> {
             *p = c.schema.place(*p);
         }
         let paths_at = positions.len();
+        // Not in the browser module, which holds one copy of the reader.
         let past_dropped = match (c.schema.dropped.first(), positions.iter().max()) {
-            (Some(d), Some(last)) => d < last,
+            (Some(d), Some(last)) => !cfg!(target_arch = "wasm32") && d < last,
             _ => false,
         };
         let (positions, passing) = match past_dropped {
@@ -18090,6 +18091,7 @@ impl<'q> Filter<'q> {
 
     #[inline(never)]
     fn read_paths(&self, id: DocId, vals: &mut Vec<Value>) -> Result<()> {
+        #[cfg(not(target_arch = "wasm32"))]
         if !self.passing.is_empty()
             && !self.c.store.read_fields_passing(id, &self.passing, vals)?
         {
