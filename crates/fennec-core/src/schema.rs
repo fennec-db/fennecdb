@@ -847,9 +847,15 @@ pub fn place(dropped: &[usize], pos: usize) -> usize {
 impl Schema {
     pub fn new(name: impl Into<String>, mut fields: Vec<Field>) -> Result<Schema> {
         let name = name.into();
-        let mut seen = Vec::new();
         for f in &mut fields {
             f.index = f.index.resolved();
+        }
+        // The names met so far, in a set: each against every one before it
+        // was 5.4e8 comparisons for the 32 767 fields an import of a SQLite
+        // table may declare, and 3.8e9 for the 87 376 one did before the
+        // importer held a table to SQLite's own ceiling (G14 F2b).
+        let mut seen = std::collections::HashSet::with_capacity(fields.len());
+        for f in &fields {
             if f.name == "id" {
                 return Err(Error::Query(
                     "`id` is a reserved field, it cannot be declared in a schema".into(),
@@ -879,7 +885,7 @@ impl Schema {
                     crate::codec::MAX_DEPTH
                 )));
             }
-            if seen.contains(&f.name) {
+            if !seen.insert(f.name.as_str()) {
                 return Err(Error::Exists(format!("duplicate field `{}`", f.name)));
             }
             if let Some(c) = f.collate.filter(|_| !collatable(&f.ty)) {
@@ -907,7 +913,6 @@ impl Schema {
             if let Some(spec) = f.beside {
                 IndexKind::Text(spec).check(&f.name, &f.ty)?;
             }
-            seen.push(f.name.clone());
         }
         one_expiry(&name, fields.iter())?;
         Ok(Schema {
@@ -1537,4 +1542,45 @@ fn unknown(what: &str, byte: u8) -> Error {
     m.push(' ');
     crate::json::int_into(&mut m, byte as i64);
     Error::Corrupt(m)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Schema::new` refuses a name met before, naming the first one met
+    /// again in the fields' order, wherever the two stand -- a schema of
+    /// SQLite's 32 767 columns, its last field the first's name, too -- and
+    /// the refusals it makes before that one in a field's checks (`id`, a
+    /// dot) still come first. The names are looked up in a set.
+    #[test]
+    fn a_field_named_twice_is_refused_by_the_first_name_met_again() {
+        let fields = |names: &[&str]| {
+            names
+                .iter()
+                .map(|n| Field::new(*n, DataType::Int))
+                .collect::<Vec<_>>()
+        };
+        let refused = |names: &[&str]| Schema::new("t", fields(names)).unwrap_err().to_string();
+        assert!(refused(&["a", "b", "c", "b", "a"]).contains("duplicate field `b`"));
+        assert!(refused(&["a", "a", "id"]).contains("duplicate field `a`"));
+        assert!(refused(&["a", "id", "a"]).contains("`id` is a reserved field"));
+        assert!(refused(&["a", "a.b", "a"]).contains("`a.b` cannot name a field"));
+        assert!(Schema::new("t", fields(&["a", "A", "b"])).is_ok());
+
+        let mut wide: Vec<String> = (0..32_767).map(|i| format!("c{i}")).collect();
+        let named = |names: &[String]| {
+            names
+                .iter()
+                .map(|n| Field::new(n.as_str(), DataType::Text))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(Schema::new("w", named(&wide)).unwrap().fields.len(), 32_767);
+        wide.push("c0".into());
+        let e = Schema::new("w", named(&wide)).unwrap_err();
+        assert!(
+            matches!(&e, Error::Exists(m) if m == "duplicate field `c0`"),
+            "{e}"
+        );
+    }
 }
