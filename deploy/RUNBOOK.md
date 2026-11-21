@@ -161,7 +161,7 @@ On every machine (Debian 12 or later, Ubuntu 22.04 or later -- systemd 248
 or later for `LoadCredential=`'s `%d`):
 
 ```sh
-install -m 0755 fennec-server fennec-shard fennec /usr/local/bin/   # from a release
+install -m 0755 fennec-server fennec-shard fennec /usr/local/bin/   # fennec-server and fennec from a release; fennec-shard built from its tag (no release publishes it yet)
 install -m 0644 systemd/fennecdb.sysusers /etc/sysusers.d/fennecdb.conf && systemd-sysusers
 install -m 0644 systemd/*.service systemd/*.timer /etc/systemd/system/
 install -D -m 0755 bin/fennec-archive-sync /usr/local/libexec/fennecdb/fennec-archive-sync   # an archiver's machine
@@ -800,15 +800,44 @@ alerts between steps:
    through it as the connection ends: the entry sends a read or a keyed
    write on to the standby, and answers any other write 502, which may have
    run (send writes with an `Idempotency-Key` and they are retried safely).
-   Then the global standby and the global router the same way.
-3. **Nodes**, one at a time, a zone at a time: replace the binary and
-   `systemctl restart fennec-node`. A restart shorter than the lease costs
-   its tenants the restart; one longer -- a shutdown checkpointing large
-   graphs -- has them failed over to their replicas, and the node comes
-   back as a replica of each (A node back). Either way no acknowledged
-   write is lost. Wait for `FennecTenantsWithoutReplica` to clear before the
-   next node.
+   Then the global standby and the global router the same way. No release
+   publishes `fennec-shard` yet: upgrading a router means building it from
+   the release's tag (`cargo build --release --locked -p fennec-shard`, or
+   the `kit` image `deploy/Dockerfile` builds).
+3. **Nodes**, one at a time, a zone at a time, and in a node pair the
+   standby's node first: replace the binary and `systemctl restart
+   fennec-node`. A restart shorter than the lease costs its tenants their
+   writes for the restart -- the router answers each "the request was not
+   sent" (503, `Fennec-Unsent`), safe to send again; one longer -- a
+   shutdown checkpointing large graphs -- has them failed over to their
+   replicas (the kit's routers run `--auto-failover`; a router started
+   without it never fails a node over), and the node comes back as a
+   replica of each (A node back). Either way no acknowledged write is
+   lost. Before the next node, wait until its standby holds what its
+   primary does: on the primary's node `/t/<tenant>/_replication/status`
+   (with the replication token) lists the standby's stream with `sent`
+   equal to `durable`, or the standby's own says `"connected": true` and
+   `"behind": 0` -- for a file's replica, `fennec_replica_connected` 1 and
+   `fennec_replica_behind` 0. Not `FennecTenantsWithoutReplica`: it fires
+   only for a tenant with no copy at all, after 15 minutes, never for a
+   standby that is behind after its restart.
 4. **The entry Worker** last: it reads only the routers' answers.
+
+Every reader -- an archiver, a router, a node, the `fennec` that restores
+-- runs the new release before any primary does, and one a release back
+works beside the new one or stops in words, never reading wrong
+(RELEASING.md). A node holding both primaries and replicas -- its own
+tenants and another node's standbys -- cannot be upgraded before every
+primary: in such a fleet nothing uses a feature that moves the format
+until every node runs the release. `compat.yml` drives steps 2 and 3 with
+the last release's `fennec-server` and `fennec` and its router -- built
+from the release's tag with its `Cargo.lock` by the tree's toolchain, a
+debug build, since no release publishes one -- weekly and on every
+release tag: a router restarted, then a standby's node, then its
+primary's, under durable writes, waiting on the condition above before
+each node, every acknowledged write read back from both nodes and none the
+router said it did not send landed. A file 0.2.0 wrote holding a value
+1.x does not read whole is RELEASING.md's *The first 1.x release's notes*.
 
 **Named statements move the format by their first use, not their
 install.** A `create statement` writes record kind 13, which every binary

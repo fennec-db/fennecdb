@@ -28,18 +28,38 @@ nothing reaches a registry before the notes have had a read.
    summaries) into `integrations/ffi-sizes.md`; those jobs fail a run more
    than 1% from it.
 2. Build the Swift package's binary: `gh workflow run swift-binary.yml -f
-   version=X.Y.Z`. SwiftPM fetches the package by its tag, and the
+   version=X.Y.Z` for an X.Y.0 and its candidates, which are built from
+   `main`; a patch (X.Y.Z, Z above 0) is built from `release/X.Y`, the
+   branch the owner cuts from the minor's last tag the first time one is
+   needed (`git push origin vX.Y.0^{commit}:refs/heads/release/X.Y`), its
+   fixes merged there: `gh workflow run swift-binary.yml --ref release/X.Y
+   -f version=X.Y.Z`, and step 3 tags that branch's merge. The run stops on
+   any other branch, and step 6 takes the XCFramework's attestation from
+   that one ref alone: a `release/*` branch is pushed by whoever may write
+   the repository, and its run of an edited `swift-binary.yml` would attest
+   whatever bytes it was given, so `release/X.Y` vouches for a patch and
+   never for an X.Y.0 (and the owner's ruleset on `release/*` decides who
+   pushes one). SwiftPM fetches the package by its tag, and the
    `Package.swift` at that tag must already name the XCFramework's zip by
    its URL and checksum, so the zip is built before the tag: the run builds
-   it from main, tests it on macOS and an iOS simulator, keeps it as its
+   it from its branch, tests it on macOS and an iOS simulator, keeps it as its
    artifact and opens a pull request writing its checksum into
    `Package.swift` (`integrations/swift/set-binary.sh`). It keeps the
    `FennecFFIDynamic.xcframework.zip` beside it -- the frameworks, and
    macOS's binary again as a plain `libfennec_ffi.dylib`, which the Flutter
    plugin's macOS pod vendors -- built from the same commit and named by
-   nothing. Merge it.
+   nothing. Its `pull-request` job attests the three files (the two zips
+   and the `.checksum`) as the run's build, from the branch it ran on and
+   its commit, before it opens the pull request: `release.yml` attaches
+   them and does not attest them again (step 6 verifies them against
+   `swift-binary.yml`). Merge it.
 3. Tag what was merged and push the tag:
-   `git tag vX.Y.Z origin/main && git push origin vX.Y.Z`.
+   `git tag vX.Y.Z origin/main && git push origin vX.Y.Z` (a patch:
+   `origin/release/X.Y`). A tag is `vX.Y.Z`, or `vX.Y.Z-rc.N` for a
+   candidate with N from 1, and nothing else: every job of `release.yml`
+   refuses another form in its first step, saying so, and
+   `tools/release-verify.sh` and `release-latest.sh` take the same one
+   (`tools/test_release_verify.py` holds each copy to it).
    `release.yml` builds the binaries for Linux and macOS, the Windows zips
    (`fennec-vX.Y.Z-<arch>-pc-windows-msvc.zip` for x86_64 and aarch64, each
    on a runner of its architecture, `tools/windows-zip.sh`: the
@@ -52,14 +72,24 @@ nothing reaches a registry before the notes have had a read.
    each and run on the runner and in AlmaLinux 9's glibc 2.34 before it is
    kept, `tools/linux-ffi-check.sh`), the `fennec-web`
    bundle, the Android AAR (`fennecdb-android-X.Y.Z.aar`, the native library
-   for each ABI inside) and the multi-arch image on ghcr.io, takes the
+   for each ABI inside) and the multi-arch image on ghcr.io as
+   `X.Y.Z` -- each architecture's run on the runner that built it before
+   it is pushed, its `--version` and its server healthy by its own
+   HEALTHCHECK (`tools/image-check.sh`), pushed from Docker's classic image
+   store and read back, each tag and the list held to v0.2.0's Docker v2
+   manifests and gzip layers; `latest` waits for step 4 -- takes the
    XCFramework zips step 2's run kept -- the static one held to the checksum the tag's
    `Package.swift` names, and stopping the release where none matches --
    and drafts the release with all of them and their checksums, its notes
    opening with the compiler: each `binaries` job holds its `rustc -V` to
    the release `rust-toolchain.toml` names and, on Linux, to the one the
    image's build stage resolves, and a difference stops the release before
-   the draft ([A toolchain bump](#a-toolchain-bump)). It also
+   the draft ([A toolchain bump](#a-toolchain-bump)). Each file it built is
+   attested first as this run's build (`publish`), then `SHA256SUMS`, which
+   ties each file to its name in the release, and the image's
+   list and its two architectures' manifests once the list is made
+   (`manifest`; step 6 verifies all of them). A candidate's tag (`vX.Y.Z-rc.N`) is
+   drafted as a pre-release, which GitHub never makes Latest. It also
    makes a `.deb` and an `.rpm` for amd64 and arm64 from the musl tarballs
    (`tools/linux-packages.sh`, `packaging/nfpm.yaml`), each architecture on a
    runner of its own, installs them in a Debian and a Fedora container and
@@ -69,10 +99,27 @@ nothing reaches a registry before the notes have had a read.
    the same commit: a Go module in a subdirectory is fetched by a tag that
    names it, so that tag is the Go SDK's release (`go get
    github.com/fennec-db/fennecdb/integrations/go@vX.Y.Z`), and there is no
-   registry to publish to. A release built again, by the tag or by a
-   dispatch, replaces the assets of a draft; a published release's are never
+   registry to publish to. A release built again -- a job of its run
+   retried, or a dispatch for its tag; the tag itself is never moved
+   (*GitHub*, below) -- replaces the assets of a draft; a published
+   release's are never
    replaced, and it only gets the files it has no asset of, with a warning
-   that its `SHA256SUMS` does not list them. The Homebrew formula, `install.sh`,
+   that its `SHA256SUMS` does not list them. Only the tag's own run attests
+   what it built, as an attestation names the run's ref and commit as the
+   source: its push, or a dispatch at the tag, `gh workflow run release.yml
+   --ref vX.Y.Z -f tag=vX.Y.Z`, which runs the tag's own `release.yml`. A
+   dispatch from a branch (`--ref main`, for a fix to the workflow made
+   after the tag) builds the tag's tree under the branch's name and head
+   commit, and would sign that as the source: its files and image are
+   attached unattested, with a warning, and step 6 fails on them, so such
+   a fix ships in the next version, a candidate's or a patch's. **A
+   published release whose file went out without its attestation stays
+   unverifiable for good**: a rebuild at the tag is not the same bytes,
+   and `publish` gives a published release only the files it has no asset
+   of, so nothing can put an attested file under that name, and step 6
+   fails on that release as long as it stands. Its fix ships in the next
+   version. A draft is still mended: a dispatch at the tag replaces its
+   files and `SHA256SUMS` with attested ones. The Homebrew formula, `install.sh`,
    `install.ps1` and the packages name the release's files by checksum, and a
    rebuild is not byte for byte the first build: a replaced tarball would fail
    every `brew install` and every sum already taken. To change what a
@@ -80,21 +127,42 @@ nothing reaches a registry before the notes have had a read.
 
    **A power cut.** Every release needs the last run of
    `linux-power-cut.yml` green, as its Linux binaries are every release's:
-   the commit's fennec-server, built as `release.yml` builds it, in four
+   the commit's fennec-server, built as `release.yml` builds it, in seven
    Ubuntu guests cut five times each, twice with the disk's cache lost,
    the sync log a durable write takes on Linux applied at each open -- on
-   ext4 and on XFS under `--sync always` writes, compacts and spills, every
-   acknowledged write read back; on ext4 under `--sync 250`, the default,
-   every write `/_changes` handed over read back, every write lost
-   answered within 250 ms and two syncs' own time of the cut, no sync a
-   second late nor the syncer slowed; and a `--dir` node of two tenants
-   with a standby following it, every acknowledged write read back and
-   the standby near the node's tip and holding nothing the node lost; each
-   cut mid-write
+   ext4 in each of its three data modes (`ordered`, `writeback`,
+   `journal`) and on XFS under `--sync always` writes, compacts and
+   spills, every acknowledged write read back; on ext4 under `--sync 250`,
+   the default, every write `/_changes` handed over read back, every write
+   lost answered within 250 ms and two syncs' own time of the cut, no sync
+   a second late nor the syncer slowed; and a `--dir` node of two tenants
+   with a standby following it, under `--sync always` every acknowledged
+   write read back, under `--sync 250` each tenant held as the file is,
+   and the standby near the node's tip and holding nothing the node lost;
+   each cut mid-write
    (docs/design/durability.md, "A power cut"): `gh run list --workflow
    linux-power-cut.yml --limit 1`, and if it ran before the commit being
    released, `gh workflow run linux-power-cut.yml --ref main` and wait for
    it.
+
+   **Two releases beside each other.** Every release needs `compat.yml`
+   green on the release commit: the commit's `fennec-server`, `fennec` and
+   `fennec-shard` beside the last published release's -- its own Linux
+   tarball, checked against its `SHA256SUMS` by `site/install.sh`, and its
+   router built from its tag's sources with the tag's `Cargo.lock`
+   (`--locked`) by this tree's toolchain, a debug build, since no release
+   ships one -- driven through replication both ways, archives and backups
+   plain and sealed, the values 0.2.0 wrote that 1.x does not read whole, a
+   router over nodes of the other release and a node at `https://`, a
+   `github` hook kept with `key delivery`, and a rolling upgrade of a router
+   and a node pair under durable writes, every acknowledged write read back
+   from both nodes and none the router said it did not send landed (`make
+   compat-check`, `docs/design/compatibility.md#the-compatibility-matrix`).
+   The tag's push runs it on the tag; read it before the draft is published
+   (step 4): `gh run list --workflow compat.yml --commit <sha>`, or run it
+   beforehand, `gh workflow run compat.yml --ref main`. A case that fails
+   is a break or a bug until this file or the compatibility contract
+   promises what it found, and the release waits for that decision.
 
    **Windows.** The zip is unsigned (SmartScreen warns of a program a
    browser downloaded; `install.ps1` takes the mark off what it checked),
@@ -109,7 +177,37 @@ nothing reaches a registry before the notes have had a read.
    published, run `irm https://fennecdb.com/install.ps1 | iex` once on a
    Windows machine and the Quickstart's Windows line, as the other
    installs are run once more.
-4. Read the draft, then publish it: `gh release edit vX.Y.Z --draft=false`.
+4. Read the draft, then publish it, once step 3's run has passed
+   `image (manifest)`, the job that makes the image's `X.Y.Z`:
+   `gh release edit vX.Y.Z --draft=false` (with `--latest=false` where
+   `X.Y.Z` is not the newest release: a patch to an older minor, [A
+   security release](#a-security-release)). A candidate is published as a
+   pre-release and never Latest: `gh release edit vX.Y.Z-rc.N --draft=false
+   --prerelease --latest=false` (its draft is a pre-release already; the
+   flags say so again). Published without them a candidate would be
+   GitHub's Latest, and `install.sh` and `install.ps1`, which read
+   `releases/latest/download/SHA256SUMS`, would install it for everyone;
+   `packages.yml`'s `github-latest` puts Latest back on the newest X.Y.Z
+   whatever was published, a candidate included, within the minute its run
+   takes. A candidate's packages go out as pre-releases where a registry
+   has them: npm under `next` (`next-X.Y` for one older than the newest
+   pre-release), PyPI as `X.Y.ZrcN`, which `pip install` passes over
+   unless asked, NuGet and pub.dev as pre-release versions; the image gets
+   `X.Y.Z-rc.N` and no `latest`, Homebrew nothing. Maven Central is the
+   one that does not hold it apart: its `maven-metadata.xml` `<release>` is
+   the highest version uploaded, pre-releases among them, so while a
+   candidate is the highest, Gradle's `latest.release` and Maven's
+   `RELEASE` resolve to it. The upload stays (a candidate is there to be
+   tried); a user pins a version. npm's `next` is left on the last
+   candidate once X.Y.Z is out, so `npm i @fennecdb/web@next` would install
+   an older build than `latest`, and the workflow cannot move it: each
+   package's trusted publisher allows `npm publish` alone (*Allow npm
+   dist-tag* off, *Once: the registries' side*), and a publish names one
+   dist-tag. So after a release that went out under `latest`, the owner
+   moves `next` to it with npm's own login (2FA):
+   `for p in web react cloudflare langchain; do npm dist-tag add
+   @fennecdb/$p@X.Y.Z next; done`, where `npm view @fennecdb/web
+   dist-tags.next` names an older version.
    `packages.yml` builds the three packages again, installs them where a user
    would and uses them (`integrations/packages.sh`), and only then publishes
    `fennecdb` to PyPI, `@fennecdb/web`, `@fennecdb/react`,
@@ -133,11 +231,27 @@ nothing reaches a registry before the notes have had a read.
    skips with a notice where the secret is not set, for a draft or a
    pre-release, and for a version older than the tap's formula (the tap is
    never moved back, whichever release is dispatched or published late), and
-   one run pushes at a time.
+   one run pushes at a time. The image's `latest` follows the same way
+   (`image-latest`, `tools/image-latest.sh`): moved to `X.Y.Z`'s list once
+   the release is published, only where it is the newest published release,
+   never for a draft, a pre-release or an older version. Where a release
+   was published before `image (manifest)` made `X.Y.Z`,
+   `packages.yml`'s `image (latest)` fails, saying `X.Y.Z` is not on
+   ghcr.io yet. If the tag's `release.yml` run was still going, nothing
+   needs re-running: its own `image (latest)` moves `latest` once
+   `manifest` has made the list. If its image jobs failed, re-run that
+   run's failed jobs (`gh run rerun <run-id> --failed`), not a new
+   `gh workflow run`: a new run builds the images again and pushes the arch
+   tags under new digests. A re-run within a day pushes the images `image`
+   saved; after that they are gone, and `image` must run again too. Of the
+   two `image (latest)` jobs, the one that runs second moves it.
    The `.deb` and `.rpm` need no step of their own: step 3 built them, and
    publishing the draft is what makes them downloadable.
 5. Once the release is published and `packages.yml`'s run is done, attach the
-   app: `gh workflow run desktop.yml --ref main -f release=vX.Y.Z`. Its
+   app: `gh workflow run desktop.yml --ref main -f release=vX.Y.Z`. A
+   candidate has no app: `desktop.yml` takes `X.Y.Z` alone (its `app`,
+   `other-systems` and attach jobs refuse `vX.Y.Z-rc.N`), so this step is
+   skipped for one. Its
    `app` job builds the Mac app with the release's own `fennec-server` and
    shell (the tarball checked against the release's `SHA256SUMS`; a draft's
    downloads are not public, so not before step 4), makes the DMG and runs
@@ -169,7 +283,89 @@ nothing reaches a registry before the notes have had a read.
    Anyway* in System Settings, Privacy & Security opens it; and start the
    Windows zip's `bin\launcher.exe` downloaded by a browser, which SmartScreen
    holds to *More info*, *Run anyway* -- neither of which a check here can
-   click through.
+   click through. `attach` and `attach-unsigned` attest each download before
+   they attach it, as `publish` does.
+6. Verify the release, once step 5 has attached the app's downloads (a
+   candidate's at once): `tools/release-verify.sh vX.Y.Z`, with `gh` logged
+   in, `npm`, `curl` and `jq`. It holds the release to what the workflows
+   publish and attest ([docs/design/integrations.md](docs/design/integrations.md#provenance)),
+   one line an asset, and stops non-zero at the first thing missing or
+   wrong, its last lines (`not checked: ...`) naming every check it did
+   not make:
+   - the assets are exactly `release.yml`'s 17 -- its own 14 and
+     `swift-binary.yml`'s three XCFramework files -- `SHA256SUMS`, and for
+     an X.Y.Z the app's 5: 23, none missing and none beside them; a
+     candidate's are 18, no app (`tools/release-verify.sh --assets
+     vX.Y.Z` lists them, held to the workflows by
+     `tools/test_release_verify.py`);
+   - a candidate is a pre-release, an X.Y.Z is not, and GitHub's Latest is
+     an X.Y.Z;
+   - `SHA256SUMS`'s lines before the app's verify as the file `release.yml`
+     attested at `refs/tags/vX.Y.Z` (the app's lines follow them, appended
+     by `desktop.yml` in step 5), before a sum is read from it; then it
+     lists every asset but itself and the `.checksum`, each by its sum.
+     It is what ties a file to its name in this release: an attestation
+     names bytes, so two of the tag's files swapped under each other's
+     names would each verify alone;
+   - each other asset verifies as built by its workflow at its ref, on
+     GitHub's runners: `gh attestation verify <file> -R
+     fennec-db/fennecdb --signer-workflow
+     fennec-db/fennecdb/.github/workflows/release.yml --source-ref
+     refs/tags/vX.Y.Z --deny-self-hosted-runners`; the XCFramework's with
+     `swift-binary.yml` and the one ref of its version (step 2):
+     `refs/heads/main` for an X.Y.0 and its candidates,
+     `refs/heads/release/X.Y` for a patch; the app's with `desktop.yml` and
+     `refs/heads/main`, the one ref `desktop.yml` attaches from. `-R`
+     alone takes an attestation by any workflow of the repository at any
+     ref -- a branch's, or `desktop.yml`'s `attach` vouching for a server
+     tarball;
+   - the image, `oci://ghcr.io/fennec-db/fennec-server:X.Y.Z`, `X.Y.Z-amd64`
+     and `X.Y.Z-arm64`, with `release.yml`'s flags, each by the digest
+     ghcr.io serves for the tag, which the verified statement must name;
+   - each of npm's four packages carries SLSA provenance
+     (`dist.attestations`) naming `packages.yml` of this repository, and
+     `npm audit signatures` passes over them. That command alone is not
+     enough: it fails on a bad registry signature or a bad attestation and
+     passes a package that has no provenance at all, exit 0;
+   - each of PyPI's files has PEP 740 attestations whose publisher is
+     `packages.yml` of this repository (`pypa/gh-action-pypi-publish` makes
+     them under trusted publishing alone: with `PYPI_API_TOKEN` set it
+     makes none).
+
+   Run on a draft, it verifies `release.yml`'s files and the image and
+   stops there. A file that does not verify is a release job that attached
+   without attesting, or a run that was not the tag's own (step 3): fix
+   the workflow, and the next release carries it (a published release's
+   files are never replaced, so that release stays unverifiable: step 3).
+   What each check proves, and what none does, is in
+   [the design file](docs/design/integrations.md#provenance).
+
+   **The app's attest step before 1.0.0.** A candidate has no app files,
+   so `attach` and `attach-unsigned` first attest at 1.0.0. Once this is
+   merged the owner runs the step for real on a release that has its app
+   already: `gh workflow run desktop.yml --ref main -f release=v0.2.0`.
+   Its build jobs rebuild the app with 0.2.0's server, `attach-unsigned`
+   attests what they made (Sigstore's public log and GitHub's attestations
+   API take a record of each, naming the run), and `attach.sh` then holds
+   each rebuilt file to the asset of its name, finds other bytes and fails
+   before it writes anything: v0.2.0's assets and `SHA256SUMS` are left as
+   they are. Nothing else is written: the build jobs read alone, `sign`
+   signs nothing without its secrets (with a reviewer on
+   `desktop-signing` it waits for one), and `attach`, the signed DMG's,
+   runs only after a signing. **Approve nothing there: reject the
+   `desktop-signing` review the run asks for.** Were its signing secrets
+   set and the review approved, `sign` would sign the rebuilt DMG and
+   `attach` would run `gh release upload v0.2.0 ... --clobber`: a published
+   release's DMG replaced (or one added beside it, as the signed DMG's
+   name falls), its bytes in no line of v0.2.0's `SHA256SUMS`, so
+   `install.sh --app` would refuse v0.2.0's app from then on, and nothing
+   puts the first DMG back. The run's red `attach-unsigned` is the
+   expected end; what it proves is the attest step's log, and an artifact
+   of the run verifying: `gh run download <run-id> -R fennec-db/fennecdb
+   -n fennec-studio-app-Linux-X64`, then `gh attestation verify
+   fennec-studio-linux-x64.tar.xz -R fennec-db/fennecdb --signer-workflow
+   fennec-db/fennecdb/.github/workflows/desktop.yml --source-ref
+   refs/heads/main --deny-self-hosted-runners`.
 
 `make packages` runs the same checks locally at any time, NuGet's where
 the .NET SDK is installed.
@@ -182,6 +378,51 @@ document version it went out in, and `git diff vA.B.C --
 integrations/openapi/` against the last tag shows each operation added
 and each newly `deprecated`, with its `x-fennec-sunset`. A deprecated route
 is removed no sooner than its sunset, in a release whose notes say so.
+
+**Every reader upgrades before any primary.** Across two releases, every
+binary that reads a file or a stream -- a replica, a standby, an archiver,
+a router, a node, the `fennec` that verifies and restores -- runs the new
+release before any primary does. A binary one release back beside a newer
+one either works or stops in words, and never reads a record as another;
+where it names the record kind, the type tag or the version it does not
+know, it names it, and where it knew of no other it cannot: 0.2.0's
+`fennec` refuses a version 2 sealed file as "not a sealed file", naming
+nothing, so the notes of the release that made version 2 name it. A newer
+reader reads what an older writer wrote, but for four values and types
+0.2.0 took that no write makes any more
+(`docs/design/compatibility.md#what-1x-does-not-read-of-020s-files`,
+and *The first 1.x release's notes* below). The order below and
+`deploy/RUNBOOK.md`'s *Upgrading with no downtime* keep it, and the notes
+of a release that moves a format say which reader stops where it is not
+kept. Three things that order cannot say alone:
+
+- **A node pair: the standby's node first.** Between two nodes' restarts,
+  wait until the standby holds what the primary does: on the primary's
+  node `/t/<tenant>/_replication/status` (the replication token) lists the
+  standby's stream with `sent` equal to `durable`, or the standby's own
+  says `"connected": true` and `"behind": 0` -- for a file's replica, the
+  metrics `fennec_replica_connected` 1 and `fennec_replica_behind` 0. Not
+  the alert `FennecTenantsWithoutReplica`, which fires only for a tenant
+  with no copy at all, after 15 minutes. Restarting the primary's node in
+  place costs that node's tenants their writes for the restart -- the
+  router answers each "the request was not sent" (503, `Fennec-Unsent`),
+  safe to send again -- since automatic failover is off unless the router
+  runs with `--auto-failover`.
+- **A node holding both primaries and replicas** -- a `--dir` node holding
+  its own tenants and another node's standbys -- cannot be a reader
+  upgraded before every primary. In such a fleet nothing uses a feature
+  that moves the format until every node runs the release.
+- **"Upgrade every router" means building it.** No release publishes
+  `fennec-shard` yet (`release.yml` packs `fennec` and `fennec-server`):
+  each router is built from the release's tag (`cargo build --release
+  --locked -p fennec-shard`), and `compat.yml`'s old router is that tag's
+  code, built by this tree's toolchain.
+
+`compat.yml` (`make compat-check`) drives the order with the last
+published release's server and `fennec` and its tag's router, weekly and
+on every release tag; `make upgrade-check` drives the cases below against
+the commits before a kind, an op or the checksums. More than one release
+back is not driven.
 
 **A release whose first use moves the format says so in its notes.** The
 first release with named statements is one: installing it changes nothing
@@ -400,7 +641,13 @@ armed, and that a single server started with `--hooks` whose file has a
 line's `key delivery` is taken out, or made `key body`, before the server
 is restarted on it. `make upgrade-check` drives the archive's case: CK_BASE's `fennec
 restore` and `fennec verify` refuse a backup and an archive this tree
-sealed, which this tree's read.
+sealed, which this tree's read. `compat.yml` drives each against 0.2.0's
+own binaries: its `fennec` refusing a backup and an archive sealed as
+version 2 in those words, writing no file, and opening what it sealed
+itself; a hooks file's `key delivery` refused at the start, exit 2; and a
+tenant's set kept with it by a 0.2.0 node, its verified event answered 409
+once the router and the node are upgraded, nothing written, until it is
+set again with `key body`.
 
 | Package | From | What it holds |
 | --- | --- | --- |
@@ -429,8 +676,17 @@ sealed, which this tree's read.
 
 From 1.0.0 on a release only grows what [the compatibility
 contract](docs/design/compatibility.md) freezes; a break is a major
-version. Release candidates are tagged `1.0.0-rc.N`, and the owner pushes
-every tag. Before a 1.x tag, check:
+version. Release candidates are tagged `1.0.0-rc.N`, N from 1 -- the one
+form a candidate's tag takes, `vX.Y.Z-rc.N`, which every job of
+`release.yml` holds in its first step (step 3) -- and the owner pushes
+every tag. A candidate goes through [A release](#a-release) as its steps
+say for one: drafted and published as a pre-release, never GitHub's
+Latest (step 4, where Maven Central's `<release>`, which a candidate
+becomes while it is the highest version, is said too), no app (step 5),
+and verified as 18 assets (step 6), its XCFramework built from `main`
+(step 2). `make version` (`tools/version.py`)
+takes X.Y.Z alone today, so a candidate's version needs it to take a
+pre-release part first. Before a 1.x tag, check:
 
 1. `make openapi-check` is green against the previous 1.x tag's documents,
    and `make types-check`, `make builder-golden`, `make schema-golden` and
@@ -466,14 +722,55 @@ every tag. Before a 1.x tag, check:
    later refuses until it has been run; from then a break needs a major
    version above 1.0 in its `BREAKS` entry.
 4. HEAD opens every file written from v0.2.0 on (`tests/language.fennec`,
-   `tests/statements.fennec`; T2 adds each release's own), and
-   `make upgrade-check` (by hand, kind 13 alone; CI check: T3) passes: an older replica stops by name on a record
-   kind or tag it does not know. The notes name any feature whose first use
-   moves the file format, and say that replicas upgrade before primaries.
+   `tests/statements.fennec`; T2 adds each release's own) but for the four
+   exceptions *The first 1.x release's notes* name, and
+   `compat.yml` is green on the release commit: `make compat-check`'s
+   matrix against the previous release's server and `fennec` and its
+   tag's router (*Two releases beside each other*, under A release) -- a
+   replica, an archiver, `fennec`, a router and a node of either release
+   beside the other's, each working or stopping in words, never reading
+   wrong, and a rolling upgrade under writes losing no acknowledged one. `make upgrade-check` (by hand) still
+   passes against the commits before kind 13, its ops and the checksums:
+   an older replica stops by name on a record kind or tag it does not
+   know. The notes name any feature whose first use moves the file format,
+   and say that every reader upgrades before any primary.
 5. No asset of the table above is renamed or dropped.
 6. The size ceilings hold against the 1.0 baseline (the browser module
    +3.5%, native libraries and binaries +5%), and the notes state the
    measured cost where one was raised.
+
+**The first 1.x release's notes.** "1.x opens every file written from
+v0.2.0 on" has four exceptions, all values or types 0.2.0 took that no
+write makes any more
+(`docs/design/compatibility.md#what-1x-does-not-read-of-020s-files`),
+and the first 1.x release's notes name them under their upgrade heading:
+
+1. A `[[json]]` field's row nested past 64 levels: the file opens and
+   every other collection reads, but any statement that decodes that row
+   fails whole (`a value nests more than 64 levels deep`) -- `count`, a read
+   by another row's id and the fields stored before the deep one still
+   answer; a `del` or a `set` of the row is refused; `alter ... drop` of
+   the field is taken and helps only where no field is declared after it
+   (every skip of a dropped place is depth-bound as a read is, so a field
+   after it, and a `del` of the row, are refused in the same words), and
+   an index built over a later field stays refused. Backups and images
+   carry the row unchanged; a replica takes it in an image, holds
+   it and refuses its reads alike, and connects again, 100 ms to 5 s
+   apart, while a write touching it cannot be applied. On 1.x alone the
+   way out is, where the field is its collection's last, to drop it and
+   `del` the row; otherwise to read out the readable rows, drop the
+   collection and make it again.
+2. A type nested past 64 lists,
+3. a point's type under 64 lists, and
+4. a schema's number past its range (`m` under 2 or past 32 767, a
+   `vector<N>` or a `sparse<N>` of 0 or past 10^9, a list of such
+   vectors): the whole file is refused at the open, and only v0.2.0 can
+   rewrite it.
+
+The advice they give: rewrite such values with v0.2.0 before upgrading.
+`compat.yml` drives the first two with v0.2.0's own binaries (a3, a3b; the
+engine's tests that hold all four are named in
+`docs/design/compatibility.md#what-1x-does-not-read-of-020s-files`).
 
 The previous minor gets security fixes for six months after the next
 minor's release; a `release/1.N` branch is cut when a backport needs one
@@ -525,38 +822,64 @@ tag, a setting or a secret.
    whose `Package.swift` `release` is not the tag's version and wants a
    swift-binary run for it, and `make version` moves `release` but not the
    checksum: `gh workflow run swift-binary.yml --ref release/1.N -f
-   version=1.N.P`. Its pull request is opened with no `--base`, so it
-   targets `main`: retarget it, `gh pr edit <n> --base release/1.N`, and
-   merge it there (the workflow is not changed for this). Then the owner
+   version=1.N.P`. Its pull request is opened against the branch the run
+   was started on, `release/1.N`: merge it there. Then the owner
    tags the branch's commit (`git tag v1.N.P <commit>`, then `git push
    origin v1.N.P`) and `release.yml` drafts the release. A tag already
-   pushed is built again by `gh workflow run release.yml --ref release/1.N
-   -f tag=v1.N.P`. The power-cut checks of step 3 are read the same way,
+   pushed is built again by `gh workflow run release.yml --ref v1.N.P -f
+   tag=v1.N.P`: at the tag, so the run is the tag's own and its
+   attestations name `refs/tags/v1.N.P`, as [A release](#a-release)'s step
+   6 verifies (one dispatched from `release/1.N` builds the same tree but
+   attaches it unattested, since its attestations would name the branch:
+   step 3 there). The swift-binary run's files are attested as built on
+   `release/1.N`, the one ref that step 6 takes for a patch's (and never
+   for an X.Y.0's, step 2 there). The power-cut checks of step 3 are read the same way,
    with `--ref release/1.N` where they say `--ref main`. Read the draft,
-   publish it, and `packages.yml` follows, as in steps 4 and 5 there: every
+   publish it, and `packages.yml` follows, as in steps 4 to 6 there: every
    channel of the table above -- PyPI, npm, NuGet, Maven Central, pub.dev,
    Homebrew, the `.deb` and `.rpm`, the image on ghcr.io, the Go module's
    tag, the Swift package's tag and zip, the install scripts (which read
-   the latest release) and the desktop app -- gets the patch; check each by
-   installing it.
+   the latest release, so a patch to an older minor reaches them only as
+   the newest minor's own) and the desktop app -- gets the patch; check
+   each by installing it.
 
-   **A minor that is not the newest must not be published yet.** The
-   pipeline has pointers that mean "the newest", and only one is guarded:
-   the Homebrew tap is never moved back (`packages.yml`'s `homebrew` job
-   skips a release older than the formula). The others would move to the
-   backport: a published release becomes GitHub's Latest, which
-   `site/install.sh` and `site/install.ps1` read; `release.yml` tags the
-   image `:latest` on every run; `packages.yml`'s `npm publish` has no
-   `--tag`, so npm's `latest` moves. Where a hand step exists today it is
-   `gh release edit v1.N.P --latest=false` (publish with `--draft=false
-   --latest=false`); the image's `:latest` and npm's dist-tag
-   (`npm dist-tag add <pkg>@<newest> latest`) have none in the workflows.
-   **Owed before the first backport to a non-newest minor:** `release.yml`
-   and `packages.yml` keep the image's `:latest`, npm's `latest` and the
-   GitHub Latest on the newest release, and swift-binary opens its pull
-   request against the branch it ran on. Tracked apart from this file; until
-   it lands, the previous minor's fix waits, or is released with those three
-   put back by hand at once. A patch to the newest minor has none of this.
+   **A patch to a minor that is not the newest** moves none of the
+   pointers that mean "the newest"; each is kept there by the pipeline,
+   by version order (`sort -V`), never by which release was published
+   last:
+   - GitHub's Latest, which `site/install.sh` and `site/install.ps1` read:
+     GitHub makes a release Latest as it is published, whatever its
+     version, so publish it with `gh release edit v1.N.P --draft=false
+     --latest=false` and Latest does not move. Published without it,
+     `packages.yml`'s `github-latest` (`tools/release-latest.sh github`)
+     puts Latest back on the newest release within the minute its run
+     takes, the installs in between taking the patch.
+   - The image's `latest`: `image-latest` (`tools/image-latest.sh`) moves it
+     only to the newest published release; `1.N.P` gets its own tag alone.
+   - npm's `latest`: `packages.yml`'s `npm` publishes `1.N.P` under the
+     dist-tag `release-1.N` (`npm install @fennecdb/web@release-1.N`), never
+     `latest`; a pre-release goes out under `next` where it is the newest
+     pre-release by version, and `next-1.N` where it is not, so `next`
+     never moves back either. Not `v1.N`: npm refuses a dist-tag that reads
+     as a semver range. A package's first publish ever is `latest`
+     whatever the tag: the registry gives a package with none that
+     version. The tag is decided from the
+     release list as the job runs, and the job's credential (a trusted
+     publisher allowing `npm publish` alone) cannot move it after, so
+     publish one release at a time, each once the previous one's
+     `packages.yml` run is done; `next` left on a candidate older than the
+     newest release is moved by hand (step 4 there).
+   - The Homebrew tap is never moved back (`homebrew` skips a release older
+     than the formula).
+   - The rest have no pointer the pipeline sets: PyPI, NuGet, pub.dev and
+     Maven Central each name their newest by version order (a `pip
+     install`, a `dotnet add`, a `dart pub add` takes the highest; Central
+     writes `maven-metadata.xml`'s `<release>` as the highest version, a
+     candidate among them (step 4), and `packages.yml` uploads none of its
+     own), Go's proxy answers `@latest`
+     with the highest `integrations/go/v*` tag, SwiftPM resolves the
+     highest tag a requirement allows, and the `.deb` and `.rpm` are files
+     of the release, named by its version.
 6. **Disclose.** Publish the advisory (with the CVE) the same hour the
    release is published, as step 2 says, and put it in the release's notes with the first
    fixed version of each supported minor. Merge the private fork's changes
@@ -655,10 +978,11 @@ token without access -- 0.1.5's dispatch stopped there -- and
 `https://registry.npmjs.org/-/org/fennecdb/package` says `Scope not found`
 until the organization exists. On PyPI, an API token for the whole account,
 since a token scoped to a project cannot make the project on its first
-upload. Then, pasting each when asked:
+upload. Then, pasting each when asked, each into the environment of the
+job that reads it and not the repository's (GitHub, below):
 
-    gh secret set NPM_TOKEN -R fennec-db/fennecdb
-    gh secret set PYPI_API_TOKEN -R fennec-db/fennecdb
+    gh secret set NPM_TOKEN --env npm -R fennec-db/fennecdb
+    gh secret set PYPI_API_TOKEN --env pypi -R fennec-db/fennecdb
 
 After the first upload the PyPI token can be replaced by one scoped to
 `fennecdb`. A release published before the secrets were set gets its
@@ -680,7 +1004,7 @@ trusts a workflow only for a package that already exists, so each package's
 first version goes out with a token:
 
 1. Make a granular access token with read and write on `@fennecdb` and store it
-   as the repository secret `NPM_TOKEN`.
+   as `NPM_TOKEN`, a secret of the `npm` environment.
 2. Publish the release: the four `@fennecdb` packages go out with it.
 3. On npmjs.com, for each of the four, *Settings*, *Trusted publishing*,
    GitHub Actions: `fennec-db/fennecdb`, workflow `packages.yml`, environment
@@ -722,10 +1046,12 @@ By hand, as the owner:
 Where the exchange fails the job uses `NUGET_API_KEY` if it is set (under
 *API Keys*, a key with that scope for the glob pattern `FennecDb`, which
 expires within 365 days); with neither it fails, naming the exchange's
-failure, and the other registries go on. A key left from before the policy
-is better deleted (`gh secret delete NUGET_API_KEY -R fennec-db/fennecdb`):
-a key for another package's name only fails the push where the exchange
-does. A release published before either was set gets its package from a
+failure, and the other registries go on. A key kept for that is a secret
+of the `nuget` environment (`gh secret set NUGET_API_KEY --env nuget -R
+fennec-db/fennecdb`), not the repository's; once the policy has pushed a
+release it is better deleted, the repository's too (`gh secret delete
+NUGET_API_KEY -R fennec-db/fennecdb`): a key for another package's name only
+fails the push where the exchange does. A release published before either was set gets its package from a
 dispatch: `gh workflow run packages.yml -f tag=vX.Y.Z`.
 
 **Go.** Nothing to set up: the module is fetched from the repository by its
@@ -759,15 +1085,21 @@ bundle `packages.yml` makes, with no Gradle plugin. Once:
    (`gpg --quick-gen-key "fennecdb releases" rsa4096 sign never`), send its
    public half to a key server the Portal reads
    (`gpg --keyserver keyserver.ubuntu.com --send-keys <id>`), and store the
-   private half, armored, and its passphrase:
+   private half, armored, and its passphrase.
 
-       gpg --armor --export-secret-keys <id> | gh secret set SIGNING_KEY -R fennec-db/fennecdb
-       gh secret set SIGNING_PASSWORD -R fennec-db/fennecdb
-       gh secret set MAVEN_CENTRAL_USERNAME -R fennec-db/fennecdb
-       gh secret set MAVEN_CENTRAL_PASSWORD -R fennec-db/fennecdb
+The Portal has no trusted publishing, so these four stay secrets, kept in
+the `maven` environment and not the repository's: limit it to `main` and
+`v*` tags first (the NuGet section's three commands, naming `maven`), then
 
-The upload is `publishingType=AUTOMATIC`: the Portal releases the
-deployment once it validates, and a version is there for good.
+       gpg --armor --export-secret-keys <id> | gh secret set SIGNING_KEY --env maven -R fennec-db/fennecdb
+       gh secret set SIGNING_PASSWORD --env maven -R fennec-db/fennecdb
+       gh secret set MAVEN_CENTRAL_USERNAME --env maven -R fennec-db/fennecdb
+       gh secret set MAVEN_CENTRAL_PASSWORD --env maven -R fennec-db/fennecdb
+
+and delete any of the same names from the repository's secrets (`gh secret
+delete SIGNING_KEY -R fennec-db/fennecdb`, and so on). The upload is
+`publishingType=AUTOMATIC`: the Portal releases the deployment once it
+validates, and a version is there for good.
 
 **pub.dev.** pub.dev's automated publishing trusts only a workflow started
 by a tag's push, and `packages.yml` follows a published release, so it
@@ -775,9 +1107,12 @@ publishes with an account's credentials. Signed in to pub.dev as the account
 that will own `fennecdb` and `fennecdb_flutter` (a verified publisher,
 `fennecdb.dev` or the like, can own them after): `dart pub login` on any
 machine writes `pub-credentials.json` (`~/Library/Application
-Support/dart/` on macOS, `~/.config/dart/` on Linux); then
+Support/dart/` on macOS, `~/.config/dart/` on Linux); then, the `pub`
+environment limited to `main` and `v*` tags first (the NuGet section's
+three commands, naming `pub`),
 
-    gh secret set PUB_CREDENTIALS -R fennec-db/fennecdb < <that file>
+    gh secret set PUB_CREDENTIALS --env pub -R fennec-db/fennecdb < <that file>
+    gh secret delete PUB_CREDENTIALS -R fennec-db/fennecdb # the repository's, if there is one
 
 The first publish creates both packages. The credentials hold a refresh
 token: logging out of that machine's pub (`dart pub logout`) revokes it,
@@ -870,7 +1205,50 @@ time the workflow runs. A required reviewer on them makes a publish wait for a s
 yes. `homebrew`, which holds a secret of its own, and `pypi` and `nuget`,
 whose policies PyPI and nuget.org trust, are limited to `main` and `v*`
 tags (the Homebrew, PyPI and NuGet sections above), and `npm` too since its
-packages publish by trusted publishing.
+packages publish by trusted publishing; `maven` and `pub` hold their
+secrets and are limited the same way. A job reads only the secrets of the
+environment it names, and a repository secret of the same name too: each
+is moved by setting it in its environment (`gh secret set <NAME> --env
+<environment> -R fennec-db/fennecdb`) and then deleting the repository's
+(`gh secret delete <NAME> -R fennec-db/fennecdb`), its environment limited
+first, since a secret in an environment with no rules is read by a job of
+any branch that names it. `tools/workflow_check.py` refuses a job that
+reads a secret and names no environment, but for one it lets off by name
+with the reason.
+
+`site.yml`'s deploy is that one, until its environment exists: the
+Cloudflare secrets (`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, and
+`CLOUDFLARE_AI_TOKEN` where there is one: site/README.md) are the
+repository's, which any branch's workflow reads. A workflow naming an
+environment that does not exist makes GitHub create it at its next run,
+with no rules, so the owner creates `site` first, limited to `main` alone:
+
+    gh api -X PUT repos/fennec-db/fennecdb/environments/site \
+      -F 'deployment_branch_policy[protected_branches]=false' \
+      -F 'deployment_branch_policy[custom_branch_policies]=true'
+    gh api -X POST repos/fennec-db/fennecdb/environments/site/deployment-branch-policies -f name=main -f type=branch
+
+then a pull request puts the line back in `site.yml`'s `deploy`
+(`environment: { name: site, url: https://fennecdb.com }`) and drops the job
+from `REPOSITORY_SECRETS` in `tools/workflow_check.py`, which fails while
+the entry outlives its reason; once it has merged, the three secrets move
+into `site` as above.
+
+The repository's own settings hold what the workflows cannot. Every action
+a workflow runs is pinned to a commit (`docs/design/integrations.md#workflows`);
+GitHub refuses one that is not, a pull request's workflow among them, once
+the Actions setting says so:
+
+    gh api -X PUT repos/fennec-db/fennecdb/actions/permissions \
+      -F enabled=true -f allowed_actions=all -F sha_pinning_required=true
+
+A `v*` tag is what `release.yml` builds and SwiftPM, Go's checksum database
+and the packages name, so it is created by the owner alone, deleted by the
+owner alone, and moved by nobody: under *Settings*, *Rules*, *Rulesets*,
+a tag ruleset on `v*` restricting creations and deletions with the
+repository's admins as its bypass, and a second restricting updates with
+none. A tag pushed by mistake is never moved: the owner deletes it, or the
+next version replaces it.
 
 **After the first publish.** The docs install what a registry holds: PyPI's
 `fennecdb` since 0.1.5 (`pip install "fennecdb[langchain]"`). Until

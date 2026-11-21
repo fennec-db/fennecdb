@@ -464,7 +464,9 @@ archiver's fsyncs on the same disk -- against 31-33 with none and 65-86 a
 stream each, and a close 4.0 ms p50, 15-33 at most, against 3.8-4.0 and
 12-25 with none. With no archiver and with a stream each, every figure
 stayed main's in ABBA turns (the pass 31.0-31.4 and 67-73 ms p50 on main, a
-close 3.6-3.9). The pending feed, the lock held up and the departures moved
+close 3.6-3.9) -- the pass every dirty tenant synced in turn, as a node
+synced them before [each had a thread of its
+own](durability.md#a-nodes-syncs), which the example still times. The pending feed, the lock held up and the departures moved
 nothing, four turns a side against the build before them: the writes while
 the first images were taken 13.9-15.3 ms p50 and 26.7-32.9 p99 against
 13.9-14.9 and 29.5-30.6, the first images 14.8-16.8 s against 15.1-16.8, and
