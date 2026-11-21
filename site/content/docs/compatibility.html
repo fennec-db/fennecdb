@@ -55,7 +55,7 @@ as a break:</p>
     <code>--follow</code>, <code>fennec-server --follow</code>). A host off
     this machine is spoken to under <code>sslmode=verify-full</code> unless
     the connection string or <code>PGSSLMODE</code> names a mode: a server
-    with no TLS, or a certificate signed by a CA the client does not trust,
+    whose <code>ssl</code> is off, or a certificate signed by a CA the client does not trust,
     is refused, the error saying how to go on. Holding a password, the
     client signs in by SCRAM-SHA-256 alone unless <code>require_auth</code>
     says otherwise, bound to TLS where the server offers it. A SCRAM

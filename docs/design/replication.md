@@ -1306,15 +1306,32 @@ the channel binding is the hash of the certificate it was shown, by the
 certificate's own signature hash -- SHA-256 for MD5 and SHA-1, RSA-PSS's by
 its parameters, none for Ed25519, refused -- computed in fennec-tls with
 rustls's own ring (`server_end_point`, the DER walk bounds-checked and
-held by `a_certificate_cut_or_changed_never_panics_the_binding`). A relay
-under `require` or `prefer` shows its own certificate, so the server's
-comparison fails and the sign-in with it. `channel_binding` is libpq's:
-`prefer` binds where offered and says `y,,` where the server offered no
-`-PLUS` over TLS (RFC 5802: a server that did offer it, its offer taken out
-on the way, refuses), `require` refuses a server not offering it and a
-connection in plain text, `disable` sends `n,,`. A bound sign-in makes the
-connection proven. PostgreSQL offers `-PLUS` over TLS from 11 on, so
-`make import-test`'s server, TLS on, signs every live test in bound.
+held by `a_certificate_cut_or_changed_never_panics_the_binding`, and
+fuzzed: `crates/fennec-fuzz`'s `certificate` target). A relay under
+`require` or `prefer` that passes the offer on shows its own certificate,
+so the server's comparison fails and the sign-in with it. One that takes
+`-PLUS` out of the offer and dials the server in plain text is not caught:
+the client, offered no `-PLUS` over TLS, signs in unbound saying `y,,`
+(RFC 5802: it could have bound), and PostgreSQL refuses `y` only on a
+connection of its own over TLS (`ssl_in_use`, `read_client_first_message`)
+-- so a server whose `pg_hba.conf` takes the role by a `host` line, not
+`hostssl` alone, signs the relay in, which then reads the rows and can
+write the stream's commits. What keeps that relay out: `verify-full`, where
+no certificate but the server's passes (the default off this machine),
+`hostssl` alone at the server, or `channel_binding=require` at the client,
+which refuses a server offering no `-PLUS`. A stream signed in unbound is
+not proven, so its keepalives move nothing it confirms (above). The first
+form of this section, SECURITY.md and the import page said a stand-in
+under `require` got no sign-in it could relay; the review of the change
+found the plain-text relay by reading PostgreSQL's SCRAM, and the three
+now say what holds. `channel_binding` is libpq's: `prefer` binds where
+offered and says `y,,` where no `-PLUS` came over TLS -- a server that did
+offer it, its offer taken out on a connection that reaches it over TLS,
+refuses -- `require` refuses a server not offering it and a connection in
+plain text (`a_plus_offer_taken_out_is_told_the_client_could_bind`),
+`disable` sends `n,,`. A bound sign-in makes the connection proven.
+PostgreSQL offers `-PLUS` over TLS from 11 on, so `make import-test`'s
+server, TLS on, signs every live test in bound.
 
 **Run on CI.** Those tests -- fennec-import's `tests/pg.rs` (9) and
 `tests/follow.rs` (4), fennec-server's `tests/follow.rs` (4), each

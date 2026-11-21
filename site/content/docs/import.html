@@ -198,13 +198,23 @@ a server that asks for none is taken.</p>
 <code>tls-server-end-point</code>) wherever the server offers it, as
 PostgreSQL 11 and later do over TLS: the proof carries the hash of the
 certificate the client was shown, which the server compares with its own,
-so a sign-in relayed through someone else's TLS session — which
-<code>require</code> and <code>prefer</code> cannot see — fails at the
-server. <code>channel_binding</code> is libpq's: <code>prefer</code>, the
-default, binds where it can; <code>require</code> refuses a server that
-does not offer it, and a connection in plain text; <code>disable</code> binds
-nothing. A server whose <code>-PLUS</code> offer was taken out on the way
-is told the client could have bound, and refuses the sign-in.</p>
+so a bound sign-in relayed through someone else's TLS session fails at
+the server. What that keeps out depends on the mode. Under
+<code>verify-full</code>, the default off this machine, no one else's
+session gets that far: its certificate is refused. Under
+<code>require</code> or <code>prefer</code>, which check nothing,
+whoever is on the path can show its own certificate, take the
+<code>-PLUS</code> offer out of what the server says and relay the sign-in
+to the server in plain text: the client, offered nothing to bind, signs in
+unbound, and a server reached in plain text takes that — PostgreSQL
+refuses it only over TLS — so the relay is signed in and reads and writes
+as the client. Under <code>require</code> it fails only where the server
+takes TLS alone (<code>hostssl</code> lines in <code>pg_hba.conf</code>,
+no <code>host</code> line for the role) or where the string says
+<code>channel_binding=require</code>. <code>channel_binding</code> is
+libpq's: <code>prefer</code>, the default, binds where it can;
+<code>require</code> refuses a server that does not offer it, and a
+connection in plain text; <code>disable</code> binds nothing.</p>
 
 <p><b>What a server's SCRAM may ask is bounded.</b> Its iteration count is
 held to 4 096 (RFC 7677's floor; PostgreSQL's default) up to 4 194 304, 1 024

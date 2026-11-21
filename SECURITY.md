@@ -135,14 +135,15 @@ a studio that a `fennec-server` serves
 ([`integrations/CLAUDE.md`](integrations/CLAUDE.md)); what a page shows of
 the server's data is the server's to decide, as in a browser.
 
-Six parsers are fuzzed, the targets of `crates/fennec-fuzz`: an HTTP request
+Seven parsers are fuzzed, the targets of `crates/fennec-fuzz`: an HTTP request
 (`http`), JSON (`json`), FennecQL (`fennecql`), the file format's codec
 (`codec`), a `.fennec` file's open, mapped as a server opens it, with a
-replica's apply (`image`), and a SQLite file (`sqlite`), under
+replica's apply (`image`), a SQLite file (`sqlite`), and the walk of the
+certificate a PostgreSQL server shows that picks a channel binding's hash
+(`certificate`), under
 AddressSanitizer on every pull request and for longer each week (`make fuzz`
 lists them). **Not fuzzed today:** the PostgreSQL wire and `pgoutput`
-reader, the certificate walk that picks a channel binding's hash
-(`fennec-tls`), the framing of a sealed file and of an archive, JWT and JWKS
+reader, the framing of a sealed file and of an archive, JWT and JWKS
 reading, and a webhook's headers; a report there is as welcome, and a fuzz
 target for each is a contribution. An input that crashes a target is a
 report worth making, privately as above.
@@ -315,10 +316,16 @@ These are deliberate. The [server](https://fennecdb.com/docs/server),
   `prefer`, `require` (which checks nothing without a CA file) or
   `verify-ca` (the chain, not the host's name) gets what it names. Holding
   a password, the client signs in by SCRAM-SHA-256 alone unless the
-  string's `require_auth` says otherwise, bound to the TLS session where
-  the server offers `SCRAM-SHA-256-PLUS`, so a stand-in under `require`
-  gets neither the password nor a sign-in it can relay; it still gets the
-  rows ([import docs](https://fennecdb.com/docs/import#tls)).
+  string's `require_auth` says otherwise, so the password itself never
+  goes out, and binds the sign-in to the TLS session where the server
+  offers `SCRAM-SHA-256-PLUS`. Under `verify-full` no stand-in finishes the
+  handshake, so nothing is relayed. Under `require` a stand-in can take the
+  `-PLUS` offer out and relay the sign-in to the server in plain text,
+  which a server takes unless its `pg_hba.conf` takes TLS alone
+  (`hostssl`): the relay is then signed in as the client. It is kept out
+  only by such a server or by `channel_binding=require` in the string,
+  and it gets the rows either way
+  ([import docs](https://fennecdb.com/docs/import#signing-in)).
 - **What a followed PostgreSQL sends is the mirror's content, and it can
   stop the server.** A follower that cannot go on stops `fennec-server
   --follow` on purpose (exit 1), so whoever answers at the follower's
