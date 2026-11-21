@@ -24,7 +24,7 @@ SCHEMA ?= 1
 STUDIO_SERVER ?=
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js upgrade-check compat-check openapi-lint openapi-check openapi-golden api-check api-golden sync-scenarios-check float-test fennecql-corpus fuzz fuzz-smoke fuzz-toolchain fuzz-seeds builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test browser-test studio-desktop studio-desktop-dist studio-desktop-test studio-highlight statements-bench gzip-bench replay-bench hook-bench perf-gate perf-gate-io instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench node-sync-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench lists-bench stress-test
+.PHONY: all test test-js upgrade-check compat-check openapi-lint openapi-check openapi-golden api-check api-golden sync-scenarios-check float-test fennecql-corpus fuzz fuzz-smoke fuzz-toolchain fuzz-seeds sanitize builder-golden docs-builder schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test browser-test studio-desktop studio-desktop-dist studio-desktop-test studio-highlight statements-bench gzip-bench replay-bench hook-bench perf-gate perf-gate-io instr-compare file-bench web serve server node shard shard-bench schedule-bench quota-bench request-rate-bench fence-bench tls-bench tls-dial-bench policy-bench wake-bench jwt-bench replica-bench node-archive-bench node-sync-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench seed-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench lists-bench stress-test
 	python-test go-test dotnet-test languages-test examples-test recipes-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench entry-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down pgvector-tls docker docker-run docker-compact docker-down grafana-check slow-client-check deploy-check drill chaos memory clean \
@@ -491,8 +491,9 @@ fennecql-corpus:
 	@python3 tools/fennecql_corpus.py $(if $(FREEZE),--freeze $(FREEZE),$(if $(filter frozen,$(BASE)),--frozen,$(or $(BASE),origin/main)))
 
 # The fuzzer's nightly, a date: AddressSanitizer is a nightly flag, and only
-# the fuzz targets and the jobs running them take one (ci.yml's fuzz-smoke,
-# fuzz.yml). Moved forward in a pull request of its own.
+# the fuzz targets, the sanitized tests (`make sanitize`) and the jobs
+# running them take one (ci.yml's fuzz-smoke and sanitize, fuzz.yml). Moved
+# forward in a pull request of its own.
 FUZZ_NIGHTLY ?= nightly-2026-11-01
 FUZZ_SECONDS ?=
 # Flags for each run, CI's: `--corpus none`, and the weekly run's
@@ -536,6 +537,28 @@ fuzz-smoke:
 	@$(MAKE) --no-print-directory fuzz ASAN=$(SMOKE_ASAN)
 	@bin=$(if $(filter 1,$(SMOKE_ASAN)),target/$(FUZZ_HOST)/fuzz/fennec-fuzz,target/fuzz/fennec-fuzz); \
 	for t in $$($$bin names); do $$bin run $$t $(if $(FUZZ_SECONDS),--seconds $(FUZZ_SECONDS),--smoke) --corpus none $(FUZZ_FLAGS) || exit 1; done
+
+## The tests of fennec-ffi, fennec-abi and fennec-core -- the C ABI an
+## app's pointers and lengths reach, the file's mapping, the kernels, the
+## arenas -- under AddressSanitizer on FUZZ_NIGHTLY (`make fuzz-toolchain`):
+## CI's sanitize job (docs/design/conventions.md#sanitizers). For the host's
+## triple, as the fuzzer is built, so build scripts and proc macros run
+## uninstrumented; a report ends the run, failed. Leaks are not looked for
+## (SANITIZE_ASAN_OPTIONS): the engine's tests forget a database on purpose,
+## as a killed process leaves one
+SANITIZE_RUSTFLAGS = -Zsanitizer=address
+SANITIZE_ASAN_OPTIONS ?= detect_leaks=0
+# The tests held to the standard library's own Unicode, which a nightly
+# moves ahead of the pinned release's: they fail on a new Unicode by design,
+# for the case tables to be written again (src/case.rs, tests/nocase.rs),
+# and say nothing of memory.
+SANITIZE_SKIP = --skip case::tests::the_tables_are_the_standard_library_s \
+	--skip case::tests::the_unlike_runs_are_the_standard_library_s \
+	--skip nocase::the_fold_is_python_s_casefold_at_every_code_point
+sanitize:
+	RUSTFLAGS="$(SANITIZE_RUSTFLAGS)" ASAN_OPTIONS="$(SANITIZE_ASAN_OPTIONS)" \
+	  $(CARGO) +$(FUZZ_NIGHTLY) test --profile sanitize --target $(FUZZ_HOST) --no-fail-fast \
+	  -p fennec-ffi -p fennec-abi -p fennec-core --lib --tests -- $(SANITIZE_SKIP)
 
 ## FUZZ_NIGHTLY, the one nightly the fuzzer is built with
 fuzz-toolchain:

@@ -713,7 +713,8 @@ fn float_into(out: &mut String, bits: u64, mbits: u32, ebits: u32) {
     // Pushed a `char` at a time, encoding each was 8% of the time a page of
     // vectors took to write, and checking the digits were UTF-8 another 6%.
     let push = |out: &mut String, digits: &[u8]| {
-        // SAFETY: every byte is `b'0'` and a digit, ASCII.
+        // SAFETY: each caller hands a piece of `text`, every byte of which
+        // the loop above wrote as `b'0'` plus a digit: ASCII, so UTF-8.
         out.push_str(unsafe { std::str::from_utf8_unchecked(digits) })
     };
     if point <= 0 {

@@ -192,11 +192,21 @@ impl Sink for JournalSink {
 // ------------------------------------------------------------- memory
 
 /// Allocates a buffer of `len` bytes. The JS side uses it to write input.
+/// Null where it cannot: no memory left, or a length past `isize::MAX` --
+/// on wasm32 2 GiB -- which no allocation, `Vec` or slice may be; handed
+/// to the allocator as a `Layout` it was undefined behaviour, and the
+/// `Vec` `fennec_load_owned` made of it too.
 #[no_mangle]
 pub extern "C" fn fennec_alloc(len: usize) -> *mut u8 {
     if len == 0 {
         return std::ptr::NonNull::dangling().as_ptr();
     }
+    if len > isize::MAX as usize {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: an alignment of 1 is a power of two, and `len`, which needs
+    // no rounding up to it, is at most `isize::MAX` (above): the layout's
+    // conditions. `len` is not 0, as `alloc` asks.
     unsafe { alloc(Layout::from_size_align_unchecked(len, 1)) }
 }
 
@@ -211,6 +221,10 @@ pub unsafe extern "C" fn fennec_free(ptr: *mut u8, len: usize) {
     if ptr.is_null() || len == 0 {
         return;
     }
+    // SAFETY: as the contract says, `ptr` is `fennec_alloc(len)`'s -- a
+    // returned buffer is one too (`boxed`) -- freed once, with the layout
+    // it was made with, which `fennec_alloc` made only for a `len` of at
+    // most `isize::MAX`.
     unsafe { dealloc(ptr, Layout::from_size_align_unchecked(len, 1)) }
 }
 
@@ -218,6 +232,16 @@ pub unsafe extern "C" fn fennec_free(ptr: *mut u8, len: usize) {
 fn boxed(payload: &[u8]) -> *mut u8 {
     let total = 4 + payload.len();
     let ptr = fennec_alloc(total);
+    // Out of memory ends the module, as a `Vec` that cannot grow ends it:
+    // the copies below went through the null, which in a module is the
+    // address 0, over the bottom of its stack.
+    if ptr.is_null() {
+        std::process::abort();
+    }
+    // SAFETY: `ptr` is a fresh allocation of `total` bytes, not null
+    // (above), that nothing else points at: the length's 4 bytes, then the
+    // payload's `payload.len()` from 4, end at `total`. `payload` is
+    // memory already borrowed, which a fresh allocation cannot overlap.
     unsafe {
         let len_bytes = (payload.len() as u32).to_le_bytes();
         std::ptr::copy_nonoverlapping(len_bytes.as_ptr(), ptr, 4);
@@ -230,11 +254,19 @@ fn boxed(payload: &[u8]) -> *mut u8 {
 /// outlives the call. Copied out, as it was, a page of 200 768-dim vectors'
 /// parameters were 3 MB more to write before the first was read, and took
 /// 23.7 ms to read against 21.9.
+///
+/// # Safety
+/// `ptr` is null, `len` is 0, or `ptr` is valid for `len` bytes that do not
+/// change while the text lives.
 unsafe fn str_from<'a>(ptr: *const u8, len: usize) -> std::borrow::Cow<'a, str> {
     if ptr.is_null() || len == 0 {
         return "".into();
     }
-    let bytes = std::slice::from_raw_parts(ptr, len);
+    // SAFETY: not null and not empty, so valid for `len` bytes, as the
+    // contract says: an allocation the page made with `fennec_alloc(len)`
+    // and wrote, `len` at most `isize::MAX`, which `fennec_alloc` refuses
+    // past, kept unchanged until the export reading it returns.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
     match std::str::from_utf8(bytes) {
         Ok(s) => s.into(),
         Err(_) => lossy(bytes).into(),
@@ -257,7 +289,9 @@ fn lossy(mut bytes: &[u8]) -> String {
             }
             Err(e) => {
                 let (good, bad) = bytes.split_at(e.valid_up_to());
-                // `valid_up_to` is where the text stopped being UTF-8.
+                // SAFETY: `good` is `bytes` up to `valid_up_to`, the length
+                // of their longest prefix that is UTF-8, as `Utf8Error`
+                // documents it.
                 out.push_str(unsafe { std::str::from_utf8_unchecked(good) });
                 out.push('\u{FFFD}');
                 bytes = bad
@@ -334,11 +368,17 @@ pub unsafe extern "C" fn fennec_query(
     vectors_len: usize,
     now: f64,
 ) -> *mut u8 {
-    let sql = str_from(sql_ptr, sql_len);
-    let params_src = str_from(params_ptr, params_len);
+    // SAFETY: each pointer is null, or valid for its length, as the
+    // contract says -- the page's `fennec_alloc` buffers, written, alive
+    // across the call -- which `str_from` asks.
+    let sql = unsafe { str_from(sql_ptr, sql_len) };
+    // SAFETY: as for `sql`.
+    let params_src = unsafe { str_from(params_ptr, params_len) };
     let vectors = match vectors_ptr.is_null() || vectors_len == 0 {
         true => &[][..],
-        false => std::slice::from_raw_parts(vectors_ptr, vectors_len),
+        // SAFETY: not null and not empty, so valid for `vectors_len` bytes,
+        // as the contract says, at most `isize::MAX` (`fennec_alloc`).
+        false => unsafe { std::slice::from_raw_parts(vectors_ptr, vectors_len) },
     };
 
     let now = now.is_finite().then_some(now as i64);
@@ -397,7 +437,8 @@ pub extern "C" fn fennec_wide() -> u32 {
 /// fennec studio shows of a database in the page.
 ///
 /// # Safety
-/// `ptr` must be valid and `len` bytes long.
+/// `ptr` must be valid and `len` bytes long under modes 0 and 1; the others
+/// read it not at all.
 #[cfg(feature = "schema")]
 #[no_mangle]
 pub unsafe extern "C" fn fennec_schema(
@@ -407,7 +448,15 @@ pub unsafe extern "C" fn fennec_schema(
     mode: u32,
     now: f64,
 ) -> *mut u8 {
-    let request = str_from(ptr, len);
+    // Read only where a mode takes it, as the native library's
+    // `FENNEC_SCHEMA_DESCRIBE` does: the page hands a description none
+    // (`describe`), and read first, any pointer with a length was a slice.
+    let request = match mode {
+        // SAFETY: under these modes, as the contract says, `ptr` is valid
+        // for `len` bytes, which the page wrote and keeps across the call.
+        0 | 1 => unsafe { str_from(ptr, len) },
+        _ => "".into(),
+    };
     let now = now.is_finite().then_some(now as i64);
     collate::take_missing();
     let out = with_db(handle, |db| {
@@ -491,7 +540,10 @@ pub unsafe extern "C" fn fennec_add_chunk(ptr: *const u8, len: usize) -> i32 {
     if ptr.is_null() {
         return -1;
     }
-    let bytes = std::slice::from_raw_parts(ptr, len);
+    // SAFETY: not null, so valid for `len` bytes, as the contract says: the
+    // page's `fennec_alloc(len)` buffer holding the chunk, alive across the
+    // call, `len` at most `isize::MAX`.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
     match collate::add_chunk(bytes) {
         Some(name) => collate::CHUNKS
             .iter()
@@ -633,7 +685,10 @@ pub unsafe extern "C" fn fennec_load(handle: u32, ptr: *const u8, len: usize) ->
     if ptr.is_null() || len == 0 {
         return 1;
     }
-    let bytes = std::slice::from_raw_parts(ptr, len);
+    // SAFETY: not null and not empty, so valid for `len` bytes, as the
+    // contract says: the page's `fennec_alloc(len)` buffer holding the
+    // image, alive across the call, `len` at most `isize::MAX`.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
     collate::take_missing();
     loaded(with_slot(handle, |s| {
         s.loaded = s.db.load(bytes).ok()?;
@@ -676,6 +731,11 @@ pub unsafe extern "C" fn fennec_load_owned(handle: u32, ptr: *mut u8, len: usize
     if ptr.is_null() || len == 0 {
         return 1;
     }
+    // SAFETY: as its contract says, `ptr` is `fennec_alloc(len)`'s, never
+    // used after: the global allocator's block of `len` bytes at an
+    // alignment of 1 -- the layout a `Vec<u8>` of capacity `len` frees
+    // with -- `len` no more than `isize::MAX`, which `fennec_alloc` refuses
+    // past, and every byte written, the page having copied the image in.
     let bytes: Vec<u8> = unsafe { Vec::from_raw_parts(ptr, len, len) };
     let base: fennec_core::store::Base = Arc::new(bytes);
     collate::take_missing();
@@ -829,9 +889,51 @@ mod tests {
         }
         for b in &cases {
             let want = String::from_utf8_lossy(b);
+            // SAFETY: `b` is a `Vec` of `b.len()` bytes, alive across the
+            // call and the comparison after.
             let got = unsafe { str_from(b.as_ptr(), b.len()) };
             assert_eq!(got, want, "{b:?}");
         }
+    }
+
+    /// A length past `isize::MAX` is no allocation Rust can describe: it is
+    /// refused with a null, which the page reads as no room (`#room`),
+    /// never made into a `Layout` the allocator is handed. On wasm32 that
+    /// is an image of 2 GiB or more, which `fennec_load_owned` then took as
+    /// a `Vec` and `fennec_load` as a slice, neither of which may be that
+    /// long. An empty one is the dangling pointer, freed as nothing.
+    #[test]
+    fn an_allocation_past_isize_max_is_refused() {
+        assert!(fennec_alloc(isize::MAX as usize + 1).is_null());
+        assert!(fennec_alloc(usize::MAX).is_null());
+        let empty = fennec_alloc(0);
+        assert!(!empty.is_null());
+        // SAFETY: what `fennec_alloc(0)` answered, freed as its length.
+        unsafe { fennec_free(empty, 0) };
+        let p = fennec_alloc(3);
+        assert!(!p.is_null());
+        // SAFETY: `fennec_alloc(3)`'s, freed once.
+        unsafe { fennec_free(p, 3) };
+    }
+
+    /// Modes 3 and 4 describe the database and take no request: their text
+    /// is not read, whatever pointer and length come with it, as the native
+    /// library's `FENNEC_SCHEMA_DESCRIBE` leaves its text unread. Read
+    /// first, a pointer to nothing with a length was made a slice: the
+    /// standard library's precondition check aborted this test.
+    #[cfg(feature = "schema")]
+    #[test]
+    fn a_description_reads_no_request() {
+        let h = fennec_open();
+        run(h, "create collection t (a int)", "", &[]);
+        for (mode, has) in [(3, "\"name\":\"t\""), (4, "create collection t (a int)")] {
+            let nothing = std::ptr::NonNull::<u8>::dangling().as_ptr();
+            // SAFETY: under modes 3 and 4 the contract asks nothing of the
+            // pointer and the length, which are not read.
+            let out = read(unsafe { fennec_schema(h, nothing, usize::MAX, mode, 0.0) });
+            assert!(out.contains(has), "{mode}: {out}");
+        }
+        fennec_close(h);
     }
 
     #[test]
@@ -894,6 +996,9 @@ mod tests {
 
     /// Turns a `boxed` buffer into a string (`[u32 len][contents]`).
     fn read(ptr: *mut u8) -> String {
+        // SAFETY: `ptr` is a buffer `boxed` made, as every export answering
+        // one does: its length's four bytes, then that many, which it frees
+        // with its whole length, once.
         unsafe {
             let mut len = [0u8; 4];
             std::ptr::copy_nonoverlapping(ptr, len.as_mut_ptr(), 4);

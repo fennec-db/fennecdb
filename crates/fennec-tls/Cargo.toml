@@ -9,6 +9,9 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[lints]
+workspace = true
+
 # The one crate besides fennec-bench that takes dependencies from outside the
 # workspace (docs/design/crates.md#zero-dependencies): TLS is written by no one
 # by hand. rustls without its default features, whose aws-lc-rs wants cmake

@@ -177,6 +177,16 @@ nothing reaches a registry before the notes have had a read.
    published, run `irm https://fennecdb.com/install.ps1 | iex` once on a
    Windows machine and the Quickstart's Windows line, as the other
    installs are run once more.
+
+   **AddressSanitizer.** Every release needs `ci.yml`'s `sanitize` job
+   green at the release's commit, its tests run, not skipped: the tests of
+   fennec-ffi, fennec-abi and fennec-core under ASan
+   (docs/design/conventions.md, "Sanitizers"). It is no required check, so
+   a pull request merges past a red one: `gh run list --workflow ci.yml
+   --branch main --limit 5`, its jobs read on the run of the commit being
+   released (`gh run view <run> --json jobs`), and if none ran there, `gh
+   workflow run ci.yml --ref main` -- a dispatched run tests whatever it
+   finds -- and wait for it.
 4. Read the draft, then publish it, once step 3's run has passed
    `image (manifest)`, the job that makes the image's `X.Y.Z`:
    `gh release edit vX.Y.Z --draft=false` (with `--latest=false` where

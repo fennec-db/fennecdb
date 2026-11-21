@@ -2065,6 +2065,13 @@ impl Store {
         self.base.is_some()
     }
 
+    /// The mapped file the records are read from, as a reader is handed it
+    /// (`fs::tests`).
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn mapped_base(&self) -> Option<&Base> {
+        self.base.as_ref().map(|(b, _)| b)
+    }
+
     /// The records, written into `out` rather than gathered into a `Vec`:
     /// what a checkpoint of a large collection would otherwise hold beside
     /// the data.

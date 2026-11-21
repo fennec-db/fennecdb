@@ -587,6 +587,9 @@ mod record {
     #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
     pub fn take(file: &File) -> Result<(), super::Refused> {
         let l = whole();
+        // SAFETY: the descriptor is `file`'s, open across the call; `l` is
+        // a whole `struct flock` as this system lays it out (above), which
+        // `F_SETLK` reads and keeps no pointer to.
         match unsafe { fcntl(file.as_raw_fd(), F_SETLK, &l as *const Flock) } {
             0 => Ok(()),
             _ => Err(super::Refused::Held),
@@ -598,6 +601,8 @@ mod record {
     #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
     pub fn holder(file: &File) -> Option<Option<i32>> {
         let mut l = whole();
+        // SAFETY: as in `take`; `F_GETLK` writes the holder's `struct flock`
+        // back into `l`, writable and of that very layout.
         if unsafe { fcntl(file.as_raw_fd(), F_GETLK, &mut l as *mut Flock) } != 0 {
             return None;
         }
@@ -611,6 +616,8 @@ mod record {
         }
         const LOCK_EX: i32 = 2;
         const LOCK_NB: i32 = 4;
+        // SAFETY: the descriptor is `file`'s, open across the call; no
+        // pointer is passed.
         match unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } {
             0 => Ok(()),
             _ => Err(super::Refused::Held),

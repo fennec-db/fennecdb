@@ -54,8 +54,13 @@ fn musl(n: usize) -> usize {
     C[i] * 16
 }
 
+// SAFETY: each call is handed on to `System` with the arguments it was given,
+// so every block is `System`'s and `GlobalAlloc`'s contract holds as `System`
+// keeps it; the counting beside is atomics, allocating nothing.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        // SAFETY: `l` is this call's layout, of a nonzero size as
+        // `GlobalAlloc::alloc`'s caller guarantees.
         let p = unsafe { System.alloc(l) };
         if !p.is_null() {
             HEAP.fetch_add(l.size(), Ordering::Relaxed);
@@ -65,6 +70,9 @@ unsafe impl GlobalAlloc for Counting {
         p
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        // SAFETY: `p` is `System`'s, made with `l` -- `alloc` and `realloc`
+        // hand on nothing else -- as `GlobalAlloc::dealloc`'s caller
+        // guarantees.
         unsafe { System.dealloc(p, l) };
         HEAP.fetch_sub(l.size(), Ordering::Relaxed);
         LIVE.fetch_sub(1, Ordering::Relaxed);

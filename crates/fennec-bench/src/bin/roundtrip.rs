@@ -96,6 +96,9 @@ extern "C" {
 
 fn rusage() -> Rusage {
     let mut r = Rusage::default();
+    // SAFETY: the struct is a whole `struct rusage` of 64-bit Linux and macOS
+    // -- two `timeval`s of two words, then fourteen longs -- writable, and the
+    // call keeps no pointer to it.
     unsafe { getrusage(0, &mut r) };
     r
 }

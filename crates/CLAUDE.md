@@ -24,6 +24,20 @@ fuzz` lists the targets; CI's `fuzz-smoke` runs each by count, `fuzz.yml`
 weekly): a new parser owes its target and `fuzz.yml`'s matrix line, a
 finding a regression test in its own crate.
 
+**[Every `unsafe` block says why it is sound.](../docs/design/conventions.md#unsafe-code)**
+A `// SAFETY:` comment above each `unsafe` block and `unsafe impl`, or above
+the statement it is, names what guarantees it -- for a C ABI the contract
+fennec.h and its `# Safety` sections write, never "the caller guarantees"
+alone -- and an unsafe operation in an `unsafe fn` is in a block of its
+own. Clippy's `undocumented_unsafe_blocks` and rustc's
+`unsafe_op_in_unsafe_fn`, denied in the root Cargo.toml's
+`[workspace.lints]`, which every crate takes, hold it where code compiles;
+`tools/lints_check.py` (CI's fmt job) reads every `.rs` file whatever its
+`cfg`. [fennec-ffi's, fennec-abi's and fennec-core's tests run under
+ASan](../docs/design/conventions.md#sanitizers) (`make sanitize`, CI's
+`sanitize`, no required check, never a merge group's): every unsafe site
+they hold is reached by one, and a new site owes its test.
+
 **[A secret is compared by `crypto::ct_eq` alone](../docs/design/conventions.md#secrets-compared)**
 -- a token, a mark, a MAC, a signature, a proof, a password -- never by
 `==` or `!=`, which leave at the first byte that differs:

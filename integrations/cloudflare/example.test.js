@@ -127,3 +127,42 @@ test('a failed maintain lets the database go once no request holds it', { skip }
   await allKept(storage, await Promise.all([c, d, e]));
   assert.notEqual(await t.db(), first, 'restored again');
 });
+
+// A trap -- the module out of memory to answer in -- stops every call on
+// the database, the write it stopped answered 503 and the database let go
+// of. Its `close` threw "the module stopped", so `#retire` never reached
+// the restore: the calls waiting on the database it was retiring were
+// refused with that error, and only the call after them restored one.
+test('after a trap the calls waiting on the retired database run on the one restored', { skip }, async () => {
+  const trap = { on: false };
+  const instantiate = WebAssembly.instantiate;
+  WebAssembly.instantiate = async (...args) => {
+    const out = await instantiate(...args);
+    const x = (out instanceof WebAssembly.Instance ? out : out.instance).exports;
+    const query = (...a) => {
+      const res = x.fennec_query(...a);
+      if (trap.on) throw new WebAssembly.RuntimeError('unreachable');
+      return res;
+    };
+    Object.defineProperty(query, 'length', { value: x.fennec_query.length });
+    return { instance: { exports: { ...x, fennec_query: query } } };
+  };
+  try {
+    const [storage, t] = await begun();
+    const first = await t.db();
+    trap.on = true;
+    const failed = await t.query('put t {n: 2}');
+    assert.equal(failed.status, 503, JSON.stringify(failed));
+    assert.match(failed.body.error, /^not stored: the module stopped \(unreachable\)/);
+    trap.on = false;
+    // Waits on the database being retired, then runs on the one restored
+    // from storage: the row before the trap, not the one it stopped.
+    const after = await t.query('get t select n order n');
+    assert.equal(after.status, 200, JSON.stringify(after));
+    assert.deepEqual(after.body.rows, [{ n: 1 }]);
+    assert.notEqual(await t.db(), first, 'restored again');
+    assert.deepEqual(await stored(storage), [{ id: 1, n: 1 }]);
+  } finally {
+    WebAssembly.instantiate = instantiate;
+  }
+});

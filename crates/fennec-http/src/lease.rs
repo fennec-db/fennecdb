@@ -1129,6 +1129,8 @@ mod tests {
                 fn clock_gettime(clock: i32, ts: *mut Timespec) -> i32;
             }
             let mut ts = Timespec { sec: 0, nsec: 0 };
+            // SAFETY: `ts` is a `timespec`, two longs, writable across the
+            // call, which writes that alone (`CLOCK_MONOTONIC`, 1).
             assert_eq!(unsafe { clock_gettime(1, &mut ts) }, 0);
             ts.sec as u64 * 1_000_000_000 + ts.nsec as u64
         };
@@ -1138,6 +1140,7 @@ mod tests {
                 fn clock_gettime_nsec_np(clock: u32) -> u64;
             }
             // `CLOCK_UPTIME_RAW`, `Instant`'s.
+            // SAFETY: no pointers: a clock's number in, nanoseconds out.
             unsafe { clock_gettime_nsec_np(8) }
         };
         #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
@@ -1170,10 +1173,14 @@ mod tests {
                 fn mach_timebase_info(info: *mut Timebase) -> i32;
             }
             let mut t = Timebase { numer: 0, denom: 0 };
+            // SAFETY: `t` is a `mach_timebase_info`, two `u32`s, writable
+            // across the call, which writes that alone.
             assert_eq!(unsafe { mach_timebase_info(&mut t) }, 0);
             let ns = |ticks: u64| (ticks as u128 * t.numer as u128 / t.denom as u128) as u64;
+            // SAFETY: no arguments and no memory of ours: the ticks out.
             let c0 = ns(unsafe { mach_continuous_time() });
             let boot = Moment::now().0;
+            // SAFETY: as for `c0`.
             let c1 = ns(unsafe { mach_continuous_time() });
             // A microsecond of each conversion's rounding either way.
             assert!(
@@ -1196,8 +1203,11 @@ mod tests {
             }
             let from = boot::from().expect("QueryInterruptTimePrecise, Windows 10's");
             let mut unbiased = 0u64;
+            // SAFETY: the call writes one `u64` into `unbiased`, alive
+            // across it.
             assert_ne!(unsafe { QueryUnbiasedInterruptTime(&mut unbiased) }, 0);
             let boot = Moment::now().0;
+            // SAFETY: no arguments and no memory of ours: the count out.
             let ticks = unsafe { GetTickCount64() };
             println!(
                 "the boot clock is {from}'s QueryInterruptTimePrecise: {boot} ns, \

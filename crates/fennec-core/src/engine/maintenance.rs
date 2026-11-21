@@ -844,6 +844,10 @@ impl Database {
         let side = &mut b.side;
         self.last_marks(&mut |body| put_record(side, super::REC_STATEMENT, 0, body))?;
         let len = b.side.at();
+        // In place, in bytes a mapping covers (`Beside::write`'s), which a
+        // `&[u8]` must never see change: its stores are this compact's
+        // alone until the swap below, on this thread, and no slice of it
+        // outlives the read that took it (`fs::Mapping`).
         b.side
             .patch(b.head_at + 1, &self.changes.seq().to_le_bytes())?;
         b.side

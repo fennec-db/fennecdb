@@ -530,6 +530,7 @@ pub fn become_user(user: User) -> Result<(), String> {
     if unsafe { sys::setuid(0) } == 0 {
         return Err(format!("became {user}, and could become root again"));
     }
+    // SAFETY: as above, a plain number.
     if user.gid != 0 && unsafe { sys::setgid(0) } == 0 {
         return Err(format!("became {user}, and could take root's group again"));
     }
