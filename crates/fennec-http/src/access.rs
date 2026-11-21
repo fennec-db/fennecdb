@@ -382,7 +382,36 @@ fn unix_now() -> u64 {
 /// How long a token `mint` signs lives when its claims name no `exp`.
 pub const MINTED_FOR: u64 = 3600;
 
-type Claims = Arc<Vec<(String, Value)>>;
+type Claims = Arc<Verified>;
+
+/// A verified token's claims, kept with its text in [`Access::verified`],
+/// and the caller it is worked out once ([`Scope::authority`]): a SHA-256
+/// a keyed write, 9 700 instructions of a scoped keyed `set`'s 94 000
+/// (`make replay-bench MODE=scoped-keyed`), is one a token while it is
+/// kept.
+#[derive(Debug)]
+struct Verified {
+    claims: Vec<(String, Value)>,
+    authority: std::sync::OnceLock<String>,
+}
+
+impl Verified {
+    fn new(claims: Vec<(String, Value)>) -> Verified {
+        Verified {
+            claims,
+            authority: std::sync::OnceLock::new(),
+        }
+    }
+}
+
+impl std::ops::Deref for Verified {
+    type Target = Vec<(String, Value)>;
+
+    fn deref(&self) -> &Vec<(String, Value)> {
+        &self.claims
+    }
+}
+
 const SHARDS: usize = 16;
 /// Tokens a shard keeps, emptied when full.
 const KEPT: usize = 256;
@@ -1242,7 +1271,7 @@ impl Access {
                 "no key has the token's kid"
             });
         }
-        let claims = Arc::new(object(body)?);
+        let claims = Arc::new(Verified::new(object(body)?));
         // Asked once, before the token is kept, as its signature is: the
         // demands are fixed with the `Access`, unlike the time `exp` is
         // asked against. After the signature, so a token no key signed is
@@ -2849,12 +2878,23 @@ impl Scope {
     /// What is kept for a caller alone is kept under it: an
     /// `Idempotency-Key`'s answer, whose `returning` rows are those its
     /// first caller could read. Made where it is asked, a keyed write's,
-    /// never as a scope is made: no request without a key pays for it.
-    pub fn authority(&self) -> String {
+    /// never as a scope is made: no request without a key pays for it; and
+    /// once a token, kept with its claims while the token is
+    /// ([`Verified`]).
+    pub fn authority(&self) -> &str {
+        let verified = &self.roles.0;
+        verified
+            .authority
+            .get_or_init(|| self.authority_of(verified))
+    }
+
+    /// [`Self::authority`] of `claims`, worked out.
+    #[cold]
+    fn authority_of(&self, claims: &[(String, Value)]) -> String {
         let mut text = String::new();
         for name in &self.lines.authority {
             fennec_core::json::escape_into(&mut text, name);
-            match self.roles.0.iter().find(|(k, _)| k == name) {
+            match claims.iter().find(|(k, _)| k == name) {
                 Some((_, v)) => {
                     text.push('=');
                     fennec_core::json::value_into(&mut text, v);

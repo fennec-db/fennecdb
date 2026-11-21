@@ -77,7 +77,7 @@ pub fn key(req: &Request, who: &Who) -> std::result::Result<Option<Key>, Respons
     // `sub` is a number, which names none: told so, an app minting its
     // numeric ids as `"sub": 42` knows what to change.
     let owner = match who {
-        Who::Full => String::new(),
+        Who::Full => "",
         Who::Scoped(scope) => match scope.subject() {
             Some(_) => scope.authority(),
             None => {
@@ -90,7 +90,7 @@ pub fn key(req: &Request, who: &Who) -> std::result::Result<Option<Key>, Respons
         },
     };
     let mut name = String::with_capacity(owner.len() + 1 + given.len());
-    name.push_str(&owner);
+    name.push_str(owner);
     name.push('\u{1f}');
     name.push_str(given);
     Ok(Some(Key {

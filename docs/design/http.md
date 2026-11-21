@@ -515,9 +515,14 @@ caller, as before. Two tokens of one caller name one key, and a token of
 another issuer or other rights another, which runs the write as a key
 seen for the first time does. The names are worked out once a policy
 (`authority_claims`, in the `Lines` every scope shares), and the digest
-only where a key is sent: a write without one asks nothing new, and the
-statement cache, a row's tag and the token cache read nothing of it --
-none hashes a token on a request's path. Keys kept by a server from
+only where a key is sent, once a token: kept with the claims of a token
+the server keeps verified (`access::Verified`), so a token's keyed writes
+after its first pay a load for it. Made at each keyed write, it cost a
+scoped keyed `set` 9 700 instructions of 94 000 (the review of the G14
+fixes, measured; `make replay-bench MODE=scoped-keyed`). A write without
+a key asks nothing new, and the statement cache, a row's tag and the
+token cache read nothing of it -- none hashes a token on a request's
+path. Keys kept by a server from
 before are their subject's, and are no caller's now: a retry across the
 upgrade, within the key's day, runs again. `tests/idempotency.rs`'s
 `a_key_is_replayed_only_to_a_caller_of_the_same_authority` holds another
