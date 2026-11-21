@@ -263,7 +263,10 @@ type, after the collation's where it has one. A dropped field's place
 (<code>alter collection ... drop field</code>) is written where it stands
 as a field with no name and type tag 12: the documents written before the
 drop hold a value there, which a read passes over, and a document written
-after it a <code>null</code>. A document that ends before a field's place
+after it a <code>null</code>, as every document does once a
+<code>compact</code> has run. The place stays for the collection's life:
+no compact renumbers the places, which a replica applying the writes after
+it reads by. A document that ends before a field's place
 holds <code>null</code> there: it was written before the field was
 added. A <code>json</code> field is type tag 14, and after its index kind
 come the indexes on paths into it: a count, then each one's keys

@@ -1280,8 +1280,11 @@ impl Schema {
         let mut short = false;
         for (i, f) in self.fields.iter().enumerate() {
             let want = self.place(i);
+            // Only dropped places are passed here, each field read in
+            // turn: a `null` by its byte, as a write or a compact leaves
+            // one (`skip_passing`). No other collection's read enters it.
             while at < want {
-                skip_field(buf, &mut pos)?;
+                skip_passing(buf, &mut pos)?;
                 at += 1;
             }
             let v = match pos < buf.len() {

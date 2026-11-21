@@ -9511,10 +9511,6 @@ impl Database {
         };
         let (ids, _) = self.page_ids(c, sel, params, &ctx, false, true, false)?;
         let limit = sel.limit.map_or(usize::MAX, |l| l.at(params));
-        // A collection holding a dropped place passes its `null` by its
-        // byte (`codec::skip_passing`): asked only where a place is passed,
-        // which a `get` of every field of any other collection never does.
-        let passing = !c.schema.dropped.is_empty();
         let mut n = 0;
         out.push('[');
         for id in ids.into_iter().skip(sel.offset.at(params)).take(limit) {
@@ -9538,9 +9534,15 @@ impl Database {
                 // Past the payload's end nothing is skipped: a field added
                 // after the document was written reads as `null`.
                 while at < want {
-                    match passing {
-                        true => crate::codec::skip_passing(doc, &mut pos)?,
-                        false => crate::codec::skip_field(doc, &mut pos)?,
+                    // A collection holding a dropped place passes its
+                    // `null` by its byte (`codec::skip_passing`): asked
+                    // only where a place is passed, which a `get` of every
+                    // field of any other collection never does. Asked of a
+                    // bool held across the rows, it cost such a page 1.5
+                    // instructions a row.
+                    match c.schema.dropped.is_empty() {
+                        true => crate::codec::skip_field(doc, &mut pos)?,
+                        false => crate::codec::skip_passing(doc, &mut pos)?,
                     }
                     at += 1;
                 }
