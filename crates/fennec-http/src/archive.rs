@@ -1751,49 +1751,24 @@ fn scratch_name(end: u64, left: &[String]) -> String {
     name
 }
 
-/// `from` copied to `to`, `to` open to read back and append to. A Unix
-/// copies by the system -- a clone on APFS, `copy_file_range` on Linux --
-/// and opens it again. The system's copy gives `to` the mode `from` has,
-/// so an image wider than its owner's -- an archive an earlier release
-/// made with the umask's mode -- is copied into a file made its owner's
-/// alone (`fennec_core::fs::create_private`) instead: the database
-/// restored from it is never wider than that.
-#[cfg(not(windows))]
+/// `from` copied into `to`, a file made for it, and the handle it was
+/// written through, open to read back and append to: nothing opens `to`
+/// again by its name. Made by `fennec_core::fs::create_private` -- its
+/// owner's alone whatever mode the image has, an archive an earlier
+/// release made with the umask's included, and by `O_EXCL`, which follows
+/// no link put at the name: one there is removed, never the file it names.
+/// It was the system's copy, `fs::copy`, which opens `to` through a link
+/// (a clone on APFS refused by one, the copy after opening it) and gives
+/// it the image's mode, and then an open by the name again. On Linux
+/// `io::copy` from one file to another is `copy_file_range`, a reflink
+/// where the file system shares blocks, as `fs::copy` was; elsewhere the
+/// bytes go a mebibyte a call, where macOS cloned (a restore, and a
+/// consolidating round of an archive with no key). On Windows it was this
+/// already: opened again after `CopyFileExW`, `to` could be held between
+/// by a copier that shares no writer (32) -- a sync tool, an indexer,
+/// `fs::copy` itself -- and the round's image refused.
 fn copied(from: &Path, to: &Path) -> io::Result<File> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if fs::metadata(from)?.permissions().mode() & 0o077 != 0 {
-            io::copy(
-                &mut File::open(from)?,
-                &mut fennec_core::fs::create_private(to)?,
-            )?;
-            return File::options().read(true).append(true).open(to);
-        }
-    }
-    // The system's copy opens `to` through a link put at its name, as a
-    // side file is never opened (`fennec_core::fs::create_private`), so
-    // whatever is there -- a link, a file a crash left -- goes first.
-    match fs::remove_file(to) {
-        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-        _ => {}
-    }
-    fs::copy(from, to)?;
-    File::options().read(true).append(true).open(to)
-}
-
-/// [`copied`] on Windows: through the one handle, from the file's making
-/// on. Opened again after `CopyFileExW`, it could be held between by a
-/// copier that shares no writer (32) -- a sync tool, an indexer, `fs::copy`
-/// itself -- and the round's image refused.
-#[cfg(windows)]
-fn copied(from: &Path, to: &Path) -> io::Result<File> {
-    let out = File::options()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(to)?;
+    let out = fennec_core::fs::create_private(to)?;
     let mut w = io::BufWriter::with_capacity(1 << 20, out);
     io::copy(&mut File::open(from)?, &mut w)?;
     w.into_inner().map_err(io::IntoInnerError::into_error)
@@ -1985,6 +1960,54 @@ mod tests {
         ] {
             assert!(!is_scratch(name), "{name}");
         }
+    }
+
+    /// A restore's copy of an image follows no link put at its name: the
+    /// link is removed and the file made anew, the file it named keeping
+    /// its bytes and its mode, the copy its owner's alone whatever the
+    /// image's mode and read back and appended to through the handle that
+    /// made it, which is the file at the name. Up to 0.2.0 the system's
+    /// copy opened the name through the link (on macOS once the clone was
+    /// refused by it) and wrote the image into the file it named, with the
+    /// image's mode.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_of_an_image_follows_no_link_at_its_name() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = std::env::temp_dir().join(format!("fennec-copied-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let target = dir.join("elsewhere");
+        fs::write(&target, b"another file").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+        for image in [0o600, 0o644] {
+            let from = dir.join("image");
+            fs::write(&from, b"image").unwrap();
+            fs::set_permissions(&from, fs::Permissions::from_mode(image)).unwrap();
+            let to = dir.join("restoring");
+            let _ = fs::remove_file(&to);
+            std::os::unix::fs::symlink(&target, &to).unwrap();
+            let mut f = copied(&from, &to).unwrap();
+            assert_eq!(
+                (fs::read(&target).unwrap(), mode(&target)),
+                (b"another file".to_vec(), 0o644),
+                "the file a link at the copy's name named, an image {image:o}"
+            );
+            assert!(fs::symlink_metadata(&to).unwrap().is_file());
+            assert_eq!(mode(&to), 0o600, "the copy of an image {image:o}");
+            assert_eq!(
+                f.metadata().unwrap().ino(),
+                fs::metadata(&to).unwrap().ino(),
+                "the handle is the file at the name"
+            );
+            f.write_all(b" and its writes").unwrap();
+            f.seek(SeekFrom::Start(0)).unwrap();
+            let mut read = Vec::new();
+            f.read_to_end(&mut read).unwrap();
+            assert_eq!(read, b"image and its writes");
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Each verify restores into a directory of its own: a hundred held at

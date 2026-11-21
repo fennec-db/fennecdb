@@ -191,8 +191,10 @@ fn write(dir: &Path, name: &str, id: u64, bound: Binding, following: bool) -> io
         if following { "f" } else { "n" }
     );
     // Made its owner's alone, as its tenant's file is; one there keeps its
-    // mode (`fennec_core::fs::private`).
-    let mut file = fennec_core::fs::private(
+    // mode. Opened only where it is no link (`private_beside`): truncated
+    // and written through one, the line went into whatever file a writer
+    // of the directory had it name.
+    let mut file = fennec_core::fs::private_beside(
         std::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -335,6 +337,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// A link put at a tenant's `.instance` is never written through: the
+    /// write is refused, and the file the link names keeps its bytes and
+    /// its mode. Up to this fix the sidecar was opened through it,
+    /// truncated and given the identity's line (fennec-core's
+    /// `a_link_at_a_side_files_name_is_never_followed` holds the
+    /// database's side files alike).
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_the_sidecars_name_is_never_followed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("link");
+        let file = dir.join("acme.fennec");
+        std::fs::write(&file, b"one").unwrap();
+        let target = dir.join("elsewhere");
+        std::fs::write(&target, b"another file").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::os::unix::fs::symlink(&target, path(&dir, "acme")).unwrap();
+        assert!(
+            stamp(&dir, "acme", &file, 5).is_err(),
+            "a sidecar written through a link"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"another file");
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "the linked file's mode");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
