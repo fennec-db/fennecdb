@@ -92,6 +92,15 @@ after() {
     shift
     printf '%s\n' "$@" | awk -v w="$w" 'f { printf "%s%s", s, $0; s = ", " } $0 == w { f = 1 }'
 }
+# A list's words, one or more a line, joined by commas; and a value's words
+# on one line, single spaces between: what `echo $x | sed 's/ /, /g'` and
+# `echo $x` said, without a word read as a pattern of file names.
+joined() {
+    printf '%s\n' "$1" | awk '{ for (i = 1; i <= NF; i++) { printf "%s%s", s, $i; s = ", " } }'
+}
+oneline() {
+    printf '%s\n' "$1" | awk '{ for (i = 1; i <= NF; i++) { printf "%s%s", s, $i; s = " " } }'
+}
 doing() {
     left=$(printf '%s\n' "$left" | awk -v c="$1" 'f; $0 == c { f = 1 }')
     pending=
@@ -222,9 +231,9 @@ assets "$app" >"$work/want"
 cut -d' ' -f2 "$work/want" | sort >"$work/want-names"
 printf '%s' "$release" | jq -r '.assets[].name' | sort >"$work/have-names"
 missing=$(comm -23 "$work/want-names" "$work/have-names")
-[ -z "$missing" ] || fails "$tag lacks $(echo $missing | sed 's/ /, /g'), which $( [ "$app" = yes ] && echo "release.yml and desktop.yml attach" || echo "release.yml attaches")"
+[ -z "$missing" ] || fails "$tag lacks $(joined "$missing"), which $( [ "$app" = yes ] && echo "release.yml and desktop.yml attach" || echo "release.yml attaches")"
 extra=$(comm -13 "$work/want-names" "$work/have-names")
-[ -z "$extra" ] || fails "$tag holds $(echo $extra | sed 's/ /, /g'), which no workflow attaches: tools/release-verify.sh's list and the workflows part"
+[ -z "$extra" ] || fails "$tag holds $(joined "$extra"), which no workflow attaches: tools/release-verify.sh's list and the workflows part"
 ok "$tag holds its $(wc -l <"$work/want-names" | tr -d ' ') assets, no more"
 
 mkdir "$work/assets"
@@ -247,7 +256,7 @@ verified() {
 doing "SHA256SUMS's attestation"
 sums=$work/assets/SHA256SUMS
 late=$(awk '{ f = $2; sub(/^\*/, "", f) } f ~ /^fennec-studio-/ { app = 1; next } app { print f }' "$sums")
-[ -z "$late" ] || fails "SHA256SUMS lists $(echo $late | sed 's/ /, /g') after the app's lines, which desktop.yml appends to release.yml's: no run wrote it there"
+[ -z "$late" ] || fails "SHA256SUMS lists $(joined "$late") after the app's lines, which desktop.yml appends to release.yml's: no run wrote it there"
 own=$(awk '{ f = $2; sub(/^\*/, "", f) } f ~ /^fennec-studio-/ { exit } { n++ } END { print n + 0 }' "$sums")
 head -n "$own" "$sums" >"$work/sums-release"
 verified "$work/sums-release" release.yml "refs/tags/$tag" ||
@@ -281,6 +290,7 @@ while read -r kind name; do
 done <"$work/want"
 
 doing "each asset's attestation"
+# shellcheck disable=SC2094 # awk reads the list the loop reads; nothing writes it
 while read -r kind name; do
     file=$work/assets/$name
     case $kind in
@@ -320,7 +330,7 @@ for ref in "$version" "$version-amd64" "$version-arm64"; do
         --jq '.[].verificationResult.statement.subject[].digest.sha256' 2>"$err") ||
         fails "$image:$ref ($digest): no attestation by release.yml at refs/tags/$tag: $(said)"
     printf '%s\n' "$subjects" | grep -qxF "${digest#sha256:}" ||
-        fails "$image:$ref: the attestation names [$(echo $subjects)], not $digest, which the registry serves"
+        fails "$image:$ref: the attestation names [$(oneline "$subjects")], not $digest, which the registry serves"
     ok "$image:$ref $digest: release.yml at refs/tags/$tag"
 done
 
@@ -336,11 +346,12 @@ fi
 doing "npm's provenance"
 pkgs="@fennecdb/web @fennecdb/react @fennecdb/cloudflare @fennecdb/langchain"
 for pkg in $pkgs; do
+    # shellcheck disable=SC2086 # the packages' names, a word each
     pending=$(after "$pkg" $pkgs)
     [ -z "$pending" ] || pending="npm's provenance of $pending"
     att=$(npm view "$pkg@$version" dist.attestations --json 2>"$err") || fails "npm $pkg@$version could not be read: $(said)"
     url=$(printf '%s' "${att:-null}" | jq -r 'if type == "object" and .provenance.predicateType == "https://slsa.dev/provenance/v1" then .url // empty else empty end')
-    [ -n "$url" ] || fails "npm $pkg@$version carries no SLSA provenance (dist.attestations is [$(echo $att)]): published without --provenance, or not by packages.yml"
+    [ -n "$url" ] || fails "npm $pkg@$version carries no SLSA provenance (dist.attestations is [$(oneline "$att")]): published without --provenance, or not by packages.yml"
     bundle=$(curl -fsS "$url" 2>"$err") || fails "npm $pkg@$version: its attestations ($url) could not be read: $(said)"
     from=$(printf '%s' "$bundle" | jq -r '[.attestations[] | select(.predicateType == "https://slsa.dev/provenance/v1")
         | .bundle.dsseEnvelope.payload | @base64d | fromjson | .predicate.buildDefinition.externalParameters.workflow
@@ -372,6 +383,7 @@ esac
 files=$(curl -fsS "https://pypi.org/pypi/fennecdb/$pyversion/json" 2>"$err" | jq -r '.urls[].filename') || true
 [ -n "$files" ] || fails "PyPI holds no files of fennecdb $pyversion: $(said)"
 for f in $files; do
+    # shellcheck disable=SC2086 # PyPI's file names, a word each, as the loop splits them
     pending=$(after "$f" $files)
     [ -z "$pending" ] || pending="PyPI's attestations of $pending"
     prov=$(curl -fsS "https://pypi.org/integrity/fennecdb/$pyversion/$f/provenance" 2>"$err") ||
