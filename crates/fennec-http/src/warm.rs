@@ -54,13 +54,15 @@ pub fn start(what: &str, db: &Arc<RwLock<Database>>, warm: &Warm) {
         .name("fennec-warm".into())
         .spawn(move || {
             let t = Instant::now();
-            let todo = match db.upgrade() {
+            let todo = match crate::held::beside(&db) {
                 Some(db) => crate::held::read(&db).unbuilt_indexes(&only),
                 None => return,
             };
             let mut built = 0;
             for (c, f, kind) in &todo {
-                let Some(db) = db.upgrade() else { return };
+                let Some(db) = crate::held::beside(&db) else {
+                    return;
+                };
                 // One index under each hold of the lock, so a writer waits
                 // out one build and not all of them -- a field's `@text`
                 // beside its `@unique` too, listed apart.
