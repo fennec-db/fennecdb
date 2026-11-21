@@ -10459,6 +10459,11 @@ impl Database {
             }
             return Err(Error::Exists(format!("collection `{}`", schema.name)));
         }
+        // Whoever built it: no read refuses what a write took. A schema
+        // whose fields were pushed past `Schema::new` was written as handed,
+        // and the file refused at its next open, a replica's apply too
+        // (the fuzz fix's third review).
+        schema.readable()?;
         // Every id below the last `u32`, which an open refuses
         // (`unmade_collection`): reached only from a file naming an id near
         // it, where `+= 1` overflowed, or wrapped to 0 in a release build.
