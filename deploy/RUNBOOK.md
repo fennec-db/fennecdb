@@ -680,8 +680,9 @@ run again once it is gone.
 
 **Remove `<t>.instance` when you replace a tenant's file by hand.** The
 identity is bound to the file's device, inode and birth time; where the
-node reads no birth time -- every Linux build, and file systems keeping
-none -- to its device and inode alone, and a file copied into place after
+node reads no birth time -- every Linux release binary, and file systems
+keeping none -- or the node that wrote the sidecar read none, to its device
+and inode alone, and a file copied into place after
 an `rm` may be given
 the inode of the one it replaced -- and with the sidecar kept, its
 identity, which a router's reclaim or follow would then act on. Every way
