@@ -1375,6 +1375,23 @@ read +0. The file was written again from that run. A percent in a day,
 with no pull request in which anybody saw it, is what the check is for:
 from that landing the job holds each one to what main measures.
 
+The fifth train (#677, 2026-11-21) was the first to meet the budgets in
+its own run, and went past two: `fennec` 5 028 624 bytes (+135 168,
++2.76%) and `fennec-server` 8 378 960 (+86 016, +1.04%), with `make small`
+2 972 160 (+4 096) inside its own. Built a step of the train at a time on
+macOS, the symbols kept, the code it added splits by branch. G14's
+PostgreSQL client (verify-full off this machine, SCRAM alone and bound to
+TLS, a follower's copy that holds no lock) is 43% of the shell's growth
+and 58% of the server's, some 21 KB of `fennec_wire::client` in each. The
+sealed format's version 3, which only the shell's `backup`, `archive` and
+`restore` hold, is 30% of the shell's, and the SQLite reader 26%; a
+schema's names held in a set natively, where a SQLite table may declare
+32 767 of them, is all of `make small`'s page. The HTTP edge (a JWKS file
+read again with a back-off, an `Idempotency-Key` bound to its caller,
+refusals and MCP rates counted by caller) is 29% of the server's, and
+db-64's registry that waits on no lock after its shutdown 18%. The file
+was written from that run, each budget the one the job printed.
+
 Rejected: a budget of the measurement itself, which would stop every pull
 request that adds a byte and make any two in the merge queue that each
 write one conflict; a ceiling 5% above it, the 1.0 plan's for after 1.0,
