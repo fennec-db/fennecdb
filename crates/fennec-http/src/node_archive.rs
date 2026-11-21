@@ -562,7 +562,9 @@ impl NodeArchive {
     /// Beside `follow`: an image of each tenant's archive's end every
     /// `every` once a write came after its last, and what a restore within
     /// `keep` does not need let go after it, until `stop` is set -- what
-    /// `fennec archive` does for its one database, a tenant at a time.
+    /// `fennec archive` does for its one database, a tenant at a time --
+    /// each line an upgrade left sealed before version 3 given its image of
+    /// version 3 first ([`Self::seal_ends`]).
     pub fn keep_up(
         &self,
         every: Duration,
@@ -570,6 +572,7 @@ impl NodeArchive {
         stop: &AtomicBool,
         report: &dyn Fn(&str),
     ) -> io::Result<()> {
+        self.seal_ends(stop, report);
         let mut last = Instant::now();
         while !stop.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(200));
@@ -580,6 +583,58 @@ impl NodeArchive {
             self.keep_once(keep, stop, report);
         }
         Ok(())
+    }
+
+    /// As [`Self::keep_up`] begins: each followed tenant's line sealed
+    /// before version 3 given the image of its end sealed in version 3
+    /// that it goes on from (`Archive::seal_end`), here beside the stream.
+    /// Sealed at a tenant's first write after the upgrade, as it was, a
+    /// line no write reached held no file of version 3, and an older image
+    /// put in meanwhile -- another tenant's, another database's under the
+    /// key -- under its end's change or a later one, at a later time, was
+    /// what that image was assembled from at last, and read in every
+    /// restore past it (1.0's third review of version 3). Once a line, at
+    /// the upgrade: an assembly of its end each, a tenant at a time, of
+    /// lines no write has since reached too, which the stream would
+    /// otherwise have paid at their first writes; after, a line's identity
+    /// it read anyway. A tenant written before its turn is sealed by its
+    /// first write, on the stream, as before, or waits for this one's
+    /// image of it. A line moved aside is not: it takes no write, and a
+    /// restore to a moment reads it only before the line after it began,
+    /// where an image timed now is never the base. A disk's refusal leaves
+    /// the line to its first write or the next start; an end that does not
+    /// restore, to an operator, as the stream leaves it.
+    fn seal_ends(&self, stop: &AtomicBool, report: &dyn Fn(&str)) {
+        if self.key.is_none() {
+            return;
+        }
+        let all: Vec<(String, Arc<Kept>)> = lock(&self.tenants)
+            .iter()
+            .map(|(n, k)| (n.clone(), Arc::clone(k)))
+            .collect();
+        for (name, kept) in all {
+            if stop.load(Ordering::SeqCst) {
+                return;
+            }
+            let _held = lock(&kept.keeping);
+            if kept.moved.load(Ordering::SeqCst) {
+                continue;
+            }
+            match kept.archive.seal_end() {
+                Ok(Some(at)) => report(&format!(
+                    "tenant `{name}`: its line, sealed before version 3, goes on from an image \
+                     of its end at change {at}, sealed in version 3 here"
+                )),
+                Ok(None) => {}
+                Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+                    report(&format!("tenant `{name}`: {e}"))
+                }
+                Err(e) => report(&format!(
+                    "tenant `{name}`: no image of its end sealed in version 3: {e}; sealed at \
+                     its next write, or as the archiver starts again"
+                )),
+            }
+        }
     }
 
     /// One pass of [`Self::keep_up`] over every tenant.

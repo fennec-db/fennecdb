@@ -145,6 +145,12 @@ pub struct Archive {
     /// What its sealed files say it is ([`Self::learned`]), once read or
     /// made.
     identity: Mutex<Option<Identity>>,
+    /// Held while the image of a line's end its upgrade goes on from is
+    /// looked for and sealed ([`Self::seal_before_version`]): a node's
+    /// archiver seals it beside the stream as it starts, and the stream's
+    /// first write to the tenant meanwhile waits for that one rather than
+    /// assembling a second.
+    sealing: Mutex<()>,
 }
 
 /// The directory archives are made in, synced once for every one made in
@@ -226,7 +232,8 @@ struct Identity {
     /// the archive's order, by its name ([`place`]): an older version's is
     /// read only before it, and an older image only where it is an image
     /// (`Archive::older`), as an upgraded archiver leaves a line
-    /// (`Archive::seal_before_version`).
+    /// (`Archive::seal_before_version`). Read off the directory, or noted
+    /// as a file lands (`Archive::landed`), never as it is bound.
     newer: Option<(u64, u64)>,
 }
 
@@ -673,6 +680,7 @@ impl Archive {
             parent: Arc::clone(parent),
             tenant: tenant.map(str::to_string),
             identity: Mutex::new(None),
+            sealing: Mutex::new(()),
         })
     }
 
@@ -895,20 +903,11 @@ impl Archive {
             },
             _ => 0,
         };
-        // What this seals stands where its name says among the files sealed
-        // in this version: an older one there or past it is not this
-        // archive's (`Self::older`).
-        let at = match role {
-            Role::Image => Some(place(Some(time), change)),
-            Role::Segment => Some(place(None, change)),
-            _ => None,
-        };
-        if let Some(at) = at {
-            let mut held = self.identity.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(held) = held.as_mut() {
-                held.newer = Some(held.newer.map_or(at, |n| n.min(at)));
-            }
-        }
+        // Where it stands among the files sealed in this version is noted
+        // once it is in its place ([`Self::landed`]), never here. The id
+        // made above is kept as it is made, written or not: whatever binds
+        // a file beside this -- the round beside the stream -- seals it
+        // under the same id, and a file failed here leaves none holding it.
         Ok(Binding {
             role,
             archive: id.archive,
@@ -1217,14 +1216,39 @@ impl Archive {
         f.write_all(bytes)?;
         f.sync_all()?;
         renamed(&f, &tmp, path)?;
-        // Every image after says the archive began then, as this one did.
-        if let Some(t) = began {
-            let mut held = self.identity.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(id) = held.as_mut() {
-                id.began.get_or_insert(t);
-            }
+        if self.key.is_some() {
+            self.landed(role, change, time, began);
         }
         Ok(())
+    }
+
+    /// A file of `role` sealed in this version, its name's numbers `change`
+    /// and `time`, now in its place: every image after says the archive
+    /// began when this one says (`began`), and the line's first file of
+    /// this version stands at it if none stands before (`Identity::newer`).
+    /// Noted only once the file is there, as a scan of the directory would
+    /// find it. Noted as the file was bound (1.0's third review of version
+    /// 3), the upgrade's image failed to write -- a full disk, on Windows a
+    /// scanner holding its side file -- left the line taken for one whose
+    /// first file of this version was that image: the archiver, going on
+    /// on the same archive, sealed no image and began the line with a
+    /// segment, after which every older image was refused and no restore
+    /// past the upgrade had a base.
+    fn landed(&self, role: Role, change: u64, time: u64, began: Option<u64>) {
+        let at = match role {
+            Role::Image => Some(place(Some(time), change)),
+            Role::Segment => Some(place(None, change)),
+            _ => None,
+        };
+        let mut held = self.identity.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(id) = held.as_mut() {
+            if let Some(t) = began {
+                id.began.get_or_insert(t);
+            }
+            if let Some(at) = at {
+                id.newer = Some(id.newer.map_or(at, |n| n.min(at)));
+            }
+        }
     }
 
     /// When its oldest image was taken, ms since the epoch: nothing before
@@ -1552,8 +1576,9 @@ impl Archive {
         // end sealed in this one, made here rather than at the first write:
         // an end that does not restore stops the archiver by name, where
         // `take` refusing it had the stream made again, and the end
-        // assembled again, every few seconds. A node's archiver makes it at
-        // a tenant's first write, its idle tenants paying nothing.
+        // assembled again, every few seconds. A node's archiver makes each
+        // tenant's beside its stream as it starts (`Self::seal_end`), or at
+        // a tenant's first write that comes before it.
         self.seal_before_version(w.at, w.latest, w.images)?;
 
         let mut told = Instant::now();
@@ -1841,6 +1866,9 @@ impl Archive {
                     };
                     let mut file = File::create(&path)?;
                     file.write_all(head.as_ref().map_or(&LOG_MAGIC[..], |h| &h.0))?;
+                    if head.is_some() {
+                        self.landed(Role::Segment, seq, 0, None);
+                    }
                     let sealed = head.map(|(_, frames)| (frames, Vec::new()));
                     // The directory synced before the segment's first write:
                     // its name then lasts as long as its writes do, where an
@@ -2064,23 +2092,84 @@ impl Archive {
     /// from it until the first round's image, which then sealed it in.
     /// Nothing where the line holds a file of this version, holds no image
     /// to begin from, or is plain. One assembly a line, once: what the
-    /// first round would have taken of it within the hour.
+    /// first round would have taken of it within the hour. Looked for and
+    /// sealed under `sealing`: a node's archiver seals it beside the stream
+    /// as it starts ([`Self::seal_end`]), and a first write meanwhile waits
+    /// for that one, then finds it.
     ///
     /// An end that does not restore is the line's damage, refused as such
-    /// (`InvalidData`): a node's archiver passes over that tenant alone, one
-    /// database's stops (`Self::session`); the disk's own error is tried
-    /// again, as a write's is.
+    /// (`InvalidData`), naming the ways out: a node's archiver passes over
+    /// that tenant alone, one database's stops (`Self::session`); the
+    /// disk's own error is tried again, as a write's is.
     fn seal_before_version(&self, at: u64, latest: u64, images: bool) -> io::Result<()> {
-        if self.key.is_none() || !images || self.learned()?.and_then(|id| id.newer).is_some() {
+        if self.key.is_none() || !images {
             return Ok(());
         }
+        let _one = self.sealing.lock().unwrap_or_else(|e| e.into_inner());
+        if self.learned()?.and_then(|id| id.newer).is_some() {
+            return Ok(());
+        }
+        self.seal_end_at(at, latest)
+    }
+
+    /// [`Self::seal_before_version`] of the line's end as its files say it,
+    /// read as `position` reads it and nothing written: a node's archiver
+    /// seals each tenant's so as it starts, on the thread beside the stream,
+    /// so a line no write reaches after the upgrade is not left with no
+    /// file of this version -- an older image put in meanwhile was the base
+    /// the image was assembled from at its first write, and read in every
+    /// restore past it (1.0's third review of version 3). The change it
+    /// sealed an image of, where it did.
+    pub(crate) fn seal_end(&self) -> io::Result<Option<u64>> {
+        if self.key.is_none() {
+            return Ok(None);
+        }
+        let _one = self.sealing.lock().unwrap_or_else(|e| e.into_inner());
+        if self.learned()?.and_then(|id| id.newer).is_some() || self.images()?.is_empty() {
+            return Ok(None);
+        }
+        let (at, latest) = self.ends()?;
+        self.seal_end_at(at, latest).map(|()| Some(at))
+    }
+
+    /// Where the archive ends and the latest time the last segment holding
+    /// a write archived one at, as [`Self::position`] reads them, cutting,
+    /// removing and opening nothing: a segment holding no write is passed
+    /// over, as `position` removes it, and a torn tail left out.
+    fn ends(&self) -> io::Result<(u64, u64)> {
+        let at = self.images()?.last().map_or(0, |i| i.0);
+        for &first in self.segments()?.iter().rev() {
+            let plain = self.read_segment(&self.segment_path(first), first)?.plain;
+            let (list, _) = entries(&plain, Damage::Cut)?;
+            if list.is_empty() {
+                continue;
+            }
+            let last = first + list.iter().map(|e| e.3).sum::<u64>() - 1;
+            let latest = list.iter().map(|e| e.0).max().unwrap_or(0);
+            return Ok((at.max(last), latest));
+        }
+        Ok((at, 0))
+    }
+
+    /// The image of the end at change `at`, assembled, timed after `latest`
+    /// and every image the line holds, and sealed: under `sealing`.
+    fn seal_end_at(&self, at: u64, latest: u64) -> io::Result<()> {
         let refused = |e: io::Error| match e.raw_os_error() {
             Some(_) => e,
             None => corrupt(format!(
                 "{}: its end, change {at}, does not restore, and a line sealed before version 3 \
                  goes on from an image of its end sealed in version 3: {e}. Put right what \
-                 `fennec verify` refuses in it",
-                self.dir.display()
+                 `fennec verify` refuses in it, or begin a new line, keeping this one for \
+                 restores to earlier moments: {}",
+                self.dir.display(),
+                match &self.tenant {
+                    Some(t) => format!(
+                        "with the archiver stopped, move this directory aside as `{t}.<any \
+                         name>` beside it, and the archiver begins the new line with the node's \
+                         image"
+                    ),
+                    None => "archive into a new directory".into(),
+                }
             )),
         };
         let (seq, bytes) = self.end_image(at).map_err(refused)?;
@@ -3583,7 +3672,7 @@ mod tests {
         // Its segment's writes named three changes later: changes 2 to 4
         // are in no file.
         fs::rename(a.segment_path(2), a.segment_path(5)).unwrap();
-        let a = Archive::with_key(&path, Some(key)).unwrap();
+        let a = Archive::with_key(&path, Some(key.clone())).unwrap();
         let w = a.writer().unwrap();
         let e = a.seal_before_version(w.at, w.latest, w.images).unwrap_err();
         let said = e.to_string();
@@ -3591,10 +3680,161 @@ mod tests {
         assert!(
             said.contains("its end, change 7, does not restore")
                 && said.contains("lacks change 2")
-                && said.contains("Put right what `fennec verify` refuses in it"),
+                && said.ends_with(
+                    "Put right what `fennec verify` refuses in it, or begin a new line, keeping \
+                     this one for restores to earlier moments: archive into a new directory"
+                ),
+            "{said}"
+        );
+        // A node's tenant's line: the way out is a line moved aside, which
+        // the node's archiver begins anew from the node's image.
+        let a = Archive::of_tenant(&path, Some(key), "acme").unwrap();
+        let said = a.seal_end().unwrap_err().to_string();
+        assert!(
+            said.ends_with(
+                "keeping this one for restores to earlier moments: with the archiver stopped, \
+                 move this directory aside as `acme.<any name>` beside it, and the archiver \
+                 begins the new line with the node's image"
+            ),
             "{said}"
         );
         assert!(!holds_newer(&path));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// What the image an upgrade goes on from costs: a line sealed before
+    /// version 3 holding `FENNEC_UPGRADE_MB` of notes (256 by default, a
+    /// KiB each), a sixteenth of them written after its last image, its
+    /// image of the end assembled, opened, imaged and sealed as
+    /// `seal_before_version` does, three times, the image taken out between.
+    /// Run by hand, in a release build: `cargo test --release -p fennec-http
+    /// --lib upgrade_image_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn upgrade_image_cost() {
+        let mb: u64 = std::env::var("FENNEC_UPGRADE_MB")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(256);
+        let dir = std::env::temp_dir().join(format!("fennec-archive-cost-{}", fresh_id()));
+        fs::create_dir_all(&dir).unwrap();
+        let key = Key::from_hex(&"ab".repeat(32)).unwrap();
+        let path = dir.join("archive");
+        let a = Archive::with_key(&path, Some(key.clone())).unwrap();
+        let mut p = Source::new();
+        p.run("create collection notes (title text, n int @hash)");
+        let notes = mb << 10;
+        let note = |i: u64| {
+            let words: String = (0..100).map(|k| format!("{:09x} ", i * 101 + k)).collect();
+            format!("put notes {{title: \"{words}\", n: {i}}}")
+        };
+        let after = notes / 16;
+        for i in 0..notes - after {
+            p.run(&note(i));
+        }
+        a.add_image(p.db.change_seq(), &p.image(false)).unwrap();
+        let mut w = a.writer().unwrap();
+        for i in notes - after..notes {
+            let record = p.run(&note(i));
+            send(&a, &mut w, &record, false).unwrap();
+        }
+        w.park().unwrap();
+        let end = p.db.change_seq();
+        drop(p);
+        made_older(&key, &path);
+        for round in 0..3 {
+            let a = Archive::with_key(&path, Some(key.clone())).unwrap();
+            let w = a.writer().unwrap();
+            let t = Instant::now();
+            a.seal_before_version(w.at, w.latest, w.images).unwrap();
+            let took = t.elapsed().as_secs_f64();
+            let (c, time) = *a.images().unwrap().last().unwrap();
+            assert_eq!(c, end);
+            let image = a.image_path(c, time);
+            let bytes = fs::metadata(&image).unwrap().len() as f64;
+            eprintln!(
+                "round {round}: an image of {:.1} MB ({} notes, {after} of them in a segment) \
+                 sealed in {took:.2} s, {:.2} s a GB",
+                bytes / 1e6,
+                notes,
+                took / (bytes / 1e9)
+            );
+            fs::remove_file(&image).unwrap();
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The upgrade's image stands as the line's first file of version 3
+    /// only once it is in its place (`Archive::landed`). Noted as it was
+    /// bound, a write of it that failed -- a full disk, on Windows a side
+    /// file a scanner held -- left the archiver, going on on the same
+    /// archive as `follow` does, sealing no image and beginning the line
+    /// with a segment, and after a restart every older image was refused:
+    /// no restore past the upgrade had a base (1.0's third review of
+    /// version 3). The failure is a directory in the side file's place,
+    /// the image's name known by its time: its last write's, a clock's
+    /// ahead.
+    #[test]
+    fn an_upgrades_image_that_failed_to_write_is_sealed_as_the_archiver_goes_on() {
+        let dir = std::env::temp_dir().join(format!("fennec-archive-unwritten-{}", fresh_id()));
+        fs::create_dir_all(&dir).unwrap();
+        let key = Key::from_hex(&"ab".repeat(32)).unwrap();
+        let path = dir.join("archive");
+        let a = Archive::with_key(&path, Some(key.clone())).unwrap();
+        let mut p = Source::new();
+        p.run("create collection notes (n int)");
+        a.add_image(p.db.change_seq(), &p.image(false)).unwrap();
+        let mut w = a.writer().unwrap();
+        const AHEAD: u64 = 9_999_999_999_000;
+        for n in 0..3 {
+            let record = p.run(&format!("put notes {{n: {n}}}"));
+            let (next, time) = (w.at + 1, if n == 2 { AHEAD } else { now_ms() });
+            a.take(&mut w, next, &[time], &record).unwrap();
+        }
+        w.park().unwrap();
+        let upgraded = p.db.change_seq();
+        made_older(&key, &path);
+
+        // The upgraded archiver, the image's side file not to be made.
+        let a = Archive::with_key(&path, Some(key.clone())).unwrap();
+        let w = a.writer().unwrap();
+        assert_eq!((w.at, w.latest), (upgraded, AHEAD));
+        let side = a.image_path(upgraded, AHEAD).with_extension("tmp");
+        fs::create_dir(&side).unwrap();
+        let e = a.seal_before_version(w.at, w.latest, w.images).unwrap_err();
+        assert_ne!(e.kind(), io::ErrorKind::InvalidData, "{e}");
+        fs::remove_dir(&side).unwrap();
+        assert!(!holds_newer(&path));
+
+        // Its stream made again on the same archive: the image sealed, and
+        // the write after it in a segment of version 3.
+        let mut w = a.writer().unwrap();
+        a.seal_before_version(w.at, w.latest, w.images).unwrap();
+        let record = p.run("put notes {n: 3}");
+        send(&a, &mut w, &record, false).unwrap();
+        w.park().unwrap();
+
+        // Started again: a restore to the end starts from that image.
+        let a = Archive::with_key(&path, Some(key)).unwrap();
+        let out = dir.join("end.fennec");
+        let restored = a.restore(&out, Target::End).map(|r| (r.seq, r.image));
+        assert_eq!(
+            restored.map_err(|e| e.to_string()),
+            Ok((upgraded + 1, upgraded))
+        );
+        assert_eq!(restored_rows(&a, &dir, Target::End), (upgraded + 1, 4));
+        assert_eq!(a.verify().unwrap().last, upgraded + 1);
+        let mut bound: Vec<(Role, u64)> = fs::read_dir(&path)
+            .unwrap()
+            .filter_map(|e| seal::bound_in(&fs::read(e.unwrap().path()).unwrap()))
+            .filter(|b| matches!(b.role, Role::Image | Role::Segment))
+            .map(|b| (b.role, b.change))
+            .collect();
+        bound.sort_by_key(|b| b.1);
+        assert_eq!(
+            bound,
+            vec![(Role::Image, upgraded), (Role::Segment, upgraded + 1)]
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }
