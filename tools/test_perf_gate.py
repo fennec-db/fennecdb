@@ -10,13 +10,16 @@ it names -- one marked `?` failing or not --, a workload its base cannot
 run held to nothing only when named with its error's words and run in full
 by this tree -- the reading of a profile's calls into the allocator, of a
 run's heap tally, of the base's workloads, of PERF_ACCEPTED as data, never
-run; which changes are counted, and the gate's own files a change edits;
-the I/O counts -- one fsync more a write fails, an entry the pull request
+run; which changes are counted, and the gate's own files a change edits,
+the workflow read as YAML reads it (its comments aside, never a scalar's
+`#` or blank line) and named wherever it reaches the gate's jobs; the I/O
+counts -- one fsync more a write fails, an entry the pull request
 adds lets it through, one the base holds does not, a drop fails as a rise
 does, a sync swapped for another call fails by its call, a workload only
 this tree has is reported, runs that differ fail -- and their reading off
-captured and typed `strace -f` traces (tools/perf_gate_traces/), what the
-trace cannot see refused; the workflow's choice of checker held to
+captured and typed `strace -f` traces (tools/perf_gate_traces/), an answer
+where it began and the rest where they returned, what the trace cannot see
+refused; the workflow's choice of checker held to
 `io_checker`, and its two sets of results kept apart; then the committed
 list and the holdout's matrix and verdicts.
 
@@ -1443,6 +1446,78 @@ class Order(unittest.TestCase):
         counts, _ = gate.io_counts(lines[:1] + lines[2:-1] + [lines[1], lines[-1]], "/d")
         self.assertEqual(counts["unsynced"], 0)
 
+    def test_an_answer_counts_where_it_began(self):
+        # The client reads an answer's bytes inside the call and then
+        # connects again -- the driver's next connection, the stretch's end
+        # -- so on a loaded runner strace can print that accept's return
+        # before the answer's. Placed at its return, io-batch's one answer
+        # fell past the stretch and its 23,883 bytes read as none: runs of
+        # one build differing on a required check. Its beginning is printed
+        # before the call runs, so before the client can connect.
+        d = "/tmp/perf-gate-io-k8txs89e/io-batch.lcotepa4"
+        lines = trace("io-batch.strace")
+        whole, _ = gate.io_counts(lines, d)
+        at = next(i for i, line in enumerate(lines) if line.startswith("1438  writev(7<socket:[30735]>"))
+        self.assertTrue(lines[at + 1].startswith("1432  <... accept4 resumed>"), lines[at + 1])
+        late = lines[:at] + ["1438  writev(7<socket:[30735]>, [...], 2 <unfinished ...>", lines[at + 1],
+                             "1438  <... writev resumed>) = 15236"] + lines[at + 2:]
+        counts, taken = gate.io_counts(late, d)
+        self.assertEqual(taken, 3)
+        self.assertEqual(counts["unsynced"], 23_883)
+        self.assertEqual(counts, whole)
+        # On an io-put's lines, the driver's accept printed whole or resumed
+        # from its wait: the last answer resumed after it counts as the one
+        # resumed before it.
+        lines = answered_trace()
+        before = gate.io_counts(lines, "/d")
+        self.assertEqual(unsynced(lines), {"io.fennec": 4 * 550})
+        last, end = lines[-2], lines[-1]
+        self.assertTrue(last.startswith("2  writev(7<socket:[3]>") and "accept4" in end)
+        split = ["2  writev(7<socket:[3]>, [...], 2 <unfinished ...>", "2  <... writev resumed>) = 153"]
+        waited = ["1  accept4(3<socket:[1]>, NULL, NULL, SOCK_CLOEXEC <unfinished ...>",
+                  "1  <... accept4 resumed>) = 8<socket:[4]>"]
+        for name, trace_ in (
+            ("accept whole", lines[:-2] + [split[0], end, split[1]]),
+            ("accept resumed", lines[:2] + [waited[0]] + lines[2:-2] + [split[0], waited[1], split[1]]),
+        ):
+            with self.subTest(name):
+                self.assertEqual(gate.io_counts(trace_, "/d"), before)
+        # And at the stretch's start: the setup's last answer resumed after
+        # the workload's accept is the setup's, its bytes none of the
+        # workload's however its lines fall.
+        setup = ['2  pwrite64(4</d/io.fennec>, ""..., 32, 0) = 32',
+                 "2  writev(6<socket:[2]>, [...], 2 <unfinished ...>", "2  <... writev resumed>) = 10"]
+        early = lines[:1] + setup + lines[1:]
+        straddled = lines[:1] + setup[:2] + lines[1:2] + setup[2:] + lines[2:]
+        self.assertEqual(gate.io_counts(straddled, "/d"), gate.io_counts(early, "/d"))
+        self.assertEqual(gate.io_counts(early, "/d"), before)
+
+    def test_a_sync_counts_where_it_returned_whatever_another_thread_prints(self):
+        # A sync another thread's lines interleave -- the next accept's
+        # wait, a log line -- counts where it returned: before its answer
+        # began, the record was durable however the lines around it fall.
+        lines = answered_trace()
+        i = max(i for i, line in enumerate(lines) if line.startswith("2  fdatasync("))
+        self.assertTrue(lines[i + 1].startswith("2  writev("))
+        interleaved = lines[:i] + ["3  fdatasync(5</d/io.fennec.sync> <unfinished ...>",
+                                   "1  accept4(3<socket:[1]>, NULL, NULL, SOCK_CLOEXEC <unfinished ...>",
+                                   '4  write(2<pipe:[9]>, ""..., 40) = 40',
+                                   "3  <... fdatasync resumed>) = 0"] + lines[i + 1:-1] + [
+                                   "1  <... accept4 resumed>) = 8<socket:[4]>"]
+        self.assertEqual(gate.io_counts(interleaved, "/d"), gate.io_counts(lines, "/d"))
+        # Still in flight when its answer began -- a server that did not
+        # wait for it -- the record was not durable when the client could
+        # read the answer, whichever of the two returns strace printed
+        # first: read at both returns, the order of those two lines decided
+        # the count.
+        sync, began = "3  fdatasync(5</d/io.fennec.sync> <unfinished ...>", "2  writev(7<socket:[3]>, [...], 2 <unfinished ...>"
+        synced, answered = "3  <... fdatasync resumed>) = 0", "2  <... writev resumed>) = 153"
+        first = lines[:i] + [sync, began, synced, answered] + lines[i + 2:]
+        second = lines[:i] + [sync, began, answered, synced] + lines[i + 2:]
+        self.assertEqual(unsynced(first), {"io.fennec": 4 * 550, "io.fennec.sync": 581})
+        self.assertEqual(gate.io_counts(first, "/d"), gate.io_counts(second, "/d"))
+        self.assertEqual(gate.io_counts(first, "/d")[0]["fsyncs"], 4)
+
 
 class Unseen(unittest.TestCase):
     """What the trace cannot judge is refused rather than dropped: an
@@ -1718,10 +1793,12 @@ def run_script(step):
             return m.group(2) + "\n"
         body = []
         for more in lines[i + 1:]:
-            if len(more) - len(more.lstrip()) <= len(m.group(1)):
+            # A blank line inside the block is the script's (`yaml_lines`
+            # keeps it), and ends nothing.
+            if more.strip() and len(more) - len(more.lstrip()) <= len(m.group(1)):
                 break
             body.append(more)
-        return textwrap.dedent("\n".join(body)) + "\n"
+        return textwrap.dedent("\n".join(body).rstrip("\n")) + "\n"
     return None
 
 
@@ -1880,6 +1957,27 @@ class TheBasesChecker(unittest.TestCase):
         for job in self.FIRST:
             with self.subTest(job, base="its checker unreadable"):
                 self.assertRefused(job, "::error")
+
+    def test_a_tree_git_cannot_read_is_no_base_without_a_checker(self):
+        # The base's `tools` tree, or its program's directory, gone from the
+        # objects: `git cat-file -e HEAD^1:<path>` exits 128 there, as it
+        # does for a path the base has not, and the first versions of this
+        # step took that for "the base has none" -- this tree's checker, or
+        # an empty program choosing this tree's for the I/O. `git ls-tree`
+        # lists the tree or fails; and a file it lists that git cannot read
+        # fails the step too.
+        program = "const IO_WORKLOADS: &[(&str, usize)] = &[];\n"
+        for gone in ("tools", os.path.dirname(gate.PROGRAM), gate.PROGRAM):
+            self.dir.cleanup()
+            os.makedirs(self.repo)
+            self.commit({"README.md": "x\n", gate.CHECKER: STUB_CHECKER.format(who="BASE"), gate.PROGRAM: program})
+            self.commit({gate.CHECKER: STUB_CHECKER.format(who="HEAD"), gate.PROGRAM: program + "// head\n"})
+            obj = self.sh("rev-parse", f"HEAD^1:{gone}")
+            os.unlink(os.path.join(self.repo, ".git", "objects", obj[:2], obj[2:]))
+            for job in self.FIRST:
+                with self.subTest(job, unreadable=gone):
+                    said = self.assertRefused(job, "::error")
+                    self.assertIn(os.path.basename(gone), said)
 
 
 class Tracing(unittest.TestCase):
@@ -2316,6 +2414,132 @@ class Workflow(unittest.TestCase):
         renamed = gate.jobs_of(CI.replace("  perf:\n", "  perf-judge:\n"))
         self.assertNotIn("perf", renamed)
 
+    # Snippets whose comments and blank lines a reader of lines gets wrong:
+    # each holds a `#` or a blank line that is a scalar's own, or a comment
+    # beside one. Ruby's YAML reads each the same with its comments taken
+    # out (checked by hand), and so does workflow_check's reader, which the
+    # tests below hold `yaml_lines` to.
+    SNIPPETS = {
+        "a double-quoted scalar's lines": 'a: "x\n# not a comment\n\n  y" # c\nb: 1\n',
+        "a single-quoted scalar's lines": "a: 'it''s\n  # still text\n  end'\nb: 2\n",
+        "a plain scalar's blank line": "a: echo one\n\n  rm two\nb: 3\n",
+        "a blank line between keys": "a: one\n\nb: 4\n",
+        "a block scalar's comment and blank lines": "a: |\n  # script comment\n\n  echo x\n\n# yaml comment\nb: 5\n",
+        "a folded block": "a: >-\n  one\n\n  two\nb: 6\n",
+        "a block's indentation": "a: |2\n    indented\n  base\nb: 7\n",
+        "a sequence's block": "s:\n  - |\n    # in\n    x\n  - y # c\n",
+        "a step's run and its shell": "steps:\n  - run: |\n      # in\n      echo\n    shell: bash # c\n  - name: n\n",
+        "a block on the next line": "a:\n  |\n  # text\n  more\nb: 8\n",
+        "flow over lines": "a: [x, # c\n  y,\n\n  z]\nb: {k: v, # c\n  l: 'w # x'}\n",
+        "a # inside a scalar": "a: b#c\nd: e #f\n'k#': \"v #w\" # x\n",
+        "a plain entry's next line": "s:\n  - one\n\n    two\n  - three\n",
+        "an if over lines": "jobs:\n  x:\n    if: a ==\n\n      b\n    runs-on: u\n",
+        "a block's trailing spaces": "a: x   \nb: |\n  echo y \\ \n",
+        "an escaped quote": 'a: "x\\" # y"\nb: "z\\\\" # w\n',
+    }
+
+    def test_its_lines_read_every_workflow_as_yaml_does(self):
+        # Comments taken out as `yaml_lines` takes them, each workflow of the
+        # repository and each snippet reads as the same document: no line
+        # of a scalar, a `#` or a blank one, is taken for a comment -- an
+        # edit there would otherwise pass unnamed.
+        spec_ = importlib.util.spec_from_file_location("workflow_check", os.path.join(HERE, "workflow_check.py"))
+        wc = importlib.util.module_from_spec(spec_)
+        spec_.loader.exec_module(wc)
+        root = os.path.join(os.path.dirname(HERE), gate.WORKFLOWS)
+        texts = {}
+        for name in sorted(os.listdir(root)):
+            with open(os.path.join(root, name), encoding="utf-8") as f:
+                texts[name] = f.read()
+        self.assertIn("ci.yml", texts)
+        for name, text in {**texts, **self.SNIPPETS}.items():
+            with self.subTest(name):
+                lines, aliases = gate.yaml_lines(text)
+                kept = "\n".join(line for line, _ in lines) + "\n"
+                self.assertEqual(wc.read(kept), wc.read(text))
+                self.assertEqual(aliases, set())
+                if name in texts:
+                    self.assertLess(len(lines), len(text.splitlines()))
+        # And a reader of lines that drops every `#` line and blank one,
+        # and cuts a line at ` #`, reads all but two of the snippets
+        # otherwise: the test tells it from YAML's reading.
+        naive = 0
+        for text in self.SNIPPETS.values():
+            cut = "\n".join(re.sub(r"\s+#.*$", "", line).rstrip() for line in text.splitlines()
+                            if line.strip() and not line.lstrip().startswith("#")) + "\n"
+            try:
+                naive += wc.read(cut) != wc.read(text)
+            except wc.Unreadable:
+                naive += 1
+        self.assertEqual(naive, len(self.SNIPPETS) - 2)
+
+    def test_a_comment_is_told_from_a_key_as_yaml_tells_it(self):
+        lines, aliases = gate.yaml_lines(
+            "on: # when\n  push:\n# the jobs\njobs:\n  a:\n    steps:\n      - run: |\n          # a script's\n"
+            "          echo '#x'\n        env:\n          X: 'y # z' # said\n      - uses: o/a@0123 # v1.2.3\n"
+            "  b: {name: 'perf (count)'}\nanchored: &x 1\nread: *x\n"
+        )
+        self.assertEqual([line for line, _ in lines], [
+            "on:", "  push:", "jobs:", "  a:", "    steps:", "      - run: |", "          # a script's",
+            "          echo '#x'", "        env:", "          X: 'y # z'", "      - uses: o/a@0123",
+            "  b: {name: 'perf (count)'}", "anchored: &x 1", "read: *x",
+        ])
+        self.assertEqual([kind for _, kind in lines][5:8], ["node", "scalar", "scalar"])
+        self.assertEqual(aliases, {"x"})
+        parts = gate.workflow_parts("\n".join(line for line, _ in lines))
+        self.assertEqual(set(parts["keys"]), {"on", "jobs", "anchored", "read"})
+        self.assertEqual(set(parts["jobs"]), {"a", "b"})
+        self.assertEqual(parts["inline"], {"b"})
+        self.assertEqual(gate.name_in(parts, "a"), (None, None))
+
+    def test_a_jobs_needs_and_name_are_read_or_taken_as_any(self):
+        needs = {
+            "    needs: build\n    name: x": {"build"},
+            "    needs: [build, 'test']": {"build", "test"},
+            "    needs:\n      - build\n      - lint": {"build", "lint"},
+            "    runs-on: u": set(),
+            "    needs: [build,\n      test]": None,
+            "    needs: ${{ x }}": None,
+        }
+        for lines, want in needs.items():
+            with self.subTest(lines):
+                self.assertEqual(gate.job_needs(lines), want)
+        names = {
+            "    name: perf (count)": "perf (count)",
+            "    name: \"perf (instructions)\"": "perf (instructions)",
+            "    name: 'it''s'": "it's",
+            "    runs-on: u": "j",
+            "    name: >-\n      perf": None,
+            "    name: perf\n      (count)": None,
+        }
+        for lines, want in names.items():
+            with self.subTest(lines):
+                self.assertEqual(gate.job_name("j", lines), want)
+        gate_names = {"perf (count)", "perf (instructions)", "perf", "perf-count"}
+        for name, like in (("perf (instructions)", True), ("PERF (count)", True), ("${{ matrix.name }}", True),
+                           ("perf (${{ matrix.x }})", True), (None, True), ("test (${{ matrix.os }})", False),
+                           ("app on ${{ matrix.name }} (build)", False), ("holdout (${{ matrix.name }})", False)):
+            with self.subTest(name):
+                self.assertEqual(gate.named_like(name, gate_names), like)
+        # A matrix written out bounds what `${{ matrix.<key> }}` can be:
+        # release.yml's `${{ matrix.name }}` is one of its entries' names.
+        matrix = ("    strategy:\n      matrix:\n        os: [ubuntu-latest, macos-latest]\n        include:\n"
+                  "          - name: x86_64-linux\n            os: ubuntu-24.04\n"
+                  "          - { name: aarch64-windows, os: windows-11-arm }\n          - \"perf (count)\"\n")
+        values = gate.matrix_values(matrix)
+        self.assertEqual(values, {"", "ubuntu-latest", "macos-latest", "x86_64-linux", "ubuntu-24.04",
+                                  "aarch64-windows", "windows-11-arm", "perf (count)"})
+        self.assertTrue(gate.named_like("${{ matrix.name }}", gate_names, values))
+        self.assertFalse(gate.named_like("${{ matrix.name }}", gate_names, values - {"perf (count)"}))
+        self.assertTrue(gate.named_like("${{ matrix.name }}${{ github.x }}", gate_names, values - {"perf (count)"}))
+        self.assertEqual(gate.matrix_values("    runs-on: u"), {""})
+        for unread in ("    strategy:\n      matrix: ${{ fromJSON(needs.a.outputs.m) }}",
+                       "    strategy:\n      matrix:\n        name:\n          - perf\n            (count)",
+                       "    strategy:\n      matrix:\n        include:\n          - { name: [a, b] }",
+                       "    strategy: {matrix: {name: [perf]}}"):
+            with self.subTest(unread):
+                self.assertIsNone(gate.matrix_values(unread))
+
 
 class Edits(unittest.TestCase):
     """The gate's own files a change edits, read off two commits of a
@@ -2383,6 +2607,114 @@ class Edits(unittest.TestCase):
     def test_a_job_renamed_is_named(self):
         head = self.commit({gate.WORKFLOW: CI.replace("  perf:\n", "  perf-judge:\n")})
         self.assertTrue(any("removed or renamed" in n for n in gate.gate_edits(self.base, head)))
+
+    def test_the_workflow_outside_its_jobs_is_the_gates(self):
+        # Each reaches every step of the gate's jobs without an edit of
+        # their lines: BASH_ENV runs a script of the tree's before each
+        # step's first command, a default shell is a program of its own,
+        # and the rest decide what the jobs may do and whether they run.
+        edits = {
+            "env": CI.replace("jobs:\n", "env:\n  BASH_ENV: tools/x.sh\n\njobs:\n"),
+            "defaults": CI.replace("jobs:\n", "defaults:\n  run:\n    shell: bash -c 'source tools/x.sh; bash {0}'\n\njobs:\n"),
+            "permissions": CI.replace("jobs:\n", "permissions:\n  contents: write\n\njobs:\n"),
+            "concurrency": CI.replace("jobs:\n", "concurrency:\n  group: x\n  cancel-in-progress: true\njobs:\n"),
+            "on": CI.replace("  pull_request:\n", "  pull_request:\n    paths: [docs/**]\n"),
+            "name": CI.replace("name: ci\n", "name: 'ci # not a comment'\n"),
+        }
+        for key, text in edits.items():
+            with self.subTest(key):
+                self.sh("reset", "-q", "--hard", self.base)
+                notes = gate.gate_edits(self.base, self.commit({gate.WORKFLOW: text}))
+                self.assertEqual(len(notes), 1, notes)
+                self.assertIn(f"`{gate.WORKFLOW}` outside its `jobs:` is edited (`{key}`)", notes[0])
+                self.assertIn("owner approves", notes[0])
+        # Appended after the jobs, a key is the workflow's all the same.
+        self.sh("reset", "-q", "--hard", self.base)
+        notes = gate.gate_edits(self.base, self.commit({gate.WORKFLOW: CI + "env:\n  BASH_ENV: tools/x.sh\n"}))
+        self.assertTrue(any("(`env`)" in n for n in notes), notes)
+
+    def test_a_comment_or_another_jobs_line_is_not(self):
+        # A comment outside the jobs, after a key or on a line of its own,
+        # blank lines, and another job's step are none of the gate's.
+        text = ("# The workflow.\n" + CI.replace("on:\n", "on: # when it runs\n\n")
+                .replace("cargo fmt --all --check", "cargo fmt --all --check --verbose")
+                .replace("make test", "make test-js"))
+        head = self.commit({gate.WORKFLOW: text})
+        self.assertEqual(gate.gate_edits(self.base, head), [])
+
+    def test_a_job_the_gates_need_is_the_gates(self):
+        # A job the gate's jobs need can hand them an output or a file:
+        # once one is needed, its edit is named, as is the need's own edit.
+        mid = self.commit({gate.WORKFLOW: CI.replace("    name: perf (count)\n", "    name: perf (count)\n    needs: fmt\n")})
+        self.assertEqual(gate.gate_edits(self.base, mid),
+                         [f"the `perf-count` job of `{gate.WORKFLOW}` is edited: the gate's own job, which the owner approves"])
+        text = CI.replace("    name: perf (count)\n", "    name: perf (count)\n    needs: fmt\n")
+        head = self.commit({gate.WORKFLOW: text.replace("cargo fmt --all --check", "cargo fmt --all")})
+        notes = gate.gate_edits(mid, head)
+        self.assertEqual(len(notes), 1, notes)
+        self.assertIn("the `fmt` job of", notes[0])
+        self.assertIn("a job the gate's `perf-count` needs", notes[0])
+        # `test` is needed by none of them: its edit is not the gate's.
+        later = self.commit({gate.WORKFLOW: text.replace("cargo fmt --all --check", "cargo fmt --all")
+                             .replace("make test", "make test-js")})
+        self.assertEqual(gate.gate_edits(head, later), [])
+
+    def test_a_job_named_as_the_gates_is_named_in_any_workflow(self):
+        # A check shown under the gate's name -- a job of another workflow,
+        # or another job of this one, named so, whose name an expression
+        # may make so, or whose id is a gate job's -- could stand for it.
+        # With no matrix, `${{ matrix.name }}` is empty: no gate's name.
+        other = ".github/workflows/other.yml"
+        job = "name: other\non:\n  pull_request:\njobs:\n  j:\n    name: {}\n    runs-on: ubuntu-latest\n    steps:\n      - run: 'true'\n"
+        for name, named in (("perf (instructions)", True), ("'perf (count)'", True), ("${{ github.workflow }}", True),
+                            ("${{ matrix.name }}", False), ("test (${{ matrix.os }})", False), ("lint", False)):
+            with self.subTest(name):
+                self.sh("reset", "-q", "--hard", self.base)
+                notes = gate.gate_edits(self.base, self.commit({other: job.format(name)}))
+                self.assertEqual(any(f"`{other}` is edited, and its job `j`" in n for n in notes), named, notes)
+        self.sh("reset", "-q", "--hard", self.base)
+        notes = gate.gate_edits(self.base, self.commit({other: job.format("x").replace("  j:\n", "  perf:\n")}))
+        self.assertTrue(any("its job `perf`" in n for n in notes), notes)
+        # Once there, such a job is named where its lines change, or its
+        # workflow's own keys; another job's edit there is not -- whose
+        # every edit would be named, as release.yml's `${{ matrix.name }}`
+        # jobs' were before their matrix was read.
+        self.sh("reset", "-q", "--hard", self.base)
+        two = job.format("${{ github.job }}") + "  k:\n    runs-on: ubuntu-latest\n    steps:\n      - run: 'true'\n"
+        mid = self.commit({other: two})
+        for edit, named in ((two.replace("      - run: 'true'\n", "      - run: 'false'\n", 1), True),
+                            (two.replace("run: 'true'\n", "run: 'false'\n").replace("run: 'false'\n", "run: 'true'\n", 1), False),
+                            (two.replace("on:\n", "env:\n  BASH_ENV: x\non:\n"), True)):
+            with self.subTest(edit=edit):
+                self.sh("reset", "-q", "--hard", mid)
+                notes = gate.gate_edits(mid, self.commit({other: edit}))
+                self.assertEqual(any("its job `j`" in n for n in notes), named, notes)
+        # Another job of ci.yml renamed so; its other edits are not.
+        self.sh("reset", "-q", "--hard", self.base)
+        head = self.commit({gate.WORKFLOW: CI.replace("  test:\n", "  test:\n    name: perf (instructions)\n")})
+        notes = gate.gate_edits(self.base, head)
+        self.assertEqual(len(notes), 1, notes)
+        self.assertIn("its job `test` is named as one of the gate's", notes[0])
+
+    def test_a_local_action_the_gates_jobs_use_is_the_gates(self):
+        used = CI.replace("      - run: python3 tools/perf_gate.py run --base HEAD^1\n",
+                          "      - uses: ./.github/actions/setup\n      - run: python3 tools/perf_gate.py run --base HEAD^1\n")
+        mid = self.commit({gate.WORKFLOW: used, ".github/actions/setup/action.yml": "runs:\n  using: composite\n"})
+        head = self.commit({".github/actions/setup/action.yml": "runs:\n  using: composite\n  steps: []\n"})
+        notes = gate.gate_edits(mid, head)
+        self.assertEqual(len(notes), 1, notes)
+        self.assertIn("`./.github/actions/setup`, which a job of the gate's uses, is edited", notes[0])
+
+    def test_an_alias_makes_every_edit_the_gates(self):
+        # Through an alias any line may reach the gate's jobs: where the
+        # workflow reads one, its every edit is named.
+        mid = self.commit({gate.WORKFLOW: CI.replace("  fmt:\n    runs-on: ubuntu-latest\n",
+                                                     "  fmt:\n    runs-on: &runner ubuntu-latest\n")
+                           .replace("  perf:\n    name: perf (instructions)\n", "  perf:\n    name: perf (instructions)\n    runs-on: *runner\n")})
+        text = gate.show(mid, gate.WORKFLOW)
+        head = self.commit({gate.WORKFLOW: text.replace("&runner ubuntu-latest", "&runner self-hosted")})
+        notes = gate.gate_edits(mid, head)
+        self.assertTrue(any("reads a YAML alias (`*runner`)" in n for n in notes), notes)
 
     def test_the_cli_writes_a_warning_and_the_summary(self):
         head = self.commit({gate.CHECKER: checker([entry()])})

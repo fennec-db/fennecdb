@@ -1278,19 +1278,22 @@ jobs:
       # Under tools/, so it reads this checkout as its tree -- a checker
       # finds it as the directory above its own -- and chosen by the base
       # alone: the base's file as git reads it, this tree's only where git
-      # says the base has none. Whatever the pull request tracks at the
+      # lists the base's tree and the file is not in it (`git ls-tree`:
+      # `git cat-file -e`'s exit 128, "no such path", is also its answer
+      # to a tree it cannot read). Whatever the pull request tracks at the
       # path is refused, never written into or run, and a git error is no
       # base without a checker. The base's gate.rs is read here too, before
       # anything of the change runs.
       - name: The base's checker
         run: |
           at_base() {
-            local s=0
-            git cat-file -e "HEAD^1:$1" 2>/dev/null || s=$?
-            [ "$s" = 0 ] && return 0
-            [ "$s" = 128 ] && return 1
-            echo "::error title=perf gate::git cannot read the base's $1 (git cat-file -e exited $s): a git error chooses no checker"
-            exit 1
+            local s=0 listed
+            listed=$(git ls-tree HEAD^1 -- "$1") || s=$?
+            if [ "$s" != 0 ]; then
+              echo "::error title=perf gate::git cannot read the base's tree down to $1 (git ls-tree exited $s): a git error chooses no checker"
+              exit 1
+            fi
+            [ -n "$listed" ]
           }
           if [ -L tools ] || [ ! -d tools ]; then
             echo "::error title=perf gate::this change's tools/ is not a directory, and the base's checker is written into it"
@@ -1304,14 +1307,20 @@ jobs:
           rm -rf tools/perf_gate_base.py
           git cat-file -e 'HEAD^1^{tree}' || { echo "::error title=perf gate::git cannot read the base, HEAD^1"; exit 1; }
           if at_base tools/perf_gate.py; then
-            git show HEAD^1:tools/perf_gate.py > tools/perf_gate_base.py
+            git show HEAD^1:tools/perf_gate.py > tools/perf_gate_base.py || {
+              echo "::error title=perf gate::git cannot read the base's tools/perf_gate.py, which its tree lists"
+              exit 1
+            }
             echo "counted by the base's checker"
           else
             cp tools/perf_gate.py tools/perf_gate_base.py
             echo "the base has no tools/perf_gate.py yet: this tree's counts"
           fi
           if at_base crates/fennec-http/examples/gate.rs; then
-            git show HEAD^1:crates/fennec-http/examples/gate.rs > "$RUNNER_TEMP/base_gate.rs"
+            git show HEAD^1:crates/fennec-http/examples/gate.rs > "$RUNNER_TEMP/base_gate.rs" || {
+              echo "::error title=perf gate::git cannot read the base's crates/fennec-http/examples/gate.rs, which its tree lists"
+              exit 1
+            }
           else
             : > "$RUNNER_TEMP/base_gate.rs"
           fi
@@ -1431,20 +1440,21 @@ jobs:
           persist-credentials: false
 
       # As the count chose it: the base's file as git reads it, this
-      # tree's only where git says the base has none, whatever the pull
-      # request tracks at the path refused, a git error no base without a
-      # checker. The base's gate.rs beside none of the artifacts, which
-      # are downloaded each into a directory of its own.
+      # tree's only where git lists the base's tree without it, whatever
+      # the pull request tracks at the path refused, a git error no base
+      # without a checker. The base's gate.rs beside none of the artifacts,
+      # which are downloaded each into a directory of its own.
       - name: The base's checker and program
         id: base
         run: |
           at_base() {
-            local s=0
-            git cat-file -e "HEAD^1:$1" 2>/dev/null || s=$?
-            [ "$s" = 0 ] && return 0
-            [ "$s" = 128 ] && return 1
-            echo "::error title=perf gate::git cannot read the base's $1 (git cat-file -e exited $s): a git error chooses no checker"
-            exit 1
+            local s=0 listed
+            listed=$(git ls-tree HEAD^1 -- "$1") || s=$?
+            if [ "$s" != 0 ]; then
+              echo "::error title=perf gate::git cannot read the base's tree down to $1 (git ls-tree exited $s): a git error chooses no checker"
+              exit 1
+            fi
+            [ -n "$listed" ]
           }
           if [ -L tools ] || [ ! -d tools ]; then
             echo "::error title=perf gate::this change's tools/ is not a directory, and the base's checker is written into it"
@@ -1458,7 +1468,10 @@ jobs:
           rm -rf tools/perf_gate_base.py
           git cat-file -e 'HEAD^1^{tree}' || { echo "::error title=perf gate::git cannot read the base, HEAD^1"; exit 1; }
           if at_base tools/perf_gate.py; then
-            git show HEAD^1:tools/perf_gate.py > tools/perf_gate_base.py
+            git show HEAD^1:tools/perf_gate.py > tools/perf_gate_base.py || {
+              echo "::error title=perf gate::git cannot read the base's tools/perf_gate.py, which its tree lists"
+              exit 1
+            }
             echo "had=true" >> "$GITHUB_OUTPUT"
             echo "judged by the base's checker"
           else
@@ -1466,7 +1479,10 @@ jobs:
             echo "the base has no tools/perf_gate.py yet: this tree's judges"
           fi
           if at_base crates/fennec-http/examples/gate.rs; then
-            git show HEAD^1:crates/fennec-http/examples/gate.rs > "$RUNNER_TEMP/base_gate.rs"
+            git show HEAD^1:crates/fennec-http/examples/gate.rs > "$RUNNER_TEMP/base_gate.rs" || {
+              echo "::error title=perf gate::git cannot read the base's crates/fennec-http/examples/gate.rs, which its tree lists"
+              exit 1
+            }
           else
             : > "$RUNNER_TEMP/base_gate.rs"
           fi

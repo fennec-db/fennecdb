@@ -71,7 +71,10 @@ the rule is counted and judged by the rule it would replace. An entry lets
 its workload through only in the pull request that adds it -- one the base
 holds already (`--accepted-base`) lets nothing through -- so the list is
 the history of what was let through, never removed. The owner approves
-each entry, and each edit of the gate's own files, which `edits` names.
+each entry, and each edit of the gate's own files -- gate.rs, this checker,
+the workflow's two jobs, the jobs they need and the local actions they use,
+the workflow outside its jobs, and any workflow's job named as one of
+them -- which `edits` names (`workflow_edits`).
 
 The holdout (.github/workflows/perf-holdout.yml) replays merged pairs and
 knows what each must do: `--expect` names the workloads that fail and by
@@ -94,8 +97,8 @@ taking the workload's connection and its taking the driver's next one: the
 syncs that make a file durable and the writebacks that make nothing
 durable, each by its call and its file; renames; the calls writing to
 files and the bytes they wrote, file by file; the bytes written and not
-yet durable when the server next wrote to a socket, its answer, file by
-file; the files created, truncated, linked and unlinked; the calls of
+yet durable when the server next began to write to a socket, its answer,
+file by file; the files created, truncated, linked and unlinked; the calls of
 those that failed, by call and file -- and beside them the database
 file's size once the setup was answered. Each to the call, so every run
 of a side must count the same, and any count of this tree's that is not
@@ -191,8 +194,13 @@ FEATURES = "fennec-abi/sync"
 # counted from the day it appears, never once someone lists it.
 UNREAD = ("site/", "docs/", "integrations/", "web/", "studio/", "deploy/")
 # The workflow's jobs that count and judge: an edit to one is named for the
-# owner (`edits`), compared by their lines, comments and blank ones aside.
+# owner (`edits`), compared by their lines as YAML reads them, comments and
+# the blank lines that hold nothing aside (`yaml_lines`) -- and so is an
+# edit of what reaches them: the workflow outside its `jobs:`, a job they
+# need, a local action they use, and any workflow's job named as one of
+# them (`workflow_edits`).
 WORKFLOW = ".github/workflows/ci.yml"
+WORKFLOWS = ".github/workflows/"
 JOBS = ("perf-count", "perf")
 # What an entry lets through: the figure (instructions an op, the
 # allocator priced), or the heap bytes an op; or one of an I/O workload's
@@ -1259,46 +1267,475 @@ def reaches(paths):
     return any(not (p.startswith(UNREAD) or p.endswith(".md")) for p in paths)
 
 
+# A block scalar's header, `|`, `>-`, `|2+`: its lines are the scalar's,
+# a `#` among them a script's, never a comment.
+YAML_BLOCK = re.compile(r"[|>](?:[1-9][+-]?|[+-][1-9]?)?(?=[ \t]|$)")
+# A mapping's key at a line's start, plain or quoted, and the text after
+# its `:`.
+YAML_KEY = re.compile(r"""^ *(?:-[ \t]+)*(?:"((?:[^"\\]|\\.)*)"|'((?:[^']|'')*)'|([^\s"'#&*!|>\[\]{},-][^#]*?|-[^\s#][^#]*?))[ \t]*:(?:[ \t]+(.*))?$""")
+
+
+def yaml_closed(line, i, quote):
+    """Where the scalar `quote` opened, running on from `i`, closes in
+    `line`: the index after its closing quote, or None where it runs on to
+    the next line -- `\\` escaping a character between double quotes, `''`
+    a quote between single ones."""
+    while i < len(line):
+        c = line[i]
+        if quote == '"' and c == "\\":
+            i += 2
+            continue
+        if c == quote:
+            if quote == "'" and line[i + 1:i + 2] == "'":
+                i += 2
+                continue
+            return i + 1
+        i += 1
+    return None
+
+
+def yaml_lines(text):
+    """A workflow's lines as YAML reads them, ([(line, kind)], aliases):
+    each line up to its comment, its trailing spaces aside -- a block
+    scalar's kept as written, its trailing spaces its own -- and `kind`
+    "node" where a node of the document's structure begins it, "scalar"
+    where it is a scalar's text run on from a line before. A line holding nothing
+    -- a comment, or blank -- is left out, but where it is a scalar's own:
+    inside a block scalar (`run: |`, whose `#` lines are the script's),
+    inside a quoted one, and a blank line in a plain or a flow one running
+    on, which YAML folds to a break. A `#` begins a comment at a line's
+    start or after a space, outside a quoted scalar and a block one, so an
+    edit of a comment changes no line here and an edit of a key's value
+    does. `aliases`, every alias read (`*name`, `<<: *name`): through one,
+    a part of the workflow takes another's lines."""
+    out, aliases, held = [], set(), []
+    block = quote = plain = opened = None
+    flow, blanks, expect = 0, 0, True
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        indent = len(line) - len(line.lstrip(" "))
+        if block is not None:
+            # A block scalar's lines are those deeper than the key or the
+            # entry that holds it, as written -- a trailing space is its
+            # own (a script's `\ ` is no line's continuation) -- and its
+            # blank lines but the last ones.
+            if not line.strip():
+                held.append((raw, "scalar"))
+                continue
+            if indent > block:
+                out += held + [(raw, "scalar")]
+                held = []
+                continue
+            block, held = None, []
+        if quote is not None:
+            j = yaml_closed(line, 0, quote)
+            if j is None:
+                out.append((line, "scalar"))
+                continue
+            quote, i, expect, last, kind, parent = None, j, False, "quoted", "scalar", -1
+        else:
+            if not line.strip():
+                if flow or plain is not None:
+                    blanks += 1
+                continue
+            if line.lstrip().startswith("#"):
+                # A comment ends a plain scalar: a blank before it is none.
+                plain, blanks = None, 0
+                continue
+            if not flow and indent == 0 and (line in ("---", "...") or line.startswith(("--- ", "%"))):
+                out.append((line, "node"))
+                plain = opened = None
+                expect, blanks = True, 0
+                continue
+            if plain is not None and indent > plain and not flow:
+                # A plain scalar's next line, held by the key that holds it.
+                out += [("", "scalar")] * blanks
+                expect, last, kind, parent = False, "plain", "scalar", plain
+            else:
+                if flow:
+                    out += [("", "scalar")] * blanks
+                plain, last, kind = None, None, "node"
+                expect = expect if flow else True
+                parent = opened if opened is not None else -1
+            blanks, i = 0, indent
+        start, end = indent, len(line)
+        while i < len(line):
+            ch = line[i]
+            if ch in " \t":
+                i += 1
+                continue
+            if ch == "#" and (i == 0 or line[i - 1] in " \t"):
+                end = i
+                if last == "plain":
+                    last = "ended"
+                break
+            if expect:
+                nxt = line[i + 1:i + 2]
+                if ch in "-?" and not flow and nxt in ("", " ", "\t"):
+                    # A sequence's entry, or a key of its own: a node follows.
+                    parent, i = i, i + 1
+                    continue
+                if ch in "&!":
+                    # An anchor or a tag, then the node.
+                    while i < len(line) and line[i] not in " \t" + (",[]{}" if flow else ""):
+                        i += 1
+                    continue
+                if ch == "*":
+                    j = i + 1
+                    while j < len(line) and line[j] not in " \t,[]{}":
+                        j += 1
+                    aliases.add(line[i + 1:j])
+                    i, expect, last, start = j, False, "alias", i
+                    continue
+                if ch in "\"'":
+                    start = i
+                    j = yaml_closed(line, i + 1, ch)
+                    if j is None:
+                        quote = ch
+                        break
+                    i, expect, last = j, False, "quoted"
+                    continue
+                if ch in "|>" and not flow:
+                    m = YAML_BLOCK.match(line, i)
+                    if m:
+                        block = parent
+                        rest = line[m.end():].strip()
+                        end = m.end() if not rest or rest.startswith("#") else len(line)
+                        break
+                if ch in "[{":
+                    flow, i = flow + 1, i + 1
+                    continue
+                start, expect, last = i, False, "plain"
+                i += 1
+                continue
+            if flow and ch == ",":
+                expect, last, i = True, None, i + 1
+                continue
+            if flow and ch in "]}":
+                flow, last, i = max(flow - 1, 0), None, i + 1
+                continue
+            if ch == ":" and (line[i + 1:i + 2] in ("", " ", "\t") or (flow and line[i + 1:i + 2] in ",[]{}")):
+                # A key ended: its value follows, held by the key's column.
+                parent, expect, last, i = start, True, None, i + 1
+                continue
+            i += 1
+        out.append((line[:end].rstrip(), kind))
+        if block is None and quote is None and not flow:
+            # A node left for the next line (`key:`, `-`) is held by this
+            # line's key or entry; a plain scalar may run on beneath it.
+            opened = parent if expect else None
+            plain = parent if last == "plain" else None
+    return out, aliases
+
+
+def yaml_key(line):
+    """The key a node's line begins with, unquoted, and the text after its
+    `:` -- (None, None) where it begins with none."""
+    m = YAML_KEY.match(line)
+    if not m:
+        return None, None
+    key = m.group(1) if m.group(1) is not None else m.group(2) if m.group(2) is not None else m.group(3)
+    if m.group(2) is not None:
+        key = key.replace("''", "'")
+    return key.strip(), (m.group(4) or "").strip()
+
+
+def workflow_parts(text):
+    """A workflow's parts as YAML reads them (`yaml_lines`): {"keys": {key:
+    its lines}, the top level's keys but `jobs`, "jobs": {id: its lines},
+    "inline": the jobs whose header holds more than the id, "aliases":
+    every alias read}. A job's lines are those beneath its header, and the
+    header where it holds more; a key read twice keeps both its lines, so
+    neither hides the other."""
+    lines, aliases = yaml_lines(text)
+    keys, jobs, inline = {}, {}, set()
+    cur, in_jobs, level = None, False, None
+    for line, kind in lines:
+        indent = len(line) - len(line.lstrip(" "))
+        if kind == "node" and indent == 0:
+            key, rest = yaml_key(line)
+            in_jobs = key == "jobs"
+            level = None
+            cur = keys.setdefault(key if key is not None else "(the document)", [])
+            if not in_jobs or rest:
+                cur.append(line)
+            cur = None if in_jobs and not rest else cur
+            continue
+        if in_jobs and kind == "node" and (level is None or indent <= level):
+            level = indent
+            key, rest = yaml_key(line)
+            job = key if key is not None else line.strip()
+            cur = jobs.setdefault(job, [])
+            if key is None or rest:
+                cur.append(line)
+                inline.add(job)
+            continue
+        if cur is None:
+            cur = keys.setdefault("jobs", [])
+        cur.append(line)
+    return {"keys": {k: "\n".join(v) for k, v in keys.items()},
+            "jobs": {k: "\n".join(v) for k, v in jobs.items()}, "inline": inline, "aliases": aliases}
+
+
 def jobs_of(text, ids=JOBS):
-    """The jobs `ids` of a workflow's `text`, each its lines but comments
-    and blank ones, joined: {id: lines}, a job the text lacks absent."""
-    out, job, in_jobs = {}, None, False
-    for line in text.splitlines():
-        if re.match(r"^jobs:\s*(#.*)?$", line):
-            in_jobs = True
+    """The jobs `ids` of a workflow's `text`, each its lines as YAML reads
+    them, comments and blank lines aside (`workflow_parts`): {id: lines}, a
+    job the text lacks absent."""
+    jobs = workflow_parts(text)["jobs"]
+    return {k: jobs[k] for k in ids if k in jobs}
+
+
+def job_property(lines, name):
+    """The text after `name:` at a job's own level (its first line's), and
+    the lines beneath it: (text, [lines]), or None where the job has none."""
+    rows = lines.splitlines()
+    if not rows:
+        return None
+    level = len(rows[0]) - len(rows[0].lstrip(" "))
+    for i, line in enumerate(rows):
+        if len(line) - len(line.lstrip(" ")) != level:
             continue
-        if line[:1] not in ("", " ", "#"):
-            in_jobs, job = False, None
+        key, rest = yaml_key(line)
+        if key == name:
+            below = []
+            for more in rows[i + 1:]:
+                if len(more) - len(more.lstrip(" ")) <= level:
+                    break
+                below.append(more)
+            return rest, below
+    return None
+
+
+def job_needs(lines):
+    """The jobs a job's `needs:` names, or None where they cannot be read
+    here -- every job then, as any could hand it an output or a file."""
+    found = job_property(lines, "needs")
+    if found is None:
+        return set()
+    rest, below = found
+    if rest.startswith("[") and rest.endswith("]"):
+        items = rest[1:-1].split(",")
+    elif rest:
+        items = [rest]
+    else:
+        items = [re.sub(r"^\s*-\s+", "", b) for b in below if re.match(r"^\s*-\s+\S", b)]
+        if len(items) != len(below):
+            return None
+    out = {i.strip().strip("'\"") for i in items if i.strip()}
+    return out if all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", i) for i in out) else None
+
+
+def job_name(job, lines):
+    """The name a job's check is shown by: its `name:` unquoted, the id
+    where it has none, None where it cannot be read here (a scalar running
+    on, or a block one) -- any name then."""
+    found = job_property(lines, "name")
+    if found is None:
+        return job
+    rest, below = found
+    if below or not rest or rest[:1] in "|>&!*[{":
+        return None
+    if rest[:1] in "'\"":
+        end = yaml_closed(rest, 1, rest[0])
+        if end != len(rest):
+            return None
+        inner = rest[1:-1]
+        return inner.replace("''", "'") if rest[0] == "'" else re.sub(r"\\(.)", r"\1", inner)
+    return rest
+
+
+def matrix_values(lines):
+    """Every value a job's `strategy:` writes out -- each key's and each
+    entry's, a flow list's items one by one, and "" for a key it lacks --
+    which `${{ matrix.<key> }}` can only be one of; None where the matrix
+    is not all written out here (an expression, a block or flow mapping, a
+    scalar running on to the next line), when it may be anything."""
+    found = job_property(lines, "strategy")
+    if found is None:
+        return {""}
+    rest, below = found
+    if rest:
+        return None
+    out = {""}
+    for line in below:
+        text = line.strip()
+        if "${{" in text:
+            return None
+        while text.startswith("- ") or text == "-":
+            text = text[2:].strip()
+        key, value = yaml_key(text)
+        if key is None:
+            if not line.lstrip().startswith("- "):
+                return None
+            value = text
+        if not value:
             continue
-        if not in_jobs:
-            continue
-        m = re.match(r"^  ([A-Za-z0-9_-]+):\s*(#.*)?$", line)
-        if m:
-            job = m.group(1) if m.group(1) in ids else None
-            if job:
-                out[job] = []
-            continue
-        if job and line.strip() and not line.lstrip().startswith("#"):
-            out[job].append(line.rstrip())
-    return {k: "\n".join(v) for k, v in out.items()}
+        items = [value]
+        if value[:1] in "[{":
+            # A flow list or mapping on its one line, of plain scalars.
+            close = "]" if value[0] == "[" else "}"
+            if not value.endswith(close) or any(c in value[1:-1] for c in "[]{}\"'#&*!|>"):
+                return None
+            items = value[1:-1].split(",")
+            if close == "}":
+                items = [i.split(":", 1)[1] if ":" in i else "" for i in items]
+        elif value[:1] in "|>&*!":
+            return None
+        for item in items:
+            item = item.strip()
+            if item[:1] in "'\"":
+                if len(item) < 2 or item[-1] != item[0]:
+                    return None
+                item = item[1:-1].replace("''", "'") if item[0] == "'" else re.sub(r"\\(.)", r"\1", item[1:-1])
+            out.add(item)
+    return out
+
+
+def name_in(parts, job):
+    """A job's check name as `job_name` reads it and its matrix's values
+    (`matrix_values`): (None, None) where its workflow writes the job on its
+    header line or reads an alias, either of which could give it any name."""
+    if job in parts["inline"] or parts["aliases"]:
+        return None, None
+    lines = parts["jobs"][job]
+    return job_name(job, lines), matrix_values(lines)
+
+
+def named_like(name, names, values=None):
+    """Whether a job's check `name` may be one of `names`: a `${{
+    matrix.<key> }}` in it any of `values` (a matrix written out), every
+    other `${{ }}` any text, and a name not read (None) any name."""
+    if name is None:
+        return True
+    pieces = re.split(r"(\$\{\{.*?\}\})", name, flags=re.S)
+    pattern = ""
+    for i, p in enumerate(pieces):
+        if i % 2 == 0:
+            pattern += re.escape(p)
+        elif values is not None and re.fullmatch(r"\$\{\{\s*matrix\.[A-Za-z_][A-Za-z0-9_-]*\s*\}\}", p):
+            pattern += "(?:" + "|".join(re.escape(v) for v in sorted(values)) + ")"
+        else:
+            pattern += ".*"
+    return any(re.fullmatch(pattern, n, re.I | re.S) for n in names)
+
+
+def gate_jobs(parts, starts=JOBS):
+    """The jobs `starts` of a workflow's parts and every job they need, on
+    and on: {id: why it is the gate's}. A `needs:` not read here takes in
+    every job."""
+    jobs = parts["jobs"]
+    out = {j: "the gate's own job" for j in starts if j in jobs}
+    todo = list(out)
+    while todo:
+        job = todo.pop()
+        needs = None if job in parts["inline"] else job_needs(jobs[job])
+        for n in sorted(set(jobs) if needs is None else needs):
+            if n not in out:
+                out[n] = f"a job the gate's `{job}` needs, which can hand it an output or a file"
+                todo.append(n)
+    return out
+
+
+def named_jobs_edited(was, now, names, skip=(), keys=True):
+    """The jobs of a workflow's two sides whose check may be shown under one
+    of `names` (`named_like`, or a gate job's id) and whose lines are
+    edited, or those of a job they need, or -- with `keys` -- the
+    workflow's own keys outside its jobs, which reach all of them; every
+    such job where the workflow reads an alias and is edited at all."""
+    aliased = bool(was["aliases"] or now["aliases"]) and (was["keys"], was["jobs"]) != (now["keys"], now["jobs"])
+    out = set()
+    for parts in (was, now):
+        for j in parts["jobs"]:
+            if j in skip or j in out:
+                continue
+            name, values = name_in(parts, j)
+            if not (j in JOBS or named_like(name, names, values)):
+                continue
+            chain = set(gate_jobs(was, (j,))) | set(gate_jobs(now, (j,)))
+            if aliased or (keys and was["keys"] != now["keys"]) or \
+                    any(was["jobs"].get(c) != now["jobs"].get(c) for c in chain):
+                out.add(j)
+    return sorted(out)
+
+
+def local_uses(texts):
+    """The paths the jobs' `uses: ./...` name -- a local action or a
+    workflow of the checkout's own -- each without its `./`."""
+    out = set()
+    for text in texts:
+        for m in re.finditer(r"""^\s*(?:-\s+)?uses:\s*["']?\./([^\s"'@]*)""", text, re.M):
+            out.add(m.group(1).rstrip("/"))
+    return out
+
+
+def workflow_edits(base, head, changed):
+    """What a change does to the workflow the gate runs in, a line each for
+    the owner: a job of the gate's, or one it needs, added, edited or
+    removed; the workflow outside its `jobs:` -- its `env`, `defaults`,
+    `permissions`, `concurrency`, `on` and the rest, which reach every
+    step of the gate's jobs -- edited; a local action or workflow one of
+    them uses; and a job of any workflow whose check may be shown under a
+    gate job's name, edited as `named_jobs_edited` reads it (an expression
+    in a name may stand for any text, `release.yml`'s `${{ matrix.name }}`
+    among them, so its job is named where its own lines change, not at
+    every edit of its file). Compared as YAML reads them, so a comment's
+    edit is none; and every edit where the workflow reads an alias,
+    through which any of its lines may reach the gate's."""
+    was, now = workflow_parts(show(base, WORKFLOW)), workflow_parts(show(head, WORKFLOW))
+    notes = []
+    if (was["aliases"] or now["aliases"]) and (was["keys"], was["jobs"]) != (now["keys"], now["jobs"]):
+        notes.append(
+            f"`{WORKFLOW}` reads a YAML alias (`*{sorted(was['aliases'] | now['aliases'])[0]}`) and is edited: through "
+            "an alias any of its lines may reach the gate's jobs, so every edit of it is the gate's, which the owner "
+            "approves"
+        )
+    ours = {**gate_jobs(now), **gate_jobs(was)}
+    for job in sorted(ours, key=lambda j: (j not in JOBS, JOBS.index(j) if j in JOBS else 0, j)):
+        a, b = was["jobs"].get(job), now["jobs"].get(job)
+        if a != b:
+            how = "added" if a is None else "removed or renamed" if b is None else "edited"
+            notes.append(f"the `{job}` job of `{WORKFLOW}` is {how}: {ours[job]}, which the owner approves")
+    keys = sorted(k for k in set(was["keys"]) | set(now["keys"]) if was["keys"].get(k) != now["keys"].get(k))
+    if keys:
+        notes.append(
+            f"`{WORKFLOW}` outside its `jobs:` is edited ({', '.join(f'`{k}`' for k in keys)}): the workflow's own "
+            "keys, which reach every step of the gate's jobs -- their environment, shell, permissions and triggers "
+            "-- the gate's own, which the owner approves"
+        )
+    for used in sorted(local_uses([*(was["jobs"].get(j, "") for j in ours), *(now["jobs"].get(j, "") for j in ours)])):
+        hit = sorted(p for p in changed if not used or p == used or p.startswith(used + "/"))
+        if hit:
+            notes.append(f"`./{used}`, which a job of the gate's uses, is edited (`{hit[0]}`): the gate's own, which "
+                         "the owner approves")
+    names = {n for parts in (was, now) for j in JOBS if j in parts["jobs"]
+             for n in (j, name_in(parts, j)[0]) if n is not None}
+    for path in sorted(p for p in changed if p.startswith(WORKFLOWS) and "/" not in p[len(WORKFLOWS):]
+                       and p.endswith((".yml", ".yaml"))):
+        if path == WORKFLOW:
+            # Its keys outside the jobs are named above, and its gate's jobs.
+            like = named_jobs_edited(was, now, names, skip=ours, keys=False)
+        else:
+            like = named_jobs_edited(workflow_parts(show(base, path)), workflow_parts(show(head, path)), names)
+        if like:
+            notes.append(
+                f"`{path}` is edited, and its job `{like[0]}` is named as one of the gate's ({', '.join(sorted(names))}): "
+                "a check shown under the gate's name, which the owner approves"
+            )
+    return notes
 
 
 def gate_edits(base, head):
     """What a change from `base` to `head` does to the gate's own files, a
-    line each for the owner: the program or the checker edited, a job of
-    the workflow's that counts or judges edited, and every PERF_ACCEPTED
-    entry added, edited or removed."""
+    line each for the owner: the program or the checker edited, what the
+    workflow runs the gate's jobs with edited (`workflow_edits`), and every
+    PERF_ACCEPTED entry added, edited or removed."""
     changed = set(diff_paths(base, head))
     notes = [
         f"`{path}` is edited: one of the gate's own files, which the owner approves"
         for path in (PROGRAM, CHECKER)
         if path in changed
     ]
-    was, now = jobs_of(show(base, WORKFLOW)), jobs_of(show(head, WORKFLOW))
-    for job in JOBS:
-        if was.get(job) != now.get(job):
-            how = "added" if job not in was else "removed or renamed" if job not in now else "edited"
-            notes.append(f"the `{job}` job of `{WORKFLOW}` is {how}: the gate's own job, which the owner approves")
+    notes += workflow_edits(base, head, changed)
     old, new = show(base, CHECKER), show(head, CHECKER)
     old = accepted_text(old, f"{base}:{CHECKER}") if old else []
     new = accepted_text(new, f"{head}:{CHECKER}") if new else []
@@ -1736,8 +2173,17 @@ def strace_calls(lines):
     `<... name resumed>` where it returned, is joined by its thread's id
     and yielded where it returned. Exits and signals are passed over, and
     so is a call resumed whose beginning the trace does not hold."""
+    for _, _, *call in strace_placed(lines):
+        yield tuple(call)
+
+
+def strace_placed(lines):
+    """The calls of `strace_calls`, each with the line it began on and the
+    one it returned on, in the order they returned: (began, returned, name,
+    arguments, return, path) -- one line both where strace printed the
+    call whole."""
     begun = {}
-    for raw in lines:
+    for at, raw in enumerate(lines):
         m = STRACE_LINE.match(raw.rstrip("\n"))
         if not m:
             continue
@@ -1749,14 +2195,15 @@ def strace_calls(lines):
             start = begun.pop(tid, None)
             if start is None or start[0] != r.group(1):
                 continue
-            name, text = start[0], start[1] + r.group(2)
+            name, text, began = start[0], start[1] + r.group(2), start[2]
         else:
             c = STRACE_CALL.match(body)
             if not c:
                 continue
             name, text = c.groups()
+            began = at
             if text.endswith(UNFINISHED):
-                begun[tid] = (name, text[: -len(UNFINISHED)].rstrip())
+                begun[tid] = (name, text[: -len(UNFINISHED)].rstrip(), at)
                 continue
         # strace pads before the `=` where a call was resumed or its
         # arguments were short: `<... write resumed>)        = 100`.
@@ -1765,7 +2212,7 @@ def strace_calls(lines):
             continue
         v = re.match(r"-?(?:0x[0-9a-fA-F]+|\d+)", done.group(2))
         fd = STRACE_FD.match(done.group(2))
-        yield name, done.group(1), strace_number(v.group()) if v else None, fd.group(2) if fd else None
+        yield began, at, name, done.group(1), strace_number(v.group()) if v else None, fd.group(2) if fd else None
 
 
 def strace_args(args):
@@ -1855,7 +2302,7 @@ def io_counts(lines, data_dir, start=2, end=3):
     connection it took and the `end`th: {fsyncs, writebacks, renames,
     writes, written, unsynced, failed, creates, truncates, links, unlinks,
     files}, and the connections it took in all. A call counts where it
-    returned. A descriptor counts as a file where `-y` names it by a path
+    returned, an answer where it began (below). A descriptor counts as a file where `-y` names it by a path
     outside /dev, /proc and /sys -- never a socket, a pipe (the server's
     log, its stderr, is the driver's pipe) or /dev/null; one unlinked
     since it was opened by its name and ` (deleted)`, its own file. A call
@@ -1922,8 +2369,43 @@ def io_counts(lines, data_dir, start=2, end=3):
                 share("answer", f, f, "unsynced", n)
         fresh.clear()
 
+    # Where each call counts, against the stretch's ends -- the returns of
+    # the accepts that took the workload's connection and the driver's
+    # next -- and against each other. strace prints a call's beginning as
+    # it stops the thread on its way in, before the call runs, and its
+    # return as it stops it on its way out, before the thread goes on;
+    # another thread's line can fall between the two (`<unfinished ...>`,
+    # `<... resumed>`). An answer's bytes reach the client inside the call,
+    # and the client connects again once it has read them: on a loaded
+    # runner the next accept's return can be printed before the answer's,
+    # and placed there the last answer would fall past the stretch
+    # (io-batch's unsynced 23,883 -> 0), runs of one build differing on a
+    # required check that nothing changed. So an answer counts
+    # where it began, which comes before its client can connect. The rest
+    # count where they returned, and no other thread's line moves them: an
+    # accept takes its connection as it returns (it began waiting long
+    # before), and the server hands the connection on only after, so a
+    # workload's calls all begin past it; a sync makes a file durable as it
+    # returns -- placed where it began, one still running at an answer would
+    # pass for done -- and the bytes of a write and the error of a failure
+    # are known there; and what the server does for a request returns
+    # before that request's answer begins, on the answering thread in turn
+    # or on one it waited for, which went on only once strace had printed
+    # its return. A call the server did not wait for before answering can
+    # fall either side of an end in any reading: then its runs differ, and
+    # the judge says so.
+    def placed(call):
+        began, returned, name, args = call[:4]
+        if name in IO_SENDS or name in IO_WRITES:
+            parts = strace_args(args)
+            i = 0 if name in IO_SENDS else IO_WRITES[name]
+            d = strace_fd(parts[i]) if i < len(parts) else None
+            if d and d[1] and d[1].startswith("socket:"):
+                return began
+        return returned
+
     taken = 0
-    for name, args, ret, shown in strace_calls(lines):
+    for _, _, name, args, ret, shown in sorted(strace_placed(lines), key=placed):
         ok = ret is not None and ret >= 0
         if name in IO_REFUSED:
             # Set up before the stretch, a ring or a context could write in it.
