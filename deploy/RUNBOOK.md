@@ -457,9 +457,14 @@ failover the router's line for each tenant (`failover of <node>: <tenant>
 promoted on <to>, its copy connected to its primary, 0 writes behind it as
 it last said, last heard from it 812 ms before`) says what the copy knew,
 and `fennec_router_promotions_total{copy="not_connected"}` counts the ones
-promoted not connected -- every copy of a node killed among them, its
-stream ended with it: read `last_contact_ms` against when the node stopped
-answering. Writes the old primary took that were never sent are dropped
+promoted not connected -- every copy of a node whose process was killed
+among them, its stream ended with it: read `last_contact_ms` against when
+the node stopped answering. A copy of a machine lost or cut off stays
+connected until 10 s of silence, so the line ends `what it was not sent is
+lost` wherever the copy was last heard from more than 4 s before. A copy
+taking an image is counted as sent each write from the image's flush on:
+promoted before it applied the image, it loses the writes answered
+meanwhile, `connected` false. Writes the old primary took that were never sent are dropped
 when it comes back as a replica (A node back).
 
 Seen in `make drill` (lease 2 s, the routers' upstream timeout 4 s, three
@@ -553,7 +558,9 @@ reachable by clients without leases: that makes two primaries.
 node's `fennec_copies_disconnected` and `fennec_copies_behind`: the copies
 it holds that a failover may promote -- its pair's standby copies, the
 tenants' replicas of their own, never a read replica -- not connected to
-their primary now, and the most writes one trails its primary's disk by.
+their primary now or with no follower running (its database failed, or
+nothing follows for it: the node keeps such a copy open), and the most
+writes one trails its primary's disk by, as its primary says every 2 s.
 A failover promotes such a copy where it stands, and every write its
 primary answered after it stopped being sent is lost with the primary,
 `--sync always` or not. With its primary's node lost, every copy of it

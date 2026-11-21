@@ -38,8 +38,11 @@ curl -X PUT localhost:8090/_shard/nodes/n1 \
 <p>Each copy says how it follows at
 <code>/t/&lt;tenant&gt;/_replication/status</code> (the replication token):
 <code>connected</code>, <code>behind</code> — writes on its primary's disk it
-has not applied — and <code>last_contact_ms</code>. A node counts its copies a
-failover may promote, never by tenant: <code>fennec_copies_disconnected</code>
+has not applied, as its primary says every 2 s — and
+<code>last_contact_ms</code>. A node counts its copies a failover may
+promote, never by tenant, and keeps each open, its follower running or not
+— one whose database failed, one nothing follows for:
+<code>fennec_copies_disconnected</code>
 and <code>fennec_copies_behind</code> on its <code>/_metrics</code>, which the
 deploy kit's <code>FennecTenantCopiesDisconnected</code> (one not connected
 for two minutes) and <code>FennecTenantCopiesBehind</code> (one more than
@@ -49,9 +52,13 @@ copy not following</a>). A promotion answers what its copy knew —
 <code>"connected"</code>, <code>"behind"</code>,
 <code>"last_contact_ms"</code> — the router logs it for each tenant, and
 <code>fennec_router_promotions_total{copy="not_connected"}</code> counts the
-copies promoted not connected: every copy of a node killed among them, its
-stream ended with it, so read <code>last_contact_ms</code> against when the
-node stopped answering. Over a network others can reach, give the nodes
+copies promoted not connected: every copy of a node whose process was
+killed among them, its stream ended with it, so read
+<code>last_contact_ms</code> against when the node stopped answering. A
+copy stays connected until a read of its stream fails, 10 s on where its
+primary's machine was lost or cut off, so the router's line says what it
+was not sent is lost wherever it was last heard from more than 4 s — two
+keep-alives — before. Over a network others can reach, give the nodes
 <code>--tls-cert</code> and <code>--tls-key</code> and follow
 <code>https://</code>.</p>
 
@@ -105,7 +112,11 @@ first write on the promoted node 0.18 ms.</p>
 primary had not sent is gone — the same trade a database's failover makes.
 <code>--sync always</code> on the primary makes it none for a standby that
 was keeping up: none the standby was sent, which under it is every write
-answered while its stream kept up. A
+answered while its stream kept up. Sent means handed to the primary's
+kernel, which a machine lost takes with it, and a standby taking an image
+is counted as sent each write from the image's flush on, so a promotion
+before it has applied the image loses the writes answered meanwhile, its
+copy saying <code>"connected": false</code>. A
 failover that moved every tenant ends the pair; one that left a tenant behind
 keeps it, so a second call can take it. The old node rejoins as the standby of
 the new one: point its <code>--replica-of</code> there and record the pair the

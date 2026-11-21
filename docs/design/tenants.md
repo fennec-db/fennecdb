@@ -442,22 +442,45 @@ under `--sync always` lost none, from 0.1.5 on). It is seen before it
 matters: a copy's status names `connected`, `behind` and
 `last_contact_ms`, and a node counts its copies a failover may promote --
 a standby's and a tenant's replica of its own, never a read replica's --
-not connected and the most writes one is behind (`fennec_copies_disconnected`,
+not connected or with no follower running, and the most writes one is
+behind (`fennec_copies_disconnected`,
 `fennec_copies_behind`, `Tenants::stats`' `Copies`, never by tenant),
 which the kit's `FennecTenantCopiesDisconnected` (two minutes) and
 `FennecTenantCopiesBehind` (more than 1 000 writes for five) alert on,
 with promtool's tests in `deploy/alerts/fennecdb.rules.test.yml` and a
-RUNBOOK section of their own ("A copy not following"). And it is seen as
+RUNBOOK section of their own ("A copy not following"). A copy a failover
+may promote stays open whether its follower runs or not
+(`Tenants::promotable`, asked by `close` and the scrape alike): one whose
+follower ended -- its database failed -- was closed as idle after
+`--idle-close`, and one nothing follows for -- a standby's file on a node
+started without `--replica-of` -- once a request had opened it; closed,
+nothing opened either again but a request or the failover, and the
+scrape, which reads open tenants alone (a closed one's role is in its
+file), counted it no more, `FennecTenantCopiesDisconnected` resolving while
+it followed nothing (the review's third round). Counting closed copies
+instead would have the scrape open files, or the registry keep a list of
+closed copies by name beside the files that every install, follow and
+delete would have to keep right; kept open, such a copy costs its
+memory, as a copy whose follower runs does, until a follow, a release or a
+restart opens it again. Its `behind` counts from a keep-alive a stream
+sends every `ALIVE` behind as caught up ([replication.md](replication.md#replication)):
+sent only once a stream had caught up, a copy as far behind as its
+primary's buffer read 0 until the third round. And it is seen as
 it happens: the admin's promotion answers what its copy knew as the
 promotion began and its follower stopped (`replication::Heard`, by the
 status's names, `Follower::promote_heard`, `Tenants::promote_heard`), the
 router's failover logs them in its line for the tenant (`promote_on`) and
 counts the copy by them, `fennec_router_promotions_total{copy="connected"
 | "not_connected" | "unknown"}` (unknown: a node before the fields). A
-node killed ends its copies' streams with it, so its failover counts them
-not connected too; `last_contact_ms` against when the node stopped
-answering tells a copy cut off long before from one its node's end cut
-off, which a router could judge against a lease's lapse -- not done. And a repair gives no
+node whose process is killed ends its copies' streams with it, so its
+failover counts them not connected too; `last_contact_ms` against when the
+node stopped answering tells a copy cut off long before from one its
+node's end cut off. A node whose machine is lost or cut off leaves them
+connected: `connected` holds until a read fails, `SILENCE` (10 s) on, past
+a 5 s lease's lapse. So the router's line says what the copy was not sent
+is lost unless it was connected, nothing behind and heard from within two
+keep-alives (`STALE_MS`, 4 s; the review's third round), while the count
+stays by `connected`, as the node said it. And a repair gives no
 tenant a copy while its primary does not answer its `GET /_admin/tenants`
 -- one that ran between a node's death and its lapse attached a copy
 following nothing, which the failover promoted and the node's return wiped

@@ -19,7 +19,14 @@ panic in a session is its failure (`Follower::session_caught`), one
 applying the primary's records caught with the lock held, one past them
 failing the copy (`Changing`); the thread says its end however it comes
 (`Ends`), which a halt waits on. A message is held to its kind's bound
-before a byte of it is read, and grown as it comes (`read_kind`). A
+before a byte of it is read, and grown as it comes (`read_kind`). The
+session looks at a halt as an image has arrived and once it is loaded,
+before `Changing` (`Follower::halted`); a message's growth and an image's
+room for its follow record are asked with `try_reserve_exact`, refused in
+words (`read_kind`, `loaded`); a peer's words reach a log line or the
+status cut and escaped (`peer_words`). A stream says where its disk
+stands every `ALIVE`, behind as caught up (`stream`'s `told`), which a
+copy's `behind` counts from. A
 restart reads a copy's role from its file: one made to follow says so on
 disk before the follow is answered (`Tenants::open_as` syncs it), and an
 image is taken with the record saying it inside its rename.

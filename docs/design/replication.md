@@ -97,7 +97,27 @@ stream and hold it there. It is watched (`connected`, `behind` and
 `fennec_copies_*` in `/_metrics`, the kit's alerts on each) and a
 tenant's promotion says what its copy knew ([tenants.md](tenants.md),
 `replication::Heard`); the site said a failover under `--sync always`
-lost none, from 0.1.5, until the review's second round (G14, area D). An archive (`fennec archive`,
+lost none, from 0.1.5, until the review's second round (G14, area D).
+"Sent" is handed to the primary's kernel, which a machine lost takes
+with it; and a stream sent an image is waited for from the image's flush
+(`sending_standby`), so the writes answered between it and the replica's
+adoption of the image -- its check and load, which a halt walks away
+from -- are lost to a promotion then, the copy saying `connected` false.
+`behind` counts from what the primary last said of its disk: a keep-alive
+every `ALIVE` (2 s), which a stream sent only once it had caught up, so a
+replica as far behind as the feed's buffer -- its reads slower than the
+writes, its socket full -- read `behind` 0, and so did a node's
+`fennec_copies_behind`, a promotion's answer and the router's line, and
+`FennecTenantCopiesBehind` never fired on it. A stream behind now sends
+one after the writes it sends once `ALIVE` has passed since it last told
+(`stream`'s `told`; the review's third round): 33 bytes every 2 s a
+lagging stream, one look at the clock a `W` message, nothing on a
+request's path. Every replica since 0.1.5 reads a keep-alive between any
+two messages, and an archiver syncs its segment on one, as it does every
+250 ms while it takes writes. `connected` is true until a read fails: a
+primary's process killed ends the stream at once, its machine lost or cut
+off only after `SILENCE` (10 s) -- past a 5 s lease's lapse -- so a
+router reads `last_contact_ms` beside it ([tenants.md](tenants.md)). An archive (`fennec archive`,
 `fennec-http/src/archive.rs`) is the same stream written to files, each write
 with the time the primary appended it -- an archive of a copy too, [below](#a-writes-time); `fennec restore` is an image plus the
 archived writes up to a time or a change, forked -- a fennecdb file is exactly
@@ -248,7 +268,13 @@ after each -- in fennec-server's.
   asked with `try_reserve_exact`, a refusal an error naming the kind, the
   length and the bytes asked for (`grown`): with `reserve_exact` a refused
   one still aborted a node, `fennec archive` or `fennec backup` once a
-  peer sent enough bytes (the review's second round). A growth holds the
+  peer sent enough bytes (the review's second round); the image's room
+  for the record saying it follows is asked so too (`loaded`, the third
+  round), where `reserve_exact` copied the image whole into a buffer
+  aborting on a refusal. What `Database::load` allocates as it reads the
+  image -- its documents, its indexes -- still aborts the process on a
+  refusal: the engine has no fallible path for a load, and an image taken
+  whole is a database's size by its primary's word. A growth holds the
   bytes that came and the buffer twice as long the allocator moves them
   into -- three times what came at the most -- and a message read whole
   has held twice its length at the most, not the "twice what came" this
@@ -350,7 +376,10 @@ after each -- in fennec-server's.
   minutes for many gigabytes -- for a promotion, a release under the
   tenant's slot, every `get` behind it and the node's shutdown. Walked away
   from, the copy holds what it held and follows on from there once
-  started again. What a halt can still wait for is an adoption begun: the
+  started again. A halt that comes while the check and load are under way
+  still waits for them -- nothing looks inside `load`, minutes for many
+  gigabytes -- and walks away at the second look, before the adoption.
+  What a halt can still wait for besides is an adoption begun: the
   image written over the copy's file and synced, a write of the image's
   length, then the copy's memory pointed at it; or one message landing
   and its fsync. `a_halt_as_an_image_arrives_or_is_loaded_takes_none_of_it`
@@ -371,8 +400,16 @@ after each -- in fennec-server's.
   (`answered`: a follower's, an archiver's, a backup's, a node archiver's)
   and a status line (`read_head`); `a_peers_words_are_cut_and_escaped`
   holds each with a mebibyte holding a newline, an escape and quotes. A
-  router's own log of a node's answers is not a stream's, and is not
-  changed here.
+  router's log of a node's answers and the errors it answers with -- `said`,
+  a promotion's refusal, every `{status}: {body}` of a node's -- went in as
+  they came too, from anyone at a node's address or on a plain-HTTP hop;
+  they go through it now (`peer_words_within`, fennec-shard's `words`, the
+  third round), cut at 2 000 characters rather than 200: a node's refusal
+  is shown whole, the lineage one a failover meets 313 bytes, whose `force`
+  a cut at 200 took off (fennec-shard's
+  `a_standby_that_never_synced_is_promoted_by_force_alone_and_its_read_replica_follows`
+  failed so). `a_nodes_words_are_cut_and_escaped` holds `said`, `words`
+  and `expect` to it.
 
 The stream's framing is a parser of untrusted bytes, fuzzed as one: the
 `stream` target ([conventions.md](conventions.md#fuzzing)) hands
