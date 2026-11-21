@@ -41,7 +41,8 @@ options
   --source-where <SQL>    postgres: applies the filter on the server, so the
                           rows never stream. It is SQL, not FennecQL.
   --limit <N>             at most N rows
-  --batch <N>             put batch size (default 2000)
+  --batch <N>             rows a put takes at most (default 2000); a batch
+                          is put sooner once its rows hold 16 MiB as read
   --sample <N>            sqlite: rows scanned for untyped columns (1000)
   -n, --dry-run           print the plan, write nothing
   --count                 with --dry-run: also count how many rows will be

@@ -31,6 +31,59 @@ ALTER TABLE t RENAME COLUMN b TO \"b two\";
 INSERT INTO t(a, \"b two\", c, d, e, f, g, h, i, j, k, l, m, n)
   VALUES (2, 'two', 8, 'w', 1.5, 0, x'01', 0, 1, 2, 'k', 'l', 'm', 'n');"
 
+# Constants SQLite's ADD COLUMN takes (`valueFromExpr`'s): signs, casts, hex
+# past 32 bits. Row 1 reads each as its default; row 2 holds what SQLite
+# stored. The last four tables' defaults are read by SQLite's own formatting
+# of a real, a text's numeric prefix, a blob's bytes as text and a text's as
+# a blob.
+sqlite3 constants.sqlite "PRAGMA page_size=512;
+CREATE TABLE t(a INTEGER);
+INSERT INTO t VALUES (1);
+ALTER TABLE t ADD COLUMN b DEFAULT (CAST(5 AS TEXT));
+ALTER TABLE t ADD COLUMN c DEFAULT (-(-5));
+ALTER TABLE t ADD COLUMN d DEFAULT +'x';
+ALTER TABLE t ADD COLUMN e DEFAULT -'5';
+ALTER TABLE t ADD COLUMN f DEFAULT 0x100000000;
+ALTER TABLE t ADD COLUMN g TEXT DEFAULT 0x100000000;
+ALTER TABLE t ADD COLUMN h DEFAULT -0x100000000;
+ALTER TABLE t ADD COLUMN i DEFAULT 0xFFFFFFFFFFFFFFFF;
+ALTER TABLE t ADD COLUMN j TEXT DEFAULT 012345678901;
+ALTER TABLE t ADD COLUMN k DEFAULT 1.0;
+ALTER TABLE t ADD COLUMN l DEFAULT (CAST('1e5' AS INTEGER));
+ALTER TABLE t ADD COLUMN m DEFAULT (CAST(1.5 AS TEXT));
+ALTER TABLE t ADD COLUMN n DEFAULT (CAST(-1.5 AS INTEGER));
+ALTER TABLE t ADD COLUMN o REAL DEFAULT (CAST(3 AS INTEGER));
+ALTER TABLE t ADD COLUMN p NUMERIC DEFAULT (-(-5.0));
+ALTER TABLE t ADD COLUMN q DEFAULT (+(-(+'1e15')));
+ALTER TABLE t ADD COLUMN r DEFAULT (-(-9223372036854775808));
+ALTER TABLE t ADD COLUMN s DEFAULT (CAST(NULL AS TEXT));
+ALTER TABLE t ADD COLUMN v INTEGER DEFAULT (CAST(CAST(7 AS TEXT) AS INTEGER));
+ALTER TABLE t ADD COLUMN w TEXT DEFAULT (-0x80000000);
+ALTER TABLE t ADD COLUMN x DEFAULT 0x1_0;
+ALTER TABLE t ADD COLUMN y DEFAULT (CAST(5 AS NONE));
+ALTER TABLE t ADD COLUMN z DEFAULT (- TRUE);
+INSERT INTO t(a) VALUES (2);
+CREATE TABLE real_as_text(a INTEGER);
+INSERT INTO real_as_text VALUES (1);
+ALTER TABLE real_as_text ADD COLUMN b TEXT DEFAULT (-(-1.5));
+CREATE TABLE text_prefix(a INTEGER);
+INSERT INTO text_prefix VALUES (1);
+ALTER TABLE text_prefix ADD COLUMN b DEFAULT (-'5 apples');
+CREATE TABLE blob_as_text(a INTEGER);
+INSERT INTO blob_as_text VALUES (1);
+ALTER TABLE blob_as_text ADD COLUMN b DEFAULT (CAST(x'41' AS TEXT));
+CREATE TABLE as_blob(a INTEGER);
+INSERT INTO as_blob VALUES (1);
+ALTER TABLE as_blob ADD COLUMN b DEFAULT (CAST(7 AS BLOB));"
+
+# Names holding ESC, BEL and U+202E, and a default holding an ESC, which
+# SQLite reads by the text's numeric prefix: what reaches a terminal.
+E=$(printf '\033'); B=$(printf '\007'); R=$(printf '\342\200\256')
+sqlite3 escapes.sqlite "PRAGMA page_size=512;
+CREATE TABLE t(a INTEGER, \"${E}[31mred${B}\" AS (a * 2) VIRTUAL);
+INSERT INTO t VALUES (1);
+ALTER TABLE t ADD COLUMN \"${E}]0;title${B}${R}\" TEXT DEFAULT (-'${E}[2J');"
+
 sqlite3 names.sqlite "PRAGMA page_size=512;
 CREATE TABLE quotes(\"dq\" INT, 'sq' TEXT, \`bt\` INT, [br] TEXT, x DECIMAL(10,2), z INT,
   PRIMARY KEY (dq, bt), CONSTRAINT positive CHECK (dq > 0 AND bt IN (1, 2, 3)), UNIQUE (x, z));

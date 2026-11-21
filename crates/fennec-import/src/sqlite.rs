@@ -8,8 +8,12 @@
 //!
 //! The file is the attacker's: its lengths are held to the file before
 //! anything is allocated, its walk reaches a page once and holds a page and
-//! a row at a time ([`Walk`]), and its `CREATE TABLE` text is read as SQLite
-//! reads it, so no column takes another's values ([`parse_create`]).
+//! a row at a time ([`Walk`]), a row as wide as SQLite lets a table be
+//! ([`MAX_COLUMNS`]), and its `CREATE TABLE` text is read as SQLite reads
+//! it, so no column takes another's values ([`parse_create`]), and no
+//! default reads otherwise ([`default_of`]). What an import holds besides
+//! is its batch, which `load::run` puts by its bytes as well as its rows
+//! (`fennec_import::BATCH_BYTES`).
 //!
 //! Reference: <https://www.sqlite.org/fileformat2.html>
 
@@ -17,7 +21,7 @@ use crate::{Column, Source};
 use fennec_core::error::{Error, Result};
 use fennec_core::value::{DataType, Value};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{ErrorKind, Read, Seek, SeekFrom};
 use std::path::Path;
 
 const MAGIC: &[u8; 16] = b"SQLite format 3\0";
@@ -211,6 +215,10 @@ impl Pager {
     /// (`fennec_wire::proto::zeroed`): every byte of a payload is in the
     /// file, and `Vec::with_capacity` of a length declaring 2^62 bytes
     /// ended the import -- capacity overflow, or the allocator's abort.
+    /// [`Walk::cells_apart`] refuses such a cell first, as its page is
+    /// entered, reading the same length from the same bytes, so no file
+    /// reaches this one: it is the check beside the allocation, kept for a
+    /// way into `payload` that does not pass there.
     fn held_to_file(&self, total: u64) -> Result<()> {
         if total > self.len {
             return Err(corrupt(format!(
@@ -366,7 +374,11 @@ impl Reached {
 /// bit a page of the file (`reached`), the pages named and not yet entered
 /// (`stack`, 4 bytes each, a page of the file at most once, since a page is
 /// reached as it is named) and the row it yields, whose payload is at most
-/// the file's length and read from pages no other row reads. A cell's
+/// the file's length and read from pages no other row reads. The row made
+/// of it ([`Table::row`]) is a value a column, 32 bytes each and at most
+/// [`MAX_COLUMNS`] of them, its texts and blobs at most the payload and the
+/// defaults it lacks at most the `CREATE TABLE` text: some 1 MiB and twice
+/// the file's length at worst, whatever the file declares. A cell's
 /// payload is read as the cell is yielded: every cell of a leaf was read as
 /// the leaf was entered, and a leaf of 64 KiB pages whose 28 660 pointers
 /// named one cell, its payload the file's length, made a 192 KiB file ask
@@ -487,7 +499,16 @@ impl Walk {
             let mut end = at;
             if leaf {
                 let total = varint(&self.page, &mut end)? as u64;
-                pager.held_to_file(total)?;
+                // Here first, the page refused before a row of it is
+                // yielded; `Pager::payload` holds it again where it
+                // allocates.
+                if total > pager.len {
+                    return Err(corrupt(format!(
+                        "page {p}'s cell {i} declares a payload of {total} bytes, longer than \
+                         the file, {} bytes",
+                        pager.len
+                    )));
+                }
                 varint(&self.page, &mut end)?;
                 let local = pager.local_len(total as usize);
                 end += local + if (local as u64) < total { 4 } else { 0 };
@@ -638,12 +659,18 @@ enum Generated {
 /// `NULL`, a `NOT NULL DEFAULT 7` column's too.
 #[derive(Debug, Clone, PartialEq)]
 enum Absent {
-    /// A constant, the column's affinity applied.
+    /// A constant, read as SQLite reads it ([`default_of`]). Each row
+    /// lacking the column holds a copy, at most the `CREATE TABLE` text's
+    /// length: `load::run` counts it in its batch's bytes
+    /// (`fennec_import::BATCH_BYTES`).
     Value(Value),
-    /// A default the importer does not compute -- `CURRENT_TIMESTAMP`, an
-    /// expression -- as written: a row needing it is refused. SQLite's
-    /// `ADD COLUMN` takes constants alone, so only a file made otherwise
-    /// has one where a row lacks it.
+    /// A default the importer does not read as SQLite does, as written: a
+    /// row needing it is refused. What SQLite reads as no constant --
+    /// `CURRENT_TIMESTAMP`, an expression -- `ADD COLUMN` takes only into a
+    /// table holding no row, so no row of a file SQLite wrote lacks it;
+    /// and a constant whose value is SQLite's formatting of a real as
+    /// text, a text's numeric prefix, or a blob's bytes read as text or a
+    /// text's as a blob, in the file's encoding.
     Unread(String),
 }
 
@@ -652,11 +679,48 @@ impl Absent {
         match self {
             Absent::Value(v) => Ok(v.clone()),
             Absent::Unread(text) => Err(Error::Query(format!(
-                "row {rowid} of `{table}` holds no value for `{column}`, added after it was \
-                 written, and its default `{text}` is one fennec-import does not compute"
+                "row {rowid} of `{}` holds no value for `{}`, added after it was \
+                 written, and its default `{}` is one fennec-import does not compute",
+                shown(table),
+                shown(column),
+                shown(text)
             ))),
         }
     }
+}
+
+/// How much of a file's text a message shows, in bytes ([`shown`]).
+const SHOWN: usize = 512;
+
+/// Text of the file's -- a table's or a column's name, a default -- made
+/// fit for a terminal, where an error and the summary's warning lines take
+/// it: a control character, and one that reorders a line (the
+/// bidirectional overrides, embeddings, isolates and marks), escaped as
+/// Rust writes it (`\u{1b}`), and no more than [`SHOWN`] bytes kept, the
+/// whole length said after them. A name holding an escape sequence
+/// reached the terminal as one. `fennec_wire::client::peer_text`, which a
+/// PostgreSQL server's words go through and fennec-cli's `said` with them
+/// (G14 F2a), escapes alike; this crate's copy is here until the two meet.
+fn shown(s: &str) -> String {
+    let mut out = String::with_capacity(s.len().min(SHOWN) + 24);
+    for c in s.chars() {
+        if out.len() >= SHOWN {
+            out.push_str(&format!("... ({} bytes)", s.len()));
+            break;
+        }
+        let reorders = matches!(
+            c,
+            '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+        );
+        if c.is_control() {
+            out.extend(c.escape_debug());
+        } else if reorders {
+            out.extend(c.escape_unicode());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Keywords that begin a column constraint; the type ends before them.
@@ -678,6 +742,24 @@ const COLUMN_CONSTRAINTS: &[&str] = &[
 /// Keywords that begin a table-level constraint; these are not columns.
 const TABLE_CONSTRAINTS: &[&str] = &["CONSTRAINT", "PRIMARY", "UNIQUE", "CHECK", "FOREIGN"];
 
+/// Whether a piece of a `CREATE TABLE` body is a table's constraint rather
+/// than a column.
+fn table_constraint(part: &str) -> bool {
+    let first = first_word(part);
+    TABLE_CONSTRAINTS
+        .iter()
+        .any(|k| first.eq_ignore_ascii_case(k))
+}
+
+/// SQLite's ceiling on a table's columns: `SQLITE_MAX_COLUMN`, 2 000 unless
+/// a build raises it, may be raised to 32 767 and no further, so no file
+/// SQLite wrote declares more. A row holds a value for every column its
+/// table declares, whatever its record holds -- a record of one byte too --
+/// so a table of 87 376 columns made each row of a 384 KiB file 2.8 MB
+/// (G14 F2b's review): a table declaring more is refused before a column of
+/// it is read.
+const MAX_COLUMNS: usize = 32_767;
+
 /// Parses the column list inside `CREATE TABLE ... ( ... )`, every column
 /// in its place: a column keeps its position whatever its name, its
 /// quotes or the comments around it, since a record's values are read by
@@ -686,8 +768,16 @@ const TABLE_CONSTRAINTS: &[&str] = &["CONSTRAINT", "PRIMARY", "UNIQUE", "CHECK",
 fn parse_create(sql: &str) -> Result<Vec<Decl>> {
     let sql = strip_comments(sql);
     let (inner, _) = create_body(&sql)?;
+    let declared = split_top(inner)
+        .filter(|p| !p.trim().is_empty() && !table_constraint(p))
+        .count();
+    if declared > MAX_COLUMNS {
+        return Err(corrupt(format!(
+            "the table declares {declared} columns, past SQLite's own ceiling of {MAX_COLUMNS}"
+        )));
+    }
 
-    let mut decls = Vec::new();
+    let mut decls = Vec::with_capacity(declared);
     // A table-level `PRIMARY KEY (x)`: if x is INTEGER it is a rowid alias too.
     let mut table_pk: Option<String> = None;
 
@@ -696,8 +786,7 @@ fn parse_create(sql: &str) -> Result<Vec<Decl>> {
         if part.is_empty() {
             continue;
         }
-        let upper_first = first_word(part).to_ascii_uppercase();
-        if TABLE_CONSTRAINTS.contains(&upper_first.as_str()) {
+        if table_constraint(part) {
             if let Some(pk) = table_primary_key(part) {
                 table_pk = Some(pk);
             }
@@ -710,16 +799,12 @@ fn parse_create(sql: &str) -> Result<Vec<Decl>> {
         }
         let (ty, tail) = take_type(rest);
         let ty = ty.trim().to_string();
-        let c = constraints(tail);
+        let c = constraints(tail, affinity(&ty));
         decls.push(Decl {
             rowid_alias: ty.eq_ignore_ascii_case("INTEGER") && c.primary_key && !c.descending,
             nocase: c.nocase,
             generated: c.generated,
-            absent: match c.default {
-                Some(Literal::Unread(text)) => Absent::Unread(text),
-                Some(lit) => Absent::Value(constant(lit, affinity(&ty))),
-                None => Absent::Value(Value::Null),
-            },
+            absent: c.default.unwrap_or(Absent::Value(Value::Null)),
             unnamed: name.is_empty(),
             name,
             ty,
@@ -894,35 +979,44 @@ fn balanced_body(s: &str) -> Option<&str> {
     None
 }
 
-/// Splits on depth-0 commas.
-fn split_top(s: &str) -> Vec<&str> {
+/// The pieces of `s` between its depth-0 commas, one at a time: a body of
+/// 87 376 columns held as a vector of them was 2 MiB, five times the file
+/// that declared it.
+fn split_top(s: &str) -> impl Iterator<Item = &str> {
     let b = s.as_bytes();
-    let mut out = Vec::new();
-    let mut depth = 0usize;
-    let mut start = 0usize;
+    let (mut depth, mut start, mut i) = (0usize, 0usize, 0usize);
     let mut quote: Option<u8> = None;
-    for (i, &c) in b.iter().enumerate() {
-        match quote {
-            Some(q) => {
-                if c == q {
-                    quote = None;
-                }
-            }
-            None => match c {
-                b'\'' | b'"' | b'`' => quote = Some(c),
-                b'[' => quote = Some(b']'),
-                b'(' => depth += 1,
-                b')' => depth = depth.saturating_sub(1),
-                b',' if depth == 0 => {
-                    out.push(&s[start..i]);
-                    start = i + 1;
-                }
-                _ => {}
-            },
+    let mut done = false;
+    std::iter::from_fn(move || {
+        if done {
+            return None;
         }
-    }
-    out.push(&s[start..]);
-    out
+        while i < b.len() {
+            let c = b[i];
+            i += 1;
+            match quote {
+                Some(q) => {
+                    if c == q {
+                        quote = None;
+                    }
+                }
+                None => match c {
+                    b'\'' | b'"' | b'`' => quote = Some(c),
+                    b'[' => quote = Some(b']'),
+                    b'(' => depth += 1,
+                    b')' => depth = depth.saturating_sub(1),
+                    b',' if depth == 0 => {
+                        let part = &s[start..i - 1];
+                        start = i;
+                        return Some(part);
+                    }
+                    _ => {}
+                },
+            }
+        }
+        done = true;
+        Some(&s[start..])
+    })
 }
 
 fn first_word(s: &str) -> &str {
@@ -1140,10 +1234,13 @@ struct Constraints {
     descending: bool,
     nocase: bool,
     generated: Option<Generated>,
-    default: Option<Literal>,
+    /// What a row lacking the column reads it as ([`default_of`]).
+    default: Option<Absent>,
 }
 
-fn constraints(tail: &str) -> Constraints {
+/// The constraints `tail` holds, a default read with the column's
+/// affinity `aff`.
+fn constraints(tail: &str, aff: Affinity) -> Constraints {
     let t = tokens(tail);
     let mut c = Constraints::default();
     for k in 0..t.len() {
@@ -1169,7 +1266,7 @@ fn constraints(tail: &str) -> Constraints {
         }
         // Not a foreign key's `ON DELETE SET DEFAULT`.
         if word(&t, k, "DEFAULT") && !(k > 0 && word(&t, k - 1, "SET")) {
-            c.default = Some(literal(&t[k + 1..]));
+            c.default = Some(default_of(&t[k + 1..], aff));
         }
     }
     c
@@ -1184,140 +1281,213 @@ fn table_primary_key(part: &str) -> Option<String> {
     let Some(Tok::Group(cols)) = t.get(k + 2) else {
         return None;
     };
-    let cols = split_top(cols);
-    if cols.len() != 1 {
+    let mut cols = split_top(cols);
+    let (Some(col), None) = (cols.next(), cols.next()) else {
         return None;
-    }
-    match tokens(cols[0]).into_iter().next()? {
+    };
+    match tokens(col).into_iter().next()? {
         Tok::Word(name) => Some(name.to_string()),
         Tok::Quoted(name) => Some(name),
         _ => None,
     }
 }
 
-/// A default as SQLite's grammar reads it (`ccons ::= DEFAULT ...`), before
-/// the column's affinity is applied.
-#[derive(Debug, Clone, PartialEq)]
-enum Literal {
-    Null,
-    /// A number as written, its sign before it, and its value where SQLite
-    /// holds the token as one: digits, or `0x` and hex digits, that fit 32
-    /// bits (`sqlite3GetInt32`).
-    Number(String, Option<i64>),
-    /// A string -- or a bare name, which SQLite reads as one.
-    Text(String),
-    Blob(Vec<u8>),
-    Bool(bool),
-    /// Anything else, as written.
-    Unread(String),
-}
-
-/// How deep a default's parentheses are read: SQLite's constants are
-/// rarely in more than one pair, and a file's `DEFAULT ((((...` read without
-/// a bound recursed once a pair, and scanned the text once a pair.
+/// How deep a default's parentheses, signs and casts are read: SQLite's
+/// constants are rarely in more than one pair, and a file's `DEFAULT
+/// ((((...` read without a bound recursed once a pair, and scanned the
+/// text once a pair. Past it the default is not read ([`Absent::Unread`]).
 const DEFAULT_DEPTH: usize = 8;
 
-/// The default `t` begins with.
-fn literal(t: &[Tok]) -> Literal {
-    literal_within(t, DEFAULT_DEPTH)
+/// A column's default as SQLite reads it in a row lacking the column
+/// (`sqlite3ColumnDefault`): `valueFromExpr` over the default's expression
+/// with the column's affinity `aff`, a REAL column's then made a real
+/// (`OP_RealAffinity`). The grammar's default is a term, a sign and a term,
+/// a name or an expression in parentheses (`ccons ::= DEFAULT ...`): the
+/// first of `t`'s tokens, or a sign and the one after it.
+fn default_of(t: &[Tok], aff: Affinity) -> Absent {
+    let n = if matches!(t.first(), Some(Tok::Mark('+' | '-'))) {
+        2
+    } else {
+        1
+    };
+    let t = &t[..n.min(t.len())];
+    match value_of(t, aff, true, DEFAULT_DEPTH) {
+        Some(Value::Int(n)) if aff == Affinity::Real => Absent::Value(Value::Float(n as f64)),
+        Some(v) => Absent::Value(v),
+        None => Absent::Unread(written(t)),
+    }
 }
 
-fn literal_within(t: &[Tok], depth: usize) -> Literal {
-    let unread = || {
-        Literal::Unread(match t.first() {
-            Some(Tok::Word(w)) => (*w).to_string(),
-            Some(Tok::Group(g)) => format!("({g})"),
-            _ => "an expression".to_string(),
-        })
-    };
-    match t.first() {
-        Some(Tok::Mark(sign @ ('-' | '+'))) => match t.get(1) {
-            Some(Tok::Word(n)) if is_number(n) => {
-                let n = n.replace('_', "");
-                let negative = *sign == '-';
-                let value = int32(&n).map(|v| if negative { -v } else { v });
-                let text = if negative { format!("-{n}") } else { n };
-                Literal::Number(text, value)
-            }
-            _ => unread(),
-        },
-        Some(Tok::Word(n)) if is_number(n) => {
-            let n = n.replace('_', "");
-            let value = int32(&n);
-            Literal::Number(n, value)
+/// Tokens as they were written, near enough to name them in a refusal: a
+/// parenthesis's text as it is, a sign against what it signs.
+fn written(t: &[Tok]) -> String {
+    let mut out = String::new();
+    for (k, x) in t.iter().enumerate() {
+        if k > 0 && !matches!(t[k - 1], Tok::Mark('+' | '-')) {
+            out.push(' ');
         }
-        Some(Tok::Word(w)) if w.eq_ignore_ascii_case("NULL") => Literal::Null,
-        Some(Tok::Word(w)) if w.eq_ignore_ascii_case("TRUE") => Literal::Bool(true),
-        Some(Tok::Word(w)) if w.eq_ignore_ascii_case("FALSE") => Literal::Bool(false),
+        match x {
+            Tok::Word(w) => out.push_str(w),
+            Tok::Quoted(q) => out.push_str(&format!("'{}'", q.replace('\'', "''"))),
+            Tok::Blob(h) => out.push_str(&format!("x'{h}'")),
+            Tok::Group(g) => out.push_str(&format!("({g})")),
+            Tok::Mark(c) => out.push(*c),
+        }
+    }
+    out
+}
+
+/// `valueFromExpr` (vdbemem.c) on `t`, read whole as one expression with
+/// the affinity `aff`: `None` where it gives no value -- a column's name,
+/// a function, an operator: no constant -- and where the importer does not
+/// read the value as SQLite does: a real SQLite writes as text by its own
+/// formatting, which changed between its versions (3.51 writes
+/// `9.22337203685477581e+18` where older ones wrote 15 digits), a text's
+/// numeric prefix (`-'5 apples'` is -5), and a blob's bytes read as text or
+/// a text's as a blob, in the file's encoding. Outside parentheses (`top`)
+/// a bare name is a string, as `DEFAULT abc` is.
+///
+/// Read as one literal before, a constant SQLite's `ADD COLUMN` takes --
+/// `(-(-5))`, `+'x'`, `-'5'`, `(CAST(5 AS TEXT))` -- was refused where a
+/// row needed it, and a hexadecimal one past 32 bits read as its text.
+fn value_of(t: &[Tok], aff: Affinity, top: bool, depth: usize) -> Option<Value> {
+    let depth = depth.checked_sub(1)?;
+    match t {
+        // `TK_UPLUS`, passed over.
+        [Tok::Mark('+'), rest @ ..] => value_of(rest, aff, top, depth),
+        // A number SQLite negates as it reads it: any but a hexadecimal one
+        // past 32 bits, which is read, then negated as anything else is.
+        [Tok::Mark('-'), Tok::Word(w)] if number(w).is_some_and(|n| n.negated_as_read()) => {
+            number_value(w, true, aff)
+        }
+        // `TK_UMINUS`: the value with the affinity, made a number
+        // (`sqlite3VdbeMemNumerify`), negated, and the affinity again.
+        [Tok::Mark('-'), rest @ ..] => {
+            let v = value_of(rest, aff, top, depth)?;
+            apply(negated(numerified(v)?), aff)
+        }
+        [Tok::Group(g)] => value_of(&tokens(g), aff, false, depth),
+        [Tok::Word(w), Tok::Group(g)] if !top && w.eq_ignore_ascii_case("CAST") => {
+            cast(g, aff, depth)
+        }
+        [one] => term(one, aff, top),
+        _ => None,
+    }
+}
+
+/// A single token's value with the affinity `aff`.
+fn term(t: &Tok, aff: Affinity, top: bool) -> Option<Value> {
+    match t {
+        Tok::Word(w) if number(w).is_some() => number_value(w, false, aff),
+        Tok::Word(w) if w.eq_ignore_ascii_case("NULL") => Some(Value::Null),
+        Tok::Word(w) if w.eq_ignore_ascii_case("TRUE") => apply(Value::Int(1), aff),
+        Tok::Word(w) if w.eq_ignore_ascii_case("FALSE") => apply(Value::Int(0), aff),
         // `CURRENT_TIME`, `CURRENT_DATE`, `CURRENT_TIMESTAMP`: the clock's
         // when the row was read, which no import knows.
-        Some(Tok::Word(w))
+        Tok::Word(w)
             if w.len() > 8
                 && w.get(..8)
                     .is_some_and(|p| p.eq_ignore_ascii_case("CURRENT_")) =>
         {
-            unread()
+            None
         }
-        // A bare name is a string to SQLite (`DEFAULT scantok id`); a word
-        // that is neither a number nor a name is not read.
-        Some(Tok::Word(w)) if is_name(w) => Literal::Text((*w).to_string()),
-        Some(Tok::Word(_)) => unread(),
-        Some(Tok::Quoted(s)) => Literal::Text(s.clone()),
-        Some(Tok::Blob(hex)) => match unhex(hex) {
-            Some(b) => Literal::Blob(b),
-            None => unread(),
-        },
-        // `DEFAULT (expr)`: a constant in parentheses is the constant; in
-        // an expression a bare name is a column, not a string.
-        Some(Tok::Group(g)) if depth > 0 => {
-            let inside = tokens(g);
-            match literal_within(&inside, depth - 1) {
-                Literal::Text(_) if matches!(inside.first(), Some(Tok::Word(_))) => unread(),
-                lit if inside.len() <= 2 => lit,
-                _ => unread(),
-            }
-        }
-        _ => unread(),
+        // A bare name is a string to SQLite (`DEFAULT scantok id`); in
+        // parentheses it is a column.
+        Tok::Word(w) if top && is_name(w) => apply(Value::Text((*w).to_string()), aff),
+        Tok::Quoted(s) => apply(Value::Text(s.clone()), aff),
+        // A blob takes no affinity.
+        Tok::Blob(hex) => unhex(hex).map(Value::Bytes),
+        _ => None,
     }
 }
 
-/// Whether `w` is one of SQLite's number tokens: digits, a point and
-/// digits, an exponent; or `0x` and hex digits. Digits may be parted by a
-/// single `_`, as SQLite 3.46 reads them.
-fn is_number(w: &str) -> bool {
-    let b = w.as_bytes();
-    if let [b'0', b'x' | b'X', rest @ ..] = b {
-        return !rest.is_empty() && rest.iter().all(u8::is_ascii_hexdigit);
+/// One of SQLite's number tokens: digits, a point and digits, an exponent
+/// (`TK_FLOAT` with a point or an exponent, `TK_INTEGER` without), or `0x`
+/// and hex digits; digits parted by a single `_`, as SQLite 3.46 reads
+/// them, which `text` has taken out.
+struct Number {
+    text: String,
+    float: bool,
+    hex: bool,
+}
+
+impl Number {
+    /// Its value where `sqlite3DecOrHexToI64` reads one: decimal digits an
+    /// i64 holds, or sixteen hex digits at most, past leading zeros, read
+    /// as a u64 and its bits as an i64 (`0xFFFFFFFFFFFFFFFF` is -1).
+    fn int64(&self) -> Option<i64> {
+        if self.float {
+            return None;
+        }
+        if !self.hex {
+            return self.text.parse().ok();
+        }
+        let digits = self.text[2..].trim_start_matches('0');
+        if digits.len() > 16 {
+            return None;
+        }
+        if digits.is_empty() {
+            return Some(0);
+        }
+        u64::from_str_radix(digits, 16).ok().map(|u| u as i64)
     }
-    let mut i = 0;
-    let digits = |i: &mut usize| {
+
+    /// Whether `-` before it is taken as it is read: any decimal number,
+    /// and a hexadecimal one under 2^31 (`sqlite3GetInt32`'s, an
+    /// `EP_IntValue`).
+    fn negated_as_read(&self) -> bool {
+        !self.hex || self.int64().is_some_and(|v| (0..1 << 31).contains(&v))
+    }
+}
+
+/// The number token `w` is, if it is one.
+fn number(w: &str) -> Option<Number> {
+    let b = w.as_bytes();
+    // A run of digits, a single `_` between two of them.
+    let run = |i: &mut usize, digit: fn(&u8) -> bool| {
         let from = *i;
         while *i < b.len()
-            && (b[*i].is_ascii_digit()
-                || (b[*i] == b'_' && *i > from && b.get(*i + 1).is_some_and(u8::is_ascii_digit)))
+            && (digit(&b[*i]) || (b[*i] == b'_' && *i > from && b.get(*i + 1).is_some_and(digit)))
         {
             *i += 1;
         }
         *i - from
     };
-    let mut n = digits(&mut i);
+    let text = || w.replace('_', "");
+    if let [b'0', b'x' | b'X', ..] = b {
+        let mut i = 2;
+        return (run(&mut i, u8::is_ascii_hexdigit) > 0 && i == b.len()).then(|| Number {
+            text: text(),
+            float: false,
+            hex: true,
+        });
+    }
+    let mut i = 0;
+    let mut n = run(&mut i, u8::is_ascii_digit);
+    let mut float = false;
     if b.get(i) == Some(&b'.') {
         i += 1;
-        n += digits(&mut i);
+        n += run(&mut i, u8::is_ascii_digit);
+        float = true;
     }
     if n == 0 {
-        return false;
+        return None;
     }
     if matches!(b.get(i), Some(b'e' | b'E')) {
         i += 1;
         if matches!(b.get(i), Some(b'+' | b'-')) {
             i += 1;
         }
-        if digits(&mut i) == 0 {
-            return false;
+        if run(&mut i, u8::is_ascii_digit) == 0 {
+            return None;
         }
+        float = true;
     }
-    i == b.len()
+    (i == b.len()).then(|| Number {
+        text: text(),
+        float,
+        hex: false,
+    })
 }
 
 /// Whether `w` is a name SQLite reads bare: letters, digits, `_`, `$` and
@@ -1328,17 +1498,104 @@ fn is_name(w: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || !c.is_ascii())
 }
 
-/// A number token's value where SQLite holds it as one (`sqlite3GetInt32`):
-/// decimal digits, or `0x` and up to eight hex digits, under 2^31.
-fn int32(w: &str) -> Option<i64> {
-    let v = match w.as_bytes() {
-        [b'0', b'x' | b'X', ..] => i64::from_str_radix(w[2..].trim_start_matches('0'), 16)
-            .ok()
-            .or_else(|| w[2..].bytes().all(|c| c == b'0').then_some(0))?,
-        b if b.iter().all(u8::is_ascii_digit) => w.parse().ok()?,
-        _ => return None,
+/// A number token's value with the affinity `aff`, negative where `-` was
+/// taken with it (`valueFromExpr`'s `TK_INTEGER` and `TK_FLOAT`). An
+/// integer is its value where it has one, and its text, sign and all,
+/// otherwise; a real its text: under no affinity SQLite reads a real's
+/// text as a real and an integer's with NUMERIC's affinity, under any
+/// other the affinity reads it.
+fn number_value(w: &str, negative: bool, aff: Affinity) -> Option<Value> {
+    let n = number(w)?;
+    let sign = if negative { "-" } else { "" };
+    if n.float {
+        let text = format!("{sign}{}", n.text);
+        return match aff {
+            Affinity::Blob => text.parse().ok().map(Value::Float),
+            _ => apply(Value::Text(text), aff),
+        };
+    }
+    let v = match n.int64() {
+        Some(i) if negative => Value::Int(i.checked_neg()?),
+        Some(i) => Value::Int(i),
+        None => Value::Text(format!("{sign}{}", n.text)),
     };
-    (v <= i32::MAX as i64).then_some(v)
+    apply(
+        v,
+        match aff {
+            Affinity::Blob => Affinity::Numeric,
+            aff => aff,
+        },
+    )
+}
+
+/// `sqlite3VdbeMemNumerify` on a value: a text that is a number whole is
+/// one -- an integer where it is written as one an i64 holds, or where it
+/// is a real equal to an integer within 2^51 (`sqlite3RealSameAsInt`) --
+/// and any other text or a blob, which SQLite reads by its numeric prefix,
+/// is not read (`None`).
+fn numerified(v: Value) -> Option<Value> {
+    match v {
+        Value::Text(s) => match number_in(&s)? {
+            Value::Float(f)
+                if f == (f as i64) as f64 && (-(1i64 << 51)..1 << 51).contains(&(f as i64)) =>
+            {
+                Some(Value::Int(f as i64))
+            }
+            v => Some(v),
+        },
+        Value::Bytes(_) => None,
+        v => Some(v),
+    }
+}
+
+/// A number negated: the least i64's negation is the real 2^63, as SQLite
+/// makes it; `NULL` stays.
+fn negated(v: Value) -> Value {
+    match v {
+        Value::Int(i) => i
+            .checked_neg()
+            .map_or(Value::Float(-(i as f64)), Value::Int),
+        Value::Float(f) => Value::Float(-f),
+        v => v,
+    }
+}
+
+/// `CAST(x AS type)`, `g` the parenthesis's text: `x` read with the type's
+/// affinity, then made a value of it (`sqlite3VdbeMemCast`), then the
+/// column's affinity applied.
+fn cast(g: &str, aff: Affinity, depth: usize) -> Option<Value> {
+    let t = tokens(g);
+    let at = (0..t.len()).rev().find(|&k| word(&t, k, "AS"))?;
+    let named = written(&t[at + 1..]);
+    // A cast to no type is NUMERIC's, where a column of none has no
+    // affinity (`sqlite3AffinityType`'s start).
+    let to = if named.trim().is_empty() {
+        Affinity::Numeric
+    } else {
+        affinity(&named)
+    };
+    let v = value_of(&t[..at], to, false, depth)?;
+    apply(cast_to(v, to)?, aff)
+}
+
+/// `sqlite3VdbeMemCast` on a value the cast's affinity was applied to:
+/// `None` where SQLite would read a text's numeric prefix (a text the
+/// affinity left a text), write a real as text, or take a text's or a
+/// blob's bytes as the other.
+fn cast_to(v: Value, to: Affinity) -> Option<Value> {
+    Some(match (to, v) {
+        (_, Value::Null) => Value::Null,
+        (Affinity::Blob, v @ Value::Bytes(_)) => v,
+        (Affinity::Text, v @ Value::Text(_)) => v,
+        (Affinity::Text, Value::Int(n)) => Value::Text(n.to_string()),
+        (Affinity::Integer, v @ Value::Int(_)) => v,
+        // Toward zero, the ends where it is past them (`doubleToInt64`).
+        (Affinity::Integer, Value::Float(f)) => Value::Int(f as i64),
+        (Affinity::Real, Value::Int(n)) => Value::Float(n as f64),
+        (Affinity::Real | Affinity::Numeric, v @ Value::Float(_)) => v,
+        (Affinity::Numeric, v @ Value::Int(_)) => v,
+        _ => return None,
+    })
 }
 
 fn unhex(hex: &str) -> Option<Vec<u8>> {
@@ -1378,52 +1635,27 @@ fn affinity(ty: &str) -> Affinity {
     }
 }
 
-/// A constant default as SQLite reads it in a row lacking its column
-/// (`valueFromExpr`): the column's affinity applied, and a number's,
-/// under no affinity, made a number.
-fn constant(lit: Literal, aff: Affinity) -> Value {
-    match lit {
-        Literal::Null | Literal::Unread(_) => Value::Null,
-        Literal::Blob(b) => Value::Bytes(b),
-        Literal::Bool(b) => apply(Value::Int(b as i64), aff),
-        Literal::Text(s) => apply(Value::Text(s), aff),
-        Literal::Number(text, value) => {
-            let v = value.map_or(Value::Text(text), Value::Int);
-            apply(
-                v,
-                if aff == Affinity::Blob {
-                    Affinity::Numeric
-                } else {
-                    aff
-                },
-            )
-        }
-    }
-}
-
-/// `sqlite3ValueApplyAffinity` on what a default can be.
-fn apply(v: Value, aff: Affinity) -> Value {
-    match (aff, v) {
+/// `sqlite3ValueApplyAffinity` on a constant: TEXT writes an integer as
+/// its digits; NUMERIC, INTEGER and REAL read a text that is a number as
+/// one and keep a real an integer holds as that integer (a REAL column's
+/// read back as a real, [`default_of`]); no affinity changes nothing.
+/// `None` for a real under TEXT, whose text is SQLite's own formatting.
+fn apply(v: Value, aff: Affinity) -> Option<Value> {
+    Some(match (aff, v) {
         (Affinity::Blob, v) => v,
         (Affinity::Text, Value::Int(n)) => Value::Text(n.to_string()),
+        (Affinity::Text, Value::Float(_)) => return None,
         (Affinity::Text, v) => v,
-        (Affinity::Integer | Affinity::Numeric, Value::Text(s)) => {
-            numeric(&s).unwrap_or(Value::Text(s))
-        }
-        (Affinity::Real, Value::Int(n)) => Value::Float(n as f64),
-        (Affinity::Real, Value::Text(s)) => match numeric(&s) {
-            Some(Value::Int(n)) => Value::Float(n as f64),
-            Some(v) => v,
-            None => Value::Text(s),
-        },
+        (_, Value::Text(s)) => numeric(&s).unwrap_or(Value::Text(s)),
+        (_, Value::Float(f)) => integer_affinity(f),
         (_, v) => v,
-    }
+    })
 }
 
-/// A text that is a number to SQLite's numeric affinity: an integer where
-/// it is one, or where a real is one exactly (`'3.0e+5'` is 300000), and a
-/// real otherwise; `None` for any other text, which stays text.
-fn numeric(s: &str) -> Option<Value> {
+/// A text that is a number whole, as SQLite reads one: spaces around it, a
+/// sign, digits, a point, an exponent; an integer where it is written as
+/// one an i64 holds, a real otherwise, and `None` for any other text.
+fn number_in(s: &str) -> Option<Value> {
     let t = s.trim_matches(|c: char| matches!(c, ' ' | '\t' | '\n' | '\x0c' | '\r'));
     if t.is_empty()
         || !t
@@ -1435,13 +1667,30 @@ fn numeric(s: &str) -> Option<Value> {
     if let Ok(n) = t.parse::<i64>() {
         return Some(Value::Int(n));
     }
-    let f: f64 = t.parse().ok()?;
-    // 2^63, `i64::MAX` as an f64, is past an i64; every f64 under it that
-    // has no fraction is one.
-    if f.fract() == 0.0 && f.abs() < i64::MAX as f64 {
-        return Some(Value::Int(f as i64));
+    t.parse().ok().map(Value::Float)
+}
+
+/// A text that is a number to SQLite's numeric affinity
+/// (`applyNumericAffinity`): an integer where it is one, or where a real
+/// is one exactly (`'3.0e+5'` is 300000), and a real otherwise; `None` for
+/// any other text, which stays text.
+fn numeric(s: &str) -> Option<Value> {
+    Some(match number_in(s)? {
+        Value::Float(f) => integer_affinity(f),
+        v => v,
+    })
+}
+
+/// `sqlite3VdbeIntegerAffinity`: a real an i64 holds exactly, short of the
+/// i64's two ends, made that integer; any other stays a real.
+fn integer_affinity(f: f64) -> Value {
+    // Toward zero, and the ends where it is past them, as `doubleToInt64`.
+    let i = f as i64;
+    if f == i as f64 && i > i64::MIN && i < i64::MAX {
+        Value::Int(i)
+    } else {
+        Value::Float(f)
     }
-    Some(Value::Float(f))
 }
 
 // ------------------------------------------------------------ type inference
@@ -1535,9 +1784,10 @@ struct Table {
 impl Table {
     fn new(name: &str, sql: &str) -> Result<Table> {
         let decls = parse_create(sql).map_err(|e| match e {
-            Error::Corrupt(m) => {
-                Error::Corrupt(format!("{m}, in the CREATE TABLE text of `{name}`"))
-            }
+            Error::Corrupt(m) => Error::Corrupt(format!(
+                "{m}, in the CREATE TABLE text of `{}`",
+                shown(name)
+            )),
             other => other,
         })?;
         let (stored, virtuals): (Vec<Decl>, Vec<Decl>) = decls
@@ -1545,7 +1795,8 @@ impl Table {
             .partition(|d| d.generated != Some(Generated::Virtual));
         if stored.is_empty() {
             return Err(Error::Query(format!(
-                "every column of `{name}` is a VIRTUAL generated one, which SQLite never stores"
+                "every column of `{}` is a VIRTUAL generated one, which SQLite never stores",
+                shown(name)
             )));
         }
         let rowid_alias = stored.iter().position(|d| d.rowid_alias);
@@ -1687,8 +1938,9 @@ impl Source for Reader {
             .iter()
             .map(|name| {
                 format!(
-                    "`{name}` is a VIRTUAL generated column, which SQLite computes as a row \
-                     is read and never stores: left out"
+                    "`{}` is a VIRTUAL generated column, which SQLite computes as a row \
+                     is read and never stores: left out",
+                    shown(name)
                 )
             })
             .collect()
@@ -1727,15 +1979,28 @@ pub fn count_rows(path: impl AsRef<Path>, table: &str) -> Result<u64> {
 ///   an import took what was never committed. SQLite rolls one back at
 ///   its first read; a journal whose header PERSIST mode zeroed, or one
 ///   whose header was never synced, is not hot.
+///
+/// They are looked for where SQLite keeps them: on Unix beside the file a
+/// symbolic link leads to, its VFS resolving the database's path
+/// (`unixFullPathname`) -- looked for beside the link, a hot journal
+/// beside the file it leads to was missed and the file read torn; on
+/// Windows beside the path as named, as its VFS keeps them. And each is
+/// looked at before it is opened: one that is no file -- a FIFO, a
+/// device, a directory -- is refused by its kind, where a FIFO named
+/// `-journal` held the import in its open for ever, waiting for a writer.
 fn check_side_files(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    #[cfg(not(unix))]
+    let real = path.to_path_buf();
     let beside = |suffix: &str| {
-        path.with_file_name(format!(
+        real.with_file_name(format!(
             "{}{suffix}",
-            path.file_name().unwrap_or_default().to_string_lossy()
+            real.file_name().unwrap_or_default().to_string_lossy()
         ))
     };
     let wal = beside("-wal");
-    if let Ok(m) = std::fs::metadata(&wal) {
+    if let Some(m) = side_file(&wal, "write-ahead log")? {
         if m.len() > 0 {
             return Err(Error::Query(format!(
                 "{} holds unprocessed changes; first run \
@@ -1746,9 +2011,28 @@ fn check_side_files(path: &Path) -> Result<()> {
         }
     }
     let journal = beside("-journal");
-    let mut first = [0u8; 1];
-    let hot = File::open(&journal).is_ok_and(|mut f| f.read(&mut first).is_ok_and(|n| n == 1))
-        && first[0] != 0;
+    let hot = match side_file(&journal, "rollback journal")? {
+        Some(m) if m.len() > 0 => {
+            let mut first = [0u8; 1];
+            match File::open(&journal).and_then(|mut f| f.read_exact(&mut first)) {
+                Ok(()) => first[0] != 0,
+                // Gone, or emptied, since it was looked at: a writer
+                // committed.
+                Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::UnexpectedEof) => {
+                    false
+                }
+                // Unread, it was taken as not hot and the file read as it
+                // stood, which SQLite, unable to read it either, does not.
+                Err(e) => {
+                    return Err(Error::Io(format!(
+                        "{}: {e}; it is read to tell whether a writer left it hot",
+                        journal.display()
+                    )))
+                }
+            }
+        }
+        _ => false,
+    };
     if hot {
         return Err(Error::Query(format!(
             "{} is a hot rollback journal: a writer stopped inside a transaction, and {} \
@@ -1760,6 +2044,42 @@ fn check_side_files(path: &Path) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// A side file's metadata, the link it may be followed as SQLite's open
+/// follows it; `None` where there is none to read. One that is no file is
+/// refused naming its kind, before anything opens it.
+fn side_file(side: &Path, what: &str) -> Result<Option<std::fs::Metadata>> {
+    let Ok(m) = std::fs::metadata(side) else {
+        return Ok(None);
+    };
+    if m.is_file() {
+        return Ok(Some(m));
+    }
+    let t = m.file_type();
+    #[cfg(unix)]
+    let kind = {
+        use std::os::unix::fs::FileTypeExt;
+        if t.is_fifo() {
+            "a FIFO"
+        } else if t.is_char_device() || t.is_block_device() {
+            "a device"
+        } else if t.is_socket() {
+            "a socket"
+        } else if t.is_dir() {
+            "a directory"
+        } else {
+            "no file"
+        }
+    };
+    #[cfg(not(unix))]
+    let kind = if t.is_dir() { "a directory" } else { "no file" };
+    Err(Error::Query(format!(
+        "{} is {kind}, not a file, where SQLite keeps the database's {what}: the import \
+         does not open it; move it away, or import a copy of the database from a \
+         directory of its own",
+        side.display()
+    )))
 }
 
 /// Finds the table in `sqlite_master`: its name as the file has it, its
@@ -1784,12 +2104,14 @@ fn find_table(pager: &mut Pager, table: &str) -> Result<(String, u32, String)> {
             let sql = r[4].as_text().unwrap_or_default().to_string();
             if sql.is_empty() {
                 return Err(Error::Query(format!(
-                    "`{name}` is an internal table; it cannot be imported"
+                    "`{}` is an internal table; it cannot be imported",
+                    shown(&name)
                 )));
             }
             if without_rowid(&sql) {
                 return Err(Error::Query(format!(
-                    "`{name}` is declared `WITHOUT ROWID`; fennec-import only reads rowid tables"
+                    "`{}` is declared `WITHOUT ROWID`; fennec-import only reads rowid tables",
+                    shown(&name)
                 )));
             }
             return Ok((name, root as u32, sql));
@@ -1797,12 +2119,14 @@ fn find_table(pager: &mut Pager, table: &str) -> Result<(String, u32, String)> {
         tables.push(name);
     }
     tables.sort();
+    let table = shown(table);
     Err(Error::NotFound(if tables.is_empty() {
         format!("there is no `{table}` table; no table was found in the file")
     } else {
+        let names: Vec<String> = tables.iter().map(|t| shown(t)).collect();
         format!(
             "there is no `{table}` table; the tables in the file: {}",
-            tables.join(", ")
+            names.join(", ")
         )
     }))
 }
@@ -2012,6 +2336,78 @@ mod tests {
         assert!(p.local_len(100_000) <= 4061);
     }
 
+    /// `Pager::payload` holds a payload's length to the file's before it
+    /// allocates for it. No file reaches it: `Walk::cells_apart` reads the
+    /// same length from the same bytes as the page is entered and refuses
+    /// first, in words of its own (`tests/sqlite.rs`,
+    /// `a_payload_longer_than_the_file_is_refused_before_it_is_allocated`).
+    /// It is the check beside the allocation, held here.
+    #[test]
+    fn a_payload_past_the_file_is_refused_where_it_is_allocated() {
+        let mut p = Pager {
+            file: File::open(if cfg!(windows) { "NUL" } else { "/dev/null" }).unwrap(),
+            len: 1024,
+            page_size: 512,
+            usable: 512,
+            encoding: Encoding::Utf8,
+            spare: Vec::new(),
+        };
+        let page = vec![0u8; 512];
+        for total in [1025, 1 << 40, u64::MAX >> 1] {
+            let e = p
+                .payload(&mut Reached::default(), &page, 8, total)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                e.contains(&format!(
+                    "a cell's payload of {total} bytes is longer than the file, 1024 bytes"
+                )),
+                "{e}"
+            );
+        }
+        assert_eq!(
+            p.payload(&mut Reached::default(), &page, 8, 3).unwrap(),
+            [0; 3]
+        );
+    }
+
+    /// A name or a default of the file's is shown with its control
+    /// characters and those that reorder a line escaped, and cut.
+    #[test]
+    fn a_files_text_is_shown_escaped_and_cut() {
+        assert_eq!(
+            shown("a\u{1b}[31m\u{7}\u{202e}b"),
+            r"a\u{1b}[31m\u{7}\u{202e}b"
+        );
+        assert_eq!(shown("Ünits\t"), r"Ünits\t");
+        let long = shown(&"x".repeat(10_000));
+        assert!(long.starts_with(&"x".repeat(SHOWN)) && long.ends_with("... (10000 bytes)"));
+    }
+
+    /// SQLite's ceiling on a table's columns, 32 767, is held as the text
+    /// is read, a table's constraints not counted.
+    #[test]
+    fn a_table_declares_at_most_sqlites_ceiling_of_columns() {
+        let table = |n: usize| {
+            let cols: Vec<String> = (0..n).map(|i| format!("c{i}")).collect();
+            format!(
+                "CREATE TABLE t({}, PRIMARY KEY (c0), CHECK (c1 > 0))",
+                cols.join(",")
+            )
+        };
+        assert_eq!(
+            parse_create(&table(MAX_COLUMNS)).unwrap().len(),
+            MAX_COLUMNS
+        );
+        let e = parse_create(&table(MAX_COLUMNS + 1))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("declares 32768 columns, past SQLite's own ceiling of 32767"),
+            "{e}"
+        );
+    }
+
     /// A comment is a space, outside a quote; inside one it is text.
     #[test]
     fn comments_are_spaces_outside_quotes() {
@@ -2040,12 +2436,10 @@ mod tests {
     /// as `SELECT quote(..)` read it from a file SQLite 3.51 wrote.
     #[test]
     fn defaults_read_as_sqlite_reads_them() {
-        let read = |ty: &str, tail: &str| {
-            let lit = constraints(tail).default.expect(tail);
-            match lit {
-                Literal::Unread(text) => Err(text),
-                lit => Ok(constant(lit, affinity(ty))),
-            }
+        let read = |ty: &str, tail: &str| match constraints(tail, affinity(ty)).default {
+            Some(Absent::Value(v)) => Ok(v),
+            Some(Absent::Unread(text)) => Err(text),
+            None => panic!("no default in {tail}"),
         };
         let text = |s: &str| Ok(Value::Text(s.into()));
         assert_eq!(read("INTEGER", "NOT NULL DEFAULT 7"), Ok(Value::Int(7)));
@@ -2077,9 +2471,84 @@ mod tests {
         );
         assert_eq!(read("", "DEFAULT (a + 1)"), Err("(a + 1)".into()));
         assert_eq!(read("", "DEFAULT (abc)"), Err("(abc)".into()));
+        // Signs and casts, `valueFromExpr`'s constants: each as SQLite 3.51
+        // read it in a row written before its column.
+        let real = |f: f64| Ok(Value::Float(f));
+        assert_eq!(read("", "DEFAULT (- -5)"), Ok(Value::Int(5)));
+        assert_eq!(read("", "DEFAULT (-+-5)"), Ok(Value::Int(5)));
+        assert_eq!(read("", "DEFAULT (-(5))"), Ok(Value::Int(-5)));
+        assert_eq!(read("", "DEFAULT (-'1e17')"), real(-1e17));
+        assert_eq!(
+            read("", "DEFAULT (-'1e15')"),
+            Ok(Value::Int(-1_000_000_000_000_000))
+        );
+        assert_eq!(read("", "DEFAULT (-' 7 ')"), Ok(Value::Int(-7)));
+        assert_eq!(read("", "DEFAULT (-'1.0')"), Ok(Value::Int(-1)));
+        assert_eq!(read("", "DEFAULT (-NULL)"), Ok(Value::Null));
+        assert_eq!(read("", "DEFAULT (-TRUE)"), Ok(Value::Int(-1)));
+        assert_eq!(read("", "DEFAULT (-(-5.0))"), real(5.0));
+        assert_eq!(
+            read("", "DEFAULT (-0x8000000000000000)"),
+            real(2f64.powi(63))
+        );
+        assert_eq!(
+            read("", "DEFAULT -0x7FFFFFFF"),
+            Ok(Value::Int(-2_147_483_647))
+        );
+        assert_eq!(read("INTEGER", "DEFAULT (-(-1.5))"), real(1.5));
+        assert_eq!(read("REAL", "DEFAULT (-(-5))"), real(5.0));
+        assert_eq!(read("TEXT", "DEFAULT (-(-5))"), text("5"));
+        assert_eq!(read("TEXT", "DEFAULT (FALSE)"), text("0"));
+        assert_eq!(read("TEXT", "DEFAULT (+5.50)"), text("5.50"));
+        assert_eq!(read("TEXT", "DEFAULT 1e400"), text("1e400"));
+        assert_eq!(read("INTEGER", "DEFAULT (+'5.0')"), Ok(Value::Int(5)));
+        assert_eq!(read("", "DEFAULT 1_0.5"), real(10.5));
+        assert_eq!(read("", "DEFAULT (+x'41')"), Ok(Value::Bytes(vec![0x41])));
+        assert_eq!(read("", "DEFAULT (CAST (5 AS TEXT))"), text("5"));
+        assert_eq!(read("", "DEFAULT (cast(5 as \"TEXT\"))"), text("5"));
+        assert_eq!(read("", "DEFAULT (CAST(5 AS VARCHAR(10)))"), text("5"));
+        assert_eq!(read("", "DEFAULT (CAST(-5 AS TEXT))"), text("-5"));
+        assert_eq!(read("", "DEFAULT (CAST(5 AS))"), Ok(Value::Int(5)));
+        assert_eq!(read("", "DEFAULT (CAST(1.5 AS NUMERIC))"), real(1.5));
+        assert_eq!(
+            read("", "DEFAULT (CAST('1.0' AS NUMERIC))"),
+            Ok(Value::Int(1))
+        );
+        assert_eq!(
+            read("", "DEFAULT (CAST(' 12 ' AS NUMERIC))"),
+            Ok(Value::Int(12))
+        );
+        assert_eq!(
+            read("", "DEFAULT (CAST('1e17' AS NUMERIC))"),
+            Ok(Value::Int(100_000_000_000_000_000))
+        );
+        assert_eq!(read("", "DEFAULT (CAST('1e17' AS REAL))"), real(1e17));
+        assert_eq!(
+            read("", "DEFAULT (CAST(1e400 AS INTEGER))"),
+            Ok(Value::Int(i64::MAX))
+        );
+        assert_eq!(
+            read("", "DEFAULT (CAST(x'41' AS BLOB))"),
+            Ok(Value::Bytes(vec![0x41]))
+        );
+        // What SQLite reads by a text's numeric prefix, its formatting of a
+        // real, or a blob's bytes as text or a text's as a blob: named.
+        for (ty, d) in [
+            ("", "(-'x')"),
+            ("", "(-x'41')"),
+            ("", "(CAST('5abc' AS INTEGER))"),
+            ("TEXT", "(CAST('abc' AS INTEGER))"),
+            ("TEXT", "(CAST(3 AS REAL))"),
+            ("", "(CAST('x' AS BLOB))"),
+            ("", "('a' COLLATE NOCASE)"),
+            ("", "((((((((((5))))))))))"),
+        ] {
+            assert_eq!(read(ty, &format!("DEFAULT {d}")), Err(d.into()), "{ty} {d}");
+        }
+        assert_eq!(read("", "DEFAULT -'x'"), Err("-'x'".into()));
         // A foreign key's `SET DEFAULT` is no default.
         assert_eq!(
-            constraints("REFERENCES p(id) ON DELETE SET DEFAULT").default,
+            constraints("REFERENCES p(id) ON DELETE SET DEFAULT", Affinity::Blob).default,
             None
         );
     }
@@ -2088,13 +2557,22 @@ mod tests {
     /// is no key, and `DESC` after a column's is SQLite's exception.
     #[test]
     fn constraints_are_read_as_tokens() {
-        let c = constraints("DEFAULT ' PRIMARY KEY ' CHECK (x COLLATE NOCASE)");
+        let c = constraints(
+            "DEFAULT ' PRIMARY KEY ' CHECK (x COLLATE NOCASE)",
+            Affinity::Blob,
+        );
         assert!(!c.primary_key && !c.nocase);
-        let c = constraints("CONSTRAINT pk PRIMARY KEY DESC");
+        let c = constraints("CONSTRAINT pk PRIMARY KEY DESC", Affinity::Blob);
         assert!(c.primary_key && c.descending);
-        let c = constraints("GENERATED ALWAYS AS (a + 1) STORED NOT NULL");
+        let c = constraints(
+            "GENERATED ALWAYS AS (a + 1) STORED NOT NULL",
+            Affinity::Blob,
+        );
         assert_eq!(c.generated, Some(Generated::Stored));
-        assert_eq!(constraints("AS (a)").generated, Some(Generated::Virtual));
+        assert_eq!(
+            constraints("AS (a)", Affinity::Blob).generated,
+            Some(Generated::Virtual)
+        );
         assert_eq!(
             table_primary_key("CONSTRAINT pk PRIMARY KEY (\"Id\" DESC)"),
             Some("Id".into())

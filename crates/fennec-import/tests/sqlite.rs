@@ -295,8 +295,34 @@ fn hand_made(sql: &str, reserved: u8, pages: &[Vec<u8>]) -> Vec<u8> {
     hand_made_of(512, sql, reserved, pages)
 }
 
-/// [`hand_made`], of pages of `size` bytes: 65 536 is the header's 1.
+/// [`hand_made`], of pages of `size` bytes: 65 536 is the header's 1. A
+/// `sql` page 1 cannot hold spills into overflow pages after it, as SQLite
+/// spills it, and the table is rooted at the page after them.
 fn hand_made_of(size: usize, sql: &str, reserved: u8, pages: &[Vec<u8>]) -> Vec<u8> {
+    let usable = size - reserved as usize;
+    // The row (type, name, tbl_name, rootpage, sql): its header -- its own
+    // length, then a serial type a column: text of 5, 1 and 1 bytes, an
+    // 8-bit int, the text -- then the values.
+    let serial = sqlite_varint(13 + 2 * sql.len() as u64);
+    let header = 5 + serial.len();
+    let total = header + 8 + sql.len();
+    let local = local_of(usable, total);
+    let spilled = (total - local).div_ceil(usable - 4);
+    let root = 2 + spilled;
+    assert!(root < 128, "the root page is an 8-bit int");
+    let mut record = vec![header as u8, 23, 15, 15, 1];
+    record.extend_from_slice(&serial);
+    record.extend_from_slice(b"tablett");
+    record.push(root as u8);
+    record.extend_from_slice(sql.as_bytes());
+    assert_eq!(record.len(), total);
+    let mut cell = sqlite_varint(total as u64);
+    cell.push(1);
+    cell.extend_from_slice(&record[..local]);
+    if spilled > 0 {
+        cell.extend_from_slice(&2u32.to_be_bytes());
+    }
+
     let mut f = vec![0u8; size];
     f[..16].copy_from_slice(b"SQLite format 3\0");
     let field = if size == 65_536 { 1 } else { size as u16 };
@@ -305,31 +331,74 @@ fn hand_made_of(size: usize, sql: &str, reserved: u8, pages: &[Vec<u8>]) -> Vec<
     f[19] = 1;
     f[20] = reserved;
     f[21..24].copy_from_slice(&[64, 32, 32]);
-    f[28..32].copy_from_slice(&(1 + pages.len() as u32).to_be_bytes());
+    f[28..32].copy_from_slice(&((1 + spilled + pages.len()) as u32).to_be_bytes());
     f[56..60].copy_from_slice(&1u32.to_be_bytes());
-    // The row (type, name, tbl_name, rootpage, sql): its header -- its own
-    // length, then a serial type a column: text of 5, 1 and 1 bytes, an
-    // 8-bit int, the text -- then the values.
-    let mut record = vec![0, 23, 15, 15, 1];
-    record.extend_from_slice(&sqlite_varint(13 + 2 * sql.len() as u64));
-    record[0] = record.len() as u8;
-    record.extend_from_slice(b"tablett");
-    record.push(2);
-    record.extend_from_slice(sql.as_bytes());
-    let mut cell = sqlite_varint(record.len() as u64);
-    cell.push(1);
-    cell.extend_from_slice(&record);
-    let at = size - cell.len();
-    f[at..].copy_from_slice(&cell);
+    let at = usable - cell.len();
+    assert!(at >= 110, "page 1 holds its row's local part");
+    f[at..usable].copy_from_slice(&cell);
     f[100] = 0x0d;
     f[103..105].copy_from_slice(&1u16.to_be_bytes());
     f[105..107].copy_from_slice(&(at as u16).to_be_bytes());
     f[108..110].copy_from_slice(&(at as u16).to_be_bytes());
+    for (j, part) in record[local..].chunks(usable - 4).enumerate() {
+        let mut p = vec![0u8; size];
+        let next = if j + 1 < spilled { 3 + j as u32 } else { 0 };
+        p[..4].copy_from_slice(&next.to_be_bytes());
+        p[4..4 + part.len()].copy_from_slice(part);
+        f.extend_from_slice(&p);
+    }
     for p in pages {
         assert_eq!(p.len(), size);
         f.extend_from_slice(p);
     }
     f
+}
+
+/// How much of a payload of `p` bytes a table leaf of `u` usable bytes
+/// keeps, the rest spilling (fileformat2.html, *Cell Payload Overflow
+/// Pages*).
+fn local_of(u: usize, p: usize) -> usize {
+    let x = u - 35;
+    if p <= x {
+        return p;
+    }
+    let m = (u - 12) * 32 / 255 - 23;
+    let k = m + (p - m) % (u - 4);
+    if k <= x {
+        k
+    } else {
+        m
+    }
+}
+
+/// A table leaf of `size` bytes holding `cells`, laid from the page's end
+/// down, their pointers in order.
+fn leaf_sized(size: usize, cells: &[Vec<u8>]) -> Vec<u8> {
+    let mut p = vec![0u8; size];
+    p[0] = 0x0d;
+    p[3..5].copy_from_slice(&(cells.len() as u16).to_be_bytes());
+    let mut at = size;
+    for (i, c) in cells.iter().enumerate() {
+        at -= c.len();
+        p[at..at + c.len()].copy_from_slice(c);
+        p[8 + 2 * i..10 + 2 * i].copy_from_slice(&(at as u16).to_be_bytes());
+    }
+    assert!(
+        8 + 2 * cells.len() <= at,
+        "the cells run into their pointers"
+    );
+    // 65 536 is written 0, as SQLite writes it.
+    p[5..7].copy_from_slice(&(at as u16).to_be_bytes());
+    p
+}
+
+/// A leaf of `size` bytes holding `n` rows of three bytes, rowids from 1:
+/// each a record of one column, the 8-bit int 7.
+fn short_rows(size: usize, n: usize) -> Vec<u8> {
+    let cells: Vec<Vec<u8>> = (1..=n as u64)
+        .map(|rowid| cell(3, rowid, &[2, 1, 7], None))
+        .collect();
+    leaf_sized(size, &cells)
 }
 
 /// An interior table page with no cells, its right-most child `child`.
@@ -376,7 +445,8 @@ fn a_page_reached_twice_is_refused_not_walked_for_ever() {
 
 /// A cell's payload length is a varint of the file's: one past the file's
 /// length is refused before a byte is allocated for it, where
-/// `Vec::with_capacity` of 2^62 bytes ended the import.
+/// `Vec::with_capacity` of 2^62 bytes ended the import -- as its page is
+/// entered (`Walk::cells_apart`), before a row of the page is yielded.
 #[test]
 fn a_payload_longer_than_the_file_is_refused_before_it_is_allocated() {
     for declared in [1u64 << 62, u64::MAX >> 1, 1 << 40, 4096] {
@@ -393,7 +463,13 @@ fn a_payload_longer_than_the_file_is_refused_before_it_is_allocated() {
             "huge-payload",
             &hand_made("CREATE TABLE t (a INTEGER)", 0, &[leaf]),
         );
-        refused(&path, "is longer than the file, 1024 bytes");
+        refused(
+            &path,
+            &format!(
+                "page 2's cell 0 declares a payload of {declared} bytes, longer than the file, \
+                 1024 bytes"
+            ),
+        );
     }
 }
 
@@ -644,6 +720,170 @@ fn a_page_named_by_two_parents_is_refused() {
     refused(&path, "page 5 is reached twice");
 }
 
+/// A record of `total` bytes holding one blob, the rest of them, each
+/// `fill`: a header of four bytes.
+fn spilling_record(total: usize, fill: u8) -> Vec<u8> {
+    let serial = sqlite_varint(12 + 2 * (total as u64 - 4));
+    assert_eq!(serial.len(), 3, "a header of four bytes");
+    let mut r = vec![4];
+    r.extend_from_slice(&serial);
+    r.resize(total, fill);
+    r
+}
+
+/// A row spilling into overflow pages is read as it is yielded, never as
+/// its leaf is entered: a leaf of ten rows of 20 301 bytes, each keeping 39
+/// in the leaf and the rest over 40 overflow pages, is walked holding two
+/// pages -- the leaf, and the overflow page its chains are read through --
+/// and one payload, and read holding the row decoded from it besides. Read
+/// as their leaf was entered, the ten payloads were held at once, and no
+/// test said so (G14 F2b's review).
+#[test]
+fn a_walk_of_spilling_rows_holds_two_pages_and_a_payload() {
+    // Past 477 bytes, and (P - 39) % 508 = 450 puts SQLite's K past them:
+    // the leaf keeps M, 39 bytes, as SQLite would lay it.
+    const P: usize = 20_301;
+    const LOCAL: usize = 39;
+    const PER_PAGE: usize = 508;
+    let chain = (P - LOCAL).div_ceil(PER_PAGE);
+    assert_eq!((chain, local_of(512, P)), (40, LOCAL));
+    let mut cells = Vec::new();
+    let mut pages = Vec::new();
+    for row in 0..10 {
+        let record = spilling_record(P, row as u8);
+        let first = 3 + (row * chain) as u32;
+        cells.push(cell(P, row as u64 + 1, &record[..LOCAL], Some(first)));
+        for (j, part) in record[LOCAL..].chunks(PER_PAGE).enumerate() {
+            let next = if j + 1 < chain {
+                first + j as u32 + 1
+            } else {
+                0
+            };
+            let mut page = overflow(next);
+            page[4..4 + part.len()].copy_from_slice(part);
+            pages.push(page);
+        }
+    }
+    pages.insert(0, leaf(&cells));
+    let path = written(
+        "spilling-rows",
+        &hand_made("CREATE TABLE t (a BLOB)", 0, &pages),
+    );
+    // Two pages, a payload, and 4 KiB for the bits a page and a byte, the
+    // stack and the file's handle.
+    let (count, held) = crate::held::peak(|| fennec_import::sqlite::count_rows(&path, "t"));
+    assert_eq!(count.unwrap(), 10);
+    eprintln!("spilling rows: counting held {held} bytes at once");
+    assert!(
+        held < 2 * 512 + P + 4096,
+        "counting held {held} bytes at once"
+    );
+    let mut r = Reader::open(&path, "t").unwrap();
+    let (rows, held) = crate::held::peak(|| {
+        let mut n = 0;
+        while let Some(row) = r.next_row().unwrap() {
+            // Looked at where it is: a copy to compare with would be held too.
+            let whole = matches!(&row[..], [Value::Bytes(b)]
+                if b.len() == P - 4 && b.iter().all(|&x| x == n as u8));
+            assert!(whole, "row {n}");
+            n += 1;
+        }
+        n
+    });
+    assert_eq!(rows, 10);
+    eprintln!("spilling rows: reading held {held} bytes at once");
+    assert!(
+        held < 2 * 512 + 2 * P + 4096,
+        "reading held {held} bytes at once"
+    );
+}
+
+/// The review's wide file (G14 F2b, finding F1): pages of 64 KiB, a
+/// `CREATE TABLE t("","",...)` of `columns` columns -- 256 KiB of text at
+/// 87 376, spilling over four pages -- and a leaf of 2 000 rows of three
+/// bytes.
+fn reviews_wide_file(columns: usize) -> Vec<u8> {
+    let sql = format!("CREATE TABLE t({})", vec!["\"\""; columns].join(","));
+    hand_made_of(65_536, &sql, 0, &[short_rows(65_536, 2_000)])
+}
+
+/// A row holds a value for each column its table declares, whatever its
+/// record holds: 87 376 columns made each three-byte row 2.8 MB, and an
+/// import's batch of 2 000 such rows held some 12.6 GB of a 384 KiB file.
+/// SQLite declares 32 767 columns at most, `SQLITE_MAX_COLUMN`'s ceiling:
+/// a table declaring more is refused as it is opened, by name, holding
+/// the `CREATE TABLE` text three times over (its payload, its value and
+/// its copy) and two of its pages -- under three times the file. One at
+/// the ceiling is read.
+#[test]
+fn a_table_past_sqlites_column_ceiling_is_refused_as_it_is_opened() {
+    let file = reviews_wide_file(87_376);
+    assert_eq!(file.len(), 6 * 65_536);
+    let path = written("review-wide", &file);
+    let (opened, held) = crate::held::peak(|| Reader::open(&path, "t").map(|_| ()));
+    let e = opened
+        .expect_err("a table of 87 376 columns was opened")
+        .to_string();
+    eprintln!("the review's wide file: opening it held {held} bytes at once");
+    assert!(
+        e.contains("87376 columns") && e.contains("32767") && e.contains("`t`"),
+        "{e}"
+    );
+    assert!(
+        held < 3 * file.len(),
+        "opening it held {held} bytes at once"
+    );
+
+    let path = written("ceiling-wide", &reviews_wide_file(32_767));
+    let mut r = Reader::open(&path, "t").unwrap();
+    assert_eq!(r.width(), 32_767);
+    let row = r.next_row().unwrap().unwrap();
+    assert_eq!(
+        (row.len(), &row[0], &row[32_766]),
+        (32_767, &Value::Int(7), &Value::Null)
+    );
+}
+
+/// A file whose rows read far larger than they are: 2 000 rows of three
+/// bytes under 200 columns, 199 of them named `""` (imported as
+/// `column<N>`) with a default of 150 bytes, which a row lacking them reads,
+/// each row its own copy. Some 46 KB a row as read: a batch of 2 000 such
+/// rows was 92 MB of a 128 KiB file, and the import held 339 MB at once
+/// with what the engine made of it. A batch is put once its rows hold
+/// `BATCH_BYTES` (16 MiB) as read, so an import holds the batch, the
+/// engine's documents of it, their frames twice until the block lands --
+/// in its record and in the store -- each less than the batch, and the
+/// frames the store holds since the file was opened, up to `HANDOVER_AT`
+/// (16 MB): under five times `BATCH_BYTES`, whatever the file declares.
+#[test]
+fn an_import_holds_a_batch_by_its_bytes_not_its_rows() {
+    let default = "d".repeat(150);
+    let mut sql = String::from("CREATE TABLE t(a INTEGER");
+    for _ in 0..199 {
+        sql.push_str(&format!(", \"\" TEXT DEFAULT '{default}'"));
+    }
+    sql.push(')');
+    let file = hand_made_of(65_536, &sql, 0, &[short_rows(65_536, 2_000)]);
+    let path = written("wide-defaults", &file);
+    let at = dir().join("wide-defaults");
+    let _ = std::fs::remove_dir_all(&at);
+    std::fs::create_dir_all(&at).unwrap();
+    let mut src = Reader::open(&path, "t").unwrap();
+    let mut db = fennec_core::fs::open(at.join("w.fennec")).unwrap();
+    let (loaded, held) =
+        crate::held::peak(|| load::run(&mut src, &mut db, &Options::new("w")).map(|s| s.rows));
+    drop(db);
+    let _ = std::fs::remove_dir_all(&at);
+    assert_eq!(loaded.unwrap(), 2_000);
+    eprintln!("wide defaults: the import held {held} bytes at once");
+    let bound = 5 * fennec_import::BATCH_BYTES;
+    assert!(
+        held < bound,
+        "the import held {held} bytes at once, of a file of {} bytes",
+        file.len()
+    );
+}
+
 /// A row lacking a column whose default the importer does not compute --
 /// `CURRENT_TIMESTAMP`, an expression -- is refused naming the table, the
 /// column and the default, where it was read as `NULL`. SQLite's own
@@ -891,6 +1131,181 @@ fn a_hot_rollback_journal_is_refused() {
     assert!(e.contains("hot rollback journal"), "{e}");
     let (_, rows) = read_whole(&kept("persist.sqlite"), "t");
     assert_eq!(rows, [vec![Value::Int(1), text("kept")]]);
+}
+
+/// SQLite keeps a database's side files beside the file a symbolic link
+/// leads to -- its unix VFS resolves the link -- so the import looks for
+/// them there: a link to a file beside a hot journal was read torn, the
+/// journal looked for beside the link.
+#[cfg(unix)]
+#[test]
+fn a_hot_journal_beside_a_linked_files_target_is_refused() {
+    let link = dir().join("linked-hot.sqlite");
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(kept("hot.sqlite"), &link).unwrap();
+    let e = match Reader::open(&link, "t") {
+        Ok(mut r) => panic!(
+            "the torn file was read through the link, its first row {:?}",
+            r.next_row()
+        ),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        e.contains("hot.sqlite-journal is a hot rollback journal"),
+        "{e}"
+    );
+    let e = fennec_import::sqlite::count_rows(&link, "t")
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("hot rollback journal"), "{e}");
+}
+
+/// A side file that is no file -- a FIFO, a device, a directory -- is
+/// refused by its kind before anything opens it: a FIFO named `-journal`
+/// beside the file held the import in its open for ever, waiting for a
+/// writer. The wait is bounded here, and a writer let in past it so the
+/// test ends either way.
+#[cfg(unix)]
+#[test]
+fn a_side_file_that_is_no_file_is_refused_not_waited_on() {
+    let d = dir().join("fifo");
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let db = d.join("db.sqlite");
+    std::fs::copy(kept("persist.sqlite"), &db).unwrap();
+    let journal = d.join("db.sqlite-journal");
+    match Command::new("mkfifo").arg(&journal).status() {
+        Ok(s) if s.success() => {}
+        _ => {
+            assert!(
+                std::env::var_os("CI").is_none_or(|v| v.is_empty()),
+                "mkfifo failed under CI: the FIFO test would test nothing"
+            );
+            eprintln!("mkfifo failed, the FIFO test skipped");
+            return;
+        }
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let at = db.clone();
+    let opener = std::thread::spawn(move || {
+        let _ = tx.send(
+            Reader::open(&at, "t")
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+        );
+    });
+    let Ok(answer) = rx.recv_timeout(std::time::Duration::from_secs(60)) else {
+        // A writer at the FIFO's other end lets the open go.
+        let _ = std::fs::OpenOptions::new().write(true).open(&journal);
+        let _ = opener.join();
+        panic!("the import waited on the FIFO {}", journal.display());
+    };
+    opener.join().unwrap();
+    let e = answer.expect_err("a FIFO named -journal was taken");
+    assert!(e.contains("db.sqlite-journal is a FIFO, not a file"), "{e}");
+}
+
+/// A default SQLite's `ADD COLUMN` takes is a constant `valueFromExpr`
+/// reads -- a sign before anything, `CAST`, a hex number past 32 bits --
+/// and a row written before the column reads it so: each value here is
+/// SQLite's own reading of the older row, `SELECT quote(..)`:
+/// 1|'5'|5|'x'|-5|4294967296|'4294967296'|-4294967296|-1|'12345678901'|1.0|
+/// 100000|'1.5'|-1|3.0|5|-1000000000000000|9.22337203685477581e+18|NULL|7|
+/// '-2147483648'|16|5|-1. Each was refused, or read as its text. Row 2,
+/// written after the columns, holds what SQLite stored: its `CAST('1e5' AS
+/// INTEGER)` is 1 and its `-'1e15'` a real, where the older row reads
+/// 100000 and an integer -- SQLite's own two readings -- and its REAL
+/// column's 3.0 is the integer 3, as SQLite keeps a real it stores
+/// that an integer holds (a float field takes it as 3.0).
+#[test]
+fn constant_defaults_read_as_sqlite_reads_them_in_older_rows() {
+    let db = kept("constants.sqlite");
+    let (names, rows) = read_whole(&db, "t");
+    assert_eq!(names.concat(), "abcdefghijklmnopqrsvwxyz");
+    let older = vec![
+        Value::Int(1),
+        text("5"),
+        Value::Int(5),
+        text("x"),
+        Value::Int(-5),
+        Value::Int(4_294_967_296),
+        text("4294967296"),
+        Value::Int(-4_294_967_296),
+        Value::Int(-1),
+        text("12345678901"),
+        Value::Float(1.0),
+        Value::Int(100_000),
+        text("1.5"),
+        Value::Int(-1),
+        Value::Float(3.0),
+        Value::Int(5),
+        Value::Int(-1_000_000_000_000_000),
+        Value::Float(9_223_372_036_854_775_808.0),
+        Value::Null,
+        Value::Int(7),
+        text("-2147483648"),
+        Value::Int(16),
+        Value::Int(5),
+        Value::Int(-1),
+    ];
+    assert_eq!(rows[0], older);
+    let mut stored = older;
+    stored[0] = Value::Int(2);
+    stored[11] = Value::Int(1);
+    stored[14] = Value::Int(3);
+    stored[16] = Value::Float(-1e15);
+    assert_eq!(rows[1], stored);
+}
+
+/// A constant default whose value SQLite makes by its own formatting of a
+/// real as text, by a text's numeric prefix, or by taking a blob's bytes
+/// as text or a text's as a blob -- in the file's encoding -- is refused
+/// where a row needs it, naming the table, the column and the default:
+/// SQLite reads `'1.5'`, `-5`, `'A'` and `X'37'` here.
+#[test]
+fn a_constant_default_read_by_sqlites_formatting_is_refused_where_a_row_needs_it() {
+    let db = kept("constants.sqlite");
+    for (table, default) in [
+        ("real_as_text", "(-(-1.5))"),
+        ("text_prefix", "(-'5 apples')"),
+        ("blob_as_text", "(CAST(x'41' AS TEXT))"),
+        ("as_blob", "(CAST(7 AS BLOB))"),
+    ] {
+        // An untyped column's rows are read as the table is opened, its
+        // type taken from them.
+        let e = match Reader::open(&db, table) {
+            Ok(mut r) => r.next_row().unwrap_err().to_string(),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            e.contains(&format!("row 1 of `{table}`"))
+                && e.contains("`b`")
+                && e.contains(&format!("`{default}`")),
+            "{table}: {e}"
+        );
+    }
+}
+
+/// A name or a default of the file's reaches the terminal through the
+/// summary's warning lines and an import's error: escaped, a control
+/// character, or one that reorders a line, written as Rust writes it, so
+/// no escape sequence a file holds reaches a terminal. `escapes.sqlite`
+/// names its VIRTUAL column and a column added later with ESC, BEL and
+/// U+202E, and the later one's default holds an ESC.
+#[test]
+fn a_files_names_reach_the_terminal_escaped() {
+    let mut r = Reader::open(kept("escapes.sqlite"), "t").unwrap();
+    let lines = r.left_out();
+    let e = r.next_row().unwrap_err().to_string();
+    assert_eq!(lines.len(), 1);
+    for line in lines.iter().chain([&e]) {
+        assert!(!line.contains(['\u{1b}', '\u{7}', '\u{202e}']), "{line:?}");
+    }
+    assert!(lines[0].contains(r"`\u{1b}[31mred\u{7}`"), "{}", lines[0]);
+    assert!(
+        e.contains(r"`\u{1b}]0;title\u{7}\u{202e}`") && e.contains(r"(-'\u{1b}[2J')"),
+        "{e}"
+    );
 }
 
 /// A file of SQLite's largest pages, 65 536 bytes -- the header's 1 --

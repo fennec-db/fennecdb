@@ -151,7 +151,8 @@ pub struct Options {
     pub filter: Option<Expr>,
     /// `--limit <N>` -- read at most this many rows.
     pub limit: Option<u64>,
-    /// `--batch <N>` -- documents per `put` statement.
+    /// `--batch <N>` -- documents per `put` statement, at most: a batch is
+    /// put sooner once its rows hold [`BATCH_BYTES`].
     pub batch: usize,
 }
 
@@ -159,6 +160,24 @@ pub struct Options {
 /// (`crates/fennec-bench/src/main.rs`): a larger batch does not lower the
 /// per-document cost, while peak memory grows linearly.
 pub const DEFAULT_BATCH: usize = 2_000;
+
+/// The most a batch holds of the rows it puts, in bytes as read
+/// (`load::run`): a batch is put once it holds `--batch` rows or this
+/// many bytes, whichever comes first. A row holds a value for each column
+/// its source declares and a SQLite row a copy of each default its record
+/// lacks, whatever its bytes in the source: rows bounded by their count
+/// alone, 2 000 rows of three bytes each under a table of 87 376 columns
+/// held some 12.6 GB of a 384 KiB file (G14 F2b's review). 16 MiB is the
+/// most the engine holds of an open block before it spills it into the
+/// file (`SPILL_AT`, 16 MB): a batch is one `put`, one block, which the
+/// engine holds again as its documents, and as their frames twice until
+/// the block lands -- in its record and in the store, each less than the
+/// batch -- beside the frames the store holds since its file was opened,
+/// up to `HANDOVER_AT` (16 MB). So an import holds under five times this
+/// beside the row it reads, whatever its source declares. Rows under 8
+/// KiB as read -- 2 000 of them -- never reach it, so `--batch` alone
+/// decides for them, as before.
+pub const BATCH_BYTES: usize = 16 << 20;
 
 impl Options {
     pub fn new(into: impl Into<String>) -> Options {

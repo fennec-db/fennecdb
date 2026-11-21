@@ -7,7 +7,7 @@
 //! README, "Comparison with SQLite and PostgreSQL").
 
 use crate::map::{self, Plan, Target};
-use crate::{Options, Source, Summary};
+use crate::{Options, Source, Summary, BATCH_BYTES};
 use fennec_core::error::{Error, Result};
 use fennec_core::plugin::Registry;
 use fennec_core::prelude::*;
@@ -75,6 +75,9 @@ fn load(
     let mut skipped: u64 = 0;
     let mut seen: u64 = 0;
     let mut batch: Vec<Vec<(String, Expr)>> = Vec::with_capacity(opts.batch);
+    // What the batch holds as read: put at `opts.batch` rows or at
+    // `BATCH_BYTES`, whichever comes first.
+    let mut held: usize = 0;
     while let Some(values) = src.next_row()? {
         if opts.limit.is_some_and(|n| rows >= n) {
             break;
@@ -87,10 +90,12 @@ fn load(
                 continue;
             }
         }
+        held += bytes_of(&doc);
         batch.push(doc);
         rows += 1;
-        if batch.len() >= opts.batch {
+        if batch.len() >= opts.batch || held >= BATCH_BYTES {
             flush(db, &opts.into, &mut batch, rows)?;
+            held = 0;
             progress(rows);
         }
     }
@@ -164,6 +169,48 @@ pub(crate) fn document(
         }
     }
     Ok(doc)
+}
+
+/// What a document being put holds, in bytes: each field's name and value
+/// as read, beside the pair holding them -- the allocator's rounding aside,
+/// never less than the bytes themselves, which [`BATCH_BYTES`] bounds. A
+/// field nobody wrote a value for holds its pair and its name: a row of a
+/// source's 32 767 columns, its record one byte, is some 3 MB.
+fn bytes_of(doc: &[(String, Expr)]) -> usize {
+    doc.iter()
+        .map(|(name, e)| {
+            std::mem::size_of::<(String, Expr)>()
+                + name.capacity()
+                + match e {
+                    Expr::Lit(v) => value_bytes(v),
+                    _ => 0,
+                }
+        })
+        .sum()
+}
+
+/// The bytes a value holds past its own `size_of`. A list or an object is
+/// counted by its members, which nest no deeper than every reader of a
+/// value lets them (`value::MAX_JSON_DEPTH`).
+fn value_bytes(v: &Value) -> usize {
+    use std::mem::size_of;
+    match v {
+        Value::Text(s) => s.capacity(),
+        Value::Bytes(b) => b.capacity(),
+        Value::Vector(x) => x.capacity() * size_of::<f32>(),
+        Value::Sparse(_, x) => x.capacity() * size_of::<(u32, f32)>(),
+        Value::List(items) => {
+            items.capacity() * size_of::<Value>() + items.iter().map(value_bytes).sum::<usize>()
+        }
+        Value::Object(members) => {
+            members.capacity() * size_of::<(String, Value)>()
+                + members
+                    .iter()
+                    .map(|(k, x)| k.capacity() + value_bytes(x))
+                    .sum::<usize>()
+        }
+        _ => 0,
+    }
 }
 
 /// Applies the filter to one row.
@@ -391,6 +438,36 @@ mod tests {
     use crate::{Column, IdSource, Rows};
     use fennec_core::schema::VectorIndexSpec;
     use fennec_core::value::VecPrec;
+
+    /// A batch is put at `--batch` rows or once its rows hold `BATCH_BYTES`
+    /// as read, whichever comes first: rows of 1 MiB go 16 a batch under
+    /// the default of 2 000, and 5 a batch under `--batch 5`.
+    #[test]
+    fn a_batch_is_put_at_its_rows_or_its_bytes() {
+        let puts = |batch: usize| {
+            let rows: Vec<Vec<Value>> = (0..20)
+                .map(|i| {
+                    vec![Value::Text(
+                        char::from(b'a' + i as u8).to_string().repeat(1 << 20),
+                    )]
+                })
+                .collect();
+            let mut src = Rows::new(vec![Column::new("t", DataType::Text, "text")], rows);
+            let mut opts = Options::new("c");
+            opts.batch = batch;
+            let mut db = Database::new();
+            let mut at = Vec::new();
+            run_with_progress(&mut src, &mut db, &opts, &mut |n| at.push(n)).unwrap();
+            at
+        };
+        assert_eq!(puts(crate::DEFAULT_BATCH), [16, 20]);
+        assert_eq!(puts(5), [5, 10, 15, 20]);
+        let doc = [("t".to_string(), Expr::Lit(Value::Text("x".repeat(100))))];
+        assert_eq!(
+            bytes_of(&doc),
+            std::mem::size_of::<(String, Expr)>() + 1 + 100
+        );
+    }
 
     /// A text bound for a `float` -- SQLite's, a PostgreSQL cell -- past a
     /// float's range is refused naming it, where it read as an infinity or
