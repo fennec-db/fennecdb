@@ -320,7 +320,7 @@ fennec-http's `audit::open`, `instance::write` (`<t>.instance`),
 `tenants.rs`' `.follows`, `.quota` and an install's `.importing`,
 `Tenants::new`'s directory, `tenant_hooks` (`<t>.hooks`, already `0600`),
 `schedule::hint::write`, the archive's directory, images, `began`,
-segments and a restore's `.restoring` (`copied`, `assemble_into`), `backup`'s and
+segments and a restore's `.restoring` (`fs::copy_private`, `assemble_into`), `backup`'s and
 `unseal`'s `.tmp`, a node archive's root, records and restored directory;
 fennec-cli's `.save` and `fennec key` (already `0600`, made with
 `create_new`). Not data: `fennec types`' TypeScript, written with the
@@ -343,9 +343,21 @@ where it is there -- the sync log, the lock, a tenant's `.instance` -- takes
 libc's `fcntl.h` has it -- Linux's by processor, the BSDs' and Apple's,
 illumos' -- and a Unix whose number is not listed fails to build: `0`
 there, as armv7 Android's library had it, left the open following links
-unsaid. `copied` copies an image into `create_private`'s handle and
-returns it (it was the system's `fs::copy`, which opens its target through
-a link, then an open by the name), and `swap_in` renames a rewrite's
+unsaid. `fs::copy_private` copies an image into `create_private`'s handle
+and returns it (it was the system's `fs::copy`, which opens its target
+through a link, then an open by the name); on Apple's systems it clones an
+image whose mode gives its owner read and write and no one else anything
+(`cloned`, `fclonefileat`), a clone being made with its source's mode --
+a wider image's would be another user's to open until an `fchmod` --
+and `CLONE_NOFOLLOW` keeping it off a link at its name: without the flag a
+clone follows one that names no file and is made where it points (macOS
+26.1), as the system's `fs::copy`, passing none, did. The clone hands back
+no descriptor, so its name is opened again with `O_NOFOLLOW` and held to
+what the clone made -- one regular file of one name, the process's
+(`CLONE_NOOWNERCOPY`: under root, root's), on the image's volume and of
+its length -- and to the name (`still_named`), then made `0600` on that
+handle where it is not; another file system, volume or a system without
+the flags copies. And `swap_in` renames a rewrite's
 `.compacting` in through the handle
 that wrote it, `.beside` through one opened with `O_NOFOLLOW` (an open by
 the name, as both were, followed a link put there while the image was
@@ -355,11 +367,20 @@ handle's file (`still_named`, its device and inode against an `lstat`):
 another file put there since is renamed over nothing, and the sink fails, as
 a failed rename fails it. Each of these needs write access to the
 database's directory, which takes the database itself anyway: what they
-close is a write, a mode or a rename landing on a file the link names. What
-still goes by a name, to the same access: a restore opens its `.restoring`
-again to check and fork it (`fs::open`, which resolves a link there), and
-`backup`, `unseal`, a restore and the small records rename their side file
-by its name, unheld to the handle that wrote it.
+close is a write, a mode or a rename landing on a file the link names.
+`backup`, `unseal` and the small records (`renamed`: an image, `history`,
+`began`) hold their side file's name to the handle that wrote it before the
+rename, as `swap_in` does, and `unseal` syncs through that handle, where it
+opened the name again. What still goes by a name, to the same access, and
+SECURITY.md says so: a restore opens its `.restoring` again to check and
+fork it (`fs::open`, which resolves a link there) and renames it in after
+the checkpoint renamed its own image there, and `unseal` reads its `.tmp`
+again to check it (`fs::open_read_only`), each held to the handle that
+wrote it just before the open, so a link put there in that moment is
+followed. Closing the restore's takes an open of a database over a handle,
+which fennec-core has not; the unseal's check, read from the plaintext in
+memory instead, would copy every document, where the mapped open adopts
+the image's offset index.
 
 **One way to make a file.** `tools/file_create_check.py` (CI's fmt job,
 with `--self-test`) reads `crates/*/src` but fennec-bench's and
@@ -367,6 +388,7 @@ fennec-fuzz's through `tools/secret_eq_check.py`'s reader -- comments,
 strings and `#[cfg(test)]` items left out -- and refuses `File::create`,
 `fs::write`, `.create(..)` and `.create_new(..)` given `true` or a name,
 `create_dir`, `create_dir_all`, `DirBuilder`, `fs::copy`, `fs::rename`,
+a call of `clonefile`, `clonefileat` or `fclonefileat`,
 `UnixListener::bind` and `UnixDatagram::bind` outside the helpers, a
 function of `std::fs` imported by its name or another (`use std::fs::{write,
 rename as moved}`) found where it is called so, and `File` or `fs` imported
@@ -374,7 +396,7 @@ under another name too: an open whose statement puts the mode on it
 (`private(` or `private_beside(`) passes, a rename in a function that keeps
 the mode (`create_like(` or `mode_like(`) passes, and each other one is in
 its `ALLOWED` by file and kind, with why and how many: the helpers' own
-`DirBuilder`s, Windows' opens and swap, `fennec key`'s `create_new` with
+`DirBuilder`s and clone, Windows' opens and swap, `fennec key`'s `create_new` with
 mode `0600`, `fennec types`' TypeScript, the unwinding checks' scratch
 directory, an archive's `renamed` (whose callers made the record by
 `create_like`, or `began` by `create_private` where there is none), a
@@ -473,9 +495,25 @@ checkpoint's, against an image's writing -- and an `fchmod` only where the
 modes differ; `swap_in` takes the writer's handle where it opened
 `.compacting` by name (one `open` fewer), opens `.beside` as it did with
 `O_NOFOLLOW` added, and `still_named` adds an `fstat` and an `lstat` to
-each. `copied` copies through a 1 MiB buffer where macOS cloned
-(`copy_file_range` on Linux either way): a restore, and a consolidating
-round of an archive with no key, never a request. The lock's `writers_mode` runs
+each, and to a record's, a backup's and an unseal's rename. The image a
+restore or a consolidating round of an archive with no key starts from
+(never a request) is copied by `copy_file_range` on Linux, as
+`fs::copy` copied it: std's `io::copy` from a `File` into a
+`BufWriter<File>` is its `kernel_copy`, which flushes the empty buffer and
+hands both descriptors to the kernel. On APFS it is cloned again, as
+`fs::copy` cloned it, where the third round of G14's fixes had copied its
+bytes a mebibyte a call: with the fsync a restore runs after, on an
+8-core Mac with the one-minute load at 2.9-3.1, 256 MiB took
+0.004-0.008 s cloned, three runs, against 0.13-0.27 s copied and
+0.008-0.012 s by `fs::copy`; 1 GiB 0.003-0.010 s against 0.55-1.20 s and
+0.006-0.013 s (at a load of 6.8-7.1, others' work: 0.003-0.004 s,
+0.27-0.34 s and 0.010-0.013 s; 0.004-0.008 s, 0.81-1.98 s and
+0.006-0.018 s). An image wider than its owner's, which 0.2.0's archives
+hold, is still copied. The clone's code is 1 152 bytes of the `fennec`
+shell's `__text` on macOS (2 854 400 to 2 855 552; the file 3 751 920 to
+3 752 032 bytes), where `restore`, `archive` and `unseal` run;
+`fennec-server`'s file and sections are the same to the byte, and no other
+target builds it. The lock's `writers_mode` runs
 only for a lock file made, and the log's `kept_mode` only for a log made,
 its `fchmod` only where the log's mode is not already its database's. No request opens a file, and the perf gate's `file-open` makes
 none; its `file-compact` makes a side file an op. Counted natively on
@@ -507,9 +545,15 @@ both; `a_link_at_a_side_files_name_is_never_followed` puts links at the
 sync log's, `.compacting`'s and `.beside`'s names, before each is made and,
 for the two images, while each is written (a link put there then was
 followed until `swap_in` took the writer's handle), and fennec-http's
-`a_link_at_the_sidecars_name_is_never_followed` at `.instance`'s and
-`a_copy_of_an_image_follows_no_link_at_its_name` at `copied`'s target, an
-image `0600` and `0644`. fennec-abi's
+`a_link_at_the_sidecars_name_is_never_followed` at `.instance`'s;
+fennec-core's `a_copy_of_an_image_is_cloned_where_it_is_its_owners_alone`
+copies images `0600`, `0700`, `0644` and `0400` onto nothing, a link to a
+file, a link to none and a file left there, holds what the links name
+unchanged and unmade and the copy `0600`, the file at the name, open at
+its end, and on Apple's systems counts the clones (the first two cloned);
+fennec-http's `a_record_is_renamed_in_only_from_the_file_it_wrote` puts a
+link and a file at a record's side file once written, and holds the rename
+refused. fennec-abi's
 `a_lock_file_is_given_only_to_those_who_may_write_its_database` takes a
 lock beside databases `0600` to `0666`, of another group, and a link at the
 lock's name. fennec-http's `modes::verify_writes_nothing_another_user_reaches`

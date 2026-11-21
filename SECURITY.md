@@ -305,7 +305,12 @@ These are deliberate. The [server](https://fennecdb.com/docs/server),
   file replaced keeps the mode of the one it replaces, a group's bits only
   where the new file is in that group (a setgid directory keeps it), and
   nothing of a file another user owns; a copy made elsewhere
-  with other modes; and what the process list shows, a password in
+  with other modes; a user who may write the directory a database is in,
+  trusted with its files as one who may remove or replace the database
+  itself: a restore opens its `.restoring` there again by its name, and
+  `fennec unseal` reads its `.tmp` so, each held to the file it wrote just
+  before, a link put there in the moment between followed; and what the
+  process list shows, a password in
   `--follow`'s connection string among it
   ([server docs](https://fennecdb.com/docs/server#file-modes)). On Windows a
   file takes its folder's access list, and a key or a tenant's hook secrets

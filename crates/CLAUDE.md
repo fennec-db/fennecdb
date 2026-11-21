@@ -42,16 +42,18 @@ it names that is gone fails, and so does any kind of check counting zero.
 -- `private` on the open of a file its operator names, which goes through
 a link there as a database's open does (`fs::resolved`); `private_beside`
 (`O_NOFOLLOW`, each target's number, a Unix without one failing to build)
-on a file opened again beside a database; `create_private` or
-`create_like` (`O_EXCL`) for a side file written whole, these two following
-no link at their name; `create_dir_private` or `create_dir_new` for a
-directory -- `0600`, a directory `0700`, from the call that makes it
-whatever the umask, never a `chmod` narrowing it after. A file renamed over
-another is given that one's mode before the rename, by an `fchmod` of its
-open handle (`mode_like`), a group's bits only where it is of that group,
-nothing from a file another user owns; nothing is chowned.
-`tools/file_create_check.py` (CI's fmt job) refuses `File::create`,
-`fs::write`, `.create(..)`, `create_dir_all`, `fs::copy`, an `fs::rename`
-in a function giving no mode and the like, by any name a `use` gives them,
-in `crates/*/src` outside tests, fennec-bench and fennec-fuzz, an exception
-allowed with why and how many times.
+on a file opened again beside a database; `create_private`,
+`create_like` (`O_EXCL`) or `copy_private` (a clone with `CLONE_NOFOLLOW`
+on Apple's systems, of a file its owner's alone) for a side file written
+whole, these following no link at their name, and one renamed in held to
+its writer's handle first (`still_named`); `create_dir_private` or
+`create_dir_new` for a directory -- `0600`, a directory `0700`, from the
+call that makes it whatever the umask, never a `chmod` narrowing it after.
+A file renamed over another is given that one's mode before the rename, by
+an `fchmod` of its open handle (`mode_like`), a group's bits only where it
+is of that group, nothing from a file another user owns; nothing is
+chowned. `tools/file_create_check.py` (CI's fmt job) refuses
+`File::create`, `fs::write`, `.create(..)`, `create_dir_all`, `fs::copy`,
+a clone, an `fs::rename` in a function giving no mode and the like, by any
+name a `use` gives them, in `crates/*/src` outside tests, fennec-bench and
+fennec-fuzz, an exception allowed with why and how many times.

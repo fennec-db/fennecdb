@@ -304,7 +304,11 @@ directory the server writes new files into -- an archive, a node's
 <code>--dir</code> -- gives each new file to its owner alone: a reader there
 runs as the server's user, or is given read of what is there before each
 read, as the deploy kit's bucket sync is (<code>chmod -R g+rX</code> as root,
-then a copy of what the group may read). Up to 0.2.0 files took the umask's mode, usually
+then a copy of what the group may read). Whoever may write the directory a
+database is in may remove or replace the database, so it is trusted with its
+files: a restore or an unseal there opens its scratch file again by its name,
+which such a user could swap for a link. Keep that directory writable by the
+server's user alone. Up to 0.2.0 files took the umask's mode, usually
 <code>0644</code>, readable by every user; a file made then keeps it until you
 change it (<code>chmod 600 data.fennec</code>). On Windows a file takes its
 folder's access list, as it always did.</p>

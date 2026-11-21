@@ -154,11 +154,12 @@ reaches -- or, where a file of that name stays, the first
 `consolidating-<end>-<k>.fennec` that does not (`scratch_name`) -- and
 reads it back through the handle that wrote it (`assemble_into`), never
 opening it again by its name: on Windows that handle writes it from its
-making (`copied`), where a copier holding it between `fs::copy` and an
+making (`fs::copy_private`), where a copier holding it between `fs::copy` and an
 open after kept the round's appends, and its read -- an open of a
 database asks to write (`fs::open_in_memory`) -- from it. On a Unix the
-image is still copied by the system (a clone on APFS, `copy_file_range`
-on Linux) and nothing changes but the name. What rounds left goes as a
+image is cloned on APFS where it is its owner's alone and copied by
+`copy_file_range` on Linux (docs/design/durability.md#files-modes), and
+nothing changes but the name. What rounds left goes as a
 round begins and as an archiver opens the archive to write
 (`Archive::sweep`, in `writer`, never while a round runs beside it),
 `consolidating.fennec` among it, and a file that will not go is said in
