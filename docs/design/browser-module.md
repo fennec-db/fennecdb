@@ -52,21 +52,21 @@ alone.
 ## Language features
 
 **The rest of the language is features too, and the smallest module is
-191 KB brotli.** `language` is what a page may go without past the
+192 KB brotli.** `language` is what a page may go without past the
 indexes: `geo` (`distance`, `within`, `near` over a point and `@geo`,
 which needs `sorted` too), `nocase`, `collate`, `facets`, `highlight`
 (which marks what `match` found, so needs `text`) and `analytics` (the
 HLL sketches and `bucket`; every other aggregate -- `count`, `sum`,
 `avg`, `min`, `max`, `count(distinct)`, `first` and `last` -- and
 `having` are in every build). `make wasm-sizes` builds each added to the
-module with none (553.4 KB, 191.1 brotli, against 840.5 and 287.7 with
+module with none (554.6 KB, 191.6 brotli, against 841.8 and 288.2 with
 every one) and left out of the full one, brotli added and saved:
-`vector` 20.5 and 18.4, `sorted` 8.5 and 22.6 (with `composite`), `composite` 11.1 and 10.2
-(beside it), `collate` 8.7 and 8.0, `text` 17.0 and 18.0
+`vector` 20.4 and 18.2, `sorted` 8.5 and 22.7 (with `composite`), `composite` 11.1 and 10.3
+(beside it), `collate` 8.7 and 8.1, `text` 17.1 and 17.9
 (with `fuzzy`, `prefix` and its term table; 5.7 and 7.3 before the first two, 10.9 and 13.0 before the table),
-`facets` 3.4 and 3.7, `highlight` 3.9 and 3.2 (beside `text`), `nocase` 2.8 and 2.5, `geo`
-2.5 and 5.1 (its index with it), `analytics` 5.4 and 4.8, `sparse` 2.6
-and 0.8, the schema check 9.6 and 9.2. The module with every feature is the code
+`facets` 3.5 and 3.7, `highlight` 3.8 and 3.1 (beside `text`), `nocase` 2.8 and 2.5, `geo`
+2.5 and 5.3 (its index with it), `analytics` 5.5 and 4.8, `sparse` 2.6
+and 1.0, the schema check 9.7 and 9.5. The module with every feature is the code
 it was (`make size-report BASE=main`: 14 bytes less of it, functions moved
 and closures renumbered, brotli within noise), each check for a missing
 one behind `crate::FULL`, a `cfg!` of them all as `EVERY_INDEX` is: a
