@@ -312,7 +312,22 @@ line holding nothing are no edit, while a `#` line or a blank one inside
 a scalar -- a `run: |` script's, a quoted one's, a plain one running on to
 the next line -- is, as is a trailing space in a block scalar (a script's
 `\ ` is no continuation). Where the workflow reads a YAML alias, every
-edit of it is named: through one, any line may reach the gate's jobs.
+edit of it is named: through one, any line may reach the gate's jobs. So
+is every edit, a comment's too, of a workflow holding a character Python's
+strings take for a line's break or a space and YAML 1.2 for neither
+(`\v`, `\f`, `\x1c`-`\x1f`, `\x85`, U+00A0, U+1680, U+2000-U+200A,
+U+2028, U+2029, U+202F, U+205F, U+3000; no workflow holds one): readers of
+YAML differ there -- YAML 1.1 broke a line at `\x85`, U+2028 and U+2029 --
+so a line one reads as a comment another may run, and the reader, which
+ends a line where YAML 1.2 does, cannot say which GitHub's is; with
+`str.splitlines`, which breaks at eight of them, a `# ; curl ... | sh`
+after one on a line of `perf-count`'s script was a comment of its own line
+and the edit named by nothing. The paths a change touches are read as git
+stores them (`git diff -z`): without it git quotes a path holding a byte
+past ASCII, a `"`, a `\` or a control character, and a workflow named
+`ü.yml` holding a job named `perf (count)` was no workflow's; a byte that
+is not UTF-8 is kept, handed back to git as it came and written escaped
+(`\xff`), never dropped.
 Over main's last 120 landings the judge names three edits the two jobs'
 lines did not, each of `ci.yml`'s own keys: #617's `concurrency`, #656's
 `on` and #672's `permissions`. main asks for no review, and pull requests
@@ -328,7 +343,9 @@ agent reads the diff for these files and entries too. What no check
 holds: the count runs the change's code, and a build script or a workload
 that forges the count forges the gate -- as does any job of the run, an
 edit of whose lines is not the gate's, that uploads over the count's
-artifacts (`overwrite`) before the judge downloads them.
+artifacts (`overwrite`) before the judge downloads them, and any job given
+`checks: write`, which could post a check run named `perf (count)` through
+the API: an edit of another job, named by nothing, of the same class.
 
 *What is counted.* One program, this tree's source copied into the base's
 worktree, so both sides run the same work against their own crates; a
