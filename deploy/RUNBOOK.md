@@ -901,16 +901,19 @@ records say; one refused names the damaged record and the
 whole one after it that says the file was synced past it -- restore that
 tenant from its archive or a replica, and keep the file for a look.
 
-**A sealed archive's next file is bound to itself, which older readers
-refuse.** From the release that binds a sealed frame to its file, an
+**A sealed archive's next file is bound to what it is, which older readers
+refuse.** From the release that binds a sealed file to what it is, an
 archiver restarted on it seals its next image and segment, and `fennec
-backup --key-file` its backup, with a file id (`FENECSL\x02`), and a
-`fennec restore` or `fennec verify` from 0.2.0 or earlier refuses such a
-file (`not a sealed file`, `<image>: not sealed, where the archive is`).
-The files sealed before still open in the new release, and a segment an
-older archiver began goes on as it was. So `fennec` is upgraded on every
-machine that restores or verifies -- an operator's, the weekly restore's --
-with step 1, before any archiver is restarted on the new release. The older files still open under their key, and whoever
+backup --key-file` its backup, as version 3 (`FENECSL\x03`: its own key,
+its frames chained, its head naming its role, archive, tenant and first
+change), and a `fennec restore` or `fennec verify` from 0.2.0 or earlier
+refuses such a file (`not a sealed file`, `<image>: not sealed, where the
+archive is`). The files sealed before still open in the new release, and a
+segment an older archiver began is closed: the next write begins a version
+3 segment after it. So `fennec` is upgraded on every machine that restores
+or verifies -- an operator's, the weekly restore's -- with step 1, before
+any archiver is restarted on the new release. The older files still open
+under their key, bound to nothing a restore holds them to, and whoever
 holds two of them can build a third from their frames: to be rid of that,
 make a new key (`fennec key`), point every archiver and backup at it, and
 begin a new archive under it, keeping the old key to read the older one

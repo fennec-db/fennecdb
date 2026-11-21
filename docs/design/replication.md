@@ -429,7 +429,9 @@ archiver refuses it and the node's moves the line aside to
 takes, of a tenant's lines, the one that began last by then
 (`node_archive::lines`; `Archive::began`, its oldest image's time, which a
 `prune` letting that image go writes into `began` first -- written with the
-first image it was an fsync more a tenant of the stream's first pass), and
+first image it was an fsync more a tenant of the stream's first pass; sealed,
+each image's head says it and `began` is held to that, and `presence` is
+sealed, [below](#sealed-archives)), and
 refuses a moment `--keep` let go of (`Restoring::LetGo`, exit 1) rather than
 pass the tenant over as never archived; `verify` and `prune` run on every
 line, and `Archive::verify` names a gap an image alone ends. One tenant's
@@ -728,101 +730,224 @@ encryption, so with a key every archive file and a backup file is
 ChaCha20-Poly1305 (`crypto.rs`, RFC 8439's vectors, every case of
 Wycheproof's, and 2 000 random cases against node:crypto): ChaCha20 over
 AES-GCM because it has no secret-indexed tables in software, Poly1305 in
-26-bit limbs. Frames carry a random nonce, and their file's id, place and
-last-ness in the AAD (below); an image and the history are sealed whole
-(`open_whole` refuses a file cut short), a segment a frame for
-each batch of writes, whole records in each, so a crash cuts off a frame as
-it cut a record (`open_appended`, the segment's `sealed` state). A frame's
-length is under no tag: changed, the bytes then read as its tag are not it
-and the frame is refused, unless the length now runs past the segment's
-end, which is a frame cut short there and nothing tells from a crash's --
-a verify then counts the bytes from it on as torn, as it would in a
-segment whoever can write the archive had cut
+26-bit limbs. Each file is sealed under a key of its own, its frames under
+random nonces with the tag before them, their place and last-ness in the
+AAD (below); an image, the history and a tenant's presence are sealed whole
+(`open_whole` refuses a file cut short), a segment a frame for each batch
+of writes, whole records in each and a mebibyte at most, so a crash cuts
+off a frame as it cut a record (`open_appended`, the segment's `sealed`
+state). A frame's length is under no tag: changed, the bytes then read as
+its tag are not it and the frame is refused, unless the length now runs
+past the segment's end, which is a frame cut short there and nothing tells
+from a crash's -- a verify then counts the bytes from it on as torn, as it
+would in a segment whoever can write the archive had cut; so with the
+magic's version byte set back to 2 or 1, or the tenant's name made longer,
+which reads the first frame from further on, its length past the end: the
+file one of no frame, as if cut after its head, a head no tag vouches for,
+which no reader holds a file to until a frame opened
 (`a_bit_changed_is_refused_unless_a_length_then_runs_past_the_end` walks
 every bit of a file; the archive's own test changed its segment's middle
 byte, wherever the run's flushes had put it, and failed the run that put a
-length there). A file of
-the other kind than the archive is refused. About 400 MB/s either way on
-one core. The live file stays plain -- mapped and read in place -- for the
-disk to encrypt. A checksum a record was measured and not taken: hardware
-CRC32C was 45 ns of an 840 ns put at 530 bytes, 357 at 3 KB, under the write
-lock, and the browser has no hardware CRC.
+length there). A file of the other kind than the archive is refused. About
+400 MB/s either way on one core. The live file stays plain -- mapped and
+read in place -- for the disk to encrypt. A checksum a record was measured
+and not taken: hardware CRC32C was 45 ns of an 840 ns put at 530 bytes, 357
+at 3 KB, under the write lock, and the browser has no hardware CRC.
 
-**A frame is bound to its file** (`FENECSL\x02`, `seal::FileId`). A file
-sealed now begins with the magic and its id, 16 bytes of the system's
-randomness -- refused without it, as a nonce is -- and every frame's AAD
-is `[id 16][index u64][last u8]`, 25 bytes. Until 1.0's security review
-the AAD was the place and last-ness alone, version 1
-(`FENECSL\x01`, every release from 0.1.7 to 0.2.0): two files sealed under
-one key -- two images of an archive, two segments, last week's backup and
-today's -- each held frames at places the other's frames of those places
-would open in, so a frame of one put in the other at its place opened, and
-the file read as whole with another's megabyte or batch of writes in it,
-every tag good. Every segment's frames sit at small indexes and every
-image's from 0, so anyone able to write to the bucket, holding no key,
-could splice them. With the id a frame opens only in the file it was sealed
-into, and an id changed, cut short or dropped -- the magic set back to
-version 1's to match -- opens nothing: Poly1305 takes the AAD's length in,
-so a 25-byte AAD's tag never stands for a 9-byte one (`seal::tests`,
-`a_frame_from_another_file_does_not_open`). What it does not cover: a whole
-file put in another's place -- an older image under a newer one's name, one
-backup for another -- opens, a whole file as it was sealed; an archive's
-names, the change numbers its records carry and its history hold it to its
-order, and a backup is the database it holds.
+**A file is sealed under its own key, and each frame's tag covers the one
+before it** (`FENECSL\x03`, `seal::begin`, `seal::Frames`). A file begins
+with the magic, its id -- 16 bytes of the system's randomness, refused
+without it, as a nonce is -- and what it is (`seal::Binding`, below). Its
+frames are sealed under HChaCha20 of the key and the id
+(`crypto::hchacha20`, draft-irtf-cfrg-xchacha's construction and vector:
+ChaCha20's rounds, no second primitive), and each frame's AAD is the tag of
+the frame before it -- the first frame's, the file's whole head -- then its
+place and whether it is the last. Three things 1.0's security review found
+in version 2 close so:
 
-*Rejected*: a key a file derived from the id (HKDF), which binds no better
-for a second primitive to hold to its vectors; the file's name or path in
-the AAD, which a sync tool's copy, a renamed backup or a node archive's
-directory moved would break where a sealed file opens wherever it is
-copied; a tag over the whole file, which an appended segment cannot keep
-without writing it again; an id counted by the archive, which two
-archivers or two backups under one key would share.
+- *A frame spliced across a cut.* Version 2's AAD was the file's id, the
+  frame's place and its last-ness. A segment's last frames cut while its
+  archiver was down, the archiver going on from the last whole frame sealed
+  new frames at the places the cut ones had -- often batched otherwise, the
+  lengths in the clear -- so an old frame k and a new frame k+1 opened
+  together, writes dropped or doubled in the segment's middle. With the tag
+  before it in its AAD a frame opens only after the frame it followed, and
+  only a run of whole frames from the head does: the old ones or the new,
+  which hold the same writes as far as both go (`position` goes on from the
+  last whole frame's tag, `open_appended`'s `next`). What remains is a
+  file cut at a frame's edge (below).
+- *A nonce among every file's.* Every frame of every archive, backup and
+  tenant took a random 96-bit nonce under the one key, with no count: a
+  repeat -- which gives away the two frames' XOR and Poly1305's key for
+  that nonce, every tag under it forgeable -- was a 2^-32 chance at 6.1e9
+  frames, about 70 days of 1 000 frames a second, and 0.6% a year at 10^6
+  a second across a node's tenants. Under a key of its own a nonce can
+  repeat only among one file's frames: 2^-32 at 6.1e9 frames in one file,
+  even odds near 3e14. A segment closes at 64 MB of writes, each frame a
+  whole record of 8 bytes and more, so it holds at most some 2^23 frames,
+  a chance below 2^-50; an image is a frame a mebibyte. Two files share a
+  key only where their 128-bit ids do, 2^-32 at 2^48 files. The nonce stays
+  random, never a count: a place is sealed again after a cut, as above.
+- *A frame's length cast.* `seal_frame` wrote `plain.len() as u32`, and a
+  segment sealed each batch of writes as one frame whatever its size: a
+  `W` message carries a mebibyte of records at most (`replication::MESSAGE`),
+  but a longer record goes alone, so a single record of 4 GiB -- a block's
+  writes -- would have written a wrapped length, and nothing after it
+  opened. Not reproduced, no test allocating 4 GiB: settled by reading. A
+  frame is now a mebibyte at most (`seal::FRAME`, `Frames::seal` refusing
+  more, its length checked), a batch going out in frames of whole records,
+  and a record longer than a frame in frames of its own, beginning one
+  (`Segment::write_by`). A crash between those leaves the record cut short
+  after whole frames: `position` cuts it where it began, a frame's end
+  (`seal::open_appended_to`), and `verify` counts it as the last segment's
+  torn tail (`a_batch_goes_out_in_frames_of_whole_records`, at frames of
+  256 bytes).
 
-*Older files.* A version 1 file opens as it did (`tests/sealed-v1/`, an
-archive and a backup 0.2.0 sealed, held by
-`a_v1_sealed_archive_still_opens`), and a segment an older archiver began
-goes on in version 1 frames, `FileId::V1` read back from it: frames of two
-versions in one file would open as neither. Nothing new is begun as
-version 1: images and segments taken after the upgrade are version 2
-beside the older files, which leave as `prune` lets them go. Since a
-version 1 file still opens under its key, the binding holds only for a key
-that never sealed one: whoever holds two version 1 files sealed under a
-key builds a third from their frames and puts it wherever a file sealed
-under that key is read, a version 2 archive's or a backup's place among
-them. Neither pruning the older files nor restoring a backup and sealing it
-again under the same key ends that -- the older files are wherever they
-were copied -- so the way out is a new key (`fennec key`) sealing
-everything from then on and a new archive begun under it, the older files
-read with the old key while they are kept. A switch refusing version 1
-files is not built: under it every archive and backup 0.2.0 sealed would
-be unreadable, and it is left for a later decision. A version past 2
-is refused by its number (`sealed as version 3, which this binary does not
-open`), never read as a plain file: `is_sealed` reads the magic's first
-seven bytes. A binary from before the id took the magic's whole eight
-bytes, so a version 2 file is no sealed file to it, and it refuses one:
-`fennec restore today.sealed out.fennec --key-file k` says `today.sealed:
-not a sealed file`, `fennec verify` or `restore` of an archive `<image>:
-not sealed, where the archive is`, and without a key an image does not
-open as a database (`corrupt: invalid fennecdb signature`), the file asked
-for never made. The binaries reading an archive are upgraded before the one
-writing it.
+**A file says what it is, and every read holds it to that**
+(`seal::Binding`, `Archive::learned`, `Archive::held`). The head names,
+under the first frame's tag and so every frame's: the file's role (a
+segment, an image, an archive's history, a tenant's presence, a backup),
+the archive's id -- 16 bytes of the system's randomness made as the
+archive's first sealed file is, and read back from its files' heads after
+-- the tenant whose line it is (none for one database's), a segment's
+first change, an image's change and time, and an image's archive's start
+(`began`). Version 2 bound a file to its id alone, and a write's record
+carries no change number -- `writes_in` counts its writes and `entries`
+numbers them from the segment's name -- so whoever could write the bucket:
 
-*Cost*: one Poly1305 block more a frame -- the AAD padded to 32 bytes
-where it was 16 -- and 16 bytes a file, some 13 000 instructions a
-64 MB file sealed and opened. Measured, that took 3 970.2 and 3 970.1
-million instructions before, 3 974.3 and 3 970.4 million after
-(`/usr/bin/time -l`, six rounds less one, two runs of each): the 0.01 to
-0.1% between them is the runs' own spread, a build's whole runs differing
-by up to 34 million between two tries. Timed on a quiet M1 before the
-change, 164 ms to seal and 165 to open at the median, about 410 MB/s; the
-machine was not quiet again while this was measured (a load of 8 to 10),
-where both builds took 244 to 282 ms alike, so the instructions stand for
-the time. fennec-server's code grew by 3.2 KB: the head read, the AAD
-built and a version named.
+- deleted a middle segment and renamed the next into its name -- one
+  beginning at an image's change plus one, which the hourly images make
+  common -- and `verify` passed, naming a gap later than where the writes
+  went, and a restore to a moment inside it gave a database missing a run
+  of writes and holding later ones. A segment's head now says its first
+  change, and a name saying another is refused
+  (`a_segment_renamed_into_anothers_place_is_refused`);
+- copied tenant X's directory, or a line of its moved aside, over tenant
+  A's -- every tenant sealed with the one key -- and `restore --tenants`
+  wrote X's rows into A's file, which A's tokens then read, or passed A
+  over as gone. A tenant's line is read as its tenant's
+  (`node_archive::Line::archive`, `Archive::of_tenant`): a file naming
+  another is refused by name
+  (`a_tenants_archive_copied_over_anothers_is_refused`);
+- put an archive's image where a backup was asked for, or a backup in an
+  image's place, and each opened as the other: an image has its primary's
+  history, a backup a fork of its own. Each is now refused as what it is
+  (`an_image_and_a_backup_do_not_stand_in_for_each_other`).
+
+Every reader holds each file it opens -- `verify`, a restore to the end, a
+change or a moment, `restore --tenants`, `consolidate`'s assembly, the
+archiver going on (`position`, `ends_on_image_of`) and `unseal` -- and a
+directory's files to one another: its sealed files' heads, read without
+opening them, must name one archive and one tenant -- the line's, under
+`--tenants` -- and their images one start, else nothing of it is read; a
+head changed to agree opens nothing, its first frame's tag over it. What
+is chosen from a head before its file is read is vouched for by that
+file's first frame (`seal::vouched_in`): the archive's id and tenant, from
+the first file that has one -- the history's few bytes as a rule -- and
+`began`, from the first image's first mebibyte once it is asked for
+(`Archive::began_of`). Read from the heads alone, every image's head
+edited with the plain `began` chose another line for a restore to a
+moment, or passed the tenant over as not yet archived, opening no image
+whose tag would refuse it, and the archiver sealed its next images so; it
+is refused now (`presence_and_began_edited_are_refused`). The rest need
+only agree, each held once it is opened. A
+segment cut inside its head, or after it and before a frame, vouches for
+nothing and holds no write, and is read as one cut as it was made. A line
+read as one database's -- `fennec verify <root>/<tenant>` -- holds its files
+to one another, and `verify` says whose they are.
+
+The plain files that choose what a restore reads are sealed or held to the
+sealed ones. `began` -- when a line took its first image, written plain by
+the prune that lets that image go, which chose the line a restore to a
+moment read and whether one before it was refused or passed over -- is in
+every image's head, and a plain `began` saying otherwise is refused by name
+(`Archive::began`); lost, the images still say it. `presence` -- a tenant
+gone and back, which marked a tenant gone, so passed over, by a line
+written by hand -- is sealed as the line's other files are
+(`Archive::note`, `Archive::presence`); one an archiver before this version
+left plain is read only while nothing of its line is sealed in this
+version, and an archiver's start seals it first (`Archive::seal_presence`).
+So an operator who must mark a tenant gone by hand -- a node lost, its word
+never heard -- does it in a plain archive by a line in `presence` as
+before, and in a sealed one leaves the tenant's file out of a restore's
+output (or moves its lines out of the root): no tool writes a sealed
+presence but the archiver.
+
+What none of this covers, and the docs say: a file cut at a frame's edge
+opens as the shorter file, which nothing tells from a crash's -- the
+archive's own order notices it in any segment but the last (a gap no image
+ends, refused; a gap an image ends, named by `verify`), and `verify` says
+where the last ends; a middle segment deleted is such a gap; and an older
+whole file, or a whole archive or line, put back opens as what it was, the
+names and heads holding a file to its place, never to its age. A bucket
+that keeps versions or locks objects is what holds an archive to its age.
+A plain archive promises nothing against whoever can write it.
+
+*Rejected*: the file's name or path in the AAD, which a sync tool's copy, a
+renamed backup or a node archive's directory moved would break where a
+sealed file opens wherever it is copied -- the head names the numbers a
+name carries, and a tenant, and a reader compares them with the name it
+found; a key derived by HKDF, a second primitive to hold to its vectors
+where HChaCha20 is ChaCha20's own rounds; the frame's place as its nonce,
+which a cut sealed again; a tag over the whole file, which an appended
+segment cannot keep without writing it again; an id counted by the archive,
+which two archivers or two backups under one key would share; a sealed
+manifest of an archive's files, which would hold it to its age only where
+the manifest itself could not be put back, and an archive's directory can.
+
+*Older files.* Version 2 (`FENECSL\x02`, the id after the magic and every
+tag over it and the frame's place, the frames under the key itself, main's
+builds from 2026-11-15 and no release) and version 1 (`FENECSL\x01`, no id,
+every release from 0.1.7 to 0.2.0) open as they did (`tests/sealed-v1/` and
+`tests/sealed-v2/`, an archive and a backup each version's code sealed,
+held by `older_sealed_archives_still_open`). Nothing is sealed in either
+any more, and a segment an older archiver began is gone on in by none: the
+archiver cuts its tail, durably, and its next write begins a version 3
+segment after it -- frames of two versions in one file would open as
+neither, and going on in an older one sealed writes bound to nothing. Their
+files bind nothing a reader holds them to, so the binding holds only for a
+key that never sealed one: whoever holds version 1 files under a key builds
+others from their frames, and a version 1 or 2 file of any archive under
+the key -- a segment, an image -- reads where it is put. Neither pruning
+the older files nor restoring a backup and sealing it again under the same
+key ends that -- they are wherever they were copied -- so the way out is a
+new key (`fennec key`) sealing everything from then on and a new archive
+begun under it, the older files read with the old key while they are kept.
+A switch refusing them is not built: under it every archive and backup
+0.2.0 sealed would be unreadable. A version past 3 is refused by its number
+(`sealed as version 4, which this binary does not open (it opens 1 to 3): a
+later fennecdb's`), never read as a plain file: `is_sealed` reads the
+magic's first seven bytes, and a role a version 3 head names that this
+binary does not know is refused by its number too. A version 3 file is
+refused alike by the binaries before it: main's version 2 builds say
+`sealed as version 3, which this binary does not open (it opens 1 and 2): a
+later fennecdb's`; 0.2.0, which took the magic's whole eight bytes, finds no
+sealed file -- `fennec restore today.sealed out.fennec --key-file k` says
+`today.sealed: not a sealed file`, `fennec verify` or `restore` of an
+archive `<image>: not sealed, where the archive is`, and without a key an
+image does not open as a database (`corrupt: invalid fennecdb signature`).
+The binaries reading an archive are upgraded before the one writing it.
+
+*Cost*: a file's own key is one HChaCha20 -- a ChaCha20 block's rounds --
+as it is begun and as it is opened; its head is 66 bytes and its tenant's
+name where version 2's was 24, and its first frame's AAD the head, three
+Poly1305 blocks more than version 2's and one more for each 16 bytes of
+the name; every frame after takes 25 bytes of AAD, the tag before and its
+place, as version 2's took the id and its place: nothing more a frame,
+and not one byte more a write. Measured on a shared M1 whose load rose
+from 8 to 57 over the run, each the best of three rounds taken in turn in
+one release binary, version 3 against version 2 (`seal::tests::seal_cost`,
+run by hand): 10 000 frames of 1 KiB, a thousand a file, 1.01; of 1 MiB,
+0.96, the same within the noise; and 10 000 files of one 64-byte frame
+each 1.70, some 2 µs a file -- the subkey, the longer first AAD and, on
+version 3's side of the loop alone, the system's randomness for the id,
+which version 2 drew as it began too. An archive's files are an image an
+hour and a segment each 64 MB: nothing a write pays.
 
 **A frame's nonce is the system's randomness, never a fallback**
 (`crypto::system_random`), and so is every key and nonce fennecdb makes:
-`fennec key`'s, the hooks' stand-in key, SCRAM's client nonce. Each was
+`fennec key`'s, the hooks' stand-in key, SCRAM's client nonce, a sealed
+file's id and an archive's. Each was
 read from `/dev/urandom`, and where its open failed -- at a busy server's
 descriptor limit, EMFILE -- the nonces fell back to SHA-256 of the clock,
 the process id, a stack address and a count that began again at each call:
@@ -831,7 +956,7 @@ gives away the XOR of their plaintexts and Poly1305's one-time key, so
 both tags could be forged. The randomness is now read with no descriptor
 (`crypto/unix.rs`) -- `getrandom` on Linux (glibc 2.25, musl, the kernel's
 3.17), `getentropy` on macOS, 256 bytes a call -- and where the system
-gives none a seal fails as a write does (`seal_frame`'s error, the
+gives none a seal fails as a write does (`Frames::seal`'s error, the
 archive's), a key is not made and a SCRAM sign-in is refused. A nonce is
 one call where it was an open, a read and a close: 1.0-1.2 us against
 10.7-13.8 on an M1, 200 000 draws three rounds each. A test runs
@@ -845,6 +970,12 @@ is built for; where the file cannot be read either, the seal is refused. Only id
 be secret -- request and trace ids, a hook set's version -- may take the
 clock where the system gives nothing (`crypto::id_u64`, a count of the
 process's own in place of the one that began again).
+
+**The key file is warned of where others can read it** (`seal::open_key`,
+by `conn::open_to`'s rule, `--tls-key`'s): its name and mode on stderr as
+`Key::from_file` reads it, on Unix alone, never a refusal -- a container's
+secret volume mounts its files 0644 -- where whoever reads it opens every
+archive and backup it sealed and seals files that open as theirs.
 
 ## follow
 

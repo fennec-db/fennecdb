@@ -376,16 +376,22 @@ what follows the last colon -- not a host name, refused by the resolver
 node. A record of the directory carries the address alone, so no
 field of it is read another way.
 
-**A sealed frame bound to its file moves a sealed archive at once.** From
+**A sealed file bound to what it is moves a sealed archive at once.** From
 the release that binds it (`docs/design/replication.md#sealed-archives`),
 an archiver restarted on it seals its next image and segment, and `fennec
-backup --key-file` a backup, as version 2 (`FENECSL\x02`, a file id under
-every frame's tag), which a `fennec restore` or `fennec verify` from 0.2.0
-or earlier refuses (`not a sealed file`, `not sealed, where the archive
-is`): its notes say, under their upgrade heading, to upgrade `fennec`
-wherever an archive is restored or verified before any archiver, and that
-files sealed before stay open under their key -- splices of them with it
--- until a new key (`fennec key`) begins a new archive. The same notes say
+backup --key-file` a backup, as version 3 (`FENECSL\x03`: each file under
+a key of its own, its frames chained, its head naming its role, archive,
+tenant and first change), which a `fennec restore` or `fennec verify` from
+0.2.0 or earlier refuses (`not a sealed file`, `not sealed, where the
+archive is`), and a build of main from before it by its number (`sealed
+as version 3, which this binary does not open (it opens 1 and 2): a later
+fennecdb's`): its notes say, under their upgrade heading, to upgrade
+`fennec` wherever an archive is restored or verified before any archiver,
+and that files sealed before stay open under their key -- splices of them
+with it, and any of them read where it is put -- until a new key (`fennec
+key`) begins a new archive. A tool reading sealed files itself reads
+version 3 as `docs/design/replication.md#sealed-archives` lays it out. The
+same notes say
 that a tenant's `github` hook 0.2.0 saved with `key delivery` is kept, its
 events answered 409 until it is set again with `key body`, its other hooks
 armed, and that a single server started with `--hooks` whose file has a
