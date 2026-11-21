@@ -21,6 +21,38 @@ pub const SETS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../fennec-core/test
 /// statement, why). None so far.
 pub const ACCEPTED: &[(&str, &str, &str, &str)] = &[];
 
+/// A request to a release's server file (`server.http.json`) a later build
+/// answers otherwise, on purpose. The release's answer stays in the set;
+/// this build is held to the answer named here instead, so any other
+/// answer is still a difference.
+pub struct AcceptedRequest {
+    pub set: &'static str,
+    pub method: &'static str,
+    pub path: &'static str,
+    /// The request's `Idempotency-Key`, where it sends one.
+    pub key: Option<&'static str>,
+    /// This build's answer.
+    pub status: u16,
+    pub body: &'static str,
+    pub why: &'static str,
+}
+
+pub const ACCEPTED_REQUESTS: &[AcceptedRequest] = &[AcceptedRequest {
+    set: "v0.2.0",
+    method: "POST",
+    path: "/query",
+    key: Some("compat-idempotency-key"),
+    status: 409,
+    body: r#"{"error":"`orders.ref` is unique, and document 4 holds \"o-4\" already"}"#,
+    why: "#677 (train-e): a key is kept as its caller's 16 bytes and the key's own, and \
+          `_idempotency` as v0.2.0 kept it, its `key` text, is made again at the first keyed \
+          write, so a keyed write sent before the upgrade and again after it runs again \
+          (docs/design/http.md#idempotency-keys, compatibility.md's *Changed on purpose \
+          before 1.0*, compatibility.html's upgrade from 0.2.0): v0.2.0 answered the kept \
+          `{\"affected\":1}`, this build runs the put again, which clashes with the row it \
+          wrote",
+}];
+
 /// What this build does with a file a release wrote that it reads
 /// otherwise on purpose (docs/design/compatibility.md, *What 1.x does not
 /// read of 0.2.0's files*).

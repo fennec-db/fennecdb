@@ -16,7 +16,7 @@
 mod answers;
 
 use crate::support::*;
-use answers::{set_name, sets, Scratch};
+use answers::{set_name, sets, Scratch, ACCEPTED_REQUESTS};
 use fennec_core::prelude::Value;
 
 /// `member` of a JSON object, as `server.http.json` holds it.
@@ -95,11 +95,23 @@ fn asked(
             client = client.with_token(token);
         }
         let a = client.ask_with(method, path, text(member(r, "body")), &headers);
-        let (status, answer) = (int(member(r, "status")), text(member(r, "answer")));
+        let key = headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("idempotency-key"))
+            .map(|&(_, v)| v);
+        let accepted = ACCEPTED_REQUESTS
+            .iter()
+            .find(|x| x.set == set && x.method == method && x.path == path && x.key == key);
+        let (status, answer) = match accepted {
+            Some(x) => (x.status, x.body),
+            None => (int(member(r, "status")), text(member(r, "answer"))),
+        };
         if a.status != status || a.body != answer {
             found.push(format!(
-                "{set}/server.fennec ({when}): {method} {path}\n  release: {status} {answer}\n  this build: {} {}",
-                a.status, a.body
+                "{set}/server.fennec ({when}): {method} {path}\n  {}: {status} {answer}\n  this build: {} {}",
+                if accepted.is_some() { "accepted" } else { "release" },
+                a.status,
+                a.body
             ));
         }
     }
