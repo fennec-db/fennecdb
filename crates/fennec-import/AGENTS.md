@@ -68,4 +68,4 @@ file beside a non-empty `-wal` or a hot `-journal`, looked for beside the
 file a link leads to and opened by that one path (`resolved`), or one
 that is no file, is refused (`check_side_files`), the journal opened
 never to wait on a FIFO (`side_opened`). The file's text reaches a
-terminal escaped (`shown`).
+terminal escaped by `peer_text`, as a server's words do (`shown`).

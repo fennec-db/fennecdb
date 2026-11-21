@@ -17,6 +17,7 @@
 //!
 //! Reference: <https://www.sqlite.org/fileformat2.html>
 
+use crate::pg::{peer_text, SHOWN};
 use crate::{Column, Source};
 use fennec_core::error::{Error, Result};
 use fennec_core::value::{DataType, Value};
@@ -708,38 +709,17 @@ impl Absent {
     }
 }
 
-/// How much of a file's text a message shows, in bytes ([`shown`]).
-const SHOWN: usize = 512;
-
 /// Text of the file's -- a table's or a column's name, a default -- made
 /// fit for a terminal, where an error and the summary's warning lines take
-/// it: a control character, and one that reorders a line (the
-/// bidirectional overrides, embeddings, isolates and marks), escaped as
-/// Rust writes it (`\u{1b}`), and no more than [`SHOWN`] bytes kept, the
-/// whole length said after them. A name holding an escape sequence
-/// reached the terminal as one. `fennec_wire::client::peer_text`, which a
-/// PostgreSQL server's words go through and fennec-cli's `said` with them
-/// (G14 F2a), escapes alike; this crate's copy is here until the two meet.
+/// it: escaped and cut as a PostgreSQL server's words are
+/// (`fennec_wire::client::peer_text`, G14 F2a) -- a control character, and
+/// one that reorders a line (the bidirectional overrides, embeddings,
+/// isolates and marks), escaped as Rust writes it (`\u{1b}`), and no more
+/// than [`SHOWN`] bytes kept, the whole length said after them. A name
+/// holding an escape sequence reached the terminal as one. One function
+/// escapes both sources' words, so the two cannot drift apart.
 fn shown(s: &str) -> String {
-    let mut out = String::with_capacity(s.len().min(SHOWN) + 24);
-    for c in s.chars() {
-        if out.len() >= SHOWN {
-            out.push_str(&format!("... ({} bytes)", s.len()));
-            break;
-        }
-        let reorders = matches!(
-            c,
-            '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
-        );
-        if c.is_control() {
-            out.extend(c.escape_debug());
-        } else if reorders {
-            out.extend(c.escape_unicode());
-        } else {
-            out.push(c);
-        }
-    }
-    out
+    peer_text(s.as_bytes(), SHOWN)
 }
 
 /// Keywords that begin a column constraint; the type ends before them.

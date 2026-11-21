@@ -821,8 +821,9 @@ and a default's text are the file writer's, and the summary's warning
 lines and an import's errors carried them as they were: a column named
 `ESC ] 0 ;` retitled the terminal. Each is shown with its control
 characters and the characters that reorder a line escaped as Rust writes
-them, and at most 512 bytes (`shown`, as `fennec_wire::client::peer_text`
-escapes a PostgreSQL server's words, G14 F2a), held by
+them, and at most 512 bytes (`shown`, which is
+`fennec_wire::client::peer_text`, the function a PostgreSQL server's words
+go through, G14 F2a: one escape for both sources), held by
 `a_files_names_reach_the_terminal_escaped` and, through `fennec import`,
 fennec-cli's `a_sqlite_files_names_reach_the_terminal_escaped`.
 
