@@ -8,7 +8,9 @@
 //! 180-4's examples, HMAC to RFC 4231's seven cases, PBKDF2 to RFC 7914's,
 //! and both where a key meets the block to Python's standard library's
 //! (`hmac_pbkdf2_vectors.txt`), ChaCha20, Poly1305 and the AEAD to RFC
-//! 8439's appendix A whole (`rfc8439_vectors.txt`) -- the AEAD, RS256,
+//! 8439's appendix A whole (`rfc8439_vectors.txt`), HChaCha20 to
+//! draft-irtf-cfrg-xchacha's, RS256 at each end of the keys it takes to
+//! OpenSSL's signatures (`rsa_bounds_vectors.txt`) -- the AEAD, RS256,
 //! HMAC, PBKDF2 and ES256 to every case of Project Wycheproof's files
 //! (`tests/wycheproof.rs`, `tests/es256.rs`), and SCRAM's exchange,
 //! fennec-wire's, to RFC 7677's; hand-written crypto is only usable when it
@@ -357,19 +359,51 @@ fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
         init[13 + i] = le32(&nonce[i * 4..]);
     }
     let mut s = init;
-    for _ in 0..10 {
-        quarter(&mut s, 0, 4, 8, 12);
-        quarter(&mut s, 1, 5, 9, 13);
-        quarter(&mut s, 2, 6, 10, 14);
-        quarter(&mut s, 3, 7, 11, 15);
-        quarter(&mut s, 0, 5, 10, 15);
-        quarter(&mut s, 1, 6, 11, 12);
-        quarter(&mut s, 2, 7, 8, 13);
-        quarter(&mut s, 3, 4, 9, 14);
-    }
+    rounds(&mut s);
     let mut out = [0u8; 64];
     for i in 0..16 {
         out[i * 4..i * 4 + 4].copy_from_slice(&s[i].wrapping_add(init[i]).to_le_bytes());
+    }
+    out
+}
+
+/// ChaCha20's 20 rounds over a state.
+#[inline(always)]
+fn rounds(s: &mut [u32; 16]) {
+    for _ in 0..10 {
+        quarter(s, 0, 4, 8, 12);
+        quarter(s, 1, 5, 9, 13);
+        quarter(s, 2, 6, 10, 14);
+        quarter(s, 3, 7, 11, 15);
+        quarter(s, 0, 5, 10, 15);
+        quarter(s, 1, 6, 11, 12);
+        quarter(s, 2, 7, 8, 13);
+        quarter(s, 3, 4, 9, 14);
+    }
+}
+
+/// HChaCha20 (draft-irtf-cfrg-xchacha, 2.2): a key of 256 bits made from
+/// `key` and 128 bits of `input`, as XChaCha20 makes its subkey -- the
+/// input where ChaCha20's counter and nonce stand, its 20 rounds, and the
+/// state's first and last rows with nothing added back. A sealed file's
+/// frames are sealed under the one made from its id (`seal.rs`): a nonce
+/// can then repeat only among one file's frames, never across every file
+/// a key seals. Never of a key ChaCha20 also runs under: a block's
+/// keystream, 32 of its bytes known, is HChaCha20 of that key and the
+/// block's counter and nonce (`seal::FILE_KEYS`).
+pub fn hchacha20(key: &[u8; 32], input: &[u8; 16]) -> [u8; 32] {
+    let mut s = [0u32; 16];
+    s[..4].copy_from_slice(&[0x61707865, 0x3320646e, 0x79622d32, 0x6b206574]);
+    for i in 0..8 {
+        s[4 + i] = le32(&key[i * 4..]);
+    }
+    for i in 0..4 {
+        s[12 + i] = le32(&input[i * 4..]);
+    }
+    rounds(&mut s);
+    let mut out = [0u8; 32];
+    for (i, w) in s[..4].iter().chain(&s[12..]).enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
     }
     out
 }
@@ -828,6 +862,67 @@ mod tests {
         assert!(RsaKey::new(&even, &[1, 0, 1]).is_none(), "an even modulus");
     }
 
+    /// RS256 at each end of the keys `RsaKey::new` takes, and one step past
+    /// each: a modulus of 256 bytes at the least (2041 bits, e = 3) and of
+    /// 1024 at the most (8192 bits, e = 2^64 - 59, the widest exponent),
+    /// taken and verified; 255 bytes (2040 bits), 1025 (8200 bits) and an
+    /// exponent of 65 bits (2^64 + 13) refused, though each signature is
+    /// good. Every key and signature of `rsa_bounds_vectors.txt` (`taken`
+    /// or `refused`, then n, e, the message and its signature, in hex) is
+    /// OpenSSL 3.6's, made by these commands:
+    ///
+    /// ```text
+    /// printf 'fennecdb: RS256 at the ends of the keys it takes' > msg
+    /// openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2041 \
+    ///   -pkeyopt rsa_keygen_pubexp:3 -out low.pem                    # taken
+    /// openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2040 \
+    ///   -pkeyopt rsa_keygen_pubexp:3 -out under.pem                  # refused
+    /// openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
+    ///   -pkeyopt rsa_keygen_pubexp:18446744073709551629 -out wide.pem # refused
+    /// openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:8192 \
+    ///   -pkeyopt rsa_keygen_pubexp:18446744073709551557 -out high.pem # taken
+    /// openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:8200 \
+    ///   -pkeyopt rsa_keygen_pubexp:65537 -out over.pem               # refused
+    /// openssl dgst -sha256 -sign <key>.pem -out <key>.sig msg
+    /// openssl rsa -in <key>.pem -noout -modulus   # n; -text: the exponent
+    /// ```
+    ///
+    /// (8193 bits asked of OpenSSL gave 8192; 8200 is the first size it
+    /// made past 1024 bytes.) Each bound has its reason, so none is
+    /// narrowed: RFC 7518 (3.3) asks 2048 bits at the least, held here in
+    /// whole bytes; a check's work grows with the square of the modulus,
+    /// and whoever serves the JWKS document chooses it; an exponent is a
+    /// `u64` here.
+    #[test]
+    fn rs256_at_each_end_of_the_keys_it_takes() {
+        let mut taken = 0;
+        let mut refused = 0;
+        for line in include_str!("rsa_bounds_vectors.txt").lines() {
+            let f: Vec<&str> = line.split(' ').collect();
+            let (n, e, msg, sig) = (unhex(f[1]), unhex(f[2]), unhex(f[3]), unhex(f[4]));
+            match f[0] {
+                "taken" => {
+                    let key = RsaKey::new(&n, &e).unwrap_or_else(|| panic!("{} bytes", n.len()));
+                    assert!(key.verify_sha256(&msg, &sig), "{} bytes", n.len());
+                    let mut bad = sig.clone();
+                    bad[sig.len() / 2] ^= 1;
+                    assert!(!key.verify_sha256(&msg, &bad));
+                    taken += 1;
+                }
+                _ => {
+                    assert!(
+                        RsaKey::new(&n, &e).is_none(),
+                        "{} bytes, e of {}",
+                        n.len(),
+                        e.len()
+                    );
+                    refused += 1;
+                }
+            }
+        }
+        assert_eq!((taken, refused), (2, 3));
+    }
+
     /// RFC 8439, 2.4.2: ChaCha20 encryption.
     #[test]
     fn chacha20_rfc8439() {
@@ -1116,6 +1211,26 @@ mod tests {
             ran += 1;
         }
         assert_eq!(ran, 5 + 3 + 3);
+    }
+
+    /// draft-irtf-cfrg-xchacha-03, 2.2.1: HChaCha20's vector -- the key
+    /// 00..1f, the input 000000090000004a0000000031415927 -- and the
+    /// subkey it gives, as the draft prints it. One bit of either input
+    /// changed gives another.
+    #[test]
+    fn hchacha20_draft_irtf_cfrg_xchacha() {
+        let key = key32("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+        let input: [u8; 16] = unhex("000000090000004a0000000031415927")
+            .try_into()
+            .unwrap();
+        let want = unhex("82413b4227b27bfed30e42508a877d73a0f9e4d58a74a853c12ec41326d3ecdc");
+        assert_eq!(hchacha20(&key, &input)[..], want[..]);
+        let mut other = input;
+        other[15] ^= 1;
+        assert_ne!(hchacha20(&key, &other)[..], want[..]);
+        let mut k = key;
+        k[0] ^= 1;
+        assert_ne!(hchacha20(&k, &input)[..], want[..]);
     }
 
     /// RFC 8439, appendix A.3: Poly1305's eleven vectors -- an r of zero

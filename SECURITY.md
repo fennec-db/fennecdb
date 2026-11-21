@@ -55,8 +55,10 @@ below. That removes the upstream CVE surface for all but TLS, and the
 desktop app's runtime, and puts the rest in this repository instead.
 
 The primitives we wrote are SHA-256, HMAC-SHA-256, PBKDF2-HMAC-SHA-256,
-ChaCha20-Poly1305, RSA PKCS#1 v1.5 verification with SHA-256, ECDSA P-256
-verification (ES256) and the client half of SCRAM-SHA-256 that
+ChaCha20-Poly1305 and HChaCha20 (each sealed file's own key, under
+HKDF-Expand of the sealing key), RSA PKCS#1
+v1.5 verification with SHA-256, ECDSA P-256 verification (ES256) and the
+client half of SCRAM-SHA-256 that
 `fennec import` signs in to PostgreSQL with. They are in
 `crates/fennec-http/src/crypto.rs` (ES256 in `crypto/p256.rs`) and
 `crates/fennec-wire/src/client.rs`, and are exactly the code that most
@@ -66,7 +68,11 @@ the keys and nonces come from. Each primitive is held to its RFC's vectors
 and, where Project Wycheproof has a file for it, to every case of that file:
 ChaCha20-Poly1305, RSA PKCS#1 v1.5 with SHA-256 at 2048 to 4096 bits, ECDSA
 P-256, HMAC-SHA-256 and PBKDF2-HMAC-SHA-256
-([docs/design/conventions.md](docs/design/conventions.md#secrets-compared)).
+([docs/design/conventions.md](docs/design/conventions.md#secrets-compared));
+HChaCha20 to draft-irtf-cfrg-xchacha's vector, a sealed file's key to a
+vector computed apart from our code and to RFC 5869's HKDF cases, and RS256 at each end of the
+keys it takes, 2041 and 8192 bits, and just past each, to signatures
+OpenSSL made.
 Vectors are no proof: a bug they miss is as welcome a report as any. What a
 browser page seals with `cryptoKey` is WebCrypto's AES-GCM, not ours.
 
@@ -102,9 +108,18 @@ In scope, and worth reporting:
   expected to reject a damaged or hostile file, not to be exploited by it.
 - Query text reaching an identifier or a value without validation, from any
   client surface.
-- An integrity break in a sealed file: a frame that opens in a file it was
-  not sealed into (a version 2 file binds each frame to its file, its place
-  and whether it is the last), or one changed byte that still opens.
+- An integrity break in a sealed file: a file that opens though no one
+  holding its key sealed it -- one built from another file's bytes; a
+  frame that opens in a file it was not sealed into, or after a frame it
+  did not follow; a changed byte that opens to changed contents; or a file
+  sealed now read without a refusal as
+  other than its head says it is -- another role (an image as a backup),
+  another archive or tenant, a segment under another change than its first
+  -- by `fennec restore`, `verify` or `restore --tenants`. A file cut at a
+  frame's edge, or made to look cut there (a frame's length pushed past the
+  end, or the head's version or name's length changed so that its first
+  frame's is),
+  opens as the shorter file by design (below).
 - Studio, the page the server serves: it is served before any token, under a
   strict CSP, and shows stored rows to whoever holds the server token, so a
   script injected through a row it shows would take that token
@@ -301,11 +316,55 @@ These are deliberate. The [server](https://fennecdb.com/docs/server),
   A batch of reads alone holds the read lock: writers wait for it as for
   any read, readers go on beside it.
   An import that stops halfway cannot be rolled back.
-- **A sealed file from 0.1.7 to 0.2.0 is not bound to its file.** Its tags
-  cover a frame's place and whether it is the last, not its file, so a frame of another such file under the
-  same key, at the same place, opens in it. Such a file still opens and a
-  segment of one goes on as one; every file begun now binds its frames to its
-  own. A key that sealed a file of that version should be changed.
+- **A sealed file from 0.1.7 to 0.2.0 is not bound to its file,** nor
+  is one main sealed before 1.0 to what it is. The first's tags cover a
+  frame's place and whether it is the last, so a frame of another such file
+  under the same key, at the same place, opens in it; neither says what it
+  is, so one of any archive or tenant under the key reads where it is put
+  -- but past a line's first file sealed now, where an older image or
+  segment is refused by name: no archiver puts one there, so it is moved
+  out of the archive's directory, and the archive is read without it.
+  That first file is an image of the line's end, which an upgraded
+  archiver seals before it writes on (a node's archiver, each tenant's as
+  it starts), so a restore past the upgrade starts from it or a later
+  image; where a line's first file sealed now is a segment, no older image
+  is read at all. Before that image (the images and segments from before
+  the upgrade, which a restore to a moment before it reads), and anywhere
+  in a line holding no file sealed now (a line a node's archiver moved
+  aside before the upgrade, which takes no write, or one whose files
+  sealed now were deleted), one of another archive or tenant reads as the
+  line's own. Put in before the upgraded archiver seals that image -- no
+  archiver running, or its start not at the line yet -- an older image
+  standing after the line's own last one (of a later change up to the
+  line's end, or of its change taken later), or a segment running on past
+  the line's end, is what the image is assembled from: its rows are sealed
+  into it, and every restore past the upgrade holds them. A line's
+  history sealed so reads anywhere, in place of one sealed now too: read
+  by the archiver going on and by `fennec verify` alone, never by a
+  restore, all it decides is whether the archiver takes a primary's hello
+  as leading from the archive. Such files still open, and
+  nothing is sealed so any more: an archive one began goes on in files
+  sealed now, each under its own key -- made from the key so that nothing
+  an older file's bytes give away makes one -- its frames chained and its
+  head saying what it is. A key that sealed a file of either version
+  should be changed: `fennec key`, and a new archive begun under it.
+- **A sealed archive holds a file to its place, not to its age, and its end
+  can be cut.** Whoever can write where archives are kept can cut a segment
+  at a frame's edge, or delete one: the last segment cut is the archive's
+  shorter end, as a crash leaves it, which `fennec verify` reports with its
+  torn bytes; anywhere else the changes it held are missing, which `verify`
+  refuses, or names as a gap where an image of the archive's ends it. An
+  older copy of a file, or of a whole archive or tenant's line, put back
+  opens as what it was, and so does a line with a later file deleted: a
+  tenant's `presence` gone, the tenant restores as never gone. A backup
+  names no database, so one backup put in another's place opens as itself;
+  nor does one database's archive, so another database's archive, or a
+  node tenant's line, put in its place restores with `fennec restore <dir>`
+  as that database -- which says the tenant a line is sealed as, as
+  `fennec verify` does, and nothing of one database's.
+  Keeping archives and backups in a bucket that keeps versions or locks
+  objects is what holds them to their age. A plain archive promises nothing
+  against whoever can write it.
 - **Nothing in memory is encrypted, and the live file is plain on disk.** The
   indexes (a text index's terms, a hash index's keys, vectors), the documents
   written since the last handover to the file (16 MB, 65 536 records or

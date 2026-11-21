@@ -771,7 +771,7 @@ fn a_file_put_in_place_under_a_running_node_is_armed_by_no_secret_before_it() {
     let plain = std::fs::read(&file).unwrap();
     std::fs::write(
         &sealed,
-        fennec_http::seal::seal_whole(&key, &plain).unwrap(),
+        fennec_http::seal::seal_whole(&key, &fennec_http::seal::Binding::backup(), &plain).unwrap(),
     )
     .unwrap();
     fennec_http::archive::unseal(&sealed, &key, &file).unwrap();
