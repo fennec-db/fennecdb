@@ -65,7 +65,9 @@ its token (`admitted`), a stream's before its head.
 key and nonce, is the system's randomness (`crypto::system_random`, read
 with no descriptor), the seal refused without it: never the clock, which
 only an id may fall back to (`crypto::id_u64`). A file (`FENECSL\x03`) is
-sealed under HChaCha20 of the key and its random id, each frame's tag over
+sealed under HChaCha20 of its random id under HKDF-Expand of the key
+(`seal::FILE_KEYS`), never under the key, whose ChaCha20 keystream in
+versions 1 and 2 gives HChaCha20 of it away; each frame's tag over
 the tag before it (the first's, the head) and its place; its head names
 what it is (`seal::Binding`: role, archive, tenant, its name's numbers),
 which every read holds it to (`Archive::held`), one read unopened
@@ -74,10 +76,11 @@ vouched for by its first frame (`seal::vouched_in`), `began` held and
 length checked, never cast, a longer batch going out in frames of whole
 records; a key file others can read is warned of (`seal::open_key`), never
 refused. Versions 1 (0.1.7 to 0.2.0) and 2 still open, an
-older segment gone on in by none; only a key that sealed none is free of
-their splices: the docs say to change keys. A later version is refused by
-its number, and what a tag covers changes only with the magic's version
-byte.
+older segment gone on in by none, an older image or segment read only
+before a line's first of version 3 (`Archive::older`); only a key that
+sealed none is free of their splices: the docs say to change keys. A
+later version is refused by its number, and what a tag covers changes
+only with the magic's version byte.
 
 ### Quotas and retries
 

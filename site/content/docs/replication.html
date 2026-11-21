@@ -709,8 +709,9 @@ fennec restore today.sealed today.fennec --key-file /secrets/archive.key</pre>
 disk encryption. With a key every file of an archive — its images, its
 segments, its history, a tenant's presence — and a backup file are sealed:
 encrypted and authenticated with ChaCha20-Poly1305 (RFC 8439), each file
-under a key of its own made from the key and the file's random id
-(HChaCha20, as XChaCha20 makes one), a random nonce a frame, and under each
+under a key of its own made from the file's random id (HChaCha20, as
+XChaCha20 makes one) under a key made from yours for that alone
+(HKDF-Expand, RFC 5869), never from yours itself, a random nonce a frame, and under each
 frame's tag the tag of the frame before it, its place in the file and
 whether it is the last. A byte changed, a frame moved or dropped, a frame
 taken from another file sealed with the same key, two runs of a segment's
@@ -749,7 +750,11 @@ shorter file, as the one a crash leaves does — in the last segment it is
 the archive's end, and <code>fennec verify</code> says where that is and
 how much is torn; anywhere else it leaves changes no segment holds, which
 <code>verify</code> refuses, or names as a gap where an image ends it, as it
-names a segment deleted. An older copy of a whole file, or of a whole
+names a segment deleted. A tenant's line copied where one database's
+archive was restores as that database: <code>fennec restore</code> and
+<code>fennec verify</code> of a directory say the tenant its files are
+sealed as (<code>sealed as tenant `acme`'s archive</code>), and one
+database's archive names no database. An older copy of a whole file, or of a whole
 archive or tenant's line, put back opens as what it was, and so does a line
 whose later file was deleted — a tenant's <code>presence</code> gone, the
 tenant restores as never gone: a seal holds a file to its place, not to its
@@ -769,7 +774,10 @@ goes on: its next write begins a segment sealed as files are now, after
 the older one. The older files say nothing of what they are — their frames
 are bound to their places alone — so a frame of another such file sealed
 with the same key could be put in one unnoticed, and an older file of any
-archive sealed with that key reads wherever it is put. Because the older
+archive sealed with that key reads wherever it is put: in an archive
+sealed as files are now from some file on, an older image or segment
+after that file is refused by name, but one before it, or in an archive
+holding nothing sealed now, reads as the archive's own. Because the older
 files still open, that stays true of every key that ever sealed one,
 beside an archive or a backup sealed now. Pruning the older files does not
 end it, and neither does restoring a backup and sealing it again with the

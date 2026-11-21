@@ -760,12 +760,13 @@ at 3 KB, under the write lock, and the browser has no hardware CRC.
 before it** (`FENECSL\x03`, `seal::begin`, `seal::Frames`). A file begins
 with the magic, its id -- 16 bytes of the system's randomness, refused
 without it, as a nonce is -- and what it is (`seal::Binding`, below). Its
-frames are sealed under HChaCha20 of the key and the id
-(`crypto::hchacha20`, draft-irtf-cfrg-xchacha's construction and vector:
-ChaCha20's rounds, no second primitive), and each frame's AAD is the tag of
-the frame before it -- the first frame's, the file's whole head -- then its
-place and whether it is the last. Three things 1.0's security review found
-in version 2 close so:
+frames are sealed under a key of its own, HChaCha20 (`crypto::hchacha20`,
+draft-irtf-cfrg-xchacha's construction and vector) of the id under a key
+made from the key for that alone -- HKDF-Expand's of the key, never the key
+itself (below) -- and each frame's AAD is the tag of the frame before it --
+the first frame's, the file's whole head -- then its place and whether it
+is the last. Three things 1.0's security review found in version 2 close
+so:
 
 - *A frame spliced across a cut.* Version 2's AAD was the file's id, the
   frame's place and its last-ness. A segment's last frames cut while its
@@ -804,6 +805,62 @@ in version 2 close so:
   (`seal::open_appended_to`), and `verify` counts it as the last segment's
   torn tail (`a_batch_goes_out_in_frames_of_whole_records`, at frames of
   256 bytes).
+
+**A file's key is never made under the key itself** (`seal::FILE_KEYS`,
+`Key::of`, `seal::file_key`). Version 3 as first made sealed a file under
+HChaCha20(key, id), the id read from the file, while the same key seals
+version 1 and 2 frames with ChaCha20 itself -- the one finding of 1.0's
+review of version 3 that held it back. A ChaCha20 block is the 20 rounds
+over the constants, the key, the counter c and the nonce N with that state
+added back; HChaCha20 of c || N is the same rounds' words 0-3 and 12-15 with
+nothing added back. So a block's keystream, its words 0-3 less the
+constants and 12-15 less (c, N), is HChaCha20(key, c || N): bytes 0-15 and
+48-63 of a block of a frame whose plaintext was known -- a string of 127
+bytes and more written through the API before an upgrade, or a backup's
+first block, its magic, change number and schema -- gave the key of a
+version 3 file of id c || N, and whoever could write where archives are
+kept, holding a version 1 or 2 file and no key, sealed a whole version 3
+file -- any role, archive, tenant, change and rows -- that `unseal`,
+`restore` and `restore --tenants` took. `an_older_files_keystream_gives_no_file_key`
+does it with a version 2 frame of 64 known bytes: at 4a834627 its forged
+image of tenant `xeno`'s at change 99 opened, holding what the forger
+chose.
+
+- *What a block under the key had for its input, in versions 1 and 2.*
+  Counter 0 under each frame's nonce, Poly1305's one-time key
+  (`aead_tag`), and counters 1 to the frame's length in 64-byte blocks
+  under it, the keystream (`chacha20_xor`), wrapping at 2^32; the nonce
+  12 bytes of the system's randomness -- before 0.2.0, where a descriptor
+  ran out, SHA-256 of the clock and the process: never a value anyone
+  chose. An opener runs block 0 under any nonce a file names, but only for
+  a tag it compares, and opens no keystream before the tag matched: no
+  block leaves but those of frames the key sealed. No code bounded a frame
+  below 2^32 bytes: `seal_frame` cast its length to `u32` and sealed the
+  whole batch, which a record of up to 2^40 bytes could be (`read_message`).
+  A constant input whose counter is 2^32 - 1, the review's way, is out of
+  their reach only because no frame of 256 GiB was ever sealed, and by the
+  nonce's 96 random bits.
+- *What version 3's own keys give away.* A file's key runs ChaCha20, so its
+  frames' known plaintext gives HChaCha20 of the file's key, which makes
+  no key; the key files' keys are made under runs HChaCha20 alone, never
+  ChaCha20, so no keystream gives HChaCha20 under it away.
+- *So that key is HKDF-Expand's* (RFC 5869, 2.3) of the key, `FILE_KEYS`
+  its info, 32 bytes: HMAC-SHA256(key, info || 0x01), the key 32 uniformly
+  random bytes, so no Extract. HMAC-SHA256 shares no rounds with ChaCha20:
+  what ChaCha20 under the key gives away tells nothing of it, whatever a
+  frame's length or nonce, and it is held to RFC 4231's vectors and
+  Wycheproof's already (`the_file_keys_key_is_hkdf_expand` holds the
+  first block to RFC 5869's SHA-256 cases, so a reader's own HKDF makes
+  it). It is made once a key, as the key is read, and a file pays the one
+  HChaCha20 it paid.
+
+The derivation's vector, computed apart from this code in Python -- HMAC
+and HKDF from its standard library, HChaCha20 written from the draft and
+held to its 2.2.1 vector -- is `a_file_key_is_the_one_another_reader_makes`:
+the key 00..1f, the id f0..ff, the info `fennecdb sealed file keys,
+version 3`, the key files' keys are made under
+`b334afb4e085eabd2c6cd511a3ee509a414695c8e2fd8d1f50845a65eb2e47da`, the
+file's key `862970b95cd16be8c85c3e3f58f648a77eafd77a3a3a96a3aa0de9fdf0421c09`.
 
 **A file says what it is, and every read holds it to that**
 (`seal::Binding`, `Archive::learned`, `Archive::held`). The head names,
@@ -889,8 +946,13 @@ A plain archive promises nothing against whoever can write it.
 renamed backup or a node archive's directory moved would break where a
 sealed file opens wherever it is copied -- the head names the numbers a
 name carries, and a tenant, and a reader compares them with the name it
-found; a key derived by HKDF, a second primitive to hold to its vectors
-where HChaCha20 is ChaCha20's own rounds; the frame's place as its nonce,
+found; a file's key from HKDF alone, an HMAC -- four SHA-256 blocks -- a
+file where HChaCha20 is one block's rounds (the key HChaCha20 runs under
+is HKDF-Expand's, made once a key); HChaCha20 of the key itself under an
+input of its own, the review's way -- a counter word of 2^32 - 1, which a
+ChaCha20 block of an older frame reaches only past 256 GiB -- whose
+separation rests on no such frame ever sealed and on the nonces'
+randomness, where HMAC's rests on nothing a frame did; the frame's place as its nonce,
 which a cut sealed again; a tag over the whole file, which an appended
 segment cannot keep without writing it again; an id counted by the archive,
 which two archivers or two backups under one key would share; a sealed
@@ -910,7 +972,26 @@ neither, and going on in an older one sealed writes bound to nothing. Their
 files bind nothing a reader holds them to, so the binding holds only for a
 key that never sealed one: whoever holds version 1 files under a key builds
 others from their frames, and a version 1 or 2 file of any archive under
-the key -- a segment, an image -- reads where it is put. Neither pruning
+the key -- a segment, an image -- reads where it is put, but past a line's
+first file of version 3. There an older image or segment is held to where
+it stands in the archive's order (`Archive::older`): before the first
+image or segment sealed in version 3, by its name -- an image of an
+earlier change, or of its change taken earlier, a segment whose writes all
+come before it -- it reads; at or past it, it is refused by name. Tenant
+xeno's image from before an upgrade, copied into acme's line under a later
+change, and xeno's segment named before acme's first image with its writes
+running on past it, each restored as acme's at 4a834627 (at changes 6 and
+5, `older_files_put_past_a_lines_newer_ones_are_refused`); each is refused
+now, and so is a presence sealed in version 1 or 2, which no archiver
+wrote. What remains: an older file standing before a line's first of
+version 3 -- its history, its images and segments before it, which an
+older file of another line can be put among -- and every file of a line
+with none of version 3, or whose version 3 files were deleted, which
+reads as an older whole line put back does. An upgrade that left an older
+segment holding writes past a version 3 image -- a primary behind its
+archive at the first hello after the upgrade, sending an image of an
+earlier change -- has that segment refused, by name, and its archive is
+read once the segment is moved out. Neither pruning
 the older files nor restoring a backup and sealing it again under the same
 key ends that -- they are wherever they were copied -- so the way out is a
 new key (`fennec key`) sealing everything from then on and a new archive
@@ -931,7 +1012,8 @@ image does not open as a database (`corrupt: invalid fennecdb signature`).
 The binaries reading an archive are upgraded before the one writing it.
 
 *Cost*: a file's own key is one HChaCha20 -- a ChaCha20 block's rounds --
-as it is begun and as it is opened; its head is 66 bytes and its tenant's
+as it is begun and as it is opened, and the key it runs under one
+HMAC-SHA256 a process, as the key is read (`Key::of`); its head is 66 bytes and its tenant's
 name where version 2's was 24, and its first frame's AAD the head, three
 Poly1305 blocks more than version 2's and one more for each 16 bytes of
 the name; every frame after takes 25 bytes of AAD, the tag before and its
@@ -945,7 +1027,10 @@ was discarded): 10 000 frames of 1 KiB, a thousand a file, 1.00; of 1 MiB,
 1.00 (26.1 s against 26.0, some 400 MB/s); and 10 000 files of one 64-byte
 frame each 1.86, 1.0 µs more a file -- the subkey, the longer first AAD
 and, on version 3's side of the loop alone, the system's randomness for
-the id, which version 2 drew as it began too. An archive's files are an
+the id, which version 2 drew as it began too. Measured with version 3's
+first derivation, HChaCha20 under the key itself: a file now runs the same
+HChaCha20 under the key HKDF-Expand made once, in `seal_cost`'s loop as in
+an archive's. An archive's files are an
 image an hour and a segment each 64 MB: nothing a write pays. The seal is
 the `fennec` binary's alone -- `fennec-server` reaches no archive and no
 seal, and fennec-http is not in the browser module -- and its code grew
@@ -985,7 +1070,21 @@ process's own in place of the one that began again).
 by `conn::open_to`'s rule, `--tls-key`'s): its name and mode on stderr as
 `Key::from_file` reads it, on Unix alone, never a refusal -- a container's
 secret volume mounts its files 0644 -- where whoever reads it opens every
-archive and backup it sealed and seals files that open as theirs.
+archive and backup it sealed and seals files that open as theirs. Held
+through the command (`fennec-cli`'s `a_key_file_others_can_read_is_warned_of`:
+`fennec verify --key-file` of a file of mode 0644 says so, of 0600 says
+nothing), so a `Key::from_file` that dropped its log fails it, as the
+seal's own test of `open_key`'s words did not.
+
+**A line read as one database's says whose it is.** Only `--tenants`
+holds a tenant's line to its directory's name (`Line::archive`), so a line
+copied where one database's archive was -- or a node's tenant's moved
+there -- restores with `fennec restore <dir>` as that database: its files
+agree with one another, and a database's archive names no database. `fennec
+verify` and `fennec restore` of such a directory say ``sealed as tenant
+`x`'s archive`` (`Verified::tenant`, `Restored::tenant`,
+`a_tenants_line_restored_alone_says_whose_it_is`); one database's says
+nothing, and SECURITY.md says one database's archive is bound to no name.
 
 ## follow
 
