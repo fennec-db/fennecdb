@@ -1,0 +1,43 @@
+# Hand-written, not captured: lines typed as strace 6 prints them under
+# `strace -f -qq -y -s 0` (the thread's id, the call, each descriptor with
+# its path, a path argument whole), for forms no capture here holds --
+# x86_64's `rename(`, `open(`, `creat(`, `unlink(`, `mkdir(` and `rmdir(`,
+# which aarch64 has not; the descriptor copy_file_range, sendfile and
+# splice write to, a file's and a socket's or a pipe's; msync with MS_SYNC
+# and without, sync, syncfs and sync_file_range; fallocate; opens with
+# O_CREAT and O_TRUNC and one without, ftruncate, linkat, unlinkat (one
+# failing), an fcntl and a pwritev2 that make nothing durable; a file
+# unlinked since it was opened, `(deleted)`. The data directory is
+# /tmp/hw; the stretch counted lies between the second accept4 and the
+# third. tools/test_perf_gate.py reads it.
+40    accept4(3<socket:[100]>, {sa_family=AF_INET, sin_port=htons(40000), sin_addr=inet_addr("127.0.0.1")}, [16], SOCK_CLOEXEC) = 5<socket:[101]>
+41    write(4</tmp/hw/data>, ""..., 8) = 8
+40    accept4(3<socket:[100]>, {sa_family=AF_INET, sin_port=htons(40002), sin_addr=inet_addr("127.0.0.1")}, [16], SOCK_CLOEXEC) = 6<socket:[102]>
+41    rename("/tmp/hw/data.new", "/tmp/hw/data") = 0
+41    copy_file_range(7</tmp/hw/src>, NULL, 8</tmp/hw/dst>, NULL, 100, 0) = 100
+41    sendfile(8</tmp/hw/dst>, 7</tmp/hw/src>, NULL, 200) = 200
+41    sendfile(6<socket:[102]>, 7</tmp/hw/src>, [0] => [300], 300) = 300
+41    splice(9<pipe:[103]>, NULL, 8</tmp/hw/dst>, NULL, 50, 0) = 50
+41    splice(7</tmp/hw/src>, NULL, 9<pipe:[103]>, NULL, 60, 0) = 60
+41    fallocate(8</tmp/hw/dst>, 0, 0, 4096) = 0
+41    msync(0xffff8a2c1000, 4096, MS_SYNC) = 0
+41    msync(0xffff8a2c2000, 4096, MS_ASYNC) = 0
+41    sync() = 0
+41    syncfs(8</tmp/hw/dst>) = 0
+41    sync_file_range(8</tmp/hw/dst>, 0, 4096, SYNC_FILE_RANGE_WAIT_BEFORE|SYNC_FILE_RANGE_WRITE|SYNC_FILE_RANGE_WAIT_AFTER) = 0
+41    write(10</tmp/hw/old (deleted)>, ""..., 10) = 10
+41    fdatasync(10</tmp/hw/old (deleted)>) = 0
+41    openat(AT_FDCWD</tmp/hw>, "made", O_RDWR|O_CREAT|O_TRUNC|O_CLOEXEC, 0644) = 12</tmp/hw/made>
+41    open("/tmp/hw/data", O_RDONLY|O_CLOEXEC) = 13</tmp/hw/data>
+41    creat("/tmp/hw/c", 0644) = 14</tmp/hw/c>
+41    ftruncate(12</tmp/hw/made>, 4096) = 0
+41    fcntl(12</tmp/hw/made>, F_SETFL, O_RDWR|O_NONBLOCK) = 0
+41    pwritev2(12</tmp/hw/made>, [{iov_base=""..., iov_len=16}], 1, 0, RWF_HIPRI) = 16
+41    linkat(AT_FDCWD</tmp/hw>, "made", AT_FDCWD</tmp/hw>, "made.link", 0) = 0
+41    unlinkat(AT_FDCWD</tmp/hw>, "made.link", 0) = 0
+41    unlink("/tmp/hw/c") = 0
+41    mkdir("/tmp/hw/sub", 0755) = 0
+41    rmdir("/tmp/hw/sub") = 0
+41    unlinkat(AT_FDCWD</tmp/hw>, "gone", 0) = -1 ENOENT (No such file or directory)
+40    accept4(3<socket:[100]>, {sa_family=AF_INET, sin_port=htons(40004), sin_addr=inet_addr("127.0.0.1")}, [16], SOCK_CLOEXEC) = 11<socket:[104]>
+41    fdatasync(4</tmp/hw/data>) = 0
