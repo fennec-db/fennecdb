@@ -48,13 +48,16 @@
 # room, and while a step runs both disks are held to a floor
 # (ycsb/env-check.sh): a step the environment cannot take ends the run, its
 # cells written `env_failed` -- the environment's failure, never a pass
-# and never the server's. `--preflight` says what must be on this machine
-# first, which a run checks before it starts anything (ycsb/env-check.sh):
-# nothing is pulled while it runs. Everything it starts is named p51-<its
-# pid>-*, so that a run never removes another's, and removed when it ends,
-# however it ends: `kill <its pid>` stops it cleanly, the measurement under
-# `caffeinate` too (`--self-test` holds the trap to it with toys), the
-# lines written so far kept.
+# and never the server's. `--preflight`, in a window where the network may
+# be used, says what must be on this machine first and builds the server's
+# image from this tree, labelled with the tree's identity; a run checks the
+# same before it starts anything and runs the server from that image's id,
+# refusing one built from another tree (ycsb/env-check.sh): nothing is
+# pulled, fetched or built while it runs. Everything it starts is named
+# p51-<its pid>-*, so that a run never removes another's, and removed when
+# it ends, however it ends: `kill <its pid>` stops it cleanly, the
+# measurement under `caffeinate` too (`--self-test` holds the trap to it
+# with toys), the lines written so far kept.
 set -eu
 cd "$(dirname "$0")/../../.."
 ENV_PREFIX=p51
@@ -69,7 +72,7 @@ case ${1:-} in
     exit
     ;;
 --preflight)
-    env_preflight
+    env_preflight build
     exit
     ;;
 esac
@@ -233,8 +236,10 @@ while [ "$r" -le "$RUNS" ]; do
     env_check "$turn" "$P-data" || env_failed server-docker "$id" "$ENV_WHY"
     ENV_VOLUME="$P-data" ENV_KILL="$P-server $P-server-watch $P-server-look"
     s=0
+    # The server from the image the pre-flight found labelled with this
+    # tree, by its id: a build moving the tag meanwhile changes nothing.
     # shellcheck disable=SC2086
-    guarded $awake "$YCSB" --systems server-docker --docker-name "$P" \
+    guarded $awake "$YCSB" --systems server-docker --docker-name "$P" --image "$ENV_IMAGE" \
         $args --run-id "$id" --out "$OUT" --verify "$VERIFY" --gate "$gate" $probe || s=$?
     [ -s "$gate/refused" ] && refused
     [ -s "$ENV_MARKER" ] && env_failed server-docker "$id" "$(cat "$ENV_MARKER")"
@@ -296,7 +301,7 @@ heap_failed() {
 env_check "$heap_need" "$P-data" || heap_failed "$ENV_WHY"
 ENV_GATE='' ENV_VOLUME="$P-data" ENV_KILL="$P-server $P-server-look"
 # shellcheck disable=SC2086
-guarded $awake "$YCSB" heap --records "$RECORDS" \
+guarded $awake "$YCSB" heap --records "$RECORDS" --image "$ENV_IMAGE" \
     --docker-name "$P" --family ycsb_larger --run-id "${RUN}h" --out "$OUT" --dim "$DIM" ||
     echo "the heap's measurement ended early: its lines say which kinds"
 [ -s "$ENV_MARKER" ] && heap_failed "$(cat "$ENV_MARKER")"

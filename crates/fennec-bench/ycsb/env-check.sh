@@ -53,6 +53,11 @@ env_guard_pid=
 # tag can move. ycsb names the same (`ALPINE` in src/bin/ycsb.rs, a test
 # holding the two to one digest); `--preflight` checks it is here.
 ENV_ALPINE=alpine@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
+# The servers' image: built by `--preflight` alone, labelled with the
+# identity of the tree it was built from (`env_files`), and run by its id
+# once a run found that label to be its own tree's (`env_image`).
+ENV_IMAGE_TAG=fennecdb-ycsb
+ENV_IMAGE=
 # The shell's own directory: what each bounded call started (`env_within`)
 # and a `df`'s answer (ENV_DF, the guard's apart).
 ENV_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ycsb-env.XXXXXX")
@@ -329,11 +334,96 @@ env_stop_guard() {
     return 0
 }
 
-# env_preflight: what a run needs before its first command, each looked at
-# and said -- `ok` or `MISSING` with how to get it -- so that a run fails in
-# words before anything starts, and nothing is pulled while it runs: every
-# `docker run` of the scripts and of ycsb takes `--pull never`, and the
-# image is built with no network. 1 when one is missing.
+# env_files: this tree's identity, which the pre-flight's build labels the
+# image with and every run holds the image to: a hash of every file git
+# tracks, or sees untracked and not ignored, with its path, as its bytes are
+# on disk now (`--no-filters`: what the build's COPY takes) -- but for the
+# harness's own crate, crates/fennec-bench (its sources, and the results and
+# verify logs its runs write, none of which the server is built from),
+# .claude/ (agents' files and worktrees, which .dockerignore leaves out of
+# the build) and untracked files at the root (a run's log, `> soak.log`).
+# Every other file counts, whether the server reads it or not: it embeds
+# studio/ and web/ files, and a list of what it reads would miss the next
+# one; a change to the docs costs a pre-flight, never a stale server. A
+# commit and a dirty flag would not do: a run's own lines dirty the tree,
+# and a dirty tree says nothing of which changes. Nothing when git cannot
+# list the tree (1). Under a second for 1 900 files.
+env_files() {
+    ef_list=$ENV_DIR/tree
+    {
+        git ls-files -z --cached -- . ':(exclude)crates/fennec-bench' ':(exclude).claude' &&
+            git ls-files -z --others --exclude-standard -- '*/*' \
+                ':(exclude)crates/fennec-bench' ':(exclude).claude'
+    } 2>/dev/null | tr '\0' '\n' | while IFS= read -r ef_f; do
+        # A tracked file deleted from the disk is not in the build either.
+        if [ -f "$ef_f" ]; then
+            printf '%s\n' "$ef_f"
+        fi
+    done >"$ef_list"
+    if [ ! -s "$ef_list" ]; then
+        rm -f "$ef_list"
+        return 1
+    fi
+    ef_sum=$(git hash-object --no-filters --stdin-paths <"$ef_list" |
+        paste -d ' ' - "$ef_list" | git hash-object --stdin) || ef_sum=
+    rm -f "$ef_list"
+    [ -n "$ef_sum" ] || return 1
+    echo "$ef_sum"
+}
+
+# env_commit: the commit this tree is at, `-dirty` where a tracked file
+# env_files counts differs from it: the label's words for a person, never
+# what a run is held to.
+env_commit() {
+    ec_c=$(git rev-parse --short=12 HEAD 2>/dev/null) || ec_c=unknown
+    git diff --quiet HEAD -- . ':(exclude)crates/fennec-bench' ':(exclude).claude' 2>/dev/null ||
+        ec_c="$ec_c-dirty"
+    echo "$ec_c"
+}
+
+# env_image TREE: whether the image tagged ENV_IMAGE_TAG is one the
+# pre-flight built from a tree whose identity is TREE (its label
+# com.fennecdb.tree); its id in ENV_IMAGE then, the image every container
+# of the run starts from -- never the tag, which a build from another tree
+# (run-redis.sh's, `make ycsb`'s, another checkout's) can move while a run
+# runs. ENV_WHY says why not. The labels are read by ranging over the
+# config: `.Config.Labels` is an error, not an empty map, on an image that
+# has none.
+env_image() {
+    ENV_IMAGE=
+    ei_out=$ENV_DIR/image
+    env_within 60 "docker image inspect" docker image inspect --format \
+        '{{.Id}}{{range $k, $v := .Config}}{{if eq $k "Labels"}}{{range $l, $w := $v}} {{$l}}={{$w}}{{end}}{{end}}{{end}}' \
+        "$ENV_IMAGE_TAG" >"$ei_out" 2>/dev/null || : >"$ei_out"
+    ei_id=$(awk 'NR == 1 {print $1}' "$ei_out")
+    ei_tree=$(tr ' ' '\n' <"$ei_out" | sed -n 's/^com\.fennecdb\.tree=//p')
+    ei_commit=$(tr ' ' '\n' <"$ei_out" | sed -n 's/^com\.fennecdb\.commit=//p')
+    rm -f "$ei_out"
+    case $ei_id in
+    sha256:*) ;;
+    *)
+        ENV_WHY="no image $ENV_IMAGE_TAG on this machine"
+        return 1
+        ;;
+    esac
+    if [ -z "$ei_tree" ]; then
+        ENV_WHY="$ENV_IMAGE_TAG ($(printf '%.19s' "$ei_id")) carries no tree's label: built by hand or by another script"
+        return 1
+    fi
+    if [ "$ei_tree" != "$1" ]; then
+        ENV_WHY="built from another tree (its files $(printf '%.12s' "$ei_tree") at ${ei_commit:-an unnamed commit}; this tree's $(printf '%.12s' "$1") at $(env_commit))"
+        return 1
+    fi
+    ENV_IMAGE=$ei_id
+    return 0
+}
+
+# env_preflight [build]: what a run needs before its first command, each
+# looked at and said -- `ok` or `MISSING` with how to get it -- so that a
+# run fails in words before anything starts, and nothing is pulled or
+# fetched while it runs: every `docker run` of the scripts and of ycsb
+# takes `--pull never`, the tools build with no network, and a run builds
+# no image. 1 when one is missing.
 #
 #   the rust image the Dockerfile names, by its digest (the tag alone can
 #     move), which ycsb/linux-tools.sh builds the Linux tools in;
@@ -342,10 +432,17 @@ env_stop_guard() {
 #   rustup's toolchain rust-toolchain.toml names, with its targets: a
 #     cargo in this tree installs a missing one from the network;
 #   cargo's registry index, which the tools' build reads offline;
-#   the image `fennecdb-ycsb` built from this tree with no network
-#     (`docker build --network=none`): Docker's build cache must hold the
-#     apk and rustup layers and the cargo registry's mount -- a first build
-#     with the network (`docker build -t fennecdb-ycsb .`) fills it.
+#   the image `fennecdb-ycsb` built from this tree: labelled with this
+#     tree's identity (`env_files`, `env_image`), its id in ENV_IMAGE.
+#
+# With `build` -- `--preflight`, in a window where the network may be used
+# -- an image not labelled with this tree is built, with the network as a
+# plain `docker build` has it, and labelled; a run passes no argument and
+# only looks. Not `docker build --network=none` at every run, as before:
+# BuildKit keys a RUN step's cache by its network mode, so a build with no
+# network never reuses an online build's apk layer and wants the network
+# for it -- the check could not pass on a machine whose online build had
+# just succeeded.
 env_preflight() {
     pf_bad=0
     pf() {
@@ -383,12 +480,38 @@ env_preflight() {
     pf_s=0
     [ -d "${CARGO_HOME:-$HOME/.cargo}/registry/index" ] || pf_s=1
     pf "$pf_s" "cargo's registry index" "build the workspace once on this machine"
-    if [ "$pf_bad" = 0 ]; then
+    pf_what="$ENV_IMAGE_TAG built from this tree"
+    pf_how="run --preflight where the network may be used, which builds it"
+    pf_tree=$(env_files) || pf_tree=
+    if [ -z "$pf_tree" ]; then
+        pf 1 "$pf_what" "git cannot list this tree's files: run from a git checkout"
+    elif env_image "$pf_tree"; then
+        pf 0 "$pf_what (its files $(printf '%.12s' "$pf_tree")), run as $(printf '%.19s' "$ENV_IMAGE")"
+    elif [ "${1:-}" != build ]; then
+        pf 1 "$pf_what" "$ENV_WHY: $pf_how"
+    elif [ "$pf_bad" != 0 ]; then
+        # Not built while something above is missing: the build would
+        # fetch the rust image itself.
+        pf 1 "$pf_what" "$ENV_WHY: not built while a line above is MISSING"
+    else
+        echo "  building $ENV_IMAGE_TAG from this tree (its files $(printf '%.12s' "$pf_tree")), the network allowed: $ENV_WHY"
         pf_s=0
         env_within 1800 "the image's build" \
-            docker build --network=none -q -t fennecdb-ycsb . >/dev/null 2>&1 || pf_s=1
-        pf "$pf_s" "fennecdb-ycsb built from this tree with no network" \
-            "Docker's build cache lacks a layer or the cargo registry: docker build -t fennecdb-ycsb . once, where the network may be used"
+            docker build -q --label "com.fennecdb.tree=$pf_tree" \
+            --label "com.fennecdb.commit=$(env_commit)" -t "$ENV_IMAGE_TAG" . \
+            >"$ENV_DIR/build" 2>&1 || pf_s=1
+        if [ "$pf_s" != 0 ]; then
+            pf 1 "$pf_what" "docker build failed, its last lines below; fill what it lacked and run --preflight again"
+            tail -n 20 "$ENV_DIR/build" | sed 's/^/    | /'
+        elif [ "$(env_files || :)" != "$pf_tree" ]; then
+            # The label says the files as they were when the build began.
+            pf 1 "$pf_what" "a file changed while it built: run --preflight again"
+        elif env_image "$pf_tree"; then
+            pf 0 "$pf_what (its files $(printf '%.12s' "$pf_tree")), run as $(printf '%.19s' "$ENV_IMAGE"), built now"
+        else
+            pf 1 "$pf_what" "$ENV_WHY, after its build: run --preflight again"
+        fi
+        rm -f "$ENV_DIR/build"
     fi
     return "$pf_bad"
 }
@@ -401,7 +524,9 @@ env_preflight() {
 # alone leaves running -- and a line to its --progress file unless
 # TOY_SILENT is set; it lists its --kept file's first volume, `<name>-data`.
 # The toy docker's `df` never ends while DIR/hang-df is there, its pid in
-# DIR/hung.pid.
+# DIR/hung.pid; its `fennecdb-ycsb` is DIR/image, the id and labels as
+# `env_image` reads them, which its `build` writes from the labels it is
+# given.
 env_toys() {
     mkdir -p "$1/bin" "$1/cargo/registry/index"
     cat >"$1/bin/docker" <<'TOY'
@@ -428,6 +553,24 @@ inspect)
     *OOMKilled*) echo false ;;
     *ExitCode*) echo 0 ;;
     esac
+    ;;
+image)
+    # Every image by its digest is here; fennecdb-ycsb only once built.
+    case "$*" in
+    *fennecdb-ycsb*)
+        [ -s "$TOY_DIR/image" ] || exit 1
+        cat "$TOY_DIR/image"
+        ;;
+    esac
+    ;;
+build)
+    labels=''
+    while [ $# -gt 0 ]; do
+        [ "$1" = --label ] && labels="$labels $2"
+        shift
+    done
+    echo "sha256:toybuilt$labels" >"$TOY_DIR/image"
+    echo sha256:toybuilt
     ;;
 esac
 exit 0
@@ -509,8 +652,13 @@ env_toy_wait() {
     return 0
 }
 
-# env_self_test SCRIPT SOAK ARGS...: SCRIPT's trap and guard held to what
-# they promise, with toys and no Docker (`env_toys`). Interrupted in the
+# env_self_test SCRIPT SOAK ARGS...: SCRIPT's pre-flight, trap and guard
+# held to what they promise, with toys and no Docker (`env_toys`). Its
+# `--preflight` builds the image once, labelled with this tree; a run
+# starts its servers from that image by its id and builds nothing, and
+# refuses one labelled for another tree, starting nothing (so a file
+# changed outside crates/fennec-bench while it runs fails it: every run
+# hashes the tree as it is then). Interrupted in the
 # middle of a step run under `caffeinate`, the script stops the
 # measurement itself, not only its parent; where SOAK is not empty, it
 # leaves the volumes the soak said to keep and removes its others, and a
@@ -540,11 +688,23 @@ env_self_test() {
             st_bad=1
         fi
     }
+    # The pre-flight, with no image yet: built, labelled with this tree.
+    env_toy_run "$st_dir" "$st_script" --preflight
+    st_s=0
+    env_toy_ended 60 "the pre-flight's end" || st_s=1
+    [ "$st_rc" = 0 ] || st_s=1
+    st_files=$(env_files) || st_s=1
+    [ "$(grep -c '^build ' "$st_dir/docker.log")" = 1 ] || st_s=1
+    grep -q " com.fennecdb.tree=$st_files" "$st_dir/image" || st_s=1
+    st "$st_s" "the pre-flight built the image, labelled with this tree's files"
     # Interrupted while its toy measures.
     env_toy_run "$st_dir" "$st_script" "$@"
     env_toy_wait 60 "the toy's first line" test -s "$st_dir/toy.out"
     st_s=$?
     st "$st_s" "the step started under caffeinate"
+    st_s=0
+    grep -q -- '--image sha256:toybuilt' "$st_dir/ycsb.log" || st_s=1
+    st "$st_s" "the run's servers start from the image by its id"
     kill -TERM "$toy_run" 2>/dev/null
     wait "$toy_run" 2>/dev/null
     toy=$(cat "$st_dir/toy.pid" 2>/dev/null)
@@ -589,6 +749,25 @@ env_self_test() {
     env_toy_left || st_s=1
     st "$st_s" "interrupted while its guard was in a docker call, nothing it started left running"
     rm -f "$st_dir/toy.pid" "$st_dir/hung.pid" "$st_dir/hang-df"
+    # None of the runs built: the pre-flight's build is the only one.
+    st_s=0
+    [ "$(grep -c '^build ' "$st_dir/docker.log")" = 1 ] || st_s=1
+    st "$st_s" "no run built an image"
+    # An image labelled for another tree: refused in words, nothing built,
+    # nothing measured.
+    echo "sha256:toyother com.fennecdb.commit=0123456789ab com.fennecdb.tree=0123456789abcdef0123456789abcdef01234567" \
+        >"$st_dir/image"
+    : >"$st_dir/ycsb.log"
+    rm -f "$st_dir/toy.out"
+    env_toy_run "$st_dir" "$st_script" "$@"
+    st_s=0
+    env_toy_ended 60 "the refused run's end" || st_s=1
+    [ "$st_rc" = 2 ] || st_s=1
+    grep -q 'MISSING  fennecdb-ycsb built from this tree: built from another tree' "$st_dir/run.log" || st_s=1
+    [ "$(grep -c '^build ' "$st_dir/docker.log")" = 1 ] || st_s=1
+    [ -s "$st_dir/ycsb.log" ] && st_s=1
+    [ -s "$st_dir/toy.out" ] && st_s=1
+    st "$st_s" "an image labelled for another tree refused, nothing built or started"
     env_toy_stop "$st_dir"
     env_end
     trap - EXIT INT TERM
@@ -598,6 +777,21 @@ env_self_test() {
 
 env_toy_gone() {
     [ -z "$1" ] || ! kill -0 "$1" 2>/dev/null
+}
+
+# env_toy_ended SECS WHAT: the toy run's end, SECS at the most, its exit
+# status in st_rc; 1 and WHAT said where it did not end -- a run that went
+# on to measure, which is then stopped as `kill <its pid>` does, with
+# everything under it, rather than waited for.
+env_toy_ended() {
+    st_rc=0
+    if env_toy_wait "$1" "$2" env_toy_gone "$toy_run"; then
+        wait "$toy_run" 2>/dev/null || st_rc=$?
+        return 0
+    fi
+    st_rc=143
+    env_toy_left
+    return 1
 }
 
 # Whether PID runs: a zombie, ended and not yet waited for, does not.

@@ -236,18 +236,40 @@ written `env_failed 1`: the environment's failure, counted in the report's
 `env` column, never a pass and never `failed`.
 
 What a run needs is looked at before its first command, and nothing is
-pulled while it runs (`--preflight`, `env_preflight`, both scripts): the
+pulled, fetched or built while it runs (`env_preflight`, both scripts): the
 rust image the Dockerfile names, by its digest -- a tag can move -- which
 the Linux tools build in; `alpine`, by its digest too (`ENV_ALPINE` in the
 scripts, `ALPINE` in `ycsb`, a test holding them to one), which the looks,
 verifies, backups and `df` run in; rustup's toolchain and the targets rust-toolchain.toml names,
 which a cargo in the tree would fetch; cargo's registry index, which the
-tools' build reads offline; and `fennecdb-ycsb` built from the tree with no
-network (`docker build --network=none`), which holds Docker's build cache to
-the apk and rustup layers and the cargo registry's mount. Each is said `ok`
-or `MISSING` with how to get it, and a run with one missing starts nothing.
-Every `docker run` of the scripts and of `ycsb` takes `--pull never`; the
-tools build with `--network none`, the host's `ycsb` with `--offline`.
+tools' build reads offline; and `fennecdb-ycsb` built from this tree. Each
+is said `ok` or `MISSING` with how to get it, and a run with one missing
+starts nothing. Every `docker run` of the scripts and of `ycsb` takes
+`--pull never`; the tools build with `--network none`, the host's `ycsb`
+with `--offline`.
+
+The image is built by `--preflight` alone, in a window where the network
+may be used, as a plain `docker build` builds it, and labelled with the
+tree's identity (`com.fennecdb.tree`, `env_files`): a hash of every file git
+tracks or sees untracked and unignored, path and bytes as on disk, but the
+harness's own crate (its results and logs are what a run writes, and the
+server is built from none of it), `.claude/` (out of the build context) and
+the root's untracked files (a run's log). Every other file counts, the docs
+too -- the server embeds `studio/` and `web/` files, and a list of what it
+reads would miss the next -- so a change anywhere else costs a pre-flight,
+never a stale server; a commit and a dirty flag would not do, since a run's
+own lines dirty the tree. A run builds nothing: it computes the same hash,
+refuses an image labelled with another ("built from another tree ...: run
+--preflight"), none, or one built without the label (run-redis.sh's, `make
+ycsb`'s), and starts every server from the matching image by its id
+(`--image sha256:...`), so a build from another checkout moving the tag
+while it runs changes nothing it starts. Rejected: building the image at
+each run with `docker build --network=none`, which held Docker's build cache
+to the online build's layers. BuildKit keys a `RUN` step's cache by its
+network mode, so an offline build never reuses an online build's apk layer
+and goes to the network for it: the check failed on the machine whose
+online build had just succeeded (Docker Desktop 29.2.1, 2026-11-22).
+
 Every container, volume and network a run makes carries its process id
 (`p51-<pid>-server`), so that a run never removes another's; the trap stops
 the step's own children before the step -- `caffeinate -i` runs the
@@ -264,7 +286,10 @@ so a stopped one leaves no long `sleep`. `--self-test` holds it to that
 with toys and no Docker (`env_self_test`), in CI's clippy job: interrupted
 under `caffeinate`, and in a docker call that never ends -- its own
 shell's before a step, its guard's during one -- every process under the
-script then is gone within 30 s.
+script then is gone within 30 s; and the pre-flight's build labels the
+image with the tree's hash, a run starts its servers by the image's id and
+builds nothing, and an image labelled for another tree is refused, nothing
+built or started.
 
 In process, the verify logs are the measured process's own memory, under
 the limit: `--verify-max` (half the limit, from the script) ends a cell's

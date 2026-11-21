@@ -30,10 +30,13 @@
 # the two bounds are read against, and is run at each soak's end. The runs
 # are named <RUN>-s<sync>-peak and <RUN>-s<sync>-<fraction>.
 #
-# `--preflight` says what must be on this machine before a run -- the
-# images by digest, the toolchain, the registry, Docker's build cache, the
-# image built with no network -- and every run checks it first, failing in
-# words: nothing is pulled while one runs. Refused before anything starts:
+# `--preflight`, in a window where the network may be used, says what must
+# be on this machine before a run -- the images by digest, the toolchain,
+# the registry -- and builds the server's image from this tree, labelled
+# with the tree's identity; every run checks the same first, the image by
+# that label, and starts its servers from that image's id, failing in words
+# where one is missing or the image was built from another tree: nothing is
+# pulled, fetched or built while one runs. Refused before anything starts:
 # --memory not under the file's size, a Docker VM without room for the
 # server and its replica, less free disk than the run needs (printed), a
 # load average over QUIET_LOAD (printed). Before the peak and each fraction
@@ -67,7 +70,7 @@ case ${1:-} in
     exit
     ;;
 --preflight)
-    env_preflight
+    env_preflight build
     exit
     ;;
 esac
@@ -206,8 +209,12 @@ echo "$(date '+%F %H:%M') the tools"
 step "$LINUX_TOOLS" "$NAME"
 step "$cargo" build --release --offline -q -p fennec-bench --bin ycsb --no-default-features
 
+# The servers start from the image the pre-flight found labelled with this
+# tree, by its id: a build from another tree moving the tag meanwhile
+# changes nothing a run starts.
 common="--sync $sync --records $RECORDS --memory $MEMORY --threads $THREADS
     --subscriptions $SUBSCRIPTIONS --tools $NAME-tools --out $OUT --kept $KEPT
+    --image $ENV_IMAGE
     --progress $ENV_PROGRESS --loss-ms $LOSS_MS --restart-max $RESTART_MAX"
 
 # The environment failed run $1 (cell $2): marked so, and the run ends.
