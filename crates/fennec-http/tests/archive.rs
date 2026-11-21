@@ -1285,7 +1285,8 @@ fn a_sealed_archive_restores_with_its_key_and_nothing_else() {
 /// open as they did: verified, restored and unsealed, the wrong key
 /// refused. Files the archive takes after them are version 3 beside them;
 /// a segment an older archiver began is gone on in by none, its tail cut
-/// short cut off, and the next write begins a segment of version 3.
+/// short cut off, and the next write begins a segment of version 3, after
+/// an image of version 3 of the line's end.
 #[test]
 fn older_sealed_archives_still_open() {
     use fennec_http::seal::{self, Frames, Key};
@@ -1384,12 +1385,23 @@ fn older_sealed_archives_still_open() {
     }
     // Read afresh: what an archive is, from its files, is learned once.
     let b = Archive::with_key(&live, Some(key.clone())).unwrap();
+    let older_end = p.seq();
     let archiver = follow();
     for i in 5..10 {
         p.exec(&format!("put c {{x: {i}}}"));
         reached(&b, &probe, p.seq());
     }
     archiver.finish();
+    // The line's first file of version 3 is an image of its end as the
+    // older archiver left it, sealed as the archiver went on and before its
+    // first segment of version 3: an older image is read only before it.
+    let images = named(&live, "image-");
+    assert_eq!(images.len(), 2, "{images:?}");
+    let upgrade = seal::bound_in(&std::fs::read(&images[1]).unwrap()).unwrap();
+    assert_eq!(
+        (upgrade.role, upgrade.change),
+        (seal::Role::Image, older_end)
+    );
     let segments = named(&live, "writes-");
     assert_eq!((segments.len(), &segments[0]), (2, &segment));
     let bytes = std::fs::read(&segment).unwrap();

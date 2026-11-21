@@ -1751,3 +1751,252 @@ fn older_files_put_past_a_lines_newer_ones_are_refused() {
         .unwrap();
     assert_eq!(r.tenant.as_deref(), Some("acme"));
 }
+
+/// A line's files, sealed again as an archiver before version 3 left them:
+/// version 2, an image and the history whole, a segment's frames appended.
+fn made_older(key: &fennec_http::seal::Key, line: &Path) {
+    use fennec_http::seal;
+    for path in listed(line, "") {
+        let bytes = std::fs::read(&path).unwrap();
+        if !seal::is_sealed(&bytes) {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let whole = !name.starts_with("writes-");
+        let plain = match whole {
+            true => seal::open_whole(key, &bytes).unwrap().0,
+            false => seal::open_appended(key, &bytes).unwrap().plain,
+        };
+        std::fs::write(&path, sealed_v2(key, &plain, whole)).unwrap();
+    }
+}
+
+/// An image of a database at change `at` whose notes are all `forged`,
+/// sealed as an archiver before version 3 sealed one: any image or backup
+/// of that change under the key, another tenant's or database's.
+fn forged_at(key: &fennec_http::seal::Key, at: u64) -> Vec<u8> {
+    let mut db = Database::new();
+    let run = |db: &mut Database, sql: &str| {
+        db.execute(&fennec_ql::parse_one(sql).unwrap()).unwrap();
+    };
+    run(&mut db, "create collection notes (title text, n int @hash)");
+    let mut i = 0;
+    while db.change_seq() < at {
+        run(
+            &mut db,
+            &format!("put notes {{title: \"forged {i}\", n: {}}}", 100 + i),
+        );
+        i += 1;
+    }
+    assert_eq!(db.change_seq(), at);
+    sealed_v2(key, &db.snapshot(), true)
+}
+
+/// Tenant acme's line, archived by an archiver before version 3 -- its
+/// image, a segment after it and its history sealed in version 2, as that
+/// archiver left them -- and gone on in by an upgraded one through two
+/// writes.
+struct Upgraded {
+    d: PathBuf,
+    acme: Arc<Tenant>,
+    root: PathBuf,
+    line: PathBuf,
+    /// The change the line's older files end at, which the upgraded
+    /// archiver went on from.
+    upgraded: u64,
+}
+
+fn upgraded_line(tag: &str, key: &fennec_http::seal::Key) -> Upgraded {
+    let d = scratch(tag);
+    let n = node(&d.join("node"), None);
+    let acme = made(&n, "acme", 3);
+    let root = d.join("root");
+    let line = root.join("acme");
+    let a = sealed_archiver(&root, &n.url, key);
+    sealed_reached(&line, key, seq(&acme));
+    for i in 3..6 {
+        exec(&acme, &format!("put notes {{title: \"acme {i}\", n: {i}}}"));
+    }
+    sealed_reached(&line, key, seq(&acme));
+    a.finish();
+    made_older(key, &line);
+    let upgraded = seq(&acme);
+    let a = sealed_archiver(&root, &n.url, key);
+    for i in 6..8 {
+        exec(&acme, &format!("put notes {{title: \"acme {i}\", n: {i}}}"));
+    }
+    sealed_reached(&line, key, seq(&acme));
+    a.finish();
+    Upgraded {
+        d,
+        acme,
+        root,
+        line,
+        upgraded,
+    }
+}
+
+/// An image sealed before version 3 put among a line's under a time no
+/// image of the line's has.
+const LATE: u64 = 9_999_999_999_999;
+
+/// A restore's notes, or why there are none; and in words, how many of
+/// them are forged.
+type Outcome = std::result::Result<Rows, String>;
+
+fn said(r: &Outcome) -> String {
+    match r {
+        Ok(rows) => {
+            let forged = rows
+                .iter()
+                .filter(|r| format!("{:?}", r.1).contains("forged"))
+                .count();
+            format!("restored, {forged} of its {} notes forged", rows.len())
+        }
+        Err(e) => e.clone(),
+    }
+}
+
+/// 1.0's second review of version 3: an archiver upgraded onto a line an
+/// older one sealed began the line's first file of version 3 as a segment,
+/// so an image sealed before version 3 -- another tenant's, or another
+/// database's under the key -- of a change after the line's last image and
+/// up to that segment, copied in under a later time, stood before it in
+/// the archive's order and was read as the line's: every restore past the
+/// upgrade started from it, and the first image the archiver took after
+/// sealed it in. The upgraded archiver now seals an image of the line's
+/// end before its first segment of version 3: an older image of that
+/// change under a later time is refused by name, naming the way out, and
+/// one of an earlier change stands before that image, never a restore's
+/// base past it.
+#[test]
+fn an_older_image_put_in_after_an_upgrade_is_no_restores_base() {
+    use fennec_http::seal::{self, Key};
+    let key = Key::from_hex(&"ab".repeat(32)).unwrap();
+    let u = upgraded_line("upgrade-image", &key);
+    let (end, upgraded) = (seq(&u.acme), u.upgraded);
+    let acme_rows = rows(&u.acme.db.read().unwrap(), "get notes");
+    let of_acme = |out: &str| -> Outcome {
+        let done = node_archive::restore_all(&u.root, &u.d.join(out), Target::End, Some(&key));
+        match done
+            .unwrap()
+            .into_iter()
+            .find(|(t, _)| t == "acme")
+            .unwrap()
+            .1
+        {
+            Restoring::Restored(..) => {
+                let db = fennec_core::fs::open(u.d.join(out).join("acme.fennec")).unwrap();
+                Ok(rows(&db, "get notes"))
+            }
+            other => Err(format!("{other:?}")),
+        }
+    };
+    let image_at = |change: u64| u.line.join(format!("image-{change:020}-{LATE:013}.fennec"));
+
+    // Another database's image of the change the older files end at, and
+    // of the change before it, each under a later time.
+    let put = image_at(upgraded);
+    std::fs::write(&put, forged_at(&key, upgraded)).unwrap();
+    let at_end = of_acme("at-end");
+    std::fs::remove_file(&put).unwrap();
+    let put = image_at(upgraded - 1);
+    std::fs::write(&put, forged_at(&key, upgraded - 1)).unwrap();
+    let before_end = of_acme("before-end");
+    let named_out = matches!(&at_end, Err(e)
+        if e.contains(&format!("image-{upgraded:020}-{LATE:013}"))
+            && e.contains("sealed before version 3, at or past")
+            && e.contains("Move it out of the archive's directory"));
+    assert!(
+        named_out && before_end.as_ref() == Ok(&acme_rows),
+        "an older image of the change the upgrade went on from: {}; of the change before \
+         it: {}",
+        said(&at_end),
+        said(&before_end)
+    );
+    let held = Archive::of_tenant(&u.line, Some(key.clone()), "acme").unwrap();
+    assert_eq!(held.verify().unwrap().last, end);
+    std::fs::remove_file(&put).unwrap();
+
+    // Its first file of version 3 is that image, of the change its older
+    // segment ends at, and its first segment of version 3 the one after.
+    let bound = |prefix: &str| -> Vec<(seal::Role, u64)> {
+        let read = |p: &PathBuf| seal::bound_in(&std::fs::read(p).unwrap());
+        let files = listed(&u.line, prefix);
+        files
+            .iter()
+            .filter_map(read)
+            .map(|b| (b.role, b.change))
+            .collect()
+    };
+    assert_eq!(bound("image-"), vec![(seal::Role::Image, upgraded)]);
+    assert_eq!(bound("writes-"), vec![(seal::Role::Segment, upgraded + 1)]);
+}
+
+/// Where a line's first file of version 3 is a segment -- the image an
+/// upgraded archiver sealed before it let go of by `prune`, which lets go
+/// of every image before it first, or a line no archiver of this version
+/// began with an image -- no image sealed before version 3 is read: one
+/// of the change before that segment, put in, was the base of a restore to
+/// a moment the line no longer held, which was refused, that segment's
+/// writes read on top of it.
+#[test]
+fn an_older_image_is_read_only_before_an_image_of_version_3() {
+    use fennec_http::seal::Key;
+    let key = Key::from_hex(&"ab".repeat(32)).unwrap();
+    let u = upgraded_line("pruned-upgrade", &key);
+    let (end, upgraded) = (seq(&u.acme), u.upgraded);
+    let held = Archive::of_tenant(&u.line, Some(key.clone()), "acme").unwrap();
+    assert_eq!(held.consolidate().unwrap(), Some(end));
+    held.prune(0, u64::MAX / 2).unwrap();
+    assert_eq!(listed(&u.line, "image-").len(), 1);
+    let to = |out: &str| -> Outcome {
+        let out = u.d.join(format!("{out}.fennec"));
+        Archive::of_tenant(&u.line, Some(key.clone()), "acme")
+            .and_then(|a| a.restore(&out, Target::Change(upgraded + 1)))
+            .map(|_| rows(&fennec_core::fs::open(&out).unwrap(), "get notes"))
+            .map_err(|e| e.to_string())
+    };
+    let pruned = to("pruned");
+    assert!(
+        matches!(&pruned, Err(e) if e.contains("no image at or before")),
+        "{}",
+        said(&pruned)
+    );
+    let name = format!("image-{upgraded:020}-{LATE:013}.fennec");
+    std::fs::write(u.line.join(&name), forged_at(&key, upgraded)).unwrap();
+    let past = to("past-pruned");
+    assert!(
+        matches!(&past, Err(e) if e.contains(&name)
+            && e.contains("an older image is read only before an image of version 3")),
+        "an older image put before the line's first segment of version 3: {}",
+        said(&past)
+    );
+}
+
+/// A presence sealed in version 1 or 2, which no archiver wrote -- before
+/// version 3 a presence was plain -- is refused by name, in words joined as
+/// written: they lacked a line's continuation, 22 spaces inside them, and
+/// no test read them.
+#[test]
+fn a_presence_sealed_before_version_3_is_refused_in_its_words() {
+    use fennec_http::seal::Key;
+    let key = Key::from_hex(&"ab".repeat(32)).unwrap();
+    let d = scratch("older-presence");
+    let line = d.join("acme");
+    std::fs::create_dir_all(&line).unwrap();
+    let presence = line.join("presence");
+    std::fs::write(&presence, sealed_v2(&key, b"gone 5\n", true)).unwrap();
+    let e = Archive::of_tenant(&line, Some(key), "acme")
+        .unwrap()
+        .presence()
+        .unwrap_err();
+    assert_eq!(
+        e.to_string(),
+        format!(
+            "{}: a presence sealed before version 3, which no archiver wrote: before it, a \
+             presence was plain",
+            presence.display()
+        )
+    );
+}
