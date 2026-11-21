@@ -45,7 +45,7 @@ pub fn beside(what: &str, db: &Arc<RwLock<Database>>) {
             let t0 = Instant::now();
             let mut nodes = 16;
             loop {
-                let Some(db) = weak.upgrade() else {
+                let Some(db) = crate::held::beside(&weak) else {
                     return;
                 };
                 let mut g = crate::held::write(&db);
@@ -123,7 +123,7 @@ pub fn keep_held(what: &str, db: &Arc<RwLock<Database>>, bytes: Option<Bytes>) {
                 // serves.
                 let memory = fennec_core::engine::memory(&policy);
                 for (what, db, bytes) in kept {
-                    if let Some(db) = db.upgrade() {
+                    if let Some(db) = crate::held::beside(&db) {
                         let quota = bytes.map_or(0, |b| b());
                         let policy = quota_policy(&db, quota).unwrap_or(policy);
                         compact(&what, &db, &policy, memory);
@@ -145,7 +145,7 @@ pub fn keep_held(what: &str, db: &Arc<RwLock<Database>>, bytes: Option<Bytes>) {
                     kept.clone()
                 };
                 for (what, db, _) in kept {
-                    if let Some(db) = db.upgrade() {
+                    if let Some(db) = crate::held::beside(&db) {
                         save(&what, &db);
                     }
                 }

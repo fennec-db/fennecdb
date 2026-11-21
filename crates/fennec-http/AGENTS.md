@@ -375,4 +375,8 @@ Never sync them in turn on one thread, nor look at one under a lock a
 writer may hold (`try_read`); one still syncing is passed over, and a
 sync's panic stops the node through its one shutdown. The pass in turn
 (`sync_dirty`) is for a caller that must see the writes down first:
-Windows' shutdown.
+Windows' shutdown. Nothing waits on a lock the shutdown keeps: it ends the
+syncs first (`Syncs::close`, one under way waited for) and marks each
+database before its lock, which the threads beside the queries pass over
+(`held::beside`); a tenant dropped after it syncs nothing
+(`kept_to_exit`), its registry's drop saying so once.

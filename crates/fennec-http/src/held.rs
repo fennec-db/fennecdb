@@ -9,7 +9,49 @@
 pub use fennec_abi::held::Writing;
 use fennec_core::engine::Prepared;
 use fennec_core::prelude::*;
-use std::sync::{RwLock, RwLockReadGuard};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, Weak};
+
+/// The databases whose write lock a node's shutdown keeps to the process's
+/// exit (`Tenants::shutdown`), never let go. Kept as `Weak`s, which keep
+/// the allocation: no database made later at one's address is taken for
+/// it.
+static KEPT: Mutex<Vec<Weak<RwLock<Database>>>> = Mutex::new(Vec::new());
+/// Whether [`KEPT`] was ever written: a process that never shut a node
+/// down takes no lock to look.
+static ANY_KEPT: AtomicBool = AtomicBool::new(false);
+
+/// Notes that the shutdown keeps `db`'s write lock to the exit, before it
+/// takes it.
+pub(crate) fn kept_to_exit(db: &Arc<RwLock<Database>>) {
+    let mut kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+    kept.retain(|w| w.strong_count() > 0);
+    kept.push(Arc::downgrade(db));
+    ANY_KEPT.store(true, Ordering::Release);
+}
+
+/// `db` for a thread working beside the queries -- the compacter, the graph
+/// keeper, the sweeper, a linking or warming thread -- unless it is gone or
+/// its lock is kept to the exit ([`kept_to_exit`]). That lock is never let
+/// go: in a process going on past the shutdown -- a test's -- with the
+/// database still held, by a request or a follower parked at it, the
+/// process's one compacter and one sweeper each parked behind it for good.
+/// A pass already holding the database as the shutdown took the lock waits
+/// for it still, as until a server's exit: let go, the lock would let it
+/// write after the final sync.
+pub fn beside(db: &Weak<RwLock<Database>>) -> Option<Arc<RwLock<Database>>> {
+    let db = db.upgrade()?;
+    if ANY_KEPT.load(Ordering::Acquire) {
+        let kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+        if kept
+            .iter()
+            .any(|w| std::ptr::eq(w.as_ptr(), Arc::as_ptr(&db)))
+        {
+            return None;
+        }
+    }
+    Some(db)
+}
 
 /// The database to read: whatever a read lock finds has landed, since a
 /// block of writes is open only under the write lock of whoever opened it.
