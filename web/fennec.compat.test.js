@@ -20,8 +20,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, readdir } from 'node:fs/promises';
-import { pathToFileURL } from 'node:url';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { needs } from './ci-prereq.mjs';
 import { KeyRange, answers, fakeDir, fakeIndexedDB, heldDatabase, sealingKey, statements } from '../tools/compat/web.mjs';
 import { PIECE, loadRows, loadValues } from '../tools/compat/cloudflare.mjs';
@@ -37,19 +39,28 @@ const skip = !wasm && 'no web/fennec.wasm (make wasm)';
 const SETS = process.env.FENNEC_COMPAT_SETS
   ? pathToFileURL(`${process.env.FENNEC_COMPAT_SETS.replace(/\/*$/, '')}/`)
   : new URL('../crates/fennec-core/tests/compat/', import.meta.url);
-const dirs = (await readdir(SETS, { withFileTypes: true })).filter((d) => d.isDirectory()).map((d) => d.name).sort();
 /**
- * The sets, each `v<version>/` with its README and sums, at least one: as
- * the Rust tests' `sets`, an empty directory or one set itself (its
- * `archive/` no set) fails rather than pass over nothing.
+ * A set's name: its tag, `v<version>`, or `v<version>+<n>` for a further set
+ * of the same tag, n from 2 -- as the Rust tests' `version_of`,
+ * tools/version.py's `SET_NAME` and the writer's `write` take it.
  */
-async function everySet() {
-  assert.ok(dirs.length > 0, `no fixture set under ${SETS.pathname}`);
+const SET = /^v\d+\.\d+\.\d+(\+([2-9]|[1-9]\d+))?$/;
+/** A set's place: its version's numbers, then 1 for the tag's first set or its `+<n>`. */
+const place = (d) => [...d.slice(1).split('+')[0].split('.').map(Number), Number(d.split('+')[1] ?? 1)];
+const older = (a, b) => place(a).reduce((o, x, i) => o || x - place(b)[i], 0);
+/**
+ * The sets under `root`, oldest first, each with its README and sums, at
+ * least one: as the Rust tests' `sets`, an empty directory or one set
+ * itself (its `archive/` no set) fails rather than pass over nothing.
+ */
+async function everySet(root = SETS) {
+  const dirs = (await readdir(root, { withFileTypes: true })).filter((d) => d.isDirectory()).map((d) => d.name);
+  assert.ok(dirs.length > 0, `no fixture set under ${root.pathname}`);
   for (const d of dirs) {
-    assert.match(d, /^v\d+\.\d+\.\d+$/, `${SETS.pathname}: ${d} is no set: FENNEC_COMPAT_SETS names the directory holding the sets`);
-    for (const must of ['README.md', 'SHA256SUMS']) await readFile(new URL(`${d}/${must}`, SETS));
+    assert.match(d, SET, `${root.pathname}: ${d} is no set: FENNEC_COMPAT_SETS names the directory holding the sets`);
+    for (const must of ['README.md', 'SHA256SUMS']) await readFile(new URL(`${d}/${must}`, root));
   }
-  return dirs;
+  return dirs.sort(older);
 }
 const { Fennec, persist, restore, openFile } = await import('./fennec.js');
 
@@ -60,14 +71,14 @@ async function page() {
   return db;
 }
 
-const read = (set, file) => readFile(new URL(`${set}/${file}`, SETS), 'utf8');
+const read = (set, file, root = SETS) => readFile(new URL(`${set}/${file}`, root), 'utf8');
 
 /** Each statement whose answer is not the release's page's, with both. */
-async function differences(db, set, name, when) {
-  const reads = statements(await read(set, `${name}.fennecql`));
+async function differences(db, set, name, when, root = SETS) {
+  const reads = statements(await read(set, `${name}.fennecql`, root));
   // As the Rust tests' `MIN_STATEMENTS`: a list cut short holds the store to nothing.
   assert.ok(reads.length >= 4, `${set}/${name}.fennecql: ${reads.length} statements`);
-  const theirs = (await read(set, `${name}.web`)).split('\n').filter(Boolean);
+  const theirs = (await read(set, `${name}.web`, root)).split('\n').filter(Boolean);
   const ours = answers(db, reads).split('\n').filter(Boolean);
   assert.equal(ours.length, theirs.length, `${set}/${name}: a statement an answer`);
   return reads.flatMap((q, i) => (ours[i] === theirs[i] ? [] : [`${set}/${name} (${when}): ${q}\n  release: ${theirs[i]}\n  this client: ${ours[i]}`]));
@@ -261,39 +272,69 @@ test('a release\'s IndexedDB records are found only where its page put them', { 
   }
 });
 
+/** The OPFS file of `set` under `root` opened, written into, compacted and opened again: what differs. */
+async function opfsDifferences(set, root = SETS) {
+  const found = [];
+  const bytes = new Uint8Array(await readFile(new URL(`${set}/page-opfs.fennec`, root)));
+  const dir = fakeDir(new Map([['page.fennec', { bytes, open: false }]]));
+  const opened = async () => {
+    const db = await page();
+    return [db, await openFile(db, 'page.fennec', { dir })];
+  };
+  const close = ([db, file]) => {
+    file.close();
+    db.close();
+  };
+  let o = await opened();
+  found.push(...(await differences(o[0], set, 'page-opfs', 'opened', root)));
+  const w = writeAfter(o[0]);
+  found.push(...readBack(o[0], w, 'page-opfs', 'written'));
+  close(o);
+  o = await opened();
+  found.push(...readBack(o[0], w, 'page-opfs', 'written, opened again'));
+  o[0].run('compact');
+  close(o);
+  o = await opened();
+  found.push(...readBack(o[0], w, 'page-opfs', 'compacted, opened again'));
+  takeOut(o[0], w);
+  found.push(...(await differences(o[0], set, 'page-opfs', 'written and taken out', root)));
+  o[0].run('compact');
+  close(o);
+  o = await opened();
+  found.push(...(await differences(o[0], set, 'page-opfs', 'taken out, compacted, opened again', root)));
+  close(o);
+  return found;
+}
+
 test('a release\'s OPFS file opens and answers as its page did', { skip }, async () => {
   const found = [];
-  for (const set of await everySet()) {
-    const bytes = new Uint8Array(await readFile(new URL(`${set}/page-opfs.fennec`, SETS)));
-    const dir = fakeDir(new Map([['page.fennec', { bytes, open: false }]]));
-    const opened = async () => {
-      const db = await page();
-      return [db, await openFile(db, 'page.fennec', { dir })];
-    };
-    const close = ([db, file]) => {
-      file.close();
-      db.close();
-    };
-    let o = await opened();
-    found.push(...(await differences(o[0], set, 'page-opfs', 'opened')));
-    const w = writeAfter(o[0]);
-    found.push(...readBack(o[0], w, 'page-opfs', 'written'));
-    close(o);
-    o = await opened();
-    found.push(...readBack(o[0], w, 'page-opfs', 'written, opened again'));
-    o[0].run('compact');
-    close(o);
-    o = await opened();
-    found.push(...readBack(o[0], w, 'page-opfs', 'compacted, opened again'));
-    takeOut(o[0], w);
-    found.push(...(await differences(o[0], set, 'page-opfs', 'written and taken out')));
-    o[0].run('compact');
-    close(o);
-    o = await opened();
-    found.push(...(await differences(o[0], set, 'page-opfs', 'taken out, compacted, opened again')));
-    close(o);
-  }
+  for (const set of await everySet()) found.push(...(await opfsDifferences(set)));
   assert.deepEqual(found, [], `${found.length} answers differ:\n${found.join('\n')}`);
+});
+
+// A further set of a tag (`<tag>+<n>`, n from 2) is the same release's
+// files: made in a directory of this test's own from the first set's page
+// file, it is found after its first set, and its page opens and answers as
+// the release's did. A name no further set takes is no set.
+test('a further set of a tag is read as that release\'s', { skip }, async () => {
+  const [first] = await everySet();
+  const root = pathToFileURL(`${await mkdtemp(join(tmpdir(), 'fennec-compat-further-'))}/`);
+  try {
+    const tag = first.split('+')[0];
+    const names = [tag, `${tag}+10`, `${tag}+2`];
+    for (const name of names) {
+      await mkdir(new URL(`${name}/`, root));
+      for (const f of ['README.md', 'SHA256SUMS', 'page-opfs.fennec', 'page-opfs.fennecql', 'page-opfs.web']) {
+        await copyFile(new URL(`${first}/${f}`, SETS), new URL(`${name}/${f}`, root));
+      }
+    }
+    assert.deepEqual(await everySet(root), [tag, `${tag}+2`, `${tag}+10`], 'the sets in order, oldest first');
+    for (const name of ['+1', '+02', '+0', '+', '+x'].map((n) => `${tag}${n}`)) assert.doesNotMatch(name, SET, `${name}: no set's name`);
+    const found = await opfsDifferences(`${tag}+2`, root);
+    assert.deepEqual(found, [], `${found.length} answers differ:\n${found.join('\n')}`);
+  } finally {
+    await rm(fileURLToPath(root), { recursive: true, force: true });
+  }
 });
 
 test('a release\'s OPFS file and the copy a stopped rewrite left beside it open as its page did', { skip }, async () => {

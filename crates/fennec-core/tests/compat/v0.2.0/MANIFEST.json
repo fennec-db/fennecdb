@@ -5,6 +5,9 @@
  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
  "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
  "target": "aarch64-apple-darwin",
+ "cargo_home": "/Users/furkankinyas/.cargo",
+ "sdk": "macOS SDK 26.2, ld 1230.1",
+ "tree": "/private/tmp/fennec-compat-build-v0.2.0/src",
  "built": {
   "fennec": "build --profile cli --locked --offline --target aarch64-apple-darwin -p fennec-cli",
   "fennec-server": "build --release --locked --offline --target aarch64-apple-darwin -p fennec-server",
@@ -15,9 +18,9 @@
  "files": {
   "cloudflare/fakes.js": "7ec4cf4312ce96ad1055c68caa044f644296479f00ca71a7dbd3e2ead7042cf1",
   "cloudflare/index.js": "068bc23217d984b28390eb4a83f58920e184ee7774ebf584f9bb33f925950c4a",
-  "compat_writer": "7fe2b0a68938605f011ffaefc7f674e514d52475a8cb73a634d1d62e66e398fd",
-  "fennec": "09cb7aba449a727c29a122939b3f8e232d002878149ae4f5e4e1f7c7174cc7e1",
-  "fennec-server": "3b9888239ad1230268d649feac63aac0d88d4a27ee69195146905e3df59dd275",
+  "compat_writer": "f586b2502672f22a1e83c0fe734a3203187e2ae9e87fc9ec4b91ecf936c823c0",
+  "fennec": "fdc4c0c387ed0d04f1ee2487033bd0985bf90c649156f5d736e513a0b9651b11",
+  "fennec-server": "c6ec6b4417295c92db8aacb47e3915837ca302a48b63bc2d0131403a2bd19db1",
   "web/builder.js": "2bcf496963171186850dc15fd50c72618e129b77dffd3f45aded5d8b699d16d8",
   "web/client.js": "c9e19928813f20eeaf62c03652fbfbad9bf12256aa244af5f947e825a72f3612",
   "web/collate/cyrillic.bin": "d080f879c38c598ed627de67a484aea0df00187399f2ebfab297549dc89afe4f",
@@ -42,9 +45,10 @@
   "web/schema.js": "12010ed1dfdfedcee87d9fbc8f06a011ebc77cd65d407c1e6723f948b1bcff1d"
  },
  "inputs": {
-  "tools/compat_fixtures.py": "3475c25c1134e2fbc735bd716c662d34de01bf8b68e330c70cf8b0daa7bd9fd4",
-  "tools/compat/README.template.md": "85483ba57bd9e82bd0b2698d0a4c5fc7ff9916fcf7a34a499525aa3e611df757",
+  "tools/compat_fixtures.py": "c5ce170298739f62e69ce9b2409c4546afa7f74833d1160ffa68ce9dac556d46",
+  "tools/compat/README.template.md": "facbcdea4c7cba2620f7c82ea32105ca8eddc10dd25cbece63738263698416de",
   "tools/compat/cloudflare.mjs": "a877d41661ff74119a99268c7d97ac01fe49064578f6028e79b8e77f8eb16b11",
+  "tools/compat/compacted.fennecql": "984911a7c3905d513a80edd1a7a8cd5fc34e0343fc0b06229491b299f2d6498d",
   "tools/compat/deep.fennecql": "81cb9136a55c1dbc0d08bc760c2ba63fe9af5b135586523ba44f9601da7563c6",
   "tools/compat/do.fennecql": "cbeb5574f4413a802659b64cfe7f9f37b0d2679263df424ce43b154f809a1b1e",
   "tools/compat/follow.fennecql": "39e2586dd78f451fcb1e75f32d61edcf75003ae0d7973d8b2414102a1d6e22ff",
@@ -52,6 +56,7 @@
   "tools/compat/graph.fennecql": "b99fde279b6cbf14a6adcfa3194c87e3b9fba584688651fce619a6fec0e2d513",
   "tools/compat/ids.fennecql": "735c1b1f32553ae27dd7bf18128f3eff4eaf8bdcc2fcf7da6462cb43db0bf899",
   "tools/compat/kept.fennecql": "9ed8e6271ea1535f564416da4c59a9d06c2f065f5539b0fde6eb838b99d0aeb8",
+  "tools/compat/many.fennecql": "2735ac10744973ca00ed3b66f64eb40be933f13d1c43165f7eee700b67898111",
   "tools/compat/node.fennecql": "eea82975ce9e5b659234b25ca23a823ad345aa82d783d951e5ae8d77dc851081",
   "tools/compat/page.fennecql": "3ad2025f34b37668c0598c25fa3b21fe3861202de239daf54c2dfa749a8a6538",
   "tools/compat/points-deep.fennecql": "0a923035cfad68fa9e36a47fb3e0693499713a74ce9f93d1f8f728ab895096b6",

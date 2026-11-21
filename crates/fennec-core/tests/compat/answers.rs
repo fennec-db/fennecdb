@@ -17,16 +17,27 @@ use std::path::{Path, PathBuf};
 /// The sets, a directory a release, from any crate's tests.
 pub const SETS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../fennec-core/tests/compat");
 
-/// Answers a later build gives otherwise, on purpose: (set, file,
-/// statement, why). None so far.
+/// Answers a later build gives otherwise, on purpose: (tag, file,
+/// statement, why), for every set of the tag -- a further set is written
+/// by the same binaries, and answered alike ([`accepted`]). None so far.
 pub const ACCEPTED: &[(&str, &str, &str, &str)] = &[];
+
+/// Whether `ACCEPTED` names `text` over `file` of the set `set`, by the
+/// set's tag.
+pub fn accepted(set: &str, file: &str, text: &str) -> bool {
+    ACCEPTED
+        .iter()
+        .any(|(tag, f, t, _)| *tag == tag_of(set) && *f == file && *t == text)
+}
 
 /// A request to a release's server file (`server.http.json`) a later build
 /// answers otherwise, on purpose. The release's answer stays in the set;
 /// this build is held to the answer named here instead, so any other
-/// answer is still a difference.
+/// answer is still a difference. Named by the tag whose binaries wrote the
+/// file: a further set's server file is the same release's
+/// ([`accepted_request`]).
 pub struct AcceptedRequest {
-    pub set: &'static str,
+    pub tag: &'static str,
     pub method: &'static str,
     pub path: &'static str,
     /// The request's `Idempotency-Key`, where it sends one.
@@ -38,7 +49,7 @@ pub struct AcceptedRequest {
 }
 
 pub const ACCEPTED_REQUESTS: &[AcceptedRequest] = &[AcceptedRequest {
-    set: "v0.2.0",
+    tag: "v0.2.0",
     method: "POST",
     path: "/query",
     key: Some("compat-idempotency-key"),
@@ -52,6 +63,19 @@ pub const ACCEPTED_REQUESTS: &[AcceptedRequest] = &[AcceptedRequest {
           `{\"affected\":1}`, this build runs the put again, which clashes with the row it \
           wrote",
 }];
+
+/// The answer `ACCEPTED_REQUESTS` holds this build to for a request to the
+/// server file of the set `set`, by the set's tag.
+pub fn accepted_request(
+    set: &str,
+    method: &str,
+    path: &str,
+    key: Option<&str>,
+) -> Option<&'static AcceptedRequest> {
+    ACCEPTED_REQUESTS
+        .iter()
+        .find(|x| x.tag == tag_of(set) && x.method == method && x.path == path && x.key == key)
+}
 
 /// What this build does with a file a release wrote that it reads
 /// otherwise on purpose (docs/design/compatibility.md, *What 1.x does not
@@ -178,7 +202,12 @@ pub fn id_differences(db: &Database, set: &Path, name: &str, when: &str) -> Vec<
 pub fn sets() -> Vec<PathBuf> {
     let root =
         std::env::var_os("FENNEC_COMPAT_SETS").map_or_else(|| PathBuf::from(SETS), PathBuf::from);
-    let mut v: Vec<PathBuf> = std::fs::read_dir(&root)
+    sets_in(&root)
+}
+
+/// The sets under `root`, oldest first, held as [`sets`] holds them.
+pub fn sets_in(root: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = std::fs::read_dir(root)
         .unwrap_or_else(|e| panic!("{}: {e}", root.display()))
         .map(|e| e.unwrap().path())
         .filter(|p| p.is_dir())
@@ -336,10 +365,7 @@ pub fn differences(db: &Database, set: &Path, name: &str, when: &str) -> Vec<Str
         .zip(release)
         .filter_map(|(text, theirs)| {
             let ours = answer(db, text);
-            let accepted = ACCEPTED
-                .iter()
-                .any(|(s, f, t, _)| *s == set && *f == name && t == text);
-            (ours != theirs && !accepted).then(|| {
+            (ours != theirs && !accepted(&set, name, text)).then(|| {
                 format!("{set}/{name} ({when}): {text}\n  release: {theirs}\n  this build: {ours}")
             })
         })

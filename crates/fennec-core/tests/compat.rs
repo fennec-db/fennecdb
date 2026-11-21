@@ -71,29 +71,7 @@ fn every_file_of_every_release_opens_and_answers_as_its_release_did() {
     let mut found = Vec::new();
     for set in sets() {
         let scratch = Scratch::new(&format!("files-{}", set_name(&set)));
-        let per_file = each_file(&files(&set), |name| {
-            // The sync log is a Unix file system's (`synclog.rs`): no
-            // Windows build reads one, and the file cut back to its last
-            // fsync answers there with what it holds alone.
-            if cfg!(windows) && set.join(format!("{name}.fennec.sync")).exists() {
-                eprintln!("{name}: passed over, no sync log on Windows");
-                return Vec::new();
-            }
-            let dir = scratch.0.join(name);
-            std::fs::create_dir_all(&dir).unwrap();
-            let path = copied(&set, name, &dir);
-            verified(&path, name, torn(name));
-            // As a tool looks at it, writing nothing; then as a server or
-            // the shell opens it to write.
-            let looked = fennec_core::fs::open_read_only(&path)
-                .unwrap_or_else(|e| panic!("{name}: a read-only open: {e}"));
-            let looked = at_clock(looked, &set);
-            let mut found = differences(&looked, &set, name, "read-only");
-            found.extend(id_differences(&looked, &set, name, "read-only"));
-            drop(looked);
-            found.extend(written_and_compacted(&path, &set, name));
-            found
-        });
+        let per_file = each_file(&files(&set), |name| as_released(&set, name, &scratch.0));
         found.extend(per_file.into_iter().flatten());
     }
     assert!(
@@ -102,6 +80,101 @@ fn every_file_of_every_release_opens_and_answers_as_its_release_did() {
         found.len(),
         found.join("\n")
     );
+}
+
+/// `name` of `set`, on a copy in `scratch`: verified, opened as a tool
+/// looks at it and as a server or the shell opens it to write, answering
+/// as its release did, written into and compacted ([`written_and_compacted`]):
+/// what differs.
+fn as_released(set: &Path, name: &str, scratch: &Path) -> Vec<String> {
+    // The sync log is a Unix file system's (`synclog.rs`): no Windows build
+    // reads one, and the file cut back to its last fsync answers there with
+    // what it holds alone.
+    if cfg!(windows) && set.join(format!("{name}.fennec.sync")).exists() {
+        eprintln!("{name}: passed over, no sync log on Windows");
+        return Vec::new();
+    }
+    let dir = scratch.join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = copied(set, name, &dir);
+    verified(&path, name, torn(name));
+    let looked = fennec_core::fs::open_read_only(&path)
+        .unwrap_or_else(|e| panic!("{name}: a read-only open: {e}"));
+    let looked = at_clock(looked, set);
+    let mut found = differences(&looked, set, name, "read-only");
+    found.extend(id_differences(&looked, set, name, "read-only"));
+    drop(looked);
+    found.extend(written_and_compacted(&path, set, name));
+    found
+}
+
+/// A further set of a tag (`<tag>+<n>`, n from 2) is read beside its first,
+/// after it, as a set of the same release: made in this test's own
+/// directory from the first set's files, every Rust suite's `sets` finds it
+/// in its place, its database file opens and answers as the release did,
+/// and what `ACCEPTED_REQUESTS` names for the tag holds for it -- a name no
+/// further set takes is no set. fennec-server's suite serves such a set's
+/// server file, and `web/fennec.compat.test.js` restores its page.
+#[test]
+fn a_further_set_of_a_tag_is_read_as_that_release_s() {
+    fennec_ql::install();
+    let first = sets().remove(0);
+    let tag = tag_of(&set_name(&first)).to_string();
+    let scratch = Scratch::new("further");
+    let names = [tag.clone(), format!("{tag}+2"), format!("{tag}+10")];
+    for name in &names {
+        let dir = scratch.0.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in ["README.md", "SHA256SUMS"] {
+            std::fs::copy(first.join(f), dir.join(f)).unwrap();
+        }
+    }
+    let found: Vec<String> = answers::sets_in(&scratch.0)
+        .iter()
+        .map(|p| set_name(p))
+        .collect();
+    assert_eq!(found, names, "the sets in order, oldest first");
+    for name in &names {
+        assert_eq!(tag_of(name), tag, "{name}: a set of {tag}");
+    }
+    for name in ["+1", "+02", "+0", "+", "+x"].map(|n| format!("{tag}{n}")) {
+        assert_eq!(
+            answers::version_of(&name),
+            (0, 0, 0, 0),
+            "{name}: no set's name"
+        );
+    }
+    for x in answers::ACCEPTED_REQUESTS.iter().filter(|x| x.tag == tag) {
+        let further = format!("{tag}+2");
+        assert!(
+            answers::accepted_request(&further, x.method, x.path, x.key).is_some(),
+            "{further}: {} {} is not held to its tag's accepted answer",
+            x.method,
+            x.path
+        );
+    }
+    // Database files of the further set, each held to its release's
+    // answers as a first set's is.
+    let further = scratch.0.join(&names[1]);
+    let held = ["kept", "shell", "spill", "waiting"];
+    for (file, ext) in held
+        .iter()
+        .flat_map(|f| ["fennec", "fennecql", "answers", "ids"].map(|e| (f, e)))
+    {
+        std::fs::copy(
+            first.join(format!("{file}.{ext}")),
+            further.join(format!("{file}.{ext}")),
+        )
+        .unwrap();
+    }
+    let names = files(&further);
+    assert_eq!(names, held, "the further set's database files");
+    let opened = scratch.0.join("opened");
+    let differ: Vec<String> = each_file(&names, |name| as_released(&further, name, &opened))
+        .into_iter()
+        .flatten()
+        .collect();
+    assert!(differ.is_empty(), "{}", differ.join("\n"));
 }
 
 // ------------------------------------------------------------- coverage
@@ -254,6 +327,16 @@ fn every_kind_and_shape_a_release_writes_is_in_its_set() {
         let mut all = Seen::default();
         let mut table = Vec::new();
         for (file, seen) in walked(&set) {
+            // The field the release dropped there it compacted away: no
+            // dropped place left in the schema, nor the drop's record.
+            if file == "compacted.fennec" {
+                for gone in ["field: dropped place", "fields: 2 drop"] {
+                    assert!(
+                        !seen.shapes.contains(gone),
+                        "{name}/{file}: `{gone}`, where the release's compact took the dropped field out"
+                    );
+                }
+            }
             table.push(format!("{file}: {}", seen.summary()));
             all.add(&seen);
         }
@@ -1131,6 +1214,102 @@ fn deep_steps(
     }
     found.extend(also);
     found
+}
+
+/// What stands on 1.x beside `many.fennec`'s collection of 4 097 fields,
+/// more places than 4 096, which the release made with no bound: on a copy,
+/// the file opened anew for each, a field renamed, one dropped and one
+/// added, then a compact, each step's outcome held, and after each every
+/// row read at its places as the release's file reads them.
+#[test]
+fn a_collection_of_more_than_4_096_places_takes_its_alters_and_a_compact() {
+    fennec_ql::install();
+    let mut held = 0;
+    for set in sets() {
+        if !set.join("many.fennec").is_file() {
+            continue;
+        }
+        let name = set_name(&set);
+        let scratch = Scratch::new(&format!("many-{name}"));
+        let copy = |step: &str| {
+            let dir = scratch.0.join(step);
+            std::fs::create_dir_all(&dir).unwrap();
+            copied(&set, "many", &dir)
+        };
+        let (untouched, path) = (copy("untouched"), copy("altered"));
+        let read = |path: &Path, q: &str| {
+            let db = at_clock(fennec_core::fs::open_read_only(path).unwrap(), &set);
+            answers::answer(&db, q)
+        };
+        // Its rows at places before the dropped one, past it and at the
+        // last, read through the last field's index and in its order; `f0`
+        // named `first` once renamed.
+        let rows = |path: &Path, f0: &str| -> Vec<String> {
+            [
+                "get many where f4096 = 4096 select {f0}, f2, f2048, f4095, f4096",
+                "get many where f4096 = -1 select {f0}, f2048, f4096",
+                "get many order f4096 select {f0}, f2, f4096",
+                "get many count",
+            ]
+            .iter()
+            .map(|q| read(path, &q.replace("{f0}", f0)))
+            .collect()
+        };
+        let theirs: Vec<String> = rows(&untouched, "f0")
+            .iter()
+            .map(|a| a.replace("\"f0\"", "\"first\""))
+            .collect();
+        assert!(
+            theirs.iter().all(|a| !a.starts_with("{\"kind\":\"error\"")),
+            "{name}/many: {theirs:?}"
+        );
+        let mut found = Vec::new();
+        // Each step, and what it is held to: taken, or refused in words.
+        let steps: [(&str, &str, Result<(), &str>); 4] = [
+            (
+                "a field renamed",
+                "alter collection many rename field f0 to first",
+                Ok(()),
+            ),
+            (
+                "a field dropped",
+                "alter collection many drop field f1",
+                Ok(()),
+            ),
+            (
+                "a field added",
+                "alter collection many add field extra int",
+                Ok(()),
+            ),
+            ("a compact", "compact", Ok(())),
+        ];
+        for (what, q, want) in steps {
+            let got = match fennec_core::fs::open(&path) {
+                Ok(mut db) => tried(&mut db, q),
+                Err(e) => Err(format!("opened again: {e}")),
+            };
+            eprintln!("many: {what}: {got:?}");
+            let as_held = match (&got, &want) {
+                (Ok(()), Ok(())) => true,
+                (Err(e), Err(words)) => e.contains(words),
+                _ => false,
+            };
+            if !as_held {
+                found.push(format!(
+                    "{name}/many: {what}: {got:?}, where {want:?} was held"
+                ));
+            }
+            let ours = rows(&path, "first");
+            if ours != theirs {
+                found.push(format!(
+                    "{name}/many, after {what}:\n  the release's rows: {theirs:?}\n  this build: {ours:?}"
+                ));
+            }
+        }
+        assert!(found.is_empty(), "{}", found.join("\n"));
+        held += 1;
+    }
+    assert!(held > 0, "no set holds many.fennec");
 }
 
 #[test]

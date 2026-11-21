@@ -13,24 +13,36 @@ few kilobytes or on the machine writing the set. The binaries were built
 tag's `Cargo.lock` resolved from cargo's cache, with the toolchain named
 above (the tag's `rust-toolchain.toml` says `stable`; `TOOLCHAINS` in the
 writer pins the version its release was built with, and `build` refuses a
-cargo or rustc that says another). Writing it took 12 minutes:
-server 89 s, graph 1 s, graph-wide 3 s, shell 0 s, on purpose 0 s, kept 0 s, waiting 0 s, spill 0 s, synclog 0 s, synclog-torn 0 s, synclog-spent 0 s, synclog-unbegun 0 s, torn-wide 15 s, torn-tail 0 s, torn-mark 0 s, schedules 0 s, ids 560 s, page 1 s, durable object 0 s, follow 6 s, node 9 s, backup-wide 1 s, restores to a moment 5 s.
+cargo or rustc that says another). Writing it took 8 minutes:
+server 67 s, graph 0 s, graph-wide 2 s, shell 0 s, compacted 0 s, many 0 s, on purpose 0 s, kept 0 s, waiting 0 s, spill 0 s, synclog 0 s, synclog-torn 0 s, synclog-spent 0 s, synclog-unbegun 0 s, torn-wide 8 s, torn-tail 0 s, torn-mark 0 s, schedules 0 s, ids 360 s, page 1 s, durable object 0 s, follow 10 s, node 10 s, backup-wide 1 s, restores to a moment 2 s.
 
 `MANIFEST.json` names what wrote the set: the tag, its commit, the
-compiler, the commands each program was built by, and the SHA-256 of
-every program and module -- `fennec-server`, `fennec`, `compat_writer`,
-`web/fennec.wasm`, the web client's files and its collations, the Durable
-Object's module and its stand-ins -- and of the writer's inputs
-(`tools/compat_fixtures.py`, `tools/compat/`). `write` refused to run
-before every program `build` left matched its line there and every file
-taken from the tag's tree was the tag's own bytes (`git show
-v0.2.0:<path>`). To check a program against it, build the tag again
+compiler, the cargo home, the SDK and the path of the tag's tree the
+programs were built under, the commands each program was built by, and the
+SHA-256 of every program and module -- `fennec-server`, `fennec`,
+`compat_writer`, `web/fennec.wasm`, the web client's files and its
+collations, the Durable Object's module and its stand-ins -- and of the
+writer's inputs (`tools/compat_fixtures.py`, `tools/compat/`). `write`
+refused to run before every program `build` left matched its line there
+and every file taken from the tag's tree was the tag's own bytes (`git
+show v0.2.0:<path>`).
+
+The three programs are built from the tag, not taken from the release's
+assets, and their digests reproduce only on a machine whose cargo home is
+the one the manifest records (`cargo_home`: `/Users/furkankinyas/.cargo`) and whose SDK
+is too (`sdk`: macOS SDK 26.2, ld 1230.1): a program holds its cargo home's path in the panic
+locations of the crates from outside the workspace, and its layout moves
+with the SDK and its linker. `build` puts the tag's tree at one path on
+every machine (`tree`: `/private/tmp/fennec-compat-build-v0.2.0/src`), since the linker's UUID of a program
+hashes the paths of the objects it was handed. There, build the tag again
 (`tools/compat_fixtures.py build v0.2.0 <dir>`) and compare `shasum -a 256
-<dir>/<file>` with the line of `files` naming it; a file of the tag's tree
-compares with `git show v0.2.0:<path> | shasum -a 256`. The release's
-published binaries are not these bytes: they hold the paths of the
-machine that built them (its cargo home, in the panic locations of the
-crates from outside the workspace) and were linked by its toolchain.
+<dir>/<file>` with the line of `files` naming it. The release's published
+binaries are not these bytes: they were built under its runner's cargo
+home and SDK, in its checkout. The module is: anyone can check
+`web/fennec.wasm`'s digest against the release itself -- the release's
+`SHA256SUMS` names `fennec-web-v0.2.0.tar.gz` by its sum, and the
+`fennec.wasm` in it is the bytes `files` names. A file of the tag's tree
+compares with `git show v0.2.0:<path> | shasum -a 256`.
 
 Every later build opens each file and answers each statement alike:
 `compat::` in fennec-core's, fennec-http's, fennec's and fennec-server's
@@ -48,6 +60,8 @@ it, and no other answer moves with the clock.
 | `replica.fennec` | fennec-server `--replica-of` the server above | a replica's file: an image whose history follows its primary (kind 8, following), and the primary's records after it |
 | `promoted.fennec` | fennec-server `--promote` on a copy of `replica.fennec` | the replica promoted: its history forked twice, a write of its own |
 | `shell.fennec` | the `fennec` shell, a `-c` an open and a close | a file an app's own process keeps, a field's expiry set on it (`alter field at @ttl(36500d)`) |
+| `compacted.fennec` | the `fennec` shell | a field v0.2.0 dropped and then compacted away: `people`'s `age`, a field among others with an index after it, dropped after two rows were put and before a third, then `compact`, which took its place out of every document and out of the schema -- the fields after it a place down, no record of the drop left -- then a row put, `age` added again as a new last place and a row holding it |
+| `many.fennec` | the `fennec` shell | a collection of 4 097 fields, more places than 4 096 (MySQL's column count), which v0.2.0 made with no bound: the last field `@hash`, a row holding a value at every place and one holding three |
 | `graph.fennec` | fennec-server's shutdown | the checkpoint: graphs (version 9) of every metric, precision and quantization -- f32, f16, int8 over an f32 and an f16 field, bit holding its vectors whole and bit codes with their centres over an f32 and an f16 field (2 100 vectors of 4 dimensions, past `BIT_TRAIN`) -- tombstones in each arena carrying their vectors, rows sharing a vector (aliases), a row whose id takes 8 bytes, and the copies table's halves |
 | `graph-wide.fennec` | fennec-server's shutdown | the checkpoint of a graph past 65 536 nodes -- 70 000 vectors of one dimension, `@hnsw(l2, m=2)`, put in an order of their own -- whose record's links take three bytes, and its steps between a list's links three bytes where two of them are more than 65 535 nodes apart |
 | `kept.fennec` | writer.rs `kept` (`set_graph_saves`, `save_graphs`) | graphs kept in the file's tail (version 10), tombstones in them, writes after them, and the close's mark that the file was synced (kind 14) |
@@ -118,7 +132,7 @@ log among them, a tenant node's directory and a router's file meet HEAD.
 writes -- its record kinds, statement ops, graph versions, schema tags,
 value tags and index kinds -- and places every alternative its encoders
 emit that the walk tells apart (`ALTERNATIVES`): in a file of this set,
-held both ways, or here with why. Forms: 211 held in a file of this set, 5 named absent below, of the 216 the walk tells apart; and 64 numbers -- record kinds, statement ops, graph versions, schema tags, value tags and index kinds -- each in a file. v0.2.0 can also write, and no
+held both ways, or here with why. Forms: 212 held in a file of this set, 5 named absent below, of the 217 the walk tells apart; and 64 numbers -- record kinds, statement ops, graph versions, schema tags, value tags and index kinds -- each in a file. v0.2.0 can also write, and no
 file here holds:
 
 - `claim: 3 bytes`: a record more than 256 MiB past the file's last
@@ -172,4 +186,4 @@ moved-aside line's history; the PostgreSQL slot's positions behind
 repeated and zeros, which compress to a few percent; `backup-wide.sealed`
 is a mebibyte of ciphertext nothing compresses.
 
-Files: MANIFEST.json, archive, archive-plain, archive-plain.answers, archive-plain.fennecql, archive-plain.ids, archive-plain.restores.json, archive-plain.verify, archive.answers, archive.fennecql, archive.ids, archive.restores.json, archive.verify, backup-wide.answers, backup-wide.fennecql, backup-wide.ids, backup-wide.sealed, backup.answers, backup.fennecql, backup.ids, backup.sealed, clock, deep.answers, deep.fennec, deep.fennecql, deep.ids, do-kv.fennecql, do-kv.json, do-kv.web, do-sql.fennecql, do-sql.json, do-sql.web, follow.answers, follow.fennec, follow.fennecql, follow.ids, graph-wide.answers, graph-wide.fennec, graph-wide.fennecql, graph-wide.ids, graph.answers, graph.fennec, graph.fennecql, graph.ids, ids.answers, ids.fennec, ids.fennecql, ids.ids, kept.answers, kept.fennec, kept.fennecql, kept.ids, key, node-archive, node-archive.json, node.fennecql, page-idb-sealed.fennecql, page-idb-sealed.json, page-idb-sealed.web, page-idb.fennecql, page-idb.json, page-idb.web, page-opfs-stopped.fennec, page-opfs-stopped.fennecql, page-opfs-stopped.fennec~, page-opfs-stopped.web, page-opfs.answers, page-opfs.fennec, page-opfs.fennecql, page-opfs.ids, page-opfs.web, points-deep.answers, points-deep.fennec, points-deep.fennecql, points-deep.ids, promoted.answers, promoted.fennec, promoted.fennecql, promoted.ids, refused-dims.answers, refused-dims.fennec, refused-dims.fennecql, refused-dims.ids, refused-lists.answers, refused-lists.fennec, refused-lists.fennecql, refused-lists.ids, replica.answers, replica.fennec, replica.fennecql, replica.ids, restore.fennecql, schedules.answers, schedules.fennec, schedules.fennecql, schedules.ids, server.answers, server.fennec, server.fennecql, server.http.json, server.ids, shell.answers, shell.fennec, shell.fennecql, shell.ids, spill.answers, spill.fennec, spill.fennecql, spill.ids, synclog-spent.answers, synclog-spent.fennec, synclog-spent.fennec.sync, synclog-spent.fennecql, synclog-spent.ids, synclog-torn.answers, synclog-torn.fennec, synclog-torn.fennec.sync, synclog-torn.fennecql, synclog-torn.ids, synclog-unbegun.answers, synclog-unbegun.fennec, synclog-unbegun.fennec.sync, synclog-unbegun.fennecql, synclog-unbegun.ids, synclog.answers, synclog.fennec, synclog.fennec.sync, synclog.fennecql, synclog.ids, torn-mark.answers, torn-mark.fennec, torn-mark.fennecql, torn-mark.ids, torn-tail.answers, torn-tail.fennec, torn-tail.fennecql, torn-tail.ids, torn-wide.answers, torn-wide.fennec, torn-wide.fennecql, torn-wide.ids, waiting.answers, waiting.fennec, waiting.fennecql, waiting.ids, SHA256SUMS.
+Files: MANIFEST.json, archive, archive-plain, archive-plain.answers, archive-plain.fennecql, archive-plain.ids, archive-plain.restores.json, archive-plain.verify, archive.answers, archive.fennecql, archive.ids, archive.restores.json, archive.verify, backup-wide.answers, backup-wide.fennecql, backup-wide.ids, backup-wide.sealed, backup.answers, backup.fennecql, backup.ids, backup.sealed, clock, compacted.answers, compacted.fennec, compacted.fennecql, compacted.ids, deep.answers, deep.fennec, deep.fennecql, deep.ids, do-kv.fennecql, do-kv.json, do-kv.web, do-sql.fennecql, do-sql.json, do-sql.web, follow.answers, follow.fennec, follow.fennecql, follow.ids, graph-wide.answers, graph-wide.fennec, graph-wide.fennecql, graph-wide.ids, graph.answers, graph.fennec, graph.fennecql, graph.ids, ids.answers, ids.fennec, ids.fennecql, ids.ids, kept.answers, kept.fennec, kept.fennecql, kept.ids, key, many.answers, many.fennec, many.fennecql, many.ids, node-archive, node-archive.json, node.fennecql, page-idb-sealed.fennecql, page-idb-sealed.json, page-idb-sealed.web, page-idb.fennecql, page-idb.json, page-idb.web, page-opfs-stopped.fennec, page-opfs-stopped.fennecql, page-opfs-stopped.fennec~, page-opfs-stopped.web, page-opfs.answers, page-opfs.fennec, page-opfs.fennecql, page-opfs.ids, page-opfs.web, points-deep.answers, points-deep.fennec, points-deep.fennecql, points-deep.ids, promoted.answers, promoted.fennec, promoted.fennecql, promoted.ids, refused-dims.answers, refused-dims.fennec, refused-dims.fennecql, refused-dims.ids, refused-lists.answers, refused-lists.fennec, refused-lists.fennecql, refused-lists.ids, replica.answers, replica.fennec, replica.fennecql, replica.ids, restore.fennecql, schedules.answers, schedules.fennec, schedules.fennecql, schedules.ids, server.answers, server.fennec, server.fennecql, server.http.json, server.ids, shell.answers, shell.fennec, shell.fennecql, shell.ids, spill.answers, spill.fennec, spill.fennecql, spill.ids, synclog-spent.answers, synclog-spent.fennec, synclog-spent.fennec.sync, synclog-spent.fennecql, synclog-spent.ids, synclog-torn.answers, synclog-torn.fennec, synclog-torn.fennec.sync, synclog-torn.fennecql, synclog-torn.ids, synclog-unbegun.answers, synclog-unbegun.fennec, synclog-unbegun.fennec.sync, synclog-unbegun.fennecql, synclog-unbegun.ids, synclog.answers, synclog.fennec, synclog.fennec.sync, synclog.fennecql, synclog.ids, torn-mark.answers, torn-mark.fennec, torn-mark.fennecql, torn-mark.ids, torn-tail.answers, torn-tail.fennec, torn-tail.fennecql, torn-tail.ids, torn-wide.answers, torn-wide.fennec, torn-wide.fennecql, torn-wide.ids, waiting.answers, waiting.fennec, waiting.fennecql, waiting.ids, SHA256SUMS.

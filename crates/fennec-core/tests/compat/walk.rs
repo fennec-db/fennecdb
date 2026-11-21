@@ -172,7 +172,9 @@ pub const ALTERNATIVES: &[&str] = &[
     "live schedule: last slot refused",
     "live schedule: no slot run, its since alone",
     "synced mark",
-    // A schema's fields.
+    // A schema's fields, and a collection of more places than 4 096,
+    // MySQL's column count, which 0.2.0 made with no bound.
+    "schema: more than 4 096 places",
     "field: dropped place",
     "field: required",
     "field: optional",
@@ -291,7 +293,7 @@ pub const ALTERNATIVES: &[&str] = &[
 pub const RELEASES: &[Writes] = &[Writes {
     set: "v0.2.0",
     tag: "v0.2.0",
-    sums: "9a209946cb5a9df35bbc79e9101085011e7efa9a663eb7a41136ff1618484089",
+    sums: "b77d24bd7d87dc88fe17150fdbb2f895a6a76e683af33bdc5fd61562eee797d2",
     kinds: &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
     ops: &[1, 2, 3, 4, 5, 6],
     graphs: &[9, 10],
@@ -429,6 +431,7 @@ const V0_2_0_SHAPES: &[&str] = &[
     "live schedule: last slot refused",
     "live schedule: no slot run, its since alone",
     "synced mark",
+    "schema: more than 4 096 places",
     "field: dropped place",
     "field: required",
     "field: optional",
@@ -1290,6 +1293,9 @@ pub fn schema(c: &mut Cur, seen: &mut Seen) -> (Facts, usize) {
                 });
             }
         }
+    }
+    if places > 4096 {
+        seen.shape("schema: more than 4 096 places");
     }
     (facts, places)
 }

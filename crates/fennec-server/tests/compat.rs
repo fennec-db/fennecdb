@@ -16,8 +16,9 @@
 mod answers;
 
 use crate::support::*;
-use answers::{set_name, sets, Scratch, ACCEPTED_REQUESTS};
+use answers::{accepted_request, set_name, sets, tag_of, Scratch};
 use fennec_core::prelude::Value;
+use std::path::Path;
 
 /// `member` of a JSON object, as `server.http.json` holds it.
 fn member<'a>(v: &'a Value, name: &str) -> &'a Value {
@@ -99,9 +100,7 @@ fn asked(
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("idempotency-key"))
             .map(|&(_, v)| v);
-        let accepted = ACCEPTED_REQUESTS
-            .iter()
-            .find(|x| x.set == set && x.method == method && x.path == path && x.key == key);
+        let accepted = accepted_request(set, method, path, key);
         let (status, answer) = match accepted {
             Some(x) => (x.status, x.body),
             None => (int(member(r, "status")), text(member(r, "answer"))),
@@ -118,50 +117,86 @@ fn asked(
     found
 }
 
+/// The server file of `set` served as the release's deployment served it,
+/// started again once: every answer that differs from the release's, or
+/// from the one `ACCEPTED_REQUESTS` names for the set's tag. `None` where
+/// the set holds no server file.
+fn served(set: &Path) -> Option<Vec<String>> {
+    let name = set_name(set);
+    let recorded = std::fs::read_to_string(set.join("server.http.json")).ok()?;
+    let recorded = fennec_core::json::parse_json(&recorded).unwrap();
+    let serve = member(&recorded, "serve");
+    let token = text(member(serve, "token"));
+    let scratch = Scratch::new(&format!("server-{name}"));
+    let file = scratch.0.join("server.fennec");
+    std::fs::copy(set.join("server.fennec"), &file).unwrap();
+    let secret = scratch.0.join("hook.secret");
+    std::fs::write(&secret, text(member(serve, "secret"))).unwrap();
+    let hooks = scratch.0.join("hooks");
+    let line = text(member(serve, "hooks")).replace("{secret}", secret.to_str().unwrap());
+    std::fs::write(&hooks, format!("{line}\n")).unwrap();
+    let mut args: Vec<&str> = list(member(serve, "args")).iter().map(text).collect();
+    args.extend([
+        "--file",
+        file.to_str().unwrap(),
+        "--hooks",
+        hooks.to_str().unwrap(),
+    ]);
+    let statements = answers::statements(set, "server");
+    let mut found = Vec::new();
+    for when in ["started on the release's file", "stopped and started again"] {
+        let server = start(&args);
+        found.extend(asked(
+            server.port,
+            token,
+            &name,
+            &recorded,
+            &statements,
+            when,
+        ));
+        let (code, log) = server.terminate();
+        assert_eq!(code, 0, "{name}: the server's stop ({when}):\n{log}");
+    }
+    Some(found)
+}
+
 #[test]
 fn a_release_s_server_file_is_served_and_answers_as_its_server_did() {
     let mut found = Vec::new();
-    let mut served = 0;
+    let mut served_sets = 0;
     for set in sets() {
-        let name = set_name(&set);
-        let Ok(recorded) = std::fs::read_to_string(set.join("server.http.json")) else {
-            continue;
-        };
-        let recorded = fennec_core::json::parse_json(&recorded).unwrap();
-        let serve = member(&recorded, "serve");
-        let token = text(member(serve, "token"));
-        let scratch = Scratch::new(&format!("server-{name}"));
-        let file = scratch.0.join("server.fennec");
-        std::fs::copy(set.join("server.fennec"), &file).unwrap();
-        let secret = scratch.0.join("hook.secret");
-        std::fs::write(&secret, text(member(serve, "secret"))).unwrap();
-        let hooks = scratch.0.join("hooks");
-        let line = text(member(serve, "hooks")).replace("{secret}", secret.to_str().unwrap());
-        std::fs::write(&hooks, format!("{line}\n")).unwrap();
-        let mut args: Vec<&str> = list(member(serve, "args")).iter().map(text).collect();
-        args.extend([
-            "--file",
-            file.to_str().unwrap(),
-            "--hooks",
-            hooks.to_str().unwrap(),
-        ]);
-        let statements = answers::statements(&set, "server");
-        for when in ["started on the release's file", "stopped and started again"] {
-            let server = start(&args);
-            found.extend(asked(
-                server.port,
-                token,
-                &name,
-                &recorded,
-                &statements,
-                when,
-            ));
-            let (code, log) = server.terminate();
-            assert_eq!(code, 0, "{name}: the server's stop ({when}):\n{log}");
+        if let Some(f) = served(&set) {
+            found.extend(f);
+            served_sets += 1;
         }
-        served += 1;
     }
-    assert!(served > 0, "no set holds server.http.json");
+    assert!(served_sets > 0, "no set holds server.http.json");
+    assert!(
+        found.is_empty(),
+        "{} answers differ:\n{}",
+        found.len(),
+        found.join("\n")
+    );
+}
+
+/// A further set of a tag (`<tag>+2/`) is the same release's files, written
+/// by the same binaries: its server file is answered as the release
+/// answered, and held to what `ACCEPTED_REQUESTS` names for the tag. Made
+/// in this test's own directory from the first set's server file, under
+/// the name a further set takes.
+#[test]
+fn a_further_set_s_server_file_is_held_to_its_tag_s_answers() {
+    let first = sets()
+        .into_iter()
+        .find(|s| s.join("server.http.json").is_file())
+        .expect("no set holds server.http.json");
+    let scratch = Scratch::new("server-further");
+    let further = scratch.0.join(format!("{}+2", tag_of(&set_name(&first))));
+    std::fs::create_dir_all(&further).unwrap();
+    for f in ["server.fennec", "server.fennecql", "server.http.json"] {
+        std::fs::copy(first.join(f), further.join(f)).unwrap();
+    }
+    let found = served(&further).unwrap();
     assert!(
         found.is_empty(),
         "{} answers differ:\n{}",

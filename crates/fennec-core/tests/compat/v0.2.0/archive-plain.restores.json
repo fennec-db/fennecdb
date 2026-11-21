@@ -1,8 +1,8 @@
 {
  "moments": [
   {
-   "to": "2026-11-15T12:24:36.483Z",
-   "at": 1794745476483,
+   "to": "2026-11-21T21:02:57.902Z",
+   "at": 1795294977902,
    "label": "before its image",
    "status": 1,
    "said": [
@@ -10,8 +10,8 @@
    ]
   },
   {
-   "to": "2026-11-15T12:24:36.484Z",
-   "at": 1794745476484,
+   "to": "2026-11-21T21:02:57.903Z",
+   "at": 1795294977903,
    "label": "its image's time",
    "status": 0,
    "said": [
@@ -20,8 +20,8 @@
    "change": 43
   },
   {
-   "to": "2026-11-15T12:24:36.547Z",
-   "at": 1794745476547,
+   "to": "2026-11-21T21:02:58.480Z",
+   "at": 1795294978480,
    "label": "its image alone, before the first write",
    "status": 0,
    "said": [
@@ -30,642 +30,382 @@
    "change": 43
   },
   {
-   "to": "2026-11-15T12:24:36.548Z",
-   "at": 1794745476548,
+   "to": "2026-11-21T21:02:58.481Z",
+   "at": 1795294978481,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 44 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.548Z"
+    "<out>: change 44 -- image 43 and the writes after it, the last written 2026-11-21T21:02:58.481Z"
    ],
    "change": 44
   },
   {
-   "to": "2026-11-15T12:24:36.549Z",
-   "at": 1794745476549,
+   "to": "2026-11-21T21:02:58.482Z",
+   "at": 1795294978482,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 45 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.549Z"
+    "<out>: change 45 -- image 43 and the writes after it, the last written 2026-11-21T21:02:58.482Z"
    ],
    "change": 45
   },
   {
-   "to": "2026-11-15T12:24:36.550Z",
-   "at": 1794745476550,
+   "to": "2026-11-21T21:02:58.483Z",
+   "at": 1795294978483,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 46 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.550Z"
-   ],
-   "change": 46
-  },
-  {
-   "to": "2026-11-15T12:24:36.551Z",
-   "at": 1794745476551,
-   "label": "the moment before the next write",
-   "status": 0,
-   "said": [
-    "<out>: change 46 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.550Z"
-   ],
-   "change": 46
-  },
-  {
-   "to": "2026-11-15T12:24:36.552Z",
-   "at": 1794745476552,
-   "label": "a write's time",
-   "status": 0,
-   "said": [
-    "<out>: change 47 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.552Z"
+    "<out>: change 47 -- image 43 and the writes after it, the last written 2026-11-21T21:02:58.483Z"
    ],
    "change": 47
   },
   {
-   "to": "2026-11-15T12:24:36.553Z",
-   "at": 1794745476553,
+   "to": "2026-11-21T21:02:58.484Z",
+   "at": 1795294978484,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 48 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.553Z"
-   ],
-   "change": 48
-  },
-  {
-   "to": "2026-11-15T12:24:36.555Z",
-   "at": 1794745476555,
-   "label": "the moment before the next write",
-   "status": 0,
-   "said": [
-    "<out>: change 48 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.553Z"
-   ],
-   "change": 48
-  },
-  {
-   "to": "2026-11-15T12:24:36.556Z",
-   "at": 1794745476556,
-   "label": "a write's time",
-   "status": 0,
-   "said": [
-    "<out>: change 49 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.556Z"
+    "<out>: change 49 -- image 43 and the writes after it, the last written 2026-11-21T21:02:58.484Z"
    ],
    "change": 49
   },
   {
-   "to": "2026-11-15T12:24:36.557Z",
-   "at": 1794745476557,
-   "label": "the moment before the next write",
-   "status": 0,
-   "said": [
-    "<out>: change 49 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.556Z"
-   ],
-   "change": 49
-  },
-  {
-   "to": "2026-11-15T12:24:36.558Z",
-   "at": 1794745476558,
+   "to": "2026-11-21T21:02:58.485Z",
+   "at": 1795294978485,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 51 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.558Z"
+    "<out>: change 51 -- image 43 and the writes after it, the last written 2026-11-21T21:02:58.485Z"
    ],
    "change": 51
   },
   {
-   "to": "2026-11-15T12:24:36.559Z",
-   "at": 1794745476559,
+   "to": "2026-11-21T21:02:58.486Z",
+   "at": 1795294978486,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 52 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.559Z"
+    "<out>: change 52 -- image 43 and the writes after it, the last written 2026-11-21T21:02:58.486Z"
    ],
    "change": 52
   },
   {
-   "to": "2026-11-15T12:24:36.560Z",
-   "at": 1794745476560,
-   "label": "the moment before the next write",
-   "status": 0,
-   "said": [
-    "<out>: change 52 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.559Z"
-   ],
-   "change": 52
-  },
-  {
-   "to": "2026-11-15T12:24:36.561Z",
-   "at": 1794745476561,
+   "to": "2026-11-21T21:02:58.487Z",
+   "at": 1795294978487,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 53 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.561Z"
-   ],
-   "change": 53
-  },
-  {
-   "to": "2026-11-15T12:24:36.562Z",
-   "at": 1794745476562,
-   "label": "a write's time",
-   "status": 0,
-   "said": [
-    "<out>: change 54 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.562Z"
+    "<out>: change 54 -- image 43 and the writes after it, the last written 2026-11-21T21:02:58.487Z"
    ],
    "change": 54
   },
   {
-   "to": "2026-11-15T12:24:36.564Z",
-   "at": 1794745476564,
-   "label": "the moment before the next write",
-   "status": 0,
-   "said": [
-    "<out>: change 54 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.562Z"
-   ],
-   "change": 54
-  },
-  {
-   "to": "2026-11-15T12:24:36.565Z",
-   "at": 1794745476565,
+   "to": "2026-11-21T21:02:58.488Z",
+   "at": 1795294978488,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 55 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.565Z"
-   ],
-   "change": 55
-  },
-  {
-   "to": "2026-11-15T12:24:36.566Z",
-   "at": 1794745476566,
-   "label": "the moment before the next write",
-   "status": 0,
-   "said": [
-    "<out>: change 55 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.565Z"
-   ],
-   "change": 55
-  },
-  {
-   "to": "2026-11-15T12:24:36.567Z",
-   "at": 1794745476567,
-   "label": "a write's time",
-   "status": 0,
-   "said": [
-    "<out>: change 56 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.567Z"
+    "<out>: change 56 -- image 43 and the writes after it, the last written 2026-11-21T21:02:58.488Z"
    ],
    "change": 56
   },
   {
-   "to": "2026-11-15T12:24:36.568Z",
-   "at": 1794745476568,
+   "to": "2026-11-21T21:02:58.489Z",
+   "at": 1795294978489,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 57 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.568Z"
+    "<out>: change 57 -- image 43 and the writes after it, the last written 2026-11-21T21:02:58.489Z"
    ],
    "change": 57
   },
   {
-   "to": "2026-11-15T12:24:36.569Z",
-   "at": 1794745476569,
-   "label": "the moment before the next write",
-   "status": 0,
-   "said": [
-    "<out>: change 57 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.568Z"
-   ],
-   "change": 57
-  },
-  {
-   "to": "2026-11-15T12:24:36.570Z",
-   "at": 1794745476570,
+   "to": "2026-11-21T21:02:58.490Z",
+   "at": 1795294978490,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 58 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.570Z"
-   ],
-   "change": 58
-  },
-  {
-   "to": "2026-11-15T12:24:36.571Z",
-   "at": 1794745476571,
-   "label": "a write's time",
-   "status": 0,
-   "said": [
-    "<out>: change 59 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.571Z"
+    "<out>: change 59 -- image 43 and the writes after it, the last written 2026-11-21T21:02:58.490Z"
    ],
    "change": 59
   },
   {
-   "to": "2026-11-15T12:24:36.572Z",
-   "at": 1794745476572,
+   "to": "2026-11-21T21:02:58.491Z",
+   "at": 1795294978491,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 60 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.572Z"
-   ],
-   "change": 60
-  },
-  {
-   "to": "2026-11-15T12:24:36.573Z",
-   "at": 1794745476573,
-   "label": "a write's time",
-   "status": 0,
-   "said": [
-    "<out>: change 61 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.573Z"
+    "<out>: change 61 -- image 43 and the writes after it, the last written 2026-11-21T21:02:58.491Z"
    ],
    "change": 61
   },
   {
-   "to": "2026-11-15T12:24:36.574Z",
-   "at": 1794745476574,
-   "label": "the moment before the next write",
-   "status": 0,
-   "said": [
-    "<out>: change 61 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.573Z"
-   ],
-   "change": 61
-  },
-  {
-   "to": "2026-11-15T12:24:36.575Z",
-   "at": 1794745476575,
+   "to": "2026-11-21T21:02:58.492Z",
+   "at": 1795294978492,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 62 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.575Z"
-   ],
-   "change": 62
-  },
-  {
-   "to": "2026-11-15T12:24:36.576Z",
-   "at": 1794745476576,
-   "label": "a write's time",
-   "status": 0,
-   "said": [
-    "<out>: change 63 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.576Z"
+    "<out>: change 63 -- image 43 and the writes after it, the last written 2026-11-21T21:02:58.492Z"
    ],
    "change": 63
   },
   {
-   "to": "2026-11-15T12:24:36.577Z",
-   "at": 1794745476577,
-   "label": "the moment before the next write",
-   "status": 0,
-   "said": [
-    "<out>: change 63 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.576Z"
-   ],
-   "change": 63
-  },
-  {
-   "to": "2026-11-15T12:24:36.578Z",
-   "at": 1794745476578,
+   "to": "2026-11-21T21:02:58.493Z",
+   "at": 1795294978493,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 64 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.578Z"
+    "<out>: change 64 -- image 43 and the writes after it, the last written 2026-11-21T21:02:58.493Z"
    ],
    "change": 64
   },
   {
-   "to": "2026-11-15T12:24:36.579Z",
-   "at": 1794745476579,
-   "label": "the moment before the next write",
-   "status": 0,
-   "said": [
-    "<out>: change 64 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.578Z"
-   ],
-   "change": 64
-  },
-  {
-   "to": "2026-11-15T12:24:36.580Z",
-   "at": 1794745476580,
+   "to": "2026-11-21T21:02:58.494Z",
+   "at": 1795294978494,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 65 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.580Z"
+    "<out>: change 66 -- image 43 and the writes after it, the last written 2026-11-21T21:02:58.494Z"
    ],
-   "change": 65
+   "change": 66
   },
   {
-   "to": "2026-11-15T12:24:36.581Z",
-   "at": 1794745476581,
+   "to": "2026-11-21T21:02:58.495Z",
+   "at": 1795294978495,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 67 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.581Z"
-   ],
-   "change": 67
-  },
-  {
-   "to": "2026-11-15T12:24:36.582Z",
-   "at": 1794745476582,
-   "label": "a write's time",
-   "status": 0,
-   "said": [
-    "<out>: change 68 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.582Z"
+    "<out>: change 68 -- image 43 and the writes after it, the last written 2026-11-21T21:02:58.495Z"
    ],
    "change": 68
   },
   {
-   "to": "2026-11-15T12:24:36.584Z",
-   "at": 1794745476584,
-   "label": "the moment before the next write",
-   "status": 0,
-   "said": [
-    "<out>: change 68 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.582Z"
-   ],
-   "change": 68
-  },
-  {
-   "to": "2026-11-15T12:24:36.585Z",
-   "at": 1794745476585,
+   "to": "2026-11-21T21:02:58.496Z",
+   "at": 1795294978496,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 71 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.585Z"
+    "<out>: change 71 -- image 43 and the writes after it, the last written 2026-11-21T21:02:58.496Z"
    ],
    "change": 71
   },
   {
-   "to": "2026-11-15T12:24:36.586Z",
-   "at": 1794745476586,
+   "to": "2026-11-21T21:02:58.497Z",
+   "at": 1795294978497,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 79 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.586Z"
+    "<out>: change 79 -- image 43 and the writes after it, the last written 2026-11-21T21:02:58.497Z"
    ],
    "change": 79
   },
   {
-   "to": "2026-11-15T12:24:36.587Z",
-   "at": 1794745476587,
+   "to": "2026-11-21T21:02:58.498Z",
+   "at": 1795294978498,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 80 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.587Z"
+    "<out>: change 80 -- image 43 and the writes after it, the last written 2026-11-21T21:02:58.498Z"
    ],
    "change": 80
   },
   {
-   "to": "2026-11-15T12:25:00.011Z",
-   "at": 1794745500011,
+   "to": "2026-11-21T21:03:00.001Z",
+   "at": 1795294980001,
    "label": "the moment before the next write",
    "status": 0,
    "said": [
-    "<out>: change 80 -- image 43 and the writes after it, the last written 2026-11-15T12:24:36.587Z"
+    "<out>: change 80 -- image 43 and the writes after it, the last written 2026-11-21T21:02:58.498Z"
    ],
    "change": 80
   },
   {
-   "to": "2026-11-15T12:25:00.012Z",
-   "at": 1794745500012,
+   "to": "2026-11-21T21:03:00.002Z",
+   "at": 1795294980002,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 82 -- image 43 and the writes after it, the last written 2026-11-15T12:25:00.012Z"
+    "<out>: change 82 -- image 43 and the writes after it, the last written 2026-11-21T21:03:00.002Z"
    ],
    "change": 82
   },
   {
-   "to": "2026-11-15T12:25:00.248Z",
-   "at": 1794745500248,
+   "to": "2026-11-21T21:03:00.010Z",
+   "at": 1795294980010,
    "label": "the moment before the next write",
    "status": 0,
    "said": [
-    "<out>: change 82 -- image 43 and the writes after it, the last written 2026-11-15T12:25:00.012Z"
+    "<out>: change 82 -- image 43 and the writes after it, the last written 2026-11-21T21:03:00.002Z"
    ],
    "change": 82
   },
   {
-   "to": "2026-11-15T12:25:00.249Z",
-   "at": 1794745500249,
+   "to": "2026-11-21T21:03:00.011Z",
+   "at": 1795294980011,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 83 -- image 43 and the writes after it, the last written 2026-11-15T12:25:00.249Z"
+    "<out>: change 83 -- image 43 and the writes after it, the last written 2026-11-21T21:03:00.011Z"
    ],
    "change": 83
   },
   {
-   "to": "2026-11-15T12:25:00.250Z",
-   "at": 1794745500250,
-   "label": "the moment before the next write",
-   "status": 0,
-   "said": [
-    "<out>: change 83 -- image 43 and the writes after it, the last written 2026-11-15T12:25:00.249Z"
-   ],
-   "change": 83
-  },
-  {
-   "to": "2026-11-15T12:25:00.251Z",
-   "at": 1794745500251,
+   "to": "2026-11-21T21:03:00.012Z",
+   "at": 1795294980012,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 84 -- image 43 and the writes after it, the last written 2026-11-15T12:25:00.251Z"
+    "<out>: change 84 -- image 43 and the writes after it, the last written 2026-11-21T21:03:00.012Z"
    ],
    "change": 84
   },
   {
-   "to": "2026-11-15T12:25:36.426Z",
-   "at": 1794745536426,
+   "to": "2026-11-21T21:03:57.797Z",
+   "at": 1795295037797,
    "label": "the moment before the next write",
    "status": 0,
    "said": [
-    "<out>: change 84 -- image 43 and the writes after it, the last written 2026-11-15T12:25:00.251Z"
+    "<out>: change 84 -- image 43 and the writes after it, the last written 2026-11-21T21:03:00.012Z"
    ],
    "change": 84
   },
   {
-   "to": "2026-11-15T12:25:36.427Z",
-   "at": 1794745536427,
+   "to": "2026-11-21T21:03:57.798Z",
+   "at": 1795295037798,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 85 -- image 43 and the writes after it, the last written 2026-11-15T12:25:36.427Z"
+    "<out>: change 85 -- image 43 and the writes after it, the last written 2026-11-21T21:03:57.798Z"
    ],
    "change": 85
   },
   {
-   "to": "2026-11-15T12:26:00.091Z",
-   "at": 1794745560091,
+   "to": "2026-11-21T21:04:00.030Z",
+   "at": 1795295040030,
    "label": "the moment before the next write",
    "status": 0,
    "said": [
-    "<out>: change 85 -- image 43 and the writes after it, the last written 2026-11-15T12:25:36.427Z"
+    "<out>: change 85 -- image 43 and the writes after it, the last written 2026-11-21T21:03:57.798Z"
    ],
    "change": 85
   },
   {
-   "to": "2026-11-15T12:26:00.092Z",
-   "at": 1794745560092,
+   "to": "2026-11-21T21:04:00.031Z",
+   "at": 1795295040031,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 87 -- image 43 and the writes after it, the last written 2026-11-15T12:26:00.092Z"
+    "<out>: change 87 -- image 43 and the writes after it, the last written 2026-11-21T21:04:00.031Z"
    ],
    "change": 87
   },
   {
-   "to": "2026-11-15T12:26:00.098Z",
-   "at": 1794745560098,
-   "label": "the moment before the next write",
-   "status": 0,
-   "said": [
-    "<out>: change 87 -- image 43 and the writes after it, the last written 2026-11-15T12:26:00.092Z"
-   ],
-   "change": 87
-  },
-  {
-   "to": "2026-11-15T12:26:00.099Z",
-   "at": 1794745560099,
+   "to": "2026-11-21T21:04:00.032Z",
+   "at": 1795295040032,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 88 -- image 43 and the writes after it, the last written 2026-11-15T12:26:00.099Z"
+    "<out>: change 88 -- image 43 and the writes after it, the last written 2026-11-21T21:04:00.032Z"
    ],
    "change": 88
   },
   {
-   "to": "2026-11-15T12:26:00.111Z",
-   "at": 1794745560111,
-   "label": "the moment before the next write",
-   "status": 0,
-   "said": [
-    "<out>: change 88 -- image 43 and the writes after it, the last written 2026-11-15T12:26:00.099Z"
-   ],
-   "change": 88
-  },
-  {
-   "to": "2026-11-15T12:26:00.112Z",
-   "at": 1794745560112,
+   "to": "2026-11-21T21:04:00.033Z",
+   "at": 1795295040033,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 94 -- image 43 and the writes after it, the last written 2026-11-15T12:26:00.112Z"
+    "<out>: change 94 -- image 43 and the writes after it, the last written 2026-11-21T21:04:00.033Z"
    ],
    "change": 94
   },
   {
-   "to": "2026-11-15T12:26:00.117Z",
-   "at": 1794745560117,
-   "label": "the moment before the next write",
-   "status": 0,
-   "said": [
-    "<out>: change 94 -- image 43 and the writes after it, the last written 2026-11-15T12:26:00.112Z"
-   ],
-   "change": 94
-  },
-  {
-   "to": "2026-11-15T12:26:00.118Z",
-   "at": 1794745560118,
+   "to": "2026-11-21T21:04:00.034Z",
+   "at": 1795295040034,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 95 -- image 43 and the writes after it, the last written 2026-11-15T12:26:00.118Z"
+    "<out>: change 95 -- image 43 and the writes after it, the last written 2026-11-21T21:04:00.034Z"
    ],
    "change": 95
   },
   {
-   "to": "2026-11-15T12:26:00.133Z",
-   "at": 1794745560133,
+   "to": "2026-11-21T21:04:00.038Z",
+   "at": 1795295040038,
    "label": "the moment before the next write",
    "status": 0,
    "said": [
-    "<out>: change 95 -- image 43 and the writes after it, the last written 2026-11-15T12:26:00.118Z"
+    "<out>: change 95 -- image 43 and the writes after it, the last written 2026-11-21T21:04:00.034Z"
    ],
    "change": 95
   },
   {
-   "to": "2026-11-15T12:26:00.134Z",
-   "at": 1794745560134,
+   "to": "2026-11-21T21:04:00.039Z",
+   "at": 1795295040039,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 98 -- image 43 and the writes after it, the last written 2026-11-15T12:26:00.134Z"
+    "<out>: change 98 -- image 43 and the writes after it, the last written 2026-11-21T21:04:00.039Z"
    ],
    "change": 98
   },
   {
-   "to": "2026-11-15T12:26:00.166Z",
-   "at": 1794745560166,
+   "to": "2026-11-21T21:04:00.044Z",
+   "at": 1795295040044,
    "label": "the moment before the next write",
    "status": 0,
    "said": [
-    "<out>: change 98 -- image 43 and the writes after it, the last written 2026-11-15T12:26:00.134Z"
+    "<out>: change 98 -- image 43 and the writes after it, the last written 2026-11-21T21:04:00.039Z"
    ],
    "change": 98
   },
   {
-   "to": "2026-11-15T12:26:00.167Z",
-   "at": 1794745560167,
+   "to": "2026-11-21T21:04:00.045Z",
+   "at": 1795295040045,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 102 -- image 43 and the writes after it, the last written 2026-11-15T12:26:00.167Z"
+    "<out>: change 102 -- image 43 and the writes after it, the last written 2026-11-21T21:04:00.045Z"
    ],
    "change": 102
   },
   {
-   "to": "2026-11-15T12:26:00.168Z",
-   "at": 1794745560168,
-   "label": "the moment before the next write",
-   "status": 0,
-   "said": [
-    "<out>: change 102 -- image 43 and the writes after it, the last written 2026-11-15T12:26:00.167Z"
-   ],
-   "change": 102
-  },
-  {
-   "to": "2026-11-15T12:26:00.169Z",
-   "at": 1794745560169,
+   "to": "2026-11-21T21:04:00.046Z",
+   "at": 1795295040046,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 104 -- image 43 and the writes after it, the last written 2026-11-15T12:26:00.169Z"
+    "<out>: change 104 -- image 43 and the writes after it, the last written 2026-11-21T21:04:00.046Z"
    ],
    "change": 104
   },
   {
-   "to": "2026-11-15T12:26:00.170Z",
-   "at": 1794745560170,
+   "to": "2026-11-21T21:04:00.047Z",
+   "at": 1795295040047,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 105 -- image 43 and the writes after it, the last written 2026-11-15T12:26:00.170Z"
-   ],
-   "change": 105
-  },
-  {
-   "to": "2026-11-15T12:26:00.175Z",
-   "at": 1794745560175,
-   "label": "the moment before the next write",
-   "status": 0,
-   "said": [
-    "<out>: change 105 -- image 43 and the writes after it, the last written 2026-11-15T12:26:00.170Z"
-   ],
-   "change": 105
-  },
-  {
-   "to": "2026-11-15T12:26:00.176Z",
-   "at": 1794745560176,
-   "label": "a write's time",
-   "status": 0,
-   "said": [
-    "<out>: change 106 -- image 43 and the writes after it, the last written 2026-11-15T12:26:00.176Z"
+    "<out>: change 106 -- image 43 and the writes after it, the last written 2026-11-21T21:04:00.047Z"
    ],
    "change": 106
   },
   {
-   "to": "2026-11-15T12:26:00.184Z",
-   "at": 1794745560184,
+   "to": "2026-11-21T21:04:00.050Z",
+   "at": 1795295040050,
    "label": "the moment before the next write",
    "status": 0,
    "said": [
-    "<out>: change 106 -- image 43 and the writes after it, the last written 2026-11-15T12:26:00.176Z"
+    "<out>: change 106 -- image 43 and the writes after it, the last written 2026-11-21T21:04:00.047Z"
    ],
    "change": 106
   },
   {
-   "to": "2026-11-15T12:26:00.185Z",
-   "at": 1794745560185,
+   "to": "2026-11-21T21:04:00.051Z",
+   "at": 1795295040051,
    "label": "a write's time",
    "status": 0,
    "said": [
-    "<out>: change 109 -- image 43 and the writes after it, the last written 2026-11-15T12:26:00.185Z"
+    "<out>: change 109 -- image 43 and the writes after it, the last written 2026-11-21T21:04:00.051Z"
    ],
    "change": 109
   }
@@ -695,23 +435,7 @@
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"k\"],\"rows\":[]}}",
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"n\",\"action\"],\"rows\":[]}}"
   ],
-  "46": [
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"i\",\"f\",\"tag\"],\"rows\":[{\"i\":1,\"f\":1.5,\"tag\":\"red fox\"},{\"i\":2,\"f\":-2.25,\"tag\":\"blue whale\"},{\"i\":3,\"f\":null,\"tag\":null},{\"i\":9007199254740993,\"f\":0.1,\"tag\":null}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"req\",\"b\"],\"rows\":[{\"req\":1,\"b\":2},{\"req\":2,\"b\":3},{\"req\":3,\"b\":1}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"ref\"],\"rows\":[{\"ref\":\"o-1\"},{\"ref\":\"o-2\"}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"ref\",\"what\"],\"rows\":[{\"ref\":\"o-1\",\"what\":\"placed\"},{\"ref\":\"o-2\",\"what\":\"placed\"}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"k\"],\"rows\":[]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"n\",\"action\"],\"rows\":[]}}"
-  ],
   "47": [
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"i\",\"f\",\"tag\"],\"rows\":[{\"i\":1,\"f\":1.5,\"tag\":\"red fox\"},{\"i\":2,\"f\":-2.25,\"tag\":\"blue whale\"},{\"i\":3,\"f\":null,\"tag\":null},{\"i\":9007199254740993,\"f\":0.1,\"tag\":null}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"req\",\"b\"],\"rows\":[{\"req\":1,\"b\":2},{\"req\":2,\"b\":3},{\"req\":3,\"b\":1}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"ref\"],\"rows\":[{\"ref\":\"o-1\"},{\"ref\":\"o-2\"}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"ref\",\"what\"],\"rows\":[{\"ref\":\"o-1\",\"what\":\"placed\"},{\"ref\":\"o-2\",\"what\":\"placed\"}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"k\"],\"rows\":[]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"n\",\"action\"],\"rows\":[]}}"
-  ],
-  "48": [
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"i\",\"f\",\"tag\"],\"rows\":[{\"i\":1,\"f\":1.5,\"tag\":\"red fox\"},{\"i\":2,\"f\":-2.25,\"tag\":\"blue whale\"},{\"i\":3,\"f\":null,\"tag\":null},{\"i\":9007199254740993,\"f\":0.1,\"tag\":null}]}}",
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"req\",\"b\"],\"rows\":[{\"req\":1,\"b\":2},{\"req\":2,\"b\":3},{\"req\":3,\"b\":1}]}}",
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"ref\"],\"rows\":[{\"ref\":\"o-1\"},{\"ref\":\"o-2\"}]}}",
@@ -743,23 +467,7 @@
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"k\"],\"rows\":[]}}",
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"n\",\"action\"],\"rows\":[]}}"
   ],
-  "53": [
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"i\",\"f\",\"tag\"],\"rows\":[{\"i\":1,\"f\":1.5,\"tag\":\"red fox\"},{\"i\":2,\"f\":9.5,\"tag\":\"green fox\"},{\"i\":5,\"f\":2.5,\"tag\":null},{\"i\":9007199254740993,\"f\":0.1,\"tag\":null}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"req\",\"b\"],\"rows\":[{\"req\":1,\"b\":2},{\"req\":2,\"b\":3},{\"req\":3,\"b\":1}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"ref\"],\"rows\":[{\"ref\":\"o-1\"},{\"ref\":\"o-2\"}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"ref\",\"what\"],\"rows\":[{\"ref\":\"o-1\",\"what\":\"placed\"},{\"ref\":\"o-2\",\"what\":\"placed\"}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"k\"],\"rows\":[]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"n\",\"action\"],\"rows\":[]}}"
-  ],
   "54": [
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"i\",\"f\",\"tag\"],\"rows\":[{\"i\":1,\"f\":1.5,\"tag\":\"red fox\"},{\"i\":2,\"f\":9.5,\"tag\":\"green fox\"},{\"i\":5,\"f\":2.5,\"tag\":null},{\"i\":9007199254740993,\"f\":0.1,\"tag\":null}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"req\",\"b\"],\"rows\":[{\"req\":1,\"b\":2},{\"req\":2,\"b\":3},{\"req\":3,\"b\":1}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"ref\"],\"rows\":[{\"ref\":\"o-1\"},{\"ref\":\"o-2\"}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"ref\",\"what\"],\"rows\":[{\"ref\":\"o-1\",\"what\":\"placed\"},{\"ref\":\"o-2\",\"what\":\"placed\"}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"k\"],\"rows\":[]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"n\",\"action\"],\"rows\":[]}}"
-  ],
-  "55": [
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"i\",\"f\",\"tag\"],\"rows\":[{\"i\":1,\"f\":1.5,\"tag\":\"red fox\"},{\"i\":2,\"f\":9.5,\"tag\":\"green fox\"},{\"i\":5,\"f\":2.5,\"tag\":null},{\"i\":9007199254740993,\"f\":0.1,\"tag\":null}]}}",
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"req\",\"b\"],\"rows\":[{\"req\":1,\"b\":2},{\"req\":2,\"b\":3},{\"req\":3,\"b\":1}]}}",
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"ref\"],\"rows\":[{\"ref\":\"o-1\"},{\"ref\":\"o-2\"}]}}",
@@ -783,14 +491,6 @@
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"k\"],\"rows\":[]}}",
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"n\",\"action\"],\"rows\":[]}}"
   ],
-  "58": [
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"i\",\"f\",\"tag\"],\"rows\":[{\"i\":1,\"f\":1.5,\"tag\":\"red fox\"},{\"i\":2,\"f\":9.5,\"tag\":\"green fox\"},{\"i\":5,\"f\":2.5,\"tag\":null},{\"i\":9007199254740993,\"f\":0.1,\"tag\":null}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"req\",\"b\"],\"rows\":[{\"req\":1,\"b\":2},{\"req\":2,\"b\":3},{\"req\":3,\"b\":1}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"ref\"],\"rows\":[{\"ref\":\"o-1\"},{\"ref\":\"o-2\"}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"ref\",\"what\"],\"rows\":[{\"ref\":\"o-1\",\"what\":\"placed\"},{\"ref\":\"o-2\",\"what\":\"placed\"}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"k\"],\"rows\":[]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"n\",\"action\"],\"rows\":[]}}"
-  ],
   "59": [
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"i\",\"f\",\"tag\"],\"rows\":[{\"i\":1,\"f\":1.5,\"tag\":\"red fox\"},{\"i\":2,\"f\":9.5,\"tag\":\"green fox\"},{\"i\":5,\"f\":2.5,\"tag\":null},{\"i\":9007199254740993,\"f\":0.1,\"tag\":null}]}}",
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"req\",\"b\"],\"rows\":[{\"req\":1,\"b\":2},{\"req\":2,\"b\":3},{\"req\":3,\"b\":1}]}}",
@@ -799,23 +499,7 @@
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"k\"],\"rows\":[]}}",
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"n\",\"action\"],\"rows\":[]}}"
   ],
-  "60": [
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"i\",\"f\",\"tag\"],\"rows\":[{\"i\":1,\"f\":1.5,\"tag\":\"red fox\"},{\"i\":2,\"f\":9.5,\"tag\":\"green fox\"},{\"i\":5,\"f\":2.5,\"tag\":null},{\"i\":9007199254740993,\"f\":0.1,\"tag\":null}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"req\",\"b\"],\"rows\":[{\"req\":1,\"b\":2},{\"req\":2,\"b\":3},{\"req\":3,\"b\":1}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"ref\"],\"rows\":[{\"ref\":\"o-1\"},{\"ref\":\"o-2\"}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"ref\",\"what\"],\"rows\":[{\"ref\":\"o-1\",\"what\":\"placed\"},{\"ref\":\"o-2\",\"what\":\"placed\"}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"k\"],\"rows\":[]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"n\",\"action\"],\"rows\":[]}}"
-  ],
   "61": [
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"i\",\"f\",\"tag\"],\"rows\":[{\"i\":1,\"f\":1.5,\"tag\":\"red fox\"},{\"i\":2,\"f\":9.5,\"tag\":\"green fox\"},{\"i\":5,\"f\":2.5,\"tag\":null},{\"i\":9007199254740993,\"f\":0.1,\"tag\":null}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"req\",\"b\"],\"rows\":[{\"req\":1,\"b\":2},{\"req\":2,\"b\":3},{\"req\":3,\"b\":1}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"ref\"],\"rows\":[{\"ref\":\"o-1\"},{\"ref\":\"o-2\"}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"ref\",\"what\"],\"rows\":[{\"ref\":\"o-1\",\"what\":\"placed\"},{\"ref\":\"o-2\",\"what\":\"placed\"}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"k\"],\"rows\":[]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"n\",\"action\"],\"rows\":[]}}"
-  ],
-  "62": [
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"i\",\"f\",\"tag\"],\"rows\":[{\"i\":1,\"f\":1.5,\"tag\":\"red fox\"},{\"i\":2,\"f\":9.5,\"tag\":\"green fox\"},{\"i\":5,\"f\":2.5,\"tag\":null},{\"i\":9007199254740993,\"f\":0.1,\"tag\":null}]}}",
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"req\",\"b\"],\"rows\":[{\"req\":1,\"b\":2},{\"req\":2,\"b\":3},{\"req\":3,\"b\":1}]}}",
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"ref\"],\"rows\":[{\"ref\":\"o-1\"},{\"ref\":\"o-2\"}]}}",
@@ -839,17 +523,9 @@
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"k\"],\"rows\":[]}}",
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"n\",\"action\"],\"rows\":[]}}"
   ],
-  "65": [
+  "66": [
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"i\",\"f\",\"tag\"],\"rows\":[{\"i\":1,\"f\":1.5,\"tag\":\"red fox\"},{\"i\":2,\"f\":9.5,\"tag\":\"green fox\"},{\"i\":5,\"f\":2.5,\"tag\":null},{\"i\":9007199254740993,\"f\":0.1,\"tag\":null}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"req\",\"b\"],\"rows\":[{\"req\":1,\"b\":2},{\"req\":2,\"b\":3},{\"req\":3,\"b\":1},{\"req\":4,\"b\":1}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"ref\"],\"rows\":[{\"ref\":\"o-1\"},{\"ref\":\"o-2\"}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"ref\",\"what\"],\"rows\":[{\"ref\":\"o-1\",\"what\":\"placed\"},{\"ref\":\"o-2\",\"what\":\"placed\"}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"k\"],\"rows\":[]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"n\",\"action\"],\"rows\":[]}}"
-  ],
-  "67": [
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"i\",\"f\",\"tag\"],\"rows\":[{\"i\":1,\"f\":1.5,\"tag\":\"red fox\"},{\"i\":2,\"f\":9.5,\"tag\":\"green fox\"},{\"i\":5,\"f\":2.5,\"tag\":null},{\"i\":9007199254740993,\"f\":0.1,\"tag\":null}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"req\",\"b\"],\"rows\":[{\"req\":1,\"b\":2},{\"req\":2,\"b\":3},{\"req\":3,\"b\":1},{\"req\":4,\"b\":5},{\"req\":5,\"b\":2}]}}",
+   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"req\",\"b\"],\"rows\":[{\"req\":1,\"b\":2},{\"req\":2,\"b\":3},{\"req\":3,\"b\":1},{\"req\":4,\"b\":1},{\"req\":5,\"b\":2}]}}",
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"ref\"],\"rows\":[{\"ref\":\"o-1\"},{\"ref\":\"o-2\"}]}}",
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"ref\",\"what\"],\"rows\":[{\"ref\":\"o-1\",\"what\":\"placed\"},{\"ref\":\"o-2\",\"what\":\"placed\"}]}}",
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"k\"],\"rows\":[]}}",
@@ -968,14 +644,6 @@
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"n\",\"action\"],\"rows\":[{\"n\":7,\"action\":\"opened\"}]}}"
   ],
   "104": [
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"i\",\"f\",\"tag\"],\"rows\":[{\"i\":1,\"f\":1.5,\"tag\":\"red fox\"},{\"i\":2,\"f\":9.5,\"tag\":\"green fox\"},{\"i\":5,\"f\":2.5,\"tag\":null},{\"i\":9007199254740993,\"f\":0.1,\"tag\":null}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"req\",\"b\"],\"rows\":[{\"req\":1,\"b\":2},{\"req\":2,\"b\":3},{\"req\":4,\"b\":5},{\"req\":5,\"b\":2}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"ref\"],\"rows\":[{\"ref\":\"o-1\"},{\"ref\":\"o-2\"},{\"ref\":\"o-3\"},{\"ref\":\"o-4\"}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"ref\",\"what\"],\"rows\":[{\"ref\":\"o-1\",\"what\":\"placed\"},{\"ref\":\"o-2\",\"what\":\"placed\"},{\"ref\":\"o-3\",\"what\":\"placed\"},{\"ref\":\"o-4\",\"what\":\"placed\"}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"k\"],\"rows\":[{\"k\":\"tick\"}]}}",
-   "{\"kind\":\"rows\",\"result\":{\"columns\":[\"n\",\"action\"],\"rows\":[{\"n\":7,\"action\":\"opened\"}]}}"
-  ],
-  "105": [
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"i\",\"f\",\"tag\"],\"rows\":[{\"i\":1,\"f\":1.5,\"tag\":\"red fox\"},{\"i\":2,\"f\":9.5,\"tag\":\"green fox\"},{\"i\":5,\"f\":2.5,\"tag\":null},{\"i\":9007199254740993,\"f\":0.1,\"tag\":null}]}}",
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"req\",\"b\"],\"rows\":[{\"req\":1,\"b\":2},{\"req\":2,\"b\":3},{\"req\":4,\"b\":5},{\"req\":5,\"b\":2}]}}",
    "{\"kind\":\"rows\",\"result\":{\"columns\":[\"ref\"],\"rows\":[{\"ref\":\"o-1\"},{\"ref\":\"o-2\"},{\"ref\":\"o-3\"},{\"ref\":\"o-4\"}]}}",
