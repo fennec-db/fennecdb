@@ -559,6 +559,12 @@ pub fn main(command: &str, args: &[String]) -> Code {
                     "{b}: change {} -- image {} and the writes after it{when}",
                     r.seq, r.image
                 );
+                // A tenant's line restored as one database's says whose it
+                // is, as `verify` does: only `--tenants` holds a line to its
+                // directory's name, and one database's archive names none.
+                if let Some(t) = &r.tenant {
+                    println!("  sealed as tenant `{t}`'s archive");
+                }
             }),
         _ => unreachable!("dispatched by main"),
     };

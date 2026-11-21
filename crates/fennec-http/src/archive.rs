@@ -80,6 +80,10 @@ pub struct Restored {
     pub seq: u64,
     pub image: u64,
     pub time: Option<u64>,
+    /// The tenant whose line its sealed files say it is, where they name
+    /// one: a line restored as one database's says whose it is, as
+    /// [`Verified::tenant`] does.
+    pub tenant: Option<String>,
 }
 
 /// What `verify` found an archive holds, whole.
@@ -216,6 +220,29 @@ struct Identity {
     /// it (`Archive::began_of`): `None` once it has, or where this process
     /// sealed it.
     began_from: Option<PathBuf>,
+    /// Where the first image or segment sealed in this version stands in
+    /// the archive's order, by its name ([`place`]): an older version's is
+    /// read only before it (`Archive::older`).
+    newer: Option<(u64, u64)>,
+}
+
+/// Where what a file holds stands in an archive's order: an image of
+/// change `c` taken at `t` at `(c, t)`; a write `w` -- a segment's, from
+/// its first -- at `(w - 1, u64::MAX)`, after every image of the change
+/// before it and before any of its own.
+fn place(image: Option<u64>, change: u64) -> (u64, u64) {
+    match image {
+        Some(time) => (change, time),
+        None => (change.saturating_sub(1), u64::MAX),
+    }
+}
+
+/// [`place`] in words, as a refusal names it.
+fn place_said((change, time): (u64, u64)) -> String {
+    match time {
+        u64::MAX => format!("its segment beginning at change {}", change + 1),
+        _ => format!("its image of change {change} taken at {time}"),
+    }
 }
 
 /// Whose archive files of `tenant` are, in words.
@@ -682,6 +709,8 @@ impl Archive {
         // When the archive began, the image it was read from, and whether
         // that image's first frame vouched for it here.
         let mut began: Option<(u64, PathBuf, bool)> = None;
+        // The first image or segment sealed in this version, by its name.
+        let mut newer: Option<(u64, u64)> = None;
         for name in names {
             let path = self.dir.join(&name);
             // A head is read before its file is opened, and anyone who can
@@ -710,6 +739,14 @@ impl Archive {
             let Some(b) = bound else {
                 continue;
             };
+            let at = match (image_name(&name), segment_name(&name)) {
+                (Some((change, time)), _) => Some(place(Some(time), change)),
+                (_, Some(first)) => Some(place(None, first)),
+                _ => None,
+            };
+            if let Some(at) = at {
+                newer = Some(newer.map_or(at, |n| n.min(at)));
+            }
             let two = |what: &str, p: &Path| {
                 corrupt(format!(
                     "{} and {}: {what} -- files put among the archive's that are not its own",
@@ -753,6 +790,7 @@ impl Archive {
                         tenant: b.tenant,
                         began: None,
                         began_from: None,
+                        newer: None,
                     };
                     found = Some((id, path.clone()));
                 }
@@ -772,6 +810,7 @@ impl Archive {
             id.began = Some(t);
             id.began_from = (!vouched).then_some(from);
         }
+        id.newer = newer;
         Ok(Some(id))
     }
 
@@ -839,6 +878,7 @@ impl Archive {
                         tenant: self.tenant.clone().unwrap_or_default(),
                         began: None,
                         began_from: None,
+                        newer: None,
                     });
                 }
                 held.clone().expect("made above")
@@ -851,6 +891,20 @@ impl Archive {
             },
             _ => 0,
         };
+        // What this seals stands where its name says among the files sealed
+        // in this version: an older one there or past it is not this
+        // archive's (`Self::older`).
+        let at = match role {
+            Role::Image => Some(place(Some(time), change)),
+            Role::Segment => Some(place(None, change)),
+            _ => None,
+        };
+        if let Some(at) = at {
+            let mut held = self.identity.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(held) = held.as_mut() {
+                held.newer = Some(held.newer.map_or(at, |n| n.min(at)));
+            }
+        }
         Ok(Binding {
             role,
             archive: id.archive,
@@ -865,7 +919,9 @@ impl Archive {
     /// and tenant the others name ([`Self::learned`]), and the numbers its
     /// name says -- a segment's first change, an image's change and time --
     /// each refused by name where it says another. A file sealed before
-    /// this version (`bound` none) says nothing, and is read as it was.
+    /// this version (`bound` none) says nothing of itself: an image is held
+    /// to its place among the files sealed in this one ([`Self::older`]),
+    /// and a presence refused, which no archiver sealed before it.
     fn held(
         &self,
         path: &Path,
@@ -875,7 +931,18 @@ impl Archive {
         time: u64,
     ) -> io::Result<()> {
         let Some(b) = bound else {
-            return Ok(());
+            return match role {
+                Role::Image => self.older(
+                    path,
+                    place(Some(time), change),
+                    &format!("an image of change {change}"),
+                ),
+                Role::Presence => Err(corrupt(format!(
+                    "{}: a presence sealed before version 3, which no archiver wrote:                      before it, a presence was plain",
+                    path.display()
+                ))),
+                _ => Ok(()),
+            };
         };
         let refused = |what: String| Err(corrupt(format!("{}: {what}", path.display())));
         if b.role != role {
@@ -917,6 +984,53 @@ impl Archive {
                 id.began.unwrap_or(0)
             )),
             _ => Ok(()),
+        }
+    }
+
+    /// A file sealed before this version, what it holds standing at `at`
+    /// in the archive's order ([`place`]), read only before the first image
+    /// or segment sealed in this one: it names no archive, tenant or change,
+    /// so one of another archive or tenant under the key -- an image from
+    /// before an upgrade copied in under a later change, or a segment named
+    /// before it whose writes run on past it -- read as this archive's after
+    /// its upgrade. Refused by name at or past it; before it, such a file
+    /// still reads (SECURITY.md).
+    fn older(&self, path: &Path, at: (u64, u64), what: &str) -> io::Result<()> {
+        let Some(newer) = self.learned()?.and_then(|id| id.newer) else {
+            return Ok(());
+        };
+        if at < newer {
+            return Ok(());
+        }
+        Err(corrupt(format!(
+            "{}: {what}, sealed before version 3, where this archive is sealed in version 3 \
+             from {} on: an older file put among its newer ones",
+            path.display(),
+            place_said(newer)
+        )))
+    }
+
+    /// [`Self::older`] of a segment sealed before this version: its last
+    /// write's place, its writes counted as a reader counts them, read only
+    /// where the archive has files of this version.
+    fn older_segment(&self, path: &Path, first: u64, plain: &[u8]) -> io::Result<()> {
+        if self.learned()?.and_then(|id| id.newer).is_none() {
+            return Ok(());
+        }
+        // Not a segment: its reader refuses it as one.
+        let Ok((list, _)) = entries(plain, Damage::Cut) else {
+            return Ok(());
+        };
+        match list.iter().map(|e| e.3).sum::<u64>() {
+            0 => Ok(()),
+            n => {
+                let last = first.saturating_add(n - 1);
+                self.older(
+                    path,
+                    place(None, last),
+                    &format!("a segment holding change {last}"),
+                )
+            }
         }
     }
 
@@ -977,6 +1091,9 @@ impl Archive {
                 // no write: a segment cut as it was made, read as empty.
                 if o.next.index() > 0 {
                     self.held(path, o.binding.as_ref(), Role::Segment, first, 0)?;
+                    if o.binding.is_none() {
+                        self.older_segment(path, first, &o.plain)?;
+                    }
                 }
                 // Gone on in only in this version: frames of two versions
                 // in one file would open as neither, and an older one's
@@ -1985,10 +2102,7 @@ impl Archive {
     /// its name says (`Archive::learned`, `Archive::held`): its history and
     /// a tenant's presence are opened too.
     pub fn verify(&self) -> io::Result<Verified> {
-        let tenant = self
-            .learned()?
-            .map(|id| id.tenant)
-            .filter(|t| !t.is_empty());
+        let tenant = self.tenant_named()?;
         let images = self.images()?;
         let Some(&(first, from)) = images.first() else {
             return Err(corrupt(
@@ -2238,8 +2352,19 @@ impl Archive {
             seq: stop,
             image,
             time,
+            tenant: self.tenant_named()?,
         };
         Ok((r, f))
+    }
+
+    /// The tenant this archive's sealed files name, where they name one:
+    /// only `--tenants` holds a line to its directory's name, so a line read
+    /// as one database's says whose it is.
+    fn tenant_named(&self) -> io::Result<Option<String>> {
+        Ok(self
+            .learned()?
+            .map(|id| id.tenant)
+            .filter(|t| !t.is_empty()))
     }
 
     /// Removes what consolidating rounds left -- a crash's, or one a copy

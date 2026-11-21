@@ -1631,3 +1631,123 @@ fn presence_and_began_edited_are_refused() {
     assert_eq!(verified().unwrap(), 7, "its presence sealed");
     assert!(matches!(of_olden("olden-sealed"), Restoring::Gone(5)));
 }
+
+/// `plain` as an archiver before version 3 sealed it: version 2, under the
+/// key itself, its frames bound to the file's id and their places alone --
+/// whole, its last frame flagged as the last, or appended.
+fn sealed_v2(key: &fennec_http::seal::Key, plain: &[u8], whole: bool) -> Vec<u8> {
+    use fennec_http::seal::{self, Frames};
+    let id = [0x5a; 16];
+    let mut out = [&seal::MAGIC_V2[..], &id].concat();
+    let mut frames = Frames::v2(key, id);
+    let chunks: Vec<&[u8]> = plain.chunks(seal::FRAME).collect();
+    for (i, c) in chunks.iter().enumerate() {
+        frames
+            .seal(whole && i + 1 == chunks.len(), c, &mut out)
+            .unwrap();
+    }
+    out
+}
+
+/// The files of `dir` whose names begin with `prefix`, in order.
+fn listed(dir: &Path, prefix: &str) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with(prefix))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// 1.0's review of version 3: a file sealed in version 1 or 2 names no
+/// tenant, archive or change, so tenant xeno's image from before an
+/// upgrade, copied into acme's line under a later change, restored as
+/// acme's -- xeno's rows in acme's file, which acme's tokens then read --
+/// and so did xeno's writes in a segment named before acme's first image,
+/// running on past it. In a line sealed in version 3 from some file on, an
+/// older image or segment reads only before that file in the archive's
+/// order: one at or past it is refused by name. What stands before it still
+/// reads (SECURITY.md).
+#[test]
+fn older_files_put_past_a_lines_newer_ones_are_refused() {
+    use fennec_http::seal::{self, Key};
+    let key = Key::from_hex(&"ab".repeat(32)).unwrap();
+    let d = scratch("older-past");
+    let n = node(&d.join("node"), None);
+    let acme = made(&n, "acme", 3);
+    let xeno = made(&n, "xeno", 5);
+    let root = d.join("root");
+    let a = sealed_archiver(&root, &n.url, &key);
+    sealed_reached(&root.join("acme"), &key, seq(&acme));
+    sealed_reached(&root.join("xeno"), &key, seq(&xeno));
+    // xeno's writes after its image, in a segment of its line.
+    for i in 5..8 {
+        exec(&xeno, &format!("put notes {{title: \"xeno {i}\", n: {i}}}"));
+    }
+    sealed_reached(&root.join("xeno"), &key, seq(&xeno));
+    a.finish();
+    let acme_rows = rows(&acme.db.read().unwrap(), "get notes");
+    // acme's line is version 3 from its first image on.
+    let first = &listed(&root.join("acme"), "image-")[0];
+    let acme_at = seal::bound_in(&std::fs::read(first).unwrap())
+        .unwrap()
+        .change;
+    let of_acme = |out: &str| {
+        let done = node_archive::restore_all(&root, &d.join(out), Target::End, Some(&key));
+        let done = done.unwrap();
+        done.into_iter().find(|(t, _)| t == "acme").unwrap().1
+    };
+
+    // xeno's image, sealed as before the upgrade, under its own change and
+    // time, later than acme's.
+    let image = &listed(&root.join("xeno"), "image-")[0];
+    let (plain, bound) = seal::open_whole(&key, &std::fs::read(image).unwrap()).unwrap();
+    let b = bound.unwrap();
+    assert!(
+        b.change > acme_at,
+        "xeno at {}, acme at {acme_at}",
+        b.change
+    );
+    let put = root
+        .join("acme")
+        .join(format!("image-{:020}-{:013}.fennec", b.change, b.time));
+    std::fs::write(&put, sealed_v2(&key, &plain, true)).unwrap();
+    let by_image = of_acme("image");
+    std::fs::remove_file(&put).unwrap();
+
+    // xeno's segment so, named before acme's first image, its writes
+    // running on past it: read after that image, they were acme's.
+    let segment = &listed(&root.join("xeno"), "writes-")[0];
+    let o = seal::open_appended(&key, &std::fs::read(segment).unwrap()).unwrap();
+    let put = root
+        .join("acme")
+        .join(format!("writes-{:020}.log", acme_at - 1));
+    std::fs::write(&put, sealed_v2(&key, &o.plain, false)).unwrap();
+    let by_segment = of_acme("segment");
+    std::fs::remove_file(&put).unwrap();
+    let refused = |r: &Restoring, name: String| matches!(r, Restoring::Failed(e) if e.contains(&name) && e.contains("sealed before version 3"));
+    assert!(
+        refused(&by_image, format!("image-{:020}", b.change))
+            && refused(&by_segment, format!("writes-{:020}", acme_at - 1)),
+        "xeno's older image in acme's line: {by_image:?}; its older segment: {by_segment:?}"
+    );
+
+    // acme's own files alone restore as they were.
+    assert!(
+        matches!(of_acme("own"), Restoring::Restored(..)),
+        "acme's own line"
+    );
+    let db = fennec_core::fs::open(d.join("own").join("acme.fennec")).unwrap();
+    assert_eq!(rows(&db, "get notes"), acme_rows);
+    // Restored alone, as `fennec restore <dir>` restores it, a line says
+    // whose it is: nothing but `--tenants` holds it to its directory's name.
+    let r = Archive::with_key(root.join("acme"), Some(key.clone()))
+        .unwrap()
+        .restore(&d.join("alone.fennec"), Target::End)
+        .unwrap();
+    assert_eq!(r.tenant.as_deref(), Some("acme"));
+}

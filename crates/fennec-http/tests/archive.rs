@@ -1064,6 +1064,22 @@ fn a_segment_cut_as_it_was_made_holds_no_write() {
             frames.seal(false, b"FENECLG\x01", &mut head).unwrap();
             head
         };
+        // A whole segment of change `first` holding the first one's writes:
+        // sealed, bound to that change as `take` binds one, so a reader
+        // refuses it for nothing but where it stands.
+        let segment_at = |first: u64| -> Vec<u8> {
+            let Some(k) = &key else {
+                return segment.clone();
+            };
+            let plain = seal::open_appended(k, &segment).unwrap().plain;
+            let mut b = seal::bound_in(&segment).unwrap();
+            b.change = first;
+            let mut out = Vec::new();
+            let mut frames = seal::begin(k, &b, &mut out).unwrap();
+            frames.seal(false, &plain[..8], &mut out).unwrap();
+            frames.seal(false, &plain[8..], &mut out).unwrap();
+            out
+        };
         let cuts: &[usize] = match sealed {
             false => &[0, 3],
             true => &[
@@ -1092,13 +1108,19 @@ fn a_segment_cut_as_it_was_made_holds_no_write() {
             // Only the last may hold no write: with a segment after it, one
             // is refused by name.
             let after = copy.join(format!("writes-{:020}.log", p.seq() + 2));
-            std::fs::write(&after, &segment).unwrap();
+            std::fs::write(&after, segment_at(p.seq() + 2)).unwrap();
             let e = c.verify().unwrap_err().to_string();
             let name = format!("writes-{:020}.log", p.seq() + 1);
             assert!(
                 e.contains(&name) && e.contains("holds no write"),
                 "cut at {cut}, sealed {sealed}: {e}"
             );
+            // The one after is a segment of its own name: without the one
+            // cut, all `verify` refuses is the change between them.
+            std::fs::remove_file(next(&copy)).unwrap();
+            let e = c.verify().unwrap_err().to_string();
+            let between = format!("changes {0} to {0} are missing", p.seq() + 1);
+            assert!(e.contains(&between), "cut at {cut}, sealed {sealed}: {e}");
         }
 
         // An archiver stopped as it made one goes on in the segment before:
@@ -1346,6 +1368,22 @@ fn older_sealed_archives_still_open() {
     let whole = older.len();
     older.extend_from_slice(&[1, 2, 3]);
     std::fs::write(&segment, &older).unwrap();
+    // Its image and history as that archiver sealed them too: an older
+    // segment after an image of this version is no older archiver's, and
+    // is refused (`older_files_put_past_a_lines_newer_ones_are_refused`).
+    let (images, history) = (named(&live, "image-"), live.join("history"));
+    for path in images.iter().chain([&history]) {
+        let (plain, _) = seal::open_whole(&key, &std::fs::read(path).unwrap()).unwrap();
+        let mut v1 = seal::MAGIC_V1.to_vec();
+        let mut frames = Frames::v1(&key);
+        let chunks: Vec<&[u8]> = plain.chunks(seal::FRAME).collect();
+        for (i, c) in chunks.iter().enumerate() {
+            frames.seal(i + 1 == chunks.len(), c, &mut v1).unwrap();
+        }
+        std::fs::write(path, v1).unwrap();
+    }
+    // Read afresh: what an archive is, from its files, is learned once.
+    let b = Archive::with_key(&live, Some(key.clone())).unwrap();
     let archiver = follow();
     for i in 5..10 {
         p.exec(&format!("put c {{x: {i}}}"));
