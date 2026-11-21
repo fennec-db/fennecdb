@@ -56,6 +56,9 @@ timeout back first (`node_stream`): `Paced` takes it to stand. A cut and a
 write timed out are counted by their bound (`conn::Timeout`) in the
 thread's shard, before a 408 is written. A new reader of a served
 connection goes through `Paced`, never a bare `BufReader` over the `Conn`.
+Over TLS every timeout and mode is set on the session's own socket
+(`fennec_tls::TlsStream::socket`), never a `dup`'s: on Windows a
+duplicate's timeouts are its own, and bound none of the session's reads.
 
 **[`--tls-cert` and `--tls-key` make a listener HTTPS
 alone](../../../../docs/design/http.md#tls)**, `--metrics` too, each handshake on its
