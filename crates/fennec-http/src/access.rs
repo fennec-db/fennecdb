@@ -436,20 +436,32 @@ struct Source {
     path: PathBuf,
     /// The second the file was last looked at.
     looked: AtomicU64,
-    /// When the file read last was modified, and of the one that did not
-    /// read, when it was modified and the second it was read at.
-    modified: Mutex<(Option<SystemTime>, Option<Failed>)>,
+    /// What the looks at the file found.
+    seen: Mutex<Seen>,
 }
 
-/// A JWKS file that did not read: when it was modified, and the second it
+/// What [`Access::look`] found of a JWKS file.
+struct Seen {
+    /// When the file read last was modified.
+    read: Option<SystemTime>,
+    /// Of a file that did not parse, when it was modified and the second
+    /// it was read at: read again [`JWKS_FAILED_AGAIN`] later.
+    unparsed: Option<Failed>,
+    /// Of a file that could not be read, when it was modified: said once,
+    /// and read again at the next look.
+    unread: Option<Option<SystemTime>>,
+}
+
+/// A JWKS file that did not parse: when it was modified, and the second it
 /// was read at.
 type Failed = (Option<SystemTime>, u64);
 
-/// How long, in seconds, a JWKS file that did not read is let be before
+/// How long, in seconds, a JWKS file that did not parse is let be before
 /// a request reads it again, its modification time unchanged: one changed
-/// is read at the next look. Read at every look, a file that did not parse
-/// cost a request each second its read -- on a slow mount, a stall each
-/// second -- for as long as it failed.
+/// is read at the next look, and so is one that could not be read at all.
+/// Read at every look, a file that did not parse cost a request each
+/// second its read -- on a slow mount, a stall each second -- for as long
+/// as it failed.
 const JWKS_FAILED_AGAIN: u64 = 60;
 
 struct Jwk {
@@ -808,7 +820,11 @@ impl Access {
         let source = Source {
             path: path.to_path_buf(),
             looked: AtomicU64::new(0),
-            modified: Mutex::new((modified, None)),
+            seen: Mutex::new(Seen {
+                read: modified,
+                unparsed: None,
+                unread: None,
+            }),
         };
         Access::with(keys, Some(source), policy)
     }
@@ -944,10 +960,12 @@ impl Access {
     /// finished under the same time -- a file system keeping whole
     /// seconds, a write inside one tick. Kept as the read began, the
     /// finished file was never read, and a key the rotation took out went
-    /// on verifying tokens. A file that does not read is read again until
+    /// on verifying tokens. A file that does not parse is read again until
     /// it does: at the next look where its time moved, and
     /// [`JWKS_FAILED_AGAIN`] after where it did not, said once a time it
-    /// was modified at.
+    /// was modified at. One that could not be read -- an error opening or
+    /// reading it, which says nothing of what it holds -- is read again at
+    /// the next look whatever its time, said once a time too.
     fn keys(&self, now: u64) -> Arc<Vec<Jwk>> {
         if let Some(src) = &self.source {
             if src.looked.swap(now, Ordering::Relaxed) != now {
@@ -961,39 +979,61 @@ impl Access {
     #[cold]
     #[inline(never)]
     fn look(&self, src: &Source, now: u64) {
-        let mut last = match src.modified.try_lock() {
-            Ok(last) => last,
+        let mut seen = match src.seen.try_lock() {
+            Ok(seen) => seen,
             Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => return,
         };
         let modified = std::fs::metadata(&src.path).and_then(|m| m.modified()).ok();
-        if modified == last.0 {
+        if modified == seen.read {
             return;
         }
-        let failed = last.1.filter(|(m, _)| *m == modified);
-        if failed.is_some_and(|(_, at)| now < at.saturating_add(JWKS_FAILED_AGAIN)) {
+        let unparsed = seen.unparsed.filter(|(m, _)| *m == modified);
+        if unparsed.is_some_and(|(_, at)| now < at.saturating_add(JWKS_FAILED_AGAIN)) {
             return;
         }
-        match std::fs::read_to_string(&src.path)
-            .map_err(|e| e.to_string())
-            .and_then(|t| read_jwks(&t))
-        {
+        // An error reading the file is no word on what it holds -- a
+        // process out of descriptors under load, a mount gone stale, a
+        // file renamed in before it could be read -- and the next look
+        // reads it again. Held back the minute a file that did not parse
+        // is, a rotation renamed in under a new time and met by such an
+        // error was taken a minute late: its new key's tokens refused, a
+        // key it took out verifying, all that minute.
+        let text = match std::fs::read_to_string(&src.path) {
+            Ok(text) => text,
+            Err(e) => {
+                if seen.unread != Some(modified) {
+                    crate::log!(
+                        "{}: {e}; the keys read before stay, and the file is read again at \
+                         the next request, until it reads",
+                        src.path.display()
+                    );
+                    seen.unread = Some(modified);
+                }
+                return;
+            }
+        };
+        match read_jwks(&text) {
             Ok(keys) => {
-                *last = (modified, None);
+                *seen = Seen {
+                    read: modified,
+                    unparsed: None,
+                    unread: None,
+                };
                 *self.keys.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(keys);
                 for v in &self.verified {
                     v.lock().unwrap_or_else(|e| e.into_inner()).clear();
                 }
             }
             Err(e) => {
-                if failed.is_none() {
+                if unparsed.is_none() {
                     crate::log!(
                         "{}: {e}; the keys read before stay, and the file is read again as it \
-                         changes, or in a minute, until it reads",
+                         changes, or in a minute, until it parses",
                         src.path.display()
                     )
                 }
-                last.1 = Some((modified, now));
+                seen.unparsed = Some((modified, now));
             }
         }
     }
@@ -4927,6 +4967,59 @@ mod tests {
             Some("no key has the token's kid"),
             "a file changed since was not read at the next look"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A JWKS file that could not be read -- an error opening or reading
+    /// it, which says nothing of what it holds: here a directory in its
+    /// place -- is read again at the next look, its modification time
+    /// unchanged; the minute's wait is a file's that did not parse. Held
+    /// back that minute, a rotation renamed in and met by a passing error
+    /// -- a process out of descriptors, a mount gone stale -- was taken a
+    /// minute late: its new key's tokens refused, a key it took out
+    /// verifying.
+    #[test]
+    fn a_jwks_file_that_could_not_be_read_is_read_at_the_next_look() {
+        let dir = std::env::temp_dir().join(format!("fennec-jwks-unread-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("keys.json");
+        let oct = |kid: &str, byte: u8| {
+            let k = b64url_encode(&[byte; 32]);
+            format!(r#"{{"keys":[{{"kty":"oct","kid":"{kid}","k":"{k}"}}]}}"#)
+        };
+        let stamp = |at: SystemTime| {
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+        };
+        std::fs::write(&path, oct("old", 1)).unwrap();
+        // An hour back: no directory made now shares its time.
+        stamp(SystemTime::now() - std::time::Duration::from_secs(3600));
+        let a = Access::from_jwks(&path, "").unwrap();
+        let old = a.mint(r#"{"sub":"alice"}"#).unwrap();
+        let now = unix_now();
+        assert!(a.scope(&old, now).is_ok());
+
+        // The look meets a file it cannot read.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let at = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(std::fs::read_to_string(&path).is_err());
+        assert!(a.scope(&old, now + 1).is_ok(), "the keys read before stay");
+        // The rotation in its place, under the time that look met.
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, oct("new", 2)).unwrap();
+        stamp(at);
+        assert_eq!(
+            a.scope(&old, now + 2).err(),
+            Some("no key has the token's kid"),
+            "a file that could not be read was let be past the next look"
+        );
+        let new = a.mint(r#"{"sub":"alice"}"#).unwrap();
+        assert!(a.scope(&new, now + 2).is_ok());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

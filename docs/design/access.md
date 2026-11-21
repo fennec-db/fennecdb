@@ -67,8 +67,19 @@ second for as long as it failed, under the mutex every look takes -- on a
 slow mount, a stall a second, and the request in the next second waiting
 behind it (the review of the G14 fixes). A rotation written in place under
 one time is taken a minute late; the docs say to replace the file by a
-rename. `access::tests::a_jwks_read_half_written_is_read_again_once_whole`
-holds the minute and the moved time with its clock given, and
+rename. The minute is a parse's alone: a file that could not be read --
+an error opening or reading it, a process out of descriptors under load,
+a mount gone stale -- says nothing of what it holds, and is read again at
+the next look, said once a modification time (`Seen::unread`). Held back
+the minute as the first shape held it, a rotation renamed in under a new
+time and met by such an error was taken a minute late, its new key's
+tokens refused and a key it took out verifying that long (the review of
+the fixes' second and third rounds).
+`access::tests::a_jwks_read_half_written_is_read_again_once_whole`
+holds the minute and the moved time with its clock given,
+`a_jwks_file_that_could_not_be_read_is_read_at_the_next_look` a directory
+in the file's place and the rotation under the time that look met, taken
+at the next look (before, a minute later), and
 `tests/access.rs`'s `a_jwks_file_rotated_by_a_rename_is_read_through_a_request`
 a rotation, a broken file and the next through a server's requests.
 A verified token is kept by its text (`verified`, 16 shards of 256,
