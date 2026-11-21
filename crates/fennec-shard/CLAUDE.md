@@ -41,7 +41,9 @@ slot; no id, never.
 **[A tenant's hook secrets are its file's, relayed by the router and kept
 by none of its records.](../../docs/design/named-statements.md#where-the-secret-lives)**
 `<t>.hooks` is bound to its file as `.instance` is (`tenant_hooks::Store`,
-`fennec_http::instance`): put away, synced, before every create, install,
+`fennec_http::instance`), its birth time held only where the node that
+wrote it and the one reading it both read one (`instance::same`: a Linux
+release binary reads none): put away, synced, before every create, install,
 follow, delete, reclaim and restore (`Tenants::put_away`,
 `put_away_beside`), never adopted by another file -- an open puts away one
 naming another than it opened, and an event verified against a set no
