@@ -28,7 +28,20 @@
 //!     `x-compact-open` the same once the file is opened again, which walks
 //!     the documents for what it can reclaim once;
 //!   * `gate-compact`: `gate.rs`'s `file-compact`, 10 000 rows each set
-//!     once, then a `compact`.
+//!     once, then a `compact`;
+//!   * `x-agg`, `p-agg`: `get x select k, count(*), sum(v) group k` over
+//!     `x (a int, b text, k int, v int)`, 100 000 rows in 100 groups, `b`
+//!     dropped and compacted (`p`: never there), both fields read past it;
+//!   * `x-order`, `p-order`: `get x order c limit 10`, `c` read of every row
+//!     as its sort key.
+//!
+//! Two that count something done once a process: `x-warm`, `p-warm` the
+//! hash index of `c int @hash` built from the documents of a file read in,
+//! as the first read after an open or a server's warm-up builds it
+//! (`Database::warm`); `x-open-vec`, `p-open-vec` the open, read into
+//! memory, of a file of 100 000 rows `x (a int, b text, v vector<8>
+//! @hnsw(cosine))` checkpointed with its graph, which copies every vector
+//! into the graph's arena past the dropped place (`Store::field_at`).
 //!
 //! And two that print what they measure: `bytes-<k>` the record bytes a
 //! document of `x` with `k` text fields dropped between `a` and `c` holds
@@ -69,10 +82,15 @@ impl Rng {
 /// `name`'s rows written into `db`: with `dropped` text fields between `a`
 /// and `c` that are then dropped, or none, and compacted either way.
 fn rows(db: &mut Database, name: &str, dropped: usize, n: i64) {
+    rows_indexed(db, name, dropped, n, "");
+}
+
+/// [`rows`], `c` declared with `index` after its type.
+fn rows_indexed(db: &mut Database, name: &str, dropped: usize, n: i64, index: &str) {
     let gone: Vec<String> = (0..dropped).map(|i| format!("b{i} text")).collect();
     let mut fields = vec!["a int".to_string()];
     fields.extend(gone.iter().cloned());
-    fields.extend(["c int".to_string(), "d text".to_string()]);
+    fields.extend([format!("c int {index}"), "d text".to_string()]);
     run(
         db,
         &format!("create collection {name} ({})", fields.join(", ")),
@@ -97,6 +115,65 @@ fn rows(db: &mut Database, name: &str, dropped: usize, n: i64) {
         run(db, &format!("alter collection {name} drop field b{i}"));
     }
     run(db, &format!("compact {name}"));
+}
+
+/// `x (a int, b text, k int, v int)` -- `b` dropped and compacted, or
+/// never there -- 100 000 rows in 100 groups by `k`.
+fn grouped(db: &mut Database, dropped: usize) {
+    let (fields, put) = match dropped {
+        0 => ("a int, k int, v int", "put x {id: $1, a: $1, k: $2, v: $3}"),
+        _ => (
+            "a int, b text, k int, v int",
+            "put x {id: $1, a: $1, b: 'a dropped value', k: $2, v: $3}",
+        ),
+    };
+    run(db, &format!("create collection x ({fields})"));
+    let put = stmt(put);
+    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+    for id in 1..=ROWS {
+        let params = [
+            Value::Int(id),
+            Value::Int(id % 100),
+            Value::Int(rng.below(1_000) as i64),
+        ];
+        db.execute_with(&put, &params).unwrap();
+    }
+    if dropped > 0 {
+        run(db, "alter collection x drop field b");
+    }
+    run(db, "compact x");
+}
+
+/// A file of `x (a int, b text, v vector<8> @hnsw(cosine))`'s 100 000
+/// rows, `b` dropped and compacted or never there, checkpointed with its
+/// graph.
+fn vectors(dir: &Path, dropped: usize) -> PathBuf {
+    let path = dir.join("db.fennec");
+    let mut db = fennec_core::fs::open(&path).unwrap();
+    let (fields, put) = match dropped {
+        0 => (
+            "a int, v vector<8> @hnsw(cosine)",
+            "put x {id: $1, a: $1, v: $2}",
+        ),
+        _ => (
+            "a int, b text, v vector<8> @hnsw(cosine)",
+            "put x {id: $1, a: $1, b: 'a dropped value', v: $2}",
+        ),
+    };
+    run(&mut db, &format!("create collection x ({fields})"));
+    let put = stmt(put);
+    let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+    for id in 1..=ROWS {
+        let v: Vec<f32> = (0..8).map(|_| rng.below(1_000) as f32 + 1.0).collect();
+        db.execute_with(&put, &[Value::Int(id), Value::Vector(v)])
+            .unwrap();
+    }
+    if dropped > 0 {
+        run(&mut db, "alter collection x drop field b");
+    }
+    run(&mut db, "compact");
+    db.checkpoint().unwrap();
+    path
 }
 
 /// The instructions this process retired so far
@@ -276,6 +353,52 @@ fn main() {
             drop(db);
             let _ = std::fs::remove_dir_all(&dir);
         }
+        (_, "agg") => {
+            let mut db = Database::new();
+            grouped(&mut db, dropped);
+            let agg = stmt("get x select k, count(*), sum(v) group k");
+            db.query(&agg, &[]).unwrap();
+            count(&mode, 20, |_| {
+                black_box(db.query(&agg, &[]).unwrap());
+            });
+        }
+        (_, "order") => {
+            let mut db = Database::new();
+            rows(&mut db, name, dropped, ROWS);
+            let order = stmt("get x order c limit 10");
+            db.query(&order, &[]).unwrap();
+            count(&mode, 20, |_| {
+                black_box(db.query(&order, &[]).unwrap());
+            });
+        }
+        (_, "warm") => {
+            let dir = scratch(&mode);
+            let path = dir.join("db.fennec");
+            {
+                let mut db = fennec_core::fs::open(&path).unwrap();
+                rows_indexed(&mut db, name, dropped, ROWS, "@hash");
+                db.checkpoint().unwrap();
+            }
+            let db = fennec_core::fs::open_in_memory(&path).unwrap();
+            count(&mode, 1, |_| {
+                assert_eq!(db.warm(&[]).unwrap(), 1);
+            });
+            drop(db);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        (_, "open-vec") => {
+            let dir = scratch(&mode);
+            let path = vectors(&dir, dropped);
+            let mut db = None;
+            count(&mode, 1, |_| {
+                db = Some(fennec_core::fs::open_in_memory(&path).unwrap());
+            });
+            let db = db.unwrap();
+            let x = db.collection("x").unwrap();
+            assert_eq!(x.store.len(), ROWS as usize);
+            drop(db);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
         (m, _) if m.starts_with("bytes-") => {
             let k: usize = m["bytes-".len()..].parse().expect("bytes-<k>");
             let mut db = Database::new();
@@ -290,8 +413,8 @@ fn main() {
         ("peak-mapped", _) | ("peak-memory", _) => peak(&mode),
         _ => {
             eprintln!(
-                "modes: x- or p-: get-id, scan, json, put, compact; x-compact-open, \
-                 gate-compact, bytes-<k>, peak-mapped, peak-memory"
+                "modes: x- or p-: get-id, scan, json, put, compact, agg, order, warm, \
+                 open-vec; x-compact-open, gate-compact, bytes-<k>, peak-mapped, peak-memory"
             );
             std::process::exit(2);
         }

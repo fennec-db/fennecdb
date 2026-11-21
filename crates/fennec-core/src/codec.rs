@@ -628,9 +628,13 @@ pub fn skip_field(buf: &[u8], pos: &mut usize) -> Result<()> {
 /// [`skip_field`] where a dropped place may stand, which every write after
 /// the drop and every compact makes a one-byte `null`: a null stepped over
 /// by its byte, the call into the skip -- 34 instructions of its frame and
-/// its match -- not made. Asked only by a reader of a collection holding a
-/// dropped place (`Store::read_fields_passing`, `Database::query_json`):
-/// a compare more on every other value it passes.
+/// its match -- not made. Asked only where a dropped place may stand: by
+/// the readers a query picks once for a collection holding one before a
+/// field it reads (`Store::read_fields_passing`, a filter's fields and an
+/// aggregate's; `Store::read_field_in`, an order's keys), a compare more on
+/// every other value they pass, and by `Schema::read_doc` and
+/// `read_written` for the dropped places alone. The JSON writer passes a
+/// dropped place as any value (`Database::query_json`).
 #[inline(always)]
 pub fn skip_passing(buf: &[u8], pos: &mut usize) -> Result<()> {
     if buf.get(*pos) == Some(&TAG_NULL) {

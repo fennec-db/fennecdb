@@ -18826,15 +18826,27 @@ fn order_ids(store: &Store, ids: &[DocId], keys: &[OrderKey], k: usize) -> Resul
     }
     let n = keys.len();
     let mut flat: Vec<Value> = Vec::with_capacity(ids.len() * n);
-    // The read stays inline: behind a closure returning `Result<Value>` the
-    // same query measured 39 ms.
-    for &id in ids {
-        for (pos, _, _, path) in keys {
-            flat.push(match (pos, path) {
-                (None, _) => Value::Int(id as i64),
-                (Some(p), None) => store.read_field(id, *p)?.unwrap_or(Value::Null),
-                (Some(p), Some(k)) => store.read_path(id, *p, k)?.unwrap_or(Value::Null),
-            });
+    // A field past a dropped place read passing its `null` by its byte, by
+    // a loop of its own chosen once a query (`order_keys_passing`): asked a
+    // row, every other collection's order would pay for it. Not in the
+    // browser module, which holds one copy of the reader.
+    let passing = !cfg!(target_arch = "wasm32")
+        && keys
+            .iter()
+            .any(|(p, _, _, path)| path.is_none() && p.is_some_and(|p| store.passes(p)));
+    if passing {
+        order_keys_passing(store, ids, keys, &mut flat)?;
+    } else {
+        // The read stays inline: behind a closure returning
+        // `Result<Value>` the same query measured 39 ms.
+        for &id in ids {
+            for (pos, _, _, path) in keys {
+                flat.push(match (pos, path) {
+                    (None, _) => Value::Int(id as i64),
+                    (Some(p), None) => store.read_field(id, *p)?.unwrap_or(Value::Null),
+                    (Some(p), Some(k)) => store.read_path(id, *p, k)?.unwrap_or(Value::Null),
+                });
+            }
         }
     }
     let unfolded: Vec<OrderKey>;
@@ -18847,6 +18859,31 @@ fn order_ids(store: &Store, ids: &[DocId], keys: &[OrderKey], k: usize) -> Resul
     };
     let idx = order_rows(&flat, n, ids.len(), keys, k);
     Ok(idx.into_iter().map(|i| ids[i]).collect())
+}
+
+/// [`order_ids`]'s keys of `ids` into `flat`, a row's after the row before,
+/// where a field read is past a dropped place: each `null` passed by its
+/// byte ([`Store::read_field_in`]), a call into the skip a row saved. Out
+/// of line, a call a query: the loop over every other collection's rows
+/// stays as it was, which a second copy beside it in `order_ids` took 11
+/// instructions a row from.
+#[inline(never)]
+fn order_keys_passing(
+    store: &Store,
+    ids: &[DocId],
+    keys: &[OrderKey],
+    flat: &mut Vec<Value>,
+) -> Result<()> {
+    for &id in ids {
+        for (pos, _, _, path) in keys {
+            flat.push(match (pos, path) {
+                (None, _) => Value::Int(id as i64),
+                (Some(p), None) => store.read_field_in::<true>(id, *p)?.unwrap_or(Value::Null),
+                (Some(p), Some(k)) => store.read_path(id, *p, k)?.unwrap_or(Value::Null),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// The `nocase` keys' texts in `flat`, rows of `keys.len()`, made their

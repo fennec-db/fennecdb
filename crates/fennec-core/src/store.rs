@@ -1207,13 +1207,40 @@ impl Store {
     /// payload that ends before it holds `null` there: the field was added
     /// after the document was written, which no document is rewritten for.
     pub fn read_field(&self, id: DocId, field_pos: usize) -> Result<Option<Value>> {
+        self.read_field_in::<false>(id, field_pos)
+    }
+
+    /// Whether a read of the field at `field_pos` passes a dropped place:
+    /// what picks the reader that passes its `null` by its byte
+    /// ([`Self::read_field_in`]), once a query.
+    pub(crate) fn passes(&self, field_pos: usize) -> bool {
+        self.dropped
+            .first()
+            .is_some_and(|&d| d < self.place(field_pos))
+    }
+
+    /// [`Self::read_field`], each value it passes stepped over by
+    /// [`crate::codec::skip_passing`] where `PASS` says: an order by a field
+    /// past a dropped place paid a call into the skip, 44 instructions, a
+    /// row. A second copy where a caller asks for one, as
+    /// [`Self::read_fields_passing`] is, so that no other collection's read
+    /// asks which.
+    #[inline(always)]
+    pub(crate) fn read_field_in<const PASS: bool>(
+        &self,
+        id: DocId,
+        field_pos: usize,
+    ) -> Result<Option<Value>> {
         let Some(loc) = self.index.get(id) else {
             return Ok(None);
         };
         let buf = self.payload(loc)?;
         let mut pos = 0;
         for _ in 0..self.place(field_pos) {
-            crate::codec::skip_field(buf, &mut pos)?;
+            match PASS {
+                true => crate::codec::skip_passing(buf, &mut pos)?,
+                false => crate::codec::skip_field(buf, &mut pos)?,
+            }
         }
         match pos < buf.len() {
             true => Ok(Some(decode_value(buf, &mut pos)?)),

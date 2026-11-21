@@ -566,11 +566,12 @@ fn a_copy_refuses_a_write_made_by_other_places_than_it_holds() {
     }
 }
 
-/// A read past a dropped place -- a filter's fields and a plain `get`
-/// written as JSON, which pass a dropped place's `null` by its byte --
-/// reads the value a write before the drop left there as a value it steps
-/// over, and the `null` a write after it or a compact puts there by its
-/// byte: the same rows before the compact and after it.
+/// A read past a dropped place -- a filter's fields, an aggregate's and its
+/// group keys, a sort's keys and a computed column's, which pass a dropped
+/// place's `null` by its byte, and a plain `get` written as JSON -- reads
+/// the value a write before the drop left there as a value it steps over,
+/// and the `null` a write after it or a compact puts there by its byte:
+/// the same rows before the compact and after it.
 #[test]
 fn reads_past_a_dropped_place_answer_alike_before_and_after_a_compact() {
     let mut db = Database::new();
@@ -618,6 +619,37 @@ fn reads_past_a_dropped_place_answer_alike_before_and_after_a_compact() {
                 "{sql}"
             );
             assert_eq!(json, want, "{sql}, compacted: {compacted}");
+        }
+        // An aggregate's fields and its group keys, a sort's keys and a
+        // computed column's, read past the place: the same answers.
+        for (sql, want) in [
+            (
+                "get x select d, count(*), sum(c) group d order d",
+                vec![
+                    vec![text("one"), int(1), int(3)],
+                    vec![text("two"), int(1), int(30)],
+                ],
+            ),
+            ("get x select sum(c), max(c)", vec![vec![int(33), int(30)]]),
+            (
+                "get x select a, d order c desc",
+                vec![vec![int(2), text("two")], vec![int(1), text("one")]],
+            ),
+            (
+                "get x select a order c * 2 desc limit 1",
+                vec![vec![int(2)]],
+            ),
+            (
+                "get x select a, c + 1 as n order id",
+                vec![vec![int(1), int(4)], vec![int(2), int(31)]],
+            ),
+        ] {
+            let got: Vec<Vec<Value>> = rows_of(&db, sql)
+                .unwrap_or_else(|e| panic!("{sql}: {e}"))
+                .into_iter()
+                .map(|(_, v)| v)
+                .collect();
+            assert_eq!(got, want, "{sql}, compacted: {compacted}");
         }
     }
 }
