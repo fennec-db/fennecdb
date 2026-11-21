@@ -2224,7 +2224,7 @@ mod tests {
     /// it, to add no dependency.
     #[cfg(any(target_os = "linux", target_vendor = "apple"))]
     mod interrupt {
-        use std::os::unix::thread::RawPthread;
+        use std::os::unix::thread::{JoinHandleExt, RawPthread};
 
         #[cfg(target_os = "linux")]
         const SIGUSR1: i32 = 10;
@@ -2245,7 +2245,9 @@ mod tests {
         pub fn arm() {
             static ARMED: std::sync::Once = std::sync::Once::new();
             // SAFETY: `nothing` is a handler of the C signature, which touches
-            // nothing, installed once; `siginterrupt` takes a signal and a flag.
+            // nothing, installed once; `siginterrupt` is handed two integers, as
+            // declared, reads no memory of ours, and changes only whether a call
+            // SIGUSR1 cuts -- this test's signal alone -- is restarted.
             ARMED.call_once(|| unsafe {
                 signal(SIGUSR1, nothing as *const () as usize);
                 #[cfg(target_vendor = "apple")]
@@ -2253,11 +2255,13 @@ mod tests {
             });
         }
 
-        /// SIGUSR1 to `thread`, a thread not yet joined.
-        pub fn send(thread: RawPthread) {
-            // SAFETY: `thread` is a thread not yet joined (above), so its
-            // `pthread_t` names it still; SIGUSR1 is handled (`arm`).
-            unsafe { pthread_kill(thread, SIGUSR1) };
+        /// SIGUSR1 to `thread`'s thread.
+        pub fn send<T>(thread: &std::thread::JoinHandle<T>) {
+            // SAFETY: the handle is borrowed, so it is neither joined nor
+            // dropped (detached) while this runs: its thread's `pthread_t`,
+            // which only a join or a detach frees, names that thread still,
+            // running or ended. SIGUSR1 is handled (`arm`).
+            unsafe { pthread_kill(thread.as_pthread_t(), SIGUSR1) };
         }
     }
 
@@ -2273,7 +2277,6 @@ mod tests {
     #[cfg(any(target_os = "linux", target_vendor = "apple"))]
     #[test]
     fn a_signal_is_no_failure_of_the_stream() {
-        use std::os::unix::thread::JoinHandleExt;
         interrupt::arm();
         let mut commit = vec![b'C', 0];
         commit.extend_from_slice(&16u64.to_be_bytes());
@@ -2311,7 +2314,7 @@ mod tests {
             if sent == 20 {
                 stop.store(true, Ordering::SeqCst);
             }
-            interrupt::send(follower.as_pthread_t());
+            interrupt::send(&follower);
             sent += 1;
             std::thread::sleep(Duration::from_millis(5));
         }
