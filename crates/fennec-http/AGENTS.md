@@ -70,7 +70,10 @@ the tag before it (the first's, the head) and its place; its head names
 what it is (`seal::Binding`: role, archive, tenant, its name's numbers),
 which every read holds it to (`Archive::held`), one read unopened
 vouched for by its first frame (`seal::vouched_in`), `began` held and
-`presence` sealed. Versions 1 (0.1.7 to 0.2.0) and 2 still open, an
+`presence` sealed. A frame holds a mebibyte at most (`seal::FRAME`), its
+length checked, never cast, a longer batch going out in frames of whole
+records; a key file others can read is warned of (`seal::open_key`), never
+refused. Versions 1 (0.1.7 to 0.2.0) and 2 still open, an
 older segment gone on in by none; only a key that sealed none is free of
 their splices: the docs say to change keys. A later version is refused by
 its number, and what a tag covers changes only with the magic's version
