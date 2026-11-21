@@ -9,16 +9,24 @@ web/fennec.compat.test.js.
 
     python3 tools/compat_fixtures.py build v0.2.0 <bin-dir>
         the release's binaries, built from its tag alone: `git archive` of
-        the tag into a scratch directory, `cargo build --release --locked
-        --offline` of fennec-server and fennec (their crates from outside
-        the workspace, behind `tls`, from cargo's cache: nothing
-        downloaded), the tag's own `make wasm`, and tools/compat/writer.rs
-        built as an example of the tag's fennec-core; the binaries and the
-        tag's web/ copied into <bin-dir> and the scratch directory, its
-        target/ with it, deleted
+        the tag into a scratch directory, `cargo build --locked --offline`
+        of fennec-server and fennec as the tag's release.yml builds them
+        (`--release` and `--profile cli`, for the host's target; their
+        crates from outside the workspace, behind `tls`, from cargo's
+        cache: nothing downloaded), the tag's own `make wasm`, and
+        tools/compat/writer.rs built as an example of the tag's
+        fennec-core, by the pinned compiler and no other; the binaries, the
+        tag's web/ and its @fennecdb/cloudflare module copied into
+        <bin-dir> with MANIFEST.json naming each by its SHA-256, and the
+        scratch directory, its target/ with it, deleted
     python3 tools/compat_fixtures.py write <bin-dir> <set-dir>
-        the set, written by those binaries (macOS or Linux), its files'
-        sums last in SHA256SUMS, which `make version` holds the set to
+        the set, written by those binaries (macOS or Linux) once each is
+        the bytes the manifest names and every file of the tag's tree the
+        tag's own; the manifest in the set beside the files, and their
+        sums last in SHA256SUMS, whose digest the set's `RELEASES` line pins
+        and `make version` and the compat tests hold the set to. <set-dir>
+        is named by the tag, `v0.2.0`, or `v0.2.0+2` for a further set of
+        the same tag, which holds what a landed one was found missing
     make compat-fixtures V=0.2.0
         both, into crates/fennec-core/tests/compat/v0.2.0/
 
@@ -135,6 +143,43 @@ PHASE_A = [
     "create statement order_by_ref($r text) as get orders select ref, status, total where ref = $r",
     "create statement on_order after insert orders as insert audit {ref: new.ref, what: 'placed'}",
     'put orders [{ref: "o-1", status: "open", total: 2000}, {ref: "o-2", status: "open", total: 500}]',
+    # Numbers past their type's range, which the release stored where a
+    # later build refuses them as they are written: a float of 1e400 and
+    # -1e400 (infinities), a vector's component of 1e39 (an f32's
+    # infinity), an f16's past 65 504 (its infinity) -- in a field, in a
+    # list -- and a named statement whose text holds 1e400.
+    "create collection edges (n int @hash, f float @sorted, v vector<4>, vh vector<4, f16>, lv [vector<2>], "
+    "lf [float])",
+    "put edges {n: 1, f: 1e400, v: [1e39, 0, 0, 0], vh: [70000, 0, 0, 1], lv: [[1e39, 1], [0, 1]], "
+    "lf: [1e400, -1e400, 2.5]}",
+    "put edges {n: 2, f: -1e400, v: [-1e39, 1, 0, 0], vh: [-70000, 1, 0, 0], lv: [[1, -1e39]], lf: []}",
+    "put edges {n: 3, f: 1.5, v: [0, 0, 1, 0], vh: [0.5, 0, 0, 0], lv: [], lf: [0.5]}",
+    "create statement past_range() as get edges select n where f >= 1e400",
+    # Negative numbers -- an int and a time before 1970 -- in a field, a
+    # list and json, and the keys of ordered indexes across zero.
+    "create collection signed (n int @sorted, at timestamp @sorted, l [int], ts [timestamp], j json)",
+    "create index on signed (j.n) @sorted",
+    'put signed [{n: -5, at: "1969-07-20T20:17:40Z", l: [-3, 0, 3], ts: ["1969-12-31T23:59:59.999Z", 0], '
+    'j: {n: -42, list: [-1, 2], deep: {m: -7}}}, '
+    '{n: 0, at: "1970-01-01T00:00:00Z", l: [], ts: [], j: {n: 0}}, '
+    '{n: 7, at: "2026-01-01T00:00:00Z", l: [-9007199254740993, 9007199254740993], ts: [-86400000], j: {n: 42}}, '
+    '{n: -300, at: -2208988800000, l: [-1], j: {n: -1}}]',
+    # One index of every kind that takes options with each away from its
+    # default: `@text`'s k1, b, prefix and prefix_min on each of its kinds
+    # and beside a `@hash`, `@hnsw`'s metric, m, ef_construction and
+    # ef_search, plain and quantized.
+    "create collection tuned (n int @hash, t text @text(k1=1.5, b=0.9, prefix=6, prefix_min=2), "
+    "c text @text(chars, k1=1.2, b=0.6, prefix=5, prefix_min=1), "
+    "a text @text(accents, k1=2, b=1, prefix=4, prefix_min=2), "
+    "h text @hash @text(k1=0.5, b=0.2, prefix=3, prefix_min=1), "
+    "v vector<4> @hnsw(l2, m=12, ef_construction=40, ef_search=24), "
+    "q vector<4> @hnsw(dot, m=6, ef_construction=50, ef_search=30, quant=int8))",
+    'put tuned [{n: 1, t: "fox", c: "東京タワー", a: "café", h: "red fox", v: [1, 0, 0, 0], q: [1, 0, 0, 0]}, '
+    '{n: 2, t: "fox fox fox and the quick brown dog jumps over the lazy cat once again", c: "京都", '
+    'a: "cafe crème brûlée", h: "a fox and a fox", v: [0, 1, 0, 0], q: [0, 1, 0, 0]}, '
+    '{n: 3, t: "the quick fox", c: "東京", a: "naïve café", h: "fox", v: [0, 0, 1, 0], q: [0, 0, 1, 0]}, '
+    '{n: 4, t: "a quiet quokka", c: "大阪", a: "Zürich", h: "blue whale", v: [0.5, 0.5, 0, 0], '
+    'q: [0.5, 0.5, 0, 0]}]',
 ]
 
 # After it: the log's records, each kind a write takes, and every change a
@@ -587,13 +632,46 @@ def write_graph(bins, work, out):
         die("graph.fennec: the server wrote no checkpoint")
 
 
+# A graph past 65 536 nodes, whose record takes links of three bytes, and
+# steps of three between a list's links once two of them are more than 65 535
+# nodes apart: the smallest one the release writes so -- one dimension, `m`
+# 2, the least it takes -- of 70 000 vectors put in an order of their own,
+# so a node's nearest are nodes made far apart.
+WIDE_NODES = 70_000
+WIDE_BATCH = 5_000
+
+
+def wide_value(n):
+    """The `n`th vector's one number: a permutation of 0..WIDE_NODES, from
+    `n` alone, each a whole number an f32 holds."""
+    return (n * 40_503 + 12_345) % WIDE_NODES
+
+
+def write_graph_wide(bins, work, out):
+    """graph-wide.fennec: the checkpoint a server's shutdown writes of a
+    graph of 70 000 nodes, its links and steps three bytes wide."""
+    if len({wide_value(n) for n in range(WIDE_NODES)}) != WIDE_NODES:
+        die("graph-wide: two vectors alike, which would alias")
+    s = Server(str(bins / "fennec-server"), ["--file", str(out / "graph-wide.fennec"), "--http-token", TOKEN,
+                                             "--auth-delay", "0"], work / "graph-wide.log")
+    try:
+        s.query("create collection wide (n int @hash, v vector<1> @hnsw(l2, m=2))")
+        for start in range(0, WIDE_NODES, WIDE_BATCH):
+            rows = ", ".join("{n: %d, v: [%d]}" % (n, wide_value(n)) for n in range(start, start + WIDE_BATCH))
+            s.query(f"put wide [{rows}]")
+    finally:
+        s.stop()
+    if "checkpoint written" not in (work / "graph-wide.log").read_text():
+        die("graph-wide.fennec: the server wrote no checkpoint")
+
+
 # What the release writes that a later build reads otherwise on purpose
-# (docs/design/crates.md, *How deep a value nests* and *Limits*), each a
-# small file of the shell's: a row of a `[[json]]` field nesting 66 levels
-# in all, refused where it is read; a field of 65 nested lists, and one of
-# vectors past a dimension's range in a list (SQL's array of them), each
-# refused at the open; and a point under 64 lists, refused at the open by
-# a change that follows. A later build's test holds each to its words.
+# (docs/design/compatibility.md, *What 1.x does not read of 0.2.0's
+# files*), each a small file of the shell's: a row of a `[[json]]` field
+# nesting 66 levels in all, refused where it is read; a field of 65 nested
+# lists, one of vectors past a dimension's range in a list (SQL's array of
+# them) and a point under 64 lists, each refused at the open. A later
+# build's test holds each to its words.
 LISTS = "[" * 65 + "int" + "]" * 65
 POINTS = "[" * 64 + "geo" + "]" * 64
 NESTED_JSON = "{a: " * 64 + "1" + "}" * 64
@@ -909,14 +987,14 @@ def sums(out):
     (out / "SHA256SUMS").write_text("\n".join(lines) + "\n")
 
 
-def forms(tag):
-    """How many forms `RELEASES`' line for `tag` places in a file and names
-    absent (crates/fennec-core/tests/compat/walk.rs): what the set's README
-    states, and the compat tests hold it to."""
+def forms(set_name):
+    """How many forms `RELEASES`' line for the set `set_name` places in a
+    file and names absent (crates/fennec-core/tests/compat/walk.rs): what
+    the set's README states, and the compat tests hold it to."""
     walk = (SETS / "walk.rs").read_text()
-    m = re.search(r'set: "' + re.escape(tag) + r'",(.*?)\n    \}', walk, flags=re.S)
+    m = re.search(r'set: "' + re.escape(set_name) + r'",(.*?)\n    \}', walk, flags=re.S)
     if not m:
-        die(f"walk.rs: RELEASES has no line for {tag}: add it before the set is written")
+        die(f"walk.rs: RELEASES has no line for {set_name}: add it before the set is written")
     line = m.group(1)
     shapes = re.search(r"shapes: (\w+),", line).group(1)
     listed = re.search(r"const " + shapes + r": &\[&str\] = &\[(.*?)\n\];", walk, flags=re.S).group(1)
@@ -936,16 +1014,120 @@ def readme(out, versions):
     (out / "README.md").write_text(text)
 
 
+def write_cloudflare(bins, out):
+    """do-sql.json, do-kv.json: what the release's @fennecdb/cloudflare kept
+    of the page's writes in a SQLite-backed Durable Object's storage and a
+    key-value backed one's, over the release's own stand-ins for each, and
+    the answers its module gave once it restored each."""
+    run("node", COMPAT / "cloudflare.mjs", bins / "web", bins / "cloudflare", out, COMPAT / "do.fennecql")
+
+
+def segment_times(archive):
+    """Each write's time in a plain archive's segments, in order: a segment
+    is `FENECLG\x01`, then a write's time (8 bytes) and its record, whose
+    head -- its kind's byte, its collection's varint and its length's --
+    says how long it is."""
+    def varint(b, i):
+        v = shift = 0
+        while True:
+            x = b[i]
+            i += 1
+            v |= (x & 0x7F) << shift
+            shift += 7
+            if x < 0x80:
+                return v, i
+    times = []
+    for seg in sorted(archive.glob("writes-*.log")):
+        b = seg.read_bytes()
+        if b[:8] != b"FENECLG\x01":
+            die(f"{seg}: no segment signature")
+        i = 8
+        while i < len(b):
+            times.append(int.from_bytes(b[i:i + 8], "little"))
+            _, j = varint(b, i + 9)
+            length, j = varint(b, j)
+            i = j + length
+    return times
+
+
+def archive_moments(archive, times):
+    """The moments a restore of `archive` is asked for, each once: before
+    its image, its image's time and -- past it, before the first write --
+    the image alone, each write's time and the moment before the next."""
+    image = min(int(p.stem.rsplit("-", 1)[1]) for p in archive.glob("image-*.fennec"))
+    moments = [(image - 1, "before its image"), (image, "its image's time")]
+    if times and times[0] - 1 > image:
+        moments.append((times[0] - 1, "its image alone, before the first write"))
+    for i, at in enumerate(times):
+        moments.append((at, "a write's time"))
+        if i + 1 < len(times) and times[i + 1] > at + 1:
+            moments.append((times[i + 1] - 1, "the moment before the next write"))
+    seen, out = set(), []
+    for at, label in moments:
+        if at not in seen:
+            seen.add(at)
+            out.append((at, label))
+    return out
+
+
+def write_restores(bins, work, out):
+    """`<archive>.restores.json`: the release's own `fennec restore --to` of
+    each archive at every moment a later build restores it to -- what it
+    said and its exit status -- and what the database it restored to each
+    change answered to restore.fennecql. The writes' times are the plain
+    archive's, read from its segments: both archives carry each write at
+    the time its primary appended it, which `fennec verify` says alike."""
+    times = segment_times(out / "archive-plain")
+    spans = {name: re.sub(r"from \S+ ", "", (out / f"{name}.verify").read_text().split("restores", 1)[1])
+             for name in ("archive", "archive-plain")}
+    if spans["archive"] != spans["archive-plain"]:
+        die(f"the two archives restore other changes or times: {spans}")
+    for name, keyed in (("archive", ["--key-file", out / "key"]), ("archive-plain", [])):
+        record = {"moments": [], "answers": {}}
+        for at, label in archive_moments(out / name, times):
+            into = work / f"{name}-at-{at}.fennec"
+            r = subprocess.run([bins / "fennec", "restore", out / name, into, "--to", iso(at), *keyed],
+                               capture_output=True, text=True)
+            said = (r.stdout + r.stderr).replace(str(into), "<out>").splitlines()
+            entry = {"to": iso(at), "at": at, "label": label, "status": r.returncode, "said": said}
+            if r.returncode == 0:
+                change = re.search(r": change (\d+) -- ", r.stdout).group(1)
+                entry["change"] = int(change)
+                if change not in record["answers"]:
+                    got = work / f"{name}-{change}.answers"
+                    run(bins / "compat_writer", "answers", into, COMPAT / "restore.fennecql", got)
+                    record["answers"][change] = got.read_text().splitlines()
+            record["moments"].append(entry)
+        if not any(m["label"].startswith("its image alone") for m in record["moments"]):
+            die(f"{name}: no moment between its image and its first write")
+        (out / f"{name}.restores.json").write_text(json.dumps(record, indent=1, ensure_ascii=False) + "\n")
+
+
 def write(bins, out):
     bins = Path(bins).resolve()
     out = Path(out).resolve()
     if out.exists() and any(out.iterdir()):
         die(f"{out} holds files already: a set is written once, by its release")
-    # What `follow.fennec` and the page need, asked before anything is written.
+    # A set is `<tag>`, or `<tag>+<n>` for a further one of the same tag
+    # (docs/design/compatibility.md): written by that tag's programs alone,
+    # each the bytes its manifest names, asked before any of them runs.
+    m = re.fullmatch(r"(v\d+\.\d+\.\d+)(?:\+([2-9]|[1-9]\d+))?", out.name)
+    if not m:
+        die(f"{out.name}: a set is named by its tag, `v<version>`, or `v<version>+<n>` for a further one")
+    tag = m.group(1)
+    manifest = checked(bins, tag)
+    for b in ("fennec-server", "fennec"):
+        said = run(bins / b, "--version").strip()
+        if said.split()[-1] != tag[1:]:
+            die(f"{bins / b} says `{said}`, not {tag}")
+    # What `follow.fennec`, the page and the Durable Object's storage need,
+    # asked before anything is written.
     if subprocess.run(["docker", "image", "inspect", pg_image()], capture_output=True).returncode != 0:
         die(f"{pg_image()} is not on this machine: `docker pull {pg_image()}` once (the writer pulls nothing)")
     if shutil.which("node") is None:
         die("node runs the release's web client: install it")
+    if subprocess.run(["node", "-e", "require('node:sqlite')"], capture_output=True).returncode != 0:
+        die("node has no node:sqlite, which a SQLite-backed Durable Object's storage stands on: Node 22.13 or later")
     work = Path(tempfile.mkdtemp(prefix="fennec-compat-"))
     stage = work / "set"
     stage.mkdir()
@@ -961,12 +1143,14 @@ def write(bins, out):
 
         timed("server", write_server, bins, work, stage)
         timed("graph", write_graph, bins, work, stage)
+        timed("graph-wide", write_graph_wide, bins, work, stage)
         timed("shell", write_shell, bins, stage)
         timed("on purpose", write_on_purpose, bins, stage)
         for what in ("kept", "waiting", "spill", "synclog", "synclog-torn", "synclog-spent", "synclog-unbegun",
                      "torn-wide", "torn-tail", "torn-mark", "schedules", "ids"):
             timed(what, run, bins / "compat_writer", what, stage / f"{what}.fennec")
         timed("page", write_page, bins, work, stage)
+        timed("durable object", write_cloudflare, bins, stage)
         timed("follow", write_follow, bins, work, stage)
         timed("node", write_node, bins, work, stage)
         timed("backup-wide", write_wide_backup, bins, work, stage)
@@ -980,18 +1164,19 @@ def write(bins, out):
         # The answers, each file read as it lies -- the sync log beside the
         # file it names, its inode -- a sealed one restored first.
         lists = {"server": "server", "replica": "replica", "promoted": "replica", "shell": "shell", "graph": "graph",
-                 "kept": "kept", "waiting": "waiting", "spill": "spill", "synclog": "synclog",
-                 "synclog-torn": "synclog", "synclog-spent": "synclog", "synclog-unbegun": "unbegun",
-                 "torn-wide": "wide", "torn-tail": "torn", "torn-mark": "torn", "schedules": "schedules",
-                 "ids": "ids", "follow": "follow", "backup": "server", "backup-wide": "wide-backup",
-                 "archive": "server", "archive-plain": "server", "page-opfs": "page", "page-opfs-stopped": "page",
-                 "page-idb": "page", "page-idb-sealed": "page", "node": "node", "deep": "deep",
+                 "graph-wide": "graph-wide", "kept": "kept", "waiting": "waiting", "spill": "spill",
+                 "synclog": "synclog", "synclog-torn": "synclog", "synclog-spent": "synclog",
+                 "synclog-unbegun": "unbegun", "torn-wide": "wide", "torn-tail": "torn", "torn-mark": "torn",
+                 "schedules": "schedules", "ids": "ids", "follow": "follow", "backup": "server",
+                 "backup-wide": "wide-backup", "archive": "server", "archive-plain": "server", "page-opfs": "page",
+                 "page-opfs-stopped": "page", "page-idb": "page", "page-idb-sealed": "page", "do-sql": "do",
+                 "do-kv": "do", "node": "node", "restore": "restore", "deep": "deep",
                  "refused-lists": "refused-lists", "refused-dims": "refused-dims", "points-deep": "points-deep"}
         for name, src in lists.items():
             shutil.copyfile(COMPAT / f"{src}.fennecql", stage / f"{name}.fennecql")
-        for name in ("server", "replica", "promoted", "shell", "graph", "kept", "waiting", "spill", "synclog",
-                     "synclog-torn", "synclog-spent", "synclog-unbegun", "torn-wide", "torn-tail", "torn-mark",
-                     "schedules", "ids", "follow", "page-opfs", "deep", "refused-lists", "refused-dims",
+        for name in ("server", "replica", "promoted", "shell", "graph", "graph-wide", "kept", "waiting", "spill",
+                     "synclog", "synclog-torn", "synclog-spent", "synclog-unbegun", "torn-wide", "torn-tail",
+                     "torn-mark", "schedules", "ids", "follow", "page-opfs", "deep", "refused-lists", "refused-dims",
                      "points-deep"):
             run(bins / "compat_writer", "answers", stage / f"{name}.fennec", stage / f"{name}.fennecql",
                 stage / f"{name}.answers")
@@ -1008,13 +1193,24 @@ def write(bins, out):
                 # the times they span, which a later build says alike.
                 said = run(bins / "fennec", "verify", src, *keyed)
                 (stage / f"{name}.verify").write_text(said.replace(str(src), f"<{name}>"))
+        timed("restores to a moment", write_restores, bins, work, stage)
+        # The programs that wrote the set, by their sums (`build`'s
+        # manifest), and the inputs that drove them: what a file of the set
+        # is checked against.
+        manifest["inputs"] = {p.relative_to(ROOT).as_posix(): sha256(p)
+                              for p in [Path(__file__).resolve(), *sorted(COMPAT.iterdir())] if p.is_file()}
+        (stage / "MANIFEST.json").write_text(json.dumps(manifest, indent=1) + "\n")
         versions = {
             "server": run(bins / "fennec-server", "--version").strip(),
             "cli": run(bins / "fennec", "--version").strip(),
-            "rustc": os.environ.get("FENNEC_COMPAT_RUSTC") or (bins / "rustc-version").read_text().strip(),
+            "rustc": manifest["rustc"],
             "node": run("node", "--version").strip(),
+            "tag": tag,
+            "set": out.name,
+            "commit": manifest["commit"],
+            "target": manifest["target"],
         }
-        held, absent, numbers = forms(f"v{versions['server'].split()[-1]}")
+        held, absent, numbers = forms(out.name)
         versions["forms"] = (f"Forms: {held} held in a file of this set, {absent} named absent below, of the "
                              f"{held + absent} the walk tells apart; and {numbers} numbers -- record kinds, "
                              "statement ops, graph versions, schema tags, value tags and index kinds -- each "
@@ -1029,22 +1225,38 @@ def write(bins, out):
     finally:
         shutil.rmtree(work, ignore_errors=True)
     size = sum(p.stat().st_size for p in out.rglob("*") if p.is_file())
-    print(f"{out}: {len(list(out.rglob('*')))} files, {size} bytes")
+    sums_digest = sha256(out / "SHA256SUMS")
+    print(f"{out}: {len(list(out.rglob('*')))} files, {size} bytes; its SHA256SUMS {sums_digest}, which its "
+          "RELEASES line pins (`sums:`)")
 
 
-def toolchain(tag, src):
-    """The toolchain `tag`'s binaries are built with: the version its
+def pinned(tag, toolchain_toml):
+    """The Rust release `tag`'s binaries are built with: the version its
     rust-toolchain.toml names, or where it names a channel the one in
     `TOOLCHAINS` -- `stable` today is not the stable its release was built
-    with. Refused, naming what to install, where rustup lacks it or its
-    wasm32 target, or node is missing."""
-    m = re.search(r'^channel = "([^"]+)"', (src / "rust-toolchain.toml").read_text(), flags=re.M)
+    with."""
+    m = re.search(r'^channel = "([^"]+)"', toolchain_toml, flags=re.M)
     channel = m.group(1) if m else ""
     version = channel if re.fullmatch(r"\d+\.\d+\.\d+", channel) else TOOLCHAINS.get(tag)
     if not version:
         die(f"{tag}'s rust-toolchain.toml names `{channel}`, no version: add the version its release was built "
             "with to TOOLCHAINS")
+    return version
+
+
+def toolchain(tag, src):
+    """The toolchain `tag`'s binaries are built with ([`pinned`]), held to
+    what runs: cargo is rustup's -- Homebrew's ignores `RUSTUP_TOOLCHAIN`
+    and builds with whatever it is -- and the cargo and rustc it runs under
+    that toolchain say its version. Refused, naming what to install, where
+    rustup lacks it or its wasm32 target, or node is missing. The pinned
+    version, the environment that selects it and what `rustc --version`
+    said."""
+    version = pinned(tag, (src / "rust-toolchain.toml").read_text())
     rustup = str(Path(CARGO).with_name("rustup")) if os.path.isabs(CARGO) else "rustup"
+    if not os.path.isabs(CARGO) or not Path(rustup).is_file():
+        die(f"cargo is {CARGO}, not rustup's (~/.cargo/bin/cargo): a cargo of its own builds with its own "
+            f"compiler whatever the tag pins ({version})")
     r = subprocess.run([rustup, "target", "list", "--installed", "--toolchain", version], capture_output=True,
                        text=True)
     if r.returncode != 0 or "wasm32-unknown-unknown" not in r.stdout.split():
@@ -1052,12 +1264,65 @@ def toolchain(tag, src):
             "--target wasm32-unknown-unknown`")
     if shutil.which("node") is None:
         die("node runs the tag's web client: install it")
-    return version
+    env = {k: v for k, v in os.environ.items() if k not in ("CARGO_TARGET_DIR", "RUSTC", "RUSTC_WRAPPER")}
+    env["CARGO_NET_OFFLINE"] = "true"
+    env["RUSTUP_TOOLCHAIN"] = version
+    said = {}
+    for tool in ("cargo", "rustc"):
+        out = subprocess.run([str(Path(CARGO).with_name(tool)), "--version"], cwd=src, capture_output=True,
+                             text=True, env=env).stdout.strip()
+        if not out.startswith(f"{tool} {version} "):
+            die(f"{tool} under RUSTUP_TOOLCHAIN={version} says `{out}`: not the pinned {version}")
+        said[tool] = out
+    host = re.search(r"^host: (\S+)$", subprocess.run([str(Path(CARGO).with_name("rustc")), "-vV"], cwd=src,
+                                                      capture_output=True, text=True, env=env).stdout, flags=re.M)
+    return version, env, said, host.group(1)
+
+
+def sha256(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def tag_commit(tag):
+    return run("git", "-C", ROOT, "rev-parse", f"{tag}^{{commit}}").strip()
+
+
+# What `build` keeps of the tag's tree beside the binaries, each the tag's
+# bytes, which `write` holds to `git show <tag>:<path>` ([`origin_of`]): the
+# web client and the collations its `make wasm` copies beside it, and
+# @fennecdb/cloudflare's module with the stand-ins for a Durable Object's
+# storage its own tests used.
+def tag_files(src):
+    out = []
+    for p in sorted((src / "web").iterdir()):
+        if p.suffix == ".js" and not p.name.endswith(".test.js") or p.name == "package.json":
+            out.append(f"web/{p.name}")
+    out += [f"web/collate/{p.name}" for p in sorted((src / "web" / "collate").iterdir())]
+    return out + ["cloudflare/index.js", "cloudflare/fakes.js"]
+
+
+def origin_of(name):
+    """The path in the tag's tree a file `build` kept is a copy of, or None
+    for one it built (the module)."""
+    if name == "web/collate/zones.bin":
+        return "crates/fennec-core/src/tz/zones.bin"
+    if name.startswith("web/collate/"):
+        return "crates/fennec-core/src/collate/" + name.rsplit("/", 1)[1]
+    if name.startswith("cloudflare/"):
+        return "integrations/" + name
+    if name.startswith("web/") and name != "web/fennec.wasm":
+        return name
+    return None
 
 
 def build(tag, bins):
+    """`tag`'s programs into `bins`, and `MANIFEST.json` naming each by its
+    SHA-256 beside the tag, its commit and the compiler that built them,
+    which `write` holds the directory to before it runs any."""
     bins = Path(bins).resolve()
     bins.mkdir(parents=True, exist_ok=True)
+    if any(bins.iterdir()):
+        die(f"{bins} holds files already: build into an empty directory")
     scratch = Path(tempfile.mkdtemp(prefix=f"fennec-{tag}-"))
     try:
         src = scratch / "src"
@@ -1072,41 +1337,96 @@ def build(tag, bins):
         # webpki-roots behind their default `tls` feature -- the only crates
         # from outside the workspace -- so a cache that lacks them is told
         # so, never fetched behind the build's back.
-        env = {k: v for k, v in os.environ.items() if k != "CARGO_TARGET_DIR"}
-        env["CARGO_NET_OFFLINE"] = "true"
-        env["RUSTUP_TOOLCHAIN"] = toolchain(tag, src)
-        # The rustc beside the cargo that builds, as the toolchain named
-        # above: Homebrew's has no wasm32.
-        rustc = str(Path(CARGO).with_name("rustc")) if os.path.isabs(CARGO) else "rustc"
-        rustc = subprocess.run([rustc, "--version"], cwd=src, capture_output=True, text=True, env=env).stdout.strip()
+        version, env, said, host = toolchain(tag, src)
+        # As the tag's release.yml builds them: `fennec` under the `cli`
+        # profile (panic = abort, its network crates built for size),
+        # `fennec-server` under `release`, each for the target named. And
         # `--locked`: the tag's Cargo.lock as it was released, never one
         # resolved again today.
-        for cmd in (
-            [CARGO, "build", "--release", "--locked", "--offline", "-p", "fennec-server", "-p", "fennec-cli"],
-            [CARGO, "build", "--release", "--locked", "--offline", "-p", "fennec-core", "--example", "compat_writer"],
-            ["make", "wasm"],
-        ):
+        builds = {
+            "fennec": [CARGO, "build", "--profile", "cli", "--locked", "--offline", "--target", host, "-p",
+                       "fennec-cli"],
+            "fennec-server": [CARGO, "build", "--release", "--locked", "--offline", "--target", host, "-p",
+                              "fennec-server"],
+            "compat_writer": [CARGO, "build", "--release", "--locked", "--offline", "--target", host, "-p",
+                              "fennec-core", "--example", "compat_writer"],
+            "web/fennec.wasm": ["make", "wasm"],
+        }
+        for cmd in builds.values():
             r = subprocess.run(cmd, cwd=src, env=env)
             if r.returncode != 0:
                 die(f"{' '.join(map(str, cmd))} in {tag}'s tree failed (exit {r.returncode}). Built offline from "
                     "cargo's cache: where it lacks a crate of the tag's Cargo.lock (rustls, ring and webpki-roots, "
                     f"behind the release binaries' `tls` feature), fetch them once, online -- `git worktree add "
                     f"<dir> {tag} && cargo fetch --locked --manifest-path <dir>/Cargo.toml` -- and build again")
-        release = src / "target" / "release"
-        for b in ("fennec-server", "fennec"):
-            shutil.copy2(release / b, bins / b)
-        shutil.copy2(release / "examples" / "compat_writer", bins / "compat_writer")
-        web = bins / "web"
-        shutil.rmtree(web, ignore_errors=True)
-        web.mkdir()
-        for p in (src / "web").iterdir():
-            if p.suffix == ".js" and not p.name.endswith(".test.js") or p.name in ("fennec.wasm", "package.json"):
-                shutil.copy2(p, web / p.name)
-        shutil.copytree(src / "web" / "collate", web / "collate")
-        (bins / "rustc-version").write_text(rustc + "\n")
+        out = src / "target" / host
+        made = {
+            "fennec": out / "cli" / "fennec",
+            "fennec-server": out / "release" / "fennec-server",
+            "compat_writer": out / "release" / "examples" / "compat_writer",
+            "web/fennec.wasm": src / "web" / "fennec.wasm",
+        }
+        made.update({k: src / origin_of(k) for k in tag_files(src)})
+        for name, path in made.items():
+            (bins / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, bins / name)
+        manifest = {
+            "tag": tag,
+            "commit": tag_commit(tag),
+            "toolchain": version,
+            "rustc": said["rustc"],
+            "cargo": said["cargo"],
+            "target": host,
+            "built": {k: " ".join(map(str, v[1:] if v[0] == CARGO else v)) for k, v in builds.items()},
+            "writer": f"tools/compat/writer.rs {sha256(COMPAT / 'writer.rs')}",
+            "files": {name: sha256(bins / name) for name in sorted(made)},
+        }
+        (bins / "MANIFEST.json").write_text(json.dumps(manifest, indent=1) + "\n")
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
-    print(f"{bins}: {tag}'s fennec-server, fennec, compat_writer and web/, built with {rustc}")
+    print(f"{bins}: {tag}'s fennec-server, fennec, compat_writer, web/ and cloudflare/, built with {said['rustc']}")
+
+
+def checked(bins, tag):
+    """`bins` held to its `MANIFEST.json` before a program of it runs: every
+    file it holds named there by its SHA-256 and none other, the tag and
+    commit `tag`'s, the compiler the pinned one, and every file taken from
+    the tag's tree -- the web client, its collations, the Durable Object
+    module -- the tag's own bytes (`git show`). The manifest."""
+    path = bins / "MANIFEST.json"
+    if not path.is_file():
+        die(f"{bins}: no MANIFEST.json (`compat_fixtures.py build` writes it)")
+    m = json.loads(path.read_text())
+    problems = []
+    if m.get("tag") != tag:
+        problems.append(f"built from {m.get('tag')}, not {tag}")
+    if m.get("commit") != tag_commit(tag):
+        problems.append(f"built from commit {m.get('commit')}, not {tag}'s {tag_commit(tag)}")
+    version = pinned(tag, run("git", "-C", ROOT, "show", f"{tag}:rust-toolchain.toml"))
+    if m.get("toolchain") != version or not str(m.get("rustc", "")).startswith(f"rustc {version} "):
+        problems.append(f"built by {m.get('rustc')}, not the pinned rustc {version}")
+    files = m.get("files", {})
+    held = {p.relative_to(bins).as_posix() for p in bins.rglob("*") if p.is_file()} - {"MANIFEST.json"}
+    for name in sorted(held - files.keys()):
+        problems.append(f"{name}: not in the manifest")
+    for name, digest in sorted(files.items()):
+        if not (bins / name).is_file():
+            problems.append(f"{name}: missing")
+        elif sha256(bins / name) != digest:
+            problems.append(f"{name}: not the bytes the manifest names")
+    for name in files:
+        origin = origin_of(name)
+        if origin is None or not (bins / name).is_file():
+            continue
+        theirs = subprocess.run(["git", "-C", ROOT, "show", f"{tag}:{origin}"], capture_output=True).stdout
+        if (bins / name).read_bytes() != theirs:
+            problems.append(f"{name}: not {tag}'s {origin}")
+    for need in ("fennec-server", "fennec", "compat_writer", "web/fennec.js", "web/fennec.wasm"):
+        if need not in files:
+            problems.append(f"{need}: not built")
+    if problems:
+        die(f"{bins} is not what `build {tag}` made:\n  " + "\n  ".join(problems))
+    return m
 
 
 def main():

@@ -238,7 +238,7 @@ const FILLER = Array.from({ length: 30 }, (_, n) => `{n: ${n}, body: "${`filler 
  * after the first is far smaller than the image, so `persist` keeps it as a
  * chunk rather than folding a new image (`FOLD`).
  */
-const WRITES = [
+export const WRITES = [
   [
     'create collection filler (n int @hash, body text)',
     `put filler [${FILLER.join(', ')}]`,
@@ -269,7 +269,7 @@ const WRITES = [
   ],
 ];
 
-async function page(web, wasm) {
+export async function page(web, wasm) {
   const { Fennec } = await import(pathToFileURL(join(web, 'fennec.js')).href);
   const collation = (name) => readFile(join(web, 'collate', `${name}.bin`));
   const db = await Fennec.open(wasm, { collation });
