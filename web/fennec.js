@@ -1663,7 +1663,8 @@ async function syncAccess(dir, name, mine) {
       // Safari names a held file InvalidStateError, where the standard
       // (and Chrome and Firefox) say NoModificationAllowedError.
       if (e?.name !== 'NoModificationAllowedError' && e?.name !== 'InvalidStateError') throw e;
-      // Its handles let go of now: asked again at once.
+      // Kept by a database of this worker whose module stopped, its
+      // handles were let go of just now: asked again at once.
       if (mine()) continue;
       if (Date.now() >= until) {
         throw new FennecError(`${name} is open elsewhere (another worker or tab): one database at a time writes a file`, { cause: e });

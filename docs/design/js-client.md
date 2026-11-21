@@ -198,10 +198,11 @@ call on any database of its instance throws one `FennecError` saying to
 open the database again (`guarded`), and the instance is marked stopped
 (`halted`). What the error asks for works with nothing called first:
 `openFile` of a name a database of this worker keeps (`holding`, by name,
-the `FennecFile` keeping it) takes it from a database whose module
-stopped -- its handles closed, nothing flushed or written, since what the
-trap kept from the file never reaches it -- and refuses it at once, naming
-this worker, from one that runs on. Before, the name stayed held until
+the `FennecFile` keeping it, asked once the file's handle is refused, as
+that database holds it) takes it from a database whose module stopped --
+its handles closed, nothing flushed or written, since what the trap kept
+from the file never reaches it, and the handle asked for again at once --
+and refuses it at once, naming this worker, from one that runs on. Before, the name stayed held until
 the file's own `close()`, which nothing said to call, and the open was
 refused as "open elsewhere (another worker or tab)"; and `Fennec.close()`
 called `fennec_close`, threw "the module stopped" and let go of nothing.
