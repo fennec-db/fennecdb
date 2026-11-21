@@ -6,6 +6,7 @@
 mod api_dump;
 mod api_golden;
 mod calls;
+mod compat;
 mod crash;
 mod follow;
 mod hooks;

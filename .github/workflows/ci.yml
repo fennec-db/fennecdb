@@ -208,6 +208,18 @@ jobs:
       - name: tools/openapi_compat.py finds every break and passes every addition
         run: python3 tools/test_openapi_compat.py
 
+      # docs/design/compatibility.md: a release after one with no fixture
+      # set (crates/fennec-core/tests/compat/v<version>/, RELEASING.md's
+      # step 7), or with one its RELEASES line does not pin, is refused
+      # where its version is set.
+      - name: make version refuses a release after one with no fixture set
+        run: python3 tools/test_version.py
+
+      # docs/design/compatibility.md#fixture-sets: a set is written only by
+      # the programs its manifest names, built from its tag.
+      - name: compat_fixtures.py writes a set only with its tag's programs
+        run: python3 tools/test_compat_fixtures.py
+
       # docs/design/compatibility.md: fennec.h, the JS types, the CLI and
       # the metrics only grow. Here only the checker's own tests, a break
       # seeded into each surface for the quick answer; the check over the

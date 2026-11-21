@@ -75,6 +75,9 @@ test:
 ##   fennec.https.test.js FennecHttp against fennec-server --tls-cert: reached
 ##                     with NODE_EXTRA_CA_CERTS naming the test CA, refused
 ##                     without it; skipped without the binary
+##   fennec.compat.test.js  each release's page restored by this client: its
+##                     IndexedDB image and chunks, sealed or not, and its OPFS
+##                     file (crates/fennec-core/tests/compat/)
 ##   studio/test/statements.test.mjs  fennec studio's statements: every value a
 ##                     parameter, every name one FennecQL writes, its first load
 ##                     under 120 KB gzipped and holding nothing of the playground's
@@ -84,7 +87,7 @@ test:
 ##                     `web/fennec.wasm` or the binary is missing
 test-js:
 	@if command -v node >/dev/null 2>&1; then \
-		$(SKIPS) tee target/skips/js.log -- node --test --test-reporter=spec web/fennec.test.js web/fennec.sync.test.js web/fennec.sync.scenarios.test.js web/fennec.persist.test.js web/fennec.file.test.js web/fennec.schema.test.js web/fennec.client.test.js web/fennec.replicas.test.js web/fennec.https.test.js studio/test/statements.test.mjs studio/test/transport.test.mjs; \
+		$(SKIPS) tee target/skips/js.log -- node --test --test-reporter=spec web/fennec.test.js web/fennec.sync.test.js web/fennec.sync.scenarios.test.js web/fennec.persist.test.js web/fennec.file.test.js web/fennec.schema.test.js web/fennec.client.test.js web/fennec.replicas.test.js web/fennec.https.test.js web/fennec.compat.test.js studio/test/statements.test.mjs studio/test/transport.test.mjs; \
 	else \
 		echo "node not found -- JS tests skipped"; \
 	fi
@@ -579,9 +582,25 @@ packages: wasm
 	@if command -v dotnet >/dev/null 2>&1; then integrations/dotnet/package.sh; \
 	else echo "dotnet not found: FennecDb (NuGet) not checked"; fi
 
-## One version wherever a release reads it: make version V=0.1.5
+## One version wherever a release reads it: make version V=0.1.5. Refused
+## while the release it moves on from has no fixture set (compat-fixtures)
 version:
 	@python3 tools/version.py $(or $(V),$(error V=<version> is required))
+
+## A release's fixture set, from its tag alone: its fennec-server, fennec,
+## module and engine built in a scratch directory (deleted after; BIN=<dir>
+## keeps the binaries instead) and run into
+## crates/fennec-core/tests/compat/v$(V)/, the files they write and the
+## answers they gave, which every later build's compat:: tests open
+## (RELEASING.md, step 7), by the programs MANIFEST.json names. A further
+## set of the tag is `write <bin-dir> .../v$(V)+2` with BIN's programs.
+## macOS or Linux: the builds about ten minutes, the writes about twelve
+compat-fixtures:
+	@test -n "$(V)" || (echo "V=<version> is required: make compat-fixtures V=0.2.0"; exit 1)
+	@bin=$${BIN:-$$(mktemp -d)}; \
+		python3 tools/compat_fixtures.py build v$(V) "$$bin" && \
+		python3 tools/compat_fixtures.py write "$$bin" crates/fennec-core/tests/compat/v$(V); \
+		status=$$?; if [ -z "$(BIN)" ]; then rm -rf "$$bin"; fi; exit $$status
 
 ## A page's database kept in real browsers (web/browser/run.mjs): persist,
 ## restore and openFile against the engine's own IndexedDB, WebCrypto and

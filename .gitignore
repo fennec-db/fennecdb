@@ -4,6 +4,14 @@ pkg/
 # A file only a build with every feature can write, which the builds
 # without them open (crates/fennec-core/tests/language_file.rs).
 !crates/fennec-core/tests/language.fennec
+# Each release's fixture set: the files its own binaries wrote
+# (tools/compat_fixtures.py), opened by every later build's tests.
+!crates/fennec-core/tests/compat/*/*.fennec
+!crates/fennec-core/tests/compat/*/archive/*.fennec
+!crates/fennec-core/tests/compat/*/archive-plain/*.fennec
+!crates/fennec-core/tests/compat/*/node-archive/*/*.fennec
+# A page's copy beside its file, which an editor's `*~` would hide.
+!crates/fennec-core/tests/compat/*/*.fennec~
 # Archives 0.2.0 and main's version 2 sealed, which every later binary
 # opens (crates/fennec-http/tests/archive.rs,
 # `older_sealed_archives_still_open`).

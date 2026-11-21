@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+"""tools/version.py refuses to move the version past a released version
+(from v0.2.0 on) whose fixture set is missing from the working tree or is
+not the one its release wrote -- every file the bytes its SHA256SUMS
+names, none beside them (RELEASING.md, step 7), its SHA256SUMS the one
+its `RELEASES` line pins -- and past one whose tag this clone lacks,
+naming `git fetch --tags`; it asks nothing of a version from before
+v0.2.0 or of the version a release already has. Its `main` is run as
+`make version` runs it, a process in a scratch copy of the tree, so a
+merge that drops or moves the gate fails here. And the tree holds every
+set it names: v0.2.0's, and each line of `RELEASES` in the compat tests'
+walk -- a release's set or a further set of its tag, `<tag>+2` --
+whole and pinned: not only the newest, a set deleted beside a later
+one's failing too, and a set written again whole, its sums with it,
+failing by its pin. Not of this tree's version: between a release's tag
+and its set's pull request main holds a version with no set, which only
+the next `make version` refuses. And it refuses while any release tagged
+from v0.2.0 on, a release candidate aside, has no whole set -- a later
+release's set deleted with its `RELEASES` line passes every compat test
+-- and a "set" of a README and its sums alone."""
+
+import hashlib
+import importlib.util
+import os
+import pathlib
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+HERE = pathlib.Path(__file__).resolve().parent
+spec = importlib.util.spec_from_file_location("version", HERE / "version.py")
+version = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(version)
+
+SETS = HERE.parent / "crates" / "fennec-core" / "tests" / "compat"
+
+
+def write_set(d, files):
+    d.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for name, data in sorted(files.items()):
+        (d / name).parent.mkdir(parents=True, exist_ok=True)
+        (d / name).write_bytes(data)
+        lines.append(f"{hashlib.sha256(data).hexdigest()}  {name}")
+    (d / "SHA256SUMS").write_text("\n".join(lines) + "\n")
+
+
+def sums_of(d):
+    return hashlib.sha256((d / "SHA256SUMS").read_bytes()).hexdigest()
+
+
+def write_walk(root, lines):
+    """The compat tests' walk with a `RELEASES` line for each (set, tag,
+    sums) -- sums None for a line pinning none."""
+    walk = root / version.WALK
+    walk.parent.mkdir(parents=True, exist_ok=True)
+    body = "".join(f'    Writes {{\n        set: "{s}",\n        tag: "{t}",\n'
+                   + (f'        sums: "{p}",\n' if p else "") + "    },\n" for s, t, p in lines)
+    walk.write_text("pub const RELEASES: &[Writes] = &[\n" + body + "];\n")
+
+
+def missing_set_reasons():
+    released = lambda root, v: v in ("0.2.0", "0.1.12")
+    never = lambda root, v: False
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        why = version.missing_set(root, "0.2.0", "1.0.0", released)
+        assert why and "make compat-fixtures V=0.2.0" in why, "a release with no set let through"
+        why = version.missing_set(root, "0.2.0", "1.0.0", never)
+        assert why and "git fetch --tags" in why, "a version with no tag in this clone let through"
+        assert version.missing_set(root, "0.1.12", "0.2.0", released) is None, "a set asked of a release before v0.2.0"
+        assert version.missing_set(root, "0.2.0", "0.2.0", released) is None, "a set asked to set the same version"
+        s = root / "crates" / "fennec-core" / "tests" / "compat" / "v0.2.0"
+        s.mkdir(parents=True)
+        (s / "README.md").write_text("# The fixture set\n")
+        why = version.missing_set(root, "0.2.0", "1.0.0", released)
+        assert why and "SHA256SUMS: missing" in why, "a set with no SHA256SUMS let through"
+        write_set(s, {"README.md": b"# The fixture set\n"})
+        why = version.missing_set(root, "0.2.0", "1.0.0", released)
+        assert why and "no database file beside the release's answers" in why, "a README and its sums let through"
+        write_set(s, {"README.md": b"# The fixture set\n", "server.fennec": b"FENECDB\x01", "server.answers": b"{}\n",
+                      "archive/history": b"h"})
+        why = version.missing_set(root, "0.2.0", "1.0.0", released)
+        assert why and "pinning its SHA256SUMS" in why, "a whole set with no line pinning it let through"
+        write_walk(root, [("v0.2.0", "v0.2.0", "0" * 64)])
+        why = version.missing_set(root, "0.2.0", "1.0.0", released)
+        assert why and "not the one its RELEASES line pins" in why, "a set its line does not pin let through"
+        write_walk(root, [("v0.2.0", "v0.2.0", sums_of(s))])
+        assert version.missing_set(root, "0.2.0", "1.0.0", released) is None, "a whole set refused"
+        (s / "server.fennec").write_bytes(b"FENECDB\x02")
+        why = version.missing_set(root, "0.2.0", "1.0.0", released)
+        assert why and "server.fennec: not the bytes its release wrote" in why, "a file changed let through"
+        (s / "server.fennec").write_bytes(b"FENECDB\x01")
+        (s / "extra.fennec").write_bytes(b"x")
+        why = version.missing_set(root, "0.2.0", "1.0.0", released)
+        assert why and "extra.fennec: in no line of SHA256SUMS" in why, "a file beside the set let through"
+        (s / "extra.fennec").unlink()
+        (s / "archive" / "history").unlink()
+        why = version.missing_set(root, "0.2.0", "1.0.0", released)
+        assert why and "archive/history: missing" in why, "a file missing let through"
+
+
+def git(repo, *args):
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                   check=True, capture_output=True)
+
+
+def version_py_refuses_as_a_process():
+    """`tools/version.py` run in a scratch copy, a repository of its own:
+    refused with no set, refused with no tag, and let through -- its first
+    file rewritten -- with a whole set."""
+    with tempfile.TemporaryDirectory() as d:
+        repo = pathlib.Path(d)
+        (repo / "tools").mkdir()
+        shutil.copyfile(HERE / "version.py", repo / "tools" / "version.py")
+        cargo = '[workspace.package]\nversion = "0.2.0"\n'
+        (repo / "Cargo.toml").write_text(cargo)
+        git(repo, "init", "-q")
+        git(repo, "add", ".")
+        git(repo, "commit", "-q", "-m", "a release")
+        git(repo, "tag", "v0.2.0")
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+        def run():
+            # A minor version: a major one asks api_compat.py for frozen
+            # baselines too, which the scratch copy does not hold.
+            return subprocess.run([sys.executable, str(repo / "tools" / "version.py"), "0.4.0"],
+                                  capture_output=True, text=True, env=env)
+
+        r = run()
+        assert r.returncode != 0 and "make compat-fixtures V=0.2.0" in r.stderr, f"no set let through: {r.stderr}"
+        assert (repo / "Cargo.toml").read_text() == cargo, "Cargo.toml changed by a refused move"
+        git(repo, "tag", "-d", "v0.2.0")
+        r = run()
+        assert r.returncode != 0 and "git fetch --tags" in r.stderr, f"a clone with no tag let through: {r.stderr}"
+        assert (repo / "Cargo.toml").read_text() == cargo, "Cargo.toml changed by a refused move"
+        git(repo, "tag", "v0.2.0")
+        sets = repo / "crates" / "fennec-core" / "tests" / "compat"
+        write_set(sets / "v0.2.0", {"README.md": b"# set\n"})
+        r = run()
+        assert r.returncode != 0 and "no database file" in r.stderr, f"a README and its sums let through: {r.stderr}"
+        write_set(sets / "v0.2.0", {"README.md": b"# set\n", "server.fennec": b"FENECDB\x01", "server.answers": b"{}\n"})
+        write_walk(repo, [("v0.2.0", "v0.2.0", sums_of(sets / "v0.2.0"))])
+        # The set written again whole, its sums with it: its pin refuses it.
+        write_set(sets / "v0.2.0", {"README.md": b"# set, again\n", "server.fennec": b"FENECDB\x01",
+                                    "server.answers": b"{}\n"})
+        r = run()
+        assert r.returncode != 0 and "not the one its RELEASES line pins" in r.stderr, \
+            f"a set written again let through: {r.stderr}"
+        assert (repo / "Cargo.toml").read_text() == cargo, "Cargo.toml changed by a refused move"
+        write_set(sets / "v0.2.0", {"README.md": b"# set\n", "server.fennec": b"FENECDB\x01", "server.answers": b"{}\n"})
+        # A later release tagged, its set never written (or deleted with its
+        # RELEASES line): refused, a release candidate's tag aside.
+        git(repo, "tag", "v0.3.0-rc.1")
+        git(repo, "tag", "v0.3.0")
+        r = run()
+        assert r.returncode != 0 and "v0.3.0 was released (its tag) and has no fixture set" in r.stderr, \
+            f"a later release with no set let through: {r.stderr}"
+        assert "rc.1" not in r.stderr, f"a release candidate asked for a set: {r.stderr}"
+        assert (repo / "Cargo.toml").read_text() == cargo, "Cargo.toml changed by a refused move"
+        write_set(sets / "v0.3.0", {"README.md": b"# set\n", "server.fennec": b"FENECDB\x01", "server.answers": b"{}\n"})
+        r = run()
+        assert r.returncode != 0 and "v0.3.0's fixture set has no line" in r.stderr, \
+            f"a later release's set with no line pinning it let through: {r.stderr}"
+        write_walk(repo, [("v0.2.0", "v0.2.0", sums_of(sets / "v0.2.0")),
+                          ("v0.3.0", "v0.3.0", sums_of(sets / "v0.3.0"))])
+        r = run()
+        assert 'version = "0.4.0"' in (repo / "Cargo.toml").read_text(), f"a whole set refused: {r.stderr}"
+
+
+def named_sets_held():
+    """A set a `RELEASES` line names, deleted, is found missing -- the
+    first one beside a later one's too; a set written again whole, its
+    sums with it, is refused by its pin; a further set of a tag (`+2`) is a
+    set of its own, pinned as one, and no set is in the tree without its
+    line; and the tree's own are whole and pinned."""
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        sets = (root / version.WALK).parent
+        whole = lambda v: {"README.md": v.encode(), "server.fennec": b"FENECDB\x01", "server.answers": b"{}\n"}
+        for v in ("v0.2.0", "v0.2.0+2", "v1.0.0"):
+            write_set(sets / v, whole(v))
+        lines = lambda: [(v, v.split("+")[0], sums_of(sets / v)) for v in ("v0.2.0", "v0.2.0+2", "v1.0.0")]
+        write_walk(root, lines())
+        assert version.named_sets(root) == ["v0.2.0", "v0.2.0+2", "v1.0.0"], version.named_sets(root)
+        assert version.named_sets_problems(root) == [], version.named_sets_problems(root)
+        shutil.rmtree(sets / "v0.2.0")
+        problems = version.named_sets_problems(root)
+        assert any("v0.2.0: missing" in p for p in problems), f"v0.2.0's set deleted beside v1.0.0's: {problems}"
+        write_set(sets / "v0.2.0", whole("v0.2.0"))
+        assert version.named_sets_problems(root) == [], version.named_sets_problems(root)
+        write_set(sets / "v0.2.0+2", whole("v0.2.0+2, written again"))
+        problems = version.named_sets_problems(root)
+        assert any("v0.2.0+2/SHA256SUMS: not the one its RELEASES line pins" in p for p in problems), \
+            f"a further set written again whole let through: {problems}"
+        write_set(sets / "v0.2.0+2", whole("v0.2.0+2"))
+        write_walk(root, [x for x in lines() if x[0] != "v0.2.0+2"])
+        problems = version.named_sets_problems(root)
+        assert any("v0.2.0+2: a set no line of RELEASES names" in p for p in problems), \
+            f"a set with no line let through: {problems}"
+        write_walk(root, [(s, t, None if s == "v1.0.0" else p) for s, t, p in lines()])
+        problems = version.named_sets_problems(root)
+        assert any("v1.0.0's line pins no SHA256SUMS" in p for p in problems), f"a line pinning nothing: {problems}"
+        write_walk(root, [x for x in lines() if x[0] != "v0.2.0"])
+        problems = version.named_sets_problems(root)
+        assert any("no v0.2.0 line" in p for p in problems), f"v0.2.0's line dropped: {problems}"
+        assert any("v0.2.0+2 is a further set of v0.2.0, whose first set has no line" in p for p in problems), \
+            f"a further set with no first: {problems}"
+    problems = version.named_sets_problems(HERE.parent) + version.sets_of_tags_problems(HERE.parent)
+    assert not problems, "\n".join(problems)
+    pinned = version.pins(HERE.parent)
+    for s in sorted(p for p in SETS.iterdir() if p.is_dir() and p.name in pinned):
+        problems = version.set_problems(s, pinned[s.name])
+        assert not problems, "\n".join(problems)
+
+
+def tags_read_from_git():
+    """A tag in a repository of its own: `tagged` asks git for it."""
+    with tempfile.TemporaryDirectory() as d:
+        repo = pathlib.Path(d)
+        git(repo, "init", "-q")
+        git(repo, "commit", "-q", "--allow-empty", "-m", "a release")
+        git(repo, "tag", "v0.2.0")
+        assert version.tagged(repo, "0.2.0"), "a tag not found"
+        assert not version.tagged(repo, "0.2.1"), "a version never tagged taken as released"
+    assert version.current_version(HERE.parent), "the workspace's version"
+
+
+class VersionGate(unittest.TestCase):
+    """The same checks under `python3 -m unittest tools/test_version.py`."""
+
+    def test_missing_set_reasons(self):
+        missing_set_reasons()
+
+    def test_version_py_refuses_as_a_process(self):
+        version_py_refuses_as_a_process()
+
+    def test_named_sets_held(self):
+        named_sets_held()
+
+    def test_tags_read_from_git(self):
+        tags_read_from_git()
+
+
+def main():
+    missing_set_reasons()
+    version_py_refuses_as_a_process()
+    named_sets_held()
+    tags_read_from_git()
+    print("version.py: a release after one with no whole fixture set, or with no tag in this clone, is refused, "
+          "its main run as a process; every set the tree names is whole")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

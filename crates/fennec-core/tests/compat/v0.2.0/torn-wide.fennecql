@@ -1,0 +1,18 @@
+-- The statements every later build answers over torn-wide.fennec: an image of
+-- 16 400 documents in two shares, collection ids of two, three and four bytes, a
+-- synced row a disk flipped a bit of, read unchecked below the durable point
+-- the claims name, and the first write after that fsync with a page a power
+-- cut lost, where the open cuts the file: the write of 2.3 MB after it and the
+-- writes after that, more than 1 MiB past the fsync, claiming it in two bytes,
+-- go with it.
+get wide count
+get mid order n select id, n
+get deep
+get wide where n in [0, 1, 2, 16383, 16384, 16399] select id, n, body
+get wide where n >= 20000 count
+get wide where n >= 20000 order n limit 3 select n
+get wide order id desc limit 3 select id, n
+collections
+get wide where n = 40000 select n, body
+get wide where n = 40001 count
+get wide where n = 40002 count

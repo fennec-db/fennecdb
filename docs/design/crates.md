@@ -536,8 +536,24 @@ reads a schema with), at the one place every collection is made. A
 schema's fields are public, and until the fuzz fix's third review a
 create took one built in code past `Schema::new` as handed and wrote it,
 the file refused at its next open; the damage tests now make such a
-file's record by hand. No test file of the repository's holds one
+file's record by hand
 (`a_point_past_the_depth_a_type_nests_is_refused_where_a_file_is_opened_and_applied`).
+v0.2.0's fixture set holds one of each, written by its shell
+(`deep.fennec`, `refused-lists.fennec`, `points-deep.fennec`, and
+`refused-dims.fennec`, a list of vectors past a dimension's range), and
+its compat test holds what this build does with each (`ON_PURPOSE`,
+[compatibility.md](compatibility.md#fixture-sets)): the deep row's `get`,
+`del` and `set`, and a `put` writing over it, refused in its words, and a
+`compact` taken, copying the row as it is; dropped, its field is skipped
+as a read skips it, depth-bound, so the row reads -- and its `del` works
+-- only where no field is declared after the dropped one, a field added
+after it refused in the same words; and a `compact`, which skips the
+dropped place too, refused in the same words while the row's record is in
+the file. Dropping the field never frees the file by itself: the way out
+on 1.x is to drop the field where it is its collection's last and delete
+the row (or write over it), and where a field follows it, to read out the
+rows that read, drop the collection and make it again. The other three
+are refused at the open.
 The 1.x contract names all three, a schema's number past its range beside
 them, as the exceptions to "1.x opens every file written from v0.2.0 on",
 with what each still answers and the advice the first 1.x release's notes

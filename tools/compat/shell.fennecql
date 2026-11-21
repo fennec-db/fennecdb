@@ -1,0 +1,7 @@
+-- The statements every later build answers over shell.fennec: the shell's
+-- own file, an open and a close a statement.
+describe notes
+get notes order n
+get notes match body "second" select n
+get notes order at desc select n, at
+get notes count

@@ -1,0 +1,5 @@
+{"kind":"schemas","collections":[{"name":"t","fields":[{"name":"n","type":"int","index":"hash"},{"name":"s","type":"text","index":"none"}]}]}
+{"kind":"rows","result":{"columns":["count"],"rows":[{"count":6}]}}
+{"kind":"rows","result":{"columns":["n"],"rows":[{"n":0},{"n":1},{"n":2},{"n":3},{"n":4},{"n":5}]}}
+{"kind":"rows","result":{"columns":["id","n","s"],"rows":[{"id":5,"n":4,"s":"row 4"}]}}
+{"kind":"rows","result":{"columns":["n"],"rows":[{"n":5}]}}
