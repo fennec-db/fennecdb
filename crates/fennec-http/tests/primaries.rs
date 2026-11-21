@@ -7,7 +7,8 @@
 //! refused in words, the reader's thread living on, and nothing waits for
 //! ever on a follower: a halt, a promotion, a tenant's release and the
 //! node's shutdown each end. And a tenant's copy is promoted by the node's
-//! admin alone, never through `/t/<t>/_replication/promote`.
+//! admin alone, never through `/t/<t>/_replication/promote`; a copy behind
+//! its primary hears how far.
 
 use fennec_core::engine::Watcher;
 use fennec_core::prelude::*;
@@ -19,7 +20,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Mutex, RwLock};
+use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 const TOKEN: &str = "replication-secret";
@@ -563,6 +564,11 @@ impl Drop for Node {
 
 /// A node of tenants replicating them, its admin token `adm`.
 fn node(tag: &str) -> Node {
+    node_with(tag, 1 << 20)
+}
+
+/// [`node`], each tenant's feed holding `buffer` bytes of writes.
+fn node_with(tag: &str, buffer: usize) -> Node {
     fennec_http::audit::set_delay(0);
     let dir = scratch(tag);
     let tenants = Arc::new(
@@ -570,7 +576,7 @@ fn node(tag: &str) -> Node {
             .expect("dir")
             .with_replication(Replicated {
                 token: TOKEN.into(),
-                buffer: 1 << 20,
+                buffer,
                 upstream: None,
                 sync_on_write: true,
             }),
@@ -703,6 +709,257 @@ fn a_tenants_copy_is_promoted_by_the_admin_alone() {
     };
     // A keep-alive every 2 s: well within a test's wait.
     assert!((0..30_000).contains(&heard), "{}", promoted.body);
+}
+
+/// What a relay in front of a primary has passed on to the copy behind it,
+/// and whether it holds.
+#[derive(Default)]
+struct Relayed {
+    /// The copy's change as what was passed on leaves it: a hello's, then
+    /// each `W`'s last write.
+    at: u64,
+    /// Whether the next keep-alive saying the primary's disk is past `at`
+    /// holds the relay after it.
+    armed: bool,
+    /// Such a keep-alive passed on, the relay holding until it is taken:
+    /// where the copy stood and where its primary said its disk did.
+    ahead: Option<(u64, u64)>,
+    /// Every keep-alive passed on since it was armed: `at` beside the disk.
+    alive: Vec<(u64, u64)>,
+}
+
+type Gate = Arc<(Mutex<Relayed>, Condvar)>;
+
+/// A relay on a port of its own in front of the node at `primary`: each
+/// connection's request passed on, then the node's answer a message at a
+/// time, the next read off the node only once the last was written to the
+/// copy -- so while the copy reads nothing, or the relay holds, the node's
+/// socket fills behind it as behind a copy that stopped reading.
+fn relay(primary: u16) -> (String, Gate) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let gate = Gate::default();
+    let g = Arc::clone(&gate);
+    std::thread::spawn(move || {
+        for s in listener.incoming() {
+            let Ok(copy) = s else { return };
+            let g = Arc::clone(&g);
+            std::thread::spawn(move || {
+                let _ = relayed(copy, primary, &g);
+            });
+        }
+    });
+    (url, gate)
+}
+
+fn relayed(mut copy: TcpStream, primary: u16, gate: &Gate) -> std::io::Result<()> {
+    copy.set_read_timeout(Some(WITHIN))?;
+    let mut node = TcpStream::connect(("127.0.0.1", primary))?;
+    node.set_read_timeout(Some(WITHIN))?;
+    let head = |from: &mut TcpStream| -> std::io::Result<Vec<u8>> {
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            from.read_exact(&mut byte)?;
+            head.push(byte[0]);
+        }
+        Ok(head)
+    };
+    // A stream's request is a GET: its head is all of it.
+    let request = head(&mut copy)?;
+    node.write_all(&request)?;
+    let answer = head(&mut node)?;
+    copy.write_all(&answer)?;
+    if !answer.starts_with(b"HTTP/1.1 200") {
+        return Ok(());
+    }
+    let (m, cv) = &**gate;
+    loop {
+        {
+            let mut r = m.lock().unwrap();
+            let deadline = Instant::now() + WITHIN;
+            while r.ahead.is_some() && Instant::now() < deadline {
+                r = cv.wait_timeout(r, WITHIN).unwrap().0;
+            }
+        }
+        let mut msg = vec![0u8; 9];
+        node.read_exact(&mut msg)?;
+        let len = u64::from_le_bytes(msg[1..9].try_into().unwrap()) as usize;
+        msg.resize(9 + len, 0);
+        node.read_exact(&mut msg[9..])?;
+        copy.write_all(&msg)?;
+        let body = &msg[9..];
+        let u64_at = |i: usize| u64::from_le_bytes(body[i..i + 8].try_into().unwrap());
+        let mut r = m.lock().unwrap();
+        match msg[0] {
+            b'H' => r.at = u64_at(2),
+            b'W' => r.at = u64_at(0) + u64_at(8) - 1,
+            b'K' if r.armed => {
+                let (at, durable) = (r.at, u64_at(8));
+                r.alive.push((at, durable));
+                if durable > at {
+                    r.armed = false;
+                    r.ahead = Some((at, durable));
+                }
+            }
+            _ => {}
+        }
+        cv.notify_all();
+    }
+}
+
+/// A number a JSON answer gives after `"key":`, the first.
+fn number_after(text: &str, key: &str) -> Option<u64> {
+    let at = text.find(&format!("\"{key}\":"))? + key.len() + 3;
+    let digits: String = text[at..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
+/// A copy behind its primary hears how far: a stream behind says where its
+/// primary's disk stands every `ALIVE` too, after the writes it sends, so
+/// the copy's `behind`, its node's `fennec_copies_behind`, a promotion's
+/// answer and a router's line count the writes it lacks. Said only once a
+/// stream had caught up, a copy as far behind as the primary's buffer --
+/// its reads slower than the writes, its socket full -- read `behind` 0
+/// throughout. The copy's reads stop on its own write lock, a read of which
+/// the test holds, until the primary's stream has handed its socket
+/// nothing for longer than `ALIVE`; a relay in front of the primary then
+/// holds after the first keep-alive saying more than the copy has, so what
+/// it heard is read before it catches up.
+#[test]
+fn a_copy_behind_its_primary_reads_how_far() {
+    let primary = node_with("behind-primary", 64 << 20);
+    let copy = node("behind-copy");
+    tenant(primary.port);
+    let big = query(primary.port, "acme", "create collection big (pad text)");
+    assert_eq!(big.status, 200, "{}", big.body);
+    let (url, gate) = relay(primary.port);
+    let (m, cv) = &*gate;
+    let made = admin(copy.port, "PUT", "/_admin/tenants/acme", "");
+    assert_eq!(made.status, 201, "{}", made.body);
+    let from = format!(r#"{{"from":"{url}"}}"#);
+    let followed = admin(copy.port, "POST", "/_admin/tenants/acme/follow", &from);
+    assert_eq!(followed.status, 200, "{}", followed.body);
+    holds(&copy, 1);
+    m.lock().unwrap().armed = true;
+
+    // The copy stops reading as it lands the next write. The primary is
+    // sent writes of a mebibyte each until its stream is held back -- its
+    // socket, the relay's and the copy's full, three writes past what it
+    // has handed its socket -- and has handed it nothing for longer than
+    // `ALIVE`: whatever it last told the copy of its disk, it told before
+    // that, and the next write it hands its socket is followed by where its
+    // disk stands.
+    let auth = format!("Bearer {TOKEN}");
+    let sent_and_durable = || {
+        let status = call(
+            primary.port,
+            "GET",
+            "/t/acme/_replication/status",
+            &[("Authorization", &auth)],
+            b"",
+        );
+        let sent = number_after(&status.body, "sent");
+        sent.zip(number_after(&status.body, "durable"))
+    };
+    let t = copy.tenants.get("acme").unwrap();
+    let held = t.db.read().unwrap();
+    let pad = "x".repeat(1 << 20);
+    let mut writes = 0;
+    let last = loop {
+        assert!(
+            writes < 48,
+            "the primary's stream was never held back by {writes} MiB of writes"
+        );
+        let put = query(primary.port, "acme", &format!("put big {{pad: \"{pad}\"}}"));
+        assert_eq!(put.status, 200, "{}", put.body);
+        writes += 1;
+        let Some((sent, durable)) = sent_and_durable() else {
+            continue;
+        };
+        if durable < sent + 3 {
+            continue;
+        }
+        std::thread::sleep(replication::ALIVE + Duration::from_millis(250));
+        if sent_and_durable() == Some((sent, durable)) {
+            break durable;
+        }
+    };
+    drop(held);
+
+    let deadline = Instant::now() + WITHIN;
+    let (at, durable) = {
+        let mut r = m.lock().unwrap();
+        loop {
+            if let Some(ahead) = r.ahead {
+                break ahead;
+            }
+            assert!(
+                r.at < last,
+                "the copy was sent every write to change {last} and no keep-alive said \
+                 where its primary's disk stood while it was behind: it read `behind` 0 \
+                 throughout (keep-alives, the copy's change beside the disk: {:?})",
+                r.alive
+            );
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(!left.is_zero(), "nothing passed on within {WITHIN:?}");
+            r = cv.wait_timeout(r, left).unwrap().0;
+        }
+    };
+    assert_eq!(durable, last);
+    let behind = durable - at;
+
+    // The copy read it: its status and its node's scrape say how far.
+    let reads = |want: u64| {
+        let deadline = Instant::now() + WITHIN;
+        loop {
+            let status = call(
+                copy.port,
+                "GET",
+                "/t/acme/_replication/status",
+                &[("Authorization", &auth)],
+                b"",
+            );
+            if number_after(&status.body, "behind") == Some(want) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the copy never read {want} behind: {}",
+                status.body
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let scrape = admin(copy.port, "GET", "/_metrics", "");
+        let line = format!("fennec_copies_behind {want}");
+        assert!(
+            scrape.body.lines().any(|l| l == line),
+            "no `{line}` in the copy's node's scrape"
+        );
+    };
+    reads(behind);
+
+    // Let go, it catches up, and both say so.
+    m.lock().unwrap().ahead = None;
+    cv.notify_all();
+    reads(0);
+    holds_seq(&copy, last);
+}
+
+/// Waits for `acme` on `node` to stand at change `seq`.
+fn holds_seq(node: &Node, seq: u64) {
+    let deadline = Instant::now() + WITHIN;
+    let t = node.tenants.get("acme").unwrap();
+    while t.db.read().unwrap().change_seq() < seq {
+        assert!(
+            Instant::now() < deadline,
+            "change {seq} never reached the copy"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// A tenant's copy whose image's adoption panicked is failed in words, and

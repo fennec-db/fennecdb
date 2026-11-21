@@ -943,6 +943,16 @@ Cache-Control: no-cache, no-transform\r\nConnection: close\r\n\r\n";
         }
         a
     };
+    // The same image and writes as a version before checksums wrote them,
+    // as a primary sends them to a follower that does not say `sums=1`: a
+    // record without a sum passes `check_records` whatever its bytes, so a
+    // mutation of one reaches the image's load and its adoption by the
+    // copy -- `repoint`'s walk, `rebind` -- where one of a checked image's
+    // stops at its sum.
+    let plain = fennec_core::engine::plain_image(&image).expect("the image's records");
+    let mut plain_writes = u64s(&[3, 2, 1_700_000_000_001, 1_700_000_000_002]);
+    plain_writes
+        .extend_from_slice(&fennec_core::engine::plain_records(&records).expect("its records"));
     let replica = [
         answer(&[
             framed(b'H', &hello(true)),
@@ -950,6 +960,12 @@ Cache-Control: no-cache, no-transform\r\nConnection: close\r\n\r\n";
             framed(b'W', &writes),
             framed(b'K', &alive),
             framed(b'E', b"the database is closing"),
+        ]),
+        answer(&[
+            framed(b'H', &hello(true)),
+            framed(b'I', &plain),
+            framed(b'W', &plain_writes),
+            framed(b'K', &alive),
         ]),
         answer(&[framed(b'H', &hello(false)), framed(b'W', &writes)]),
         b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 36\r\n\r\ninvalid or missing replication token"

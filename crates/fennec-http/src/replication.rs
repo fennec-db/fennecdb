@@ -100,8 +100,10 @@ pub(crate) const SHORT: u64 = MESSAGE as u64;
 const FIRST: usize = 2 * MESSAGE + 16;
 
 /// A stream with nothing to send says so this often: the replica learns the
-/// primary is there, and how far it has got.
-pub(crate) const ALIVE: Duration = Duration::from_secs(2);
+/// primary is there, and how far it has got. A stream behind says how far
+/// its disk has got this often too, after the writes it sends. Public for a
+/// router, which reads a promoted copy's last contact against it.
+pub const ALIVE: Duration = Duration::from_secs(2);
 
 /// A replica that hears nothing for this long takes the primary for gone and
 /// connects again.
@@ -1556,6 +1558,9 @@ fn stream(
         let feed = Arc::clone(feed);
         move || feed.nudge()
     });
+    // When the replica was last told where this disk stands: the hello
+    // told it.
+    let mut told = Instant::now();
     loop {
         if crate::conn::ending() {
             return;
@@ -1568,10 +1573,26 @@ fn stream(
                         .and_then(|_| w.flush());
                     return;
                 };
+                // Behind, a stream says where the disk stands every
+                // `ALIVE` too, after the writes it sends: said only once
+                // it had caught up, a replica up to the feed's buffer
+                // behind -- its reads slower than the writes, its socket
+                // full -- heard of no write it had not been sent, and its
+                // `behind`, a node's `fennec_copies_behind`, a promotion's
+                // answer and the router's line read 0. A replica of every
+                // release reads a keep-alive between any two messages.
+                let tell = told.elapsed() >= ALIVE;
                 let sent = message(&mut w, b'W', &[&u64s(&[first, n]), &u64s(&times), &records])
+                    .and_then(|_| match tell {
+                        true => message(&mut w, b'K', &[&alive(feed)]),
+                        false => Ok(()),
+                    })
                     .and_then(|_| w.flush());
                 if sent.is_err() {
                     return;
+                }
+                if tell {
+                    told = Instant::now();
                 }
                 cursor = last;
                 feed.sent(key, cursor, false);
@@ -1583,13 +1604,13 @@ fn stream(
                 feed.sent(key, cursor, true);
                 feed.wait_unless(cursor, epoch, ALIVE, crate::conn::ending);
                 if feed.durable() <= cursor {
-                    let alive = u64s(&[feed.seq(), feed.durable(), now_ms()]);
-                    if message(&mut w, b'K', &[&alive])
+                    if message(&mut w, b'K', &[&alive(feed)])
                         .and_then(|_| w.flush())
                         .is_err()
                     {
                         return;
                     }
+                    told = Instant::now();
                 }
             }
             Next::Behind => {
@@ -1613,6 +1634,12 @@ fn stream(
             }
         }
     }
+}
+
+/// A keep-alive's body: the feed's last write, the last on disk -- what a
+/// replica's `behind` is counted to -- and the time.
+fn alive(feed: &Feed) -> Vec<u8> {
+    u64s(&[feed.seq(), feed.durable(), now_ms()])
 }
 
 /// Takes a finished stream off what durable writes wait for.
@@ -1793,15 +1820,25 @@ pub(crate) const SHOWN: usize = 200;
 /// the log -- a newline and the next line's prefix, a terminal's escapes --
 /// and a mebibyte into it and into the status at every reconnect. The one
 /// way every reader of a peer's stream shows its words: a replica's, an
-/// archiver's, a backup's and a node archiver's.
-pub(crate) fn peer_words(bytes: &[u8]) -> String {
+/// archiver's, a backup's and a node archiver's -- and a router its nodes'
+/// answers, in a log line and the errors it answers with
+/// ([`peer_words_within`]).
+pub fn peer_words(bytes: &[u8]) -> String {
+    peer_words_within(bytes, SHOWN)
+}
+
+/// [`peer_words`], showing the first `most` characters: a router shows a
+/// node's refusal whole, whose sentence runs past [`SHOWN`] to what an
+/// operator does about it -- cut at 200, a failover's refusal of a copy of
+/// another lineage lost its last 113 bytes and the `force` it names.
+pub fn peer_words_within(bytes: &[u8], most: usize) -> String {
     let text = String::from_utf8_lossy(bytes);
     let mut chars = text.chars();
-    let shown: String = chars.by_ref().take(SHOWN).collect();
+    let shown: String = chars.by_ref().take(most).collect();
     let mut out = format!("{shown:?}");
     if chars.next().is_some() {
         out.push_str(&format!(
-            " (the first {SHOWN} characters of {} bytes)",
+            " (the first {most} characters of {} bytes)",
             bytes.len()
         ));
     }
@@ -2060,7 +2097,9 @@ impl Follower {
     /// adoption after them; a promotion, a release under the tenant's slot,
     /// every `get` of the tenant behind it and the node's shutdown waited
     /// with it. Walked away from, the copy holds what it held, and follows on
-    /// from there once started again.
+    /// from there once started again. A halt that comes during the check
+    /// and load still waits for them -- nothing looks inside `load` -- and
+    /// is met at the second look, before the adoption.
     fn halted(&self, _at: &'static str) -> bool {
         #[cfg(test)]
         self.halt_here(_at);
@@ -2453,13 +2492,14 @@ impl Follower {
     /// is walked away from within 10 ms (`dial::connect_unless`), the
     /// back-off within 20; an image that has arrived is walked away from
     /// before its check and load and again before its adoption
-    /// ([`Self::halted`]); else one message landing under the write lock,
-    /// and its fsync, or an adoption begun: the image written over the
-    /// copy's file and synced, a write of the image's length, which the
-    /// copy's memory then points at. A promotion and a tenant's release,
-    /// which halt, end within that, and so do a `get` of the tenant and the
-    /// node's shutdown, which wait for the tenant's slot a release holds as
-    /// it halts.
+    /// ([`Self::halted`]), a check and load already under way waited for
+    /// -- minutes for many gigabytes -- and walked away from after; else
+    /// one message landing under the write lock, and its fsync, or an
+    /// adoption begun: the image written over the copy's file and synced, a
+    /// write of the image's length, which the copy's memory then points
+    /// at. A promotion and a tenant's release, which halt, end within that,
+    /// and so do a `get` of the tenant and the node's shutdown, which wait
+    /// for the tenant's slot a release holds as it halts.
     pub fn halt(&self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(s) = lock(&self.conn).take() {
@@ -2499,11 +2539,16 @@ impl Follower {
 /// answered among it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Heard {
-    /// Connected to its primary as the promotion began. Its primary gone, a
-    /// stream has ended with it: `last_contact_ms` says when.
+    /// Connected to its primary as the promotion began: true until a read
+    /// of the stream fails. A primary's process killed ends the stream with
+    /// it; its machine lost or cut off leaves the copy connected until
+    /// `SILENCE` (10 s) passes with nothing heard, which a lease's lapse
+    /// comes before: `last_contact_ms` past a keep-alive's [`ALIVE`] says
+    /// it was not hearing from it.
     pub connected: bool,
     /// Writes on its primary's disk, as its primary last said, it had not
-    /// applied: each of them lost to the promotion.
+    /// applied: each of them lost to the promotion. A stream says so every
+    /// [`ALIVE`], behind or caught up.
     pub behind: u64,
     /// How long before the promotion its primary was last heard from, a
     /// keep-alive's every [`ALIVE`] included; `None` where it was not since
@@ -2545,7 +2590,21 @@ fn loaded(mut bytes: Vec<u8>, lineage: &[(u64, u64)], seq: u64) -> io::Result<(D
         following: true,
     }
     .record();
-    bytes.reserve_exact(follows.len());
+    // Asked, a refusal in words: the image is the database whole, and
+    // its room taken as `reserve_exact` takes it, a refused one aborted the
+    // process -- a node and every tenant it holds -- one allocation past
+    // `read_kind`'s. `load`'s own allocations still abort on a refusal.
+    bytes.try_reserve_exact(follows.len()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::OutOfMemory,
+            format!(
+                "an image of {} bytes: the allocator refused the {} asked for it and the \
+                 record that follows it",
+                bytes.len(),
+                bytes.len().saturating_add(follows.len())
+            ),
+        )
+    })?;
     bytes.extend_from_slice(&follows);
     let mut fresh = Database::new();
     fresh.load(&bytes).map_err(io::Error::other)?;
@@ -3340,20 +3399,27 @@ mod tests {
     /// The `stream` target's reader, given a copy mapped as a server's, takes
     /// an image its hello promised as a follower does: adopted, the copy's
     /// stores pointed at the rewritten bytes, following -- `adopt`'s
-    /// `repoint` and `rebind`, which no target reached before.
+    /// `repoint` and `rebind`, which no target reached before. An image of
+    /// records without sums, as a primary sends one to a follower that does
+    /// not ask for them, is adopted too: the target's seed of one, whose
+    /// mutations pass `check_records` and reach the adoption.
     #[test]
     fn an_answers_image_is_adopted_by_a_mapped_copy() {
         let (image, seq) = two_rows();
-        let bytes = answer(true, seq, &framed(b'I', &image));
-        let mut copy = Database::with_sink(Box::new(Remapped(None)));
-        let empty: fennec_core::store::Base = Arc::new(Database::new().snapshot());
-        copy.load_mapped(empty).unwrap();
-        let (n, end) = read_answer(&mut &bytes[..], Some(&mut copy));
-        assert_eq!((n, end.kind()), (2, io::ErrorKind::UnexpectedEof), "{end}");
-        assert_eq!((copy.change_seq(), copy.adoptions()), (seq, 1));
-        assert!(copy.history().following);
-        let q = fennec_ql::parse_one("get c count").unwrap();
-        let r = fennec_core::json::response_to_string(&copy.query(&q, &[]).unwrap());
-        assert!(r.contains(r#""count":2"#), "{r}");
+        let plain = fennec_core::engine::plain_image(&image).unwrap();
+        assert_ne!(plain, image);
+        for image in [image, plain] {
+            let bytes = answer(true, seq, &framed(b'I', &image));
+            let mut copy = Database::with_sink(Box::new(Remapped(None)));
+            let empty: fennec_core::store::Base = Arc::new(Database::new().snapshot());
+            copy.load_mapped(empty).unwrap();
+            let (n, end) = read_answer(&mut &bytes[..], Some(&mut copy));
+            assert_eq!((n, end.kind()), (2, io::ErrorKind::UnexpectedEof), "{end}");
+            assert_eq!((copy.change_seq(), copy.adoptions()), (seq, 1));
+            assert!(copy.history().following);
+            let q = fennec_ql::parse_one("get c count").unwrap();
+            let r = fennec_core::json::response_to_string(&copy.query(&q, &[]).unwrap());
+            assert!(r.contains(r#""count":2"#), "{r}");
+        }
     }
 }
