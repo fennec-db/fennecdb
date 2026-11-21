@@ -198,7 +198,7 @@ const READER: &str = "reader";
 fn write_follows(dir: &Path, name: &str, text: &str) -> std::io::Result<()> {
     let tmp = dir.join(format!("{name}.follows.writing"));
     let path = dir.join(format!("{name}.follows"));
-    std::fs::File::create(&tmp)
+    fennec_core::fs::create_like(&tmp, &path)
         .and_then(|mut f| {
             use std::io::Write;
             f.write_all(text.as_bytes())?;
@@ -589,7 +589,7 @@ impl Tenants {
     /// A registry over `dir`, created when missing. Nothing is opened yet.
     pub fn new(dir: impl Into<PathBuf>) -> std::io::Result<Tenants> {
         let dir = dir.into();
-        std::fs::create_dir_all(&dir)?;
+        fennec_core::fs::create_dir_private(&dir)?;
         let hooks = Arc::new(crate::tenant_hooks::Store::open(&dir)?);
         Ok(Tenants {
             dir,
@@ -1919,7 +1919,7 @@ impl Tenants {
                 },
                 false => {
                     let tmp = self.dir.join(format!("{name}.quota.writing"));
-                    std::fs::File::create(&tmp)
+                    fennec_core::fs::create_like(&tmp, &path)
                         .and_then(|mut f| {
                             use std::io::Write;
                             f.write_all(set.json().as_bytes())?;
@@ -2350,7 +2350,7 @@ impl Tenants {
             // would be a file of its own.
             let target = fennec_core::fs::resolved(&path);
             let tmp = fennec_core::fs::beside(&target, "importing");
-            let written = std::fs::File::create(&tmp)
+            let written = fennec_core::fs::create_private(&tmp)
                 .and_then(|mut f| {
                     use std::io::Write;
                     f.write_all(image)?;

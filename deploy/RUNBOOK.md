@@ -218,12 +218,16 @@ unit: the servers take SIGHUP for a shutdown.
 
 The servers write their log to the journal and refusals, schema changes
 and admin changes to an audit log, `/var/log/fennecdb/<role>/audit.log`
-(`node`, `router`, `global`), 0600 under the units' `UMask` -- it names
-clients' addresses and every tenant changed. A log shipper reads it through
-an ACL, set once on the directory so each new file inherits it:
+(`node`, `router`, `global`), 0600 whatever the units' `UMask`, as
+fennecdb makes every file -- it names clients' addresses and every tenant
+changed. A log shipper reads it through an ACL. A directory's default ACL
+reaches no file fennecdb makes, whose mode masks the ACL's group class to
+nothing; the file keeps the ACL it is given, so give it once, after the
+first start made it:
 
 ```sh
-setfacl -m u:<shipper>:rx -m d:u:<shipper>:r /var/log/fennecdb/node
+setfacl -m u:<shipper>:rx /var/log/fennecdb/node
+setfacl -m u:<shipper>:r /var/log/fennecdb/node/audit.log
 ```
 
 The server opens the file once and appends; it does not reopen it, and
@@ -1065,7 +1069,16 @@ is in the archive once its node's stream has sent it -- under load the
 stream may be behind its node (Known gaps) -- and in the bucket after the
 next `fennec-archive-sync` run that succeeds: the timer starts one every
 five minutes, so a write is there five minutes and a run's length after
-the archive took it, while runs succeed. One that fails is retried at the
+the archive took it, while runs succeed. The archiver makes each file 0600
+whatever its `UMask`, as fennecdb makes every file, so each run first gives
+the archiver's group read of the archive, as root (the unit's
+`ExecStartPre=`), and copies what that group may then read: a segment or
+image made after that step waits for the next run, five minutes on. A
+directory there before the run that the group still cannot read fails the
+run ("... older than this run are not readable ...: did the unit's
+ExecStartPre= chmod run?"): the step never reached it, and a copy around
+it would leave that tenant out of the bucket while every run succeeded.
+One that fails is retried at the
 next tick, and `FennecArchiveSyncStale` fires once no run has succeeded for
 half an hour. Each success is written into node_exporter's textfile
 collector, `/var/lib/prometheus/node-exporter`, which the `fennec-sync` user

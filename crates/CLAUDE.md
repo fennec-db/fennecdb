@@ -37,3 +37,26 @@ meets its block to another implementation's, each test's count of cases
 held. `SECURITY.md` is held to the tree the same way, by
 `tools/security_md_check.py` (CI's fmt job): a flag, path, link or primitive
 it names that is gone fails, and so does any kind of check counting zero.
+
+**[A file is made by `fennec_core::fs`'s helpers, its owner's alone](../docs/design/durability.md#files-modes)**
+-- `private` on the open of a file its operator names, which goes through
+a link there as a database's open does (`fs::resolved`); `private_beside`
+(`O_NOFOLLOW`, each target's number, a Unix without one failing to build)
+on a file opened again beside a database; `create_private`,
+`create_like` (`O_EXCL`) or `copy_private` (a clone with `CLONE_NOFOLLOW`
+on Apple's systems, of a file its owner's alone) for a side file written
+whole, these following no link at their name, an archive's records, a
+backup, an unseal and a compact's swap held to their writer's handle
+before their rename (`still_named`); `create_dir_private` or
+`create_dir_new` for a directory -- `0600`, a directory `0700`, whatever
+the umask, from the call that makes it, or for a clone, which takes its
+source's owner-only mode, on its handle before it is handed back: never
+a `chmod` by name.
+A file renamed over another is given that one's mode before the rename, by
+an `fchmod` of its open handle (`mode_like`), a group's bits only where it
+is of that group, nothing from a file another user owns; nothing is
+chowned. `tools/file_create_check.py` (CI's fmt job) refuses
+`File::create`, `fs::write`, `.create(..)`, `create_dir_all`, `fs::copy`,
+a clone, an `fs::rename` in a function giving no mode and the like, by any
+name a `use` gives them, in `crates/*/src` outside tests, fennec-bench and
+fennec-fuzz, an exception allowed with why and how many times.

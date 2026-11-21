@@ -197,7 +197,7 @@ impl NodeArchive {
     pub fn new(root: impl AsRef<Path>, key: Option<Key>) -> io::Result<NodeArchive> {
         let root = root.as_ref().to_path_buf();
         let made = !root.is_dir();
-        fs::create_dir_all(&root)?;
+        fennec_core::fs::create_dir_private(&root)?;
         // Its name durable once, at the start: lost to a crash, every
         // tenant's archive went with it. A tenant's own directory is synced
         // into it before the tenant's first segment is written, once for
@@ -881,7 +881,7 @@ pub fn restore_all(
         ));
     }
     let made = !out.is_dir();
-    fs::create_dir_all(out)?;
+    fennec_core::fs::create_dir_private(out)?;
     // Its name durable too, as each file restored into it is
     // (`Archive::restore`): lost to a crash, it took them all along.
     if made {

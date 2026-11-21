@@ -223,6 +223,7 @@ Covers `crates/`.
 - Unit tests live inline
 - Every parser of untrusted bytes is fuzzed
 - A secret is compared by `crypto::ct_eq` alone
+- A file is made by `fennec_core::fs`'s helpers, its owner's alone
 
 ### `crates/fennec-core/CLAUDE.md`
 

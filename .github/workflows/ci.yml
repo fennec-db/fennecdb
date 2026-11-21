@@ -138,6 +138,15 @@ jobs:
           python3 tools/secret_eq_check.py --self-test
           python3 tools/secret_eq_check.py
 
+      # docs/design/durability.md#files-modes: a file the crates make is
+      # made 0600 (a directory 0700) by fennec_core::fs's helpers, whatever
+      # the umask; File::create, fs::write, create_dir_all and the like take
+      # the umask's 0644. The reader is held to its own cases first.
+      - name: Every file the crates make is made by fennec_core::fs's helpers
+        run: |
+          python3 tools/file_create_check.py --self-test
+          python3 tools/file_create_check.py
+
       # docs/design/conventions.md#security-policy: SECURITY.md names flags,
       # paths and primitives, and says nothing of TLS or the crates that the
       # tree has since made untrue; a file or a comment that does is found.

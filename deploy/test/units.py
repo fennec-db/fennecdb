@@ -401,6 +401,27 @@ def archive_checks():
           + "\n".join(l for l in metrics.splitlines() if "textfile" in l or "fennec_" in l))
     check(re.search(r"^node_textfile_scrape_error 0$", metrics, re.M), "node_exporter could not read a textfile")
 
+    # The group's read never given -- the unit's chmod skipped, which its
+    # "-" lets pass -- to a directory there before the run: the run fails,
+    # where copying around it wrote a success for a copy that left a tenant
+    # out, and FennecArchiveSyncStale never fired.
+    # The instance's own drop-in directory, which nothing else makes (the
+    # kit's is the template's, fennec-archive-sync@.service.d): made here
+    # and removed with the drop-in.
+    dropins = "/etc/systemd/system/fennec-archive-sync@eu-a.service.d"
+    dropin = f"{dropins}/no-chmod.conf"
+    unread = "/var/lib/fennecdb/archive/eu-a/unread"
+    sh("m2", f"install -d -o fennec-archive -g fennec-archive -m 0700 {unread} && "
+             f"mkdir -p {dropins} && "
+             f"printf '[Service]\\nExecStartPre=\\nExecStartPre=/usr/bin/touch %%S/fennecdb/sync/%%i/began\\n' > {dropin} && "
+             "systemctl daemon-reload")
+    sh("m2", "systemctl start fennec-archive-sync@eu-a.service", check_=False)
+    skipped = show("m2", "fennec-archive-sync@eu-a.service", "Result")
+    j = journal("m2", "fennec-archive-sync@eu-a.service")
+    check(skipped != "success" and "older than this run" in j and "unread" in j,
+          f"a run whose chmod never ran: {skipped}\n{j[-2000:]}")
+    sh("m2", f"rm {dropin} && rmdir {dropins} {unread} && systemctl daemon-reload")
+
     # A disk replaced: the archiver begins a new archive at once, the
     # bucket holding the old one. The first copy is refused, and the bucket
     # is as it was.
@@ -433,7 +454,7 @@ def archive_checks():
     check(active("m2", "fennec-archive-sync@eu-a.timer") == "active", "the sync's timer")
     say(f"archive: sealed, verified with the key and refused without it; the archiver stopped clean in "
         f"{took:.2f} s; rclone copied it to the bucket three times while it was written, the copy "
-        f"verifying, and node_exporter read the sync's success; a new disk's archive refused over the "
+        f"verifying, and node_exporter read the sync's success; a run whose chmod never ran failed; a new disk's archive refused over the "
         f"bucket's, the bucket unchanged, and copied once the bucket was copied back")
 
 

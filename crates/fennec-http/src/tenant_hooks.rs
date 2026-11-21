@@ -392,6 +392,12 @@ impl Store {
         let path = self.path(name);
         let tmp = self.writing(name);
         let written = (|| {
+            // Made `0600` by its open, never through a link put at its
+            // name, and given the mode an operator set on the sidecar, as
+            // every file keeps its mode (`fennec_core::fs::create_like`).
+            #[cfg(unix)]
+            let mut f = fennec_core::fs::create_like(&tmp, &path)?;
+            #[cfg(windows)]
             let mut f = std::fs::OpenOptions::new()
                 .write(true)
                 .create(true)
@@ -1068,19 +1074,16 @@ fn remove(path: &Path) -> io::Result<()> {
     }
 }
 
-/// A file opened readable by its owner alone -- mode 0600, on Windows a
-/// DACL set before a byte is written (`owner_only`): the sidecar holds secrets.
+/// A file opened readable by its owner alone on Windows, a DACL set
+/// before a byte is written (`owner_only`): the sidecar holds secrets. A
+/// Unix makes it `0600` by `fennec_core::fs::create_like`.
+#[cfg(windows)]
 trait Private {
     fn mode_private(&mut self) -> &mut Self;
 }
 
+#[cfg(windows)]
 impl Private for std::fs::OpenOptions {
-    #[cfg(unix)]
-    fn mode_private(&mut self) -> &mut Self {
-        use std::os::unix::fs::OpenOptionsExt;
-        self.mode(0o600)
-    }
-    #[cfg(windows)]
     fn mode_private(&mut self) -> &mut Self {
         crate::owner_only::options(self)
     }
