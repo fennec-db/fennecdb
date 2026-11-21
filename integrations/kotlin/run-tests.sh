@@ -35,7 +35,7 @@ command -v docker >/dev/null 2>&1 || { echo "kotlin-test: needs Docker, or Linux
 docker run --rm -v "$ROOT":/src -w /src \
   -v fennec-cargo-registry:/usr/local/cargo/registry \
   -e CARGO_TARGET_DIR=/src/target/linux-docker \
-  rust:1.99.1-slim-bookworm@sha256:f2c004e3d2d8b547e8cf7ffbc29205385f4e71d23e53e4e383065db5e9f822cd \
+  rust:1.100.0-slim-bookworm@sha256:7c7d4eb4d05b7781187a327809466cfddf29753f6defdc3d19a0e291951b7a37 \
   sh -c 'export RUSTUP_TOOLCHAIN=$(ls /usr/local/rustup/toolchains | head -1) &&
     cargo rustc -q -p fennec-ffi --lib --features jni --profile ffi --crate-type cdylib &&
     cargo build -q -p fennec-server -p fennec-shard'
