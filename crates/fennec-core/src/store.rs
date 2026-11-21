@@ -1213,6 +1213,7 @@ impl Store {
     /// Whether a read of the field at `field_pos` passes a dropped place:
     /// what picks the reader that passes its `null` by its byte
     /// ([`Self::read_field_in`]), once a query.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn passes(&self, field_pos: usize) -> bool {
         self.dropped
             .first()
