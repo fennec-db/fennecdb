@@ -1573,6 +1573,16 @@ fn stream(
                         .and_then(|_| w.flush());
                     return;
                 };
+                let sent = message(&mut w, b'W', &[&u64s(&[first, n]), &u64s(&times), &records])
+                    .and_then(|_| w.flush());
+                if sent.is_err() {
+                    return;
+                }
+                cursor = last;
+                feed.sent(key, cursor, false);
+                if let Some(s) = lock(&repl.streams).iter_mut().find(|s| s.key == key) {
+                    s.sent = cursor;
+                }
                 // Behind, a stream says where the disk stands every
                 // `ALIVE` too, after the writes it sends: said only once
                 // it had caught up, a replica up to the feed's buffer
@@ -1581,23 +1591,19 @@ fn stream(
                 // `behind`, a node's `fennec_copies_behind`, a promotion's
                 // answer and the router's line read 0. A replica of every
                 // release reads a keep-alive between any two messages.
-                let tell = told.elapsed() >= ALIVE;
-                let sent = message(&mut w, b'W', &[&u64s(&[first, n]), &u64s(&times), &records])
-                    .and_then(|_| match tell {
-                        true => message(&mut w, b'K', &[&alive(feed)]),
-                        false => Ok(()),
-                    })
-                    .and_then(|_| w.flush());
-                if sent.is_err() {
-                    return;
-                }
-                if tell {
+                // Asked once `feed.sent` let the writes waiting on this one
+                // go, and sent in a flush of its own: in the `W`'s flush,
+                // a `--sync always` write waited on the clock and, every
+                // `ALIVE`, on the keep-alive's bytes too. A stream that has
+                // sent every write on disk is not behind and says nothing.
+                if told.elapsed() >= ALIVE && feed.durable() > cursor {
+                    if message(&mut w, b'K', &[&alive(feed)])
+                        .and_then(|_| w.flush())
+                        .is_err()
+                    {
+                        return;
+                    }
                     told = Instant::now();
-                }
-                cursor = last;
-                feed.sent(key, cursor, false);
-                if let Some(s) = lock(&repl.streams).iter_mut().find(|s| s.key == key) {
-                    s.sent = cursor;
                 }
             }
             Next::Nothing => {

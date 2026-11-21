@@ -111,9 +111,16 @@ writes, its socket full -- read `behind` 0, and so did a node's
 `FennecTenantCopiesBehind` never fired on it. A stream behind now sends
 one after the writes it sends once `ALIVE` has passed since it last told
 (`stream`'s `told`; the review's third round): 33 bytes every 2 s a
-lagging stream, one look at the clock a `W` message, nothing on a
-request's path. Every replica since 0.1.5 reads a keep-alive between any
-two messages, and an archiver syncs its segment on one, as it does every
+lagging stream, a stream that has sent every write on disk saying
+nothing. It looks, at the clock once a `W` message and at the feed's
+`durable` once `ALIVE` has passed, after `Feed::sent` has let the writes
+waiting on that `W` go, and sends the keep-alive in a flush of its own --
+a `write` every 2 s, none a `W` -- so a `--sync always` write waits for
+neither: nothing on a request's path. The third round sent it in the
+`W`'s flush, where such a write waited on the look and, every 2 s, on the
+keep-alive's bytes; the fourth moved both after `Feed::sent`. Every
+replica since 0.1.5 reads a keep-alive between any two messages, and an
+archiver syncs its segment on one, as it does every
 250 ms while it takes writes. `connected` is true until a read fails: a
 primary's process killed ends the stream at once, its machine lost or cut
 off only after `SILENCE` (10 s) -- past a 5 s lease's lapse -- so a
