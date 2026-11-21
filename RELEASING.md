@@ -386,8 +386,8 @@ release before any primary does. A binary one release back beside a newer
 one either works or stops in words, and never reads a record as another;
 where it names the record kind, the type tag or the version it does not
 know, it names it, and where it knew of no other it cannot: 0.2.0's
-`fennec` refuses a version 2 sealed file as "not a sealed file", naming
-nothing, so the notes of the release that made version 2 name it. A newer
+`fennec` refuses a version 3 sealed file as "not a sealed file", naming
+nothing, so the notes of the release that made version 3 name it. A newer
 reader reads what an older writer wrote, but for four values and types
 0.2.0 took that no write makes any more
 (`docs/design/compatibility.md#what-1x-does-not-read-of-020s-files`,

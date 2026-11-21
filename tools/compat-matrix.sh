@@ -38,7 +38,7 @@
 #   b1-b4  archives: the old `fennec archive`'s, plain and sealed (version 1),
 #       verified and restored by the new `fennec`, to the end and to a moment;
 #       the new archiver's, plain, read by the old `fennec`, and sealed
-#       (version 2), refused by it in RELEASING.md's words;
+#       (version 3), refused by it in RELEASING.md's words;
 #   c1-c3  the old `fennec backup`, plain and sealed, opened by the new
 #       server; a file the old server wrote, opened and written by the new,
 #       then verified, typed and opened by the old; the new backup opened, or
@@ -1019,13 +1019,13 @@ case_b() {
         differs b3 "the new archiver's plain archive, read by the old \`fennec\`: $why"
     fi
 
-    # b4: the new archiver's sealed archive is version 2, which the old
+    # b4: the new archiver's sealed archive is version 3, which the old
     # `fennec` refuses as RELEASING.md says ("not a sealed file", "not sealed,
     # where the archive is"), writing nothing; the new reads it. Words that
     # name no version: 0.2.0 knew of no other.
     why=
     v=$(sealed_version "$(first_image "$C/new-sealed")")
-    [ "$v" = 2 ] || why="its image is no version 2 sealed file (version '$v')"
+    [ "$v" = 3 ] || why="its image is no version 3 sealed file (version '$v')"
     local verify_said= restore_said=
     if [ -z "$why" ]; then
         if "$OLD/fennec" verify "$C/new-sealed" --key-file "$C/new.key" >"$C/b4-verify.log" 2>&1; then
@@ -1051,7 +1051,7 @@ case_b() {
         state_holds "$want" "$OPENED" || why="the new restore of it: $(first_difference "$want" "$OPENED")"
     fi
     if [ -z "$why" ]; then
-        held b4 "the new archiver's sealed archive (version 2) refused by the old \`fennec\` as promised, in words naming no version -- verify: \"$verify_said\"; restore: \"$restore_said\", no file written -- and restored by the new"
+        held b4 "the new archiver's sealed archive (version 3) refused by the old \`fennec\` as promised, in words naming no version -- verify: \"$verify_said\"; restore: \"$restore_said\", no file written -- and restored by the new"
     else
         differs b4 "the new archiver's sealed archive: $why"
     fi
@@ -1125,7 +1125,7 @@ case_c() {
     fi
 
     # c3: the new `fennec backup`, plain, opened by the old server; sealed
-    # (version 2), refused by the old `fennec restore` in RELEASING.md's words.
+    # (version 3), refused by the old `fennec restore` in RELEASING.md's words.
     why=
     server new-primary "$NEW" --file "$C/n.fennec" --http-token t --replication-token r
     local NN=$ADDR
@@ -1141,7 +1141,7 @@ case_c() {
     opened c3-open "$OLD" "$C/new-backup.fennec"
     state_holds "$OPENED" "$want" || why="its plain backup, opened by the old server: $(first_difference "$want" "$OPENED")"
     v=$(sealed_version "$C/new-backup.sealed")
-    [ -n "$why" ] || [ "$v" = 2 ] || why="its sealed backup is no version 2 file (version '$v')"
+    [ -n "$why" ] || [ "$v" = 3 ] || why="its sealed backup is no version 3 file (version '$v')"
     local said_=
     if [ -z "$why" ]; then
         if "$OLD/fennec" restore "$C/new-backup.sealed" "$C/c3-old.fennec" --key-file "$C/new.key" \
@@ -1155,7 +1155,7 @@ case_c() {
         said_=$(grep -m1 'not a sealed file' "$C/c3-restore.log" | bare || true)
     fi
     if [ -z "$why" ]; then
-        held c3 "the new \`fennec backup\` opened by the old server; sealed (version 2), refused by the old restore as promised, in words naming no version: \"$said_\", no file written"
+        held c3 "the new \`fennec backup\` opened by the old server; sealed (version 3), refused by the old restore as promised, in words naming no version: \"$said_\", no file written"
     else
         differs c3 "the new \`fennec backup\`: $why"
     fi
