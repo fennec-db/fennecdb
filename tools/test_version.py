@@ -2,19 +2,22 @@
 """tools/version.py refuses to move the version past a released version
 (from v0.2.0 on) whose fixture set is missing from the working tree or is
 not the one its release wrote -- every file the bytes its SHA256SUMS
-names, none beside them (RELEASING.md, step 6) -- and past one whose tag
-this clone lacks, naming `git fetch --tags`; it asks nothing of a version
-from before v0.2.0 or of the version a release already has. Its `main`
-is run as `make version` runs it, a process in a scratch copy of the
-tree, so a merge that drops or moves the gate fails here. And the tree
-holds every set it names: v0.2.0's, and each line of `RELEASES` in the
-compat tests' walk, whole -- not only the newest, a set deleted beside a
-later one's failing too. Not of this tree's version: between a release's
-tag and its set's pull request main holds a version with no set, which
-only the next `make version` refuses. And it refuses while any release
-tagged from v0.2.0 on, a release candidate aside, has no whole set -- a
-later release's set deleted with its `RELEASES` line passes every compat
-test -- and a "set" of a README and its sums alone."""
+names, none beside them (RELEASING.md, step 7), its SHA256SUMS the one
+its `RELEASES` line pins -- and past one whose tag this clone lacks,
+naming `git fetch --tags`; it asks nothing of a version from before
+v0.2.0 or of the version a release already has. Its `main` is run as
+`make version` runs it, a process in a scratch copy of the tree, so a
+merge that drops or moves the gate fails here. And the tree holds every
+set it names: v0.2.0's, and each line of `RELEASES` in the compat tests'
+walk -- a release's set or a further set of its tag, `<tag>+2` --
+whole and pinned: not only the newest, a set deleted beside a later
+one's failing too, and a set written again whole, its sums with it,
+failing by its pin. Not of this tree's version: between a release's tag
+and its set's pull request main holds a version with no set, which only
+the next `make version` refuses. And it refuses while any release tagged
+from v0.2.0 on, a release candidate aside, has no whole set -- a later
+release's set deleted with its `RELEASES` line passes every compat test
+-- and a "set" of a README and its sums alone."""
 
 import hashlib
 import importlib.util
@@ -44,6 +47,20 @@ def write_set(d, files):
     (d / "SHA256SUMS").write_text("\n".join(lines) + "\n")
 
 
+def sums_of(d):
+    return hashlib.sha256((d / "SHA256SUMS").read_bytes()).hexdigest()
+
+
+def write_walk(root, lines):
+    """The compat tests' walk with a `RELEASES` line for each (set, tag,
+    sums) -- sums None for a line pinning none."""
+    walk = root / version.WALK
+    walk.parent.mkdir(parents=True, exist_ok=True)
+    body = "".join(f'    Writes {{\n        set: "{s}",\n        tag: "{t}",\n'
+                   + (f'        sums: "{p}",\n' if p else "") + "    },\n" for s, t, p in lines)
+    walk.write_text("pub const RELEASES: &[Writes] = &[\n" + body + "];\n")
+
+
 def missing_set_reasons():
     released = lambda root, v: v in ("0.2.0", "0.1.12")
     never = lambda root, v: False
@@ -65,6 +82,12 @@ def missing_set_reasons():
         assert why and "no database file beside the release's answers" in why, "a README and its sums let through"
         write_set(s, {"README.md": b"# The fixture set\n", "server.fennec": b"FENECDB\x01", "server.answers": b"{}\n",
                       "archive/history": b"h"})
+        why = version.missing_set(root, "0.2.0", "1.0.0", released)
+        assert why and "pinning its SHA256SUMS" in why, "a whole set with no line pinning it let through"
+        write_walk(root, [("v0.2.0", "v0.2.0", "0" * 64)])
+        why = version.missing_set(root, "0.2.0", "1.0.0", released)
+        assert why and "not the one its RELEASES line pins" in why, "a set its line does not pin let through"
+        write_walk(root, [("v0.2.0", "v0.2.0", sums_of(s))])
         assert version.missing_set(root, "0.2.0", "1.0.0", released) is None, "a whole set refused"
         (s / "server.fennec").write_bytes(b"FENECDB\x02")
         why = version.missing_set(root, "0.2.0", "1.0.0", released)
@@ -119,6 +142,15 @@ def version_py_refuses_as_a_process():
         r = run()
         assert r.returncode != 0 and "no database file" in r.stderr, f"a README and its sums let through: {r.stderr}"
         write_set(sets / "v0.2.0", {"README.md": b"# set\n", "server.fennec": b"FENECDB\x01", "server.answers": b"{}\n"})
+        write_walk(repo, [("v0.2.0", "v0.2.0", sums_of(sets / "v0.2.0"))])
+        # The set written again whole, its sums with it: its pin refuses it.
+        write_set(sets / "v0.2.0", {"README.md": b"# set, again\n", "server.fennec": b"FENECDB\x01",
+                                    "server.answers": b"{}\n"})
+        r = run()
+        assert r.returncode != 0 and "not the one its RELEASES line pins" in r.stderr, \
+            f"a set written again let through: {r.stderr}"
+        assert (repo / "Cargo.toml").read_text() == cargo, "Cargo.toml changed by a refused move"
+        write_set(sets / "v0.2.0", {"README.md": b"# set\n", "server.fennec": b"FENECDB\x01", "server.answers": b"{}\n"})
         # A later release tagged, its set never written (or deleted with its
         # RELEASES line): refused, a release candidate's tag aside.
         git(repo, "tag", "v0.3.0-rc.1")
@@ -130,35 +162,57 @@ def version_py_refuses_as_a_process():
         assert (repo / "Cargo.toml").read_text() == cargo, "Cargo.toml changed by a refused move"
         write_set(sets / "v0.3.0", {"README.md": b"# set\n", "server.fennec": b"FENECDB\x01", "server.answers": b"{}\n"})
         r = run()
+        assert r.returncode != 0 and "v0.3.0's fixture set has no line" in r.stderr, \
+            f"a later release's set with no line pinning it let through: {r.stderr}"
+        write_walk(repo, [("v0.2.0", "v0.2.0", sums_of(sets / "v0.2.0")),
+                          ("v0.3.0", "v0.3.0", sums_of(sets / "v0.3.0"))])
+        r = run()
         assert 'version = "0.4.0"' in (repo / "Cargo.toml").read_text(), f"a whole set refused: {r.stderr}"
 
 
 def named_sets_held():
     """A set a `RELEASES` line names, deleted, is found missing -- the
-    first one beside a later one's too; and the tree's own are whole."""
+    first one beside a later one's too; a set written again whole, its
+    sums with it, is refused by its pin; a further set of a tag (`+2`) is a
+    set of its own, pinned as one, and no set is in the tree without its
+    line; and the tree's own are whole and pinned."""
     with tempfile.TemporaryDirectory() as d:
         root = pathlib.Path(d)
-        walk = root / version.WALK
-        walk.parent.mkdir(parents=True)
-        walk.write_text('const RELEASES: &[Writes] = &[\n    Writes {\n        set: "v0.2.0",\n    },\n'
-                        '    Writes {\n        set: "v1.0.0",\n    },\n];\n')
-        sets = walk.parent
+        sets = (root / version.WALK).parent
         whole = lambda v: {"README.md": v.encode(), "server.fennec": b"FENECDB\x01", "server.answers": b"{}\n"}
-        for v in ("v0.2.0", "v1.0.0"):
+        for v in ("v0.2.0", "v0.2.0+2", "v1.0.0"):
             write_set(sets / v, whole(v))
-        assert version.named_sets(root) == ["v0.2.0", "v1.0.0"], version.named_sets(root)
+        lines = lambda: [(v, v.split("+")[0], sums_of(sets / v)) for v in ("v0.2.0", "v0.2.0+2", "v1.0.0")]
+        write_walk(root, lines())
+        assert version.named_sets(root) == ["v0.2.0", "v0.2.0+2", "v1.0.0"], version.named_sets(root)
         assert version.named_sets_problems(root) == [], version.named_sets_problems(root)
         shutil.rmtree(sets / "v0.2.0")
         problems = version.named_sets_problems(root)
         assert any("v0.2.0: missing" in p for p in problems), f"v0.2.0's set deleted beside v1.0.0's: {problems}"
         write_set(sets / "v0.2.0", whole("v0.2.0"))
-        walk.write_text('const RELEASES: &[Writes] = &[\n    Writes {\n        set: "v1.0.0",\n    },\n];\n')
+        assert version.named_sets_problems(root) == [], version.named_sets_problems(root)
+        write_set(sets / "v0.2.0+2", whole("v0.2.0+2, written again"))
+        problems = version.named_sets_problems(root)
+        assert any("v0.2.0+2/SHA256SUMS: not the one its RELEASES line pins" in p for p in problems), \
+            f"a further set written again whole let through: {problems}"
+        write_set(sets / "v0.2.0+2", whole("v0.2.0+2"))
+        write_walk(root, [x for x in lines() if x[0] != "v0.2.0+2"])
+        problems = version.named_sets_problems(root)
+        assert any("v0.2.0+2: a set no line of RELEASES names" in p for p in problems), \
+            f"a set with no line let through: {problems}"
+        write_walk(root, [(s, t, None if s == "v1.0.0" else p) for s, t, p in lines()])
+        problems = version.named_sets_problems(root)
+        assert any("v1.0.0's line pins no SHA256SUMS" in p for p in problems), f"a line pinning nothing: {problems}"
+        write_walk(root, [x for x in lines() if x[0] != "v0.2.0"])
         problems = version.named_sets_problems(root)
         assert any("no v0.2.0 line" in p for p in problems), f"v0.2.0's line dropped: {problems}"
+        assert any("v0.2.0+2 is a further set of v0.2.0, whose first set has no line" in p for p in problems), \
+            f"a further set with no first: {problems}"
     problems = version.named_sets_problems(HERE.parent) + version.sets_of_tags_problems(HERE.parent)
     assert not problems, "\n".join(problems)
-    for s in sorted(p for p in SETS.iterdir() if p.is_dir()):
-        problems = version.set_problems(s)
+    pinned = version.pins(HERE.parent)
+    for s in sorted(p for p in SETS.iterdir() if p.is_dir() and p.name in pinned):
+        problems = version.set_problems(s, pinned[s.name])
         assert not problems, "\n".join(problems)
 
 
