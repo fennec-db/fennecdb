@@ -850,11 +850,17 @@ impl Schema {
         for f in &mut fields {
             f.index = f.index.resolved();
         }
-        // The names met so far, in a set: each against every one before it
-        // was 5.4e8 comparisons for the 32 767 fields an import of a SQLite
-        // table may declare, and 3.8e9 for the 87 376 one did before the
-        // importer held a table to SQLite's own ceiling (G14 F2b).
+        // The names met so far. Natively in a set: each against every one
+        // before it was 5.4e8 comparisons for the 32 767 fields an import of
+        // a SQLite table may declare, and 3.8e9 for the 87 376 one did before
+        // the importer held a table to SQLite's own ceiling (G14 F2b). The
+        // browser module keeps the list it had: it reads no SQLite file, its
+        // schemas are its page's or its server's, and the set's table was
+        // 1 568 bytes of it.
+        #[cfg(not(target_arch = "wasm32"))]
         let mut seen = std::collections::HashSet::with_capacity(fields.len());
+        #[cfg(target_arch = "wasm32")]
+        let mut seen = Vec::new();
         for f in &fields {
             if f.name == "id" {
                 return Err(Error::Query(
@@ -885,7 +891,11 @@ impl Schema {
                     crate::codec::MAX_DEPTH
                 )));
             }
-            if !seen.insert(f.name.as_str()) {
+            #[cfg(not(target_arch = "wasm32"))]
+            let again = !seen.insert(f.name.as_str());
+            #[cfg(target_arch = "wasm32")]
+            let again = seen.contains(&f.name);
+            if again {
                 return Err(Error::Exists(format!("duplicate field `{}`", f.name)));
             }
             if let Some(c) = f.collate.filter(|_| !collatable(&f.ty)) {
@@ -913,6 +923,8 @@ impl Schema {
             if let Some(spec) = f.beside {
                 IndexKind::Text(spec).check(&f.name, &f.ty)?;
             }
+            #[cfg(target_arch = "wasm32")]
+            seen.push(f.name.clone());
         }
         one_expiry(&name, fields.iter())?;
         Ok(Schema {
