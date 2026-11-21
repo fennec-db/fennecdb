@@ -948,8 +948,9 @@ impl FileSink {
 /// past the mapped length, a rewrite (`compact`, `checkpoint`) renames a
 /// new file over it, so the mapping keeps the old one's pages until it is
 /// dropped, and the one cut, a torn tail at the open, takes the bytes past
-/// it out of the mapping first ([`FileSink::cut`]). A compact beside the
-/// database patches its side file's head in place, before that file's
+/// it out of the mapping first ([`FileSink::cut`]) -- a reader's that takes
+/// no lock reaches no page it cuts ([`Mapping::reading`]). A compact beside
+/// the database patches its side file's head in place, before that file's
 /// stores are the database's (`Database::finish_beside`).
 ///
 /// A database's own file is mapped with room past its end (`with_room`),
@@ -990,7 +991,25 @@ extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, offset: i64) -> *mut u8;
     fn munmap(addr: *mut u8, len: usize) -> i32;
     fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
+    fn mprotect(addr: *mut u8, len: usize, prot: i32) -> i32;
 }
+
+/// `mmap`'s memory of no file, zeros until written: Linux's and Android's
+/// value, illumos' and every BSD's, macOS among them.
+#[cfg(all(unix, target_pointer_width = "64"))]
+const MAP_ANON: i32 = if cfg!(any(target_os = "linux", target_os = "android")) {
+    0x20
+} else if cfg!(any(target_os = "illumos", target_os = "solaris")) {
+    0x100
+} else {
+    0x1000
+};
+
+/// The largest page a system this maps on has (arm64 Linux's 64 KiB; 16
+/// KiB on Apple's, 4 KiB on x86_64): where a mapping's pages may be laid
+/// over by others, a multiple of every one.
+#[cfg(all(unix, target_pointer_width = "64"))]
+const PAGE_MAX: usize = 64 << 10;
 
 /// `madvise`'s "the pages will be needed": the kernel reads them in ahead
 /// of the faults. 3 on Linux and on macOS.
@@ -1014,6 +1033,72 @@ impl Mapping {
     /// much -- an address space limit -- and a handover then maps it anew.
     fn with_room(file: &File, len: usize) -> Result<Mapping> {
         Mapping::reserving(file, len, len + len.max(ROOM)).or_else(|_| Mapping::of(file, len))
+    }
+
+    /// The first `len` bytes of `file` for a reader that takes no lock
+    /// ([`open_read_only`]), and the survey its load takes: mapped up to
+    /// where no open to write the file cuts it ([`crate::engine::surveyed`],
+    /// found by reading it, never through a mapping), and from the page
+    /// holding that point on read into memory of its own. A server opening
+    /// the file after a crash cuts its torn tail while the reader walks it,
+    /// and a page of a mapping wholly past a file's end is the process's end
+    /// to read (`SIGBUS`); bytes read are the reader's whatever happens to
+    /// the file after.
+    fn reading(file: &File, len: usize) -> Result<(Mapping, crate::engine::Survey)> {
+        use std::os::unix::fs::FileExt;
+        let (survey, uncut) = crate::engine::surveyed(&mut |buf, at| file.read_at(buf, at), len)?;
+        let m = Mapping::of(file, len)?;
+        let at = uncut / PAGE_MAX * PAGE_MAX;
+        if at >= len {
+            return Ok((m, survey));
+        }
+        const PROT_READ: i32 = 1;
+        const PROT_WRITE: i32 = 2;
+        const MAP_PRIVATE: i32 = 2;
+        const MAP_FIXED: i32 = 0x10;
+        let tail = len - at;
+        // SAFETY: `at < len = reserved`, a multiple of every page, so the
+        // range from `ptr + at` to the mapping's end is pages of `m` alone,
+        // which `MAP_FIXED` lays memory of no file over -- nothing has read
+        // them, nor holds a pointer into them, `m` being this function's
+        // until it returns. A failure is `MAP_FAILED`, checked below, and
+        // `m`'s drop unmaps the range whatever lies there.
+        let laid = unsafe {
+            mmap(
+                m.ptr.add(at),
+                tail,
+                PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_FIXED | MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        if laid as isize == -1 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        // SAFETY: those `tail` bytes from `ptr + at` are the memory just
+        // laid there, readable and writable, and this is the one reference
+        // to them until the `mprotect` below; they are zeros, so every one
+        // is initialized.
+        let into = unsafe { std::slice::from_raw_parts_mut(m.ptr.add(at), tail) };
+        let mut got = 0;
+        while got < tail {
+            match file.read_at(&mut into[got..], (at + got) as u64) {
+                Ok(0) => break,
+                Ok(n) => got += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        // Read-only, as the rest: nothing writes through a `&Mapping`.
+        // SAFETY: the same pages, `into`'s last use above; a failure leaves
+        // them writable, which nothing does, and is said.
+        if unsafe { mprotect(m.ptr.add(at), tail, PROT_READ) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        // A file cut meanwhile ended sooner: covered as far as it was read.
+        m.cover(at + got);
+        Ok((m, survey))
     }
 
     fn reserving(file: &File, len: usize, reserved: usize) -> Result<Mapping> {
@@ -1116,11 +1201,11 @@ impl AsRef<[u8]> for Mapping {
         // holding them, no slice of its mapping alive across it. Another
         // process writing the file is what the `<file>.lock` every opener
         // of a file to write holds keeps out (*Single writer*). A reader
-        // taking none (`open_read_only`) is covered only to the records
-        // its open took, so a server's open cutting a torn tail under it
-        // cuts no byte of a slice it takes after its open; what is left is
-        // its open's own walk of the file, which reads to the length the
-        // file had and meets that cut if the two run at once
+        // taking none (`open_read_only`) maps the file only up to where no
+        // open to write it cuts it, found by reading it, and reads the rest
+        // into memory of its own laid over the mapping (`Mapping::reading`),
+        // so a server's open cutting a torn tail under it, during its walk
+        // or after, takes no page of the file a slice of it spans
         // (docs/design/conventions.md#unsafe-code).
         unsafe { std::slice::from_raw_parts(self.ptr, len) }
     }
@@ -1469,45 +1554,68 @@ fn open_mapped_into(
 /// damage their sums refused. A raw copy of the file taken then, before a
 /// server or the library opens it again, may lack them.
 pub fn open_read_only(path: impl AsRef<Path>) -> Result<Database> {
-    let mut db = Database::new();
-    if let Some(bytes) = read_with_sync_log(path.as_ref())? {
-        db.load(&bytes)?;
+    let read = |bytes: &[u8]| -> Result<Database> {
+        let mut db = Database::new();
+        db.load(bytes)?;
         db.set_sink(Box::new(ReadOnly));
-        return Ok(db);
+        Ok(db)
+    };
+    if let Some(bytes) = read_with_sync_log(path.as_ref())? {
+        return read(&bytes);
     }
     // Where a server would not map the file, neither does a reader: a
     // share's read error would end it, and on FAT32 its view refuses the
     // server's rename.
     #[cfg(all(windows, target_pointer_width = "64"))]
     if !windows::mappable(path.as_ref()) {
-        db.load(&std::fs::read(path)?)?;
-        db.set_sink(Box::new(ReadOnly));
-        return Ok(db);
+        return read(&std::fs::read(path)?);
     }
     #[cfg(all(any(unix, windows), target_pointer_width = "64"))]
-    {
-        let file = File::open(path)?;
-        let len = file.metadata()?.len() as usize;
-        if len < MAGIC.len() {
-            return Err(crate::error::Error::Corrupt(
-                "invalid fennecdb signature".into(),
-            ));
-        }
-        let mapping = Arc::new(Mapping::of(&file, len)?);
-        #[cfg_attr(not(unix), allow(unused_variables))]
-        let whole = db.load_mapped(mapping.clone())?;
-        // Covered no further than the records the open took: a torn tail
-        // past them is what a server opening the file after a crash cuts,
-        // under this reader, which takes no lock -- covered still, every
-        // slice of the mapping spanned the pages past the file's new end,
-        // a read of which ends the process (`SIGBUS`). On Windows the
-        // reader's view refuses that cut (`ERROR_USER_MAPPED_FILE`, the
-        // server's open failing), and its mapping only grows.
-        #[cfg(unix)]
-        mapping.cover(whole);
-    }
+    return read_looked(looked(&File::open(path)?)?);
     #[cfg(not(all(any(unix, windows), target_pointer_width = "64")))]
-    db.load(&std::fs::read(path)?)?;
+    read(&std::fs::read(path)?)
+}
+
+/// The first of a read-only open's two steps: the file looked at -- on a
+/// Unix surveyed by reading and mapped no further than an open to write it
+/// could cut ([`Mapping::reading`]), the rest read into memory. On Windows
+/// it is mapped at its length, and the reader's view refuses a cut
+/// (`ERROR_USER_MAPPED_FILE`): a server's open after a crash fails by name
+/// until the reader is gone. A test cuts the file between the two.
+#[cfg(all(any(unix, windows), target_pointer_width = "64"))]
+fn looked(file: &File) -> Result<Looked> {
+    let len = file.metadata()?.len() as usize;
+    if len < MAGIC.len() {
+        return Err(crate::error::Error::Corrupt(
+            "invalid fennecdb signature".into(),
+        ));
+    }
+    #[cfg(unix)]
+    let (mapping, survey) = Mapping::reading(file, len)?;
+    #[cfg(unix)]
+    return Ok((Arc::new(mapping), Some(survey)));
+    #[cfg(windows)]
+    Ok((Arc::new(Mapping::of(file, len)?), None))
+}
+
+/// What [`looked`] made: the mapping, and on a Unix the survey the load
+/// takes in the place of a walk of the mapping.
+#[cfg(all(any(unix, windows), target_pointer_width = "64"))]
+type Looked = (Arc<Mapping>, Option<crate::engine::Survey>);
+
+/// The second: the database read off what [`looked`] mapped, which it
+/// covers no further than the records it took -- a torn tail past them is
+/// nothing a slice of it hands out.
+#[cfg(all(any(unix, windows), target_pointer_width = "64"))]
+fn read_looked((mapping, survey): Looked) -> Result<Database> {
+    let mut db = Database::new();
+    #[cfg_attr(not(unix), allow(unused_variables))]
+    let whole = match survey {
+        Some(s) => db.load_surveyed(mapping.clone(), s)?,
+        None => db.load_mapped(mapping.clone())?,
+    };
+    #[cfg(unix)]
+    mapping.cover(whole);
     db.set_sink(Box::new(ReadOnly));
     Ok(db)
 }
@@ -1702,6 +1810,99 @@ mod tests {
         // end this process.
         touch(base);
         assert_eq!(t.stats().documents, 1);
+        drop(reader);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A reader that takes no lock (`open_read_only`) stopped between its
+    /// look at the file and its walk of it, a server's open cutting the
+    /// torn tail in between: what it walks past the point no open cuts it
+    /// read into memory at its look, so no page it reads is past the file's
+    /// end, and it reads the whole records. Mapped at its length, as the
+    /// reader was before, its walk summed the torn record's pages past the
+    /// cut and the process ended (`SIGBUS`).
+    #[cfg(all(unix, target_pointer_width = "64"))]
+    #[test]
+    fn a_reader_that_looked_before_a_cut_walks_what_it_read() {
+        use crate::query::{Expr, Statement};
+        use crate::schema::{Field, Schema};
+        use crate::value::{DataType, Value};
+        use std::os::unix::fs::FileExt;
+        let dir = std::env::temp_dir().join(format!("fennecdb-fs-looked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("looked.fennec");
+        let put = |a: String| Statement::Put {
+            collection: "t".into(),
+            docs: vec![vec![("a".into(), Expr::Lit(Value::Text(a)))]],
+            docs_param: None,
+            insert: false,
+            if_absent: false,
+            else_set: None,
+            require: None,
+            pick: None,
+        };
+        let synced = {
+            let mut db = open(&path).unwrap();
+            let schema = Schema::new("t", vec![Field::new("a", DataType::Text)]).unwrap();
+            db.execute(&Statement::CreateCollection {
+                schema,
+                if_not_exists: false,
+            })
+            .unwrap();
+            // Pages before the point no open cuts, whatever the system's
+            // page, so that the reader maps some of the file.
+            db.execute(&put("y".repeat(3 << 16))).unwrap();
+            db.sync().unwrap();
+            db.execute(&put("one".into())).unwrap();
+            db.sync().unwrap();
+            db.execute(&put("x".repeat(3 << 16))).unwrap();
+            db.sync().unwrap();
+            std::fs::metadata(&path).unwrap().len()
+        };
+        // As a crash leaves it: no close's mark, and the last record's last
+        // 64 KiB zeros, its length on the disk before its bytes.
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.set_len(synced - (1 << 16)).unwrap();
+        f.set_len(synced).unwrap();
+        drop(f);
+        let _ = std::fs::remove_file(crate::synclog::path_for(&path));
+
+        let file = File::open(&path).unwrap();
+        let (_, floor) =
+            crate::engine::surveyed(&mut |b, at| file.read_at(b, at), synced as usize).unwrap();
+        assert!(floor >= PAGE_MAX, "the reader maps nothing: {floor}");
+        let looked = looked(&file).unwrap();
+        // A server's open after the crash, under the reader.
+        drop(open(&path).unwrap());
+        let cut = std::fs::metadata(&path).unwrap().len() as usize;
+        assert!(
+            cut < synced as usize,
+            "the open cut nothing: {cut} of {synced}"
+        );
+        assert!(floor <= cut, "{floor} mapped past the cut at {cut}");
+        let reader = read_looked(looked).unwrap();
+        let t = reader.collection("t").unwrap();
+        let base = t
+            .store
+            .mapped_base()
+            .expect("the reader's records are mapped");
+        // Every page of what it covers read: one past the file's end would
+        // end this process.
+        touch(base);
+        assert!((**base).as_ref().len() <= cut);
+        let mut texts: Vec<String> = t
+            .store
+            .iter_ids()
+            .map(
+                |id| match t.store.read(&t.schema, id).unwrap().unwrap().get("a") {
+                    Some(Value::Text(a)) => a.chars().take(3).collect(),
+                    other => panic!("{other:?}"),
+                },
+            )
+            .collect();
+        texts.sort();
+        assert_eq!(texts, ["one", "yyy"]);
         drop(reader);
         let _ = std::fs::remove_dir_all(&dir);
     }

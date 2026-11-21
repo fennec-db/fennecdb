@@ -712,20 +712,27 @@ bytes as they change. Another process writing the file is what the
 `<file>.lock` every opener of a file to write takes keeps out (root
 CLAUDE.md, *Single writer*); a process ignoring it can end a reader with
 `SIGBUS`. A reader that takes no lock (`open_read_only`: `fennec types`,
-`--read-only`) maps the file as it stood at its open, and a server opening
-it after a crash cuts a torn tail under it. So the reader's open covers its
-mapping only to the records it took (`Mapping::cover` once the load
-returns, `a_reader_is_covered_to_the_records_its_open_took`), and no slice
-it takes after its open spans a byte past the cut. Until 2026-11-15 it kept
-the length the file had at its open, every slice spanning the pages past
-the file's new end once a server had cut it -- no record pointed there, so
-no read reached them, but no slice may span them. What is left is the
-open's own walk of the file, which reads to the length the file had: a
-server's open cutting it in the middle of that walk ends the reader. On
-Windows the reader's view refuses the cut (`ERROR_USER_MAPPED_FILE`, the
-server's open failing by name: [windows.md](windows.md)); its mapping is
-views laid end to end, which only grow (`fs::windows::map`), and its own
-cut drops the database and its views first (`cut_and_open`).
+`--read-only`) reads the file as it stood at its open, and a server opening
+it after a crash cuts a torn tail under it. So the reader maps the file only
+up to where no open to write it cuts it, a point it finds by reading the
+file, never through a mapping, and reads the rest into memory laid over the
+mapping's own pages (`Mapping::reading`; storage.md's *What a reader maps*):
+its open's walk and every slice it takes after read pages no cut takes, or
+its own copy. `a_reader_that_looked_before_a_cut_walks_what_it_read` stops
+a reader between its look at the file and its walk, cuts the file under it
+with a server's open, and walks: mapped at its length, the walk ended the
+process (`SIGBUS`). Its open covers the mapping only to the records it took
+(`Mapping::cover` once the load returns,
+`a_reader_is_covered_to_the_records_its_open_took`). Until 2026-11-15 it
+mapped the file at its length and walked it there, a server's open cutting
+it in the middle of that walk ending the reader, and before that it kept
+the length for its life, every slice spanning the pages past the file's
+new end once a server had cut it. On Windows the reader maps the file at
+its length still: its view refuses the cut (`ERROR_USER_MAPPED_FILE`), the
+server's open failing by name until the reader is gone
+([windows.md](windows.md)); its mapping is views laid end to end, which
+only grow (`fs::windows::map`), and its own cut drops the database and its
+views first (`cut_and_open`).
 
 ## Sanitizers
 

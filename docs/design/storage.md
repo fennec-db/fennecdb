@@ -764,6 +764,55 @@ close's mark torn by a power cut after the close is cut by the next open
 and not said as a cut (`torn_mark`): it was no write, and every byte
 before it was durable (`a_torn_close_mark_is_cut_unsaid`).
 
+*What a reader maps.* `fs::open_read_only` takes no lock (root CLAUDE.md,
+*Single writer*), so a server may open the file while the reader walks it,
+and a server opening a file after a crash cuts its torn tail
+(`FileSink::cut`): a page of a mapping wholly past a file's end is the
+process's end to read (`SIGBUS`), the reader's alone, no byte of the file
+harmed. An open cuts where its walk stops, at a record failing its sum
+that ends past the durable point the survey found, or where the spills the
+walk ends with start (`load_records`' `whole`) -- never before the record
+holding that point, nor before a run of spills, the close's marks among
+them, reaching it. So on a Unix the reader first surveys the file by
+reading it, a mebibyte at a time, never through a mapping
+(`engine::surveyed`): the survey's own walk over the heads, stopping where
+it stops, finding the same graphs, newest records and samples and so the
+same durable point, which its load takes in the place of a walk of the
+mapping (`Database::load_surveyed`) -- the heads are walked once, as
+before -- and the runs of spills, with where a record starts kept every
+64 KiB. It maps the file up to the last such start at or before the point,
+rounded down to 64 KiB, the largest page of a system it maps on, and reads
+the rest into memory of its own laid over the mapping's pages
+(`Mapping::reading`: anonymous memory `MAP_FIXED` over them before anything
+reads them, made read-only once read). What its walk reads past the point is that copy,
+which no cut reaches, and a file cut by then is covered as far as it was
+read; the load then covers the mapping only to the records it took
+(`Mapping::cover`). What it read holds whatever the file does after: cut,
+appended to, or replaced by a rename, which leaves the reader the old
+file, whose pages its mapping keeps. A server's file under `--sync always`
+is durable to within a page of its end, so the copy is the last 64 KiB to
+128 KiB and a record; under a periodic sync (a server's default, 250 ms)
+the writes since the last one too; after a crash, the torn tail. A file no
+sync ever claimed past its image -- a library's, written and let go of with
+no `sync` -- is read whole, as one with a sync log beside it always was
+(`read_with_sync_log`). `tests/reader.rs` holds the survey to
+the walk's and the point to the open's cut over a file torn at every point
+of its tail, cut short or zeroed to its end -- an image with a graph,
+graphs in the tail, spills landed and put back, records of 200 KiB -- and
+`a_reader_that_looked_before_a_cut_walks_what_it_read` stops a reader
+between its look and its walk, cuts the file with a server's open and
+walks: mapped at its length, as the reader was until 2026-11-15, its walk
+summed the torn record's pages past the cut and the process ended. A
+byte-range lock on the file was the other way,
+read-held by the reader across its load and write-taken by the cut: a
+server's start would wait for a reader's load, or fail beside it, and a
+POSIX record lock is let go of by any close of the file in its process.
+On Windows the reader maps the file at its length still: its view refuses
+the cut (`ERROR_USER_MAPPED_FILE`), so a server opening a file a crash left
+torn fails by name until the reader is gone ([windows.md](windows.md)) --
+not changed here, no Windows build being at hand to try a view ending
+where a copy begins.
+
 *The sum.* CRC32C: the instructions compute it -- aarch64's `crc32c`, in
 every Apple chip's target and found at run time elsewhere, and x86_64's
 SSE4.2 `crc32`, found at run time -- three lanes at once over a stretch of

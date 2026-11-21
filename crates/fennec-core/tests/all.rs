@@ -55,6 +55,7 @@ mod mixed_numbers;
 mod model;
 mod nan;
 mod read_calls;
+mod reader;
 // Its fold is held to Python's by the fold's own functions, which a build
 // without the feature has no fold to call.
 #[cfg(feature = "nocase")]

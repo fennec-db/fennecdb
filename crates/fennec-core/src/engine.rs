@@ -1400,13 +1400,20 @@ impl Rec<'_> {
     /// the image.
     #[cfg(not(target_arch = "wasm32"))]
     fn claimed(&self, bytes: &[u8]) -> Option<usize> {
+        self.claimed_at(bytes, self.at)
+    }
+
+    /// [`Self::claimed`] of a record read out of the file on its own, its
+    /// first byte `at` in the file ([`surveyed`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn claimed_at(&self, bytes: &[u8], at: usize) -> Option<usize> {
         let c = self.claim_at?;
         let raw = bytes.get(c..self.sum_at)?;
         let mut v = [0u8; 4];
         v[..raw.len()].copy_from_slice(raw);
         match u32::from_le_bytes(v) as u64 {
             0 => None,
-            v => self.at.checked_sub(((v - 1) * CLAIM_UNIT) as usize),
+            v => at.checked_sub(((v - 1) * CLAIM_UNIT) as usize),
         }
     }
 
@@ -2226,7 +2233,7 @@ fn records_from(bytes: &[u8], at: usize) -> u64 {
 /// the load checks the records from. The walk reads record heads alone and
 /// stops where the load would, so the load says what is wrong.
 #[cfg(not(target_arch = "wasm32"))]
-struct Survey {
+pub(crate) struct Survey {
     graphs: Vec<(u32, String, usize)>,
     durable: usize,
 }
@@ -2308,6 +2315,228 @@ fn survey(bytes: &[u8]) -> Result<Survey> {
         }
     }
     Ok(Survey { graphs, durable })
+}
+
+/// The file's bytes a window at a time, read rather than mapped
+/// ([`surveyed`]).
+#[cfg(not(target_arch = "wasm32"))]
+struct Window<'r> {
+    read: &'r mut dyn FnMut(&mut [u8], u64) -> std::io::Result<usize>,
+    /// The bytes from `at` on, as many as were read.
+    buf: Vec<u8>,
+    at: usize,
+    /// The file's length when it was asked for: nothing past it is read.
+    len: usize,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Window<'_> {
+    /// What a window reads at once: a walk over records of a few dozen
+    /// bytes asks the system once a mebibyte.
+    const STEP: usize = 1 << 20;
+
+    /// The file's bytes from `from`, `want` of them, or as many as it holds:
+    /// fewer where it ended sooner, cut meanwhile.
+    fn bytes(&mut self, from: usize, want: usize) -> Result<&[u8]> {
+        if from >= self.len {
+            return Ok(&[]);
+        }
+        let end = from.saturating_add(want).min(self.len);
+        if from < self.at || end > self.at + self.buf.len() {
+            let n = (end - from).max(Self::STEP).min(self.len - from);
+            self.buf.resize(n, 0);
+            let mut got = 0;
+            while got < n {
+                match (self.read)(&mut self.buf[got..], (from + got) as u64) {
+                    Ok(0) => break,
+                    Ok(k) => got += k,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            self.buf.truncate(got);
+            self.at = from;
+        }
+        let have = (end - from).min(self.at + self.buf.len() - from);
+        Ok(&self.buf[from - self.at..from - self.at + have])
+    }
+}
+
+/// A file of `len` bytes read through `read` -- its bytes at an offset, 0
+/// at its end -- never a mapping: its [`Survey`], and how far into it no
+/// open to write it cuts. What a reader that takes no lock may map of it
+/// (`fs::open_read_only`), the rest read into memory, since a page of a
+/// mapping wholly past a file's end is the process's end to read
+/// (`SIGBUS`) and a server opening the file after a crash cuts its torn
+/// tail while the reader walks it; the load then takes this survey for
+/// its own ([`Database::load_surveyed`]).
+///
+/// A load cuts where its walk stops, at a record failing its sum that ends
+/// past the durable point its survey found, or where the spills it ends
+/// with start (`load_records`' `whole`): never before the record holding
+/// that point, nor before a run of spills -- the close's marks among them --
+/// reaching it. This is [`survey`]'s walk over the same heads, stopping
+/// where it stops, finding the same graphs and the same point, a window of
+/// the file at a time, and it keeps where each record starts every 64 KiB
+/// and the runs of spills: the answer is the last kept start at or before
+/// that point, or a run reaching it -- up to 64 KiB and a record more read
+/// into memory than a cut could take.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn surveyed(
+    read: &mut dyn FnMut(&mut [u8], u64) -> std::io::Result<usize>,
+    len: usize,
+) -> Result<(Survey, usize)> {
+    const MARK: usize = 64 << 10;
+    let mut w = Window {
+        read,
+        buf: Vec::new(),
+        at: 0,
+        len,
+    };
+    if w.bytes(0, MAGIC.len())? != &MAGIC[..] {
+        return Err(Error::Corrupt("invalid fennecdb signature".into()));
+    }
+    let mut graphs: Vec<(u32, String, usize)> = Vec::new();
+    let mut pos = MAGIC.len();
+    let mut body_end = pos;
+    let mut checked = false;
+    let mut recent = [(0usize, 0usize); RECENT];
+    let mut n = 0;
+    let mut samples: Vec<(usize, usize)> = Vec::new();
+    let mut marks = vec![pos];
+    // Runs of spills, the marks after them counted in, by where each
+    // starts and where it ended: the one a walk stops at is cut.
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut run: Option<usize> = None;
+    while pos < len {
+        let head = w.bytes(pos, 1 + 2 * 10)?;
+        let Some(&byte) = head.first() else { break };
+        if byte == REC_SEQ && pos == MAGIC.len() {
+            // The image's head; its records are walked as the survey walks
+            // them, past the image the tail's.
+            let body = head
+                .get(9..REC_SEQ_LEN)
+                .ok_or_else(|| Error::Corrupt("truncated counter header".into()))?;
+            let mut v = [0u8; 8];
+            v.copy_from_slice(body);
+            pos += REC_SEQ_LEN;
+            body_end = pos.saturating_add(u64::from_le_bytes(v) as usize);
+            continue;
+        }
+        // Where the survey's walk stops ([`whole_record`]): a kind it does
+        // not know, zeros, a head or a length running past the end.
+        if !known(byte) {
+            break;
+        }
+        let mut q = 1;
+        let (Ok(cid), Ok(blen)) = (get_uvarint(head, &mut q), get_uvarint(head, &mut q)) else {
+            break;
+        };
+        let start = pos + q;
+        if cid >= u64::from(u32::MAX) || blen > (len.saturating_sub(start)) as u64 {
+            break;
+        }
+        let end = start + blen as usize;
+        let sums = byte & CHECKED != 0;
+        let kind = if sums { byte & KIND } else { byte };
+        let plain_after = checked && !sums;
+        checked |= sums;
+        let mut counts = sums;
+        if kind == REC_GRAPH && !plain_after {
+            // Its field, read as the survey reads `r.body`'s.
+            let body = match sums {
+                true => (blen as usize).saturating_sub((((byte & WIDTH) >> 5) + 1) as usize + SUM),
+                false => blen as usize,
+            };
+            let mut at = 0;
+            let need = match get_uvarint(w.bytes(start, body.min(10))?, &mut at) {
+                Ok(k) => at.saturating_add(k as usize).min(body),
+                Err(_) => body.min(10),
+            };
+            match crate::codec::decode_str(w.bytes(start, need)?, &mut 0) {
+                Ok(field) => match graphs
+                    .iter_mut()
+                    .find(|(c, f, _)| *c == cid as u32 && *f == field)
+                {
+                    Some(l) => l.2 = pos,
+                    None => graphs.push((cid as u32, field, pos)),
+                },
+                Err(_) if sums => counts = false,
+                Err(e) => return Err(e),
+            }
+        }
+        if pos >= body_end && counts {
+            recent[n % RECENT] = (pos, end);
+            n += 1;
+            if samples.last().is_none_or(|&(s, _)| pos - s >= SAMPLE) {
+                samples.push((pos, end));
+            }
+        }
+        run = match kind {
+            REC_SPILL => run.or(Some(pos)),
+            REC_SYNCED => run,
+            _ => {
+                if let Some(s) = run {
+                    runs.push((s, pos));
+                }
+                None
+            }
+        };
+        if pos - marks[marks.len() - 1] >= MARK {
+            marks.push(pos);
+        }
+        pos = end;
+    }
+    if let Some(s) = run {
+        runs.push((s, pos));
+    }
+    let newest = (0..n.min(RECENT)).map(|k| recent[(n - 1 - k) % RECENT]);
+    let mut durable = body_end;
+    for (at, end) in newest.chain(samples.into_iter().rev()) {
+        let r = w.bytes(at, end - at)?;
+        if r.len() < end - at {
+            continue;
+        }
+        let rec = record_at(r, &mut 0)?;
+        if let Some(d) = rec.claimed_at(r, at).filter(|_| rec.holds(r)) {
+            durable = durable.max(d);
+            break;
+        }
+    }
+    let at = marks
+        .iter()
+        .rev()
+        .find(|&&m| m <= durable)
+        .map_or(MAGIC.len(), |&m| m);
+    let uncut = runs
+        .into_iter()
+        .filter(|&(_, e)| e >= at)
+        .fold(at, |at, (s, _)| at.min(s));
+    Ok((Survey { graphs, durable }, uncut))
+}
+
+/// What a survey found: the last graph record of each index, by
+/// collection id, field and where it starts, and the durable point.
+#[doc(hidden)]
+#[cfg(not(target_arch = "wasm32"))]
+pub type Found = (Vec<(u32, String, usize)>, usize);
+
+/// [`surveyed`] of a file's bytes in hand, with the point no open cuts the
+/// file before, beside [`survey`]'s walk of them: what `tests/reader.rs`
+/// holds a reader's survey to, over files torn at every point.
+#[doc(hidden)]
+#[cfg(not(target_arch = "wasm32"))]
+pub fn reader_survey(file: &[u8]) -> (Result<(Found, usize)>, Result<Found>) {
+    let read = &mut |buf: &mut [u8], at: u64| {
+        let at = (at as usize).min(file.len());
+        let n = buf.len().min(file.len() - at);
+        buf[..n].copy_from_slice(&file[at..at + n]);
+        Ok(n)
+    };
+    (
+        surveyed(read, file.len()).map(|(s, uncut)| ((s.graphs, s.durable), uncut)),
+        survey(file).map(|s| (s.graphs, s.durable)),
+    )
 }
 
 /// Whether `r` is a graph record a later one of its index replaces, by the
@@ -5701,6 +5930,10 @@ pub struct Database {
     /// pointed at the file again.
     #[cfg(not(target_arch = "wasm32"))]
     mapped: bool,
+    /// The next load's [`Survey`], made by reading the file rather than
+    /// walking the mapping ([`Self::load_surveyed`]); `None`, it walks it.
+    #[cfg(not(target_arch = "wasm32"))]
+    surveyed: Option<Survey>,
     /// The writes a `create index` or `compact` running beside the database
     /// has to catch up with once it is built (see `maintenance`). A `Mutex`
     /// for the reason `sink` is one: it is registered under the read lock,
@@ -5961,6 +6194,8 @@ impl Database {
             history: History::default(),
             #[cfg(not(target_arch = "wasm32"))]
             mapped: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            surveyed: None,
             tails: Mutex::default(),
             watched: std::sync::atomic::AtomicBool::new(false),
             adoptions: 0,
@@ -6726,6 +6961,18 @@ impl Database {
         self.load_from((*keep).as_ref(), Some(&file))
     }
 
+    /// [`Self::load_mapped`] with the survey [`surveyed`] made of the file
+    /// by reading it, which the load takes in the place of its own walk of
+    /// the mapping: a reader taking no lock (`fs::open_read_only`), whose
+    /// mapping stops short of the bytes an open to write the file may cut.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn load_surveyed(&mut self, file: crate::store::Base, s: Survey) -> Result<usize> {
+        self.surveyed = Some(s);
+        let took = self.load_mapped(file);
+        self.surveyed = None;
+        took
+    }
+
     /// With `base` the documents are read where they lie in it, and
     /// without it copied into segments.
     fn load_from(&mut self, bytes: &[u8], base: Option<&crate::store::Base>) -> Result<usize> {
@@ -6955,7 +7202,10 @@ impl Database {
         // record past the image.
         #[cfg(not(target_arch = "wasm32"))]
         let (last, durable) = {
-            let s = survey(bytes)?;
+            let s = match self.surveyed.take() {
+                Some(s) => s,
+                None => survey(bytes)?,
+            };
             (Some(s.graphs), s.durable)
         };
         #[cfg(target_arch = "wasm32")]
