@@ -10,11 +10,13 @@
 //!     lock).
 //!   * `keyed`: the same, each with a key of its own: the key's lookup,
 //!     the block and the `_idempotency` row.
-//!   * `scoped`, `scoped-keyed`: `put` and `keyed` by a JSON Web Token
-//!     (HS256, `t read,write`), verified once and found in the server's
-//!     table after: what a key costs a scoped caller -- its key kept under
-//!     its caller (`Scope::authority`), where the server's token keeps it
-//!     under none.
+//!   * `scoped`, `scoped-keyed`: a `set` by id (`set t {n: $2} where id =
+//!     $1`, the 500 rows put first by the server's token) by a JSON Web
+//!     Token (HS256, `t read,write`), verified once and found in the
+//!     server's table after, without a key and with one of its own: what a
+//!     key costs a scoped caller -- its key kept under its caller
+//!     (`Scope::authority`), where the server's token keeps it under none.
+//!     A scoped token puts no document by id.
 //!   * `batch`: N writes of 100 documents each (`put t [{id: 1, n: $1},
 //!     ...]`, the same 100 ids written over), no key: a record of 100
 //!     frames, where `put` writes one of one.
@@ -93,6 +95,9 @@ fn main() {
         // the JWT.
         token: access.as_ref().map(|_| "bench-token".to_string()),
         access,
+        // One caller writing as fast as it can: held to a thousand a second,
+        // it would be refused.
+        request_rate: 0,
         ..Config::default()
     };
     let root = cfg.token.as_deref();
@@ -113,6 +118,12 @@ fn main() {
     if mode == "replay" {
         send(&db, &cfg, &replayed);
     }
+    let set = "set t {n: $2} where id = $1";
+    if jwt.is_some() {
+        let rows: Vec<String> = (1..=500).map(|id| format!("{{id: {id}, n: 0}}")).collect();
+        let all = format!("put t [{}]", rows.join(", "));
+        send(&db, &cfg, &scoped(&all, "", None, root));
+    }
     let per = n / ROUNDS;
     let mut rounds = Vec::with_capacity(ROUNDS);
     let mut i = 0usize;
@@ -130,13 +141,13 @@ fn main() {
                 }
                 "replay" => send(&db, &cfg, &replayed),
                 "batch" => send(&db, &cfg, &request(&batch, &i.to_string(), None)),
-                "scoped" => send(&db, &cfg, &scoped(put, &params(), None, jwt.as_deref())),
+                "scoped" => send(&db, &cfg, &scoped(set, &params(), None, jwt.as_deref())),
                 "scoped-keyed" => {
                     let key = format!("k-{i}");
                     send(
                         &db,
                         &cfg,
-                        &scoped(put, &params(), Some(&key), jwt.as_deref()),
+                        &scoped(set, &params(), Some(&key), jwt.as_deref()),
                     )
                 }
                 other => {
