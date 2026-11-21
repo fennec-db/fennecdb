@@ -1077,7 +1077,7 @@ impl Router {
                     format!(
                         "{u} keeps another directory than {}'s: {}",
                         region_name(region),
-                        String::from_utf8_lossy(&body)
+                        crate::words(&body)
                     ),
                 ));
             }
@@ -1676,11 +1676,7 @@ fn answered((status, hs, body): Whole, want: u16, region: &str) -> Outcome<Whole
     }
     Err(Fail(
         if status >= 500 { 502 } else { status },
-        format!(
-            "{}'s router: {}",
-            region_name(region),
-            String::from_utf8_lossy(&body).trim()
-        ),
+        format!("{}'s router: {}", region_name(region), crate::words(&body)),
     ))
 }
 

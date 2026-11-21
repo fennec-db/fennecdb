@@ -6172,9 +6172,7 @@ impl Router {
                         }
                         self.lease_now(&name);
                         return Err(match other {
-                            Ok((status, body)) => {
-                                Fail(status, String::from_utf8_lossy(&body).into_owned())
-                            }
+                            Ok((status, body)) => Fail(status, words(&body)),
                             Err(e) => Fail(502, format!("node `{name}` did not answer: {e}")),
                         });
                     }
@@ -6249,7 +6247,7 @@ impl Router {
             })?;
         // 404 from the node: already gone there, which is what was asked.
         if status != 204 && status != 404 {
-            return Err(Fail(status, String::from_utf8_lossy(&body).into_owned()));
+            return Err(Fail(status, words(&body)));
         }
         let standby = self.read_dir().standby(&placement.node).map(str::to_string);
         self.write_dir().remove_tenant(tenant).map_err(internal)?;
@@ -6722,10 +6720,13 @@ fn copy_heard(answer: &[u8]) -> Heard {
 
 /// A promoted copy's [`Heard`] in a log line's words, saying what it was
 /// not sent is lost unless it was connected, nothing behind, and heard from
-/// within two keep-alives ([`STALE_MS`]).
+/// within two keep-alives ([`STALE_MS`]) -- a node too old to say any of it
+/// included.
 fn heard_words((connected, behind, contact): Heard) -> String {
     let Some(connected) = connected else {
-        return "its node too old to say what the copy knew of its primary".into();
+        return "its node too old to say what the copy knew of its primary: \
+                what it was not sent is lost"
+            .into();
     };
     let heard = match contact {
         Some(ms) if ms >= 0 => format!("last heard from it {ms} ms before"),
@@ -7301,6 +7302,24 @@ mod tests {
             );
         }
         assert_eq!(STALE_MS, 4_000);
+    }
+
+    /// A node too old to say what its copy knew -- 0.2.0's promotion answers
+    /// `promoted`, `seq` and `history`, none of `connected`, `behind` and
+    /// `last_contact_ms` -- is logged as
+    /// losing what the copy was not sent, as one that said it was not
+    /// connected: it may have been anything. The answer is a stub node's,
+    /// as `promote_on` reads it.
+    #[test]
+    fn an_old_nodes_copy_is_logged_as_losing_what_it_was_not_sent() {
+        let body = r#"{"promoted":true,"seq":7,"history":"0000000700000001"}"#;
+        let heard = copy_heard(body.as_bytes());
+        assert_eq!(heard, (None, None, None));
+        assert_eq!(
+            heard_words(heard),
+            "its node too old to say what the copy knew of its primary: \
+             what it was not sent is lost"
+        );
     }
 
     /// A node's words reach the router's log and its errors cut and
