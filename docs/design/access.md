@@ -57,6 +57,20 @@ never the token's: `--jwt-keys` reads a JWKS file, `oct` keys for HS256 and
 and `EC` keys on P-256 for its ES256 (below), a `kid` picking the key; an
 RSA modulus taken for an HS256 secret would sign anything. The file is
 read again as it changes, looked at once a second, which is the rotation.
+Its time is kept only once a read of it took, so a file read half-written
+in place is read again once whole even under the same time; the read is
+one request's, the others going on with the keys as they are (`look`, a
+`try_lock`, never a wait); and a file that does not parse is read again
+as its time moves, or a minute after the read that failed
+(`JWKS_FAILED_AGAIN`): read again each second, it cost a request a read a
+second for as long as it failed, under the mutex every look takes -- on a
+slow mount, a stall a second, and the request in the next second waiting
+behind it (the review of the G14 fixes). A rotation written in place under
+one time is taken a minute late; the docs say to replace the file by a
+rename. `access::tests::a_jwks_read_half_written_is_read_again_once_whole`
+holds the minute and the moved time with its clock given, and
+`tests/access.rs`'s `a_jwks_file_rotated_by_a_rename_is_read_through_a_request`
+a rotation, a broken file and the next through a server's requests.
 A verified token is kept by its text (`verified`, 16 shards of 256,
 emptied when the keys change, `exp` asked each time): 0.27 us against 2.9
 for HS256.

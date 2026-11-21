@@ -400,10 +400,21 @@ struct Source {
     path: PathBuf,
     /// The second the file was last looked at.
     looked: AtomicU64,
-    /// When the file read last was modified, and when the one that did not
-    /// read was, once its failure was said.
-    modified: Mutex<(Option<SystemTime>, Option<Option<SystemTime>>)>,
+    /// When the file read last was modified, and of the one that did not
+    /// read, when it was modified and the second it was read at.
+    modified: Mutex<(Option<SystemTime>, Option<Failed>)>,
 }
+
+/// A JWKS file that did not read: when it was modified, and the second it
+/// was read at.
+type Failed = (Option<SystemTime>, u64);
+
+/// How long, in seconds, a JWKS file that did not read is let be before
+/// a request reads it again, its modification time unchanged: one changed
+/// is read at the next look. Read at every look, a file that did not parse
+/// cost a request each second its read -- on a slow mount, a stall each
+/// second -- for as long as it failed.
+const JWKS_FAILED_AGAIN: u64 = 60;
 
 struct Jwk {
     kid: Option<String>,
@@ -888,7 +899,8 @@ impl Access {
     }
 
     /// The keys, the file's read again first where it changed -- looked at
-    /// once in a second `now`, at most.
+    /// once in a second `now`, at most, by one request: another meeting
+    /// its read goes on with the keys as they are, never waiting on it.
     ///
     /// The time the file was modified is kept once a read of it took, and
     /// only then: a file rewritten in place and read half-written fails,
@@ -896,40 +908,58 @@ impl Access {
     /// finished under the same time -- a file system keeping whole
     /// seconds, a write inside one tick. Kept as the read began, the
     /// finished file was never read, and a key the rotation took out went
-    /// on verifying tokens. A file that does not read is read again at
-    /// each look until it does, said once a time it was modified at.
+    /// on verifying tokens. A file that does not read is read again until
+    /// it does: at the next look where its time moved, and
+    /// [`JWKS_FAILED_AGAIN`] after where it did not, said once a time it
+    /// was modified at.
     fn keys(&self, now: u64) -> Arc<Vec<Jwk>> {
         if let Some(src) = &self.source {
             if src.looked.swap(now, Ordering::Relaxed) != now {
-                let modified = std::fs::metadata(&src.path).and_then(|m| m.modified()).ok();
-                let mut last = src.modified.lock().unwrap_or_else(|e| e.into_inner());
-                if modified != last.0 {
-                    match std::fs::read_to_string(&src.path)
-                        .map_err(|e| e.to_string())
-                        .and_then(|t| read_jwks(&t))
-                    {
-                        Ok(keys) => {
-                            *last = (modified, None);
-                            *self.keys.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(keys);
-                            for v in &self.verified {
-                                v.lock().unwrap_or_else(|e| e.into_inner()).clear();
-                            }
-                        }
-                        Err(e) => {
-                            if last.1 != Some(modified) {
-                                last.1 = Some(modified);
-                                crate::log!(
-                                    "{}: {e}; the keys read before stay, and the file is read \
-                                     again each second until it reads",
-                                    src.path.display()
-                                )
-                            }
-                        }
-                    }
-                }
+                self.look(src, now);
             }
         }
         self.keys.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// [`Self::keys`]' look at the file, at `now`.
+    #[cold]
+    #[inline(never)]
+    fn look(&self, src: &Source, now: u64) {
+        let mut last = match src.modified.try_lock() {
+            Ok(last) => last,
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return,
+        };
+        let modified = std::fs::metadata(&src.path).and_then(|m| m.modified()).ok();
+        if modified == last.0 {
+            return;
+        }
+        let failed = last.1.filter(|(m, _)| *m == modified);
+        if failed.is_some_and(|(_, at)| now < at.saturating_add(JWKS_FAILED_AGAIN)) {
+            return;
+        }
+        match std::fs::read_to_string(&src.path)
+            .map_err(|e| e.to_string())
+            .and_then(|t| read_jwks(&t))
+        {
+            Ok(keys) => {
+                *last = (modified, None);
+                *self.keys.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(keys);
+                for v in &self.verified {
+                    v.lock().unwrap_or_else(|e| e.into_inner()).clear();
+                }
+            }
+            Err(e) => {
+                if failed.is_none() {
+                    crate::log!(
+                        "{}: {e}; the keys read before stay, and the file is read again as it \
+                         changes, or in a minute, until it reads",
+                        src.path.display()
+                    )
+                }
+                last.1 = Some((modified, now));
+            }
+        }
     }
 
     /// A token for `claims`, a JSON object -- what `fennec-server --mint-token`
@@ -4827,13 +4857,29 @@ mod tests {
         std::fs::write(&path, &whole[..whole.len() / 2]).unwrap();
         stamp(at);
         assert!(a.scope(&old, now + 1).is_ok(), "the keys read before stay");
-        // Finished under the same time.
+        // Finished under the same time: read again a minute after the read
+        // that failed, not at each look before -- the read of a file that
+        // does not parse costs a request once a minute, not each second.
         std::fs::write(&path, &whole).unwrap();
         stamp(at);
+        assert!(a.scope(&old, now + 2).is_ok(), "read again within a minute");
+        assert!(a.scope(&old, now + JWKS_FAILED_AGAIN).is_ok());
         assert_eq!(
-            a.scope(&old, now + 2).err(),
+            a.scope(&old, now + 1 + JWKS_FAILED_AGAIN).err(),
             Some("no key has the token's kid"),
             "the key the rotation took out still verifies"
+        );
+        // A file whose time moves is read at the next look.
+        std::fs::write(&path, &whole[..whole.len() / 2]).unwrap();
+        stamp(at + std::time::Duration::from_secs(1));
+        let new = a.mint(r#"{"sub":"alice"}"#).unwrap();
+        assert!(a.scope(&new, now + 70).is_ok(), "the keys read before stay");
+        std::fs::write(&path, oct("third", 3)).unwrap();
+        stamp(at + std::time::Duration::from_secs(2));
+        assert_eq!(
+            a.scope(&new, now + 71).err(),
+            Some("no key has the token's kid"),
+            "a file changed since was not read at the next look"
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }
