@@ -683,7 +683,7 @@ was. It never takes the place out: a replica, an archive or a standby
 applies the writes after the compact by the places it holds, and no record
 tells it of a compact. Up to 0.2.0 a compact did take them out, and each
 copy read the writes after it a field off; see
-<a href="replication.html">Replication</a> for a 0.2.0 primary.
+<a href="replication.html#upgrading-from-0-2-0">Replication</a> for a 0.2.0 primary.
 A document <code>compact</code> cannot read is copied as it is and refused
 where it is read, as before; the compact goes on. A field added under a dropped one's name is
 a new field: the old values stay in the dropped place, and the new field

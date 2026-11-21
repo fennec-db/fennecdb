@@ -794,21 +794,24 @@ feeding and how far each has been sent.</p>
 took a dropped field's place out of every document and told no replica,
 archive or standby, which then read every later write of that collection
 one field off. From 1.0 a compact keeps the place, so this happens only
-while a 0.2.0 primary still runs:</p>
+while a 0.2.0 primary still runs. A newer replica or standby notices at the
+primary's first write of that collection after such a compact: it refuses
+the write, logs <code>the primary's writes moved the fields of</code> and
+takes a fresh copy of the primary on its own. An archive does not notice:
+a restore across that compact reads the writes after it one field off.</p>
 
 <ul>
-  <li><b>Before upgrading the first replica</b>, if a field was dropped on
-    the primary since its last compact, run <code>compact</code> on it and
-    seed every replica again from a <code>fennec backup</code> of it taken
-    after; begin an archive again in a directory of its own.</li>
+  <li><b>Before upgrading the first replica</b>, if a field was ever
+    dropped on the primary, the replicas may already hold rows read one
+    field off. Run <code>compact</code> on the primary and seed every
+    replica and standby again from a <code>fennec backup</code> of it taken
+    after; begin an archive again in a directory of its own, keeping the
+    old one for restores to a moment before.</li>
   <li><b>Drop no field on the primary</b> until it runs 1.0. Its next
     compact would take the place out, and <code>--auto-compact</code> runs
     one on its own.</li>
-  <li><b>A replica that logs <code>a schema change moved the fields
-    of</code></b> met such a compact at the primary's next
-    <code>alter</code> or <code>create index</code> of the collection, and
-    takes a copy of the primary on its own; the writes between read one
-    field off on it until then.</li>
+  <li><b>Promote no replica</b> that logged <code>moved the fields
+    of</code> until it has caught up again.</li>
 </ul>
 
 <h2>What it does not do</h2>

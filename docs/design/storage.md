@@ -262,13 +262,16 @@ the process starts again.
 the release that brought `drop field`, to 0.2.0, and emptied the list.
 That went wrong two ways. *Refused part way:* it stripped one collection
 at a time, in memory as it went, so a document no decoder reads in a later
-collection -- a value nesting past `codec::MAX_DEPTH` that 0.2.0 wrote
-through a `[[json]]` field ([crates.md](crates.md#how-deep-a-value-nests)),
-or a damaged value -- refused it with the earlier collections renumbered
-in memory and the file not rewritten. A later `put x {a: 10, c: 30, d: 40}`
-then read `[10, 30, 40]` in the process and `[10, 40, null]` after a
-reopen, on a replica, and after the server's own compaction, which met the
-same refusal every five seconds. *Succeeded, telling no copy:* a compact
+collection -- a damaged value the open let through (read unchecked below
+a claim), or, once the depth was bounded after 0.2.0, a value nesting past
+`codec::MAX_DEPTH` that 0.2.0 wrote through a `[[json]]` field
+([crates.md](crates.md#how-deep-a-value-nests)) -- refused it with the
+earlier collections renumbered in memory and the file not rewritten. The
+writes after it were encoded by the renumbered places: a later `put x {a:
+10, c: 30, d: 40}` read `[10, 30, 40]` in the process and `[10, 40, null]`
+after a reopen and on a replica. The server's own compaction (`--auto-compact`,
+from 0.1.10) met the same refusal every five seconds, logging it each
+time. *Succeeded, telling no copy:* a compact
 appends no record. A copy caught up before it kept the places, and read
 every later write of the collection one field early. A copy that
 compacted itself first (`may_write` lets a following database compact, and
@@ -278,7 +281,9 @@ before the compact, with the writes after it, misread them, and so did
 every image the archive took after. A `--dir` node's standby misread them,
 and after a failover the misread values were the tenant's. Nothing was
 loud until the primary's next `create index`, whose record carries the
-whole schema and failed the copy's layout check (`Database::apply`).
+whole schema and failed the copy's layout check (`Database::apply`). A
+copy now reads each write as it was made, and refuses one made by other
+places than it holds ([replication.md](replication.md#a-copy-across-a-compact)).
 
 *What a compact meets that it cannot read.* A compact is refused for
 nothing a document holds, and fails only as storage fails:
@@ -302,7 +307,7 @@ nothing a document holds, and fails only as storage fails:
 - Nothing else in a compact decodes a document. The rewrite copies payloads
   by their locations, whose one refusal is a location outside its segment
   or the mapped file: a damaged store, which every read of that row meets
-  too.
+  too, and which fails the database (below).
 
 The browser module's compact is `execute`'s, under the lock. The copy it
 built beside the page, and every index over it built again
@@ -361,20 +366,29 @@ a write took. A copy takes its primary's schema as it comes.
   which they hold. The next handover then read the records appended to the
   new file at their places in the old one. A checkpoint and an adopted
   image reach `repoint` too, and fail alike.
-- Under the lock, a store compacted in memory before a later collection's
-  damaged location refuses the compact holds the same documents at the same
-  places. Only its dead-byte counters are ahead of the file, until the next
-  compact. A compact refuses there for nothing a document holds, and no
-  test reaches it without damaging the store's own offsets.
+- Under the lock, the stores are compacted one collection at a time before
+  the rewrite (in memory into fresh segments, over a mapped file the
+  reclaimed documents written again), and the only refusal there is a
+  location outside its segment or the file. Met at a later collection, it
+  left the stores before it compacted, their counters and their records'
+  places ahead of the file -- over a mapped file, frames the file never
+  held, which no handover then took in. It fails the database now
+  (`Database::storage`), as the rewrite's own copy of that record already
+  did: writes stop until the file is opened again, which reads back what
+  the file holds, and a server's compaction asks no failed database again
+  (`compact_due`). No write makes such a location, so a test puts one
+  where the store is read (`unwinding`'s `refused`). Beside the database
+  the copies are the maintenance's own: the same refusal leaves the
+  database as it was, and the compact refused.
 - A refusal the server's compaction meets at every look is counted in
   `fennec_auto_compactions_refused_total` each time, and logged once in its
   words, until the words change or a compact runs (`link::refusal_is_news`).
   It was logged every five seconds for as long as it stood. Left after
-  this change: a damaged location, which reads of that row meet too; a side
-  file the disk refuses (`Error::Io`, the disk full); and a schema changed
-  or an image adopted during the compact, which the next look gets past.
-  The native library's `Compactor` keeps no log, and tries again at its
-  next look.
+  this change: a damaged location met beside the database, which reads of
+  that row meet too; a side file the disk refuses (`Error::Io`, the disk
+  full); and a schema changed or an image adopted during the compact, which
+  the next look gets past. None is what a document holds. The native
+  library's `Compactor` keeps no log, and tries again at its next look.
 
 ## Compaction and the page cache
 

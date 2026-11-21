@@ -212,7 +212,8 @@ so a copy, an archive or a standby holds whatever places it held, and
 applies every record after the compact by them. A compact that took a
 dropped field's places out -- every release from 0.1.7 to 0.2.0 -- left
 each copy reading the collection's later writes one field early. A copy
-that compacted itself first read them one field late. An archive's restore
+that compacted itself first -- a server's own compaction runs on a
+following database from 0.1.10 -- read them one field late. An archive's restore
 from an image before the compact misread them, and so did its images
 after. A `--dir` node's standby misread them, and a failover made those
 values the tenant's. Kept places, each one's value made a `null`, leave
@@ -230,24 +231,40 @@ protocol's replicas take rows as values and write them by their own schema
 
 *A 0.2.0 primary.* Replicas upgrade before primaries, so for as long as a
 0.2.0 primary runs, its compact still takes the places out and tells
-nobody. A newer copy cannot tell from the writes after it, which carry no
-layout, and reads them one field early. It can tell at the primary's next
-schema record of that collection. A `create index` carries the whole
-schema, held to the copy's layout as it was. An alter of any kind --
-`add`, `drop`, `rename`, `ttl` -- carries the schema after it (record kind
-12), and the copy now holds that schema's dropped places to its own:
-the same, or one more for a drop (`keeps_places`), refused by name
-otherwise -- "a schema change moved the fields of `x`: its primary took a
-dropped field's places out of its documents, which this copy keeps; seed
-the copy again from its primary". A server's follower takes an image of its
-primary on a write it cannot apply, and holds what the primary holds from
-there; an archive's restore past that record is refused. A check that
-tells at once would need the compact to say so in the feed: a record kind,
-which a format change and an older copy's refusal would bring, for a
-window 1.0 closes. `tests/replication.rs`'
-`a_copy_of_a_primary_that_took_the_places_out_is_seeded_again_at_its_next_alter`
-holds the window and its end. What an operator does is the compatibility
+nobody. A newer copy tells at the primary's next write of that collection:
+it reads each write as it was made (`Schema::read_written`), a value at
+every place up to the last field and none past it, as every release since
+0.1.7 encodes one (`Store::encode_doc` writes a `null` at every dropped
+place a field follows), and a write made by other places than the copy
+holds -- one value short where the primary took a place out, one over
+where the copy did, under a release that compacted it -- is refused by name
+before anything reads it: "the primary's writes moved the fields of `x`:
+... seed the copy again from its primary". An alter that comes first is
+refused alike: it carries the schema after it (record kind 12), whose
+dropped places the copy holds to its own, the same or one more for a drop
+(`keeps_places`); a `create index` carries the whole schema, held to the
+copy's layout as it was. A server's follower takes an image of its primary
+on a write it cannot apply, and holds what the primary holds from there,
+so no value read a field off reaches a copy's file. The check is the end
+of the read `apply` makes of every write already, and costs the copy a
+comparison a write; a check at the compact itself would need the compact
+to say so in the feed, a record kind, which a format change and an older
+copy's refusal would bring, for a window 1.0 closes.
+
+An archive does not tell: it keeps the stream's bytes, and a restore is an
+image and the writes after it opened (`Archive::restore`, `fs::open`),
+which reads a payload by the schema it holds and never refuses one for its
+length -- an open reads the documents of an image written before an `add
+field`, one value short, as every image has. A restore from an image
+taken before a 0.2.0 primary's stripping compact, to a moment after it,
+reads the writes after it a field early, as every image the archiver
+takes from there does. What an operator does is the compatibility
 contract's ([compatibility.md](compatibility.md#a-020-primary-and-a-compact)).
+`tests/replication.rs`'
+`a_copy_of_a_primary_that_took_the_places_out_is_seeded_again_at_its_next_write`
+holds a follower of a stripped primary seeded again at the write, and
+fennec-core's `compact_places::a_copy_refuses_a_write_made_by_other_places_than_it_holds`
+both directions.
 
 ## A write's time
 
