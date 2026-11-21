@@ -657,10 +657,11 @@ pub fn create_dir_private(path: &Path) -> std::io::Result<()> {
 /// by `recursive` or a file's open could be another user's, put there
 /// first.
 pub fn create_dir_new(path: &Path) -> std::io::Result<()> {
-    let mut dir = std::fs::DirBuilder::new();
     #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut dir, 0o700);
-    dir.create(path)
+    return std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
+        .create(path);
+    #[cfg(not(unix))]
+    std::fs::DirBuilder::new().create(path)
 }
 
 /// Removes the file at `path`, if there is one, and makes its removal
