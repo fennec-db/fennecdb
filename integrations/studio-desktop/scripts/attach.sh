@@ -37,7 +37,14 @@ die() {
 
 release=${1:-}
 [ "$#" -gt 0 ] && shift
-printf '%s' "$release" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$' || die "release is a tag such as v0.2.0, not '$release'"
+# grep matches line by line, so a release of two lines, one of them a
+# version, is refused by hand.
+nl='
+'
+case $release in
+  *"$nl"*) false ;;
+  *) printf '%s\n' "$release" | grep -Eqx 'v?[0-9]+\.[0-9]+\.[0-9]+' ;;
+esac || die "release is a tag such as v0.2.0, not '$release'"
 version=${release#v}
 tag=v$version
 [ "$#" -gt 0 ] || die "nothing to attach to $tag: the jobs that make the downloads failed or did not run"
