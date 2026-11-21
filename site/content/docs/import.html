@@ -96,10 +96,18 @@ field holding the values SQLite stored. The import computes no expression. A
 column named <code>""</code> keeps its place as <code>column&lt;N&gt;</code>,
 N its place from 1, as SQLite names a result column that has no name. A row
 written before an <code>ALTER TABLE ... ADD COLUMN</code> reads the column
-as its default, as SQLite does, and <code>NULL</code> where it has none; a
-default no import can compute, such as <code>CURRENT_TIMESTAMP</code>, stops
-the import at a row that needs it. A <code>WITHOUT ROWID</code> table is
-refused by name; a <code>STRICT</code> one is read.</p>
+as its default, as SQLite reads it there, and <code>NULL</code> where it has
+none: numbers, strings, blobs, <code>TRUE</code>, signs before them,
+<code>CAST</code> and hexadecimal numbers past 32 bits, each with the
+column's type applied as SQLite applies it. A default the import cannot read
+as SQLite does stops it at a row that needs it, naming the table, the column
+and the default: <code>CURRENT_TIMESTAMP</code> or an expression, which no
+row SQLite wrote needs, and the rare constant SQLite reads by its own
+formatting of a real as text, by a text's leading digits
+(<code>-'5 apples'</code>), or by taking a blob's bytes as text or a text's
+as a blob. A <code>WITHOUT ROWID</code> table is refused by name; a
+<code>STRICT</code> one is read, and a table of more columns than SQLite
+allows, 32 767, is refused by name.</p>
 
 <p>The file is read alone, so the import looks beside it for the two files
 SQLite keeps there, and refuses the file while either holds what the file
@@ -110,12 +118,21 @@ stopped in the middle of a transaction, beside a file that may be torn (one
 read with SQLite rolls it back: <code>sqlite3 data.sqlite "PRAGMA
 user_version"</code>). An empty <code>-wal</code>, and a journal whose header
 is zeroed as <code>journal_mode=PERSIST</code> leaves it, are not in the
-way.</p>
+way. When the file is a symbolic link, they are looked for beside the file it
+leads to, where SQLite keeps them on Linux and macOS; one that is not a plain
+file — a FIFO, a device, a directory — is refused rather than opened.</p>
 
 <p>A damaged or hostile file is refused naming the page — a page reached
-twice, cells that overlap, an overflow chain longer than its row — and an
-import holds about a page and a row in memory at a time, whatever lengths
-the file declares.</p>
+twice, cells that overlap, an overflow chain longer than its row. Reading
+the file holds a page and a row in memory at a time, whatever lengths it
+declares: a row is a value for each of its table's columns, 32 767 at most,
+which may read far larger than it is stored — a column it lacks reads as its
+default — so a batch is written once it holds 16 MiB of rows as read, before
+<code>--batch</code> rows where rows are large. What an import holds at
+once is that batch and what the database makes of it while writing it —
+under five times 16 MiB — beside the row being read: some 1 MiB of values
+for the widest table, and its texts, blobs and defaults, each no longer than
+the file.</p>
 
 <p><b>PostgreSQL.</b> It connects to the live server and streams
 <code>COPY ... TO STDOUT</code> — no <code>psql</code>, no
