@@ -894,6 +894,17 @@ impl Tenants {
         (lineage, text.lines().any(|l| l.trim() == READER))
     }
 
+    /// Whether an open tenant is a copy a failover may promote: its file
+    /// `following`, and no read replica's -- told by its follower, or by its
+    /// `.follows` where none runs for it ([`Self::followed`]).
+    fn promotable(&self, t: &Tenant, following: bool) -> bool {
+        following
+            && !match t.repl.as_ref().and_then(|r| r.follower()) {
+                Some(f) => f.is_read_replica(),
+                None => self.followed(&t.name).1,
+            }
+    }
+
     /// Whether a tenant's copy has heard from the node it follows since it
     /// was last told to follow it (`.follows`' `heard` line, [`mark_heard`]):
     /// `None` where it was never told, a standby's copy made with its node
@@ -2028,6 +2039,16 @@ impl Tenants {
         {
             return false;
         }
+        // And a copy a failover may promote stays open with no follower
+        // running for it -- its database failed, or nothing follows for it:
+        // closed, nothing opened it again but a request or that failover,
+        // and a scrape, which reads the open tenants alone, counted it no
+        // more (`fennec_copies_disconnected`), the alert resolving while it
+        // followed nothing. A follow or a restart opens it again.
+        let following = t.read().history().following;
+        if self.promotable(t, following) {
+            return false;
+        }
         // The node's stream holds a tenant open until it has sent what the
         // disk holds: the feed goes with the tenant, and writes it had not
         // sent would have come again as an image, a gap in the archive.
@@ -2645,22 +2666,23 @@ impl Tenants {
         open.sort();
         // The copies a failover may promote -- a standby's, a tenant's own
         // replica, never a read replica's -- each still following: one not
-        // connected, and the most writes one trails its primary's disk by.
-        // Every copy a node holds is open ([`Self::close`]).
+        // connected, or with no follower running -- its database failed, or
+        // none follows for it -- and the most writes one trails its
+        // primary's disk by. Every such copy a node holds is open, its
+        // follower running or not ([`Self::close`]).
         let mut copies = Copies::default();
         for t in self.open_tenants() {
-            let Some(f) = t.repl.as_ref().and_then(|r| r.follower()) else {
-                continue;
-            };
             let (seq, following) = {
                 let g = t.read();
                 (g.change_seq(), g.history().following)
             };
-            if !following || f.is_read_replica() {
+            if !self.promotable(&t, following) {
                 continue;
             }
-            let (connected, primary_durable) = f.progress();
-            copies.disconnected += usize::from(!connected || !f.running());
+            let f = t.repl.as_ref().and_then(|r| r.follower());
+            let (connected, primary_durable) = f.map_or((false, 0), |f| f.progress());
+            let running = f.is_some_and(|f| f.running());
+            copies.disconnected += usize::from(!connected || !running);
             copies.behind = copies.behind.max(primary_durable.saturating_sub(seq));
         }
         let unlinked = self

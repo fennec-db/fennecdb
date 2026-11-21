@@ -8,7 +8,7 @@
 //! ever on a follower: a halt, a promotion, a tenant's release and the
 //! node's shutdown each end. And a tenant's copy is promoted by the node's
 //! admin alone, never through `/t/<t>/_replication/promote`; a copy behind
-//! its primary hears how far.
+//! its primary hears how far, and one no follower runs for is counted.
 
 use fennec_core::engine::Watcher;
 use fennec_core::prelude::*;
@@ -1028,6 +1028,17 @@ fn a_tenants_copy_failed_by_a_panic_holds_nothing_up() {
     );
     assert_eq!(promoted.status, 500, "{}", promoted.body);
     assert!(promoted.body.contains("panic"), "{}", promoted.body);
+    // Its follower ended: counted as a copy not following, and kept open,
+    // idle or not. Closed, nothing opened it again but a request or a
+    // failover, and the node's scrape, which reads its open tenants, no
+    // longer counted it while it followed nothing.
+    assert_eq!(n.tenants.stats().copies.disconnected, 1);
+    assert_eq!(
+        n.tenants.close_idle(Duration::ZERO),
+        0,
+        "the copy whose follower ended was closed as idle, and counted no more"
+    );
+    assert_eq!(n.tenants.stats().copies.disconnected, 1);
 
     // A release under the tenant's slot: made to follow another primary,
     // the failed copy is closed -- its follower halted, which ended -- and

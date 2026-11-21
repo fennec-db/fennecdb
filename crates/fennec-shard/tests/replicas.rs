@@ -450,6 +450,22 @@ fn a_replica_file_on_a_node_following_nobody_is_promoted_where_it_stands() {
     });
     let (status, body) = query(n.port, "/t/acme/query", r#"put notes {title: "no"}"#);
     assert_eq!(status, 403, "{body}");
+    // A copy a failover may promote that nothing follows for: counted not
+    // connected, and kept open, idle or not -- closed, the scrape counted
+    // it no more while it followed nothing. Skipped for having no
+    // follower, it was never counted.
+    let disconnected = |n: &Node| {
+        let (status, text) = call(n.port, "GET", "/_metrics", "", Some("adm-orphan"));
+        assert_eq!(status, 200, "{text}");
+        text.lines()
+            .find_map(|l| l.strip_prefix("fennec_copies_disconnected "))
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or_else(|| panic!("no fennec_copies_disconnected: {text}"))
+    };
+    assert_eq!(disconnected(&n), 1, "the orphan copy was not counted");
+    assert_eq!(n.tenants.close_idle(Duration::ZERO), 0);
+    assert!(is_open(&n, "acme"));
+    assert_eq!(disconnected(&n), 1);
     let (status, body) = call(
         n.port,
         "POST",
@@ -458,6 +474,7 @@ fn a_replica_file_on_a_node_following_nobody_is_promoted_where_it_stands() {
         Some("adm-orphan"),
     );
     assert_eq!(status, 200, "{body}");
+    assert_eq!(disconnected(&n), 0, "a primary now");
     // With no follower, it knew nothing of a primary: not connected, never
     // heard from -- promoted where it stood.
     assert!(
@@ -474,6 +491,8 @@ fn a_replica_file_on_a_node_following_nobody_is_promoted_where_it_stands() {
         Some("adm-orphan"),
     );
     assert_eq!(status, 409, "{body}");
+    // A primary closes as any idle tenant does.
+    assert_eq!(n.tenants.close_idle(Duration::ZERO), 1);
 }
 
 // ---------------------------------------------------------- replicas of their own

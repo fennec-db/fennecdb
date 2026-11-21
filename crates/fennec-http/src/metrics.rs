@@ -787,13 +787,13 @@ fn render(source: Source) -> String {
             out.family(
                 "fennec_copies_disconnected",
                 "gauge",
-                "Copies of tenants here a failover may promote that are not connected to their primary now: one promoted so loses what it was not sent.",
+                "Copies of tenants here a failover may promote that are not connected to their primary now, or that no follower runs for -- their database failed, or none follows for them: one promoted so loses what it was not sent.",
             );
             out.sample("fennec_copies_disconnected", &[], s.copies.disconnected);
             out.family(
                 "fennec_copies_behind",
                 "gauge",
-                "The most writes on its primary's disk, as its primary last said, any copy here a failover may promote has not applied.",
+                "The most writes on its primary's disk, as its primary last said every 2 s, any copy here a failover may promote has not applied.",
             );
             out.sample("fennec_copies_behind", &[], s.copies.behind);
             unlinked(&mut out, s.unlinked);
