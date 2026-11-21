@@ -132,9 +132,8 @@ pub trait Source {
     /// `load::run` holds a batch to ([`BATCH_BYTES`]). The default counts
     /// the values one by one; a source that knows it from what it read
     /// says so at a row's cost -- the SQLite reader its record's length and
-    /// the defaults of the columns the record lacks. One call a row, the
-    /// count with it: asked for apart, it was a second call through the
-    /// trait object a row, and the reader's store and load of it.
+    /// the defaults of the columns the record lacks. The count comes with
+    /// its row, so no source keeps a row's count between two calls.
     fn next_counted(&mut self) -> Result<Option<(Vec<Value>, usize)>> {
         Ok(self.next_row()?.map(|row| {
             let n = load::values_bytes(&row);
