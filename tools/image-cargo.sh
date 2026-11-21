@@ -72,6 +72,7 @@ set -eu
 # ---------------------------------------------------------------- wrapper
 # Cargo calls `$RUSTC_WRAPPER <rustc> <arguments>`.
 if [ -n "${FENNEC_IMAGE_RECORDS:-}" ]; then
+    rustc=$1
     "$@" || exit
     shift
     out='' name='' extra='' prev='' externs=''
@@ -87,6 +88,32 @@ if [ -n "${FENNEC_IMAGE_RECORDS:-}" ]; then
     done
     # rustc asked what it is (-vV, --print): no unit.
     if [ -z "$out" ] || [ -z "$name" ]; then exit 0; fi
+    # A unit is its crate and its directory's hash: Cargo's build-dir
+    # (1.100.0 on) gives each a directory of its own,
+    # build/<package>/<hash>/out, and its files the extra-filename -<hash>,
+    # or none: a binary it copies out, a build script. Another layout --
+    # the deps/ of the Cargo before, or the next one -- is refused by name
+    # here, where it shows first: the records are keyed by that hash, and
+    # read under any other layout the check finds no unit, or the wrong one.
+    unit=${out%/out}
+    hash=${unit##*/}
+    package=${unit%/*}
+    ok=''
+    case $out in */out) ;; *) hash='' ;; esac
+    case ${package%/*} in */build) ;; *) hash='' ;; esac
+    case $hash in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+        case $extra in '' | "-$hash") ok=1 ;; esac
+        ;;
+    esac
+    if [ -z "$ok" ]; then
+        met=$("$rustc" -V 2>/dev/null) || met=$rustc
+        echo "image-cargo: $name was compiled into $out, extra-filename '$extra'; the check" \
+            "reads Cargo's build-dir of 1.100.0, each unit in build/<package>/<16-hex hash>/out" \
+            "with the extra-filename -<that hash> or none, and this build's compiler is $met:" \
+            "make tools/image-cargo.sh read its layout before building with it" >&2
+        exit 1
+    fi
     d=$out/$name$extra.d
     # The dep-info's rule for itself names every file the compile read.
     deps=$(awk -v t="$d:" 'index($0, t) == 1 { print substr($0, length(t) + 1); exit }' "$d")
@@ -96,12 +123,7 @@ if [ -n "${FENNEC_IMAGE_RECORDS:-}" ]; then
         exit 1
         ;;
     esac
-    # A unit is its crate and its directory's hash: Cargo's build-dir
-    # (1.100.0 on) gives each a directory of its own,
-    # build/<package>/<hash>/out, and a binary it copies out or a build
-    # script no extra-filename.
-    unit=${out%/out}
-    record=$FENNEC_IMAGE_RECORDS/$name-${unit##*/}
+    record=$FENNEC_IMAGE_RECORDS/$name-$hash
     set -f
     # shellcheck disable=SC2086 # one word a file
     sha256sum $deps $externs > "$record.$$"
