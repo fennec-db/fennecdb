@@ -1214,7 +1214,13 @@ impl Archive {
         let given = out;
         let out = &fennec_core::fs::resolved(out);
         let tmp = out.with_extension("restoring");
-        let r = self.assemble(&tmp, to)?;
+        let (r, written) = self.assemble_into(&tmp, to)?;
+        // The mode of the file it replaces, set on the handle that wrote it
+        // (`fennec_core::fs::mode_like`), never by a name a link could
+        // move: the checkpoint below renames its image over with this
+        // file's mode, as every rewrite keeps a database's.
+        fennec_core::fs::mode_like(&written, out)?;
+        drop(written);
         // Opened to check it whole, and forked: from here its writes are no
         // longer the primary's. The checkpoint lands the graph the open just
         // built in the file, as a clean shutdown would, so the database's
@@ -1237,7 +1243,6 @@ impl Archive {
         fennec_core::fs::forget_sync_log(out)?;
         crate::instance::put_away_beside(given)?;
         crate::tenant_hooks::put_away_beside(given)?;
-        fennec_core::fs::mode_like(&tmp, out)?;
         fs::rename(&tmp, out)?;
         // Durable once it returns: lost to a crash, the file a server is
         // started on next was whatever was there before.
@@ -1560,13 +1565,9 @@ impl Archive {
     }
 
     /// The image `to` starts from and the writes after it up to there,
-    /// copied into `tmp`: a fennecdb file, not yet opened.
-    fn assemble(&self, tmp: &Path, to: Target) -> io::Result<Restored> {
-        self.assemble_into(tmp, to).map(|(r, _)| r)
-    }
-
-    /// [`Self::assemble`], and `tmp` as it was written: one handle, open to
-    /// read it back, from its making to its last write.
+    /// copied into `tmp` -- a fennecdb file, not yet opened -- and `tmp` as
+    /// it was written: one handle, open to read it back, from its making to
+    /// its last write.
     ///
     /// Two passes over the segments, one in memory at a time: the first
     /// finds where to stop, the second copies the writes up to there.
@@ -1769,6 +1770,13 @@ fn copied(from: &Path, to: &Path) -> io::Result<File> {
             )?;
             return File::options().read(true).append(true).open(to);
         }
+    }
+    // The system's copy opens `to` through a link put at its name, as a
+    // side file is never opened (`fennec_core::fs::create_private`), so
+    // whatever is there -- a link, a file a crash left -- goes first.
+    match fs::remove_file(to) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
     }
     fs::copy(from, to)?;
     File::options().read(true).append(true).open(to)

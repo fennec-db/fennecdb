@@ -302,67 +302,138 @@ pub fn beside(path: &Path, suffix: &str) -> PathBuf {
 /// already keeps the mode it has: an operator's `chmod 640` for a backup
 /// group is never narrowed. On Windows a file takes its directory's access
 /// list, and this changes nothing (a secret's file is `owner_only`'s,
-/// fennec-http).
+/// fennec-http). `tools/file_create_check.py` holds every file the crates
+/// make to these helpers.
 pub fn private(options: &mut OpenOptions) -> &mut OpenOptions {
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(options, 0o600);
     options
 }
 
+/// `open`'s `O_NOFOLLOW`: the path's last name is opened only where it is
+/// no link (`ELOOP` otherwise). Each target's own number, read from its
+/// libc (Linux's differs by processor, as fennec-server's `user::sys`
+/// reads it); none where it was not read, which leaves the open as it was.
+#[cfg(all(
+    any(target_os = "linux", target_os = "android"),
+    target_arch = "x86_64"
+))]
+const NOFOLLOW: i32 = 0o400000;
+#[cfg(all(
+    any(target_os = "linux", target_os = "android"),
+    target_arch = "aarch64"
+))]
+const NOFOLLOW: i32 = 0o100000;
+#[cfg(target_vendor = "apple")]
+const NOFOLLOW: i32 = 0x100;
+#[cfg(all(
+    unix,
+    not(any(
+        all(
+            any(target_os = "linux", target_os = "android"),
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_vendor = "apple"
+    ))
+))]
+const NOFOLLOW: i32 = 0;
+
+/// [`private`] for a file kept beside a database and opened again when
+/// there -- its sync log, its lock -- never opened through a link put at
+/// its name: the open would write, and a mode set land, on whatever file
+/// the link names. A side file written whole is [`create_private`]'s.
+pub fn private_beside(options: &mut OpenOptions) -> &mut OpenOptions {
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(options, NOFOLLOW);
+    private(options)
+}
+
 /// A side file made [`private`], written from its start and read back: an
-/// image, a backup, a record renamed into its place. One an earlier
-/// process left there wider -- a crash under a release that took the
-/// umask's mode -- is removed and made anew: truncated in place it keeps
-/// its mode, and a reader that opened it then reads every byte written to
-/// it now.
+/// image, a backup, a record renamed into its place. Made by this open
+/// alone (`O_CREAT | O_EXCL`), which follows no link put at its name: one
+/// there -- a link, or a file an earlier process left, wider under a
+/// release that took the umask's mode -- is removed and the file made
+/// anew. Truncated in place, a file kept its mode, and a reader that
+/// opened it then read every byte written to it now; opened through a
+/// link, the image went into the file the link names, and the mode set on
+/// it after with it.
 pub fn create_private(path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
-    options.read(true).write(true).create(true).truncate(true);
-    let file = private(&mut options).open(path)?;
+    options.read(true).write(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        if file.metadata()?.permissions().mode() & 0o077 != 0 {
-            drop(file);
-            std::fs::remove_file(path)?;
-            return private(options.create_new(true)).open(path);
+        private(options.create_new(true));
+        match options.open(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                std::fs::remove_file(path)?;
+                options.open(path)
+            }
+            made => made,
         }
     }
-    Ok(file)
+    #[cfg(not(unix))]
+    options.create(true).truncate(true).open(path)
 }
 
 /// [`create_private`] for a small record to be renamed over `like`, given
 /// `like`'s mode before a byte is written ([`mode_like`]).
 pub fn create_like(path: &Path, like: &Path) -> std::io::Result<File> {
     let file = create_private(path)?;
-    mode_like(path, like)?;
+    mode_like(&file, like)?;
     Ok(file)
 }
 
-/// Gives `new`, a file about to be renamed over `like`, the mode `like`
-/// has: a file replaced -- by a checkpoint, a compact, a restore or a
-/// backup with `--force`, a tenant's record -- keeps the mode an operator
-/// set on it, which would otherwise go with the inode the rename unlinks.
-/// Its permission bits alone, set-id bits being no data file's; owner and
-/// group are the rename's, never chowned. Nothing where `like` is not
+/// The permission bits a file `new` made by this process takes from
+/// `like`, the file it is to stand for: `like`'s, but for a group's where
+/// `new`'s group is another -- the process's or its directory's, where
+/// `chgrp backup` gave `like` the backup group, whose read would go to
+/// every member of the other: on macOS a directory's group, often `staff`,
+/// every local user. `None` where `like` is not the process's user's, as
+/// `new` is: a file another user put at a name fennecdb writes -- a link
+/// in a shared directory -- lends it nothing (G14's review, F5). Set-id
+/// bits are no data file's.
+#[cfg(unix)]
+pub fn kept_mode(new: &std::fs::Metadata, like: &std::fs::Metadata) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    if like.uid() != new.uid() {
+        return None;
+    }
+    let mode = like.mode() & 0o777;
+    Some(match like.gid() == new.gid() {
+        true => mode,
+        false => mode & !0o070,
+    })
+}
+
+/// Gives `new`, a file open to be renamed over `like`, the mode `like`
+/// has ([`kept_mode`]): a file replaced -- by a checkpoint, a compact, a
+/// restore or a backup with `--force`, a tenant's record -- keeps the mode
+/// an operator set on it, which would otherwise go with the inode the
+/// rename unlinks. On the open file (`fchmod`), never by its name, which a
+/// link could have moved. Owner and group are the rename's, never chowned:
+/// a group kept across a rewrite is a setgid directory's
+/// (docs/design/durability.md#files-modes). Nothing where `like` is not
 /// there: `new` stays its owner's alone. Nothing on Windows, where a
 /// renamed file keeps the access list it was made with.
-pub fn mode_like(new: &Path, like: &Path) -> std::io::Result<()> {
+pub fn mode_like(new: &File, like: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = match std::fs::metadata(like) {
-            Ok(m) => m.permissions().mode() & 0o777,
+        let like = match std::fs::metadata(like) {
+            Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(e),
         };
+        let made = new.metadata()?;
         // Set only where it differs. A `chmod` is a metadata write the
         // file system journals: on APFS it cost each compact of the perf
         // gate's 10 000 rows some 100 000 instructions of the kernel's,
-        // 1-2%, where a `stat` costs next to nothing, and a database its
+        // 1-2%, where an `fstat` costs next to nothing, and a database its
         // owner's alone -- the usual one -- has the image's mode already.
-        if std::fs::metadata(new)?.permissions().mode() & 0o777 != mode {
-            std::fs::set_permissions(new, std::fs::Permissions::from_mode(mode))?;
+        if let Some(mode) = kept_mode(&made, &like) {
+            if made.permissions().mode() & 0o777 != mode {
+                new.set_permissions(std::fs::Permissions::from_mode(mode))?;
+            }
         }
     }
     #[cfg(not(unix))]
@@ -376,6 +447,19 @@ pub fn mode_like(new: &Path, like: &Path) -> std::io::Result<()> {
 pub fn create_dir_private(path: &Path) -> std::io::Result<()> {
     let mut dir = std::fs::DirBuilder::new();
     dir.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut dir, 0o700);
+    dir.create(path)
+}
+
+/// One new directory at `path`, its owner's alone (0700 on a Unix): one
+/// there already, or a link at the name, is refused (`AlreadyExists`)
+/// rather than used. A directory of a process's own in one every user
+/// writes -- `fennec verify`'s in the temp directory -- where a name made
+/// by `recursive` or a file's open could be another user's, put there
+/// first.
+pub fn create_dir_new(path: &Path) -> std::io::Result<()> {
+    let mut dir = std::fs::DirBuilder::new();
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut dir, 0o700);
     dir.create(path)
@@ -520,17 +604,21 @@ impl FileSink {
     /// sink failed, so nothing waiting is told its write is durable.
     fn swap_in(&self, disk: &mut Disk, from: &Path) -> Result<()> {
         let swapped = (|| -> Result<File> {
-            // The image takes the mode of the file it replaces: an
-            // operator's `chmod 640` lasts through every compact.
-            mode_like(from, &self.path)?;
+            // Opened before the rename, the image it renames and the file
+            // the sink appends to after: it takes the mode of the file it
+            // replaces on this handle, never by a name a link could move
+            // (`mode_like`), so an operator's `chmod 640` lasts through
+            // every compact.
+            #[cfg(not(windows))]
+            let mut f = OpenOptions::new().read(true).write(true).open(from)?;
+            #[cfg(not(windows))]
+            mode_like(&f, &self.path)?;
             #[cfg(unix)]
             disk.tail.forget(&disk.file)?;
             #[cfg(not(windows))]
             std::fs::rename(from, &self.path)?;
             #[cfg(not(windows))]
             sync_dir(&self.path)?;
-            #[cfg(not(windows))]
-            let mut f = OpenOptions::new().read(true).write(true).open(&self.path)?;
             // On Windows the rename is tried again while another handle
             // refuses it, and the file flushed through the handle opened
             // here before its directory is (docs/design/windows.md).
@@ -2021,6 +2109,13 @@ mod tests {
         db.sync().unwrap();
         let log = crate::synclog::path_for(&path);
         assert!(log.exists(), "the sync log is made at the first sync");
+        // As its open made it, before it took its database's mode: made
+        // without the mode on the open, it was the umask's until then.
+        assert_eq!(
+            crate::synclog::MADE.with(|m| m.take()),
+            Some(0o600),
+            "a sync log as its open made it"
+        );
         assert_eq!(mode(&log), 0o600, "the sync log of a database its owner's");
         drop(db);
 
@@ -2085,6 +2180,11 @@ mod tests {
         db.fork(7).unwrap();
         db.sync().unwrap();
         let log = crate::synclog::path_for(&path);
+        assert_eq!(
+            crate::synclog::MADE.with(|m| m.take()),
+            Some(0o600),
+            "a sync log beside a database made 0640, as its open made it"
+        );
         assert_eq!(mode(&log), 0o640, "a sync log takes its database's mode");
         let before = inode(&path);
         db.checkpoint().unwrap();
@@ -2127,6 +2227,164 @@ mod tests {
         drop(open(&path).unwrap());
         assert_eq!(mode(&path), 0o644, "a database there keeps its mode");
 
+        keep_sync_log(false);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A group of this process's user other than `made`, the one its files
+    /// in that directory are made with, that `path` could be given
+    /// (`chgrp`): none where the user is in no other.
+    #[cfg(unix)]
+    fn another_group(path: &Path, made: u32) -> Option<u32> {
+        let out = std::process::Command::new("id").arg("-G").output().ok()?;
+        String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .filter_map(|g| g.parse::<u32>().ok())
+            .filter(|&g| g != made)
+            .find(|&g| std::os::unix::fs::chown(path, None, Some(g)).is_ok())
+    }
+
+    /// A database an operator gave a group's read (`chgrp backup` and
+    /// `chmod 640`) is never readable by another group after a rewrite: an
+    /// image is made with the process's group (Linux) or its directory's
+    /// (macOS), so a checkpoint, a compact and a compact beside the
+    /// database each leave it in that group with the group's bits, or with
+    /// none. Its sync log too. Up to this fix every rewrite copied the
+    /// bits whatever the new file's group: the backup group lost its read
+    /// on Linux, and on macOS every user of `staff` gained it. A setgid
+    /// directory -- the docs' way to keep a group across rewrites -- makes
+    /// every new file of its group, and the database keeps both.
+    #[cfg(all(unix, target_pointer_width = "64"))]
+    #[test]
+    fn a_groups_read_goes_to_no_other_group() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = std::env::temp_dir().join(format!("fennecdb-fs-groups-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let gid = |p: &Path| std::fs::metadata(p).unwrap().gid();
+        let path = dir.join("db.fennec");
+        drop(open(&path).unwrap());
+        let made = gid(&path);
+        let Some(backup) = another_group(&path, made) else {
+            eprintln!(
+                "skipped a_groups_read_goes_to_no_other_group: the user running the tests is in \
+                 no group but {made} (`id -G`), so no file can be given another's"
+            );
+            std::fs::remove_dir_all(&dir).unwrap();
+            return;
+        };
+        let held = |p: &Path, what: &str| {
+            let (m, g) = (mode(p), gid(p));
+            match g == backup {
+                true => assert_eq!(m, 0o640, "{what}: the group's read is gone"),
+                false => assert_eq!(
+                    m & 0o070,
+                    0,
+                    "{what}: mode {m:o} gives group {g} the read given group {backup}"
+                ),
+            }
+        };
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        keep_sync_log(true);
+        let mut db = open(&path).unwrap();
+        db.fork(7).unwrap();
+        db.sync().unwrap();
+        held(&crate::synclog::path_for(&path), "a sync log made");
+        db.checkpoint().unwrap();
+        held(&path, "a checkpoint");
+        db.fork(8).unwrap();
+        db.execute(&crate::query::Statement::Compact(None)).unwrap();
+        held(&path, "a compact");
+        let db = std::sync::RwLock::new(db);
+        Database::maintain_with(&db, &crate::query::Statement::Compact(None), &mut || {})
+            .unwrap()
+            .unwrap();
+        held(&path, "a compact beside the database");
+        drop(db);
+
+        // The recipe: a directory of the group, setgid, keeps the group on
+        // every file made in it, and the database the group's read.
+        let shared = dir.join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::os::unix::fs::chown(&shared, None, Some(backup)).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o2750)).unwrap();
+        let path = shared.join("db.fennec");
+        drop(open(&path).unwrap());
+        assert_eq!(gid(&path), backup, "a file made in a setgid directory");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let mut db = open(&path).unwrap();
+        db.fork(7).unwrap();
+        db.sync().unwrap();
+        db.checkpoint().unwrap();
+        db.fork(8).unwrap();
+        db.execute(&crate::query::Statement::Compact(None)).unwrap();
+        drop(db);
+        assert_eq!(
+            (gid(&path), mode(&path)),
+            (backup, 0o640),
+            "a database in a setgid directory, compacted"
+        );
+        keep_sync_log(false);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A link put at the name of a file a database keeps beside it -- a
+    /// rewrite's `.compacting`, a compact beside's `.beside`, the sync log
+    /// -- is never opened through: the file it names keeps its bytes and
+    /// its mode, and the database is renamed over by its image, never by
+    /// the link. Up to this fix a side file was opened through the link,
+    /// which wrote the image into the file the link named, set its mode
+    /// there and renamed the link over the database; the sync log wrote
+    /// its zeros into it.
+    #[cfg(all(unix, target_pointer_width = "64"))]
+    #[test]
+    fn a_link_at_a_side_files_name_is_never_followed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("fennecdb-fs-links-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("db.fennec");
+        let elsewhere = |name: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, b"another file").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+            p
+        };
+        let untouched = |p: &Path, what: &str| {
+            assert_eq!(std::fs::read(p).unwrap(), b"another file", "{what}");
+            assert_eq!(mode(p), 0o644, "{what}: its mode");
+        };
+        keep_sync_log(true);
+        let mut db = open(&path).unwrap();
+        db.fork(7).unwrap();
+
+        let log = crate::synclog::path_for(&path);
+        let target = elsewhere("log-target");
+        std::os::unix::fs::symlink(&target, &log).unwrap();
+        db.sync().unwrap();
+        untouched(&target, "a link at the sync log's name");
+        std::fs::remove_file(&log).unwrap();
+
+        let target = elsewhere("compacting-target");
+        std::os::unix::fs::symlink(&target, beside(&path, "compacting")).unwrap();
+        db.checkpoint().unwrap();
+        untouched(&target, "a link at a rewrite's side file");
+        assert!(
+            std::fs::symlink_metadata(&path).unwrap().is_file(),
+            "the database renamed over by a link"
+        );
+        assert_eq!(mode(&path), 0o600, "the database rewritten");
+
+        let target = elsewhere("beside-target");
+        std::os::unix::fs::symlink(&target, beside(&path, "beside")).unwrap();
+        db.fork(8).unwrap();
+        let db = std::sync::RwLock::new(db);
+        Database::maintain_with(&db, &crate::query::Statement::Compact(None), &mut || {})
+            .unwrap()
+            .unwrap();
+        untouched(&target, "a link at a compact beside's side file");
+        assert!(std::fs::symlink_metadata(&path).unwrap().is_file());
+        drop(db);
         keep_sync_log(false);
         std::fs::remove_dir_all(&dir).unwrap();
     }

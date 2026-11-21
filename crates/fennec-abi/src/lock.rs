@@ -307,14 +307,48 @@ pub fn waiting_for(path: impl AsRef<std::path::Path>) -> bool {
     lock_waiting().contains(&name)
 }
 
+/// Gives `lock`, a lock file just made (`made` its metadata), the bits of
+/// `db`'s mode a class -- the group, the others -- has where it may write
+/// `db`, as `fennec_core::fs::kept_mode` reads them (none where `db` is
+/// another user's, a group's only where the lock is of `db`'s group): whoever
+/// an operator let write the database opens its lock. A class that may only
+/// read it gets none: a reader opening the lock could take a read lock on
+/// it, which refuses the server's next start, and no reader needs it
+/// (`--read-only` takes none). Before, the lock took the database's whole
+/// mode, and a backup group given `chmod 640` could hold a server's start.
+#[cfg(unix)]
+fn writers_mode(
+    lock: &File,
+    made: &std::fs::Metadata,
+    db: &std::path::Path,
+) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(mode) = fennec_core::fs::kept_mode(made, &std::fs::metadata(db)?) else {
+        return Ok(());
+    };
+    let mut want = mode & 0o700;
+    if mode & 0o020 != 0 {
+        want |= mode & 0o070;
+    }
+    if mode & 0o002 != 0 {
+        want |= mode & 0o007;
+    }
+    if made.permissions().mode() & 0o777 != want {
+        lock.set_permissions(std::fs::Permissions::from_mode(want))?;
+    }
+    Ok(())
+}
+
 /// Takes the lock file `name` no lock of this process holds, under
 /// [`LOCKED`]'s guard.
 fn take(
     name: std::path::PathBuf,
     mut locked: MutexGuard<'_, Vec<Key>>,
 ) -> Result<FileLock, Refused> {
-    // Made its owner's alone, as every file is (`fennec_core::fs::private`).
-    let lock = fennec_core::fs::private(
+    // Made its owner's alone, as every file is, and never opened through a
+    // link put at its name, whose file the holder's line would go into
+    // (`fennec_core::fs::private_beside`).
+    let lock = fennec_core::fs::private_beside(
         std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -328,11 +362,12 @@ fn take(
     #[cfg(any(unix, windows))]
     record::take(&lock)?;
     // Made just now -- a holder writes its line at once -- it takes the
-    // mode of the database it guards, there already: whoever an operator
-    // let write that file opens its lock too. One there keeps its own.
-    // Missed, the lock is only narrower.
+    // mode of the database it guards, there already, for those who may
+    // write it (`writers_mode`). One there keeps its own. Missed, the lock
+    // is only narrower.
+    #[cfg(unix)]
     if meta.len() == 0 {
-        let _ = fennec_core::fs::mode_like(&name, &name.with_extension(""));
+        let _ = writers_mode(&lock, &meta, &name.with_extension(""));
     }
     locked.push(key);
     // Written only now, under the lock: before it, the line was the
@@ -860,6 +895,87 @@ mod tests {
         assert_eq!(mode(&lock), 0o640, "a lock file there keeps its mode");
         std::fs::remove_file(&lock).unwrap();
         std::fs::remove_file(&path).unwrap();
+    }
+
+    /// A lock file made beside a database takes of the database's mode
+    /// only what a class that may write the database has: a group or the
+    /// others that may only read it get none of the lock, which they could
+    /// open and hold a read lock on, refusing the server's next start; a
+    /// group's bits only where the lock is of the database's group; and a
+    /// link put at the lock's name is never opened through. Up to this fix
+    /// the lock took the database's whole mode, whatever its group, and the
+    /// holder's line went into the file a link there named.
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_file_is_given_only_to_those_who_may_write_its_database() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        fn mode(p: &str) -> u32 {
+            std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+        }
+        let chmod = |p: &str, m: u32| {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap()
+        };
+        let path = scratch("writers.fennec");
+        let lock = format!("{path}.lock");
+        for (db, want) in [
+            (0o600, 0o600),
+            (0o640, 0o600),
+            (0o644, 0o600),
+            (0o604, 0o600),
+            (0o660, 0o660),
+            (0o664, 0o660),
+            (0o666, 0o666),
+        ] {
+            let _ = std::fs::remove_file(&lock);
+            std::fs::write(&path, b"").unwrap();
+            chmod(&path, db);
+            drop(hold(&path).unwrap());
+            assert_eq!(mode(&lock), want, "a lock made beside a database {db:o}");
+        }
+
+        // A database of a group the lock is not made with: the group's
+        // bits stay with that group.
+        std::fs::remove_file(&lock).unwrap();
+        let made = std::fs::metadata(&path).unwrap().gid();
+        let other = std::process::Command::new("id")
+            .arg("-G")
+            .output()
+            .ok()
+            .and_then(|out| {
+                String::from_utf8_lossy(&out.stdout)
+                    .split_whitespace()
+                    .filter_map(|g| g.parse::<u32>().ok())
+                    .filter(|&g| g != made)
+                    .find(|&g| std::os::unix::fs::chown(&path, None, Some(g)).is_ok())
+            });
+        match other {
+            Some(g) => {
+                chmod(&path, 0o660);
+                drop(hold(&path).unwrap());
+                let m = std::fs::metadata(&lock).unwrap();
+                assert!(
+                    m.gid() == g || m.permissions().mode() & 0o070 == 0,
+                    "a lock of group {} given the writes of group {g}: {:o}",
+                    m.gid(),
+                    m.permissions().mode() & 0o777
+                );
+                std::fs::remove_file(&lock).unwrap();
+            }
+            None => eprintln!(
+                "skipped a lock beside a database of another group: the user running the tests \
+                 is in no group but {made} (`id -G`)"
+            ),
+        }
+
+        // A link at the lock's name: refused, the file it names untouched.
+        let target = format!("{path}.elsewhere");
+        std::fs::write(&target, b"another file").unwrap();
+        std::os::unix::fs::symlink(&target, &lock).unwrap();
+        assert!(hold(&path).is_err(), "a lock taken through a link");
+        assert_eq!(std::fs::read(&target).unwrap(), b"another file");
+        for f in [&lock, &target, &path] {
+            std::fs::remove_file(f).unwrap();
+        }
     }
 
     fn scratch(name: &str) -> String {

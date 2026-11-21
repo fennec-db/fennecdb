@@ -275,16 +275,25 @@ pub(crate) struct SyncLog {
     begun: Option<[u8; HEADER]>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The mode the last log made on this thread had as its open made it,
+    /// before it took its database's: what `fs::private_beside` gave it.
+    pub(crate) static MADE: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
 impl SyncLog {
     /// The log at `path`, made its full size -- written, not left sparse,
     /// so that writing it never changes what the file system holds of it
-    /// -- with no generation begun. Made, it takes the mode of `main`, the
-    /// file whose bytes it holds: its owner's alone where `main` is
-    /// (`fs::private`), and readable by whoever an operator let read
-    /// `main`, whose `--read-only` open and `fennec verify` read the log
-    /// too. A log there already keeps its own.
+    /// -- with no generation begun. Made its owner's alone by the open
+    /// that makes it, through no link put at its name (`fs::private_beside`),
+    /// it then takes the mode of `main`, the file whose bytes it holds
+    /// (`fs::kept_mode`, a group's bits only where the log is of `main`'s
+    /// group), so whoever an operator let read `main` reads the log its
+    /// `--read-only` open and `fennec verify` apply too. A log there
+    /// already keeps its own.
     pub(crate) fn open(path: &Path, main: &File) -> io::Result<SyncLog> {
-        let mut file = crate::fs::private(
+        let mut file = crate::fs::private_beside(
             OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -294,11 +303,21 @@ impl SyncLog {
         .open(path)?;
         let size = HEAD + ROOM;
         let mut head = [0u8; HEADER];
-        let had = file.metadata()?.len();
+        let made = file.metadata()?;
+        let had = made.len();
         if had == 0 {
             use std::os::unix::fs::PermissionsExt;
-            let mode = main.metadata()?.permissions().mode() & 0o777;
-            file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+            let mode = made.permissions().mode() & 0o777;
+            #[cfg(test)]
+            MADE.with(|m| m.set(Some(mode)));
+            // On the open log, and only where the mode differs: a `chmod`
+            // is a metadata write the file system journals, and a database
+            // its owner's alone -- the usual one -- has the log's already.
+            if let Some(want) = crate::fs::kept_mode(&made, &main.metadata()?) {
+                if want != mode {
+                    file.set_permissions(std::fs::Permissions::from_mode(want))?;
+                }
+            }
         }
         if had < size {
             file.write_all_at(&vec![0u8; (size - had) as usize], had)?;
