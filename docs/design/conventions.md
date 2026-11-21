@@ -155,19 +155,41 @@ pair over the paths the actions used, and the Flutter caches are gone.
 caches' inputs among them, and `desktop.yml` gained a schedule, Monday and
 Thursday at 05:41 UTC, so that an entry evicted or unused for 7 days is saved
 again. The cargo keys moved to a `v2-` prefix so that no run restores the
-unpruned entries through `restore-keys`.
+unpruned entries through `restore-keys`. Each holds the toolchain's hash
+before the lock's (`v2-<runner>-<job>-<rust-toolchain.toml>-<Cargo.lock>`)
+and restores only under its own toolchain's prefix: every unit's hash holds
+the compiler's version, so nothing of another release's entry is a build's
+to use. With the two hashed together and `restore-keys` the job alone, the
+first run of Rust 1.100.0 restored 1.99.1's entries, and the prune kept
+their registry crates -- `deps/`, `.fingerprint/`, `build/ring-<hash>/`, a
+layout the new Cargo reads none of -- into every save after: by the
+review's count about 1 GiB of the repository's 10 GB, and another
+generation each bump.
 
 *What main keeps of `target/`.* A checkout's files carry new times, so cargo
 builds the workspace's crates again whatever `target/` holds; what a restored
 `target/` saves is the crates from outside the workspace, and the workspace's
 test binaries and debug info were most of every entry.
-`tools/ci_prune_target.sh` runs on main just before a save and keeps only the
-units whose dep-info (`deps/*.d`) names a file under the registry or a git
-checkout, with their build scripts and fingerprints. Measured on a local build
-of the fennec-server and fennec-import tests: 822 MiB to 59 MiB, and the next
-build compiled only the workspace's own crates, none of rustls, ring or libc
-(mtimes are kept, as the cache's tar keeps them; a copy that does not keep
-them makes cargo rebuild everything). An entry is now 0 to 47 MiB, but for the
+`tools/ci_prune_target.sh` runs on main just before a save. Cargo 1.100
+keeps each unit in a directory of its own, `<profile>/build/<package>/<hash>/`
+-- outputs and dep-info in `out/`, the fingerprint in `fingerprint/`, a build
+script's run in `run/` -- so the script keeps a package whole where any of
+its units' dep-info (`out/*.d`) names a file under the registry or a git
+checkout, a build script's run (ring's C objects) among it, removes every
+other package whole, `incremental/`, `examples/` and the workspace's copied
+binaries, and removes `deps/` and `.fingerprint/`, where Cargo before 1.100
+kept every unit. Measured on a local `target/` under 1.100.0 (CI's clippy
+steps, fennec-core's, -ql's, -abi's and fennec-http's tests, the Windows
+target's check), with a 1.99.1 build of fennec-tls's crates beside it as a
+restored entry held one: 4 281 MiB unpruned (`incremental/` 3 152, `build/`
+987, `examples/` 230, the 1.99.1 generation 41); the script before this
+layout left 328 MiB, 40 of them the 1.99.1 generation; this one 287 MiB,
+none of it, and the next build compiled 5 crates, every one the workspace's.
+Before 1.100, on a build of the fennec-server and fennec-import tests: 822
+MiB to 59 MiB, and the next build compiled only the workspace's own crates,
+none of rustls, ring or libc (mtimes are kept, as the cache's tar keeps
+them; a copy that does not keep them makes cargo rebuild everything). An
+entry was then 0 to 47 MiB, but for the
 clippy job's 373 MiB (it checks the Windows target too), against 15 to 801 MiB
 before (`ubuntu-latest-cargo` 801, `ubuntu-24.04-arm` 643, `macos-latest` 522,
 `clippy` 440 MiB). Four of the 21 are 0 MiB because fennec-core and the C

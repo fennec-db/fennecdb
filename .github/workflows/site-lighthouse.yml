@@ -55,8 +55,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-site-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-site-cargo-
+          key: v2-site-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-site-cargo-${{ hashFiles('rust-toolchain.toml') }}-
 
       # As the deploy's build has them: minified assets, and the brotli
       # figures build.py checks the site's quoted sizes against.

@@ -9,29 +9,41 @@
 #
 #   sh tools/ci_prune_target.sh [target-dir]    (default: target)
 #
-# A unit is the workspace's when its dep-info (`deps/*.d`, the sources it was
-# built from) names no file under the registry or a git checkout; its outputs
-# are every `deps/` file of its stem (found, not globbed: a test binary
-# leaves thousands of object files), and its fingerprint goes with them.
+# Cargo 1.100 keeps each unit in a directory of its own,
+# `<profile>/build/<package>/<hash>/`: its outputs and dep-info in `out/`,
+# its fingerprint in `fingerprint/`, a build script's run in `run/` (and
+# what the script made, ring's C objects, in that unit's `out/`). A package
+# is the workspace's when none of its units' dep-info (`out/*.d`, the
+# sources a unit was built from) names a file under the registry or a git
+# checkout: the workspace's packages go whole, every unit and hash of them,
+# and a registry crate's stay whole, its build script's run among them,
+# since rebuilding one is what the cache saves. What Cargo before 1.100
+# kept -- `deps/`, `.fingerprint/`, `build/<package>-<hash>/` -- no build
+# reads now, and goes too: an entry restored across a bump carried a dead
+# generation of it on into every save (the keys restore within one
+# toolchain since).
 set -eu
 t=${1:-target}
 [ -d "$t" ] || exit 0
 before=$(du -sk "$t" | cut -f1)
 
-for deps in "$t"/*/deps "$t"/*/*/deps; do
-  [ -d "$deps" ] || continue
-  for d in "$deps"/*.d; do
-    [ -f "$d" ] || continue
-    grep -Eq 'registry[/\\]+src|git[/\\]+checkouts' "$d" && continue
-    stem=$(basename "$d" .d)
-    find "$deps" -maxdepth 1 \( -name "$stem" -o -name "$stem.*" -o -name "lib$stem.*" \) -exec rm -f {} +
-  done
-done
-
 for profile in "$t"/*/ "$t"/*/*/; do
   [ -d "$profile" ] || continue
-  rm -rf "$profile"incremental "$profile"examples
-  rm -rf "$profile".fingerprint/fennec-* "$profile"build/fennec-*
+  if [ -d "$profile"build ]; then
+    for package in "$profile"build/*/; do
+      [ -d "$package" ] || continue
+      kept=
+      for d in "$package"*/out/*.d; do
+        [ -f "$d" ] || continue
+        if grep -Eq 'registry[/\\]+src|git[/\\]+checkouts' "$d"; then
+          kept=1
+          break
+        fi
+      done
+      [ -n "$kept" ] || rm -rf "$package"
+    done
+  fi
+  rm -rf "$profile"incremental "$profile"examples "$profile"deps "$profile".fingerprint
   # The top-level copies of the workspace's binaries and libraries.
   find "$profile" -maxdepth 1 -type f \( -name 'fennec*' -o -name 'libfennec*' \) -exec rm -f {} +
 done

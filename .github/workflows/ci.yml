@@ -296,8 +296,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-ubuntu-latest-clippy-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-ubuntu-latest-clippy-
+          key: v2-ubuntu-latest-clippy-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-ubuntu-latest-clippy-${{ hashFiles('rust-toolchain.toml') }}-
 
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -407,8 +407,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-${{ matrix.os }}-cargo-
+          key: v2-${{ matrix.os }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-${{ matrix.os }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-
 
       # The browser bundle comes first: the JS suites skip themselves on a
       # machine with no web/fennec.wasm and throw under CI (web/ci-prereq.mjs),
@@ -711,8 +711,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-windows-latest-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-windows-latest-cargo-
+          key: v2-windows-latest-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-windows-latest-cargo-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: Build fennec-server, fennec and the native library
         run: cargo build -p fennec-server -p fennec-cli -p fennec-ffi
@@ -770,8 +770,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-macos-x86_64-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-macos-x86_64-cargo-
+          key: v2-macos-x86_64-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-macos-x86_64-cargo-${{ hashFiles('rust-toolchain.toml') }}-
 
       # crc.rs falls back to the table silently where detection fails; this
       # makes the test `hardware_path_is_chosen` assert Rosetta runs SSE4.2.
@@ -827,8 +827,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-${{ matrix.os }}-core-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-${{ matrix.os }}-core-
+          key: v2-${{ matrix.os }}-core-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-${{ matrix.os }}-core-${{ hashFiles('rust-toolchain.toml') }}-
 
       # The library's and the integration tests; not the examples, which
       # `cargo test` builds otherwise: measurement programs `make` runs on
@@ -931,8 +931,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-${{ matrix.os }}-server-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-${{ matrix.os }}-server-
+          key: v2-${{ matrix.os }}-server-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-${{ matrix.os }}-server-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: Build the suites
         run: cargo test -p fennec-server -p fennec-abi -p fennec-cli -p fennec-ffi --no-run
@@ -996,8 +996,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-windows-latest-http-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-windows-latest-http-
+          key: v2-windows-latest-http-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-windows-latest-http-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: Build the suites
         run: cargo test -p fennec-http -p fennec-ql -p fennec-import --features fennec-http/tls --lib --tests --no-run
@@ -1115,8 +1115,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-${{ matrix.os }}-release-zip-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-${{ matrix.os }}-release-zip-
+          key: v2-${{ matrix.os }}-release-zip-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-${{ matrix.os }}-release-zip-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: The zip, as release.yml makes it
         run: tools/windows-zip.sh "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)" ${{ matrix.target }} dist
@@ -1185,8 +1185,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-${{ matrix.os }}-linux-ffi-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-${{ matrix.os }}-linux-ffi-
+          key: v2-${{ matrix.os }}-linux-ffi-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-${{ matrix.os }}-linux-ffi-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: The tarball, as release.yml makes it
         run: tools/linux-ffi.sh "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)" ${{ matrix.target }} dist
@@ -1687,8 +1687,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-ubuntu-latest-integrations-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-ubuntu-latest-integrations-
+          key: v2-ubuntu-latest-integrations-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-ubuntu-latest-integrations-${{ hashFiles('rust-toolchain.toml') }}-
 
       # LangChain's standard vector store suite and the tests LlamaIndex's
       # own integrations run, from a python:3.13 container, against a
@@ -1809,8 +1809,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-ubuntu-latest-examples-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-ubuntu-latest-examples-
+          key: v2-ubuntu-latest-examples-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-ubuntu-latest-examples-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: The Notes examples
         run: |
@@ -1860,8 +1860,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-ubuntu-latest-shop-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-ubuntu-latest-shop-
+          key: v2-ubuntu-latest-shop-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-ubuntu-latest-shop-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: The shop
         run: |
@@ -1913,8 +1913,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-ubuntu-latest-ledger-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-ubuntu-latest-ledger-
+          key: v2-ubuntu-latest-ledger-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-ubuntu-latest-ledger-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: The ledger
         run: |
@@ -1966,8 +1966,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-ubuntu-latest-saas-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-ubuntu-latest-saas-
+          key: v2-ubuntu-latest-saas-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-ubuntu-latest-saas-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: Trellis
         run: |
@@ -2021,8 +2021,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-ubuntu-latest-recipes-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-ubuntu-latest-recipes-
+          key: v2-ubuntu-latest-recipes-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-ubuntu-latest-recipes-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: The recipes
         run: |
@@ -2073,8 +2073,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-ubuntu-latest-dispatch-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-ubuntu-latest-dispatch-
+          key: v2-ubuntu-latest-dispatch-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-ubuntu-latest-dispatch-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: Plover
         run: |
@@ -2127,8 +2127,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-ubuntu-latest-analytics-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-ubuntu-latest-analytics-
+          key: v2-ubuntu-latest-analytics-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-ubuntu-latest-analytics-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: Kestrel
         run: |
@@ -2379,8 +2379,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-ubuntu-24.04-build-musl-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-ubuntu-24.04-build-musl-
+          key: v2-ubuntu-24.04-build-musl-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-ubuntu-24.04-build-musl-${{ hashFiles('rust-toolchain.toml') }}-
 
       # The three at once. Each build is a chain of compiles of one unit
       # (`codegen-units = 1`) ending in one fat LTO, a core's work most of
@@ -2507,8 +2507,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-ubuntu-latest-mobile-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-ubuntu-latest-mobile-
+          key: v2-ubuntu-latest-mobile-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-ubuntu-latest-mobile-${{ hashFiles('rust-toolchain.toml') }}-
 
       - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
@@ -2699,8 +2699,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: v2-macos-latest-mobile-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: v2-macos-latest-mobile-
+          key: v2-macos-latest-mobile-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: v2-macos-latest-mobile-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: XCFramework (macOS, iOS, the simulator)
         run: integrations/swift/build-xcframework.sh --zip
