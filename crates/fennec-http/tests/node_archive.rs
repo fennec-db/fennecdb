@@ -1615,7 +1615,11 @@ fn presence_and_began_edited_are_refused() {
             .and_then(|a| a.verify())
             .map(|v| v.last)
     };
-    assert_eq!(verified().unwrap(), 7, "0.2.0's line and its plain presence");
+    assert_eq!(
+        verified().unwrap(),
+        7,
+        "0.2.0's line and its plain presence"
+    );
     let of_olden = |out: &str| {
         let done = all(out, Target::End);
         done.into_iter().find(|(t, _)| t == "olden").unwrap().1
