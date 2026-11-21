@@ -39,6 +39,12 @@ A feature whose first use moves the file format -- it writes a new kind or tag -
 - Measured numbers, benchmarks and their harnesses, `examples/`.
 - 0.x: it promises nothing, and a 0.x client has no compatibility with a 1.x server.
 
+## Changed on purpose before 1.0
+
+0.x promises nothing, but a change a 0.x user meets as a break is named here, with the release that last behaved otherwise, so the 1.0 notes can say it.
+
+- **PostgreSQL connections from `fennec import`, its `--follow` and `fennec-server --follow`** (last otherwise in v0.2.0; [replication.md](replication.md#follow)). A host off this machine is dialed under `sslmode=verify-full` unless the string or `PGSSLMODE` names a mode, where v0.2.0 took libpq's `prefer`: a server with no TLS, or a certificate no trusted CA signed, is refused, the error naming `sslrootcert=<file>` and `sslmode=require` or `disable`. Holding a password, the client signs in by SCRAM-SHA-256 alone: a server asking for it in clear text, or signing the client in before SCRAM's exchange finished, is refused unless the string's `require_auth` allows it (`password`, `none`). A SCRAM iteration count under 4 096 is refused, as is a server nonce that is not the client's followed by the server's own and an `m=` extension. In the string, a `%` not followed by two hex digits is refused (it was passed through, or panicked before a character of several bytes), and `connect_timeout=0` is refused. Over TLS the sign-in is bound to the session where the server offers `SCRAM-SHA-256-PLUS` (`channel_binding=disable` turns it off). Over a connection whose server is not proven, an error's own text is not shown, and a keepalive's position is not confirmed. A query's answer past 100 000 rows and a COPY line past a gigabyte are refused.
+
 ## Upgrade order
 
 Replicas before primaries, and files go one way. `deploy/RUNBOOK.md`'s *Upgrading with no downtime* is the long form: archivers, then routers, then every node holding a replica or standby, then primaries.

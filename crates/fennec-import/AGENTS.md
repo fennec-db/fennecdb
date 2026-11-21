@@ -23,11 +23,20 @@ where the socket takes it). A failure waits for nothing: its stream is
 closed and the error returned at once, the server's exit code stored
 before its log line and its wait let go, a panic's too (`mirror::Ending`).
 A wire message's length is held to
-`proto::MAX_MESSAGE` before anything is allocated (`proto::zeroed`), and
-the iteration count a server asks SCRAM for to `SCRAM_MAX_ITERATIONS`
-(2^22) before PBKDF2 runs, refused naming the range and what brings a
-server under it, the role's password set again under a lower
-`scram_iterations`: the server, or whoever stands in for it, chooses it.
+`proto::MAX_MESSAGE` before anything is allocated (`proto::zeroed`), a
+query's rows to `QUERY_ROWS` and a COPY line to `MAX_MESSAGE`, each byte
+scanned once, and
+the iteration count a server asks SCRAM for to `SCRAM_MIN_ITERATIONS`
+(4 096) through `SCRAM_MAX_ITERATIONS` (2^22) before PBKDF2 runs, refused
+naming the range and what brings a server within it, the role's password
+set again under another `scram_iterations`: the server, or whoever stands
+in for it, chooses it. Nothing waits on PostgreSQL under a lock:
+the copy decides under the write lock, then dials and reads with none,
+landing a batch a block (`load::run_locked`); the sign-in is held to
+`connect_timeout`, a COPY's read wakes for the stop flag within
+`client::LOOK`, the copy then left unfinished. A keepalive's end is
+confirmed only on a proven stream (`WalStream::proven`), and a server's
+words reach a log or a terminal only through `peer_text`.
 The tests need a live PostgreSQL and are `#[ignore]`d; CI's `postgres` job runs
 them as `make import-test` does and fails unless every test `tests/pg.rs`
 and both `tests/follow.rs` mark so passed: a new one goes in one of those

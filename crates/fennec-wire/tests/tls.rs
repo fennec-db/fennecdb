@@ -213,15 +213,41 @@ fn seen(port: u16, rx: &mpsc::Receiver<Seen>) -> Vec<Seen> {
 }
 
 fn url(host: &str, port: u16, sslmode: SslMode, rootcert: Option<&str>) -> Url {
-    Url {
-        user: "fennec".into(),
-        password: None,
-        host: host.into(),
+    url_as(
+        host,
         port,
-        database: "fennec".into(),
-        sslmode,
-        sslrootcert: rootcert.map(|f| cert(f).display().to_string()),
-    }
+        &format!("sslmode={}", sslmode.name()),
+        rootcert,
+        None,
+    )
+}
+
+/// A URL of the stand-in's, `query` its parameters, `rootcert` a file of
+/// `tests/certs`, `password` the user's: read with no variable of libpq's,
+/// so a `PGPASSWORD` or `PGSSLMODE` this process inherited changes nothing.
+fn url_as(
+    host: &str,
+    port: u16,
+    query: &str,
+    rootcert: Option<&str>,
+    password: Option<&str>,
+) -> Url {
+    let root = rootcert.map_or_else(String::new, |f| {
+        let path = cert(f).display().to_string();
+        let path = path
+            .replace('%', "%25")
+            .replace('&', "%26")
+            .replace(' ', "%20")
+            .replace('?', "%3F")
+            .replace('#', "%23");
+        format!("&sslrootcert={path}")
+    });
+    let pw = password.map_or_else(String::new, |p| format!(":{p}"));
+    Url::parse_in(
+        &format!("postgres://fennec{pw}@{host}:{port}/fennec?{query}{root}"),
+        |_| None,
+    )
+    .unwrap()
 }
 
 /// Connects, asks which way the query went, and lets go.
@@ -390,9 +416,12 @@ fn dial_in_a_home_of_its_own() {
     };
     let mut it = what.splitn(3, ' ');
     let (host, port, query) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
-    let got = Url::parse(&format!("postgres://fennec@{host}:{port}/fennec?{query}"))
-        .map_err(|e| e.to_string())
-        .and_then(|u| via(&u));
+    let got = Url::parse_in(
+        &format!("postgres://fennec@{host}:{port}/fennec?{query}"),
+        |_| None,
+    )
+    .map_err(|e| e.to_string())
+    .and_then(|u| via(&u));
     println!("dialed: {got:?}");
 }
 
@@ -555,4 +584,286 @@ fn ending_a_stream_over_tls_is_bounded() {
         "{e}"
     );
     assert_eq!(rx.recv().unwrap(), Some(b'X'), "no Terminate after the end");
+}
+
+// ---------------------------------------------------- channel binding
+
+/// What a stand-in signing in by SCRAM over TLS saw of the client's
+/// exchange: the mechanism it chose, its GS2 header, and whether its `c=`
+/// was that header followed -- for `p=tls-server-end-point` -- by the hash
+/// of the stand-in's own certificate, RFC 5929's binding.
+#[derive(Debug, PartialEq)]
+struct Bound {
+    mechanism: String,
+    gs2: String,
+    cbind_ok: bool,
+    signed_in: bool,
+}
+
+/// RFC 5929's `tls-server-end-point` of the test server's certificate: its
+/// signature is ECDSA with SHA-256 (rcgen's P-256 key, `wire_certs`), so
+/// SHA-256 of its DER.
+fn end_point() -> Vec<u8> {
+    let pem = std::fs::read(cert("server.pem")).unwrap();
+    let der = fennec_tls::pem_certs(&pem).unwrap().remove(0);
+    fennec_http::crypto::sha256(&der).to_vec()
+}
+
+/// A stand-in over TLS that offers the SASL mechanisms `offer` and runs
+/// SCRAM's server half for password `p`: what it saw of the client's
+/// exchange, `None` where the client sent none.
+fn scram_over_tls(offer: &'static [&'static str]) -> (u16, mpsc::Receiver<Option<Bound>>) {
+    use crate::client::{attr, Exchange, Verifier};
+    use fennec_http::crypto::{b64_encode, nonce, system_random};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server =
+        fennec_tls::Server::from_pem_files(&cert("server.pem"), &cert("server.key")).unwrap();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        let mut request = [0u8; 8];
+        s.read_exact(&mut request).unwrap();
+        s.write_all(b"S").unwrap();
+        let mut t = server.accept(s).unwrap();
+        assert!(startup(&mut t));
+        let mut b = 10i32.to_be_bytes().to_vec();
+        for m in offer {
+            b.extend_from_slice(m.as_bytes());
+            b.push(0);
+        }
+        b.push(0);
+        t.write_all(&framed(b'R', &b)).unwrap();
+        t.flush().unwrap();
+        let Some((b'p', body)) = message(&mut t) else {
+            return tx.send(None).unwrap();
+        };
+        let name_end = body.iter().position(|&c| c == 0).unwrap();
+        let mechanism = String::from_utf8_lossy(&body[..name_end]).into_owned();
+        let first = String::from_utf8_lossy(&body[name_end + 1 + 4..]).into_owned();
+        let mut parts = first.splitn(3, ',');
+        let gs2 = format!("{},{},", parts.next().unwrap(), parts.next().unwrap());
+        let v = Verifier::new("p", system_random(16).unwrap());
+        let (ex, server_first) = Exchange::client_first(&v, &first, &nonce(18).unwrap());
+        let mut b = 11i32.to_be_bytes().to_vec();
+        b.extend_from_slice(server_first.as_bytes());
+        t.write_all(&framed(b'R', &b)).unwrap();
+        t.flush().unwrap();
+        let Some((b'p', last)) = message(&mut t) else {
+            return tx.send(None).unwrap();
+        };
+        let last = String::from_utf8_lossy(&last).into_owned();
+        let mut header = gs2.as_bytes().to_vec();
+        if gs2.starts_with("p=") {
+            header.extend_from_slice(&end_point());
+        }
+        let cbind_ok = attr(&last, 'c') == Some(b64_encode(&header).as_str());
+        let signed_in = match ex.client_final(&last) {
+            Ok(server_final) if cbind_ok => {
+                let mut b = 12i32.to_be_bytes().to_vec();
+                b.extend_from_slice(server_final.as_bytes());
+                let mut out = framed(b'R', &b);
+                out.extend_from_slice(&framed(b'R', &0i32.to_be_bytes()));
+                out.extend_from_slice(&framed(b'Z', b"I"));
+                t.write_all(&out).unwrap();
+                t.flush().unwrap();
+                true
+            }
+            _ => false,
+        };
+        tx.send(Some(Bound {
+            mechanism,
+            gs2,
+            cbind_ok,
+            signed_in,
+        }))
+        .unwrap();
+        // Up to the client's close.
+        while message(&mut t).is_some() {}
+    });
+    (port, rx)
+}
+
+const BOTH: &[&str] = &["SCRAM-SHA-256-PLUS", "SCRAM-SHA-256"];
+
+/// Over TLS, a server offering `SCRAM-SHA-256-PLUS` is signed in to with it:
+/// the exchange carries the hash of the certificate the client was shown
+/// (`tls-server-end-point`), which a server compares with its own, so a
+/// sign-in relayed through someone else's TLS -- `require` and `prefer`
+/// check no certificate -- fails at the server. The client sent `n,,` and
+/// plain SCRAM whatever was offered.
+#[test]
+fn a_sign_in_over_tls_is_bound_to_the_servers_certificate() {
+    for (mode, root) in [
+        ("sslmode=verify-full", Some("ca.pem")),
+        ("sslmode=require", None),
+    ] {
+        let (port, rx) = scram_over_tls(BOTH);
+        let c = Client::connect(&url_as("localhost", port, mode, root, Some("p")));
+        assert!(c.is_ok(), "{mode}: {:?}", c.err());
+        assert_eq!(
+            rx.recv().unwrap(),
+            Some(Bound {
+                mechanism: "SCRAM-SHA-256-PLUS".into(),
+                gs2: "p=tls-server-end-point,,".into(),
+                cbind_ok: true,
+                signed_in: true,
+            }),
+            "{mode}"
+        );
+    }
+}
+
+/// A `-PLUS` offer taken out on the way: the client says it could have
+/// bound (`y,,`), which the real server, having offered it, refuses; under
+/// `channel_binding=require` it signs in to no such server at all, sending
+/// nothing of SCRAM. `disable` binds nothing whatever is offered (`n,,`).
+#[test]
+fn a_plus_offer_taken_out_is_told_the_client_could_bind() {
+    let (port, rx) = scram_over_tls(&["SCRAM-SHA-256"]);
+    let u = url_as(
+        "localhost",
+        port,
+        "sslmode=verify-full",
+        Some("ca.pem"),
+        Some("p"),
+    );
+    assert!(Client::connect(&u).is_ok());
+    let seen = rx.recv().unwrap().unwrap();
+    assert_eq!(
+        (seen.mechanism.as_str(), seen.gs2.as_str()),
+        ("SCRAM-SHA-256", "y,,")
+    );
+    assert!(seen.cbind_ok && seen.signed_in, "{seen:?}");
+
+    let (port, rx) = scram_over_tls(&["SCRAM-SHA-256"]);
+    let u = url_as(
+        "localhost",
+        port,
+        "sslmode=verify-full&channel_binding=require",
+        Some("ca.pem"),
+        Some("p"),
+    );
+    let e = Client::connect(&u).unwrap_err().to_string();
+    assert!(e.contains("does not offer SCRAM-SHA-256-PLUS"), "{e}");
+    assert_eq!(rx.recv().unwrap(), None, "SCRAM began");
+
+    let (port, rx) = scram_over_tls(BOTH);
+    let u = url_as(
+        "localhost",
+        port,
+        "sslmode=verify-full&channel_binding=disable",
+        Some("ca.pem"),
+        Some("p"),
+    );
+    assert!(Client::connect(&u).is_ok());
+    let seen = rx.recv().unwrap().unwrap();
+    assert_eq!(
+        (seen.mechanism.as_str(), seen.gs2.as_str()),
+        ("SCRAM-SHA-256", "n,,")
+    );
+}
+
+/// Bytes a server -- or someone on the path -- sends after its `S`, before
+/// the handshake, go into the handshake, which refuses them, and never
+/// into what the client reads as the server's: here an `AuthenticationOk`
+/// and a `ReadyForQuery`, which taken as the server's would have signed
+/// the client in (libpq's CVE-2021-23222). The stand-in goes on to a real
+/// handshake, with a certificate the client trusts: a client that kept the
+/// bytes aside would finish it and read them as the server's first words
+/// over TLS, signed in by them -- with no password held, nothing else is
+/// asked of an `AuthenticationOk`.
+#[test]
+fn bytes_after_the_servers_s_are_never_read_as_the_servers() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server =
+        fennec_tls::Server::from_pem_files(&cert("server.pem"), &cert("server.key")).unwrap();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        let mut request = [0u8; 8];
+        s.read_exact(&mut request).unwrap();
+        let mut out = b"S".to_vec();
+        out.extend_from_slice(&framed(b'R', &0i32.to_be_bytes()));
+        out.extend_from_slice(&framed(b'Z', b"I"));
+        s.write_all(&out).unwrap();
+        let seen = match server.accept(s) {
+            // Over TLS the stand-in answers nothing: what signs a client
+            // in here is the bytes it sent before the handshake.
+            Ok(mut t) => {
+                let startup = startup(&mut t);
+                let _ = t.read_to_end(&mut Vec::new());
+                Seen::Tls { startup }
+            }
+            Err(e) => Seen::HandshakeFailed(e.to_string()),
+        };
+        let _ = tx.send(seen);
+    });
+    let u = url_as(
+        "localhost",
+        port,
+        "sslmode=verify-full",
+        Some("ca.pem"),
+        None,
+    );
+    let e = match Client::connect(&u) {
+        Ok(_) => panic!("signed in by the bytes sent before the handshake"),
+        Err(e) => e.to_string(),
+    };
+    assert!(e.contains("TLS") || e.contains("handshake"), "{e}");
+    match rx.recv_timeout(Duration::from_secs(30)).unwrap() {
+        Seen::HandshakeFailed(_) => {}
+        other => panic!("{other:?}: {e}"),
+    }
+}
+
+/// Off this machine `verify-full` is the default: a certificate it cannot
+/// verify is refused before a byte of the client's goes out, in words
+/// naming the cause, what this client trusts and the ways out -- the CA to
+/// trust, or TLS that checks nothing -- and a server refusing TLS is told
+/// how to speak plain text to it. `prefer`, the default before, spoke to
+/// either, checking nothing. On this machine the default is `prefer` still.
+#[test]
+fn off_this_machine_the_default_checks_the_certificate() {
+    let far = |port: u16| {
+        let name = format!("pg-remote-{port}.test:{port}");
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        fennec_http::dial::stand_in(&name, move || Ok(vec![addr]));
+        format!("pg-remote-{port}.test")
+    };
+    let (port, rx) = standin(Answer::Tls);
+    let u = url_as(&far(port), port, "", Some("other-ca.pem"), None);
+    assert_eq!(u.sslmode, SslMode::VerifyFull);
+    let e = via(&u).unwrap_err();
+    for says in [
+        "could not be verified",
+        "UnknownIssuer",
+        "sslmode=verify-full is the default for a host off this machine",
+        "other-ca.pem",
+        "sslrootcert=<file>",
+        "sslmode=require",
+    ] {
+        assert!(e.contains(says), "{says}: {e}");
+    }
+    let saw = seen(port, &rx);
+    assert!(matches!(&saw[..], [Seen::HandshakeFailed(_)]), "{saw:?}");
+
+    let (port, rx) = standin(Answer::No);
+    let e = via(&url_as(&far(port), port, "", None, None)).unwrap_err();
+    assert!(
+        e.contains("verify-full is the default for a host off this machine")
+            && e.contains("sslmode=disable"),
+        "{e}"
+    );
+    assert_eq!(seen(port, &rx), vec![Seen::Refused { startup: false }]);
+
+    let (port, rx) = standin(Answer::No);
+    assert_eq!(
+        via(&url_as("127.0.0.1", port, "", None, None)).unwrap(),
+        "plain"
+    );
+    assert_eq!(seen(port, &rx), vec![Seen::Refused { startup: true }]);
 }

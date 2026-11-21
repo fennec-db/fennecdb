@@ -13,6 +13,7 @@ use fennec_core::plugin::Registry;
 use fennec_core::prelude::*;
 use fennec_core::query::{eval, truthy, EvalCtx, RowAccess};
 use fennec_core::value::{DataType, VecPrec};
+use std::sync::{PoisonError, RwLock};
 use std::time::Instant;
 
 /// Reads the source, derives the schema and loads it.
@@ -32,12 +33,69 @@ pub fn run_with_progress(
     opts: &Options,
     progress: &mut dyn FnMut(u64),
 ) -> Result<Summary> {
-    db.unbound(|db| load(src, db, opts, progress))
+    db.unbound(|db| load(src, &mut Whole(db), opts, progress))
+}
+
+/// [`run_with_progress`] into a database behind its lock, which is taken for
+/// each statement -- a batch of rows, an index, the checkpoint -- and let go
+/// between them: `fennec-server --follow`'s copy, which held the server's
+/// write lock from its dial to its last row, and every request of the
+/// server with it, for as long as the source took to send the table --
+/// for good, a server sending a byte a little under every 30 s. Nothing
+/// that waits on the source runs under the lock now; readers of the
+/// collection see its rows as each batch lands.
+pub fn run_locked(
+    src: &mut dyn Source,
+    db: &RwLock<Database>,
+    opts: &Options,
+    progress: &mut dyn FnMut(u64),
+) -> Result<Summary> {
+    load(src, &mut Locked(db), opts, progress)
+}
+
+/// Where a load's statements land.
+trait Land {
+    /// One statement, waking no statement bound to the collection's writes
+    /// (`Database::unbound`).
+    fn land(&mut self, stmt: &Statement) -> Result<()>;
+    /// The checkpoint that ends a load.
+    fn settle(&mut self) -> Result<()>;
+}
+
+/// A database the load holds whole: the file `fennec import` writes, which
+/// nothing else has open.
+struct Whole<'a>(&'a mut Database);
+
+impl Land for Whole<'_> {
+    fn land(&mut self, stmt: &Statement) -> Result<()> {
+        self.0.execute(stmt).map(|_| ())
+    }
+    fn settle(&mut self) -> Result<()> {
+        self.0.checkpoint()
+    }
+}
+
+/// A database behind its lock, taken a statement at a time.
+struct Locked<'a>(&'a RwLock<Database>);
+
+impl Locked<'_> {
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, Database> {
+        self.0.write().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl Land for Locked<'_> {
+    fn land(&mut self, stmt: &Statement) -> Result<()> {
+        self.write().unbound(|db| db.execute(stmt)).map(|_| ())
+    }
+    fn settle(&mut self) -> Result<()> {
+        self.write().checkpoint()
+    }
 }
 
 fn load(
     src: &mut dyn Source,
-    db: &mut Database,
+    db: &mut dyn Land,
     opts: &Options,
     progress: &mut dyn FnMut(u64),
 ) -> Result<Summary> {
@@ -45,7 +103,7 @@ fn load(
     let plan = map::plan(&columns, opts)?;
     let t0 = Instant::now();
 
-    db.execute(&Statement::CreateCollection {
+    db.land(&Statement::CreateCollection {
         schema: plan.schema.clone(),
         if_not_exists: false,
     })?;
@@ -100,7 +158,7 @@ fn load(
     }
 
     for (field, kind) in &plan.indexes {
-        db.execute(&Statement::CreateIndex {
+        db.land(&Statement::CreateIndex {
             collection: opts.into.clone(),
             field: field.clone(),
             kind: kind.clone(),
@@ -108,7 +166,7 @@ fn load(
         })?;
     }
     for c in &opts.composites {
-        db.execute(&Statement::CreateComposite {
+        db.land(&Statement::CreateComposite {
             collection: opts.into.clone(),
             index: c.clone(),
             if_not_exists: false,
@@ -117,7 +175,7 @@ fn load(
 
     // The checkpoint writes the HNSW graph into the file too: the next open
     // does not rebuild the index.
-    db.checkpoint()?;
+    db.settle()?;
 
     Ok(Summary {
         rows,
@@ -345,14 +403,14 @@ fn show(v: &Value) -> String {
 }
 
 fn flush(
-    db: &mut Database,
+    db: &mut dyn Land,
     collection: &str,
     batch: &mut Vec<Vec<(String, Expr)>>,
     rows_done: u64,
 ) -> Result<()> {
     let n = batch.len() as u64;
     let docs = std::mem::take(batch);
-    db.execute(&Statement::Put {
+    db.land(&Statement::Put {
         collection: collection.to_string(),
         docs,
         insert: false,
@@ -363,7 +421,6 @@ fn flush(
         pick: None,
     })
     .map_err(|e| locate(e, rows_done - n + 1, rows_done))
-    .map(|_| ())
 }
 
 /// The engine does not say which document it tripped on. Since the sources

@@ -94,12 +94,14 @@ dial), `fennec-server` and `fennec` one 16 KB page each.
 **What must never happen.** A dependency in `fennec-core`, `fennec-ql`,
 `fennec-abi`, `fennec-wasm`, the browser module or `fennec-ffi`, the
 library apps embed -- not `fennec-tls`, not anything -- and another crate
-coming in by this door: `fennec-tls` takes rustls and webpki-roots, rcgen
+coming in by this door: `fennec-tls` takes rustls and webpki-roots -- and
+ring, rustls's own, by name for the digest of a channel binding
+(`server_end_point`), its version the one rustls resolves -- rcgen
 to test, and nothing else, and no other crate takes a crate from outside
 the workspace because TLS now does. `tools/deps_check.py`, in CI's fmt
 job, fails a change that breaks either: a crate but `fennec-tls` and
 `fennec-bench` naming a crate from outside the workspace, of any kind;
-`fennec-tls` naming one beyond its three; `fennec-tls` taken other than
+`fennec-tls` naming one beyond its four; `fennec-tls` taken other than
 optional behind `tls`; the trees of `fennec-core`, `fennec-ql`,
 `fennec-abi`, `fennec-wasm` and `fennec-ffi`, every feature on, reaching
 outside the workspace or `fennec-tls`; or `fennec-tls`'s own tree, normal

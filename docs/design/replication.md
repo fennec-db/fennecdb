@@ -873,8 +873,9 @@ importer's options come as `--follow-index` and the rest
 collection takes no write but the follower thread's (a write hook, 403):
 the next change from PostgreSQL would write over one, or a copy made again
 forget it. The follower stops at the server's shutdown flag, and the
-shutdown waits for it (`durability::before_shutdown`, 5 s at most, past which a
-copy still being made is left for the next start) before its checkpoint;
+shutdown waits for it (`durability::before_shutdown`, 5 s at most; a copy
+still being made stops within `client::LOOK` and is left for the next
+start, below) before its checkpoint;
 an error it cannot wait out stops the server rather than leave it serving
 a mirror that no longer moves -- through the one shutdown, exit code 1
 (`durability::stop_with`, [durability.md](durability.md#the-one-shutdown)). This is why the PostgreSQL client is
@@ -907,6 +908,86 @@ before the pg wire went gave 3.7 and 3.7 the same day); a server killed
 while the table was written to held every row 370 ms after it started
 again. The
 follower adds 178 KB to `fennec-server`.
+
+*The copy waits on PostgreSQL with no lock held.* `ensure_copy` decides
+under the write lock -- the `_follow` entry read, a stale collection
+dropped, the entry written unfinished -- and lets it go; the dial, the
+sign-in and the COPY are read with none, and the rows land a batch at a
+time, each batch, index and the checkpoint a statement of its own under
+the lock (`load::run_locked`, `Land`), the entry marked finished after the
+last. Every release with a server that follows held the write lock from
+the dial to the last row: `fenec-pg --follow` (v0.1.5, v0.1.6),
+`fenec-server --follow` (v0.1.7 to v0.1.12) and `fennec-server --follow`
+(v0.2.0), so every request of the server, of any collection, waited on
+PostgreSQL for as long as the table took to come -- and for good where
+whoever answered at its address sent a byte a little under every 30 s, a
+read's timeout; the shutdown takes the same lock, so a SIGTERM never ended
+that server either. The dial took std's connect (the system's 75 s and
+more, the name's lookup unbounded) and every read of the sign-in 30 s
+anew. Now the sign-in is held to one deadline, libpq's `connect_timeout`
+(30 s by default; `client::CONNECT_WAIT`): the name looked up on a thread
+of its own (`fennec_http::dial::resolve`), each address dialed within what
+is left, the TLS handshake (`dial_within`) and every message to the first
+`ReadyForQuery` read through `Until`, PBKDF2's own time added back, since
+it is this side's. The COPY's socket has a read timeout of `client::LOOK`,
+200 ms, and its reads (`Watched`) ask again at each until the stop flag is
+set or the server has said nothing for 30 s: a stop or a shutdown ends the
+copy within 0.2 s wherever it waits, the copy left unfinished as a kill
+leaves one, made again from the start at the next start. A reader sees the
+collection fill a batch at a time, its `_follow` entry unfinished until
+the end -- what a reader saw before was nothing at all until the copy was
+whole, its request waiting the while. A failed copy drops what it landed,
+under the lock, as before. The cost is the lock taken once a batch
+(`--follow-batch`, 2 000 rows by default) where it was taken once a copy,
+and a 200 ms timer on the copy's socket, which a busy copy never meets:
+a copy's rows are read and put as they were. fennec-server's
+`a_copy_held_up_holds_up_no_request_nor_the_shutdown` holds it at the three
+places a stand-in stalls -- a startup never answered, a TLS handshake
+begun and never answered, a COPY sending a byte every half second --
+each time a write and a read of another collection answered at once and
+a SIGTERM ending the server, exit 0, within its wait.
+
+*A keepalive's end is confirmed only where the server is proven.* With
+nothing pending, the follower confirmed the end a keepalive named: the
+walsender's word for how far its log had gone, which lets a quiet
+publication's slot move with the log other tables' writes fill --
+PostgreSQL 15 and later skip an empty transaction, so with no change of
+its table the slot hears nothing else, and its own subscriber reports the
+position received where nothing is pending (`send_feedback`) for that
+reason. But a keepalive is anyone's on a path no CA checked, and an end
+named past what the stream reached, confirmed, has PostgreSQL skip every
+change before it for good: PostgreSQL 17.12, sent a confirm a terabyte
+past its log's tip on a slot's stream, set the slot's
+`confirmed_flush_lsn` to it, and a row inserted after never came on the
+next stream, where one inserted before the confirm did. `pg_recvlogical` never confirms a keepalive's
+end: its written and flushed positions are the last XLogData's start, put
+on disk. The follower now does as PostgreSQL's subscriber does only on a
+proven stream (`WalStream::proven`: this machine, TLS checked against a
+CA, or a sign-in bound to the session, `SCRAM-SHA-256-PLUS`), and as
+`pg_recvlogical` does on any other, where a quiet table's slot keeps the
+server's log until its next change -- the price of a stream someone may be
+writing. A commit's end is confirmed once on disk on any stream, as
+`pg_recvlogical` confirms what it wrote: on one not proven, whoever can
+write a keepalive can write a commit, and the changes before it, which no
+rule of the follower's tells from the server's -- only `verify-full` and a
+bound sign-in keep that writer out, which is why they are the default
+off this machine. Every release with `--follow`, v0.1.5 to v0.2.0, confirmed any
+keepalive's end. fennec-import's
+`a_keepalive_moves_no_confirmed_position_on_a_stream_not_proven` sends one
+naming a terabyte past the commit, over plain text to a name off this
+machine (`dial::stand_in`), and holds no status update to it; over
+loopback it is confirmed.
+
+*What the client keeps is bounded by what it asked.* A simple query's
+answer is held to 100 000 rows (`QUERY_ROWS`; the client's queries read a
+catalog for a row or a few, the follower's read-back one row, `limit 1`)
+and to `MAX_MESSAGE` of what the rows cost here, 24 bytes a row and a cell
+beside their bytes: a null cell is 4 bytes of the server's and 24 of
+memory, so a server's answer of a gigabyte of rows held six. A COPY's line
+is held to `MAX_MESSAGE`, PostgreSQL's bound of a row, and each byte is
+scanned for its end once (`CopyOut::scanned`): a line sent a byte a
+message was scanned whole at every message, quadratic, and kept without
+bound. Every release since v0.1.0 kept both without bound and scanned so.
 
 *A follower that stops lets its slot go before it returns -- within a
 bound, and on a clean stop alone.* It ends the stream as the protocol ends
@@ -1103,8 +1184,19 @@ TLS to the source (`sslmode`, `fennec_wire::client::SslMode`) is asked
 for as libpq asks: an `SSLRequest` before the startup message, so the
 user's and the database's names, and SCRAM's exchange, go out only once
 the handshake is done -- and under `verify-full` only to the server the
-certificate names. The modes are libpq's five but `allow`, with its
-default, `prefer`, and its rules: `prefer` goes on in plain text on an
+certificate names. The modes are libpq's five but `allow`, with libpq's
+rules but for the default: `verify-full` for a host off this machine,
+`prefer` only for `localhost` and a loopback address
+(`client::on_this_machine`), a mode the string or `PGSSLMODE` names
+always winning. libpq's `prefer` everywhere -- v0.2.0's, the first release
+with TLS (v0.1.x spoke plain text alone) -- spoke to whoever answered a
+connection string copied across a network and checked nothing; the
+default is now the one that keeps a stand-in out, a deliberate break
+([compatibility.md](compatibility.md#changed-on-purpose-before-10)),
+said once at each start (`Url::tls_said`: the shell's `tls` line, the
+server's `follow:` log line), and a refusal under it names the cause,
+the CAs trusted -- `sslrootcert`'s file, libpq's root file or Mozilla's --
+and the ways out, a CA to trust or `sslmode=require`. The rules: `prefer` goes on in plain text on an
 `N` and dials again without TLS when the handshake fails (fe-connect.c's
 `CONNECTION_FAILED` after it: failing there would keep out no one, since
 whoever can break a handshake can as well answer `N`), never after an
@@ -1124,7 +1216,18 @@ server's (CVE-2021-23222, libpq's). An error in answer is said to be one,
 its text never read: it comes before TLS and any password, so anyone in
 the path writes it, and shown it would put their words in a log or a
 terminal as the server's (libpq stopped showing it in 17.2,
-CVE-2024-10977). A build
+CVE-2024-10977). The same holds after the handshake wherever the server
+is not proven (`Client::proven`: this machine, a chain checked against a
+CA, or a sign-in bound to the session): an `ErrorResponse`'s own words
+are not shown, its SQLSTATE -- held to five digits or capitals -- and this
+client's words for it are (`server_error`, `sqlstate_words`). What is
+shown of a server's -- an error's words on a proven connection, a column's
+name, a cell that does not parse, `server_version` -- goes through
+`peer_text`: control and bidirectional characters escaped, cut at 512
+bytes (a cell at 64) with the length said; the follower's log lines and
+the shell's errors pass through it again, cut at 4 KiB, so a server's
+escape sequence never reaches a terminal or a log as one. Every release
+since v0.1.0 printed them raw. A build
 without the `tls` feature takes `prefer` as plain text and refuses the
 rest, as libpq built without SSL does. The wait for the next replication
 message is `TlsStream::readable` over TLS: it takes whole records in under
@@ -1143,7 +1246,9 @@ the `fennec` binary's z -- more than half an hour of an M1 core even at
 its widest, eight a cycle at 3.2 GHz, and some three hours by the CPU
 time 2^20 rounds took on this machine shared with other work (2.9 s; 1.2
 s keyed, below) -- `fennec import`, or `--follow` connecting again,
-waiting on it. The client runs 1 to `SCRAM_MAX_ITERATIONS` (2^22, 1 024
+waiting on it. The client runs `SCRAM_MIN_ITERATIONS`, 4 096 (RFC 7677's
+floor, PostgreSQL's default; below it a proof is cheap to guess from, and
+`i=1`, which every release took, makes it four HMACs), to `SCRAM_MAX_ITERATIONS` (2^22, 1 024
 times PostgreSQL's `scram_iterations` default of 4 096: 28.6 thousand
 million instructions at the bound, 51.5 at opt-level z, which took 6.3 s
 and 9.2 s of a core here under a load average past 40) and refuses any
@@ -1169,7 +1274,64 @@ The exchange's messages are `Scram`'s, the nonce given, so
 `scram_rfc7677_exchange` holds them to RFC 7677's example byte for byte,
 the proof and the server signature among them; the server signature is
 compared by `ct_eq`, as every signature is
-([conventions.md](conventions.md#secrets-compared)).
+([conventions.md](conventions.md#secrets-compared)). The server-first
+message is held to RFC 5802: its nonce must begin with the client's and be
+longer, and an `m=` extension is refused; the client is driven to verify
+the signature by `the_client_refuses_a_server_signature_it_cannot_verify`,
+a stand-in sending a wrong one and one sending `AuthenticationOk` in its
+place. A password that is not ASCII is PBKDF2's as its UTF-8 bytes, not
+SASLprep'd: libpq sends exactly that where its SASLprep refuses a
+password, and the verifier a server made of one SASLprep leaves as it is
+-- one in NFKC, as one typed nearly always is -- is the same; a password
+SASLprep would change (a compatibility character, a non-ASCII space) fails
+here where libpq signs in, a gap the docs name and a table of NFKC's
+would close.
+
+*Who may ask for the password.* Holding one, the client signs in by
+SCRAM-SHA-256 alone (`RequireAuth::default_for`), libpq's
+`require_auth=scram-sha-256`: a request for it in clear text (`R3`) or as
+MD5 (`R5`) is refused before anything goes out, as is an
+`AuthenticationOk` before SCRAM's exchange finished -- a stand-in needs no
+password to send one, and taking it proved nothing. Every release since
+v0.1.0 answered `R3` with the password under any `sslmode`, so whoever
+stood in for the server -- anyone on the path, under `prefer` -- had it.
+`require_auth` is libpq's, its rules (`check_expected_areq`): a list of
+`password`, `md5`, `gss`, `sspi`, `scram-sha-256` and `none`, all negated
+or none, `none` letting a server ask for nothing; MD5 is never spoken.
+Without a password a server asking none is taken, as before.
+
+*The sign-in is bound to TLS where the server offers it.* Over TLS the
+client takes `SCRAM-SHA-256-PLUS` with `tls-server-end-point` (RFC 5929):
+the channel binding is the hash of the certificate it was shown, by the
+certificate's own signature hash -- SHA-256 for MD5 and SHA-1, RSA-PSS's by
+its parameters, none for Ed25519, refused -- computed in fennec-tls with
+rustls's own ring (`server_end_point`, the DER walk bounds-checked and
+held by `a_certificate_cut_or_changed_never_panics_the_binding`, and
+fuzzed: `crates/fennec-fuzz`'s `certificate` target). A relay under
+`require` or `prefer` that passes the offer on shows its own certificate,
+so the server's comparison fails and the sign-in with it. One that takes
+`-PLUS` out of the offer and dials the server in plain text is not caught:
+the client, offered no `-PLUS` over TLS, signs in unbound saying `y,,`
+(RFC 5802: it could have bound), and PostgreSQL refuses `y` only on a
+connection of its own over TLS (`ssl_in_use`, `read_client_first_message`)
+-- so a server whose `pg_hba.conf` takes the role by a `host` line, not
+`hostssl` alone, signs the relay in, which then reads the rows and can
+write the stream's commits. What keeps that relay out: `verify-full`, where
+no certificate but the server's passes (the default off this machine),
+`hostssl` alone at the server, or `channel_binding=require` at the client,
+which refuses a server offering no `-PLUS`. A stream signed in unbound is
+not proven, so its keepalives move nothing it confirms (above). The first
+form of this section, SECURITY.md and the import page said a stand-in
+under `require` got no sign-in it could relay; the review of the change
+found the plain-text relay by reading PostgreSQL's SCRAM, and the three
+now say what holds. `channel_binding` is libpq's: `prefer` binds where
+offered and says `y,,` where no `-PLUS` came over TLS -- a server that did
+offer it, its offer taken out on a connection that reaches it over TLS,
+refuses -- `require` refuses a server not offering it and a connection in
+plain text (`a_plus_offer_taken_out_is_told_the_client_could_bind`),
+`disable` sends `n,,`. A bound sign-in makes the connection proven.
+PostgreSQL offers `-PLUS` over TLS from 11 on, so `make import-test`'s
+server, TLS on, signs every live test in bound.
 
 **Run on CI.** Those tests -- fennec-import's `tests/pg.rs` (9) and
 `tests/follow.rs` (4), fennec-server's `tests/follow.rs` (4), each

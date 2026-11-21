@@ -2438,8 +2438,9 @@ jobs:
 
   # docs/design/conventions.md#fuzzing: every parser of untrusted bytes --
   # an HTTP request, JSON, FennecQL, the codec, a .fennec file's open and a
-  # replica's apply, a SQLite file -- fuzzed for a count of runs each (about
-  # 30 s of this runner), built with AddressSanitizer and LLVM's coverage
+  # replica's apply, a SQLite file, the certificate a PostgreSQL server
+  # shows, walked to its signature's hash -- fuzzed for a count of runs each
+  # (about 30 s of this runner), built with AddressSanitizer and LLVM's coverage
   # counters on the Makefile's dated nightly (a nightly only here and in
   # fuzz.yml). A count, not a time: the same commit hands each target the
   # same inputs on any runner, so the job passes or fails by the commit,
@@ -2449,12 +2450,14 @@ jobs:
   # recipe. The test job runs the same targets over their seeds in a plain
   # build; fuzz.yml gives each half an hour a week. Each target is capped
   # at six minutes of CPU time (`SMOKE_CAP`), so a commit slowing every run
-  # ends at a named target's cap before this timeout: six just under it
-  # are 36 minutes, and the build a minute and a half.
+  # ends at a named target's cap before this timeout: eight just under it
+  # -- these seven and `stream`, a primary's stream, which lands beside
+  # them -- are 48 minutes, and the build a minute and a half, with the
+  # seven and a half minutes to spare six had under 45.
   fuzz-smoke:
     name: fuzz-smoke (each target a count of runs under ASan)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 57
     permissions:
       contents: read
     steps:

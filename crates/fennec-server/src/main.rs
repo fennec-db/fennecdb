@@ -359,14 +359,24 @@ usage: fennec-server [options]
                             its copy when there is no whole one, then its
                             changes as they commit, through a logical
                             replication slot. The collection takes no write
-                            but the follower's. TLS is the URL's ?sslmode=,
-                            libpq's, and its &sslrootcert= (else
-                            ~/.postgresql/root.crt if there): prefer, the
-                            default, and require encrypt but check nothing
-                            of the server (require: unless a CA file is
-                            there), so anyone in the path can stand in for
-                            it; across a network, use verify-full, which
-                            checks its certificate and name
+                            but the follower's, and fills as the copy lands.
+                            TLS is the URL's ?sslmode=, libpq's, and its
+                            &sslrootcert= (else ~/.postgresql/root.crt if
+                            there): verify-full, the default for a host off
+                            this machine, checks the certificate and name,
+                            against Mozilla's CAs or the file's; prefer, the
+                            default on this machine, and require check
+                            nothing (require: unless a CA file is there).
+                            Holding a password, the follower signs in by
+                            SCRAM alone, bound to TLS where the server
+                            offers it (&require_auth=, &channel_binding=,
+                            libpq's); a sign-in is held to
+                            &connect_timeout=, 30 s. Give the password in
+                            PGPASSWORD rather than the URL, which any user
+                            of the machine can read in the process list. A
+                            follower that cannot go on stops the server
+                            (exit 1): the PostgreSQL it follows is trusted
+                            that far
       --follow-table <name> the table (required with --follow)
       --follow-into <name>  the collection  default: the table's name
       --follow-slot <name>, --follow-publication <name>

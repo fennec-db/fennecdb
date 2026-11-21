@@ -11,9 +11,14 @@ use crate::{Column, Source};
 use fennec_core::error::{Error, Result};
 use fennec_core::value::{DataType, Value};
 use fennec_wire::client::{Client, CopyOut, FieldDesc};
+use std::sync::atomic::AtomicBool;
 
 /// The connection string. Passed through from `fennec_wire::client` as is.
 pub use fennec_wire::client::Url;
+
+/// A server's text made fit to print or log: escaped and cut
+/// (`fennec_wire::client::peer_text`).
+pub use fennec_wire::client::{peer_text, SHOWN};
 
 // PostgreSQL builtin type OIDs.
 const BOOL: i32 = 16;
@@ -293,10 +298,14 @@ fn text(b: &[u8]) -> String {
 }
 
 pub(crate) fn parse_cell(raw: &[u8], kind: &Kind, column: &str) -> Result<Value> {
+    // The cell and the column's name are the server's: escaped and cut
+    // before a log or a terminal shows them -- a cell is up to a gigabyte,
+    // and was shown whole, escape sequences and all.
     let bad = |want: &str| {
         Error::Type(format!(
-            "`{column}` expected {want}, could not parse `{}`",
-            text(raw)
+            "`{}` expected {want}, could not parse `{}`",
+            peer_text(column.as_bytes(), SHOWN),
+            peer_text(raw, 64)
         ))
     };
     Ok(match kind {
@@ -572,13 +581,12 @@ impl Reader {
     }
 }
 
-impl Source for Reader {
-    fn columns(&mut self) -> Result<Vec<Column>> {
-        Ok(self.columns.clone())
-    }
-
-    fn next_row(&mut self) -> Result<Option<Vec<Value>>> {
-        let Some(line) = self.copy.next_line()? else {
+impl Reader {
+    /// The next row, given up once `stop` is set: the COPY's read waits on
+    /// the server a moment at a time and looks at `stop` between
+    /// (`CopyOut::next_line_until`).
+    pub fn next_row_until(&mut self, stop: &AtomicBool) -> Result<Option<Vec<Value>>> {
+        let Some(line) = self.copy.next_line_until(stop)? else {
             return Ok(None);
         };
         let cells = split_line(&line);
@@ -597,6 +605,19 @@ impl Source for Reader {
             });
         }
         Ok(Some(out))
+    }
+}
+
+/// A flag nothing sets: `fennec import`'s copy, which a signal ends.
+static NEVER: AtomicBool = AtomicBool::new(false);
+
+impl Source for Reader {
+    fn columns(&mut self) -> Result<Vec<Column>> {
+        Ok(self.columns.clone())
+    }
+
+    fn next_row(&mut self) -> Result<Option<Vec<Value>>> {
+        self.next_row_until(&NEVER)
     }
 }
 

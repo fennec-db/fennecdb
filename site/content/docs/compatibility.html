@@ -45,6 +45,26 @@ and removed only in 2.0. 0.x releases promise nothing.</p>
   <li>The studio's pages and the desktop app (beta).</li>
 </ul>
 
+<h2 id="changed-before-1-0">Changed on purpose since v0.2.0</h2>
+
+<p>0.x promises nothing, but these changes are ones a v0.2.0 user can meet
+as a break:</p>
+
+<ul>
+  <li><b>Connecting to PostgreSQL</b> (<code>fennec import</code>, its
+    <code>--follow</code>, <code>fennec-server --follow</code>). A host off
+    this machine is spoken to under <code>sslmode=verify-full</code> unless
+    the connection string or <code>PGSSLMODE</code> names a mode: a server
+    whose <code>ssl</code> is off, or a certificate signed by a CA the client does not trust,
+    is refused, the error saying how to go on. Holding a password, the
+    client signs in by SCRAM-SHA-256 alone unless <code>require_auth</code>
+    says otherwise, bound to TLS where the server offers it. A SCRAM
+    iteration count under 4 096, a <code>%</code> not followed by two hex
+    digits and <code>connect_timeout=0</code> are refused
+    (<a href="import.html#tls">TLS</a>,
+    <a href="import.html#signing-in">Signing in</a>).</li>
+</ul>
+
 <h2>Upgrading</h2>
 
 <p>Upgrade every reader before any primary, and roll forward. For a cluster
