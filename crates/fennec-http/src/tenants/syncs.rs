@@ -88,7 +88,9 @@ impl Syncs {
             return;
         }
         q.waiting.push_back(t);
-        let free = q.threads - q.busy;
+        // A sync run here, where no thread could be made, counts as busy
+        // with no thread of its own: `busy` may pass `threads`.
+        let free = q.threads.saturating_sub(q.busy);
         if q.waiting.len() <= free || q.threads >= THREADS {
             drop(q);
             self.inner.ready.notify_one();
@@ -176,7 +178,9 @@ impl Inner {
             };
             let busy = Busy(&self);
             let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&t)));
-            drop(busy);
+            // Counted busy until the panic has asked for the stop: let go
+            // before, a shutdown waiting in `close` went on and could exit
+            // with code 0 before `stop` stored the failure.
             if let Err(p) = ran {
                 let words = crate::schedule::panic_words(p.as_ref());
                 match self.stop.get() {
@@ -190,6 +194,7 @@ impl Inner {
                     None => crate::log!("tenant `{}`'s sync panicked ({words})", t.name),
                 }
             }
+            drop(busy);
         }
     }
 }
