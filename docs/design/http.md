@@ -2602,7 +2602,8 @@ Windows a session's reads and writes ran under no timeout once it was done. An i
 held until its client left; a request silent past its time was answered
 when its bytes came (`a_requests_time_over_tls_runs_from_its_first_records_first_part`
 answered 200 at 7.5 s on `windows (http)`, three runs of three, where 408
-was owed at 5 s); `--write-timeout` and a stream's write timeout bounded none
+was owed at 5 s, and passed with the one handle: `windows (http)` green in
+#672's run 44896135886); `--write-timeout` and a stream's write timeout bounded none
 of the session's writes; and where Windows keeps the non-blocking mode a
 handle's too -- which `clone_probe`, below, says -- neither did the node's
 archive stream's (`write_or_hold`) nor the one a connection's end sends its
@@ -2640,8 +2641,13 @@ the platform's fact; `tests/dials.rs`'s
 timeouts against a server sending and reading nothing); fennec-tls's
 `what_is_set_through_the_socket_bounds_the_session` (Linux's and macOS's
 test jobs: no Windows job runs fennec-tls's own). On macOS, where a `dup`
-shares both, each passes before the change and after; Windows is told by
-CI's `windows (http)`, which runs fennec-http's.
+shares both, each timing passes before the change and after; Windows is
+told by CI's `windows (http)`, which runs fennec-http's. So the one handle
+is held on every platform by the handles' numbers, which a `dup` cannot
+share: fennec-tls's test compares `socket()`'s with `get_ref()`'s, a
+dial's and an accept's, and conn.rs's
+`a_tls_connections_socket_is_its_sessions_own_handle` a served
+connection's `Conn::socket` with its session's `get_ref`.
 
 *Counted.* `fennec_client_timeouts_total{reason}`, the router's
 `fennec_router_client_timeouts_total`, counts each connection so ended by

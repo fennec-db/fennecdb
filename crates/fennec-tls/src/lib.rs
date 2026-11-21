@@ -1426,11 +1426,29 @@ mod tests {
         assert_eq!(e.kind(), ErrorKind::UnexpectedEof);
     }
 
+    /// The handle the system knows a socket by, to tell the session's own
+    /// from a `dup` of it.
+    #[cfg(unix)]
+    fn handle(s: &TcpStream) -> u64 {
+        use std::os::fd::AsRawFd;
+        s.as_raw_fd() as u64
+    }
+
+    #[cfg(windows)]
+    fn handle(s: &TcpStream) -> u64 {
+        use std::os::windows::io::AsRawSocket;
+        s.as_raw_socket()
+    }
+
     /// A timeout and a mode set through [`TlsStream::socket`] bound a read
     /// through the session: the session's own handle, where a `dup`'s are
     /// its own on Windows and a read through the session waited with none.
     /// The peer sends nothing, and ends only once told or at 20 s, so a
-    /// read the timeout did not bound reads that end, not a timeout.
+    /// read the timeout did not bound reads that end, not a timeout. On
+    /// Linux and macOS a `dup` shares the socket's file description, and
+    /// the timings would pass over one: the handles' numbers, a dial's and
+    /// an accept's, tell it on every platform.
+    #[cfg(any(unix, windows))]
     #[test]
     fn what_is_set_through_the_socket_bounds_the_session() {
         let ca = ca("fennec test CA");
@@ -1440,12 +1458,14 @@ mod tests {
         let (done, wait) = mpsc::channel::<()>();
         let served = thread::spawn(move || {
             let (sock, _) = listener.accept().unwrap();
-            let _s = server.accept(sock).unwrap();
+            let s = server.accept(sock).unwrap();
             let _ = wait.recv_timeout(Duration::from_secs(20));
+            assert_eq!(handle(&s.socket()), handle(s.get_ref()), "an accept's");
         });
         let mut s = dial(&trusting(&ca), port, "localhost").unwrap();
         let within = Duration::from_millis(300);
         let sock = s.socket();
+        assert_eq!(handle(&sock), handle(s.get_ref()), "a dial's");
         sock.set_read_timeout(Some(within)).unwrap();
         let started = Instant::now();
         let e = s.read(&mut [0u8; 16]).unwrap_err();
