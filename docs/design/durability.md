@@ -362,13 +362,20 @@ nothing (`private` compiles to the plain open, `mode_like` to nothing);
 a secret's file is `owner_only`'s DACL ([windows.md](windows.md)).
 
 Measured: only a file's making changes. `private` is a flag on the open
-that makes the file; `mode_like` a `stat` and a `chmod` a replacement, a
-compact's or a checkpoint's against an image's writing; the lock's
+that makes the file; `create_private` adds an `fstat`, and `mode_like`
+two `stat`s to a replacement -- a compact's or a checkpoint's, against an
+image's writing -- and a `chmod` only where the modes differ; the lock's
 `mode_like` runs only for a lock file made, and the log's only for a log
 made. No request opens a file, and the perf gate's `file-open` makes
-none; its `file-compact` makes a side file an op, three system calls
-more (`create_private`'s `fstat`, `mode_like`'s `stat` and `chmod`)
-against writing 10 000 rows anew.
+none; its `file-compact` makes a side file an op. Counted natively on
+macOS (`proc_pid_rusage`'s instructions, the kernel's with the process's,
+which callgrind does not see), the op with the gate's 10 000 rows took
+10.34-10.43 million instructions before, four runs, and 10.40-10.42
+million after, inside that spread, its allocations the same (38 calls,
+1 086 121 bytes). A `chmod` on every compact, as `mode_like` first did,
+took it to 10.50-10.61 million: APFS journals the metadata write, some
+100 000 instructions, where the image of a database its owner's alone
+has its mode already.
 fennec-core's `files_are_made_their_owners_alone_and_keep_their_mode`,
 fennec-abi's `a_lock_file_is_made_its_owners_alone_or_as_its_database`,
 fennec-http's `tests/modes.rs` and fennec-cli's

@@ -356,7 +356,14 @@ pub fn mode_like(new: &Path, like: &Path) -> std::io::Result<()> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(e),
         };
-        std::fs::set_permissions(new, std::fs::Permissions::from_mode(mode))?;
+        // Set only where it differs. A `chmod` is a metadata write the
+        // file system journals: on APFS it cost each compact of the perf
+        // gate's 10 000 rows some 100 000 instructions of the kernel's,
+        // 1-2%, where a `stat` costs next to nothing, and a database its
+        // owner's alone -- the usual one -- has the image's mode already.
+        if std::fs::metadata(new)?.permissions().mode() & 0o777 != mode {
+            std::fs::set_permissions(new, std::fs::Permissions::from_mode(mode))?;
+        }
     }
     #[cfg(not(unix))]
     let _ = (new, like);
