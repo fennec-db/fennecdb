@@ -17037,7 +17037,9 @@ fn past_tombstones(
 /// ran on, which no record says: the copy tells at the primary's next
 /// write of the collection ([`Schema::read_written`]) or, before any, at
 /// its next alter here (a `create index`'s schema, whole, is held to the
-/// copy's layout as well).
+/// copy's layout as well). Where no field followed a place taken out, it
+/// was last in every document, which a write leaves out: the writes agree
+/// and read alike, and the next alter alone tells.
 fn keeps_places(before: &Schema, ch: &FieldChange) -> bool {
     let (was, now) = (&before.dropped, &ch.schema.dropped);
     match ch.op {

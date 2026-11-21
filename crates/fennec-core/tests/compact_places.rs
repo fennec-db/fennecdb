@@ -566,6 +566,46 @@ fn a_copy_refuses_a_write_made_by_other_places_than_it_holds() {
     }
 }
 
+/// Where the place one side's 0.2.0 compact took out was last in every
+/// document -- no field after the dropped one -- a write leaves it out on
+/// both sides: the primary's writes read alike on the copy, which applies
+/// them, and its next alter of the collection, whose schema holds other
+/// dropped places than the copy's, is what the copy refuses by name.
+#[test]
+fn a_copy_tells_a_last_place_taken_out_at_the_primarys_next_alter() {
+    let stripped: &[&str] = &["create collection x (a int, c int)"];
+    let kept: &[&str] = &[
+        "create collection x (a int, c int, d int)",
+        "alter collection x drop field d",
+    ];
+    for (primary_sql, copy_sql) in [(stripped, kept), (kept, stripped)] {
+        let sink = Records::default();
+        let mut primary = Database::with_sink(Box::new(sink.clone()));
+        let mut copy = Database::new();
+        for (db, sql) in [(&mut primary, primary_sql), (&mut copy, copy_sql)] {
+            for s in sql {
+                ok(db, s);
+            }
+        }
+        let from = primary.change_seq();
+        ok(&mut primary, "put x {a: 10, c: 30}");
+        for r in sink.after(from) {
+            copy.apply(&r).unwrap();
+        }
+        let read = "get x select a, c";
+        assert_eq!(
+            rows_of(&copy, read).unwrap(),
+            rows_of(&primary, read).unwrap()
+        );
+        let from = primary.change_seq();
+        ok(&mut primary, "alter collection x add field e int");
+        match copy.apply(sink.after(from).last().unwrap()) {
+            Err(Error::Corrupt(m)) => assert!(m.contains("moved the fields of `x`"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
 /// A read past a dropped place -- a filter's fields, an aggregate's and its
 /// group keys, a sort's keys and a computed column's, which pass a dropped
 /// place's `null` by its byte, and a plain `get` written as JSON -- reads

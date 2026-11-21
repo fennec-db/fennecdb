@@ -243,13 +243,30 @@ before anything reads it: "the primary's writes moved the fields of `x`:
 refused alike: it carries the schema after it (record kind 12), whose
 dropped places the copy holds to its own, the same or one more for a drop
 (`keeps_places`); a `create index` carries the whole schema, held to the
-copy's layout as it was. A server's follower takes an image of its primary
+copy's layout as it was. Where no field followed the dropped one, its
+place was last in every document, which a write leaves out: the primary's
+writes after its compact hold what the copy's would, read alike on both,
+and the copy tells at the primary's next alter or `create index` of the
+collection instead. A server's follower takes an image of its primary
 on a write it cannot apply, and holds what the primary holds from there,
 so no value read a field off reaches a copy's file. The check is the end
 of the read `apply` makes of every write already, and costs the copy a
 comparison a write; a check at the compact itself would need the compact
 to say so in the feed, a record kind, which a format change and an older
 copy's refusal would bring, for a window 1.0 closes.
+
+*A 0.2.0 copy.* The other way round -- a 1.x primary, a 0.2.0 copy, as a
+`--dir` node upgraded first leaves its tenants' standbys on the node not
+yet upgraded -- a field dropped on the primary keeps its place, and the
+copy's own compact takes it out of the copy's documents: it reads every
+later write of the collection a field late, with nothing to check it, and
+a failover makes those values the tenant's. The primary cannot tell the
+copy's release to refuse the drop: a copy's request names only where it
+stands (`since`, `history`, `sums`, `image`, `archive`, `reader`) with its
+token, and the hello is the primary's; both are the same in 0.2.0 and 1.x.
+The compatibility contract's rule is to drop no field until every node and
+every copy runs 1.x, or to run each 0.2.0 copy with `--auto-compact off`
+until it does.
 
 An archive does not tell: it keeps the stream's bytes, and a restore is an
 image and the writes after it opened (`Archive::restore`, `fs::open`),
@@ -259,7 +276,7 @@ field`, one value short, as every image has. A restore from an image
 taken before a 0.2.0 primary's stripping compact, to a moment after it,
 reads the writes after it a field early, as every image the archiver
 takes from there does. What an operator does is the compatibility
-contract's ([compatibility.md](compatibility.md#a-020-primary-and-a-compact)).
+contract's ([compatibility.md](compatibility.md#a-020-node-and-a-compact)).
 `tests/replication.rs`'
 `a_copy_of_a_primary_that_took_the_places_out_is_seeded_again_at_its_next_write`
 holds a follower of a stripped primary seeded again at the write, and

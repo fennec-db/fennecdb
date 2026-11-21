@@ -386,7 +386,15 @@ place again, where the strip wrote every document again. The first after
 an open walks every document of a collection holding a dropped place, a
 value at a time as far as its last one, copying nothing where it finds
 only `null`s (`schema::reclaims`); building the copy to compare took that
-compact to +47%; walked, +25%, with no lock held beside the database.
+compact to +47%; walked, +25%. Beside the database the walk holds no
+lock: the server's compaction and the native library's `Compactor`, and a
+`compact` a server or the native library is sent alone
+(`Database::maintain`). The shell's `compact`, and `Database::compact`
+wherever a program calls it, walks under the write lock. The browser
+module has no walk: its compact, under the lock, builds every document of
+such a collection again as the reclaim would leave it (`schema::reclaim`
+in `Store::compacted`), kept where it changed, once after a drop or an
+open.
 The store notes the places it reclaimed, so the compacts
 after it walk nothing; an open forgets them, the note being in no file.
 
