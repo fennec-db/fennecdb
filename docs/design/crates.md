@@ -655,33 +655,64 @@ body's pieces read one at a time where a vector of them was 2 MiB), and
 `Schema::new` looks a name up in a set. A row is then a value a column, 32
 bytes each, at most 1 MiB of them, its texts and blobs within its payload
 and its defaults within the `CREATE TABLE` text, each at most the file's
-length. And a batch is put once it holds `BATCH_BYTES`, 16 MiB, of its
-rows (`load::fields_bytes` once a plan, each field's name and the pair
-that holds it, and each value's bytes past its own size added as the
-row's document is built, `load::built`), or `--batch` rows, whichever
-comes first: 16 MiB is the most the engine holds of an open block before
-it spills it into the file (`SPILL_AT`), and a batch is one `put`, one
-block, which the engine holds again as its documents, and as their
-frames twice until the block lands -- in its record and in the store,
-each less than the batch -- beside the frames the store holds since its
-file was opened, up to `HANDOVER_AT` (16 MB): an import holds under
-five times `BATCH_BYTES` beside the row it reads, whatever its source
-declares. Rows under 8 KiB each, 2 000 of them, never reach it, so
-`--batch` alone decides for them, as before. The count is what bounding by
-bytes costs, and it is counted after a value is adapted to its field,
-since a text read into a `json` field or a vector holds more than it did
-as read: some 75 instructions a row, 0.66% of a million-row import of an
-id and three small columns (11.269 billion instructions against 11.343,
-four runs each in turn, macOS's `time -l`; 0.64 s of CPU against 0.65 s in
-ten pairs), the narrowest rows the most. Counted in a pass of its own over
-the row's values as read, or over its built document, it cost the same
-within the noise (11.357 billion); a source's own count of what it read --
-a SQLite record's length, its absent columns' defaults summed once a table
--- would cost less, and miss what adapting a value adds. A file of 128 KiB
-whose 2 000 three-byte rows read 46 KB each -- 199 columns named `""` with
-a default of 150 bytes -- held 339 MB at once in `load::run` before
+length: as it is read a row holds its payload and its values, about twice
+the file at most, more where a text is not UTF-8, each such byte U+FFFD's
+three. And a batch is put once it holds `BATCH_BYTES`, 16 MiB, of its
+rows, or `--batch` rows, whichever comes first: 16 MiB is the most the
+engine holds of an open block before it spills it into the file
+(`SPILL_AT`), and a batch is one `put`, one block, which the engine holds
+again as its documents, and as their frames twice until the block lands
+-- in its record and in the store, each less than the batch -- beside the
+frames the store holds since its file was opened, up to `HANDOVER_AT` (16
+MB). A batch holds under `BATCH_BYTES` and the row that reached it, which
+the engine copies with the rest, so an import holds about five times
+`BATCH_BYTES` and its largest row at most, whatever its source declares.
+Rows under 8 KiB each, 2 000 of them, never reach it, so `--batch` alone
+decides for them, as before. A file of 128 KiB whose 2 000 three-byte rows
+read 46 KB each -- 199 columns named `""` with a default of 150 bytes --
+held 339 MB at once in `load::run` before
 (`an_import_holds_a_batch_by_its_bytes_not_its_rows`, counted as above),
 and 74 MB now, under five times `BATCH_BYTES`.
+
+*A row is counted once, from sizes known before its values are looked
+at.* A row's count is its fields' pairs and names, once a plan
+(`load::fields_bytes`), and what its source read (`Source::next_counted`): a
+SQLite row its record's length, which holds its texts and blobs, what
+decoding a text made it grow by (`decode_text`: bytes that are not UTF-8
+become U+FFFD's three each, a UTF-16 unit up to three bytes, added as the
+text is made, where valid UTF-8 is copied as it is), and the defaults of
+the columns it lacks, summed once a table (`Table::absent`), each copy its
+default's length; a PostgreSQL row and a change of `--follow` their
+values counted one by one (`load::values_bytes`), since a cell's text a
+`jsonb`, an array or a vector may make more of. Adapting a value to its
+field makes one larger than it was read: a number made text, up to 20
+bytes as an integer and 327 as a float, which Rust writes digit by digit
+(`-5e-324` is `-0.` and 324 decimals), added by the capacity it got where
+`adapt` allocates it (`load::built`) -- counted as the most a field could
+make, each text field of a narrow row would count 327 bytes on every row.
+A text read into a `json` field is passed on as text and kept so by the
+engine, and bytes made a vector are as many bytes, so nothing else grows.
+So a row holds nothing past its count but the allocator's rounding, and a
+batch, put once its count reaches `BATCH_BYTES`, holds under it and the
+row that reached it. The second round counted each value as its document
+was built, on the premise that adapting a value -- a text read into a
+`json` field, bytes made a vector -- makes it larger, which neither does:
+some 75 instructions a row, 0.66% of a million-row import of an id and
+three small columns (11.269 billion instructions against 11.343, four
+runs each in turn, macOS's `time -l`), the narrowest rows the most.
+Counted once a row, the same import, each build under six re-signed
+UUIDs and run three times each ([benchmarks.md](benchmarks.md#instruction-counts),
+the mean of the copies' medians, standard errors 1.8 to 4.6 million),
+retires 10.474 billion instructions, the same tree with the count taken
+out 10.450, the second round 10.511 and `train-d` 10.603: the count is
+some 24 instructions a row (two standard errors 12), where the second
+round's was some 60, and the branch retires 1.2% fewer than `train-d`:
+the first round's walk, which reads its pages into one buffer where it
+allocated one a page, took 175 a row off (`e7d6b6e7`, 10.427), and the
+later rounds' reader, the count aside -- a lacking column's default read
+for it, a text's decoding growth carried -- put 23 back. The count asked
+for in a call of its own after the row (`row_bytes`) measured the same,
+26 a row; it comes with its row (`Source::next_counted`).
 
 *A table's columns are read where SQLite puts them.* A record holds a
 value a column by position, so a column the reader misplaced took its
@@ -763,15 +794,25 @@ file a symbolic link leads to, its VFS resolving the database's path
 (`unixFullPathname`) -- looked for beside the link, a hot journal beside
 the file it leads to was missed and the file read torn
 (`a_hot_journal_beside_a_linked_files_target_is_refused`); on Windows
-beside the path as named, as its VFS keeps them. Each is looked at before
-it is opened, and one that is no file -- a FIFO, a device, a socket, a
-directory -- is refused by its kind, where a FIFO named `-journal` held
-the import in its open for ever, waiting for a writer
+beside the path as named, as its VFS keeps them. The path is resolved once
+an import (`resolved`), and the file read is opened by it as its side
+files are looked for beside it: resolved to look and opened by the path
+as given, a link moved between the two had its side files checked for
+another file than the one read. Each is looked at before it is opened,
+and one that is no file -- a FIFO, a device, a socket, a directory -- is
+refused by its kind, where a FIFO named `-journal` held the import in its
+open for ever, waiting for a writer
 (`a_side_file_that_is_no_file_is_refused_not_waited_on`, its wait bounded:
-before, it met its 60 s bound). A side file swapped for a FIFO between the
-look and the open is still waited on: who can do that can make the
-database file one. A non-empty journal that cannot be read is refused,
-where it was taken as not hot.
+before, it met its 60 s bound). The journal, the side file read, is opened
+with `O_NONBLOCK` -- each target's number, as fennec-server's hand-over
+takes its flags, none where it was not read -- and refused again by the
+kind of what was opened (`side_opened`, `fstat`): a FIFO swapped in
+between the look and the open, by whoever writes the directory, is
+opened without waiting for a writer and refused, where `File::open`
+waited on it (`a_side_file_swapped_for_a_fifo_is_refused_not_waited_on`,
+which calls the open itself: opened as before, it met its 60 s bound). A
+non-empty journal that cannot be read is refused, where it was taken as
+not hot.
 
 *A file's text reaches a terminal escaped.* A table's or a column's name
 and a default's text are the file writer's, and the summary's warning

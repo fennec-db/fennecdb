@@ -127,13 +127,22 @@ twice, cells that overlap, an overflow chain longer than its row. Reading
 the file holds a page and a row in memory at a time, whatever lengths it
 declares: a row is a value for each of its table's columns, 32 767 at most,
 which may read far larger than it is stored — a column it lacks reads as its
-default — so a batch is written once its rows hold 16 MiB, each value
-counted as its field will hold it, before <code>--batch</code> rows where
-rows are large. What an import holds at
-once is that batch and what the database makes of it while writing it —
-under five times 16 MiB — beside the row being read: some 1 MiB of values
-for the widest table, and its texts, blobs and defaults, each no longer than
-the file.</p>
+default — so a batch is written once its rows hold 16 MiB, before
+<code>--batch</code> rows where rows are large. A row is at most about twice
+the file's length as it is read (its stored bytes, no longer than the file,
+and its values: its texts and blobs, and its defaults, no longer than the
+<code>CREATE TABLE</code> text), more where a text is not UTF-8, each such
+byte read as the three of U+FFFD. What an import holds at once is at most about
+five times 16 MiB and its largest row together: a batch, the row that
+filled it, and what the database makes of them while writing them.</p>
+
+<p>What an import writes, and the time it takes, is the rows times what each
+holds as SQLite reads it, a column it lacks its default, as SQLite returns
+it to every query: a file of about 2 MB whose table gained a column with a
+default of 1 MiB after its 150 000 rows of one byte were written imports
+150 000 copies of the default, some 157 GB. That is the table SQLite
+holds, and the file's length does not bound it: <code>--limit</code> takes
+fewer rows.</p>
 
 <p><b>PostgreSQL.</b> It connects to the live server and streams
 <code>COPY ... TO STDOUT</code> — no <code>psql</code>, no

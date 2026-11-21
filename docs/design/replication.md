@@ -863,7 +863,15 @@ finished: a copy cut short is made again rather than streamed on top of,
 which would lose the rows it never reached. An update arrives without its
 TOASTed columns -- a `vector(768)` is 3 KB, past the threshold -- so the
 follower takes them from its pending writes or the collection; flushing
-before each such read cost the batching, 5 900 rows/s against 17 100. Commit
+before each such read cost the batching, 5 900 rows/s against 17 100. The
+pending writes are put at `--batch` changes or once their rows hold
+`BATCH_BYTES`, 16 MiB, counted as a copy's batch is
+([crates.md](crates.md#a-sqlite-files-lengths)), each document moved into
+its statement: put at `--batch` changes alone and copied into the
+statement beside the pending ones, a transaction of a 4 MiB row and 2 000
+of 28 KiB held 377 MB at once, and holds 97 MB now, under five times
+`BATCH_BYTES` and its largest row
+(`a_follower_holds_its_writes_by_their_bytes_not_their_count`). Commit
 to visible: p50 0.16 ms (`make follow-bench`). `fennec-server --follow` runs the
 same follower on a thread of the server's, over the database it serves, so
 the mirror is served over HTTP and subscriptions with no second process

@@ -45,13 +45,18 @@ overflow chain's -- to the file's pages and reached once by any path
 read as it is yielded, so a walk holds a page and a row; a page's usable
 part to SQLite's 480 bytes (`MIN_USABLE`); a table to SQLite's 32 767
 columns (`MAX_COLUMNS`), since a row holds a value a declared column; and
-an import's batch to `BATCH_BYTES`, a value counted once adapted to its
-field, as well as `--batch` rows (`load::run`), since a row may read far larger than it is stored. A
-table's columns are read where SQLite puts them -- comments spaces, a
+a copy's batch and a follower's pending writes to `BATCH_BYTES` as well
+as `--batch` rows (`load::run`, `follow::Mirror`), since a row may read
+far larger than it is stored, a row counted once from sizes known before
+its values are looked at (`Source::next_counted`: a SQLite row its record's
+length and the defaults it lacks) and a number its field makes text as
+it is made (`adapt`), never value by value where the source knows them.
+A table's columns are read where SQLite puts them -- comments spaces, a
 VIRTUAL generated column in no record and named in the summary
 (`Source::left_out`), `""` kept as `column<N>`, a lacking column its
 default as `valueFromExpr` reads it or refused (`default_of`) -- and a
 file beside a non-empty `-wal` or a hot `-journal`, looked for beside the
-file a link leads to, or one that is no file, is refused
-(`check_side_files`). The file's text reaches a terminal escaped
-(`shown`).
+file a link leads to and opened by that one path (`resolved`), or one
+that is no file, is refused (`check_side_files`), the journal opened
+never to wait on a FIFO (`side_opened`). The file's text reaches a
+terminal escaped (`shown`).
