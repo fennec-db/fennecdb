@@ -405,9 +405,14 @@ def archive_checks():
     # "-" lets pass -- to a directory there before the run: the run fails,
     # where copying around it wrote a success for a copy that left a tenant
     # out, and FennecArchiveSyncStale never fired.
-    dropin = "/etc/systemd/system/fennec-archive-sync@eu-a.service.d/no-chmod.conf"
+    # The instance's own drop-in directory, which nothing else makes (the
+    # kit's is the template's, fennec-archive-sync@.service.d): made here
+    # and removed with the drop-in.
+    dropins = "/etc/systemd/system/fennec-archive-sync@eu-a.service.d"
+    dropin = f"{dropins}/no-chmod.conf"
     unread = "/var/lib/fennecdb/archive/eu-a/unread"
     sh("m2", f"install -d -o fennec-archive -g fennec-archive -m 0700 {unread} && "
+             f"mkdir -p {dropins} && "
              f"printf '[Service]\\nExecStartPre=\\nExecStartPre=/usr/bin/touch %%S/fennecdb/sync/%%i/began\\n' > {dropin} && "
              "systemctl daemon-reload")
     sh("m2", "systemctl start fennec-archive-sync@eu-a.service", check_=False)
@@ -415,7 +420,7 @@ def archive_checks():
     j = journal("m2", "fennec-archive-sync@eu-a.service")
     check(skipped != "success" and "older than this run" in j and "unread" in j,
           f"a run whose chmod never ran: {skipped}\n{j[-2000:]}")
-    sh("m2", f"rm {dropin} && rmdir {unread} && systemctl daemon-reload")
+    sh("m2", f"rm {dropin} && rmdir {dropins} {unread} && systemctl daemon-reload")
 
     # A disk replaced: the archiver begins a new archive at once, the
     # bucket holding the old one. The first copy is refused, and the bucket
