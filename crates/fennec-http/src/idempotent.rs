@@ -49,6 +49,10 @@ pub struct Key {
     /// lookup is handed it and copies nothing.
     name: Value,
     request: i64,
+    /// Whether the last look for the key ([`answered`]) found no row: read
+    /// by [`keep`] under the write lock that looked, every path asking
+    /// [`replay`] under the lock it then keeps the key in.
+    absent: std::cell::Cell<bool>,
 }
 
 /// The first byte of a key the server's own token sent.
@@ -121,6 +125,7 @@ pub fn key(req: &Request, who: &Who) -> std::result::Result<Option<Key>, Respons
     name.extend_from_slice(given.as_bytes());
     Ok(Some(Key {
         name: Value::Bytes(name),
+        absent: std::cell::Cell::new(false),
         request: fnv(&[
             req.method.name().as_bytes(),
             req.target.as_bytes(),
@@ -174,7 +179,6 @@ const PUT: usize = 2;
 /// key was bytes ([`key`]) -- `key text`, whose keys no request names now
 /// -- is made again, the keys it held a day's retries at most.
 fn ensure(db: &mut Database, ttl_ms: i64) -> fennec_core::error::Result<()> {
-    let ttl = fennec_core::schema::ttl_text(ttl_ms.max(1) as u64);
     let at = db.collection(KEYS).ok().map(|c| {
         let bytes = c
             .schema
@@ -185,8 +189,15 @@ fn ensure(db: &mut Database, ttl_ms: i64) -> fennec_core::error::Result<()> {
             .filter(|_| bytes)
             .map(|f| (f.ty == DataType::Timestamp, f.index.ttl()))
     });
+    if let Some(Some((true, Some(t)))) = at {
+        if t == ttl_ms.max(1) as u64 {
+            return Ok(());
+        }
+    }
+    // Written only where the collection is made or moved: written at each
+    // keyed write, it was a `format!` a write.
+    let ttl = fennec_core::schema::ttl_text(ttl_ms.max(1) as u64);
     let sql = match at {
-        Some(Some((true, Some(t)))) if t == ttl_ms.max(1) as u64 => return Ok(()),
         Some(Some((true, Some(_)))) => {
             format!("alter collection {KEYS} alter field at @ttl({ttl})")
         }
@@ -294,12 +305,14 @@ pub fn replay(db: &Database, key: &Key, ttl_ms: i64, durable: bool) -> Option<Re
 
 /// The answer kept for `key`, as it was sent.
 fn answered(db: &Database, key: &Key, ttl_ms: i64) -> Option<Response> {
+    key.absent.set(false);
     db.collection(KEYS).ok()?;
     let fennec_core::query::Response::Rows(rs) =
         db.query(stmt(GET), std::slice::from_ref(&key.name)).ok()?
     else {
         return None;
     };
+    key.absent.set(rs.rows.is_empty());
     let row = rs.rows.first()?;
     let [Value::Int(request), Value::Int(status), Value::Text(body), Value::Timestamp(at)] =
         row.values.as_slice()
@@ -357,8 +370,11 @@ pub fn keep(
     ];
     // A key sent again after its time is a new request: the row of the
     // first, if a read still finds it, is written over; one past the
-    // expiry is the sweeper's.
-    if !fresh {
+    // expiry is the sweeper's. One the look under this lock found no row
+    // for has none to write over: its `del`, run at every keyed write,
+    // was a lookup and a statement a write for nothing -- the work that
+    // pays for a caller's 16 bytes in the key ([`key`]).
+    if !fresh && !key.absent.get() {
         db.execute_with(stmt(DEL), &row[..1])?;
     }
     db.execute_with(stmt(PUT), &row)?;
