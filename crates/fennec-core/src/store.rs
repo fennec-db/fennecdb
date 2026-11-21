@@ -2121,7 +2121,11 @@ mod tests {
         // nothing to reclaim.
         let mut reclaimed = Vec::new();
         let before = st.raw(1).unwrap().unwrap();
-        assert!(crate::schema::reclaim(&later.dropped, before, &mut reclaimed));
+        assert!(crate::schema::reclaim(
+            &later.dropped,
+            before,
+            &mut reclaimed
+        ));
         // `a` alone: the dropped place ended the payload.
         assert_eq!(reclaimed, before[..3]);
         assert_eq!(
@@ -2129,7 +2133,11 @@ mod tests {
             later.read_doc(1, before).unwrap()
         );
         let mut nothing = Vec::new();
-        assert!(!crate::schema::reclaim(&later.dropped, &payload, &mut nothing));
+        assert!(!crate::schema::reclaim(
+            &later.dropped,
+            &payload,
+            &mut nothing
+        ));
         assert!(nothing.is_empty());
         let compacted = st.compacted().unwrap();
         assert_eq!(compacted.raw(1).unwrap().unwrap(), reclaimed);

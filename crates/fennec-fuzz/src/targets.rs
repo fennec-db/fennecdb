@@ -649,7 +649,11 @@ fn codec(data: &[u8]) {
                 let again = schema.read_doc(1, &reclaimed);
                 assert_eq!(again.as_ref().ok(), Some(doc), "reclaimed, read otherwise");
             }
-            assert!(!fennec_core::schema::reclaim(&schema.dropped, &reclaimed, &mut Vec::new()));
+            assert!(!fennec_core::schema::reclaim(
+                &schema.dropped,
+                &reclaimed,
+                &mut Vec::new()
+            ));
         }
     }
 }

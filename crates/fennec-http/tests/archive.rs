@@ -257,10 +257,7 @@ fn a_restore_across_a_compact_reads_the_writes_after_it_as_the_primary_did() {
     p.exec("put x {a: 10, c: 30, d: 40}");
     let xs = "get x select a, c, d order id";
     let want = rows(&p.db.read().unwrap(), xs);
-    assert_eq!(
-        want[1].1,
-        [Value::Int(10), Value::Int(30), Value::Int(40)]
-    );
+    assert_eq!(want[1].1, [Value::Int(10), Value::Int(30), Value::Int(40)]);
     archived(&arch, p.seq());
     // The image from before the compact alone, and the writes after it.
     assert_eq!(files(&arch, "image-"), 1);

@@ -1450,7 +1450,11 @@ mod tests {
                 }
             };
             assert_eq!(graph(&db), stood, "beside: {beside}");
-            assert_eq!(db.collection("g").expect("g").store.len(), 3, "beside: {beside}");
+            assert_eq!(
+                db.collection("g").expect("g").store.len(),
+                3,
+                "beside: {beside}"
+            );
         }
     }
 }

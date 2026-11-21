@@ -249,7 +249,10 @@ fn main() {
             let dir = scratch(&mode);
             let path = dir.join("compact.fennec");
             let mut db = fennec_core::fs::open(&path).unwrap();
-            run(&mut db, "create collection t (n int, k text @hash, body text)");
+            run(
+                &mut db,
+                "create collection t (n int, k text @hash, body text)",
+            );
             let put = stmt("put t {id: $1, n: $2, k: $3, body: $4}");
             for id in 1..=10_000i64 {
                 let params = [

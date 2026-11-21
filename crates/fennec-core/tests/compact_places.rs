@@ -302,7 +302,10 @@ fn a_hosts_compaction_runs_once_past_a_document_it_cannot_read() {
     // Opened again: dead records once more, and the native library's
     // thread compacts them, once.
     let db = Arc::new(RwLock::new(fennec_core::fs::open(&path).unwrap()));
-    ok(&mut db.write().unwrap(), "put x {id: 2, a: 10, c: 30, d: 40}");
+    ok(
+        &mut db.write().unwrap(),
+        "put x {id: 2, a: 10, c: 30, d: 40}",
+    );
     assert!(db.read().unwrap().compact_due(&policy()));
     let compactor = Compactor::start_every(&db, policy(), Duration::from_millis(5)).unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -400,7 +403,10 @@ fn a_file_with_dropped_places_keeps_them_through_a_compact() {
     let mut db = Database::with_sink(Box::new(sink.clone()));
     ok(&mut db, "create collection x (a int, b text, c int, d int)");
     ok(&mut db, "create collection y (a int, z text)");
-    ok(&mut db, "put x {a: 1, b: 'a long dropped value', c: 3, d: 4}");
+    ok(
+        &mut db,
+        "put x {a: 1, b: 'a long dropped value', c: 3, d: 4}",
+    );
     ok(&mut db, "put y {a: 1, z: 'gone at the end'}");
     ok(&mut db, "alter collection x drop field b");
     ok(&mut db, "alter collection y drop field z");
@@ -451,7 +457,10 @@ fn a_copy_refuses_an_alter_of_a_primary_that_took_the_places_out() {
     ok(&mut primary, "create collection x (a int, c int, d int)");
     // The copy as it stood before: `b` dropped, its place kept.
     let mut copy = Database::new();
-    ok(&mut copy, "create collection x (a int, b int, c int, d int)");
+    ok(
+        &mut copy,
+        "create collection x (a int, b int, c int, d int)",
+    );
     ok(&mut copy, "alter collection x drop field b");
     assert_eq!(
         primary.collection("x").unwrap().id,
@@ -478,7 +487,10 @@ fn a_copy_refuses_an_alter_of_a_primary_that_took_the_places_out() {
     // A primary keeping its places is followed alter by alter.
     let sink = Records::default();
     let mut primary = Database::with_sink(Box::new(sink.clone()));
-    ok(&mut primary, "create collection x (a int, b int, c int, d int)");
+    ok(
+        &mut primary,
+        "create collection x (a int, b int, c int, d int)",
+    );
     ok(&mut primary, "alter collection x drop field b");
     ok(&mut primary, "compact");
     let from = primary.change_seq();
@@ -600,8 +612,10 @@ fn a_collection_takes_no_place_past_its_bound() {
     let text = format!("create collection v ({})", wide.join(", "));
     match fennec_ql::parse_one(&text).map(|s| db.execute(&s)) {
         Err(e) | Ok(Err(e)) => assert!(
-            e.to_string()
-                .contains(&format!("declares {} fields, and a collection holds {max} at most", max + 1)),
+            e.to_string().contains(&format!(
+                "declares {} fields, and a collection holds {max} at most",
+                max + 1
+            )),
             "{e}"
         ),
         Ok(Ok(r)) => panic!("{r:?}"),

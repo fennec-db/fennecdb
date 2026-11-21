@@ -249,26 +249,29 @@ fn a_standby_reads_the_writes_after_a_compact_and_after_its_failover_as_written(
     ok(port, "compact");
     ok(port, "put x {a: 1000, c: 3000, d: 4000}");
     let now = ok(port, xs);
-    let (one, two) = (r#""a":100,"c":300,"d":400"#, r#""a":1000,"c":3000,"d":4000"#);
+    let (one, two) = (
+        r#""a":100,"c":300,"d":400"#,
+        r#""a":1000,"c":3000,"d":4000"#,
+    );
     assert!(now.contains(one) && now.contains(two), "{now}");
     // Its file read on its own holds the same.
     let file = std::fs::read(n2.dir.join("acme.fennec")).unwrap();
     let mut db = fennec_core::prelude::Database::new();
     db.load(&file).unwrap();
-    let r = db
-        .query(&fennec_ql::parse_one(xs).unwrap(), &[])
-        .unwrap();
-    let held: Vec<Vec<fennec_core::prelude::Value>> =
-        r.rows().unwrap().rows.iter().map(|r| r.values.clone()).collect();
+    let r = db.query(&fennec_ql::parse_one(xs).unwrap(), &[]).unwrap();
+    let held: Vec<Vec<fennec_core::prelude::Value>> = r
+        .rows()
+        .unwrap()
+        .rows
+        .iter()
+        .map(|r| r.values.clone())
+        .collect();
     assert_eq!(held.len(), 4);
     assert_eq!(
         held[3],
         [1000, 3000, 4000].map(fennec_core::prelude::Value::Int)
     );
-    assert_eq!(
-        held[1],
-        [10, 30, 40].map(fennec_core::prelude::Value::Int)
-    );
+    assert_eq!(held[1], [10, 30, 40].map(fennec_core::prelude::Value::Int));
     drop(n1);
     drop(n2);
 }
