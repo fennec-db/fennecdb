@@ -25,7 +25,7 @@
 //! `reproduce` exits 65 where the recipe makes no input of its hash.
 
 use fennec_fuzz::targets::TARGETS;
-use fennec_fuzz::{Options, Outcome};
+use fennec_fuzz::{Outcome, USAGE};
 use std::os::raw::c_void;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -72,11 +72,6 @@ pub unsafe extern "C" fn getrandom(buf: *mut c_void, len: usize, _flags: u32) ->
     len as isize
 }
 
-const USAGE: &str = "usage: fennec-fuzz list | names | run <target> [--seconds N] [--runs N] \
-    [--smoke] [--seed N] [--corpus DIR|none] [--crashes DIR] [--timeout-ms N] [--max-alloc-mb N] [--quiet] \
-    [--private] | replay <target> <file>... | reproduce <target> --seed N --start HASH \
-    [--corpus DIR] --run N --fnv HASH --kept RUNS [--out FILE]";
-
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
@@ -121,61 +116,13 @@ fn run(args: &[String]) -> ExitCode {
         Ok(t) => t,
         Err(code) => return code,
     };
-    let root = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/fuzz"));
-    let mut opts = Options {
-        seconds: None,
-        runs: None,
-        seed: 1,
-        corpus: Some(root.join("corpus").join(t.name)),
-        crashes: root.join("crashes"),
-        // Wall time: a loop that never ends is caught at any bound, and at
-        // 10 s a machine at a load of 40 took 8 000 numbers of 1e255, 2.5 s
-        // of a quiet one's under ASan, for a hang.
-        timeout: Duration::from_secs(30),
-        cap: None,
-        max_alloc: 2048 << 20,
-        quiet: false,
-        private: false,
-    };
-    let mut it = args[1..].iter();
-    while let Some(flag) = it.next() {
-        let mut value = || {
-            it.next().cloned().unwrap_or_else(|| {
-                eprintln!("fennec-fuzz: {flag} takes a value\n{USAGE}");
-                std::process::exit(64)
-            })
-        };
-        let number = |v: String| -> u64 {
-            v.parse().unwrap_or_else(|_| {
-                eprintln!("fennec-fuzz: {flag} takes a number, not `{v}`");
-                std::process::exit(64)
-            })
-        };
-        match flag.as_str() {
-            "--seconds" => opts.seconds = Some(number(value())),
-            "--runs" => opts.runs = Some(number(value())),
-            "--smoke" => {
-                opts.runs = Some(t.smoke);
-                opts.cap = Some(fennec_fuzz::SMOKE_CAP);
-            }
-            "--seed" => opts.seed = number(value()),
-            "--corpus" => {
-                opts.corpus = match value() {
-                    v if v == "none" => None,
-                    v => Some(PathBuf::from(v)),
-                }
-            }
-            "--crashes" => opts.crashes = PathBuf::from(value()),
-            "--timeout-ms" => opts.timeout = Duration::from_millis(number(value())),
-            "--max-alloc-mb" => opts.max_alloc = (number(value()) as usize).saturating_mul(1 << 20),
-            "--quiet" => opts.quiet = true,
-            "--private" => opts.private = true,
-            other => {
-                eprintln!("fennec-fuzz: unknown flag `{other}`\n{USAGE}");
-                return ExitCode::from(64);
-            }
+    let opts = match fennec_fuzz::run_options(t, &args[1..]) {
+        Ok(opts) => opts,
+        Err(why) => {
+            eprintln!("fennec-fuzz: {why}");
+            return ExitCode::from(64);
         }
-    }
+    };
     match fennec_fuzz::fuzz(t, opts) {
         Outcome::Clean { .. } => ExitCode::SUCCESS,
         Outcome::Panicked { .. } => ExitCode::from(1),

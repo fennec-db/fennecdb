@@ -17,14 +17,15 @@ and removed only in 2.0. 0.x releases promise nothing.</p>
 <table>
 <thead><tr><th>Surface</th><th>What holds</th><th>Checked by</th></tr></thead>
 <tbody>
-<tr><td>The file</td><td>1.x opens every file written from v0.2.0 on, and a file a 1.x wrote opens in every later 1.x. Record kinds 1 to 14 and type tags 0 to 18 keep their meaning; a new one takes the next number (<a href="file-format.html">File format</a>).</td><td>Fixture files opened by every later build (a change that rewrites one says why in its pull request); the power-cut runs on Linux and Windows. A directory per release is still to come.</td></tr>
+<tr><td>The file</td><td>1.x opens every file written from v0.2.0 on, and a file a 1.x wrote opens in every later 1.x, but for four values and types v0.2.0 took that no write makes any more (<a href="#not-read-whole">below</a>). Record kinds 1 to 14 and type tags 0 to 18 keep their meaning; a new one takes the next number (<a href="file-format.html">File format</a>).</td><td>Fixture files opened by every later build (a change that rewrites one says why in its pull request); the power-cut runs on Linux and Windows; the four exceptions refused in tests, two of them written by v0.2.0's own server in the weekly run below. A directory per release is still to come.</td></tr>
 <tr><td>FennecQL</td><td>No text that parsed reads as another statement, and none a 1.x release read is refused by a later 1.x. A stored statement keeps its meaning, so the grammar epoch stays 4.</td><td>Every pull request: each text the repository and main hold, and a list of every kind of statement, read as main reads it; and the 8 845 texts of v0.2.0's corpus as v0.2.0's own parser read them, with each later release's corpus kept beside it (<code>make fennecql-corpus</code>). A statement a named statement may hold is compared by the digest a stored statement is held to; a schema change, a listing or a <code>call</code> by the tree it reads as, a field that holds nothing left out. Where that tree changes under a 1.x release's text, the change passes only with the grammar epoch raised -- a major version -- or with a written claim that the statement means what it meant, which the check prints for review. A text that was refused may come to be accepted.</td></tr>
 <tr><td>HTTP API</td><td>It only grows: no route, parameter, field or status removed or narrowed. The OpenAPI document the server serves is held to it.</td><td>The same steps as <code>make openapi-check</code>, on every pull request.</td></tr>
 <tr><td>C library</td><td><code>fennec.h</code>'s functions and <code>FENNEC_*</code> codes keep their prototypes and values.</td><td>The library's tests check the codes; <code>make api-check</code> holds every prototype and macro to a dump of the header, and from the 1.0 tag a break is a major version.</td></tr>
 <tr><td>JavaScript types</td><td><code>fennec.d.ts</code> and <code>client.d.ts</code> only gain declarations.</td><td><code>make types-check</code>, the builder's and schema's golden files, and <code>make api-check</code>, which holds every export of both files to a dump of them, kept current and never smaller than the last release's: a removed export, a changed declaration or a dropped overload fails.</td></tr>
 <tr><td>The SDKs</td><td>Python, JavaScript, Go, .NET, Swift, Kotlin and Dart keep the public names they ship at 1.0.</td><td>Each SDK's tests; a dump per language (each needs an outside tool, so they come after 1.0) and a run against servers of other versions are to come.</td></tr>
 <tr><td>Sync</td><td>A replica of one release syncs with a server of another.</td><td><code>make sync-scenarios-check</code>: both runners pass every scenario.</td></tr>
-<tr><td>Sealed archives and backups</td><td>A file sealed with a key opens with that key in every later 1.x, those 0.2.0 sealed among them. A release from before files were bound to themselves refuses one sealed after, so upgrade every <code>fennec</code> that restores or verifies before any archiver (<a href="replication.html#sealed">Sealed archives and backups</a>).</td><td>An archive and a backup sealed by 0.2.0's code, opened by every build; a script drives an older reader's refusal by hand.</td></tr>
+<tr><td>Sealed archives and backups</td><td>A file sealed with a key opens with that key in every later 1.x, those 0.2.0 sealed among them. A release from before files were bound to themselves refuses one sealed after, so upgrade every <code>fennec</code> that restores or verifies before any archiver (<a href="replication.html#sealed">Sealed archives and backups</a>).</td><td>An archive and a backup sealed by 0.2.0's code, opened by every build; a weekly run beside the last release's server and shell, whose <code>fennec</code> seals files this release opens and refuses the ones this release sealed in those words.</td></tr>
+<tr><td>Replicas, archives and the router across releases</td><td>Every reader of a file or a stream — a replica, a standby, an archiver, a router, a node, the shell that verifies and restores — upgrades before any primary. One a release back beside a newer one works or stops in words, never reading wrong, naming the record kind, type tag or version where it names one. A newer one follows an older and reads what it wrote, but for the <a href="#not-read-whole">four exceptions</a>.</td><td>A weekly run, and one on every release tag, of this release's server, shell and router beside the last release's server and shell and its router, built from its tag (no release publishes one yet): replication both ways, every record kind, type tag and statement record of the release written, archives and backups, a router over nodes of the other release, and a rolling upgrade of a router and a node pair under writes, every acknowledged write read back from both nodes.</td></tr>
 <tr><td>Command line</td><td>A flag of <code>fennec</code>, <code>fennec-server</code> or <code>fennec-shard</code> is not removed, and a switch does not start taking a value or the reverse. An exit code keeps its meaning (<a href="server.html">Server</a> lists the server's, <a href="shell.html#exit-codes">the shell</a> the shell's).</td><td><code>make api-check</code> and each binary's tests, on every pull request: every command's flags, read off its <code>--help</code> and asked of the binary itself, and its exit codes with their meanings, held to a dump kept current and never smaller than the last release's.</td></tr>
 <tr><td>Metrics</td><td>A metric of <code>/_metrics</code>, the server's or the router's, keeps its name, its type and its labels; new metrics and new labels are added beside them.</td><td>The same check: every metric a scrape shows, with its type and labels, held to a dump, and every metric name in the code held to be in it.</td></tr>
 <tr><td>Release files</td><td>The names of the archives, zips, packages and checksums.</td><td>CI checks the tarballs' and the Windows zip's names through the installers' tests; the release workflow checks each file; the rest by hand.</td></tr>
@@ -46,21 +47,78 @@ and removed only in 2.0. 0.x releases promise nothing.</p>
 
 <h2>Upgrading</h2>
 
-<p>Upgrade replicas before primaries, and roll forward. For a cluster the
-order is archivers, routers, nodes holding replicas or standbys, then
-primaries (<a href="sharding-reference.html">Sharding reference</a>).</p>
+<p>Upgrade every reader before any primary, and roll forward. For a cluster
+the order is archivers and the shells that restore, routers, nodes holding
+replicas or standbys, then primaries
+(<a href="sharding-reference.html">Sharding reference</a>).</p>
 
 <ul>
-  <li>A newer replica follows an older primary. This order is not yet checked in CI; a script drives it by hand for record kind 13.</li>
+  <li>No release publishes the router, <code>fennec-shard</code>, yet: upgrading
+    a router means building it from the release's tag
+    (<code>cargo build --release --locked -p fennec-shard</code>).</li>
+  <li>In a node pair, the standby's node goes first. Before the next node, wait
+    until the standby holds what the primary does: on the primary's node
+    <code>/t/&lt;tenant&gt;/_replication/status</code> lists the standby with
+    <code>sent</code> equal to <code>durable</code>, or the standby's own status
+    says <code>"connected": true</code> and <code>"behind": 0</code> (for a
+    file's replica, the metrics <code>fennec_replica_connected</code> 1 and
+    <code>fennec_replica_behind</code> 0).</li>
+  <li>Restarting the primary's node in place costs its tenants their writes for
+    the restart: the router answers each that it was not sent (503), safe to
+    send again. A router fails a node over only with
+    <code>--auto-failover</code>.</li>
+  <li>A node holding both primaries and replicas cannot be upgraded before
+    every primary: in such a fleet, use no feature that moves the format until
+    every node runs the release.</li>
+</ul>
+
+<ul>
+  <li>A newer replica follows an older primary, and one a release back beside
+    a newer primary follows it or stops in words. Each release is run beside
+    the last one's server and shell and its tag's router, weekly and at its
+    tag, both ways.</li>
   <li>An older replica that meets a record kind or type tag it does not know
     stops and names it, for example <code>record kind 13 is not a
-    write</code>. It never reads it as something else.</li>
+    write</code>. It never reads it as something else. Where the older release
+    knew of no other version it cannot name it: v0.2.0's shell refuses a
+    sealed file of the second version as <code>not a sealed file</code>.</li>
   <li>Such a record appears when a feature is first used, not when it is
     installed: the first <code>create statement</code>, a field with a second
     index. The release notes name each, so upgrade every reader first.</li>
   <li>An older binary refuses a file a newer one has written to. Going back is
     safe only before a feature's first use.</li>
 </ul>
+
+<h2 id="not-read-whole">Files from v0.2.0 that 1.x does not read whole</h2>
+
+<p>v0.2.0 took four kinds of value or type that no write makes any more. 1.x
+refuses them where it reads them, rather than read them with the unbounded
+recursion the limit of 64 levels closed:</p>
+
+<ol>
+  <li><b>A <code>[[json]]</code> field's row nested past 64 levels.</b> The
+    file opens and every other collection reads. Any statement that decodes
+    that row fails whole with <code>a value nests more than 64 levels
+    deep</code>; <code>count</code>, a read of another row by its id, and the
+    fields stored before the deep one still answer. A <code>del</code> or a
+    <code>set</code> of the row is refused. Dropping the field is taken and
+    helps only where no field is declared after it: a field after it, and a
+    <code>del</code> of the row, are still refused in the same words, and so
+    is an index over a later field. Backups and a replica's image
+    carry the row unchanged; a replica holds it and refuses its reads
+    alike. On 1.x alone the way out is, where the field is the collection's
+    last, to drop it and delete the row; otherwise to read out the
+    readable rows, drop the collection and make it again.</li>
+  <li><b>A type nested past 64 lists</b>,</li>
+  <li><b>a point's type under 64 lists</b>, and</li>
+  <li><b>a schema's number past its range</b> (an HNSW <code>m</code> under 2
+    or past 32 767, a <code>vector&lt;N&gt;</code> or a
+    <code>sparse&lt;N&gt;</code> of 0 or past 10<sup>9</sup>, a list of such
+    vectors): the whole file is refused at the open, and only v0.2.0 can
+    rewrite it.</li>
+</ol>
+
+<p>Rewrite such values with v0.2.0 before upgrading.</p>
 
 <h2>The grammar epoch</h2>
 
@@ -74,7 +132,18 @@ statements it breaks.</p>
 
 <p>The latest 1.x minor gets every fix. The previous minor gets security fixes
 for six months after the next one is released. Release candidates are tagged
-<code>1.0.0-rc.N</code>.</p>
+<code>1.0.0-rc.N</code> and published as pre-releases.</p>
+
+<p>A patch to the previous minor, or a release candidate, is installed by
+naming it: what takes "the newest" stays on the latest release. The install
+script and GitHub's latest release, the image's <code>latest</code> tag,
+npm's <code>latest</code> and the Homebrew formula keep the newest release;
+on npm the previous minor's patches go out under <code>release-1.N</code>
+(<code>npm install @fennecdb/web@release-1.4</code>) and the newest release
+candidate under <code>next</code>, and every other registry takes the
+version you ask for. Maven Central is the exception: while a candidate is
+its highest version, Gradle's <code>latest.release</code> resolves to it, so
+pin a version there.</p>
 
 <p>Until 1.0.0 fennecdb is 0.x, an alpha: a security bug found in a 0.x release
 gets no advisory and no patch release. The fix lands on <code>main</code> and
