@@ -379,31 +379,81 @@ mod sys {
 
     /// `open`'s `O_NOFOLLOW | O_NONBLOCK` for a hand-over: the path's last
     /// name is opened only if it is no link, and a FIFO there is not
-    /// waited on. The numbers are each target's own, read from its libc
-    /// (Python's `os.O_NOFOLLOW` on each: Linux's differs by processor),
-    /// and none where they were not read: there the inode's check stands
-    /// alone, as it did before these.
+    /// waited on. `O_NOFOLLOW` is fennec-core's (`fs::NOFOLLOW`, each
+    /// Unix's own); `O_NONBLOCK` each Unix's as its libc's `fcntl.h` has
+    /// it: Linux's generic `0o4000`, but mips' `0x80` and sparc's
+    /// `0x4000`; Apple's and the BSDs' `0x4`; illumos' `0x80`. A Unix not
+    /// listed fails to build, naming this, as one without `NOFOLLOW` does:
+    /// it was `0` there, the link followed and the inode's check after the
+    /// open standing alone, unsaid -- a FIFO swapped in held the start --
+    /// on every Unix but Linux's x86-64 and aarch64 and Apple's.
+    pub const AS_FOUND: i32 = fennec_core::fs::NOFOLLOW | NONBLOCK;
     #[cfg(all(
         any(target_os = "linux", target_os = "android"),
-        target_arch = "x86_64"
+        any(
+            target_arch = "x86",
+            target_arch = "x86_64",
+            target_arch = "arm",
+            target_arch = "aarch64",
+            target_arch = "riscv64",
+            target_arch = "s390x",
+            target_arch = "loongarch64",
+            target_arch = "powerpc",
+            target_arch = "powerpc64",
+            target_arch = "m68k"
+        )
     ))]
-    pub const AS_FOUND: i32 = 0o400000 | 0o4000;
+    const NONBLOCK: i32 = 0o4000;
     #[cfg(all(
         any(target_os = "linux", target_os = "android"),
-        target_arch = "aarch64"
+        any(target_arch = "mips", target_arch = "mips64")
     ))]
-    pub const AS_FOUND: i32 = 0o100000 | 0o4000;
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    pub const AS_FOUND: i32 = 0x100 | 0x4;
+    const NONBLOCK: i32 = 0x80;
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        target_arch = "sparc64"
+    ))]
+    const NONBLOCK: i32 = 0x4000;
+    #[cfg(any(
+        target_vendor = "apple",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    const NONBLOCK: i32 = 0x4;
+    #[cfg(any(target_os = "illumos", target_os = "solaris"))]
+    const NONBLOCK: i32 = 0x80;
     #[cfg(not(any(
         all(
             any(target_os = "linux", target_os = "android"),
-            any(target_arch = "x86_64", target_arch = "aarch64")
+            any(
+                target_arch = "x86",
+                target_arch = "x86_64",
+                target_arch = "arm",
+                target_arch = "aarch64",
+                target_arch = "riscv64",
+                target_arch = "s390x",
+                target_arch = "loongarch64",
+                target_arch = "powerpc",
+                target_arch = "powerpc64",
+                target_arch = "m68k",
+                target_arch = "mips",
+                target_arch = "mips64",
+                target_arch = "sparc64"
+            )
         ),
-        target_os = "macos",
-        target_os = "ios"
+        target_vendor = "apple",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly",
+        target_os = "illumos",
+        target_os = "solaris"
     )))]
-    pub const AS_FOUND: i32 = 0;
+    compile_error!(
+        "fennec-server's user::sys::AS_FOUND: this Unix's O_NONBLOCK is not known; add it from its libc's fcntl.h"
+    );
 }
 
 /// The process's effective uid and its user and group, for [`wanted`].
@@ -843,10 +893,8 @@ mod tests {
     }
 
     /// A link put where a file was, between the look and the change, is
-    /// refused where it is opened: what it points at is never opened, and
-    /// keeps its owner. Held on the targets whose `open` flags are known
-    /// (`sys::AS_FOUND`); on the others the inode's check refuses it, after
-    /// the open.
+    /// refused where it is opened (`sys::AS_FOUND`): what it points at is
+    /// never opened, and keeps its owner.
     #[test]
     fn a_link_in_a_files_place_is_not_followed() {
         let d = dir("link");
@@ -859,11 +907,9 @@ mod tests {
         std::os::unix::fs::symlink(outside.join("target"), d.join("data.fennec")).unwrap();
         let (_, me) = current();
         let e = hand_over(&got, me).unwrap_err();
-        if sys::AS_FOUND != 0 {
-            // The open's own refusal (ELOOP), not the check after it.
-            assert!(!e.contains("changed while it was handed over"), "{e}");
-            assert!(e.contains("os error"), "{e}");
-        }
+        // The open's own refusal (ELOOP), not the check after it.
+        assert!(!e.contains("changed while it was handed over"), "{e}");
+        assert!(e.contains("os error"), "{e}");
         let _ = std::fs::remove_dir_all(&d);
         let _ = std::fs::remove_dir_all(&outside);
     }
