@@ -324,6 +324,12 @@ not logged.</p>
     address, an IPv6 one's /64 (<code>--auth-delay</code>).</li>
   <li><b>No literal reaches the log:</b> a schema change is logged by its
     shape.</li>
+  <li><b>Readable by the server's user alone:</b> on Linux and macOS the log
+    is made mode <code>0600</code> whatever the umask, and a log there keeps
+    its mode. A shipper running as another user is given it once, by
+    <code>chmod</code> or an ACL on the file itself: a directory's default
+    ACL does not reach it (<a href="/docs/server#file-modes">Files on a
+    shared machine</a>).</li>
 </ul>
 
 <details class="deep"><summary>The audit log's events and the refusal wait</summary>

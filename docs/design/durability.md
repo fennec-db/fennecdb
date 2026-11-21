@@ -365,7 +365,9 @@ that makes the file; `mode_like` a `stat` and a `chmod` a replacement, a
 compact's or a checkpoint's against an image's writing; the lock's
 `mode_like` runs only for a lock file made, and the log's only for a log
 made. No request opens a file, and the perf gate's `file-open` makes
-none; its `file-compact` makes a side file an op, two system calls more.
+none; its `file-compact` makes a side file an op, three system calls
+more (`create_private`'s `fstat`, `mode_like`'s `stat` and `chmod`)
+against writing 10 000 rows anew.
 fennec-core's `files_are_made_their_owners_alone_and_keep_their_mode`,
 fennec-abi's `a_lock_file_is_made_its_owners_alone_or_as_its_database`,
 fennec-http's `tests/modes.rs` and fennec-cli's
