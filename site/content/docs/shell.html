@@ -84,12 +84,19 @@ it. Where the lock cannot be taken at all, in a directory you may only read,
 the refusal points to <code>--read-only</code>, which takes no lock and writes
 nothing: it reads the file as it stood at the open, beside a server writing it,
 and refuses every write and <code>.checkpoint</code>. It maps the file up to
-where the server last made it durable and reads the rest into memory — the
-writes since the server's last sync and up to 128 KB before them; after a
-crash, the torn tail a server opening the file cuts; the whole file, when
-no sync ever made it durable past its first image (an app's file written
-and closed with no <code>sync</code>) — so a server starting beside it
-neither waits for it nor ends it. On Windows the reader's mapping keeps a
+where the server last made it durable and reads the rest into memory, so a
+server starting beside it neither waits for it nor ends it; <code>fennec
+types</code> and <code>fennec mcp --read-only</code> open a file the same way.
+That memory has no bound but the file: the writes since the server's last
+sync, up to 128 KB before them and the record holding that point whole — a
+graph the server kept in the file, a block of up to 16 MB, the spills of a
+block still open; under <code>--sync off</code>, running or crashed, every
+write since the server opened the file or last compacted it; after a crash,
+the torn tail a server opening the file cuts; all of the file past its first
+image, when no sync ever made it durable past it (an app's file written and
+closed with no <code>sync</code>). A file with nothing past its image — what
+a compact, a checkpoint, <code>.save</code> and a backup write — is mapped
+whole and none of it read into memory. On Windows the reader's mapping keeps a
 server from cutting that tail: a server opening a file a crash left torn
 fails, naming the file, until <code>--read-only</code> is closed. A file opened through a
 symbolic link is the file the link leads to, for its lock and for the

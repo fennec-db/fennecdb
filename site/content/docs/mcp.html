@@ -42,7 +42,12 @@ answered. <code>--read-only</code> takes no lock and writes nothing, and reads
 the file as it stood when the session began, beside a server writing it (on
 Linux, after the machine went down and before a writer opens the file again,
 without the last durable writes, which wait in the sync log beside it); to
-read what a server serves now, use <code>--url</code>. Over
+read what a server serves now, use <code>--url</code>. It reads into memory
+what the server has not yet made durable, with no bound but the file — every
+write since its last sync, all of them under <code>--sync off</code> — and
+none of a file with nothing past its image, what a compact or a backup
+writes: <a href="shell.html#the-lock">the shell's <code>--read-only</code></a>
+says what, as it opens a file the same way. Over
 <code>--url</code> the tools are the server's, under its options and the
 token's rules, and the bridge decides nothing.</p>
 
