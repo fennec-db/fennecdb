@@ -1527,8 +1527,6 @@ function refused(name, e) {
 const HELD_MS = 3000;
 /** The files this worker keeps, by directory (`null`: the origin's) and name: the `FennecFile` keeping each. */
 const holding = new Map();
-/** `openFile`'s look at a name this worker keeps (`FennecFile`'s static block). */
-let here;
 
 /** A database kept in a file of the origin private file system (`openFile`). */
 class FennecFile {
@@ -1548,18 +1546,23 @@ class FennecFile {
     holding.get(where).set(name, this);
   }
 
-  static {
-    // Refused while its database runs; let go of once its module stopped,
-    // of which nothing runs again: whether it was.
-    here = (where, name) => {
-      const holder = holding.get(where)?.get(name);
-      if (!holder) return false;
-      if (!stoppedOf(holder.#fennec)) {
-        throw new FennecError(`${name} is kept by another database of this worker: one database at a time writes a file; close that one, or its file, first`);
-      }
-      holder.close();
-      return true;
-    };
+  /**
+   * `openFile`'s look at a name this worker keeps: refused while its
+   * database runs; let go of once its module stopped, of which nothing runs
+   * again: whether it was. A static method, never a static block assigning
+   * it: a block runs as the module loads, a side effect a bundler keeps,
+   * and with it this class and all it reaches in an app that opens no file
+   * (esbuild, minified: 2.0 KB of the 51 KB an app of `connect` bundled to
+   * through this module, 0.65 KB brotli).
+   */
+  static here(where, name) {
+    const holder = holding.get(where)?.get(name);
+    if (!holder) return false;
+    if (!stoppedOf(holder.#fennec)) {
+      throw new FennecError(`${name} is kept by another database of this worker: one database at a time writes a file; close that one, or its file, first`);
+    }
+    holder.close();
+    return true;
   }
 
   /** The file's name in its directory. */
@@ -1763,7 +1766,7 @@ async function openFileNow(fennec, name, opts) {
   // Asked only once a handle is refused: a database of this worker that
   // keeps the file holds both handles until its file's close, and a handle
   // granted is no file anyone holds.
-  const mine = () => here(where, name);
+  const mine = () => FennecFile.here(where, name);
   const main = await syncAccess(dir, name, mine);
   let aside = null;
   // Closed while the file was asked for, its handles are let go of below,

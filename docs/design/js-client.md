@@ -23,7 +23,11 @@ fetched the `.wasm` through `fennec.js` either (only `Fennec.open` does),
 and bundling `connect` and a builder query's rows is 8.8 KB brotli
 through the entry against 11.7 through `fennec.js` (5.7 against 8.2 when
 the entry was made, 7.5 through `fennec.js` before `FennecHttp.live`), whose `Fennec` class a bundler cannot drop -- its static
-block is a side effect. `web/fennec.client.test.js` walks the client's imports and fails
+block is a side effect. `FennecFile`'s look at a name its worker keeps is
+a static method for that reason (`FennecFile.here`, which `openFile`
+calls): as a static block it kept the class, and all it reaches, in that
+bundle -- 50 972 bytes against 48 964, 16 385 brotli against 15 734
+(esbuild 0.28, minified, 2026-11-21). `web/fennec.client.test.js` walks the client's imports and fails
 if they reach anything but those three files or hold the module's glue,
 `FennecSync`, IndexedDB or files. `FennecHttp.live` is `Fennec.live`'s
 contract over a server: a subscription to each collection the query reads
@@ -261,7 +265,7 @@ What it found, fixed with it:
   handles open till then, and `openFile` was refused as open elsewhere for
   1.98 to 2.01 s (Chrome 157). It now asks again for 3 s (`HELD_MS`) before
   it refuses, a file another database of this worker keeps refused at once,
-  naming it (`holding`, `here`), or taken from it once its module stopped.
+  naming it (`holding`, `FennecFile.here`), or taken from it once its module stopped.
   Firefox and Safari end the worker at once: the file opens 50 to 85 ms
   after the reload in Firefox, about 60 ms in Safari 27.
 - Safari names a held file `InvalidStateError`, where the standard, Chrome
