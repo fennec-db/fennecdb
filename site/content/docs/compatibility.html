@@ -56,6 +56,11 @@ replicas or standbys, then primaries
   <li>No release publishes the router, <code>fennec-shard</code>, yet: upgrading
     a router means building it from the release's tag
     (<code>cargo build --release --locked -p fennec-shard</code>).</li>
+  <li>Routers go before nodes for a node that asks no data token too: such a
+    node refuses what a v0.2.0 router forwards it, even on loopback, unless it
+    runs <code>--insecure</code>
+    (<a href="sharding-reference.html#open-nodes">A node with no token behind a
+    router</a>).</li>
   <li>In a node pair, the standby's node goes first. Before the next node, wait
     until the standby holds what the primary does: on the primary's node
     <code>/t/&lt;tenant&gt;/_replication/status</code> lists the standby with
