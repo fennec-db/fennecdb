@@ -31,6 +31,7 @@ mod open_servers;
 mod ordered_claims;
 mod own;
 mod prepared;
+mod primaries;
 mod providers;
 mod reach;
 mod replication;

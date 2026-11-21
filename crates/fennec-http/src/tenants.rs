@@ -904,6 +904,17 @@ impl Tenants {
         (lineage, text.lines().any(|l| l.trim() == READER))
     }
 
+    /// Whether an open tenant is a copy a failover may promote: its file
+    /// `following`, and no read replica's -- told by its follower, or by its
+    /// `.follows` where none runs for it ([`Self::followed`]).
+    fn promotable(&self, t: &Tenant, following: bool) -> bool {
+        following
+            && !match t.repl.as_ref().and_then(|r| r.follower()) {
+                Some(f) => f.is_read_replica(),
+                None => self.followed(&t.name).1,
+            }
+    }
+
     /// Whether a tenant's copy has heard from the node it follows since it
     /// was last told to follow it (`.follows`' `heard` line, [`mark_heard`]):
     /// `None` where it was never told, a standby's copy made with its node
@@ -1148,6 +1159,18 @@ impl Tenants {
         name: &str,
         want: &Expected,
     ) -> std::result::Result<(u64, u64), Refused> {
+        self.promote_heard(name, want).map(|(seq, id, _)| (seq, id))
+    }
+
+    /// [`Tenants::promote_as`], and what the copy knew of its primary as
+    /// it was promoted ([`crate::replication::Heard`]): what the admin's
+    /// promotion answers and a router's failover logs. A copy with no
+    /// follower running knew nothing of it: not connected, never heard.
+    pub fn promote_heard(
+        &self,
+        name: &str,
+        want: &Expected,
+    ) -> std::result::Result<(u64, u64, crate::replication::Heard), Refused> {
         // Its identity goes with its `.follows`, which the promotion
         // removes, synced: a copy a router noted as left and a failover
         // promotes is a live tenant from here, and a reclaim naming what it
@@ -1173,7 +1196,7 @@ impl Tenants {
         &self,
         name: &str,
         want: &Expected,
-    ) -> std::result::Result<(u64, u64), Refused> {
+    ) -> std::result::Result<(u64, u64, crate::replication::Heard), Refused> {
         let t = self.get(name)?;
         // A copy that is not its tenant as the primary has it is refused:
         // promoted, a copy that never took its primary's image was an empty
@@ -1221,7 +1244,7 @@ impl Tenants {
         };
         if let Some(follower) = t.repl.as_ref().and_then(|r| r.follower()) {
             let done = follower
-                .promote(fresh_id())
+                .promote_heard(fresh_id())
                 .map_err(|e| Refused(500, e.to_string()))?;
             return forget(done);
         }
@@ -1238,7 +1261,7 @@ impl Tenants {
         g.fork(id)
             .and_then(|_| g.sync())
             .map_err(|e| Refused(500, e.to_string()))?;
-        forget((g.change_seq(), id))
+        forget((g.change_seq(), id, Default::default()))
     }
 
     /// Has a tenant follow `from`, the node its primary is on -- or, with
@@ -2027,6 +2050,21 @@ impl Tenants {
         {
             return false;
         }
+        // And a copy a failover may promote stays open with no follower
+        // running for it -- its database failed, or nothing follows for it:
+        // closed, nothing opened it again but a request or that failover,
+        // and a scrape, which reads the open tenants alone, counted it no
+        // more (`fennec_copies_disconnected`), the alert resolving while it
+        // followed nothing. A follow, a release or a delete closes it. A
+        // restart opens only the copies a `.follows` names, or every tenant
+        // on a standby (`resume_following`): one nothing follows for is
+        // counted once something opens it -- a request, the failover --
+        // since only an open reads whether a file follows, and opening
+        // every tenant at a start to look was not worth it.
+        let following = t.read().history().following;
+        if self.promotable(t, following) {
+            return false;
+        }
         // The node's stream holds a tenant open until it has sent what the
         // disk holds: the feed goes with the tenant, and writes it had not
         // sent would have come again as an image, a gap in the archive.
@@ -2642,6 +2680,27 @@ impl Tenants {
             .map(|t| (t.name.clone(), t.read().memory_bytes(), t.is_frozen()))
             .collect();
         open.sort();
+        // The copies a failover may promote -- a standby's, a tenant's own
+        // replica, never a read replica's -- each still following: one not
+        // connected, or with no follower running -- its database failed, or
+        // none follows for it -- and the most writes one trails its
+        // primary's disk by. Every such copy a node holds is open, its
+        // follower running or not ([`Self::close`]).
+        let mut copies = Copies::default();
+        for t in self.open_tenants() {
+            let (seq, following) = {
+                let g = t.read();
+                (g.change_seq(), g.history().following)
+            };
+            if !self.promotable(&t, following) {
+                continue;
+            }
+            let f = t.repl.as_ref().and_then(|r| r.follower());
+            let (connected, primary_durable) = f.map_or((false, 0), |f| f.progress());
+            let running = f.is_some_and(|f| f.running());
+            copies.disconnected += usize::from(!connected || !running);
+            copies.behind = copies.behind.max(primary_durable.saturating_sub(seq));
+        }
         let unlinked = self
             .open_tenants()
             .iter()
@@ -2655,6 +2714,7 @@ impl Tenants {
             open,
             unlinked,
             node_streams: self.streams.as_ref().map(|s| s.connected()),
+            copies,
         }
     }
 
@@ -2972,6 +3032,20 @@ pub struct Stats {
     /// The node's streams of every tenant connected now, on a node that
     /// replicates its tenants: its archivers.
     pub node_streams: Option<usize>,
+    /// The copies here a failover may promote, as their followers stand.
+    pub copies: Copies,
+}
+
+/// The copies of tenants a node holds that a failover may promote -- a
+/// standby's, a tenant's own replica -- as a scrape reads them, never by
+/// tenant: how many are not connected to their primary now, and the most
+/// writes on its primary's disk any of them has not applied. A failover
+/// promotes a copy where it stands: what it was not sent is lost
+/// ([`crate::replication::Heard`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Copies {
+    pub disconnected: usize,
+    pub behind: u64,
 }
 
 /// What a tenant uses of its quota, as `quota_report` writes it.

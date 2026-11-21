@@ -41,6 +41,14 @@
   ],
   "type": "counter"
  },
+ "fennec_copies_behind": {
+  "labels": [],
+  "type": "gauge"
+ },
+ "fennec_copies_disconnected": {
+  "labels": [],
+  "type": "gauge"
+ },
  "fennec_copies_refused_total": {
   "labels": [],
   "type": "counter"

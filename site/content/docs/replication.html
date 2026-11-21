@@ -236,8 +236,21 @@ wrote past the fork.</p>
 
 <h2>What a failover loses</h2>
 
-<p>With <code>--sync always</code> on the primary, no acknowledged write was
-lost in ten failovers. With the default <code>--sync 250</code>, a failover
+<p>With <code>--sync always</code> on the primary, a failover loses no write
+the replica was sent, and in ten failovers of a replica keeping up no
+acknowledged write was lost. A replica not connected, or behind, when its
+primary is lost is promoted where it stands, without what it was not sent —
+a write waits a second at most for a stream that keeps up and not at all for
+one behind or reconnecting — so watch <code>connected</code> and
+<code>behind</code> in <code>/_replication/status</code> and
+<code>fennec_replica_connected</code>, <code>fennec_replica_behind</code> in
+<code>/_metrics</code> (<a href="monitoring.html">Monitoring</a>), and over a
+network others can reach follow <code>https://</code>: on a plain-HTTP hop,
+whoever can reach it can cut the stream. A replica taking an image is
+counted as sent each write from the image's flush on, so one promoted
+before it has applied the image loses the writes answered meanwhile,
+<code>connected</code> false. With the default <code>--sync
+250</code>, a failover
 loses up to the last 250 ms of writes.</p>
 
 <p>A power cut was measured on the primary, with no failover after it: no
@@ -287,7 +300,9 @@ was sent was lost: none of these ten failovers caught one, while a node of
 the SaaS example killed under eight writers lost one in 3 of 60 runs, and
 none in 120 since. A stream that has not sent a write within a second is
 not waited for until it catches up again, so a stalled replica costs the
-writes one wait. A machine that dies takes its sockets with it: this holds
+writes one wait, and a replica reconnecting none: writes answered meanwhile
+are on no replica, and a failover then loses them. The ten failovers above
+promoted a replica that was keeping up. A machine that dies takes its sockets with it: this holds
 for a process killed, not for a power loss. No failover left the replica
 holding a write the client had not been answered for.</p>
 </details>
@@ -842,10 +857,13 @@ mode; <code>chmod 600</code> it.</p>
 
 <h2>Endpoints</h2>
 
-<p>Three endpoints — a <code>--dir</code> node's tenants each have them
-under <code>/t/&lt;tenant&gt;/</code>, and the node one more, the stream of
-every tenant — all on the HTTP listener and all wanting the replication
-token, not the <code>--http-token</code>.</p>
+<p>Three endpoints — a <code>--dir</code> node's tenants each have the
+first two under <code>/t/&lt;tenant&gt;/</code>, and the node one more, the
+stream of every tenant — all on the HTTP listener and all wanting the
+replication token, not the <code>--http-token</code>. A tenant's copy is
+promoted by the node's admin, <code>POST /_admin/tenants/&lt;t&gt;/promote</code>,
+which a router's failover calls (<a href="/docs/sharding-reference">Sharding
+reference</a>); <code>/t/&lt;tenant&gt;/_replication/promote</code> is a 404.</p>
 
 <pre data-lang="http">GET  /_replication?since=&lt;change&gt;&amp;history=&lt;id&gt;   the stream a replica is fed
 GET  /_replication/status                          role, position, replicas, lag
@@ -857,9 +875,13 @@ POST /_replication/tenants                         on a --dir node: every tenant
 <details class="deep"><summary>Which token the endpoints want, and the status</summary>
 <p>All of them want <code>Authorization: Bearer &lt;replication token&gt;</code>,
 not the <code>--http-token</code>: the token is for replicas and for whoever
-promotes them. The status of a replica names its primary and says whether it
-is connected, how many writes it is <code>behind</code> the primary's disk,
-and how long ago it last heard from it; a primary's lists the replicas it is
+promotes a file's replica. On a node it promotes nothing: a tenant's copy is
+held to the router's lease and to what the router knows of the tenant, which
+only the admin's promotion asks. The status of a replica names its primary and says whether it
+is connected — until a read of the stream fails, 10 s of silence where
+its primary's machine is gone — how many writes it is <code>behind</code>
+the primary's disk, as the primary says every 2 s, and how long ago it
+last heard from it; a primary's lists the replicas it is
 feeding and how far each has been sent.</p>
 </details>
 

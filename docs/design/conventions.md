@@ -373,14 +373,24 @@ on threads past 16 384 documents, any other replayed in place,
 linked, and its records applied as a replica applies a primary's; the
 first byte of an input says whether its records are summed anew, so an
 open reads what a record holds rather than stopping at its sum),
-`sqlite` (`fennec import`'s reader over a file) and `certificate`
+`sqlite` (`fennec import`'s reader over a file), `certificate`
 (fennec-tls's walk of the certificate a PostgreSQL server shows to its
 signature algorithm, which picks a channel binding's hash, RFC 5929: the
 file itself, `src/end_point.rs`, compiled into the fuzzer by `#[path]`,
 since fennec-tls is rustls and ring and the fuzzer takes nothing from
 outside the workspace; its seeds are fennec-wire's test certificates and
 a certificate's shape for each signature algorithm the walk tells
-apart). `make fuzz`
+apart) and `stream` (a primary's
+answer as a replica, `fennec archive` and `fennec backup` read it --
+`replication::read_head`, each message held to its kind's bound,
+`read_message`, and decoded, `Receiver::receive`, an image its hello
+promised taken as the follower takes one, `loaded`, and adopted by a copy
+mapped as a server's, `Database::adopt`'s `repoint` and `rebind` -- and a
+node's stream of every tenant as its archiver reads it, whole or a few
+bytes a read; its
+seeds hold the two findings that came before it, a count of writes
+wrapping its message and writes of a terabyte announced,
+[replication.md](replication.md#replication)). `make fuzz`
 lists them, `make fuzz TARGET=<name>` runs one; a new parser of untrusted
 bytes gets its target in the pull request that adds it, and
 `.github/workflows/fuzz.yml`'s matrix its name, which the crate's tests
@@ -478,8 +488,17 @@ differs -- a commit's smoke is the same on every Linux runner and on
 every Mac, not on both -- and the counts were set from CI's runner, about
 30 s each under ASan; `certificate`'s, 300 000, from its CPU time under ASan
 on a Mac beside the six's own smokes in the same run (19.8 s, where theirs
-took 13.2 to 29.5 s, 20.2 at the median), until CI's smoke says its own.
-Nor does a target read the wall clock: the `image`
+took 13.2 to 29.5 s, 20.2 at the median), until CI's smoke says its own;
+`stream`'s from a plain build's CPU time beside
+`http`'s (3.9 s for 120 000 runs of each on a Mac), then measured under
+ASan on the pinned nightly once it adopted the images it accepts: 34.8 s
+on a Mac (34.1 s of CPU) for 120 000 beside `http`'s 24.5 s for the same
+count, 1.42 times it -- some 43 s where CI's runner gives `http` its 30. With
+a seed of records without sums (the review's third round), 120 000 took
+32.1 s (31.6 of CPU), past every other target's 11.8 to 25.2 s in the same
+build on the same Mac: its count is 90 000, which that run passed at 24 s
+(80 000 at 21.4 s, 100 000 at 26.6), inside `http`'s 25.2, until CI's
+smoke says its own. Nor does a target read the wall clock: the `image`
 target's databases read a fixed time as now (`set_clock`), where a
 `@ttl` collection's read asked the system's for its cutoff, a row alive
 in one run and expired in a later one. A count still needs a bound in

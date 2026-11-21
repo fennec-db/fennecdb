@@ -562,7 +562,7 @@ fn ctl(b: u8) -> bool {
 }
 
 /// Why a line could not be read.
-enum Line {
+pub(crate) enum Line {
     Io(std::io::Error),
     Long,
 }
@@ -577,7 +577,15 @@ fn unread(e: &std::io::Error) -> BadRequest {
     }
 }
 
-fn read_line<R: BufRead>(reader: &mut R, out: &mut Vec<u8>, budget: usize) -> Result<usize, Line> {
+/// A line onto `out`, its newline kept, and its length: [`Line::Long`]
+/// once more than `budget` bytes came without a newline, a buffer's fill
+/// past it at the most. A request's head is read so, and a primary's
+/// answer to a replica (`replication::read_head`).
+pub(crate) fn read_line<R: BufRead>(
+    reader: &mut R,
+    out: &mut Vec<u8>,
+    budget: usize,
+) -> Result<usize, Line> {
     let mut taken = 0;
     loop {
         let available = reader.fill_buf().map_err(Line::Io)?;

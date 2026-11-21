@@ -451,9 +451,25 @@ the bytes leaving it: a write answered then is on a disk no one can read
 until the machine is back, and the promoted replica never had it. And a
 stream that has missed a write for a second is not waited for until it
 catches up (`SENT_WAIT`): while a replica is behind, writes are answered
-with no copy beside them, and a primary lost then loses them. Writes the
-old primary took that were never sent are dropped when it comes back as a
-replica (A node back).
+with no copy beside them, and a primary lost then loses them. A replica
+reconnecting or one whose copy failed is not waited for at all. The router
+asks no position of the copy it promotes: one not connected, or behind, as
+its node is lost is promoted where it stands, and whoever sits on a
+plain-HTTP hop between the two nodes can hold it there by cutting its
+stream. Watch for it before it matters (A copy not following); after a
+failover the router's line for each tenant (`failover of <node>: <tenant>
+promoted on <to>, its copy connected to its primary, 0 writes behind it as
+it last said, last heard from it 812 ms before`) says what the copy knew,
+and `fennec_router_promotions_total{copy="not_connected"}` counts the ones
+promoted not connected -- every copy of a node whose process was killed
+among them, its stream ended with it: read `last_contact_ms` against when
+the node stopped answering. A copy of a machine lost or cut off stays
+connected until 10 s of silence, so the line ends `what it was not sent is
+lost` wherever the copy was last heard from more than 4 s before. A copy
+taking an image is counted as sent each write from the image's flush on:
+promoted before it applied the image, it loses the writes answered
+meanwhile, `connected` false. Writes the old primary took that were never sent are dropped
+when it comes back as a replica (A node back).
 
 Seen in `make drill` (lease 2 s, the routers' upstream timeout 4 s, three
 tenants a region, the node cut off the network and then killed, as a
@@ -539,6 +555,40 @@ restores).
 lapses because you know it is gone: `POST /_shard/nodes/<n>/failover` on
 the region's router. Never on a node that may still be running and
 reachable by clients without leases: that makes two primaries.
+
+## A copy not following
+
+`FennecTenantCopiesDisconnected` and `FennecTenantCopiesBehind` read a
+node's `fennec_copies_disconnected` and `fennec_copies_behind`: the copies
+it holds that a failover may promote -- its pair's standby copies, the
+tenants' replicas of their own, never a read replica -- not connected to
+their primary now or with no follower running (its database failed, or
+nothing follows for it: the node keeps such a copy open, and after a
+restart counts one nothing follows for once something opens it, a request
+or the promotion), and the most
+writes one trails its primary's disk by, as its primary says every 2 s.
+A failover promotes such a copy where it stands, and every write its
+primary answered after it stopped being sent is lost with the primary,
+`--sync always` or not. With its primary's node lost, every copy of it
+disconnects too: `FennecNodeDown` and the failover come first.
+
+1. Find the tenants: `GET /t/<tenant>/_replication/status` on the copy's
+   node, with the replication token, for each tenant it holds (`GET
+   /_admin/tenants`): `connected`, `behind`, `last_contact_ms` and the
+   `error` its follower last met. The node's log says the same as it
+   happens (`replication: ...; connecting again`).
+2. A primary's node that does not answer the copy's node -- a firewall, a
+   route, a name -- is fixed there; a copy refused by its primary (401, its
+   replication token) is given the right token. A plain-HTTP hop between
+   the nodes that someone else can reach lets them cut the stream at will:
+   run the nodes' listeners with `--tls-cert` and `--tls-key`, or keep the
+   hop on a network no one else is on.
+3. A copy whose `error` names a failure of its own -- its disk, a panic --
+   takes nothing more until its node opens it again: `POST
+   /_admin/tenants/<t>/follow` closes and opens it, or restart the node.
+4. Until it follows, a failover of its primary's node loses what it was not
+   sent: keep that node up, or move the tenant (Placing and moving a
+   tenant) to a node whose copy follows.
 
 ## A node back
 
@@ -1381,6 +1431,7 @@ textfile collector).
 | `FennecTextfileUnread` | warning | node_exporter cannot read a file of its textfile collector | Archives and restores |
 | `FennecArchiveSyncUnreported` | warning | no sync's success read anywhere for an hour | Archives and restores |
 | `FennecCopiesRefused` | info | a copy of a tenant made again deleted itself | Read replicas |
+| `FennecTenantCopiesDisconnected`, `FennecTenantCopiesBehind` | warning | a copy a failover may promote not connected to its primary, or behind it: promoted now, it loses what it was not sent | A copy not following |
 
 ## The drill
 

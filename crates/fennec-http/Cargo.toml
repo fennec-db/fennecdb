@@ -99,3 +99,8 @@ path = "tests/hook_counts.rs"
 [[test]]
 name = "auto_compact_places"
 path = "tests/auto_compact_places.rs"
+
+# Apart: its allocator counts the process's own bytes.
+[[test]]
+name = "message_peak"
+path = "tests/message_peak.rs"
