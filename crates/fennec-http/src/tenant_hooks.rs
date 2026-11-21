@@ -399,6 +399,9 @@ impl Store {
             crate::owner_only::restrict(&f)?;
             std::io::Write::write_all(&mut f, text.as_bytes())?;
             f.sync_all()?;
+            // A mode an operator set on the sidecar is kept, as every
+            // file's is (`fennec_core::fs::mode_like`).
+            fennec_core::fs::mode_like(&tmp, &path)?;
             std::fs::rename(&tmp, &path)?;
             fennec_core::fs::sync_dir(&path).map_err(|e| io::Error::other(e.to_string()))
         })();

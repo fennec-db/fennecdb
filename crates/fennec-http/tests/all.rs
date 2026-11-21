@@ -22,6 +22,8 @@ mod gzip;
 mod idempotency;
 mod lease_answers;
 mod mcp;
+// Opens the audit log in a child process of its own alone.
+mod modes;
 mod named;
 mod node_archive;
 mod node_scheduled;

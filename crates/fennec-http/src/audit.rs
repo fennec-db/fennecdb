@@ -72,11 +72,12 @@ const WINDOW: Duration = Duration::from_secs(60);
 /// it should refresh.
 pub const ADDRESSES: usize = 10_000;
 
-/// Appends the events to `path` from now on.
+/// Appends the events to `path` from now on: a log made here is its
+/// owner's alone (`fennec_core::fs::private`), since a refused request's
+/// line names its address, token subject and statement; one there keeps
+/// its mode.
 pub fn open(path: &std::path::Path) -> std::io::Result<()> {
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
+    let file = fennec_core::fs::private(std::fs::OpenOptions::new().create(true).append(true))
         .open(path)?;
     let _ = LOG.set(Mutex::new(file));
     Ok(())

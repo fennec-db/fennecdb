@@ -536,7 +536,7 @@ impl Archive {
         parent: &Arc<Parent>,
     ) -> io::Result<Archive> {
         let made = !dir.as_ref().is_dir();
-        fs::create_dir_all(dir.as_ref())?;
+        fennec_core::fs::create_dir_private(dir.as_ref())?;
         Ok(Archive {
             dir: dir.as_ref().to_path_buf(),
             key,
@@ -673,7 +673,7 @@ impl Archive {
             None => bytes,
         };
         let tmp = path.with_extension("tmp");
-        let mut f = File::create(&tmp)?;
+        let mut f = fennec_core::fs::create_like(&tmp, path)?;
         f.write_all(bytes)?;
         f.sync_all()?;
         renamed(&f, &tmp, path)
@@ -709,7 +709,7 @@ impl Archive {
         }
         // Plain, sealed or not: a time, which the images' names say.
         let tmp = began.with_extension("tmp");
-        let mut f = File::create(&tmp)?;
+        let mut f = fennec_core::fs::create_private(&tmp)?;
         f.write_all(format!("{first}\n").as_bytes())?;
         f.sync_all()?;
         renamed(&f, &tmp, &began)
@@ -1140,7 +1140,7 @@ impl Archive {
                         }
                         None => None,
                     };
-                    let mut file = File::create(&path)?;
+                    let mut file = fennec_core::fs::create_private(&path)?;
                     file.write_all(head.as_ref().map_or(&LOG_MAGIC[..], |h| &h.0))?;
                     let sealed = head.map(|(_, key, id)| (key, id, 1, Vec::new()));
                     // The directory synced before the segment's first write:
@@ -1237,6 +1237,7 @@ impl Archive {
         fennec_core::fs::forget_sync_log(out)?;
         crate::instance::put_away_beside(given)?;
         crate::tenant_hooks::put_away_beside(given)?;
+        fennec_core::fs::mode_like(&tmp, out)?;
         fs::rename(&tmp, out)?;
         // Durable once it returns: lost to a crash, the file a server is
         // started on next was whatever was there before.
@@ -1638,12 +1639,7 @@ impl Archive {
         let mut f = match &self.key {
             None => copied(&self.image_path(image, taken), tmp)?,
             Some(_) => {
-                let mut f = File::options()
-                    .read(true)
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .open(tmp)?;
+                let mut f = fennec_core::fs::create_private(tmp)?;
                 f.write_all(&self.read_whole(&self.image_path(image, taken))?)?;
                 f
             }
@@ -1756,9 +1752,24 @@ fn scratch_name(end: u64, left: &[String]) -> String {
 
 /// `from` copied to `to`, `to` open to read back and append to. A Unix
 /// copies by the system -- a clone on APFS, `copy_file_range` on Linux --
-/// and opens it again.
+/// and opens it again. The system's copy gives `to` the mode `from` has,
+/// so an image wider than its owner's -- an archive an earlier release
+/// made with the umask's mode -- is copied into a file made its owner's
+/// alone (`fennec_core::fs::create_private`) instead: the database
+/// restored from it is never wider than that.
 #[cfg(not(windows))]
 fn copied(from: &Path, to: &Path) -> io::Result<File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if fs::metadata(from)?.permissions().mode() & 0o077 != 0 {
+            io::copy(
+                &mut File::open(from)?,
+                &mut fennec_core::fs::create_private(to)?,
+            )?;
+            return File::options().read(true).append(true).open(to);
+        }
+    }
     fs::copy(from, to)?;
     File::options().read(true).append(true).open(to)
 }
@@ -1835,7 +1846,7 @@ pub fn backup(upstream: &Upstream, out: &Path, key: Option<&Key>) -> io::Result<
             bytes = seal::seal_whole(key, &bytes)?;
         }
         let tmp = out.with_extension("tmp");
-        let mut f = File::create(&tmp)?;
+        let mut f = fennec_core::fs::create_like(&tmp, out)?;
         f.write_all(&bytes)?;
         f.sync_all()?;
         fennec_core::fs::forget_sync_log(out)?;
@@ -1856,7 +1867,7 @@ pub fn unseal(sealed: &Path, key: &Key, out: &Path) -> io::Result<u64> {
     let bytes = seal::open_whole(key, &fs::read(sealed)?)
         .map_err(|e| corrupt(format!("{}: {e}", sealed.display())))?;
     let tmp = out.with_extension("tmp");
-    fs::write(&tmp, &bytes)?;
+    fennec_core::fs::create_like(&tmp, out)?.write_all(&bytes)?;
     // Opened to check it whole, as a restore checks its file.
     let seq = fennec_core::fs::open_read_only(&tmp)
         .map_err(|e| corrupt(format!("{}: {e}", sealed.display())))?
