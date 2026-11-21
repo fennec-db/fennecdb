@@ -398,6 +398,55 @@ open.
 The store notes the places it reclaimed, so the compacts
 after it walk nothing; an open forgets them, the note being in no file.
 
+*Aggregates, orders, and what an open reads.* An aggregate's fields and
+its group keys, and an order's keys, passed a dropped place as any value
+too, which this change's review found; counted as above, over
+`x (a int, b text, k int, v int)`, 100 000 rows in 100 groups by `k`, `b`
+dropped and compacted, and over `x`'s rows ordered by `c`:
+
+| | stripped (main) | kept, read as any value | kept, read passing | |
+|---|---|---|---|---|
+| `get x select k, count(*), sum(v) group k` | 90.25 M | 94.66 M | 91.46 M | +1.33%, 12 a row (passed as any value: +4.88%, 44) |
+| the same, no field ever dropped (`p`) | 90.25 M | 90.26 M | 90.26 M | +134, inside 2 SE (±6 055) |
+| `get x order c limit 10` | 60.68 M | 66.28 M | 60.28 M | -0.66%, -4 a row (passed as any value: +9.23%, 56) |
+| the same, `p` | 60.68 M | 60.68 M | 60.68 M | +3, inside 2 SE (±2 399) |
+
+Each now picks its reader once a query, as a filter does. The aggregate's
+(`aggregate::Reader::passing`) calls `Store::read_fields_passing` where a
+dropped place comes before a field it reads: a flag asked a row, which a
+flag in place of the lengths of its paths and computed values pays for
+(`Reader::more`). Out of line in a wrapper of its own, the second reader
+cost 34 instructions a row by a trace, all a passed `null` saves. The rest
+of the aggregate's 12 a row is the compare a passed value of any other
+kind pays, and the payload a byte longer. An order picks at its call
+(`order_ids_of`): `order_ids_passing`, a copy of its own out of line, or
+`order_ids` as it was. Any test or copy beside the loop inside `order_ids`
+-- a second loop, a generic copy, the original inlined beside a call out
+of line -- moved its registers and took 1 to 11 instructions a row from
+every other collection's order. The passing copy inlines its reader
+(`Store::read_field_in`), a call a row fewer than `order_ids` makes of
+`read_field`, and counts below main.
+
+Every other reader of a field past a dropped place passes it as any value,
+about 34 instructions a row a place: a page's columns (as many rows as its
+limit), a facet's field, a `lookup`'s key, and what is read once a process
+-- each vector an open copies into a graph's arena (`Store::field_at`),
+and the field an index is built from at the first read after an open or a
+server's warm-up. Counted once a process, plainly, three runs a side
+(millions against the allocator's hundreds):
+
+| | stripped (main) | kept | |
+|---|---|---|---|
+| a hash index of `c int @hash` built from 100 000 documents (`Database::warm`) | 131.39 M | 134.35 M | +2.26%, 30 a row |
+| the same, `p` | 127.70 M | 127.66 M | -0.03% |
+| the open, read into memory, of 100 000 rows `x (a int, b text, v vector<8> @hnsw(cosine))` checkpointed with its graph | 123.93 M | 130.22 M | +5.07%, 63 a row |
+| the same, `p` | 125.11 M | 125.07 M | -0.03% |
+
+Each is paid once a process, a few per cent of what that build or open
+costs whole, so neither keeps a second copy of its reader: a server warms
+an index once, and opens a file once. A `--dir` node pays it again at each
+open of a tenant it had closed, a collection's index or graph at a time.
+
 *How many places.* A collection holds `schema::MAX_PLACES`, 4 096, over
 its life: its fields and its dropped ones. An `alter ... add field` past
 them is refused, and so is a `create` declaring more fields, a declared
