@@ -559,7 +559,9 @@ node's `fennec_copies_disconnected` and `fennec_copies_behind`: the copies
 it holds that a failover may promote -- its pair's standby copies, the
 tenants' replicas of their own, never a read replica -- not connected to
 their primary now or with no follower running (its database failed, or
-nothing follows for it: the node keeps such a copy open), and the most
+nothing follows for it: the node keeps such a copy open, and after a
+restart counts one nothing follows for once something opens it, a request
+or the promotion), and the most
 writes one trails its primary's disk by, as its primary says every 2 s.
 A failover promotes such a copy where it stands, and every write its
 primary answered after it stopped being sent is lost with the primary,

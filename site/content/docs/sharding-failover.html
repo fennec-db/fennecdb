@@ -41,7 +41,8 @@ curl -X PUT localhost:8090/_shard/nodes/n1 \
 has not applied, as its primary says every 2 s — and
 <code>last_contact_ms</code>. A node counts its copies a failover may
 promote, never by tenant, and keeps each open, its follower running or not
-— one whose database failed, one nothing follows for:
+— one whose database failed, one nothing follows for, which after a
+restart it counts once something opens it, a request or the promotion:
 <code>fennec_copies_disconnected</code>
 and <code>fennec_copies_behind</code> on its <code>/_metrics</code>, which the
 deploy kit's <code>FennecTenantCopiesDisconnected</code> (one not connected

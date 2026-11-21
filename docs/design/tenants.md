@@ -461,8 +461,16 @@ it followed nothing (the review's third round). Counting closed copies
 instead would have the scrape open files, or the registry keep a list of
 closed copies by name beside the files that every install, follow and
 delete would have to keep right; kept open, such a copy costs its
-memory, as a copy whose follower runs does, until a follow, a release or a
-restart opens it again. Its `behind` counts from a keep-alive a stream
+memory, as a copy whose follower runs does, until a follow, a release or
+a delete. A restart opens only the tenants a `.follows` names, or every
+tenant on a standby (`Tenants::resume_following`), so after one a copy
+nothing follows for is counted once something opens it -- a request, the
+failover: only an open reads whether a file follows, its history a record
+in it, and looking at every tenant at a start would open each file --
+mapped, its index of frames adopted, a few milliseconds a tenant
+([storage.md](storage.md)) and its pages after -- on a node of thousands
+for the few copies a node started without `--replica-of` holds. Its
+`behind` counts from a keep-alive a stream
 sends every `ALIVE` behind as caught up ([replication.md](replication.md#replication)):
 sent only once a stream had caught up, a copy as far behind as its
 primary's buffer read 0 until the third round. And it is seen as

@@ -2055,7 +2055,12 @@ impl Tenants {
         // closed, nothing opened it again but a request or that failover,
         // and a scrape, which reads the open tenants alone, counted it no
         // more (`fennec_copies_disconnected`), the alert resolving while it
-        // followed nothing. A follow or a restart opens it again.
+        // followed nothing. A follow, a release or a delete closes it. A
+        // restart opens only the copies a `.follows` names, or every tenant
+        // on a standby (`resume_following`): one nothing follows for is
+        // counted once something opens it -- a request, the failover --
+        // since only an open reads whether a file follows, and opening
+        // every tenant at a start to look was not worth it.
         let following = t.read().history().following;
         if self.promotable(t, following) {
             return false;
