@@ -1,7 +1,8 @@
 //! Node administration under `/_admin/`: the surface a router drives.
 //!
 //! ```text
-//! GET    /_admin/stats                 {tenants, disk, memory, open}: flat
+//! GET    /_admin/stats                 {tenants, disk, memory, open,
+//!                                      no_token}: flat
 //! GET    /_admin/open                  the open tenants: name, memory, frozen
 //! GET    /_admin/tenants               names on disk
 //! GET    /_admin/sizes                 {"<tenant>": bytes on disk, ...}
@@ -90,8 +91,10 @@ pub(crate) fn carries(req: &Request, token: &str) -> bool {
     ct_eq(given.as_bytes(), token.as_bytes())
 }
 
-/// The answer to a request under `/_admin/` without the admin token.
+/// The answer to a request under `/_admin/` without the admin token:
+/// counted as a guess at a token, which no good JWT starts again.
 pub(crate) fn refused() -> Response {
+    crate::audit::refused_as(crate::audit::Kind::Token);
     Response::error(401, "invalid or missing admin token").header("WWW-Authenticate", "Bearer")
 }
 
@@ -120,7 +123,7 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
 
     let segs = req.segments();
     let result = match (req.method, &segs[1..]) {
-        (Method::Get, ["stats"]) => Ok(stats(tenants)),
+        (Method::Get, ["stats"]) => Ok(stats(tenants, cfg)),
         (Method::Get, ["open"]) => Ok(open(tenants)),
         (Method::Get, ["tenants"]) => Ok(names(tenants)),
         (Method::Get, ["sizes"]) => Ok(sizes(tenants)),
@@ -586,13 +589,20 @@ fn lease(tenants: &Tenants, body: &[u8]) -> Result<Response, Refused> {
 
 /// Flat on purpose: it is what a router reads, and a flat object is what
 /// `json::parse_object` accepts -- the per-tenant list is `/_admin/open`.
-fn stats(tenants: &Tenants) -> Response {
+/// `GET /_admin/stats`: the node's tenants, disk, memory and open tenants,
+/// and `no_token`, whether it asks no data token -- neither `--http-token`
+/// nor JSON Web Tokens -- which a router listening past loopback reads as
+/// a node is added and before it forwards to one (fennec-shard's
+/// `Router::open_node`): it forwards nothing to such a node, its clients
+/// being the network's.
+fn stats(tenants: &Tenants, cfg: &Config) -> Response {
     let s = tenants.stats();
     let memory: usize = s.open.iter().map(|(_, m, _)| m).sum();
+    let no_token = cfg.token.is_none() && cfg.access.is_none();
     Response::json(
         200,
         format!(
-            "{{\"tenants\":{},\"disk\":{},\"memory\":{},\"open\":{}}}",
+            "{{\"tenants\":{},\"disk\":{},\"memory\":{},\"open\":{},\"no_token\":{no_token}}}",
             s.tenants,
             s.disk,
             memory,

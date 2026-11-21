@@ -64,15 +64,26 @@ its token (`admitted`), a stream's before its head.
 (`seal.rs`, `--key-file`), never the live file. A frame's nonce, as every
 key and nonce, is the system's randomness (`crypto::system_random`, read
 with no descriptor), the seal refused without it: never the clock, which
-only an id may fall back to (`crypto::id_u64`). A frame is bound to its
-file: its tag covers the file's id -- 16 bytes of that randomness after
-the magic (`FENECSL\x02`, `seal::FileId`) -- its place and whether it is
-the last, so no frame of another file under the key opens in it. A
-version 1 file (no id: 0.1.7 to 0.2.0) still opens and a segment of one
-goes on as one; nothing new is begun so. Only a key that sealed none is
-free of a version 1 file spliced from others' frames: the docs say to
-change keys. A later version is refused by its
-number, and what a tag covers changes only with the magic's version byte.
+only an id may fall back to (`crypto::id_u64`). A file (`FENECSL\x03`) is
+sealed under HChaCha20 of its random id under HKDF-Expand of the key
+(`seal::FILE_KEYS`), never under the key, whose ChaCha20 keystream in
+versions 1 and 2 gives HChaCha20 of it away; each frame's tag over
+the tag before it (the first's, the head) and its place; its head names
+what it is (`seal::Binding`: role, archive, tenant, its name's numbers),
+which every read holds it to (`Archive::held`), one read unopened
+vouched for by its first frame (`seal::vouched_in`), `began` held and
+`presence` sealed. A frame holds a mebibyte at most (`seal::FRAME`), its
+length checked, never cast, a longer batch going out in frames of whole
+records; a key file others can read is warned of (`seal::open_key`), never
+refused. Versions 1 (0.1.7 to 0.2.0) and 2 still open, an
+older segment gone on in by none, an older image or segment read only
+before a line's first of version 3, an image of its end an upgraded
+archiver seals before writing on -- a node's, each tenant's as it starts,
+beside the stream -- where it stands noted once the file is in place
+(`Archive::older`, `seal_before_version`, `landed`); only a key that
+sealed none is free of their splices: the docs say to change keys. A
+later version is refused by its number, and what a tag covers changes
+only with the magic's version byte.
 
 ### Quotas and retries
 
@@ -105,9 +116,12 @@ which a client sends again whole.
 
 **[An `Idempotency-Key` makes a write
 once.](../../docs/design/http.md#idempotency-keys)** The write and its key's
-`_idempotency` row are one block, the key the subject's for a scoped token
-and the key with another request 422; a failed write or a `compact` keeps
-none. A replay answers only once the first try's record is as durable and
+`_idempotency` row are one block, the key its caller's for a scoped
+token (`Scope::authority`) and the key with another request 422; a failed
+write or a `compact` keeps none. Every path asks `idempotent::replay` under
+the write lock it then keeps the key in: `keep` deletes no row where that
+look found none (`Key::absent`) under the expiry it keeps (`ensure` moving
+none). A replay answers only once the first try's record is as durable and
 sent as its answer was to be: under `--sync always` every path that finds
 a key runs `Database::durability` after its lock (`idempotent::replay`),
 and a failed fsync is its answer, never the kept success; after a storage
@@ -116,9 +130,13 @@ A replay is a write's answer on every path, a call made to read's too
 (`metrics::wrote`), asked of a tenant's lease (`answered_under_lease`).
 
 **[Refusals and schema changes are logged; a refusal
-waits.](../../docs/design/http.md#audit)** Only `audit::verified`, where a token
-checks out, clears the wait; a new check must call it, and nothing infers
-it from an answer. A node believes `Fennec-Router` from the router alone.
+waits.](../../docs/design/http.md#audit)** Only `audit::verified_as`,
+where a token checks out, clears its kind's wait (`audit::Kind`); a new
+check must call it, and nothing infers it from an answer. A node believes `Fennec-Router` from the router alone.
+A tenant named past `~`, a router's stand-in for one it does not place
+([router.md](../../docs/design/router.md#tenants-it-does-not-place)), is
+asked every credential as one held, then answered 404 before
+`Tenants::get` (`route_tenant`): no file of its name opens.
 A refusal is counted by its address, an IPv6 one's /64
 (`audit::counted_ip`, the hooks' count's key too), in a table that, full,
 lets the count refused longest ago go (`audit::ADDRESSES`): never every
@@ -293,8 +311,9 @@ name, and a page only of its own origin or
 `--http-token` and JWTs (`open_refusal`), `cors::foreign` refuses (403),
 before routing but for `/_health` and an allowed preflight, a `Host` or
 `X-Forwarded-Host` (only refusing) not localhost's nor an IP, and an
-`Origin` not its own, scheme and all, nor `--http-cors`'s; the router's is
-fennec-shard's.
+`Origin` not its own, scheme and all, nor `--http-cors`'s, and, unless
+`--insecure`, a router's forward past loopback
+(`audit::routed_past_loopback`); the router's is fennec-shard's.
 
 ### Held writes
 
@@ -333,4 +352,8 @@ Never sync them in turn on one thread, nor look at one under a lock a
 writer may hold (`try_read`); one still syncing is passed over, and a
 sync's panic stops the node through its one shutdown. The pass in turn
 (`sync_dirty`) is for a caller that must see the writes down first:
-Windows' shutdown.
+Windows' shutdown. Nothing waits on a lock the shutdown keeps: it ends the
+syncs first (`Syncs::close`, one under way waited for) and marks each
+database before its lock, which the threads beside the queries pass over
+(`held::beside`); a tenant dropped after it syncs nothing
+(`kept_to_exit`), its registry's drop saying so once.

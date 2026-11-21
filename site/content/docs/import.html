@@ -88,20 +88,69 @@ KEY</code> becomes the document id, <code>--vector field:N</code> turns
 little-endian <code>f32</code> BLOBs into <code>vector&lt;N&gt;</code>, and
 untyped columns are resolved from the first 1000 rows.</p>
 
+<p>Each column is read where SQLite puts it in a row. A <code>VIRTUAL</code>
+generated column (<code>b AS (a * 2)</code>), which SQLite computes as a row
+is read and never stores, is left out, and the import names it in a
+<code>warning</code> line; a <code>STORED</code> one comes across as a plain
+field holding the values SQLite stored. The import computes no expression. A
+column named <code>""</code> keeps its place as <code>column&lt;N&gt;</code>,
+N its place from 1, as SQLite names a result column that has no name. A row
+written before an <code>ALTER TABLE ... ADD COLUMN</code> reads the column
+as its default, as SQLite reads it there, and <code>NULL</code> where it has
+none: numbers, strings, blobs, <code>TRUE</code>, signs before them,
+<code>CAST</code> and hexadecimal numbers past 32 bits, each with the
+column's type applied as SQLite applies it. A default the import cannot read
+as SQLite does stops it at a row that needs it, naming the table, the column
+and the default: <code>CURRENT_TIMESTAMP</code> or an expression, which no
+row SQLite wrote needs, and the rare constant SQLite reads by its own
+formatting of a real as text, by a text's leading digits
+(<code>-'5 apples'</code>), or by taking a blob's bytes as text or a text's
+as a blob. A <code>WITHOUT ROWID</code> table is refused by name; a
+<code>STRICT</code> one is read, and a table of more columns than SQLite
+allows, 32 767, is refused by name.</p>
+
+<p>The file is read alone, so the import looks beside it for the two files
+SQLite keeps there, and refuses the file while either holds what the file
+does not: a <code>&lt;file&gt;-wal</code> with changes not yet checkpointed
+(<code>sqlite3 data.sqlite "PRAGMA wal_checkpoint(TRUNCATE)"</code> moves
+them in), or a hot <code>&lt;file&gt;-journal</code>, left by a writer
+stopped in the middle of a transaction, beside a file that may be torn (one
+read with SQLite rolls it back: <code>sqlite3 data.sqlite "PRAGMA
+user_version"</code>). An empty <code>-wal</code>, and a journal whose header
+is zeroed as <code>journal_mode=PERSIST</code> leaves it, are not in the
+way. When the file is a symbolic link, they are looked for beside the file it
+leads to, where SQLite keeps them on Linux and macOS; one that is not a plain
+file — a FIFO, a device, a directory — is refused rather than opened.</p>
+
+<p>A damaged or hostile file is refused naming the page — a page reached
+twice, cells that overlap, an overflow chain longer than its row. Reading
+the file holds a page and a row in memory at a time, whatever lengths it
+declares: a row is a value for each of its table's columns, 32 767 at most,
+which may read far larger than it is stored — a column it lacks reads as its
+default — so a batch is written once its rows hold 16 MiB, before
+<code>--batch</code> rows where rows are large. A row is at most about twice
+the file's length as it is read (its stored bytes, no longer than the file,
+and its values: its texts and blobs, and its defaults, no longer than the
+<code>CREATE TABLE</code> text), more where a text is not UTF-8, each such
+byte read as the three of U+FFFD. What an import holds at once is at most about
+five times 16 MiB and its largest row together: a batch, the row that
+filled it, and what the database makes of them while writing them.</p>
+
+<p>What an import writes, and the time it takes, is the rows times what each
+holds as SQLite reads it, a column it lacks its default, as SQLite returns
+it to every query: a file of about 2 MB whose table gained a column with a
+default of 1 MiB after its 150 000 rows of one byte were written imports
+150 000 copies of the default, some 157 GB. That is the table SQLite
+holds, and the file's length does not bound it: <code>--limit</code> takes
+fewer rows.</p>
+
 <p><b>PostgreSQL.</b> It connects to the live server and streams
 <code>COPY ... TO STDOUT</code> — no <code>psql</code>, no
 <code>pg_dump</code>. Authentication is SCRAM-SHA-256, hand-written in
 <code>fennec-wire</code>'s client over <code>fennec-http</code>'s own crypto
-and held to RFC 7677's example exchange byte for byte. It runs at most
-4 194 304 iterations, 1 024 times PostgreSQL's default of 4 096 and room
-above a hardened setting near a million — seconds of a core: a server
-asking for more — its <code>scram_iterations</code> set past it, or someone
-standing in for it — is refused by name rather than run, as the most a
-count can ask, four billion rounds, would hold the import well over half an
-hour before it signed in. To come under it, set the role's password again
-with a lower <code>scram_iterations</code>
-(<code>SET scram_iterations = 4096;</code> then <code>\password</code> in
-<code>psql</code>). TLS is <a href="https://github.com/rustls/rustls">rustls</a>'s, with ring,
+and held to RFC 7677's example exchange byte for byte (see
+<a href="#signing-in">Signing in</a>). TLS is
+<a href="https://github.com/rustls/rustls">rustls</a>'s, with ring,
 behind <code>fennec-tls</code>, the one shipped crate that takes
 dependencies. pgvector's
 <code>vector</code>, <code>halfvec</code> and <code>sparsevec</code> columns
@@ -115,30 +164,51 @@ is encrypted and what of the server's certificate is checked, as libpq's
 does, and <code>sslrootcert</code> names a PEM file of the CAs to check it
 against:</p>
 
-<pre><code>fennec import 'postgres://app@db.example.com/shop?sslmode=verify-full' --table products --to shop.fennec
-fennec import 'postgres://app@10.0.0.5/shop?sslmode=verify-ca&amp;sslrootcert=/etc/pg/ca.pem' --table products --to shop.fennec</code></pre>
+<pre><code>fennec import 'postgres://app@db.example.com/shop?sslmode=verify-full' --table products --file shop.fennec
+fennec import 'postgres://app@10.0.0.5/shop?sslmode=verify-ca&amp;sslrootcert=/etc/pg/ca.pem' --table products --file shop.fennec</code></pre>
 
 <div class="tbl">
 <table>
 <thead><tr><th><code>sslmode</code></th><th>Encrypted</th><th>What is checked</th></tr></thead>
 <tbody>
 <tr><td><code>disable</code></td><td>no</td><td>—</td></tr>
-<tr><td><code>prefer</code>, the default</td><td>where the server takes TLS</td><td>nothing</td></tr>
+<tr><td><code>prefer</code>, the default on this machine</td><td>where the server takes TLS</td><td>nothing</td></tr>
 <tr><td><code>require</code></td><td>yes, or no connection</td><td>nothing; with a CA file (<code>sslrootcert</code>, or <code>~/.postgresql/root.crt</code> where it is), as <code>verify-ca</code></td></tr>
 <tr><td><code>verify-ca</code></td><td>yes</td><td>the certificate is signed by the CA file's CAs; the name is not checked</td></tr>
-<tr><td><code>verify-full</code></td><td>yes</td><td>the certificate is signed by a trusted CA and names the host dialed</td></tr>
+<tr><td><code>verify-full</code>, the default for any other host</td><td>yes</td><td>the certificate is signed by a trusted CA and names the host dialed</td></tr>
 </tbody>
 </table>
 </div>
+
+<p><b>A host off this machine is spoken to under
+<code>verify-full</code> unless the string says otherwise.</b> The default
+is <code>prefer</code> only for <code>localhost</code> and a loopback
+address, where no one stands on the path. libpq's default is
+<code>prefer</code> everywhere; this one differs on purpose (a deliberate
+change since v0.2.0, whose default was <code>prefer</code> everywhere): a
+connection string copied from a PostgreSQL client and pointed across a
+network is checked rather than spoken to whoever answers. A
+<code>sslmode</code> the string or <code>PGSSLMODE</code> names always
+wins. Where the default refuses — a server that does not take TLS, or a certificate a
+CA this client does not trust signed — the error names the cause, the CAs
+it trusts, and the way out: <code>sslrootcert=&lt;file&gt;</code> with the CA
+that signed it, or <code>sslmode=require</code> (TLS that checks nothing) or
+<code>sslmode=disable</code> on a network you own. The mode taken and why
+are printed (<code>fennec import</code>'s <code>tls</code> line) or logged
+(<code>fennec-server --follow</code>, once at the start).</p>
 
 <p><b><code>prefer</code> and <code>require</code> encrypt without checking
 the server</b>, as libpq's do not check it — <code>require</code> unless a CA
 file is there, when it checks the chain as <code>verify-ca</code>. They keep
 the rows from someone listening on the path, not from someone standing in
-for the server, who would read them, and the password's proof too; and
-<code>prefer</code> goes on in plain text where the server, or whoever stands
-in for it, refuses TLS. Only <code>verify-full</code> keeps that
-out: it is the mode to use across a network, and on any you do not own.</p>
+for the server, who would read them; and <code>prefer</code> goes on in
+plain text where the server, or whoever stands in for it, refuses TLS. Only
+<code>verify-full</code> keeps that out. Over a connection no CA checked,
+the server's own words in an error are not shown — anyone on the path could
+have written them — only its SQLSTATE code and this client's words for it;
+on this machine, under <code>verify-ca</code> or <code>verify-full</code>,
+or after a sign-in bound to the TLS session, they are shown, their control
+characters escaped and cut at 512 bytes.</p>
 
 <p>Without <code>sslrootcert</code>, libpq's own CA file,
 <code>~/.postgresql/root.crt</code> (<code>%APPDATA%\postgresql\root.crt</code>
@@ -161,7 +231,76 @@ refused rather than passed over.</p>
 <code>--follow</code> and <code>fennec-server --follow</code>. A build
 without the <code>tls</code> feature (<code>--no-default-features</code>)
 speaks plain text under <code>prefer</code>, as libpq built without SSL
-does, and refuses the modes that ask for TLS.</p>
+does, and refuses the modes that ask for TLS — the default for a host off
+this machine among them, saying so.</p>
+
+<h3 id="signing-in">Signing in</h3>
+
+<p><b>Holding a password, the client signs in by SCRAM-SHA-256 alone</b>,
+as libpq does with <code>require_auth=scram-sha-256</code>: a server — or
+whoever stands in for it — that asks for the password in clear text or as
+MD5, or that says the client is in before SCRAM's exchange is done, is
+refused before anything of the password goes out. Before, the password was
+sent in clear text to whoever asked, under <code>prefer</code> to anyone on
+the path. A connection string takes libpq's <code>require_auth</code> to say
+otherwise: <code>require_auth=password</code> sends it in clear text (over
+<code>verify-full</code> only, sensibly), <code>require_auth=scram-sha-256,none</code>
+also takes a server that asks for nothing, and each method may be negated
+(<code>!md5</code>). MD5 is never spoken, allowed or not. With no password,
+a server that asks for none is taken.</p>
+
+<p><b>Over TLS, the sign-in is bound to the session</b>
+(<code>SCRAM-SHA-256-PLUS</code>, RFC 5929's
+<code>tls-server-end-point</code>) wherever the server offers it, as
+PostgreSQL 11 and later do over TLS: the proof carries the hash of the
+certificate the client was shown, which the server compares with its own,
+so a bound sign-in relayed through someone else's TLS session fails at
+the server. What that keeps out depends on the mode. Under
+<code>verify-full</code>, the default off this machine, no one else's
+session gets that far: its certificate is refused. Under
+<code>require</code> or <code>prefer</code>, which check nothing,
+whoever is on the path can show its own certificate, take the
+<code>-PLUS</code> offer out of what the server says and relay the sign-in
+to the server in plain text: the client, offered nothing to bind, signs in
+unbound, and a server reached in plain text takes that — PostgreSQL
+refuses it only over TLS — so the relay is signed in and reads and writes
+as the client. Under <code>require</code> it fails only where the server
+takes TLS alone (<code>hostssl</code> lines in <code>pg_hba.conf</code>,
+no <code>host</code> line for the role) or where the string says
+<code>channel_binding=require</code>. <code>channel_binding</code> is
+libpq's: <code>prefer</code>, the default, binds where it can;
+<code>require</code> refuses a server that does not offer it, and a
+connection in plain text; <code>disable</code> binds nothing.</p>
+
+<p><b>What a server's SCRAM may ask is bounded.</b> Its iteration count is
+held to 4 096 (RFC 7677's floor; PostgreSQL's default) up to 4 194 304, 1 024
+times the default and room above a hardened setting near a million —
+seconds of a core. Below the floor a proof costs a guesser almost nothing,
+above the cap the most a count can ask, four billion rounds, would hold the
+import well over half an hour before it signed in: either is refused by
+name, before a proof goes out. To come within it, set the role's password
+again under another <code>scram_iterations</code>
+(<code>SET scram_iterations = 4096;</code> then <code>\password</code> in
+<code>psql</code>). A server nonce that is not the client's followed by the
+server's own, and an <code>m=</code> extension, are refused, as RFC 5802
+says. A password that is not ASCII is sent as its UTF-8 bytes, which is
+what libpq sends where its SASLprep refuses a password and what a server
+stores for one SASLprep leaves as it is — a password in NFKC, as one
+typed on a keyboard nearly always is.</p>
+
+<p><b>A sign-in is held to <code>connect_timeout</code></b>, libpq's
+parameter in seconds (30 by default, 2 at least): the name's lookup, the
+dial, the TLS handshake and every message up to the server's first
+<code>ReadyForQuery</code>, however little at a time the server answers.
+<code>connect_timeout=0</code>, libpq's "wait for ever", is refused.</p>
+
+<p><b>Give the password in <code>PGPASSWORD</code></b>, not in the
+connection string: a string given as an argument is in the process list,
+which any user of the machine can read, and in your shell's history.
+<code>PGPASSWORD</code> is read where the string names no password. A
+<code>%</code> in the string not followed by two hex digits, and an
+unknown parameter — a <code>?</code> left unescaped in a password begins
+one — are refused without the text being shown.</p>
 
 <h2>Type mapping</h2>
 
@@ -248,6 +387,7 @@ again and it picks up where it stopped.</p>
 <pre data-lang="text">$ fennec import postgres://app@db:5432/app --table docs --into articles \
     --index "category@hash" --follow
 source   app@db:5432/app -> docs
+tls      db:5432 with sslmode=verify-full (the default for a host off this machine): TLS, its certificate's chain and name checked
 target   articles.fennec -> articles
 follow   slot fennec_articles (created), publication fennec_articles (created)
 note     the slot keeps the server's WAL until this follower confirms it; to stop following for good: select pg_drop_replication_slot('fennec_articles')
@@ -293,7 +433,18 @@ It must also be in the replica identity: the primary key, or
   <li><b>Nothing is confirmed before it is on disk.</b> The slot only moves
     past a transaction once an fsync has covered it. A broken connection or a
     killed follower starts again from there, and the writes it replays are
-    puts and deletes by id, so applying them twice changes nothing.</li>
+    puts and deletes by id, so applying them twice changes nothing. While
+    the table is quiet, the server's keepalives name how far its log has
+    gone; over a connection whose server is proven — on this machine, under
+    <code>verify-ca</code> or <code>verify-full</code>, or signed in bound to
+    the TLS session — the follower confirms that position where nothing of
+    its own is pending, as PostgreSQL's own subscriber does, so the slot
+    lets go of the log other tables' writes fill. Over any other it confirms
+    only what it received and put on disk, as <code>pg_recvlogical</code>
+    does: a keepalive there may be anyone's on the path, and a position
+    confirmed past what was received would have PostgreSQL skip every
+    change before it, for good. The slot then keeps the server's log while
+    the table is quiet, until its next change.</li>
   <li><b>An untouched vector is not resent.</b> A vector of 768 floats is
     3 KB, past PostgreSQL's TOAST threshold, so an update of any other column
     arrives without it; the follower takes it from the collection.</li>
@@ -367,6 +518,7 @@ opened: articles.fennec
 following: docs
 fennec-server {{version}}: articles.fennec  [sync=250 ms]
 fennec-http {{version}} listening on: http://0.0.0.0:8080  [token]
+follow: db:5432 with sslmode=verify-full (the default for a host off this machine): TLS, its certificate's chain and name checked
 follow: docs: slot fennec_articles (created), publication fennec_articles (created)
 follow: the slot keeps the server's WAL until this server confirms it; to stop following for good: select pg_drop_replication_slot('fennec_articles')
 follow: copying docs: there is none yet
@@ -399,6 +551,26 @@ change from PostgreSQL would write over it. The rest of the file takes
 writes as ever. A subscriber of the collection
 (<code>GET /articles/changes</code>) hears each change as the follower
 applies it, and so does a replica of the server.</p>
+
+<p><b>The first copy holds up nothing of the server's.</b> It is read from
+PostgreSQL with no lock held and lands a batch (<code>--follow-batch</code>)
+at a time, each its own write, so every other request is answered as it
+goes. A reader of the collection sees it fill as the batches land; its
+<code>_follow</code> entry says the copy is unfinished until the last one,
+and an unfinished copy is made again from the start by the next start. A
+stop, or the shutdown, ends the copy within 0.2 s wherever it waits on
+PostgreSQL, and the dial and sign-in within <code>connect_timeout</code>,
+so neither a slow table nor a server that answers a byte at a time holds
+the server up.</p>
+
+<p><b>The PostgreSQL it follows is trusted that far:</b> what it sends is
+the collection's content, and a follower that cannot go on — a change it
+cannot read, a column the collection needs dropped — stops the server on
+purpose, exit code 1, rather than serve a mirror that no longer moves.
+Whoever answers at the follower's address can therefore stop the server;
+only <code>verify-full</code> (the default off this machine) and a sign-in
+bound to TLS keep that to the server itself. Its words in a log line are
+escaped and cut, never written raw.</p>
 
 <p>The follower stops with the server, before the shutdown's checkpoint:
 its last changes on disk and confirmed, then its slot let go, which it
@@ -511,7 +683,7 @@ import without it, <code>prefer</code> then plain text).
 backup</code>, <code>archive</code>, <code>restore</code> and <code>fennec
 mcp</code> with them (1876 KB). Those three figures are the
 <code>release</code> profile's on macOS arm64. As a release builds it, on
-the <code>cli</code> profile, <code>fennec</code> is 4779 KB on x86-64 Linux,
-and 2899 KB without its default features (<code>make small</code>), as CI
+the <code>cli</code> profile, <code>fennec</code> is 4911 KB on x86-64 Linux,
+and 2903 KB without its default features (<code>make small</code>), as CI
 measures them.</p>
 </details>

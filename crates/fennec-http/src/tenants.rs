@@ -146,6 +146,9 @@ pub struct Tenant {
     /// Whether its sync is queued or running on the node's sync threads
     /// ([`Tenants::sync_each`]): a tick finding it so passes it over.
     syncing: AtomicBool,
+    /// Whether the shutdown synced it and keeps its write lock to the
+    /// process's exit ([`Tenants::shutdown`]): its drop then syncs nothing.
+    kept_to_exit: AtomicBool,
 }
 
 impl Tenant {
@@ -437,6 +440,13 @@ impl Drop for Tenant {
     /// The last reference is going: whatever is buffered reaches the disk.
     /// `FileSink` would flush on its own drop, but without an fsync.
     fn drop(&mut self) {
+        // The shutdown synced it under the write lock it keeps to the exit,
+        // so no write landed after and nothing is left to sync -- and that
+        // lock is never let go: a registry dropped after its shutdown, in a
+        // test, waited here for good (`Drop for Tenants`).
+        if self.kept_to_exit.load(Ordering::Acquire) {
+            return;
+        }
         let mut g = self.write();
         if g.is_dirty() {
             if let Err(e) = g.sync() {
@@ -1815,6 +1825,7 @@ impl Tenants {
             bound: Mutex::new(bound),
             hooks_compactions: AtomicU64::new(0),
             syncing: AtomicBool::new(false),
+            kept_to_exit: AtomicBool::new(false),
         }))
     }
 
@@ -2664,12 +2675,18 @@ impl Tenants {
         // The flag first, the snapshot after: an open that got past the flag
         // inserted its slot before the snapshot, and is waited for below.
         self.shutting_down.store(true, Ordering::SeqCst);
+        // Before any lock is kept: a sync thread reaching for one after
+        // waited for it for good.
+        self.syncs.close();
         let mut count = 0;
         let mut kept = Vec::new();
         for slot in self.all_slots() {
             let held = slot.held.lock().unwrap_or_else(|e| e.into_inner());
             if let Held::Open(t) = &*held {
                 count += 1;
+                // Before its lock is kept: a compact, a sweep or a linking
+                // slice beginning after passes it over.
+                crate::held::kept_to_exit(&t.db);
                 let mut g = t.write();
                 if g.is_dirty() {
                     if let Err(e) = g.sync() {
@@ -2694,6 +2711,7 @@ impl Tenants {
                 // The file synced and its sync log removed, as the close the
                 // lock kept below never runs would (`Database::close_log`).
                 g.close_log();
+                t.kept_to_exit.store(true, Ordering::Release);
                 // Leaked on purpose: the process is about to exit, and a lock
                 // released here would let a session write after the final sync.
                 std::mem::forget(g);
@@ -2705,6 +2723,36 @@ impl Tenants {
         }
         count
     }
+}
+
+impl Drop for Tenants {
+    /// A registry dropped after its shutdown -- in a process going on past
+    /// it, as a test's does; a server exits holding it -- lets its tenants
+    /// go as the shutdown left them: synced, their write locks kept, each
+    /// tenant's drop syncing nothing (`Tenant::kept_to_exit`). Each drop
+    /// waited for that lock for good, the compacter and the sweeper parked
+    /// behind it. Said once, so that code dropping one so is seen.
+    fn drop(&mut self) {
+        if !self.shutting_down.load(Ordering::SeqCst) {
+            return;
+        }
+        let line = dropped_after_shutdown(&self.dir);
+        crate::log!("{line}");
+        #[cfg(test)]
+        tests::DROPPED_AFTER_SHUTDOWN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(line);
+    }
+}
+
+/// What a registry dropped after its shutdown says ([`Tenants`]' drop).
+fn dropped_after_shutdown(dir: &Path) -> String {
+    format!(
+        "the tenants of {} were dropped after their shutdown, left as it left them: synced, \
+         their write locks kept",
+        dir.display()
+    )
 }
 
 /// Pushes a tenant's writes to disk as the syncer does: the flush under its
@@ -2951,6 +2999,19 @@ fn frozen(name: &str) -> Refused {
         format!("tenant `{name}` is frozen: a move is under way, ask again once it ends"),
     )
 }
+
+/// What a router puts before a tenant's name in a request it sends a node
+/// of its own in the place of a tenant it does not place (fennec-shard's
+/// `Router::stand_in`): `~` is no character of a name ([`check_name`]), so
+/// no tenant can be made under it and no file of any node answers it -- a
+/// node from before refuses it as a name, after its token. A node reads
+/// the tenant's name past it, asks every credential of it as of a tenant
+/// it holds, and answers as for one it holds no file of (`route_tenant`):
+/// a leftover file of that name -- a deleted tenant's copy that would not
+/// come off, a create taken back whose delete failed -- is no tenant of
+/// the router's, and sent the name, a node opened it for any token
+/// reaching the name, to read and to write.
+pub const STAND_IN: &str = "~";
 
 /// `[a-z0-9_-]{1,64}`, and no device's name ([`a_device`]): safe as a file
 /// name everywhere, no traversal, and the same name on a case-insensitive
@@ -3935,6 +3996,97 @@ mod tests {
         );
         drop(ts);
         drop(reg);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The lines a registry dropped after its shutdown said, in this
+    /// process ([`dropped_after_shutdown`]).
+    pub(super) static DROPPED_AFTER_SHUTDOWN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    /// How many times `line` was said.
+    fn said(line: &str) -> usize {
+        let said = DROPPED_AFTER_SHUTDOWN.lock().unwrap();
+        said.iter().filter(|l| *l == line).count()
+    }
+
+    fn no_stop() {}
+
+    /// A registry dropped after its shutdown lets its tenants go as the
+    /// shutdown left them, and says so once. Each tenant's drop took the
+    /// write lock to sync, which the shutdown keeps to the exit, and waited
+    /// for good: 5 runs of 5 with the node's syncer running, the compacter
+    /// and the sweeper parked behind it. A sync handed over by a tick in
+    /// flight is refused -- its thread parked at the lock -- and every
+    /// thread beside the queries passes the databases over.
+    #[test]
+    fn a_registry_dropped_after_its_shutdown_lets_its_tenants_go_as_it_left_them() {
+        let dir = scratch("dropped-after-shutdown");
+        let reg = Arc::new(synced_later(&dir));
+        reg.sync_every(Duration::from_millis(1), no_stop).unwrap();
+        let ts: Vec<_> = ["after-shutdown-a", "after-shutdown-b"]
+            .iter()
+            .map(|n| reg.create(n).unwrap())
+            .collect();
+        for t in &ts {
+            run(t, "create collection n (i int)");
+            run(t, "put n {i: 1}");
+        }
+        assert_eq!(reg.shutdown(), ts.len());
+        for t in &ts {
+            assert!(on_disk(t), "`{}` unsynced by its shutdown", t.name);
+            let db = Arc::downgrade(&t.db);
+            assert!(crate::held::beside(&db).is_none(), "`{}` worked on", t.name);
+            let before = Arc::strong_count(t);
+            reg.syncs.hand(Arc::clone(t));
+            assert_eq!(
+                Arc::strong_count(t),
+                before,
+                "`{}` handed to a sync",
+                t.name
+            );
+        }
+        let gone: Vec<_> = ts.iter().map(Arc::downgrade).collect();
+        drop(ts);
+        let (done, dropped) = std::sync::mpsc::channel();
+        let dropping = std::thread::spawn(move || {
+            drop(reg);
+            let _ = done.send(());
+        });
+        assert!(
+            dropped.recv_timeout(Duration::from_secs(60)).is_ok(),
+            "the registry's drop never returned"
+        );
+        dropping.join().unwrap();
+        // The syncer's look may hold the registry a moment more, and drop it.
+        let line = dropped_after_shutdown(&dir);
+        until("the registry dropped", &|| said(&line) > 0);
+        until("its tenants let go", &|| {
+            gone.iter().all(|t| t.upgrade().is_none())
+        });
+        assert_eq!(said(&line), 1, "not said once");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A registry dropped with no shutdown before it is as it was: each
+    /// tenant's drop syncs what it holds, and nothing is said.
+    #[test]
+    fn a_registry_dropped_without_a_shutdown_syncs_each_tenant() {
+        let dir = scratch("dropped-unshut");
+        let reg = synced_later(&dir);
+        let t = reg.create("dropped-unshut").unwrap();
+        run(&t, "create collection n (i int)");
+        run(&t, "put n {i: 1}");
+        let feed = Arc::clone(t.repl.as_ref().and_then(|r| r.feed()).unwrap());
+        assert!(t.db.read().unwrap().is_dirty() && !on_disk(&t));
+        let gone = Arc::downgrade(&t);
+        drop(t);
+        drop(reg);
+        assert!(gone.upgrade().is_none(), "the tenant outlived its registry");
+        assert!(
+            feed.durable() >= feed.seq(),
+            "the tenant's drop synced nothing"
+        );
+        assert_eq!(said(&dropped_after_shutdown(&dir)), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

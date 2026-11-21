@@ -1274,8 +1274,15 @@ jobs:
   # runs cut -- counts nothing until it has landed; judged apart, by
   # `perf`. The base is the merge's first parent, a pull request's base
   # branch or the commit a merge group queues onto, built with its own
-  # toolchain. valgrind and musl-gcc (ring's C, through the examples'
-  # dev-dependency on fennec-tls) are the runner's packages, no crate.
+  # toolchain. Then the I/O workloads: each side's fennec-server, built in
+  # the same trees and target directories, sent gate.rs's requests under
+  # strace -f -- its fsyncs, renames and bytes written to files. The
+  # instructions' results are kept before the I/O runs, so a failed I/O
+  # count leaves them to be judged, and the I/O runs whatever became of
+  # them, its results an artifact of their own. valgrind, strace (which
+  # the runner's image lacks) and musl-gcc (ring's C, through the
+  # examples' dev-dependency on fennec-tls) are the runner's packages, no
+  # crate.
   perf-count:
     name: perf (count)
     if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
@@ -1289,15 +1296,54 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
 
-      # Under tools/, so it reads this checkout as its tree; this tree's
-      # only where the base has none yet.
+      # Under tools/, so it reads this checkout as its tree -- a checker
+      # finds it as the directory above its own -- and chosen by the base
+      # alone: the base's file as git reads it, this tree's only where git
+      # lists the base's tree and the file is not in it (`git ls-tree`:
+      # `git cat-file -e`'s exit 128, "no such path", is also its answer
+      # to a tree it cannot read). Whatever the pull request tracks at the
+      # path is refused, never written into or run, and a git error is no
+      # base without a checker. The base's gate.rs is read here too, before
+      # anything of the change runs.
       - name: The base's checker
         run: |
-          if git show HEAD^1:tools/perf_gate.py > tools/perf_gate_base.py; then
+          at_base() {
+            local s=0 listed
+            listed=$(git ls-tree HEAD^1 -- "$1") || s=$?
+            if [ "$s" != 0 ]; then
+              echo "::error title=perf gate::git cannot read the base's tree down to $1 (git ls-tree exited $s): a git error chooses no checker"
+              exit 1
+            fi
+            [ -n "$listed" ]
+          }
+          if [ -L tools ] || [ ! -d tools ]; then
+            echo "::error title=perf gate::this change's tools/ is not a directory, and the base's checker is written into it"
+            exit 1
+          fi
+          tracked=$(git ls-tree --name-only HEAD -- tools/perf_gate_base.py)
+          if [ -n "$tracked" ]; then
+            echo "::error title=perf gate::this change tracks tools/perf_gate_base.py, where the job writes the base's checker: remove it"
+            exit 1
+          fi
+          rm -rf tools/perf_gate_base.py
+          git cat-file -e 'HEAD^1^{tree}' || { echo "::error title=perf gate::git cannot read the base, HEAD^1"; exit 1; }
+          if at_base tools/perf_gate.py; then
+            git show HEAD^1:tools/perf_gate.py > tools/perf_gate_base.py || {
+              echo "::error title=perf gate::git cannot read the base's tools/perf_gate.py, which its tree lists"
+              exit 1
+            }
             echo "counted by the base's checker"
           else
             cp tools/perf_gate.py tools/perf_gate_base.py
             echo "the base has no tools/perf_gate.py yet: this tree's counts"
+          fi
+          if at_base crates/fennec-http/examples/gate.rs; then
+            git show HEAD^1:crates/fennec-http/examples/gate.rs > "$RUNNER_TEMP/base_gate.rs" || {
+              echo "::error title=perf gate::git cannot read the base's crates/fennec-http/examples/gate.rs, which its tree lists"
+              exit 1
+            }
+          else
+            : > "$RUNNER_TEMP/base_gate.rs"
           fi
 
       # Counted unless every path is the site's, the docs', an
@@ -1310,6 +1356,7 @@ jobs:
 
       # The base's channel beside this tree's: a pull request moving
       # rust-toolchain.toml builds its base with the base's compiler.
+      # strace is the I/O step's own.
       - name: Install both sides' toolchains, the musl target, valgrind and musl-gcc
         if: steps.reach.outputs.built == 'true'
         run: |
@@ -1322,18 +1369,23 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends valgrind musl-tools
 
+      # `--keep`: the I/O step builds fennec-server in the same trees and
+      # target directories, the crates both reach built once.
       - name: Count each workload's instructions and heap in the base's build and this one's
         if: steps.reach.outputs.built == 'true'
         run: |
           python3 -I tools/perf_gate_base.py run --base HEAD^1 --target x86_64-unknown-linux-musl \
-            --work "$RUNNER_TEMP/perf" --out "$RUNNER_TEMP/perf/results.json" --no-check
+            --work "$RUNNER_TEMP/perf" --out "$RUNNER_TEMP/perf/results.json" --no-check --keep
 
+      # Kept before the I/O runs: a strace refused, a server's crash or a
+      # hang there leaves the instructions' results for the judge.
       - name: Keep the results for the judgement
         if: steps.reach.outputs.built == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: perf-results
           path: ${{ runner.temp }}/perf/results.json
+          if-no-files-found: error
           retention-days: 14
 
       # Each side's median run of each workload, by function: what
@@ -1346,9 +1398,34 @@ jobs:
           path: ${{ runner.temp }}/perf/profiles/
           retention-days: 14
 
-      # P50, the I/O counts -- fsyncs and bytes written a durable write and
-      # a compact, under strace -f -c -- goes here, over the same two
-      # builds and the same checker: a results file of its own `metric`.
+      # By the base's checker wherever the base's gate.rs mentions
+      # IO_WORKLOADS, however spelt; this tree's only where grep reads it
+      # and finds none -- the pull request that brought them, counted by
+      # its own as the gate's first was. Chosen by a grep, never by Python
+      # of the change's, which the tests hold to the checker's
+      # `io_checker`; a base checker that cannot count them fails the step.
+      # Run whatever became of the instructions' count, which is judged
+      # apart.
+      - name: Count each I/O workload's fsyncs, renames and bytes written against the base's server and this one's
+        if: ${{ !cancelled() && steps.reach.outputs.built == 'true' }}
+        run: |
+          sudo apt-get install -y --no-install-recommends strace
+          checker=tools/perf_gate_base.py
+          grep -q IO_WORKLOADS "$RUNNER_TEMP/base_gate.rs" || test $? -ne 1 || checker=tools/perf_gate.py
+          echo "the I/O counted by $checker"
+          python3 -I "$checker" io --base HEAD^1 --target x86_64-unknown-linux-musl \
+            --work "$RUNNER_TEMP/perf" --out "$RUNNER_TEMP/perf/io.json" --no-check
+
+      # An artifact of its own: the instructions' is never uploaded again,
+      # so a failed upload here loses nothing of theirs.
+      - name: Keep the I/O results beside them
+        if: ${{ !cancelled() && steps.reach.outputs.built == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: perf-io-results
+          path: ${{ runner.temp }}/perf/io.json
+          if-no-files-found: error
+          retention-days: 14
 
   # docs/design/benchmarks.md#the-gate: perf (count)'s results held to the
   # base's by the base's copy of the checker, the pull request's
@@ -1356,12 +1433,19 @@ jobs:
   # program's: +1% or more in instructions or in heap bytes an op fails
   # unless the pull request adds an entry naming the workload, and so does
   # a workload the base's program runs that this tree dropped or the base
-  # did not run. A job of its own: the count runs the change's build
-  # scripts and programs, which could put anything on a later step's PATH
-  # ($GITHUB_PATH); here nothing of the change runs, and git and python3
-  # are the runner's. It names every edit of the gate's own files and
-  # every entry added, which the owner approves before the change merges.
-  # This job is the check a merge may require.
+  # did not run; an I/O workload's count that is not the base's, up or
+  # down, fails unless an entry names that count. Each set of results is
+  # judged whatever became of the other, and the job says which it lacks;
+  # a count that did not end well fails it after both. A job of its own:
+  # the count runs the change's build scripts and programs, which could
+  # put anything on a later step's PATH ($GITHUB_PATH); here nothing of the
+  # change runs but these steps, whose every edit it names for the owner --
+  # the checker the base's, but where the base's gate.rs mentions no
+  # IO_WORKLOADS, chosen by a grep, and never what the change put where
+  # the copy is written -- and git and python3 are the runner's. It names
+  # every edit of the gate's own files and every entry added, which the
+  # owner approves before the change merges. This job is the check a
+  # merge may require.
   perf:
     name: perf (instructions)
     needs: perf-count
@@ -1376,19 +1460,53 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
 
+      # As the count chose it: the base's file as git reads it, this
+      # tree's only where git lists the base's tree without it, whatever
+      # the pull request tracks at the path refused, a git error no base
+      # without a checker. The base's gate.rs beside none of the artifacts,
+      # which are downloaded each into a directory of its own.
       - name: The base's checker and program
         id: base
         run: |
-          mkdir -p "$RUNNER_TEMP/judge"
-          if git show HEAD^1:tools/perf_gate.py > tools/perf_gate_base.py; then
+          at_base() {
+            local s=0 listed
+            listed=$(git ls-tree HEAD^1 -- "$1") || s=$?
+            if [ "$s" != 0 ]; then
+              echo "::error title=perf gate::git cannot read the base's tree down to $1 (git ls-tree exited $s): a git error chooses no checker"
+              exit 1
+            fi
+            [ -n "$listed" ]
+          }
+          if [ -L tools ] || [ ! -d tools ]; then
+            echo "::error title=perf gate::this change's tools/ is not a directory, and the base's checker is written into it"
+            exit 1
+          fi
+          tracked=$(git ls-tree --name-only HEAD -- tools/perf_gate_base.py)
+          if [ -n "$tracked" ]; then
+            echo "::error title=perf gate::this change tracks tools/perf_gate_base.py, where the job writes the base's checker: remove it"
+            exit 1
+          fi
+          rm -rf tools/perf_gate_base.py
+          git cat-file -e 'HEAD^1^{tree}' || { echo "::error title=perf gate::git cannot read the base, HEAD^1"; exit 1; }
+          if at_base tools/perf_gate.py; then
+            git show HEAD^1:tools/perf_gate.py > tools/perf_gate_base.py || {
+              echo "::error title=perf gate::git cannot read the base's tools/perf_gate.py, which its tree lists"
+              exit 1
+            }
             echo "had=true" >> "$GITHUB_OUTPUT"
             echo "judged by the base's checker"
           else
             cp tools/perf_gate.py tools/perf_gate_base.py
             echo "the base has no tools/perf_gate.py yet: this tree's judges"
           fi
-          git show HEAD^1:crates/fennec-http/examples/gate.rs > "$RUNNER_TEMP/judge/base_gate.rs" \
-            || : > "$RUNNER_TEMP/judge/base_gate.rs"
+          if at_base crates/fennec-http/examples/gate.rs; then
+            git show HEAD^1:crates/fennec-http/examples/gate.rs > "$RUNNER_TEMP/base_gate.rs" || {
+              echo "::error title=perf gate::git cannot read the base's crates/fennec-http/examples/gate.rs, which its tree lists"
+              exit 1
+            }
+          else
+            : > "$RUNNER_TEMP/base_gate.rs"
+          fi
 
       - name: The gate's own files this change edits, for the owner
         run: python3 -I tools/perf_gate_base.py edits --base HEAD^1 --summary "$GITHUB_STEP_SUMMARY"
@@ -1397,38 +1515,80 @@ jobs:
         id: reach
         run: python3 -I tools/perf_gate_base.py reaches --base HEAD^1 --output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
 
-      # A count that failed, or never ran, is no pass.
-      - name: The count ran
-        if: steps.reach.outputs.built == 'true'
-        env:
-          COUNT: ${{ needs.perf-count.result }}
-        run: |
-          if [ "$COUNT" != success ]; then
-            echo "::error title=perf gate::perf (count) ended $COUNT: nothing to judge, its log says why"
-            echo "perf (count) ended $COUNT: nothing to judge." >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-
+      # Whatever the count left, each artifact apart and into a directory
+      # of its own, which holds nothing the judge reads but its results: a
+      # file it lacks is said by the step that judges it.
       - name: The count's results
-        if: steps.reach.outputs.built == 'true'
+        if: ${{ !cancelled() && steps.reach.outputs.built == 'true' }}
+        continue-on-error: true
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: perf-results
-          path: ${{ runner.temp }}/judge
+          path: ${{ runner.temp }}/judge/count
+
+      - name: The I/O count's results
+        if: ${{ !cancelled() && steps.reach.outputs.built == 'true' }}
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: perf-io-results
+          path: ${{ runner.temp }}/judge/io
 
       - name: Hold them to the base's, by the base's checker
-        if: steps.reach.outputs.built == 'true'
+        if: ${{ !cancelled() && steps.reach.outputs.built == 'true' }}
         env:
           BASE_HAD: ${{ steps.base.outputs.had }}
         run: |
+          if [ ! -f "$RUNNER_TEMP/judge/count/results.json" ]; then
+            echo "::error title=perf gate::perf (count) left no instruction results (results.json): its count failed or never ran, and its log says why"
+            echo "perf (count) left no instruction results (results.json): the instructions are not judged." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
           # The entries the base holds already let nothing through.
           held=()
           if [ "$BASE_HAD" = true ]; then
             held=(--accepted-base tools/perf_gate_base.py)
           fi
-          python3 -I tools/perf_gate_base.py check "$RUNNER_TEMP/judge/results.json" \
+          python3 -I tools/perf_gate_base.py check "$RUNNER_TEMP/judge/count/results.json" \
             --accepted-from tools/perf_gate.py "${held[@]}" \
-            --base-program "$RUNNER_TEMP/judge/base_gate.rs" --summary "$GITHUB_STEP_SUMMARY"
+            --base-program "$RUNNER_TEMP/base_gate.rs" --summary "$GITHUB_STEP_SUMMARY"
+
+      # Judged whether or not the instructions passed, so the summary holds
+      # both tables; by the checker that counted them, chosen as the count
+      # chose it.
+      - name: Hold the I/O counts to the base's, by the base's checker
+        if: ${{ !cancelled() && steps.reach.outputs.built == 'true' }}
+        env:
+          BASE_HAD: ${{ steps.base.outputs.had }}
+        run: |
+          if [ ! -f "$RUNNER_TEMP/judge/io/io.json" ]; then
+            echo "::error title=perf gate::perf (count) left no I/O results (io.json): its I/O count failed or never ran, and its log says why"
+            echo "perf (count) left no I/O results (io.json): the I/O is not judged." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          checker=tools/perf_gate_base.py
+          grep -q IO_WORKLOADS "$RUNNER_TEMP/base_gate.rs" || test $? -ne 1 || checker=tools/perf_gate.py
+          echo "the I/O judged by $checker"
+          held=()
+          if [ "$BASE_HAD" = true ]; then
+            held=(--accepted-base tools/perf_gate_base.py)
+          fi
+          python3 -I "$checker" check "$RUNNER_TEMP/judge/io/io.json" \
+            --accepted-from tools/perf_gate.py "${held[@]}" \
+            --base-program "$RUNNER_TEMP/base_gate.rs" --summary "$GITHUB_STEP_SUMMARY"
+
+      # A count that failed, or never ran, is no pass: said after what it
+      # left was judged.
+      - name: The count ran
+        if: ${{ !cancelled() && steps.reach.outputs.built == 'true' }}
+        env:
+          COUNT: ${{ needs.perf-count.result }}
+        run: |
+          if [ "$COUNT" != success ]; then
+            echo "::error title=perf gate::perf (count) ended $COUNT: what it left is judged above, and its log says why it ended so"
+            echo "perf (count) ended $COUNT." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
 
   # A page's database kept in real browsers (web/browser/, `make
   # browser-test`): persist and restore against each engine's IndexedDB and
@@ -2299,8 +2459,9 @@ jobs:
 
   # docs/design/conventions.md#fuzzing: every parser of untrusted bytes --
   # an HTTP request, JSON, FennecQL, the codec, a .fennec file's open and a
-  # replica's apply, a SQLite file -- fuzzed for a count of runs each (about
-  # 30 s of this runner), built with AddressSanitizer and LLVM's coverage
+  # replica's apply, a SQLite file, the certificate a PostgreSQL server
+  # shows, walked to its signature's hash -- fuzzed for a count of runs each
+  # (about 30 s of this runner), built with AddressSanitizer and LLVM's coverage
   # counters on the Makefile's dated nightly (a nightly only here and in
   # fuzz.yml). A count, not a time: the same commit hands each target the
   # same inputs on any runner, so the job passes or fails by the commit,
@@ -2310,12 +2471,14 @@ jobs:
   # recipe. The test job runs the same targets over their seeds in a plain
   # build; fuzz.yml gives each half an hour a week. Each target is capped
   # at six minutes of CPU time (`SMOKE_CAP`), so a commit slowing every run
-  # ends at a named target's cap before this timeout: six just under it
-  # are 36 minutes, and the build a minute and a half.
+  # ends at a named target's cap before this timeout: eight just under it
+  # -- these seven and `stream`, a primary's stream, which lands beside
+  # them -- are 48 minutes, and the build a minute and a half, with the
+  # seven and a half minutes to spare six had under 45.
   fuzz-smoke:
     name: fuzz-smoke (each target a count of runs under ASan)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 57
     permissions:
       contents: read
     steps:

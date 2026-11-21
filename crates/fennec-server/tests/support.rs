@@ -225,11 +225,22 @@ pub fn without_tokens(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
+/// `cmd` without the variables of libpq's a connection string is read
+/// with (`fennec_wire::client::Url::parse`): a `--follow` URL a test gives
+/// means what it says. A `PGPASSWORD` exported in a developer's shell had a
+/// follower hold a password and refuse a trust stand-in's sign-in.
+pub fn without_libpq(cmd: &mut Command) -> &mut Command {
+    for name in ["PGPASSWORD", "PGSSLMODE", "PGSSLROOTCERT", "PGUSER"] {
+        cmd.env_remove(name);
+    }
+    cmd
+}
+
 /// [`try_start_env`] with `stdin` as the server's stdin.
 pub fn try_start_with(args: &[&str], env: &[(&str, &str)], stdin: Stdio) -> Result<Server, String> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_fennec-server"));
     own_group(&mut cmd);
-    without_tokens(&mut cmd).envs(env.iter().copied());
+    without_libpq(without_tokens(&mut cmd)).envs(env.iter().copied());
     if !args.contains(&"--http") {
         cmd.args(["--http", "127.0.0.1:0"]);
     }

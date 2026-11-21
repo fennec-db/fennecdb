@@ -62,7 +62,7 @@ pub fn watch(what: &str, db: &std::sync::Arc<RwLock<Database>>) {
                     swept.clone()
                 };
                 for (what, db) in swept {
-                    if let Some(db) = db.upgrade() {
+                    if let Some(db) = crate::held::beside(&db) {
                         pass_after(&what, &db, GRACE);
                     }
                 }

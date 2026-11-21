@@ -206,11 +206,12 @@ repository holds both, up to 7.4 GiB with main's 3.36 GiB: under the 10 GB.
 
 Which `ci.yml` jobs are required checks is a repository setting (classic
 branch protection on main, not the merge queue's ruleset). All of them are
-but `size (browser module)`, which only runs on a pull request and so would
-never report in the merge queue, and a job is left out until it has passed
-on main: `perf (instructions)` until the gate's holdout has
-([benchmarks.md](benchmarks.md#the-gate)), a new job until the merge group
-that brought it has. A job skipped by an `if:` reports success
+-- 38 checks since 2026-11-21 -- but `size (browser module)`, which only
+runs on a pull request and so would never report in the merge queue, and a
+job is left out until it has passed on main: a new job until the merge
+group that brought it has. `perf (instructions)` was left out until the
+gate's holdout had a green run on main, and is required since 2026-11-21
+([benchmarks.md](benchmarks.md#the-gate)). A job skipped by an `if:` reports success
 and can be required (the Rosetta job is one, skipped on a pull request); a
 whole workflow skipped by a path or branch filter reports nothing, its checks
 stay pending, and a required check of one blocks a merge it should not, so
@@ -371,8 +372,15 @@ on threads past 16 384 documents, any other replayed in place,
 `replay_mapped` -- each read whole, its indexes built and its vectors
 linked, and its records applied as a replica applies a primary's; the
 first byte of an input says whether its records are summed anew, so an
-open reads what a record holds rather than stopping at its sum) and
-`sqlite` (`fennec import`'s reader over a file). `make fuzz`
+open reads what a record holds rather than stopping at its sum),
+`sqlite` (`fennec import`'s reader over a file) and `certificate`
+(fennec-tls's walk of the certificate a PostgreSQL server shows to its
+signature algorithm, which picks a channel binding's hash, RFC 5929: the
+file itself, `src/end_point.rs`, compiled into the fuzzer by `#[path]`,
+since fennec-tls is rustls and ring and the fuzzer takes nothing from
+outside the workspace; its seeds are fennec-wire's test certificates and
+a certificate's shape for each signature algorithm the walk tells
+apart). `make fuzz`
 lists them, `make fuzz TARGET=<name>` runs one; a new parser of untrusted
 bytes gets its target in the pull request that adds it, and
 `.github/workflows/fuzz.yml`'s matrix its name, which the crate's tests
@@ -468,15 +476,18 @@ every five seconds, a clock's comparison counted in the next run: where a
 count bounds the run it is said by the count. The platform's own code
 differs -- a commit's smoke is the same on every Linux runner and on
 every Mac, not on both -- and the counts were set from CI's runner, about
-30 s each under ASan. Nor does a target read the wall clock: the `image`
+30 s each under ASan; `certificate`'s, 300 000, from its CPU time under ASan
+on a Mac beside the six's own smokes in the same run (19.8 s, where theirs
+took 13.2 to 29.5 s, 20.2 at the median), until CI's smoke says its own.
+Nor does a target read the wall clock: the `image`
 target's databases read a fixed time as now (`set_clock`), where a
 `@ttl` collection's read asked the system's for its cutoff, a row alive
 in one run and expired in a later one. A count still needs a bound in
 time, or a commit slowing every run ends at the job's timeout naming no
 target: `--smoke` caps each target at six minutes of CPU time
 (`SMOKE_CAP`, twelve times its 30 s on CI and three times the most a Mac
-under ASan spent, `http`'s 110 s; six targets just under it end inside
-the job's 45 minutes with the build), by a timer of the process's CPU
+under ASan spent, `http`'s 110 s; eight targets just under it end inside
+the job's 57 minutes with the build), by a timer of the process's CPU
 time (`ITIMER_PROF`) set once, whose handler says the target and the run
 it reached and exits 4. A bound, never a pass; CPU time, which a machine
 others load lengthens less than the clock (`http` 375 s by the clock and
@@ -729,7 +740,18 @@ and reductions 26-bit limbs get wrong, A.4's three one-time keys and A.5's
 decryption (`chacha20_rfc8439_appendix_a`, `poly1305_rfc8439_appendix_a`,
 `aead_rfc8439_appendix_a`, read from `rfc8439_vectors.txt`, each hex dump
 of the RFC's text read as bytes and held to its own ASCII column as it was
-made); ES256 to Wycheproof's (`tests/es256.rs`); and SCRAM's client half,
+made); HChaCha20, a sealed file's own key, to draft-irtf-cfrg-xchacha's
+vector (`hchacha20_draft_irtf_cfrg_xchacha`), and the key it runs under --
+HKDF-Expand's first block, one HMAC -- to RFC 5869's three SHA-256 cases
+and the whole derivation to a vector computed apart in Python
+(`the_file_keys_key_is_hkdf_expand`, `a_file_key_is_the_one_another_reader_makes`);
+RS256 at each end of the keys
+`RsaKey::new` takes -- 2041 bits with e = 3, 8192 with a 64-bit exponent --
+and just past each -- 2040 bits, 8200, an exponent of 65 bits -- refused,
+every key and signature OpenSSL's, the commands beside the test
+(`rs256_at_each_end_of_the_keys_it_takes`, `rsa_bounds_vectors.txt`), where
+Wycheproof stops at 4096; ES256 to Wycheproof's (`tests/es256.rs`); and
+SCRAM's client half,
 fennec-wire's, to RFC 7677's exchange byte for byte, its nonce a parameter
 of `Scram` so the RFC's can be given (`scram_rfc7677_exchange`). Each
 vector is read from its RFC's text or computed by another implementation,

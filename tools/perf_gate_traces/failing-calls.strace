@@ -1,0 +1,17 @@
+10    accept4(3<socket:[22547]>, {sa_family=AF_INET, sin_port=htons(46872), sin_addr=inet_addr("127.0.0.1")}, [16], SOCK_CLOEXEC) = 5<socket:[20538]>
+12    write(7</tmp/fx/data.ro>, ""..., 7 <unfinished ...>
+11    write(6</tmp/fx/data>, ""..., 100 <unfinished ...>
+12    <... write resumed>)              = -1 EBADF (Bad file descriptor)
+11    <... write resumed>)              = 100
+12    renameat(AT_FDCWD</>, "/tmp/fx/missing", AT_FDCWD</>, "/tmp/fx/renamed" <unfinished ...>
+11    fdatasync(6</tmp/fx/data> <unfinished ...>
+12    <... renameat resumed>)           = -1 ENOENT (No such file or directory)
+12    fsync(9<pipe:[19500]>)            = -1 EINVAL (Invalid argument)
+12    write(4<socket:[22548]>, ""..., 11) = 11
+12    renameat(AT_FDCWD</>, "/tmp/fx/data.ro", AT_FDCWD</>, "/tmp/fx/data.kept") = 0
+11    <... fdatasync resumed>)          = 0
+11    write(6</tmp/fx/data>, ""..., 101) = 101
+11    fdatasync(6</tmp/fx/data>)        = 0
+11    write(6</tmp/fx/data>, ""..., 102) = 102
+11    fdatasync(6</tmp/fx/data>)        = 0
+10    accept4(3<socket:[22547]>, {sa_family=AF_INET, sin_port=htons(46874), sin_addr=inet_addr("127.0.0.1")}, [16], SOCK_CLOEXEC) = 10<socket:[20540]>

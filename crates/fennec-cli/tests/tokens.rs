@@ -95,3 +95,34 @@ fn an_empty_key_file_is_refused() {
         );
     }
 }
+
+/// A key file others can read is warned of as `fennec` reads it, by name
+/// and mode, and never refused; one its owner alone reads is not. Through
+/// the command, so the warning is the one `Key::from_file` logs on the way
+/// every `--key-file` takes, not `seal::open_key`'s words alone.
+#[cfg(unix)]
+#[test]
+fn a_key_file_others_can_read_is_warned_of() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("fennec-cli-open-key-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("archive")).unwrap();
+    let key = dir.join("archive.key");
+    std::fs::write(&key, "ab".repeat(32)).unwrap();
+    let (k, archive) = (key.to_str().unwrap(), dir.join("archive"));
+    for (mode, warned) in [(0o600, false), (0o644, true)] {
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(mode)).unwrap();
+        let out = fennec(&["verify", archive.to_str().unwrap(), "--key-file", k], &[]);
+        let text = said(&out);
+        match warned {
+            true => assert!(
+                text.contains(&format!(
+                    "warning: --key-file {k} is open to every user (mode 0644)"
+                )),
+                "{text}"
+            ),
+            false => assert!(!text.contains("warning: --key-file"), "{text}"),
+        }
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}

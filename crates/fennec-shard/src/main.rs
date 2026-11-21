@@ -29,7 +29,8 @@ usage: fennec-shard [options]
                             Data requests pass their own Authorization through
                             to the nodes, which check it against --http-token.
                             Past loopback 32 bytes at least
-      --insecure            allow a non-loopback address without --token
+      --insecure            allow a non-loopback address without --token, and
+                            forwarding there to a node that asks no token
       --tls-cert <pem>      serve clients HTTPS alone, with this certificate
       --tls-key <pem>       chain and its private key, both or neither. Read
                             at the start: a renewed certificate takes a

@@ -2101,3 +2101,86 @@ fn the_servers_own_collections_are_no_agents() {
     let (_, s) = n.call(Some(ROOT), "query", r#"{"query":"get _consumers count"}"#);
     assert_eq!(at(&s, &["rows", "0", "count"]), &Value::Int(1), "{s:?}");
 }
+
+/// `--mcp-calls-per-sec` through the node's endpoints: a caller is its
+/// issuer and subject in the tenant it calls. Keyed by `sub` alone, one
+/// subject's calls to one tenant spent its bucket in every other, and
+/// another issuer's user of the same name spent it too.
+#[test]
+fn a_callers_rate_is_its_own_in_each_tenant_through_the_endpoint() {
+    fennec_http::audit::set_delay(0);
+    let dir = std::env::temp_dir().join(format!(
+        "fennec-mcp-rates-{}-{}",
+        std::process::id(),
+        std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
+    ));
+    let tenants = Arc::new(Tenants::new(&dir).unwrap());
+    for name in ["acme", "globex"] {
+        let t = tenants.create(name).unwrap();
+        setup(&mut t.db.write().unwrap(), DOCS);
+    }
+    let access = Arc::new(Access::new(SECRET, POLICY).unwrap());
+    let server = Server::with_tenants(
+        Arc::clone(&tenants),
+        Config {
+            addr: "127.0.0.1:0".into(),
+            access: Some(Arc::clone(&access)),
+            admin_token: Some("adm".into()),
+            mcp: Some(Arc::new(Options {
+                calls_per_sec: 1,
+                ..opts()
+            })),
+            ..Config::default()
+        },
+    );
+    let listener = server.bind().unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let _ = server.serve_on(listener);
+    });
+    let n = Node {
+        port,
+        access: Some(access),
+    };
+    // One call a second: the first of a bucket is let in, the second in the
+    // same second refused, with when to call again.
+    let call = |path: &str, token: &str| {
+        let a = n.modern_at(
+            path,
+            Some(token),
+            1,
+            "tools/call",
+            r#"{"name":"schema","arguments":{}}"#,
+        );
+        assert_eq!(a.status, 200, "{}", a.body);
+        let v = a.json();
+        match at(&v, &["result", "isError"]) == &Value::Bool(true) {
+            true => {
+                let s = at(&v, &["result", "structuredContent"]);
+                assert_eq!(at(s, &["status"]), &Value::Int(429), "{}", a.body);
+                false
+            }
+            false => true,
+        }
+    };
+    // Spent in acme: a second's worth, however slow the calls come.
+    let vera = n.token(r#"{"sub":"vera-endpoint","tenant":["acme","globex"]}"#);
+    assert!(
+        (0..10).any(|_| !call("/t/acme/_mcp", &vera)),
+        "ten calls at once, one a second"
+    );
+    // A bucket of its own is full: its first call is let in, whatever the
+    // clock did meanwhile.
+    assert!(
+        call("/t/globex/_mcp", &vera),
+        "another tenant is counted apart"
+    );
+    let other = n.token(
+        r#"{"sub":"vera-endpoint","iss":"https://other.example/","tenant":["acme","globex"]}"#,
+    );
+    assert!(
+        call("/t/acme/_mcp", &other),
+        "another issuer's subject is counted apart"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
