@@ -428,7 +428,7 @@ env_image() {
 #   the rust image the Dockerfile names, by its digest (the tag alone can
 #     move), which ycsb/linux-tools.sh builds the Linux tools in;
 #   alpine by its digest (ENV_ALPINE), which the looks, verifies, backups
-#     and df run in;
+#     and df run in: run, first (below);
 #   rustup's toolchain rust-toolchain.toml names, with its targets: a
 #     cargo in this tree installs a missing one from the network;
 #   cargo's registry index, which the tools' build reads offline;
@@ -457,15 +457,23 @@ env_preflight() {
     pf_s=0
     env_within 60 "docker info" docker info --format '{{.MemTotal}}' >/dev/null 2>&1 || pf_s=1
     pf "$pf_s" "Docker answering" "start Docker Desktop"
+    # alpine is run, not inspected, and first. On this Mac (Docker Desktop
+    # 29.2.1, 2026-11-22) `docker image inspect` answered "No such image"
+    # for every image, by tag, digest or platform, while `docker image ls`
+    # listed them all -- twice, after the VM had idled some minutes -- and
+    # a `docker run` answered truly and woke it, every inspect after it
+    # answering truly again. So the run holds alpine to what every look
+    # does with it (`--pull never`), and the inspects come after it.
+    pf_s=0
+    env_within 120 "docker run $ENV_ALPINE" docker run --rm --pull never --network none \
+        --name "$ENV_PREFIX-df" "$ENV_ALPINE" true >/dev/null 2>&1 || pf_s=1
+    pf "$pf_s" "the image $ENV_ALPINE, by its digest, runs" \
+        "docker pull $ENV_ALPINE, where the network may be used"
     rust=$(awk '/^FROM rust:[^ ]*@sha256:/ {print $2; exit}' Dockerfile)
     pf_s=0
     [ -n "$rust" ] && env_within 60 "docker image inspect" docker image inspect "$rust" >/dev/null 2>&1 || pf_s=1
     pf "$pf_s" "the image ${rust:-the Dockerfile names}, by its digest" \
         "docker pull $rust, where the network may be used"
-    pf_s=0
-    env_within 60 "docker image inspect" docker image inspect "$ENV_ALPINE" >/dev/null 2>&1 || pf_s=1
-    pf "$pf_s" "the image $ENV_ALPINE, by its digest" \
-        "docker pull $ENV_ALPINE, where the network may be used"
     rustup=rustup
     command -v rustup >/dev/null 2>&1 || rustup=$HOME/.cargo/bin/rustup
     channel=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)

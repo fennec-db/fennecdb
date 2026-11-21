@@ -240,7 +240,11 @@ pulled, fetched or built while it runs (`env_preflight`, both scripts): the
 rust image the Dockerfile names, by its digest -- a tag can move -- which
 the Linux tools build in; `alpine`, by its digest too (`ENV_ALPINE` in the
 scripts, `ALPINE` in `ycsb`, a test holding them to one), which the looks,
-verifies, backups and `df` run in; rustup's toolchain and the targets rust-toolchain.toml names,
+verifies, backups and `df` run in, and which the check runs, first, rather
+than inspects -- Docker Desktop 29.2.1 answered `docker image inspect` "No
+such image" for every image while its VM had idled some minutes, `image
+ls` listing them all, and a run answered truly and woke it, the inspects
+after it answering truly too; rustup's toolchain and the targets rust-toolchain.toml names,
 which a cargo in the tree would fetch; cargo's registry index, which the
 tools' build reads offline; and `fennecdb-ycsb` built from this tree. Each
 is said `ok` or `MISSING` with how to get it, and a run with one missing
