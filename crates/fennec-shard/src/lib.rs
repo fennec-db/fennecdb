@@ -698,6 +698,9 @@ const WORD_OPEN: u64 = 1;
 /// It said nothing: asked, it did not answer, or refused the admin token
 /// recorded for it.
 const WORD_NONE: u64 = 2;
+/// [`Router::ask_now`]'s answer, never kept: not asked yet, and another
+/// request's ask is out.
+const WORD_ASKING: u64 = 3;
 
 /// The router process's seconds, from one: what a node's word on its data
 /// token is timed by ([`Marked::open`]).
@@ -728,9 +731,10 @@ pub(crate) struct Marked {
     /// at, shifted left two, and in the low two bits what it said: a
     /// [`WORD_TOKEN`], [`WORD_OPEN`] or [`WORD_NONE`].
     open: std::sync::atomic::AtomicU64,
-    /// Held by whoever asks the node: one ask a node at a time, the
-    /// requests meeting it waiting for its word rather than asking again.
-    asking: Mutex<()>,
+    /// Claimed by whoever asks the node: one ask a node at a time, a
+    /// request meeting it answered as the node's word stands, never
+    /// waiting for the ask ([`Router::ask_now`]).
+    asking: std::sync::atomic::AtomicBool,
     /// Whether a thread asks it beside a read ([`Router::open_copy`]).
     beside: std::sync::atomic::AtomicBool,
 }
@@ -743,7 +747,7 @@ impl Marked {
             past: marks.past.into(),
             local: marks.local.into(),
             open: std::sync::atomic::AtomicU64::new(OPEN_UNKNOWN),
-            asking: Mutex::new(()),
+            asking: std::sync::atomic::AtomicBool::new(false),
             beside: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -1918,7 +1922,9 @@ impl Router {
     /// no token ([`Self::word_of`]): asked as the node is added
     /// ([`Self::set_node`]), and of a node not asked since the router
     /// started -- one its directory held, or a standby's directory brought
-    /// -- by the first request to it, before it goes ([`Self::ask_now`]).
+    /// -- by the first request to it, before it goes, one ask out a node at
+    /// a time, a request meeting it answered 503 rather than waiting
+    /// ([`Self::ask_now`]).
     /// A node that said so is asked again by a request refused once its
     /// word is [`Config::open_asked_again`] old, so one given a token since
     /// is forwarded to with no router started again; one that said nothing
@@ -1966,6 +1972,15 @@ impl Router {
                     ),
                 ))
             }
+            WORD_ASKING => Some(Response::retry_after(
+                503,
+                &format!(
+                    "node `{node}` is being asked whether it asks a data token, and this \
+                     router listens past loopback, where it forwards to no node that may ask \
+                     none"
+                ),
+                SILENT_ASKED_AGAIN,
+            )),
             _ => Some(Response::retry_after(
                 503,
                 &format!(
@@ -2009,7 +2024,8 @@ impl Router {
     }
 
     /// [`Self::ask_now`] on a thread of its own, one at a time a node: the
-    /// read asking goes on meanwhile.
+    /// read asking goes on meanwhile, and one meeting a request's ask out
+    /// leaves it that one.
     #[cold]
     fn ask_beside(&self, addr: &str, m: &Arc<Marked>) {
         if m.beside.swap(true, Ordering::Relaxed) {
@@ -2033,11 +2049,30 @@ impl Router {
     }
 
     /// Asks the node at `addr` what it says of its data token, unless
-    /// another asked it since its word was `seen` -- one ask a node at a
-    /// time, the others waiting for its word -- and keeps the word in `m`:
-    /// the word, a [`WORD_TOKEN`], [`WORD_OPEN`] or [`WORD_NONE`].
+    /// another asked it since its word was `seen`, and keeps the word in
+    /// `m`: the word, a [`WORD_TOKEN`], [`WORD_OPEN`] or [`WORD_NONE`]. One
+    /// ask a node at a time, and no request waits for it: one meeting an
+    /// ask out has the word as it stands, [`WORD_ASKING`] where there is
+    /// none yet -- 503, `Retry-After` -- as a node that said nothing is
+    /// answered. Each waiting on a lock the ask held, every request to the
+    /// node queued behind a call bounded by `--upstream-timeout` alone,
+    /// against fennec-shard's rule that no lock is held across a call to a
+    /// node.
     fn ask_now(&self, addr: &str, m: &Marked, seen: u64) -> u64 {
-        let _one = m.asking.lock().unwrap_or_else(|e| e.into_inner());
+        if m.asking.swap(true, Ordering::Acquire) {
+            return match m.open.load(Ordering::Relaxed) {
+                OPEN_UNKNOWN => WORD_ASKING,
+                s => s & 3,
+            };
+        }
+        // Let go as this returns, a panic's unwinding too.
+        struct Asking<'a>(&'a std::sync::atomic::AtomicBool);
+        impl Drop for Asking<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let _one = Asking(&m.asking);
         let state = m.open.load(Ordering::Relaxed);
         if state != seen {
             return match state {

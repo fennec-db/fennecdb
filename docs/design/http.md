@@ -388,7 +388,12 @@ where it asks none and its 401 where it asks one (`Router::word_of`). It
 asks as the node is added, and of a node it has not asked since it
 started -- one its directory held, one a standby's directory brought -- at
 the first request to it, before that request goes, one ask a node at a
-time (`ask_now`); a node that said so is asked again by a refused request
+time (`ask_now`), a request meeting it answered 503 with `Retry-After: 1`
+as the ask goes on, never waiting for it: each waiting on a lock the ask
+held, every request to the node queued behind a call bounded by
+`--upstream-timeout` alone, against fennec-shard's rule that no lock is held across a
+call to a node (the review of the fixes' second and third rounds); a node
+that said so is asked again by a refused request
 once its word is 10 s old, so one given a token since is reached with no
 router started again. Not known is not forwarded to: a node that does not
 say -- its stats refusing the admin token recorded for it, or not
@@ -447,8 +452,12 @@ token asked once (`a_router_past_loopback_forwards_to_no_node_it_could_not_ask`)
 an open node's word held inside its 10 s, asked again past it -- the period
 set to nothing -- and kept where the node then says nothing
 (`a_router_past_loopback_asks_an_open_node_again_once_its_word_is_old`);
-and a marked read passing a copy on a node not asked, and then one asking
-none, for home (`a_marked_read_goes_to_no_copy_on_a_node_past_loopback_could_not_tell_is_closed`).
+a marked read passing a copy on a node not asked, and then one asking
+none, for home (`a_marked_read_goes_to_no_copy_on_a_node_past_loopback_could_not_tell_is_closed`);
+and a request meeting a node's ask out, its stats' answer held by the
+node, answered 503 with `Retry-After` while the first waits, the node
+asked once (`a_request_meeting_a_nodes_ask_out_waits_for_none`; before,
+it waited out the held ask).
 Each waits for the scripted node's requests, not a time. Before, the first
 two were answered 200 by the scripted node, and the marked read by the
 copy; the third needs the period this made a setting

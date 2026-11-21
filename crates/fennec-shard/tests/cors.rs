@@ -942,17 +942,30 @@ enum Said {
 /// A node the test scripts, answering 200 to every tenant's request as one
 /// asking no token answers whoever reaches it -- one from before, or one
 /// running `--insecure` -- and saying of its token what [`Said`] it is set
-/// to. Each request's line is sent on `seen`, the order the node met them.
+/// to. Each request's line is sent on `seen`, the order the node met them;
+/// its stats are answered only while not `held`.
 struct Scripted {
     addr: String,
     said: Arc<std::sync::atomic::AtomicU8>,
     seen: std::sync::mpsc::Receiver<String>,
+    held: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
 }
 
 impl Scripted {
     fn set(&self, said: Said) {
         self.said
             .store(said as u8, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Holds its stats' answers, each request for them met (`seen`) and
+    /// answered once [`Self::release`]d.
+    fn hold(&self) {
+        *self.held.0.lock().unwrap() = true;
+    }
+
+    fn release(&self) {
+        *self.held.0.lock().unwrap() = false;
+        self.held.1.notify_all();
     }
 
     /// The request lines it met so far.
@@ -984,11 +997,12 @@ fn scripted(tag: &'static str, said: Said) -> Scripted {
     let addr = listener.local_addr().unwrap().to_string();
     let state = Arc::new(AtomicU8::new(said as u8));
     let (to, seen) = std::sync::mpsc::channel::<String>();
-    let held = Arc::clone(&state);
+    let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let (held, gated) = (Arc::clone(&state), Arc::clone(&gate));
     std::thread::spawn(move || {
         for conn in listener.incoming() {
             let Ok(conn) = conn else { return };
-            let (to, state) = (to.clone(), Arc::clone(&held));
+            let (to, state, gate) = (to.clone(), Arc::clone(&held), Arc::clone(&gated));
             std::thread::spawn(move || {
                 let mut out = conn.try_clone().unwrap();
                 let mut r = BufReader::new(conn);
@@ -1044,6 +1058,13 @@ fn scripted(tag: &'static str, said: Said) -> Scripted {
                         (200, format!(r#"{{"node":"{tag}"}}"#))
                     };
                     let _ = to.send(line.trim_end().to_string());
+                    if line.contains(" /_admin/stats ") {
+                        let (holding, released) = &*gate;
+                        let mut holding = holding.lock().unwrap();
+                        while *holding {
+                            holding = released.wait(holding).unwrap();
+                        }
+                    }
                     let head = format!(
                         "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n\
                          Content-Length: {}\r\n\r\n",
@@ -1064,6 +1085,7 @@ fn scripted(tag: &'static str, said: Said) -> Scripted {
         addr,
         said: state,
         seen,
+        held: gate,
     }
 }
 
@@ -1176,6 +1198,46 @@ fn a_router_past_loopback_forwards_to_no_node_it_could_not_ask() {
     let met = closed.taken();
     assert_eq!(
         met.iter().filter(|l| l.contains("/_admin/stats")).count(),
+        1,
+        "{met:?}"
+    );
+}
+
+/// A node's ask is one at a time, and no request waits for it: one meeting
+/// the ask out to a node not yet known is answered 503 with `Retry-After`
+/// as the ask goes on, and the node asked once. Each waiting on a lock the
+/// ask held, every request to the node queued behind a call bounded by
+/// `--upstream-timeout` alone, against the rule that no lock is held
+/// across a call to a node.
+#[test]
+fn a_request_meeting_a_nodes_ask_out_waits_for_none() {
+    let node = scripted("asked", Said::Token);
+    node.hold();
+    let port = past_loopback_over(placed_at(&node.addr), |c| c);
+    let first =
+        std::thread::spawn(move || send(port, "GET", "/t/acme/collections", "localhost", "", ""));
+    // The first request's ask is out, its answer held.
+    node.until("/_admin/stats");
+    let r = send(port, "GET", "/t/acme/collections", "localhost", "", "");
+    assert_eq!(r.status, 503, "{}", r.body);
+    assert!(
+        r.body.contains("`n1`") && r.body.contains("being asked"),
+        "{}",
+        r.body
+    );
+    assert!(r.one("retry-after").is_some(), "{}", r.head);
+    node.release();
+    let r = first.join().unwrap();
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(r.body.contains("asked"), "{}", r.body);
+    // Asked once, and the request it answered 503 never sent.
+    let met = node.taken();
+    assert!(
+        !met.iter().any(|l| l.contains("/_admin/stats")),
+        "asked again: {met:?}"
+    );
+    assert_eq!(
+        met.iter().filter(|l| l.contains("/t/acme")).count(),
         1,
         "{met:?}"
     );

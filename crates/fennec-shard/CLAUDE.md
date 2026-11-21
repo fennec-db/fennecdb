@@ -146,7 +146,8 @@ fennec-http's rule, a forward without `--http-cors` to its `Host` alone,
 the node judging its `Origin`. Listening past loopback, it forwards nothing
 to a node asking no token (`open_node`, 403) but under `--insecure`, nor
 to one not known to ask one (503), a node from before asked its
-`/_whoami`, and marks every forward by its listener's class (`mark_of`), a relayed or
+`/_whoami`, one ask out a node at a time that no request waits for
+(`ask_now`, 503 meanwhile), and marks every forward by its listener's class (`mark_of`), a relayed or
 entry-named one as past loopback, for the node to hold the same line.
 
 **[The router looks at a pooled connection first, and resends only what
